@@ -10,7 +10,8 @@ from kelpie.core.ports import ActionConnector, PlatformAdapter, SupportsReassign
 
 
 class Executor(Protocol):
-    name: str
+    @property
+    def name(self) -> str: ...
 
     def execute(self, action: Action) -> bool:
         """Carry out ``action``. Return False if this executor cannot do it."""

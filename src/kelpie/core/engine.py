@@ -22,8 +22,9 @@ class Engine:
     """Runs rules over a snapshot and routes their actions to executors.
 
     Executors are platform adapters and action-capable connectors, keyed by name. An
-    action goes to ``action.executor`` if set, else to its task's ``source`` adapter,
-    else to the only platform adapter if there is exactly one. Actions that no executor
+    action goes to ``action.executor`` if set, else to the ``source`` adapter of its task
+    (or of the task behind ``params.session_id``), else to the only platform adapter if
+    there is exactly one. Actions that no executor
     can carry out become alerts for a human. A failing rule or action is logged and
     skipped; it never stops the loop.
     """
@@ -76,10 +77,14 @@ class Engine:
         return actions
 
     def route(self, action: Action, snapshot: Snapshot) -> Executor | None:
-        if action.executor is not None:
+        if action.executor:
             return self.executors.get(action.executor)
-        task = snapshot.task(action.task_id) if action.task_id else None
-        if task is not None and task.source is not None:
+        task_id = action.task_id
+        if not task_id and (session_id := action.params.get("session_id")):
+            session = next((s for s in snapshot.sessions if s.id == session_id), None)
+            task_id = session.task_id if session else None
+        task = snapshot.task(task_id) if task_id else None
+        if task is not None and task.source:
             return self.executors.get(task.source)
         if len(self._platforms) == 1:
             return self.executors[self._platforms[0]]

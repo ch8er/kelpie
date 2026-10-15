@@ -6,7 +6,7 @@ import pytest
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.engine import Engine
-from kelpie.core.model import Snapshot, Status, Task
+from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.ports import (
     ActionConnector,
     Alerter,
@@ -219,6 +219,26 @@ def test_routes_by_task_source() -> None:
     assert hermes.calls == [("unblock", "T-2")]
 
 
+def test_stop_routes_by_session_task_source() -> None:
+    hermes, other = StoppingAdapter(name="hermes"), StoppingAdapter(name="other")
+    session = Session("S-9", "T-2", "agent", NOW)
+    snapshot = Snapshot(now=NOW, tasks=(task("T-2", "other"),), sessions=(session,))
+    engine = Engine(
+        [Emit([act(ActionKind.STOP, task_id=None, session_id="S-9")])],
+        adapters=[hermes, other],
+        dry_run=False,
+    )
+    engine.tick(lambda: snapshot)
+    assert other.calls == [("stop", "S-9")]
+    assert hermes.calls == []
+
+
+def test_empty_executor_means_route_by_source() -> None:
+    adapter = FakeAdapter()
+    run([act(ActionKind.REQUEUE, executor="")], adapter)
+    assert adapter.calls == [("requeue", "T-1")]
+
+
 def test_explicit_executor_routes_to_connector() -> None:
     ci, adapter = FakeCI(), FakeAdapter()
     engine = Engine(
@@ -238,15 +258,16 @@ def test_explicit_executor_routes_to_connector() -> None:
         act(ActionKind.REQUEUE, executor="missing"),
         act(ActionKind.REQUEUE, "T-9"),  # two adapters, task unknown: ambiguous
         act(ActionKind.REQUEUE, executor="ci"),  # connector does not requeue
+        act(ActionKind.REQUEUE, "T-5"),  # task source names an unregistered adapter
     ],
-    ids=["unknown-executor", "ambiguous", "unsupported-by-connector"],
+    ids=["unknown-executor", "ambiguous", "unsupported-by-connector", "unknown-source"],
 )
 def test_unroutable_action_becomes_alert(action: Action) -> None:
     a, b, alerter = FakeAdapter(name="a"), FakeAdapter(name="b"), FakeAlerter()
     engine = Engine(
         [Emit([action])], adapters=[a, b], connectors=[FakeCI()], alerter=alerter, dry_run=False
     )
-    engine.tick(lambda: Snapshot(now=NOW))
+    engine.tick(lambda: Snapshot(now=NOW, tasks=(task("T-5", "gone"),)))
     assert a.calls == b.calls == []
     assert len(alerter.sent) == 1
 
