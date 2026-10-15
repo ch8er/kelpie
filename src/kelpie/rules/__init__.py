@@ -53,6 +53,8 @@ _P0, _P1, _P2 = Priority.P0, Priority.P1, Priority.P2
 # Mirrors docs/plan.md, which wins on any conflict. Rule 8 is the daily report (report/).
 # Rules 1 and 3 gain P1 extensions (evidence for "done", stop patterns) under the same name.
 PLANNED: tuple[PlannedRule, ...] = (
+    # First: a WIP commit must happen before any rule requeues the task.
+    PlannedRule("checkpoints", None, _P0, "Commit reminder, WIP commit on exit, resume"),
     PlannedRule("exit_contract", 1, _P0, "No final status / bad block -> requeue", (2,)),
     PlannedRule("wait_condition", 2, _P0, "Register condition and exit; wake the task", (10,)),
     PlannedRule("orphan_status", 3, _P0, "Ownerless status > N min -> alert/reassign", (11,)),
@@ -67,7 +69,6 @@ PLANNED: tuple[PlannedRule, ...] = (
     PlannedRule("needs_you", 13, _P1, "Everything waiting for a human, by cost of delay", (13,)),
     PlannedRule("compaction_gate", 14, _P2, "Gate violated right after context compaction"),
     PlannedRule("return_causes", None, _P1, "Root causes of task returns -> recommendation", (7,)),
-    PlannedRule("checkpoints", None, _P0, "Commit reminder, WIP commit on exit, resume"),
 )
 
 

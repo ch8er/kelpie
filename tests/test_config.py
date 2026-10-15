@@ -69,6 +69,8 @@ def test_ledger_settings() -> None:
     assert config.cooldown == timedelta(minutes=10)
     assert config.retry_after == timedelta(minutes=1)
     assert config.max_actions_per_task_per_hour == 2
+    once = EngineConfig.from_mapping({"once_window": "2d", "once_attempts": 5})
+    assert (once.once_window, once.once_attempts) == (timedelta(days=2), 5)
 
 
 @pytest.mark.parametrize(
@@ -77,6 +79,9 @@ def test_ledger_settings() -> None:
         {"cooldown": -1},
         {"max_actions_per_task_per_hour": 0},
         {"max_actions_per_task_per_hour": True},
+        {"once_window": "0s"},
+        {"once_attempts": 0},
+        {"once_attempts": True},
     ],
 )
 def test_invalid_ledger_settings_rejected(data: dict[str, object]) -> None:

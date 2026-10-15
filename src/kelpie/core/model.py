@@ -171,7 +171,11 @@ class Session:
     exit_reason: str | None = None
     last_heartbeat: datetime | None = None
     last_commit_at: datetime | None = None
+    last_commit: str | None = None  # ref (sha) of the last commit on the task branch
+    branch: str | None = None
     dirty_worktree: bool = False
+    changed_files: int | None = None  # uncommitted changed files, if the adapter knows
+    summary: str | None = None  # the agent's own progress note, if it left one
     artifacts: tuple[Artifact, ...] = ()
 
 

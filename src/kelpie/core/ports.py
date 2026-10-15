@@ -36,7 +36,14 @@ class PlatformAdapter(Protocol):
 
     def comment(self, task_id: str, body: str) -> None: ...
 
-    def wip_commit(self, task_id: str, message: str) -> None: ...
+    def wip_commit(
+        self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
+    ) -> None:
+        """Commit and push everything uncommitted in the task's worktree, on ``branch`` when
+        given. With ``draft_pr`` the push goes to a draft PR (which does not run CI) instead
+        of relying on ``[skip ci]`` in the message. Afterwards the adapter reports the new
+        commit as the session's ``last_commit``, so the next session can resume from it."""
+        ...
 
     def events(self, since: datetime) -> Iterable[PlatformEvent]: ...
 

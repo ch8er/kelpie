@@ -14,6 +14,7 @@ class FakeAdapter:
     name: str = "fake"
     calls: list[tuple[str, str]] = field(default_factory=list)
     fail_on: str | None = None
+    wip_commits: list[tuple[str, str, str | None, bool]] = field(default_factory=list)
 
     def _record(self, op: str, task_id: str) -> None:
         if op == self.fail_on:
@@ -35,8 +36,11 @@ class FakeAdapter:
     def comment(self, task_id: str, body: str) -> None:
         self._record("comment", task_id)
 
-    def wip_commit(self, task_id: str, message: str) -> None:
+    def wip_commit(
+        self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
+    ) -> None:
         self._record("wip_commit", task_id)
+        self.wip_commits.append((task_id, message, branch, draft_pr))
 
     def events(self, since: datetime) -> Iterable[PlatformEvent]:
         return []

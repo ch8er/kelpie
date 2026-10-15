@@ -49,7 +49,12 @@ class PlatformExecutor:
             case ActionKind.COMMENT:
                 adapter.comment(tid, action.reason)
             case ActionKind.WIP_COMMIT:
-                adapter.wip_commit(tid, action.reason)
+                adapter.wip_commit(
+                    tid,
+                    action.reason,
+                    branch=action.params.get("branch"),
+                    draft_pr=bool(action.params.get("draft_pr", False)),
+                )
             case ActionKind.REASSIGN if action.params.get("owner_id") and isinstance(
                 adapter, SupportsReassign
             ):

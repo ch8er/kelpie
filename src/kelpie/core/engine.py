@@ -78,6 +78,8 @@ class Engine:
             cooldown=self.config.cooldown,
             retry_after=self.config.retry_after,
             max_per_subject_per_hour=self.config.max_actions_per_task_per_hour,
+            once_window=self.config.once_window,
+            once_attempts=self.config.once_attempts,
         )
         self.states = StateTracker(
             self.state_store, self.config.state_escalations, self.config.state_resolve_after

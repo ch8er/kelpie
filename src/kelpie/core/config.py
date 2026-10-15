@@ -37,6 +37,10 @@ class EngineConfig:
     retry_after: timedelta = timedelta(minutes=5)  # ledger: retry delay after a failure
     # Ledger cap on actions with an effect, per task (else per session, else per rule).
     max_actions_per_task_per_hour: int = 6
+    # Ledger: a ``once`` action is done once per fingerprint within this window, and is
+    # given up after this many failed attempts.
+    once_window: timedelta = timedelta(days=7)
+    once_attempts: int = 3
     # Long-lived state alerts re-fire only when their age passes one of these.
     state_escalations: tuple[timedelta, ...] = (
         timedelta(hours=4),
@@ -69,6 +73,8 @@ class EngineConfig:
             "cooldown",
             "retry_after",
             "max_actions_per_task_per_hour",
+            "once_window",
+            "once_attempts",
             "state_escalations",
             "state_resolve_after",
             "rules",
@@ -96,6 +102,14 @@ class EngineConfig:
             raise ValueError("engine.cooldown and engine.retry_after must not be negative")
         if not isinstance(max_actions, int) or isinstance(max_actions, bool) or max_actions < 1:
             raise ValueError("engine.max_actions_per_task_per_hour must be a positive integer")
+        once_window = parse_duration(data.get("once_window", "7d"))
+        if once_window <= timedelta(0):
+            raise ValueError("engine.once_window must be positive")
+        once_attempts = data.get("once_attempts", 3)
+        if isinstance(once_attempts, bool) or not isinstance(once_attempts, int):
+            raise ValueError("engine.once_attempts must be a positive integer")
+        if once_attempts < 1:
+            raise ValueError("engine.once_attempts must be a positive integer")
         escalations = cls.state_escalations
         if "state_escalations" in data:
             raw = data["state_escalations"]
@@ -117,6 +131,8 @@ class EngineConfig:
             cooldown=cooldown,
             retry_after=retry_after,
             max_actions_per_task_per_hour=max_actions,
+            once_window=once_window,
+            once_attempts=once_attempts,
             state_escalations=escalations,
             state_resolve_after=resolve_after,
             default_mode=Mode(data.get("default_mode", Mode.OBSERVE)),

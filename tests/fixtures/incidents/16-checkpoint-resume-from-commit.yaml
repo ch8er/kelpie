@@ -1,0 +1,29 @@
+id: "16-checkpoint-resume-from-commit"
+incident: null
+title: "A requeued task carries where to resume from"
+description: >
+  Foundation rule (checkpoints). A task went back to the queue after its session died; that
+  session had committed work and left a clean worktree. The next session should continue
+  from the last commit, so the task gets one comment with the commit, branch and progress
+  note. A queued task whose previous session committed nothing, and a queued task that was
+  never worked on, get nothing.
+rule: checkpoints
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: T-1601, title: "Implement CSV export", status: ready, status_since: "2026-03-02T15:10:00+00:00"}
+    - {id: T-1602, title: "Spike: caching", status: ready, status_since: "2026-03-02T15:10:00+00:00"}
+    - {id: T-1603, title: "New task", status: ready, status_since: "2026-03-02T09:00:00+00:00"}
+  sessions:
+    - {id: S-1601, task_id: T-1601, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", last_commit_at: "2026-03-02T14:58:00+00:00", last_commit: "a1b2c3d", branch: "task/T-1601", summary: "Exporter done; header escaping still failing in test_quotes."}
+    - {id: S-1602, task_id: T-1602, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00"}
+expected_actions:
+  - kind: comment
+    task_id: T-1601
+    reason_contains: "Resume from commit a1b2c3d on task/T-1601"
+    params: {commit: a1b2c3d}
+not_expected_actions:
+  - {kind: comment, task_id: T-1602}
+  - {kind: comment, task_id: T-1603}

@@ -12,6 +12,10 @@ Before an action is handled the ledger may suppress it:
 - **rate limit**: its subject (task, else session, else executor and rule) already had
   ``max_per_subject_per_hour`` actions with an effect in the last hour. The first such
   suppression per subject and hour is flagged so the engine can tell a human once.
+- **once**: an action with ``Action.once`` (a WIP commit, a resume note) is done at most
+  once per fingerprint and mode within ``once_window``, not again after the cooldown. A
+  failed attempt is retried after ``retry_after``, up to ``once_attempts`` attempts. Rules
+  that emit once actions must stop emitting them well within ``once_window``.
 
 Suppressed actions are counted on the latest entry with the same fingerprint instead of
 being stored one by one. If the store fails, entries are kept in memory and retried, and
@@ -58,6 +62,20 @@ EFFECTS = frozenset(
         Outcome.EXECUTED,
         Outcome.NOT_EXECUTED,
         Outcome.FAILED,
+    }
+)
+
+
+# Outcomes after which a ``once`` action counts as done. A failure may be retried, and so
+# may a drop (no executor and no alerter: nothing happened, the config may be fixed later).
+_ONCE_DONE = frozenset(
+    {
+        Outcome.SUGGESTED,
+        Outcome.ALERTED,
+        Outcome.EXECUTED,
+        Outcome.NOT_EXECUTED,
+        Outcome.OBSERVED,
+        Outcome.DRY_RUN,
     }
 )
 
@@ -189,6 +207,8 @@ class ActionLedger:
     cooldown: timedelta = timedelta(minutes=30)
     retry_after: timedelta = timedelta(minutes=5)
     max_per_subject_per_hour: int = 6
+    once_window: timedelta = timedelta(days=7)
+    once_attempts: int = 3
     _unsaved: list[LedgerEntry] = field(default_factory=list)
     _limited: set[tuple[str, datetime]] = field(default_factory=set)
 
@@ -198,6 +218,13 @@ class ActionLedger:
         The rate limit only guards effects, so it does not apply in observe mode.
         """
         fp = fingerprint(action)
+        if action.once:
+            done = self.store.by_fingerprint(fp, now - self.once_window)
+            done = self._with_unsaved(done, now - self.once_window, fp=fp)
+            same = [e for e in done if e.mode is mode]
+            failed = sum(1 for e in same if e.outcome is Outcome.FAILED)
+            if failed >= self.once_attempts or any(e.outcome in _ONCE_DONE for e in same):
+                return Suppression.COOLDOWN, False
         horizon = now - max(self.cooldown, self.retry_after)
         stored = self.store.by_fingerprint(fp, horizon)
         for e in self._with_unsaved(stored, horizon, fp=fp):

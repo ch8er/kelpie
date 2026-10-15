@@ -464,7 +464,9 @@ class HermesAdapter:
     def comment(self, task_id: str, body: str) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)
 
-    def wip_commit(self, task_id: str, message: str) -> None:
+    def wip_commit(
+        self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
+    ) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)
 
 
