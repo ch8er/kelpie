@@ -7,7 +7,13 @@ import pytest
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.engine import Engine
 from kelpie.core.model import Snapshot, Task
-from kelpie.core.ports import Alerter, PlatformAdapter, PlatformEvent, SupportsReassign
+from kelpie.core.ports import (
+    Alerter,
+    PlatformAdapter,
+    PlatformEvent,
+    SupportsPause,
+    SupportsReassign,
+)
 
 NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
 
@@ -52,6 +58,12 @@ class ReassigningAdapter(FakeAdapter):
 
 
 @dataclass
+class PausingAdapter(FakeAdapter):
+    def pause(self, task_id: str, reason: str) -> None:
+        self._record("pause", task_id)
+
+
+@dataclass
 class FakeAlerter:
     sent: list[tuple[str, str]] = field(default_factory=list)
 
@@ -88,6 +100,8 @@ def test_fakes_satisfy_protocols() -> None:
     assert isinstance(FakeAdapter(), PlatformAdapter)
     assert not isinstance(FakeAdapter(), SupportsReassign)
     assert isinstance(ReassigningAdapter(), SupportsReassign)
+    assert isinstance(PausingAdapter(), SupportsPause)
+    assert not isinstance(FakeAdapter(), SupportsPause)
     assert isinstance(FakeAlerter(), Alerter)
 
 
@@ -130,6 +144,19 @@ def test_reassign_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, st
     run([act(ActionKind.REASSIGN, **params)], adapter, alerter)
     assert adapter.calls == []
     assert alerter.sent == [("[emit] reassign T-1", Severity.INFO)]
+
+
+def test_pause_uses_capability_when_available() -> None:
+    adapter = PausingAdapter()
+    run([act(ActionKind.PAUSE)], adapter)
+    assert adapter.calls == [("pause", "T-1")]
+
+
+def test_pause_falls_back_to_alert() -> None:
+    adapter, alerter = FakeAdapter(), FakeAlerter()
+    run([act(ActionKind.PAUSE)], adapter, alerter)
+    assert adapter.calls == []
+    assert alerter.sent == [("[emit] pause T-1", Severity.INFO)]
 
 
 def test_alert_and_escalate_go_to_alerter() -> None:

@@ -38,6 +38,13 @@ class SupportsReassign(Protocol):
 
 
 @runtime_checkable
+class SupportsPause(Protocol):
+    """Optional adapter capability: stop a running task/session until a human resumes it."""
+
+    def pause(self, task_id: str, reason: str) -> None: ...
+
+
+@runtime_checkable
 class ConditionConnector(Protocol):
     """Evaluates external conditions: GitHub PR/CI, LLM provider quotas, human tasks."""
 

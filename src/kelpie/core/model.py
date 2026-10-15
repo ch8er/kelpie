@@ -155,6 +155,7 @@ class Session:
     last_heartbeat: datetime | None = None
     last_commit_at: datetime | None = None
     dirty_worktree: bool = False
+    artifacts: tuple[str, ...] = ()
 
 
 class SpanKind(StrEnum):
@@ -179,6 +180,7 @@ class Span:
     session_id: str | None = None
     model: str | None = None
     tool: str | None = None
+    args_hash: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
