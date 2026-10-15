@@ -75,7 +75,7 @@ The numbers in brackets are the farm incidents each rule is validated against.
 6. Bottlenecks and idle time per role → alert with a rebalancing suggestion (9, 10)
 7. Environment resources: disk, memory, processes or provider quotas running out, auth expiring → alert before the agents stop (3, 4, 6). Provider usage and cost also feed budgets (see below)
 8. Daily "cost of chaos" report and before/after verification of every fix
-9. CI economy: finds builds that burn minutes for nothing — on drafts and WIP commits, superseded by a newer push, triggered by docs-only changes, or repeated for an already verified commit. Cancels superseded builds by itself, forecasts how long the quota will last, and proposes a PR with a better CI configuration (5)
+9. CI economy: finds builds that burn minutes for nothing — on drafts and WIP commits, superseded by a newer push, triggered by docs-only changes, or repeated for an already verified commit. Cancels superseded builds by itself and forecasts how long the quota will last (5). Proposing a PR with a better CI configuration is P1 (rules backlog)
 10. Loop and budget breaker, cross-platform, built on traces: N identical consecutive tool calls (same tool and same arguments hash; default 8 in 10 minutes), 5 consecutive tool errors, or a budget's hard threshold exceeded (see "Budgets and spend") → stop the run through the adapter and alert. Defaults reuse the AgentWatchdog thresholds. Polling that rule 2 recognizes is coached by rule 2 first and stopped only if it continues (field evidence: heartbeat runaway)
 11. Activity without progress: tokens spent by sessions that produce no status change, commit or artifact → alert with recommendations: a longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file (field evidence: idle context resend)
 
@@ -96,6 +96,7 @@ Spend becomes a metric Kelpie watches, not a number someone checks in a billing 
 - Rule 12. Early conflict warning: two live tasks editing the same files → warn or serialize (7)
 - Rule 1, extended: "done" requires evidence (test output, green CI or a live check); track the reopened-after-done rate (2)
 - Rule 13. "Needs you" inbox: everything waiting for a human across platforms, sorted by cost of delay; detects agents waiting for approval longer than N minutes (13)
+- Rule 9, extended: turn the wasted-build statistics into a proposed PR with a better CI configuration (5)
 
 ### P2. Rules backlog — on signal
 
