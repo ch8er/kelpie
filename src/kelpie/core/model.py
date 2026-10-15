@@ -306,6 +306,56 @@ class LimitHit:
     resets_at: datetime | None = None
 
 
+class BuildStatus(StrEnum):
+    """Normalized CI build (pipeline run) status. Connectors map their CI's states."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILURE = "failure"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+    UNKNOWN = "unknown"  # a state the connector does not know: never treated as active
+
+    @property
+    def is_active(self) -> bool:
+        return self in {BuildStatus.QUEUED, BuildStatus.RUNNING}
+
+
+@dataclass(frozen=True, slots=True)
+class Build:
+    """One CI build (a pipeline run for one commit), as a CI connector reports it.
+
+    ``id`` is opaque and unique across connectors; ``source`` names the connector that
+    reported it, which is also the executor for actions on it (``cancel_build``).
+    ``workflow`` identifies the pipeline within ``repo``. ``draft`` is the current draft
+    state of the change request the build belongs to. ``commit_message`` is the first line
+    of the head commit's message. ``changed_paths`` are the files the change touches;
+    None when unknown. ``minutes`` is what the build has burned so far (billable minutes
+    where the CI reports them). ``superseded_by`` is the id of a newer build of the same
+    pipeline and branch that started after this one. ``cancellable`` is set by the
+    connector: the build is superseded, still active, and within what the connector is
+    configured to cancel; rules only ask to cancel such builds.
+    """
+
+    id: str
+    source: str | None = None
+    repo: str | None = None
+    workflow: str | None = None
+    branch: str | None = None
+    sha: str | None = None
+    event: str | None = None
+    draft: bool = False
+    commit_message: str | None = None
+    changed_paths: tuple[str, ...] | None = None
+    status: BuildStatus = BuildStatus.QUEUED
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    minutes: float = 0.0
+    superseded_by: str | None = None
+    cancellable: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderStatus:
     """The last probe of an LLM provider (``[connectors.llm_quotas]``), as of ``checked_at``.
@@ -353,6 +403,7 @@ class Snapshot:
     budgets_ok: bool = True
     limit_hits: tuple[LimitHit, ...] = ()  # observed provider limits (budgets forecast them)
     providers: tuple[ProviderStatus, ...] = ()  # LLM provider quota and auth probes
+    builds: tuple[Build, ...] = ()  # recent CI builds (CI connectors)
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -369,6 +420,9 @@ class Snapshot:
     def dependents(self, task_id: str) -> tuple[Task, ...]:
         ids = {d.task_id for d in self.dependencies if d.depends_on == task_id}
         return tuple(t for t in self.tasks if t.id in ids)
+
+    def build(self, build_id: str) -> Build | None:
+        return next((b for b in self.builds if b.id == build_id), None)
 
     def sessions_for(self, task_id: str) -> tuple[Session, ...]:
         return tuple(s for s in self.sessions if s.task_id == task_id)

@@ -1,4 +1,7 @@
-"""``[connectors.github]``: which repositories Kelpie may read, and with which token."""
+"""``[connectors.github]``: which repositories Kelpie may read, and with which token.
+
+``[connectors.github.ci]`` (optional) adds GitHub Actions runs for rule 9 and, opt-in, the
+``cancel_build`` action (see :mod:`kelpie.connectors.github.builds`)."""
 
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.connectors.github.blocks import DEFAULT_MAX_REQUESTS, DEFAULT_TICK_BUDGET
+from kelpie.connectors.github.builds import CiSettings, GitHubCI, load_ci
 from kelpie.connectors.github.client import (
     DEFAULT_API_URL,
     DEFAULT_CACHE_TTL,
@@ -36,6 +40,7 @@ _KEYS = {
     "max_requests_per_tick",
     "tick_budget",
     "enabled",
+    "ci",
 }
 
 
@@ -50,6 +55,7 @@ class GitHubSettings:
     max_requests_per_tick: int = DEFAULT_MAX_REQUESTS
     tick_budget: timedelta = DEFAULT_TICK_BUDGET
     enabled: bool = True
+    ci: CiSettings | None = None  # None: no [connectors.github.ci] table
 
     def token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The token from ``$token_env``; None when unset (anonymous, 60 requests an hour).
@@ -84,6 +90,31 @@ class GitHubSettings:
             observer=observer,
         )
         return GitHubConnector(client, self.repos)
+
+    def build_ci(
+        self,
+        connector: GitHubConnector,
+        clock: Callable[[], datetime],
+        environ: Mapping[str, str] = os.environ,
+        observer: GitHubObserver | None = None,
+    ) -> GitHubCI | None:
+        """The CI source sharing ``connector``'s client; None when not configured. With
+        ``cancel_token_env`` the cancel request alone goes through a second client that
+        holds that token. Raises ValueError when that token is missing or unusable."""
+        if self.ci is None or not self.ci.enabled:
+            return None
+        token = self.ci.cancel_token(environ)
+        cancel_client = None
+        if token is not None:
+            cancel_client = GitHubClient(
+                self.api_url,
+                token,
+                timeout=self.timeout,
+                cache_ttl=self.cache_ttl,
+                clock=clock,
+                observer=observer or connector.client.observer,
+            )
+        return GitHubCI(connector.client, self.ci, cancel_client)
 
 
 def load_github(section: Any) -> GitHubSettings:
@@ -132,8 +163,10 @@ def load_github(section: Any) -> GitHubSettings:
     enabled = section.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ValueError("[connectors.github] enabled must be true or false")
+    repos = list(dict.fromkeys(r.lower() for r in repos))
+    ci = load_ci(section["ci"], repos) if "ci" in section else None
     return GitHubSettings(
-        repos=tuple(dict.fromkeys(r.lower() for r in repos)),
+        repos=tuple(repos),
         api_url=api_url,
         token_env=token_env,
         token_env_explicit="token_env" in section,
@@ -142,6 +175,7 @@ def load_github(section: Any) -> GitHubSettings:
         max_requests_per_tick=max_requests,
         tick_budget=tick_budget,
         enabled=enabled,
+        ci=ci,
     )
 
 

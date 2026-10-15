@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from kelpie.core.actions import Action, ActionKind
+from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.model import (
     Condition,
     ConditionKind,
@@ -104,7 +104,15 @@ class ActionConnector(Protocol):
     name: str
     actions: frozenset[ActionKind]
 
-    def execute(self, action: Action) -> None: ...
+    def execute(self, action: Action) -> ActionResult | bool | None:
+        """Carry out ``action``.
+
+        ``REFUSED`` (or False): not allowed by the connector's config, or not a target it
+        knows; a human is told instead. ``NOTHING_TO_DO``: the target no longer needs it.
+        ``DONE``, True or None: carried out. A transient failure (network, rate limit, a
+        state that could not be re-checked) raises, so the engine records a failure and
+        the ledger retries it later."""
+        ...
 
 
 @runtime_checkable

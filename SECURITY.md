@@ -33,8 +33,14 @@ please keep these properties in mind when assessing impact:
   GitHub (PRs, CI status), LLM provider APIs (quota checks), Slack (alerts) and optionally
   Langfuse. Leaking any of them through logs, reports, traces, `/metrics` or error
   messages is in scope.
+- **It can cancel CI runs.** With `[connectors.github.ci] allow_cancel` (off by default)
+  Kelpie cancels superseded GitHub Actions runs in the `cancel_repos` allow-list. This is
+  its only write to GitHub; it needs `Actions: write`, which should be granted to a separate
+  token (`cancel_token_env`) scoped to those repositories only, so the token that reads PRs
+  and CI stays read-only. Anything that makes Kelpie cancel a run outside that policy, or
+  one that was not superseded, is in scope.
 - **It acts on task boards.** Kelpie can requeue, unblock, comment on, reassign and
-  WIP-commit tasks. Anything that lets an untrusted party trigger or forge those actions
+  WIP-commit tasks, and cancel superseded CI runs (above). Anything that lets an untrusted party trigger or forge those actions
   (for example spoofed platform events or OTLP spans, or crafted condition payloads) is
   in scope.
 - **It ingests untrusted text.** Task titles, comments, tool outputs and trace attributes
