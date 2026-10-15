@@ -89,6 +89,7 @@ Fixture conventions:
 |---|------|------|--------------------|
 | 1 | `01-stale-guard-block.yaml` | `stale_blocks` | `unblock` T-101 (CI condition already satisfied) |
 | 2 | `02-exit-without-status.yaml` | `exit_contract` | `requeue` T-201 (session ended with no final status), `requeue` T-202 (block reason not allowed) |
+| 2 | `02-healthy-exit.yaml` | `exit_contract` | `requeue` only T-215 (ended an hour ago without status); nothing for a final status, an allowed reason with detail, a block on a registered condition, or an exit still inside the grace period |
 | 3 | `03-disk-full.yaml` | `resources` | `alert` critical, `{host: host-a}` |
 | 4 | `04-host-overload-heavy-queue.yaml` | `resources` | `alert` warning, `{host: host-a, max_heavy: 1}`; none for healthy host-b or light T-406 |
 | 5 | `05-ci-minutes-exhausted.yaml` | `ci_economy` | `alert` critical (CI quota exhausted), `blocked_tasks` listed; no host alert for the healthy disk |
