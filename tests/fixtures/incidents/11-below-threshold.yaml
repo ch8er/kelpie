@@ -1,0 +1,74 @@
+id: "11-below-threshold"
+incident: 11
+title: "Ownerless tasks: thresholds, queues, live sessions, vanished owners, idle candidates"
+description: >
+  The boundaries of the orphan-status rule. Nothing happens for a task ownerless for 29
+  minutes (threshold 30), a review task queued for an hour (queue threshold 2h), backlog
+  and ready queues, blocked tasks, done tasks, or an ownerless task whose live session is
+  still working on it. An ownerless in-progress task is proposed to the idle developer, not
+  the busy one or the human. A task whose owner is missing from the directory may belong to
+  another platform, so it only alerts. A task with no role can only be alerted on.
+rule: orphan_status
+config:
+  orphan_after: "30m"
+  queue_after: "2h"
+  critical_dependents: 3
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: human-lead, role: developer, kind: human}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    # Ownerless for 29 minutes: below the threshold.
+    - {id: T-1111, title: "Tidy imports", status: in_progress, status_since: "2026-03-02T15:31:00+00:00", role: developer}
+    # Queues and states that are unowned by design or moved by conditions.
+    - {id: T-1112, title: "Write ADR", status: backlog, status_since: "2026-03-02T08:00:00+00:00", role: developer}
+    - {id: T-1113, title: "Add retries", status: ready, status_since: "2026-03-02T08:00:00+00:00", role: developer}
+    - {id: T-1114, title: "Old task", status: done, status_since: "2026-03-02T08:00:00+00:00", role: developer}
+    - {id: T-1118, title: "Wait for upstream", status: blocked, status_since: "2026-03-02T10:00:00+00:00", role: developer}
+    # Review queue for an hour: normal congestion.
+    - {id: T-1119, title: "Review: CSV export", status: review, status_since: "2026-03-02T15:00:00+00:00", role: reviewer}
+    # Ownerless, but a live session is working on it.
+    - {id: T-1120, title: "Hotfix login", status: in_progress, status_since: "2026-03-02T14:00:00+00:00", role: developer}
+    # Owner missing from the directory (maybe another platform): alert only.
+    - {id: T-1115, title: "Fix pagination bug", status: in_progress, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-9}
+    # Ownerless with no role: alert only.
+    - {id: T-1116, title: "Investigate flaky job", status: in_progress, status_since: "2026-03-02T14:00:00+00:00"}
+    # Ownerless for an hour: proposed to the idle developer (dev-1 has a task in progress,
+    # dev-3 has a live session, the human is never picked automatically).
+    - {id: T-1121, title: "Add metrics labels", status: in_progress, status_since: "2026-03-02T15:00:00+00:00", role: developer}
+    # agent-dev-1 is busy with this one.
+    - {id: T-1117, title: "Busy work", status: in_progress, status_since: "2026-03-02T15:50:00+00:00", role: developer, owner_id: agent-dev-1}
+  sessions:
+    - {id: S-1120, task_id: T-1120, owner_id: agent-dev-3, started_at: "2026-03-02T14:00:00+00:00", last_heartbeat: "2026-03-02T15:58:00+00:00"}
+expected_actions:
+  - kind: alert
+    task_id: T-1115
+    severity: warning
+    reason_contains: "no longer known"
+    params: {dependents: 0}
+  - kind: alert
+    task_id: T-1116
+    reason_contains: "a human needs to pick it up"
+  - kind: alert
+    task_id: T-1121
+    reason_contains: "Proposed owner: agent-dev-2"
+  - kind: reassign
+    task_id: T-1121
+    params: {owner_id: agent-dev-2}
+not_expected_actions:
+  - {kind: alert, task_id: T-1111}
+  - {kind: reassign, task_id: T-1111}
+  - {kind: alert, task_id: T-1112}
+  - {kind: alert, task_id: T-1113}
+  - {kind: alert, task_id: T-1114}
+  - {kind: alert, task_id: T-1118}
+  - {kind: alert, task_id: T-1119}
+  - {kind: alert, task_id: T-1120}
+  - {kind: reassign, task_id: T-1115}
+  - {kind: reassign, task_id: T-1116}
+  - {kind: alert, task_id: T-1117}
+  - {kind: reassign, task_id: T-1117}

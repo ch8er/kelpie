@@ -101,6 +101,7 @@ Fixture conventions:
 | 10 | `10-condition-satisfied-wake.yaml` | `wait_condition` | `wake` T-1011 (all conditions hold, freshly checked); `alert` T-1013 (overdue) and T-1014 (waiting on nothing); nothing for a pending condition, stale evidence, or a blocked task |
 | 10 | `10-productive-long-session.yaml` | `wait_condition` | `comment` only on the session polling a known CI check; nothing for a busy edit/test session |
 | 11 | `11-orphan-accepted-task.yaml` | `orphan_status` | `alert` critical `{dependents: 7}`, `reassign` T-1101 |
+| 11 | `11-below-threshold.yaml` | `orphan_status` | `alert` + `reassign` to the idle developer for an ownerless in-progress task; `alert` only for a vanished owner and for a task with no role; nothing below the thresholds, for queues, blocked or done tasks, or a task a live session is working on |
 | 12 | `12-review-ping-pong.yaml` | `ping_pong` | `escalate` T-1201 (9 rounds > 3) |
 | 13 | `13-human-tasks-block-agents.yaml` | `needs_you` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5`; T-1308 (nothing blocked behind it) not escalated |
 | – | `field-01-heartbeat-runaway.yaml` | `loop_breaker` | `stop` + critical `alert` for the heartbeat loop (about 900 identical calls, about 80k input tokens each) and for the agent with 5 consecutive tool errors (`stop` carries `session_id`); nothing for the healthy agent or for the CI-polling reviewer, which is left to rule 2 |

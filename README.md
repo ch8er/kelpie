@@ -258,7 +258,7 @@ adapter/connector protocols, the engine (routing to executors, per-rule modes, a
 ledger in SQLite), `kelpie serve` with the control loop and engine metrics, `kelpie
 status`, and fixtures for the 13 farm incidents and for field evidence. Adapters,
 connectors, traces, alerters and the report are stubs, `kelpie report` does not exist yet,
-and rules 1–2 (`exit_contract`, `wait_condition`) are implemented; see
+and rules 1–3 (`exit_contract`, `wait_condition`, `orphan_status`) are implemented; see
 [docs/plan.md](docs/plan.md) and [docs/roadmap.md](docs/roadmap.md).
 
 ## Contributing

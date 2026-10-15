@@ -325,15 +325,17 @@ thresholds: 8 repeats in 10 minutes, 5 errors in a row.
 
 ### rules: orphan_status (rule 3, incident 11)
 labels: P0, week-1, area:rules
-A task stays in a non-terminal status with no owner for more than N minutes. Alert and
-reassign it to an owner of the task's role (the default; reassignment can be switched off
-in config). Severity rises with the number of dependents.
+A task sits in a status where someone must be responsible for it (in progress; review and
+accepted as hand-off queues with a longer threshold), nobody is, and no session works on
+it. Alert, and propose it to an idle agent of the task's role (the default; reassignment
+can be switched off). Severity rises with the number of open dependents.
 
 **Acceptance criteria**
-- [ ] Ownerless task beyond threshold → `alert` and `reassign` (unless disabled in config)
-- [ ] Severity is `critical` when dependents exceed a threshold
-- [ ] Tasks below the threshold or in terminal statuses are ignored
-- [ ] Fixtures: existing `11-orphan-accepted-task.yaml`; new `11-below-threshold.yaml`
+- [ ] Ownerless beyond `orphan_after` (owned statuses) or `queue_after` (queue statuses) → `alert` and `reassign` to an idle agent of the role
+- [ ] Severity is `critical` when open dependents (transitive) reach a threshold
+- [ ] Blocked, waiting, backlog/ready and terminal tasks, tasks with a live session, and tasks left by a session without a final status (rule 1) are ignored
+- [ ] An owner missing from the directory only alerts unless `reassign_unknown_owner`
+- [ ] Fixtures: existing `11-orphan-accepted-task.yaml`; `11-below-threshold.yaml`
 
 ### rules: stale_blocks (rule 4, incidents 1, 8)
 labels: P0, week-1, area:rules
