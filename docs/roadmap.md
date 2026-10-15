@@ -274,6 +274,7 @@ Implement `requeue`, `unblock`, `comment`, `wake`, `reassign` and `wip_commit` f
 - [ ] Every action leaves a comment on the task explaining what Kelpie did and why
 - [ ] Actions are idempotent (re-running the same action is a no-op)
 - [ ] Concurrent writes with Hermes handled safely (transactions, retry on lock)
+- [ ] Tasks in Kelpie's `waiting` status are reported to the Hermes dispatcher as waiting and alive, never as dead (the "waiting" heartbeat of rule 2); fixture `10-waiting-heartbeat` in the adapter tests
 
 ### adapters: Hermes plugin for post_tool_call and on_session_end
 labels: P0, week-1, area:adapters
@@ -305,9 +306,9 @@ dispatcher does not declare the agent dead.
 
 **Acceptance criteria**
 - [ ] Satisfied condition on a waiting task → `wake`
-- [ ] Waiting tasks get a "waiting" heartbeat; they are not requeued or flagged as dead
+- [ ] Waiting tasks are never requeued or flagged as dead by Kelpie's rules; the "waiting" heartbeat towards the platform's dispatcher is part of the adapter contract (`PlatformAdapter` docstring) and is delivered with the Hermes adapter
 - [ ] A condition that stays unsatisfied past a configurable deadline → `alert`
-- [ ] Fixtures: new `10-condition-satisfied-wake.yaml`, `10-waiting-heartbeat.yaml`
+- [ ] Fixtures: `10-condition-satisfied-wake.yaml` (the waiting-heartbeat fixture moves to the Hermes adapter tests)
 
 ### rules: wait_condition — detect in-session polling (rule 2, incident 10)
 labels: P0, week-1, area:rules

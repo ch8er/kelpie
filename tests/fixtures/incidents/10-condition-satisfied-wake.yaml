@@ -1,0 +1,62 @@
+id: "10-condition-satisfied-wake"
+incident: 10
+title: "Waiting tasks: wake when conditions hold, alert when overdue or waiting on nothing"
+description: >
+  The fix for incident 10: instead of polling CI inside its session, the reviewer registers
+  a ci_status condition and exits, and the task becomes "waiting". Kelpie wakes it once
+  every condition holds. A task whose conditions are still pending stays waiting (it is
+  neither requeued nor treated as dead). A condition last checked before the current wait
+  began (green for the previous commit) is not evidence and wakes nothing. A task that waits past max_wait, or waits with no
+  condition at all, gets an alert because nothing would ever wake it on its own.
+rule: wait_condition
+config:
+  max_wait: "6h"
+snapshot:
+  now: "2026-03-02T18:00:00+00:00"
+  owners:
+    - {id: reviewer-1, role: reviewer}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # Both conditions satisfied: wake.
+    - {id: T-1011, title: "Review: rate limiter", status: waiting, status_since: "2026-03-02T16:00:00+00:00", owner_id: reviewer-1}
+    # One of two conditions still pending, waited 2h: nothing.
+    - {id: T-1012, title: "Review: search API", status: waiting, status_since: "2026-03-02T16:00:00+00:00", owner_id: reviewer-1}
+    # Pending for 8h, past max_wait: alert.
+    - {id: T-1013, title: "Deploy docs site", status: waiting, status_since: "2026-03-02T10:00:00+00:00", owner_id: agent-dev-1}
+    # Waiting with no condition registered: alert.
+    - {id: T-1014, title: "Update changelog", status: waiting, status_since: "2026-03-02T17:00:00+00:00", owner_id: agent-dev-1}
+    # Waiting since 17:30 on a condition last checked at 15:10: stale evidence, no wake.
+    - {id: T-1016, title: "Review: fix after push", status: waiting, status_since: "2026-03-02T17:30:00+00:00", owner_id: reviewer-1}
+    # Blocked (not waiting) with a satisfied condition: rule 4's business, not this rule's.
+    - id: T-1015
+      title: "Bump lockfile"
+      status: blocked
+      status_since: "2026-03-02T15:00:00+00:00"
+      owner_id: agent-dev-1
+      block: {reason: "guard", since: "2026-03-02T15:00:00+00:00", condition_id: C-1015}
+  conditions:
+    - {id: C-1011a, kind: ci_status, task_id: T-1011, params: {repo: example/repo, pr: 101}, satisfied: true, satisfied_at: "2026-03-02T17:40:00+00:00", checked_at: "2026-03-02T17:58:00+00:00"}
+    - {id: C-1011b, kind: pr_merged, task_id: T-1011, params: {repo: example/repo, pr: 99}, satisfied: true, satisfied_at: "2026-03-02T17:00:00+00:00", checked_at: "2026-03-02T17:58:00+00:00"}
+    - {id: C-1012a, kind: ci_status, task_id: T-1012, params: {repo: example/repo, pr: 102}, satisfied: true, checked_at: "2026-03-02T17:58:00+00:00"}
+    # Reused condition id: green for the previous commit, last checked before this wait.
+    - {id: C-1016, kind: ci_status, task_id: T-1016, params: {repo: example/repo, pr: 105}, satisfied: true, satisfied_at: "2026-03-02T15:00:00+00:00", checked_at: "2026-03-02T15:10:00+00:00"}
+    - {id: C-1012b, kind: human_task, task_id: T-1012, satisfied: false}
+    - {id: C-1013, kind: quota_reset, task_id: T-1013, params: {provider: example-llm}, satisfied: false}
+    - {id: C-1015, kind: ci_status, task_id: T-1015, satisfied: true}
+expected_actions:
+  - kind: wake
+    task_id: T-1011
+    params: {conditions: [C-1011a, C-1011b]}
+  - kind: alert
+    task_id: T-1013
+    reason_contains: "waited"
+    params: {pending_conditions: [C-1013]}
+  - kind: alert
+    task_id: T-1014
+    reason_contains: "without any registered condition"
+not_expected_actions:
+  - {kind: wake, task_id: T-1012}
+  - {kind: alert, task_id: T-1012}
+  - {kind: requeue, task_id: T-1012}
+  - {kind: wake, task_id: T-1015}
+  - {kind: wake, task_id: T-1016}

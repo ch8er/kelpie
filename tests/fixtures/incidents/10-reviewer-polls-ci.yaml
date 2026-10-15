@@ -3,9 +3,10 @@ incident: 10
 title: "Reviewer polls CI inside its session and looks dead"
 description: >
   A reviewer agent waited for CI by running `gh pr checks` in a loop roughly every 60 seconds
-  for 40 minutes inside its own session. It made no progress and sent no heartbeat, so the
+  for 40 minutes inside its own session. The session stayed alive (every tool call is a
+  heartbeat) but the task made no progress, so the
   dispatcher considered it dead and restarted it, wasting the session and tokens. The right
-  behavior is to register a ci_status condition, block on it, and exit. Which commands count
+  behavior is to register a ci_status condition and exit, leaving the task "waiting". Which commands count
   as polling, and which condition kind each one maps to, is configuration data
   (`poll_patterns`), not code, so the rule stays independent of any particular CI.
 rule: wait_condition
@@ -30,7 +31,7 @@ snapshot:
       task_id: T-1001
       owner_id: reviewer-1
       started_at: "2026-03-02T10:02:00+00:00"
-      last_heartbeat: "2026-03-02T10:04:00+00:00"
+      last_heartbeat: "2026-03-02T10:44:04+00:00"
   spans:
     - {trace_id: TR-1001, span_id: SP-00, name: "session reviewer-1", kind: session, start: "2026-03-02T10:02:00+00:00", task_id: T-1001, session_id: S-1001}
     - {trace_id: TR-1001, span_id: SP-01, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:04:00+00:00", end: "2026-03-02T10:04:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}

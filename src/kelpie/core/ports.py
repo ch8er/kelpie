@@ -12,7 +12,12 @@ from kelpie.core.model import Condition, ConditionKind, Session, Status, Task
 
 @runtime_checkable
 class PlatformAdapter(Protocol):
-    """Bridge to an agent platform (Hermes, OpenClaw, Paperclip, Claude Code, ...)."""
+    """Bridge to an agent platform (Hermes, OpenClaw, Paperclip, Claude Code, ...).
+
+    Contract for ``waiting`` tasks (rule 2): the agent registered a condition and exited on
+    purpose. The adapter reports such tasks to the platform's dispatcher as waiting and
+    alive, never as dead or abandoned, until Kelpie wakes them.
+    """
 
     name: str
 
