@@ -39,7 +39,7 @@ path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memor
 # lookback = "24h"                  # runs, spans and finished tasks older than this are left out
 # enabled = true
 # git_state = true                  # git state (commit, branch, dirty files) of live task workspaces
-# git_timeout = "5s"                # limit for each git call
+# git_timeout = "5s"                # limit for each git call; 2x per snapshot in total
 #
 # Recommended on Hermes. A valid Hermes claim counts as a heartbeat, but Hermes tolerates
 # heartbeats up to an hour old, while Kelpie's default is 30 minutes:
