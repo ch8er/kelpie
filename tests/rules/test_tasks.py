@@ -1,7 +1,14 @@
 from datetime import UTC, datetime, timedelta
 
 from kelpie.core.model import Block, Condition, ConditionKind, Session, Snapshot, Status, Task
-from kelpie.rules._tasks import is_live, last_seen, linked_conditions, live_session
+from kelpie.rules._tasks import (
+    is_live,
+    last_exit,
+    last_seen,
+    linked_conditions,
+    live_session,
+    undeclared_exit,
+)
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 H = timedelta(hours=1)
@@ -37,3 +44,31 @@ def test_linked_conditions() -> None:
     assert linked_conditions(by_block, snap) == ([other], None)
     dangling = Task("T-1", "t", Status.BLOCKED, NOW - H, block=Block("guard", NOW - H, "gone"))
     assert linked_conditions(dangling, snap) == ([], "gone")
+
+
+def test_undeclared_exit() -> None:
+    def t(status: Status, since: datetime) -> Task:
+        return Task("T-1", "t", status, since)
+
+    ended = Session("S", "T-1", "a", NOW - 3 * H, ended_at=NOW - H)
+    snap = lambda task, *ss: Snapshot(now=NOW, tasks=(task,), sessions=ss)  # noqa: E731
+    assert (
+        undeclared_exit(t(Status.IN_PROGRESS, NOW - 4 * H), snap(t(Status.IN_PROGRESS, NOW), ended))
+        is not None
+    )
+    # Handed to review during the session: declared.
+    task = t(Status.REVIEW, NOW - 2 * H)
+    assert undeclared_exit(task, snap(task, ended)) is None
+    # Review that predates the session: the reviewer left without a verdict.
+    task = t(Status.REVIEW, NOW - 4 * H)
+    assert undeclared_exit(task, snap(task, ended)) is not None
+    # Declared final status, changed since, other statuses, no sessions.
+    declared = Session("S", "T-1", "a", NOW - 3 * H, ended_at=NOW - H, final_status=Status.DONE)
+    task = t(Status.IN_PROGRESS, NOW - 4 * H)
+    assert undeclared_exit(task, snap(task, declared)) is None
+    task = t(Status.IN_PROGRESS, NOW - 0.5 * H)
+    assert undeclared_exit(task, snap(task, ended)) is None
+    task = t(Status.BLOCKED, NOW - 4 * H)
+    assert undeclared_exit(task, snap(task, ended)) is None
+    task = t(Status.IN_PROGRESS, NOW - 4 * H)
+    assert undeclared_exit(task, snap(task)) is None and last_exit(task, snap(task)) is None

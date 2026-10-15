@@ -57,8 +57,25 @@ def test_no_sessions_no_action() -> None:
     assert run(task()) == []
 
 
-def test_final_status_recorded_is_fine() -> None:
-    assert run(task(), session(final_status=Status.DONE)) == []
+def test_declared_and_applied_final_status_is_fine() -> None:
+    assert run(task(Status.REVIEW, since=NOW - H), session(final_status=Status.REVIEW)) == []
+    assert run(task(Status.DONE, since=NOW - H), session(final_status=Status.DONE)) == []
+
+
+@pytest.mark.parametrize("declared", [Status.IN_PROGRESS, Status.READY, Status.BACKLOG])
+def test_non_final_declared_status_is_not_an_end(declared: Status) -> None:
+    assert run(task(), session(final_status=declared)) == [ActionKind.REQUEUE]
+
+
+def test_declared_but_unapplied_status_alerts() -> None:
+    snap = Snapshot(now=NOW, tasks=(task(),), sessions=(session(final_status=Status.DONE),))
+    [action] = ExitContract().evaluate(snap)
+    assert action.kind is ActionKind.ALERT and "did not apply" in action.reason
+    assert action.params == {"session_id": "S-1", "declared": "done"}
+    # Not before the grace period, and not when someone changed the task since.
+    recent = session(ended=NOW - timedelta(minutes=5), final_status=Status.DONE)
+    assert run(task(), recent) == []
+    assert run(task(since=NOW - timedelta(minutes=30)), session(final_status=Status.DONE)) == []
 
 
 def test_grace_period_boundary() -> None:
@@ -95,7 +112,8 @@ def test_stale_boundary_uses_heartbeat_or_start() -> None:
 
 def test_only_the_last_session_counts() -> None:
     older = session("S-0", ended=NOW - 2 * H)
-    assert run(task(), older, session(final_status=Status.REVIEW)) == []
+    applied = task(Status.REVIEW, since=NOW - H)
+    assert run(applied, older, session(final_status=Status.REVIEW)) == []
     assert run(task(), session("S-0", ended=NOW - 2 * H, final_status=Status.DONE), session()) == [
         ActionKind.REQUEUE
     ]
@@ -192,3 +210,8 @@ def test_block_with_task_linked_condition_is_allowed() -> None:
     c = Condition("C-9", ConditionKind.CI_STATUS, task_id="T-1", satisfied=False)
     snap = Snapshot(now=NOW, tasks=(blocked("stuck"),), sessions=(session(),), conditions=(c,))
     assert ExitContract().evaluate(snap) == []
+
+
+def test_unapplied_check_only_for_in_progress() -> None:
+    reviewing = task(Status.REVIEW, since=NOW - 4 * H)
+    assert run(reviewing, session(final_status=Status.DONE)) == []

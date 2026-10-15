@@ -163,6 +163,9 @@ class Session:
     owner_id: str
     started_at: datetime
     ended_at: datetime | None = None
+    # The status the session declared at its end. Only a real end counts as declared:
+    # terminal statuses or a hand-off (review, accepted, blocked, waiting). in_progress,
+    # ready or backlog mean the session did not say how it ended.
     final_status: Status | None = None
     exit_reason: str | None = None
     last_heartbeat: datetime | None = None

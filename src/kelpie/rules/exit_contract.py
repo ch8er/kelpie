@@ -20,18 +20,23 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import DEFAULT_STALE_AFTER, is_live, last_seen, linked_conditions
+from kelpie.rules._tasks import (
+    DEFAULT_STALE_AFTER,
+    Exit,
+    last_exit,
+    linked_conditions,
+    undeclared_exit,
+)
 
 NAME = "exit_contract"
 
-_HANDOFF = {Status.REVIEW, Status.ACCEPTED}  # queues for the next stage
 DEFAULT_ALLOWED_BLOCK_REASONS = (
     "guard",
     "waiting_ci",
@@ -39,13 +44,6 @@ DEFAULT_ALLOWED_BLOCK_REASONS = (
     "waiting_human",
     "quota",
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _Exit:
-    session: Session
-    at: datetime  # ended_at, or the last sign of life of a silent session
-    silent: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,46 +62,57 @@ class ExitContract:
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         actions: list[Action] = []
         for task in snapshot.tasks:
-            if task.status in {Status.IN_PROGRESS, Status.BLOCKED, *_HANDOFF}:
-                end = self._last_exit(task, snapshot)
-                if end is not None and snapshot.now - end.at >= self.session_exit_grace:
-                    actions.extend(self._judge(task, end, snapshot))
+            if task.status is Status.BLOCKED:
+                actions.extend(self._check_block(task, snapshot))
+                continue
+            end = undeclared_exit(task, snapshot, self.session_stale_after)
+            if end is not None and self._past_grace(end, snapshot):
+                actions.append(self._requeue_exit(task, end))
+            elif end is None:
+                actions.extend(self._check_unapplied(task, snapshot))
         return actions
 
-    def _last_exit(self, task: Task, snapshot: Snapshot) -> _Exit | None:
-        """The task's most recent session if it is over, else None (someone is on it)."""
-        exits: list[_Exit] = []
-        for s in snapshot.sessions_for(task.id):
-            if is_live(s, snapshot.now, self.session_stale_after):
-                return None  # a live session: the task is being worked on
-            exits.append(_Exit(s, last_seen(s), silent=s.ended_at is None))
-        return max(exits, key=lambda e: (e.at, e.session.started_at), default=None)
+    def _past_grace(self, end: Exit, snapshot: Snapshot) -> bool:
+        return snapshot.now - end.at >= self.session_exit_grace
 
-    def _judge(self, task: Task, end: _Exit, snapshot: Snapshot) -> Iterable[Action]:
+    def _check_block(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
+        end = last_exit(task, snapshot, self.session_stale_after)
+        if end is None or task.status_since > end.at or not self._past_grace(end, snapshot):
+            return
         last = end.session
-        if task.status_since > end.at:
-            return  # changed by someone after the session
         # A status stamped at the same moment as the exit was set by the session itself.
-        changed_during = task.status_since >= last.started_at
-        if task.status is Status.BLOCKED:
-            block = task.block
-            if not changed_during and last.final_status is not Status.BLOCKED:
-                return  # the block predates the session: not this session's doing
-            # Tied to a condition (via the block or the task) means something will clear it.
-            conditions, missing = linked_conditions(task, snapshot)
-            if conditions or missing or (block is not None and self._allowed(block.reason)):
-                return
-            yield self._requeue_block(task, last)
-        elif last.final_status is not None:
-            return  # the session declared how it ended
-        elif task.status in _HANDOFF:
-            if changed_during:
-                return  # the agent handed the task on during the session
-            yield self._requeue_exit(task, end)  # a reviewer/merger left without a verdict
-        else:
-            yield self._requeue_exit(task, end)
+        if task.status_since < last.started_at and last.final_status is not Status.BLOCKED:
+            return  # the block predates the session: not this session's doing
+        # Tied to a condition (via the block or the task) means something will clear it.
+        conditions, missing = linked_conditions(task, snapshot)
+        block = task.block
+        if conditions or missing or (block is not None and self._allowed(block.reason)):
+            return
+        yield self._requeue_block(task, last)
 
-    def _requeue_exit(self, task: Task, end: _Exit) -> Action:
+    def _check_unapplied(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
+        """The session declared an end, but the platform never applied it."""
+        if task.status is not Status.IN_PROGRESS:
+            return
+        end = last_exit(task, snapshot, self.session_stale_after)
+        if end is None or task.status_since > end.at or not self._past_grace(end, snapshot):
+            return
+        declared = end.session.final_status
+        if declared is None or declared is task.status:
+            return
+        yield Action(
+            ActionKind.ALERT,
+            NAME,
+            f"Session {end.session.id} ended declaring '{declared}', but the task is still "
+            f"'{task.status}' {_hours(snapshot.now - end.at)} later: the platform did not "
+            "apply the declared status.",
+            task_id=task.id,
+            severity=Severity.WARNING,
+            key=f"unapplied:{end.session.id}",
+            params={"session_id": end.session.id, "declared": str(declared)},
+        )
+
+    def _requeue_exit(self, task: Task, end: Exit) -> Action:
         s = end.session
         when = f"{end.at.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
         how = (
@@ -153,6 +162,10 @@ class ExitContract:
             head == r or head.startswith(f"{r}:") or head.startswith(f"{r} ")
             for r in (a.strip().lower() for a in self.allowed_block_reasons)
         )
+
+
+def _hours(d: timedelta) -> str:
+    return f"{d.total_seconds() / 3600:.1f}h"
 
 
 def _duration(value: Any, name: str) -> timedelta:
