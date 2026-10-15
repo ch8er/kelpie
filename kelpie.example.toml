@@ -68,6 +68,37 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # queue_bytes = 67108864                  # ...and bytes waiting (64 MiB)
 # retries = 3                             # for network errors, 429 and 5xx (at most 10)
 
+# Budgets: spend priced from traces (needs [traces]). See README "Budgets and spend".
+# scope: day (whole farm) | agent | task | project; unit: usd | tokens; soft and/or hard
+# (hard > soft). Windows are rolling and must fit in [traces] retention.
+#
+# [[budgets]]
+# name = "farm-daily"
+# scope = "day"
+# unit = "usd"
+# soft = 50                 # alert
+# hard = 100                # stop the run (act mode only)
+# window = "24h"            # default 24h; task budgets: the span retention
+# burn_window = "1h"        # burn rate and "runs out at" forecast over this
+# mode = "api"              # api | subscription (spend is an estimate; forecast is the
+#                           # time to the next provider limit once limit hits are known)
+#
+# [[budgets]]
+# name = "web-project"
+# scope = "project"
+# match = "label:web"       # or a task id glob such as "WEB-*"; agent/task budgets take
+#                           # an owner or task id (glob); without match: each on its own
+# unit = "tokens"
+# hard = 20000000
+#
+# USD per 1M tokens, per model name or glob (exact names first, then globs in order).
+# Models without a price: tokens still count, their cost is unknown (not guessed).
+#
+# [prices."model-a"]
+# input = 3
+# output = 15
+# cached_input = 0.3        # default: the input price
+
 # Platform adapters. Kelpie only reads the board and, for now, cannot change it (Hermes
 # actions are not implemented yet): keep rules in observe or suggest mode. A rule in act
 # mode with dry_run = false and Hermes as the only adapter stops Kelpie at startup.

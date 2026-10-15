@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from kelpie.adapters.hermes import adapter as hermes
+from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
@@ -28,7 +29,7 @@ from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.states import MemoryStateStore, StateStore
-from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
+from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
 from kelpie.rules.no_progress import NoProgress
@@ -76,6 +77,7 @@ class Settings:
     db_path: Path | None = DEFAULT_DB  # None keeps the ledger in memory
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
+    budgets: BudgetConfig = field(default_factory=BudgetConfig)  # [[budgets]], [prices]
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -95,7 +97,7 @@ def load_settings(path: Path | None) -> Settings:
                 data = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"cannot read config {path}: {exc}") from exc
-    unknown = set(data) - {"engine", "storage", "adapters", "traces"}
+    unknown = set(data) - {"engine", "storage", "adapters", "traces", "budgets", "prices"}
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
     try:
@@ -115,12 +117,19 @@ def load_settings(path: Path | None) -> Settings:
         traces = load_traces(data.get("traces"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    try:
+        budgets = load_budgets(data.get("budgets"), data.get("prices"), traces.retention)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if budgets.budgets and not traces.enabled:
+        raise ConfigError("[[budgets]] read spend from traces: they need [traces] enabled")
     return Settings(
         engine=engine,
         hermes=_load_hermes(data.get("adapters", {})),
         db_path=db_path,
         source=path,
         traces=traces,
+        budgets=budgets,
     )
 
 
@@ -247,6 +256,8 @@ def merged_snapshot(
     metrics: Metrics,
     clock: Callable[[], datetime] = utc_now,
     spans: SpanWindow | None = None,
+    budgets: BudgetConfig | None = None,
+    remember: bool = True,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
 
@@ -255,8 +266,13 @@ def merged_snapshot(
     (OTLP ingest) and per-session totals are added; a span id already seen is kept once. A
     span store that fails is logged and counted, and the tick goes on without its spans.
     Tool calls reported both by hooks and over OTLP are kept once, as the OTLP span
-    completed with the hook's arguments hash and command.
+    completed with the hook's arguments hash and command. With ``budgets`` (and ``spans``),
+    token usage per budget window is priced into ``Snapshot.budgets``, and (``remember``)
+    the snapshot's session owners and task labels are recorded so spend stays attributed
+    after adapters drop them. A failed spend read is logged and counted, and that tick
+    carries the last good budget state with ``budgets_ok`` false.
     """
+    last = _LastBudgets()
 
     def source() -> Snapshot:
         now = clock()
@@ -279,6 +295,7 @@ def merged_snapshot(
                 resources=merged.resources + part.resources,
                 sessions=merged.sessions + part.sessions,
                 spans=merged.spans + part.spans,
+                limit_hits=merged.limit_hits + part.limit_hits,
             )
         if spans is not None:
             try:
@@ -292,9 +309,46 @@ def merged_snapshot(
                 )
         folded = merge_hook_spans(merged.spans)
         metrics.hook_spans_merged(folded.merged)
-        return replace(merged, spans=folded.spans)
+        merged = replace(merged, spans=folded.spans)
+        if spans is not None and budgets is not None and budgets.budgets:
+            merged = _with_budgets(merged, spans, budgets, metrics, last, remember)
+        return merged
 
     return source
+
+
+@dataclass(slots=True)
+class _LastBudgets:
+    statuses: tuple[BudgetStatus, ...] = ()
+
+
+def _with_budgets(
+    snapshot: Snapshot,
+    spans: SpanWindow,
+    budgets: BudgetConfig,
+    metrics: Metrics,
+    last: _LastBudgets,
+    remember: bool,
+) -> Snapshot:
+    now = snapshot.now
+    if remember:
+        try:
+            spans.remember(snapshot.sessions, snapshot.tasks, now)
+        except Exception as exc:  # the read below may still work: go on
+            log.error("span store failed to record session owners and task labels: %s", exc)
+            metrics.span_store_failed()
+    try:
+        usage = spans.usage(now, budgets.windows)
+        attribution = spans.attribution(now)
+    except Exception as exc:
+        log.error("span store failed to read spend: %s", exc)
+        metrics.span_store_failed()
+        metrics.budgets_stale()
+        return replace(snapshot, budgets=last.statuses, budgets_ok=False)
+    result = evaluate(budgets, usage, snapshot, attribution)
+    last.statuses = result.statuses
+    metrics.set_budgets(result, now)
+    return replace(snapshot, budgets=result.statuses)
 
 
 def _unique_owners(owners: tuple[Owner, ...]) -> tuple[Owner, ...]:
@@ -430,6 +484,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     metrics = Metrics()
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     metrics.set_adapters(a.name for a in adapters)
+    metrics.set_budgets_enabled(bool(settings.budgets.budgets))
     if not traces.enabled:
         loop = ControlLoop(engine, merged_snapshot(adapters, metrics, clock), metrics)
         return App(settings, loaded, engine, loop, metrics, store)
@@ -468,7 +523,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     window = SpanWindow(
         span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
     )
-    source = merged_snapshot(adapters, metrics, clock, window)
+    source = merged_snapshot(adapters, metrics, clock, window, settings.budgets)
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     return App(
         settings, loaded, engine, loop, metrics, store, span_store, ingest, retention, forwarder
@@ -545,8 +600,94 @@ def _traces_status(traces: TraceSettings) -> str:
     return f"POST /v1/traces, {auth}, window {traces.window}, retention {traces.retention}{forward}"
 
 
+def read_budgets(
+    settings: Settings,
+    adapters: Sequence[PlatformAdapter] = (),
+    clock: Callable[[], datetime] = utc_now,
+) -> tuple[BudgetStatus, ...] | str:
+    """Current budget state for ``kelpie status``: one snapshot against the database's span
+    store, opened read-only (no database yet: no spend). A string says why spend cannot be
+    read."""
+    if not settings.budgets.budgets:
+        return ()
+    db = settings.db_path
+    try:
+        store: SpanStore = (
+            SqliteSpanStore(db, readonly=True)
+            if db is not None and db.exists()
+            else MemorySpanStore()
+        )
+    except SchemaOutdated:
+        return "the database predates budgets; run kelpie serve once to upgrade it"
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        return f"cannot open the span store {db}: {exc}"
+    try:
+        metrics = Metrics()
+        traces = settings.traces
+        window = SpanWindow(store, traces.window, traces.totals_window, traces.max_snapshot_spans)
+        snapshot = merged_snapshot(
+            adapters, metrics, clock, window, settings.budgets, remember=False
+        )()
+        if not snapshot.budgets_ok or metrics.span_store_errors:
+            return "the span store cannot be read"
+        return snapshot.budgets
+    finally:
+        close = getattr(store, "close", None)
+        if callable(close):
+            close()
+
+
+def _amount(value: float, unit: BudgetUnit) -> str:
+    return f"{value:,.2f}" if unit is BudgetUnit.USD else f"{value:,.0f}"
+
+
+def render_budgets(
+    settings: Settings, statuses: Sequence[BudgetStatus] | str, now: datetime
+) -> list[str]:
+    config = settings.budgets
+    if not config.budgets:
+        return []
+    lines = ["", "budgets:"]
+    for b in config.budgets:
+        match = f" {b.match}" if b.match else ""
+        limits = ", ".join(
+            f"{k} {_amount(v, b.unit)}"
+            for k, v in (("soft", b.soft), ("hard", b.hard))
+            if v is not None
+        )
+        lines.append(
+            f"  {b.name}: {b.scope}{match}, {b.unit}, {b.mode}, window {b.window}"
+            f" (burn rate over {b.burn_window}), {limits}"
+        )
+        if isinstance(statuses, str):
+            lines.append(f"    spend unavailable: {statuses}")
+            continue
+        mine = [s for s in statuses if s.budget == b.name]
+        if not mine:
+            lines.append("    (no spend in the window)")
+        for s in mine:
+            when = "never at this rate"
+            if s.runs_out_at is not None:
+                when = "now" if s.runs_out_at <= now else f"{s.runs_out_at:%Y-%m-%d %H:%M %Z}"
+            extra = " (estimate)" if s.estimated else ""
+            if s.next_limit_at is not None:
+                extra += f", next provider limit {s.next_limit_at:%Y-%m-%d %H:%M %Z}"
+            if s.cost_unknown_tokens:
+                extra += f", {s.cost_unknown_tokens:,} tokens without a price"
+            lines.append(
+                f"    {s.subject}: {s.state}, spent {_amount(s.spent, s.unit)} {s.unit}{extra},"
+                f" remaining {_amount(s.remaining, s.unit)},"
+                f" {_amount(s.burn_rate, s.unit)}/h, runs out {when}"
+            )
+    return lines
+
+
 def render_status(
-    settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter] = ()
+    settings: Settings,
+    loaded: LoadedRules,
+    adapters: Sequence[PlatformAdapter] = (),
+    budgets: Sequence[BudgetStatus] | str = (),
+    now: datetime | None = None,
 ) -> str:
     """Human-readable view of what ``kelpie serve`` would load with these settings."""
     engine = settings.engine
@@ -568,5 +709,6 @@ def render_status(
             mode += " (dry-run)"
         lines.append(f"{number:>3}  {s.name:<17} {prio:<4}  {status:<16} {mode}")
     lines += [f"warning: {w}" for w in loaded.warnings]
+    lines += render_budgets(settings, budgets, now or utc_now())
     lines += render_adapters(adapters)
     return "\n".join(lines) + "\n"

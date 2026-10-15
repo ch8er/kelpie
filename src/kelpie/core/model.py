@@ -222,9 +222,11 @@ class SpanTotals:
     """Per-session aggregates over stored spans, so rules and the report can see tokens and
     call counts over a long window without loading every raw span.
 
-    Tokens are summed over LLM spans. ``input_tokens`` follows the GenAI conventions and
-    includes cached tokens (``cached_tokens`` is the part served from a cache); OTLP
-    ingest normalizes sources that report it the other way (Claude Code).
+    Tokens and ``llm_calls`` count root LLM spans: an LLM span with an LLM ancestor in the
+    same trace (a second instrumentation of the same call) is left out. ``input_tokens``
+    follows the GenAI conventions and includes cached tokens (``cached_tokens`` is the
+    part served from a cache); OTLP ingest normalizes sources that report it the other
+    way (Claude Code).
     """
 
     session_id: str
@@ -238,6 +240,67 @@ class SpanTotals:
     cached_tokens: int = 0
     first_start: datetime | None = None
     last_end: datetime | None = None
+
+
+class BudgetScope(StrEnum):
+    DAY = "day"  # the whole farm
+    TASK = "task"
+    AGENT = "agent"
+    PROJECT = "project"
+
+
+class BudgetUnit(StrEnum):
+    USD = "usd"
+    TOKENS = "tokens"  # input (cached included) + output
+
+
+class BudgetState(StrEnum):
+    OK = "ok"
+    SOFT = "soft"  # soft threshold reached: alert
+    HARD = "hard"  # hard threshold reached: stop (act mode)
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetStatus:
+    """Spend of one subject against one budget at snapshot time (``kelpie.core.budgets``
+    computes it). ``remaining`` and ``runs_out_at`` are measured against ``hard``, or
+    ``soft`` when the budget has no hard threshold; ``remaining`` never goes below 0.
+    ``burn_rate`` is ``unit`` per hour over the budget's recent ``burn_window``;
+    ``runs_out_at`` is when the remaining budget runs out at that rate: ``now`` once it
+    has, None when nothing is being spent. ``estimated`` is set in subscription mode,
+    where there is no bill and the spend is priced from traces; ``next_limit_at`` is then
+    the forecast next provider limit from observed limit hits (None without enough of
+    them). ``cost_unknown_tokens`` are tokens of models with no price in ``[prices]``: a
+    ``usd`` budget leaves them out of ``spent``. ``session_ids`` are the sessions that
+    spent within the window."""
+
+    budget: str
+    scope: BudgetScope
+    subject: str  # task id, agent (owner) id, the project's match, or "farm" for a day
+    unit: BudgetUnit
+    spent: float
+    state: BudgetState = BudgetState.OK
+    soft: float | None = None
+    hard: float | None = None
+    remaining: float = 0.0
+    burn_rate: float = 0.0
+    runs_out_at: datetime | None = None
+    next_limit_at: datetime | None = None
+    window: timedelta = timedelta(hours=24)
+    cost_unknown_tokens: int = 0
+    estimated: bool = False
+    session_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LimitHit:
+    """A provider usage limit was reached (subscription mode): the run was refused until
+    ``resets_at``. ``limit`` names the limit (e.g. a rolling 5-hour or a weekly window);
+    forecasts are made per limit. Connectors fill these; none does yet."""
+
+    limit: str
+    at: datetime
+    resets_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +317,13 @@ class Snapshot:
     spans: tuple[Span, ...] = ()
     # Aggregates over a longer window than ``spans`` (see ``[traces] totals_window``).
     span_totals: tuple[SpanTotals, ...] = ()
+    # Budget state per budget and subject ([[budgets]]), computed when the snapshot is
+    # assembled; rules read it instead of pricing spans themselves.
+    budgets: tuple[BudgetStatus, ...] = ()
+    # False when spend could not be read this tick: ``budgets`` then holds the last good
+    # statuses (stale), so a rule should neither resolve nor raise budget alerts on them.
+    budgets_ok: bool = True
+    limit_hits: tuple[LimitHit, ...] = ()  # subscription mode: observed provider limits
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )

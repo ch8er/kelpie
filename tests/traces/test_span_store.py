@@ -13,7 +13,7 @@ import pytest
 
 from kelpie.core import storage
 from kelpie.core.model import Span, SpanKind, SpanTotals
-from kelpie.core.spans import MemorySpanStore, SpanStore, totals
+from kelpie.core.spans import MemorySpanStore, SpanStore, TokenUsage, totals, usage
 from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
 from kelpie.traces.store import SpanRetention, SpanWindow, merge_spans
 
@@ -125,6 +125,151 @@ def test_totals_per_session(store: SpanStore) -> None:
     assert tuple(got) == totals(store.spans_since(NOW - timedelta(hours=1)))
 
 
+def llm(trace: str, span_id: str, parent: str | None, tokens: int, *, model: str = "m") -> Span:
+    t0 = NOW - timedelta(minutes=10)
+    return Span(
+        trace_id=trace,
+        span_id=span_id,
+        name="chat",
+        kind=SpanKind.LLM,
+        start=t0,
+        end=t0 + timedelta(seconds=5),
+        parent_id=parent,
+        task_id="T-1",
+        session_id="s-1",
+        model=model,
+        input_tokens=tokens,
+        output_tokens=tokens // 10,
+        cached_tokens=tokens // 2,
+    )
+
+
+def nested_trace() -> list[Span]:
+    """One trace: an agent span, a framework chat span wrapping a provider chat span
+    (one call instrumented twice), a tool span with a provider chat span inside the
+    framework span, and a sibling chat call that counts on its own."""
+    agent = replace(llm("a" * 32, "agent", None, 0), kind=SpanKind.SESSION, model=None)
+    return [
+        agent,
+        llm("a" * 32, "framework", "agent", 1000, model="fw"),
+        llm("a" * 32, "provider", "framework", 1000),
+        replace(llm("a" * 32, "tool", "framework", 0), kind=SpanKind.TOOL, model=None),
+        llm("a" * 32, "in-tool", "tool", 400),  # LLM ancestor through a tool span
+        llm("a" * 32, "sibling", "agent", 300),
+        llm("b" * 32, "other-trace", "framework", 50),  # same parent id, another trace
+    ]
+
+
+def test_nested_llm_spans_count_once(store: SpanStore) -> None:
+    store.append_spans(nested_trace(), NOW)
+    (got,) = store.totals_since(NOW - timedelta(hours=1))
+    # framework (1000) + sibling (300) + the other trace's call (its parent is not stored)
+    assert (got.llm_calls, got.input_tokens, got.output_tokens) == (3, 1350, 135)
+    assert got.cached_tokens == 500 + 150 + 25
+    assert got.spans == 7
+    assert list(store.usage_since(NOW, [timedelta(hours=1)])[0]) == [
+        TokenUsage("s-1", "T-1", "fw", 1, 1000, 100, 500),
+        TokenUsage("s-1", "T-1", "m", 2, 350, 35, 175),
+    ]
+
+
+def test_nested_llm_spans_count_once_when_the_child_arrives_first(store: SpanStore) -> None:
+    spans = nested_trace()
+    children, parents = spans[2:], spans[:2]  # the framework span arrives last
+    store.append_spans(children, NOW)
+    before = store.totals_since(NOW - timedelta(hours=1))
+    # until the parent arrives, both of its LLM descendants are roots: nothing is lost
+    assert before[0].input_tokens == 1000 + 400 + 300 + 50
+    store.append_spans(parents, NOW + timedelta(seconds=1))
+    (after,) = store.totals_since(NOW - timedelta(hours=1))
+    assert after.input_tokens == 1350
+    assert sum(u.input_tokens for u in store.usage_since(NOW, [timedelta(hours=1)])[0]) == 1350
+
+
+def test_nested_llm_parent_outside_the_window_still_counts_once(store: SpanStore) -> None:
+    parent = llm("c" * 32, "framework", None, 500)
+    old = replace(parent, start=NOW - timedelta(hours=3), end=NOW - timedelta(hours=3))
+    child = llm("c" * 32, "provider", "framework", 500)
+    store.append_spans([old, child], NOW)
+    # the parent left the window but is still stored: the child is its duplicate
+    assert store.totals_since(NOW - timedelta(hours=1))[0].input_tokens == 0
+    assert list(store.usage_since(NOW, [timedelta(hours=1)])[0]) == []
+
+
+def usage_of(store: SpanStore, *spans: Span) -> list[tuple[str | None, int]]:
+    store.append_spans(spans, NOW)
+    return [(u.model, u.input_tokens) for u in store.usage_since(NOW, [timedelta(hours=1)])[0]]
+
+
+def test_a_wrapper_without_usage_hides_nothing(store: SpanStore) -> None:
+    wrapper = replace(llm("w" * 32, "W", None, 0), model=None)
+    assert usage_of(store, wrapper, llm("w" * 32, "P", "W", 100)) == [("m", 100)]
+
+
+def test_a_call_without_a_model_is_priced_by_its_wrapper(store: SpanStore) -> None:
+    wrapper = llm("w" * 32, "W", None, 0, model="fw")
+    inner = replace(llm("w" * 32, "P", "W", 100), model=None)
+    assert usage_of(store, inner, wrapper) == [("fw", 100)]
+
+
+def test_a_wrapper_without_usage_around_two_calls_counts_both(store: SpanStore) -> None:
+    wrapper = llm("w" * 32, "W", None, 0)
+    assert usage_of(store, wrapper, llm("w" * 32, "P1", "W", 60), llm("w" * 32, "P2", "W", 40)) == [
+        ("m", 100)
+    ]
+    (t,) = store.totals_since(NOW - timedelta(hours=1))
+    assert (t.llm_calls, t.input_tokens) == (2, 100)
+
+
+def test_a_wrapper_with_usage_around_two_calls_counts_once(store: SpanStore) -> None:
+    wrapper = llm("w" * 32, "W", None, 100)
+    assert usage_of(store, llm("w" * 32, "P1", "W", 60), llm("w" * 32, "P2", "W", 40), wrapper) == [
+        ("m", 100)
+    ]
+
+
+def test_parent_loops_end_and_the_span_counts(store: SpanStore) -> None:
+    looped = llm("l" * 32, "A", "A", 100)
+    assert usage_of(store, looped) == [("m", 100)]
+    tool = replace(llm("k" * 32, "B", "C", 0), kind=SpanKind.TOOL, model=None)
+    assert usage_of(store, llm("k" * 32, "C", "B", 50), tool) == [("m", 150)]
+
+
+def test_usage_for_several_windows(store: SpanStore) -> None:
+    old = llm("o" * 32, "O", None, 70)
+    old = replace(old, start=NOW - timedelta(hours=5), end=NOW - timedelta(hours=5))
+    store.append_spans([old, llm("n" * 32, "N", None, 30)], NOW)
+    day, hour, never = store.usage_since(
+        NOW, [timedelta(hours=24), timedelta(hours=1), timedelta(hours=-1)]
+    )
+    assert [u.input_tokens for u in day] == [100] and day[0].calls == 2
+    assert [u.input_tokens for u in hour] == [30]
+    assert never == ()
+    assert store.usage_since(NOW, []) == []
+
+
+def test_attribution_is_remembered_and_pruned(store: SpanStore) -> None:
+    sessions = [("run-1", "agent-1", "T-1"), ("run-2", "agent-2", None)]
+    assert store.record_attribution(sessions, {"T-1": ("web",)}, NOW - timedelta(days=2)) == 3
+    # seen again unchanged within the hour: nothing is written
+    assert store.record_attribution(sessions, {"T-1": ("web",)}, NOW - timedelta(days=2)) == 0
+    assert store.record_attribution([("run-1", "agent-1", "T-1")], {}, NOW) == 1  # refreshed
+    got = store.attribution()
+    assert dict(got.owners) == {"run-1": "agent-1", "run-2": "agent-2"}
+    assert dict(got.session_tasks) == {"run-1": "T-1"}
+    assert dict(got.labels) == {"T-1": ("web",)}
+    store.prune(NOW - timedelta(days=1), max_rows=100)
+    got = store.attribution()
+    assert dict(got.owners) == {"run-1": "agent-1"} and dict(got.labels) == {}
+    assert store.record_attribution(sessions[1:], {"T-1": ("web",)}, NOW) == 2
+
+
+def test_pure_helpers_resolve_ancestry_among_the_spans_given() -> None:
+    spans = nested_trace()
+    assert totals(reversed(spans))[0].input_tokens == 1350
+    assert sum(u.input_tokens for u in usage(spans)) == 1350
+
+
 def test_prune_by_age_then_row_cap(store: SpanStore) -> None:
     spans = [span(i, NOW - timedelta(days=10 - i)) for i in range(10)]
     store.append_spans(spans, NOW)
@@ -148,7 +293,7 @@ def test_sqlite_spans_share_the_ledger_file_and_survive_reopen(tmp_path: Path) -
     reopened = SqliteSpanStore(path)
     assert [s.span_id for s in reopened.spans_since(NOW)] == [f"{1:016x}"]
     db = sqlite3.connect(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 3
+    assert db.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 4
     assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     (received,) = db.execute("SELECT received_at FROM spans").fetchone()
     assert received == "2026-03-02T12:00:00.000000+00:00"
@@ -162,6 +307,54 @@ def test_v2_database_is_upgraded(tmp_path: Path) -> None:
     s = SqliteSpanStore(path)
     assert s.count() == 0
     s.close()
+
+
+def test_v3_database_is_upgraded_and_its_spans_decided(tmp_path: Path) -> None:
+    path = tmp_path / "v3.db"
+    db = sqlite3.connect(path)
+    db.executescript("".join(storage.MIGRATIONS[v] for v in (1, 2, 3)) + "PRAGMA user_version = 3;")
+    columns = (
+        "trace_id, span_id, parent_id, name, kind, start, last_at, session_id, model,"
+        " input_tokens, attributes, received_at"
+    )
+    at = storage._ts(NOW - timedelta(minutes=5))
+    for sid, parent, tokens in (("P", "W", 100), ("W", None, 100), ("S", None, 7)):
+        db.execute(
+            f"INSERT INTO spans ({columns}) VALUES (?, ?, ?, 'chat', 'llm', ?, ?, 's', 'm', ?,"
+            " '{}', ?)",
+            ("t" * 32, sid, parent, at, at, tokens, at),
+        )
+    db.commit()
+    db.close()
+    s = SqliteSpanStore(path)
+    assert [u.input_tokens for u in s.usage_since(NOW, [timedelta(hours=1)])[0]] == [107]
+    s.close()
+    db = sqlite3.connect(path)
+    assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert db.execute("SELECT COUNT(*) FROM spans WHERE counted IS NULL").fetchone()[0] == 0
+
+
+def test_read_only_open_never_writes(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.executescript(storage.MIGRATIONS[1] + storage.MIGRATIONS[2] + "PRAGMA user_version = 2;")
+    db.close()
+    with pytest.raises(storage.SchemaOutdated):
+        SqliteSpanStore(path, readonly=True)
+    SqliteSpanStore(path).close()  # serve upgrades it
+    writer = SqliteSpanStore(path)
+    writer.append_spans([llm("r" * 32, "A", None, 10)], NOW)
+    writer.close()
+    reader = SqliteSpanStore(path, readonly=True)
+    assert [u.input_tokens for u in reader.usage_since(NOW, [timedelta(hours=1)])[0]] == [10]
+    with pytest.raises(sqlite3.OperationalError):
+        reader.append_spans([llm("r" * 32, "B", None, 10)], NOW)
+    reader.close()
+    db = sqlite3.connect(path)
+    db.execute(f"PRAGMA user_version = {storage.SCHEMA_VERSION + 1}")
+    db.close()
+    with pytest.raises(RuntimeError, match="newer"):
+        SqliteSpanStore(path, readonly=True)
 
 
 def test_sqlite_concurrent_appends(tmp_path: Path) -> None:
