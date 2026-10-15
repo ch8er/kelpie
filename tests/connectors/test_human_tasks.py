@@ -406,9 +406,10 @@ def test_step_is_wired_only_when_configured(tmp_path: Path) -> None:
         settings = load_settings(write(tmp_path, text))
         return [name for name, _ in _connector_steps(settings, Metrics(), lambda: NOW)[0]]
 
-    assert steps("") == []
-    assert steps("[connectors.human_tasks]\nenabled = false\n") == []
-    assert steps("[connectors.human_tasks]\n") == ["human_tasks"]
+    # task_status needs only the board and always runs first.
+    assert steps("") == ["task_status"]
+    assert steps("[connectors.human_tasks]\nenabled = false\n") == ["task_status"]
+    assert steps("[connectors.human_tasks]\n") == ["task_status", "human_tasks"]
 
 
 def test_hermes_human_owners_reach_the_adapter(tmp_path: Path) -> None:

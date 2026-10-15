@@ -35,6 +35,7 @@ from kelpie.connectors.human_tasks import (
 )
 from kelpie.connectors.llm_quotas import LlmQuotaSettings, load_llm_quotas
 from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
+from kelpie.core.conditions import check_task_status
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
@@ -852,7 +853,8 @@ def _connector_steps(
     """Connector steps (human tasks; GitHub PR/CI conditions and block conditions; with
     ``[connectors.github.ci]`` recent builds and the CI quota) and the connectors that can
     carry out actions."""
-    steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = []
+    # task_status conditions need nothing but the board (dispatch gate, rule 12).
+    steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = [("task_status", check_task_status)]
     if settings.human_tasks is not None and settings.human_tasks.enabled:
         steps.append(("human_tasks", HumanTaskConnector(settings.human_tasks.block_patterns)))
     github_steps, connectors = _github_steps(settings, metrics, clock)

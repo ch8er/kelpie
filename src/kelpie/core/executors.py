@@ -7,7 +7,14 @@ from typing import Protocol
 
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.ledger import Outcome
-from kelpie.core.ports import ActionConnector, PlatformAdapter, SupportsReassign, SupportsStop
+from kelpie.core.model import Condition, ConditionKind
+from kelpie.core.ports import (
+    ActionConnector,
+    PlatformAdapter,
+    SupportsReassign,
+    SupportsStop,
+    SupportsWait,
+)
 
 
 class Executor(Protocol):
@@ -61,6 +68,11 @@ class PlatformExecutor:
                 adapter, SupportsReassign
             ):
                 adapter.reassign(tid, action.params["owner_id"], action.reason)
+            case ActionKind.WAIT if isinstance(adapter, SupportsWait):
+                conditions = wait_conditions(action)
+                if not conditions:
+                    return False
+                adapter.wait(tid, conditions, action.reason)
             case _:
                 return False
         return True
@@ -85,3 +97,22 @@ class ConnectorExecutor:
         if result is ActionResult.NOTHING_TO_DO:
             return Outcome.NOTHING_TO_DO
         return True
+
+
+def wait_conditions(action: Action) -> list[Condition]:
+    """The conditions a ``wait`` action carries in ``params.conditions`` (``id``, ``kind``,
+    ``params``), for the task it parks. Malformed entries are left out."""
+    raw = action.params.get("conditions")
+    result: list[Condition] = []
+    for item in raw if isinstance(raw, list) else ():
+        if not isinstance(item, dict):
+            continue
+        cid, kind, params = item.get("id"), item.get("kind"), item.get("params", {})
+        if not isinstance(cid, str) or kind not in ConditionKind.__members__.values():
+            continue
+        if not isinstance(params, dict):
+            continue
+        result.append(
+            Condition(cid, ConditionKind(kind), task_id=action.task_id, params=dict(params))
+        )
+    return result

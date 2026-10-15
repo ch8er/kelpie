@@ -8,13 +8,14 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Outcome
-from kelpie.core.model import Session, Snapshot, Status, Task
+from kelpie.core.model import ConditionKind, Session, Snapshot, Status, Task
 from kelpie.core.ports import (
     ActionConnector,
     Alerter,
     PlatformAdapter,
     SupportsReassign,
     SupportsStop,
+    SupportsWait,
 )
 from tests.fakes import (
     Broken,
@@ -24,6 +25,7 @@ from tests.fakes import (
     FakeCI,
     ReassigningAdapter,
     StoppingAdapter,
+    WaitingAdapter,
 )
 
 NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
@@ -156,6 +158,40 @@ def test_stop_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, str]) 
     run([act(ActionKind.STOP, **params)], adapter, alerter)
     assert adapter.calls == []
     assert alerter.sent == [("[emit] stop T-1 (not executed, needs a human)", Severity.INFO)]
+
+
+WAIT_CONDITIONS = [
+    {"id": "C-1", "kind": "task_status", "params": {"task": "T-0", "status": "done"}},
+    {"id": "C-bad-kind", "kind": "nope", "params": {}},
+    {"id": "C-bad-params", "kind": "pr_merged", "params": "x"},
+    "not-a-table",
+]
+
+
+def test_wait_parks_the_task_on_its_well_formed_conditions() -> None:
+    adapter = WaitingAdapter()
+    assert isinstance(adapter, SupportsWait) and not isinstance(FakeAdapter(), SupportsWait)
+    run([act(ActionKind.WAIT, conditions=WAIT_CONDITIONS)], adapter)
+    [(tid, conditions)] = adapter.waits
+    assert tid == "T-1" and [c.id for c in conditions] == ["C-1"]
+    assert conditions[0].kind is ConditionKind.TASK_STATUS and conditions[0].task_id == "T-1"
+    assert conditions[0].params == {"task": "T-0", "status": "done"}
+
+
+@pytest.mark.parametrize(
+    ("adapter", "params"),
+    [
+        (FakeAdapter(), {"conditions": WAIT_CONDITIONS}),
+        (WaitingAdapter(), {}),
+        (WaitingAdapter(), {"conditions": [{"id": "C", "kind": "nope"}]}),
+    ],
+    ids=["adapter-cannot-wait", "no-conditions", "only-bad-conditions"],
+)
+def test_wait_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, object]) -> None:
+    alerter = FakeAlerter()
+    run([act(ActionKind.WAIT, **params)], adapter, alerter)
+    assert adapter.calls == []
+    assert alerter.sent == [("[emit] wait T-1 (not executed, needs a human)", Severity.INFO)]
 
 
 def test_alert_and_escalate_go_to_alerter() -> None:

@@ -77,6 +77,20 @@ class SupportsReassign(Protocol):
 
 
 @runtime_checkable
+class SupportsWait(Protocol):
+    """Optional adapter capability: park a task in ``waiting`` on conditions.
+
+    The adapter registers ``conditions`` for the task (they show up in later snapshots with
+    ``task_id`` set and ``registered_at`` no earlier than the wait) and reports the task as
+    waiting, so rule 2 (``wait_condition``) wakes it when every condition holds. A task an
+    agent is running is stopped first. Used by the dispatch gate and by rule 12's
+    serialization of conflicting tasks.
+    """
+
+    def wait(self, task_id: str, conditions: Sequence[Condition], reason: str) -> None: ...
+
+
+@runtime_checkable
 class SupportsStop(Protocol):
     """Optional adapter capability: stop (pause) a running session.
 
