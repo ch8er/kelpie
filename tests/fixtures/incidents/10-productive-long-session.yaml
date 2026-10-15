@@ -1,0 +1,55 @@
+id: "10-productive-long-session"
+incident: 10
+title: "A long, busy session is not mistaken for polling"
+description: >
+  The negative side of the polling detector. A developer session runs for two hours with
+  many tool calls, some of them repeated (running the test suite after each edit), and a
+  couple of failed test runs, but the calls vary and the work moves. It must not be told to
+  register a condition. A second session that really polls CI with an identical command is
+  included so the detector is known to be active on this snapshot.
+rule: wait_condition
+config:
+  poll_patterns:
+    ci_status: ["gh pr checks", "gh run watch"]
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - {id: T-1021, title: "Refactor billing service", status: in_progress, status_since: "2026-03-02T10:00:00+00:00", owner_id: agent-dev-1}
+    - {id: T-1022, title: "Review: export job", status: review, status_since: "2026-03-02T11:30:00+00:00", owner_id: reviewer-1}
+  sessions:
+    - {id: S-1021, task_id: T-1021, owner_id: agent-dev-1, started_at: "2026-03-02T10:00:00+00:00", last_heartbeat: "2026-03-02T11:59:00+00:00", last_commit_at: "2026-03-02T11:40:00+00:00"}
+    - {id: S-1022, task_id: T-1022, owner_id: reviewer-1, started_at: "2026-03-02T11:40:00+00:00", last_heartbeat: "2026-03-02T11:45:00+00:00"}
+  spans:
+    # Edit / test cycles: the same test command repeats, but never 8 times in a row.
+    - {trace_id: TR-1021, span_id: E1, name: "execute_tool edit", kind: tool, tool: edit, args_hash: e1, start: "2026-03-02T11:50:00+00:00", end: "2026-03-02T11:50:02+00:00", task_id: T-1021, session_id: S-1021, outcome: ok}
+    - {trace_id: TR-1021, span_id: R1, name: "execute_tool bash", kind: tool, tool: bash, args_hash: pytest, start: "2026-03-02T11:51:00+00:00", end: "2026-03-02T11:51:40+00:00", task_id: T-1021, session_id: S-1021, outcome: error}
+    - {trace_id: TR-1021, span_id: E2, name: "execute_tool edit", kind: tool, tool: edit, args_hash: e2, start: "2026-03-02T11:52:00+00:00", end: "2026-03-02T11:52:02+00:00", task_id: T-1021, session_id: S-1021, outcome: ok}
+    - {trace_id: TR-1021, span_id: R2, name: "execute_tool bash", kind: tool, tool: bash, args_hash: pytest, start: "2026-03-02T11:53:00+00:00", end: "2026-03-02T11:53:40+00:00", task_id: T-1021, session_id: S-1021, outcome: error}
+    - {trace_id: TR-1021, span_id: E3, name: "execute_tool edit", kind: tool, tool: edit, args_hash: e3, start: "2026-03-02T11:54:00+00:00", end: "2026-03-02T11:54:02+00:00", task_id: T-1021, session_id: S-1021, outcome: ok}
+    - {trace_id: TR-1021, span_id: R3, name: "execute_tool bash", kind: tool, tool: bash, args_hash: pytest, start: "2026-03-02T11:55:00+00:00", end: "2026-03-02T11:55:40+00:00", task_id: T-1021, session_id: S-1021, outcome: ok}
+    - {trace_id: TR-1021, span_id: G1, name: "execute_tool bash", kind: tool, tool: bash, args_hash: git-commit, start: "2026-03-02T11:56:00+00:00", end: "2026-03-02T11:56:01+00:00", task_id: T-1021, session_id: S-1021, outcome: ok}
+    - {trace_id: TR-1021, span_id: RD, name: "execute_tool read", kind: tool, tool: read, args_hash: r1, start: "2026-03-02T11:58:00+00:00", end: "2026-03-02T11:58:01+00:00", task_id: T-1021, session_id: S-1021, outcome: ok}
+    # Real polling: 9 identical CI checks, one per minute.
+    - trace_id: TR-1022
+      span_id: POLL
+      name: "execute_tool bash"
+      kind: tool
+      tool: bash
+      args_hash: "gh-pr-checks-55"
+      start: "2026-03-02T11:51:00+00:00"
+      end: "2026-03-02T11:51:03+00:00"
+      task_id: T-1022
+      session_id: S-1022
+      outcome: ok
+      attributes: {command: "gh pr checks 55"}
+      repeat: {count: 9, every: "1m"}
+expected_actions:
+  - kind: comment
+    task_id: T-1022
+    reason_contains: "condition"
+    params: {session_id: S-1022, condition_kind: ci_status}
+not_expected_actions:
+  - {kind: comment, task_id: T-1021}

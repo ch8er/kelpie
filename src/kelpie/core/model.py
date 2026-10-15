@@ -20,6 +20,7 @@ class Status(StrEnum):
     IN_PROGRESS = "in_progress"
     REVIEW = "review"
     BLOCKED = "blocked"
+    WAITING = "waiting"  # the agent registered a condition and exited; Kelpie wakes it
     ACCEPTED = "accepted"
     DONE = "done"
     FAILED = "failed"
