@@ -88,6 +88,7 @@ Fixture conventions:
 | # | File | Rule | Expected action(s) |
 |---|------|------|--------------------|
 | 1 | `01-stale-guard-block.yaml` | `stale_blocks` | `unblock` T-101 (CI condition already satisfied) |
+| 1 | `01-guard-block-after-new-push.yaml` | `stale_blocks` | `unblock` only the block whose condition was re-checked after it was set and recently; `alert` for the condition the connector stopped checking; nothing for a fresh block with pre-push data |
 | 2 | `02-exit-without-status.yaml` | `exit_contract` | `requeue` T-201 (session ended with no final status), `requeue` T-202 (block reason not allowed) |
 | 2 | `02-healthy-exit.yaml` | `exit_contract` | `requeue` only T-215 (ended an hour ago without status); nothing for a final status, an allowed reason with detail, a block on a registered condition, or an exit still inside the grace period |
 | 3 | `03-disk-full.yaml` | `resources` | `alert` critical, `{host: host-a}` |
