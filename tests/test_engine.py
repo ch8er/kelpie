@@ -1,4 +1,6 @@
-from datetime import UTC, datetime
+import logging
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -304,3 +306,47 @@ def test_alerter_failure_is_a_failed_action_not_a_crash() -> None:
         config=ACT,
     )
     assert [d.outcome for d in engine.tick(lambda: Snapshot(now=NOW))] == [Outcome.FAILED]
+
+
+def _ticks(engine: Engine, adapter: FakeAdapter, fail: list[bool]) -> list[Outcome]:
+    outcomes = []
+    for i, failing in enumerate(fail):
+        adapter.fail_on = "requeue" if failing else None
+        now = NOW + timedelta(minutes=10 * i)  # past retry_after, inside the cooldown
+        [d] = engine.tick(lambda now=now: Snapshot(now=now))
+        outcomes.append(d.outcome)
+    return outcomes
+
+
+def test_once_action_alerts_only_when_last_attempt_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adapter, alerter = FakeAdapter(), FakeAlerter()
+    action = replace(act(ActionKind.REQUEUE), once=True)
+    engine = Engine([Emit([action])], adapters=[adapter], alerter=alerter, config=ACT)
+    with caplog.at_level(logging.INFO):
+        outcomes = _ticks(engine, adapter, [True, True, False])
+    assert outcomes == [Outcome.FAILED, Outcome.FAILED, Outcome.EXECUTED]
+    assert alerter.sent == []
+    assert not any(r.exc_info for r in caplog.records)  # no traceback above DEBUG
+
+
+def test_once_action_failing_every_attempt_alerts_exactly_once() -> None:
+    adapter, alerter = FakeAdapter(), FakeAlerter()
+    action = replace(act(ActionKind.REQUEUE), once=True)
+    engine = Engine([Emit([action])], adapters=[adapter], alerter=alerter, config=ACT)
+    outcomes = _ticks(engine, adapter, [True, True, True, True])
+    assert outcomes[:3] == [Outcome.FAILED] * 3
+    assert outcomes[3] is Outcome.SUPPRESSED  # attempts used up
+    assert [t for t, _ in alerter.sent] == [
+        "[emit] failed requeue T-1 (not executed, needs a human)"
+    ]
+
+
+def test_repeated_failure_of_a_plain_action_alerts_once_per_cooldown() -> None:
+    adapter, alerter = FakeAdapter(), FakeAlerter()
+    engine = Engine(
+        [Emit([act(ActionKind.REQUEUE)])], adapters=[adapter], alerter=alerter, config=ACT
+    )
+    assert _ticks(engine, adapter, [True, True, True]) == [Outcome.FAILED] * 3
+    assert len(alerter.sent) == 1

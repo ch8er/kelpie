@@ -153,13 +153,30 @@ class Engine:
         else:
             try:
                 outcome = self._handle(action, mode, snapshot)
-            except Exception:
-                log.exception("action failed: %s", action)
+            except Exception as exc:
+                log.warning("action failed: %s: %r", action, exc)
+                log.debug("traceback of failed action: %s", action, exc_info=True)
                 outcome = Outcome.FAILED
-                self._safe_alert(action, executed=False, prefix="failed")
+                if self._last_attempt(action, mode, snapshot.now):
+                    self._safe_alert(action, executed=False, prefix="failed")
             dispatched = Dispatched(action, mode, outcome)
         self._record(dispatched, snapshot.now)
         return dispatched
+
+    def _last_attempt(self, action: Action, mode: Mode, now: datetime) -> bool:
+        """Whether this failure should reach a human.
+
+        Every attempt is recorded as FAILED, but a human hears about it once: when the last
+        allowed attempt of a once-action fails, else on the first failure per cooldown.
+        """
+        try:
+            earlier = self.ledger.failed_attempts(action, mode, now)
+        except Exception:
+            log.exception("could not count earlier attempts; alerting")
+            return True
+        if action.once:
+            return earlier + 1 >= self.config.once_attempts
+        return earlier == 0
 
     # --- long-lived states --------------------------------------------------------------
 
