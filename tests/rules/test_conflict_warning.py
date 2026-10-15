@@ -36,8 +36,12 @@ def run(
     return list((rule or ConflictWarning()).evaluate(snapshot))
 
 
-def comments(actions: list[Action]) -> dict[str, Action]:
-    return {str(a.task_id): a for a in actions if a.kind is ActionKind.COMMENT}
+def comments(actions: list[Action]) -> dict[tuple[str, str], Action]:
+    return {
+        (str(a.task_id), a.params["conflicting_task"]): a
+        for a in actions
+        if a.kind is ActionKind.COMMENT
+    }
 
 
 def of(actions: list[Action], kind: ActionKind) -> dict[str, Action]:
@@ -53,18 +57,19 @@ def test_registered() -> None:
 
 def test_overlapping_live_tasks_both_get_one_comment() -> None:
     found = comments(run(task("A", "x.py", "y.py"), task("B", "./y.py", "x.py", "z.py")))
-    assert set(found) == {"A", "B"}
-    a = found["A"]
+    assert set(found) == {("A", "B"), ("B", "A")}
+    a = found[("A", "B")]
     assert a.once and a.key == "conflict_warning:A:B"
-    assert a.params == {"conflicting_tasks": ["B"], "files": ["x.py", "y.py"]}
-    assert "B ('title B', in_progress) changes x.py, y.py" in a.reason
+    assert a.params == {"conflicting_task": "B", "files": ["x.py", "y.py"]}
+    assert "live task B ('title B', in_progress) changes the same files" in a.reason
 
 
 @pytest.mark.parametrize(
     "status", [Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED, Status.BLOCKED, Status.WAITING]
 )
 def test_every_unmerged_status_is_live(status: Status) -> None:
-    assert set(comments(run(task("A", "x.py"), task("B", "x.py", status=status)))) == {"A", "B"}
+    found = comments(run(task("A", "x.py"), task("B", "x.py", status=status)))
+    assert set(found) == {("A", "B"), ("B", "A")}
 
 
 @pytest.mark.parametrize(
@@ -82,41 +87,34 @@ def test_expected_shared_files_are_ignored() -> None:
     rule = ConflictWarning(expected_shared=("CHANGELOG.md", "docs/*"))
     shared = ("CHANGELOG.md", "docs/a/b.md")
     assert run(task("A", *shared), task("B", *shared), rule=rule) == []
-    [a, _] = run(
-        task("A", "CHANGELOG.md", "src/x.py"), task("B", "CHANGELOG.md", "src/x.py"), rule=rule
-    )
+    both = ("CHANGELOG.md", "src/x.py")
+    [a, _] = run(task("A", *both), task("B", *both), rule=rule)
     assert a.params["files"] == ["src/x.py"]
 
 
-def test_hot_file_gives_each_task_one_comment_listing_every_partner() -> None:
+def test_three_way_overlap_comments_once_per_pair() -> None:
     tasks = (task("A", "x.py"), task("B", "x.py"), task("C", "x.py", "y.py"), task("D", "y.py"))
-    found = comments(run(*tasks))
-    assert len([a for a in run(*tasks) if a.kind is ActionKind.COMMENT]) == 4
-    assert found["A"].params["conflicting_tasks"] == ["B", "C"]
-    assert found["C"].params == {"conflicting_tasks": ["A", "B", "D"], "files": ["x.py", "y.py"]}
+    assert set(comments(run(*tasks))) == {
+        ("A", "B"), ("A", "C"), ("B", "A"), ("B", "C"),
+        ("C", "A"), ("C", "B"), ("C", "D"), ("D", "C"),
+    }  # fmt: skip
 
 
-def test_comment_key_follows_the_newest_partner_only() -> None:
-    def key(*tasks: Task) -> str | None:
-        return comments(run(*tasks))["A"].key
-
-    a, b = task("A", "x.py", since=90 * M), task("B", "x.py", since=60 * M)
-    c = task("C", "x.py", since=30 * M)
-    base = key(a, b)
-    assert key(replace(a, files=("x.py", "q.py")), replace(b, files=("x.py", "q.py"))) == base
-    joined = key(a, b, c)
-    assert joined != base  # a new partner: a new comment
-    older = task("O", "x.py", since=120 * M)
-    assert key(a, b, c, older) == joined  # an older task showing up is not news
+def test_comment_key_is_the_pair_whatever_the_files_or_other_tasks() -> None:
+    a, b = task("A", "x.py", since=90 * M), task("C", "x.py", since=30 * M)
+    first = comments(run(a, b))[("A", "C")]
+    grown = comments(run(replace(a, files=("x.py", "q.py")), replace(b, files=("x.py", "q.py"))))
+    assert grown[("A", "C")].key == first.key  # the ledger sends it once
+    middle = task("B", "x.py", since=60 * M)  # started between them, joins later
+    found = comments(run(a, b, middle))
+    assert found[("A", "B")].key == "conflict_warning:A:B"  # A is told about B too
+    assert found[("A", "C")].key == first.key
 
 
-def test_long_lists_are_shortened_in_the_message_only() -> None:
+def test_long_file_lists_are_shortened_in_the_message_only() -> None:
     files = [f"f{i}.py" for i in range(8)]
-    others = [task(f"O{i}", "hot.py") for i in range(7)]
-    found = comments(run(task("A", "hot.py", *files), task("B", *files), *others))
-    a = found["A"]
-    assert len(a.params["conflicting_tasks"]) == 8 and "+3 more task(s)" in a.reason
-    assert "+3 more" in found["B"].reason  # 8 shared files, 5 named
+    [a, _] = run(task("A", *files), task("B", *files))
+    assert len(a.params["files"]) == 8 and "+3 more" in a.reason
 
 
 # --- serialization -----------------------------------------------------------------------
@@ -155,6 +153,18 @@ def test_wait_comes_before_the_comment_for_the_rate_limit() -> None:
     actions = run(task("A", "x.py", since=90 * M), task("B", "x.py", since=10 * M), rule=SERIAL)
     kinds = [a.kind for a in actions if a.task_id == "B"]
     assert kinds == [ActionKind.WAIT, ActionKind.COMMENT]
+
+
+def test_mixed_wait_with_an_ended_target_is_still_a_dead_end_for_rule_2() -> None:
+    b, conditions = parked("A")
+    other = Condition("C-ci", ConditionKind.CI_STATUS, "B", {}, registered_at=NOW - 20 * M)
+    snapshot = check_task_status(
+        Snapshot(
+            NOW, tasks=(b, task("A", status=Status.CANCELLED)), conditions=(*conditions, other)
+        )
+    )
+    assert ConflictWarning().evaluate(snapshot) == []  # not only ours: no release
+    assert [a.kind for a in WaitCondition().evaluate(snapshot)] == [ActionKind.ALERT]
 
 
 def test_start_is_the_first_session_and_ties_go_by_id() -> None:
