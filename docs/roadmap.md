@@ -362,7 +362,7 @@ with the history of return reasons.
 - [ ] Escalation message lists return reasons and categories
 - [ ] Fixtures: existing `12-review-ping-pong.yaml`; new `12-below-threshold.yaml`
 
-### rules: bottlenecks — role utilization and critical path (rule 6, incidents 9, 10)
+### rules: bottlenecks — role utilization, critical path, idle with ready work (rule 6, incidents 9, 10, 14)
 labels: P0, week-2, area:rules
 Compute idle time and queue depth per role and the critical path of the task graph. When a
 sequential graph keeps agents idle, or one role (e.g. reviewers) becomes the bottleneck,
@@ -372,7 +372,10 @@ alert with a rebalancing suggestion.
 - [ ] Idle time and queue depth per role computed from sessions and task statuses
 - [ ] Long sequential chains with idle agents → `alert` suggesting parallelization, with `critical_path_length`
 - [ ] Overloaded role with idle roles elsewhere → `alert` with a rebalancing suggestion
-- [ ] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`
+- [ ] Farm or role idle longer than N minutes (config) while ready work waits (queued tasks, mergeable PRs from the GitHub connector) → `alert` with the idle time, the waiting work and the likely cause (an active hold, an empty queue upstream)
+- [ ] Holds are first-class: a hold (a label, flag or pause, matched by config) has an owner and an expiry (default from config); expired hold → `alert`; in act mode the executor that owns it lifts it
+- [ ] Idle hours caused by holds go to the cost-of-chaos report
+- [ ] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`, `14-forgotten-merge-hold.yaml` (hold set, promised lift missed, ready PRs waiting about 5 h)
 
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules
@@ -475,6 +478,19 @@ superseded run.
 - [ ] Build/run records mapped to the CI-agnostic model fields
 - [ ] Exposes the `cancel_build` action as an executor (see "action routing"); only with a token that allows it, read-only otherwise
 - [ ] Respects rate limits with caching / conditional requests; tests with mocked HTTP
+
+### rules: stale_blocks — block reasons that mean "waiting" become conditions (rule 4, incident 15)
+labels: P0, week-2, area:rules
+First live run: most block alerts came from a reviewer blocking its own card with
+"waiting for CI/merge" while its PR sat in the merge queue. That is waiting expressed as a
+block (incident 10 in another form). Turn such blocks into conditions instead of alerting.
+
+**Acceptance criteria**
+- [ ] Config: block-reason patterns as data (like `wait_condition`'s `poll_patterns`), each mapped to a condition kind (`pr_merged`, `ci_green`) and a way to extract the PR reference
+- [ ] A matching block gets the condition attached through the GitHub connector when it can resolve the PR; rule 4 then clears the block when the condition is met
+- [ ] Matched blocks count as waiting: no "block without condition" alert
+- [ ] Unmatched blocks, and matched ones whose PR cannot be resolved, keep the current behaviour
+- [ ] Fixtures: new `15-review-block-waiting-merge.yaml` (synthetic names), with a 13 h unmatched block as the true positive
 
 ### connectors: LLM provider quotas and auth health
 labels: P0, week-2, area:connectors

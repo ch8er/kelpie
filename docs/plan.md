@@ -10,7 +10,7 @@ Priorities: **P0** — now, this week · **P1** — next step · **P2** — late
 
 ## Requirements from a real farm
 
-13 incidents from three days of a running farm are a ready-made requirements list: almost all of them are about execution control, not LLM quality.
+13 incidents from three days of a running farm, plus those found during the first live run, are a ready-made requirements list: almost all of them are about execution control, not LLM quality.
 
 | # | Incident | Cost | What Kelpie does |
 | --- | --- | --- | --- |
@@ -27,6 +27,8 @@ Priorities: **P0** — now, this week · **P1** — next step · **P2** — late
 | 11 | Task stuck in a status with no owner | half a day, 7 tasks blocked | Orphan statuses |
 | 12 | 9 review rounds on one task | not measured | Ping-pong → escalation |
 | 13 | Human tasks blocked agents | not measured | Humans in the task graph, with cost of delay (rule 13, P1) |
+| 14 | A deliberate merge hold was promised to be lifted in 2.5 h and was forgotten; ready PRs waited, agents had no work | about 5 h of idle farm, 1 task closed | Idle with ready work (rule 6) and holds with an owner and an expiry |
+| 15 | A reviewer blocked its own card "waiting for CI/merge" while its PR sat in the merge queue | most of the first live run's block alerts | Block reasons matched by configurable patterns become conditions (pr_merged, ci_green); rule 4 clears them when met |
 
 Example of what Kelpie must compute by itself: after a manual fix, review time dropped from 48 to 27 minutes, and failures went from 9 of 29 to 1 of 11.
 
@@ -70,9 +72,9 @@ The numbers in brackets are the farm incidents each rule is validated against.
 1. Exit contract: a session ended without a final status, or with a block that has no allowed reason → the task goes back to the queue (2)
 2. "Wait for condition" instead of waiting inside a session: the agent registers a condition through any connector and exits; Kelpie wakes the task up (10)
 3. Orphan statuses: a task sits in a status with no owner for more than N minutes → alert or reassignment (11)
-4. Stale blocks: the cause was fixed in the outside world → the block is cleared (1, 8)
+4. Stale blocks: the cause was fixed in the outside world → the block is cleared; block reasons that match configurable patterns ("waiting for CI/merge") get a condition through a connector and count as waiting, not dead (1, 8, 15)
 5. Ping-pong: after K review rounds → escalate to the architect or a human (12)
-6. Bottlenecks and idle time per role → alert with a rebalancing suggestion (9, 10)
+6. Bottlenecks and idle time per role → alert with a rebalancing suggestion; the whole farm or a role idle while ready work waits (e.g. mergeable PRs) → alert naming the likely cause, such as a hold; holds (labels, flags, pauses) carry an owner and an expiry, an expired hold → alert, or lifted in act mode (9, 10, 14)
 7. Environment resources: disk, memory, processes or provider quotas running out, auth expiring → alert before the agents stop (3, 4, 6). Provider usage and cost also feed budgets (see below)
 8. Daily "cost of chaos" report and before/after verification of every fix
 9. CI economy: finds builds that burn minutes for nothing — on drafts and WIP commits, superseded by a newer push, triggered by docs-only changes, or repeated for an already verified commit. Cancels superseded builds by itself and forecasts how long the quota will last (5). Proposing a PR with a better CI configuration is P1 (rules backlog)
