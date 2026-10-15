@@ -53,10 +53,22 @@ def test_hermes_defaults(tmp_path: Path) -> None:
         spool=Path("~/.hermes/kelpie/spool.jsonl"),
         lookback=timedelta(hours=24),
         enabled=True,
+        git_state=True,
+        git_timeout=timedelta(seconds=5),
     )
     (adapter,) = build_adapters(settings)
     assert isinstance(adapter, HermesAdapter)
     assert adapter.db_path == Path.home() / ".hermes" / "kanban.db"  # ~ expanded
+    assert adapter.git_state is True and adapter.git_timeout == timedelta(seconds=5)
+
+
+def test_hermes_git_settings(tmp_path: Path) -> None:
+    path = write(tmp_path, '[adapters.hermes]\ngit_state = false\ngit_timeout = "1m30s"\n')
+    h = load_settings(path).hermes
+    assert h is not None and h.git_state is False and h.git_timeout == timedelta(seconds=90)
+    (adapter,) = build_adapters(load_settings(path))
+    assert isinstance(adapter, HermesAdapter)
+    assert adapter.git_state is False and adapter.git_timeout == timedelta(seconds=90)
 
 
 def test_hermes_values(tmp_path: Path) -> None:
@@ -96,6 +108,12 @@ def test_spool_false_disables_spool_reading(tmp_path: Path) -> None:
         "[adapters.hermes]\nlookback = [1]\n",
         "[adapters.hermes]\nlookback = 0\n",
         "[adapters.hermes]\nenabled = 'yes'\n",
+        "[adapters.hermes]\ngit_state = 'yes'\n",
+        "[adapters.hermes]\ngit_state = 1\n",
+        "[adapters.hermes]\ngit_timeout = 'soon'\n",
+        "[adapters.hermes]\ngit_timeout = 0\n",
+        "[adapters.hermes]\ngit_timeout = [1]\n",
+        "[adapters.hermes]\ngit_timeout = false\n",
     ],
 )
 def test_bad_adapter_config(tmp_path: Path, text: str) -> None:

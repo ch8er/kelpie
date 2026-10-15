@@ -14,6 +14,8 @@ db_path = "~/.hermes/kanban.db"          # named boards: ~/.hermes/kanban/boards
 spool = "~/.hermes/kelpie/spool.jsonl"   # written by the plugin below; false = do not read one
 lookback = "24h"                         # runs, spans and finished tasks older than this are left out
 enabled = true                           # default when the section exists
+git_state = true                         # read git state of live task workspaces (see below)
+git_timeout = "5s"                       # limit for each git call; 2x per snapshot in total
 
 # Hermes tolerates heartbeats up to an hour old; Kelpie's default is 30 minutes.
 [engine.rules.exit_contract]
@@ -147,6 +149,89 @@ Liveness (`Session.last_heartbeat`): the latest of the run's `last_heartbeat_at`
 `last_heartbeat_at` (for the task's current run) and the newest spool tool call of the run. A
 valid Hermes claim counts as a heartbeat: an open run that is the task's `current_run_id` with
 `claim_expires` in the future is alive as of the snapshot.
+
+### Progress note and git state
+
+`Session.summary` is `task_runs.summary` of the run (empty means none). The `checkpoints`
+rule needs more than that: the last commit, the branch and the uncommitted files of the
+session. Hermes does not store those, so Kelpie asks git (`git_state = true`, the default).
+
+Git describes the workspace as it is now, so it is attached only to the **latest run of a
+task that is not finished** (not `done`, not `archived`), and only when the task has
+`workspace_kind = worktree` and a `workspace_path` that is an existing absolute directory on
+the Kelpie host with its own `.git` (git is never left to search parent directories). `dir`
+workspaces are skipped (they may point to a shared or human checkout), so are `scratch`
+workspaces and older runs. Paths are resolved (symlinks, `..`); when the latest runs of two
+or more live tasks resolve to the same directory, none of them gets git fields (a warning
+is logged once).
+
+| `Session` field | Source |
+| --- | --- |
+| `changed_files`, `dirty_worktree` | entries of `git status --porcelain=v2 --branch --untracked-files=normal --ignore-submodules=all` (changed, renamed, unmerged and untracked; an untracked directory counts once); dirty when above 0 |
+| `branch` | `tasks.branch_name`, else `# branch.head` of that `status` (a detached `HEAD` gives none) |
+| `last_commit` | `# branch.oid` of that `status`, first 7 hex digits (none before the first commit) |
+| `last_commit_at` | committer time of that commit, from `git cat-file commit <oid>`, in UTC |
+
+Failures (not a repository, git missing, timeout, unreadable config) leave the git fields
+unset and never fail the snapshot; `branch` from the task is kept. Set `git_state = false`
+to turn all of it off.
+
+#### Trust model
+
+Workspaces are **controlled by the agents**, and so is everything git reads there:
+`.git/config` and the files it includes, `.gitattributes`, `.git/info/attributes`, the
+objects. Git runs programs named in that config (filter drivers, `core.fsmonitor`,
+`gpg.program` for signed commits), so Kelpie asks git only what it can answer without them:
+
+- Three commands per workspace, nothing else: `git config -z --name-only --get-regexp
+  '^filter\.'` (lists filter drivers, runs nothing), the `status` above, and `git cat-file
+  commit <oid>` (no `git log`: with `log.showSignature` it runs gpg).
+- Every filter driver found is emptied for the `status` call (`-c filter.<name>.clean=`,
+  `smudge=`, `process=`, `required=false`); a driver name that cannot be written as `-c`
+  (it contains `=`) means `status` is not run for that workspace.
+- Every call also gets `-c core.fsmonitor=false -c core.attributesFile=/dev/null
+  -c core.hooksPath=/dev/null -c status.showUntrackedFiles=normal -c submodule.recurse=false`,
+  and `--attr-source=<empty tree>` when the installed git has it (2.40 or later, checked once
+  per process; the SHA-256 empty tree is used for SHA-256 repositories), so the worktree's
+  `.gitattributes` is not read at all.
+- Minimal environment: only `PATH` and `HOME` are passed from Kelpie's environment, plus
+  `LC_ALL=C`, `GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_ATTR_NOSYSTEM=1` and
+  `GIT_OPTIONAL_LOCKS=0` (so `status` never rewrites the index under a running worker), and
+  `GIT_NO_LAZY_FETCH=1` with `GIT_ALLOW_PROTOCOL=none`: git never fetches, so a "partial
+  clone" with a missing `HEAD` cannot make it start the transport the workspace config names
+  (`remote.<name>.uploadpack`, `core.sshCommand`, `ext::`). `GIT_CEILING_DIRECTORIES` is the
+  workspace's parent, so an empty or broken `.git` never makes git use a repository further
+  up (such as a human's checkout).
+  Kelpie's tokens and any inherited `GIT_*` (`GIT_DIR`, `GIT_WORK_TREE`, ...) never reach git.
+  Git still reads the global config of the user Kelpie runs as (`$HOME/.gitconfig`).
+- Each call runs in its own process group with `git_timeout`; on timeout the whole group is
+  killed.
+- Cost bound: workspaces are read by up to 4 threads, each directory at most once per
+  snapshot, and all git calls of one snapshot end within `2 × git_timeout` (10 s by
+  default); workspaces not reached by then get no git fields in that snapshot. A workspace
+  whose git call timed out is skipped for 5 minutes (snapshot time).
+
+Residual risk: git itself still parses hostile repositories (config, index, objects), so a
+bug in git is reachable from a workspace. The filter list is read just before `status`, so
+an agent that adds a driver in between could still get it run once (a narrow race). Run
+Kelpie as a separate unprivileged user that cannot read the secrets of other services and
+has nothing in its own `~/.gitconfig` that runs programs; set `git_state = false` if that
+is not good enough.
+
+Operations:
+
+- The Docker image built from this repository has no git, so the feature yields nothing
+  there (one warning: `git not found on PATH`); install git in a derived image if you need
+  it, and run the container with `--init` (or tini): processes killed on a git timeout are
+  re-parented to PID 1, which must reap them.
+- Git refuses repositories owned by another uid ("detected dubious ownership"); when Kelpie
+  runs as a different user than the agents, git fields stay empty without a warning. Run
+  Kelpie with debug logging (`kelpie.adapters.hermes`) to see git's error. Whether to add the
+  workspaces to `safe.directory` in Kelpie's global git config is the operator's call: it
+  makes git trust config written by the agents, which the measures above are meant to
+  contain.
+- Timeouts, shared workspaces and unusable filter drivers are logged once per workspace and
+  cause; a timed out `git version` once per process.
 
 Notes:
 

@@ -49,6 +49,17 @@ within ``lookback``::
 
 ``exit_reason`` is the outcome, followed by the run's error text when there is one.
 
+Progress note and git state. ``Session.summary`` is ``task_runs.summary``. The git fields
+(``last_commit``, ``last_commit_at``, ``branch``, ``changed_files``, ``dirty_worktree``) come
+from the workspace as it is now, so they go only on the latest run of a task that is not
+finished and whose ``workspace_kind`` is ``worktree`` with an existing absolute
+``workspace_path``. A resolved path used by more than one such run is read for none of them.
+Workspaces are agent-controlled: see :mod:`kelpie.adapters.hermes.git_state` for how git is run
+there; any failure leaves a field ``None``. ``branch`` is ``tasks.branch_name``, else git's.
+Each path is read at most once per snapshot, by up to ``GIT_WORKERS`` threads, all within
+``GIT_BUDGET_FACTOR * git_timeout``; a path whose git call timed out is skipped for
+``GIT_BACKOFF`` (by snapshot time).
+
 Liveness. ``Session.last_heartbeat`` is the latest of the run's ``last_heartbeat_at``, the
 task's ``last_heartbeat_at`` (when the run is the task's ``current_run_id``) and the newest
 spool tool call of the run. A valid Hermes claim counts as a heartbeat: an open run that is the
@@ -64,12 +75,22 @@ import hashlib
 import json
 import logging
 import sqlite3
+import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from kelpie.adapters.hermes.git_state import (
+    DEFAULT_TIMEOUT,
+    GitState,
+    Problem,
+    probe_git,
+    read_git_state,
+    warn_once,
+)
 from kelpie.core.model import (
     Block,
     Dependency,
@@ -89,7 +110,14 @@ log = logging.getLogger(__name__)
 DEFAULT_DB = Path("~/.hermes/kanban.db")
 DEFAULT_SPOOL = Path("~/.hermes/kelpie/spool.jsonl")
 DEFAULT_LOOKBACK = timedelta(hours=24)
+DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
 BUSY_TIMEOUT_MS = 5000
+# The ``tasks.workspace_kind`` whose directory is the task's own: ``dir`` may point to a shared
+# or human checkout, ``scratch`` is not a repository.
+WORKSPACE_KINDS = ("worktree",)
+GIT_WORKERS = 4  # workspaces read in parallel
+GIT_BUDGET_FACTOR = 2  # all git calls of one snapshot end within this many git_timeouts
+GIT_BACKOFF = timedelta(minutes=5)  # a workspace whose git timed out is skipped this long
 
 NOT_IMPLEMENTED = "Hermes actions are not implemented yet; run Kelpie in observe or suggest mode"
 
@@ -168,6 +196,23 @@ def _col(row: sqlite3.Row, name: str) -> Any:
     return row[name] if name in row.keys() else None  # noqa: SIM118
 
 
+def _workspace(row: sqlite3.Row) -> Path | None:
+    """The task's own directory, if it is one that exists on this host."""
+    if _col(row, "workspace_kind") not in WORKSPACE_KINDS:
+        return None
+    raw = str(_col(row, "workspace_path") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        return None
+    try:
+        path = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return path if path.is_dir() else None
+
+
 def _block_text(row: sqlite3.Row, status_event: sqlite3.Row | None, block_event: Any) -> str:
     if block_event is not None:  # a block event at/after the block's start: current evidence
         payload = _payload(block_event["payload"])
@@ -200,7 +245,13 @@ class HermesAdapter:
     db_path: Path = DEFAULT_DB
     spool: Path | None = DEFAULT_SPOOL  # None: no hook data, no spans
     lookback: timedelta = DEFAULT_LOOKBACK
+    git_state: bool = True  # read the git state of the workspaces of live tasks
+    git_timeout: timedelta = DEFAULT_GIT_TIMEOUT  # per git call
     name: str = "hermes"
+    # workspace -> snapshot time until which it is not read (its git timed out)
+    _git_backoff: dict[Path, datetime] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path).expanduser()
@@ -282,6 +333,8 @@ class HermesAdapter:
                 sessions, profiles = self._sessions(conn, ids, rows, cutoff, now, beats)
         except sqlite3.Error as exc:
             raise HermesError(f"cannot read Hermes kanban database {self.db_path}: {exc}") from exc
+        if self.git_state:  # outside the read transaction: git may be slow
+            sessions = self._with_git_state(sessions, tasks, rows, now)
         owners = tuple(
             Owner(id=p, role=p, kind=OwnerKind.AGENT) for p in sorted(owner_ids | profiles)
         )
@@ -417,9 +470,126 @@ class HermesAdapter:
                     final_status=OUTCOME_STATUS.get(outcome) if outcome else None,
                     exit_reason=reason[:300] or None,
                     last_heartbeat=max((b for b in beats if b is not None), default=None),
+                    summary=str(_col(r, "summary") or "").strip() or None,
                 )
             )
         return tuple(sessions), profiles
+
+    def _with_git_state(
+        self,
+        sessions: tuple[Session, ...],
+        tasks: Sequence[Task],
+        rows: Mapping[str, sqlite3.Row],
+        now: datetime,
+    ) -> tuple[Session, ...]:
+        """Attach the workspace's git state to the latest run of each live task.
+
+        Git describes the worktree as it is now, so older runs of a task get nothing, and
+        neither do finished tasks: their worktree says nothing about a session any more.
+        """
+        live = {t.id for t in tasks if not t.status.is_terminal}
+        latest: dict[str, Session] = {}
+        for s in sessions:  # run ids only grow, and sessions come in run id order
+            if s.task_id in live:
+                latest[s.task_id] = s
+        users: dict[Path, list[tuple[Session, str | None]]] = {}
+        for task_id, s in latest.items():
+            row = rows[task_id]
+            if (path := _workspace(row)) is not None:
+                branch = str(_col(row, "branch_name") or "").strip() or None
+                users.setdefault(path, []).append((s, branch))
+        self._git_backoff = {p: t for p, t in self._git_backoff.items() if t > now}
+        states: dict[str, GitState] = {}
+        jobs: dict[Path, tuple[Session, str | None]] = {}
+        for path, found in users.items():
+            if len(found) > 1:
+                warn_once(
+                    (str(path), "shared"),
+                    "hermes: workspace %s is used by tasks %s; no git state for them",
+                    path,
+                    ", ".join(sorted(s.task_id for s, _ in found)),
+                )
+                states.update((s.id, GitState(branch=b)) for s, b in found)
+            elif path in self._git_backoff:
+                log.debug(
+                    "hermes: %s skipped until %s (git timed out)", path, self._git_backoff[path]
+                )
+                states.update((s.id, GitState(branch=b)) for s, b in found)
+            else:
+                jobs[path] = found[0]
+        if jobs:
+            states.update(self._read_git(jobs, now))
+        attached: dict[str, Session] = {}
+        for s in sessions:
+            if (state := states.get(s.id)) is not None:
+                attached[s.id] = replace(
+                    s,
+                    last_commit=state.last_commit,
+                    last_commit_at=state.last_commit_at,
+                    branch=state.branch,
+                    changed_files=state.changed_files,
+                    dirty_worktree=state.dirty,
+                )
+        return tuple(attached.get(s.id, s) for s in sessions)
+
+    def _read_git(
+        self, jobs: Mapping[Path, tuple[Session, str | None]], now: datetime
+    ) -> dict[str, GitState]:
+        """Git state per session id; each path read once, all within the snapshot's budget."""
+        timeout = self.git_timeout.total_seconds()
+        deadline = time.monotonic() + GIT_BUDGET_FACTOR * timeout
+        problem = probe_git(timeout)
+        if problem is not None:
+            self._report(None, problem)
+            return {s.id: GitState(branch=b, problem=problem) for s, b in jobs.values()}
+        with ThreadPoolExecutor(GIT_WORKERS, thread_name_prefix="kelpie-git") as pool:
+            futures = {
+                path: pool.submit(read_git_state, path, timeout, branch=b, deadline=deadline)
+                for path, (_, b) in jobs.items()
+            }
+        states: dict[str, GitState] = {}
+        for path, future in futures.items():
+            session, branch = jobs[path]
+            try:
+                state = future.result()
+            except Exception:  # a bug in parsing must not fail the snapshot
+                log.exception("hermes: reading git state of %s failed", path)
+                state = GitState(branch=branch, problem=Problem.FAILED)
+            if state.problem is Problem.TIMEOUT:
+                self._git_backoff[path] = now + GIT_BACKOFF
+            self._report(path, state.problem)
+            states[session.id] = state
+        return states
+
+    def _report(self, path: Path | None, problem: Problem | None) -> None:
+        timeout = self.git_timeout.total_seconds()
+        if problem is Problem.NO_GIT:
+            warn_once(("", problem), "hermes: git not found on PATH; no git state is read")
+        elif problem is Problem.TIMEOUT and path is None:
+            warn_once(("", problem), "hermes: `git version` timed out after %ss", timeout)
+        elif problem is Problem.TIMEOUT:
+            warn_once(
+                (str(path), problem),
+                "hermes: git timed out after %ss in %s; skipping it for %s",
+                timeout,
+                path,
+                GIT_BACKOFF,
+            )
+        elif problem is Problem.UNSAFE:
+            warn_once(
+                (str(path), problem),
+                "hermes: %s has a git filter driver whose name cannot be overridden; not read",
+                path,
+            )
+        elif problem is Problem.BUDGET:
+            warn_once(
+                ("", problem),
+                "hermes: git state of %s not read: the snapshot's git budget (%ss) is used up",
+                path,
+                GIT_BUDGET_FACTOR * timeout,
+            )
+        elif problem is Problem.FAILED:  # git's stderr is logged at debug level
+            log.debug("hermes: no git state for %s (git failed)", path)
 
     # --- hooks spool ---------------------------------------------------------------------
 
