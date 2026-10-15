@@ -11,8 +11,8 @@ board, wherever they run: a laptop, a cloud VM, containers or Kubernetes.
 Kelpie is a **service, not an LLM agent**. It watches your task board, agent sessions,
 traces and host resources, and applies **deterministic rules** to keep work flowing:
 it requeues tasks that agents abandoned, wakes tasks whose wait condition is met, lifts
-stale blocks, escalates review ping-pong, cancels wasted CI builds and warns before disks,
-quotas or logins run out. An LLM is optional and only used for root-cause analysis in the
+stale blocks, escalates review ping-pong, cancels wasted CI builds, stops runaway loops
+and warns before disks, quotas, logins or token budgets run out. An LLM is optional and only used for root-cause analysis in the
 daily report.
 
 Scope, priorities and order of work live in [docs/plan.md](docs/plan.md), the single source
@@ -34,16 +34,28 @@ The rules in Kelpie come from 13 real incidents on one farm:
 | 4  | Host overloaded, heavy task queue of 1.5–2 h | Resources + heavy-task concurrency limit |
 | 5  | CI minutes ran out (11 h idle) | CI economy and quota burn forecast |
 | 6  | LLM provider limits and expired logins (up to 200 hits/day) | Resources: provider quotas and auth health |
-| 7  | Conflicts in shared files (46 of 63 returns) | Return causes: root-cause analysis from traces → recommendation |
+| 7  | Conflicts in shared files (46 of 63 returns) | Return causes: root-cause analysis from traces → recommendation; early conflict warning (rule 12, P1) |
 | 8  | Block lingered 3 h after the cause was fixed | Stale blocks |
 | 9  | Idle agents due to a sequential task graph | Bottlenecks: role utilization and critical path |
 | 10 | Agent waited for an external event inside its session; the dispatcher declared it dead | Wait for condition + "waiting" heartbeat; bottlenecks |
 | 11 | Task stuck in a status with no owner, 7 tasks blocked | Orphan statuses |
 | 12 | 9 review rounds on a single task | Ping-pong → escalation |
-| 13 | Human tasks blocked agents | Humans in the task graph, with cost of delay |
+| 13 | Human tasks blocked agents | "Needs you" inbox: humans in the task graph, with cost of delay (rule 13, P1) |
 
 Kelpie must also measure the effect of a fix by itself. Example from the farm: after a
 manual fix, review time dropped from 48 to 27 minutes, and failures from 9 of 29 to 1 of 11.
+
+**Field evidence from other farms.** The same failure modes show up on other platforms,
+plus two that the 13 incidents do not cover and that became P0 rules 10 and 11: runaway
+loops (a heartbeat loop repeated the same tool call about 900 times overnight, each time
+resending about 80k input tokens) and activity without progress (an idle agent resending a
+12k-token context every 5 minutes with no status change, commit or artifact). Single-session
+loop guards exist only for some platforms: [AgentWatchdog](https://github.com/jusong/agentwatchdog)
+covers Claude Code only, and OpenClaw closed the request for one as "not planned"
+([openclaw/openclaw#159329](https://github.com/openclaw/openclaw/issues/159329)). Kelpie's
+breaker works on traces, so it covers any platform that sends them. Other field signals
+(tasks that stop silently, conflicts found only at merge, "done" without evidence, humans
+as the hidden queue, gate violations after context compaction) are in the P1 and P2 backlog.
 
 ## Key ideas
 
@@ -51,11 +63,18 @@ manual fix, review time dropped from 48 to 27 minutes, and failures from 9 of 29
   `Snapshot` (tasks, owners, dependencies, conditions, resources, sessions, spans) and runs
   every rule over it. No LLM is involved in deciding what to do.
 - **Rules are pure functions.** A rule takes a snapshot and returns a list of `Action`s
-  (`requeue`, `unblock`, `comment`, `wip_commit`, `wake`, `reassign`, `escalate`, `alert`).
+  (`requeue`, `unblock`, `comment`, `wip_commit`, `wake`, `reassign`, `stop`, `escalate`,
+  `alert`).
   It does no I/O and reads time only from `snapshot.now`, so each rule is tested with
   plain YAML fixtures.
-- **Actions only go through adapters.** The engine dispatches actions to a
-  `PlatformAdapter`; rules never touch a platform directly. The engine is dry-run by default.
+- **Actions only go through executors.** The engine routes each action to the platform
+  adapter the task came from, or to a connector that can act (a CI connector cancels a
+  superseded build); rules never touch a platform directly. Optional capabilities (reassign,
+  stop) fall back to an alert when an adapter lacks them. Every action is fingerprinted in
+  an action ledger with a cooldown and a per-task rate limit, so Kelpie cannot loop on its
+  own output.
+- **Observe first.** Each rule runs in `observe`, `suggest` or `act` mode (default
+  `observe`); a global dry-run switch overrides them all.
 - **Core knows no platform and no CI.** `kelpie.core` never imports `adapters/` or
   `connectors/`; integrations implement protocols from `kelpie.core.ports`.
 - **Don't reinvent monitoring.** Host resources come from node_exporter + Prometheus
@@ -69,10 +88,11 @@ manual fix, review time dropped from 48 to 27 minutes, and failures from 9 of 29
 
 **Use what exists, do not build.** Kelpie runs on top of platforms, not instead of them.
 "Who is doing what" dashboards already exist (Claude Code Agent View, hermes-monitor,
-Minions); single-session loop and budget guards exist too ([AgentWatchdog](https://github.com/jusong/agentwatchdog),
-whose thresholds Kelpie reuses: 8 repeats in 10 minutes, 5 errors in a row); deep
-single-agent optimization is left to HALO, Langfuse and Papaya via trace export. Kelpie's
-value is logic over the task graph and automatic repair.
+Minions). Single-session loop and budget thresholds come from AgentWatchdog (Claude Code
+only): rule 10 reuses them as defaults (8 repeats in 10 minutes, 5 errors in a row) and
+applies them across platforms from traces. Deep single-agent optimization is left to HALO,
+Langfuse and Papaya via trace export. Kelpie's value is logic over the task graph and
+automatic repair.
 
 ## Architecture
 
@@ -131,9 +151,12 @@ flowchart LR
 ```
 
 The Kelpie server can run anywhere. Adapter plugins and node_exporter run where the
-agents run.
+agents run. Hermes is the first platform adapter; Claude Code (first candidate), Paperclip,
+OpenClaw, Codex and a GitHub Issues / Linear task-queue adapter are P2, built on signal.
 
-## Rules (MVP)
+## Rules
+
+P0 is the MVP; P1 and P2 rules are backlog.
 
 | # | Rule | What it does | Incidents |
 |---|------|--------------|-----------|
@@ -146,12 +169,20 @@ agents run.
 | 7 | Resources | Disk, memory, processes, heavy-task concurrency, LLM provider quotas and auth health → alert before the agents stop | 3, 4, 6 |
 | 8 | Daily report | "Cost of chaos" plus before/after verification of every fix | all |
 | 9 | CI economy | Finds wasted builds (drafts/WIP, superseded, docs-only, already verified commit), cancels superseded ones, forecasts quota burn, proposes a better CI config PR | 5 |
+| 10 | Loop and budget breaker | N identical consecutive tool calls (same tool and arguments hash; default 8 in 10 min), 5 tool errors in a row, or a per-agent daily/nightly token budget exceeded → stop the run through the adapter and alert | field |
+| 11 | Activity without progress | Tokens spent with no status change, commit or artifact → alert with recommendations (longer heartbeat interval, cheaper maintenance model, bounded sessions with a handoff file) | field |
 | – | Return causes (P1) | Root-cause analysis of task returns from traces → recommendation | 7 |
-| – | Human tasks | Humans in the task graph: escalate to the human owner with the cost of delay | 13 |
+| 12 | Conflict warning (P1) | Two live tasks editing the same files → warn or serialize | 7 |
+| 13 | "Needs you" inbox (P1) | Everything waiting for a human, sorted by cost of delay; agents waiting for approval too long | 13 |
+| 14 | Compaction gate (P2) | Agent acts against the task's gate right after a context compaction | field |
+
+P1 also extends rule 1 ("done" requires evidence; reopened-after-done rate) and rule 3 (stop
+patterns: tasks that nothing will move again, plus `kelpie why <task>`). "Field" means field
+evidence from other farms rather than one of the 13 incidents.
 
 Rule names in code: `exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`,
-`ping_pong`, `bottlenecks`, `resources`, `ci_economy`, `return_causes`, `human_tasks`,
-`checkpoints`.
+`ping_pong`, `bottlenecks`, `resources`, `ci_economy`, `loop_breaker`, `no_progress`,
+`conflict_warning`, `needs_you`, `compaction_gate`, `return_causes`, `checkpoints`.
 
 Foundation work alongside the rules (no LLM): **traces** (OpenTelemetry GenAI spans over
 OTLP, stored locally, optionally forwarded to Langfuse, Phoenix or Datadog; adapters write
@@ -221,7 +252,7 @@ docker-compose.yml      kelpie + prometheus + grafana
 
 What exists today: the domain model, action types, the rule protocol and registry,
 adapter/connector protocols, a minimal dry-run engine, fixture deserialization, the
-`kelpie serve` HTTP stub and 13 incident fixtures. Adapters, connectors, traces, storage,
+`kelpie serve` HTTP stub, fixtures for the 13 farm incidents and for field evidence. Adapters, connectors, traces, storage,
 alerters and the report are stubs, `kelpie status` and `kelpie report` do not exist yet,
 and no rule is implemented yet; see
 [docs/plan.md](docs/plan.md) and [docs/roadmap.md](docs/roadmap.md).
