@@ -1,20 +1,31 @@
 name: CI
 
+# Draft PRs do not build. A PR builds when it is marked ready for review and on
+# every push to it afterwards; main builds on push. Docs-only changes are skipped.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
 
 permissions:
   contents: read
 
+# A new build cancels the previous one for the same branch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -25,7 +36,8 @@ jobs:
         run: uv run lint-imports
 
   test:
-    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6

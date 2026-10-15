@@ -54,6 +54,10 @@ deploy/         Prometheus and Grafana config for docker-compose.yml
 
 - Small PRs. Commit after every meaningful step. Do not wait for CI inside a session:
   push and move on (see rule 2 — we practise what we preach).
+- Push work in progress to a **draft** PR and keep pushing after every completed step.
+  Draft PRs do not run CI. Mark the PR ready for review only when the step is done and
+  ruff and pytest pass locally; that triggers CI (later pushes rebuild, cancelling the
+  previous run for the branch). Changes only to `docs/` or `*.md` skip CI.
 - Before every PR run the `reviewer` subagent (`.claude/agents/reviewer.md`) on the
   diff against `main` and fix its findings before opening the PR.
 - Local checks before pushing:
