@@ -13,6 +13,7 @@ classifiers = [
     "Topic :: System :: Monitoring",
 ]
 dependencies = [
+    "opentelemetry-proto>=1.45,<2",
     "pyyaml>=6.0",
 ]
 
@@ -52,6 +53,21 @@ source_modules = ["kelpie.core", "kelpie.rules"]
 forbidden_modules = [
     "kelpie.adapters",
     "kelpie.connectors",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+    "kelpie.traces",
+]
+
+[[tool.importlinter.contracts]]
+name = "Traces build on core only"
+type = "forbidden"
+source_modules = ["kelpie.traces"]
+forbidden_modules = [
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.rules",
     "kelpie.app",
     "kelpie.server",
     "kelpie.cli",

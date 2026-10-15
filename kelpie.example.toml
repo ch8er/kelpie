@@ -29,6 +29,26 @@ once_attempts = 3         # ...and given up after this many failed attempts
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
                           # $KELPIE_DB overrides this.
 
+# OTLP trace ingest on POST /v1/traces (same port as /metrics). See README "Traces".
+[traces]
+enabled = true
+# token_env = "KELPIE_TRACES_TOKEN"  # env var with the bearer token exporters must send.
+#   Default: used when set, else the endpoint is open (a warning is logged). Uncommented,
+#   the variable must be set or Kelpie refuses to start.
+window = "30m"            # stored spans each control-loop tick sees (rules look back
+                          # about 10 minutes)
+totals_window = "24h"     # per-session totals (calls, errors, tokens) in each tick
+retention = "7d"          # spans older than this are pruned (hourly, in the background)
+max_rows = 1000000        # ...and the oldest beyond this row count
+max_body_bytes = 8388608  # larger requests (also after gunzip) get 413
+max_snapshot_spans = 50000  # at most this many stored spans per tick, newest first
+max_concurrent_requests = 4 # requests decoded at once; more get 503 (exporters retry)
+allow_unauthenticated = false  # true: no token needed even on a non-loopback address.
+                          # Without a token and without this, `kelpie serve` refuses to
+                          # listen on anything but 127.0.0.1/::1.
+task_attribute = "kelpie.task_id"        # span or resource attribute naming the task
+session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else session.id
+
 # Platform adapters. Kelpie only reads the board and, for now, cannot change it (Hermes
 # actions are not implemented yet): keep rules in observe or suggest mode. A rule in act
 # mode with dry_run = false and Hermes as the only adapter stops Kelpie at startup.

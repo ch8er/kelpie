@@ -188,7 +188,11 @@ class SpanKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Span:
-    """A trace span following OpenTelemetry GenAI semantic conventions."""
+    """A trace span following OpenTelemetry GenAI semantic conventions.
+
+    ``input_tokens`` includes cached input tokens, as in the conventions;
+    ``cached_tokens`` is the part read from a provider cache.
+    """
 
     trace_id: str
     span_id: str
@@ -214,6 +218,29 @@ class Span:
 
 
 @dataclass(frozen=True, slots=True)
+class SpanTotals:
+    """Per-session aggregates over stored spans, so rules and the report can see tokens and
+    call counts over a long window without loading every raw span.
+
+    Tokens are summed over LLM spans. ``input_tokens`` follows the GenAI conventions and
+    includes cached tokens (``cached_tokens`` is the part served from a cache); OTLP
+    ingest normalizes sources that report it the other way (Claude Code).
+    """
+
+    session_id: str
+    task_id: str | None = None
+    spans: int = 0
+    llm_calls: int = 0
+    tool_calls: int = 0
+    tool_errors: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    first_start: datetime | None = None
+    last_end: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Snapshot:
     """Everything a rule may look at, captured at ``now``."""
 
@@ -225,6 +252,11 @@ class Snapshot:
     resources: tuple[Resource, ...] = ()
     sessions: tuple[Session, ...] = ()
     spans: tuple[Span, ...] = ()
+    # Aggregates over a longer window than ``spans`` (see ``[traces] totals_window``).
+    span_totals: tuple[SpanTotals, ...] = ()
+    _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def task(self, task_id: str) -> Task | None:
         return next((t for t in self.tasks if t.id == task_id), None)
@@ -243,4 +275,14 @@ class Snapshot:
         return tuple(s for s in self.sessions if s.task_id == task_id)
 
     def spans_for_session(self, session_id: str) -> tuple[Span, ...]:
-        return tuple(s for s in self.spans if s.session_id == session_id)
+        # Indexed on first use: rules ask per session, and a snapshot can hold many spans.
+        # The cache is derived data, not a change to the snapshot.
+        index = self._spans_by_session
+        if index is None:
+            grouped: dict[str, list[Span]] = {}
+            for span in self.spans:
+                if span.session_id is not None:
+                    grouped.setdefault(span.session_id, []).append(span)
+            index = {k: tuple(v) for k, v in grouped.items()}
+            object.__setattr__(self, "_spans_by_session", index)
+        return index.get(session_id, ())

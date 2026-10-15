@@ -15,9 +15,21 @@ FORBIDDEN_IN_CORE = (
     "kelpie.server",
     "kelpie.cli",
     "kelpie.metrics",
+    "kelpie.traces",
+)
+FORBIDDEN_IN_TRACES = (
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.rules",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
 )
 # No LLM clients in the control loop. Only report/ may use one.
-LLM_ROOTS = {"anthropic", "openai", "litellm", "langchain", "google", "ollama", "mistralai"}
+LLM_ROOTS = {"anthropic", "openai", "litellm", "langchain", "ollama", "mistralai", "vertexai"}
+# google.protobuf (OTLP decoding) is fine; Google's model SDKs are not.
+LLM_PREFIXES = ("google.generativeai", "google.genai", "google.ai", "google.cloud.aiplatform")
 
 
 def _module_name(path: Path) -> str:
@@ -75,9 +87,15 @@ def test_core_and_rules_do_not_import_integrations(path: Path) -> None:
     assert not bad, f"{path.name} imports {bad}"
 
 
-@pytest.mark.parametrize("path", _files("core", "rules", "server.py", "app.py"), ids=_ids)
+@pytest.mark.parametrize("path", _files("traces"), ids=_ids)
+def test_traces_build_on_core_only(path: Path) -> None:
+    bad = {m for m in _imports(path) if m.startswith(FORBIDDEN_IN_TRACES)}
+    assert not bad, f"{path.name} imports {bad}"
+
+
+@pytest.mark.parametrize("path", _files("core", "rules", "traces", "server.py", "app.py"), ids=_ids)
 def test_control_loop_has_no_llm(path: Path) -> None:
-    bad = {m for m in _imports(path) if m.split(".")[0] in LLM_ROOTS}
+    bad = {m for m in _imports(path) if m.split(".")[0] in LLM_ROOTS or m.startswith(LLM_PREFIXES)}
     assert not bad, f"{path.name} imports LLM client {bad}"
 
 
