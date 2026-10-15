@@ -1,0 +1,88 @@
+id: "field-02-idle-context-resend"
+incident: null
+title: "Idle agent resends a 12k-token context every 5 minutes"
+description: >
+  Field evidence from another farm (synthetic reconstruction). An agent with nothing to do
+  stayed in its session and woke up every 5 minutes, resending its whole 12k-token context
+  to the model. Over four hours it spent hundreds of thousands of tokens with no status
+  change, no commit and no artifact. Activity without progress is invisible to watchdogs
+  that only look for dead agents. Kelpie flags it and recommends a longer heartbeat
+  interval, a cheaper model for maintenance calls, and bounded sessions with a handoff file.
+  A busier but productive session (commit and artifact) is the distractor: token volume
+  alone must not trigger the rule.
+rule: no_progress
+config:
+  window: "2h"
+  min_tokens_without_progress: 200000
+snapshot:
+  now: "2026-03-02T10:00:00+00:00"
+  owners:
+    - {id: agent-ops-2, role: maintenance}
+    - {id: agent-dev-4, role: developer}
+  tasks:
+    - id: T-F201
+      title: "Watch nightly import queue"
+      status: in_progress
+      status_since: "2026-03-02T05:50:00+00:00"
+      role: maintenance
+      owner_id: agent-ops-2
+    - id: T-F202
+      title: "Generate coverage report for billing module"
+      status: in_progress
+      status_since: "2026-03-02T08:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-4
+  sessions:
+    - id: S-F201
+      task_id: T-F201
+      owner_id: agent-ops-2
+      started_at: "2026-03-02T06:00:00+00:00"
+      last_heartbeat: "2026-03-02T09:55:00+00:00"
+    - id: S-F202
+      task_id: T-F202
+      owner_id: agent-dev-4
+      started_at: "2026-03-02T08:00:00+00:00"
+      last_heartbeat: "2026-03-02T09:58:00+00:00"
+      last_commit_at: "2026-03-02T09:40:00+00:00"
+      artifacts: ["reports/coverage-billing.html"]
+  spans:
+    # 48 wake-ups, one every 5 minutes, each resending the full 12k-token context.
+    - trace_id: TR-F201
+      span_id: IDLE
+      name: "chat idle-wakeup"
+      kind: llm
+      model: "provider/large-model"
+      start: "2026-03-02T06:00:00+00:00"
+      end: "2026-03-02T06:00:04+00:00"
+      task_id: T-F201
+      session_id: S-F201
+      input_tokens: 12000
+      output_tokens: 40
+      cached_tokens: 0
+      outcome: ok
+      repeat: {count: 48, every: "5m"}
+    # Productive: more tokens in the window, but it commits and produces an artifact.
+    - trace_id: TR-F202
+      span_id: WORK
+      name: "chat coverage"
+      kind: llm
+      model: "provider/large-model"
+      start: "2026-03-02T08:00:00+00:00"
+      end: "2026-03-02T08:00:30+00:00"
+      task_id: T-F202
+      session_id: S-F202
+      input_tokens: 30000
+      output_tokens: 3000
+      cached_tokens: 15000
+      outcome: ok
+      repeat: {count: 20, every: "6m"}
+expected_actions:
+  - kind: alert
+    task_id: T-F201
+    reason_contains: "no progress"
+    params:
+      owner_id: agent-ops-2
+      recommendations: [longer_heartbeat_interval, cheaper_maintenance_model, bounded_session_handoff]
+not_expected_actions:
+  - kind: alert
+    task_id: T-F202

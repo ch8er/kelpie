@@ -1,0 +1,109 @@
+id: "field-01-heartbeat-runaway"
+incident: null
+title: "Heartbeat loop repeats the same call ~900 times overnight"
+description: >
+  Field evidence from another farm (synthetic reconstruction). A maintenance agent's
+  heartbeat loop called the same tool with the same arguments about 900 times overnight,
+  resending about 80k input tokens on every model call: roughly 72M tokens for zero work.
+  In the same snapshot a second agent hit five tool errors in a row and kept retrying.
+  Platform-level guards do not cover every platform, so Kelpie's loop and budget breaker
+  works on traces: identical consecutive calls (tool + args hash, AgentWatchdog default of
+  8 in 10 minutes), error streaks (5 in a row) and a per-agent token budget. Each trip
+  pauses the run through the adapter and raises an alert.
+rule: loop_breaker
+config:
+  identical_calls: 8          # same tool + same args_hash, consecutive...
+  identical_window: "10m"     # ...within this window (AgentWatchdog defaults)
+  consecutive_errors: 5
+  daily_token_budget: 5000000 # per agent, input + output tokens
+snapshot:
+  now: "2026-03-03T08:00:00+00:00"
+  owners:
+    - {id: agent-ops-1, role: maintenance}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+  tasks:
+    - id: T-F101
+      title: "Nightly maintenance heartbeat"
+      status: in_progress
+      status_since: "2026-03-02T21:55:00+00:00"
+      role: maintenance
+      owner_id: agent-ops-1
+    - id: T-F102
+      title: "Migrate settings loader"
+      status: in_progress
+      status_since: "2026-03-03T07:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+    # Distractor: healthy work with varied calls and a normal token spend.
+    - id: T-F103
+      title: "Add pagination to audit log API"
+      status: in_progress
+      status_since: "2026-03-03T07:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-3
+  sessions:
+    - {id: S-F101, task_id: T-F101, owner_id: agent-ops-1, started_at: "2026-03-02T22:00:00+00:00", last_heartbeat: "2026-03-03T07:59:40+00:00"}
+    - {id: S-F102, task_id: T-F102, owner_id: agent-dev-2, started_at: "2026-03-03T07:30:00+00:00", last_heartbeat: "2026-03-03T07:59:00+00:00"}
+    - {id: S-F103, task_id: T-F103, owner_id: agent-dev-3, started_at: "2026-03-03T07:00:00+00:00", last_heartbeat: "2026-03-03T07:58:00+00:00", last_commit_at: "2026-03-03T07:45:00+00:00"}
+  spans:
+    # Runaway: 900 model calls and 900 identical tool calls, one pair every 40 seconds.
+    - trace_id: TR-F101
+      span_id: LLM-F101
+      name: "chat maintenance-loop"
+      kind: llm
+      model: "provider/large-model"
+      start: "2026-03-02T22:00:00+00:00"
+      end: "2026-03-02T22:00:06+00:00"
+      task_id: T-F101
+      session_id: S-F101
+      input_tokens: 80000
+      output_tokens: 120
+      cached_tokens: 0
+      outcome: ok
+      repeat: {count: 900, every: "40s"}
+    - trace_id: TR-F101
+      span_id: TOOL-F101
+      name: "execute_tool heartbeat_check"
+      kind: tool
+      tool: heartbeat_check
+      args_hash: "hb-9f2c"
+      start: "2026-03-02T22:00:07+00:00"
+      end: "2026-03-02T22:00:08+00:00"
+      task_id: T-F101
+      session_id: S-F101
+      outcome: ok
+      repeat: {count: 900, every: "40s"}
+    # Error streak: five failing tool calls in a row.
+    - {trace_id: TR-F102, span_id: E-1, name: "execute_tool bash", kind: tool, tool: bash, args_hash: "e1", start: "2026-03-03T07:50:00+00:00", end: "2026-03-03T07:50:02+00:00", task_id: T-F102, session_id: S-F102, outcome: error}
+    - {trace_id: TR-F102, span_id: E-2, name: "execute_tool bash", kind: tool, tool: bash, args_hash: "e2", start: "2026-03-03T07:51:00+00:00", end: "2026-03-03T07:51:02+00:00", task_id: T-F102, session_id: S-F102, outcome: error}
+    - {trace_id: TR-F102, span_id: E-3, name: "execute_tool bash", kind: tool, tool: bash, args_hash: "e3", start: "2026-03-03T07:52:00+00:00", end: "2026-03-03T07:52:02+00:00", task_id: T-F102, session_id: S-F102, outcome: error}
+    - {trace_id: TR-F102, span_id: E-4, name: "execute_tool edit", kind: tool, tool: edit, args_hash: "e4", start: "2026-03-03T07:53:00+00:00", end: "2026-03-03T07:53:02+00:00", task_id: T-F102, session_id: S-F102, outcome: error}
+    - {trace_id: TR-F102, span_id: E-5, name: "execute_tool bash", kind: tool, tool: bash, args_hash: "e5", start: "2026-03-03T07:54:00+00:00", end: "2026-03-03T07:54:02+00:00", task_id: T-F102, session_id: S-F102, outcome: error}
+    # Healthy: varied tools, one error that is followed by a success, modest tokens.
+    - {trace_id: TR-F103, span_id: H-1, name: "chat", kind: llm, model: "provider/large-model", start: "2026-03-03T07:10:00+00:00", end: "2026-03-03T07:10:20+00:00", task_id: T-F103, session_id: S-F103, input_tokens: 30000, output_tokens: 2000, cached_tokens: 20000, outcome: ok}
+    - {trace_id: TR-F103, span_id: H-2, name: "execute_tool read", kind: tool, tool: read, args_hash: "h2", start: "2026-03-03T07:11:00+00:00", end: "2026-03-03T07:11:01+00:00", task_id: T-F103, session_id: S-F103, outcome: ok}
+    - {trace_id: TR-F103, span_id: H-3, name: "execute_tool edit", kind: tool, tool: edit, args_hash: "h3", start: "2026-03-03T07:12:00+00:00", end: "2026-03-03T07:12:01+00:00", task_id: T-F103, session_id: S-F103, outcome: ok}
+    - {trace_id: TR-F103, span_id: H-4, name: "execute_tool bash", kind: tool, tool: bash, args_hash: "h4", start: "2026-03-03T07:20:00+00:00", end: "2026-03-03T07:20:30+00:00", task_id: T-F103, session_id: S-F103, outcome: error}
+    - {trace_id: TR-F103, span_id: H-5, name: "execute_tool edit", kind: tool, tool: edit, args_hash: "h5", start: "2026-03-03T07:22:00+00:00", end: "2026-03-03T07:22:01+00:00", task_id: T-F103, session_id: S-F103, outcome: ok}
+    - {trace_id: TR-F103, span_id: H-6, name: "execute_tool bash", kind: tool, tool: bash, args_hash: "h4", start: "2026-03-03T07:30:00+00:00", end: "2026-03-03T07:31:00+00:00", task_id: T-F103, session_id: S-F103, outcome: ok}
+expected_actions:
+  - kind: pause
+    task_id: T-F101
+    reason_contains: "identical"
+  - kind: alert
+    task_id: T-F101
+    severity: critical
+    reason_contains: "budget"
+    params: {owner_id: agent-ops-1}
+  - kind: pause
+    task_id: T-F102
+    reason_contains: "error"
+  - kind: alert
+    task_id: T-F102
+    reason_contains: "error"
+not_expected_actions:
+  - kind: pause
+    task_id: T-F103
+  - kind: alert
+    task_id: T-F103
