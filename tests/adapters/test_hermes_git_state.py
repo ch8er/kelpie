@@ -595,10 +595,15 @@ def test_timeout_kills_the_whole_process_group(repo: Path, tmp_path: Path) -> No
     with pytest.MonkeyPatch.context() as mp:
         assert gs.probe_git(5.0) is None
         fake_git(tmp_path, mp, f"sleep 30 &\necho $! >> '{children}'\nwait\n")
-        state = read_git_state(repo, 0.3)
+        # Generous: under load the shell may need a while to start and record its child.
+        state = read_git_state(repo, 1.5)
     assert state.problem is Problem.TIMEOUT
     pids = [int(x) for x in children.read_text().split()]
-    assert pids and not any(alive(p) for p in pids)
+    assert pids
+    deadline = time.monotonic() + 3.0  # the kernel needs a moment to reap the killed group
+    while any(alive(p) for p in pids) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not any(alive(p) for p in pids)
 
 
 def many_workspaces(board: Board, tmp_path: Path, count: int) -> list[Path]:
