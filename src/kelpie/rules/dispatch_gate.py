@@ -15,7 +15,9 @@ Prerequisites of a ready task nobody is working on yet (no live session):
   ``done``; a parent on a dependency cycle with the task never gates it. When every parent
   ended without all being done, left the board, or is no longer a parent, this rule wakes
   the task itself (the conditions carry ``terminal_ok``, so rule 2 does not call that a
-  dead end).
+  dead end). Known limit: a task parked on a parent and a PR condition together is not
+  released this way when the parent ends without being done; rule 2 alerts that its wait
+  can never be met, and a human moves it back to ready.
 - **Conditions linked to the task** by ``task_id`` for its current status (as
   ``linked_conditions`` reads them): those the platform registered, and those the GitHub
   step attaches from PR references in the task's title (``[[block_conditions]]`` with
@@ -174,7 +176,8 @@ class DispatchGate:
 
 
 # Keys connectors write into ``Condition.params`` as results of a check; a condition the
-# adapter registers again starts without them. ``sha`` stays: it binds CI to the PR's head.
+# adapter registers again starts without them. ``sha`` stays on conditions the platform
+# registered (their own head binding) and is dropped from those derived from text (below).
 _RESULTS = frozenset({"error", "terminal", "observed_status", "pr_state", "ci_state"})
 # Conditions the GitHub step derives from text are rebuilt every tick for the PR's current
 # head; re-registered with ``sha`` they would stay pinned to the commit seen when parked,

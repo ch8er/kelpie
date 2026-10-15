@@ -49,7 +49,9 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #                           # wait_condition in act mode to wake them; Kelpie warns otherwise)
 # max_condition_age = "15m" # only an unmet condition checked this recently gates a task
 # gate_on_parents = false   # also park ready tasks with unfinished parents (for dispatchers
-#                           # that ignore dependencies; hides rule 6's chain alert otherwise)
+#                           # that ignore dependencies; hides rule 6's chain alert otherwise;
+#                           # a task parked on a parent and a PR together needs a human if
+#                           # the parent is cancelled)
 #
 # [engine.rules.no_progress]
 # window = "30m"            # tokens vs. progress over this long; [traces] window must be
