@@ -8,13 +8,18 @@ observe to act, or dry-run turned off), or an output filter that appeared in tra
 (:func:`kelpie.traces.outputs.filter_introductions`).
 
 Each fix is measured over ``window`` before it and the same length after it (shorter when
-the report ends sooner): stuck condition-hours per day (counted like the report's cost of
-chaos) (chaos states, only the fix's rule when it
-names one), tokens per day (the fix's role when it names one), returns per day, review time
+the report ends sooner): stuck condition-hours per day (chaos states counted like the
+report's cost of chaos, only the fix's rule when it names one), tokens per day (the fix's
+role when it names one), returns per day, review time
 (mean session length of ``review_roles``), sessions that failed or ended without a final
 status, and for a command fix the output tokens per call of that command. A side with fewer
 than ``min_sample`` observations, or an after-window shorter than a quarter of the window,
-is a small sample and labelled as such: it shows a direction, not a result.
+is a small sample and labelled as such: it shows a direction, not a result. Metrics with no
+data on either side are left out.
+
+A side whose window starts before what the board still reports (adapters look back so far:
+Hermes ``lookback``) under-counts review time, failures and returns; with the defaults the
+board must reach back ``1d + 2 x verify_window`` (72h) when the report runs.
 """
 
 from __future__ import annotations
@@ -48,7 +53,7 @@ class Metric:
     lower_is_better: bool = True
 
     @property
-    def change(self) -> float | None:
+    def change(self) -> float | None:  # None from or to nothing (see ``improved``)
         if self.before is None or self.after is None or not self.before:
             return None
         return self.after / self.before - 1
@@ -136,7 +141,7 @@ def verify(event: FixEvent, ev: Evidence) -> Verification:
                 ba.after.mean if ba.after.calls else None,
                 ba.before.calls,
                 ba.after.calls,
-                ba.small_sample,
+                ba.small_sample or short,
             )
         )
     shown = tuple(m for m in metrics if m.n_before or m.n_after)  # no data: no row
@@ -166,12 +171,13 @@ def _stuck(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) -> 
         return total / _days(w), n
 
     (hb, nb), (ha, na) = hours(b), hours(a)
-    name = (
-        f"stuck condition-hours per day ({event.rule})"
-        if len(rules) == 1
-        else ("stuck condition-hours per day")
-    )
-    return Metric(name, "h/day", hb, ha, nb, na, short)
+    if len(rules) == 1:
+        name = f"stuck condition-hours per day ({event.rule})"
+    elif event.rule:  # a rule without chaos states: all causes, and the name says so
+        name = f"stuck condition-hours per day (all causes; {event.rule} has none)"
+    else:
+        name = "stuck condition-hours per day"
+    return Metric(name, "h/day", hb, ha, nb, na, short or min(nb, na) < ev.min_sample)
 
 
 def _tokens(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) -> Metric:
@@ -191,7 +197,8 @@ def _tokens(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) ->
 
     (tb, nb), (ta, na) = per_day(b), per_day(a)
     who = f" ({event.role})" if event.role else ""
-    return Metric(f"tokens per day{who}", "tokens/day", tb, ta, nb, na, short)
+    small = short or min(nb, na) < ev.min_sample
+    return Metric(f"tokens per day{who}", "tokens/day", tb, ta, nb, na, small)
 
 
 def _returns(ev: Evidence, b: Window, a: Window, short: bool) -> Metric:
@@ -200,7 +207,8 @@ def _returns(ev: Evidence, b: Window, a: Window, short: bool) -> Metric:
         return n / _days(w), n
 
     (rb, nb), (ra, na) = per_day(b), per_day(a)
-    return Metric("task returns per day", "/day", rb, ra, nb, na, short)
+    small = short or min(nb, na) < ev.min_sample
+    return Metric("task returns per day", "/day", rb, ra, nb, na, small)
 
 
 def _ended(ev: Evidence, w: Window, roles: Iterable[str] | None) -> list[Session]:

@@ -310,7 +310,7 @@ def _verifications(
     )
     roles, platforms = session_context(board, inputs.attribution)
     found = calls(known, roles, platforms)
-    since = start - timedelta(days=1)
+    since, _ = day_bounds(inputs.day - timedelta(days=1), inputs.tz)
     events = [
         *inputs.fixes,
         *mode_events(e for e in inputs.actions if e.at < end),
@@ -323,7 +323,7 @@ def _verifications(
         return ()
     evidence = Evidence(
         end=end,
-        states=inputs.states,
+        states=[r for r in inputs.states if is_chaos(r.state)],  # counted like the chaos
         chaos_rules=frozenset(CHAOS_CAUSES),
         spans=known,
         counted=counted_llm(index, known),
@@ -372,7 +372,8 @@ def _outputs(
     roles, platforms = session_context(board, inputs.attribution)
     settings = inputs.outputs
     groups = rank(calls(spans, roles, platforms), settings, inputs.tz)
-    earlier = [s for s in inputs.spans if last_at(s) < end]
+    first, _ = day_bounds(inputs.day - timedelta(days=settings.repeat_days - 1), inputs.tz)
+    earlier = [s for s in inputs.spans if first <= last_at(s) < end]
     history = {
         (g.role, g.key): g.hot_days
         for g in rank(calls(earlier, roles, platforms), settings, inputs.tz)
@@ -724,10 +725,14 @@ def _verification_lines(report: DailyReport) -> list[str]:
             x for x in (e.rule and f"rule {e.rule}", e.role and f"role {e.role}") if x
         )
         hours = v.after.total_seconds() / 3600
+        title = f"**{_local(e.at, report)}, {e.kind}**: {_inline(e.note)}" + (
+            f" ({scope})" if scope else ""
+        )
+        if not v.metrics:
+            out += [f"{title}. No data on either side yet (after-window: {hours:.1f}h).", ""]
+            continue
         out += [
-            f"**{_local(e.at, report)}, {e.kind}**: {e.note}"
-            + (f" ({scope})" if scope else "")
-            + f". After: {hours:.1f}h of data"
+            f"{title}. After-window: {hours:.1f}h"
             + (", small sample: a direction, not a result." if v.small_sample else "."),
             "",
             "| Metric | Before | After | Change | n before / after |",
@@ -743,18 +748,25 @@ def _verification_lines(report: DailyReport) -> list[str]:
     return out[:-1] if out else out
 
 
+def _inline(text: str) -> str:
+    """Free text (a fix note) as one Markdown-safe line."""
+    flat = " ".join(text.split())
+    return flat.replace("|", "\\|").lstrip("#>-*+ ") or "(no note)"
+
+
 def _value(value: float | None, unit: str) -> str:
     if value is None:
         return "n/a"
     if unit == "share":
         return f"{value:.0%}"
-    return f"{value:,.1f}" if value < 100 else f"{value:,.0f}"
+    number = f"{value:,.1f}" if value < 100 else f"{value:,.0f}"
+    return f"{number} {unit}" if unit in ("min", "h/day") else number
 
 
 def _change(m: Metric) -> str:
     change = m.change
     if change is None:
-        return "n/a"
+        return "new, worse" if m.improved is False else "n/a"
     mark = {True: " better", False: " worse", None: ""}[m.improved]
     return f"{change:+.0%}{mark}"
 

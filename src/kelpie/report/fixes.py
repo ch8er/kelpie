@@ -5,8 +5,8 @@ write; the report reads it read-only and treats a missing table as no events):
 
 - ``kelpie fix "<note>" [--rule R] [--command PREFIX] [--role ROLE] [--at TIME]``: a fix an
   operator made by hand (a merge hold lifted, a role's instructions changed);
-- ``kelpie serve`` at startup, when the config file's content changed since the last start
-  (``config``);
+- ``kelpie serve`` once it has started, when the config file's content changed since the
+  last start (``config``);
 - nothing else writes: rule mode changes are read from the action ledger and filter
   introductions from traces when the report runs (:mod:`kelpie.report.verify`).
 """
@@ -110,8 +110,10 @@ def read_fixes(db: sqlite3.Connection, start: datetime, end: datetime) -> list[F
             " WHERE at >= ? AND at < ? ORDER BY at, id",
             (_ts(start), _ts(end)),
         ).fetchall()
-    except sqlite3.OperationalError:  # no fix was ever recorded: no table
-        return []
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):  # no fix was ever recorded
+            return []
+        raise
     return [
         FixEvent(datetime.fromisoformat(r[0]), r[1], r[2], r[3], r[4], r[5])
         for r in rows

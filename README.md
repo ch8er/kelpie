@@ -240,7 +240,11 @@ from `kelpie fix "lifted the merge hold" [--rule R] [--command PREFIX] [--role R
 [--at TIME]`, from config changes (`kelpie serve` notes when its config file changed), from
 rule mode changes in the action ledger (observe to act, dry-run off) and from output
 filters that appear in traces (`rtk`, `| xcbeautify`). Board-based metrics (review time,
-failures, returns) need the adapters to look back two days (Hermes: `lookback = "48h"`).
+failures, returns) need the adapters to look back `1d + 2 x verify_window` when the report
+runs (Hermes: `lookback = "72h"` with the defaults), and spans must be kept as long
+(`[traces] retention`, 7d by default). `kelpie fix --at` without an offset is read in
+`[report] timezone`; it needs the database `kelpie serve` creates. Mode changes are placed
+at the first ledger entry in the new mode, so a quiet rule's switch shows up late.
 
 Schedule it on the host, shortly after midnight in the report's time zone, e.g. with cron:
 `5 0 * * * kelpie --config /etc/kelpie.toml report --send`. Adapters only look back so far

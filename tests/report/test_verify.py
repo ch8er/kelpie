@@ -82,7 +82,7 @@ def test_farm_example_review_time_and_failures() -> None:
     markdown = render_markdown(report)
     assert "## Before/after of recent fixes" in markdown
     assert "reviewers read only the diff" in markdown
-    assert "| review time | 48.0 | 27.0 | -44% better | 29 / 11 |" in markdown
+    assert "| review time | 48.0 min | 27.0 min | -44% better | 29 / 11 |" in markdown
 
 
 def test_small_samples_are_labelled() -> None:
@@ -299,3 +299,127 @@ def test_verify_config() -> None:
     ):
         with pytest.raises(ValueError, match=r"\[report\]"):
             load_report(bad)
+
+
+# --- second review -----------------------------------------------------------------------
+
+
+def test_count_metrics_label_small_samples() -> None:
+    tasks = (
+        Task(
+            "T-9",
+            "t",
+            Status.IN_PROGRESS,
+            FIX,
+            returns=(
+                Return(FIX - timedelta(hours=2), "conflict"),
+                Return(FIX - timedelta(hours=1), "conflict"),
+            ),
+        ),
+    )
+    report = build_report(inputs(tasks=tasks))
+    returns = metric(report, "task returns")
+    assert (returns.n_before, returns.n_after) == (2, 0) and returns.small
+    assert "new, worse" not in render_markdown(report)  # 2 -> 0 is better
+
+
+def test_a_fix_without_data_says_so() -> None:
+    report = build_report(inputs(sessions=(), fixes=(FixEvent(FIX, MANUAL, "quiet fix"),)))
+    [v] = report.verifications
+    assert v.metrics == ()
+    assert "quiet fix. No data on either side yet (after-window: 24.0h)." in render_markdown(report)
+
+
+def test_budget_states_are_not_stuck_hours() -> None:
+    budget = StateRow(
+        OpenState(
+            "loop_breaker:budget:daily:farm",
+            "loop_breaker",
+            FIX - timedelta(hours=9),
+            FIX - timedelta(hours=9),
+            FIX + timedelta(hours=4),
+            0,
+            Severity.WARNING,
+            "s",
+        )
+    )
+    report = build_report(inputs(sessions=(), states=(budget,)))
+    assert report.verifications[0].metrics == ()
+
+
+def test_new_regressions_are_flagged_and_notes_escaped() -> None:
+    states = (_state("stale_blocks", FIX + timedelta(hours=1), FIX + timedelta(hours=5)),)
+    event = FixEvent(FIX, MANUAL, "line one\n# injected | heading", rule="ci_economy")
+    markdown = render_markdown(build_report(inputs(fixes=(event,), states=states)))
+    assert "new, worse" in markdown
+    assert "\n# injected" not in markdown and "line one # injected \\| heading" in markdown
+    assert "all causes; ci_economy has none" in markdown
+
+
+def test_offender_history_is_bounded_by_repeat_days() -> None:
+    from kelpie.traces.outputs import OutputSettings
+
+    def xcode(day: int) -> list[Span]:
+        start = datetime(2026, 3, day, 9, tzinfo=UTC)
+        return [
+            Span(
+                "tr", f"x{day}-{i}", "execute_tool", SpanKind.TOOL, start + timedelta(minutes=i),
+                start + timedelta(minutes=i), session_id="D-1",
+                attributes={"kelpie.tool.command_prefix": "xcodebuild",
+                            "kelpie.tool.output_chars": 160_000},
+            )
+            for i in range(3)
+        ]  # fmt: skip
+
+    spans = xcode(2)
+    old = [
+        Span(
+            "tr", f"old-{i}", "execute_tool", SpanKind.TOOL,
+            datetime(2026, 2, 28, 9, i, tzinfo=UTC), datetime(2026, 2, 28, 9, i, tzinfo=UTC),
+            session_id="D-1",
+            attributes={"kelpie.tool.command_prefix": "xcodebuild",
+                        "kelpie.tool.output_chars": 160_000},
+        )
+        for i in range(3)
+    ]  # fmt: skip
+    report = build_report(
+        inputs(spans=[*spans, *old], fixes=(), outputs=OutputSettings(repeat_days=2))
+    )
+    assert report.offenders == ()  # D-2 is outside repeat_days = 2
+
+
+def test_kelpie_fix_times_and_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n[report]\ntimezone = "Asia/Tokyo"\n'
+    )
+    settings = load_settings(path)
+    text, code = note_fix(settings, "too early")
+    assert code == 2 and "run kelpie serve first" in text
+    SqliteLedgerStore(tmp_path / "kelpie.db").close()
+    now = lambda: datetime(2026, 3, 1, 12, tzinfo=UTC)  # noqa: E731
+    assert note_fix(settings, "naive", when="2026-03-01T09:00", clock=now)[1] == 0
+    text, code = note_fix(settings, "later", when="2026-03-02T09:00+00:00", clock=now)
+    assert code == 2 and "future" in text
+    with ReportStore(tmp_path / "kelpie.db") as store:
+        [fix] = store.fixes(FIX - timedelta(days=1), FIX + timedelta(days=1))
+    assert fix.at == datetime(2026, 3, 1, 0, tzinfo=UTC)  # 09:00 in Tokyo
+
+
+def test_serve_records_a_config_change_after_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.server
+
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    monkeypatch.setattr(kelpie.server, "serve", lambda *a, **k: None)
+    db = tmp_path / "kelpie.db"
+    path = tmp_path / "kelpie.toml"
+    path.write_text(f'[storage]\npath = "{db}"\n[traces]\nenabled = false\n')
+    assert main(["--config", str(path), "serve"]) == 0
+    path.write_text(f'[storage]\npath = "{db}"\n[traces]\nenabled = false\n# changed\n')
+    assert main(["--config", str(path), "serve"]) == 0
+    with ReportStore(db) as store:
+        found = store.fixes(datetime(2020, 1, 1, tzinfo=UTC), datetime(2100, 1, 1, tzinfo=UTC))
+    assert [f.kind for f in found] == [CONFIG]

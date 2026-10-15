@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from kelpie.app import Settings, build_adapters, merged_snapshot, utc_now
 from kelpie.core.budgets import BudgetMode
@@ -17,6 +17,7 @@ from kelpie.report.run import ReportSources, default_day, generate, send, write
 from kelpie.rules import REGISTRY
 
 log = logging.getLogger(__name__)
+FUTURE_SKEW = timedelta(minutes=5)  # clocks of the operator's machine and the farm
 
 
 def sources(settings: Settings) -> ReportSources:
@@ -84,12 +85,17 @@ def note_fix(
     """``kelpie fix``: record a manual fix for the daily report to verify."""
     if settings.db_path is None:
         return "kelpie: fixes need a database ([storage] path is :memory:)\n", 2
+    if not settings.db_path.exists():
+        return f"kelpie: no database at {settings.db_path} yet; run kelpie serve first\n", 2
+    now = clock()
     try:
-        at = datetime.fromisoformat(when) if when else clock()
+        at = datetime.fromisoformat(when) if when else now
     except ValueError:
         return f"kelpie: --at must be an ISO time, got {when!r}\n", 2
     if at.tzinfo is None:
-        at = at.astimezone()  # local time, as typed
+        at = at.replace(tzinfo=settings.report.tz)  # as typed, in [report] timezone
+    if at > now + FUTURE_SKEW:
+        return f"kelpie: --at {at.isoformat(timespec='minutes')} is in the future\n", 2
     if rule is not None and rule not in REGISTRY:
         return f"kelpie: unknown rule {rule!r}\n", 2
     event = FixEvent(at, MANUAL, note, rule, command, role)
