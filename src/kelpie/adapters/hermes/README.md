@@ -1,10 +1,11 @@
 # Hermes adapter
 
-Lets Kelpie watch a [Hermes](https://github.com/NousResearch/hermes-agent) farm. Today this
-is the read side only: Kelpie reads the Kanban board and a spool of tool calls, so rules 1–4
-run in `observe` (or `suggest`) mode. Hermes actions (requeue, unblock, comment, WIP commit)
-raise `NotImplementedError` until a later step, and a rule in `act` mode with `dry_run = false`
-and Hermes as the only adapter stops Kelpie at startup.
+Lets Kelpie watch a [Hermes](https://github.com/NousResearch/hermes-agent) farm. Kelpie
+reads the Kanban board and a spool of tool calls; rules 1–4 run in `observe` (or `suggest`)
+mode. The one action implemented is `stop` (see [Stopping a run](#stopping-a-run)). The other
+Hermes actions (requeue, unblock, comment, WIP commit) raise `NotImplementedError` until a
+later step, so a rule other than `loop_breaker` in `act` mode with `dry_run = false` and
+Hermes as the only adapter stops Kelpie at startup.
 
 ## Config
 
@@ -16,6 +17,8 @@ lookback = "24h"                         # runs, spans and finished tasks older 
 enabled = true                           # default when the section exists
 git_state = true                         # read git state of live task workspaces (see below)
 git_timeout = "5s"                       # limit for each git call; 2x per snapshot in total
+cli = "hermes"                           # Hermes executable used by `stop` (name on PATH or a path)
+cli_timeout = "10s"                      # limit for that command (at most 60s)
 
 # Hermes tolerates heartbeats up to an hour old; Kelpie's default is 30 minutes.
 [engine.rules.exit_contract]
@@ -34,6 +37,56 @@ blocked and uncommitted rows are not seen.
 
 Kelpie must run on a host that can read `db_path` (the Hermes host, or a mounted copy).
 SQLite WAL needs the `-shm` file next to the database to be readable.
+
+## Stopping a run
+
+`loop_breaker` in `act` mode stops a runaway run with the `stop` action; the Hermes adapter
+implements it (`SupportsStop`) with Hermes' own operator command, not with signals and not by
+writing `kanban.db`:
+
+```
+hermes kanban block --kind needs_input -- <task> "Stopped by Kelpie: <reason>. ... hermes kanban unblock <task>"
+```
+
+The command is pinned to exactly the run Kelpie looked at: `HERMES_KANBAN_TASK` and
+`HERMES_KANBAN_RUN_ID` name that task and run, so Hermes passes the run as `expected_run_id` and
+`block_task` adds `AND current_run_id = ?`. A task re-claimed between Kelpie's check and the
+command (a new run) is not blocked; the command fails and Kelpie treats the old run as over.
+(The CLI writes the reason comment before it tries the block, so a lost race can leave one stray
+"BLOCKED: Stopped by Kelpie" comment.) `HERMES_KANBAN_DB` is pinned to the configured `db_path`
+(so it acts on the board Kelpie watches). The command gets an allow-listed environment only
+(`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TMPDIR`, `XDG_*`, `VIRTUAL_ENV` and `HERMES_*`
+except `HERMES_KANBAN_BOARD`, `HERMES_KANBAN_HOME` and `HERMES_DELEGATED_CHILD_CONTEXT`), so
+Kelpie's tokens never reach it; run Kelpie as the user (and with the `HERMES_HOME`) that owns the
+board. It runs in its own process group with a timeout (`cli_timeout`, default 10 s, because a
+stop runs inside the control loop tick); on timeout the whole group is killed. In one
+transaction Hermes moves the task `running` -> `blocked` with kind `needs_input` (parked for a
+human, never re-queued by Hermes itself), releases the claim, ends the run and adds the reason
+as a `BLOCKED:` comment that also says how to resume. A human resumes the task with
+`hermes kanban unblock <task>`.
+
+The worker process is not signalled by `block`. Hermes' dispatcher reaps a worker that
+outlived its closed run on a later tick (`reap_terminal_workers`, after a 120 s grace period)
+and signals it only when the run's recorded start fingerprint (`worker_started_at`) still
+matches, so a reused pid is never touched. Kelpie never signals a process itself. If no Hermes
+dispatcher is running, the task is still blocked and not re-queued, but the worker process
+lives until it exits by itself.
+
+So on Hermes `stop` means "block the task now, reap the worker after about two minutes, and
+never without a dispatcher". A budget hard-stop (`[[budgets]]`) therefore ends the *task* at once
+but the spend of a still-running worker only when the dispatcher reaps it.
+
+Why not `hermes kanban reclaim`: it terminates the worker but puts the task back in the queue,
+where the dispatcher can respawn it before a second command blocks it. `archive` is terminal.
+
+`stop` is idempotent: a run that has already ended, or is no longer the task's current run,
+is left alone (no command is run). It fails, and the engine logs it, when the id is not a
+`hermes-run-<id>` session, the run is unknown, the CLI is missing, times out (`cli_timeout`) or exits
+non-zero, or the task is still running afterwards. Stopping and unblocking the same task
+repeatedly makes Hermes route it to `triage` (its unblock-loop breaker); it still is not
+re-queued. The CLI contract was read from the Hermes sources (`hermes_cli/kanban.py`,
+`kanban_db.py`, `kanban_db_dispatch.py`) and is exercised here against a fake executable only:
+try one stop on a test board before enabling `act`.
 
 ## Hooks plugin
 

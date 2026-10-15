@@ -231,10 +231,11 @@ Ports are bound to `127.0.0.1` (Kelpie 9464, Prometheus 9090, Grafana 3000). Add
 Step by step for a first live run on a Hermes farm, with `kelpie doctor`:
 [`docs/quickstart-hermes.md`](docs/quickstart-hermes.md).
 
-To watch a Hermes farm (read only, observe mode), add the section below to `kelpie.toml`
+To watch a Hermes farm (observe mode), add the section below to `kelpie.toml`
 and install the hooks plugin on the Hermes host; see
 [`src/kelpie/adapters/hermes/README.md`](src/kelpie/adapters/hermes/README.md). Hermes
-actions are not implemented yet, so rules cannot change the board.
+can carry out only `stop` (rule 10 in `act` mode) for now: it blocks the running task
+through the Hermes CLI. Other rules cannot change the board yet.
 
 ```toml
 [adapters.hermes]
@@ -548,13 +549,13 @@ docker-compose.yml      kelpie + prometheus + grafana
 ```
 
 What exists today: the domain model, action types, the rule protocol and registry,
-adapter/connector protocols, the read side of the Hermes adapter (kanban.db and a hooks
-plugin), the engine (routing to executors, per-rule modes, action
+adapter/connector protocols, the Hermes adapter (reads kanban.db and a hooks
+plugin; stops a run through the Hermes CLI), the engine (routing to executors, per-rule modes, action
 ledger in SQLite), `kelpie serve` with the control loop and engine metrics, OTLP trace
 ingest with span storage and forwarding, a read-only GitHub PR/CI connector
 (`[connectors.github]`, plus `[[block_conditions]]` that turn block reasons naming a PR
 into conditions; see `kelpie.example.toml`), `kelpie
-status`, and fixtures for the 13 farm incidents and for field evidence. Hermes actions,
+status`, and fixtures for the 13 farm incidents and for field evidence. Other Hermes actions,
 other adapters and connectors, alerters and the report are stubs, `kelpie report` does not exist yet,
 and rules 1–4 (`exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`) are
 implemented; see
