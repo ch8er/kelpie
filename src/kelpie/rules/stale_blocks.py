@@ -14,7 +14,7 @@ clear the block itself.
 
 Conditions are linked by the shared rule semantics (``kelpie.rules._tasks``). So that no
 block sits unnoticed, Kelpie alerts on blocks it cannot clear: no visible condition after
-``unlinked_alert_after`` (4h), a condition still unmet after ``max_block`` (24h), and
+``unlinked_alert_after`` (4h), a condition still unmet after ``max_block`` (8h), and
 conditions the connector stopped checking (``stale_evidence_after``, 1h). Each can be set to
 ``false``. ``waiting`` tasks are rule 2's.
 """
@@ -41,7 +41,7 @@ class StaleBlocks:
     max_condition_age: timedelta = DEFAULT_MAX_CONDITION_AGE
     # Blocks nothing will clear on its own get an alert, so none sits unnoticed:
     unlinked_alert_after: timedelta | None = timedelta(hours=4)  # no condition Kelpie sees
-    max_block: timedelta | None = timedelta(hours=24)  # condition still not met
+    max_block: timedelta | None = timedelta(hours=8)  # condition still not met
     stale_evidence_after: timedelta | None = timedelta(hours=1)  # connector stopped checking
     name: str = NAME
 
