@@ -1,10 +1,10 @@
 # Kelpie: what we build and the plan
 
-As of 2026-10-14. This file is the single source of truth for scope and order of work. It replaces the short plan given in the first session message.
+As of 2026-10-15 (field evidence from other farms added). This file is the single source of truth for scope and order of work. It replaces the short plan given in the first session message.
 
 ## Summary
 
-Kelpie is SRE and throughput optimization for AI agent farms. Requirements come from real incidents on a working agent farm. The first adapter is Hermes, but the core is tied to no platform and no machine.
+Kelpie is SRE and throughput optimization for AI agent farms. Requirements come from real incidents on a working agent farm, cross-checked with field evidence from other farms. The first adapter is Hermes, but the core is tied to no platform and no machine.
 
 Priorities: **P0** — now, this week · **P1** — next step · **P2** — later, on signal · **No** — out of scope.
 
@@ -20,15 +20,27 @@ Priorities: **P0** — now, this week · **P1** — next step · **P2** — late
 | 4 | Host overloaded, heavy-task queue 1.5–2 h | main throughput brake | Environment resources plus a concurrency limit for heavy tasks |
 | 5 | CI minutes ran out | 11 h of idle time | External conditions: CI economy and quota burn forecast (rule 9) |
 | 6 | LLM provider limits and expired login | up to 200 limit hits per day | Provider quotas and auth health, concurrency tuned to the limit |
-| 7 | Conflicts in shared files | 46 of 63 task returns | Root-cause analysis of returns from traces → recommendation |
+| 7 | Conflicts in shared files | 46 of 63 task returns | Root-cause analysis of returns from traces → recommendation; early conflict warning (rule 12, P1) |
 | 8 | Blocks stayed after the cause was fixed | 3 h | Stale blocks, same as #1 |
 | 9 | Idle agents due to a sequential task graph | half a day | Role utilization and critical path |
 | 10 | Agent waited for an external event inside its session; the dispatcher declared it dead | reviews took 40–90 min, 4 of 10 failed | "Wait for condition" and a "waiting" heartbeat |
 | 11 | Task stuck in a status with no owner | half a day, 7 tasks blocked | Orphan statuses |
 | 12 | 9 review rounds on one task | not measured | Ping-pong → escalation |
-| 13 | Human tasks blocked agents | not measured | Humans in the task graph, with cost of delay |
+| 13 | Human tasks blocked agents | not measured | Humans in the task graph, with cost of delay (rule 13, P1) |
 
 Example of what Kelpie must compute by itself: after a manual fix, review time dropped from 48 to 27 minutes, and failures went from 9 of 29 to 1 of 11.
+
+## Field evidence from other farms
+
+The same failure modes show up outside our farm, on other platforms. Two of them are not covered by any of the 13 incidents and get their own P0 rules (10, 11):
+
+- **Runaway loops and overnight budget burn.** A heartbeat/maintenance loop repeated the same tool call about 900 times overnight, each time resending about 80k input tokens. Single-session guards exist only for some platforms: [AgentWatchdog](https://github.com/jusong/agentwatchdog) covers Claude Code only, and OpenClaw closed the request for such a guard as "not planned" ([openclaw/openclaw#159329](https://github.com/openclaw/openclaw/issues/159329)). A cross-platform breaker built on traces is therefore in scope.
+- **Activity without progress.** Idle agents keep spending tokens without moving any task, e.g. resending a 12k-token context every 5 minutes with no status change, commit or artifact.
+- **Tasks that stop silently** (P1): in review with nothing driving them, a successful run with no next action, blocker chains that end in a cancelled or inaccessible task, recovery tasks that recover themselves.
+- **Conflicts discovered too late** (P1): two live tasks edit the same files and only find out at merge (incident 7).
+- **"Done" without evidence** (P1): tasks marked done without test output, green CI or a live check, then reopened.
+- **Humans as the hidden queue** (P1): approvals and human tasks wait unnoticed across platforms (incident 13).
+- **Gate violations after context compaction** (P2): right after a compaction the agent forgets the task's gate, e.g. edits code while the task is in plan review.
 
 ## Kelpie
 
@@ -57,6 +69,19 @@ The numbers in brackets are the farm incidents each rule is validated against.
 7. Environment resources: disk, memory, processes or provider quotas running out, auth expiring → alert before the agents stop (3, 4, 6)
 8. Daily "cost of chaos" report and before/after verification of every fix
 9. CI economy: finds builds that burn minutes for nothing — on drafts and WIP commits, superseded by a newer push, triggered by docs-only changes, or repeated for an already verified commit. Cancels superseded builds by itself, forecasts how long the quota will last, and proposes a PR with a better CI configuration (5)
+10. Loop and budget breaker, cross-platform, built on traces: N identical consecutive tool calls (same tool and same arguments hash; default 8 in 10 minutes), 5 consecutive tool errors, or a per-agent daily/nightly token budget exceeded → pause the run through the adapter and alert. Defaults reuse the AgentWatchdog thresholds (field evidence: heartbeat runaway)
+11. Activity without progress: tokens spent by sessions that produce no status change, commit or artifact → alert with recommendations: a longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file (field evidence: idle context resend)
+
+### P1. Rules backlog — week 3 only if the budget allows
+
+- Rule 3, extended with stop patterns: in review with nothing driving it; a successful run with no next action; a blocker chain ending in a cancelled or inaccessible task; recovery tasks recovering themselves. Plus a `kelpie why <task>` CLI that explains why a task is not moving (11)
+- Rule 12. Early conflict warning: two live tasks editing the same files → warn or serialize (7)
+- Rule 1, extended: "done" requires evidence (test output, green CI or a live check); track the reopened-after-done rate (2)
+- Rule 13. "Needs you" inbox: everything waiting for a human across platforms, sorted by cost of delay; detects agents waiting for approval longer than N minutes (13)
+
+### P2. Rules backlog — on signal
+
+- Rule 14. Gate violation after context compaction: the agent acts against the task's gate right after a compaction event (e.g. edits code while the task is in plan review)
 
 ### P0. Traces and checkpoints — the foundation, production-style, no LLM calls
 
@@ -81,7 +106,7 @@ Metrics: tasks per hour per role, task time by stage (queue, review, waiting for
 ### Use what exists, do not build
 
 - Visibility dashboards: Claude Code Agent View, hermes-monitor, Minions
-- Single-session loop and budget guards: [AgentWatchdog](https://github.com/jusong/agentwatchdog); reuse its thresholds — 8 repeats in 10 minutes and 5 errors in a row
+- Single-session loop and budget thresholds: [AgentWatchdog](https://github.com/jusong/agentwatchdog) (Claude Code only); rule 10 reuses its thresholds as defaults — 8 repeats in 10 minutes and 5 errors in a row — and applies them across platforms
 - Deep optimization of a single agent: HALO, Langfuse, Papaya — via trace export
 
 ### Market and money
@@ -102,7 +127,7 @@ The whole credit goes to building Kelpie in Claude Code cloud sessions: it is sp
 | Week | What we build | Budget, approx. |
 | --- | --- | --- |
 | 1, Oct 15–21 | Core, traces and checkpoints, Hermes adapter, rules 1–4 | $100 |
-| 2, Oct 22–28 | Rules 5–7 and 9, resource reading via Prometheus, condition connectors | $90 |
+| 2, Oct 22–28 | Rules 5–7, 9–11, resource reading via Prometheus, condition connectors | $90 |
 | 3, Oct 29 – Nov 4 | "Cost of chaos" report, basic token optimization, throughput metrics, documentation | $60 |
 
 - **Repository:** `CLAUDE.md` with the architecture (core and adapters) and coding rules; roles in `.claude/agents/`.
@@ -119,7 +144,6 @@ So that $250 is enough, Kelpie does not build what already exists or is not need
 | Not building | Why |
 | --- | --- |
 | "Who is doing what" dashboards | Claude Code Agent View, hermes-monitor and Minions already exist |
-| Single-session loop and overspend guards | AgentWatchdog and similar tools exist; we reuse their thresholds |
 | Deep prompt and model optimization for a single agent | HALO, Langfuse and Papaya exist; Kelpie does the basic layer from traces itself |
 | Our own orchestrator and queues | Kelpie runs on top of platforms, not instead of them |
 | Coupling to CI, iOS or one machine | Everything specific lives in adapters and connectors |
@@ -142,6 +166,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 **Week 2, Oct 22–28**
 
 - [ ] Rules: ping-pong, role bottlenecks, environment resources, CI economy
+- [ ] Rules: loop and budget breaker (10), activity without progress (11)
 - [ ] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container
 - [ ] Condition connectors: GitHub and CI, LLM provider quotas, human tasks
 - [ ] Run on our own farm and record every rule trigger
@@ -152,3 +177,4 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Basic token optimization from traces and throughput metrics
 - [ ] Documentation and publication of the open core
 - [ ] 10 conversations with farm owners
+- [ ] Only if the budget allows: P1 rules backlog (stop patterns and `kelpie why`, rules 12 and 13, evidence for "done")
