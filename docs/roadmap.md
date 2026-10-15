@@ -11,6 +11,16 @@ up to the next level-2 or level-3 heading, is the issue body (Markdown). Level-2
 headings inside an issue body; use bold text instead. Titles must be unique: the script
 skips issues whose title already exists in the repository.
 
+Already delivered by the bootstrap PR and therefore not listed: the incident fixture
+loader and harness (`tests/incidents.py`), the import-boundary check (import-linter and
+`tests/test_architecture.py`), and the docker compose stack with CI.
+
+**Fixtures.** Fixture names follow `NN-slug.yaml`; several fixtures per incident are
+allowed (same number, different slug). Foundation rules without an incident number, such as
+`checkpoints`, use `incident: null` and the next free number. The format is documented in
+[`tests/fixtures/incidents/README.md`](../tests/fixtures/incidents/README.md). Fixtures listed
+below that do not exist yet are part of the issue.
+
 Labels: `P0` (needed for the milestone) / `P1` (nice to have), `week-1` / `week-2` /
 `week-3`, and `area:core|rules|adapters|traces|connectors|report|resources|deploy|docs`.
 
@@ -61,26 +71,6 @@ Implement the `Alerter` protocol for Slack incoming webhooks; used by `alert` an
 - [ ] Untrusted task text is escaped before sending
 - [ ] Tests mock HTTP; no network access
 
-### core: fixture harness for incident tests
-labels: P0, week-1, area:core
-A shared pytest helper that loads `tests/fixtures/incidents/*.yaml` (snapshot plus expected
-actions) via `kelpie.core.serde` and compares them with a rule's output.
-
-**Acceptance criteria**
-- [ ] Fixture format documented in CONTRIBUTING.md
-- [ ] Mismatch output shows expected vs actual actions readably
-- [ ] Order-insensitive comparison of actions
-- [ ] Example fixture and test included
-
-### core: import-boundary check
-labels: P1, week-1, area:core
-Enforce in CI that `kelpie.core` never imports `kelpie.adapters` or `kelpie.connectors`,
-and that `kelpie.rules` performs no I/O imports.
-
-**Acceptance criteria**
-- [ ] Test or lint step fails on a forbidden import
-- [ ] Runs as part of `uv run pytest`
-
 ### traces: OTLP ingest with GenAI semantic conventions
 labels: P0, week-1, area:traces
 Accept OTLP/HTTP spans and map them onto `Span` (task → session → model/tool call) following
@@ -111,7 +101,8 @@ session exits with a dirty worktree, and resume the next session from the last c
 - [ ] Rule emits a `comment` reminder when `last_commit_at` is older than a threshold
 - [ ] Rule emits `wip_commit` when a session ends with `dirty_worktree`
 - [ ] Requeued tasks carry the last commit reference for resume
-- [ ] Fixtures: `tests/fixtures/incidents/checkpoint-*.yaml`
+- [ ] New fixtures with `rule: checkpoints` and `incident: null`: `14-checkpoint-commit-reminder.yaml`,
+      `15-checkpoint-wip-commit-on-exit.yaml`, `16-checkpoint-resume-from-commit.yaml`
 
 ### adapters: Hermes adapter (read side)
 labels: P0, week-1, area:adapters
@@ -152,7 +143,7 @@ list. Requeue the task with an explanatory comment.
 - [ ] Session ended with `final_status` empty → `requeue`
 - [ ] Block reason not in the configured allowed list → `requeue`
 - [ ] Healthy exits (final status, allowed block) produce no action
-- [ ] Fixtures: `tests/fixtures/incidents/02-exit-without-status.yaml`, `02-block-without-reason.yaml`, `02-healthy-exit.yaml`
+- [ ] Fixtures: existing `02-exit-without-status.yaml` (covers both requeue cases); new `02-healthy-exit.yaml`
 
 ### rules: wait for condition (incident 10)
 labels: P0, week-1, area:rules
@@ -164,18 +155,20 @@ exits; Kelpie wakes the task when the condition is satisfied. Also detect in-ses
 - [ ] Satisfied condition on a waiting task → `wake`
 - [ ] In-session polling detected from spans → `comment` suggesting to register a condition and exit
 - [ ] A long but productive session is not flagged
-- [ ] Fixtures: `tests/fixtures/incidents/10-reviewer-waits-for-ci.yaml`, `10-condition-satisfied-wake.yaml`
+- [ ] Polled commands map to condition kinds via config (`poll_patterns`), never hard-coded CI commands
+- [ ] Fixtures: existing `10-reviewer-polls-ci.yaml`; new `10-condition-satisfied-wake.yaml`, `10-productive-long-session.yaml`
 
 ### rules: orphan statuses (incident 11)
 labels: P0, week-1, area:rules
-A task stays in a non-terminal status with no owner for more than N minutes. Alert, and
-reassign when a role-based owner is configured. Severity rises with the number of dependents.
+A task stays in a non-terminal status with no owner for more than N minutes. Alert and
+reassign it to an owner of the task's role (the default; reassignment can be switched off
+in config). Severity rises with the number of dependents.
 
 **Acceptance criteria**
-- [ ] Ownerless task beyond threshold → `alert` (and `reassign` if configured)
+- [ ] Ownerless task beyond threshold → `alert` and `reassign` (unless disabled in config)
 - [ ] Severity is `critical` when dependents exceed a threshold
 - [ ] Tasks below the threshold or in terminal statuses are ignored
-- [ ] Fixtures: `tests/fixtures/incidents/11-accepted-without-owner.yaml`, `11-below-threshold.yaml`
+- [ ] Fixtures: existing `11-orphan-accepted-task.yaml`; new `11-below-threshold.yaml`
 
 ### rules: stale blocks (incidents 1, 8)
 labels: P0, week-1, area:rules
@@ -186,17 +179,7 @@ condition met, cause fixed). Unblock it.
 - [ ] Block linked to a satisfied condition → `unblock` with the condition in the reason
 - [ ] Block with an unsatisfied or unknown condition → no action
 - [ ] Grace period configurable to avoid racing the agent
-- [ ] Fixtures: `tests/fixtures/incidents/01-guard-block-condition-met.yaml`, `08-block-after-fix.yaml`
-
-### deploy: docker compose stack and CI
-labels: P0, week-1, area:deploy
-`docker-compose.yml` with kelpie, prometheus and grafana; GitHub Actions running ruff and
-pytest.
-
-**Acceptance criteria**
-- [ ] `docker compose up` starts all three services
-- [ ] Prometheus scrapes Kelpie `/metrics`
-- [ ] CI runs `ruff check`, `ruff format --check` and `pytest` on every PR
+- [ ] Fixtures: existing `01-stale-guard-block.yaml`, `08-block-outlived-cause.yaml`
 
 ### core: close model gaps found while writing incident fixtures
 labels: P0, week-1, area:core
@@ -222,9 +205,9 @@ return reasons.
 **Acceptance criteria**
 - [ ] `review_rounds >= K` → `escalate` once (not every tick)
 - [ ] Escalation message lists return reasons and categories
-- [ ] Fixtures: `tests/fixtures/incidents/12-nine-review-rounds.yaml`, `12-below-threshold.yaml`
+- [ ] Fixtures: existing `12-review-ping-pong.yaml`; new `12-below-threshold.yaml`
 
-### rules: bottlenecks and idle time by role (incidents 9, 10, 13)
+### rules: bottlenecks and idle time by role (incidents 9, 13)
 labels: P0, week-2, area:rules
 Compute idle agents and queue depth per role, detect sequential dependency chains that keep
 agents idle, and human tasks that block agent work.
@@ -232,8 +215,8 @@ agents idle, and human tasks that block agent work.
 **Acceptance criteria**
 - [ ] Idle time per role computed from sessions and task statuses
 - [ ] Long sequential chains with idle agents → `alert` suggesting parallelization
-- [ ] Human tasks blocking agent tasks beyond a threshold → `alert` to the human owner
-- [ ] Fixtures: `tests/fixtures/incidents/09-sequential-graph.yaml`, `10-dispatcher-thinks-dead.yaml`, `13-human-task-blocks.yaml`
+- [ ] Human tasks blocking agent tasks beyond a threshold → `escalate` to the human owner
+- [ ] Fixtures: existing `09-sequential-chain-idle.yaml`, `13-human-tasks-block-agents.yaml`
 
 ### rules: environment resources and quotas (incidents 3, 4, 5, 6)
 labels: P0, week-2, area:rules
@@ -244,7 +227,8 @@ expiring logins.
 - [ ] Utilization thresholds per resource kind (warning / critical)
 - [ ] Credentials expiring within a window → `alert`
 - [ ] Repeated LLM limit hits aggregated into one alert with counts
-- [ ] Fixtures: `tests/fixtures/incidents/03-disk-99.yaml`, `04-host-overload.yaml`, `05-ci-minutes-exhausted.yaml`, `06-llm-limits-expired-login.yaml`
+- [ ] Fixtures: existing `03-disk-full.yaml`, `04-host-overload-heavy-queue.yaml`, `05-ci-minutes-exhausted.yaml`,
+      `06-llm-quota-and-expired-auth.yaml`; new `03-disk-below-threshold.yaml`
 
 ### resources: read host metrics via Prometheus HTTP API
 labels: P0, week-2, area:resources
@@ -307,13 +291,13 @@ task before exiting.
 
 ### rules: file contention (incident 7)
 labels: P1, week-2, area:rules
-Detect tasks running in parallel that touch the same shared files (the cause of 46 of 63
-returns) and serialize or warn before work starts.
+Detect shared-file hot spots (the cause of 46 of 63 returns): alert on files concentrating
+merge-conflict returns and warn in-progress tasks that touch them.
 
 **Acceptance criteria**
 - [ ] Overlap computed from `Task.files` and tool spans
-- [ ] Overlapping in-progress tasks → `comment` / `alert`; configurable allowlist of shared files
-- [ ] Fixtures: `tests/fixtures/incidents/07-shared-file-conflict.yaml`, `07-disjoint-files.yaml`
+- [ ] Hot files → `alert`; in-progress tasks touching them → `comment`; configurable allowlist of shared files
+- [ ] Fixtures: existing `07-shared-file-conflicts.yaml`; new `07-disjoint-files.yaml`
 
 ### deploy: live run on the maintainer's farm
 labels: P0, week-2, area:deploy

@@ -124,13 +124,13 @@ agents run.
 |---|------|--------------|-----------|
 | 1 | Exit contract | Session ended without a final status, or with a block lacking an allowed reason → requeue | 2 |
 | 2 | Wait for condition | Agent registers a condition and exits; Kelpie wakes the task when it holds. Detects in-session polling | 10 |
-| 3 | Orphan statuses | Task sits in a status with no owner for more than N min → alert / reassign | 11 |
+| 3 | Orphan statuses | Task sits in a status with no owner for more than N min → alert and reassign to an owner of its role | 11 |
 | 4 | Stale blocks | The block's cause is resolved in the outside world → unblock | 1, 8 |
 | 5 | Ping-pong | After K review rounds → escalate | 12 |
-| 6 | Bottlenecks and idle time | Idle time and queue depth by role; flags sequential graphs and human-task bottlenecks | 9, 10, 13 |
+| 6 | Bottlenecks and idle time | Idle time and queue depth by role; flags sequential graphs and escalates human-task bottlenecks | 9, 13 |
 | 7 | Resources and quotas | Disk, memory, processes, LLM limits, CI minutes, expiring auth | 3, 4, 5, 6 |
 | 8 | Daily report | "Cost of chaos" plus before/after effect of fixes | all |
-| – | File contention (planned) | Detects concurrent edits to shared files and serializes them | 7 |
+| – | File contention (planned) | Detects shared-file hot spots, alerts and warns tasks touching them | 7 |
 
 Foundation work alongside the rules: OTLP traces, checkpoints (commit reminders, WIP commit
 on exit, resume from the last commit) and basic token optimization derived from traces.
@@ -152,8 +152,12 @@ uv run kelpie serve
 Or run the full stack (Kelpie, Prometheus, Grafana) with Docker:
 
 ```bash
+cp .env.example .env   # set GRAFANA_ADMIN_PASSWORD
 docker compose up
 ```
+
+Ports are bound to `127.0.0.1` (Kelpie 9464, Prometheus 9090, Grafana 3000). Add
+`--profile local-agents` to also run node_exporter when agents share the server host.
 
 Install node_exporter and the platform plugin (for example the Hermes plugin) on each host
 where agents run, and point them at the Kelpie server.
@@ -170,7 +174,7 @@ src/kelpie/
   report/       daily cost-of-chaos report, before/after comparisons
   cli.py, server.py     `kelpie` CLI and HTTP server (/metrics, /healthz)
 tests/
-  fixtures/incidents/   YAML snapshots + expected actions, one per incident scenario
+  fixtures/incidents/   YAML snapshots + expected actions, one or more per incident
 deploy/                 Prometheus and Grafana config
 docs/
   plan.md       3-week plan

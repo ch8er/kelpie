@@ -19,7 +19,7 @@ Deliverables:
 - `core/`: domain model, `Snapshot`, rule protocol, actions, engine loop (every N seconds),
   SQLite storage for snapshots/actions/sessions, Slack alerter, config file, `kelpie serve`
   CLI.
-- Fixture loader and test harness for `tests/fixtures/incidents/*.yaml`.
+- Fixture loader and test harness for `tests/fixtures/incidents/*.yaml` (done in bootstrap).
 - `traces/`: OTLP/HTTP ingest following OpenTelemetry GenAI semantic conventions
   (task → session → model/tool call; tokens in/out/cached, duration, outcome), span storage.
 - Checkpoints: commit reminder, WIP commit on exit, resume from the last commit.
@@ -27,7 +27,7 @@ Deliverables:
   wip_commit), plugin on `post_tool_call` and `on_session_end` hooks.
 - Rules 1–4: exit contract (incident 2), wait for condition (10), orphan statuses (11),
   stale blocks (1, 8).
-- Docker compose skeleton (kelpie, prometheus, grafana), CI (ruff + pytest).
+- Docker compose skeleton (kelpie, prometheus, grafana), CI (ruff + pytest) (done in bootstrap).
 
 Exit criteria:
 
@@ -44,7 +44,7 @@ Exit criteria:
 
 Deliverables:
 
-- Rules 5–7: ping-pong (12), bottlenecks and idle time by role (9, 10, 13), resources and
+- Rules 5–7: ping-pong (12), bottlenecks and idle time by role (9, 13), resources and
   quotas (3, 4, 5, 6).
 - Resources via the Prometheus HTTP API (node_exporter metrics); Kelpie's own `/metrics`.
 - `connectors/`: GitHub PR/CI, LLM provider quotas and auth expiry, human tasks.
