@@ -24,13 +24,14 @@ from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
 from kelpie.core.model import Owner, Snapshot, SpanKind
-from kelpie.core.ports import PlatformAdapter, SnapshotSource
+from kelpie.core.ports import PlatformAdapter, ResourceReader, SnapshotSource
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
+from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
 from kelpie.rules.no_progress import NoProgress
 from kelpie.traces.config import TraceSettings, load_traces
@@ -78,6 +79,7 @@ class Settings:
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)  # [[budgets]], [prices]
+    resources: ResourceSettings = field(default_factory=ResourceSettings)
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -97,7 +99,15 @@ def load_settings(path: Path | None) -> Settings:
                 data = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"cannot read config {path}: {exc}") from exc
-    unknown = set(data) - {"engine", "storage", "adapters", "traces", "budgets", "prices"}
+    unknown = set(data) - {
+        "engine",
+        "storage",
+        "adapters",
+        "traces",
+        "budgets",
+        "prices",
+        "resources",
+    }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
     try:
@@ -115,6 +125,7 @@ def load_settings(path: Path | None) -> Settings:
     db_path = None if raw_db == ":memory:" else Path(raw_db)
     try:
         traces = load_traces(data.get("traces"))
+        resources = load_resources(data.get("resources"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     try:
@@ -130,6 +141,7 @@ def load_settings(path: Path | None) -> Settings:
         source=path,
         traces=traces,
         budgets=budgets,
+        resources=resources,
     )
 
 
@@ -258,6 +270,7 @@ def merged_snapshot(
     spans: SpanWindow | None = None,
     budgets: BudgetConfig | None = None,
     remember: bool = True,
+    resources: ResourceReader | None = None,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
 
@@ -270,7 +283,9 @@ def merged_snapshot(
     token usage per budget window is priced into ``Snapshot.budgets``, and (``remember``)
     the snapshot's session owners and task labels are recorded so spend stays attributed
     after adapters drop them. A failed spend read is logged and counted, and that tick
-    carries the last good budget state with ``budgets_ok`` false.
+    carries the last good budget state with ``budgets_ok`` false. With ``resources``, host
+    readings (Prometheus) are added; a reader that raises is logged and counted, and the
+    tick goes on without them.
     """
     last = _LastBudgets()
 
@@ -307,6 +322,12 @@ def merged_snapshot(
                 merged = replace(
                     merged, spans=merge_spans(stored, merged.spans), span_totals=totals
                 )
+        if resources is not None:
+            try:
+                merged = replace(merged, resources=merged.resources + tuple(resources.read(now)))
+            except Exception as exc:
+                log.error("resource source failed: %s", type(exc).__name__)
+                metrics.resource_failed("unexpected")
         folded = merge_hook_spans(merged.spans)
         metrics.hook_spans_merged(folded.merged)
         merged = replace(merged, spans=folded.spans)
@@ -466,8 +487,15 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     try:
         token = traces.token()
         destinations = [f.destination() for f in traces.forward] if traces.enabled else []
+        prometheus = settings.resources.prometheus
+        reader = prometheus.build() if prometheus is not None else None
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    if prometheus is not None and prometheus.sends_token_in_clear():
+        log.warning(
+            "[resources.prometheus] sends a bearer token over plain http to %s; use https",
+            prometheus.display_url,
+        )
     # No connectors or alerter are wired yet: an effect nobody can carry out turns into an
     # alert, and the defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
@@ -485,8 +513,13 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     metrics.set_adapters(a.name for a in adapters)
     metrics.set_budgets_enabled(bool(settings.budgets.budgets))
+    if reader is not None:
+        reader.observer = metrics
+        metrics.set_resources(True)
     if not traces.enabled:
-        loop = ControlLoop(engine, merged_snapshot(adapters, metrics, clock), metrics)
+        loop = ControlLoop(
+            engine, merged_snapshot(adapters, metrics, clock, resources=reader), metrics
+        )
         return App(settings, loaded, engine, loop, metrics, store)
     span_store = _open_span_store(settings.db_path)
     metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
@@ -523,7 +556,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     window = SpanWindow(
         span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
     )
-    source = merged_snapshot(adapters, metrics, clock, window, settings.budgets)
+    source = merged_snapshot(adapters, metrics, clock, window, settings.budgets, resources=reader)
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     return App(
         settings, loaded, engine, loop, metrics, store, span_store, ingest, retention, forwarder
@@ -682,6 +715,21 @@ def render_budgets(
     return lines
 
 
+def _resources_status(resources: ResourceSettings) -> str:
+    p = resources.prometheus
+    if p is None:
+        return "disabled (no [resources.prometheus])"
+    try:
+        token = p.token()
+    except ValueError as exc:
+        return f"NOT ready: {exc}"
+    auth = f"bearer token from ${p.token_env}" if token else "no token"
+    return (
+        f"Prometheus {p.display_url}, {len(p.hosts)} host(s) by label {p.host_label}, "
+        f"every {p.interval}, {auth}"
+    )
+
+
 def render_status(
     settings: Settings,
     loaded: LoadedRules,
@@ -697,6 +745,7 @@ def render_status(
         f"interval: {engine.interval}",
         f"ledger:   {settings.db_path or '(in memory)'}",
         f"traces:   {_traces_status(settings.traces)}",
+        f"resources: {_resources_status(settings.resources)}",
         "",
         f"{'#':>3}  {'rule':<17} {'prio':<4}  {'status':<16} mode",
     ]

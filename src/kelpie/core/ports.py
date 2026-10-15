@@ -7,7 +7,15 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from kelpie.core.actions import Action, ActionKind
-from kelpie.core.model import Condition, ConditionKind, Session, Snapshot, Status, Task
+from kelpie.core.model import (
+    Condition,
+    ConditionKind,
+    Resource,
+    Session,
+    Snapshot,
+    Status,
+    Task,
+)
 
 
 @runtime_checkable
@@ -95,6 +103,17 @@ class ActionConnector(Protocol):
     actions: frozenset[ActionKind]
 
     def execute(self, action: Action) -> None: ...
+
+
+@runtime_checkable
+class ResourceReader(Protocol):
+    """Reads host resource readings (disk, memory, load, processes) for a snapshot.
+
+    Must not raise: when the source is unavailable it returns no readings, so rules see no
+    data rather than stale data. The caller owns the clock.
+    """
+
+    def read(self, now: datetime) -> Sequence[Resource]: ...
 
 
 @runtime_checkable

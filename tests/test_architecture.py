@@ -26,6 +26,7 @@ FORBIDDEN_IN_TRACES = (
     "kelpie.cli",
     "kelpie.metrics",
 )
+FORBIDDEN_IN_RESOURCES = (*FORBIDDEN_IN_TRACES, "kelpie.traces")
 # No LLM clients in the control loop. Only report/ may use one.
 LLM_ROOTS = {"anthropic", "openai", "litellm", "langchain", "ollama", "mistralai", "vertexai"}
 # google.protobuf (OTLP decoding) is fine; Google's model SDKs are not.
@@ -93,7 +94,15 @@ def test_traces_build_on_core_only(path: Path) -> None:
     assert not bad, f"{path.name} imports {bad}"
 
 
-@pytest.mark.parametrize("path", _files("core", "rules", "traces", "server.py", "app.py"), ids=_ids)
+@pytest.mark.parametrize("path", _files("resources"), ids=_ids)
+def test_resources_build_on_core_only(path: Path) -> None:
+    bad = {m for m in _imports(path) if m.startswith(FORBIDDEN_IN_RESOURCES)}
+    assert not bad, f"{path.name} imports {bad}"
+
+
+@pytest.mark.parametrize(
+    "path", _files("core", "rules", "traces", "resources", "server.py", "app.py"), ids=_ids
+)
 def test_control_loop_has_no_llm(path: Path) -> None:
     bad = {m for m in _imports(path) if m.split(".")[0] in LLM_ROOTS or m.startswith(LLM_PREFIXES)}
     assert not bad, f"{path.name} imports LLM client {bad}"

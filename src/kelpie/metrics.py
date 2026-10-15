@@ -85,6 +85,10 @@ class Metrics:
         self.budgets_at: datetime | None = None
         self.budgets_unattributed: dict[str, int] = {}
         self.budgets_stale_now = False
+        self.resources_enabled = False
+        self.resource_up = True
+        self.resource_readings = 0
+        self.resource_failures: Counter[str] = Counter()
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
@@ -154,6 +158,23 @@ class Metrics:
         """Spend could not be read this tick: the last values stay, marked stale."""
         with self._lock:
             self.budgets_stale_now = True
+
+    # --- host resources (kelpie.resources.prometheus.ReadObserver) ---------------------
+
+    def set_resources(self, enabled: bool) -> None:
+        with self._lock:
+            self.resources_enabled = enabled
+
+    def resource_read(self, readings: int) -> None:
+        with self._lock:
+            self.resource_up = True
+            self.resource_readings = readings
+
+    def resource_failed(self, cause: str) -> None:
+        with self._lock:
+            self.resource_up = False
+            self.resource_readings = 0
+            self.resource_failures[cause] += 1
 
     # --- trace forwarding (kelpie.traces.forward.ForwardObserver) ----------------------
 
@@ -315,7 +336,32 @@ class Metrics:
                 self._render_forward(metric)
             if self.budgets_enabled:
                 self._render_budgets(metric)
+            if self.resources_enabled:
+                self._render_resources(metric)
             return "\n".join(out) + "\n"
+
+    def _render_resources(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        metric(
+            "kelpie_resource_source_up",
+            "gauge",
+            "1 if the last read of host resources (Prometheus) succeeded.",
+            [f"kelpie_resource_source_up {int(self.resource_up)}"],
+        )
+        metric(
+            "kelpie_resource_readings",
+            "gauge",
+            "Host resource readings in the last successful read (0 after a failure).",
+            [f"kelpie_resource_readings {self.resource_readings}"],
+        )
+        metric(
+            "kelpie_resource_read_failures_total",
+            "counter",
+            "Failed reads of host resources, by cause; rules see no host readings meanwhile.",
+            [
+                f"kelpie_resource_read_failures_total{_labels(cause=c)} {n}"
+                for c, n in sorted(self.resource_failures.items())
+            ],
+        )
 
     def _render_forward(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
         for what, name, help_ in (
