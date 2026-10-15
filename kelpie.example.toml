@@ -8,6 +8,8 @@ default_mode = "observe"  # observe | suggest | act, for rules without their own
 cooldown = "30m"          # the same action is not repeated within this window
 retry_after = "5m"        # ...except after a failure, which may be retried sooner
 max_actions_per_task_per_hour = 6  # actions with an effect per task (else session, rule)
+once_window = "7d"        # one-off actions (WIP commit, resume note) are done once per window
+once_attempts = 3         # ...and given up after this many failed attempts
 
 # One table per rule: an optional mode plus the rule's own parameters. Names must be in
 # the plan (kelpie.rules.PLANNED); unknown names stop Kelpie at startup, and planned rules
@@ -16,6 +18,12 @@ max_actions_per_task_per_hour = 6  # actions with an effect per task (else sessi
 # [engine.rules.stale_blocks]
 # mode = "suggest"
 # unblock_grace = "5m"
+#
+# [engine.rules.checkpoints]
+# commit_every = "30m"      # remind a live session to commit after this long
+# max_changed_files = 20    # ...or once it has more changed files than this
+# wip_ci = "skip_ci"        # WIP commit on exit: "skip_ci" ([skip ci]) or "draft_pr"
+# act_within = "24h"        # WIP commit and resume note only this long after the exit
 
 [storage]
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
@@ -39,6 +47,8 @@ path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memor
 # [engine.rules.orphan_status]
 # session_stale_after = "60m"
 # [engine.rules.wait_condition]
+# session_stale_after = "60m"
+# [engine.rules.checkpoints]
 # session_stale_after = "60m"
 #
 # Blocks. The adapter reports Hermes typed blocks (needs_input, capability, transient) as

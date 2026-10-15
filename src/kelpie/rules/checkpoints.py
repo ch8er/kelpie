@@ -4,17 +4,22 @@ Sessions die (crashes, timeouts, context limits). Work that was never committed 
 them, and the next session starts from zero. This rule keeps work recoverable:
 
 - **reminder**: a live session whose worktree has uncommitted changes and whose last
-  commit is older than ``commit_every`` (default 30m), or that has ``max_changed_files``
-  (default 20) changed files, gets a comment asking it to commit;
-- **WIP commit**: a session that is over (ended, or silent past ``session_stale_after``)
-  and left a dirty worktree gets a ``wip_commit`` to the task branch with its progress note.
-  WIP commits must not trigger CI: ``wip_ci = "skip_ci"`` adds ``[skip ci]`` to the message,
-  ``"draft_pr"`` asks the executor to push to a draft PR instead;
-- **resume note**: a task back in the queue after a session that committed work gets one
-  comment with the last commit, branch and progress note, so the next session continues
-  instead of restarting.
+  commit is older than ``commit_every`` (default 30m), or that has more than
+  ``max_changed_files`` (default 20) changed files, gets a comment asking it to commit;
+- **WIP commit**: when the task's last session is over (ended, or silent past
+  ``session_stale_after``) and no other session is live on it, a dirty worktree gets a
+  ``wip_commit`` to the task branch with the session's progress note. WIP commits must not
+  trigger CI: ``wip_ci = "skip_ci"`` adds ``[skip ci]`` to the message, ``"draft_pr"`` asks
+  the executor to push to a draft PR instead;
+- **resume note**: when that exit sends the task back to the queue (it is queued again, or
+  rule 1 is about to requeue it), the task gets one comment naming the WIP commit or the
+  last commit and branch, with the progress note, so the next session continues instead
+  of restarting.
 
-This rule runs first among the rules so the WIP commit precedes any requeue (rule 1).
+WIP commits and resume notes are one-off actions (``Action.once``) and are only emitted
+for ``act_within`` (default 24h) after the exit, which must stay shorter than the engine's
+``once_window``. This rule runs first among the rules so the WIP commit precedes any
+requeue (rule 1).
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import DEFAULT_STALE_AFTER, is_live, last_exit, last_seen
+from kelpie.rules._tasks import DEFAULT_STALE_AFTER, Exit, is_live, last_exit, undeclared_exit
 
 NAME = "checkpoints"
 
@@ -43,29 +48,31 @@ class Checkpoints:
     max_changed_files: int = 20
     wip_ci: str = "skip_ci"
     session_stale_after: timedelta = DEFAULT_STALE_AFTER
+    act_within: timedelta = timedelta(hours=24)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         actions: list[Action] = []
-        tasks = {t.id: t for t in snapshot.tasks}
-        for session in snapshot.sessions:
-            task = tasks.get(session.task_id)
-            if task is None or task.status.is_terminal:
-                continue
-            if is_live(session, snapshot.now, self.session_stale_after):
-                actions.extend(self._remind(task, session, snapshot))
-            elif session.dirty_worktree:
-                actions.append(self._wip_commit(task, session))
         for task in snapshot.tasks:
-            if task.status in _QUEUED:
-                actions.extend(self._resume(task, snapshot))
+            if task.status.is_terminal:
+                continue
+            sessions = snapshot.sessions_for(task.id)
+            live = [s for s in sessions if is_live(s, snapshot.now, self.session_stale_after)]
+            for session in live:
+                actions.extend(self._remind(task, session, snapshot))
+            end = None if live else last_exit(task, snapshot, self.session_stale_after)
+            if end is None or snapshot.now - end.at >= self.act_within:
+                continue  # someone is working on it, nobody ever did, or the exit is old
+            if end.session.dirty_worktree:
+                actions.append(self._wip_commit(task, end.session))
+            actions.extend(self._resume(task, end, snapshot))
         return actions
 
     def _remind(self, task: Task, session: Session, snapshot: Snapshot) -> Iterable[Action]:
         if not session.dirty_worktree and not session.changed_files:
             return
         since_commit = snapshot.now - (session.last_commit_at or session.started_at)
-        too_many = (session.changed_files or 0) >= self.max_changed_files
+        too_many = (session.changed_files or 0) > self.max_changed_files
         if since_commit < self.commit_every and not too_many:
             return
         why = (
@@ -105,24 +112,35 @@ class Checkpoints:
             },
         )
 
-    def _resume(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
-        end = last_exit(task, snapshot, self.session_stale_after)
-        if end is None or task.status_since < last_seen(end.session):
-            return  # nobody worked on it yet, or it is back for another reason
-        committed = [s for s in snapshot.sessions_for(task.id) if s.last_commit]
-        if not committed:
-            return
-        last = max(committed, key=lambda s: s.last_commit_at or s.started_at)
-        where = f"commit {last.last_commit}" + (f" on {last.branch}" if last.branch else "")
-        note = _note(last)
+    def _resume(self, task: Task, end: Exit, snapshot: Snapshot) -> Iterable[Action]:
+        if task.status in _QUEUED:
+            if task.status_since < end.session.started_at:
+                return  # queued before this session: not sent back by it
+        elif undeclared_exit(task, snapshot, self.session_stale_after) is None:
+            return  # the session declared an end; nobody resumes from here
+        session = end.session
+        if session.dirty_worktree:
+            where = "the WIP commit Kelpie saved"
+            commit = None
+        else:
+            committed = [s for s in snapshot.sessions_for(task.id) if s.last_commit]
+            if not committed:
+                return  # nothing to resume from
+            session = max(committed, key=lambda s: s.last_commit_at or s.started_at)
+            where = f"commit {session.last_commit}"
+            commit = session.last_commit
+        branch = session.branch or end.session.branch
+        if branch:
+            where += f" on {branch} (see git log there for what was done)"
+        note = _note(end.session) or _note(session)
         yield Action(
             ActionKind.COMMENT,
             NAME,
             f"Resume from {where} instead of starting over.\n\n{note}".rstrip(),
             task_id=task.id,
-            key=f"resume:{task.id}:{last.last_commit}",
+            key=f"resume:{task.id}:{end.session.id}",
             once=True,
-            params={"commit": last.last_commit, "branch": last.branch, "session_id": last.id},
+            params={"commit": commit, "branch": branch, "session_id": session.id},
         )
 
 
@@ -153,7 +171,7 @@ def _duration(value: Any, name: str) -> timedelta:
 def build(config: dict[str, Any]) -> Checkpoints:
     config = dict(config)
     kwargs: dict[str, Any] = {}
-    for key in ("commit_every", "session_stale_after"):
+    for key in ("commit_every", "session_stale_after", "act_within"):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     if "max_changed_files" in config:

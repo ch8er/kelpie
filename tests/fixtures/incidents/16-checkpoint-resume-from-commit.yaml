@@ -3,7 +3,7 @@ incident: null
 title: "A requeued task carries where to resume from"
 description: >
   Foundation rule (checkpoints). A task went back to the queue after its session died; that
-  session had committed work (plus Kelpie's WIP commit). The next session should continue
+  session had committed work and left a clean worktree. The next session should continue
   from the last commit, so the task gets one comment with the commit, branch and progress
   note. A queued task whose previous session committed nothing, and a queued task that was
   never worked on, get nothing.
