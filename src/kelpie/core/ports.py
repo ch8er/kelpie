@@ -38,6 +38,17 @@ class SupportsReassign(Protocol):
 
 
 @runtime_checkable
+class SupportsStop(Protocol):
+    """Optional adapter capability: stop (pause) a running session.
+
+    Works for sessions without a task (e.g. heartbeat loops). The task, if any, keeps its
+    status; a human or a later action resumes it.
+    """
+
+    def stop(self, session_id: str, reason: str) -> None: ...
+
+
+@runtime_checkable
 class ConditionConnector(Protocol):
     """Evaluates external conditions: GitHub PR/CI, LLM provider quotas, human tasks."""
 

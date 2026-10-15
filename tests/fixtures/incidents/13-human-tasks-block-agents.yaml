@@ -6,7 +6,7 @@ description: >
   secrets and approving a design decision. The human-owned tasks were not prioritized
   because nobody told the human that five agent tasks were stuck behind them. Agents
   stayed idle while the human was unaware of being the bottleneck.
-rule: human_tasks
+rule: needs_you
 config:
   human_wait_alert_after: "1h"
 snapshot:

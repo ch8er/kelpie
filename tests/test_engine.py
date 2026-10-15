@@ -7,7 +7,13 @@ import pytest
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.engine import Engine
 from kelpie.core.model import Snapshot, Task
-from kelpie.core.ports import Alerter, PlatformAdapter, PlatformEvent, SupportsReassign
+from kelpie.core.ports import (
+    Alerter,
+    PlatformAdapter,
+    PlatformEvent,
+    SupportsReassign,
+    SupportsStop,
+)
 
 NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
 
@@ -52,6 +58,12 @@ class ReassigningAdapter(FakeAdapter):
 
 
 @dataclass
+class StoppingAdapter(FakeAdapter):
+    def stop(self, session_id: str, reason: str) -> None:
+        self._record("stop", session_id)
+
+
+@dataclass
 class FakeAlerter:
     sent: list[tuple[str, str]] = field(default_factory=list)
 
@@ -88,6 +100,8 @@ def test_fakes_satisfy_protocols() -> None:
     assert isinstance(FakeAdapter(), PlatformAdapter)
     assert not isinstance(FakeAdapter(), SupportsReassign)
     assert isinstance(ReassigningAdapter(), SupportsReassign)
+    assert isinstance(StoppingAdapter(), SupportsStop)
+    assert not isinstance(FakeAdapter(), SupportsStop)
     assert isinstance(FakeAlerter(), Alerter)
 
 
@@ -129,7 +143,25 @@ def test_reassign_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, st
     alerter = FakeAlerter()
     run([act(ActionKind.REASSIGN, **params)], adapter, alerter)
     assert adapter.calls == []
-    assert alerter.sent == [("[emit] reassign T-1", Severity.INFO)]
+    assert alerter.sent == [("[emit] reassign T-1 (not executed, needs a human)", Severity.INFO)]
+
+
+def test_stop_targets_session_even_without_task() -> None:
+    adapter = StoppingAdapter()
+    run([act(ActionKind.STOP, task_id=None, session_id="S-1")], adapter)
+    assert adapter.calls == [("stop", "S-1")]
+
+
+@pytest.mark.parametrize(
+    ("adapter", "params"),
+    [(FakeAdapter(), {"session_id": "S-1"}), (StoppingAdapter(), {})],
+    ids=["adapter-cannot-stop", "no-session"],
+)
+def test_stop_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, str]) -> None:
+    alerter = FakeAlerter()
+    run([act(ActionKind.STOP, **params)], adapter, alerter)
+    assert adapter.calls == []
+    assert alerter.sent == [("[emit] stop T-1 (not executed, needs a human)", Severity.INFO)]
 
 
 def test_alert_and_escalate_go_to_alerter() -> None:

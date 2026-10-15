@@ -10,7 +10,7 @@ import yaml
 
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import Snapshot
-from kelpie.core.serde import snapshot_from_dict
+from kelpie.core.serde import parse_datetime, parse_duration, snapshot_from_dict
 
 FIXTURES = Path(__file__).parent / "fixtures" / "incidents"
 REQUIRED_KEYS = {"id", "incident", "title", "description", "rule", "snapshot", "expected_actions"}
@@ -28,6 +28,31 @@ class Incident:
     snapshot: Snapshot
     expected: list[dict[str, Any]]
     not_expected: list[dict[str, Any]]
+
+
+def expand_repeats(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand fixture-only ``repeat: {count, every}`` span entries.
+
+    Copy ``i`` gets ``span_id`` suffix ``-<i>`` and ``start``/``end`` shifted by
+    ``i * every``. Keeps fixtures with hundreds of identical calls readable.
+    """
+    out: list[dict[str, Any]] = []
+    for span in spans:
+        repeat = span.get("repeat")
+        if repeat is None:
+            out.append(span)
+            continue
+        if set(repeat) != {"count", "every"} or int(repeat["count"]) < 1:
+            raise ValueError(f"repeat needs exactly count >= 1 and every: {repeat!r}")
+        base = {k: v for k, v in span.items() if k != "repeat"}
+        every = parse_duration(repeat["every"])
+        for i in range(int(repeat["count"])):
+            copy = dict(base, span_id=f"{base['span_id']}-{i}")
+            for key in ("start", "end"):
+                if base.get(key) is not None:
+                    copy[key] = (parse_datetime(base[key]) + i * every).isoformat()
+            out.append(copy)
+    return out
 
 
 def load(path: Path) -> Incident:
@@ -50,7 +75,9 @@ def load(path: Path) -> Incident:
         number=raw["incident"],
         rule=raw["rule"],
         config=raw.get("config") or {},
-        snapshot=snapshot_from_dict(raw["snapshot"]),
+        snapshot=snapshot_from_dict(
+            {**raw["snapshot"], "spans": expand_repeats(raw["snapshot"].get("spans", []))}
+        ),
         expected=expected,
         not_expected=not_expected,
     )

@@ -32,7 +32,15 @@ def test_register_and_reject_duplicates(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_planned_rules_are_unique() -> None:
     names = [r.name for r in PLANNED]
+    numbers = [r.number for r in PLANNED if r.number is not None]
     assert len(names) == len(set(names))
+    assert len(numbers) == len(set(numbers))
+
+
+def test_plan_numbering_is_complete() -> None:
+    # Rule 8 is the daily report, implemented in kelpie.report rather than as a rule.
+    numbers = {r.number for r in PLANNED if r.number is not None}
+    assert numbers == set(range(1, 15)) - {8}
 
 
 def test_every_rule_module_is_imported() -> None:
