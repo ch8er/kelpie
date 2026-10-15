@@ -184,6 +184,7 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # git_state = true                  # git state (commit, branch, dirty files) of live task workspaces
 # git_timeout = "5s"                # limit for each git call; 2x per snapshot in total
 # cli = "hermes"                    # Hermes executable used to stop a run (name on PATH or a path)
+# cli_timeout = "10s"               # limit for that command (at most 60s); it runs inside the tick
 #
 # Recommended on Hermes. A valid Hermes claim counts as a heartbeat, but Hermes tolerates
 # heartbeats up to an hour old, while Kelpie's default is 30 minutes:

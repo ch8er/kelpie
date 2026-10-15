@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -289,3 +290,25 @@ def test_status_shows_spool_age(tmp_path: Path) -> None:
     spool.write_text(json.dumps({"type": "tool", "at": time.time() - 120}) + "\n")
     text = render_status(settings, load_rules(settings.engine), build_adapters(settings))
     assert "spool: last line 2m ago" in text
+
+
+def test_act_allow_list_matches_what_loop_breaker_emits() -> None:
+    """Hermes carries out stop only; loop_breaker may therefore emit nothing but stop and alerts."""
+    from kelpie.app import HERMES_ACT_RULES
+    from kelpie.rules import loop_breaker
+
+    source = Path(loop_breaker.__file__).read_text()
+    kinds = set(re.findall(r"ActionKind\.(\w+)", source))
+    assert kinds == {"ALERT", "STOP"}
+    assert {"loop_breaker"} == HERMES_ACT_RULES
+
+
+def test_hermes_cli_timeout_setting(tmp_path: Path) -> None:
+    (default,) = build_adapters(load_settings(write(tmp_path, "[adapters.hermes]\n")))
+    assert isinstance(default, HermesAdapter) and default.cli_timeout == 10.0
+    path = write(tmp_path, '[adapters.hermes]\ncli_timeout = "25s"\n')
+    (adapter,) = build_adapters(load_settings(path))
+    assert isinstance(adapter, HermesAdapter) and adapter.cli_timeout == 25.0
+    for bad in ("0", "'2m'", "'soon'", "false"):
+        with pytest.raises(ConfigError, match="cli_timeout"):
+            load_settings(write(tmp_path, f"[adapters.hermes]\ncli_timeout = {bad}\n"))

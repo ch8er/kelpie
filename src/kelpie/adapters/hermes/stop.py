@@ -24,8 +24,20 @@ the queue, where the dispatcher can respawn it before a second command blocks it
 ``hermes kanban archive`` terminates the worker but is terminal; signalling the recorded pid
 from Kelpie would duplicate Hermes' fingerprint checks and could hit a stranger.
 
-The command runs with ``HERMES_KANBAN_DB`` pinned to the adapter's ``db_path``, so it acts on
-the board Kelpie watches, and without the worker-scoping variables of a Hermes worker.
+The command is pinned to exactly the run Kelpie looked at. ``HERMES_KANBAN_TASK`` and
+``HERMES_KANBAN_RUN_ID`` name that task and run, so the CLI passes the run as
+``expected_run_id`` and ``block_task`` adds ``AND current_run_id = ?``: if the task was
+re-claimed (a new run) between Kelpie's check and the command, the new run is not blocked and
+the command fails. (The CLI records the reason as a comment before it tries the block, so a
+lost race can leave one stray "BLOCKED: Stopped by Kelpie" comment on the task.)
+``HERMES_KANBAN_DB`` is pinned to the adapter's ``db_path``, so it acts on the board Kelpie
+watches. The environment is an allow-list (:data:`ENV_EXACT`, ``LC_*``, ``XDG_*``, ``HERMES_*``
+except the board-selecting variables), so Kelpie's own credentials never reach the CLI.
+On timeout the whole process group is killed.
+
+On Hermes a stop is therefore "block the task now, reap the worker later": the worker lives
+until the dispatcher's next reaping tick after the 120 s grace period, and never when no
+dispatcher runs. Anything that must end spend at once (a hard budget) is delayed by that.
 """
 
 from __future__ import annotations
@@ -33,19 +45,35 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 DEFAULT_CLI = "hermes"
-CLI_TIMEOUT = 30.0  # seconds for one command
+CLI_TIMEOUT = 10.0  # seconds for one command; a stop runs inside the control loop tick
 RUN_PREFIX = "hermes-run-"
 BLOCK_KIND = "needs_input"
 MAX_REASON = 500
 ERROR_TAIL = 300
-# Set inside a Hermes worker; they scope the CLI to that worker's own task and run.
-WORKER_ENV = ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_DELEGATED_CHILD_CONTEXT")
 BOARD_ENV = "HERMES_KANBAN_DB"
+TASK_ENV = "HERMES_KANBAN_TASK"
+RUN_ENV = "HERMES_KANBAN_RUN_ID"
+# The CLI gets only this much of Kelpie's environment, so Kelpie's own tokens never reach it.
+ENV_EXACT = frozenset({"PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "VIRTUAL_ENV"})
+ENV_PREFIXES = ("LC_", "XDG_", "HERMES_")
+# Hermes variables that would send the command to another board or scope it elsewhere; the
+# board and the run are set explicitly instead.
+ENV_DENIED = frozenset(
+    {
+        "HERMES_KANBAN_BOARD",
+        "HERMES_KANBAN_HOME",
+        "HERMES_DELEGATED_CHILD_CONTEXT",
+        BOARD_ENV,
+        TASK_ENV,
+        RUN_ENV,
+    }
+)
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -73,44 +101,74 @@ def stop_comment(task_id: str, reason: str) -> str:
     )
 
 
-def cli_env(base: Mapping[str, str], db_path: Path) -> dict[str, str]:
-    env = {k: v for k, v in base.items() if k not in WORKER_ENV}
+def cli_env(base: Mapping[str, str], db_path: Path, task_id: str, rid: int) -> dict[str, str]:
+    """The environment of the command: allow-listed variables, the board and the run."""
+    env = {
+        k: v
+        for k, v in base.items()
+        if k not in ENV_DENIED and (k in ENV_EXACT or k.startswith(ENV_PREFIXES))
+    }
     env[BOARD_ENV] = str(db_path)
+    env[TASK_ENV] = task_id
+    env[RUN_ENV] = str(rid)
     return env
+
+
+def block_command(exe: str, task_id: str, comment: str) -> Sequence[str]:
+    return [exe, "kanban", "block", "--kind", BLOCK_KIND, "--", task_id, comment]
 
 
 def block_task(
     cli: str,
     db_path: Path,
     task_id: str,
+    rid: int,
     comment: str,
     *,
     timeout: float = CLI_TIMEOUT,
     environ: Mapping[str, str] | None = None,
 ) -> None:
-    """Run ``hermes kanban block``. Raises :class:`HermesCliError` unless it succeeds."""
+    """Run ``hermes kanban block`` for run ``rid`` of ``task_id``.
+
+    Raises :class:`HermesCliError` unless it succeeds (also when the run is no longer the
+    task's current run).
+    """
     exe = shutil.which(cli)
     if exe is None:
         raise HermesCliError(f"Hermes CLI not found: {cli!r} (set [adapters.hermes] cli)")
-    argv: Sequence[str] = [exe, "kanban", "block", task_id, "--kind", BLOCK_KIND, comment]
-    env = cli_env(os.environ if environ is None else environ, db_path)
+    env = cli_env(os.environ if environ is None else environ, db_path, task_id, rid)
     try:
-        done = subprocess.run(
-            argv,
-            capture_output=True,
+        proc = subprocess.Popen(
+            block_command(exe, task_id, comment),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
             env=env,
-            check=False,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise HermesCliError(f"hermes kanban block {task_id} timed out after {timeout:g}s") from exc
     except OSError as exc:
         raise HermesCliError(f"cannot run the Hermes CLI {cli!r}: {exc}") from exc
-    if done.returncode != 0:
-        tail = (done.stderr or done.stdout or "").strip()[-ERROR_TAIL:]
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill_group(proc)
+        proc.communicate()
+        raise HermesCliError(f"hermes kanban block {task_id} timed out after {timeout:g}s") from exc
+    if proc.returncode != 0:
+        tail = (err or out or "").strip()[-ERROR_TAIL:]
         raise HermesCliError(
-            f"hermes kanban block {task_id} failed (exit {done.returncode}): {tail}"
+            f"hermes kanban block {task_id} failed (exit {proc.returncode}): {tail}"
         )
+
+
+def _kill_group(proc: subprocess.Popen[str]) -> None:
+    """Kill the command and anything it started; it is our own child in its own session."""
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:  # pragma: no cover - Windows
+            proc.kill()
+    except (ProcessLookupError, PermissionError):
+        pass

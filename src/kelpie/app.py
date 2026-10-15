@@ -69,6 +69,7 @@ class HermesSettings:
     git_state: bool = True  # read git state of the workspaces of live tasks
     git_timeout: timedelta = hermes.DEFAULT_GIT_TIMEOUT  # per git call
     cli: str = hermes.DEFAULT_CLI  # Hermes executable that carries out ``stop``
+    cli_timeout: timedelta = timedelta(seconds=hermes.CLI_TIMEOUT)  # one stop command
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -78,6 +79,7 @@ class HermesSettings:
             git_state=self.git_state,
             git_timeout=self.git_timeout,
             cli=self.cli,
+            cli_timeout=self.cli_timeout.total_seconds(),
         )
 
 
@@ -197,6 +199,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "git_state",
         "git_timeout",
         "cli",
+        "cli_timeout",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     paths: dict[str, Path | None] = {}
@@ -232,7 +235,15 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
     cli = section.get("cli", hermes.DEFAULT_CLI)
     if not isinstance(cli, str) or not cli.strip():
         raise ConfigError("[adapters.hermes] cli must be a non-empty string")
-    return HermesSettings(db_path, paths["spool"], lookback, enabled, git_state, git_timeout, cli)
+    try:
+        cli_timeout = parse_duration(section.get("cli_timeout", f"{hermes.CLI_TIMEOUT:g}s"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ConfigError(f"[adapters.hermes] cli_timeout: {exc}") from exc
+    if not timedelta(0) < cli_timeout <= timedelta(minutes=1):
+        raise ConfigError("[adapters.hermes] cli_timeout must be positive and at most 60s")
+    return HermesSettings(
+        db_path, paths["spool"], lookback, enabled, git_state, git_timeout, cli, cli_timeout
+    )
 
 
 @dataclass(frozen=True, slots=True)

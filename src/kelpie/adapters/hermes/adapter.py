@@ -97,6 +97,7 @@ from kelpie.adapters.hermes.git_state import (
     warn_once,
 )
 from kelpie.adapters.hermes.stop import (
+    CLI_TIMEOUT,
     DEFAULT_CLI,
     HermesCliError,
     block_task,
@@ -264,6 +265,7 @@ class HermesAdapter:
     git_state: bool = True  # read the git state of the workspaces of live tasks
     git_timeout: timedelta = DEFAULT_GIT_TIMEOUT  # per git call
     cli: str = DEFAULT_CLI  # the Hermes executable that carries out ``stop``
+    cli_timeout: float = CLI_TIMEOUT  # seconds; a stop runs inside the control loop tick
     name: str = "hermes"
     # workspace -> snapshot time until which it is not read (its git timed out)
     _git_backoff: dict[Path, datetime] = field(
@@ -671,7 +673,14 @@ class HermesAdapter:
             log.info("run %s of task %s is not active; nothing to stop", rid, task_id)
             return
         try:
-            block_task(self.cli, self.db_path, task_id, stop_comment(task_id, reason))
+            block_task(
+                self.cli,
+                self.db_path,
+                task_id,
+                rid,
+                stop_comment(task_id, reason),
+                timeout=self.cli_timeout,
+            )
         except HermesCliError as exc:
             # The run may have ended on its own between our read and the command.
             if self._run_state(rid) == (task_id, False):

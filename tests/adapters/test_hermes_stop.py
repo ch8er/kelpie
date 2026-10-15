@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -39,30 +40,53 @@ NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 
 FAKE_CLI = """\
 #!{python}
-import json, os, sqlite3, sys, time
+import json, os, sqlite3, subprocess, sys, time
 
 with open({log!r}, "a") as fh:
     fh.write(json.dumps({{"argv": sys.argv[1:], "env": dict(os.environ)}}) + "\\n")
-mode = os.environ.get("FAKE_HERMES_MODE", "block")
+try:  # the test sets the behaviour in a file: the CLI's environment is filtered
+    mode = open({log!r} + ".mode").read().strip()
+except OSError:
+    mode = "block"
+task = sys.argv[sys.argv.index("--") + 1]
+# As hermes_cli/kanban.py _worker_run_id_for: the run is only pinned for the worker's own task.
+raw = os.environ.get("HERMES_KANBAN_RUN_ID")
+expected = int(raw) if os.environ.get("HERMES_KANBAN_TASK") == task and raw else None
+conn = sqlite3.connect(os.environ["HERMES_KANBAN_DB"])
+now = int(time.time())
 if mode == "finish-then-fail":  # the worker completed first; Hermes refuses the block
-    conn = sqlite3.connect(os.environ["HERMES_KANBAN_DB"])
     conn.execute("UPDATE tasks SET status='done'")
     conn.execute("UPDATE task_runs SET ended_at=1, outcome='completed'")
     conn.commit()
     mode = "fail"
+if mode == "reclaimed":  # the task was re-claimed (a new run) before this command ran
+    conn.execute("UPDATE task_runs SET ended_at=?, outcome='reclaimed' WHERE task_id=?"
+                 " AND ended_at IS NULL", (now, task))
+    cur = conn.execute("INSERT INTO task_runs (task_id, profile, status, started_at)"
+                       " VALUES (?, 'coder', 'running', ?)", (task, now))
+    conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (cur.lastrowid, task))
+    conn.commit()
 if mode == "fail":
     print("cannot block t1 (token sk-secret-value)", file=sys.stderr)
     sys.exit(1)
 if mode == "hang":
+    child = subprocess.Popen(["sleep", "30"])
+    with open({log!r} + ".pid", "w") as fh:
+        fh.write(str(child.pid))
     time.sleep(30)
 if mode == "noop":
     sys.exit(0)
-conn = sqlite3.connect(os.environ["HERMES_KANBAN_DB"])
-now = int(time.time())
-conn.execute("UPDATE tasks SET status='blocked', block_kind='needs_input' WHERE id=?",
-             (sys.argv[3],))
+sql = "UPDATE tasks SET status='blocked', block_kind='needs_input'" \
+      " WHERE id=? AND status IN ('running', 'ready')"
+params = [task]
+if expected is not None:
+    sql += " AND current_run_id=?"
+    params.append(expected)
+if conn.execute(sql, params).rowcount != 1:
+    print("cannot block " + task, file=sys.stderr)
+    sys.exit(1)
 conn.execute("UPDATE task_runs SET status='blocked', outcome='blocked', ended_at=?"
-             " WHERE task_id=? AND ended_at IS NULL", (now, sys.argv[3]))
+             " WHERE task_id=? AND ended_at IS NULL", (now, task))
 conn.commit()
 """
 
@@ -82,6 +106,10 @@ def fake_cli(tmp_path: Path) -> tuple[str, Path]:
     exe.write_text(FAKE_CLI.format(python=sys.executable, log=str(log)))
     exe.chmod(0o755)
     return str(exe), log
+
+
+def set_mode(log: Path, mode: str) -> None:
+    Path(f"{log}.mode").write_text(mode)
 
 
 def calls(log: Path) -> list[dict[str, object]]:
@@ -117,12 +145,14 @@ def test_stop_blocks_the_task_through_the_cli(board: Board, fake_cli: tuple[str,
     assert task_state(board) == "blocked"
     (call,) = calls(log)
     argv = call["argv"]
-    assert argv[:5] == ["kanban", "block", "t1", "--kind", "needs_input"]  # type: ignore[index]
-    comment = argv[5]  # type: ignore[index]
+    assert argv[:6] == ["kanban", "block", "--kind", "needs_input", "--", "t1"]  # type: ignore[index]
+    comment = argv[6]  # type: ignore[index]
     assert "same call 12 times" in comment
     assert "hermes kanban unblock t1" in comment  # how to resume
     env = call["env"]
     assert env["HERMES_KANBAN_DB"] == str(board.path)  # type: ignore[index]
+    # Pinned to exactly this task and run (Hermes then guards on current_run_id).
+    assert env["HERMES_KANBAN_TASK"] == "t1" and env["HERMES_KANBAN_RUN_ID"] == str(rid)  # type: ignore[index]
 
 
 def test_stop_is_idempotent(board: Board, fake_cli: tuple[str, Path]) -> None:
@@ -173,8 +203,8 @@ def test_missing_cli_is_an_error_and_changes_nothing(board: Board, tmp_path: Pat
 def test_cli_failure_is_an_error(
     board: Board, fake_cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    exe, _ = fake_cli
-    monkeypatch.setenv("FAKE_HERMES_MODE", "fail")
+    exe, log = fake_cli
+    set_mode(log, "fail")
     rid = running(board)
     with pytest.raises(HermesError, match=r"failed \(exit 1\)"):
         make(board, exe).stop(f"hermes-run-{rid}", "x")
@@ -185,7 +215,7 @@ def test_cli_failure_after_the_run_ended_by_itself_is_a_noop(
     board: Board, fake_cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     exe, log = fake_cli
-    monkeypatch.setenv("FAKE_HERMES_MODE", "finish-then-fail")
+    set_mode(log, "finish-then-fail")
     rid = running(board)
     make(board, exe).stop(f"hermes-run-{rid}", "x")  # no error: the run is over
     assert len(calls(log)) == 1 and task_state(board) == "done"
@@ -194,35 +224,107 @@ def test_cli_failure_after_the_run_ended_by_itself_is_a_noop(
 def test_task_still_running_after_cli_success_is_an_error(
     board: Board, fake_cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    exe, _ = fake_cli
-    monkeypatch.setenv("FAKE_HERMES_MODE", "noop")
+    exe, log = fake_cli
+    set_mode(log, "noop")
     rid = running(board)
     with pytest.raises(HermesError, match="still running"):
         make(board, exe).stop(f"hermes-run-{rid}", "x")
 
 
-def test_cli_timeout(fake_cli: tuple[str, Path], tmp_path: Path) -> None:
-    exe, _ = fake_cli
-    env = {**os.environ, "FAKE_HERMES_MODE": "hang"}
+def pid_alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return False
+    return state != "Z"  # a zombie is dead, only not reaped yet
+
+
+def test_cli_timeout_kills_the_whole_process_group(
+    fake_cli: tuple[str, Path], tmp_path: Path
+) -> None:
+    exe, log = fake_cli
+    set_mode(log, "hang")
+    pidfile = Path(f"{log}.pid")
+    env = dict(os.environ)
     with pytest.raises(HermesCliError, match="timed out"):
-        block_task(exe, tmp_path / "k.db", "t1", "c", timeout=0.3, environ=env)
+        block_task(exe, tmp_path / "k.db", "t1", 1, "c", timeout=1.5, environ=env)
+    grandchild = int(pidfile.read_text())  # started by the CLI, a dedicated test process
+    for _ in range(50):
+        if not pid_alive(grandchild):
+            break
+        time.sleep(0.1)
+    assert not pid_alive(grandchild)
 
 
-def test_worker_scoping_env_is_removed_and_board_pinned(tmp_path: Path) -> None:
+def test_env_is_an_allow_list_with_board_and_run_pinned(tmp_path: Path) -> None:
     base = {
         "PATH": "/bin",
+        "HOME": "/home/k",
+        "USER": "k",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C",
+        "TMPDIR": "/tmp",
+        "XDG_CONFIG_HOME": "/cfg",
+        "VIRTUAL_ENV": "/venv",
+        "HERMES_HOME": "/profile",
+        "HERMES_PROFILE": "coder",
         "HERMES_KANBAN_TASK": "t9",
         "HERMES_KANBAN_RUN_ID": "7",
-        "HERMES_DELEGATED_CHILD_CONTEXT": "1",
         "HERMES_KANBAN_DB": "/elsewhere/kanban.db",
-        "HERMES_HOME": "/profile",
+        "HERMES_KANBAN_BOARD": "other",
+        "HERMES_KANBAN_HOME": "/other-home",
+        "HERMES_DELEGATED_CHILD_CONTEXT": "1",
+        "GITHUB_TOKEN": "ghp_secret",
+        "KELPIE_TRACES_TOKEN": "secret",
+        "ANTHROPIC_API_KEY": "secret",
+        "SLACK_WEBHOOK_URL": "secret",
     }
-    env = cli_env(base, tmp_path / "kanban.db")
+    env = cli_env(base, tmp_path / "kanban.db", "t1", 5)
     assert env == {
         "PATH": "/bin",
+        "HOME": "/home/k",
+        "USER": "k",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C",
+        "TMPDIR": "/tmp",
+        "XDG_CONFIG_HOME": "/cfg",
+        "VIRTUAL_ENV": "/venv",
         "HERMES_HOME": "/profile",
+        "HERMES_PROFILE": "coder",
         "HERMES_KANBAN_DB": str(tmp_path / "kanban.db"),
+        "HERMES_KANBAN_TASK": "t1",
+        "HERMES_KANBAN_RUN_ID": "5",
     }
+
+
+def test_kelpie_credentials_do_not_reach_the_cli(
+    board: Board, fake_cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exe, log = fake_cli
+    for name in ("GITHUB_TOKEN", "KELPIE_TRACES_TOKEN", "SLACK_BOT_TOKEN", "OPENAI_API_KEY"):
+        monkeypatch.setenv(name, "hunter2-secret")
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "elsewhere")
+    monkeypatch.setenv("HERMES_HOME", "/profile")
+    rid = running(board)
+    make(board, exe).stop(f"hermes-run-{rid}", "loop")
+    (call,) = calls(log)
+    env = call["env"]
+    assert "hunter2-secret" not in json.dumps(env)
+    assert "HERMES_KANBAN_BOARD" not in env and env["HERMES_HOME"] == "/profile"  # type: ignore[operator]
+
+
+def test_run_re_claimed_before_the_command_is_not_blocked(
+    board: Board, fake_cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hermes guards on current_run_id: a new run of the same task survives a stale stop."""
+    exe, log = fake_cli
+    set_mode(log, "reclaimed")
+    rid = running(board)
+    make(board, exe).stop(f"hermes-run-{rid}", "loop")  # old run is over: no error
+    assert len(calls(log)) == 1
+    assert task_state(board) == "running"
+    row = board.conn.execute("SELECT current_run_id FROM tasks WHERE id='t1'").fetchone()
+    assert row[0] != rid  # the new run is the one running, untouched
 
 
 def test_comment_is_one_clean_bounded_line() -> None:
@@ -243,10 +345,10 @@ def test_run_id_parsing() -> None:
 def test_cli_error_output_is_bounded(
     fake_cli: tuple[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    exe, _ = fake_cli
-    monkeypatch.setenv("FAKE_HERMES_MODE", "fail")
+    exe, log = fake_cli
+    set_mode(log, "fail")
     with pytest.raises(HermesCliError) as info:
-        block_task(exe, tmp_path / "k.db", "t1", "c")
+        block_task(exe, tmp_path / "k.db", "t1", 1, "c")
     assert len(str(info.value)) < 500
 
 
