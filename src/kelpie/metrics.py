@@ -6,7 +6,7 @@ import contextlib
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from kelpie import __version__
@@ -44,6 +44,12 @@ class Metrics:
         self.open_states: Counter[str] = Counter()
         self.dry_run = True
         self.rules: list[tuple[str, str, bool]] = []  # (name, mode, implemented)
+        self.traces_enabled = False
+        self.traces_requests: Counter[str] = Counter()
+        self.spans_received_total: Counter[str] = Counter()
+        self.spans_rejected_total: Counter[str] = Counter()
+        self.span_rows = 0
+        self.span_store_errors = 0
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
@@ -59,6 +65,38 @@ class Metrics:
         with self._lock:
             for name in names:  # expose 0 so rate() sees the first error
                 self.adapter_errors.setdefault(name, 0)
+
+    # --- traces (kelpie.traces.ingest.IngestObserver, kelpie.traces.store.StoreObserver) --
+
+    def set_traces(self, enabled: bool, kinds: Iterable[str] = ()) -> None:
+        with self._lock:
+            self.traces_enabled = enabled
+            for kind in kinds:  # expose 0 so rate() sees the first span
+                self.spans_received_total.setdefault(kind, 0)
+
+    def traces_request(self, code: int) -> None:
+        with self._lock:
+            self.traces_requests[str(code)] += 1
+
+    def spans_received(self, kind: str, count: int) -> None:
+        with self._lock:
+            self.spans_received_total[kind] += count
+
+    def spans_rejected(self, reason: str, count: int) -> None:
+        with self._lock:
+            self.spans_rejected_total[reason] += count
+
+    def span_rows_added(self, count: int) -> None:
+        with self._lock:
+            self.span_rows += count
+
+    def set_span_rows(self, rows: int) -> None:
+        with self._lock:
+            self.span_rows = rows
+
+    def span_store_failed(self) -> None:
+        with self._lock:
+            self.span_store_errors += 1
 
     def adapter_failed(self, name: str) -> None:
         with self._lock:
@@ -193,4 +231,48 @@ class Metrics:
                 "1 unless the last action-ledger read or write failed.",
                 [f"kelpie_ledger_up {int(self.ledger_up)}"],
             )
+            if self.traces_enabled:
+                self._render_traces(metric)
             return "\n".join(out) + "\n"
+
+    def _render_traces(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        metric(
+            "kelpie_traces_requests_total",
+            "counter",
+            "OTLP trace export requests, by HTTP status code.",
+            [
+                f"kelpie_traces_requests_total{_labels(code=c)} {n}"
+                for c, n in sorted(self.traces_requests.items())
+            ],
+        )
+        metric(
+            "kelpie_spans_received_total",
+            "counter",
+            "Spans accepted from OTLP, by Kelpie span kind; kind=ignored for spans that are "
+            "not GenAI steps (used for linkage, not stored).",
+            [
+                f"kelpie_spans_received_total{_labels(kind=k)} {n}"
+                for k, n in sorted(self.spans_received_total.items())
+            ],
+        )
+        metric(
+            "kelpie_spans_rejected_total",
+            "counter",
+            "Spans rejected from OTLP requests (reported back as partial success), by reason.",
+            [
+                f"kelpie_spans_rejected_total{_labels(reason=r)} {n}"
+                for r, n in sorted(self.spans_rejected_total.items())
+            ],
+        )
+        metric(
+            "kelpie_span_store_rows",
+            "gauge",
+            "Spans in the span store (exact after each retention run, counted up in between).",
+            [f"kelpie_span_store_rows {self.span_rows}"],
+        )
+        metric(
+            "kelpie_span_store_errors_total",
+            "counter",
+            "Span store reads (snapshot) or retention runs that failed.",
+            [f"kelpie_span_store_errors_total {self.span_store_errors}"],
+        )

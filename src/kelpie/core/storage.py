@@ -1,10 +1,14 @@
-"""SQLite persistence: the action ledger and long-lived alert states. Snapshots and spans
-follow.
+"""SQLite persistence: the action ledger, long-lived alert states and trace spans.
 
 The database runs in WAL mode so readers (``kelpie status``, the report) do not block the
-control loop. One connection is shared across threads behind a lock. Each insert commits
-on its own: the ledger writes a handful of rows per tick, and losing one would let an
-action repeat.
+control loop. The ledger store shares one connection across threads behind a lock. Each
+insert commits on its own: the ledger writes a handful of rows per tick, and losing one
+would let an action repeat.
+
+Spans live in the same file but behind their own connection and lock
+(:class:`SqliteSpanStore`), so OTLP ingest on HTTP threads never waits for the ledger lock
+and the other way round. Span writes and deletes run in short batches, so the one SQLite
+writer slot is never held for long.
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ from pathlib import Path
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
+from kelpie.core.model import Span, SpanKind, SpanTotals
+from kelpie.core.spans import last_at
 from kelpie.core.states import OpenState
 
 _V1 = """
@@ -63,8 +69,37 @@ CREATE UNIQUE INDEX states_open ON states (id) WHERE closed_at IS NULL;
 CREATE INDEX states_closed ON states (closed_at);
 """
 
+_V3 = """
+CREATE TABLE spans (
+    rowid_        INTEGER PRIMARY KEY,
+    trace_id      TEXT NOT NULL,
+    span_id       TEXT NOT NULL,
+    parent_id     TEXT,
+    name          TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    start         TEXT NOT NULL,
+    end_at        TEXT,
+    last_at       TEXT NOT NULL,
+    task_id       TEXT,
+    session_id    TEXT,
+    model         TEXT,
+    tool          TEXT,
+    args_hash     TEXT,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    outcome       TEXT,
+    attributes    TEXT NOT NULL,
+    received_at   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX spans_id ON spans (trace_id, span_id);
+CREATE INDEX spans_last ON spans (last_at);
+CREATE INDEX spans_session ON spans (session_id, start);
+CREATE INDEX spans_task ON spans (task_id, start);
+"""
+
 # version -> script that upgrades from version - 1. Append, never edit a released one.
-MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2}
+MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 _COLUMNS = (
@@ -98,30 +133,36 @@ def _entry(row: sqlite3.Row) -> LedgerEntry:
     )
 
 
+def _open(path: Path | str, busy_timeout_ms: int) -> sqlite3.Connection:
+    db = sqlite3.connect(str(path), check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+    db.execute("PRAGMA journal_mode = WAL")
+    _migrate(db)
+    return db
+
+
+def _migrate(db: sqlite3.Connection) -> None:
+    version = db.execute("PRAGMA user_version").fetchone()[0]
+    if version > SCHEMA_VERSION:
+        raise RuntimeError(f"database schema {version} is newer than {SCHEMA_VERSION}")
+    for target in range(version + 1, SCHEMA_VERSION + 1):
+        # executescript commits any open transaction first, so wrap the script and the
+        # version bump in one explicit transaction: a failed migration leaves no trace.
+        try:
+            db.executescript(
+                f"BEGIN;\n{MIGRATIONS[target]}\nPRAGMA user_version = {target};\nCOMMIT;"
+            )
+        except sqlite3.Error:
+            if db.in_transaction:
+                db.rollback()
+            raise
+
+
 class SqliteLedgerStore:
     def __init__(self, path: Path | str, busy_timeout_ms: int = 5000) -> None:
         self._lock = threading.Lock()
-        self._db = sqlite3.connect(str(path), check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
-        self._db.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
-        self._db.execute("PRAGMA journal_mode = WAL")
-        self._migrate()
-
-    def _migrate(self) -> None:
-        version = self._db.execute("PRAGMA user_version").fetchone()[0]
-        if version > SCHEMA_VERSION:
-            raise RuntimeError(f"database schema {version} is newer than {SCHEMA_VERSION}")
-        for target in range(version + 1, SCHEMA_VERSION + 1):
-            # executescript commits any open transaction first, so wrap the script and the
-            # version bump in one explicit transaction: a failed migration leaves no trace.
-            try:
-                self._db.executescript(
-                    f"BEGIN;\n{MIGRATIONS[target]}\nPRAGMA user_version = {target};\nCOMMIT;"
-                )
-            except sqlite3.Error:
-                if self._db.in_transaction:
-                    self._db.rollback()
-                raise
+        self._db = _open(path, busy_timeout_ms)
 
     def close(self) -> None:
         with self._lock:
@@ -247,3 +288,152 @@ def _state(r: sqlite3.Row) -> OpenState:
         key=r["key"],
         mode=Mode(r["mode"]),
     )
+
+
+# --- trace spans (kelpie.core.spans.SpanStore) --------------------------------------------
+
+_SPAN_COLUMNS = (
+    "trace_id, span_id, parent_id, name, kind, start, end_at, last_at, task_id, session_id,"
+    " model, tool, args_hash, input_tokens, output_tokens, cached_tokens, outcome, attributes,"
+    " received_at"
+)
+# Rows per write or delete transaction: keeps the SQLite writer slot free for the ledger.
+SPAN_BATCH = 500
+
+
+def _span_row(span: Span, received: str) -> tuple[object, ...]:
+    return (
+        span.trace_id,
+        span.span_id,
+        span.parent_id,
+        span.name,
+        str(span.kind),
+        _ts(span.start),
+        None if span.end is None else _ts(span.end),
+        _ts(last_at(span)),
+        span.task_id,
+        span.session_id,
+        span.model,
+        span.tool,
+        span.args_hash,
+        span.input_tokens,
+        span.output_tokens,
+        span.cached_tokens,
+        span.outcome,
+        json.dumps(span.attributes, sort_keys=True, separators=(",", ":"), default=str),
+        received,
+    )
+
+
+def _span(r: sqlite3.Row) -> Span:
+    attributes = json.loads(r["attributes"])
+    return Span(
+        trace_id=r["trace_id"],
+        span_id=r["span_id"],
+        parent_id=r["parent_id"],
+        name=r["name"],
+        kind=SpanKind(r["kind"]),
+        start=datetime.fromisoformat(r["start"]),
+        end=None if r["end_at"] is None else datetime.fromisoformat(r["end_at"]),
+        task_id=r["task_id"],
+        session_id=r["session_id"],
+        model=r["model"],
+        tool=r["tool"],
+        args_hash=r["args_hash"],
+        input_tokens=r["input_tokens"],
+        output_tokens=r["output_tokens"],
+        cached_tokens=r["cached_tokens"],
+        outcome=r["outcome"],
+        attributes=attributes if isinstance(attributes, dict) else {},
+    )
+
+
+class SqliteSpanStore:
+    """Spans in the Kelpie database, behind a connection and lock of their own."""
+
+    def __init__(
+        self, path: Path | str, busy_timeout_ms: int = 5000, batch: int = SPAN_BATCH
+    ) -> None:
+        self._lock = threading.Lock()
+        self._db = _open(path, busy_timeout_ms)
+        self._batch = max(1, batch)
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    def append_spans(self, spans: Sequence[Span], received_at: datetime) -> int:
+        received = _ts(received_at)
+        sql = (
+            f"INSERT OR IGNORE INTO spans ({_SPAN_COLUMNS})"
+            f" VALUES ({', '.join('?' * len(_SPAN_COLUMNS.split(',')))})"
+        )
+        added = 0
+        for i in range(0, len(spans), self._batch):
+            rows = [_span_row(s, received) for s in spans[i : i + self._batch]]
+            with self._lock, self._db:  # one short transaction per batch
+                added += self._db.executemany(sql, rows).rowcount
+        return added
+
+    def spans_since(self, after: datetime) -> Sequence[Span]:
+        sql = f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? ORDER BY start, rowid_"
+        with self._lock:
+            rows = self._db.execute(sql, (_ts(after),)).fetchall()
+        return [_span(r) for r in rows]
+
+    def totals_since(self, after: datetime) -> Sequence[SpanTotals]:
+        sql = (
+            "SELECT session_id, MAX(task_id) AS task_id, COUNT(*) AS spans,"
+            " SUM(kind = 'llm') AS llm_calls, SUM(kind = 'tool') AS tool_calls,"
+            " SUM(kind = 'tool' AND outcome = 'error') AS tool_errors,"
+            " SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,"
+            " SUM(cached_tokens) AS cached_tokens, MIN(start) AS first_start,"
+            " MAX(last_at) AS last_end"
+            " FROM spans WHERE last_at >= ? AND session_id IS NOT NULL AND session_id != ''"
+            " GROUP BY session_id ORDER BY session_id"
+        )
+        with self._lock:
+            rows = self._db.execute(sql, (_ts(after),)).fetchall()
+        return [
+            SpanTotals(
+                session_id=r["session_id"],
+                task_id=r["task_id"],
+                spans=r["spans"],
+                llm_calls=r["llm_calls"],
+                tool_calls=r["tool_calls"],
+                tool_errors=r["tool_errors"],
+                input_tokens=r["input_tokens"],
+                output_tokens=r["output_tokens"],
+                cached_tokens=r["cached_tokens"],
+                first_start=datetime.fromisoformat(r["first_start"]),
+                last_end=datetime.fromisoformat(r["last_end"]),
+            )
+            for r in rows
+        ]
+
+    def prune(self, before: datetime, max_rows: int) -> int:
+        """Batched deletes, each its own short transaction; the lock is released between
+        batches so ingest and snapshot reads interleave with a long prune."""
+        deleted = 0
+        old = (
+            "DELETE FROM spans WHERE rowid_ IN (SELECT rowid_ FROM spans WHERE last_at < ? LIMIT ?)"
+        )
+        while n := self._write_count(old, (_ts(before), self._batch)):
+            deleted += n
+        excess = self.count() - max(0, max_rows)
+        oldest = (
+            "DELETE FROM spans WHERE rowid_ IN"
+            " (SELECT rowid_ FROM spans ORDER BY last_at, rowid_ LIMIT ?)"
+        )
+        while excess > 0 and (n := self._write_count(oldest, (min(excess, self._batch),))):
+            deleted += n
+            excess -= n
+        return deleted
+
+    def _write_count(self, sql: str, args: tuple[object, ...]) -> int:
+        with self._lock, self._db:
+            return self._db.execute(sql, args).rowcount
+
+    def count(self) -> int:
+        with self._lock:
+            return int(self._db.execute("SELECT COUNT(*) FROM spans").fetchone()[0])

@@ -214,6 +214,24 @@ class Span:
 
 
 @dataclass(frozen=True, slots=True)
+class SpanTotals:
+    """Per-session aggregates over stored spans, so rules and the report can see tokens and
+    call counts over a long window without loading every raw span."""
+
+    session_id: str
+    task_id: str | None = None
+    spans: int = 0
+    llm_calls: int = 0
+    tool_calls: int = 0
+    tool_errors: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    first_start: datetime | None = None
+    last_end: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Snapshot:
     """Everything a rule may look at, captured at ``now``."""
 
@@ -225,6 +243,8 @@ class Snapshot:
     resources: tuple[Resource, ...] = ()
     sessions: tuple[Session, ...] = ()
     spans: tuple[Span, ...] = ()
+    # Aggregates over a longer window than ``spans`` (see ``[traces] totals_window``).
+    span_totals: tuple[SpanTotals, ...] = ()
 
     def task(self, task_id: str) -> Task | None:
         return next((t for t in self.tasks if t.id == task_id), None)

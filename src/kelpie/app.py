@@ -13,7 +13,7 @@ import threading
 import time
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,14 +22,18 @@ from kelpie.adapters.hermes import adapter as hermes
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
-from kelpie.core.model import Owner, Snapshot
+from kelpie.core.model import Owner, Snapshot, SpanKind
 from kelpie.core.ports import PlatformAdapter, SnapshotSource
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
+from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.states import MemoryStateStore, StateStore
-from kelpie.core.storage import SqliteLedgerStore
+from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
+from kelpie.traces.config import TraceSettings, load_traces
+from kelpie.traces.ingest import IGNORED, TraceIngest
+from kelpie.traces.store import SpanRetention, SpanWindow, merge_spans
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +72,7 @@ class Settings:
     hermes: HermesSettings | None = None  # None: no [adapters.hermes] section
     db_path: Path | None = DEFAULT_DB  # None keeps the ledger in memory
     source: Path | None = None  # the file the settings came from, if any
+    traces: TraceSettings = field(default_factory=TraceSettings)
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -87,7 +92,7 @@ def load_settings(path: Path | None) -> Settings:
                 data = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"cannot read config {path}: {exc}") from exc
-    unknown = set(data) - {"engine", "storage", "adapters"}
+    unknown = set(data) - {"engine", "storage", "adapters", "traces"}
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
     try:
@@ -103,8 +108,16 @@ def load_settings(path: Path | None) -> Settings:
     if not isinstance(raw_db, str) or not raw_db.strip():
         raise ConfigError("storage path must be a non-empty string")
     db_path = None if raw_db == ":memory:" else Path(raw_db)
+    try:
+        traces = load_traces(data.get("traces"))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return Settings(
-        engine=engine, hermes=_load_hermes(data.get("adapters", {})), db_path=db_path, source=path
+        engine=engine,
+        hermes=_load_hermes(data.get("adapters", {})),
+        db_path=db_path,
+        source=path,
+        traces=traces,
     )
 
 
@@ -230,11 +243,14 @@ def merged_snapshot(
     adapters: Sequence[PlatformAdapter],
     metrics: Metrics,
     clock: Callable[[], datetime] = utc_now,
+    spans: SpanWindow | None = None,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
 
     An adapter that raises is logged, counted in ``kelpie_adapter_errors_total`` and left
-    out of that tick; the others still count.
+    out of that tick; the others still count. With ``spans``, stored spans of the window
+    (OTLP ingest) and per-session totals are added; a span id already seen is kept once. A
+    span store that fails is logged and counted, and the tick goes on without its spans.
     """
 
     def source() -> Snapshot:
@@ -259,6 +275,16 @@ def merged_snapshot(
                 sessions=merged.sessions + part.sessions,
                 spans=merged.spans + part.spans,
             )
+        if spans is not None:
+            try:
+                stored, totals = spans.spans(now), spans.totals(now)
+            except Exception as exc:
+                log.error("span store failed to read: %s", exc)
+                metrics.span_store_failed()
+            else:
+                merged = replace(
+                    merged, spans=merge_spans(stored, merged.spans), span_totals=totals
+                )
         return merged
 
     return source
@@ -282,6 +308,8 @@ class ControlLoop:
     engine: Engine
     snapshot_source: Callable[[], Snapshot]
     metrics: Metrics
+    # Run after every tick, must return at once (e.g. start span retention in a thread).
+    housekeeping: Callable[[], object] | None = None
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
 
@@ -300,6 +328,11 @@ class ControlLoop:
         while not self._stop.is_set():
             started = time.monotonic()
             self.tick_once()
+            if self.housekeeping is not None:
+                try:
+                    self.housekeeping()
+                except Exception:
+                    log.exception("housekeeping failed")
             self._stop.wait(max(0.0, interval - (time.monotonic() - started)))
 
     def start(self) -> None:
@@ -328,12 +361,18 @@ class App:
     loop: ControlLoop
     metrics: Metrics
     store: LedgerStore
+    span_store: SpanStore | None = None
+    ingest: TraceIngest | None = None  # None: [traces] enabled = false
+    retention: SpanRetention | None = None
 
     def close(self) -> None:
         self.loop.stop()
-        close = getattr(self.store, "close", None)
-        if callable(close):
-            close()
+        if self.retention is not None:
+            self.retention.join(5.0)
+        for store in (self.store, self.span_store):
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
 
 
 def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> App:
@@ -346,6 +385,11 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         )
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
+    traces = settings.traces
+    try:
+        token = traces.token()
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     # No connectors or alerter are wired yet: an effect nobody can carry out turns into an
     # alert, and the defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
@@ -362,8 +406,38 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     metrics = Metrics()
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     metrics.set_adapters(a.name for a in adapters)
-    loop = ControlLoop(engine, merged_snapshot(adapters, metrics, clock), metrics)
-    return App(settings, loaded, engine, loop, metrics, store)
+    if not traces.enabled:
+        loop = ControlLoop(engine, merged_snapshot(adapters, metrics, clock), metrics)
+        return App(settings, loaded, engine, loop, metrics, store)
+    span_store = _open_span_store(settings.db_path)
+    metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
+    metrics.set_span_rows(span_store.count())
+    if token is None:
+        log.warning(
+            "OTLP ingest on /v1/traces accepts spans without a token; set $%s", traces.token_env
+        )
+    ingest = TraceIngest(
+        store=span_store,
+        clock=clock,
+        observer=metrics,
+        token=token,
+        max_body_bytes=traces.max_body_bytes,
+        options=traces.options,
+    )
+    retention = SpanRetention(span_store, clock, traces.retention, traces.max_rows, metrics)
+    window = SpanWindow(span_store, traces.window, traces.totals_window)
+    source = merged_snapshot(adapters, metrics, clock, window)
+    loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
+    return App(settings, loaded, engine, loop, metrics, store, span_store, ingest, retention)
+
+
+def _open_span_store(db_path: Path | None) -> SpanStore:
+    if db_path is None:
+        return MemorySpanStore()
+    try:
+        return SqliteSpanStore(db_path)
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        raise ConfigError(f"cannot open span store {db_path}: {exc}") from exc
 
 
 def _refuse_unimplemented_actions(
