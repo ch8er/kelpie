@@ -10,13 +10,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol
 
 from kelpie.core.model import Span, SpanTotals
-from kelpie.core.spans import SpanKey, SpanStore, last_at, span_key
+from kelpie.core.spans import SpanKey, SpanStore, TokenUsage, last_at, span_key
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +41,8 @@ class SpanWindow:
     (links) since the last one, evicts spans that left the window, and starts over when
     the store deleted rows (``epoch``). At most ``max_spans`` are returned, the most recent
     by start; the rest are counted as dropped. Totals cover the longer ``totals_window`` and
-    are recomputed at most every ``totals_every`` of snapshot time.
+    are recomputed at most every ``totals_every`` of snapshot time, as is token usage per
+    budget window (:meth:`usage`).
     """
 
     store: SpanStore
@@ -55,6 +56,8 @@ class SpanWindow:
     _epoch: int | None = None
     _totals: tuple[SpanTotals, ...] = ()
     _totals_at: datetime | None = None
+    _usage: dict[timedelta, tuple[TokenUsage, ...]] = field(default_factory=dict)
+    _usage_at: datetime | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def spans(self, now: datetime) -> tuple[Span, ...]:
@@ -88,6 +91,22 @@ class SpanWindow:
         with self._lock:
             self._totals, self._totals_at = totals, now
         return totals
+
+    def usage(
+        self, now: datetime, windows: Collection[timedelta]
+    ) -> Mapping[timedelta, Sequence[TokenUsage]]:
+        """Token usage of root LLM spans per rolling window ending at ``now`` (budgets),
+        one store query per distinct window, at most every ``totals_every``."""
+        wanted = set(windows)
+        with self._lock:
+            at = self._usage_at
+            fresh = at is not None and timedelta(0) <= now - at < self.totals_every
+            if fresh and wanted <= set(self._usage):
+                return {w: self._usage[w] for w in wanted}
+        found = {w: tuple(self.store.usage_since(now - w)) for w in sorted(wanted)}
+        with self._lock:
+            self._usage, self._usage_at = found, now
+        return found
 
 
 def merge_spans(*groups: Iterable[Span]) -> tuple[Span, ...]:

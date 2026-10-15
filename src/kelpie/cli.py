@@ -17,6 +17,7 @@ from kelpie.app import (
     find_config,
     load_rules,
     load_settings,
+    read_budgets,
     render_status,
 )
 
@@ -57,7 +58,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = load_settings(find_config(args.config))
         if args.command == "status":
             rules = load_rules(settings.engine)
-            sys.stdout.write(render_status(settings, rules, build_adapters(settings)))
+            adapters = build_adapters(settings)
+            budgets = read_budgets(settings, adapters)
+            sys.stdout.write(render_status(settings, rules, adapters, budgets))
             return 0
         load_rules(settings.engine)  # rule errors first: they are the likelier mistake
         check_exposure(settings, args.host)

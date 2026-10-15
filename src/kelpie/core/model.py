@@ -242,6 +242,65 @@ class SpanTotals:
     last_end: datetime | None = None
 
 
+class BudgetScope(StrEnum):
+    DAY = "day"  # the whole farm
+    TASK = "task"
+    AGENT = "agent"
+    PROJECT = "project"
+
+
+class BudgetUnit(StrEnum):
+    USD = "usd"
+    TOKENS = "tokens"  # input (cached included) + output
+
+
+class BudgetState(StrEnum):
+    OK = "ok"
+    SOFT = "soft"  # soft threshold reached: alert
+    HARD = "hard"  # hard threshold reached: stop (act mode)
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetStatus:
+    """Spend of one subject against one budget at snapshot time (``kelpie.core.budgets``
+    computes it). ``remaining`` and ``runs_out_at`` are measured against ``hard``, or
+    ``soft`` when the budget has no hard threshold; ``remaining`` never goes below 0.
+    ``burn_rate`` is ``unit`` per hour over the budget's recent ``burn_window``.
+    ``runs_out_at`` is None when nothing is being spent; when the limit is already reached
+    it is ``now``. ``estimated`` is set in subscription mode, where there is no bill and the
+    spend is priced from traces; its ``runs_out_at`` is the forecast next provider limit
+    once limit hits have been observed. ``cost_unknown_tokens`` are tokens of models with
+    no price in ``[prices]``: a ``usd`` budget leaves them out of ``spent``.
+    ``session_ids`` are the sessions that spent within the window."""
+
+    budget: str
+    scope: BudgetScope
+    subject: str  # task id, agent (owner) id, the project's match, or "farm" for a day
+    unit: BudgetUnit
+    spent: float
+    state: BudgetState = BudgetState.OK
+    soft: float | None = None
+    hard: float | None = None
+    remaining: float = 0.0
+    burn_rate: float = 0.0
+    runs_out_at: datetime | None = None
+    window: timedelta = timedelta(hours=24)
+    cost_unknown_tokens: int = 0
+    estimated: bool = False
+    session_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LimitHit:
+    """A provider usage limit was reached (subscription mode): the run was refused until
+    ``resets_at``. ``limit`` names the limit (e.g. a rolling 5-hour or a weekly window);
+    forecasts are made per limit. Connectors fill these; none does yet."""
+
+    limit: str
+    at: datetime
+    resets_at: datetime | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class Snapshot:
     """Everything a rule may look at, captured at ``now``."""
@@ -256,6 +315,10 @@ class Snapshot:
     spans: tuple[Span, ...] = ()
     # Aggregates over a longer window than ``spans`` (see ``[traces] totals_window``).
     span_totals: tuple[SpanTotals, ...] = ()
+    # Budget state per budget and subject ([[budgets]]), computed when the snapshot is
+    # assembled; rules read it instead of pricing spans themselves.
+    budgets: tuple[BudgetStatus, ...] = ()
+    limit_hits: tuple[LimitHit, ...] = ()  # subscription mode: observed provider limits
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
