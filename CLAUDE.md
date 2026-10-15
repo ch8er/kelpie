@@ -30,7 +30,8 @@ tests/fixtures/incidents/   synthetic incident fixtures (format: README.md there
 2. No LLM in the control loop: `core/`, `rules/` and `server.py` never import an LLM client.
 3. A rule is a pure function over a `Snapshot`: no I/O, no clock reads (use
    `snapshot.now`), no mutation. Side effects happen only through actions that the engine
-   executes (today via the platform adapter or the alerter).
+   routes to executors (platform adapters, action connectors) or the alerter, subject to
+   the rule's mode (observe | suggest | act) and the global dry-run.
 4. Every rule has fixture tests in `tests/fixtures/incidents/`, including a negative case
    (`not_expected_actions`). `kelpie.rules` coverage stays >= 90%.
 5. No coupling to a specific platform in core, a specific CI, iOS, or a single machine.
