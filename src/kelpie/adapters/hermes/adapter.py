@@ -236,7 +236,7 @@ def _block_text(row: sqlite3.Row, status_event: sqlite3.Row | None, block_event:
     return ""
 
 
-def _age(delta: timedelta) -> str:
+def format_age(delta: timedelta) -> str:
     seconds = max(0, int(delta.total_seconds()))
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
         if seconds >= size:
@@ -273,18 +273,33 @@ class HermesAdapter:
             return str(exc)
         return None
 
+    def board_counts(self) -> tuple[int, int]:
+        """(all tasks, tasks with status ``running``); raises HermesError/sqlite3.Error."""
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+            running = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'")
+            return int(total), int(running.fetchone()[0])
+
+    def live_workspaces(self) -> list[Path]:
+        """Existing worktree directories of tasks that are not finished, sorted, unique."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE status NOT IN ('done', 'archived')"
+            ).fetchall()
+        return sorted({p for row in rows if (p := _workspace(row)) is not None})
+
     def status_detail(self, now: datetime) -> list[str]:
         """Extra lines for ``kelpie status``: how fresh the hooks spool is."""
         if self.spool is None:
             return ["spool: disabled"]
         if not self.spool.exists():
             return [f"spool: missing ({self.spool})"]
-        last = self._last_spool_at()
+        last = self.last_spool_at()
         if last is None:
             return [f"spool: no readable lines ({self.spool})"]
-        return [f"spool: last line {_age(now - last)} ago ({self.spool})"]
+        return [f"spool: last line {format_age(now - last)} ago ({self.spool})"]
 
-    def _last_spool_at(self) -> datetime | None:
+    def last_spool_at(self) -> datetime | None:
         if self.spool is None:
             return None
         try:
