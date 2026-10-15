@@ -1,104 +1,31 @@
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.config import EngineConfig, Mode
-from kelpie.core.engine import Engine, Outcome
+from kelpie.core.engine import Engine
+from kelpie.core.ledger import Outcome
 from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.ports import (
     ActionConnector,
     Alerter,
     PlatformAdapter,
-    PlatformEvent,
     SupportsReassign,
     SupportsStop,
+)
+from tests.fakes import (
+    Broken,
+    Emit,
+    FakeAdapter,
+    FakeAlerter,
+    FakeCI,
+    ReassigningAdapter,
+    StoppingAdapter,
 )
 
 NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
 ACT = EngineConfig(default_mode=Mode.ACT)
-
-
-@dataclass
-class FakeAdapter:
-    name: str = "fake"
-    calls: list[tuple[str, str]] = field(default_factory=list)
-    fail_on: str | None = None
-
-    def _record(self, op: str, task_id: str) -> None:
-        if op == self.fail_on:
-            raise RuntimeError(f"{op} failed")
-        self.calls.append((op, task_id))
-
-    def list_tasks(self) -> Sequence[Task]:
-        return []
-
-    def get_task(self, task_id: str) -> Task | None:
-        return None
-
-    def requeue(self, task_id: str, reason: str) -> None:
-        self._record("requeue", task_id)
-
-    def unblock(self, task_id: str, reason: str) -> None:
-        self._record("unblock", task_id)
-
-    def comment(self, task_id: str, body: str) -> None:
-        self._record("comment", task_id)
-
-    def wip_commit(self, task_id: str, message: str) -> None:
-        self._record("wip_commit", task_id)
-
-    def events(self, since: datetime) -> Iterable[PlatformEvent]:
-        return []
-
-
-@dataclass
-class ReassigningAdapter(FakeAdapter):
-    def reassign(self, task_id: str, owner_id: str, reason: str) -> None:
-        self._record(f"reassign:{owner_id}", task_id)
-
-
-@dataclass
-class StoppingAdapter(FakeAdapter):
-    def stop(self, session_id: str, reason: str) -> None:
-        self._record("stop", session_id)
-
-
-@dataclass
-class FakeAlerter:
-    sent: list[tuple[str, str]] = field(default_factory=list)
-
-    def send(self, title: str, body: str, severity: str) -> None:
-        self.sent.append((title, severity))
-
-
-@dataclass
-class Emit:
-    actions: list[Action]
-    name: str = "emit"
-
-    def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
-        return self.actions
-
-
-@dataclass
-class Broken:
-    name: str = "broken"
-
-    def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
-        raise ValueError("boom")
-
-
-@dataclass
-class FakeCI:
-    name: str = "ci"
-    actions: frozenset[ActionKind] = frozenset({ActionKind.CANCEL_BUILD})
-    cancelled: list[str] = field(default_factory=list)
-
-    def execute(self, action: Action) -> None:
-        self.cancelled.append(str(action.params["build_id"]))
 
 
 def act(
@@ -357,3 +284,18 @@ def test_naive_now_rejected() -> None:
     engine = Engine([], adapters=[FakeAdapter()])
     with pytest.raises(ValueError, match="timezone"):
         engine.tick(lambda: Snapshot(now=datetime(2026, 3, 2, 10)))
+
+
+class RaisingAlerter:
+    def send(self, title: str, body: str, severity: str) -> None:
+        raise ConnectionError("slack down")
+
+
+def test_alerter_failure_is_a_failed_action_not_a_crash() -> None:
+    engine = Engine(
+        [Emit([act(ActionKind.ALERT)])],
+        adapters=[FakeAdapter()],
+        alerter=RaisingAlerter(),
+        config=ACT,
+    )
+    assert [d.outcome for d in engine.tick(lambda: Snapshot(now=NOW))] == [Outcome.FAILED]
