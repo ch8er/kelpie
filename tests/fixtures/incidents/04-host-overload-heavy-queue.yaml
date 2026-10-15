@@ -24,13 +24,23 @@ snapshot:
     - {id: T-403, title: "Run full e2e suite", status: in_progress, status_since: "2026-03-02T15:30:00+00:00", role: developer, owner_id: agent-dev-3, labels: [heavy], estimate: "2h"}
     - {id: T-404, title: "Rebuild search index", status: ready, status_since: "2026-03-02T15:00:00+00:00", role: developer, labels: [heavy], estimate: "1h30m"}
     - {id: T-405, title: "Profile memory of importer", status: ready, status_since: "2026-03-02T15:05:00+00:00", role: developer, labels: [heavy], estimate: "2h"}
+    # Distractor: light (non-heavy) ready task; it must not be held back or alerted on.
     - {id: T-406, title: "Fix typo in CLI help", status: ready, status_since: "2026-03-02T15:40:00+00:00", role: developer, estimate: "15m"}
   resources:
     - {name: "host-a:load1", kind: load, host: host-a, used: 27.5, limit: 8, unit: load}
     - {name: "host-a:memory", kind: memory, host: host-a, used: 30.8, limit: 32, unit: GB}
     - {name: "host-a:cpu", kind: cpu, host: host-a, used: 98, limit: 100, unit: percent}
+    # Distractor: a second, healthy host well within every threshold.
+    - {name: "host-b:load1", kind: load, host: host-b, used: 2.1, limit: 8, unit: load}
+    - {name: "host-b:memory", kind: memory, host: host-b, used: 9.5, limit: 32, unit: GB}
+    - {name: "host-b:cpu", kind: cpu, host: host-b, used: 22, limit: 100, unit: percent}
 expected_actions:
   - kind: alert
     severity: warning
     reason_contains: "heavy"
     params: {host: host-a, max_heavy: 1}
+not_expected_actions:
+  - kind: alert
+    params: {host: host-b}
+  - kind: alert
+    task_id: T-406

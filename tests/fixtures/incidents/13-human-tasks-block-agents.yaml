@@ -19,6 +19,8 @@ snapshot:
   tasks:
     - {id: T-1301, title: "Add deploy token to repo secrets", status: ready, status_since: "2026-03-02T10:00:00+00:00", role: owner, owner_id: human-owner}
     - {id: T-1302, title: "Decide on storage backend", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: owner, owner_id: human-owner}
+    # Distractor: an old human task with nothing blocked behind it; not a bottleneck.
+    - {id: T-1308, title: "Review quarterly budget", status: ready, status_since: "2026-03-02T09:00:00+00:00", role: owner, owner_id: human-owner}
     - id: T-1303
       title: "Configure deploy pipeline"
       status: blocked
@@ -66,3 +68,8 @@ expected_actions:
     params:
       human_tasks: [T-1301, T-1302]
       blocked_agent_tasks: 5
+not_expected_actions:
+  - kind: escalate
+    task_id: T-1308
+  - kind: escalate
+    params: {human_tasks: [T-1301, T-1302, T-1308]}

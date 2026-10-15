@@ -48,9 +48,14 @@ snapshot:
       limit: 3000
       unit: minutes
       resets_at: "2026-04-01T00:00:00+00:00"
+    # Distractor: host disk well within limits; the CI outage must not spill into host alerts.
+    - {name: "host-a:disk", kind: disk, host: host-a, used: 120, limit: 500, unit: GB}
 expected_actions:
   - kind: alert
     severity: critical
     reason_contains: "CI"
     params:
       blocked_tasks: [T-501, T-502, T-503]
+not_expected_actions:
+  - kind: alert
+    params: {host: host-a}

@@ -5,11 +5,15 @@ description: >
   A reviewer agent waited for CI by running `gh pr checks` in a loop roughly every 60 seconds
   for 40 minutes inside its own session. It made no progress and sent no heartbeat, so the
   dispatcher considered it dead and restarted it, wasting the session and tokens. The right
-  behavior is to register a ci_status condition, block on it, and exit.
+  behavior is to register a ci_status condition, block on it, and exit. Which commands count
+  as polling, and which condition kind each one maps to, is configuration data
+  (`poll_patterns`), not code, so the rule stays independent of any particular CI.
 rule: wait_condition
 config:
-  poll_min_repeats: 10
-  poll_window: "45m"
+  poll_patterns:             # condition kind -> command substrings that indicate polling
+    ci_status: ["gh pr checks", "gh run watch"]
+  poll_min_repeats: 10       # same pattern at least this many times...
+  poll_window: "45m"         # ...within this window of the session
 snapshot:
   now: "2026-03-02T10:45:00+00:00"
   owners:

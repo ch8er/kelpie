@@ -12,6 +12,7 @@ snapshot:
   now: "2026-03-02T15:00:00+00:00"
   owners:
     - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
   tasks:
     - id: T-801
       title: "Use new client API from upstream PR"
@@ -23,6 +24,17 @@ snapshot:
         reason: "waiting_pr_merge: example/repo#80"
         since: "2026-03-02T10:30:00+00:00"
         condition_id: C-801
+    # Distractor: blocked on a PR that has not merged yet; the block is still valid.
+    - id: T-802
+      title: "Adopt new retry policy from upstream PR"
+      status: blocked
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block:
+        reason: "waiting_pr_merge: example/repo#81"
+        since: "2026-03-02T11:00:00+00:00"
+        condition_id: C-802
   conditions:
     - id: C-801
       kind: pr_merged
@@ -31,7 +43,16 @@ snapshot:
       satisfied: true
       satisfied_at: "2026-03-02T12:00:00+00:00"
       checked_at: "2026-03-02T14:58:00+00:00"
+    - id: C-802
+      kind: pr_merged
+      task_id: T-802
+      params: {repo: example/repo, pr: 81}
+      satisfied: false
+      checked_at: "2026-03-02T14:58:00+00:00"
 expected_actions:
   - kind: unblock
     task_id: T-801
     reason_contains: "3h"
+not_expected_actions:
+  - kind: unblock
+    task_id: T-802

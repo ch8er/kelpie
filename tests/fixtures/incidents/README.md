@@ -12,7 +12,7 @@ humans (`human-owner`), hosts (`host-a`) and repos (`example/repo`).
 
 ```yaml
 id: "01-stale-guard-block"   # must equal the filename stem
-incident: 1                  # incident number
+incident: 1                  # incident number, or null for foundation rules (checkpoints)
 title: "short title"
 description: >               # 2-5 sentences: what happened and why it hurt throughput
   ...
@@ -33,7 +33,7 @@ expected_actions:            # must be emitted; subset match, order-insensitive
     severity: warning        # optional Severity value
     reason_contains: "..."   # optional substring of Action.reason
     params: {}               # optional; subset of Action.params
-not_expected_actions:        # optional; same item shape, none may match
+not_expected_actions:        # required, at least one item; same shape, none may match
   - kind: unblock
     task_id: T-102
 ```
@@ -48,9 +48,21 @@ Snapshot rules (enforced by `snapshot_from_dict`):
 - Empty snapshot lists are omitted.
 
 Matching semantics: an expected item matches an emitted `Action` when every key present
-in the item agrees with it (`params` is compared as a subset; list values in `params`
-compare order-insensitively). Fixtures include distractor tasks (healthy tasks that look
-similar) and list them under `not_expected_actions`.
+in the item agrees with it. `params` is compared as a subset of `Action.params`; list
+values in `params` compare order-insensitively (`[T-502, T-501]` equals `[T-501, T-502]`),
+everything else by equality.
+
+Fixture conventions:
+
+- **Several fixtures per incident are allowed.** Positive, negative and edge scenarios for
+  the same incident share the number and differ by slug, e.g. `02-exit-without-status.yaml`
+  and `02-healthy-exit.yaml`. Each still has a unique `id` equal to its file stem.
+- **`incident` may be `null`** for foundation rules that are not tied to a numbered
+  incident, such as `checkpoints`. Such fixtures still follow `NN-slug.yaml`, e.g.
+  `14-checkpoint-commit-reminder.yaml` with `rule: checkpoints` and `incident: null`.
+- **Every fixture must have at least one `not_expected_actions` entry.** Each snapshot
+  includes a realistic distractor (a healthy task, host or resource that looks similar)
+  that the rule must leave alone, and the negative expectation pins that down.
 
 ## Incident index
 
@@ -59,31 +71,32 @@ similar) and list them under `not_expected_actions`.
 | 1 | `01-stale-guard-block.yaml` | `stale_blocks` | `unblock` T-101 (CI condition already satisfied) |
 | 2 | `02-exit-without-status.yaml` | `exit_contract` | `requeue` T-201 (session ended with no final status), `requeue` T-202 (block reason not allowed) |
 | 3 | `03-disk-full.yaml` | `resources` | `alert` critical, `{host: host-a}` |
-| 4 | `04-host-overload-heavy-queue.yaml` | `resources` | `alert` warning, `{host: host-a, max_heavy: 1}` |
-| 5 | `05-ci-minutes-exhausted.yaml` | `resources` | `alert` critical, `blocked_tasks` listed |
-| 6 | `06-llm-quota-and-expired-auth.yaml` | `resources` | `alert` warning (rate limits), `alert` critical (expired auth) |
+| 4 | `04-host-overload-heavy-queue.yaml` | `resources` | `alert` warning, `{host: host-a, max_heavy: 1}`; none for healthy host-b or light T-406 |
+| 5 | `05-ci-minutes-exhausted.yaml` | `resources` | `alert` critical, `blocked_tasks` listed; no host alert for the healthy disk |
+| 6 | `06-llm-quota-and-expired-auth.yaml` | `resources` | `alert` warning (rate limits), `alert` critical (expired auth); none for valid or non-expiring credentials |
 | 7 | `07-shared-file-conflicts.yaml` | `file_contention` | `alert` with `hot_files`; `comment` on in-progress tasks touching them |
-| 8 | `08-block-outlived-cause.yaml` | `stale_blocks` | `unblock` T-801, reason mentions the 3h delay |
-| 9 | `09-sequential-chain-idle.yaml` | `bottlenecks` | `alert` suggesting parallelization, idle agents and `critical_path_length` |
+| 8 | `08-block-outlived-cause.yaml` | `stale_blocks` | `unblock` T-801, reason mentions the 3h delay; T-802 (PR not merged) stays blocked |
+| 9 | `09-sequential-chain-idle.yaml` | `bottlenecks` | `alert` suggesting parallelization, idle agents and `critical_path_length`; nothing for reviewer work T-906, no `escalate` |
 | 10 | `10-reviewer-polls-ci.yaml` | `wait_condition` | `comment` T-1001 (register a condition and exit); no `requeue` |
 | 11 | `11-orphan-accepted-task.yaml` | `orphan_status` | `alert` critical `{dependents: 7}`, `reassign` T-1101 |
 | 12 | `12-review-ping-pong.yaml` | `ping_pong` | `escalate` T-1201 (9 rounds > 3) |
-| 13 | `13-human-tasks-block-agents.yaml` | `bottlenecks` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5` |
+| 13 | `13-human-tasks-block-agents.yaml` | `bottlenecks` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5`; T-1308 (nothing blocked behind it) not escalated |
 
 ## Adding a fixture
 
-1. Pick the next number and a short slug: `NN-slug.yaml`; set `id` to the stem.
+1. Reuse the incident number for another scenario of a known incident, or pick the next
+   number; add a short slug: `NN-slug.yaml`; set `id` to the stem.
 2. Describe the real incident in generalized terms; no personal or company data.
 3. Build the smallest snapshot that reproduces it. Add at least one distractor that the
-   rule must leave alone and list it under `not_expected_actions`.
+   rule must leave alone and list it under `not_expected_actions` (required).
 4. Put every threshold the rule needs in `config`, so the scenario does not depend on defaults.
 5. Keep `expected_actions` minimal: assert the kind, target and the params that matter;
    use `reason_contains` for a key word rather than the full message.
 6. Validate:
 
    ```sh
-   uv run python -c "import yaml,glob; from kelpie.core.serde import snapshot_from_dict; \
-     [snapshot_from_dict(yaml.safe_load(open(f))['snapshot']) for f in sorted(glob.glob('tests/fixtures/incidents/*.yaml'))]; print('ok')"
+   uv run python -c "import glob; from pathlib import Path; from tests.incidents import load; \
+     [load(Path(f)) for f in sorted(glob.glob('tests/fixtures/incidents/*.yaml'))]; print('ok')"
    ```
 
 7. Add a row to the table above.
