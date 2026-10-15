@@ -3,6 +3,7 @@ stores, read back read-only, and checked number by number."""
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ from kelpie.report.daily import (
     session_of,
 )
 from kelpie.report.run import ReportSources, default_day, generate, send, write
-from kelpie.report.store import ReportStore
+from kelpie.report.store import ReportStore, StateRow
 from kelpie.rules import REGISTRY
 from kelpie.traces.outputs import OutputSettings
 from tests.incidents import load
@@ -445,3 +446,98 @@ def test_report_config() -> None:
 def test_report_config_errors(section: Any) -> None:
     with pytest.raises(ValueError, match=r"\[report\]"):
         load_report(section)
+
+
+# --- accounting edge cases (review findings) ------------------------------------------
+
+
+def opened(sid: str, rule: str, since: datetime, opened_at: datetime, last: datetime) -> StateRow:
+    return StateRow(OpenState(sid, rule, since, opened_at, last, 0, Severity.WARNING, "s", "T-9"))
+
+
+def day_inputs(**kw: Any) -> ReportInputs:
+    base: dict[str, Any] = {"day": DAY, "tz": UTC, "prices": PRICES}
+    return ReportInputs(**{**base, **kw})
+
+
+def test_budget_and_forecast_states_are_not_loops() -> None:
+    rows = [
+        opened("loop_breaker:budget:farm-day:farm", "loop_breaker", at(9), at(9), at(23)),
+        opened("loop_breaker:forecast:farm-day:farm", "loop_breaker", at(9), at(9), at(23)),
+    ]
+    assert build_report(day_inputs(states=rows)).chaos == ()
+
+
+def test_a_session_is_burned_once_across_overlapping_causes() -> None:
+    spans = llm("S-X", "T-9", at(6), 12, timedelta(minutes=10), (10_000, 0, 0))
+    rows = [
+        opened("no_progress:S-X", "no_progress", at(6), at(6), at(8)),
+        opened("loop_breaker:identical_calls:S-X", "loop_breaker", at(6), at(6), at(8)),
+        opened("loop_breaker:error_streak:S-X", "loop_breaker", at(7), at(7), at(8)),
+    ]
+    requeue = entry(
+        at(9), "exit_contract", ActionKind.REQUEUE, Outcome.EXECUTED, "T-9", session_id="S-X"
+    )
+    report = build_report(day_inputs(spans=spans, states=rows, actions=[requeue]))
+    assert report.chaos_spend.tokens == report.spend.tokens == 12 * 10_000
+    assert sum(c.spend.tokens for c in report.chaos) == 120_000
+
+
+def test_nothing_to_do_requeue_is_no_restart() -> None:
+    spans = llm("S-Y", "T-9", at(6), 3, timedelta(minutes=10), (10_000, 0, 0))
+    noop = entry(
+        at(9), "exit_contract", ActionKind.REQUEUE, Outcome.NOTHING_TO_DO, "T-9", session_id="S-Y"
+    )
+    assert build_report(day_inputs(spans=spans, actions=[noop])).chaos == ()
+
+
+def test_hours_count_from_when_kelpie_first_reported() -> None:
+    # blocked since 06:00, reported stale at 10:00, last seen 12:00: 2 hours lost
+    row = opened("stale_blocks:T-4", "stale_blocks", at(6), at(10), at(12))
+    [line] = build_report(day_inputs(states=[row])).chaos
+    assert line.hours == pytest.approx(2.0)
+
+
+def test_suggested_actions_count_as_would_fix() -> None:
+    suggested = entry(
+        at(9), "orphan_status", ActionKind.REASSIGN, Outcome.SUGGESTED, "T-3", Mode.SUGGEST
+    )
+    row = opened("orphan_status:T-3", "orphan_status", at(8), at(8), at(12))
+    report = build_report(
+        day_inputs(actions=[suggested], states=[row], modes={"orphan_status": Mode.SUGGEST})
+    )
+    assert [f.rule for f in report.would_fix] == ["orphan_status"]
+    assert report.recommendations[0].title == "Let orphan_status act"
+
+
+def test_headline_splits_tokens_and_hours_and_names_unpriced() -> None:
+    spans = [
+        *llm("S-Z", "T-9", at(6), 2, timedelta(minutes=10), (1_000, 0, 0), "mystery", "u"),
+    ]
+    row = opened("orphan_status:T-3", "orphan_status", at(8), at(8), at(10))
+    report = build_report(day_inputs(spans=spans, states=[row], hour_usd=5.0))
+    headline = render_summary(report).splitlines()[1]
+    assert "$0.00 in 0 tokens burned + $10.00 in stuck hours" in headline
+    assert "2,000 tokens of unpriced models" in headline
+
+
+def test_needs_a_human_shows_local_times() -> None:
+    row = opened("stale_blocks:T-4", "stale_blocks", at(10), at(10), at(23, 50))
+    report = build_report(day_inputs(states=[row], tz=ZoneInfo("Europe/Berlin")))
+    assert "since 2026-03-02 11:00 CET" in render_markdown(report)
+
+
+def test_store_opens_without_writing_anything(db: Path) -> None:
+    wal = db.with_name(db.name + "-wal")
+    before = (db.stat().st_mtime_ns, db.read_bytes(), wal.stat().st_size if wal.exists() else 0)
+    with ReportStore(db) as store:
+        start, end = day_bounds(DAY, UTC)
+        store.actions(start, end)
+        store.states(start, end)
+        store.spans(start, end)
+        store.attribution()
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            store._db.execute("CREATE TABLE x (y)")
+    # a reader may create an empty -wal/-shm pair, but writes no frames and no pages
+    after = (db.stat().st_mtime_ns, db.read_bytes(), wal.stat().st_size if wal.exists() else 0)
+    assert after == before

@@ -7,26 +7,30 @@ same report. No LLM: an optional root-cause section is a later, separate step.
 
 **Cost of chaos, hours.** Long-lived alert states (``kelpie.core.states``) of the rules in
 :data:`CHAOS_CAUSES` describe work that is stuck: an ownerless task, a block that outlived
-its cause, a runaway loop. Each counts from its ``since`` (when the condition began) to its
-``last_seen`` (the last tick that still saw it), clipped to the day. Two states of one task
-both count: the unit is *task-hours*, not wall-clock hours. ``[report] hour_usd`` turns them
-into dollars.
+its cause, a runaway loop (``loop_breaker``'s budget and forecast states are spend, not
+chaos, and are left out). Each counts from when Kelpie first reported it (``opened_at``:
+a grace period or an allowed wait before the threshold is not lost) to its ``last_seen``
+(the last tick that still saw it), clipped to the day; a lower bound, since a rule going
+live re-opens its states. Two conditions on one task both count: the unit is
+*condition-hours*, not wall-clock hours. ``[report] hour_usd`` turns them into dollars.
 
 **Cost of chaos, dollars.** Tokens burned by sessions that were going nowhere: a session in
-a ``loop_breaker`` (identical calls, error streak) or ``no_progress`` state, from the state's
-``since`` to its ``last_seen``; and every session that ``exit_contract`` requeued (it ended
-without a status, so its work is redone: a restart). Tokens are counted once per model call
-(nested instrumentations are not double counted, see :mod:`kelpie.core.spans`) and priced by
-``[prices]``; tokens of models without a price are reported as unpriced. In subscription
-mode there is no bill: dollars are an estimate and marked so.
+a ``loop_breaker`` (identical calls, error streak) or ``no_progress`` state while it lasted,
+and every session that ``exit_contract`` requeued (it ended without a status, so its work
+is redone: a restart; a requeue that found nothing to do is not one). Each model call is
+burned at most once, by the first cause in :data:`CHAOS_CAUSES` order that covers it, so
+the chaos never exceeds the day's spend; nested instrumentations are not double counted
+either (:mod:`kelpie.core.spans`). Tokens are priced by ``[prices]``; tokens of models
+without a price are reported as unpriced. In subscription mode there is no bill: dollars
+are an estimate and marked so.
 
 **Cost per completed task.** The day's priced spend divided by the tasks that reached
 ``done`` during the day, as the board reports them now.
 
 **Fixed by Kelpie.** Ledger entries of the day that an executor carried out, per rule and
-action; entries logged in observe mode or dry-run are listed as what Kelpie *would* have
-done in act mode. **Needs a human.** Long-lived states still open at the end of the day
-(since when, escalation level, last seen), actions Kelpie could not carry out, and
+action; entries logged in observe mode or dry-run, or suggested, are listed as what Kelpie
+*would* have done in act mode. **Needs a human.** Long-lived states still open at the end
+of the day (since when, escalation level, last seen), actions Kelpie could not carry out, and
 repeated huge-output offenders. **Top 3 recommendations.** Filters for huge tool outputs
 (:mod:`kelpie.traces.outputs`) with their estimated savings, rules that would have fixed
 part of the chaos in act mode, and a fixed remedy for the largest remaining causes; ranked
@@ -108,7 +112,7 @@ FIX_KINDS = frozenset(
         ActionKind.COMMENT,
     }
 )
-LOGGED_ONLY = frozenset({Outcome.OBSERVED, Outcome.DRY_RUN})
+LOGGED_ONLY = frozenset({Outcome.OBSERVED, Outcome.DRY_RUN, Outcome.SUGGESTED})
 NOT_DONE = frozenset({Outcome.FAILED, Outcome.NOT_EXECUTED, Outcome.DROPPED})
 MAX_TASKS = 5  # task ids listed per line before "+N more"
 TOP = 3
@@ -202,6 +206,7 @@ class DailyReport:
     estimated: bool = False
     priced: bool = True  # False: no [prices] table, dollars unknown
     hour_usd: float | None = None
+    tz: tzinfo = UTC  # times are shown in the report's time zone
 
     @property
     def chaos_hours(self) -> float:
@@ -267,6 +272,7 @@ def build_report(inputs: ReportInputs) -> DailyReport:
         estimated=inputs.estimated,
         priced=bool(inputs.prices.entries),
         hour_usd=inputs.hour_usd,
+        tz=inputs.tz,
     )
 
 
@@ -303,10 +309,11 @@ def _outputs(
     )
     roles, platforms = session_context(board, inputs.attribution)
     settings = inputs.outputs
-    groups = rank(calls(spans, roles, platforms), settings)
+    groups = rank(calls(spans, roles, platforms), settings, inputs.tz)
     earlier = [s for s in inputs.spans if last_at(s) < end]
     history = {
-        (g.role, g.key): g.hot_days for g in rank(calls(earlier, roles, platforms), settings)
+        (g.role, g.key): g.hot_days
+        for g in rank(calls(earlier, roles, platforms), settings, inputs.tz)
     }
     filters = []
     for rec in recommend(groups, settings):
@@ -333,45 +340,70 @@ def _chaos(
     for span in spans:
         if span.session_id and span_key(span) in counted:
             by_session[span.session_id].append(span)
+    burned: dict[SpanKey, str] = {}  # each model call is burned once, by its first cause
 
-    def burned(session: str, a: datetime, b: datetime) -> Spend:
-        mine = [s for s in by_session.get(session, ()) if a <= last_at(s) < b]
-        return pricer.price(usage(mine, {span_key(s): counted[span_key(s)] for s in mine}))
+    def burn(rule: str, session: str, a: datetime, b: datetime) -> None:
+        for span in by_session.get(session, ()):
+            if a <= last_at(span) < b:
+                burned.setdefault(span_key(span), rule)
 
     hours: dict[str, float] = defaultdict(float)
-    money: dict[str, Spend] = defaultdict(Spend)
     tasks: dict[str, set[str]] = defaultdict(set)
-    for row in inputs.states:
-        state = row.state
-        if state.rule not in CHAOS_CAUSES:
-            continue
-        a, b = max(state.since, start), min(state.last_seen, end)
+    rank_ = {rule: i for i, rule in enumerate(CHAOS_CAUSES)}
+    chaos = sorted(
+        (r.state for r in inputs.states if is_chaos(r.state)),
+        key=lambda s: (rank_[s.rule], s.opened_at, s.id),
+    )
+    for state in chaos:
+        # From when Kelpie first reported it: a grace period or an allowed wait before the
+        # threshold is not lost time. A lower bound (a rule going live re-opens a state).
+        a, b = max(state.since, state.opened_at, start), min(state.last_seen, end)
         if b <= a:
             continue
         hours[state.rule] += (b - a).total_seconds() / 3600
         if state.task_id:
             tasks[state.rule].add(state.task_id)
         if (session := session_of(state)) is not None:
-            money[state.rule] = money[state.rule] + burned(session, a, b)
-    restarted: set[str] = set()
+            burn(state.rule, session, a, b)
     for entry in inputs.actions:
         if entry.rule != "exit_contract" or entry.kind is not ActionKind.REQUEUE:
             continue
-        if entry.outcome is Outcome.SUPPRESSED:
-            continue
+        if entry.outcome in (Outcome.SUPPRESSED, Outcome.NOTHING_TO_DO):
+            continue  # nothing was restarted
         session = entry.params.get("session_id")
-        if isinstance(session, str) and session not in restarted:
-            restarted.add(session)
-            money[entry.rule] = money[entry.rule] + burned(session, start, end)
+        if isinstance(session, str):
+            burn(entry.rule, session, start, end)
             if entry.task_id:
                 tasks[entry.rule].add(entry.task_id)
+    by_rule: dict[str, list[Span]] = defaultdict(list)
+    index = {span_key(s): s for spans_ in by_session.values() for s in spans_}
+    for key, rule in burned.items():
+        by_rule[rule].append(index[key])
+    money = {
+        rule: pricer.price(usage(found, {span_key(s): counted[span_key(s)] for s in found}))
+        for rule, found in by_rule.items()
+    }
     lines = [
-        ChaosLine(rule, CHAOS_CAUSES[rule], hours[rule], money[rule], tuple(sorted(tasks[rule])))
+        ChaosLine(
+            rule,
+            CHAOS_CAUSES[rule],
+            hours[rule],
+            money.get(rule, Spend()),
+            tuple(sorted(tasks[rule])),
+        )
         for rule in CHAOS_CAUSES
-        if hours[rule] > 0 or money[rule].tokens > 0
+        if hours[rule] > 0 or money.get(rule, Spend()).tokens > 0
     ]
     lines.sort(key=lambda c: (-c.spend.usd, -c.hours, c.rule))
     return tuple(lines)
+
+
+def is_chaos(state: OpenState) -> bool:
+    """A state that is lost work: a chaos rule's, except loop_breaker's budget and
+    forecast states (spend against a budget, not a loop)."""
+    if state.rule == "loop_breaker":
+        return session_of(state) is not None
+    return state.rule in CHAOS_CAUSES
 
 
 def session_of(state: OpenState) -> str | None:
@@ -466,7 +498,9 @@ def _recommendations(
                 tasks=group.tasks,
             )
         )
-    acting = {f.rule: f for f in would_fix}
+    acting: dict[str, FixLine] = {}
+    for f in would_fix:  # most subjects first: describe a rule by its main action
+        acting.setdefault(f.rule, f)
     for line in chaos:
         mode = inputs.modes.get(line.rule, Mode.OBSERVE)
         fix = acting.get(line.rule)
@@ -474,19 +508,18 @@ def _recommendations(
             title = f"Let {line.rule} act"
             detail = (
                 f"in {mode} mode it would have done {fix.kind} on {fix.count} "
-                f"subject(s); {line.cause} cost {line.hours:.1f} task-hours"
+                f"subject(s); {line.cause} lasted {line.hours:.1f} condition-hours"
             )
         else:
             title = f"Reduce {line.cause}"
-            detail = f"{REMEDIES[line.rule]}; {line.hours:.1f} task-hours lost"
+            detail = f"{REMEDIES[line.rule]}; {line.hours:.1f} condition-hours"
         candidates.append(Advice(title, detail, line.spend.usd, line.hours, line.tasks))
     return tuple(_top(candidates, inputs.hour_usd))
 
 
 def _top(candidates: Sequence[Advice], hour_usd: float | None) -> list[Advice]:
     if hour_usd is not None:
-        ranked = sorted(candidates, key=lambda a: (-(a.usd + a.hours * hour_usd), a.title))
-        return [a for a in ranked if a.usd > 0 or a.hours > 0][:TOP]
+        return sorted(candidates, key=lambda a: (-(a.usd + a.hours * hour_usd), a.title))[:TOP]
     by_usd = sorted((a for a in candidates if a.usd > 0), key=lambda a: (-a.usd, a.title))
     by_hours = sorted(
         (a for a in candidates if a.hours > 0 and a.usd <= 0), key=lambda a: (-a.hours, a.title)
@@ -512,7 +545,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     lines += ["## Cost of chaos", ""]
     if report.chaos:
         lines += [
-            f"| Cause | Task-hours | Tokens burned | USD{est} | Tasks |",
+            f"| Cause | Condition-hours | Tokens burned | USD{est} | Tasks |",
             "|---|---:|---:|---:|---|",
         ]
         for c in report.chaos:
@@ -526,12 +559,18 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
                 f"Stuck hours at ${report.hour_usd:,.2f}/hour: "
                 f"${report.chaos_hours * report.hour_usd:,.2f}.",
             ]
+        lines += [
+            "",
+            "Condition-hours: how long each condition lasted after Kelpie first reported it, "
+            "summed over conditions (two on one task both count); a lower bound.",
+        ]
     else:
         lines.append("Nothing stuck and no tokens burned on loops, idle sessions or restarts.")
     lines += ["", "## Spend", ""]
+    note = " (as the board reports them now; adapters only look back so far)"
     lines.append(
         f"{report.spend.tokens:,} tokens, {_usd(report.spend, report)}{est}; "
-        f"{len(report.completed)} tasks completed"
+        f"{len(report.completed)} tasks completed{note}"
         + (f": {tasks(report.completed)}." if report.completed else ".")
     )
     if report.spend.unpriced_tokens:
@@ -542,7 +581,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     lines += ["", "## Fixed by Kelpie", ""]
     lines += _fix_lines(report.fixed, tasks) or ["Nothing this day."]
     if report.would_fix:
-        lines += ["", "Would have done in act mode (observe or dry-run):", ""]
+        lines += ["", "Would have done in act mode (observe, suggest or dry-run):", ""]
         lines += _fix_lines(report.would_fix, tasks)
     lines += ["", "## Needs a human", ""]
     needs = _needs_lines(report, tasks)
@@ -554,7 +593,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             if a.usd > 0:
                 value.append(f"about ${a.usd:,.2f}/day{est}")
             if a.hours > 0:
-                value.append(f"{a.hours:.1f} task-hours")
+                value.append(f"{a.hours:.1f} condition-hours")
             tail = f" ({', '.join(value)})" if value else ""
             linked = f" Tasks: {tasks(a.tasks)}." if a.tasks else ""
             lines.append(f"{i}. **{a.title}**{tail}: {a.detail}.{linked}")
@@ -586,16 +625,28 @@ def render_summary(report: DailyReport) -> str:
 
 def _headline(report: DailyReport) -> str:
     est = " (estimate)" if report.estimated else ""
-    chaos = f"Cost of chaos: {report.chaos_hours:.1f} task-hours"
+    burned = report.chaos_spend
+    chaos = f"Cost of chaos: {report.chaos_hours:.1f} condition-hours"
+    parts = []
     if report.priced:
-        chaos += f", ${report.chaos_usd:,.2f}{est}"
-    chaos += f" ({report.chaos_spend.tokens:,} tokens burned)."
+        parts.append(f"${burned.usd:,.2f}{est} in {burned.tokens:,} tokens burned")
+    else:
+        parts.append(f"{burned.tokens:,} tokens burned")
+    if report.hour_usd is not None:
+        parts.append(f"${report.chaos_hours * report.hour_usd:,.2f} in stuck hours")
+    chaos += ", " + " + ".join(parts) + "."
+    if report.priced and report.spend.unpriced_tokens:
+        chaos += f" {report.spend.unpriced_tokens:,} tokens of unpriced models not in dollars."
     per = report.per_completed_task
     if per is not None and report.priced:
         done = f" {len(report.completed)} tasks completed, ${per:,.2f}{est} per completed task."
     else:
         done = f" {len(report.completed)} tasks completed."
     return chaos + done
+
+
+def _local(at: datetime, report: DailyReport) -> str:
+    return at.astimezone(report.tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
 def _usd(spend: Spend, report: DailyReport) -> str:
@@ -614,7 +665,8 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
         level = f", escalation {s.level}" if s.level else ""
         out.append(
             f"- **{s.severity}** `{s.rule}`{task}: open {o.open_hours:.1f}h since "
-            f"{s.since:%Y-%m-%d %H:%M} UTC{level}, last seen {s.last_seen:%H:%M}: {s.summary}"
+            f"{_local(s.since, report)}{level}, "
+            f"last seen {_local(s.last_seen, report)}: {s.summary}"
         )
     for f in report.not_done:
         out.append(

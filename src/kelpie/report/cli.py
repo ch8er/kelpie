@@ -36,34 +36,36 @@ def run(
     day_text: str | None,
     deliver: bool,
     clock: Callable[[], datetime] = utc_now,
-) -> tuple[str, int]:
-    """The report as text for stdout and an exit code (2: bad input, 1: not delivered)."""
+) -> tuple[str, str, int]:
+    """``(stdout, stderr, exit code)``: the report on stdout, problems on stderr (so
+    ``kelpie report > day.md`` under cron keeps them apart); 2: bad input, 1: the database
+    could not be read or the summary did not reach every channel."""
     try:
         day = date.fromisoformat(day_text) if day_text else default_day(clock(), settings.report)
     except ValueError:
-        return f"kelpie: --date must be YYYY-MM-DD, got {day_text!r}\n", 2
+        return "", f"kelpie: --date must be YYYY-MM-DD, got {day_text!r}\n", 2
     metrics = Metrics()
     board = merged_snapshot(build_adapters(settings), metrics, clock)()
     try:
         report, markdown = generate(sources(settings), day, board)
     except (OSError, sqlite3.Error, RuntimeError) as exc:
-        return f"kelpie: cannot read the database {settings.db_path}: {exc}\n", 1
+        return "", f"kelpie: cannot read the database {settings.db_path}: {exc}\n", 1
     path = write(markdown, settings.report, day)
     if path is not None:
         log.info("report written to %s", path)
     if not deliver:
-        return markdown, 0
+        return markdown, "", 0
     try:
         delivery = settings.alerts.build(metrics)
     except ValueError as exc:
-        return markdown + f"\nkelpie: not sent: {exc}\n", 1
+        return markdown, f"kelpie: not sent: {exc}\n", 1
     if delivery is None:
-        return markdown + "\nkelpie: not sent: no [[alerts.channels]] configured\n", 1
+        return markdown, "kelpie: not sent: no [[alerts.channels]] configured\n", 1
     try:
         send(report, settings.report, delivery)
     finally:
         delivery.close(timeout=10.0)
-    if not sum(metrics.alerts_sent.values()):
+    if metrics.alerts_failed or metrics.alerts_dropped or not metrics.alerts_sent:
         # failed, dropped, or no channel takes [report] severity (min_severity)
-        return markdown + "\nkelpie: the summary was not delivered (see the log)\n", 1
-    return markdown, 0
+        return markdown, "kelpie: the summary did not reach every channel (see the log)\n", 1
+    return markdown, "", 0

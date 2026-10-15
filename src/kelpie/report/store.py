@@ -7,19 +7,18 @@ must be upgraded by ``kelpie serve`` first.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kelpie.core.actions import ActionKind, Severity
-from kelpie.core.config import Mode
-from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
+from kelpie.core.ledger import LedgerEntry
 from kelpie.core.model import Span
 from kelpie.core.spans import Attribution
 from kelpie.core.states import OpenState
-from kelpie.core.storage import SqliteSpanStore
+
+# The ledger's and state store's own row mappings, so the two cannot drift apart.
+from kelpie.core.storage import SCHEMA_VERSION, SchemaOutdated, SqliteSpanStore, _entry, _state
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +38,19 @@ class ReportStore:
 
     def __init__(self, path: Path | str, busy_timeout_ms: int = 5000) -> None:
         self._path = Path(path)
-        self._db = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        uri = self._path.resolve().as_uri() + "?mode=ro"  # escapes ?, # and % in the path
+        self._db = sqlite3.connect(uri, uri=True)
         self._db.row_factory = sqlite3.Row
         self._db.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+        version = self._db.execute("PRAGMA user_version").fetchone()[0]
+        if version != SCHEMA_VERSION:
+            self._db.close()
+            if version < SCHEMA_VERSION:
+                raise SchemaOutdated(
+                    f"database schema {version} is older than {SCHEMA_VERSION}; run kelpie "
+                    "serve once to upgrade it"
+                )
+            raise RuntimeError(f"database schema {version} is newer than {SCHEMA_VERSION}")
         self._spans: SqliteSpanStore | None = None
 
     def close(self) -> None:
@@ -91,37 +100,3 @@ def _last(span: Span) -> datetime:
 
 def _time(value: str | None) -> datetime | None:
     return None if value is None else datetime.fromisoformat(value)
-
-
-def _entry(row: sqlite3.Row) -> LedgerEntry:
-    return LedgerEntry(
-        at=datetime.fromisoformat(row["at"]),
-        fingerprint=row["fingerprint"],
-        subject=row["subject"],
-        rule=row["rule"],
-        kind=ActionKind(row["kind"]),
-        mode=Mode(row["mode"]),
-        outcome=Outcome(row["outcome"]),
-        reason=row["reason"],
-        task_id=row["task_id"],
-        executor=row["executor"],
-        params=json.loads(row["params"]),
-        suppressed=row["suppressed"],
-        suppression=Suppression(row["suppression"]) if row["suppression"] else None,
-    )
-
-
-def _state(r: sqlite3.Row) -> OpenState:
-    return OpenState(
-        id=r["id"],
-        rule=r["rule"],
-        task_id=r["task_id"],
-        since=datetime.fromisoformat(r["since"]),
-        opened_at=datetime.fromisoformat(r["opened_at"]),
-        last_seen=datetime.fromisoformat(r["last_seen"]),
-        level=r["level"],
-        severity=Severity(r["severity"]),
-        summary=r["summary"],
-        key=r["key"],
-        mode=Mode(r["mode"]),
-    )

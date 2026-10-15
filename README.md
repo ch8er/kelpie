@@ -198,7 +198,7 @@ farm throughput metrics from traces.
 - **Real-time alerts** to Telegram and Slack: only actionable
   items, always stating what Kelpie already did by itself; duplicate alerts are merged.
   See [Alerts](#alerts).
-- **Daily report** (`kelpie report`): cost of chaos in task-hours and dollars, cost per
+- **Daily report** (`kelpie report`): cost of chaos in condition-hours and dollars, cost per
   completed task, what Kelpie fixed by itself (and would have fixed in act mode), what
   needs a human (alert states still open, actions Kelpie could not carry out, repeated
   huge-output offenders), the top 3 recommendations and the largest tool outputs. See
@@ -218,7 +218,7 @@ report; no LLM is involved.
   (ownerless tasks, blocks that outlived their cause, waits past their limit, review
   ping-pong, idle capacity next to a bottleneck, runaway loops, activity without progress),
   from when the condition began to when Kelpie last saw it, clipped to the day. The unit is
-  task-hours; `[report] hour_usd` prices them.
+  condition-hours; `[report] hour_usd` prices them.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
   flagged, and by every session `exit_contract` requeued (a restart), priced with
   `[prices]`. In subscription mode the dollars are marked as an estimate.

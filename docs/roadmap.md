@@ -625,7 +625,7 @@ Kelpie fixed by itself, what needs a human decision, and the top 3 optimization
 recommendations. Delivered to Slack or Telegram and as Markdown/HTML.
 
 **Acceptance criteria**
-- [x] Generated from storage only, deterministic for the same data
+- [x] Generated from storage only, deterministic for the same data (plus the adapters' current board for tasks and hook spans)
 - [x] Sections: cost of chaos, fixed by Kelpie, needs a human, top 3 recommendations
 - [x] Cost of chaos and cost per completed task in dollars next to hours, from the budgets and spend sources; marked as an estimate in subscription mode
 - [x] "Needs a human" lists the long-lived alert states still open (state store: since, level, last seen), so states announced once are not forgotten

@@ -64,8 +64,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "report":
             from kelpie.report.cli import run as run_report
 
-            text, code = run_report(settings, args.date, args.send)
-            sys.stdout.write(text)
+            out, err, code = run_report(settings, args.date, args.send)
+            sys.stdout.write(out)
+            sys.stderr.write(err)
             return code
         if args.command == "status":
             rules = load_rules(settings.engine)
