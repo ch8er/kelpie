@@ -42,11 +42,13 @@ spare. An alert lasts as long as spare capacity exists.
   could take while such gates exist, Kelpie also alerts with the idle capacity and the
   gates that hold the most work. Kelpie never removes or rewrites a dependency: it shows
   its cost and asks whether the link is needed. Human tasks with nothing behind them are
-  not flagged, and a chain through a human task gets no parallelization advice.
+  not flagged, a human task parked by a hold is not escalated, and a chain with agent work
+  behind a human task gets no parallelization advice.
 
 ``slots`` (optional) is the farm's concurrency limit: once that many agents have a live
 session, idle agents are not free capacity, and no idle-capacity alert fires (chain,
-overloaded role, idle with ready work, human-gated).
+idle with ready work, human-gated); an overloaded role is still reported, with the advice
+to give its work the next free slot instead of rebalancing.
 
 Held tasks are left out of both the queue depth and the critical path.
 
@@ -278,8 +280,13 @@ def human_gates(snapshot: Snapshot) -> list[HumanGate]:
             continue
         for c in linked_conditions(t, snapshot)[0]:
             target = c.params.get("task")
-            if c.kind is ConditionKind.HUMAN_TASK and c.satisfied is not True and target in by_id:
-                successors.setdefault(str(target), set()).add(t.id)
+            if (
+                c.kind is ConditionKind.HUMAN_TASK
+                and c.satisfied is not True
+                and isinstance(target, str)
+                and target in by_id
+            ):
+                successors.setdefault(target, set()).add(t.id)
     open_deps = _open_dependencies(snapshot, set(by_id))
     result: list[HumanGate] = []
     for gate in gates:
@@ -331,13 +338,17 @@ class Bottlenecks:
         gates = [
             g
             for g in human_gates(snapshot)
-            if g.actionable and now - g.task.status_since >= self.human_gate_after
+            if g.actionable
+            and now - g.task.status_since >= self.human_gate_after
+            and not held.intersection(g.task.labels)  # parked on purpose
         ]
         free = self._free_capacity(snapshot)
         actions: list[Action] = []
+        # With every slot running, an overloaded role is still the bottleneck: its work
+        # should get the running slots first rather than idle agents.
+        actions.extend(self._overloaded(loads, full=not free))
         if free:
             actions.extend(self._chain(snapshot, loads, held))
-            actions.extend(self._overloaded(loads))
             actions.extend(self._idle_with_ready_work(snapshot, loads, held))
             actions.extend(self._human_gated(snapshot, loads, held, gates))
         actions.extend(self._expired_holds(snapshot, loads if free else {}))
@@ -358,8 +369,8 @@ class Bottlenecks:
         if path is None or path.length < self.min_chain_length:
             return []
         humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
-        if any(t.owner_id in humans for t in path.tasks):
-            return []  # gated by a human task: splitting will not help, the gate alert says so
+        if any(t.owner_id in humans for t in path.tasks[:-1]):
+            return []  # agent work behind a human task: the human gate, not the plan's shape
         roles = {t.role for t in path.tasks if t.role} or set(loads)
         idle_roles = sorted(r for r in roles if r in loads and loads[r].spare)
         idle_agents = sorted(a for r in idle_roles for a in loads[r].spare)
@@ -392,7 +403,7 @@ class Bottlenecks:
             )
         ]
 
-    def _overloaded(self, loads: dict[str, RoleLoad]) -> list[Action]:
+    def _overloaded(self, loads: dict[str, RoleLoad], full: bool = False) -> list[Action]:
         actions: list[Action] = []
         for role, load in loads.items():
             if len(load.queue) < self.min_queue_depth or load.idle:
@@ -414,8 +425,13 @@ class Bottlenecks:
                     f"Role '{role}' is the bottleneck: {len(load.queue)} task(s) queued "
                     f"(oldest waiting {_human(load.oldest_wait)}) and {capacity}, "
                     f"while {_names(idle_agents)} "
-                    f"({', '.join(helpers)}) sit idle. Consider rebalancing: assign idle "
-                    f"agents to '{role}' work.",
+                    f"({', '.join(helpers)}) sit idle. "
+                    + (
+                        f"Every slot is running: give '{role}' work priority for the next "
+                        "free slot."
+                        if full
+                        else f"Consider rebalancing: assign idle agents to '{role}' work."
+                    ),
                     severity=Severity.WARNING,
                     key=f"{NAME}:overloaded:{role}",
                     state=f"{NAME}:overloaded:{role}",
@@ -427,7 +443,7 @@ class Bottlenecks:
                         "oldest_wait_minutes": int(load.oldest_wait.total_seconds() // 60),
                         "idle_roles": helpers,
                         "idle_agents": idle_agents,
-                        "recommendation": "rebalance",
+                        "recommendation": "prioritize" if full else "rebalance",
                     },
                 )
             )

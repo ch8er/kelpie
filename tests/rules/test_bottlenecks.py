@@ -642,7 +642,7 @@ def test_slots_count_live_sessions_not_parked_owners() -> None:
     assert idle.params["idle_agents"] == ["d3"]
 
 
-def test_full_slots_silence_the_chain_and_overload_alerts_too() -> None:
+def test_full_slots_silence_the_chain_and_turn_overload_into_priority() -> None:
     tasks, deps = sequential(4)
     owners = agents("developer", "dev-1", "dev-2", "dev-3")
     sessions = (live("dev-1", "T-0"),)
@@ -650,8 +650,12 @@ def test_full_slots_silence_the_chain_and_overload_alerts_too() -> None:
     assert run(snap(tasks, owners, deps, sessions), Bottlenecks(slots=1)) == []
     review = (*review_queue(3), task("W", Status.REVIEW, role="reviewer", owner="rev-1"))
     on = (live("rev-1", "W"),)
-    assert of(run(snap(review, overload_owners(), sessions=on)), "overloaded")
-    assert run(snap(review, overload_owners(), sessions=on), Bottlenecks(slots=1)) == []
+    [free] = of(run(snap(review, overload_owners(), sessions=on)), "overloaded")
+    assert free.params["recommendation"] == "rebalance"
+    # Every slot running: still the bottleneck, but the advice is priority, not idle agents.
+    [full] = run(snap(review, overload_owners(), sessions=on), Bottlenecks(slots=1))
+    assert full.key == free.key and full.params["recommendation"] == "prioritize"
+    assert "give 'reviewer' work priority" in full.reason
 
 
 # --- holds with an owner and an expiry (incident 14) --------------------------------------
@@ -899,3 +903,32 @@ def test_build_parses_holds_and_new_thresholds() -> None:
 def test_build_rejects_bad_hold_config(config: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         build(config)
+
+
+def test_malformed_human_task_params_do_not_break_the_rule() -> None:
+    tasks = (human("H"), task("A", Status.BLOCKED), task("B", Status.WAITING))
+    conds = (
+        Condition("C1", ConditionKind.HUMAN_TASK, "A", {"task": ["H"]}, satisfied=False),
+        Condition("C2", ConditionKind.HUMAN_TASK, "B", {"task": {"id": "H"}}, satisfied=False),
+    )
+    snapshot = Snapshot(NOW, tasks, HUMANS, (), conds)
+    assert human_gates(snapshot) == []
+    assert run(snapshot) == []
+
+
+def test_held_human_task_is_not_escalated() -> None:
+    held = Task("H", "h", Status.READY, NOW - 2 * H, "owner", owner_id="boss", labels=("park",))
+    tasks = (held, task("A"), task("B"), task("C"))
+    owners = HUMANS + agents("developer", "d1")
+    snapshot = snap(tasks, owners, chain("H", "A", "B", "C"))
+    rule = Bottlenecks(hold_labels=frozenset({"park"}))
+    assert [a for a in run(snapshot, rule) if a.kind is ActionKind.ESCALATE] == []
+    assert of(run(snapshot, rule), "human-gated") == []
+    assert [a for a in run(snapshot) if a.kind is ActionKind.ESCALATE]  # unheld: escalated
+
+
+def test_chain_ending_in_a_human_task_still_gets_parallelization_advice() -> None:
+    ids = [*(f"A{i}" for i in range(4)), "H"]
+    tasks = (head("A0"), *(task(i) for i in ids[1:-1]), human("H", Status.BACKLOG))
+    owners = HUMANS + agents("developer", "d1", "d2", "d3")
+    assert of(run(snap(tasks, owners, chain(*ids))), "chain")
