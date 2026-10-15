@@ -328,3 +328,36 @@ def test_rule_errors_start_at_zero_and_ledger_down_is_reported() -> None:
     loop = ControlLoop(engine, lambda: Snapshot(now=NOW), metrics)
     loop.tick_once()
     assert "kelpie_ledger_up 0" in metrics.render()
+
+
+def test_loop_breaker_inherits_poll_patterns_from_wait_condition(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    patterns = {"ci_status": ["gh pr checks"]}
+    rules = {"wait_condition": {"poll_patterns": patterns}, "loop_breaker": {}}
+    loaded = load_rules(EngineConfig(rules=rules))
+    breaker = next(r for r in loaded.rules if r.name == "loop_breaker")
+    assert breaker.poll_patterns == {"ci_status": ("gh pr checks",)}  # type: ignore[attr-defined]
+    assert not caplog.records
+
+    # Its own patterns win; a difference is logged.
+    own = {
+        "wait_condition": {"poll_patterns": patterns},
+        "loop_breaker": {"poll_patterns": {"x": ["y"]}},
+    }
+    with caplog.at_level("WARNING"):
+        loaded = load_rules(EngineConfig(rules=own))
+    breaker = next(r for r in loaded.rules if r.name == "loop_breaker")
+    assert breaker.poll_patterns == {"x": ("y",)}  # type: ignore[attr-defined]
+    assert "differs from wait_condition" in caplog.text
+
+    # The same patterns on both sides are fine, and nothing is invented without rule 2's.
+    caplog.clear()
+    same = {
+        "wait_condition": {"poll_patterns": patterns},
+        "loop_breaker": {"poll_patterns": patterns},
+    }
+    load_rules(EngineConfig(rules=same))
+    assert not caplog.records
+    bare = next(r for r in load_rules(EngineConfig()).rules if r.name == "loop_breaker")
+    assert bare.poll_patterns == {}  # type: ignore[attr-defined]

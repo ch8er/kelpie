@@ -6,18 +6,21 @@ description: >
   heartbeat loop called the same tool with the same arguments about 900 times overnight,
   resending about 80k input tokens on every model call: roughly 72M tokens for zero work.
   In the same snapshot a second agent hit five tool errors in a row and kept retrying.
-  Platform-level guards do not cover every platform, so Kelpie's loop and budget breaker
-  works on traces: identical consecutive calls (tool + args hash, AgentWatchdog default of
-  8 in 10 minutes), error streaks (5 in a row) and a per-agent token budget. Each trip
-  stops the run through the adapter and raises an alert.
+  Platform-level guards do not cover every platform, so Kelpie's breaker works on traces:
+  identical consecutive calls (tool + args hash, AgentWatchdog default of 8 in 10 minutes)
+  and error streaks (5 in a row). Each trip stops the run through the adapter and raises a
+  critical alert. A reviewer polling CI with identical calls is rule 2's to coach, not a
+  runaway, so it is left alone while the polling is within the grace period.
 rule: loop_breaker
 config:
   identical_calls: 8          # same tool + same args_hash, consecutive...
   identical_window: "10m"     # ...within this window (AgentWatchdog defaults)
   consecutive_errors: 5
-  daily_token_budget: 5000000 # per agent, input + output tokens
-  poll_patterns:              # shared with wait_condition: polling is coached by rule 2 first
+  poll_patterns:              # same shape as wait_condition's: polling is coached by rule 2 first
     ci_status: ["gh pr checks", "gh run watch"]
+  poll_comment_after: 8       # rule 2 comments at this many polls; stop only poll_grace later
+  poll_grace: "15m"
+  poll_hard_limit: 30
 snapshot:
   now: "2026-03-03T08:00:00+00:00"
   owners:
@@ -120,8 +123,8 @@ expected_actions:
   - kind: alert
     task_id: T-F101
     severity: critical
-    reason_contains: "budget"
-    params: {owner_id: agent-ops-1}
+    reason_contains: "identical"
+    params: {session_id: S-F101, owner_id: agent-ops-1, trigger: identical_calls}
   - kind: stop
     task_id: T-F102
     reason_contains: "error"
@@ -130,6 +133,7 @@ expected_actions:
     task_id: T-F102
     severity: critical
     reason_contains: "error"
+    params: {session_id: S-F102, trigger: error_streak}
 not_expected_actions:
   - kind: stop
     task_id: T-F103
@@ -137,3 +141,5 @@ not_expected_actions:
     task_id: T-F104
   - kind: alert
     task_id: T-F103
+  - kind: alert
+    task_id: T-F104

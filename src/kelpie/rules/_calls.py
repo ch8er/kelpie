@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
 from kelpie.core.model import Span, SpanKind
 
 CallKey = tuple[str, str]
+
+# Condition kind -> substrings of a polled command (rule 2's ``poll_patterns``).
+PollPatterns = Mapping[str, tuple[str, ...]]
 
 
 def command(span: Span) -> str:
@@ -24,6 +27,22 @@ def call_key(span: Span) -> CallKey | None:
     """
     args = span.args_hash or command(span)
     return (span.tool or span.name, args) if args else None
+
+
+def parse_poll_patterns(raw: object) -> dict[str, tuple[str, ...]]:
+    """Validate ``poll_patterns`` config: condition kinds mapped to lists of substrings."""
+    if not isinstance(raw, Mapping) or not all(
+        isinstance(v, list | tuple) and all(isinstance(p, str) and p for p in v)
+        for v in raw.values()
+    ):
+        raise ValueError("poll_patterns must map condition kinds to lists of strings")
+    return {str(k): tuple(v) for k, v in raw.items()}
+
+
+def poll_kind(patterns: PollPatterns, span: Span) -> str | None:
+    """The condition kind a call polls for (its command matches a pattern), if any."""
+    text = command(span) or span.args_hash or ""
+    return next((k for k, pats in patterns.items() if any(p in text for p in pats)), None)
 
 
 def tool_calls(spans: Sequence[Span], after: datetime | None = None) -> list[Span]:
