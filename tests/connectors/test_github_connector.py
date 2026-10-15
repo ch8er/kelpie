@@ -80,6 +80,7 @@ def test_pr_not_merged(state: str, pr_state: str) -> None:
         out = connector(gh).check(cond(ConditionKind.PR_MERGED))
     assert out.satisfied is False and out.satisfied_at is None
     assert out.params["pr_state"] == pr_state
+    assert out.params.get("terminal") is (True if state == "closed" else None)
 
 
 def test_ci_green_from_statuses_and_check_runs() -> None:

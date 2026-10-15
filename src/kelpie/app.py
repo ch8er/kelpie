@@ -704,7 +704,7 @@ def _connector_steps(
     """Connector steps: GitHub (PR/CI conditions, block conditions), human tasks."""
     steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = []
     if settings.human_tasks is not None and settings.human_tasks.enabled:
-        steps.append(("human_tasks", HumanTaskConnector()))
+        steps.append(("human_tasks", HumanTaskConnector(settings.human_tasks.block_patterns)))
     steps.extend(_github_steps(settings, metrics, clock))
     return steps
 

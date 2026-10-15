@@ -1,0 +1,77 @@
+id: "13-block-human-task-done-unblock"
+incident: 13
+title: "Agent blocked on a human's task clears once the human finished it"
+description: >
+  The coder blocked its card with "waiting_human: approval in T-42". The human task
+  connector attached a human_task condition from the reason (T-42 is on the board and owned
+  by a human), so the block is a declared wait. The human has since marked T-42 done and the
+  condition was checked after the block was set, so rule 4 clears the block. A card waiting
+  on a human task that is still open stays blocked.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+  max_condition_age: "15m"
+  max_block: "8h"
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: coder-1, role: coder}
+    - {id: owner-1, role: owner, kind: human}
+  tasks:
+    - id: T-1301
+      title: "Rotate the deploy credentials"
+      status: blocked
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: coder
+      owner_id: coder-1
+      block:
+        reason: "waiting_human: approval in T-42"
+        since: "2026-03-02T11:00:00+00:00"
+        condition_id: "block:T-1301:human_task:T-42"
+    # Distractor: its human task is still open.
+    - id: T-1302
+      title: "Open the service port"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: coder
+      owner_id: coder-1
+      block:
+        reason: "waiting_human: approval in T-43"
+        since: "2026-03-02T12:00:00+00:00"
+        condition_id: "block:T-1302:human_task:T-43"
+    - id: T-42
+      title: "Approve credential rotation"
+      status: done
+      status_since: "2026-03-02T13:20:00+00:00"
+      owner_id: owner-1
+    - id: T-43
+      title: "Approve port change"
+      status: in_progress
+      status_since: "2026-03-02T12:30:00+00:00"
+      owner_id: owner-1
+  conditions:
+    - id: "block:T-1301:human_task:T-42"
+      kind: human_task
+      task_id: T-1301
+      params: {task: T-42, source: block_reason, status: done, owner: owner-1}
+      satisfied: true
+      satisfied_at: "2026-03-02T13:20:00+00:00"
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T11:00:00+00:00"
+    - id: "block:T-1302:human_task:T-43"
+      kind: human_task
+      task_id: T-1302
+      params: {task: T-43, source: block_reason, status: in_progress, owner: owner-1}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:00:00+00:00"
+expected_actions:
+  - kind: unblock
+    task_id: T-1301
+    reason_contains: "human_task"
+    params: {conditions: ["block:T-1301:human_task:T-42"]}
+not_expected_actions:
+  - kind: unblock
+    task_id: T-1302
+  - kind: alert
+    task_id: T-1302

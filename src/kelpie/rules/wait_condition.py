@@ -3,6 +3,8 @@
 An agent that needs something external (CI, a merge, a quota reset, a human) registers a
 condition and exits; the task becomes ``waiting``. This rule:
 
+- alerts at once when a condition can never be met (flagged ``params.terminal`` by its
+  connector: a PR closed unmerged, a human's task that failed), seen since the wait began;
 - wakes a waiting task when every condition of its *current* wait holds, on fresh evidence
   (checked since the wait began and within ``max_condition_age``);
 - alerts when a task waits past ``max_wait``, or (after a short grace) waits on nothing;
@@ -40,6 +42,8 @@ from kelpie.rules._calls import (
 from kelpie.rules._tasks import (
     DEFAULT_MAX_CONDITION_AGE,
     DEFAULT_STALE_AFTER,
+    dead_end_text,
+    dead_ends,
     fresh,
     is_live,
     linked_conditions,
@@ -99,6 +103,21 @@ class WaitCondition:
                 key=f"no-condition:{task.id}:{since}",
                 state=f"{NAME}:{task.id}:{since}",
                 since=task.status_since,
+            )
+            return
+        ended = dead_ends(conditions, task.status_since)
+        if ended:
+            yield Action(
+                ActionKind.ALERT,
+                NAME,
+                f"Task {task.id} is waiting, but {dead_end_text(ended)}: "
+                "nothing will ever wake it.",
+                task_id=task.id,
+                severity=Severity.WARNING,
+                key=f"dead-end:{task.id}:{since}",
+                state=f"{NAME}:{task.id}:{since}",
+                since=task.status_since,
+                params={"ended_conditions": [c.id for c in ended]},
             )
             return
         if all(

@@ -3,11 +3,12 @@ which conditions belong to a task right now, and is anyone still working on it."
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from kelpie.core.conditions import linked_conditions
-from kelpie.core.model import Condition, Session, Snapshot, Status, Task
+from kelpie.core.model import Condition, ConditionKind, Session, Snapshot, Status, Task
 
 __all__ = ["linked_conditions"]  # defined in kelpie.core.conditions, re-exported for rules
 
@@ -47,6 +48,38 @@ def fresh(
     """Whether the condition was checked after ``since`` and recently enough to act on."""
     checked = condition.checked_at
     return checked is not None and checked >= since and now - checked <= max_age
+
+
+def dead_ends(conditions: Iterable[Condition], since: datetime) -> list[Condition]:
+    """Unmet conditions flagged ``params.terminal`` (they can never be met), seen since ``since``.
+
+    A connector sets the flag when what the condition waits for ended the wrong way: a PR
+    closed without merging, a human's task failed or cancelled. Seen means checked after the
+    wait began; age aside, so the alert holds while the connector is slow to check again.
+    """
+    return [
+        c
+        for c in conditions
+        if not c.satisfied
+        and c.params.get("terminal") is True
+        and c.checked_at is not None
+        and c.checked_at >= since
+    ]
+
+
+def dead_end_text(conditions: Iterable[Condition]) -> str:
+    """What ended wrong, for an alert."""
+    parts: list[str] = []
+    for c in conditions:
+        if c.kind is ConditionKind.PR_MERGED:
+            parts.append(f"the PR was closed without merging ({c.id})")
+        elif c.kind is ConditionKind.HUMAN_TASK:
+            parts.append(
+                f"the human task {c.params.get('task')} ended as {c.params.get('status')} ({c.id})"
+            )
+        else:
+            parts.append(f"{c.id} ({c.kind}) can no longer be met")
+    return "; ".join(parts)
 
 
 # Statuses a session can declare as its end. in_progress/ready/backlog are not an end.

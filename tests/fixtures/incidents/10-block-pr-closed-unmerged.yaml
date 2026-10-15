@@ -41,7 +41,7 @@ snapshot:
     - id: "block:T-1051:pr_merged:example/repo#127"
       kind: pr_merged
       task_id: T-1051
-      params: {repo: example/repo, pr: 127, source: block_reason, pr_state: closed}
+      params: {repo: example/repo, pr: 127, source: block_reason, pr_state: closed, terminal: true}
       satisfied: false
       checked_at: "2026-03-02T13:59:00+00:00"
       registered_at: "2026-03-02T13:00:00+00:00"

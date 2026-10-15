@@ -40,9 +40,23 @@ blocked and uncommitted rows are not seen.
 `human_owners` names the assignees that are people (compared case-insensitively, as
 Hermes lowercases profile names). Their tasks get an owner of kind `human` in the snapshot,
 which the human task connector (`[connectors.human_tasks]`) needs: a `human_task`
-condition holds once such a task is done, failed or cancelled. Rules that treat humans
-differently (`ping_pong`, `bottlenecks`, `orphan_status`) use the same list. Hermes itself
-registers no conditions, so nothing creates a `human_task` condition from a Hermes board yet.
+condition holds once such a task is `done`. Hermes registers no conditions itself, so on a
+Hermes board they come from `[[connectors.human_tasks.block_patterns]]` (see
+`kelpie.example.toml`): a blocked agent task whose reason names a human's task id gets one.
+
+How a human's task sits on a Hermes board (read from the dispatcher, not tried live): assign it
+to a name that is **not** a Hermes profile and leave it in `ready` (or `blocked`) until the
+person completes it with `hermes kanban complete`. The dispatcher skips a ready task whose
+assignee is not a profile (`skipped_nonspawnable`, with a diagnostic event) instead of
+starting an agent for it, so it never crashes or loops. If the name *is* a profile, the
+dispatcher spawns an agent for the task: do not list such a name in `human_owners`. Hermes has
+no failed or cancelled status in Kelpie's mapping and archived tasks leave the board, so an
+archived human task makes its condition unknown (`not_found`), never satisfied.
+
+Side effects of `human_owners` on other rules: `ping_pong` escalates to `escalate_to`, else to
+the first human owner by id, so setting `human_owners` changes where its escalations go; set
+`escalate_to` explicitly. `bottlenecks` and `orphan_status` stop counting these owners as idle
+agents.
 
 Kelpie must run on a host that can read `db_path` (the Hermes host, or a mounted copy).
 SQLite WAL needs the `-shm` file next to the database to be readable.

@@ -186,7 +186,9 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # cli = "hermes"                    # Hermes executable used to stop a run (name on PATH or a path)
 # cli_timeout = "10s"               # limit for that command (at most 60s); it runs inside the tick
 # human_owners = ["alice"]         # assignees that are people, not agents (see
-#                                   # [connectors.human_tasks]); case-insensitive
+#                                   # [connectors.human_tasks]); case-insensitive. Not a Hermes
+#                                   # profile. Also sets rule 5's default escalation target
+#                                   # (first human by id): set escalate_to explicitly.
 #
 # Recommended on Hermes. A valid Hermes claim counts as a heartbeat, but Hermes tolerates
 # heartbeats up to an hour old, while Kelpie's default is 30 minutes:
@@ -215,12 +217,20 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # start; by default $GITHUB_TOKEN is used when set, else GitHub is read anonymously.
 #
 # Human tasks: a `human_task` condition (params.task = the id of a task owned by a human
-# on the same board) holds once that task is done, failed or cancelled, so an agent task
+# on the same board) holds once that task is done, so an agent task
 # can wait on a person without polling; rule 2 then wakes it. Needs no service, only the
 # board the adapter reads. Who is a human is adapter config (human_owners above).
 #
+# Only `done` satisfies it; a failed or cancelled human task makes rules 2 and 4 alert at once.
+# Agents often block their own task naming the task they wait on. Patterns (case-insensitive,
+# named group `task`) attach a condition to such a block when that task is on the board and
+# owned by a human; the block is then a declared wait that rule 4 clears when it is done.
+#
 # [connectors.human_tasks]
 # enabled = true                    # false keeps the section but evaluates nothing
+#
+# [[connectors.human_tasks.block_patterns]]
+# pattern = 'waiting[_ ]human:.*?(?P<task>t_[0-9a-f]+)'
 #
 # [connectors.github]
 # repos = ["example/repo"]          # owner/name; nothing else is ever queried

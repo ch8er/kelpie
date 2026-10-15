@@ -16,10 +16,10 @@ Conditions are linked by the shared rule semantics (``kelpie.rules._tasks``). So
 block sits unnoticed, Kelpie alerts on blocks it cannot clear: no visible condition after
 ``unlinked_alert_after`` (4h), a condition still unmet after ``max_block`` (8h), and
 conditions the connector stopped checking (``stale_evidence_after``, 1h). Each can be set to
-``false``. ``waiting`` tasks are rule 2's. A ``pr_merged`` condition whose PR was closed
-without merging (``params.pr_state = "closed"``, seen since the block was set) can never be
-met: Kelpie alerts at once instead of after ``max_block``, and keeps the alert while the
-connector is slow to check again.
+``false``. ``waiting`` tasks are rule 2's. A condition a connector flagged
+``params.terminal`` (a PR closed without merging, a human's task that failed or was
+cancelled), seen since the block was set, can never be met: Kelpie alerts at once instead of
+after ``max_block``, and keeps the alert while the connector is slow to check again.
 
 A block whose reason only says it waits ("waiting for CI/merge of #123") gets its condition
 before the rule runs: ``[[block_conditions]]`` patterns attach one during snapshot assembly
@@ -36,10 +36,16 @@ from datetime import timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import ConditionKind, Snapshot, Status, Task
+from kelpie.core.model import Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import DEFAULT_MAX_CONDITION_AGE, fresh, linked_conditions
+from kelpie.rules._tasks import (
+    DEFAULT_MAX_CONDITION_AGE,
+    dead_end_text,
+    dead_ends,
+    fresh,
+    linked_conditions,
+)
 
 NAME = "stale_blocks"
 
@@ -103,22 +109,13 @@ class StaleBlocks:
                 f"{_human(self.stale_evidence_after)}: is the connector running?",
             )
             return
-        closed = [
-            c
-            for c in conditions
-            if c.kind is ConditionKind.PR_MERGED
-            and not c.satisfied
-            and c.params.get("pr_state") == "closed"
-            and c.checked_at is not None
-            and c.checked_at >= block.since  # seen closed during this block; age aside
-        ]
-        if closed:
-            names = ", ".join(c.id for c in closed)
+        ended = dead_ends(conditions, block.since)
+        if ended:
             yield self._alert(
                 task,
-                "pr-closed",
-                f"Task {task.id} is blocked on '{block.reason}', but the PR was closed without "
-                f"merging ({names}): the block will never clear on its own.",
+                "dead-end",
+                f"Task {task.id} is blocked on '{block.reason}', but {dead_end_text(ended)}: "
+                "the block will never clear on its own.",
             )
             return
         if not all(c.satisfied for c in conditions):

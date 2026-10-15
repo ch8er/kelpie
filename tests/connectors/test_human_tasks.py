@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,7 @@ from kelpie.connectors.human_tasks import (
 )
 from kelpie.core.actions import ActionKind
 from kelpie.core.model import (
+    Block,
     Condition,
     ConditionKind,
     Owner,
@@ -83,15 +85,23 @@ def test_implements_the_port() -> None:
     assert connector.kinds == {ConditionKind.HUMAN_TASK}
 
 
-@pytest.mark.parametrize("status", [Status.DONE, Status.FAILED, Status.CANCELLED])
-def test_terminal_human_task_satisfies(status: Status) -> None:
+def test_done_human_task_satisfies() -> None:
     since = NOW - 5 * M
-    result = checked(HumanTaskConnector(), snapshot(human_task(status, since)))
+    result = checked(HumanTaskConnector(), snapshot(human_task(Status.DONE, since)))
     assert result.satisfied is True
     assert result.satisfied_at == since  # when the human's task finished
     assert result.checked_at == NOW
-    assert result.params["status"] == status.value and result.params["owner"] == "alice"
+    assert result.params["status"] == "done" and result.params["owner"] == "alice"
+    assert "terminal" not in result.params
     assert result.registered_at == NOW - 60 * M and result.task_id == "T-1"
+
+
+@pytest.mark.parametrize("status", [Status.FAILED, Status.CANCELLED])
+def test_failed_or_cancelled_never_satisfies_and_is_terminal(status: Status) -> None:
+    result = checked(HumanTaskConnector(), snapshot(human_task(status)))
+    assert result.satisfied is False and result.satisfied_at is None
+    assert result.params["status"] == status.value and result.params["terminal"] is True
+    assert result.checked_at == NOW
 
 
 @pytest.mark.parametrize(
@@ -102,6 +112,7 @@ def test_open_human_task_does_not(status: Status) -> None:
     result = checked(HumanTaskConnector(), snapshot(human_task(status)))
     assert result.satisfied is False and result.satisfied_at is None
     assert result.checked_at == NOW and result.params["status"] == status.value
+    assert "terminal" not in result.params
 
 
 def test_task_not_on_the_board_is_unknown() -> None:
@@ -139,6 +150,10 @@ def test_flip_back_and_stale_results_are_replaced() -> None:
     reopened = connector(snapshot(human_task(Status.IN_PROGRESS), conditions=done)).conditions
     assert reopened[0].satisfied is False and reopened[0].satisfied_at is None
     assert "error" not in reopened[0].params and reopened[0].params["status"] == "in_progress"
+    failed = connector(snapshot(human_task(Status.FAILED), conditions=reopened)).conditions
+    assert failed[0].params["terminal"] is True
+    again = connector(snapshot(human_task(Status.IN_PROGRESS), conditions=failed)).conditions
+    assert "terminal" not in again[0].params and again[0].satisfied is False
     missing = connector(snapshot(conditions=reopened)).conditions
     assert missing[0].params["error"] == "not_found" and "status" not in missing[0].params
 
@@ -193,6 +208,112 @@ def test_nothing_wakes_while_the_human_is_not_done(tasks: tuple[Task, ...]) -> N
     assert wake_kinds(HumanTaskConnector()(snapshot(*tasks))) == []
 
 
+# --- block reasons -------------------------------------------------------------------
+
+
+def blocked_agent(reason: str, task_id: str = "T-1", since: datetime = NOW - 60 * M) -> Task:
+    return Task(
+        task_id,
+        "needs approval",
+        Status.BLOCKED,
+        since,
+        owner_id="coder",
+        block=Block(reason, since),
+    )
+
+
+PATTERN = re.compile(r"approval in (?P<task>\S+)", re.IGNORECASE)
+
+
+def attach(*tasks: Task, patterns: tuple[re.Pattern[str], ...] = (PATTERN,)) -> Snapshot:
+    snap = Snapshot(now=NOW, tasks=tasks, owners=(HUMAN, AGENT))
+    return HumanTaskConnector(patterns)(snap)
+
+
+def test_block_reason_naming_a_human_task_gets_a_condition() -> None:
+    out = attach(blocked_agent("waiting_human: Approval in H-1."), human_task(Status.DONE))
+    (c,) = out.conditions
+    assert c.id == "block:T-1:human_task:H-1" and c.task_id == "T-1"
+    assert c.kind is ConditionKind.HUMAN_TASK and c.registered_at == NOW - 60 * M
+    assert c.satisfied is True and c.params["task"] == "H-1"
+    assert c.params["source"] == "block_reason"
+    task = out.task("T-1")
+    assert task is not None and task.block is not None
+    assert (
+        task.block.condition_id == c.id and task.block.reason == "waiting_human: Approval in H-1."
+    )
+
+
+def test_attached_condition_drives_rule_4() -> None:
+    from kelpie.rules.stale_blocks import StaleBlocks
+
+    done = attach(
+        blocked_agent("waiting_human: approval in H-1"), human_task(Status.DONE, NOW - 30 * M)
+    )
+    kinds = [a.kind for a in StaleBlocks(unblock_grace=5 * M).evaluate(done)]
+    assert kinds == [ActionKind.UNBLOCK]
+    cancelled = attach(
+        blocked_agent("waiting_human: approval in H-1"), human_task(Status.CANCELLED, NOW - 30 * M)
+    )
+    (alert,) = StaleBlocks().evaluate(cancelled)
+    assert alert.kind is ActionKind.ALERT and "ended as cancelled" in alert.reason
+    open_ = attach(blocked_agent("waiting_human: approval in H-1"), human_task())
+    assert StaleBlocks().evaluate(open_) == []
+
+
+@pytest.mark.parametrize(
+    "tasks",
+    [
+        (blocked_agent("waiting for a nice day"), human_task()),  # no pattern match
+        (blocked_agent("approval in H-9"), human_task()),  # task not on the board
+        (
+            blocked_agent("approval in T-2", "T-1"),
+            Task("T-2", "t", Status.READY, NOW, owner_id="coder"),
+        ),
+        (blocked_agent("approval in T-1"),),  # itself
+        (blocked_agent("approval in H-1"), Task("H-1", "t", Status.READY, NOW)),  # unowned
+    ],
+    ids=["no-match", "not-on-board", "agent-task", "self", "unowned"],
+)
+def test_block_without_a_human_task_is_left_alone(tasks: tuple[Task, ...]) -> None:
+    out = attach(*tasks)
+    assert out.conditions == () and out.tasks == tasks
+
+
+def test_blocks_with_a_condition_or_other_status_are_not_touched() -> None:
+    linked = replace(
+        blocked_agent("approval in H-1"),
+        block=Block("approval in H-1", NOW - 60 * M, condition_id="other"),
+    )
+    waiting = replace(blocked_agent("approval in H-1"), status=Status.WAITING)
+    existing = Condition("mine", ConditionKind.HUMAN_TASK, task_id="T-3", params={"task": "H-1"})
+    third = replace(blocked_agent("approval in H-1", "T-3"))
+    snap = Snapshot(
+        now=NOW,
+        tasks=(linked, waiting, third, human_task()),
+        owners=(HUMAN, AGENT),
+        conditions=(existing,),
+    )
+    out = HumanTaskConnector((PATTERN,))(snap)
+    assert [c.id for c in out.conditions] == ["mine"]  # T-3 already has a linked condition
+    assert out.tasks[:3] == (linked, waiting, third)
+
+
+def test_patterns_are_tried_in_order_and_the_reference_is_trimmed() -> None:
+    first = re.compile(r"blocked by (?P<task>\S+)")
+    out = attach(
+        blocked_agent("approval in (H-1); blocked by H-404"),
+        human_task(),
+        patterns=(first, PATTERN),
+    )
+    assert [c.params["task"] for c in out.conditions] == ["H-1"]  # H-404 is not a human task
+
+
+def test_no_patterns_means_no_attachment() -> None:
+    out = attach(blocked_agent("approval in H-1"), human_task(), patterns=())
+    assert out.conditions == ()
+
+
 # --- with the Hermes adapter (human-owned tasks on the same board) -----------------------
 
 
@@ -244,6 +365,14 @@ def test_settings_parsing(tmp_path: Path) -> None:
     off = load_settings(write(tmp_path, "[connectors.human_tasks]\nenabled = false\n"))
     assert off.human_tasks == HumanTaskSettings(enabled=False)
     assert load_human_tasks({}) == HumanTaskSettings()
+    text = (
+        "[connectors.human_tasks]\n"
+        "[[connectors.human_tasks.block_patterns]]\n"
+        "pattern = 'approval in (?P<task>\\S+)'\n"
+    )
+    configured = load_settings(write(tmp_path, text)).human_tasks
+    assert configured is not None and len(configured.block_patterns) == 1
+    assert configured.block_patterns[0].search("Approval in T-9")["task"] == "T-9"  # type: ignore[index]
 
 
 @pytest.mark.parametrize(
@@ -252,6 +381,15 @@ def test_settings_parsing(tmp_path: Path) -> None:
         ("[connectors.human_tasks]\nenabled = 'yes'\n", "enabled"),
         ("[connectors.human_tasks]\nurl = 'x'\n", "unknown"),
         ("[connectors]\nhuman_tasks = 1\n", "must be a table"),
+        ("[connectors.human_tasks]\nblock_patterns = 1\n", "block_patterns"),
+        ("[connectors.human_tasks]\nblock_patterns = [1]\n", "block_patterns"),
+        ("[[connectors.human_tasks.block_patterns]]\npattern = 'x'\n", "named group"),
+        ("[[connectors.human_tasks.block_patterns]]\npattern = '(?P<task>'\n", "compile"),
+        ("[[connectors.human_tasks.block_patterns]]\npattern = ''\n", "non-empty"),
+        (
+            "[[connectors.human_tasks.block_patterns]]\npattern = '(?P<task>x)'\nrepo = 'a'\n",
+            "unknown",
+        ),
         ("[adapters.hermes]\nhuman_owners = 'alice'\n", "human_owners"),
         ("[adapters.hermes]\nhuman_owners = ['']\n", "human_owners"),
         ("[adapters.hermes]\nhuman_owners = [1]\n", "human_owners"),
