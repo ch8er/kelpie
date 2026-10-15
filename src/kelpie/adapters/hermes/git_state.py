@@ -13,7 +13,9 @@ module asks git only things that do not need them, and switches off what it can:
   worktree's ``.gitattributes`` is not read;
 - a minimal environment (``PATH``, ``HOME`` and fixed git settings; nothing else from
   Kelpie's environment, so no tokens and no inherited ``GIT_*``), no prompts, no optional
-  locks (``status`` never rewrites the index);
+  locks (``status`` never rewrites the index), no fetching (a partial clone would otherwise
+  run the transport the workspace config names), and a ceiling at the workspace's parent so
+  git never falls back to a repository further up;
 - each call in its own process group with a timeout, the whole group killed on timeout, and an
   optional deadline shared by all calls of one snapshot.
 
@@ -40,6 +42,7 @@ log = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 5.0  # seconds, per git call
 ABBREV = 7  # hex digits of ``last_commit``
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+EMPTY_TREE_SHA256 = "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"
 ATTR_SOURCE_SINCE = (2, 40)  # first git with ``--attr-source``
 
 # Fixed environment of every git call: nothing else is inherited from Kelpie's environment.
@@ -49,6 +52,10 @@ GIT_ENV = {
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_ATTR_NOSYSTEM": "1",
     "GIT_OPTIONAL_LOCKS": "0",
+    # No fetching, so no transport programs (upload-pack, ssh command, ext::) named in the
+    # workspace config: a partial clone with a missing HEAD would otherwise fetch it.
+    "GIT_NO_LAZY_FETCH": "1",
+    "GIT_ALLOW_PROTOCOL": "none",
 }
 INHERITED_ENV = ("PATH", "HOME")
 # Config overrides on every call (``-c`` wins over the repository's own config).
@@ -116,14 +123,19 @@ def warn_once(key: tuple[str, str], msg: str, *args: object) -> None:
 # --- running git ------------------------------------------------------------------------
 
 
-def git_env() -> dict[str, str]:
-    """The whole environment of a git call."""
+def git_env(path: Path | None = None) -> dict[str, str]:
+    """The whole environment of a git call in the workspace at ``path``."""
     env = {k: v for k in INHERITED_ENV if (v := os.environ.get(k)) is not None}
     env.update(GIT_ENV)
+    if path is not None:
+        # An empty or broken ``.git`` must not make git use a repository further up.
+        env["GIT_CEILING_DIRECTORIES"] = str(path.parent)
     return env
 
 
-def _run(cmd: list[str], timeout: float, deadline: float | None) -> tuple[int, str, str]:
+def _run(
+    cmd: list[str], timeout: float, deadline: float | None, path: Path | None = None
+) -> tuple[int, str, str]:
     """``(returncode, stdout, stderr)`` of ``cmd``; raises ``_Stop`` if it cannot finish."""
     limit, cut = timeout, False
     if deadline is not None:
@@ -138,7 +150,7 @@ def _run(cmd: list[str], timeout: float, deadline: float | None) -> tuple[int, s
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=git_env(),
+            env=git_env(path),
             encoding="utf-8",
             errors="replace",
             start_new_session=True,  # its own process group, killed as a whole on timeout
@@ -224,11 +236,17 @@ def read_git_state(
 
 
 def _read(path: Path, timeout: float, deadline: float | None, branch: str | None) -> GitState:
+    trees = [EMPTY_TREE, EMPTY_TREE_SHA256]  # the empty tree of a SHA-1, then SHA-256 repo
+
     def git(command: str, *args: str, extra: tuple[str, ...] = ()) -> tuple[int, str]:
         config = [arg for c in (*SAFE_CONFIG, *extra) for arg in ("-c", c)]
-        options = [f"--attr-source={EMPTY_TREE}"] if _ATTR_SOURCE else []
-        cmd = ["git", "-C", str(path), *config, *options, command, *args]
-        code, out, err = _run(cmd, timeout, deadline)
+        while True:
+            options = [f"--attr-source={trees[0]}"] if _ATTR_SOURCE else []
+            cmd = ["git", "-C", str(path), *config, *options, command, *args]
+            code, out, err = _run(cmd, timeout, deadline, path)
+            if code == 0 or not options or "attr-source" not in err or len(trees) == 1:
+                break
+            trees.pop(0)  # not a SHA-1 repository
         if code != 0 and (command, code) != ("config", 1):  # 1: nothing matched
             log.debug("hermes: git %s exited %s in %s: %s", command, code, path, err.strip())
         return code, out

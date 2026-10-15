@@ -442,6 +442,58 @@ def test_filter_driver_that_cannot_be_overridden_stops_the_read(repo: Path, tmp_
     assert not marker.exists()
 
 
+def test_partial_clone_does_not_fetch_through_the_workspace_transport(
+    repo: Path, tmp_path: Path
+) -> None:
+    """A promisor remote with a missing HEAD would make status fetch via upload-pack."""
+    marker = tmp_path / "marker"
+    git(repo, "config", "core.repositoryformatversion", "1")
+    git(repo, "config", "extensions.partialClone", "origin")
+    git(repo, "config", "remote.origin.promisor", "true")
+    git(repo, "config", "remote.origin.url", str(tmp_path))
+    upload_pack = tmp_path / "up.sh"  # leaves a marker and fails, so plain git does not hang
+    upload_pack.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+    upload_pack.chmod(0o755)
+    git(repo, "config", "remote.origin.uploadpack", str(upload_pack))
+    (repo / ".git" / "refs" / "heads" / "main").write_text("1" * 40 + "\n")
+    subprocess.run(
+        ["git", "-C", str(repo), "status"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert marker.exists(), "the attack must work against plain git"
+    marker.unlink()
+    read_git_state(repo, 5.0)
+    assert not marker.exists()
+
+
+def test_empty_dot_git_does_not_fall_back_to_a_parent_repository(repo: Path) -> None:
+    inner = repo / "wt"
+    (inner / ".git").mkdir(parents=True)
+    state = read_git_state(inner, 5.0)
+    assert state.last_commit is None and state.changed_files is None
+
+
+def test_sha256_repository(tmp_path: Path) -> None:
+    path = tmp_path / "sha256"
+    path.mkdir()
+    if subprocess.run(
+        ["git", "-C", str(path), "init", "-q", "--object-format=sha256"], capture_output=True
+    ).returncode:
+        pytest.skip("git without SHA-256 support")
+    git(path, "config", "user.email", "agent@example.invalid")
+    git(path, "config", "user.name", "Agent")
+    (path / "a.txt").write_text("one\n")
+    git(path, "add", "a.txt")
+    git(path, "commit", "-q", "-m", "first", date=COMMITTED_AT)
+    (path / "b.txt").write_text("two\n")
+    state = read_git_state(path, 5.0)
+    assert state.problem is None and state.changed_files == 1
+    assert state.last_commit is not None and state.last_commit_at is not None
+
+
 def test_signed_head_does_not_run_gpg(repo: Path, tmp_path: Path) -> None:
     marker = tmp_path / "marker"
     git(repo, "config", "gpg.program", str(touch_script(tmp_path, marker, "gpg.sh")))
@@ -502,7 +554,10 @@ def test_git_env_is_minimal(monkeypatch: pytest.MonkeyPatch) -> None:
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_ATTR_NOSYSTEM": "1",
         "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_ALLOW_PROTOCOL": "none",
     }
+    assert gs.git_env(Path("/w/wt"))["GIT_CEILING_DIRECTORIES"] == "/w"
 
 
 def test_secrets_do_not_reach_git(

@@ -192,10 +192,16 @@ objects. Git runs programs named in that config (filter drivers, `core.fsmonitor
 - Every call also gets `-c core.fsmonitor=false -c core.attributesFile=/dev/null
   -c core.hooksPath=/dev/null -c status.showUntrackedFiles=normal -c submodule.recurse=false`,
   and `--attr-source=<empty tree>` when the installed git has it (2.40 or later, checked once
-  per process), so the worktree's `.gitattributes` is not read at all.
+  per process; the SHA-256 empty tree is used for SHA-256 repositories), so the worktree's
+  `.gitattributes` is not read at all.
 - Minimal environment: only `PATH` and `HOME` are passed from Kelpie's environment, plus
   `LC_ALL=C`, `GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_ATTR_NOSYSTEM=1` and
-  `GIT_OPTIONAL_LOCKS=0` (so `status` never rewrites the index under a running worker).
+  `GIT_OPTIONAL_LOCKS=0` (so `status` never rewrites the index under a running worker), and
+  `GIT_NO_LAZY_FETCH=1` with `GIT_ALLOW_PROTOCOL=none`: git never fetches, so a "partial
+  clone" with a missing `HEAD` cannot make it start the transport the workspace config names
+  (`remote.<name>.uploadpack`, `core.sshCommand`, `ext::`). `GIT_CEILING_DIRECTORIES` is the
+  workspace's parent, so an empty or broken `.git` never makes git use a repository further
+  up (such as a human's checkout).
   Kelpie's tokens and any inherited `GIT_*` (`GIT_DIR`, `GIT_WORK_TREE`, ...) never reach git.
   Git still reads the global config of the user Kelpie runs as (`$HOME/.gitconfig`).
 - Each call runs in its own process group with `git_timeout`; on timeout the whole group is
@@ -216,7 +222,8 @@ Operations:
 
 - The Docker image built from this repository has no git, so the feature yields nothing
   there (one warning: `git not found on PATH`); install git in a derived image if you need
-  it.
+  it, and run the container with `--init` (or tini): processes killed on a git timeout are
+  re-parented to PID 1, which must reap them.
 - Git refuses repositories owned by another uid ("detected dubious ownership"); when Kelpie
   runs as a different user than the agents, git fields stay empty without a warning. Run
   Kelpie with debug logging (`kelpie.adapters.hermes`) to see git's error. Whether to add the
