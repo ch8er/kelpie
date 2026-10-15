@@ -16,15 +16,25 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable, Collection, Sequence
-from datetime import UTC, datetime
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
 from kelpie.core.model import Span, SpanKind, SpanTotals
-from kelpie.core.spans import MAX_LINK_DEPTH, SpanChanges, TokenUsage, last_at
+from kelpie.core.spans import (
+    MAX_LINK_DEPTH,
+    Attribution,
+    SpanChanges,
+    TokenUsage,
+    attribution_stale,
+    counted_llm,
+    has_usage,
+    last_at,
+)
 from kelpie.core.states import OpenState
 
 _V1 = """
@@ -100,8 +110,37 @@ CREATE INDEX spans_session ON spans (session_id, start);
 CREATE INDEX spans_task ON spans (task_id, start);
 """
 
+# Counted tokens (kelpie.core.spans.counted_llm), decided per trace when spans are stored:
+# NULL until decided (rows of older databases are decided when the store opens). The
+# partial covering indexes make budget usage index-only scans of counted rows. Attribution keeps
+# session owners and task labels after adapters stop reporting them.
+_V4 = """
+ALTER TABLE spans ADD COLUMN counted INTEGER;
+ALTER TABLE spans ADD COLUMN price_model TEXT;
+CREATE INDEX spans_counted ON spans
+    (last_at, session_id, task_id, price_model, input_tokens, output_tokens, cached_tokens)
+    WHERE counted = 1;
+CREATE INDEX spans_counted_by_subject ON spans
+    (session_id, task_id, price_model, last_at, input_tokens, output_tokens, cached_tokens)
+    WHERE counted = 1;
+CREATE INDEX spans_undecided ON spans (trace_id) WHERE counted IS NULL;
+CREATE TABLE span_sessions (
+    session_id TEXT PRIMARY KEY,
+    owner_id   TEXT NOT NULL,
+    task_id    TEXT,
+    seen_at    TEXT NOT NULL
+);
+CREATE INDEX span_sessions_seen ON span_sessions (seen_at);
+CREATE TABLE span_task_labels (
+    task_id TEXT PRIMARY KEY,
+    labels  TEXT NOT NULL,
+    seen_at TEXT NOT NULL
+);
+CREATE INDEX span_task_labels_seen ON span_task_labels (seen_at);
+"""
+
 # version -> script that upgrades from version - 1. Append, never edit a released one.
-MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3}
+MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 _COLUMNS = (
@@ -297,24 +336,45 @@ def _state(r: sqlite3.Row) -> OpenState:
 _SPAN_COLUMNS = (
     "trace_id, span_id, parent_id, name, kind, start, end_at, last_at, task_id, session_id,"
     " model, tool, args_hash, input_tokens, output_tokens, cached_tokens, outcome, attributes,"
-    " received_at, version"
+    " received_at, version, counted"
 )
-# LLM spans of the window (first parameter: the cutoff) that have an LLM ancestor in the
-# same trace, by rowid_. The walk goes up through non-LLM parents over the whole table, so
-# a parent that arrived after its child, or lies outside the window, is still found.
-_NESTED_LLM = (
-    "WITH RECURSIVE up(id, trace_id, parent_id, depth) AS ("
-    " SELECT rowid_, trace_id, parent_id, 0 FROM spans"
-    " WHERE kind = 'llm' AND last_at >= ? AND parent_id IS NOT NULL"
-    " UNION ALL"
-    " SELECT up.id, p.trace_id, p.parent_id, up.depth + 1 FROM up"
-    " JOIN spans p ON p.trace_id = up.trace_id AND p.span_id = up.parent_id"
-    f" WHERE p.kind != 'llm' AND p.parent_id IS NOT NULL AND up.depth < {MAX_LINK_DEPTH}"
-    "), nested(id) AS ("
-    " SELECT DISTINCT up.id FROM up"
-    " JOIN spans p ON p.trace_id = up.trace_id AND p.span_id = up.parent_id"
-    " WHERE p.kind = 'llm') "
+
+
+# Budget windows up to this long read counted rows by time; longer ones by subject.
+SHORT_WINDOW = timedelta(hours=6)
+
+
+def _usage_key(u: TokenUsage) -> tuple[str, str, str]:
+    return (u.session_id or "", u.task_id or "", u.model or "")
+
+
+class SchemaOutdated(RuntimeError):
+    """A read-only open found a database an older Kelpie wrote; ``kelpie serve`` upgrades
+    it."""
+
+
+class _Node(NamedTuple):
+    """The columns :func:`kelpie.core.spans.counted_llm` reads, plus the stored decision."""
+
+    trace_id: str
+    span_id: str
+    parent_id: str | None
+    kind: SpanKind
+    model: str | None
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    rowid: int
+    counted: int | None
+    price_model: str | None
+
+
+_NODE_COLUMNS = (
+    "trace_id, span_id, parent_id, kind, model, input_tokens, output_tokens, cached_tokens,"
+    " rowid_, counted, price_model"
 )
+
+
 # Rows per write or delete transaction: keeps the SQLite writer slot free for the ledger.
 SPAN_BATCH = 500
 
@@ -341,6 +401,9 @@ def _span_row(span: Span, received: str, version: int) -> tuple[object, ...]:
         json.dumps(span.attributes, sort_keys=True, separators=(",", ":"), default=str),
         received,
         version,
+        # Only an LLM span with usage can count, and only its trace can tell: undecided
+        # (NULL) until _decide; any other span is decided now and needs no update.
+        None if has_usage(span) else 0,
     )
 
 
@@ -367,6 +430,23 @@ def _span(r: sqlite3.Row) -> Span:
     )
 
 
+def _open_readonly(path: Path | str, busy_timeout_ms: int) -> sqlite3.Connection:
+    """A connection that never writes, not even a migration (``kelpie status``)."""
+    db = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True, check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    db.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+    version = db.execute("PRAGMA user_version").fetchone()[0]
+    if version != SCHEMA_VERSION:
+        db.close()
+        if version < SCHEMA_VERSION:
+            raise SchemaOutdated(
+                f"database schema {version} is older than {SCHEMA_VERSION}; run kelpie serve"
+                " once to upgrade it"
+            )
+        raise RuntimeError(f"database schema {version} is newer than {SCHEMA_VERSION}")
+    return db
+
+
 class SqliteSpanStore:
     """Spans in the Kelpie database, behind connections and locks of their own.
 
@@ -375,16 +455,29 @@ class SqliteSpanStore:
     and ingest never waits for a snapshot. Every insert or link update stamps the rows
     with a new ``version``, so :meth:`changes` returns only what changed since the last
     read; ``epoch`` grows with every delete, which tells a cache to reload.
+
+    Which tokens count is decided per trace right after each insert and kept in the
+    ``counted`` and ``price_model`` columns, so :meth:`usage_since` and
+    :meth:`totals_since` are plain sums. ``readonly`` opens the file without writing
+    anything (it must already have the current schema; :class:`SchemaOutdated` otherwise).
     """
 
     def __init__(
-        self, path: Path | str, busy_timeout_ms: int = 5000, batch: int = SPAN_BATCH
+        self,
+        path: Path | str,
+        busy_timeout_ms: int = 5000,
+        batch: int = SPAN_BATCH,
+        *,
+        readonly: bool = False,
     ) -> None:
         self._lock = threading.Lock()
         self._read_lock = threading.Lock()
         self._closing = threading.Event()
-        self._db = _open(path, busy_timeout_ms)
-        self._reader = _open(path, busy_timeout_ms)
+        if readonly:
+            self._db = self._reader = _open_readonly(path, busy_timeout_ms)
+        else:
+            self._db = _open(path, busy_timeout_ms)
+            self._reader = _open(path, busy_timeout_ms)
         self._reader.execute("PRAGMA query_only = 1")
         self._batch = max(1, batch)
         # Kept in step with every write under the lock, so count() needs no table scan.
@@ -393,6 +486,11 @@ class SqliteSpanStore:
             self._db.execute("SELECT COALESCE(MAX(version), 0) FROM spans").fetchone()[0]
         )
         self.epoch = 0
+        # What record_attribution wrote last, so a tick writes only what changed.
+        self._sessions: dict[str, tuple[str, str | None, datetime]] | None = None
+        self._labels: dict[str, tuple[tuple[str, ...], datetime]] | None = None
+        if not readonly:
+            self._decide_undecided()
 
     def close(self) -> None:
         self._closing.set()  # a running prune stops at its next batch
@@ -408,6 +506,7 @@ class SqliteSpanStore:
             f" VALUES ({', '.join('?' * len(_SPAN_COLUMNS.split(',')))})"
         )
         added = 0
+        touched: set[str] = set()
         for i in range(0, len(spans), self._batch):
             chunk = spans[i : i + self._batch]
             with self._lock, self._db:  # one short transaction per batch
@@ -416,11 +515,51 @@ class SqliteSpanStore:
                 self._version = version
                 self._rows += n.rowcount
                 added += n.rowcount
+            if n.rowcount:
+                touched.update(s.trace_id for s in chunk)
+        self._decide(touched)
         return added
 
-    def _read(self, sql: str, args: tuple[object, ...]) -> list[sqlite3.Row]:
+    def _decide_undecided(self) -> None:
+        """Decide rows stored before counting existed (an upgraded database) or left
+        undecided by an interrupted write."""
+        rows = self._db.execute("SELECT DISTINCT trace_id FROM spans WHERE counted IS NULL")
+        self._decide([r[0] for r in rows.fetchall()])
+
+    def _decide(self, trace_ids: Iterable[str]) -> int:
+        """Recompute which tokens count for whole traces (their spans may have arrived in
+        any order) and store what changed. Returns the number of rows updated."""
+        ids = sorted(set(trace_ids))
+        updated = 0
+        for i in range(0, len(ids), self._batch):
+            chunk = ids[i : i + self._batch]
+            marks = ", ".join("?" * len(chunk))
+            sql = f"SELECT {_NODE_COLUMNS} FROM spans WHERE trace_id IN ({marks})"
+            with self._lock:
+                if self._closing.is_set():
+                    return updated
+                nodes = {
+                    (r[0], r[1]): _Node(r[0], r[1], r[2], SpanKind(r[3]), *r[4:])
+                    for r in self._db.execute(sql, chunk).fetchall()
+                }
+                counted = counted_llm(nodes, nodes.values())
+                changes = [
+                    (int(key in counted), counted.get(key), node.rowid)
+                    for key, node in nodes.items()
+                    if (node.counted, node.price_model) != (int(key in counted), counted.get(key))
+                ]
+                if changes:
+                    with self._db:
+                        self._db.executemany(
+                            "UPDATE spans SET counted = ?, price_model = ? WHERE rowid_ = ?",
+                            changes,
+                        )
+                updated += len(changes)
+        return updated
+
+    def _read(self, sql: str, args: Sequence[object]) -> list[sqlite3.Row]:
         with self._read_lock:
-            return self._reader.execute(sql, args).fetchall()
+            return self._reader.execute(sql, tuple(args)).fetchall()
 
     def spans_since(self, after: datetime) -> Sequence[Span]:
         sql = f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? ORDER BY start, rowid_"
@@ -436,22 +575,19 @@ class SqliteSpanStore:
         return SpanChanges(tuple(_span(r) for r in rows), version)
 
     def totals_since(self, after: datetime) -> Sequence[SpanTotals]:
-        root = "spans.kind = 'llm' AND n.id IS NULL"
         sql = (
-            f"{_NESTED_LLM}"
             "SELECT session_id, MAX(task_id) AS task_id, COUNT(*) AS spans,"
-            f" SUM({root}) AS llm_calls, SUM(kind = 'tool') AS tool_calls,"
+            " SUM(counted = 1) AS llm_calls, SUM(kind = 'tool') AS tool_calls,"
             " SUM(kind = 'tool' AND outcome = 'error') AS tool_errors,"
-            f" SUM(CASE WHEN {root} THEN input_tokens ELSE 0 END) AS input_tokens,"
-            f" SUM(CASE WHEN {root} THEN output_tokens ELSE 0 END) AS output_tokens,"
-            f" SUM(CASE WHEN {root} THEN cached_tokens ELSE 0 END) AS cached_tokens,"
+            " SUM(CASE WHEN counted = 1 THEN input_tokens ELSE 0 END) AS input_tokens,"
+            " SUM(CASE WHEN counted = 1 THEN output_tokens ELSE 0 END) AS output_tokens,"
+            " SUM(CASE WHEN counted = 1 THEN cached_tokens ELSE 0 END) AS cached_tokens,"
             " MIN(start) AS first_start,"
             " MAX(last_at) AS last_end"
-            " FROM spans LEFT JOIN nested n ON n.id = spans.rowid_"
+            " FROM spans INDEXED BY spans_last"
             " WHERE last_at >= ? AND session_id IS NOT NULL AND session_id != ''"
             " GROUP BY session_id ORDER BY session_id"
         )
-        after_ts = _ts(after)
         return [
             SpanTotals(
                 session_id=r["session_id"],
@@ -466,33 +602,91 @@ class SqliteSpanStore:
                 first_start=datetime.fromisoformat(r["first_start"]),
                 last_end=datetime.fromisoformat(r["last_end"]),
             )
-            for r in self._read(sql, (after_ts, after_ts))
+            for r in self._read(sql, (_ts(after),))
         ]
 
-    def usage_since(self, after: datetime) -> Sequence[TokenUsage]:
-        sql = (
-            f"{_NESTED_LLM}"
-            "SELECT session_id, task_id, model, COUNT(*) AS calls,"
-            " SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,"
-            " SUM(cached_tokens) AS cached_tokens"
-            " FROM spans LEFT JOIN nested n ON n.id = spans.rowid_"
-            " WHERE kind = 'llm' AND last_at >= ? AND n.id IS NULL"
-            " GROUP BY session_id, task_id, model"
-            " ORDER BY COALESCE(session_id, ''), COALESCE(task_id, ''), COALESCE(model, '')"
-        )
-        after_ts = _ts(after)
-        return [
-            TokenUsage(
-                session_id=r["session_id"],
-                task_id=r["task_id"],
-                model=r["model"],
-                calls=r["calls"],
-                input_tokens=r["input_tokens"],
-                output_tokens=r["output_tokens"],
-                cached_tokens=r["cached_tokens"],
+    def usage_since(
+        self, now: datetime, windows: Sequence[timedelta]
+    ) -> list[tuple[TokenUsage, ...]]:
+        """One plain indexed aggregate per window over counted rows only. A short window
+        is a range scan on ``spans_counted`` (time first); a long one streams through
+        ``spans_counted_by_subject`` (already in group order, so no sort of every row)."""
+        out: list[tuple[TokenUsage, ...]] = []
+        for window in windows:
+            index = "spans_counted" if window <= SHORT_WINDOW else "spans_counted_by_subject"
+            sql = (
+                "SELECT session_id, task_id, price_model, COUNT(*), SUM(input_tokens),"
+                f" SUM(output_tokens), SUM(cached_tokens) FROM spans INDEXED BY {index}"
+                " WHERE counted = 1 AND last_at >= ? GROUP BY session_id, task_id, price_model"
             )
-            for r in self._read(sql, (after_ts, after_ts))
-        ]
+            rows = [TokenUsage(*r) for r in self._read(sql, (_ts(now - window),))]
+            out.append(tuple(sorted(rows, key=_usage_key)))
+        return out
+
+    def record_attribution(
+        self,
+        sessions: Iterable[tuple[str, str, str | None]],
+        labels: Mapping[str, tuple[str, ...]],
+        at: datetime,
+    ) -> int:
+        with self._lock:
+            known_sessions, known_labels = self._known_attribution()
+            session_rows = []
+            for session_id, owner, task in sessions:
+                old = known_sessions.get(session_id)
+                if old is None or old[:2] != (owner, task) or attribution_stale(old[2], at):
+                    known_sessions[session_id] = (owner, task, at)
+                    session_rows.append((session_id, owner, task, _ts(at)))
+            label_rows = []
+            for task_id, names in labels.items():
+                prev = known_labels.get(task_id)
+                if prev is None or prev[0] != names or attribution_stale(prev[1], at):
+                    known_labels[task_id] = (names, at)
+                    label_rows.append((task_id, json.dumps(list(names)), _ts(at)))
+            if session_rows or label_rows:
+                with self._db:
+                    self._db.executemany(
+                        "INSERT INTO span_sessions (session_id, owner_id, task_id, seen_at)"
+                        " VALUES (?, ?, ?, ?) ON CONFLICT (session_id) DO UPDATE SET"
+                        " owner_id = excluded.owner_id, task_id = excluded.task_id,"
+                        " seen_at = excluded.seen_at",
+                        session_rows,
+                    )
+                    self._db.executemany(
+                        "INSERT INTO span_task_labels (task_id, labels, seen_at)"
+                        " VALUES (?, ?, ?) ON CONFLICT (task_id) DO UPDATE SET"
+                        " labels = excluded.labels, seen_at = excluded.seen_at",
+                        label_rows,
+                    )
+            return len(session_rows) + len(label_rows)
+
+    def _known_attribution(
+        self,
+    ) -> tuple[
+        dict[str, tuple[str, str | None, datetime]], dict[str, tuple[tuple[str, ...], datetime]]
+    ]:
+        """Loaded once, under the write lock."""
+        if self._sessions is None or self._labels is None:
+            self._sessions = {
+                r[0]: (r[1], r[2], datetime.fromisoformat(r[3]))
+                for r in self._db.execute(
+                    "SELECT session_id, owner_id, task_id, seen_at FROM span_sessions"
+                )
+            }
+            self._labels = {
+                r[0]: (tuple(_labels(r[1])), datetime.fromisoformat(r[2]))
+                for r in self._db.execute("SELECT task_id, labels, seen_at FROM span_task_labels")
+            }
+        return self._sessions, self._labels
+
+    def attribution(self) -> Attribution:
+        sessions = self._read("SELECT session_id, owner_id, task_id FROM span_sessions", ())
+        labels = self._read("SELECT task_id, labels FROM span_task_labels", ())
+        return Attribution(
+            owners={r[0]: r[1] for r in sessions},
+            session_tasks={r[0]: r[2] for r in sessions if r[2]},
+            labels={r[0]: tuple(_labels(r[1])) for r in labels},
+        )
 
     def prune(self, before: datetime, max_rows: int) -> int:
         """Batched deletes, each its own short transaction; the lock is released between
@@ -511,6 +705,12 @@ class SqliteSpanStore:
         while excess > 0 and (n := self._delete(oldest, (min(excess, self._batch),))):
             deleted += n
             excess -= n
+        with self._lock:
+            if not self._closing.is_set():
+                with self._db:
+                    for table in ("span_sessions", "span_task_labels"):
+                        self._db.execute(f"DELETE FROM {table} WHERE seen_at < ?", (_ts(before),))
+                self._sessions = self._labels = None  # reload on the next write
         return deleted
 
     def _delete(self, sql: str, args: tuple[object, ...]) -> int:
@@ -559,3 +759,11 @@ class SqliteSpanStore:
             if n:
                 self._version = version
             return n
+
+
+def _labels(raw: str) -> list[str]:
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return []
+    return [str(v) for v in value] if isinstance(value, list) else []
