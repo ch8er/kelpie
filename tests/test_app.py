@@ -14,6 +14,7 @@ from kelpie.app import (
     ControlLoop,
     Settings,
     build_app,
+    dispatch_gate_warnings,
     find_config,
     load_rules,
     load_settings,
