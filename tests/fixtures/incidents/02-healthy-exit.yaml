@@ -1,0 +1,60 @@
+id: "02-healthy-exit"
+incident: 2
+title: "Healthy exits and legitimate blocks are left alone"
+description: >
+  The negative side of the exit contract. Sessions that end with a final status, blocks
+  with an allowed reason (with or without detail after a colon), a block tied to a
+  registered condition, and a session that ended only a few minutes ago (the platform may
+  still be writing its status) must not be requeued. One real violation is included so the
+  rule is known to be active on this snapshot.
+rule: exit_contract
+config:
+  allowed_block_reasons: ["guard", "waiting_ci", "waiting_human"]
+  session_exit_grace: "10m"
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: agent-dev-4, role: developer}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    # Finished properly: final status recorded, task done.
+    - {id: T-211, title: "Fix flaky date test", status: done, status_since: "2026-03-02T15:00:00+00:00", owner_id: agent-dev-1}
+    # Blocked with an allowed reason plus detail.
+    - id: T-212
+      title: "Bump HTTP client"
+      status: blocked
+      status_since: "2026-03-02T14:00:00+00:00"
+      owner_id: agent-dev-2
+      block: {reason: "waiting_ci: example/repo#88", since: "2026-03-02T14:00:00+00:00"}
+    # Blocked on a registered condition, free-text reason.
+    - id: T-213
+      title: "Rotate staging certificate"
+      status: blocked
+      status_since: "2026-03-02T13:00:00+00:00"
+      owner_id: agent-dev-3
+      block: {reason: "need the ops team to approve", since: "2026-03-02T13:00:00+00:00", condition_id: C-213}
+    # Session ended 4 minutes ago without a status: still inside the grace period.
+    - {id: T-214, title: "Review: search filters", status: review, status_since: "2026-03-02T15:20:00+00:00", owner_id: reviewer-1}
+    # A real violation: in progress, last session ended an hour ago without a status.
+    - {id: T-215, title: "Add CSV export", status: in_progress, status_since: "2026-03-02T14:00:00+00:00", owner_id: agent-dev-4}
+  conditions:
+    - {id: C-213, kind: human_task, task_id: T-213, satisfied: false}
+  sessions:
+    - {id: S-211, task_id: T-211, owner_id: agent-dev-1, started_at: "2026-03-02T14:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", final_status: done}
+    - {id: S-212, task_id: T-212, owner_id: agent-dev-2, started_at: "2026-03-02T13:30:00+00:00", ended_at: "2026-03-02T14:00:00+00:00", final_status: blocked}
+    - {id: S-213, task_id: T-213, owner_id: agent-dev-3, started_at: "2026-03-02T12:30:00+00:00", ended_at: "2026-03-02T13:00:00+00:00", final_status: blocked}
+    - {id: S-214, task_id: T-214, owner_id: reviewer-1, started_at: "2026-03-02T15:20:00+00:00", ended_at: "2026-03-02T15:56:00+00:00"}
+    - {id: S-215, task_id: T-215, owner_id: agent-dev-4, started_at: "2026-03-02T14:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", exit_reason: "context limit"}
+expected_actions:
+  - kind: requeue
+    task_id: T-215
+    reason_contains: "final status"
+    params: {session_id: S-215, owner_id: agent-dev-4}
+not_expected_actions:
+  - {kind: requeue, task_id: T-211}
+  - {kind: requeue, task_id: T-212}
+  - {kind: requeue, task_id: T-213}
+  - {kind: requeue, task_id: T-214}

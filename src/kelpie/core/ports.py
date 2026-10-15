@@ -20,7 +20,12 @@ class PlatformAdapter(Protocol):
 
     def get_task(self, task_id: str) -> Task | None: ...
 
-    def requeue(self, task_id: str, reason: str) -> None: ...
+    def requeue(self, task_id: str, reason: str) -> None:
+        """Unassign the task and put it back in the ready queue of its current stage (a task
+        in review goes back to the review queue, not to development). The adapter clears
+        the owner and resets ``status_since`` to the time of the requeue, so rules see a
+        fresh state rather than the abandoned one."""
+        ...
 
     def unblock(self, task_id: str, reason: str) -> None: ...
 
