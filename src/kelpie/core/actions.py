@@ -14,6 +14,9 @@ class ActionKind(StrEnum):
     COMMENT = "comment"
     WIP_COMMIT = "wip_commit"
     WAKE = "wake"
+    # Park a task in ``waiting`` on ``params.conditions`` (dispatch gate, conflict
+    # serialization); rule 2 wakes it when they hold.
+    WAIT = "wait"
     REASSIGN = "reassign"
     STOP = "stop"
     CANCEL_BUILD = "cancel_build"

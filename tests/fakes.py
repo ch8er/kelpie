@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from kelpie.core.actions import Action, ActionKind
-from kelpie.core.model import Snapshot, Task
+from kelpie.core.model import Condition, Snapshot, Task
 from kelpie.core.ports import PlatformEvent
 
 
@@ -44,6 +44,15 @@ class FakeAdapter:
 
     def events(self, since: datetime) -> Iterable[PlatformEvent]:
         return []
+
+
+@dataclass
+class WaitingAdapter(FakeAdapter):
+    waits: list[tuple[str, tuple[Condition, ...]]] = field(default_factory=list)
+
+    def wait(self, task_id: str, conditions: Sequence[Condition], reason: str) -> None:
+        self._record("wait", task_id)
+        self.waits.append((task_id, tuple(conditions)))
 
 
 @dataclass

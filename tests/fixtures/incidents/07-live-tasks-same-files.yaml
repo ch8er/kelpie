@@ -1,0 +1,49 @@
+id: "07-live-tasks-same-files"
+incident: 7
+title: "Two live tasks edit the same files and only find out at merge"
+description: >
+  Most task returns on the farm were merge conflicts in a few shared files: two tasks in
+  flight edited the same route registry and types module, and the second to merge had to
+  redo its work. Kelpie warns both while they are still in progress, naming the shared
+  files and the other task, and (with serialization on) holds the later task until the
+  earlier one is done. A changelog everyone edits is expected to be shared and ignored.
+rule: conflict_warning
+config:
+  expected_shared: ["CHANGELOG.md", "docs/*"]
+  serialize: true
+snapshot:
+  now: "2026-03-02T17:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+  tasks:
+    - {id: T-711, title: "Add billing routes", status: in_progress, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-1, files: [src/app/routes.py, src/app/types.py, src/app/billing.py, CHANGELOG.md]}
+    - {id: T-712, title: "Add admin routes", status: in_progress, status_since: "2026-03-02T16:00:00+00:00", role: developer, owner_id: agent-dev-2, files: [src/app/routes.py, src/app/types.py, src/app/admin.py, CHANGELOG.md]}
+    # Distractor: live, but its files are disjoint except for the expected-shared changelog.
+    - {id: T-713, title: "Speed up exports", status: in_progress, status_since: "2026-03-02T16:10:00+00:00", role: developer, owner_id: agent-dev-3, files: [src/app/export.py, CHANGELOG.md, docs/export.md]}
+    # Distractor: finished long ago, so its routes.py change is already merged.
+    - {id: T-714, title: "Add webhook routes", status: done, status_since: "2026-03-02T12:00:00+00:00", role: developer, files: [src/app/routes.py]}
+  sessions:
+    - {id: S-711, task_id: T-711, owner_id: agent-dev-1, started_at: "2026-03-02T15:00:00+00:00", last_heartbeat: "2026-03-02T16:58:00+00:00"}
+    - {id: S-712, task_id: T-712, owner_id: agent-dev-2, started_at: "2026-03-02T16:00:00+00:00", last_heartbeat: "2026-03-02T16:58:00+00:00"}
+    - {id: S-713, task_id: T-713, owner_id: agent-dev-3, started_at: "2026-03-02T16:10:00+00:00", last_heartbeat: "2026-03-02T16:58:00+00:00"}
+expected_actions:
+  - kind: comment
+    task_id: T-711
+    reason_contains: "T-712"
+    params: {conflicting_task: T-712, files: [src/app/routes.py, src/app/types.py]}
+  - kind: comment
+    task_id: T-712
+    reason_contains: "src/app/routes.py"
+    params: {conflicting_task: T-711, files: [src/app/routes.py, src/app/types.py]}
+  - kind: wait
+    task_id: T-712
+    params: {waits_for: [T-711]}
+not_expected_actions:
+  - kind: comment
+    task_id: T-713
+  - kind: comment
+    task_id: T-714
+  - kind: wait
+    task_id: T-711

@@ -18,6 +18,7 @@ from kelpie.app import (
     load_rules,
     load_settings,
     render_status,
+    serialize_warnings,
 )
 from kelpie.cli import main
 from kelpie.core.actions import Action, ActionKind
@@ -26,6 +27,7 @@ from kelpie.core.engine import Engine
 from kelpie.core.model import Snapshot
 from kelpie.metrics import Metrics
 from kelpie.rules import PlannedRule, Priority
+from kelpie.rules.conflict_warning import ConflictWarning
 from kelpie.server import make_server, run
 
 NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
@@ -361,3 +363,16 @@ def test_loop_breaker_inherits_poll_patterns_from_wait_condition(
     assert not caplog.records
     bare = next(r for r in load_rules(EngineConfig()).rules if r.name == "loop_breaker")
     assert bare.poll_patterns == {}  # type: ignore[attr-defined]
+
+
+def test_serialize_in_act_mode_needs_rule_2_in_act_mode() -> None:
+    def engine(**modes: Mode) -> EngineConfig:
+        return EngineConfig(dry_run=False, modes=modes)
+
+    act, on = Mode.ACT, [ConflictWarning(serialize=True)]
+    assert serialize_warnings(engine(conflict_warning=act), on)
+    assert serialize_warnings(engine(conflict_warning=act, wait_condition=act), on) == []
+    assert serialize_warnings(engine(conflict_warning=Mode.SUGGEST), on) == []
+    assert serialize_warnings(engine(conflict_warning=act), [ConflictWarning()]) == []
+    dry = EngineConfig(dry_run=True, modes={"conflict_warning": act})
+    assert serialize_warnings(dry, on) == []

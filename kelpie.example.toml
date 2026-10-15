@@ -38,6 +38,12 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # owner = "human-owner"     # named in the alert when the hold looks forgotten
 # expires_after = "2h30m"
 #
+# [engine.rules.conflict_warning]
+# expected_shared = ["CHANGELOG.md"]  # glob patterns of files many tasks are meant to edit
+# serialize = false         # true: hold the later of two conflicting tasks (act mode, needs an
+#                           # adapter that can park a task in waiting, and wait_condition in
+#                           # act mode to wake it; Kelpie warns at startup otherwise)
+#
 # [engine.rules.no_progress]
 # window = "30m"            # tokens vs. progress over this long; [traces] window must be
 #                           # at least this long (Kelpie warns at startup otherwise)
