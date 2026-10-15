@@ -454,6 +454,7 @@ how long the quota will last. The rule stays CI-agnostic; CI specifics live in a
 - [ ] Depends on CI build/run records in the snapshot (see "close model gaps"): commit sha, branch, trigger event, draft flag, changed paths, duration/minutes, status, `superseded_by`
 - [ ] Each wasted build is classified (draft/WIP, superseded, docs-only, already verified) with the minutes it burned
 - [ ] Superseded running builds → `cancel_build`, executed by the CI connector (not the platform adapter) through action routing (see "action routing")
+- [ ] Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check)
 - [ ] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks`
 - [ ] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
 
@@ -489,8 +490,9 @@ block (incident 10 in another form). Turn such blocks into conditions instead of
 - [ ] Config: block-reason patterns as data (like `wait_condition`'s `poll_patterns`), each mapped to a condition kind (`pr_merged`, `ci_green`) and a way to extract the PR reference
 - [ ] A matching block gets the condition attached through the GitHub connector when it can resolve the PR; rule 4 then clears the block when the condition is met
 - [ ] Matched blocks count as waiting: no "block without condition" alert
+- [ ] A condition is bound to the exact target the task waits for: repo, PR number and the PR's head SHA. `ci_green` means the required checks on that head are green; green CI on `main` or on another PR never satisfies it; a new push to the PR resets it. When a task waits for a PR to land, the condition is `pr_merged`, not `ci_green` (field case: a duty agent unblocked a task because CI on `main` was green while the PR it waited for was still red)
 - [ ] Unmatched blocks, and matched ones whose PR cannot be resolved, keep the current behaviour
-- [ ] Fixtures: new `15-review-block-waiting-merge.yaml` (synthetic names), with a 13 h unmatched block as the true positive
+- [ ] Fixtures: new `15-review-block-waiting-merge.yaml` (synthetic names), with a 13 h unmatched block as the true positive; new `15-green-main-red-pr.yaml` (main green, the awaited PR head red → the block stays)
 
 ### connectors: LLM provider quotas and auth health
 labels: P0, week-2, area:connectors
