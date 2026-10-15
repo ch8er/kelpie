@@ -53,6 +53,7 @@ source_modules = ["kelpie.core", "kelpie.rules"]
 forbidden_modules = [
     "kelpie.adapters",
     "kelpie.connectors",
+    "kelpie.alerts",
     "kelpie.app",
     "kelpie.server",
     "kelpie.cli",
@@ -95,6 +96,22 @@ type = "forbidden"
 source_modules = ["kelpie.connectors"]
 forbidden_modules = [
     "kelpie.adapters",
+    "kelpie.rules",
+    "kelpie.traces",
+    "kelpie.resources",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+]
+
+[[tool.importlinter.contracts]]
+name = "Alert delivery builds on core and the HTTP helper only"
+type = "forbidden"
+source_modules = ["kelpie.alerts"]
+forbidden_modules = [
+    "kelpie.adapters",
+    "kelpie.connectors",
     "kelpie.rules",
     "kelpie.traces",
     "kelpie.resources",

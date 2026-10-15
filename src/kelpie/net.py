@@ -1,6 +1,8 @@
-"""A narrow HTTP GET for integrations that send a secret (a bearer token or an API key).
+"""A narrow HTTP client for integrations that send a secret (a bearer token or an API key).
 
-Shared by the Prometheus reader and the LLM quota connector. The rules it enforces:
+Shared by the Prometheus reader, the LLM quota connector and the alert channels (``get`` and
+``post``; a secret may even be in the path, so no error ever quotes the path).
+The rules it enforces:
 
 - Only the configured origin gets the request: redirects are never followed (a 3xx is an
   error). Plain http never goes through a proxy. For https, with ``proxy=True``, an
@@ -71,7 +73,7 @@ class RequestError(Exception):
 @dataclass(frozen=True, slots=True)
 class Response:
     """``headers`` have lower-case names (the first of repeated headers wins). ``body`` is
-    read only for 2xx answers; it is empty otherwise."""
+    read only for 2xx answers (and for others when asked to); it is empty otherwise."""
 
     status: int
     headers: Mapping[str, str] = field(default_factory=dict)
@@ -167,10 +169,43 @@ def get(
     read_body: bool = True,
     proxy: bool = False,
 ) -> Response:
-    """GET ``path`` (with its query, if any) on the origin of ``url``; raises
+    """GET ``path`` on the origin of ``url`` (see :func:`request`)."""
+    return request("GET", url, path, headers, timeout, max_bytes, read_body, proxy)
+
+
+def post(
+    url: str,
+    path: str,
+    headers: Mapping[str, str],
+    body: bytes,
+    timeout: float,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    proxy: bool = False,
+) -> Response:
+    """POST ``body`` to ``path`` (see :func:`request`). The body of a non-2xx answer is
+    read too (up to ``max_bytes``): APIs say there how long to wait."""
+    return request(
+        "POST", url, path, headers, timeout, max_bytes, True, proxy, body=body, body_on_error=True
+    )
+
+
+def request(
+    method: str,
+    url: str,
+    path: str,
+    headers: Mapping[str, str],
+    timeout: float,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    read_body: bool = True,
+    proxy: bool = False,
+    body: bytes | None = None,
+    body_on_error: bool = False,
+) -> Response:
+    """Send ``method`` ``path`` (with its query, if any) on the origin of ``url``; raises
     :class:`RequestError` on redirects, timeouts, connection errors, bodies over
     ``max_bytes`` and header values that are not valid. Other statuses are returned.
-    With ``read_body`` false the body is never read (only the status and headers count).
+    With ``read_body`` false the body is never read (only the status and headers count);
+    otherwise it is read for 2xx answers, and for others only with ``body_on_error``.
     ``proxy`` allows an environment https proxy as a CONNECT tunnel (https only)."""
     seen: set[str] = set()
     for name, value in headers.items():
@@ -195,7 +230,7 @@ def get(
     watchdog.daemon = True
     watchdog.start()
     try:
-        conn.request("GET", path, headers=dict(headers))
+        conn.request(method, path, body=body, headers=dict(headers))
         response = conn.getresponse()
         status = response.status
         if 300 <= status < 400:
@@ -203,7 +238,8 @@ def get(
         names: dict[str, str] = {}
         for name, value in response.getheaders():
             names.setdefault(name.lower(), value)
-        body = _read_limited(response, deadline, max_bytes) if read_body and status < 300 else b""
+        wanted = read_body and (status < 300 or body_on_error)
+        data = _read_limited(response, deadline, max_bytes) if wanted else b""
         if guard.expired:
             raise TimeoutError
     except RequestError:
@@ -217,7 +253,7 @@ def get(
         watchdog.cancel()
         conn.close()
         guard.close()
-    return Response(status, names, body)
+    return Response(status, names, data)
 
 
 def _tracked(guard: _Guard, deadline: float) -> Callable[..., socket.socket]:

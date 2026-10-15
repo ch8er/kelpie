@@ -389,3 +389,24 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # pattern = 'waiting for (?:green )?ci (?:on|of) (?P<pr>\S+)'
 # kind = "ci_green"
 # repo = "example/repo"
+
+# Real-time alerts. None are sent without a channel. An alert goes to every channel whose
+# min_severity it reaches; each message shows the transition (new, still open, changed,
+# resolved) and what Kelpie already did. Nothing leaves Kelpie while engine.dry_run is true.
+# Delivery runs on a background worker per channel (bounded queue; retries on 429, honouring
+# retry_after, and on 5xx); alerts that do not fit the queue are dropped and counted
+# (kelpie_alerts_dropped_total). `kelpie status` lists the channels, never their secrets.
+#
+# [alerts]
+# dedup_window = "10m"      # identical alerts within this window are sent once per channel
+# queue_size = 50           # per channel
+#
+# [[alerts.channels]]
+# type = "telegram"
+# token_env = "KELPIE_TELEGRAM_TOKEN"  # variable holding the bot token (from @BotFather);
+#                                      # must be set at startup, its value is never logged
+# chat_id = "-1001234567890"           # a chat id, or "@channelname"
+# timeout = "10s"
+# min_severity = "warning"             # info | warning | critical
+# # name = "telegram"                  # only needed with two telegram channels
+# # api_url = "https://api.telegram.org"  # e.g. a local Bot API server (http only on loopback)

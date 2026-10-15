@@ -9,6 +9,14 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import (
+    CHANGED_PREFIX,
+    ESCALATED_PREFIX,
+    FAILED_TAG,
+    NOT_EXECUTED_SUFFIX,
+    RESOLVED_PREFIX,
+    SUGGEST_TAG,
+)
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
 from kelpie.core.ledger import (
@@ -158,7 +166,7 @@ class Engine:
                 log.debug("traceback of failed action: %s", action, exc_info=True)
                 outcome = Outcome.FAILED
                 if self._last_attempt(action, mode, snapshot.now):
-                    self._safe_alert(action, executed=False, prefix="failed")
+                    self._safe_alert(action, executed=False, prefix=FAILED_TAG)
             dispatched = Dispatched(action, mode, outcome)
         self._record(dispatched, snapshot.now)
         return dispatched
@@ -198,8 +206,8 @@ class Engine:
             self._record(dispatched, now)
             return dispatched
         prefix = {
-            Transition.ESCALATED: f"Still open after {_age(now - new.since)}: ",
-            Transition.CHANGED: "Changed: ",
+            Transition.ESCALATED: f"{ESCALATED_PREFIX}{_age(now - new.since)}: ",
+            Transition.CHANGED: CHANGED_PREFIX,
         }.get(transition, "")
         # Each transition has its own fingerprint, so the cooldown only stops true repeats.
         key = f"{action.key or action.state}|{new.opened_at.isoformat()}|L{new.level}"
@@ -228,7 +236,7 @@ class Engine:
             notice = Action(
                 ActionKind.ALERT,
                 state.rule,
-                f"Resolved after {_age(snapshot.now - state.since)}: {first_line}.",
+                f"{RESOLVED_PREFIX}{_age(snapshot.now - state.since)}: {first_line}.",
                 task_id=state.task_id,
                 key=f"resolved:{state.id}|{state.opened_at.isoformat()}",
                 params={"state": state.id},
@@ -289,7 +297,7 @@ class Engine:
         if action.kind in _ALERT_ACTIONS:
             return Outcome.ALERTED if self._alert(action) else Outcome.DROPPED
         if mode is Mode.SUGGEST:
-            return Outcome.SUGGESTED if self._alert(action, prefix="suggest") else Outcome.DROPPED
+            return Outcome.SUGGESTED if self._alert(action, prefix=SUGGEST_TAG) else Outcome.DROPPED
         return self._dispatch(action, snapshot)
 
     def route(self, action: Action, snapshot: Snapshot) -> Executor | None:
@@ -326,10 +334,10 @@ class Engine:
         if self.alerter is None:
             log.warning("no alerter configured; dropped: %s", action)
             return False
-        title = f"[{action.rule}] {prefix + ' ' if prefix else ''}{action.kind}"
+        title = f"[{action.rule}] {prefix + ' ' if prefix else ''}{action.kind}"  # see alerts.py
         title += f" {action.task_id}" if action.task_id else ""
         if not executed:
-            title += " (not executed, needs a human)"
+            title += NOT_EXECUTED_SUFFIX
         self.alerter.send(title, action.reason, action.severity)
         return True
 

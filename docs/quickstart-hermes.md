@@ -155,6 +155,10 @@ Optional: to get disk and memory alerts and a heavy-task limit, point Kelpie at 
 Prometheus with `[resources.prometheus]` and `[engine.rules.resources]` (see
 `kelpie.example.toml`); without them the `resources` rule has no data and stays silent.
 
+Optional: real-time alerts to Telegram with `[[alerts.channels]]` (`type = "telegram"`,
+bot token from an environment variable, see `kelpie.example.toml`); `kelpie status` shows the
+channels and whether the token is set.
+
 ## Where to look
 
 - `kelpie doctor` and `kelpie status`: setup and what is loaded.
