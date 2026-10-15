@@ -6,7 +6,7 @@ import contextlib
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -89,6 +89,14 @@ class Metrics:
         self.resource_up = True
         self.resource_readings = 0
         self.resource_failures: Counter[str] = Counter()
+        self.connector_errors: Counter[str] = Counter()
+        self.github_enabled = False
+        self.github_requests: Counter[str] = Counter()
+        self.github_rate_remaining = -1
+        self.github_rate_limit_value = -1
+        self.block_condition_outcomes: dict[str, int] = dict.fromkeys(
+            ("attached", "unresolved", "unconfirmed", "error"), 0
+        )
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
@@ -196,6 +204,29 @@ class Metrics:
     def forward_dropped(self, destination: str, count: int = 1) -> None:
         with self._lock:
             self.forward.setdefault(destination, Counter())["dropped"] += count
+
+    # --- GitHub connector (kelpie.connectors.github observers) -------------------------
+
+    def set_github(self, enabled: bool) -> None:
+        with self._lock:
+            self.github_enabled = enabled
+
+    def github_request(self, outcome: str) -> None:
+        with self._lock:
+            self.github_requests[outcome] += 1
+
+    def github_rate_limit(self, remaining: int, limit: int) -> None:
+        with self._lock:
+            self.github_rate_remaining = remaining
+            self.github_rate_limit_value = limit
+
+    def block_conditions(self, outcomes: Mapping[str, int]) -> None:
+        with self._lock:
+            self.block_condition_outcomes = dict(outcomes)
+
+    def connector_failed(self, name: str) -> None:
+        with self._lock:
+            self.connector_errors[name] += 1
 
     def adapter_failed(self, name: str) -> None:
         with self._lock:
@@ -330,6 +361,8 @@ class Metrics:
                 "1 unless the last action-ledger read or write failed.",
                 [f"kelpie_ledger_up {int(self.ledger_up)}"],
             )
+            if self.github_enabled:
+                self._render_github(metric)
             if self.traces_enabled:
                 self._render_traces(metric)
             if self.forward:
@@ -472,6 +505,52 @@ class Metrics:
             "1 when spend could not be read on the last tick: budget values are from the last "
             "good read.",
             [f"kelpie_budget_stale {int(self.budgets_stale_now)}"],
+        )
+
+    def _render_github(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        metric(
+            "kelpie_connector_errors_total",
+            "counter",
+            "Connector snapshot steps that raised; the tick goes on without them.",
+            [
+                f"kelpie_connector_errors_total{_labels(connector=c)} {n}"
+                for c, n in sorted(self.connector_errors.items())
+            ],
+        )
+        metric(
+            "kelpie_github_requests_total",
+            "counter",
+            "GitHub API lookups by outcome: ok, not_modified (304), cached (no request), "
+            "or an error kind (backoff, network, server, rate_limited, unauthorized, "
+            "forbidden, not_found, redirect, bad_response, ...).",
+            [
+                f"kelpie_github_requests_total{_labels(outcome=o)} {n}"
+                for o, n in sorted(self.github_requests.items())
+            ],
+        )
+        metric(
+            "kelpie_github_rate_limit_remaining",
+            "gauge",
+            "X-RateLimit-Remaining from the last GitHub response (-1 before the first).",
+            [f"kelpie_github_rate_limit_remaining {self.github_rate_remaining}"],
+        )
+        metric(
+            "kelpie_github_rate_limit",
+            "gauge",
+            "X-RateLimit-Limit from the last GitHub response (-1 if unknown).",
+            [f"kelpie_github_rate_limit {self.github_rate_limit_value}"],
+        )
+        metric(
+            "kelpie_block_conditions",
+            "gauge",
+            "Blocks in the last snapshot whose reason matched [[block_conditions]]: attached "
+            "a condition; unresolved (bad ref, repo not allowed, 404) or unconfirmed (GitHub "
+            "could not confirm the PR yet), both left as they are; error (the step failed on "
+            "the block).",
+            [
+                f"kelpie_block_conditions{_labels(outcome=o)} {n}"
+                for o, n in self.block_condition_outcomes.items()
+            ],
         )
 
     def _span_rows(self) -> int:

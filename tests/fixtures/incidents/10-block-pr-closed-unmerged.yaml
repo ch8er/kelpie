@@ -1,0 +1,63 @@
+id: "10-block-pr-closed-unmerged"
+incident: 10
+title: "Self-block on a merge whose PR was closed without merging"
+description: >
+  A reviewer blocked its card with "waiting for CI/merge of #127" and a pr_merged condition
+  was attached from the reason, but the PR was then closed without merging. The condition
+  can never be met, so waiting the usual 8h before the "condition unmet" alert only loses
+  time: rule 4 alerts at once. A card whose PR is still open is left waiting.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+  max_condition_age: "15m"
+  max_block: "8h"
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - id: T-1051
+      title: "Review: drop legacy exporter"
+      status: blocked
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for CI/merge of #127"
+        since: "2026-03-02T13:00:00+00:00"
+        condition_id: "block:T-1051:pr_merged:example/repo#127"
+    # Distractor: its PR is still open, one hour into the wait.
+    - id: T-1052
+      title: "Review: config reload"
+      status: blocked
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for CI/merge of #128"
+        since: "2026-03-02T13:00:00+00:00"
+        condition_id: "block:T-1052:pr_merged:example/repo#128"
+  conditions:
+    - id: "block:T-1051:pr_merged:example/repo#127"
+      kind: pr_merged
+      task_id: T-1051
+      params: {repo: example/repo, pr: 127, source: block_reason, pr_state: closed}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T13:00:00+00:00"
+    - id: "block:T-1052:pr_merged:example/repo#128"
+      kind: pr_merged
+      task_id: T-1052
+      params: {repo: example/repo, pr: 128, source: block_reason, pr_state: open}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T13:00:00+00:00"
+expected_actions:
+  - kind: alert
+    task_id: T-1051
+    reason_contains: "closed without merging"
+not_expected_actions:
+  - kind: alert
+    task_id: T-1052
+  - kind: unblock
+    task_id: T-1051

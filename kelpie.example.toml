@@ -203,3 +203,39 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # [engine.rules.exit_contract]
 # allowed_block_reasons = ["guard", "waiting_ci", "waiting_pr_merge", "waiting_human", "quota",
 #                          "needs_input", "capability", "transient"]
+
+# GitHub connector (read-only): evaluates pr_merged and ci_status conditions for these
+# repositories only. The token is read from the named env var and sent only to api_url;
+# redirects are never followed. Uncommented, token_env must be set or Kelpie refuses to
+# start; by default $GITHUB_TOKEN is used when set, else GitHub is read anonymously.
+#
+# [connectors.github]
+# repos = ["example/repo"]          # owner/name; nothing else is ever queried
+# token_env = "GITHUB_TOKEN"        # a fine-grained token with read access to PRs and checks
+# api_url = "https://api.github.com"  # GitHub Enterprise: "https://<host>/api/v3" (then
+#                                   # token_env must be set explicitly)
+# timeout = "10s"                   # whole request, connect to last byte (at most 60s)
+# cache_ttl = "60s"                 # answers (errors too) reused this long, then revalidated
+#                                   # by ETag; at least 30s
+# max_requests_per_tick = 50        # beyond this, cached answers or an unknown result
+# tick_budget = "10s"               # wall-clock time for GitHub per tick (at most 60s)
+# enabled = true                    # false keeps the section but does not query GitHub
+#
+# Blocks that are really waits. When a blocked task's reason matches a pattern and names a
+# PR GitHub has confirmed to exist, Kelpie attaches a condition of that kind to the block,
+# so rule 4 clears the block when it holds (and alerts only if it stays unmet past
+# max_block, or at once if the PR was closed without merging) instead of alerting on a
+# block without a condition. Rule 1 then treats the block as a declared wait and does not
+# requeue it. Patterns are case-insensitive regexes with a named group `pr`: "#123", "123",
+# "owner/repo#123" or a PR link. Matched blocks whose PR cannot be resolved or confirmed
+# stay as they are (kelpie_block_conditions{outcome="unresolved"|"unconfirmed"}).
+#
+# [[block_conditions]]
+# pattern = 'waiting for (?:ci/)?merge of (?P<pr>\S+)'
+# kind = "pr_merged"                # pr_merged | ci_green
+# repo = "example/repo"             # for bare refs such as "#123"; must be in repos above
+#
+# [[block_conditions]]
+# pattern = 'waiting for (?:green )?ci (?:on|of) (?P<pr>\S+)'
+# kind = "ci_green"
+# repo = "example/repo"
