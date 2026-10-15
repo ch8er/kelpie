@@ -63,3 +63,24 @@ def test_role_with_no_idle_agent_exposes_zero() -> None:
     )
     ControlLoop(Engine([]), lambda: snapshot, metrics).tick_once()
     assert 'kelpie_idle_agents{role="coder"} 0' in metrics.render()
+
+
+def test_failing_snapshot_source_keeps_the_gauges_and_counts_a_failure() -> None:
+    metrics = Metrics()
+    calls: list[int] = []
+
+    def source() -> Snapshot:
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("adapter down")
+        return _snapshot()
+
+    loop = ControlLoop(Engine([]), source, metrics)
+    loop.tick_once()
+    before = [line for line in metrics.render().splitlines() if line.startswith("kelpie_tasks")]
+    loop.tick_once()
+    text = metrics.render()
+    assert [line for line in text.splitlines() if line.startswith("kelpie_tasks")] == before
+    assert 'kelpie_idle_agents{role="coder"} 1' in text
+    assert "kelpie_engine_tick_failures_total 1" in text
+    assert "kelpie_engine_ticks_total 1" in text

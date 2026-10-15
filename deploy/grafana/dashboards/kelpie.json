@@ -112,7 +112,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "time() - kelpie_engine_last_tick_timestamp_seconds",
+          "expr": "time() - (kelpie_engine_last_tick_timestamp_seconds > 0)",
           "legendFormat": ""
         }
       ],
@@ -153,7 +153,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Trailing-hour increase; a series appears with its first event."
     },
     {
       "id": 6,
@@ -217,7 +218,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Trailing-hour increase; a series appears with its first event."
     },
     {
       "id": 8,
@@ -385,7 +387,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Trailing-hour increase; a series appears with its first event."
     },
     {
       "id": 13,
@@ -417,7 +420,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Trailing-hour increase; a series appears with its first event."
     },
     {
       "id": 14,
@@ -449,7 +453,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Trailing-hour increase; a series appears with its first event."
     },
     {
       "id": 15,
@@ -514,7 +519,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Trailing-hour increase; a series appears with its first event."
     },
     {
       "id": 17,
@@ -1120,7 +1126,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Trailing-hour increase; a series appears with its first event."
     },
     {
       "id": 37,
@@ -1425,7 +1432,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Trailing-hour increase; a series appears with its first event."
     },
     {
       "id": 46,
@@ -1534,7 +1542,8 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "description": "Trailing-hour increase; a series appears with its first event."
     }
   ],
   "templating": {

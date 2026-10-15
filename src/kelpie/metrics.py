@@ -11,8 +11,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from kelpie import __version__
-from kelpie.core.model import OwnerKind, Snapshot, Status
-from kelpie.rules._tasks import is_live
+from kelpie.core.model import Snapshot, Status
+from kelpie.rules.bottlenecks import role_loads
 
 if TYPE_CHECKING:
     from kelpie.app import RuleStatus
@@ -281,16 +281,11 @@ class Metrics:
     def _fleet(self, snapshot: Snapshot) -> None:
         """Tasks per status and idle agents per role, from the tick's snapshot.
 
-        Idle: an agent owner with no live session and no task that is not terminal."""
-        busy = {s.owner_id for s in snapshot.sessions if is_live(s, snapshot.now)}
-        busy.update(t.owner_id for t in snapshot.tasks if t.owner_id and not t.status.is_terminal)
+        Idle agents are counted as the bottlenecks rule counts them."""
         self.fleet_seen = True
         self.tasks = Counter(dict.fromkeys(Status, 0))
         self.tasks.update(t.status for t in snapshot.tasks)
-        self.idle_agents = Counter()
-        for owner in snapshot.owners:
-            if owner.kind is OwnerKind.AGENT:
-                self.idle_agents[owner.role] += owner.id not in busy
+        self.idle_agents = Counter({r: len(load.idle) for r, load in role_loads(snapshot).items()})
 
     def tick_failed(self, engine: Engine) -> None:
         with self._lock:
