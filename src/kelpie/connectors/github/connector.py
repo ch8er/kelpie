@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+from collections import OrderedDict
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.connectors.github.client import GitHubClient, GitHubError
@@ -121,7 +122,7 @@ class GitHubConnector:
         self.client = client
         self.repos = frozenset(r.lower() for r in repos)
         self.host = web_host(client.api_url)
-        self._confirmed: set[PrRef] = set()
+        self._confirmed: OrderedDict[PrRef, None] = OrderedDict()  # LRU of existing PRs
 
     def __repr__(self) -> str:
         return f"GitHubConnector({self.client!r}, repos={sorted(self.repos)})"
@@ -189,19 +190,24 @@ class GitHubConnector:
         """Whether GitHub has shown this PR to exist (since start-up, until a 404)."""
         return ref in self._confirmed
 
+    def age(self, ref: PrRef) -> timedelta | None:
+        """How old the cached answer about this PR is; None if GitHub was never asked."""
+        return self.client.cache_age(_pull_path(ref))
+
     def pull(self, ref: PrRef) -> PullState:
         if not self.allows(ref.repo):
             raise GitHubError("not_allowed", f"{ref.repo} is not a configured repository")
         try:
-            response = self.client.get(f"/repos/{ref.repo}/pulls/{ref.number}")
+            response = self.client.get(_pull_path(ref))
         except GitHubError as exc:
             if exc.kind == "not_found":
-                self._confirmed.discard(ref)
+                self._confirmed.pop(ref, None)
             raise
         body = _mapping(response.body, f"{ref}")
-        if len(self._confirmed) >= MAX_CONFIRMED:
-            self._confirmed.clear()  # bounded; refs are confirmed again on the next answer
-        self._confirmed.add(ref)
+        self._confirmed[ref] = None
+        self._confirmed.move_to_end(ref)
+        while len(self._confirmed) > MAX_CONFIRMED:
+            self._confirmed.popitem(last=False)  # the least recently confirmed
         merged_at = _time(body.get("merged_at"))
         if body.get("merged") is True or merged_at is not None:
             state = "merged"
@@ -255,6 +261,10 @@ class GitHubConnector:
 def _more(body: Mapping[str, Any], items: Sequence[Any]) -> bool:
     total = body.get("total_count")
     return isinstance(total, int) and not isinstance(total, bool) and total > len(items)
+
+
+def _pull_path(ref: PrRef) -> str:
+    return f"/repos/{ref.repo}/pulls/{ref.number}"
 
 
 def _verdict(value: Any, green: Collection[str], red: Collection[str]) -> str:

@@ -222,6 +222,29 @@ def test_tick_request_budget() -> None:
     assert rec.blocks == {"attached": 3, "unconfirmed": 7}
 
 
+def test_demand_over_budget_confirms_everything_and_keeps_answers_fresh(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """40 PRs, 10 requests a tick: new PRs get the budget first, then the oldest answers."""
+    clock = Clock(NOW)
+    tasks = tuple(blocked(f"T-{i}", f"waiting for CI/merge of #{i + 1}", NOW) for i in range(40))
+    attached: list[int] = []
+    with serve() as gh:
+        for i in range(40):
+            gh.pull(REPO, i + 1)
+        s = sync(gh, clock=clock, max_requests=10)
+        for _ in range(20):
+            out = s(Snapshot(now=clock.now, tasks=tasks))
+            attached.append(len(out.conditions))
+            oldest = max(clock.now - c.checked_at for c in out.conditions)  # type: ignore[operator]
+            assert oldest < timedelta(minutes=15)  # within rule 4's freshness window
+            clock.advance(seconds=61)  # every cached answer is due again
+    assert attached[:4] == [10, 20, 30, 40]  # unconfirmed PRs first, ten a tick
+    assert attached[-1] == 40
+    assert oldest <= timedelta(minutes=4, seconds=5)  # fair rotation: 4 ticks per round
+    assert "budget ran out" in caplog.text
+
+
 def test_tick_time_budget() -> None:
     tasks = tuple(blocked(f"T-{i}", f"waiting for CI/merge of #{i + 1}", NOW) for i in range(3))
     with serve() as gh:

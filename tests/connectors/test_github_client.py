@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import logging
+import socket
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
@@ -93,7 +98,8 @@ def test_token_absent_from_repr_logs_and_errors(caplog: pytest.LogCaptureFixture
     assert err.value.kind == "unauthorized"
     for text in (repr(c), str(err.value), repr(err.value), caplog.text):
         assert TOKEN not in text
-    assert err.value.__cause__ is None and err.value.__suppress_context__
+    exc = err.value
+    assert exc.__cause__ is None and (exc.__context__ is None or exc.__suppress_context__)
 
 
 def test_not_found_and_forbidden() -> None:
@@ -242,25 +248,53 @@ def test_deeply_nested_json_is_a_bad_response() -> None:
     assert err.value.kind == "bad_response"
 
 
-def test_forbidden_backs_off_at_least_a_minute_and_errors_are_cached() -> None:
+def test_permission_403_is_cached_for_its_url_only() -> None:
     clock = Clock()
+    other_repo = "/repos/example/other/pulls/1"
     with serve() as gh:
-        gh.reply(PR, {"message": "nope"}, status=403)
+        gh.reply(
+            PR, {"message": "Resource not accessible"}, status=403, X_RateLimit_Remaining="4000"
+        )
+        gh.reply(other_repo, {"number": 1})
         gh.reply("/repos/example/repo/pulls/2", {"message": "gone"}, status=410)
-        c = client(gh.url, clock, error_backoff=timedelta(0))
+        c = client(gh.url, clock)
         with pytest.raises(GitHubError) as first:
             c.get(PR)
-        assert c.backoff_until == clock.now + timedelta(seconds=60)
+        assert c.backoff_until is None  # no global back-off
+        assert c.get(other_repo).body == {"number": 1}  # another repo keeps working
         with pytest.raises(GitHubError) as cached:
             c.get(PR)  # within the TTL: the cached answer, no request
-        clock.advance(seconds=61)
         with pytest.raises(GitHubError) as other:
             c.get("/repos/example/repo/pulls/2")
         with pytest.raises(GitHubError):
             c.get("/repos/example/repo/pulls/2")
     assert first.value.kind == cached.value.kind == "forbidden"
     assert other.value.kind == "http_error" and other.value.status == 410
-    assert len(gh.requests) == 2
+    assert gh.paths() == [PR, other_repo, "/repos/example/repo/pulls/2"]
+
+
+def test_secondary_rate_limit_403_backs_off_everything_for_a_minute() -> None:
+    clock = Clock()
+    body = {"message": "You have exceeded a secondary rate limit."}
+    with serve() as gh:
+        gh.reply(PR, body, status=403, X_RateLimit_Remaining="4000")
+        gh.reply("/repos/example/other/pulls/1", {"number": 1})
+        c = client(gh.url, clock, error_backoff=timedelta(0))
+        with pytest.raises(GitHubError) as limited:
+            c.get(PR)
+        with pytest.raises(GitHubError) as waiting:
+            c.get("/repos/example/other/pulls/1")
+        assert len(gh.requests) == 1
+    assert limited.value.kind == "rate_limited" and waiting.value.kind == "backoff"
+    assert c.backoff_until == clock.now + timedelta(seconds=60)
+
+
+def test_response_too_large() -> None:
+    with serve() as gh:
+        gh.reply(PR, b'"' + b"x" * (4 * 1024 * 1024 + 10) + b'"')
+        with pytest.raises(GitHubError) as err:
+            client(gh.url, Clock()).get(PR)
+    assert err.value.kind == "bad_response" and "too large" in str(err.value)
 
 
 def test_tick_budgets_serve_the_cache() -> None:
@@ -281,14 +315,71 @@ def test_tick_budgets_serve_the_cache() -> None:
     assert err.value.kind == "budget"
 
 
-def test_whole_request_deadline() -> None:
-    now = [0.0]
+@contextmanager
+def drip(head: bytes, body: bytes, drip_head: bool) -> Iterator[str]:
+    """A loopback server that sends one byte every 50 ms, of the headers or of the body."""
+    server = socket.create_server(("127.0.0.1", 0))
+    stop = threading.Event()
 
-    class Slow:
-        def read(self, n: int) -> bytes:
-            now[0] += 5.0
-            return b"x"
+    def run() -> None:
+        conn, _ = server.accept()
+        with conn:
+            conn.recv(65536)
+            if not drip_head:
+                conn.sendall(head)
+            for byte in head + body if drip_head else body:
+                if stop.is_set():
+                    return
+                try:
+                    conn.sendall(bytes([byte]))
+                except OSError:
+                    return
+                time.sleep(0.05)
 
-    c = GitHubClient("https://api.example.test", TOKEN, monotonic=lambda: now[0])
-    with pytest.raises(TimeoutError):
-        c._read(Slow(), deadline=12.0)
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.getsockname()[1]}"
+    finally:
+        stop.set()
+        server.close()
+        thread.join(2)
+
+
+@pytest.mark.parametrize("drip_head", [True, False])
+def test_whole_request_deadline_on_a_dripping_server(drip_head: bool) -> None:
+    body = b'{"number": 1, "pad": "' + b"x" * 200 + b'"}'
+    head = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Pad: "
+        + b"y" * 100
+        + b"\r\nContent-Length: "
+        + str(len(body)).encode()
+        + b"\r\n\r\n"
+    )
+    with drip(head, body, drip_head) as url:
+        c = GitHubClient(url, TOKEN, clock=Clock(), timeout=timedelta(seconds=1))
+        started = time.monotonic()
+        with pytest.raises(GitHubError) as err:
+            c.get(PR)
+        elapsed = time.monotonic() - started
+    assert err.value.kind == "network" and "timed out" in str(err.value)
+    assert elapsed < 1.5
+
+
+def test_https_goes_through_an_environment_proxy_as_a_tunnel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    c = GitHubClient("https://api.example.test", TOKEN)
+    direct = c._connection(1.0)
+    assert direct.host == "api.example.test" and direct._tunnel_host is None  # type: ignore[attr-defined]
+    monkeypatch.setenv("https_proxy", "http://user:pw@proxy.example.test:3128")
+    tunnel = c._connection(1.0)
+    assert (tunnel.host, tunnel.port) == ("proxy.example.test", 3128)
+    assert tunnel._tunnel_host == "api.example.test"  # type: ignore[attr-defined]
+    assert tunnel._tunnel_headers["Proxy-Authorization"].startswith("Basic ")  # type: ignore[attr-defined]
+    monkeypatch.setenv("no_proxy", "api.example.test")
+    assert c._connection(1.0).host == "api.example.test"
+    loopback = GitHubClient("http://127.0.0.1:1", TOKEN)._connection(1.0)
+    assert loopback.host == "127.0.0.1" and loopback._tunnel_host is None  # type: ignore[attr-defined]

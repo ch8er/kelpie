@@ -45,10 +45,13 @@ def test_pr_closed_without_merge_alerts_at_once_on_fresh_evidence() -> None:
     (action,) = run(blocked(since=NOW - 10 * M), closed)
     assert action.kind is ActionKind.ALERT and "closed without merging" in action.reason
     # Evidence from before the block, or a PR still open: no early alert.
-    old = replace(closed, checked_at=NOW - 20 * M)
+    old = replace(closed, checked_at=NOW - 20 * M)  # before the block: not evidence
     assert run(blocked(since=NOW - 10 * M), old) == []
     open_pr = replace(closed, params={"pr_state": "open"})
     assert run(blocked(since=NOW - 10 * M), open_pr) == []
+    # Seen closed during the block but not re-checked lately: the alert stays.
+    (kept,) = run(blocked(since=NOW - 60 * M), old)
+    assert kept.key == action.key.replace((NOW - 10 * M).isoformat(), (NOW - 60 * M).isoformat())
 
 
 def test_registered() -> None:

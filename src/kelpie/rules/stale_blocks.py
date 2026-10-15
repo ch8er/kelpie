@@ -17,8 +17,9 @@ block sits unnoticed, Kelpie alerts on blocks it cannot clear: no visible condit
 ``unlinked_alert_after`` (4h), a condition still unmet after ``max_block`` (8h), and
 conditions the connector stopped checking (``stale_evidence_after``, 1h). Each can be set to
 ``false``. ``waiting`` tasks are rule 2's. A ``pr_merged`` condition whose PR was closed
-without merging (``params.pr_state = "closed"``, freshly checked) can never be met: Kelpie
-alerts at once instead of after ``max_block``.
+without merging (``params.pr_state = "closed"``, seen since the block was set) can never be
+met: Kelpie alerts at once instead of after ``max_block``, and keeps the alert while the
+connector is slow to check again.
 
 A block whose reason only says it waits ("waiting for CI/merge of #123") gets its condition
 before the rule runs: ``[[block_conditions]]`` patterns attach one during snapshot assembly
@@ -108,7 +109,8 @@ class StaleBlocks:
             if c.kind is ConditionKind.PR_MERGED
             and not c.satisfied
             and c.params.get("pr_state") == "closed"
-            and fresh(c, block.since, snapshot.now, self.max_condition_age)
+            and c.checked_at is not None
+            and c.checked_at >= block.since  # seen closed during this block; age aside
         ]
         if closed:
             names = ", ".join(c.id for c in closed)

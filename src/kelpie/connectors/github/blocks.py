@@ -20,7 +20,11 @@ The attached condition is a declared wait: rule 1 (``exit_contract``) no longer 
 such a block, as for any block tied to a registered condition, and rule 4 owns it.
 
 Each tick is bounded: at most ``max_requests`` GitHub requests and ``tick_budget`` of
-wall-clock time; beyond them cached answers are served, or the result is unknown.
+wall-clock time; beyond them cached answers are served, or the result is unknown. The
+budget goes first to PRs GitHub has not confirmed yet, then to the oldest answers, so with
+more demand than budget every PR is confirmed within a few ticks and answers rotate fairly
+instead of the same PRs being revalidated every tick. A tick that runs out of budget logs
+a warning (once, until it suffices again) and counts ``outcome="budget"`` requests.
 
 The same step evaluates conditions the platform already registered (``pr_merged`` and
 ``ci_status`` with ``repo``/``pr`` params for a configured repository).
@@ -31,7 +35,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Any, Protocol
 
@@ -115,6 +119,7 @@ class ConditionSync:
     observer: BlockConditionObserver | None = None
     max_requests: int = DEFAULT_MAX_REQUESTS  # per tick
     tick_budget: timedelta = DEFAULT_TICK_BUDGET  # wall-clock time per tick
+    _exhausted: bool = field(default=False, init=False, repr=False)
 
     def __call__(self, snapshot: Snapshot) -> Snapshot:
         kinds = self.connector.kinds
@@ -125,32 +130,73 @@ class ConditionSync:
             self.tick_budget,
             min_cache_entries=3 * (blocked + len(snapshot.conditions)),
         )
-        conditions = tuple(self._check(c) if c.kind in kinds else c for c in snapshot.conditions)
-        evaluated = replace(snapshot, conditions=conditions)
-        tasks: list[Task] = []
-        added: list[Condition] = []
+        conditions = list(snapshot.conditions)
+        tasks = list(snapshot.tasks)
+        added: dict[int, Condition] = {}
         outcomes = dict.fromkeys(OUTCOMES, 0)
-        for task in snapshot.tasks:
-            condition = None
-            if self.patterns and _bare_block(task, evaluated):
+        # The budget goes to what needs it most: PRs never confirmed first, then the
+        # oldest answers. Everything else is served from the cache, with its age.
+        work: list[tuple[tuple[int, float], str, int]] = []
+        for i, c in enumerate(conditions):
+            if c.kind in kinds:
+                work.append((self._priority([self.connector.ref_from_params(c.params)]), "c", i))
+        for j, task in enumerate(tasks):
+            if self.patterns and _bare_block(task, snapshot):
                 try:
-                    condition, outcome = self._resolve(task)
-                except Exception as exc:  # one odd block reason must not sink the step
-                    log.warning("block condition for task %s failed: %s", task.id, exc)
-                    condition, outcome = None, "error"
-                if outcome is not None:
-                    outcomes[outcome] += 1
-            if condition is None:
-                tasks.append(task)
+                    key = self._priority([ref for _, ref in self._matches(task)])
+                except Exception:  # reported once, by _resolve below
+                    key = (2, 0.0)
+                work.append((key, "t", j))
+        for _, what, k in sorted(work, key=lambda w: w[0]):
+            if what == "c":
+                conditions[k] = self._check(conditions[k])
                 continue
-            assert task.block is not None
-            tasks.append(replace(task, block=replace(task.block, condition_id=condition.id)))
-            added.append(condition)
+            try:
+                condition, outcome = self._resolve(tasks[k])
+            except Exception as exc:  # one odd block reason must not sink the step
+                log.warning("block condition for task %s failed: %s", tasks[k].id, exc)
+                condition, outcome = None, "error"
+            if outcome is not None:
+                outcomes[outcome] += 1
+            if condition is not None:
+                added[k] = condition
+        self._note_budget()
         if self.observer is not None:
             self.observer.block_conditions(outcomes)
-        if not added:
-            return evaluated
-        return replace(evaluated, tasks=tuple(tasks), conditions=conditions + tuple(added))
+        for k, condition in added.items():
+            block = tasks[k].block
+            assert block is not None
+            tasks[k] = replace(tasks[k], block=replace(block, condition_id=condition.id))
+        return replace(
+            snapshot,
+            tasks=tuple(tasks),
+            conditions=tuple(conditions) + tuple(added[k] for k in sorted(added)),
+        )
+
+    def _priority(self, refs: Sequence[PrRef | None]) -> tuple[int, float]:
+        """Sort key: never confirmed (0) before confirmed (1), the oldest answer first."""
+        keys: list[tuple[int, float]] = []
+        for ref in refs:
+            if ref is None:
+                continue
+            age = self.connector.age(ref)
+            if age is None:
+                keys.append((0, float("-inf")))
+            else:
+                keys.append((int(self.connector.confirmed(ref)), -age.total_seconds()))
+        return min(keys, default=(2, 0.0))
+
+    def _note_budget(self) -> None:
+        exhausted = self.connector.client.budget_exhausted
+        if exhausted and not self._exhausted:
+            log.warning(
+                "[connectors.github] the per-tick request or time budget ran out: some PRs "
+                "are served from older answers (see kelpie_github_requests_total"
+                '{outcome="budget"}); raise max_requests_per_tick or tick_budget'
+            )
+        elif self._exhausted and not exhausted:
+            log.info("[connectors.github] the per-tick budget suffices again")
+        self._exhausted = exhausted
 
     def _check(self, condition: Condition) -> Condition:
         try:
@@ -165,17 +211,10 @@ class ConditionSync:
         A condition is attached only for a PR GitHub has shown to exist, now or on an
         earlier tick. While that is not known (back-off, network, 401), the block stays as
         it is, so it does not flap between "waiting" and "no condition"."""
-        block = task.block
-        assert block is not None
-        reason = block.reason[:MAX_REASON]
         outcome: str | None = None
-        for p in self.patterns:
-            m = p.pattern.search(reason)
-            if m is None or not m["pr"]:
-                continue
+        for p, ref in self._matches(task):
             outcome = outcome or "unresolved"
-            ref = parse_pr_ref(m["pr"], p.repo, self.connector.host)
-            if ref is None or not self.connector.allows(ref.repo):
+            if ref is None:
                 continue
             checked = self.connector.check(_condition(task, p, ref))
             if self.connector.confirmed(ref):
@@ -183,6 +222,20 @@ class ConditionSync:
             if checked.params.get("error") not in {"not_found", "not_allowed"}:
                 outcome = "unconfirmed"
         return None, outcome
+
+    def _matches(self, task: Task) -> list[tuple[BlockConditionPattern, PrRef | None]]:
+        """Patterns matching the block reason, with the PR each names (None: unresolvable)."""
+        block = task.block
+        assert block is not None
+        reason = block.reason[:MAX_REASON]
+        found: list[tuple[BlockConditionPattern, PrRef | None]] = []
+        for p in self.patterns:
+            m = p.pattern.search(reason)
+            if m is None or not m["pr"]:
+                continue
+            ref = parse_pr_ref(m["pr"], p.repo, self.connector.host)
+            found.append((p, ref if ref is not None and self.connector.allows(ref.repo) else None))
+        return found
 
 
 def _bare_block(task: Task, snapshot: Snapshot) -> bool:

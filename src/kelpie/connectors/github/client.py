@@ -4,35 +4,45 @@ Security:
 
 - The token comes from the caller (an env var named in the config) and is kept out of
   ``repr``, log lines and exception messages. Errors carry a short kind and the HTTP status,
-  never header values, and are raised ``from None`` so no urllib internals ride along.
+  never header values, and are raised ``from None`` so no library internals ride along.
 - Requests go only to the configured API origin: every URL is the API base plus a path the
   client checks (no ``..``, no ``//``, no ``@``, no scheme), and the resulting origin must
   equal the base origin before the ``Authorization`` header is added.
-- Redirects are never followed: a 3xx would carry the credentials to whatever host the
-  ``Location`` names. They count as errors.
+- Redirects are never followed (``http.client`` does not follow them): a 3xx would carry
+  the credentials to whatever host the ``Location`` names. They count as errors.
 - A plain-http API URL is only accepted on a loopback address (tests, a local mirror), and
-  then no proxy is used, so the token never crosses the network in clear.
+  then no proxy is used, so the token never crosses the network in clear. For https, an
+  ``https_proxy`` from the environment is used as a CONNECT tunnel: the proxy sees the host
+  name, never the request or the token.
 
-Load: responses are cached for ``cache_ttl``, so one tick asks GitHub once per PR however
+Time: ``timeout`` bounds the whole request. The connection is opened with the time that is
+left, a watchdog shuts the socket down at the deadline (however slowly the server drips
+header or body bytes), and every read gets only the time that is left. DNS resolution is
+not bounded (the stdlib cannot do it cheaply).
+
+Load: answers are cached for ``cache_ttl``, so one tick asks GitHub once per PR however
 many blocks name it; after that the cached ETag makes a conditional request (a 304 does not
 count against the GitHub rate limit). Error answers (404, 401, 403, other 4xx) are
-remembered for the same time. ``X-RateLimit-Remaining: 0`` and a 403/429 with
-``Retry-After`` start a back-off until the reset; 401, 403 (at least a minute), network
-errors and 5xx a shorter one. :meth:`GitHubClient.begin_tick` caps the requests and the
-wall-clock time of one tick, and every request has a deadline for the whole exchange, not
-just for each socket read.
-During a back-off nothing is sent: callers get the last cached answer, with the time it was
-fetched, or a :class:`GitHubError`.
+remembered for the same time. ``X-RateLimit-Remaining: 0``, a 403/429 with ``Retry-After``
+and a 403 for a secondary rate limit start a back-off for every request (until the reset,
+at least a minute for a secondary limit); so do 401, network errors and 5xx, shorter. A
+403 for missing access is cached for its URL only. :meth:`GitHubClient.begin_tick` caps the
+requests and the wall-clock time of one tick. During a back-off or past the budget nothing
+is sent: callers get the last cached answer, with the time it was fetched, or a
+:class:`GitHubError`.
 """
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import http.client
 import ipaddress
 import json
 import re
+import socket
+import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
@@ -46,20 +56,21 @@ from kelpie import __version__
 DEFAULT_API_URL = "https://api.github.com"
 DEFAULT_TIMEOUT = timedelta(seconds=10)
 DEFAULT_CACHE_TTL = timedelta(seconds=60)
-ERROR_BACKOFF = timedelta(seconds=60)  # after a network error, a 5xx or a bare 429
+ERROR_BACKOFF = timedelta(seconds=60)  # after a 401, a network error, a 5xx or a bare 429
+SECONDARY_WAIT = timedelta(seconds=60)  # a secondary rate limit: GitHub asks for >= 1 min
 MAX_BACKOFF = timedelta(hours=1)  # a reset or Retry-After further out is capped
 MAX_BODY_BYTES = 4 * 1024 * 1024
+MAX_ERROR_BODY_BYTES = 64 * 1024
 MAX_CACHE_ENTRIES = 1024
 MIN_CACHE_TTL = timedelta(seconds=30)
 API_VERSION = "2022-11-28"
+READ_CHUNK = 16 * 1024
 
 # A token goes into a header: printable ASCII without spaces, so it can neither split the
 # request (CR/LF) nor make http.client echo it in an error message.
 _TOKEN = re.compile(r"[\x21-\x7e]{1,1024}")
 _PATH = re.compile(r"/[A-Za-z0-9._\-/]*")
-
-SECONDARY_WAIT = timedelta(seconds=60)  # a 403 without Retry-After: GitHub asks for >= 1 min
-READ_CHUNK = 64 * 1024
+_SECONDARY = re.compile(rb"secondary rate limit|abuse detection", re.IGNORECASE)
 
 # Errors after which a cached answer, if any, is still worth more than nothing. The others
 # (404, 401, 403, redirects, other 4xx) are answers too: they are cached for ``cache_ttl``.
@@ -106,6 +117,7 @@ def check_api_url(url: str) -> str:
         raise ValueError("api_url must use https (plain http only on a loopback address)")
     if parts.username or parts.password or parts.query or parts.fragment:
         raise ValueError("api_url must not contain credentials, a query or a fragment")
+    _ = parts.port  # raises ValueError for a bad port
     return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
@@ -147,9 +159,15 @@ class _Entry:
     fetched_at: datetime
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        return None  # urllib then raises HTTPError with the 3xx code
+@dataclass(frozen=True, slots=True)
+class _Reply:
+    status: int
+    headers: http.client.HTTPMessage
+    body: bytes
+
+
+class _Timeout(Exception):
+    """The whole-request deadline passed."""
 
 
 def _utc_now() -> datetime:
@@ -178,6 +196,8 @@ class GitHubClient:
         self.__token = token
         base = urllib.parse.urlsplit(self.api_url)
         self._origin = (base.scheme, base.netloc.lower())
+        self._host = base.hostname or ""
+        self._port = base.port
         self.timeout = timeout
         self.cache_ttl = cache_ttl
         self.clock = clock
@@ -187,13 +207,10 @@ class GitHubClient:
         self.monotonic = monotonic
         self._requests_left: int | None = None  # per-tick budget, see begin_tick
         self._tick_deadline: float | None = None
+        self.budget_exhausted = False  # this tick asked for more than its budget
         self.backoff_until: datetime | None = None
         self.rate_remaining: int | None = None
         self._cache: OrderedDict[str, _Entry] = OrderedDict()
-        handlers: list[urllib.request.BaseHandler] = [_NoRedirect()]
-        if base.scheme == "http":
-            handlers.append(urllib.request.ProxyHandler({}))  # loopback: never via a proxy
-        self._opener = urllib.request.build_opener(*handlers)
 
     def __repr__(self) -> str:
         auth = "token" if self.__token else "anonymous"
@@ -210,6 +227,15 @@ class GitHubClient:
         self._requests_left = max_requests
         self._tick_deadline = self.monotonic() + budget.total_seconds()
         self.max_cache_entries = max(self._base_cache_entries, min_cache_entries)
+        self.budget_exhausted = False
+
+    def cache_age(self, path: str, query: Mapping[str, str] | None = None) -> timedelta | None:
+        """How old the cached answer for ``path`` is; None if there is none."""
+        try:
+            entry = self._cache.get(self._url(path, query))
+        except GitHubError:
+            return None
+        return None if entry is None else self.clock() - entry.fetched_at
 
     def get(self, path: str, query: Mapping[str, str] | None = None) -> Response:
         """GET ``path`` (relative to the API base). Raises :class:`GitHubError`."""
@@ -243,10 +269,12 @@ class GitHubClient:
         deadline = start + self.timeout.total_seconds()
         if self._tick_deadline is not None:
             if start >= self._tick_deadline:
+                self.budget_exhausted = True
                 raise GitHubError("budget", f"GET {path}: tick time budget spent")
             deadline = min(deadline, self._tick_deadline)
         if self._requests_left is not None:
             if self._requests_left <= 0:
+                self.budget_exhausted = True
                 raise GitHubError("budget", f"GET {path}: tick request budget spent")
             self._requests_left -= 1
         return deadline
@@ -262,64 +290,127 @@ class GitHubClient:
             raise GitHubError("invalid_request", "URL outside the API origin")
         return url
 
-    def _request(self, url: str, etag: str | None) -> urllib.request.Request:
-        request = urllib.request.Request(url, method="GET")
-        request.add_header("Accept", "application/vnd.github+json")
-        request.add_header("X-GitHub-Api-Version", API_VERSION)
-        request.add_header("User-Agent", f"kelpie/{__version__}")
+    def _headers(self, etag: str | None) -> dict[str, str]:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": API_VERSION,
+            "User-Agent": f"kelpie/{__version__}",
+        }
         if self.__token is not None:
-            request.add_header("Authorization", f"Bearer {self.__token}")
+            headers["Authorization"] = f"Bearer {self.__token}"
         if etag is not None and valid_token(etag):
-            request.add_header("If-None-Match", etag)
-        return request
+            headers["If-None-Match"] = etag
+        return headers
+
+    def _connection(self, timeout: float) -> http.client.HTTPConnection:
+        if self._origin[0] == "http":  # loopback only (check_api_url): never via a proxy
+            return http.client.HTTPConnection(self._host, self._port, timeout=timeout)
+        proxy = _https_proxy(self._host)
+        if proxy is None:
+            return http.client.HTTPSConnection(self._host, self._port, timeout=timeout)
+        conn = http.client.HTTPSConnection(proxy.hostname or "", proxy.port or 80, timeout=timeout)
+        tunnel_headers = {}
+        if proxy.username:
+            pair = f"{urllib.parse.unquote(proxy.username)}:"
+            pair += urllib.parse.unquote(proxy.password or "")
+            tunnel_headers["Proxy-Authorization"] = "Basic " + base64.b64encode(
+                pair.encode()
+            ).decode("ascii")
+        conn.set_tunnel(self._host, self._port, headers=tunnel_headers)
+        return conn
+
+    def _exchange(self, url: str, etag: str | None, deadline: float) -> _Reply:
+        """One GET with a deadline for all of it: connect, headers and body."""
+        target = urllib.parse.urlsplit(url)
+        path = target.path + (f"?{target.query}" if target.query else "")
+        remaining = deadline - self.monotonic()
+        if remaining <= 0:
+            raise _Timeout
+        conn = self._connection(remaining)
+        expired = threading.Event()
+        held: list[socket.socket] = []
+        watchdog = threading.Timer(remaining, _expire, (conn, held, expired))
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            conn.request("GET", path, headers=self._headers(etag))
+            sock = conn.sock  # http.client drops conn.sock once a response will close it
+            if sock is not None:
+                held.append(sock)
+            self._arm(held, deadline)
+            response = conn.getresponse()
+            limit = MAX_BODY_BYTES if response.status in (200, 304) else MAX_ERROR_BODY_BYTES
+            body = self._read(response, held, deadline, limit)
+            if expired.is_set():
+                raise _Timeout
+            return _Reply(response.status, response.headers, body)
+        except (OSError, http.client.HTTPException):
+            if expired.is_set():
+                raise _Timeout from None
+            raise
+        finally:
+            watchdog.cancel()
+            conn.close()
+
+    def _arm(self, held: list[socket.socket], deadline: float) -> None:
+        remaining = deadline - self.monotonic()
+        if remaining <= 0:
+            raise _Timeout
+        for sock in held:
+            sock.settimeout(remaining)
+
+    def _read(
+        self,
+        response: http.client.HTTPResponse,
+        held: list[socket.socket],
+        deadline: float,
+        limit: int,
+    ) -> bytes:
+        chunks: list[bytes] = []
+        size = 0
+        while not response.isclosed():  # the socket is gone once the last byte is read
+            self._arm(held, deadline)
+            chunk = response.read1(READ_CHUNK)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                if limit == MAX_ERROR_BODY_BYTES:
+                    break  # an error page: its start is enough
+                raise _TooLarge
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def _fetch(
         self, url: str, path: str, entry: _Entry | None, now: datetime, deadline: float
     ) -> Response:
-        request = self._request(url, entry.etag if entry else None)
-        timeout = max(0.001, deadline - self.monotonic())
         try:
-            with self._opener.open(request, timeout=timeout) as response:
-                self._note_rate_limit(response.headers, now)
-                raw = self._read(response, deadline)
-                etag = response.headers.get("ETag")
-        except urllib.error.HTTPError as exc:
-            self._note_rate_limit(exc.headers, now)
-            if exc.code == 304 and entry is not None:
-                entry.fetched_at = now
-                self._cache.move_to_end(url)
-                self.observer.github_request("not_modified")
-                return Response(entry.body, now)
-            raise self._http_error(exc, path, now) from None
-        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
-            reason = getattr(exc, "reason", exc)
+            reply = self._exchange(url, entry.etag if entry else None, deadline)
+        except _TooLarge:
+            raise GitHubError("bad_response", f"GET {path}: response too large") from None
+        except _Timeout:
+            self._back_off(now + self.error_backoff, now)
+            raise GitHubError("network", f"GET {path}: timed out") from None
+        except (OSError, http.client.HTTPException, ValueError) as exc:
             self._back_off(now + self.error_backoff, now)
             raise GitHubError(
-                "network", f"GET {path}: connection failed ({type(reason).__name__})"
+                "network", f"GET {path}: connection failed ({type(exc).__name__})"
             ) from None
-        if len(raw) > MAX_BODY_BYTES:
-            raise GitHubError("bad_response", f"GET {path}: response too large")
+        self._note_rate_limit(reply.headers, now)
+        if reply.status == 304 and entry is not None:
+            entry.fetched_at = now
+            self._cache.move_to_end(url)
+            self.observer.github_request("not_modified")
+            return Response(entry.body, now)
+        if reply.status != 200:
+            raise self._http_error(reply, path, now)
         try:
-            body = json.loads(raw)
+            body = json.loads(reply.body)
         except (ValueError, RecursionError):  # not JSON, or nested too deep to decode
             raise GitHubError("bad_response", f"GET {path}: response is not JSON") from None
-        self._store(url, _Entry(body, etag, now))
+        self._store(url, _Entry(body, reply.headers.get("ETag"), now))
         self.observer.github_request("ok")
         return Response(body, now)
-
-    def _read(self, response: Any, deadline: float) -> bytes:
-        """Read the body in chunks; the socket timeout bounds each read, this the whole."""
-        chunks: list[bytes] = []
-        size = 0
-        while size <= MAX_BODY_BYTES:
-            if self.monotonic() > deadline:
-                raise TimeoutError("request deadline passed")
-            chunk = response.read(min(READ_CHUNK, MAX_BODY_BYTES + 1 - size))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            size += len(chunk)
-        return b"".join(chunks)
 
     def _store(self, url: str, entry: _Entry) -> None:
         self._cache[url] = entry
@@ -327,8 +418,8 @@ class GitHubClient:
         while len(self._cache) > self.max_cache_entries:
             self._cache.popitem(last=False)
 
-    def _http_error(self, exc: urllib.error.HTTPError, path: str, now: datetime) -> GitHubError:
-        code = exc.code
+    def _http_error(self, reply: _Reply, path: str, now: datetime) -> GitHubError:
+        code = reply.status
         where = f"GET {path}: HTTP {code}"
         if 300 <= code < 400:
             return GitHubError("redirect", f"{where} redirect (not followed)", code)
@@ -337,26 +428,26 @@ class GitHubClient:
             return GitHubError("unauthorized", f"{where} (token missing, invalid or expired)", code)
         if code == 404:
             return GitHubError("not_found", f"{where} (no such object, or no access)", code)
-        retry_after = _seconds(exc.headers.get("Retry-After") if exc.headers else None)
-        if code == 429 or (code == 403 and (retry_after is not None or self.rate_remaining == 0)):
+        retry_after = _seconds(reply.headers.get("Retry-After"))
+        secondary = code == 403 and _SECONDARY.search(reply.body) is not None
+        if code == 429 or (
+            code == 403 and (retry_after is not None or self.rate_remaining == 0 or secondary)
+        ):
             if retry_after is not None:
                 self._back_off(now + timedelta(seconds=retry_after), now)
+            elif secondary:
+                self._back_off(now + max(self.error_backoff, SECONDARY_WAIT), now)
             elif self.rate_remaining != 0:
                 self._back_off(now + self.error_backoff, now)
             return GitHubError("rate_limited", f"{where} (rate limited)", code)
-        if code == 403:
-            # No access, or a secondary rate limit without Retry-After (GitHub then asks to
-            # wait at least a minute): either way, asking again right away will not help.
-            self._back_off(now + max(self.error_backoff, SECONDARY_WAIT), now)
-            return GitHubError("forbidden", f"{where} (no access, or a secondary rate limit)", code)
+        if code == 403:  # missing access to this resource: cached for this URL only
+            return GitHubError("forbidden", f"{where} (no access)", code)
         if code >= 500:
             self._back_off(now + self.error_backoff, now)
             return GitHubError("server", where, code)
         return GitHubError("http_error", where, code)
 
     def _note_rate_limit(self, headers: Any, now: datetime) -> None:
-        if headers is None:
-            return
         remaining = _int(headers.get("X-RateLimit-Remaining"))
         if remaining is None:
             return
@@ -376,6 +467,34 @@ class GitHubClient:
         until = min(until, now + MAX_BACKOFF)
         if self.backoff_until is None or until > self.backoff_until:
             self.backoff_until = until
+
+
+class _TooLarge(Exception):
+    pass
+
+
+def _expire(
+    conn: http.client.HTTPConnection, held: list[socket.socket], expired: threading.Event
+) -> None:
+    """Watchdog: end a request that outlived its deadline by shutting its socket down."""
+    expired.set()
+    for sock in [*held, conn.sock]:
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+
+
+def _https_proxy(host: str) -> urllib.parse.SplitResult | None:
+    """The https proxy from the environment for ``host``, if any and usable."""
+    proxy = urllib.request.getproxies().get("https")
+    if not proxy or urllib.request.proxy_bypass(host):
+        return None
+    parts = urllib.parse.urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+    try:
+        usable = parts.scheme == "http" and parts.hostname is not None and parts.port != 0
+    except ValueError:
+        usable = False
+    return parts if usable else None
 
 
 def _int(value: str | None) -> int | None:
