@@ -295,7 +295,8 @@ def _fold(otlp: Span, hook: Span) -> Span:
         args_hash=otlp.args_hash or hook.args_hash,
         tool=otlp.tool or hook.tool,
         task_id=otlp.task_id or hook.task_id,
-        session_id=otlp.session_id or hook.session_id,
+        session_id=hook.session_id
+        or otlp.session_id,  # the platform's run, not the exporter's chat
         attributes={**otlp.attributes, **extra},
     )
 

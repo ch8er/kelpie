@@ -176,7 +176,7 @@ def test_same_call_id_merges_whatever_the_session(session: str | None) -> None:
     )  # fmt: skip
     [merged] = merge_hook_spans([otlp, hook]).spans
     assert merged.span_id == otlp.span_id
-    assert merged.session_id == (session or hook.session_id)  # rules still see the run
+    assert merged.session_id == hook.session_id  # rules still see the run
     assert merged.args_hash == hook.args_hash
 
 
