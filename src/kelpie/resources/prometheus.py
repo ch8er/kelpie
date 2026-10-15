@@ -4,7 +4,8 @@ One instant query (``GET /api/v1/query``) per metric. The queries are fixed text
 built from data, and every result is matched to a host by a label value from the
 configuration; series of hosts that are not configured are ignored. Disk, memory, load, CPU
 and process counts become :class:`~kelpie.core.model.Resource` readings (``used``/``limit``
-pairs, so a rule sees utilization) with ``at`` set to the time of the fetch.
+pairs, so a rule sees utilization) with ``at`` set to the sample's timestamp (Prometheus
+clock, capped at the time of the fetch).
 
 The client is deliberately narrow. Redirects are never followed and proxies from the
 environment are never used, so a bearer token goes only to the configured URL. The timeout
@@ -30,7 +31,7 @@ import time
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from kelpie import __version__
@@ -95,6 +96,7 @@ class QueryError(Exception):
 class Sample:
     labels: Mapping[str, str]
     value: float
+    timestamp: float | None = None  # Unix seconds, as Prometheus stamped the sample
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,7 +196,7 @@ def _read_limited(
 def _parse(body: bytes) -> list[Sample]:
     try:
         payload = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: absurdly nested JSON
         raise QueryError("invalid_response", "response is not JSON") from None
     if not isinstance(payload, dict):
         raise QueryError("invalid_response", "response is not a JSON object")
@@ -209,16 +211,27 @@ def _parse(body: bytes) -> list[Sample]:
         or not isinstance(data.get("result"), list)
     ):
         raise QueryError("invalid_response", "unexpected result type (an instant vector is needed)")
+    if len(data["result"]) > MAX_SERIES:
+        log.warning(
+            "a Prometheus query returned %d series; only the first %d are read, so some hosts "
+            "may be missing: narrow the query",
+            len(data["result"]),
+            MAX_SERIES,
+        )
     samples: list[Sample] = []
     for item in data["result"][:MAX_SERIES]:
         try:
             labels = item["metric"]
             value = float(item["value"][1])
+            stamp = item["value"][0]
         except (KeyError, IndexError, TypeError, ValueError):
             continue  # a malformed series is skipped, not fatal
         if not isinstance(labels, dict) or not math.isfinite(value):
             continue  # NaN and infinities carry no reading
-        samples.append(Sample({str(k): str(v) for k, v in labels.items()}, value))
+        timestamp = (
+            float(stamp) if isinstance(stamp, int | float) and math.isfinite(stamp) else None
+        )
+        samples.append(Sample({str(k): str(v) for k, v in labels.items()}, value, timestamp))
     return samples
 
 
@@ -262,8 +275,13 @@ class PrometheusSource:
         self._next_at = now + self.config.interval
         try:
             self._cached = self._fetch(now)
-        except QueryError as exc:
-            self._cached = ()
+        except Exception as caught:
+            self._cached = ()  # no data rather than old data
+            exc = (
+                caught
+                if isinstance(caught, QueryError)
+                else QueryError("unexpected", type(caught).__name__)
+            )
             if exc.cause not in self._warned:
                 self._warned.add(exc.cause)
                 log.warning(
@@ -284,86 +302,112 @@ class PrometheusSource:
 
     # --- queries ------------------------------------------------------------------------
 
-    def _series(self, name: str, by_mount: bool = False) -> dict[tuple[str, str], float]:
+    def _series(
+        self, name: str, now: datetime, by_mount: bool = False
+    ) -> dict[tuple[str, str], Point]:
         """Values of one query per (Kelpie host, mount); unconfigured hosts are dropped."""
-        out: dict[tuple[str, str], float] = {}
+        out: dict[tuple[str, str], Point] = {}
         samples = self.client.query(self.config.query_text(name))
         for sample in sorted(samples, key=lambda s: sorted(s.labels.items())):
             host = self._hosts.get(sample.labels.get(self.config.host_label, ""))
             if host is None:
                 continue
             mount = sample.labels.get("mountpoint", "") if by_mount else ""
-            out.setdefault((host, mount), sample.value)  # first wins: bind mounts repeat
+            # First wins: bind mounts repeat.
+            out.setdefault((host, mount), Point(sample.value, _stamp(sample, now)))
         return out
 
     def _fetch(self, now: datetime) -> tuple[Resource, ...]:
         readings: list[Resource] = []
-        size, avail = self._series("disk_size", True), self._series("disk_avail", True)
+        size = self._series("disk_size", now, True)
+        avail = self._series("disk_avail", now, True)
         for (host, mount), total in sorted(size.items()):
-            if total > 0 and (host, mount) in avail:
-                used = max(0.0, total - avail[(host, mount)])
+            if total.value > 0 and (host, mount) in avail:
+                free = avail[(host, mount)]
                 readings.append(
                     Resource(
                         f"{host}:{mount}",
                         ResourceKind.DISK,
                         host,
-                        used=used / GB,
-                        limit=total / GB,
+                        used=max(0.0, total.value - free.value) / GB,
+                        limit=total.value / GB,
                         unit="GB",
-                        at=now,
+                        at=min(total.at, free.at),
                     )
                 )
-        total_mem, avail_mem = self._series("memory_total"), self._series("memory_available")
+        total_mem = self._series("memory_total", now)
+        avail_mem = self._series("memory_available", now)
         for (host, _), total in sorted(total_mem.items()):
-            if total > 0 and (host, "") in avail_mem:
+            if total.value > 0 and (host, "") in avail_mem:
+                free = avail_mem[(host, "")]
                 readings.append(
                     Resource(
                         f"{host}:memory",
                         ResourceKind.MEMORY,
                         host,
-                        used=max(0.0, total - avail_mem[(host, "")]) / GB,
-                        limit=total / GB,
+                        used=max(0.0, total.value - free.value) / GB,
+                        limit=total.value / GB,
                         unit="GB",
-                        at=now,
+                        at=min(total.at, free.at),
                     )
                 )
-        load, cores = self._series("load1"), self._series("cores")
-        for (host, _), value in sorted(load.items()):
-            if cores.get((host, ""), 0) > 0:
+        load, cores = self._series("load1", now), self._series("cores", now)
+        for (host, _), point in sorted(load.items()):
+            if cores.get((host, ""), Point(0, now)).value > 0:
                 readings.append(
                     Resource(
                         f"{host}:load1",
                         ResourceKind.LOAD,
                         host,
-                        used=value,
-                        limit=cores[(host, "")],
+                        used=point.value,
+                        limit=cores[(host, "")].value,
                         unit="load",
-                        at=now,
+                        at=min(point.at, cores[(host, "")].at),
                     )
                 )
-        for (host, _), value in sorted(self._series("cpu_busy").items()):
+        for (host, _), point in sorted(self._series("cpu_busy", now).items()):
             readings.append(
                 Resource(
                     f"{host}:cpu",
                     ResourceKind.CPU,
                     host,
-                    used=min(100.0, max(0.0, value)),
+                    used=min(100.0, max(0.0, point.value)),
                     limit=100.0,
                     unit="percent",
-                    at=now,
+                    at=point.at,
                 )
             )
-        procs, procs_max = self._series("processes"), self._series("processes_max")
-        for (host, _), value in sorted(procs.items()):
+        procs, procs_max = self._series("processes", now), self._series("processes_max", now)
+        for (host, _), point in sorted(procs.items()):
+            ceiling = procs_max.get((host, ""))
             readings.append(
                 Resource(
                     f"{host}:processes",
                     ResourceKind.PROCESSES,
                     host,
-                    used=value,
-                    limit=procs_max.get((host, "")),
+                    used=point.value,
+                    limit=ceiling.value if ceiling else None,
                     unit="processes",
-                    at=now,
+                    at=point.at,
                 )
             )
         return tuple(readings)
+
+
+@dataclass(frozen=True, slots=True)
+class Point:
+    value: float
+    at: datetime
+
+
+def _stamp(sample: Sample, now: datetime) -> datetime:
+    """When the sample was taken, never later than ``now``: Prometheus stamps an instant
+    query with its own clock, and a clock ahead of ours must not make a reading look newer
+    than it is. (A clock far behind makes readings look stale, and the rule ignores them.)"""
+    if sample.timestamp is None:
+        return now
+    try:
+        at = datetime.fromtimestamp(sample.timestamp, UTC)
+    except (OverflowError, OSError, ValueError):
+        return now
+    return min(at, now)

@@ -13,9 +13,11 @@ from kelpie.app import (
     load_settings,
     merged_snapshot,
     render_status,
+    resource_interval_warnings,
 )
 from kelpie.core.model import Resource, ResourceKind
 from kelpie.metrics import Metrics
+from kelpie.resources.config import ResourceSettings
 from tests.resources.fake_prometheus import FakeProm, fake_prometheus, vector
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
@@ -176,3 +178,14 @@ def test_a_reader_that_raises_is_counted_and_the_tick_goes_on() -> None:
     assert snapshot.resources == ()
     assert metrics.resource_failures["unexpected"] == 1
     assert 'cause="unexpected"' in metrics.render()
+
+
+def test_warns_when_the_fetch_interval_outlasts_the_reading_age(tmp_path: Path) -> None:
+    text = toml(None, 'interval = "15m"')
+    settings = settings_from(tmp_path, text)
+    loaded = load_rules(settings.engine)
+    (warning,) = resource_interval_warnings(loaded.rules, settings.resources)
+    assert "interval (0:15:00)" in warning and "max_reading_age" in warning
+    fine = settings_from(tmp_path, toml(None, 'interval = "5m"'))
+    assert resource_interval_warnings(load_rules(fine.engine).rules, fine.resources) == []
+    assert resource_interval_warnings(loaded.rules, ResourceSettings()) == []

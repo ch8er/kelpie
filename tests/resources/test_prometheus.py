@@ -368,7 +368,7 @@ def test_results_are_cached_for_the_interval_and_failures_are_not_retried_early(
         assert len(prom.requests) == asked + 1
         prom.status = 200
         again = by_name(source.read(NOW + timedelta(seconds=120)))
-        assert again["host-a:memory"].at == NOW + timedelta(seconds=120)
+        assert again["host-a:memory"].at == NOW  # the sample's own timestamp
 
 
 def test_works_without_an_observer() -> None:
@@ -377,3 +377,75 @@ def test_works_without_an_observer() -> None:
         assert PrometheusSource(config(prom)).read(NOW) == ()
         prom.status = 200
         assert PrometheusSource(config(prom)).read(NOW) == ()
+
+
+def test_readings_carry_the_sample_timestamp_capped_at_the_fetch_time() -> None:
+    later = NOW + timedelta(minutes=3)
+    with fake_prometheus() as prom:
+        cfg = config(prom)
+        prom.responses = {
+            text(cfg, "load1"): vector((A, "3"), ts=(NOW - timedelta(minutes=2)).timestamp()),
+            text(cfg, "cores"): vector((A, "2"), ts=(NOW - timedelta(minutes=5)).timestamp()),
+            # A Prometheus clock ahead of ours does not make a reading newer than the fetch.
+            text(cfg, "cpu_busy"): vector((A, "50"), ts=later.timestamp()),
+        }
+        readings = by_name(PrometheusSource(cfg).read(NOW))
+    assert readings["host-a:load1"].at == NOW - timedelta(minutes=5)  # the older of the pair
+    assert readings["host-a:cpu"].at == NOW
+
+
+def test_nonsense_timestamps_fall_back_to_the_fetch_time() -> None:
+    with fake_prometheus() as prom:
+        cfg = config(prom)
+        prom.responses = {
+            text(cfg, "cpu_busy"): {
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [{"metric": A, "value": ["soon", "50"]}],
+                },
+            },
+            text(cfg, "load1"): vector((A, "1"), ts=1e30),
+            text(cfg, "cores"): vector((A, "2")),
+        }
+        readings = by_name(PrometheusSource(cfg).read(NOW))
+    assert readings["host-a:cpu"].at == NOW
+    assert readings["host-a:load1"].at == NOW
+
+
+def test_deeply_nested_json_is_an_invalid_response() -> None:
+    with fake_prometheus() as prom:
+        prom.raw = b"[" * 200_000
+        observer = Observer()
+        assert PrometheusSource(config(prom), observer).read(NOW) == ()
+    assert observer.failures == ["invalid_response"]
+
+
+def test_an_unexpected_error_clears_the_cache_and_is_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with fake_prometheus() as prom:
+        cfg = config(prom, interval=timedelta(seconds=10))
+        load_farm(prom, cfg)
+        observer = Observer()
+        source = PrometheusSource(cfg, observer)
+        assert source.read(NOW)
+
+        def boom(self: PrometheusSource, now: datetime) -> tuple[Resource, ...]:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(PrometheusSource, "_fetch", boom)
+        assert source.read(NOW + timedelta(seconds=10)) == ()
+        assert source.read(NOW + timedelta(seconds=11)) == ()  # the old readings are gone
+    assert observer.failures == ["unexpected"]
+
+
+def test_series_beyond_the_cap_are_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(prometheus, "MAX_SERIES", 2)
+    with fake_prometheus() as prom:
+        prom.responses = {"up": vector(*[({"instance": str(i)}, "1") for i in range(5)])}
+        with caplog.at_level(logging.WARNING):
+            assert len(PrometheusClient(prom.url, 2.0).query("up")) == 2
+    assert "only the first 2 are read" in caplog.text

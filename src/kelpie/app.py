@@ -34,6 +34,7 @@ from kelpie.metrics import Metrics
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
 from kelpie.rules.no_progress import NoProgress
+from kelpie.rules.resources import Resources
 from kelpie.traces.config import TraceSettings, load_traces
 from kelpie.traces.forward import Forwarder
 from kelpie.traces.hooks import merge_hook_spans
@@ -473,9 +474,28 @@ def trace_window_warnings(rules: Sequence[Rule], traces: TraceSettings) -> list[
     ]
 
 
+def resource_interval_warnings(rules: Sequence[Rule], resources: ResourceSettings) -> list[str]:
+    """Readings older than the rule's ``max_reading_age`` are ignored: a slower fetch would
+    leave the rule blind between fetches."""
+    prometheus = resources.prometheus
+    if prometheus is None:
+        return []
+    return [
+        f"[resources.prometheus] interval ({prometheus.interval}) is longer than rule "
+        f"'resources' max_reading_age ({rule.max_reading_age}): host readings would be "
+        "ignored as stale between fetches"
+        for rule in rules
+        if isinstance(rule, Resources) and prometheus.interval > rule.max_reading_age
+    ]
+
+
 def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> App:
     loaded = load_rules(settings.engine)
-    for warning in [*loaded.warnings, *trace_window_warnings(loaded.rules, settings.traces)]:
+    for warning in [
+        *loaded.warnings,
+        *trace_window_warnings(loaded.rules, settings.traces),
+        *resource_interval_warnings(loaded.rules, settings.resources),
+    ]:
         log.warning(warning)
     try:
         store: LedgerStore = (

@@ -12,13 +12,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+# 2026-03-02T12:00:00Z, the "now" of most tests.
+TS = 1772452800.0
 
-def vector(*series: tuple[dict[str, str], str]) -> dict[str, Any]:
+
+def vector(*series: tuple[dict[str, str], str], ts: float = TS) -> dict[str, Any]:
     return {
         "status": "success",
         "data": {
             "resultType": "vector",
-            "result": [{"metric": m, "value": [1772449200.0, v]} for m, v in series],
+            "result": [{"metric": m, "value": [ts, v]} for m, v in series],
         },
     }
 
