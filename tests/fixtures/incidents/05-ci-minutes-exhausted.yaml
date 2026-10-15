@@ -1,0 +1,62 @@
+id: "05-ci-minutes-exhausted"
+incident: 5
+title: "CI minutes exhausted, tasks wait ~11h for CI"
+description: >
+  The monthly CI minutes quota was fully consumed and would not reset for weeks.
+  Every task that needed a CI run sat blocked waiting for a check that would never start,
+  some for about 11 hours, with no signal to humans that the root cause was billing,
+  not the code. Rule 9 (CI economy) must flag the exhausted quota and the tasks it blocks;
+  detecting wasted builds needs CI build records, which the model does not have yet.
+rule: ci_economy
+config:
+  quota_critical: 1.0
+snapshot:
+  now: "2026-03-02T21:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - id: T-501
+      title: "Add OAuth scopes check"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_ci", since: "2026-03-02T10:00:00+00:00", condition_id: C-501}
+    - id: T-502
+      title: "Bump parser dependency"
+      status: blocked
+      status_since: "2026-03-02T10:20:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "waiting_ci", since: "2026-03-02T10:20:00+00:00", condition_id: C-502}
+    - id: T-503
+      title: "Review: cache invalidation fix"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block: {reason: "waiting_ci", since: "2026-03-02T12:00:00+00:00", condition_id: C-503}
+  conditions:
+    - {id: C-501, kind: ci_status, task_id: T-501, params: {repo: example/repo, pr: 51}, satisfied: false, checked_at: "2026-03-02T20:55:00+00:00"}
+    - {id: C-502, kind: ci_status, task_id: T-502, params: {repo: example/repo, pr: 52}, satisfied: false, checked_at: "2026-03-02T20:55:00+00:00"}
+    - {id: C-503, kind: ci_status, task_id: T-503, params: {repo: example/repo, pr: 53}, satisfied: false, checked_at: "2026-03-02T20:55:00+00:00"}
+  resources:
+    - name: "ci:example"
+      kind: ci_minutes
+      used: 3000
+      limit: 3000
+      unit: minutes
+      resets_at: "2026-04-01T00:00:00+00:00"
+    # Distractor: host disk well within limits; the CI outage must not spill into host alerts.
+    - {name: "host-a:disk", kind: disk, host: host-a, used: 120, limit: 500, unit: GB}
+expected_actions:
+  - kind: alert
+    severity: critical
+    reason_contains: "CI"
+    params:
+      blocked_tasks: [T-501, T-502, T-503]
+not_expected_actions:
+  - kind: alert
+    params: {host: host-a}

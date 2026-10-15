@@ -1,0 +1,102 @@
+id: "07-shared-file-conflicts"
+incident: 7
+title: "Merge conflicts concentrated on a few shared files"
+description: >
+  Over one period, 46 of 63 task returns (about 73%) were merge conflicts, and almost all of
+  them touched the same few shared files (a route registry and a central types module).
+  Agents working in parallel kept editing these hot files, so every merge invalidated
+  someone else's work. This fixture uses a smaller representative sample (8 of 10 returns
+  are merge conflicts) with the same shape. Kelpie analyzes return causes and issues a
+  recommendation (alert listing the hot files) and warns in-progress tasks touching them.
+rule: return_causes
+config:
+  window: "24h"
+  conflict_ratio_threshold: 0.5
+  hot_file_min_conflicts: 3
+snapshot:
+  now: "2026-03-02T17:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: agent-dev-4, role: developer}
+  tasks:
+    - id: T-701
+      title: "Add billing routes"
+      status: review
+      status_since: "2026-03-02T15:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      files: [src/app/routes.py, src/app/billing.py]
+      returns:
+        - {at: "2026-03-02T09:10:00+00:00", reason: "merge conflict in src/app/routes.py", category: merge_conflict}
+        - {at: "2026-03-02T11:40:00+00:00", reason: "merge conflict in src/app/routes.py", category: merge_conflict}
+    - id: T-702
+      title: "Add invoice types"
+      status: review
+      status_since: "2026-03-02T14:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      files: [src/app/types.py, src/app/invoices.py]
+      returns:
+        - {at: "2026-03-02T10:05:00+00:00", reason: "merge conflict in src/app/types.py", category: merge_conflict}
+        - {at: "2026-03-02T12:15:00+00:00", reason: "merge conflict in src/app/types.py", category: merge_conflict}
+        - {at: "2026-03-02T13:00:00+00:00", reason: "missing tests", category: review}
+    - id: T-703
+      title: "Add webhook routes"
+      status: done
+      status_since: "2026-03-02T13:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-3
+      files: [src/app/routes.py, src/app/types.py, src/app/webhooks.py]
+      returns:
+        - {at: "2026-03-02T08:30:00+00:00", reason: "merge conflict in src/app/routes.py", category: merge_conflict}
+        - {at: "2026-03-02T10:50:00+00:00", reason: "merge conflict in src/app/types.py", category: merge_conflict}
+        - {at: "2026-03-02T12:40:00+00:00", reason: "merge conflict in src/app/routes.py", category: merge_conflict}
+    - id: T-704
+      title: "Add report export"
+      status: done
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-4
+      files: [src/app/types.py, src/app/export.py]
+      returns:
+        - {at: "2026-03-02T09:45:00+00:00", reason: "merge conflict in src/app/types.py", category: merge_conflict}
+        - {at: "2026-03-02T11:00:00+00:00", reason: "lint failures", category: ci}
+    # Currently in progress and touching hot files -> should get a heads-up comment.
+    - id: T-705
+      title: "Add admin routes"
+      status: in_progress
+      status_since: "2026-03-02T16:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-3
+      files: [src/app/routes.py, src/app/admin.py]
+    - id: T-706
+      title: "Extend user types"
+      status: in_progress
+      status_since: "2026-03-02T16:20:00+00:00"
+      role: developer
+      owner_id: agent-dev-4
+      files: [src/app/types.py]
+    # Distractor: in progress, touches no hot file.
+    - id: T-707
+      title: "Update README badges"
+      status: in_progress
+      status_since: "2026-03-02T16:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      files: [README.md]
+expected_actions:
+  - kind: alert
+    reason_contains: "conflict"
+    params:
+      hot_files: [src/app/routes.py, src/app/types.py]
+  - kind: comment
+    task_id: T-705
+    reason_contains: "src/app/routes.py"
+  - kind: comment
+    task_id: T-706
+    reason_contains: "src/app/types.py"
+not_expected_actions:
+  - kind: comment
+    task_id: T-707

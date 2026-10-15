@@ -1,0 +1,59 @@
+id: "01-stale-guard-block"
+incident: 1
+title: "Guard block hangs after its CI condition is already green"
+description: >
+  A task was parked behind a "guard" block waiting for CI to pass on its pull request.
+  The CI condition flipped to satisfied, but nothing cleared the block, so the task sat
+  in blocked while agents of its role were idle. The farm lost throughput on work that
+  was actually ready to continue.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+  tasks:
+    - id: T-101
+      title: "Add retry policy to webhook client"
+      status: blocked
+      status_since: "2026-03-02T12:40:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block:
+        reason: "guard: wait for CI on example/repo#41"
+        since: "2026-03-02T12:40:00+00:00"
+        condition_id: C-1
+    # Distractor: guard block whose CI condition is still pending.
+    - id: T-102
+      title: "Refactor config loader"
+      status: blocked
+      status_since: "2026-03-02T13:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block:
+        reason: "guard: wait for CI on example/repo#42"
+        since: "2026-03-02T13:30:00+00:00"
+        condition_id: C-2
+  conditions:
+    - id: C-1
+      kind: ci_status
+      task_id: T-101
+      params: {repo: example/repo, pr: 41, expect: success}
+      satisfied: true
+      satisfied_at: "2026-03-02T13:05:00+00:00"
+      checked_at: "2026-03-02T13:59:00+00:00"
+    - id: C-2
+      kind: ci_status
+      task_id: T-102
+      params: {repo: example/repo, pr: 42, expect: success}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+expected_actions:
+  - kind: unblock
+    task_id: T-101
+    reason_contains: "condition"
+not_expected_actions:
+  - kind: unblock
+    task_id: T-102

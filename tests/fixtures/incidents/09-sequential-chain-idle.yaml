@@ -1,0 +1,46 @@
+id: "09-sequential-chain-idle"
+incident: 9
+title: "Agents idle because the dependency graph is a strict chain"
+description: >
+  A feature was planned as a strictly sequential chain of five tasks, each depending on
+  the previous one. Only one agent could ever work at a time; the other agents of the
+  same role sat idle with nothing in ready. The farm's capacity was wasted by the shape
+  of the plan, not by any failure.
+rule: bottlenecks
+config:
+  min_idle_agents: 2
+  min_chain_length: 4
+snapshot:
+  now: "2026-03-02T13:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: agent-dev-4, role: developer}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - {id: T-901, title: "Chain step 1: data model", status: in_progress, status_since: "2026-03-02T12:00:00+00:00", role: developer, owner_id: agent-dev-1, estimate: "1h30m"}
+    - {id: T-902, title: "Chain step 2: repository layer", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-903, title: "Chain step 3: service layer", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-904, title: "Chain step 4: API handlers", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-905, title: "Chain step 5: UI wiring", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    # Distractor: healthy parallel work outside the chain, in another role with no idle agents.
+    - {id: T-906, title: "Review: logging cleanup", status: review, status_since: "2026-03-02T12:30:00+00:00", role: reviewer, owner_id: reviewer-1, estimate: "30m"}
+  dependencies:
+    - {task_id: T-902, depends_on: T-901}
+    - {task_id: T-903, depends_on: T-902}
+    - {task_id: T-904, depends_on: T-903}
+    - {task_id: T-905, depends_on: T-904}
+expected_actions:
+  - kind: alert
+    reason_contains: "parallel"
+    params:
+      idle_roles: [developer]
+      idle_agents: [agent-dev-2, agent-dev-3, agent-dev-4]
+      critical_path_length: 5
+not_expected_actions:
+  - kind: alert
+    task_id: T-906
+  - kind: alert
+    params: {idle_roles: [reviewer]}
+  - kind: escalate

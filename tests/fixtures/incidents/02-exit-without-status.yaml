@@ -1,0 +1,75 @@
+id: "02-exit-without-status"
+incident: 2
+title: "Agent exits without a final status; task blocked with no valid reason"
+description: >
+  Two exit-contract violations seen together. An agent session ended (process exited)
+  without writing a final status, leaving the task in in_progress with no one working on it.
+  Another agent moved its task to blocked with an empty reason that is not one of the
+  allowed block reasons, so no rule or human knew what it was waiting for. Both tasks
+  silently stalled until someone noticed by hand.
+rule: exit_contract
+config:
+  allowed_block_reasons: ["guard", "waiting_ci", "waiting_pr_merge", "waiting_human", "quota"]
+  session_exit_grace: "10m"
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+  tasks:
+    - id: T-201
+      title: "Implement pagination for list endpoint"
+      status: in_progress
+      status_since: "2026-03-02T13:10:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+    - id: T-202
+      title: "Migrate settings to new schema"
+      status: blocked
+      status_since: "2026-03-02T14:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block:
+        reason: ""
+        since: "2026-03-02T14:00:00+00:00"
+    # Distractor: running session with a fresh heartbeat.
+    - id: T-203
+      title: "Add metrics endpoint"
+      status: in_progress
+      status_since: "2026-03-02T14:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-3
+  sessions:
+    - id: S-201
+      task_id: T-201
+      owner_id: agent-dev-1
+      started_at: "2026-03-02T13:10:00+00:00"
+      ended_at: "2026-03-02T14:05:00+00:00"
+      final_status: null
+      exit_reason: "process exited (code 0)"
+      last_heartbeat: "2026-03-02T14:04:30+00:00"
+      last_commit_at: "2026-03-02T13:50:00+00:00"
+      dirty_worktree: true
+    - id: S-202
+      task_id: T-202
+      owner_id: agent-dev-2
+      started_at: "2026-03-02T13:20:00+00:00"
+      ended_at: "2026-03-02T14:00:00+00:00"
+      final_status: blocked
+      exit_reason: "agent set blocked"
+    - id: S-203
+      task_id: T-203
+      owner_id: agent-dev-3
+      started_at: "2026-03-02T14:30:00+00:00"
+      last_heartbeat: "2026-03-02T14:59:00+00:00"
+expected_actions:
+  - kind: requeue
+    task_id: T-201
+    reason_contains: "final status"
+  - kind: requeue
+    task_id: T-202
+    reason_contains: "reason"
+not_expected_actions:
+  - kind: requeue
+    task_id: T-203

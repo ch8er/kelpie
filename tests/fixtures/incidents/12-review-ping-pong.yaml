@@ -1,0 +1,44 @@
+id: "12-review-ping-pong"
+incident: 12
+title: "Nine review rounds on a single task"
+description: >
+  A developer agent and a reviewer agent bounced one task back and forth nine times: each
+  fix triggered a new objection, often contradicting an earlier one. Each round cost a full
+  session on both sides. After a few rounds the loop should go to a human to settle the
+  disagreement instead of continuing automatically.
+rule: ping_pong
+config:
+  max_review_rounds: 3
+snapshot:
+  now: "2026-03-02T19:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: reviewer-1, role: reviewer}
+    - {id: human-owner, role: owner, kind: human}
+  tasks:
+    - id: T-1201
+      title: "Rework error handling in sync worker"
+      status: in_progress
+      status_since: "2026-03-02T18:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      review_rounds: 9
+      returns:
+        - {at: "2026-03-02T09:30:00+00:00", reason: "use typed errors", category: review}
+        - {at: "2026-03-02T10:40:00+00:00", reason: "typed errors too verbose, use codes", category: review}
+        - {at: "2026-03-02T11:50:00+00:00", reason: "codes lose context", category: review}
+        - {at: "2026-03-02T13:00:00+00:00", reason: "missing retry test", category: review}
+        - {at: "2026-03-02T14:10:00+00:00", reason: "retry test flaky", category: review}
+        - {at: "2026-03-02T15:20:00+00:00", reason: "revert to typed errors", category: review}
+        - {at: "2026-03-02T16:20:00+00:00", reason: "naming", category: review}
+        - {at: "2026-03-02T17:20:00+00:00", reason: "log format", category: review}
+        - {at: "2026-03-02T18:30:00+00:00", reason: "use codes after all", category: review}
+    # Distractor: within the review-round budget.
+    - {id: T-1202, title: "Add health check", status: review, status_since: "2026-03-02T18:00:00+00:00", role: reviewer, owner_id: reviewer-1, review_rounds: 2}
+expected_actions:
+  - kind: escalate
+    task_id: T-1201
+    reason_contains: "review"
+not_expected_actions:
+  - kind: escalate
+    task_id: T-1202

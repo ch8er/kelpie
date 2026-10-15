@@ -1,0 +1,48 @@
+id: "06-llm-quota-and-expired-auth"
+incident: 6
+title: "LLM provider rate limits and an expired login"
+description: >
+  The LLM provider returned up to 200 rate-limit errors per day, so agents spent much of
+  their time backing off and retrying. In parallel, the CLI login used by agents expired;
+  every new session failed immediately at startup until a human re-authenticated.
+  Both looked like random agent failures from the board.
+rule: resources
+config:
+  rate_limit_events_warning: 50
+  auth_expiry_warning: "24h"
+snapshot:
+  now: "2026-03-02T18:00:00+00:00"
+  resources:
+    - name: "llm:provider-main"
+      kind: llm_quota
+      used: 4800000
+      limit: 5000000
+      unit: tokens
+      events: 200
+      resets_at: "2026-03-03T00:00:00+00:00"
+    - name: "auth:agent-cli"
+      kind: auth
+      host: host-a
+      expires_at: "2026-03-02T09:30:00+00:00"
+    # Distractors: a credential valid for another month and one that never expires.
+    - name: "auth:git-token"
+      kind: auth
+      host: host-b
+      expires_at: "2026-04-02T00:00:00+00:00"
+    - name: "auth:deploy-key"
+      kind: auth
+      host: host-b
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "rate"
+  - kind: alert
+    severity: critical
+    reason_contains: "expired"
+not_expected_actions:
+  - kind: alert
+    reason_contains: "git-token"
+  - kind: alert
+    reason_contains: "deploy-key"
+  - kind: alert
+    params: {host: host-b}

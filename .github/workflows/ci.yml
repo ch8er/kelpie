@@ -1,0 +1,77 @@
+name: CI
+
+# Draft PRs do not build. A PR builds when it is marked ready for review and on every
+# push to it afterwards; main builds on push. Docs-only changes skip lint and test.
+# `ci-ok` is the only required check: it always reports, and fails only if a needed
+# job failed or was cancelled.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# A newer run cancels the older one for the same PR branch. Workflow-level so runs are
+# ordered by event; drafts get their own group so a skipped draft run never cancels a
+# real build. Pushes to main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}${{ github.event.pull_request.draft && '-draft' || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+        id: filter
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - "**"
+              - "!docs/**"
+              - "!**/*.md"
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - name: Import contracts (core must not import adapters/connectors)
+        run: uv run lint-imports
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run pytest --cov=kelpie --cov-report=term
+      - name: Coverage gate for kelpie.rules (>= 90%)
+        run: uv run coverage report --include='src/kelpie/rules/*' --fail-under=90
+
+  ci-ok:
+    needs: [changes, lint, test]
+    if: always() && (github.event_name == 'push' || !github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail if a needed job failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "changes=${{ needs.changes.result }} lint=${{ needs.lint.result }} test=${{ needs.test.result }}"
+          exit 1
+      - run: echo "CI ok"

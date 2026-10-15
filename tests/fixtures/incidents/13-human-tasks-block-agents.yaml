@@ -1,0 +1,75 @@
+id: "13-human-tasks-block-agents"
+incident: 13
+title: "Pending human tasks block agent work"
+description: >
+  Several agent tasks were waiting on things only a human could do: granting repository
+  secrets and approving a design decision. The human-owned tasks were not prioritized
+  because nobody told the human that five agent tasks were stuck behind them. Agents
+  stayed idle while the human was unaware of being the bottleneck.
+rule: human_tasks
+config:
+  human_wait_alert_after: "1h"
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: human-owner, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-ops-1, role: ops}
+  tasks:
+    - {id: T-1301, title: "Add deploy token to repo secrets", status: ready, status_since: "2026-03-02T10:00:00+00:00", role: owner, owner_id: human-owner}
+    - {id: T-1302, title: "Decide on storage backend", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: owner, owner_id: human-owner}
+    # Distractor: an old human task with nothing blocked behind it; not a bottleneck.
+    - {id: T-1308, title: "Review quarterly budget", status: ready, status_since: "2026-03-02T09:00:00+00:00", role: owner, owner_id: human-owner}
+    - id: T-1303
+      title: "Configure deploy pipeline"
+      status: blocked
+      status_since: "2026-03-02T10:30:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block: {reason: "waiting_human", since: "2026-03-02T10:30:00+00:00", condition_id: C-1301}
+    - id: T-1304
+      title: "Add staging deploy job"
+      status: blocked
+      status_since: "2026-03-02T10:45:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block: {reason: "waiting_human", since: "2026-03-02T10:45:00+00:00", condition_id: C-1305}
+    - id: T-1305
+      title: "Implement storage adapter"
+      status: blocked
+      status_since: "2026-03-02T11:15:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human", since: "2026-03-02T11:15:00+00:00", condition_id: C-1302}
+    - id: T-1306
+      title: "Storage migration script"
+      status: blocked
+      status_since: "2026-03-02T11:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "waiting_human", since: "2026-03-02T11:30:00+00:00", condition_id: C-1303}
+    - id: T-1307
+      title: "Storage benchmarks"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "waiting_human", since: "2026-03-02T12:00:00+00:00", condition_id: C-1304}
+  conditions:
+    - {id: C-1301, kind: human_task, task_id: T-1303, params: {human_task_id: T-1301}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+    - {id: C-1302, kind: human_task, task_id: T-1305, params: {human_task_id: T-1302}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+    - {id: C-1303, kind: human_task, task_id: T-1306, params: {human_task_id: T-1302}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+    - {id: C-1304, kind: human_task, task_id: T-1307, params: {human_task_id: T-1302}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+    - {id: C-1305, kind: human_task, task_id: T-1304, params: {human_task_id: T-1301}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+expected_actions:
+  - kind: escalate
+    reason_contains: "human"
+    params:
+      human_tasks: [T-1301, T-1302]
+      blocked_agent_tasks: 5
+not_expected_actions:
+  - kind: escalate
+    task_id: T-1308
+  - kind: escalate
+    params: {human_tasks: [T-1301, T-1302, T-1308]}

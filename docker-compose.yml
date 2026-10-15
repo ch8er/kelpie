@@ -1,0 +1,57 @@
+# Kelpie server stack: kelpie + Prometheus + Grafana.
+# node_exporter and platform adapters run on the hosts where agents run;
+# add those hosts to deploy/prometheus/prometheus.yml.
+# Ports bind to 127.0.0.1 by default; put an authenticating proxy in front before
+# exposing them (see SECURITY.md).
+services:
+  kelpie:
+    build: .
+    image: kelpie-sre:dev
+    restart: unless-stopped
+    environment:
+      KELPIE_PORT: "9464"
+    volumes:
+      - kelpie-data:/data
+    ports:
+      - "127.0.0.1:9464:9464"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+
+  # Optional: a local node_exporter when agents run on the same host as the server.
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    profiles: ["local-agents"]
+    restart: unless-stopped
+    pid: host
+    command: ["--path.rootfs=/host"]
+    volumes:
+      - /:/host:ro,rslave
+
+volumes:
+  kelpie-data:
+  prometheus-data:
+  grafana-data:

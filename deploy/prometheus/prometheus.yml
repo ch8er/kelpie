@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: kelpie
+    static_configs:
+      - targets: ["kelpie:9464"]
+
+  # node_exporter on every host that runs agents. Replace with your hosts.
+  # The "node-exporter:9100" target exists only with `docker compose --profile local-agents up`.
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          kelpie_host: local
+      # - targets: ["agent-host-1:9100"]
+      #   labels:
+      #     kelpie_host: agent-host-1
