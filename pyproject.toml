@@ -74,6 +74,21 @@ forbidden_modules = [
     "kelpie.metrics",
 ]
 
+[[tool.importlinter.contracts]]
+name = "Resources build on core only"
+type = "forbidden"
+source_modules = ["kelpie.resources"]
+forbidden_modules = [
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.rules",
+    "kelpie.traces",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+]
+
 [tool.coverage.run]
 branch = true
 

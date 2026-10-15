@@ -19,12 +19,12 @@ snapshot:
     - {id: agent-dev-2, role: developer}
     - {id: agent-dev-3, role: developer}
   tasks:
-    - {id: T-401, title: "Full integration build", status: in_progress, status_since: "2026-03-02T15:10:00+00:00", role: developer, owner_id: agent-dev-1, labels: [heavy], estimate: "2h"}
-    - {id: T-402, title: "Regenerate fixtures for all modules", status: in_progress, status_since: "2026-03-02T15:20:00+00:00", role: developer, owner_id: agent-dev-2, labels: [heavy], estimate: "1h30m"}
-    - {id: T-403, title: "Run full e2e suite", status: in_progress, status_since: "2026-03-02T15:30:00+00:00", role: developer, owner_id: agent-dev-3, labels: [heavy], estimate: "2h"}
+    - {id: T-401, title: "Full integration build", status: in_progress, status_since: "2026-03-02T15:10:00+00:00", role: developer, owner_id: agent-dev-1, labels: [heavy], host: host-a, estimate: "2h"}
+    - {id: T-402, title: "Regenerate fixtures for all modules", status: in_progress, status_since: "2026-03-02T15:20:00+00:00", role: developer, owner_id: agent-dev-2, labels: [heavy], host: host-a, estimate: "1h30m"}
+    - {id: T-403, title: "Run full e2e suite", status: in_progress, status_since: "2026-03-02T15:30:00+00:00", role: developer, owner_id: agent-dev-3, labels: [heavy], host: host-a, estimate: "2h"}
     - {id: T-404, title: "Rebuild search index", status: ready, status_since: "2026-03-02T15:00:00+00:00", role: developer, labels: [heavy], estimate: "1h30m"}
     - {id: T-405, title: "Profile memory of importer", status: ready, status_since: "2026-03-02T15:05:00+00:00", role: developer, labels: [heavy], estimate: "2h"}
-    # Distractor: light (non-heavy) ready task; it must not be held back or alerted on.
+    # Queued tasks have no host yet. Distractor: light (non-heavy) ready task; it must not be held back or alerted on.
     - {id: T-406, title: "Fix typo in CLI help", status: ready, status_since: "2026-03-02T15:40:00+00:00", role: developer, estimate: "15m"}
   resources:
     - {name: "host-a:load1", kind: load, host: host-a, used: 27.5, limit: 8, unit: load}

@@ -1,0 +1,39 @@
+id: "04-heavy-tasks-without-host"
+incident: 4
+title: "Overloaded host, but the platform does not say where tasks run"
+description: >
+  Same overload as incident 4, but the adapter does not report which host a task runs
+  on (the Hermes board has no such field). Counting every host-less heavy task against
+  every host would blame healthy machines. With two hosts and unplaced tasks, Kelpie
+  raises a single alert that claims no host, and says per-host limits need the platform
+  to report where tasks run.
+rule: resources
+config:
+  load_warning: 1.5
+  memory_warning: 0.9
+  heavy_label: heavy
+  max_heavy_per_host: 1
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  tasks:
+    - {id: T-411, title: "Full integration build", status: in_progress, status_since: "2026-03-02T15:10:00+00:00", role: developer, labels: [heavy]}
+    - {id: T-412, title: "Regenerate fixtures", status: in_progress, status_since: "2026-03-02T15:20:00+00:00", role: developer, labels: [heavy]}
+    - {id: T-413, title: "Run full e2e suite", status: in_progress, status_since: "2026-03-02T15:30:00+00:00", role: developer, labels: [heavy]}
+    - {id: T-414, title: "Rebuild search index", status: ready, status_since: "2026-03-02T15:00:00+00:00", role: developer, labels: [heavy]}
+  resources:
+    - {name: "host-a:load1", kind: load, host: host-a, used: 27.5, limit: 8, unit: load}
+    - {name: "host-a:memory", kind: memory, host: host-a, used: 30.8, limit: 32, unit: GB}
+    # Healthy second host.
+    - {name: "host-b:load1", kind: load, host: host-b, used: 2.1, limit: 8, unit: load}
+    - {name: "host-b:memory", kind: memory, host: host-b, used: 9.5, limit: 32, unit: GB}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "do not say which host"
+    params: {max_heavy: 1, overloaded_hosts: [host-a]}
+not_expected_actions:
+  - kind: alert
+    params: {host: host-b}
+  - kind: alert
+    reason_contains: "heavy"
+    params: {host: host-a}

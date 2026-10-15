@@ -1,0 +1,32 @@
+id: "03-disk-below-threshold"
+incident: 3
+title: "Disk: below the warning threshold, stale readings, one real problem"
+description: >
+  Boundaries of the disk alert. A fairly full but still healthy disk on host-a (80%, warning
+  at 85%) and a nearly empty second mount must stay quiet: an alert at 80% would train the
+  owner to ignore disk alerts. A reading that is an hour old says nothing about the disk now
+  (the metrics source may have stopped), so host-c stays quiet too. host-b is genuinely
+  nearly full and is the only host reported, once, at its own severity.
+rule: resources
+config:
+  disk_warning: 0.85
+  disk_critical: 0.95
+  max_reading_age: "10m"
+snapshot:
+  now: "2026-03-02T11:00:00+00:00"
+  resources:
+    - {name: "host-a:/", kind: disk, host: host-a, used: 400, limit: 500, unit: GB, at: "2026-03-02T10:59:00+00:00"}
+    - {name: "host-a:/data", kind: disk, host: host-a, used: 20, limit: 2000, unit: GB, at: "2026-03-02T10:59:00+00:00"}
+    - {name: "host-b:/", kind: disk, host: host-b, used: 460, limit: 500, unit: GB, at: "2026-03-02T10:59:00+00:00"}
+    # Stale: taken an hour ago, ignored.
+    - {name: "host-c:/", kind: disk, host: host-c, used: 499, limit: 500, unit: GB, at: "2026-03-02T10:00:00+00:00"}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "disk"
+    params: {host: host-b}
+not_expected_actions:
+  - kind: alert
+    params: {host: host-a}
+  - kind: alert
+    params: {host: host-c}

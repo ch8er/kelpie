@@ -31,6 +31,29 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # min_tokens_without_progress = 100000  # alert at this many tokens and no progress
 # claim_grace = "2m"        # a status change this soon after the session start is the claim
 
+# Rule 7: disk, memory, CPU, load and process thresholds per host, and a limit on heavy
+# tasks while a host is overloaded. Utilization is used / limit (load: per core). Each
+# threshold can be set to false to switch it off. Readings older than max_reading_age are
+# ignored. Alerts only: Kelpie suggests, a human or the dispatcher acts. Needs host
+# readings: see [resources.prometheus] below.
+#
+# [engine.rules.resources]
+# mode = "suggest"
+# disk_warning = 0.85       # also disk_critical (0.95)
+# memory_warning = 0.90     # also memory_critical (0.97)
+# load_warning = 1.5        # load1 / cores; also load_critical (3.0)
+# cpu_warning = 0.95        # off by default (load covers overload); also cpu_critical
+# processes_warning = 0.80  # processes / process limit; also processes_critical (0.95). The
+#                           # default query divides by pid_max (often 4 million), so this
+#                           # rarely fires; set the processes_max query to a real ceiling
+# heavy_label = "heavy"     # tasks with this label (or a label in heavy_labels = [...]) ...
+# heavy_roles = []          # ... or in one of these roles are heavy
+# max_heavy_per_host = 2    # alert when an overloaded host runs more heavy tasks at once
+#                           # (default: not checked). Needs an adapter that sets Task.host
+#                           # (the Hermes adapter does not yet): with several hosts and tasks
+#                           # that do not say where they run, you get one alert without a host
+# max_reading_age = "10m"
+
 [storage]
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
                           # $KELPIE_DB overrides this.
@@ -98,6 +121,35 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # input = 3
 # output = 15
 # cached_input = 0.3        # default: the input price
+
+# Host metrics from node_exporter through the Prometheus HTTP API. Off unless this table
+# exists. Kelpie runs fixed instant queries (GET /api/v1/query) and keeps only the hosts
+# listed below. Redirects and environment proxies are never followed, so the token goes
+# only to `url`; it is never logged. A Prometheus that is down gives no readings (and
+# kelpie_resource_read_failures_total), never stale ones.
+#
+# [resources.prometheus]
+# url = "http://prometheus:9090"      # http(s) base URL, no credentials, no query string
+# hosts = { host-a = "host-a:9100", host-b = "host-b:9100" }  # Kelpie host name = host_label value
+# host_label = "instance"             # label that identifies the machine in node_exporter series
+# timeout = "5s"                      # per query (at most 60s); a failed query ends the fetch
+# interval = "60s"                    # at most one fetch this often (at least 5s)
+# token_env = "KELPIE_PROMETHEUS_TOKEN"  # bearer token from this env var. Used when set; when
+#                                     # written here the variable must be set or Kelpie refuses to start
+#
+# Queries are PromQL and can be replaced one by one. Each result must keep the host_label
+# label (and `mountpoint` for the disk ones). The defaults, for node_exporter:
+#
+# [resources.prometheus.queries]
+# disk_size = 'node_filesystem_size_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs"}'
+# disk_avail = 'node_filesystem_avail_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs"}'
+# memory_total = "node_memory_MemTotal_bytes"
+# memory_available = "node_memory_MemAvailable_bytes"
+# load1 = "node_load1"
+# cores = 'count by (instance) (node_cpu_seconds_total{mode="idle"})'
+# cpu_busy = '100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])))'
+# processes = "node_processes_pids"           # needs node_exporter --collector.processes
+# processes_max = "node_processes_max_processes"
 
 # Platform adapters. Kelpie only reads the board and, for now, cannot change it (Hermes
 # actions are not implemented yet): keep rules in observe or suggest mode. A rule in act

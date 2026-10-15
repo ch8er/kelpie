@@ -150,6 +150,10 @@ docker compose exec kelpie kelpie doctor --prometheus http://prometheus:9090
 Prometheus has a ready `kelpie` scrape job; the `node` job targets `node-exporter:9100`
 (`docker compose --profile local-agents up`), otherwise it shows as down, which is harmless.
 
+Optional: to get disk and memory alerts and a heavy-task limit, point Kelpie at that
+Prometheus with `[resources.prometheus]` and `[engine.rules.resources]` (see
+`kelpie.example.toml`); without them the `resources` rule has no data and stays silent.
+
 ## Where to look
 
 - `kelpie doctor` and `kelpie status`: setup and what is loaded.

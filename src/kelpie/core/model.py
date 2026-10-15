@@ -109,6 +109,7 @@ class Task:
     files: tuple[str, ...] = ()
     labels: tuple[str, ...] = ()
     returns: tuple[Return, ...] = ()
+    host: str | None = None  # where the task runs, if the adapter knows (a config name)
 
 
 class ResourceKind(StrEnum):
@@ -127,7 +128,8 @@ class Resource:
     """A point-in-time reading of a host resource or an external quota.
 
     ``used``/``limit`` share ``unit``. ``expires_at`` is set for credentials and
-    quota windows; ``resets_at`` for quotas that refill.
+    quota windows; ``resets_at`` for quotas that refill. ``at`` is when the reading was
+    taken (None: current as of the snapshot); rules ignore readings that are too old.
     """
 
     name: str
@@ -139,6 +141,7 @@ class Resource:
     expires_at: datetime | None = None
     resets_at: datetime | None = None
     events: int = 0
+    at: datetime | None = None
 
     @property
     def utilization(self) -> float | None:
