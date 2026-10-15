@@ -9,7 +9,8 @@ the architect role or a human (``escalate_to``).
 Rounds are counted from the task itself: the larger of ``review_rounds`` (the adapter's
 own counter) and the number of recorded returns whose category is in ``review_categories``.
 The escalation is a lasting-state alert, so it fires once when the threshold is crossed
-and again only at the engine's escalation thresholds, not on every tick; it resolves when
+and again only at the engine's escalation thresholds or when the loop gets worse (every further
+``max_review_rounds`` rounds), not on every tick; it resolves when
 the task leaves the loop (done, failed, cancelled).
 """
 
@@ -32,7 +33,7 @@ _SHOWN_REASONS = 10  # the most recent return reasons quoted in the message
 class PingPong:
     max_review_rounds: int = 3
     # Who settles the disagreement: an owner id or a role (e.g. "architect"). Empty means
-    # the first human owner in the snapshot.
+    # the first human owner (by id) in the snapshot.
     escalate_to: str | None = None
     review_categories: tuple[str, ...] = ("review",)
     name: str = NAME
@@ -61,11 +62,14 @@ class PingPong:
         earlier = len(reviews) - len(history)
         if earlier:
             lines = f"(+{earlier} earlier) {lines}"
+        route = (
+            f"Escalating to {target}."
+            if target
+            else "No escalation target configured (set escalate_to)."
+        )
         reason = (
             f"Task {task.id} has been through {rounds} review rounds (limit "
-            f"{self.max_review_rounds}); stop the loop and decide"
-            + (f" ({target})" if target else "")
-            + "."
+            f"{self.max_review_rounds}); stop the loop and decide. {route}"
             + (f" Return reasons: {lines}." if lines else "")
         )
         # The condition began when the limit was crossed; without a history, when the
@@ -81,7 +85,10 @@ class PingPong:
             reason,
             task_id=task.id,
             severity=Severity.WARNING,
-            key=f"{NAME}:{task.id}",
+            # The state stays one per task; the key gains a bucket each time the loop doubles
+            # down another ``max_review_rounds`` rounds, so a worsening loop is announced
+            # again (a "changed" transition) while an ongoing one is not.
+            key=f"{NAME}:{task.id}:{rounds // self.max_review_rounds}",
             state=f"{NAME}:{task.id}",
             since=min(since, snapshot.now),
             params={
@@ -98,8 +105,8 @@ class PingPong:
     def _target(self, snapshot: Snapshot) -> str | None:
         if self.escalate_to is not None:
             return self.escalate_to
-        human = next((o for o in snapshot.owners if o.kind is OwnerKind.HUMAN), None)
-        return human.id if human else None
+        humans = sorted(o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN)
+        return humans[0] if humans else None
 
 
 def _positive_int(value: Any, name: str) -> int:

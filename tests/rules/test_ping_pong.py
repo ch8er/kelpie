@@ -4,12 +4,17 @@ from typing import Any
 import pytest
 
 from kelpie.core.actions import Action, ActionKind
+from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.engine import Engine
+from kelpie.core.ledger import Outcome
 from kelpie.core.model import Owner, OwnerKind, Return, Snapshot, Status, Task
 from kelpie.rules import REGISTRY
 from kelpie.rules.ping_pong import PingPong, build
+from tests.fakes import FakeAdapter, FakeAlerter
 
 NOW = datetime(2026, 3, 2, 15, tzinfo=UTC)
 H = timedelta(hours=1)
+M = timedelta(minutes=1)
 
 
 def task(
@@ -86,11 +91,19 @@ def test_no_history_still_escalates() -> None:
 def test_target_from_config_then_first_human_then_none() -> None:
     owners = (Owner("a-1", "developer"), Owner("h-1", "owner", OwnerKind.HUMAN))
     [a] = run(task(3), rule=PingPong(escalate_to="architect"), owners=owners)
-    assert a.params["escalate_to"] == "architect" and "(architect)" in a.reason
+    assert a.params["escalate_to"] == "architect" and "Escalating to architect." in a.reason
     [b] = run(task(3), owners=owners)
     assert b.params["escalate_to"] == "h-1"
     [c] = run(task(3))
-    assert c.params["escalate_to"] is None and "()" not in c.reason
+    assert c.params["escalate_to"] is None
+    assert "no escalation target configured (set escalate_to)" in c.reason.lower()
+
+
+def test_default_human_target_is_the_lowest_id_whatever_the_order() -> None:
+    humans = (Owner("h-2", "owner", OwnerKind.HUMAN), Owner("h-1", "owner", OwnerKind.HUMAN))
+    for owners in (humans, humans[::-1]):
+        [a] = run(task(3), owners=owners)
+        assert a.params["escalate_to"] == "h-1"
 
 
 def test_escalation_is_a_lasting_state_with_a_stable_key() -> None:
@@ -99,7 +112,7 @@ def test_escalation_is_a_lasting_state_with_a_stable_key() -> None:
     later = Snapshot(now=NOW + 5 * H, tasks=(task(4, returns),))
     [second] = PingPong().evaluate(later)
     assert first.state == second.state == "ping_pong:T-1"
-    assert first.key == second.key
+    assert first.key == second.key == "ping_pong:T-1:1"
     # The state began when the limit was crossed (3rd review return), not at this tick.
     assert first.since == returns[2].at
 
@@ -149,3 +162,37 @@ def test_build_accepts_valid_config() -> None:
 def test_build_rejects_bad_config(config: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         build(config)
+
+
+# --- through the engine ------------------------------------------------------------------
+
+
+def ticks(*rounds: int) -> list[str]:
+    """Run one engine tick per round count (10 minutes apart); return what was announced."""
+    alerter = FakeAlerter()
+    engine = Engine(
+        [PingPong(max_review_rounds=3)],
+        adapters=[FakeAdapter()],
+        alerter=alerter,
+        config=EngineConfig(dry_run=False, default_mode=Mode.ACT),
+    )
+    announced: list[str] = []
+    for i, n in enumerate(rounds):
+        snapshot = Snapshot(now=NOW + i * 10 * M, tasks=(task(n),))
+        for d in engine.tick(lambda s=snapshot: s):
+            if d.outcome is Outcome.ALERTED:
+                announced.append(f"{n} rounds: {d.action.reason.split(':')[0]}")
+    assert len(engine.states.store.open_states()) <= 1  # one state per task, however it grows
+    return announced
+
+
+def test_engine_announces_once_while_the_loop_is_steady() -> None:
+    assert len(ticks(3, 3, 3)) == 1
+
+
+def test_engine_stays_quiet_for_one_more_round() -> None:
+    assert len(ticks(3, 4, 5)) == 1
+
+
+def test_engine_reannounces_once_when_the_loop_doubles() -> None:
+    assert len(ticks(3, 4, 6, 7, 8)) == 2
