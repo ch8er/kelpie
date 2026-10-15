@@ -29,6 +29,7 @@ Priorities: **P0** — now, this week · **P1** — next step · **P2** — late
 | 13 | Human tasks blocked agents | not measured | Humans in the task graph, with cost of delay (rule 13, P1) |
 | 14 | A deliberate merge hold was promised to be lifted in 2.5 h and was forgotten; ready PRs waited, agents had no work | about 5 h of idle farm, 1 task closed | Idle with ready work (rule 6) and holds with an owner and an expiry |
 | 15 | A reviewer blocked its own card "waiting for CI/merge" while its PR sat in the merge queue | most of the first live run's block alerts | Block reasons matched by configurable patterns become conditions (pr_merged, ci_green); rule 4 clears them when met |
+| 16 | An agent task was linked to a human task (store products in the app store console); 28 agent tasks depended on it through a chain, the ready queue held only human tasks | farm at 3 of 5 slots, about 4 tasks an hour instead of 9 | Human tasks on the critical path with the number of agent tasks behind them and the idle capacity (rule 6); the dependency itself is a human decision, Kelpie only shows its cost |
 
 Example of what Kelpie must compute by itself: after a manual fix, review time dropped from 48 to 27 minutes, and failures went from 9 of 29 to 1 of 11.
 
@@ -74,7 +75,7 @@ The numbers in brackets are the farm incidents each rule is validated against.
 3. Orphan statuses: a task sits in a status with no owner for more than N minutes → alert or reassignment (11)
 4. Stale blocks: the cause was fixed in the outside world → the block is cleared; block reasons that match configurable patterns ("waiting for CI/merge") get a condition through a connector and count as waiting, not dead (1, 8, 15)
 5. Ping-pong: after K review rounds → escalate to the architect or a human (12)
-6. Bottlenecks and idle time per role → alert with a rebalancing suggestion; the whole farm or a role idle while ready work waits (e.g. mergeable PRs) → alert naming the likely cause, such as a hold; holds (labels, flags, pauses) carry an owner and an expiry, an expired hold → alert, or lifted in act mode (9, 10, 14)
+6. Bottlenecks and idle time per role → alert with a rebalancing suggestion; the whole farm or a role idle while ready work waits (e.g. mergeable PRs) → alert naming the likely cause, such as a hold; holds (labels, flags, pauses) carry an owner and an expiry, an expired hold → alert, or lifted in act mode; free slots while the ready queue holds only human tasks → alert naming the human tasks on the critical path and how many agent tasks wait behind each (9, 10, 14, 16)
 7. Environment resources: disk, memory, processes or provider quotas running out, auth expiring → alert before the agents stop (3, 4, 6). Provider usage and cost also feed budgets (see below)
 8. Daily "cost of chaos" report and before/after verification of every fix
 9. CI economy: finds builds that burn minutes for nothing — on drafts and WIP commits, superseded by a newer push, triggered by docs-only changes, repeated for an already verified commit, or expensive jobs queued on a head where a cheap required check already failed. Cancels superseded and doomed builds by itself and forecasts how long the quota will last (5). Proposing a PR with a better CI configuration is P1 (rules backlog)

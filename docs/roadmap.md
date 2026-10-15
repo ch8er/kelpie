@@ -377,6 +377,19 @@ alert with a rebalancing suggestion.
 - [ ] Idle hours caused by holds go to the cost-of-chaos report
 - [ ] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`, `14-forgotten-merge-hold.yaml` (hold set, promised lift missed, ready PRs waiting about 5 h)
 
+### rules: bottlenecks — human tasks on the critical path (rule 6, incident 16)
+labels: P0, week-2, area:rules
+Live run: an agent task was linked to a human task, 28 agent tasks depended on it through a
+chain, and the ready queue held only human tasks, so the farm ran 3 of 5 slots. The core of
+rule 13 ("needs you") moves into rule 6 as P0; the full inbox stays P1.
+
+**Acceptance criteria**
+- [ ] Free agent slots while every ready task is human-owned → `alert` with the idle capacity and the human tasks that gate the most agent work
+- [ ] For each open human task: the number of agent tasks blocked behind it (transitively) and the agent hours they hold; tasks above a threshold → `escalate` to the human owner
+- [ ] Kelpie never removes or rewrites a dependency; the alert asks whether the link is needed
+- [ ] Human tasks with nothing behind them are not flagged
+- [ ] Fixtures: new `16-human-task-gates-chain.yaml` (one human task, a chain of 28 agent tasks, 3 of 5 slots busy, only human tasks ready)
+
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules
 Field evidence: a heartbeat/maintenance loop repeated the same tool call about 900 times
