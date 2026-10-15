@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import http.client
+import logging
 import re
 import socket
 import threading
@@ -35,6 +36,8 @@ import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 READ_CHUNK = 4096
 DEFAULT_MAX_BYTES = 1024 * 1024
@@ -117,7 +120,21 @@ def https_proxy(host: str) -> urllib.parse.SplitResult | None:
         usable = parts.scheme == "http" and bool(parts.hostname) and parts.port != 0
     except ValueError:
         usable = False
-    return parts if usable else None
+    if not usable:
+        # The scheme only: the proxy URL may hold credentials.
+        what = parts.scheme if parts.scheme != "http" else "http (no host or port 0)"
+        if what not in _warned_proxies:
+            _warned_proxies.add(what)
+            log.warning(
+                "the https_proxy from the environment (%s) is not supported (only http:// "
+                "proxies are); connecting directly",
+                what,
+            )
+        return None
+    return parts
+
+
+_warned_proxies: set[str] = set()
 
 
 def _connection(

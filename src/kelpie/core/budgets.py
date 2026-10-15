@@ -115,7 +115,8 @@ class Budget:
 
     def limit_hits(self, hits: Iterable[LimitHit]) -> list[LimitHit]:
         """The hits this budget forecasts from: its providers' (all without a list), minus
-        hits whose limit refills sooner than ``min_limit_window`` after the hit."""
+        hits whose limit refills sooner than ``min_limit_window`` after the hit. A hit
+        without a reset time has no known window and always counts."""
         return [
             h
             for h in hits

@@ -142,7 +142,8 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 #                           # [connectors.llm_quotas]) whose hits drive that forecast;
 #                           # default: all of them
 # min_limit_window = "10m"  # subscription: ignore hits whose limit refills sooner than
-#                           # this (per-minute rate limits are not the usage limit)
+#                           # this (per-minute rate limits are not the usage limit);
+#                           # hits without a reset time always count
 #
 # [[budgets]]
 # name = "web-project"

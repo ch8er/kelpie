@@ -296,3 +296,34 @@ def test_ipv6_literals_get_an_explicit_port(
 ) -> None:
     conn = net._connection(urllib.parse.urlsplit(url), 1.0, proxy=True)
     assert (conn.host, conn.port) == ("::1", port)
+
+
+def test_the_connection_hook_is_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deadline relies on http.client calling ``_create_connection`` (a CPython
+    internal): if it stops doing so, the watchdog would never see the sockets."""
+    tracked: list[socket.socket] = []
+    original = net._Guard.track
+
+    def track(self: net._Guard, sock: socket.socket) -> None:
+        tracked.append(sock)
+        original(self, sock)
+
+    monkeypatch.setattr(net._Guard, "track", track)
+    with raw_server(answer()) as (port, _):
+        assert net.get(f"http://127.0.0.1:{port}", "/", {}, 2.0).status == 200
+    assert len(tracked) == 1
+
+
+def test_an_unsupported_proxy_is_logged_once_without_its_url(
+    no_env_proxy: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    no_env_proxy.setattr(net, "_warned_proxies", set())
+    set_proxy(no_env_proxy, "socks5://user:secret@127.0.0.1:1080")
+    for _ in range(3):
+        assert net.https_proxy("provider.example.test") is None
+    set_proxy(no_env_proxy, "https://127.0.0.1:3128")
+    net.https_proxy("provider.example.test")
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2
+    assert "(socks5)" in warnings[0] and "(https)" in warnings[1]
+    assert "secret" not in caplog.text

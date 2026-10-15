@@ -8,6 +8,7 @@ import pytest
 from kelpie.app import (
     ConfigError,
     Settings,
+    budget_provider_warnings,
     build_app,
     load_rules,
     load_settings,
@@ -161,3 +162,19 @@ def test_warns_when_the_probe_interval_outlasts_the_reading_age(tmp_path: Path) 
     fine = settings_from(tmp_path, toml())
     assert provider_interval_warnings(load_rules(fine.engine).rules, fine.llm_quotas) == []
     assert provider_interval_warnings(loaded.rules, None) == []
+
+
+def test_warns_when_a_budget_names_an_unknown_provider(tmp_path: Path) -> None:
+    budgets = """
+[[budgets]]
+name = "sub"
+scope = "day"
+unit = "tokens"
+hard = 1000
+mode = "subscription"
+providers = ["main", "elsewhere"]
+"""
+    settings = settings_from(tmp_path, toml(traces=True) + budgets)
+    (warning,) = budget_provider_warnings(settings.budgets, settings.llm_quotas)
+    assert "'sub'" in warning and "'elsewhere'" in warning
+    assert len(budget_provider_warnings(settings.budgets, None)) == 2

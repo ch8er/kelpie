@@ -628,6 +628,19 @@ def resource_interval_warnings(rules: Sequence[Rule], resources: ResourceSetting
     ]
 
 
+def budget_provider_warnings(budgets: BudgetConfig, quotas: LlmQuotaSettings | None) -> list[str]:
+    """A budget's ``providers`` naming no configured LLM provider forecasts from nothing,
+    unless another source (an adapter) reports limit hits under that name."""
+    known = {p.name for p in quotas.providers} if quotas is not None else set()
+    return [
+        f"budget {b.name!r} providers names {name!r}, which is not a "
+        "[connectors.llm_quotas] provider: only limit hits from another source count for it"
+        for b in budgets.budgets
+        for name in b.providers or ()
+        if name not in known
+    ]
+
+
 def provider_interval_warnings(rules: Sequence[Rule], quotas: LlmQuotaSettings | None) -> list[str]:
     """Providers probed less often than rule 'resources' keeps readings would flicker."""
     if quotas is None:
@@ -650,6 +663,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         *trace_window_warnings(loaded.rules, settings.traces),
         *resource_interval_warnings(loaded.rules, settings.resources),
         *provider_interval_warnings(loaded.rules, settings.llm_quotas),
+        *budget_provider_warnings(settings.budgets, settings.llm_quotas),
     ]:
         log.warning(warning)
     try:
