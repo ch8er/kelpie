@@ -271,6 +271,12 @@ heavy_label = "heavy"               # tasks with this label are heavy
 max_heavy_per_host = 2              # alert when an overloaded host runs more at once
 ```
 
+Per-host heavy-task limits need the platform adapter to report where each task runs
+(`Task.host`); the Hermes adapter does not yet, so with several hosts Kelpie can only say
+that the farm runs too many heavy tasks while some host is overloaded. Disk, memory and
+load alerts do not depend on it. CPU alerts are off by default (load covers overload), and
+the default process ceiling is the kernel's `pid_max`, so process alerts rarely fire.
+
 Redirects and proxies are never followed, and the token is never logged. If Prometheus is
 down, rules see no host readings (never stale ones), the failure is counted in
 `kelpie_resource_read_failures_total` and logged once per cause. Queries are configurable

@@ -43,7 +43,11 @@ def run(
 
 HEAVY = Resources(max_heavy_per_host=1)
 BUSY = (res(K.LOAD, 20, 8, unit="load"), res(K.MEMORY, 28.8, 32))  # 2.5x, 90% -> warning
-THREE_RUNNING = tuple(task(f"T-{i}") for i in range(3))
+THREE_RUNNING = tuple(task(f"T-{i}", host="host-a") for i in range(3))
+
+
+def heavy_alerts(actions: list[Action]) -> list[Action]:
+    return [a for a in actions if a.state and a.state.endswith(("heavy", "unplaced"))]
 
 
 def test_registered_and_defaults() -> None:
@@ -72,13 +76,16 @@ def test_disk_thresholds_are_inclusive(used: float, severity: Severity | None) -
     assert "disk host-a:/" in alert.reason
 
 
-def test_state_is_stable_and_key_follows_severity() -> None:
+def test_state_and_key_do_not_depend_on_the_reading() -> None:
     (a,) = run(res(K.DISK, 86, 100, name="host-a:/"))
     (b,) = run(res(K.DISK, 90, 100, name="host-a:/"))
     (c,) = run(res(K.DISK, 97, 100, name="host-a:/"))
     assert a.state == b.state == c.state == "resources:disk:host-a:/"
-    assert a.key == b.key != c.key  # warning -> critical is announced again
-    assert a.since is None  # a pure rule keeps no history: the state tracker has it
+    # A rule keeps no history, so no hysteresis band is possible: the key stays put, and
+    # the state tracker escalates only when the severity rises above what it announced.
+    assert a.key == b.key == c.key
+    assert (a.severity, c.severity) == (Severity.WARNING, Severity.CRITICAL)
+    assert a.since is None  # the state tracker has it
 
 
 def test_each_mount_is_its_own_state() -> None:
@@ -90,20 +97,23 @@ def test_each_mount_is_its_own_state() -> None:
 
 
 def test_memory_load_cpu_and_processes() -> None:
-    actions = run(
+    rule = build({"cpu_warning": 0.95})
+    readings = (
         res(K.MEMORY, 31.5, 32),  # 98% -> critical
         res(K.LOAD, 13, 8, unit="load"),  # 1.6x -> warning
-        res(K.CPU, 96, 100, unit="percent"),  # 96% -> warning
+        res(K.CPU, 96, 100, unit="percent"),  # 96% -> warning, if switched on
         res(K.PROCESSES, 30000, 32768, unit="processes"),  # 92% -> warning
     )
-    by_kind = {a.params["kind"]: a.severity for a in actions}
+    by_kind = {a.params["kind"]: a.severity for a in run(*readings, rule=rule)}
     assert by_kind == {
         "memory": Severity.CRITICAL,
         "load": Severity.WARNING,
         "cpu": Severity.WARNING,
         "processes": Severity.WARNING,
     }
-    load = next(a for a in actions if a.params["kind"] == "load")
+    # CPU is off by default: load covers overload.
+    assert "cpu" not in {a.params["kind"] for a in run(*readings)}
+    load = next(a for a in run(*readings) if a.params["kind"] == "load")
     assert "1.6x its cores" in load.reason
 
 
@@ -166,7 +176,7 @@ def test_custom_thresholds() -> None:
 def test_overloaded_host_with_too_many_heavy_tasks() -> None:
     queued = (task("T-8", Status.READY), task("T-9", Status.READY), task("T-7", Status.REVIEW))
     actions = run(*BUSY, tasks=(*THREE_RUNNING, *queued), rule=HEAVY)
-    (alert,) = actions  # the warning-level load and memory alerts are folded into it
+    (alert,) = heavy_alerts(actions)
     assert alert.severity is Severity.WARNING
     assert alert.task_id is None
     assert alert.state == "resources:host-a:heavy"
@@ -178,32 +188,36 @@ def test_overloaded_host_with_too_many_heavy_tasks() -> None:
     assert "T-8, T-9" in alert.reason
 
 
+def test_pressure_alerts_stay_open_next_to_the_heavy_alert() -> None:
+    # Dropping them would let the state tracker report them as resolved while they last.
+    actions = run(*BUSY, tasks=THREE_RUNNING, rule=HEAVY)
+    assert sorted(a.state or "" for a in actions) == [
+        "resources:host-a:heavy",
+        "resources:load:host-a:load",
+        "resources:memory:host-a:memory",
+    ]
+    covered = [a for a in actions if a not in heavy_alerts(actions)]
+    assert all("covered by the heavy-task alert for host-a" in a.reason for a in covered)
+    plain = run(*BUSY)
+    assert all("heavy-task alert" not in a.reason for a in plain)
+
+
 def test_heavy_alert_key_changes_only_with_the_limit() -> None:
-    (a,) = run(*BUSY, tasks=THREE_RUNNING, rule=HEAVY)
-    (b,) = run(*BUSY, tasks=THREE_RUNNING[:2], rule=HEAVY)
-    (c,) = run(*BUSY, tasks=THREE_RUNNING, rule=Resources(max_heavy_per_host=2))
+    (a,) = heavy_alerts(run(*BUSY, tasks=THREE_RUNNING, rule=HEAVY))
+    (b,) = heavy_alerts(run(*BUSY, tasks=THREE_RUNNING[:2], rule=HEAVY))
+    (c,) = heavy_alerts(run(*BUSY, tasks=THREE_RUNNING, rule=Resources(max_heavy_per_host=2)))
     assert a.key == b.key != c.key
 
 
-def test_critical_pressure_keeps_its_own_alert() -> None:
-    memory = res(K.MEMORY, 31.5, 32)  # 98% -> critical
-    actions = run(res(K.LOAD, 20, 8, unit="load"), memory, tasks=THREE_RUNNING, rule=HEAVY)
-    assert {(a.state, a.severity) for a in actions} == {
-        ("resources:host-a:heavy", Severity.WARNING),
-        ("resources:memory:host-a:memory", Severity.CRITICAL),
-    }
-
-
-def test_disk_alerts_are_never_folded() -> None:
+def test_disk_alerts_are_unrelated_to_the_heavy_alert() -> None:
     actions = run(*BUSY, res(K.DISK, 90, 100, name="host-a:/"), tasks=THREE_RUNNING, rule=HEAVY)
-    assert sorted(a.state or "" for a in actions) == [
-        "resources:disk:host-a:/",
-        "resources:host-a:heavy",
-    ]
+    disk = next(a for a in actions if a.params.get("kind") == "disk")
+    assert "heavy" not in disk.reason
 
 
 def test_at_the_limit_there_is_no_heavy_alert_but_the_pressure_is_still_reported() -> None:
     actions = run(*BUSY, tasks=THREE_RUNNING[:1], rule=HEAVY)
+    assert heavy_alerts(actions) == []
     assert {a.params["kind"] for a in actions} == {"load", "memory"}
 
 
@@ -213,34 +227,61 @@ def test_healthy_host_with_many_heavy_tasks_is_left_alone() -> None:
 
 
 def test_light_tasks_do_not_count() -> None:
-    light = tuple(task(f"T-{i}", labels=()) for i in range(5))
-    actions = run(*BUSY, tasks=light, rule=HEAVY)
-    assert sorted(a.state or "" for a in actions) == [
-        "resources:load:host-a:load",
-        "resources:memory:host-a:memory",
-    ]
+    light = tuple(task(f"T-{i}", labels=(), host="host-a") for i in range(5))
+    assert heavy_alerts(run(*BUSY, tasks=light, rule=HEAVY)) == []
 
 
 def test_heavy_by_role() -> None:
     rule = Resources(max_heavy_per_host=1, heavy_roles=("builder",))
-    tasks = tuple(task(f"T-{i}", labels=(), role="builder") for i in range(2))
-    assert any(a.state == "resources:host-a:heavy" for a in run(*BUSY, tasks=tasks, rule=rule))
-    other = tuple(task(f"T-{i}", labels=(), role="developer") for i in range(2))
-    assert all(a.state != "resources:host-a:heavy" for a in run(*BUSY, tasks=other, rule=rule))
+    tasks = tuple(task(f"T-{i}", labels=(), role="builder", host="host-a") for i in range(2))
+    assert len(heavy_alerts(run(*BUSY, tasks=tasks, rule=rule))) == 1
+    other = tuple(task(f"T-{i}", labels=(), role="developer", host="host-a") for i in range(2))
+    assert heavy_alerts(run(*BUSY, tasks=other, rule=rule)) == []
 
 
 def test_tasks_with_a_known_host_count_only_there() -> None:
     elsewhere = tuple(task(f"T-{i}", host="host-b") for i in range(3))
-    assert all(a.state != "resources:host-a:heavy" for a in run(*BUSY, tasks=elsewhere, rule=HEAVY))
-    here = tuple(task(f"T-{i}", host="host-a") for i in range(3))
-    assert any(a.state == "resources:host-a:heavy" for a in run(*BUSY, tasks=here, rule=HEAVY))
+    assert heavy_alerts(run(*BUSY, tasks=elsewhere, rule=HEAVY)) == []
+    assert len(heavy_alerts(run(*BUSY, tasks=THREE_RUNNING, rule=HEAVY))) == 1
 
 
-def test_unplaced_tasks_count_against_every_overloaded_host() -> None:
-    busy_b = (res(K.MEMORY, 31, 32, host="host-b"),)
-    actions = run(*BUSY, *busy_b, tasks=THREE_RUNNING, rule=HEAVY)
-    heavy = [a for a in actions if a.state and a.state.endswith(":heavy")]
-    assert [a.params["host"] for a in heavy] == ["host-a", "host-b"]
+def test_hostless_tasks_belong_to_the_only_host_with_readings() -> None:
+    tasks = tuple(task(f"T-{i}") for i in range(3))
+    (alert,) = heavy_alerts(run(*BUSY, tasks=tasks, rule=HEAVY))
+    assert alert.params["host"] == "host-a"
+
+
+def test_hostless_tasks_on_several_hosts_get_one_alert_that_claims_no_host() -> None:
+    other = (res(K.MEMORY, 31, 32, host="host-b"), res(K.DISK, 10, 100, host="host-c"))
+    tasks = tuple(task(f"T-{i}") for i in range(4))  # 4 > 1 per host x 3 hosts
+    actions = run(*BUSY, *other, tasks=tasks, rule=HEAVY)
+    (alert,) = heavy_alerts(actions)
+    assert alert.state == "resources:heavy:unplaced"
+    assert "host" not in alert.params
+    assert alert.params["overloaded_hosts"] == ["host-a", "host-b"]
+    assert alert.params["running_heavy"] == ["T-0", "T-1", "T-2", "T-3"]
+    assert "do not say which host" in alert.reason
+    assert "Task.host" in alert.reason
+
+
+def test_hostless_tasks_within_what_the_hosts_allow_are_left_alone() -> None:
+    other = (res(K.MEMORY, 31, 32, host="host-b"),)
+    tasks = tuple(task(f"T-{i}") for i in range(2))  # 2 <= 1 per host x 2 hosts
+    assert heavy_alerts(run(*BUSY, *other, tasks=tasks, rule=HEAVY)) == []
+
+
+def test_placed_and_hostless_tasks_are_counted_together_farm_wide() -> None:
+    other = (res(K.MEMORY, 31, 32, host="host-b"),)
+    tasks = (task("T-0", host="host-a"), task("T-1"), task("T-2"))
+    (alert,) = heavy_alerts(run(*BUSY, *other, tasks=tasks, rule=HEAVY))
+    assert alert.state == "resources:heavy:unplaced"
+    assert alert.params["running_heavy"] == ["T-0", "T-1", "T-2"]
+
+
+def test_no_unplaced_alert_without_pressure() -> None:
+    healthy = (res(K.MEMORY, 10, 32), res(K.MEMORY, 10, 32, host="host-b"))
+    tasks = tuple(task(f"T-{i}") for i in range(5))
+    assert run(*healthy, tasks=tasks, rule=HEAVY) == []
 
 
 def test_without_a_limit_only_resource_alerts_are_raised() -> None:
@@ -250,7 +291,7 @@ def test_without_a_limit_only_resource_alerts_are_raised() -> None:
 
 def test_many_queued_tasks_are_summarized() -> None:
     queued = tuple(task(f"Q-{i}", Status.READY) for i in range(8))
-    (alert,) = run(*BUSY, tasks=(*THREE_RUNNING, *queued), rule=HEAVY)
+    (alert,) = heavy_alerts(run(*BUSY, tasks=(*THREE_RUNNING, *queued), rule=HEAVY))
     assert "and 3 more" in alert.reason
     assert len(alert.params["queued_heavy"]) == 8
 
@@ -265,7 +306,7 @@ def test_build_reads_every_parameter() -> None:
             "disk_critical": 0.9,
             "memory_critical": False,
             "load_warning": 2,
-            "cpu_warning": False,
+            "cpu_warning": 0.9,
             "heavy_label": "heavy",
             "heavy_labels": ["build", "e2e"],
             "heavy_roles": "builder",
@@ -277,7 +318,8 @@ def test_build_reads_every_parameter() -> None:
     assert rule.thresholds[K.DISK] == Thresholds(0.7, 0.9)
     assert rule.thresholds[K.MEMORY] == Thresholds(0.90, None)
     assert rule.thresholds[K.LOAD] == Thresholds(2.0, 3.0)
-    assert rule.thresholds[K.CPU] == Thresholds(None, None)
+    assert rule.thresholds[K.CPU] == Thresholds(0.9, None)
+    assert build({}).thresholds[K.CPU] == Thresholds(None, None)
     assert rule.heavy_labels == ("heavy", "build", "e2e")
     assert rule.heavy_roles == ("builder",)
     assert rule.max_heavy_per_host == 2

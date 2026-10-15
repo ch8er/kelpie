@@ -42,12 +42,16 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # disk_warning = 0.85       # also disk_critical (0.95)
 # memory_warning = 0.90     # also memory_critical (0.97)
 # load_warning = 1.5        # load1 / cores; also load_critical (3.0)
-# cpu_warning = 0.95        # also cpu_critical (off)
-# processes_warning = 0.80  # processes / process limit; also processes_critical (0.95)
+# cpu_warning = 0.95        # off by default (load covers overload); also cpu_critical
+# processes_warning = 0.80  # processes / process limit; also processes_critical (0.95). The
+#                           # default query divides by pid_max (often 4 million), so this
+#                           # rarely fires; set the processes_max query to a real ceiling
 # heavy_label = "heavy"     # tasks with this label (or a label in heavy_labels = [...]) ...
 # heavy_roles = []          # ... or in one of these roles are heavy
 # max_heavy_per_host = 2    # alert when an overloaded host runs more heavy tasks at once
-#                           # (default: not checked)
+#                           # (default: not checked). Needs an adapter that sets Task.host
+#                           # (the Hermes adapter does not yet): with several hosts and tasks
+#                           # that do not say where they run, you get one alert without a host
 # max_reading_age = "10m"
 
 [storage]

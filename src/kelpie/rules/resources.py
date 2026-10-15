@@ -11,10 +11,13 @@ Heavy tasks (full builds, large test suites; marked by a label or a role) multip
 load of a host. When a host is under pressure (memory, load or CPU past the warning
 threshold) and more heavy tasks run on it than ``max_heavy_per_host``, one alert says so,
 with the suggested limit and the heavy tasks still queued; Kelpie only suggests, the human
-or the dispatcher serializes the work. A task that does not say where it runs
-(``Task.host``) is counted against every host under pressure: it may be on any of them.
-The warning-level pressure readings of that host are folded into this alert; critical ones
-keep their own.
+or the dispatcher serializes the work. Which host a task runs on comes from ``Task.host``,
+which the platform adapter must set; the Hermes adapter does not yet. A running heavy task
+without a host is attributed to the single host with readings, if there is exactly one.
+With several hosts and unplaced tasks the rule cannot say where they run: it raises at
+most one alert without a host when the farm-wide count exceeds what the hosts allow while
+some host is under pressure. Queued (ready) tasks have no host yet by nature and are
+listed as the shared queue.
 
 Every alert is about a lasting state: a stable ``state`` and ``key`` per resource, so the
 engine alerts when it opens, when it gets worse and when it ends, not on every tick.
@@ -60,7 +63,7 @@ DEFAULT_THRESHOLDS: Mapping[ResourceKind, Thresholds] = {
     ResourceKind.DISK: Thresholds(0.85, 0.95),
     ResourceKind.MEMORY: Thresholds(0.90, 0.97),
     ResourceKind.LOAD: Thresholds(1.5, 3.0),
-    ResourceKind.CPU: Thresholds(0.95, None),
+    ResourceKind.CPU: Thresholds(None, None),  # off: load covers overload
     ResourceKind.PROCESSES: Thresholds(0.80, 0.95),
 }
 # Kinds where a heavy task adds to the pressure.
@@ -93,21 +96,15 @@ class Resources:
     # --- hosts --------------------------------------------------------------------------
 
     def _host_alerts(self, snapshot: Snapshot) -> list[Action]:
-        findings = self._findings(snapshot)
-        folded: set[str] = set()
-        actions: list[Action] = []
+        fresh = self._fresh(snapshot)
+        findings = self._findings(fresh)
+        heavy: list[Action] = []
+        covered: set[str] = set()
         if self.max_heavy_per_host is not None:
-            for host, pressure in sorted(self._pressure(findings).items()):
-                alert = self._heavy_alert(host, pressure, snapshot)
-                if alert is not None:
-                    actions.append(alert)
-                    folded.update(
-                        f.resource.name for f in pressure if f.severity is Severity.WARNING
-                    )
-        actions.extend(self._alert(f) for f in findings if f.resource.name not in folded)
-        return actions
+            heavy, covered = self._heavy_alerts(findings, {h for h, _, _ in fresh}, snapshot)
+        return [*heavy, *(self._alert(f, covered) for f in findings)]
 
-    def _findings(self, snapshot: Snapshot) -> list[Finding]:
+    def _fresh(self, snapshot: Snapshot) -> dict[tuple[str, ResourceKind, str], Resource]:
         newest: dict[tuple[str, ResourceKind, str], Resource] = {}
         for r in snapshot.resources:
             if r.host is None or r.kind not in self.thresholds:
@@ -118,8 +115,11 @@ class Resources:
             held = newest.get(key)
             if held is None or (r.at or snapshot.now) >= (held.at or snapshot.now):
                 newest[key] = r
+        return newest
+
+    def _findings(self, fresh: Mapping[tuple[str, ResourceKind, str], Resource]) -> list[Finding]:
         findings: list[Finding] = []
-        for (_, kind, _), r in sorted(newest.items(), key=lambda kv: kv[0]):
+        for (_, kind, _), r in sorted(fresh.items(), key=lambda kv: kv[0]):
             utilization = r.utilization
             if utilization is None:
                 continue
@@ -136,7 +136,7 @@ class Resources:
                 hosts.setdefault(f.resource.host, []).append(f)
         return hosts
 
-    def _alert(self, f: Finding) -> Action:
+    def _alert(self, f: Finding, covered: set[str]) -> Action:
         r = f.resource
         state = f"{NAME}:{r.kind}:{r.name}"
         limit = f.thresholds.critical if f.severity is Severity.CRITICAL else f.thresholds.warning
@@ -148,11 +148,18 @@ class Resources:
                 "Agents fail in confusing ways when it runs out."
                 if f.severity is Severity.CRITICAL
                 else "Free it before the agents stop."
+            )
+            + (
+                f" Also covered by the heavy-task alert for {r.host}."
+                if r.host in covered and f.resource.kind in PRESSURE_KINDS
+                else ""
             ),
             severity=f.severity,
-            # One state per resource; the severity is part of the key, so a warning that
-            # turns critical (or relaxes) is announced again.
-            key=f"{state}:{f.severity}",
+            # One state per resource, and the severity is not part of the key: a rule keeps
+            # no history, so a reading that wobbles around the critical threshold must not
+            # be announced again each time. The state tracker remembers the worst severity
+            # it announced and escalates only upwards.
+            key=state,
             state=state,
             params={
                 "host": r.host,
@@ -173,14 +180,50 @@ class Resources:
             task.role is not None and task.role in self.heavy_roles
         )
 
-    def _heavy_alert(self, host: str, pressure: list[Finding], snapshot: Snapshot) -> Action | None:
+    def _heavy_alerts(
+        self, findings: list[Finding], hosts: set[str], snapshot: Snapshot
+    ) -> tuple[list[Action], set[str]]:
+        """Heavy-task alerts, and the hosts they cover."""
         assert self.max_heavy_per_host is not None
         limit = self.max_heavy_per_host
-        heavy = [t for t in snapshot.tasks if self._is_heavy(t) and t.host in (None, host)]
-        running = sorted(t.id for t in heavy if t.status is Status.IN_PROGRESS)
+        pressure = self._pressure(findings)
+        if not pressure:
+            return [], set()
+        heavy = [t for t in snapshot.tasks if self._is_heavy(t)]
+        sole = next(iter(hosts)) if len(hosts) == 1 else None
+        placed: dict[str, list[str]] = {}
+        unplaced: list[str] = []
+        for t in heavy:
+            if t.status is not Status.IN_PROGRESS:
+                continue
+            if (host := t.host or sole) is None:
+                unplaced.append(t.id)
+            else:
+                placed.setdefault(host, []).append(t.id)
         queued = sorted(t.id for t in heavy if t.status is Status.READY)
-        if len(running) <= limit:
-            return None
+        actions: list[Action] = []
+        covered: set[str] = set()
+        for host, host_pressure in sorted(pressure.items()):
+            running = sorted(placed.get(host, []))
+            if len(running) > limit:
+                actions.append(self._host_alert(host, host_pressure, running, queued, limit))
+                covered.add(host)
+        total = len(unplaced) + sum(len(v) for v in placed.values())
+        if unplaced and total > limit * max(1, len(hosts)):
+            actions.append(
+                self._unplaced_alert(
+                    sorted(pressure),
+                    sorted(unplaced + [i for v in placed.values() for i in v]),
+                    queued,
+                    limit,
+                    len(hosts),
+                )
+            )
+        return actions, covered
+
+    def _host_alert(
+        self, host: str, pressure: list[Finding], running: list[str], queued: list[str], limit: int
+    ) -> Action:
         state = f"{NAME}:{host}:heavy"
         worst = max(pressure, key=lambda f: (_RANK[f.severity], f.utilization))
         return Action(
@@ -200,6 +243,30 @@ class Resources:
                 "running_heavy": running,
                 "queued_heavy": queued,
                 "worst_resource": worst.resource.name,
+            },
+        )
+
+    def _unplaced_alert(
+        self, loaded: list[str], running: list[str], queued: list[str], limit: int, hosts: int
+    ) -> Action:
+        state = f"{NAME}:heavy:unplaced"
+        return Action(
+            ActionKind.ALERT,
+            NAME,
+            f"{len(running)} heavy tasks run at once across {hosts} hosts (limit {limit} per "
+            f"host) while {', '.join(loaded)} {'is' if len(loaded) == 1 else 'are'} "
+            f"overloaded, but the tasks do not say which host they run on, so Kelpie cannot "
+            f"say where to hold back. Suggest at most {limit} heavy task(s) per host; "
+            f"{len(queued)} more wait in ready. Per-host limits need an adapter that sets "
+            f"Task.host.",
+            severity=Severity.WARNING,
+            key=f"{state}:{limit}",
+            state=state,
+            params={
+                "max_heavy": limit,
+                "running_heavy": running,
+                "queued_heavy": queued,
+                "overloaded_hosts": loaded,
             },
         )
 
