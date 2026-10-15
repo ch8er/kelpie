@@ -14,6 +14,7 @@ from kelpie.app import (
     ControlLoop,
     Settings,
     build_app,
+    dispatch_gate_warnings,
     find_config,
     load_rules,
     load_settings,
@@ -376,3 +377,12 @@ def test_serialize_in_act_mode_needs_rule_2_in_act_mode() -> None:
     assert serialize_warnings(engine(conflict_warning=act), [ConflictWarning()]) == []
     dry = EngineConfig(dry_run=True, modes={"conflict_warning": act})
     assert serialize_warnings(dry, on) == []
+
+
+def test_dispatch_gate_act_mode_needs_rule_2_in_act_mode() -> None:
+    act = Mode.ACT
+    assert dispatch_gate_warnings(EngineConfig(dry_run=False, modes={"dispatch_gate": act}))
+    both = {"dispatch_gate": act, "wait_condition": act}
+    assert dispatch_gate_warnings(EngineConfig(dry_run=False, modes=both)) == []
+    assert dispatch_gate_warnings(EngineConfig(dry_run=True, modes={"dispatch_gate": act})) == []
+    assert dispatch_gate_warnings(EngineConfig(dry_run=False)) == []

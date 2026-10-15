@@ -66,6 +66,7 @@ PLANNED: tuple[PlannedRule, ...] = (
     PlannedRule("loop_breaker", 10, _P0, "Identical calls, error streaks, token budget -> stop"),
     PlannedRule("no_progress", 11, _P0, "Tokens spent without status, commit or artifact"),
     PlannedRule("conflict_warning", 12, _P0, "Live tasks editing the same files -> warn", (7,)),
+    PlannedRule("dispatch_gate", None, _P0, "Ready task with an unmet prerequisite -> waiting"),
     PlannedRule("needs_you", 13, _P1, "Everything waiting for a human, by cost of delay", (13,)),
     PlannedRule("compaction_gate", 14, _P2, "Gate violated right after context compaction"),
     PlannedRule("return_causes", None, _P1, "Root causes of task returns -> recommendation", (7,)),

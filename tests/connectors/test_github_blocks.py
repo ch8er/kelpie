@@ -12,8 +12,11 @@ from kelpie.connectors.github.blocks import ConditionSync, load_block_conditions
 from kelpie.connectors.github.client import GitHubClient
 from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.core.actions import ActionKind
+from kelpie.core.executors import wait_conditions
 from kelpie.core.model import Block, Condition, ConditionKind, Snapshot, Status, Task
+from kelpie.rules.dispatch_gate import DispatchGate
 from kelpie.rules.stale_blocks import StaleBlocks
+from kelpie.rules.wait_condition import WaitCondition
 from tests.connectors.fake_github import TOKEN, Clock, FakeGitHub, Recorder, serve
 from tests.incidents import load
 
@@ -326,3 +329,117 @@ def test_attachment_produces_the_fixture_shape() -> None:
     assert [t.block for t in out.tasks] == [t.block for t in fixture.snapshot.tasks]
     expected = {c.id: (c.kind, c.task_id, c.registered_at) for c in fixture.snapshot.conditions}
     assert {c.id: (c.kind, c.task_id, c.registered_at) for c in out.conditions} == expected
+
+
+# --- ready tasks (dispatch gate) ----------------------------------------------------------
+
+READY_PATTERNS = [
+    *PATTERNS,
+    {
+        "pattern": r"after (?P<pr>#\d+) is green",
+        "kind": "ci_green",
+        "repo": REPO,
+        "applies_to": ["ready_task"],
+    },
+    {
+        "pattern": r"after (?P<pr>#\d+) lands",
+        "kind": "pr_merged",
+        "repo": REPO,
+        "applies_to": ["block", "ready_task"],
+    },
+]
+
+
+def ready(task_id: str, title: str, since: datetime = NOW - timedelta(hours=1)) -> Task:
+    return Task(task_id, title, Status.READY, since, role="developer")
+
+
+def ready_sync(gh: FakeGitHub, rec: Recorder | None = None) -> ConditionSync:
+    connector = GitHubConnector(GitHubClient(gh.url, TOKEN, clock=Clock(NOW)), [REPO])
+    return ConditionSync(connector, load_block_conditions(READY_PATTERNS, [REPO]), rec)
+
+
+def test_applies_to_validation() -> None:
+    patterns = load_block_conditions(READY_PATTERNS, [REPO])
+    assert [sorted(p.applies_to) for p in patterns] == [
+        ["block"],
+        ["block"],
+        ["ready_task"],
+        ["block", "ready_task"],
+    ]
+    for bad in ([], ["task"], "ready_task", [1]):
+        with pytest.raises(ValueError, match="applies_to"):
+            load_block_conditions(
+                [{"pattern": "(?P<pr>.+)", "kind": "pr_merged", "applies_to": bad}], [REPO]
+            )
+
+
+def test_ready_task_title_gets_a_condition_linked_by_task_id() -> None:
+    rec = Recorder()
+    tasks = (
+        ready("T-1", "Redo the migration after #12 is green"),
+        ready("T-2", "Cleanup after #13 lands"),
+        ready("T-3", "Waiting for CI/merge of #14"),  # a block-only pattern: not read here
+        replace(ready("T-4", "after #15 is green"), status=Status.IN_PROGRESS),  # not ready
+    )
+    with serve() as gh:
+        gh.pull(REPO, 12, sha=SHA)
+        gh.ci(REPO, SHA, statuses=[{"state": "failure", "updated_at": "2026-03-02T11:00:00Z"}])
+        gh.pull(REPO, 13)
+        out = ready_sync(gh, rec)(Snapshot(now=NOW, tasks=tasks))
+        assert sorted(gh.paths())[0].startswith("/repos/example/repo/")
+    assert out.tasks == tasks  # nothing linked through a block
+    by_id = {c.id: c for c in out.conditions}
+    assert set(by_id) == {
+        "ready:T-1:ci_green:example/repo#12",
+        "ready:T-2:pr_merged:example/repo#13",
+    }
+    red = by_id["ready:T-1:ci_green:example/repo#12"]
+    assert red.kind is ConditionKind.CI_STATUS and red.task_id == "T-1"
+    assert red.satisfied is False and red.registered_at == NOW - timedelta(hours=1)
+    assert red.params["source"] == "task_text" and red.params["pr"] == 12
+    assert rec.blocks == {}  # ready-task matches are not block outcomes
+
+
+def test_ready_condition_already_registered_is_not_duplicated() -> None:
+    task = ready("T-1", "Cleanup after #13 lands")
+    existing = Condition(
+        "ready:T-1:pr_merged:example/repo#13",
+        ConditionKind.PR_MERGED,
+        "T-1",
+        {"repo": REPO, "pr": 13},
+    )
+    with serve() as gh:
+        gh.pull(REPO, 13)
+        out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,), conditions=(existing,)))
+    assert [c.id for c in out.conditions] == [existing.id]
+
+
+def test_dispatch_gate_park_then_wake_follows_the_prs_current_head() -> None:
+    """GitHub step -> dispatch gate -> wait -> adapter registers -> fixing push -> rule 2."""
+    old, new = "1" * 40, "2" * 40
+    clock = Clock(NOW)
+    task = ready("T-1", "Redo the migration after #12 is green")
+    with serve() as gh:
+        connector = GitHubConnector(GitHubClient(gh.url, TOKEN, clock=clock), [REPO])
+        step = ConditionSync(connector, load_block_conditions(READY_PATTERNS, [REPO]))
+        gh.pull(REPO, 12, sha=old)
+        gh.ci(REPO, old, statuses=[{"state": "failure", "updated_at": "2026-03-02T11:50:00Z"}])
+        red = step(Snapshot(now=NOW, tasks=(task,)))
+        [wait] = DispatchGate().evaluate(red)
+        assert wait.kind is ActionKind.WAIT
+        [registered] = wait_conditions(wait)
+        assert "sha" not in registered.params  # follows the head, not the red commit
+        parked_at = NOW + timedelta(minutes=1)
+        registered = replace(registered, registered_at=parked_at)
+        waiting = replace(task, status=Status.WAITING, status_since=parked_at)
+        # The fix is pushed and goes green.
+        gh.pull(REPO, 12, sha=new)
+        gh.ci(REPO, new, statuses=[{"state": "success", "updated_at": "2026-03-02T12:05:00Z"}])
+        clock.advance(minutes=10)
+        green = step(Snapshot(now=clock.now, tasks=(waiting,), conditions=(registered,)))
+    [checked] = green.conditions
+    assert checked.satisfied is True and checked.params["sha"] == new
+    [wake] = WaitCondition().evaluate(green)
+    assert wake.kind is ActionKind.WAKE and wake.task_id == "T-1"
+    assert DispatchGate().evaluate(green) == []
