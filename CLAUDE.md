@@ -29,8 +29,8 @@ tests/fixtures/incidents/   synthetic incident fixtures (format: README.md there
    and `tests/test_architecture.py`.
 2. No LLM in the control loop: `core/`, `rules/` and `server.py` never import an LLM client.
 3. A rule is a pure function over a `Snapshot`: no I/O, no clock reads (use
-   `snapshot.now`), no mutation. Side effects happen only through actions the engine
-   executes via an adapter or connector.
+   `snapshot.now`), no mutation. Side effects happen only through actions that the engine
+   executes (today via the platform adapter or the alerter).
 4. Every rule has fixture tests in `tests/fixtures/incidents/`, including a negative case
    (`not_expected_actions`). `kelpie.rules` coverage stays >= 90%.
 5. No coupling to a specific platform in core, a specific CI, iOS, or a single machine.
@@ -46,12 +46,15 @@ tests/fixtures/incidents/   synthetic incident fixtures (format: README.md there
 - Mark a PR ready for review only when the step is done and ruff and pytest pass locally.
   That starts CI; later pushes rebuild and cancel the previous run for the branch.
   Docs-only changes (`docs/`, `*.md`) skip lint and test. `ci-ok` is the only required
-  check: it fails if a needed job failed.
+  check: it fails if a needed job failed or was cancelled.
 - Before marking a PR ready, run the `reviewer` subagent (`.claude/agents/reviewer.md`) on
   the diff against `main` and fix its findings.
 - Never wait for CI inside a session: push and move on.
 - Adding a rule: module in `src/kelpie/rules/` with `@register("<name>")` (auto-imported);
-  the name must be in `PLANNED`; fixtures with `rule: <name>` then run automatically.
+  the name must be in `PLANNED`; fixtures with `rule: <name>` then run automatically;
+  add `tests/rules/test_<name>.py` for edge cases.
+- Economy: routine work on a smaller model; at most 2–3 parallel sessions (plan, Budget).
+- PR, commit and extension conventions: `CONTRIBUTING.md`.
 - Backlog: `docs/roadmap.md`; `scripts/create_issues.sh` turns it into GitHub issues.
 
 ## Commands

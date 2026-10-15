@@ -14,6 +14,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# A newer run cancels the older one for the same PR branch. Workflow-level so runs are
+# ordered by event; drafts get their own group so a skipped draft run never cancels a
+# real build. Pushes to main are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}${{ github.event.pull_request.draft && '-draft' || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   changes:
     if: github.event_name == 'push' || !github.event.pull_request.draft
@@ -22,7 +29,7 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
         id: filter
         with:
           predicate-quantifier: every
@@ -35,11 +42,6 @@ jobs:
   lint:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # A new build cancels the previous one for the same branch. Job-level so that
-    # skipped runs never cancel a real build.
-    concurrency:
-      group: ${{ github.workflow }}-lint-${{ github.head_ref || github.ref_name }}
-      cancel-in-progress: true
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -53,9 +55,6 @@ jobs:
   test:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    concurrency:
-      group: ${{ github.workflow }}-test-${{ github.head_ref || github.ref_name }}
-      cancel-in-progress: true
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
