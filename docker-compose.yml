@@ -10,6 +10,8 @@ services:
     restart: unless-stopped
     environment:
       KELPIE_PORT: "9464"
+      KELPIE_DB: /data/kelpie.db
+      # Mount a config and set KELPIE_CONFIG to change the defaults (dry-run on, observe).
     volumes:
       - kelpie-data:/data
     ports:

@@ -28,10 +28,13 @@ class Mode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class EngineConfig:
-    """``dry_run`` is the global override: when set, nothing leaves Kelpie in any mode."""
+    """``dry_run`` is the global override: when set, nothing leaves Kelpie in any mode.
+
+    Both safety switches default to the safe side: dry-run on, every rule in observe.
+    """
 
     interval: timedelta = timedelta(seconds=30)
-    dry_run: bool = False
+    dry_run: bool = True
     cooldown: timedelta = timedelta(minutes=30)  # ledger: same action not repeated
     retry_after: timedelta = timedelta(minutes=5)  # ledger: retry delay after a failure
     # Ledger cap on actions with an effect, per task (else per session, else per rule).
@@ -65,7 +68,7 @@ class EngineConfig:
             raise ValueError("engine.rules must map rule names to tables")
         rules = {name: dict(section) for name, section in raw_rules.items()}
         modes = {name: Mode(s.pop("mode")) for name, s in rules.items() if "mode" in s}
-        dry_run = data.get("dry_run", False)
+        dry_run = data.get("dry_run", True)
         if not isinstance(dry_run, bool):
             raise ValueError(f"engine.dry_run must be true or false, got {dry_run!r}")
         interval = parse_duration(data.get("interval", 30))

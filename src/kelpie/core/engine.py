@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -52,6 +53,7 @@ class Engine:
     config: EngineConfig = field(default_factory=EngineConfig)
     ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
     ledger: ActionLedger = field(init=False)
+    rule_errors: Counter[str] = field(init=False, default_factory=Counter)
     _ledger_down_since: datetime | None = field(init=False, default=None)
     executors: dict[str, Executor] = field(init=False)
     _platforms: list[str] = field(init=False)
@@ -83,7 +85,13 @@ class Engine:
                 actions.extend(rule.evaluate(snapshot))
             except Exception:
                 log.exception("rule %s failed; skipped", rule.name)
+                self.rule_errors[rule.name] += 1
         return actions
+
+    @property
+    def ledger_available(self) -> bool:
+        """False from the first failed ledger read until the next successful one."""
+        return self._ledger_down_since is None
 
     def execute(self, actions: Sequence[Action], snapshot: Snapshot) -> list[Dispatched]:
         if snapshot.now.tzinfo is None:

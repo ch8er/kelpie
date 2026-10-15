@@ -68,7 +68,7 @@ def test_core_and_rules_do_not_import_integrations(path: Path) -> None:
     assert not bad, f"{path.name} imports {bad}"
 
 
-@pytest.mark.parametrize("path", _files("core", "rules", "server.py"), ids=_ids)
+@pytest.mark.parametrize("path", _files("core", "rules", "server.py", "app.py"), ids=_ids)
 def test_control_loop_has_no_llm(path: Path) -> None:
     bad = {m for m in _imports(path) if m.split(".")[0] in LLM_ROOTS}
     assert not bad, f"{path.name} imports LLM client {bad}"

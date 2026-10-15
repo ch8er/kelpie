@@ -203,8 +203,9 @@ farm throughput metrics from traces.
 
 ## Quickstart
 
-> While Kelpie is pre-alpha, `kelpie serve` only exposes `/metrics` and `/healthz`
-> on port 9464; the control loop, adapters and connectors are not wired up yet.
+> While Kelpie is pre-alpha, `kelpie serve` runs the control loop over an empty snapshot
+> (no platform adapters are wired yet) and exposes `/metrics` and `/healthz` on port 9464.
+> It starts safe: global dry-run on, every rule in observe mode.
 
 Requirements: Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
@@ -212,6 +213,8 @@ Requirements: Python 3.12 and [uv](https://docs.astral.sh/uv/).
 git clone https://github.com/ch8er/kelpie.git
 cd kelpie
 uv sync
+cp kelpie.example.toml kelpie.toml   # optional; every key has a safe default
+uv run kelpie status                 # rules that would load, with their mode
 uv run kelpie serve
 ```
 
@@ -251,9 +254,10 @@ docker-compose.yml      kelpie + prometheus + grafana
 ```
 
 What exists today: the domain model, action types, the rule protocol and registry,
-adapter/connector protocols, a minimal dry-run engine, fixture deserialization, the
-`kelpie serve` HTTP stub, fixtures for the 13 farm incidents and for field evidence. Adapters, connectors, traces, storage,
-alerters and the report are stubs, `kelpie status` and `kelpie report` do not exist yet,
+adapter/connector protocols, the engine (routing to executors, per-rule modes, action
+ledger in SQLite), `kelpie serve` with the control loop and engine metrics, `kelpie
+status`, and fixtures for the 13 farm incidents and for field evidence. Adapters,
+connectors, traces, alerters and the report are stubs, `kelpie report` does not exist yet,
 and no rule is implemented yet; see
 [docs/plan.md](docs/plan.md) and [docs/roadmap.md](docs/roadmap.md).
 

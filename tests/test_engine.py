@@ -25,7 +25,7 @@ from tests.fakes import (
 )
 
 NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
-ACT = EngineConfig(default_mode=Mode.ACT)
+ACT = EngineConfig(dry_run=False, default_mode=Mode.ACT)
 
 
 def act(
@@ -61,9 +61,9 @@ def test_fakes_satisfy_protocols() -> None:
 @pytest.mark.parametrize(
     ("config", "outcomes", "sent"),
     [
-        (EngineConfig(), [Outcome.OBSERVED, Outcome.OBSERVED], []),
+        (EngineConfig(dry_run=False), [Outcome.OBSERVED, Outcome.OBSERVED], []),
         (
-            EngineConfig(default_mode=Mode.SUGGEST),
+            EngineConfig(dry_run=False, default_mode=Mode.SUGGEST),
             [Outcome.SUGGESTED, Outcome.ALERTED],
             ["[emit] suggest requeue T-1", "[emit] alert T-1"],
         ),
@@ -93,7 +93,7 @@ def test_modes_never_touch_adapter_unless_act(
 
 def test_mode_is_per_rule() -> None:
     adapter = FakeAdapter()
-    config = EngineConfig(modes={"emit": Mode.ACT})
+    config = EngineConfig(dry_run=False, modes={"emit": Mode.ACT})
     other = Action(ActionKind.UNBLOCK, "other", "because", task_id="T-1")
     rules = [Emit([act(ActionKind.REQUEUE)]), Emit([other], name="other")]
     results = Engine(rules, adapters=[adapter], config=config).tick(lambda: Snapshot(now=NOW))
@@ -254,13 +254,18 @@ def test_failing_rule_and_action_do_not_stop_the_loop() -> None:
     )
     results = engine.tick(lambda: Snapshot(now=NOW))
     assert [r.outcome for r in results] == [Outcome.FAILED, Outcome.EXECUTED]
+    assert engine.rule_errors == {"broken": 1}
     assert adapter.calls == [("comment", "T-1")]
 
 
 @pytest.mark.parametrize(
     ("config", "action", "outcome"),
     [
-        (EngineConfig(default_mode=Mode.SUGGEST), act(ActionKind.REQUEUE), Outcome.DROPPED),
+        (
+            EngineConfig(dry_run=False, default_mode=Mode.SUGGEST),
+            act(ActionKind.REQUEUE),
+            Outcome.DROPPED,
+        ),
         (ACT, act(ActionKind.ALERT), Outcome.DROPPED),
         (ACT, act(ActionKind.STOP), Outcome.DROPPED),  # not executable, nobody to tell
     ],

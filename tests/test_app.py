@@ -1,0 +1,252 @@
+import threading
+import urllib.request
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from kelpie.app import (
+    ConfigError,
+    ControlLoop,
+    Settings,
+    build_app,
+    find_config,
+    load_rules,
+    load_settings,
+    render_status,
+)
+from kelpie.cli import main
+from kelpie.core.actions import Action, ActionKind
+from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.engine import Engine
+from kelpie.core.model import Snapshot
+from kelpie.metrics import Metrics
+from kelpie.rules import PlannedRule, Priority
+from kelpie.server import make_server
+
+NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
+PLANNED = (
+    PlannedRule("alpha", 1, Priority.P0, "implemented"),
+    PlannedRule("beta", 2, Priority.P0, "not implemented"),
+)
+
+
+@dataclass
+class AlphaRule:
+    threshold: int = 3
+    name: str = "alpha"
+
+    def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
+        return [Action(ActionKind.ALERT, "alpha", f"threshold {self.threshold}", key="a")]
+
+
+def alpha_factory(config: dict[str, Any]) -> AlphaRule:
+    return AlphaRule(**config)
+
+
+REGISTRY = {"alpha": alpha_factory}
+
+
+def write(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "kelpie.toml"
+    path.write_text(text)
+    return path
+
+
+# --- rule loading -----------------------------------------------------------------------
+
+
+def test_loads_registered_rules_with_their_config_and_mode() -> None:
+    config = EngineConfig.from_mapping({"rules": {"alpha": {"mode": "act", "threshold": 7}}})
+    loaded = load_rules(config, REGISTRY, PLANNED)
+    [rule] = loaded.rules
+    assert isinstance(rule, AlphaRule) and rule.threshold == 7
+    assert [(s.name, s.implemented, s.mode) for s in loaded.statuses] == [
+        ("alpha", True, Mode.ACT),
+        ("beta", False, Mode.OBSERVE),
+    ]
+    assert loaded.warnings == []
+
+
+def test_unknown_rule_fails_at_startup() -> None:
+    config = EngineConfig.from_mapping({"rules": {"gamma": {"mode": "act"}}})
+    with pytest.raises(ConfigError, match="unknown rules in config: \\['gamma'\\]"):
+        load_rules(config, REGISTRY, PLANNED)
+
+
+def test_planned_but_unimplemented_rule_is_skipped_with_warning() -> None:
+    config = EngineConfig.from_mapping({"rules": {"beta": {"mode": "act"}}})
+    loaded = load_rules(config, REGISTRY, PLANNED)
+    assert [type(r) for r in loaded.rules] == [AlphaRule]
+    assert loaded.warnings == [
+        "rule 'beta' is planned but not implemented yet; its config is ignored"
+    ]
+
+
+def test_registered_rule_missing_from_plan_fails() -> None:
+    with pytest.raises(ConfigError, match="not in PLANNED"):
+        load_rules(EngineConfig(), {**REGISTRY, "rogue": alpha_factory}, PLANNED)
+
+
+def test_bad_rule_parameters_fail() -> None:
+    config = EngineConfig.from_mapping({"rules": {"alpha": {"no_such_param": 1}}})
+    with pytest.raises(ConfigError, match="bad config for rule 'alpha'"):
+        load_rules(config, REGISTRY, PLANNED)
+
+
+def test_real_registry_and_plan_load_with_defaults() -> None:
+    loaded = load_rules(EngineConfig())
+    assert all(s.mode is Mode.OBSERVE for s in loaded.statuses)
+
+
+# --- settings ---------------------------------------------------------------------------
+
+
+def test_defaults_are_dry_run_and_observe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    settings = load_settings(None)
+    assert settings.engine.dry_run
+    assert settings.engine.default_mode is Mode.OBSERVE
+    assert settings.db_path == Path("kelpie.db")
+
+
+def test_storage_path_from_config_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    path = write(tmp_path, '[storage]\npath = "/data/k.db"\n[engine]\ndry_run = false\n')
+    settings = load_settings(path)
+    assert settings.db_path == Path("/data/k.db") and not settings.engine.dry_run
+    monkeypatch.setenv("KELPIE_DB", ":memory:")
+    assert load_settings(path).db_path is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["[engin]\n", "[engine]\ndry_run = 'no'\n", "not toml ["],
+    ids=["section", "value", "syntax"],
+)
+def test_bad_config_is_a_config_error(tmp_path: Path, text: str) -> None:
+    with pytest.raises(ConfigError):
+        load_settings(write(tmp_path, text))
+
+
+def test_missing_config_file_is_a_config_error(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="cannot read"):
+        load_settings(tmp_path / "missing.toml")
+
+
+def test_find_config_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KELPIE_CONFIG", raising=False)
+    assert find_config(None) is None
+    write(tmp_path, "")
+    assert find_config(None) == Path("kelpie.toml")
+    monkeypatch.setenv("KELPIE_CONFIG", "/etc/kelpie.toml")
+    assert find_config(None) == Path("/etc/kelpie.toml")
+    assert find_config("x.toml") == Path("x.toml")
+
+
+# --- control loop and metrics ----------------------------------------------------------
+
+
+def loop_for(rules: list[Any], config: EngineConfig | None = None) -> ControlLoop:
+    engine = Engine(rules, config=config or EngineConfig())
+    return ControlLoop(engine, lambda: Snapshot(now=NOW), Metrics())
+
+
+def test_tick_feeds_metrics() -> None:
+    loop = loop_for([AlphaRule()])
+    loop.tick_once()
+    loop.tick_once()
+    text = loop.metrics.render()
+    assert "kelpie_engine_ticks_total 2" in text
+    assert (
+        'kelpie_actions_total{rule="alpha",kind="alert",mode="observe",outcome="dry_run"} 1' in text
+    )
+    assert (
+        'kelpie_actions_total{rule="alpha",kind="alert",mode="observe",outcome="suppressed"} 1'
+        in text
+    )
+    assert "kelpie_ledger_up 1" in text
+
+
+class Exploding:
+    name = "boom"
+
+    def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
+        raise RuntimeError("bug")
+
+
+def test_rule_errors_and_tick_failures_are_counted() -> None:
+    loop = loop_for([Exploding()])
+    loop.tick_once()
+    assert 'kelpie_rule_errors_total{rule="boom"} 1' in loop.metrics.render()
+    loop.snapshot_source = lambda: Snapshot(now=datetime(2026, 3, 2))  # naive: tick raises
+    loop.tick_once()
+    assert "kelpie_engine_tick_failures_total 1" in loop.metrics.render()
+
+
+def test_loop_runs_in_background_and_stops() -> None:
+    loop = loop_for([AlphaRule()], EngineConfig(interval=EngineConfig().interval / 3000))
+    loop.start()
+    try:
+        for _ in range(200):
+            if loop.metrics.ticks >= 2:
+                break
+            threading.Event().wait(0.01)
+    finally:
+        loop.stop()
+    assert loop.metrics.ticks >= 2
+
+
+def test_metrics_escape_label_values() -> None:
+    metrics = Metrics()
+    metrics.rule_errors['we"ird\\rule\n'] = 1
+    assert 'kelpie_rule_errors_total{rule="we\\"ird\\\\rule\\n"} 1' in metrics.render()
+
+
+def test_build_app_serves_engine_metrics(tmp_path: Path) -> None:
+    app = build_app(Settings(db_path=tmp_path / "kelpie.db"), clock=lambda: NOW)
+    app.loop.tick_once()
+    server = make_server("127.0.0.1", 0, app.metrics)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/metrics"
+        with urllib.request.urlopen(url) as resp:
+            body = resp.read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert "kelpie_engine_ticks_total 1" in body
+    assert "kelpie_dry_run 1" in body
+    assert 'kelpie_rule_loaded{rule="exit_contract",mode="observe"}' in body
+
+
+# --- status and CLI ---------------------------------------------------------------------
+
+
+def test_render_status_lists_rules_with_modes() -> None:
+    config = EngineConfig.from_mapping({"rules": {"alpha": {"mode": "act"}, "beta": {}}})
+    text = render_status(
+        Settings(engine=config, db_path=None), load_rules(config, REGISTRY, PLANNED)
+    )
+    assert "dry-run:  on (nothing leaves Kelpie)" in text
+    assert "  1  alpha             P0    loaded           act (dry-run)" in text
+    assert "  2  beta              P0    not implemented  -" in text
+    assert "warning: rule 'beta' is planned but not implemented yet" in text
+
+
+def test_cli_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = write(tmp_path, '[engine.rules.stale_blocks]\nmode = "suggest"\n')
+    assert main(["--config", str(path), "status"]) == 0
+    out = capsys.readouterr().out
+    assert "stale_blocks" in out and "loop_breaker" in out
+
+
+def test_cli_rejects_unknown_rule(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = write(tmp_path, '[engine.rules.nope]\nmode = "act"\n')
+    assert main(["--config", str(path), "serve"]) == 2
+    assert "unknown rules in config: ['nope']" in capsys.readouterr().err

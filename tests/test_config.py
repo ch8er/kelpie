@@ -10,7 +10,7 @@ def test_defaults_are_safe() -> None:
     config = EngineConfig()
     assert config.default_mode is Mode.OBSERVE
     assert config.mode_for("anything") is Mode.OBSERVE
-    assert not config.dry_run
+    assert config.dry_run
 
 
 def test_load_toml(tmp_path: Path) -> None:
