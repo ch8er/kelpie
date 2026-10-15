@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 import pytest
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.engine import Engine
+from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.engine import Engine, Outcome
 from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.ports import (
     ActionConnector,
@@ -17,6 +18,7 @@ from kelpie.core.ports import (
 )
 
 NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
+ACT = EngineConfig(default_mode=Mode.ACT)
 
 
 @dataclass
@@ -115,7 +117,7 @@ def run(
     alerter: FakeAlerter | None = None,
     snapshot: Snapshot | None = None,
 ) -> None:
-    engine = Engine([Emit(actions)], adapters=[adapter], alerter=alerter, dry_run=False)
+    engine = Engine([Emit(actions)], adapters=[adapter], alerter=alerter, config=ACT)
     engine.tick(lambda: snapshot or Snapshot(now=NOW))
 
 
@@ -129,12 +131,50 @@ def test_fakes_satisfy_protocols() -> None:
     assert isinstance(FakeCI(), ActionConnector)
 
 
-def test_dry_run_does_not_touch_adapter() -> None:
-    adapter = FakeAdapter()
-    engine = Engine([Emit([act(ActionKind.REQUEUE)])], adapters=[adapter])
-    actions = engine.tick(lambda: Snapshot(now=NOW))
-    assert [a.kind for a in actions] == [ActionKind.REQUEUE]
+@pytest.mark.parametrize(
+    ("config", "outcomes", "sent"),
+    [
+        (EngineConfig(), [Outcome.OBSERVED, Outcome.OBSERVED], []),
+        (
+            EngineConfig(default_mode=Mode.SUGGEST),
+            [Outcome.SUGGESTED, Outcome.ALERTED],
+            ["[emit] suggest requeue T-1", "[emit] alert T-1"],
+        ),
+        (
+            EngineConfig(default_mode=Mode.ACT, dry_run=True),
+            [Outcome.DRY_RUN, Outcome.DRY_RUN],
+            [],
+        ),
+    ],
+    ids=["default-observe", "suggest", "dry-run-overrides-act"],
+)
+def test_modes_never_touch_adapter_unless_act(
+    config: EngineConfig, outcomes: list[Outcome], sent: list[str]
+) -> None:
+    adapter, alerter = FakeAdapter(), FakeAlerter()
+    engine = Engine(
+        [Emit([act(ActionKind.REQUEUE), act(ActionKind.ALERT)])],
+        adapters=[adapter],
+        alerter=alerter,
+        config=config,
+    )
+    results = engine.tick(lambda: Snapshot(now=NOW))
+    assert [r.outcome for r in results] == outcomes
+    assert [t for t, _ in alerter.sent] == sent
     assert adapter.calls == []
+
+
+def test_mode_is_per_rule() -> None:
+    adapter = FakeAdapter()
+    config = EngineConfig(modes={"emit": Mode.ACT})
+    other = Action(ActionKind.UNBLOCK, "other", "because", task_id="T-1")
+    rules = [Emit([act(ActionKind.REQUEUE)]), Emit([other], name="other")]
+    results = Engine(rules, adapters=[adapter], config=config).tick(lambda: Snapshot(now=NOW))
+    assert [(r.mode, r.outcome) for r in results] == [
+        (Mode.ACT, Outcome.EXECUTED),
+        (Mode.OBSERVE, Outcome.OBSERVED),
+    ]
+    assert adapter.calls == [("requeue", "T-1")]
 
 
 @pytest.mark.parametrize(
@@ -212,7 +252,7 @@ def test_routes_by_task_source() -> None:
     engine = Engine(
         [Emit([act(ActionKind.REQUEUE, "T-1"), act(ActionKind.UNBLOCK, "T-2")])],
         adapters=[hermes, other],
-        dry_run=False,
+        config=ACT,
     )
     engine.tick(lambda: snapshot)
     assert other.calls == [("requeue", "T-1")]
@@ -226,7 +266,7 @@ def test_stop_routes_by_session_task_source() -> None:
     engine = Engine(
         [Emit([act(ActionKind.STOP, task_id=None, session_id="S-9")])],
         adapters=[hermes, other],
-        dry_run=False,
+        config=ACT,
     )
     engine.tick(lambda: snapshot)
     assert other.calls == [("stop", "S-9")]
@@ -245,7 +285,7 @@ def test_explicit_executor_routes_to_connector() -> None:
         [Emit([act(ActionKind.CANCEL_BUILD, task_id=None, executor="ci", build_id=42)])],
         adapters=[adapter],
         connectors=[ci],
-        dry_run=False,
+        config=ACT,
     )
     engine.tick(lambda: Snapshot(now=NOW))
     assert ci.cancelled == ["42"]
@@ -265,10 +305,11 @@ def test_explicit_executor_routes_to_connector() -> None:
 def test_unroutable_action_becomes_alert(action: Action) -> None:
     a, b, alerter = FakeAdapter(name="a"), FakeAdapter(name="b"), FakeAlerter()
     engine = Engine(
-        [Emit([action])], adapters=[a, b], connectors=[FakeCI()], alerter=alerter, dry_run=False
+        [Emit([action])], adapters=[a, b], connectors=[FakeCI()], alerter=alerter, config=ACT
     )
-    engine.tick(lambda: Snapshot(now=NOW, tasks=(task("T-5", "gone"),)))
+    results = engine.tick(lambda: Snapshot(now=NOW, tasks=(task("T-5", "gone"),)))
     assert a.calls == b.calls == []
+    assert [d.outcome for d in results] == [Outcome.NOT_EXECUTED]
     assert len(alerter.sent) == 1
 
 
@@ -282,8 +323,37 @@ def test_failing_rule_and_action_do_not_stop_the_loop() -> None:
     engine = Engine(
         [Broken(), Emit([act(ActionKind.REQUEUE), act(ActionKind.COMMENT)])],
         adapters=[adapter],
-        dry_run=False,
+        config=ACT,
     )
-    actions = engine.tick(lambda: Snapshot(now=NOW))
-    assert len(actions) == 2
+    results = engine.tick(lambda: Snapshot(now=NOW))
+    assert [r.outcome for r in results] == [Outcome.FAILED, Outcome.EXECUTED]
     assert adapter.calls == [("comment", "T-1")]
+
+
+@pytest.mark.parametrize(
+    ("config", "action", "outcome"),
+    [
+        (EngineConfig(default_mode=Mode.SUGGEST), act(ActionKind.REQUEUE), Outcome.DROPPED),
+        (ACT, act(ActionKind.ALERT), Outcome.DROPPED),
+        (ACT, act(ActionKind.STOP), Outcome.DROPPED),  # not executable, nobody to tell
+    ],
+    ids=["suggest", "alert", "fallback"],
+)
+def test_undelivered_alerts_are_dropped_not_alerted(
+    config: EngineConfig, action: Action, outcome: Outcome
+) -> None:
+    engine = Engine([Emit([action])], adapters=[FakeAdapter()], config=config)
+    assert [d.outcome for d in engine.tick(lambda: Snapshot(now=NOW))] == [outcome]
+
+
+def test_dry_run_records_effective_mode() -> None:
+    config = EngineConfig(default_mode=Mode.ACT, dry_run=True)
+    engine = Engine([Emit([act(ActionKind.REQUEUE)])], adapters=[FakeAdapter()], config=config)
+    [result] = engine.tick(lambda: Snapshot(now=NOW))
+    assert (result.mode, result.outcome) == (Mode.OBSERVE, Outcome.DRY_RUN)
+
+
+def test_naive_now_rejected() -> None:
+    engine = Engine([], adapters=[FakeAdapter()])
+    with pytest.raises(ValueError, match="timezone"):
+        engine.tick(lambda: Snapshot(now=datetime(2026, 3, 2, 10)))
