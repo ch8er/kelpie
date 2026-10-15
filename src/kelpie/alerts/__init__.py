@@ -1,4 +1,4 @@
-"""Real-time alert delivery: one router over channels (Telegram now, Slack later)."""
+"""Real-time alert delivery: one router over channels (Telegram, Slack)."""
 
 from kelpie.alerts.delivery import (
     AlertObserver,
