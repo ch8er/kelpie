@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import Condition, ConditionKind, Session, Status, Task
 
 
@@ -56,6 +57,16 @@ class ConditionConnector(Protocol):
     kinds: frozenset[ConditionKind]
 
     def check(self, condition: Condition) -> Condition: ...
+
+
+@runtime_checkable
+class ActionConnector(Protocol):
+    """A connector that can also carry out actions, e.g. ``cancel_build`` for a CI system."""
+
+    name: str
+    actions: frozenset[ActionKind]
+
+    def execute(self, action: Action) -> None: ...
 
 
 @runtime_checkable

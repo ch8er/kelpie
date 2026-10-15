@@ -6,8 +6,9 @@ import pytest
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.engine import Engine
-from kelpie.core.model import Snapshot, Task
+from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.ports import (
+    ActionConnector,
     Alerter,
     PlatformAdapter,
     PlatformEvent,
@@ -88,12 +89,34 @@ class Broken:
         raise ValueError("boom")
 
 
-def act(kind: ActionKind, task_id: str | None = "T-1", **params: object) -> Action:
-    return Action(kind, "emit", "because", task_id=task_id, params=dict(params))
+@dataclass
+class FakeCI:
+    name: str = "ci"
+    actions: frozenset[ActionKind] = frozenset({ActionKind.CANCEL_BUILD})
+    cancelled: list[str] = field(default_factory=list)
+
+    def execute(self, action: Action) -> None:
+        self.cancelled.append(str(action.params["build_id"]))
 
 
-def run(actions: list[Action], adapter: FakeAdapter, alerter: FakeAlerter | None = None) -> None:
-    Engine([Emit(actions)], adapter, alerter, dry_run=False).tick(lambda: Snapshot(now=NOW))
+def act(
+    kind: ActionKind, task_id: str | None = "T-1", executor: str | None = None, **params: object
+) -> Action:
+    return Action(kind, "emit", "because", task_id=task_id, executor=executor, params=dict(params))
+
+
+def task(task_id: str, source: str | None) -> Task:
+    return Task(task_id, "t", Status.IN_PROGRESS, NOW, source=source)
+
+
+def run(
+    actions: list[Action],
+    adapter: FakeAdapter,
+    alerter: FakeAlerter | None = None,
+    snapshot: Snapshot | None = None,
+) -> None:
+    engine = Engine([Emit(actions)], adapters=[adapter], alerter=alerter, dry_run=False)
+    engine.tick(lambda: snapshot or Snapshot(now=NOW))
 
 
 def test_fakes_satisfy_protocols() -> None:
@@ -103,11 +126,13 @@ def test_fakes_satisfy_protocols() -> None:
     assert isinstance(StoppingAdapter(), SupportsStop)
     assert not isinstance(FakeAdapter(), SupportsStop)
     assert isinstance(FakeAlerter(), Alerter)
+    assert isinstance(FakeCI(), ActionConnector)
 
 
 def test_dry_run_does_not_touch_adapter() -> None:
     adapter = FakeAdapter()
-    actions = Engine([Emit([act(ActionKind.REQUEUE)])], adapter).tick(lambda: Snapshot(now=NOW))
+    engine = Engine([Emit([act(ActionKind.REQUEUE)])], adapters=[adapter])
+    actions = engine.tick(lambda: Snapshot(now=NOW))
     assert [a.kind for a in actions] == [ActionKind.REQUEUE]
     assert adapter.calls == []
 
@@ -174,17 +199,89 @@ def test_alert_without_alerter_is_dropped() -> None:
     run([act(ActionKind.ALERT)], FakeAdapter())
 
 
-def test_task_action_without_task_id_is_skipped() -> None:
-    adapter = FakeAdapter()
-    run([act(ActionKind.REQUEUE, task_id=None), act(ActionKind.UNBLOCK)], adapter)
+def test_task_action_without_task_id_becomes_alert() -> None:
+    adapter, alerter = FakeAdapter(), FakeAlerter()
+    run([act(ActionKind.REQUEUE, task_id=None), act(ActionKind.UNBLOCK)], adapter, alerter)
     assert adapter.calls == [("unblock", "T-1")]
+    assert alerter.sent == [("[emit] requeue (not executed, needs a human)", Severity.INFO)]
+
+
+def test_routes_by_task_source() -> None:
+    hermes, other = FakeAdapter(name="hermes"), FakeAdapter(name="other")
+    snapshot = Snapshot(now=NOW, tasks=(task("T-1", "other"), task("T-2", "hermes")))
+    engine = Engine(
+        [Emit([act(ActionKind.REQUEUE, "T-1"), act(ActionKind.UNBLOCK, "T-2")])],
+        adapters=[hermes, other],
+        dry_run=False,
+    )
+    engine.tick(lambda: snapshot)
+    assert other.calls == [("requeue", "T-1")]
+    assert hermes.calls == [("unblock", "T-2")]
+
+
+def test_stop_routes_by_session_task_source() -> None:
+    hermes, other = StoppingAdapter(name="hermes"), StoppingAdapter(name="other")
+    session = Session("S-9", "T-2", "agent", NOW)
+    snapshot = Snapshot(now=NOW, tasks=(task("T-2", "other"),), sessions=(session,))
+    engine = Engine(
+        [Emit([act(ActionKind.STOP, task_id=None, session_id="S-9")])],
+        adapters=[hermes, other],
+        dry_run=False,
+    )
+    engine.tick(lambda: snapshot)
+    assert other.calls == [("stop", "S-9")]
+    assert hermes.calls == []
+
+
+def test_empty_executor_means_route_by_source() -> None:
+    adapter = FakeAdapter()
+    run([act(ActionKind.REQUEUE, executor="")], adapter)
+    assert adapter.calls == [("requeue", "T-1")]
+
+
+def test_explicit_executor_routes_to_connector() -> None:
+    ci, adapter = FakeCI(), FakeAdapter()
+    engine = Engine(
+        [Emit([act(ActionKind.CANCEL_BUILD, task_id=None, executor="ci", build_id=42)])],
+        adapters=[adapter],
+        connectors=[ci],
+        dry_run=False,
+    )
+    engine.tick(lambda: Snapshot(now=NOW))
+    assert ci.cancelled == ["42"]
+    assert adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        act(ActionKind.REQUEUE, executor="missing"),
+        act(ActionKind.REQUEUE, "T-9"),  # two adapters, task unknown: ambiguous
+        act(ActionKind.REQUEUE, executor="ci"),  # connector does not requeue
+        act(ActionKind.REQUEUE, "T-5"),  # task source names an unregistered adapter
+    ],
+    ids=["unknown-executor", "ambiguous", "unsupported-by-connector", "unknown-source"],
+)
+def test_unroutable_action_becomes_alert(action: Action) -> None:
+    a, b, alerter = FakeAdapter(name="a"), FakeAdapter(name="b"), FakeAlerter()
+    engine = Engine(
+        [Emit([action])], adapters=[a, b], connectors=[FakeCI()], alerter=alerter, dry_run=False
+    )
+    engine.tick(lambda: Snapshot(now=NOW, tasks=(task("T-5", "gone"),)))
+    assert a.calls == b.calls == []
+    assert len(alerter.sent) == 1
+
+
+def test_duplicate_executor_names_rejected() -> None:
+    with pytest.raises(ValueError, match="duplicate executor"):
+        Engine([], adapters=[FakeAdapter(name="x")], connectors=[FakeCI(name="x")])
 
 
 def test_failing_rule_and_action_do_not_stop_the_loop() -> None:
     adapter = FakeAdapter(fail_on="requeue")
     engine = Engine(
         [Broken(), Emit([act(ActionKind.REQUEUE), act(ActionKind.COMMENT)])],
-        adapter,
+        adapters=[adapter],
         dry_run=False,
     )
     actions = engine.tick(lambda: Snapshot(now=NOW))

@@ -97,6 +97,7 @@ class Task:
     status_since: datetime
     role: str | None = None
     owner_id: str | None = None
+    source: str | None = None  # name of the platform adapter the task came from
     block: Block | None = None
     review_rounds: int = 0
     estimate: timedelta | None = None
