@@ -272,7 +272,8 @@ def _distance(hook: Span, other: Span) -> float | None:
     without call ids on both sides the session must agree."""
     a, b = _call_id(hook), _call_id(other)
     if a and b:
-        return -1.0 if a == b else None
+        same_tool = not (hook.tool and other.tool and hook.tool != other.tool)
+        return -1.0 if a == b and same_tool else None
     if not other.session_id or hook.session_id != other.session_id:
         return None
     if hook.tool != other.tool or not hook.tool:

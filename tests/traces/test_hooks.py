@@ -180,6 +180,24 @@ def test_same_call_id_merges_whatever_the_session(session: str | None) -> None:
     assert merged.args_hash == hook.args_hash
 
 
+def test_same_call_id_but_another_tool_is_not_a_duplicate() -> None:
+    (hook,) = hook_tools(tool(1, ago(minutes=5), tool_call_id="call_1"))
+    otlp = otlp_span(1, hook.start, tool="read_file", attributes={"gen_ai.tool.call.id": "call_1"})
+    assert kept([otlp, hook]) == [otlp.span_id, hook.span_id]
+
+
+def test_a_call_id_is_matched_once() -> None:
+    hooks = hook_tools(
+        tool(1, ago(minutes=5), tool_call_id="call_1"),
+        tool(2, ago(minutes=4), tool_call_id="call_1"),
+    )
+    otlp = otlp_span(
+        1, ago(minutes=5), session_id="chat-9", attributes={"gen_ai.tool.call.id": "call_1"}
+    )
+    merged = merge_hook_spans([otlp, *hooks])
+    assert merged.merged == 1 and len(merged.spans) == 2
+
+
 def test_without_session_and_call_id_nothing_matches() -> None:
     (hook,) = hook_tools(tool(1, ago(minutes=5)))
     otlp = otlp_span(1, hook.start, session_id=None)
