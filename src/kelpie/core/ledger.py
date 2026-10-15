@@ -249,6 +249,14 @@ class ActionLedger:
             return Suppression.RATE_LIMIT, first
         return None
 
+    def failed_attempts(self, action: Action, mode: Mode, now: datetime) -> int:
+        """Earlier FAILED attempts of ``action`` in ``mode``: within ``once_window`` for a
+        once-action, else within ``cooldown``."""
+        fp = fingerprint(action)
+        after = now - (self.once_window if action.once else self.cooldown)
+        entries = self._with_unsaved(self.store.by_fingerprint(fp, after), after, fp=fp)
+        return sum(1 for e in entries if e.mode is mode and e.outcome is Outcome.FAILED)
+
     def record(self, dispatched: Dispatched, now: datetime) -> None:
         """Persist a decision. Raises if the store fails; the entry stays in memory."""
         if dispatched.outcome is Outcome.SUPPRESSED:
