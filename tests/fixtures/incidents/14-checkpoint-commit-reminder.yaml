@@ -1,0 +1,41 @@
+id: "14-checkpoint-commit-reminder"
+incident: null
+title: "Live sessions with old uncommitted work are reminded to commit"
+description: >
+  Foundation rule (checkpoints). A developer session has been editing for 50 minutes since
+  its last commit; another has touched 25 files. Both get a reminder to commit so the work
+  survives a crash. A session that committed 10 minutes ago, a session with a clean
+  worktree, and a session that is already over are left alone (the last one is the WIP
+  commit's business).
+rule: checkpoints
+config:
+  commit_every: "30m"
+  max_changed_files: 20
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: agent-dev-4, role: developer}
+  tasks:
+    - {id: T-1401, title: "Split payment service", status: in_progress, status_since: "2026-03-02T10:30:00+00:00", owner_id: agent-dev-1}
+    - {id: T-1402, title: "Rename config keys", status: in_progress, status_since: "2026-03-02T11:30:00+00:00", owner_id: agent-dev-2}
+    - {id: T-1403, title: "Add audit fields", status: in_progress, status_since: "2026-03-02T11:00:00+00:00", owner_id: agent-dev-3}
+    - {id: T-1404, title: "Read-only investigation", status: in_progress, status_since: "2026-03-02T10:00:00+00:00", owner_id: agent-dev-4}
+  sessions:
+    - {id: S-1401, task_id: T-1401, owner_id: agent-dev-1, started_at: "2026-03-02T10:30:00+00:00", last_heartbeat: "2026-03-02T11:59:00+00:00", last_commit_at: "2026-03-02T11:10:00+00:00", dirty_worktree: true, changed_files: 4}
+    - {id: S-1402, task_id: T-1402, owner_id: agent-dev-2, started_at: "2026-03-02T11:30:00+00:00", last_heartbeat: "2026-03-02T11:59:00+00:00", last_commit_at: "2026-03-02T11:50:00+00:00", dirty_worktree: true, changed_files: 25}
+    - {id: S-1403, task_id: T-1403, owner_id: agent-dev-3, started_at: "2026-03-02T11:00:00+00:00", last_heartbeat: "2026-03-02T11:59:00+00:00", last_commit_at: "2026-03-02T11:50:00+00:00", dirty_worktree: true, changed_files: 3}
+    - {id: S-1404, task_id: T-1404, owner_id: agent-dev-4, started_at: "2026-03-02T10:00:00+00:00", last_heartbeat: "2026-03-02T11:59:00+00:00", dirty_worktree: false, changed_files: 0}
+expected_actions:
+  - kind: comment
+    task_id: T-1401
+    reason_contains: "no commit for 50 minutes"
+  - kind: comment
+    task_id: T-1402
+    reason_contains: "25 changed files"
+not_expected_actions:
+  - {kind: comment, task_id: T-1403}
+  - {kind: comment, task_id: T-1404}
+  - {kind: wip_commit, task_id: T-1401}

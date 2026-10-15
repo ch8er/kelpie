@@ -62,6 +62,20 @@ EFFECTS = frozenset(
 )
 
 
+# Outcomes after which a ``once`` action counts as done (a failure may be retried).
+_ONCE_DONE = frozenset(
+    {
+        Outcome.SUGGESTED,
+        Outcome.ALERTED,
+        Outcome.EXECUTED,
+        Outcome.NOT_EXECUTED,
+        Outcome.OBSERVED,
+        Outcome.DRY_RUN,
+        Outcome.DROPPED,
+    }
+)
+
+
 class Suppression(StrEnum):
     COOLDOWN = "cooldown"
     RATE_LIMIT = "rate_limit"
@@ -189,6 +203,7 @@ class ActionLedger:
     cooldown: timedelta = timedelta(minutes=30)
     retry_after: timedelta = timedelta(minutes=5)
     max_per_subject_per_hour: int = 6
+    once_window: timedelta = timedelta(days=7)
     _unsaved: list[LedgerEntry] = field(default_factory=list)
     _limited: set[tuple[str, datetime]] = field(default_factory=set)
 
@@ -198,6 +213,11 @@ class ActionLedger:
         The rate limit only guards effects, so it does not apply in observe mode.
         """
         fp = fingerprint(action)
+        if action.once:
+            done = self.store.by_fingerprint(fp, now - self.once_window)
+            done = self._with_unsaved(done, now - self.once_window, fp=fp)
+            if any(e.mode is mode and e.outcome in _ONCE_DONE for e in done):
+                return Suppression.COOLDOWN, False
         horizon = now - max(self.cooldown, self.retry_after)
         stored = self.store.by_fingerprint(fp, horizon)
         for e in self._with_unsaved(stored, horizon, fp=fp):

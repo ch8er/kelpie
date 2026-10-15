@@ -1,0 +1,39 @@
+id: "15-checkpoint-wip-commit-on-exit"
+incident: null
+title: "A session that dies with uncommitted work gets a WIP commit"
+description: >
+  Foundation rule (checkpoints), closely tied to incident 2. A session ran out of context
+  and exited with a dirty worktree; another went silent (crashed) with uncommitted changes.
+  Both get a WIP commit to the task branch with the agent's progress note, marked
+  [skip ci] so it does not burn CI minutes. A session that ended with a clean worktree, and
+  a dirty session on a task that is already done, get nothing.
+rule: checkpoints
+config:
+  wip_ci: "skip_ci"
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+  tasks:
+    - {id: T-1501, title: "Implement CSV export", status: in_progress, status_since: "2026-03-02T13:00:00+00:00", owner_id: agent-dev-1}
+    - {id: T-1502, title: "Retry webhook delivery", status: in_progress, status_since: "2026-03-02T13:00:00+00:00", owner_id: agent-dev-2}
+    - {id: T-1503, title: "Fix typo in docs", status: in_progress, status_since: "2026-03-02T14:00:00+00:00", owner_id: agent-dev-3}
+    - {id: T-1504, title: "Old finished task", status: done, status_since: "2026-03-02T12:00:00+00:00", owner_id: agent-dev-3}
+  sessions:
+    - {id: S-1501, task_id: T-1501, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T14:30:00+00:00", exit_reason: "context limit", dirty_worktree: true, changed_files: 6, branch: "task/T-1501", summary: "Exporter and tests written; header escaping still failing."}
+    - {id: S-1502, task_id: T-1502, owner_id: agent-dev-2, started_at: "2026-03-02T13:00:00+00:00", last_heartbeat: "2026-03-02T14:00:00+00:00", dirty_worktree: true, branch: "task/T-1502"}
+    - {id: S-1503, task_id: T-1503, owner_id: agent-dev-3, started_at: "2026-03-02T14:00:00+00:00", ended_at: "2026-03-02T14:20:00+00:00", dirty_worktree: false}
+    - {id: S-1504, task_id: T-1504, owner_id: agent-dev-3, started_at: "2026-03-02T11:00:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: done, dirty_worktree: true}
+expected_actions:
+  - kind: wip_commit
+    task_id: T-1501
+    reason_contains: "[skip ci]"
+    params: {session_id: S-1501, branch: "task/T-1501", skip_ci: true}
+  - kind: wip_commit
+    task_id: T-1502
+    params: {session_id: S-1502}
+not_expected_actions:
+  - {kind: wip_commit, task_id: T-1503}
+  - {kind: wip_commit, task_id: T-1504}

@@ -42,6 +42,10 @@ class Action:
     will clear). The engine then alerts on transitions only: once when the state opens,
     again at escalation thresholds measured from ``since`` (when the condition began), and
     a short "resolved" when the rule stops reporting it. Ignored on non-alert actions.
+
+    ``once`` asks the ledger to carry the action out once per fingerprint (within the
+    ledger's ``once_window``) instead of once per cooldown: for comments that must not
+    pile up on a task, like a resume note.
     """
 
     kind: ActionKind
@@ -54,3 +58,4 @@ class Action:
     params: dict[str, Any] = field(default_factory=dict)
     state: str | None = None
     since: datetime | None = None
+    once: bool = False

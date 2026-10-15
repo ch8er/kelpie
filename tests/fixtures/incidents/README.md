@@ -105,6 +105,9 @@ Fixture conventions:
 | 11 | `11-below-threshold.yaml` | `orphan_status` | `alert` + `reassign` to the idle developer for an ownerless in-progress task; `alert` only for a vanished owner and for a task with no role; nothing below the thresholds, for queues, blocked or done tasks, or a task a live session is working on |
 | 12 | `12-review-ping-pong.yaml` | `ping_pong` | `escalate` T-1201 (9 rounds > 3) |
 | 13 | `13-human-tasks-block-agents.yaml` | `needs_you` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5`; T-1308 (nothing blocked behind it) not escalated |
+| – | `14-checkpoint-commit-reminder.yaml` | `checkpoints` | `comment` T-1401 (no commit for 50 minutes) and T-1402 (25 changed files); nothing for a session that committed 10 minutes ago or a clean worktree |
+| – | `15-checkpoint-wip-commit-on-exit.yaml` | `checkpoints` | `wip_commit` with `[skip ci]` for T-1501 (session ended dirty) and T-1502 (session went silent); nothing for a clean exit or a task that is already done |
+| – | `16-checkpoint-resume-from-commit.yaml` | `checkpoints` | `comment` T-1601 (resume from commit a1b2c3d on task/T-1601); nothing when the previous session committed nothing or the task was never worked on |
 | – | `field-01-heartbeat-runaway.yaml` | `loop_breaker` | `stop` + critical `alert` for the heartbeat loop (about 900 identical calls, about 80k input tokens each) and for the agent with 5 consecutive tool errors (`stop` carries `session_id`); nothing for the healthy agent or for the CI-polling reviewer, which is left to rule 2 |
 | – | `field-02-idle-context-resend.yaml` | `no_progress` | `alert` with `recommendations: [longer_heartbeat_interval, cheaper_maintenance_model, bounded_session_handoff]` for the idle agent resending a 12k-token context every 5 min; nothing for the productive session |
 
