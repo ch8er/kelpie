@@ -6,15 +6,16 @@ which output filter a command already runs through.
 nothing from Kelpie; a test compares the source. A command reported by OTLP and by a hook
 is therefore redacted the same way.
 
-:func:`command_prefix` groups calls: the executable (without its directory) and, when the
-next word looks like a subcommand, that word (``npm test``, ``git status``, ``xcodebuild``,
-``pytest``); a script runner keeps the script too (``npm run build``). Wrappers that only
-run the real command (``sudo``, ``time``, ``env``, ``uv run``, ``poetry run``,
-``bundle exec``) are skipped, and so is ``rtk``, the output filter Kelpie recommends:
-``rtk git status`` groups with ``git status``, so the effect of introducing it can be
-compared before/after. :func:`detect_filter` names the filter a
-command already uses (``rtk``, ``xcbeautify``, ``tail``, ``head``, ``grep``), from the raw
-command where ingest has it, else from the redacted prefix.
+:func:`command_prefix` groups calls: the executable (without its directory) and, for tools
+known to take subcommands, the subcommand (``npm test``, ``git status``, ``xcodebuild``,
+``pytest``); a script runner keeps common script names (``npm run build``). Any other word
+is dropped, since it may be a host, a database or a secret (``ssh prod-db01`` is ``ssh``).
+Wrappers that only run the real command (``sudo -u x``, ``time``, ``env``, ``uv run``,
+``poetry run``, ``bundle exec``) are skipped with their flags, and so is ``rtk``, the output
+filter Kelpie recommends: ``rtk git status`` groups with ``git status``, so the effect of
+introducing it can be compared before/after. :func:`detect_filter` names the filter a
+command already uses (``rtk``, ``xcbeautify``, ``tail``, ``head``, ``grep``) from the first
+line of the raw command where ingest has it, else from the redacted prefix.
 """
 
 from __future__ import annotations
@@ -95,48 +96,93 @@ def redact_command(command: str) -> str | None:
 
 
 RTK = "rtk"
-_WRAPPERS = frozenset({"sudo", "time", "env", "nice", "nohup", "command", "exec", RTK})
+# Wrappers that only run the real command, with the flags of theirs that take a value.
+_WRAPPERS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({"-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D"}),
+    "time": frozenset({"-o", "-f"}),
+    "env": frozenset({"-u", "-C", "-S"}),
+    "nice": frozenset({"-n"}),
+    "nohup": frozenset(),
+    "command": frozenset(),
+    "exec": frozenset({"-a"}),
+    RTK: frozenset(),
+}
 _RUNNERS = {"uv": "run", "poetry": "run", "pipenv": "run", "bundle": "exec", "pnpm": "exec"}
-_SCRIPT_RUNNERS = frozenset({"run", "run-script", "exec"})
+# Executables whose first argument is a subcommand of the tool, not user data. Any other
+# executable is kept alone: its next word may be a host, a database or a secret.
+_SUBCOMMANDS = frozenset(
+    {
+        "git", "gh", "npm", "pnpm", "yarn", "bun", "deno", "cargo", "go", "docker", "podman",
+        "kubectl", "helm", "make", "dotnet", "xcodebuild", "swift", "mvn", "gradle",
+        "gradlew", "terraform", "rake", "bundle", "pip", "pip3", "poetry", "uv", "flutter",
+        "dart", "composer", "mix", "rustup", "brew", "just", "nx", "turbo",
+    }
+)  # fmt: skip
+_SCRIPT_RUNNERS = frozenset({"run", "run-script"})
+# Script names kept after ``npm run``: common ones only, the rest are project-defined.
+_SCRIPTS = frozenset(
+    {"build", "test", "lint", "dev", "start", "typecheck", "check", "format", "e2e", "ci"}
+)
+_PYTHON_MODULES = frozenset({"pytest", "unittest", "pip", "mypy", "ruff", "black", "build"})
 _SUBCOMMAND = re.compile(r"^[a-z][a-z0-9:_-]*$")
+_EXECUTABLE = re.compile(r"^[A-Za-z0-9_][\w.+-]*$")
 _PIPE_FILTERS = ("xcbeautify", "xcpretty", "tail", "head", "grep")
 _PIPE = re.compile(r"\|\s*(?:[\w./-]*/)?([\w-]+)")
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _base(token: str) -> str:
+    return re.split(r"[/\\]", token)[-1]
 
 
 def command_prefix(command: str | None) -> str | None:
-    """The grouping key of a (redacted or raw) command; None for an empty one."""
+    """The grouping key of a (redacted or raw) command; None when there is no recognizable
+    executable. Only whole words of ``command`` are kept, never a flag or its value."""
     if not command:
         return None
     tokens = command.split()
     while tokens:
-        word = tokens[0].rsplit("/", 1)[-1]
-        if word in _WRAPPERS or _ASSIGN.match(tokens[0]):
+        word = _base(tokens[0])
+        if _ASSIGN.match(tokens[0]):
             tokens.pop(0)
+        elif word in _WRAPPERS:
+            valued = _WRAPPERS[word]
+            tokens.pop(0)
+            while tokens and (tokens[0].startswith("-") or _ASSIGN.match(tokens[0])):
+                flag = tokens.pop(0)
+                if flag in valued and tokens:
+                    tokens.pop(0)
         elif _RUNNERS.get(word) is not None and len(tokens) > 1 and tokens[1] == _RUNNERS[word]:
             del tokens[:2]
         else:
             break
     if not tokens:
         return None
-    exe = tokens[0].rsplit("/", 1)[-1] or tokens[0]
+    exe = _base(tokens[0])
+    if not _EXECUTABLE.match(exe):
+        return None
     rest = tokens[1:]
-    if exe.startswith("python") and rest[:1] == ["-m"] and len(rest) > 1:
-        return f"{exe} -m {rest[1]}"
-    if rest and _SUBCOMMAND.match(rest[0]):
-        if rest[0] in _SCRIPT_RUNNERS and len(rest) > 1 and _SUBCOMMAND.match(rest[1]):
-            return f"{exe} {rest[0]} {rest[1]}"  # npm run build
-        return f"{exe} {rest[0]}"
-    return exe
+    if exe.startswith("python") and rest[:1] == ["-m"]:
+        module = rest[1] if len(rest) > 1 and rest[1] in _PYTHON_MODULES else None
+        return f"{exe} -m {module}" if module else f"{exe} -m"
+    if exe not in _SUBCOMMANDS or not rest or not _SUBCOMMAND.match(rest[0]):
+        return exe
+    if rest[0] in _SCRIPT_RUNNERS:
+        script = rest[1] if len(rest) > 1 and rest[1] in _SCRIPTS else None
+        return f"{exe} {rest[0]} {script}" if script else f"{exe} {rest[0]}"
+    return f"{exe} {rest[0]}"
 
 
 def detect_filter(command: str | None) -> str | None:
-    """The output filter ``command`` already runs through, if any."""
-    if not command:
+    """The output filter ``command`` already runs through, if any: ``rtk`` in front, or a
+    pipe into a known filter on the first line, outside quotes."""
+    if not command or not command.strip():
         return None
-    first = command.split(None, 1)[0].rsplit("/", 1)[-1] if command.strip() else ""
-    if first == RTK:
+    line = _QUOTED.sub("", command.strip().splitlines()[0])
+    first = line.split(None, 1)
+    if first and _base(first[0]) == RTK:
         return RTK
-    for match in _PIPE.finditer(command):
+    for match in _PIPE.finditer(line):
         if match.group(1) in _PIPE_FILTERS:
             return match.group(1)
     return None

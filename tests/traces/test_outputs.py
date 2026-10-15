@@ -110,6 +110,9 @@ def test_redaction_shares_source_with_the_hermes_plugin() -> None:
         assert getattr(plugin, name).pattern == getattr(traces_command, name).pattern
     assert plugin._SECRET_FLAGS == traces_command._SECRET_FLAGS
     assert plugin._LONG_RUN.pattern == traces_command._LONG_RUN.pattern
+    for name in ("_ASSIGN", "_KEY_VALUE", "_SENSITIVE_KEY", "_URL_USERINFO", "_QUERY_SECRET"):
+        assert getattr(plugin, name).flags == getattr(traces_command, name).flags
+    assert plugin.COMMAND_LIMIT == traces_command.COMMAND_LIMIT
     assert (plugin._MASK, plugin._MAX_TOKENS) == (traces_command._MASK, traces_command._MAX_TOKENS)
 
 
@@ -124,6 +127,8 @@ def test_redaction_shares_source_with_the_hermes_plugin() -> None:
         ("GH_TOKEN=x gh pr checks 5", "gh pr"),
         ("./gradlew build", "gradlew build"),
         ("npm run build", "npm run build"),
+        ("npm run deploy-acme", "npm run"),  # project-defined script names are dropped
+        ("C:\\tools\\bin\\make.exe", "make.exe"),
         ("npm test", "npm test"),
         ("cat notes.txt", "cat"),
         ("sudo make install", "make install"),
@@ -151,6 +156,40 @@ def test_command_prefix(command: str, prefix: str | None) -> None:
 )
 def test_detect_filter(command: str | None, used: str | None) -> None:
     assert detect_filter(command) == used
+
+
+@pytest.mark.parametrize(
+    ("command", "secret"),
+    [
+        ("sudo -u alice make test", "alice"),
+        ("time -p make test", "-p"),
+        ("nice -n 10 make", "10"),
+        ("env -i FOO=bar make test", "bar"),
+        ("ssh prod-db01", "prod-db01"),
+        ("psql customersdb", "customersdb"),
+        ("cd acme-secret-project", "acme"),
+        ("echo hunter2", "hunter2"),
+        ("sshpass hunter2 ssh host", "hunter2"),
+        ("python -m acme_internal_tool", "acme"),
+        ("C:\\Users\\alice\\bin\\tool.exe build", "alice"),
+        ("make deploy TOKEN=abc", "abc"),
+    ],
+)
+def test_prefix_keeps_no_user_data(command: str, secret: str) -> None:
+    prefix = command_prefix(redact_command(command)) or ""
+    assert secret not in prefix, prefix
+
+
+def test_prefix_skips_a_leading_flag() -> None:
+    assert command_prefix("-x foo") is None
+    assert command_prefix("sudo -u") is None
+
+
+@pytest.mark.parametrize(
+    "command", ["echo 'a | tail'", 'echo "x | grep y"', "make\nfoo | tail", "rtk-like status"]
+)
+def test_detect_filter_ignores_quotes_later_lines_and_lookalikes(command: str) -> None:
+    assert detect_filter(command) is None
 
 
 # --- ingest ------------------------------------------------------------------------------
@@ -256,7 +295,7 @@ def test_threshold_and_min_calls() -> None:
 
 
 def test_non_shell_tools_get_the_range_filter() -> None:
-    found = [_call("tool:read_file", 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
+    found = [_call("tool:Read", 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
     [rec] = recommend(rank(found))
     assert rec.filter.name == "range"
 
@@ -281,6 +320,49 @@ def test_before_after_labels_small_samples_and_windows() -> None:
     assert (result.before.calls, result.after.calls) == (6, 2)
     assert result.change == pytest.approx(-0.75) and result.small_sample
     assert before_after([], "npm test", fix).change is None
+
+
+def test_filter_introduction_keeps_roles_apart() -> None:
+    found = [
+        *[_call("git diff", 9000, T0 + timedelta(minutes=i), role="dev") for i in range(6)],
+        *[_call("git diff", 9000, T0 + timedelta(minutes=10 + i), role=None) for i in range(6)],
+        *[
+            _call("git diff", 1000, T0 + timedelta(hours=1, minutes=i), "rtk", None)
+            for i in range(6)
+        ],
+    ]
+    [result] = filter_introductions(found)
+    assert result.role is None and (result.before.calls, result.after.calls) == (6, 6)
+
+
+def test_adopted_does_not_depend_on_input_order() -> None:
+    found = [
+        _call("npm test", 9000, T0 + timedelta(hours=1), "rtk"),
+        *[_call("npm test", 9000, T0 + timedelta(minutes=i)) for i in range(4)],
+    ]
+    [group] = rank(found)
+    assert group.adopted and recommend([group]) == []
+
+
+def test_custom_service_name_is_an_unknown_platform() -> None:
+    def span(service: str) -> Span:
+        return Span(
+            "t",
+            service,
+            "execute_tool",
+            SpanKind.TOOL,
+            T0,
+            attributes={"service.name": service, "kelpie.tool.output_chars": 40},
+        )
+
+    [custom, known] = calls([span("synthetic-agent"), span("Claude_Code")])
+    assert custom.platform is None and known.platform == "claude-code"
+
+
+def test_range_filter_is_for_file_reads_only() -> None:
+    reads = [_call("tool:read_file", 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
+    search = [_call("tool:web_search", 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
+    assert [r.filter.name for r in recommend(rank(reads + search))] == ["range"]
 
 
 def test_filter_introduction_needs_earlier_unfiltered_calls() -> None:
@@ -341,6 +423,16 @@ def test_outputs_config() -> None:
 def test_outputs_config_errors(section: Any) -> None:
     with pytest.raises(ValueError, match=r"traces\.outputs"):
         load_outputs(section)
+
+
+def test_outputs_window_must_be_a_string_and_fit_retention() -> None:
+    with pytest.raises(ValueError, match="duration string"):
+        load_outputs({"window": 5})
+    with pytest.raises(ValueError, match="retention must cover"):
+        load_traces({"retention": "2d", "outputs": {"repeat_days": 3}})
+    with pytest.raises(ValueError, match="retention must cover"):
+        load_traces({"retention": "1d", "outputs": {"window": "1d"}})
+    assert load_traces({"retention": "3d", "outputs": {"repeat_days": 3}}).outputs.repeat_days == 3
 
 
 def test_traces_commands_flag_is_validated() -> None:

@@ -79,6 +79,10 @@ RTK_PLATFORMS = (
     "roo-code",
     "kilo-code",
 )
+# Tools that return a file's content (case varies by platform: Read, read_file, view).
+FILE_TOOLS = ("tool:*read*", "tool:*Read*", "tool:view*", "tool:View*", "tool:cat")
+# Platforms a span's service.name may name (other names are custom: platform unknown).
+KNOWN_PLATFORMS = frozenset({*RTK_PLATFORMS, "paperclip"})
 # Command families RTK filters (its README lists 100+ commands in these families).
 RTK_COMMANDS = (
     "git",
@@ -179,7 +183,7 @@ DEFAULT_FILTERS: tuple[Filter, ...] = (
     Filter(
         name="range",
         how="read a line range or search the file instead of returning it whole",
-        commands=("tool:*",),
+        commands=FILE_TOOLS,
         reduction=0.5,
     ),
 )
@@ -284,7 +288,8 @@ def calls(
 ) -> list[Call]:
     """Measured tool calls among ``spans``, in time order. ``roles`` and ``platforms`` map
     session ids to the role of the session's owner and the platform it runs on; a span's
-    ``service.name`` is the platform otherwise."""
+    ``service.name`` is the platform otherwise, when it names one in
+    :data:`KNOWN_PLATFORMS`."""
     roles = roles or {}
     platforms = platforms or {}
     out: list[Call] = []
@@ -297,7 +302,9 @@ def calls(
         session = span.session_id
         platform = platforms.get(session) if session else None
         if platform is None and isinstance(service := span.attributes.get("service.name"), str):
-            platform = service
+            # a custom service name says nothing about the platform: only known ones count
+            known = normalize_platform(service)
+            platform = known if known in KNOWN_PLATFORMS else None
         out.append(
             Call(
                 at=span.end or span.start,
@@ -387,7 +394,7 @@ def _group(role: str | None, key: str, mine: list[Call], settings: OutputSetting
         tasks=tuple(sorted({c.task_id for c in mine if c.task_id})),
         sessions=tuple(sorted({c.session_id for c in mine if c.session_id})),
         hot_days=hot,
-        adopted=mine[-1].filter is not None,
+        adopted=max(mine, key=lambda c: c.at).filter is not None,
     )
 
 
@@ -476,7 +483,11 @@ def filter_introductions(
     for (role, key), call in first.items():
         used = call.filter
 
-        def same(c: Call, at: datetime = call.at, used: str | None = used) -> bool:
+        def same(
+            c: Call, at: datetime = call.at, used: str | None = used, role: str | None = role
+        ) -> bool:
+            if c.role != role:  # a group without a role is one group, not "any role"
+                return False
             return c.filter is None if c.at < at else c.filter == used
 
         out.append(before_after(found, key, call.at, settings, role, same, used))

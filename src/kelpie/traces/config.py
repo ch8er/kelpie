@@ -235,6 +235,12 @@ def load_traces(section: Any) -> TraceSettings:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"[traces] {key} must be a positive integer")
         ints[key] = value
+    outputs = load_outputs(section.get("outputs"))
+    needed = max(2 * outputs.window, timedelta(days=outputs.repeat_days))
+    if durations["retention"] < needed:
+        raise ValueError(
+            "[traces] retention must cover [traces.outputs] repeat_days and twice its window"
+        )
     forward = _load_forward(section.get("forward", []))
     if forward and not enabled:
         raise ValueError(
@@ -256,7 +262,7 @@ def load_traces(section: Any) -> TraceSettings:
         allow_unauthenticated=_flag(section, "allow_unauthenticated"),
         forward=forward,
         commands=_flag_default(section, "commands"),
-        outputs=load_outputs(section.get("outputs")),
+        outputs=outputs,
     )
 
 
@@ -290,8 +296,11 @@ def load_outputs(section: Any) -> OutputSettings:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"[traces.outputs] {key} must be a positive integer")
         ints[key] = value
+    raw_window = section.get("window", "1d")
+    if not isinstance(raw_window, str):
+        raise ValueError('[traces.outputs] window must be a duration string such as "1d"')
     try:
-        window = parse_duration(section.get("window", defaults.window))
+        window = parse_duration(raw_window)
     except (ValueError, TypeError, AttributeError) as exc:
         raise ValueError(f"[traces.outputs] window: {exc}") from exc
     if window <= timedelta(0):

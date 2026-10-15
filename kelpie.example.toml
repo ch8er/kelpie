@@ -148,8 +148,9 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # retries = 3                             # for network errors, 429 and 5xx (at most 10)
 
 # Huge tool outputs: tool calls ranked by output tokens per role and command prefix, with a
-# filter recommendation (RTK first) and before/after. Only the size of an output is
-# recorded, never the output. All keys optional; see kelpie.traces.outputs.
+# filter recommendation (RTK first) and before/after, in the daily report (`kelpie report`).
+# Only the size of an output is recorded, never the output. All keys optional; see
+# kelpie.traces.outputs.
 #
 # [traces.outputs]
 # threshold_tokens = 4000   # recommend a filter when calls average at least this...
