@@ -1293,7 +1293,7 @@
     {
       "id": 42,
       "type": "row",
-      "title": "Resources",
+      "title": "LLM providers",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -1305,6 +1305,143 @@
     },
     {
       "id": 43,
+      "type": "timeseries",
+      "title": "Provider reachable and key accepted",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 89
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_llm_provider_up",
+          "legendFormat": "reachable {{provider}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "kelpie_llm_provider_auth_ok",
+          "legendFormat": "key accepted {{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bool"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "Quota remaining and limit",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 89
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_llm_provider_remaining",
+          "legendFormat": "remaining {{provider}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "kelpie_llm_provider_limit",
+          "legendFormat": "limit {{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "In the provider's own unit."
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "Limit hits and probe failures per hour",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 89
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (provider) (increase(kelpie_llm_provider_limit_hits_total[1h]))",
+          "legendFormat": "limit hits {{provider}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "sum by (provider, cause) (increase(kelpie_llm_provider_probe_failures_total[1h]))",
+          "legendFormat": "probe failures {{provider}} / {{cause}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 46,
+      "type": "row",
+      "title": "Resources",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 96
+      },
+      "panels": []
+    },
+    {
+      "id": 47,
       "type": "stat",
       "title": "Resource source up",
       "datasource": {
@@ -1315,7 +1452,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 89
+        "y": 97
       },
       "targets": [
         {
@@ -1336,7 +1473,7 @@
       }
     },
     {
-      "id": 44,
+      "id": 48,
       "type": "stat",
       "title": "Readings",
       "datasource": {
@@ -1347,7 +1484,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 89
+        "y": 97
       },
       "targets": [
         {
@@ -1368,7 +1505,7 @@
       }
     },
     {
-      "id": 45,
+      "id": 49,
       "type": "timeseries",
       "title": "Resource read failures per hour by cause",
       "datasource": {
@@ -1379,7 +1516,7 @@
         "h": 4,
         "w": 16,
         "x": 8,
-        "y": 89
+        "y": 97
       },
       "targets": [
         {

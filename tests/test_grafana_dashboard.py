@@ -31,6 +31,7 @@ def _exported_names() -> set[str]:
     metrics.set_forward_destinations(["langfuse"])
     metrics.set_budgets_enabled(True)
     metrics.set_resources(True)
+    metrics.set_providers(["provider-a"])
     snapshot = Snapshot(now=datetime(2026, 1, 1, tzinfo=UTC))
     ControlLoop(Engine([]), lambda: snapshot, metrics).tick_once()  # fleet gauges
     names: set[str] = set()
