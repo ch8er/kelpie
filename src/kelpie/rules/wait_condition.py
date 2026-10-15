@@ -25,10 +25,11 @@ from datetime import timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import Condition, Session, Snapshot, Span, SpanKind, Status, Task
+from kelpie.core.model import Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._calls import CallKey, call_key, command, error_streak, tool_calls
+from kelpie.rules._tasks import linked_conditions
 
 NAME = "wait_condition"
 
@@ -61,7 +62,7 @@ class WaitCondition:
     def _check_waiting(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
         waited = snapshot.now - task.status_since
         since = task.status_since.isoformat()
-        conditions, missing = _current_conditions(task, snapshot)
+        conditions, missing = linked_conditions(task, snapshot)
         if not conditions:
             if waited < self.no_condition_grace:
                 return  # the connector may not have synced the new condition yet
@@ -170,24 +171,6 @@ class WaitCondition:
             (k for k, pats in self.poll_patterns.items() if any(p in text for p in pats)),
             None,
         )
-
-
-def _current_conditions(task: Task, snapshot: Snapshot) -> tuple[list[Condition], str | None]:
-    """Conditions of the task's current wait, and a referenced id that cannot be found.
-
-    A condition named by the block wins. Otherwise conditions linked by ``task_id`` count,
-    except those registered before the task started waiting this time.
-    """
-    if task.block is not None and task.block.condition_id:
-        c = snapshot.condition(task.block.condition_id)
-        return ([c], None) if c is not None else ([], task.block.condition_id)
-    current = [
-        c
-        for c in snapshot.conditions
-        if c.task_id == task.id
-        and (c.registered_at is None or c.registered_at >= task.status_since)
-    ]
-    return sorted(current, key=lambda c: c.id), None
 
 
 def _hours(d: timedelta) -> str:
