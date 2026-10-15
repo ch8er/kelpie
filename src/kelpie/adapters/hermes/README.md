@@ -1,10 +1,11 @@
 # Hermes adapter
 
-Lets Kelpie watch a [Hermes](https://github.com/NousResearch/hermes-agent) farm. Today this
-is the read side only: Kelpie reads the Kanban board and a spool of tool calls, so rules 1–4
-run in `observe` (or `suggest`) mode. Hermes actions (requeue, unblock, comment, WIP commit)
-raise `NotImplementedError` until a later step, and a rule in `act` mode with `dry_run = false`
-and Hermes as the only adapter stops Kelpie at startup.
+Lets Kelpie watch a [Hermes](https://github.com/NousResearch/hermes-agent) farm. Kelpie
+reads the Kanban board and a spool of tool calls; rules 1–4 run in `observe` (or `suggest`)
+mode. The one action implemented is `stop` (see [Stopping a run](#stopping-a-run)). The other
+Hermes actions (requeue, unblock, comment, WIP commit) raise `NotImplementedError` until a
+later step, so a rule other than `loop_breaker` in `act` mode with `dry_run = false` and
+Hermes as the only adapter stops Kelpie at startup.
 
 ## Config
 
@@ -16,6 +17,7 @@ lookback = "24h"                         # runs, spans and finished tasks older 
 enabled = true                           # default when the section exists
 git_state = true                         # read git state of live task workspaces (see below)
 git_timeout = "5s"                       # limit for each git call; 2x per snapshot in total
+cli = "hermes"                           # Hermes executable used by `stop` (name on PATH or a path)
 
 # Hermes tolerates heartbeats up to an hour old; Kelpie's default is 30 minutes.
 [engine.rules.exit_contract]
@@ -34,6 +36,44 @@ blocked and uncommitted rows are not seen.
 
 Kelpie must run on a host that can read `db_path` (the Hermes host, or a mounted copy).
 SQLite WAL needs the `-shm` file next to the database to be readable.
+
+## Stopping a run
+
+`loop_breaker` in `act` mode stops a runaway run with the `stop` action; the Hermes adapter
+implements it (`SupportsStop`) with Hermes' own operator command, not with signals and not by
+writing `kanban.db`:
+
+```
+hermes kanban block <task> --kind needs_input "Stopped by Kelpie: <reason>. ... hermes kanban unblock <task>"
+```
+
+The command runs with `HERMES_KANBAN_DB` pinned to the configured `db_path` (so it acts on
+the board Kelpie watches) and without the worker-scoping variables (`HERMES_KANBAN_TASK`,
+`HERMES_KANBAN_RUN_ID`, `HERMES_DELEGATED_CHILD_CONTEXT`). `HERMES_HOME` and the rest of the
+environment are inherited, so run Kelpie as the user (and profile) that owns the board. In one
+transaction Hermes moves the task `running` -> `blocked` with kind `needs_input` (parked for a
+human, never re-queued by Hermes itself), releases the claim, ends the run and adds the reason
+as a `BLOCKED:` comment that also says how to resume. A human resumes the task with
+`hermes kanban unblock <task>`.
+
+The worker process is not signalled by `block`. Hermes' dispatcher reaps a worker that
+outlived its closed run on a later tick (`reap_terminal_workers`, after a 120 s grace period)
+and signals it only when the run's recorded start fingerprint (`worker_started_at`) still
+matches, so a reused pid is never touched. Kelpie never signals a process itself. If no Hermes
+dispatcher is running, the task is still blocked and not re-queued, but the worker process
+lives until it exits by itself.
+
+Why not `hermes kanban reclaim`: it terminates the worker but puts the task back in the queue,
+where the dispatcher can respawn it before a second command blocks it. `archive` is terminal.
+
+`stop` is idempotent: a run that has already ended, or is no longer the task's current run,
+is left alone (no command is run). It fails, and the engine logs it, when the id is not a
+`hermes-run-<id>` session, the run is unknown, the CLI is missing, times out (30 s) or exits
+non-zero, or the task is still running afterwards. Stopping and unblocking the same task
+repeatedly makes Hermes route it to `triage` (its unblock-loop breaker); it still is not
+re-queued. The CLI contract was read from the Hermes sources (`hermes_cli/kanban.py`,
+`kanban_db.py`, `kanban_db_dispatch.py`) and is exercised here against a fake executable only:
+try one stop on a test board before enabling `act`.
 
 ## Hooks plugin
 

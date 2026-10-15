@@ -1,8 +1,9 @@
 # Quickstart: Kelpie on a Hermes farm (observe only)
 
 First live run, read only: Kelpie reads your Hermes Kanban board and a spool of tool calls,
-runs its rules in `observe` mode with global dry-run on, and changes nothing. Hermes actions
-are not implemented yet, so it could not change the board anyway.
+runs its rules in `observe` mode with global dry-run on, and changes nothing. Of the Hermes
+actions only `stop` exists (`loop_breaker` in `act` mode), so nothing else could change the
+board anyway.
 
 Things marked **unverified** have not been tried against a live Hermes farm.
 

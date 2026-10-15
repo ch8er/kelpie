@@ -68,6 +68,7 @@ class HermesSettings:
     enabled: bool = True
     git_state: bool = True  # read git state of the workspaces of live tasks
     git_timeout: timedelta = hermes.DEFAULT_GIT_TIMEOUT  # per git call
+    cli: str = hermes.DEFAULT_CLI  # Hermes executable that carries out ``stop``
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -76,6 +77,7 @@ class HermesSettings:
             lookback=self.lookback,
             git_state=self.git_state,
             git_timeout=self.git_timeout,
+            cli=self.cli,
         )
 
 
@@ -194,6 +196,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "enabled",
         "git_state",
         "git_timeout",
+        "cli",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     paths: dict[str, Path | None] = {}
@@ -226,7 +229,10 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError(f"[adapters.hermes] git_timeout: {exc}") from exc
     if git_timeout <= timedelta(0):
         raise ConfigError("[adapters.hermes] git_timeout must be positive")
-    return HermesSettings(db_path, paths["spool"], lookback, enabled, git_state, git_timeout)
+    cli = section.get("cli", hermes.DEFAULT_CLI)
+    if not isinstance(cli, str) or not cli.strip():
+        raise ConfigError("[adapters.hermes] cli must be a non-empty string")
+    return HermesSettings(db_path, paths["spool"], lookback, enabled, git_state, git_timeout, cli)
 
 
 @dataclass(frozen=True, slots=True)
@@ -699,16 +705,25 @@ def _open_span_store(db_path: Path | None) -> SpanStore:
         raise ConfigError(f"cannot open span store {db_path}: {exc}") from exc
 
 
+# Rules whose only effect on a platform is ``stop`` (plus alerts), the one action the Hermes
+# adapter carries out. Update with the adapter when it gains more actions.
+HERMES_ACT_RULES = frozenset({"loop_breaker"})
+
+
 def _refuse_unimplemented_actions(
     settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter]
 ) -> None:
-    """Hermes cannot carry out actions yet; an act-mode rule would only fail at runtime."""
+    """Hermes carries out ``stop`` only; any other act-mode rule would only fail at runtime."""
     only_hermes = bool(adapters) and all(isinstance(a, hermes.HermesAdapter) for a in adapters)
-    acting = sorted(s.name for s in loaded.statuses if s.implemented and s.mode is Mode.ACT)
+    acting = sorted(
+        s.name
+        for s in loaded.statuses
+        if s.implemented and s.mode is Mode.ACT and s.name not in HERMES_ACT_RULES
+    )
     if only_hermes and acting and not settings.engine.dry_run:
         raise ConfigError(
-            f"Hermes actions are not implemented; use observe or suggest mode (rules in act "
-            f"mode: {acting})"
+            f"Hermes actions other than stop are not implemented; use observe or suggest mode "
+            f"(rules in act mode: {acting})"
         )
 
 

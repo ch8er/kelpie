@@ -171,9 +171,10 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # processes = "node_processes_pids"           # needs node_exporter --collector.processes
 # processes_max = "node_processes_max_processes"
 
-# Platform adapters. Kelpie only reads the board and, for now, cannot change it (Hermes
-# actions are not implemented yet): keep rules in observe or suggest mode. A rule in act
-# mode with dry_run = false and Hermes as the only adapter stops Kelpie at startup.
+# Platform adapters. Kelpie reads the board and, for now, changes it only to stop a run
+# (loop_breaker in act mode, through the Hermes CLI); the other Hermes actions are not
+# implemented yet: keep other rules in observe or suggest mode. Any other rule in act mode
+# with dry_run = false and Hermes as the only adapter stops Kelpie at startup.
 #
 # [adapters.hermes]
 # db_path = "~/.hermes/kanban.db"   # named boards: ~/.hermes/kanban/boards/<slug>/kanban.db
@@ -182,6 +183,7 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # enabled = true
 # git_state = true                  # git state (commit, branch, dirty files) of live task workspaces
 # git_timeout = "5s"                # limit for each git call; 2x per snapshot in total
+# cli = "hermes"                    # Hermes executable used to stop a run (name on PATH or a path)
 #
 # Recommended on Hermes. A valid Hermes claim counts as a heartbeat, but Hermes tolerates
 # heartbeats up to an hour old, while Kelpie's default is 30 minutes:

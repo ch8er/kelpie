@@ -10,7 +10,9 @@ Describes a Hermes farm to Kelpie from two sources:
   ``hermes-run-<id>``). When Hermes also exports OTLP spans for the same calls, the app
   keeps the OTLP ones, completed from the hooks (:func:`kelpie.traces.hooks.merge_hook_spans`).
 
-Actions (requeue, unblock, comment, WIP commit) are not implemented yet: run Kelpie in
+Actions. Only ``stop`` (``SupportsStop``) is implemented, by asking Hermes to block the task
+through its own CLI; see :mod:`kelpie.adapters.hermes.stop` for the mechanism. Requeue,
+unblock, comment and WIP commit are not implemented yet: rules that need them run in
 ``observe`` or ``suggest`` mode.
 
 Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
@@ -94,6 +96,13 @@ from kelpie.adapters.hermes.git_state import (
     read_git_state,
     warn_once,
 )
+from kelpie.adapters.hermes.stop import (
+    DEFAULT_CLI,
+    HermesCliError,
+    block_task,
+    run_id,
+    stop_comment,
+)
 from kelpie.core.model import (
     Block,
     Dependency,
@@ -123,7 +132,10 @@ GIT_WORKERS = 4  # workspaces read in parallel
 GIT_BUDGET_FACTOR = 2  # all git calls of one snapshot end within this many git_timeouts
 GIT_BACKOFF = timedelta(minutes=5)  # a workspace whose git timed out is skipped this long
 
-NOT_IMPLEMENTED = "Hermes actions are not implemented yet; run Kelpie in observe or suggest mode"
+NOT_IMPLEMENTED = (
+    "this Hermes action is not implemented yet (only stop is); "
+    "run the rule in observe or suggest mode"
+)
 
 STATUS_MAP: Mapping[str, Status] = {
     "triage": Status.BACKLOG,
@@ -251,6 +263,7 @@ class HermesAdapter:
     lookback: timedelta = DEFAULT_LOOKBACK
     git_state: bool = True  # read the git state of the workspaces of live tasks
     git_timeout: timedelta = DEFAULT_GIT_TIMEOUT  # per git call
+    cli: str = DEFAULT_CLI  # the Hermes executable that carries out ``stop``
     name: str = "hermes"
     # workspace -> snapshot time until which it is not read (its git timed out)
     _git_backoff: dict[Path, datetime] = field(
@@ -639,6 +652,48 @@ class HermesAdapter:
 
     def events(self, since: datetime) -> Iterable[PlatformEvent]:
         return ()
+
+    def stop(self, session_id: str, reason: str) -> None:
+        """Stop a run: the task is blocked (``needs_input``) until a human unblocks it.
+
+        Idempotent: a run that has already ended, or whose task is no longer running it, is
+        left alone. Raises :class:`HermesError` for an unknown or foreign session id and when
+        Hermes refuses or the task is still running afterwards.
+        """
+        rid = run_id(session_id)
+        if rid is None:
+            raise HermesError(f"not a Hermes run session: {session_id!r}")
+        state = self._run_state(rid)
+        if state is None:
+            raise HermesError(f"unknown Hermes run: {session_id}")
+        task_id, active = state
+        if not active:
+            log.info("run %s of task %s is not active; nothing to stop", rid, task_id)
+            return
+        try:
+            block_task(self.cli, self.db_path, task_id, stop_comment(task_id, reason))
+        except HermesCliError as exc:
+            # The run may have ended on its own between our read and the command.
+            if self._run_state(rid) == (task_id, False):
+                return
+            raise HermesError(str(exc)) from exc
+        if self._run_state(rid) != (task_id, False):
+            raise HermesError(f"task {task_id} is still running after its block")
+
+    def _run_state(self, rid: int) -> tuple[str, bool] | None:
+        """``(task id, run is the task's active run)`` for a run, ``None`` if it is unknown."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT r.task_id, r.ended_at, t.status, t.current_run_id FROM task_runs r"
+                " LEFT JOIN tasks t ON t.id = r.task_id WHERE r.id = ?",
+                (rid,),
+            ).fetchone()
+        if row is None:
+            return None
+        active = (
+            row["ended_at"] is None and row["status"] == "running" and row["current_run_id"] == rid
+        )
+        return str(row["task_id"]), active
 
     def requeue(self, task_id: str, reason: str) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)
