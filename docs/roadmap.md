@@ -35,12 +35,12 @@ Fixtures listed as "new" below do not exist yet and are part of the issue.
 **Labels.**
 - Priority, as in the plan: `P0` (now, this week), `P1` (next step), `P2` (later, on signal).
 - Schedule: `week-1` (Oct 15–21), `week-2` (Oct 22–28), `week-3` (Oct 29 – Nov 4). Issues
-  in the P1 backlog (week 3 only if the budget allows) and P2 issues have no week. Only P0
+  in the P1 backlog (after weeks 2–3, on the subscription) and P2 issues have no week. Only P0
   issues and the P1 items the plan explicitly lists in week 3 carry a week label.
 - Area: `area:core|rules|adapters|traces|connectors|report|resources|deploy|docs|project`
   (`area:project` is non-code work: validation, naming, business).
-- `adapter`: one issue per additional platform adapter (all P2, no week; Hermes is the
-  first adapter and is scheduled in week 1).
+- `adapter`: one issue per additional platform adapter (no week; Hermes is the first
+  adapter and is scheduled in week 1, Claude Code is P1, the others are P2).
 
 **Rule names** (`@register` names, also used in fixtures): `exit_contract` (rule 1),
 `wait_condition` (2), `orphan_status` (3), `stale_blocks` (4), `ping_pong` (5),
@@ -386,7 +386,7 @@ them (OTLP or spans written by an adapter from hooks). It stops the run and tell
 - [ ] N identical consecutive tool calls in a session (same `tool` and same `Span.args_hash`; default 8 within 10 minutes) → `stop` (with `session_id`) + critical `alert`
 - [ ] Precedence with rule 2: calls matching `wait_condition`'s `poll_patterns` are left to rule 2 (a coaching `comment`); the run is stopped only if polling continues after that comment for a grace period or passes a higher hard limit
 - [ ] 5 consecutive tool errors in a session → `stop` + critical `alert`
-- [ ] Per-agent daily and nightly token budget exceeded (budgets and window boundaries in config) → `stop` + critical `alert` with the tokens spent
+- [ ] A budget's hard threshold exceeded (see "core: budgets and spend") → `stop` + critical `alert` with the spend; the budget objects and windows come from that issue
 - [ ] Defaults are the AgentWatchdog thresholds (8 repeats in 10 minutes, 5 errors in a row); every threshold can be overridden per agent or role
 - [ ] Reuses the repeated-call helper from the `wait_condition` polling check; reads only spans and sessions, no platform-specific code
 - [ ] The same tool with different arguments, a varied long session and an agent under budget are not flagged
@@ -496,6 +496,7 @@ provider APIs where available and from trace errors otherwise.
 - [ ] `quota_reset` conditions evaluated
 - [ ] Limit hits from spans counted per provider
 - [ ] Credential expiry exposed as a resource
+- [ ] Provider usage and cost APIs read where they exist (API keys) and fed to budgets as a spend source
 - [ ] No provider SDK is required by core
 
 ### connectors: human tasks
@@ -516,6 +517,32 @@ open in Langfuse.
 - [ ] `/metrics` in Prometheus text format: tick duration, actions per rule, tasks per status, idle time per role
 - [ ] Grafana dashboard JSON provisioned by docker compose
 - [ ] Dashboard links to traces in Langfuse when configured
+
+### core: budgets and spend — thresholds, burn-rate forecast, spend sources
+labels: P0, week-2, area:core
+Spend becomes a metric Kelpie watches instead of a number someone checks in a billing page.
+Works with pay-per-token API keys and with subscriptions, where there is no bill but there
+are limits.
+
+**Acceptance criteria**
+- [ ] Budget config objects: scope (day, task, agent, project), window, soft and hard thresholds; strict validation like the rest of the config
+- [ ] Soft threshold → `alert`; hard threshold → `stop` through `SupportsStop` (act mode only, alert fallback otherwise); transition-based alerts like other lasting states
+- [ ] Burn-rate forecast: "budget runs out at <time>"; in subscription mode, time to the next limit from observed limit hits
+- [ ] Spend sources: traces (tokens × price table in config, cached tokens priced separately); Claude Code's OpenTelemetry cost and token metrics via OTLP ingest; provider cost APIs via the provider quota connector
+- [ ] Spend and remaining budget exported on `/metrics`; shown in `kelpie status`
+- [ ] `loop_breaker` (rule 10) reads budgets from here instead of its own config
+- [ ] No double counting of nested LLM spans in spend sums (see the double-count issue)
+- [ ] Fixtures: new `field-03-budget-overrun.yaml` (API-key agent crossing soft then hard threshold), `06-subscription-limit-forecast.yaml`
+
+### deploy: Hermes quickstart and `kelpie doctor`
+labels: P0, week-2, area:deploy
+The live run on our farm must take minutes, not an evening, and must be done by a human
+who cannot see inside the cloud session.
+
+**Acceptance criteria**
+- [ ] `docs/quickstart-hermes.md`: install, config, hooks, OTLP endpoint, docker compose with Prometheus and Grafana, in the fewest steps
+- [ ] `kelpie doctor`: kanban.db readable, hooks fire, OTLP spans arrive, worktrees readable, Prometheus reachable, dry-run on; one line per check with pass/fail and how to fix
+- [ ] Exit code non-zero when any check fails
 
 ### deploy: run on our own farm and record every rule trigger
 labels: P0, week-2, area:deploy
@@ -538,6 +565,7 @@ recommendations. Delivered to Slack or Telegram and as Markdown/HTML.
 **Acceptance criteria**
 - [ ] Generated from storage only, deterministic for the same data
 - [ ] Sections: cost of chaos, fixed by Kelpie, needs a human, top 3 recommendations
+- [ ] Cost of chaos and cost per completed task in dollars next to hours, from the budgets and spend sources; marked as an estimate in subscription mode
 - [ ] "Needs a human" lists the long-lived alert states still open (state store: since, level, last seen), so states announced once are not forgotten
 - [ ] Every number links back to the underlying tasks
 - [ ] Scheduled daily; also available via `kelpie report --date`
@@ -632,7 +660,7 @@ coding agents; self-hosted farms on Hermes, OpenClaw, Paperclip).
 - [ ] Top incidents and requested features summarized and compared with the 13 farm incidents
 - [ ] Follow-up issues filed for confirmed needs
 
-## Backlog (P1, week 3 only if the budget allows)
+## Backlog (P1, after weeks 2–3, on the subscription)
 
 P1 work that the plan does not schedule in a week. Week 3 holds only the P1 items the
 plan lists there (token optimization, throughput metrics, 10 conversations).
@@ -741,6 +769,17 @@ human tasks that block agent work and agents waiting for approval. Replaces the 
 - [ ] Human tasks with nothing blocked behind them are not escalated
 - [ ] Fixtures: existing `13-human-tasks-block-agents.yaml`; new `13-approval-wait.yaml`
 
+### adapters: Claude Code adapter
+labels: P1, adapter, area:adapters
+The second adapter, after Hermes (P1, after the credit). Claude Code already exports telemetry to OpenTelemetry,
+so traces come through OTLP ingest; the adapter maps sessions and tasks onto the core model
+and implements the actions the platform allows.
+
+**Acceptance criteria**
+- [ ] Sessions and tasks mapped onto `kelpie.core.model`; status mapping documented
+- [ ] Supported actions implemented, unsupported ones fall back to alerts through action routing
+- [ ] Tests against synthetic data, no network access
+
 ## Later (P2, on signal)
 
 ### rules: compaction_gate — gate violation after context compaction (rule 14, field evidence)
@@ -763,17 +802,6 @@ bottlenecks, top recommendations). Start only after the validation conversations
 **Acceptance criteria**
 - [ ] Audit scope and deliverable described
 - [ ] Report template based on the daily report
-
-### adapters: Claude Code adapter
-labels: P2, adapter, area:adapters
-The first candidate after Hermes. Claude Code already exports telemetry to OpenTelemetry,
-so traces come through OTLP ingest; the adapter maps sessions and tasks onto the core model
-and implements the actions the platform allows.
-
-**Acceptance criteria**
-- [ ] Sessions and tasks mapped onto `kelpie.core.model`; status mapping documented
-- [ ] Supported actions implemented, unsupported ones fall back to alerts through action routing
-- [ ] Tests against synthetic data, no network access
 
 ### adapters: Paperclip adapter
 labels: P2, adapter, area:adapters
