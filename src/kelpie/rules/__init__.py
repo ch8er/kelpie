@@ -60,7 +60,7 @@ PLANNED: tuple[PlannedRule, ...] = (
     PlannedRule("orphan_status", 3, _P0, "Ownerless status > N min -> alert/reassign", (11,)),
     PlannedRule("stale_blocks", 4, _P0, "Block cause resolved externally -> unblock", (1, 8)),
     PlannedRule("ping_pong", 5, _P0, "More than K review rounds -> escalate", (12,)),
-    PlannedRule("bottlenecks", 6, _P0, "Idle time per role -> rebalancing suggestion", (9, 10)),
+    PlannedRule("bottlenecks", 6, _P0, "Idle time per role, holds, human gates", (9, 10, 14, 16)),
     PlannedRule("resources", 7, _P0, "Disk, memory, processes, quotas, auth expiry", (3, 4, 6)),
     PlannedRule("ci_economy", 9, _P0, "Wasted CI builds, superseded runs, quota forecast", (5,)),
     PlannedRule("loop_breaker", 10, _P0, "Identical calls, error streaks, token budget -> stop"),

@@ -1,0 +1,118 @@
+id: "16-human-task-gates-chain"
+incident: 16
+title: "A human task gates a chain of 28 agent tasks"
+description: >
+  An agent task was linked to a human task (store the products in the app store console).
+  28 agent tasks depended on it through a chain, and the ready queue held only human
+  tasks, so the farm ran 3 of 5 slots and closed about 4 tasks an hour instead of 9.
+  Kelpie must show the cost of the dependency (the agent work behind the human task and
+  the idle capacity) and leave the dependency itself to a human.
+rule: bottlenecks
+config:
+  min_idle_time: "30m"
+  human_gate_min_tasks: 3
+  human_gate_after: "1h"
+  slots: 5
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: human-owner, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: agent-dev-4, role: developer}
+    - {id: agent-dev-5, role: developer}
+  tasks:
+    - {id: T-1600, title: "Store the products in the app store console", status: ready, status_since: "2026-03-02T09:00:00+00:00", role: owner, owner_id: human-owner}
+    # Distractor: a human task with nothing behind it.
+    - {id: T-1650, title: "Renew the team calendar", status: ready, status_since: "2026-03-02T08:00:00+00:00", role: owner, owner_id: human-owner}
+    # Three agents are busy on unrelated work.
+    - {id: T-1661, title: "Fix login flake", status: in_progress, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-1662, title: "Cache warmup", status: in_progress, status_since: "2026-03-02T15:10:00+00:00", role: developer, owner_id: agent-dev-2}
+    - {id: T-1663, title: "Lint cleanup", status: in_progress, status_since: "2026-03-02T15:20:00+00:00", role: developer, owner_id: agent-dev-3}
+    - {id: T-1601, title: "Store feature step 1", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1602, title: "Store feature step 2", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1603, title: "Store feature step 3", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1604, title: "Store feature step 4", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1605, title: "Store feature step 5", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1606, title: "Store feature step 6", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1607, title: "Store feature step 7", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1608, title: "Store feature step 8", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1609, title: "Store feature step 9", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1610, title: "Store feature step 10", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1611, title: "Store feature step 11", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1612, title: "Store feature step 12", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1613, title: "Store feature step 13", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1614, title: "Store feature step 14", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1615, title: "Store feature step 15", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1616, title: "Store feature step 16", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1617, title: "Store feature step 17", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1618, title: "Store feature step 18", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1619, title: "Store feature step 19", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1620, title: "Store feature step 20", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1621, title: "Store feature step 21", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1622, title: "Store feature step 22", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1623, title: "Store feature step 23", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1624, title: "Store feature step 24", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1625, title: "Store feature step 25", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1626, title: "Store feature step 26", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1627, title: "Store feature step 27", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+    - {id: T-1628, title: "Store feature step 28", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, estimate: "1h"}
+  dependencies:
+    - {task_id: T-1601, depends_on: T-1600}
+    - {task_id: T-1602, depends_on: T-1601}
+    - {task_id: T-1603, depends_on: T-1602}
+    - {task_id: T-1604, depends_on: T-1603}
+    - {task_id: T-1605, depends_on: T-1604}
+    - {task_id: T-1606, depends_on: T-1605}
+    - {task_id: T-1607, depends_on: T-1606}
+    - {task_id: T-1608, depends_on: T-1607}
+    - {task_id: T-1609, depends_on: T-1608}
+    - {task_id: T-1610, depends_on: T-1609}
+    - {task_id: T-1611, depends_on: T-1610}
+    - {task_id: T-1612, depends_on: T-1611}
+    - {task_id: T-1613, depends_on: T-1612}
+    - {task_id: T-1614, depends_on: T-1613}
+    - {task_id: T-1615, depends_on: T-1614}
+    - {task_id: T-1616, depends_on: T-1615}
+    - {task_id: T-1617, depends_on: T-1616}
+    - {task_id: T-1618, depends_on: T-1617}
+    - {task_id: T-1619, depends_on: T-1618}
+    - {task_id: T-1620, depends_on: T-1619}
+    - {task_id: T-1621, depends_on: T-1620}
+    - {task_id: T-1622, depends_on: T-1621}
+    - {task_id: T-1623, depends_on: T-1622}
+    - {task_id: T-1624, depends_on: T-1623}
+    - {task_id: T-1625, depends_on: T-1624}
+    - {task_id: T-1626, depends_on: T-1625}
+    - {task_id: T-1627, depends_on: T-1626}
+    - {task_id: T-1628, depends_on: T-1627}
+  sessions:
+    - {id: S-1661, task_id: T-1661, owner_id: agent-dev-1, started_at: "2026-03-02T15:00:00+00:00", last_heartbeat: "2026-03-02T15:59:00+00:00"}
+    - {id: S-1662, task_id: T-1662, owner_id: agent-dev-2, started_at: "2026-03-02T15:10:00+00:00", last_heartbeat: "2026-03-02T15:59:00+00:00"}
+    - {id: S-1663, task_id: T-1663, owner_id: agent-dev-3, started_at: "2026-03-02T15:20:00+00:00", last_heartbeat: "2026-03-02T15:59:00+00:00"}
+    - {id: S-1664, task_id: T-1659, owner_id: agent-dev-4, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T14:00:00+00:00", final_status: done}
+    - {id: S-1665, task_id: T-1658, owner_id: agent-dev-5, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T14:30:00+00:00", final_status: done}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "3 of 5 agent slot(s) running"
+    params:
+      idle_agents: [agent-dev-4, agent-dev-5]
+      human_tasks: [T-1600]
+      blocked_agent_tasks: 28
+  - kind: escalate
+    task_id: T-1600
+    reason_contains: "gates 28 agent task(s)"
+    params:
+      owner: human-owner
+      blocked_agent_tasks: 28
+      agent_hours: 28.0
+not_expected_actions:
+  - kind: escalate
+    task_id: T-1650
+  - kind: alert
+    params: {human_tasks: [T-1600, T-1650]}
+  # The chain is gated by a human, not badly split: no parallelization advice.
+  - kind: alert
+    reason_contains: "parallel"

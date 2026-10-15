@@ -5,9 +5,26 @@ from typing import Any
 import pytest
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import Dependency, Owner, OwnerKind, Session, Snapshot, Status, Task
+from kelpie.core.model import (
+    Condition,
+    ConditionKind,
+    Dependency,
+    Owner,
+    OwnerKind,
+    Session,
+    Snapshot,
+    Status,
+    Task,
+)
 from kelpie.rules import REGISTRY
-from kelpie.rules.bottlenecks import Bottlenecks, build, critical_path, role_loads
+from kelpie.rules.bottlenecks import (
+    Bottlenecks,
+    Hold,
+    build,
+    critical_path,
+    human_gates,
+    role_loads,
+)
 
 NOW = datetime(2026, 3, 2, 15, tzinfo=UTC)
 M = timedelta(minutes=1)
@@ -49,6 +66,11 @@ def snap(
 
 def run(snapshot: Snapshot, rule: Bottlenecks | None = None) -> list[Action]:
     return list((rule or Bottlenecks()).evaluate(snapshot))
+
+
+def of(actions: list[Action], kind: str) -> list[Action]:
+    """Actions of one check, by key: chain, overloaded, idle-ready, hold, human-gate(d)."""
+    return [a for a in actions if (a.key or "").startswith(f"bottlenecks:{kind}")]
 
 
 def sequential(n: int = 5) -> tuple[tuple[Task, ...], tuple[Dependency, ...]]:
@@ -243,7 +265,11 @@ def test_idle_agents_absorbed_by_ready_work_are_not_spare() -> None:
     tasks, deps = sequential(4)
     tasks += (task("X1", Status.READY), task("X2", Status.READY))
     owners = agents("developer", "dev-1", "dev-2", "dev-3")
-    assert run(snap(tasks, owners, deps)) == []
+    actions = run(snap(tasks, owners, deps))
+    assert of(actions, "chain") == []
+    # The work has waited an hour while they idle: that is its own alert.
+    [idle] = actions
+    assert idle.key == "bottlenecks:idle-ready" and idle.params["ready_tasks"] == ["X1", "X2"]
 
 
 def test_chain_state_key_is_stable_while_the_chain_is_worked() -> None:
@@ -264,7 +290,7 @@ def test_chain_without_roles_counts_every_agent() -> None:
     tasks = (head("A", role=None), task("B", role=None), task("C", role=None))
     owners = agents("developer", "d1") + agents("reviewer", "r1")
     rule = Bottlenecks(min_chain_length=3)
-    [action] = run(snap(tasks, owners, chain("A", "B", "C")), rule)
+    [action] = of(run(snap(tasks, owners, chain("A", "B", "C")), rule), "chain")
     assert action.params["idle_roles"] == ["developer", "reviewer"]
 
 
@@ -306,7 +332,11 @@ def test_queue_depth_boundary(queued: int, alerts: bool) -> None:
 
 def test_no_alert_when_the_role_has_an_idle_agent() -> None:
     owners = overload_owners() + agents("reviewer", "rev-2")
-    assert run(snap(review_queue(4), owners)) == []
+    actions = run(snap(review_queue(4), owners))
+    assert of(actions, "overloaded") == []
+    [idle] = of(actions, "idle-ready")  # nobody has taken the reviews for 30 minutes
+    assert idle.params["idle_agents"] == ["rev-1", "rev-2"]
+    assert idle.params["likely_cause"] == "dispatch"
 
 
 def test_no_alert_without_idle_agents_elsewhere() -> None:
@@ -338,7 +368,7 @@ def test_both_alerts_can_fire_together() -> None:
 
 
 def test_healthy_farm_is_quiet() -> None:
-    tasks = (task("A", Status.IN_PROGRESS, owner="dev-1"), task("B", Status.READY))
+    tasks = (task("A", Status.IN_PROGRESS, owner="dev-1"), task("B", Status.READY, since=10 * M))
     assert run(snap(tasks, agents("developer", "dev-1", "dev-2"))) == []
     assert run(snap(())) == []
 
@@ -454,7 +484,7 @@ def test_a_hundred_held_tasks_in_a_chain_raise_no_alert() -> None:
     )
     snapshot = snap(held, agents("developer", "d1", "d2", "d3"), chain(*ids))
     assert run(snapshot, Bottlenecks(hold_labels=frozenset({"merge-first"}))) == []
-    assert run(snapshot)  # without the hold label it is a real 100-step chain
+    assert of(run(snapshot), "chain")  # without the hold label it is a real 100-step chain
 
 
 def test_held_tasks_do_not_count_toward_queue_depth() -> None:
@@ -532,3 +562,373 @@ def test_build_hold_labels() -> None:
 def test_build_rejects_bad_hold_labels(labels: Any) -> None:
     with pytest.raises(ValueError):
         build({"hold_labels": labels})
+
+
+# --- idle with ready work (incident 14) ---------------------------------------------------
+
+
+def labelled(tid: str, status: Status, *labels: str, since: timedelta = H, **kw: Any) -> Task:
+    return Task(tid, tid, status, NOW - since, kw.pop("role", "developer"), labels=labels, **kw)
+
+
+def live(owner: str, tid: str = "X") -> Session:
+    return Session(f"S-{owner}", tid, owner, NOW - H, last_heartbeat=NOW - M)
+
+
+def test_idle_agents_with_old_ready_work_alert_dispatch() -> None:
+    tasks = (task("A", Status.READY, since=45 * M), task("B", Status.ACCEPTED, since=40 * M))
+    [action] = run(snap(tasks, agents("developer", "d1")))
+    assert action.key == action.state == "bottlenecks:idle-ready"
+    assert action.severity is Severity.WARNING and action.since == NOW - 45 * M
+    assert action.params == {
+        "idle_agents": ["d1"],
+        "idle_roles": ["developer"],
+        "ready_tasks": ["A", "B"],
+        "ready_count": 2,
+        "oldest_wait_minutes": 45,
+        "likely_cause": "dispatch",
+    }
+    assert "dispatcher" in action.reason
+
+
+@pytest.mark.parametrize("since", [10 * M, 29 * M])
+def test_recent_ready_work_is_not_idle_capacity_yet(since: timedelta) -> None:
+    assert run(snap((task("A", Status.READY, since=since),), agents("developer", "d1"))) == []
+
+
+def test_work_of_another_role_or_waiting_on_dependencies_does_not_count() -> None:
+    tasks = (
+        task("R", Status.REVIEW, role="reviewer", since=2 * H),
+        task("B", Status.READY, since=2 * H),
+        task("P", Status.IN_PROGRESS, role="reviewer", owner="rev-1"),
+    )
+    owners = agents("developer", "d1") + agents("reviewer", "rev-1")
+    deps = (Dependency("B", "P"),)  # B waits on unfinished work
+    assert of(run(snap(tasks, owners, deps)), "idle-ready") == []
+
+
+def test_roleless_work_suits_any_idle_agent() -> None:
+    tasks = (task("A", Status.READY, role=None, since=H),)
+    owners = agents("developer", "d1") + agents("reviewer", "r1")
+    [action] = run(snap(tasks, owners))
+    assert action.params["idle_roles"] == ["developer", "reviewer"]
+    assert action.params["idle_agents"] == ["d1", "r1"]
+
+
+def test_held_work_does_not_page_while_its_hold_is_fresh() -> None:
+    rule = Bottlenecks(holds=(Hold("freeze", "lead", 4 * H),))
+    tasks = (labelled("A", Status.READY, "freeze"), labelled("B", Status.REVIEW, "freeze"))
+    assert run(snap(tasks, agents("developer", "d1")), rule) == []
+
+
+def test_full_slots_mean_no_free_capacity() -> None:
+    tasks = (task("W", Status.IN_PROGRESS, owner="d1"), task("A", Status.READY, since=H))
+    owners = agents("developer", "d1", "d2")
+    sessions = (live("d1", "W"),)
+    assert of(run(snap(tasks, owners, sessions=sessions)), "idle-ready")
+    assert run(snap(tasks, owners, sessions=sessions), Bottlenecks(slots=1)) == []
+    assert of(run(snap(tasks, owners, sessions=sessions), Bottlenecks(slots=2)), "idle-ready")
+
+
+def test_slots_count_live_sessions_not_parked_owners() -> None:
+    # d2 owns a blocked task with no session: it holds no slot.
+    tasks = (
+        task("W", Status.IN_PROGRESS, owner="d1"),
+        task("P", Status.BLOCKED, owner="d2"),
+        task("A", Status.READY, since=2 * H),
+    )
+    owners = agents("developer", "d1", "d2", "d3")
+    [idle] = run(snap(tasks, owners, sessions=(live("d1", "W"),)), Bottlenecks(slots=2))
+    assert idle.params["idle_agents"] == ["d3"]
+
+
+def test_full_slots_silence_the_chain_and_turn_overload_into_priority() -> None:
+    tasks, deps = sequential(4)
+    owners = agents("developer", "dev-1", "dev-2", "dev-3")
+    sessions = (live("dev-1", "T-0"),)
+    assert of(run(snap(tasks, owners, deps, sessions)), "chain")
+    assert run(snap(tasks, owners, deps, sessions), Bottlenecks(slots=1)) == []
+    review = (*review_queue(3), task("W", Status.REVIEW, role="reviewer", owner="rev-1"))
+    on = (live("rev-1", "W"),)
+    [free] = of(run(snap(review, overload_owners(), sessions=on)), "overloaded")
+    assert free.params["recommendation"] == "rebalance"
+    # Every slot running: still the bottleneck, but the advice is priority, not idle agents.
+    [full] = run(snap(review, overload_owners(), sessions=on), Bottlenecks(slots=1))
+    assert full.key == free.key and full.params["recommendation"] == "prioritize"
+    assert "give 'reviewer' work priority" in full.reason
+
+
+# --- holds with an owner and an expiry (incident 14) --------------------------------------
+
+
+def test_hold_past_its_expiry_alerts_with_owner_and_idle_cost() -> None:
+    rule = Bottlenecks(holds=(Hold("merge-hold", "lead", 2 * H),))
+    sessions = (Session("S", "Z", "d2", NOW - 5 * H, ended_at=NOW - 30 * M),)
+    tasks = (
+        labelled("A", Status.ACCEPTED, "merge-hold", since=3 * H),
+        labelled("B", Status.READY, "merge-hold", since=H),
+        labelled("C", Status.BACKLOG, "merge-hold", since=9 * H),  # backlog: not its age
+        labelled("D", Status.DONE, "merge-hold", since=9 * H),  # finished: not held any more
+    )
+    owners = agents("developer", "d1", "d2")
+    [action] = run(snap(tasks, owners, sessions=sessions), rule)
+    assert action.state == "bottlenecks:hold:merge-hold" and action.since == NOW - H
+    assert action.params == {
+        "hold": "merge-hold",
+        "owner": "lead",
+        "held_tasks": ["A", "B"],
+        "held_count": 2,
+        "held_minutes": 180,
+        "expires_after_minutes": 120,
+        "idle_agents": ["d1", "d2"],
+        "idle_agent_minutes": 60 + 30,  # d1 idle since the expiry, d2 since its session ended
+    }
+    assert "Owner: lead." in action.reason and "past its expected 2h" in action.reason
+    assert "Meanwhile 2 agent(s) sit idle (d1, d2)" in action.reason
+
+
+@pytest.mark.parametrize(("age", "alerts"), [(3 * H - M, False), (3 * H, True)])
+def test_hold_expiry_threshold(age: timedelta, alerts: bool) -> None:
+    tasks = (labelled("A", Status.READY, "park", since=age, owner_id="d1"),)
+    rule = Bottlenecks(hold_labels=frozenset({"park"}), hold_expiry=3 * H)
+    held = of(run(snap(tasks, agents("developer", "d1")), rule), "hold")
+    assert bool(held) is alerts
+    if alerts:
+        assert held[0].params["owner"] is None and "No owner" in held[0].reason
+        assert held[0].params["idle_agents"] == []  # d1 owns it: nobody idle
+        assert "Meanwhile" not in held[0].reason
+
+
+def test_bare_hold_labels_never_expire_without_hold_expiry() -> None:
+    tasks = (labelled("A", Status.READY, "park", since=48 * H, owner_id="d1"),)
+    rule = Bottlenecks(hold_labels=frozenset({"park"}))
+    assert run(snap(tasks, agents("developer", "d1")), rule) == []
+
+
+def test_listed_holds_default_to_four_hours() -> None:
+    rule = Bottlenecks(holds=(Hold("h"),))
+    young = (labelled("A", Status.READY, "h", since=4 * H - M, owner_id="d1"),)
+    old = (labelled("A", Status.READY, "h", since=4 * H, owner_id="d1"),)
+    assert run(snap(young), rule) == [] and of(run(snap(old), rule), "hold")
+
+
+def test_unheld_board_has_no_hold_alerts() -> None:
+    rule = Bottlenecks(holds=(Hold("merge-hold", "lead", H),))
+    assert (
+        run(snap((labelled("A", Status.READY, "other", since=9 * H, owner_id="d1"),)), rule) == []
+    )
+
+
+# --- human tasks on the critical path (incident 16) ---------------------------------------
+
+
+def human(tid: str, status: Status = Status.READY, since: timedelta = 2 * H) -> Task:
+    return Task(tid, f"title {tid}", status, NOW - since, "owner", owner_id="boss")
+
+
+HUMANS = (Owner("boss", "owner", OwnerKind.HUMAN),)
+
+
+def test_human_gates_follow_dependencies_and_current_waits_transitively() -> None:
+    tasks = (
+        human("H"),
+        task("A", Status.BLOCKED, estimate=H),
+        task("B", estimate=2 * H),
+        task("C", Status.WAITING),
+        human("H2", Status.BACKLOG),
+        task("D"),
+        task("E", Status.DONE),
+        task("F", Status.IN_PROGRESS),  # a leftover condition from an earlier wait
+        task("G", Status.WAITING, since=10 * M),
+    )
+    deps = (
+        Dependency("B", "A"),
+        Dependency("H2", "B"),
+        Dependency("D", "H2"),
+        Dependency("E", "H"),
+    )
+    conds = (
+        Condition("C1", ConditionKind.HUMAN_TASK, "A", {"task": "H"}, satisfied=False),
+        Condition("C2", ConditionKind.HUMAN_TASK, "C", {"task": "H"}, satisfied=True),  # met
+        Condition("C3", ConditionKind.HUMAN_TASK, "F", {"task": "H"}, satisfied=False),
+        Condition(
+            "C4", ConditionKind.HUMAN_TASK, "G", {"task": "H"}, registered_at=NOW - H
+        ),  # registered before G's current wait began
+    )
+    gates = human_gates(Snapshot(NOW, tasks, HUMANS, deps, conds))
+    assert [(g.task.id, g.behind, g.actionable) for g in gates] == [
+        ("H", ("A", "B", "D"), True),
+        ("H2", ("D",), False),  # waits on agent work itself
+    ]
+    assert gates[0].estimate == 3 * H and gates[1].estimate is None
+
+
+def test_gate_with_enough_work_behind_is_escalated_to_its_owner() -> None:
+    tasks = (human("H"), task("A", estimate=H), task("B", estimate=30 * M), task("C"))
+    snapshot = Snapshot(NOW, tasks, HUMANS, chain("H", "A", "B", "C"))
+    [esc] = [a for a in run(snapshot) if a.kind is ActionKind.ESCALATE]
+    assert esc.task_id == "H" and esc.state == "bottlenecks:human-gate:H"
+    assert esc.since == NOW - 2 * H
+    assert esc.params == {
+        "owner": "boss",
+        "blocked_agent_tasks": 3,
+        "blocked_tasks": ["A", "B", "C"],
+        "agent_hours": 1.5,
+    }
+    assert "does not change dependencies" in esc.reason and "1h 30m of agent work" in esc.reason
+    rule = Bottlenecks(human_gate_min_tasks=4)
+    assert [a for a in run(snapshot, rule) if a.kind is ActionKind.ESCALATE] == []
+
+
+@pytest.mark.parametrize(
+    ("status", "since", "escalates"),
+    [
+        (Status.READY, 59 * M, False),  # just created: give the human time
+        (Status.READY, H, True),
+        (Status.IN_PROGRESS, H, True),
+        (Status.BACKLOG, 5 * H, False),  # not released to the human yet
+        (Status.BLOCKED, 5 * H, False),
+    ],
+)
+def test_only_human_tasks_the_human_can_do_now_and_has_had_time_for_escalate(
+    status: Status, since: timedelta, escalates: bool
+) -> None:
+    tasks = (human("H", status, since), task("A"), task("B"), task("C"))
+    actions = run(Snapshot(NOW, tasks, HUMANS, chain("H", "A", "B", "C")))
+    assert any(a.kind is ActionKind.ESCALATE for a in actions) is escalates
+
+
+def test_human_task_waiting_on_agent_work_is_not_escalated() -> None:
+    tasks = (task("P", Status.IN_PROGRESS, owner="d1"), human("H"), task("A"), task("B"), task("C"))
+    snapshot = Snapshot(
+        NOW, tasks, HUMANS + agents("developer", "d1"), chain("P", "H", "A", "B", "C")
+    )
+    assert [a for a in run(snapshot) if a.kind is ActionKind.ESCALATE] == []
+
+
+def test_idle_agents_and_only_human_tasks_ready_alert() -> None:
+    tasks = (
+        human("H"),
+        task("A"),
+        task("B"),
+        task("W", Status.IN_PROGRESS, owner="d1"),
+        human("LONE"),  # nothing behind it
+        task("R", Status.REVIEW, role="reviewer", since=2 * H),  # nobody idle could take it
+    )
+    owners = HUMANS + agents("developer", "d1", "d2", "d3") + agents("reviewer", "r1")
+    sessions = (live("d1", "W"), live("r1", "Y"))
+    [alert] = of(run(snap(tasks, owners, chain("H", "A", "B"), sessions)), "human-gated")
+    assert alert.params == {
+        "idle_agents": ["d2", "d3"],
+        "busy_slots": 2,
+        "slots": 4,
+        "human_tasks": ["H"],
+        "blocked_agent_tasks": 2,
+        "ready_human_tasks": ["H", "LONE"],
+        "recommendation": "unblock_human_tasks",
+    }
+    assert "2 of 4 agent slot(s) running" in alert.reason
+
+
+def test_no_human_gated_alert_when_agent_work_is_ready_or_nobody_is_idle() -> None:
+    owners = HUMANS + agents("developer", "d1")
+    gated = (human("H"), task("A"))
+    deps = chain("H", "A")
+    ready = (*gated, task("R", Status.READY, since=5 * M))
+    assert of(run(snap(ready, owners, deps)), "human-gated") == []
+    busy = (*gated, task("W", Status.IN_PROGRESS, owner="d1"))
+    assert of(run(snap(busy, owners, deps)), "human-gated") == []
+    lone = (human("H"),)  # gates nothing
+    assert run(snap(lone, owners)) == []
+
+
+def test_chain_through_a_human_task_gets_no_parallelization_advice() -> None:
+    ids = ["A0", "A1", "H", *(f"B{i}" for i in range(4))]
+    tasks = tuple(human(i) if i == "H" else task(i) for i in ids[1:])
+    tasks = (head("A0"), *tasks)
+    owners = HUMANS + agents("developer", "d1", "d2", "d3")
+    actions = run(snap(tasks, owners, chain(*ids)))
+    assert of(actions, "chain") == []
+    head_human = (human("H"), *(task(f"A{i}") for i in range(5)))
+    gated = run(snap(head_human, owners, chain("H", *(f"A{i}" for i in range(5)))))
+    assert of(gated, "chain") == [] and of(gated, "human-gated")
+
+
+# --- config: holds, slots, idle and gate thresholds ----------------------------------------
+
+
+def test_build_parses_holds_and_new_thresholds() -> None:
+    rule = build(
+        {
+            "holds": [
+                {"label": "merge-hold", "owner": "lead", "expires_after": "2h30m"},
+                {"label": "freeze"},
+            ],
+            "hold_labels": ["park"],
+            "hold_expiry": "6h",
+            "idle_alert_after": "45m",
+            "human_gate_min_tasks": 5,
+            "human_gate_after": "2h",
+            "slots": 4,
+        }
+    )
+    assert rule.holds == (Hold("merge-hold", "lead", 2 * H + 30 * M), Hold("freeze"))
+    assert rule.held_labels == {"merge-hold", "freeze", "park"}
+    assert (rule.hold_expiry, rule.idle_alert_after) == (6 * H, 45 * M)
+    assert (rule.human_gate_min_tasks, rule.human_gate_after, rule.slots) == (5, 2 * H, 4)
+    defaults = build({})
+    assert (defaults.hold_expiry, defaults.idle_alert_after, defaults.slots) == (None, 30 * M, None)
+    assert defaults.human_gate_after == H
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"holds": {"label": "x"}},
+        {"holds": ["x"]},
+        {"holds": [{"owner": "lead"}]},
+        {"holds": [{"label": ""}]},
+        {"holds": [{"label": "x", "owner": 3}]},
+        {"holds": [{"label": "x", "expires_after": "0s"}]},
+        {"holds": [{"label": "x", "expires_after": "later"}]},
+        {"holds": [{"label": "x", "until": "5pm"}]},
+        {"holds": [{"label": "x"}, {"label": "x"}]},
+        {"hold_expiry": "0s"},
+        {"idle_alert_after": "-1m"},
+        {"human_gate_after": "soon"},
+        {"slots": 0},
+        {"human_gate_min_tasks": 0},
+    ],
+)
+def test_build_rejects_bad_hold_config(config: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        build(config)
+
+
+def test_malformed_human_task_params_do_not_break_the_rule() -> None:
+    tasks = (human("H"), task("A", Status.BLOCKED), task("B", Status.WAITING))
+    conds = (
+        Condition("C1", ConditionKind.HUMAN_TASK, "A", {"task": ["H"]}, satisfied=False),
+        Condition("C2", ConditionKind.HUMAN_TASK, "B", {"task": {"id": "H"}}, satisfied=False),
+    )
+    snapshot = Snapshot(NOW, tasks, HUMANS, (), conds)
+    assert human_gates(snapshot) == []
+    assert run(snapshot) == []
+
+
+def test_held_human_task_is_not_escalated() -> None:
+    held = Task("H", "h", Status.READY, NOW - 2 * H, "owner", owner_id="boss", labels=("park",))
+    tasks = (held, task("A"), task("B"), task("C"))
+    owners = HUMANS + agents("developer", "d1")
+    snapshot = snap(tasks, owners, chain("H", "A", "B", "C"))
+    rule = Bottlenecks(hold_labels=frozenset({"park"}))
+    assert [a for a in run(snapshot, rule) if a.kind is ActionKind.ESCALATE] == []
+    assert of(run(snapshot, rule), "human-gated") == []
+    assert [a for a in run(snapshot) if a.kind is ActionKind.ESCALATE]  # unheld: escalated
+
+
+def test_chain_ending_in_a_human_task_still_gets_parallelization_advice() -> None:
+    ids = [*(f"A{i}" for i in range(4)), "H"]
+    tasks = (head("A0"), *(task(i) for i in ids[1:-1]), human("H", Status.BACKLOG))
+    owners = HUMANS + agents("developer", "d1", "d2", "d3")
+    assert of(run(snap(tasks, owners, chain(*ids))), "chain")
