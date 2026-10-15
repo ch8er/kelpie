@@ -163,3 +163,5 @@ Prometheus with `[resources.prometheus]` and `[engine.rules.resources]` (see
   `kelpie_spans_received_total`, `kelpie_snapshot_spans`.
 - `http://127.0.0.1:9090` (Prometheus) and `http://127.0.0.1:3000` (Grafana) with the compose stack.
 - `kelpie.db` (SQLite): the action ledger of what rules proposed.
+
+When observe has run quietly, move one rule at a time to suggest and act: [act checklist](act-checklist.md).
