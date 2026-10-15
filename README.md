@@ -247,6 +247,83 @@ alternative `allowed_block_reasons` list for Hermes block kinds.
 
 Install node_exporter on each host where agents run, and point it at the Kelpie server.
 
+## Traces (OTLP)
+
+`kelpie serve` accepts OpenTelemetry traces on the same port: `POST /v1/traces`, OTLP/HTTP
+with `application/x-protobuf` or `application/json` bodies, optionally gzip-compressed
+(gRPC is not supported: point exporters at the HTTP endpoint). Spans are mapped onto
+Kelpie's model following the
+[GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai)
+and stored in the Kelpie database; each control-loop tick sees the spans of the last
+`window` (2 hours) plus per-session totals (calls, errors, tokens) over `totals_window`
+(24 hours). Spans older than `retention` (7 days) or beyond `max_rows` are pruned once an
+hour in the background.
+
+| `gen_ai.operation.name` | Kelpie span kind |
+| --- | --- |
+| `chat`, `text_completion`, `generate_content`, `embeddings` | LLM call |
+| `execute_tool` | tool call |
+| `invoke_agent` | session |
+| `invoke_workflow` | task |
+
+Other spans with a model or token usage count as LLM calls, with `gen_ai.tool.name` as tool
+calls; spans that are not GenAI steps (HTTP spans and the like) are used to link their
+children and then dropped. Mapped: model (`gen_ai.response.model`, else
+`gen_ai.request.model`), `gen_ai.usage.input_tokens`, `output_tokens` and
+`cache_read.input_tokens`, `gen_ai.tool.name`, outcome (`error` when the span status is
+ERROR or `error.type` is set). Tool calls get an `args_hash` of their arguments (the same
+hash the Hermes hooks plugin writes), which the loop breaker compares.
+
+**Task and session.** `task_id` comes from the `kelpie.task_id` attribute and `session_id`
+from `kelpie.session_id`, else `gen_ai.conversation.id`, else `session.id` (both keys are
+configurable). Span attributes win over resource attributes, so an agent host can tag a
+whole process with `OTEL_RESOURCE_ATTRIBUTES=kelpie.task_id=T-42`. A span without them
+inherits its parent's, also when the parent arrives in a later request.
+
+**Privacy.** Kelpie never stores message content: input and output messages, system
+instructions, tool definitions, tool arguments and results, prompts and completions in
+older or vendor-specific forms, error messages and user identity attributes are dropped on
+arrival. Tool arguments are reduced to `args_hash` first. Other attributes are kept, bounded
+(64 keys, 256 characters per value).
+
+**Authentication.** Set `KELPIE_TRACES_TOKEN` and exporters must send
+`Authorization: Bearer <token>`; without it the endpoint is open and Kelpie logs a warning
+at startup. Keep the port on a private network either way.
+
+```toml
+[traces]
+token_env = "KELPIE_TRACES_TOKEN"  # configuring it makes the variable mandatory
+window = "2h"
+retention = "7d"
+```
+
+**Claude Code** exports spans as a beta feature (verified against the
+[monitoring docs](https://code.claude.com/docs/en/monitoring-usage)); Kelpie reads its
+`claude_code.llm_request` and `claude_code.tool` spans and links them by `session.id`:
+
+```bash
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://kelpie.internal:9464/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer ${KELPIE_TRACES_TOKEN}"
+export OTEL_RESOURCE_ATTRIBUTES="kelpie.task_id=T-42"   # optional: link to a board task
+```
+
+Tool arguments are redacted by Claude Code by default; with `OTEL_LOG_TOOL_DETAILS=1` its
+Bash command and file path are hashed into `args_hash` and dropped.
+
+**Hermes.** The Kelpie hooks plugin already reports every tool call (see the Hermes
+adapter README). For model calls and token usage, Hermes' bundled Langfuse plugin only
+talks to Langfuse; the community [hermes-otel](https://github.com/briancaffey/hermes-otel)
+plugin can export to any OTLP/HTTP endpoint (`type: otlp` backend in
+`~/.hermes/hermes_otel.yaml`). We have not verified how it sets request headers, so run
+Kelpie's ingest without a token on a private network if it cannot send one.
+
+**Any other OpenTelemetry SDK**: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://<kelpie>:9464/v1/traces`,
+`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf` and the bearer header as above.
+
 ## Project layout
 
 ```text
@@ -257,7 +334,7 @@ src/kelpie/
   connectors/   ConditionConnector implementations (GitHub, LLM quotas, human tasks)
   traces/       OTLP ingest, span storage, optional export (Langfuse, Phoenix, Datadog)
   report/       daily cost-of-chaos report, before/after comparisons
-  cli.py, server.py     `kelpie` CLI and HTTP server (/metrics, /healthz)
+  cli.py, server.py     `kelpie` CLI and HTTP server (/metrics, /healthz, /v1/traces)
 tests/
   fixtures/incidents/   YAML snapshots + expected actions, one or more per incident
 deploy/                 Prometheus and Grafana config
@@ -272,9 +349,10 @@ docker-compose.yml      kelpie + prometheus + grafana
 What exists today: the domain model, action types, the rule protocol and registry,
 adapter/connector protocols, the read side of the Hermes adapter (kanban.db and a hooks
 plugin), the engine (routing to executors, per-rule modes, action
-ledger in SQLite), `kelpie serve` with the control loop and engine metrics, `kelpie
+ledger in SQLite), `kelpie serve` with the control loop and engine metrics, OTLP trace
+ingest with span storage, `kelpie
 status`, and fixtures for the 13 farm incidents and for field evidence. Hermes actions,
-other adapters, connectors, traces, alerters and the report are stubs, `kelpie report` does not exist yet,
+other adapters, connectors, trace forwarding, alerters and the report are stubs, `kelpie report` does not exist yet,
 and rules 1–4 (`exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`) are
 implemented; see
 [docs/plan.md](docs/plan.md) and [docs/roadmap.md](docs/roadmap.md).

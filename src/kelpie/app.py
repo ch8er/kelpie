@@ -470,6 +470,19 @@ def render_adapters(adapters: Sequence[PlatformAdapter]) -> list[str]:
     return lines
 
 
+def _traces_status(traces: TraceSettings) -> str:
+    if not traces.enabled:
+        return "disabled"
+    try:
+        token = traces.token()
+    except ValueError as exc:
+        return f"NOT ready: {exc}"
+    auth = (
+        f"bearer token from ${traces.token_env}" if token else f"open (${traces.token_env} unset)"
+    )
+    return f"POST /v1/traces, {auth}, window {traces.window}, retention {traces.retention}"
+
+
 def render_status(
     settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter] = ()
 ) -> str:
@@ -480,6 +493,7 @@ def render_status(
         f"dry-run:  {'on (nothing leaves Kelpie)' if engine.dry_run else 'off'}",
         f"interval: {engine.interval}",
         f"ledger:   {settings.db_path or '(in memory)'}",
+        f"traces:   {_traces_status(settings.traces)}",
         "",
         f"{'#':>3}  {'rule':<17} {'prio':<4}  {'status':<16} mode",
     ]

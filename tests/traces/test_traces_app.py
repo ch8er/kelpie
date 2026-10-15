@@ -20,8 +20,10 @@ from kelpie.app import (
     ControlLoop,
     Settings,
     build_app,
+    load_rules,
     load_settings,
     merged_snapshot,
+    render_status,
 )
 from kelpie.core.config import EngineConfig
 from kelpie.core.engine import Engine
@@ -323,3 +325,23 @@ def test_large_ingest_does_not_stall_ticks(tmp_path: Path) -> None:
     assert len(durations) >= 2
     assert max(durations[:-1]) < max(1.0, ingest_seconds * 0.9)
     app.close()
+
+
+def test_example_config_has_the_trace_defaults() -> None:
+    example = Path(__file__).resolve().parents[2] / "kelpie.example.toml"
+    assert load_settings(example).traces == TraceSettings()
+
+
+def test_status_shows_traces(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KELPIE_TRACES_TOKEN", raising=False)
+    settings = load_settings(None)
+    loaded = load_rules(settings.engine)
+    assert "traces:   POST /v1/traces, open ($KELPIE_TRACES_TOKEN unset)" in render_status(
+        settings, loaded
+    )
+    monkeypatch.setenv("KELPIE_TRACES_TOKEN", "x")
+    assert "bearer token from $KELPIE_TRACES_TOKEN" in render_status(settings, loaded)
+    off = Settings(traces=TraceSettings(enabled=False))
+    assert "traces:   disabled" in render_status(off, loaded)
+    strict = Settings(traces=TraceSettings(token_env="NOPE_UNSET", token_env_explicit=True))
+    assert "NOT ready" in render_status(strict, loaded)

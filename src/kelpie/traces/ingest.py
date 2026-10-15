@@ -81,17 +81,8 @@ class TraceIngest:
         media = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
         # Errors before the media type is known are answered in JSON.
         encoding = media if media in (otlp.JSON, otlp.PROTOBUF) else otlp.JSON
-        if self.token is not None and not _authorized(headers.get("Authorization"), self.token):
-            return _error(
-                401, encoding, otlp.UNAUTHENTICATED, "missing or invalid bearer token", close=True
-            )
-        if media not in (otlp.JSON, otlp.PROTOBUF):
-            message = f"unsupported content type {media!r}; use {otlp.PROTOBUF} or {otlp.JSON}"
-            return _error(415, encoding, otlp.INVALID_ARGUMENT, message, close=True)
-        content_encoding = (headers.get("Content-Encoding") or "identity").strip().lower()
-        if content_encoding not in ("identity", "gzip"):
-            message = f"unsupported content encoding {content_encoding!r}; use gzip or none"
-            return _error(415, encoding, otlp.INVALID_ARGUMENT, message, close=True)
+        # The body is read before any other check, so the client always sees the reply
+        # instead of a connection reset; only a missing or oversized length closes early.
         raw_length = headers.get("Content-Length")
         if raw_length is None:
             return _error(411, encoding, otlp.INVALID_ARGUMENT, "Content-Length required", True)
@@ -105,6 +96,15 @@ class TraceIngest:
             message = f"body over {self.max_body_bytes} bytes"
             return _error(413, encoding, otlp.RESOURCE_EXHAUSTED, message, close=True)
         body = read(length)
+        if self.token is not None and not _authorized(headers.get("Authorization"), self.token):
+            return _error(401, encoding, otlp.UNAUTHENTICATED, "missing or invalid bearer token")
+        if media not in (otlp.JSON, otlp.PROTOBUF):
+            message = f"unsupported content type {media!r}; use {otlp.PROTOBUF} or {otlp.JSON}"
+            return _error(415, encoding, otlp.INVALID_ARGUMENT, message)
+        content_encoding = (headers.get("Content-Encoding") or "identity").strip().lower()
+        if content_encoding not in ("identity", "gzip"):
+            message = f"unsupported content encoding {content_encoding!r}; use gzip or none"
+            return _error(415, encoding, otlp.INVALID_ARGUMENT, message)
         if content_encoding == "gzip":
             try:
                 body = _gunzip(body, self.max_body_bytes)
