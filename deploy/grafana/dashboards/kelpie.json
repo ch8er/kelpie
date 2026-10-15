@@ -631,7 +631,7 @@
     {
       "id": 21,
       "type": "row",
-      "title": "Budgets & spend",
+      "title": "Tasks & agents",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -644,6 +644,84 @@
     {
       "id": 22,
       "type": "timeseries",
+      "title": "Tasks by status",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_tasks",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Idle agents by role",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_idle_agents",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Agent owners with no live session and no open task."
+    },
+    {
+      "id": 24,
+      "type": "row",
+      "title": "Budgets & spend",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "panels": []
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
       "title": "Spend per budget",
       "datasource": {
         "type": "prometheus",
@@ -653,7 +731,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 36
+        "y": 44
       },
       "targets": [
         {
@@ -674,7 +752,7 @@
       }
     },
     {
-      "id": 23,
+      "id": 26,
       "type": "timeseries",
       "title": "Remaining per budget",
       "datasource": {
@@ -685,7 +763,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 36
+        "y": 44
       },
       "targets": [
         {
@@ -706,7 +784,7 @@
       }
     },
     {
-      "id": 24,
+      "id": 27,
       "type": "timeseries",
       "title": "Burn rate per hour",
       "datasource": {
@@ -717,7 +795,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 36
+        "y": 44
       },
       "targets": [
         {
@@ -738,7 +816,7 @@
       }
     },
     {
-      "id": 25,
+      "id": 28,
       "type": "timeseries",
       "title": "Time until budget runs out",
       "datasource": {
@@ -749,7 +827,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 43
+        "y": 51
       },
       "targets": [
         {
@@ -770,7 +848,7 @@
       }
     },
     {
-      "id": 26,
+      "id": 29,
       "type": "timeseries",
       "title": "Time until next provider limit",
       "datasource": {
@@ -781,7 +859,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 43
+        "y": 51
       },
       "targets": [
         {
@@ -802,7 +880,7 @@
       }
     },
     {
-      "id": 27,
+      "id": 30,
       "type": "table",
       "title": "Budgets over a soft or hard threshold",
       "datasource": {
@@ -813,7 +891,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 43
+        "y": 51
       },
       "targets": [
         {
@@ -836,7 +914,7 @@
       }
     },
     {
-      "id": 28,
+      "id": 31,
       "type": "timeseries",
       "title": "Unattributed and unpriced tokens",
       "datasource": {
@@ -847,7 +925,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 50
+        "y": 58
       },
       "targets": [
         {
@@ -877,7 +955,7 @@
       }
     },
     {
-      "id": 29,
+      "id": 32,
       "type": "row",
       "title": "Traces ingest",
       "collapsed": false,
@@ -885,12 +963,12 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 65
       },
       "panels": []
     },
     {
-      "id": 30,
+      "id": 33,
       "type": "timeseries",
       "title": "OTLP requests per minute by code",
       "datasource": {
@@ -901,7 +979,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -922,7 +1000,7 @@
       }
     },
     {
-      "id": 31,
+      "id": 34,
       "type": "timeseries",
       "title": "Spans per minute received and rejected",
       "datasource": {
@@ -933,7 +1011,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -963,7 +1041,7 @@
       }
     },
     {
-      "id": 32,
+      "id": 35,
       "type": "timeseries",
       "title": "Span store rows",
       "datasource": {
@@ -974,7 +1052,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -995,7 +1073,7 @@
       }
     },
     {
-      "id": 33,
+      "id": 36,
       "type": "timeseries",
       "title": "Spans in the snapshot",
       "datasource": {
@@ -1006,7 +1084,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 65
+        "y": 73
       },
       "targets": [
         {
@@ -1045,7 +1123,7 @@
       }
     },
     {
-      "id": 34,
+      "id": 37,
       "type": "timeseries",
       "title": "Trace forwarding per minute",
       "datasource": {
@@ -1056,7 +1134,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 65
+        "y": 73
       },
       "targets": [
         {
@@ -1095,7 +1173,7 @@
       }
     },
     {
-      "id": 35,
+      "id": 38,
       "type": "row",
       "title": "Connectors",
       "collapsed": false,
@@ -1103,12 +1181,12 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 72
+        "y": 80
       },
       "panels": []
     },
     {
-      "id": 36,
+      "id": 39,
       "type": "timeseries",
       "title": "GitHub requests per minute by outcome",
       "datasource": {
@@ -1119,7 +1197,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 73
+        "y": 81
       },
       "targets": [
         {
@@ -1140,7 +1218,7 @@
       }
     },
     {
-      "id": 37,
+      "id": 40,
       "type": "timeseries",
       "title": "GitHub rate limit",
       "datasource": {
@@ -1151,7 +1229,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 73
+        "y": 81
       },
       "targets": [
         {
@@ -1181,7 +1259,7 @@
       }
     },
     {
-      "id": 38,
+      "id": 41,
       "type": "timeseries",
       "title": "Block conditions by outcome",
       "datasource": {
@@ -1192,7 +1270,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 73
+        "y": 81
       },
       "targets": [
         {
@@ -1213,7 +1291,7 @@
       }
     },
     {
-      "id": 39,
+      "id": 42,
       "type": "row",
       "title": "Resources",
       "collapsed": false,
@@ -1221,12 +1299,12 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 88
       },
       "panels": []
     },
     {
-      "id": 40,
+      "id": 43,
       "type": "stat",
       "title": "Resource source up",
       "datasource": {
@@ -1237,7 +1315,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 81
+        "y": 89
       },
       "targets": [
         {
@@ -1258,7 +1336,7 @@
       }
     },
     {
-      "id": 41,
+      "id": 44,
       "type": "stat",
       "title": "Readings",
       "datasource": {
@@ -1269,7 +1347,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 81
+        "y": 89
       },
       "targets": [
         {
@@ -1290,7 +1368,7 @@
       }
     },
     {
-      "id": 42,
+      "id": 45,
       "type": "timeseries",
       "title": "Resource read failures per hour by cause",
       "datasource": {
@@ -1301,7 +1379,7 @@
         "h": 4,
         "w": 16,
         "x": 8,
-        "y": 81
+        "y": 89
       },
       "targets": [
         {

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kelpie.app import ControlLoop
+from kelpie.core.engine import Engine
+from kelpie.core.model import Snapshot
 from kelpie.metrics import Metrics
 
 ROOT = Path(__file__).parent.parent
@@ -27,6 +31,8 @@ def _exported_names() -> set[str]:
     metrics.set_forward_destinations(["langfuse"])
     metrics.set_budgets_enabled(True)
     metrics.set_resources(True)
+    snapshot = Snapshot(now=datetime(2026, 1, 1, tzinfo=UTC))
+    ControlLoop(Engine([]), lambda: snapshot, metrics).tick_once()  # fleet gauges
     names: set[str] = set()
     for line in metrics.render().splitlines():
         match = re.match(r"# (?:HELP|TYPE) (\w+)", line) or re.match(r"(\w+)", line)
