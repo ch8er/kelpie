@@ -1,17 +1,24 @@
 """Long-lived alert states: alert on transitions, not on every tick.
 
 A rule that reports an ongoing condition (an orphaned task, a block nothing will clear)
-marks its alert with ``Action.state``. The engine passes each such alert through the
-:class:`StateTracker`, which decides:
+marks its alert with ``Action.state`` (a stable id for the underlying condition) and
+``Action.since`` (when the condition began). The engine asks the :class:`StateTracker`
+what each sighting means:
 
-- **opened**: first time Kelpie sees the state → deliver;
-- **escalated**: the state's age (from ``Action.since``) passed the next escalation
-  threshold (default 4h → 12h → 24h), or its severity rose → deliver again;
+- **opened**: first sighting, or first sighting since Kelpie started acting (a state seen
+  only in observe/dry-run is announced again when the rule goes live) → deliver;
+- **escalated**: the time since Kelpie first reported it passed the next escalation
+  threshold (default 4h → 12h → 24h), or the severity rose → deliver again;
+- **changed**: the same condition is now described differently (another alert key) →
+  deliver;
 - **ongoing**: nothing new → suppress.
 
-States a rule stops reporting (while the rule itself evaluated fine) are **resolved**: the
-engine sends a short "resolved" alert and closes them. Open states are persisted so the
-daily report can list them and a restart does not re-announce everything.
+A transition is committed only after the alert was handled (delivered, or logged in
+observe/dry-run); if the ledger suppressed it or delivery failed, the next tick tries
+again. States a rule (that ran fine) has not reported for ``resolve_after`` are resolved:
+the engine sends a short "resolved" and closes them, again only once that notice was
+handled. Open states persist so the daily report can list them and a restart does not
+re-announce everything.
 """
 
 from __future__ import annotations
@@ -23,14 +30,17 @@ from enum import StrEnum
 from typing import Protocol
 
 from kelpie.core.actions import Action, Severity
+from kelpie.core.config import Mode
 
 DEFAULT_ESCALATIONS = (timedelta(hours=4), timedelta(hours=12), timedelta(hours=24))
+DEFAULT_RESOLVE_AFTER = timedelta(minutes=10)
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 
 
 class Transition(StrEnum):
     OPENED = "opened"
     ESCALATED = "escalated"
+    CHANGED = "changed"
     ONGOING = "ongoing"
 
 
@@ -39,16 +49,20 @@ class OpenState:
     id: str
     rule: str
     since: datetime  # when the underlying condition began
-    opened_at: datetime  # when Kelpie first reported it
+    opened_at: datetime  # when Kelpie first reported it (escalations count from here)
     last_seen: datetime
     level: int  # escalation thresholds already announced
     severity: Severity
-    summary: str  # reason of the alert that opened (or last escalated) it
+    summary: str  # reason of the alert that last announced it
     task_id: str | None = None
+    key: str | None = None  # alert key of the last announcement
+    mode: Mode = Mode.OBSERVE  # effective mode of the last announcement
 
 
 class StateStore(Protocol):
     def open_states(self) -> Sequence[OpenState]: ...
+
+    def get_state(self, state_id: str) -> OpenState | None: ...
 
     def save(self, state: OpenState) -> None:
         """Insert or update an open state."""
@@ -65,6 +79,9 @@ class MemoryStateStore:
     def open_states(self) -> Sequence[OpenState]:
         return list(self.states.values())
 
+    def get_state(self, state_id: str) -> OpenState | None:
+        return self.states.get(state_id)
+
     def save(self, state: OpenState) -> None:
         self.states[state.id] = state
 
@@ -77,47 +94,67 @@ class MemoryStateStore:
 class StateTracker:
     store: StateStore
     escalations: tuple[timedelta, ...] = DEFAULT_ESCALATIONS
+    resolve_after: timedelta = DEFAULT_RESOLVE_AFTER
 
-    def observe(self, action: Action, now: datetime) -> tuple[Transition, OpenState]:
-        """Record a sighting of ``action.state`` and say what kind of transition it is."""
+    def peek(
+        self, action: Action, now: datetime, mode: Mode
+    ) -> tuple[Transition, OpenState, OpenState | None]:
+        """What this sighting means, the state to commit if its alert is handled, and the
+        state as stored now (None if new). Nothing is saved."""
         assert action.state is not None
-        since = action.since or now
-        level = sum(1 for t in self.escalations if now - since >= t)
-        current = {s.id: s for s in self.store.open_states()}.get(action.state)
-        if current is None:
-            # Thresholds already behind the state when Kelpie first sees it are not news.
+        current = self.store.get_state(action.state)
+        live = mode is not Mode.OBSERVE
+        if current is None or (live and current.mode is Mode.OBSERVE):
             state = OpenState(
                 id=action.state,
                 rule=action.rule,
-                since=since,
+                since=action.since or (current.since if current else now),
                 opened_at=now,
                 last_seen=now,
-                level=level,
+                level=0,
                 severity=action.severity,
                 summary=action.reason,
                 task_id=action.task_id,
+                key=action.key,
+                mode=mode,
             )
-            self.store.save(state)
-            return Transition.OPENED, state
+            return Transition.OPENED, state, current
+        level = sum(1 for t in self.escalations if now - current.opened_at >= t)
         worse = _RANK[action.severity] > _RANK[current.severity]
         if level > current.level or worse:
-            state = replace(
-                current,
-                last_seen=now,
-                level=max(level, current.level),
-                severity=action.severity if worse else current.severity,
-                summary=action.reason,
-            )
-            self.store.save(state)
-            return Transition.ESCALATED, state
-        state = replace(current, last_seen=now)
-        self.store.save(state)
-        return Transition.ONGOING, state
+            transition = Transition.ESCALATED
+        elif action.key != current.key:
+            transition = Transition.CHANGED
+        else:
+            return Transition.ONGOING, replace(current, last_seen=now), current
+        state = replace(
+            current,
+            since=action.since or current.since,
+            last_seen=now,
+            level=max(level, current.level),
+            severity=action.severity if worse else current.severity,
+            summary=action.reason,
+            key=action.key,
+            mode=mode,
+        )
+        return transition, state, current
 
-    def gone(self, rules: Iterable[str], seen: set[str]) -> list[OpenState]:
-        """Open states of ``rules`` that were not reported this time."""
+    def commit(self, state: OpenState) -> None:
+        self.store.save(state)
+
+    def touch(self, current: OpenState | None, now: datetime) -> None:
+        """Record a sighting without committing a transition (retry it next tick)."""
+        if current is not None:
+            self.store.save(replace(current, last_seen=now))
+
+    def gone(self, rules: Iterable[str], seen: set[str], now: datetime) -> list[OpenState]:
+        """Open states of ``rules`` not reported for ``resolve_after``."""
         names = set(rules)
-        return [s for s in self.store.open_states() if s.rule in names and s.id not in seen]
+        return [
+            s
+            for s in self.store.open_states()
+            if s.rule in names and s.id not in seen and now - s.last_seen >= self.resolve_after
+        ]
 
     def resolve(self, state: OpenState, now: datetime) -> None:
         self.store.close_state(state.id, now)

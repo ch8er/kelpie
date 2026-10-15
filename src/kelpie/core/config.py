@@ -43,6 +43,8 @@ class EngineConfig:
         timedelta(hours=12),
         timedelta(hours=24),
     )
+    # A state no rule reported for this long is resolved (absorbs one-tick gaps).
+    state_resolve_after: timedelta = timedelta(minutes=10)
     default_mode: Mode = Mode.OBSERVE
     modes: Mapping[str, Mode] = field(default_factory=dict)
     rules: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
@@ -68,6 +70,7 @@ class EngineConfig:
             "retry_after",
             "max_actions_per_task_per_hour",
             "state_escalations",
+            "state_resolve_after",
             "rules",
         }
         unknown = set(data) - known
@@ -103,6 +106,9 @@ class EngineConfig:
                 set(escalations)
             ):
                 raise ValueError("engine.state_escalations must be positive and increasing")
+        resolve_after = parse_duration(data.get("state_resolve_after", "10m"))
+        if resolve_after < timedelta(0):
+            raise ValueError("engine.state_resolve_after must not be negative")
         # Core cannot import kelpie.rules, so rule names are not checked against PLANNED
         # here; whoever wires the engine (CLI/server) must do it.
         return cls(
@@ -112,6 +118,7 @@ class EngineConfig:
             retry_after=retry_after,
             max_actions_per_task_per_hour=max_actions,
             state_escalations=escalations,
+            state_resolve_after=resolve_after,
             default_mode=Mode(data.get("default_mode", Mode.OBSERVE)),
             modes=modes,
             rules=rules,

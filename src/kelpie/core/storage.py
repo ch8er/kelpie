@@ -55,6 +55,8 @@ CREATE TABLE states (
     level      INTEGER NOT NULL,
     severity   TEXT NOT NULL,
     summary    TEXT NOT NULL,
+    key        TEXT,
+    mode       TEXT NOT NULL,
     closed_at  TEXT
 );
 CREATE UNIQUE INDEX states_open ON states (id) WHERE closed_at IS NULL;
@@ -175,26 +177,21 @@ class SqliteLedgerStore:
 
     # --- long-lived alert states (kelpie.core.states.StateStore) ------------------------
 
+    _STATE_COLUMNS = (
+        "id, rule, task_id, since, opened_at, last_seen, level, severity, summary, key, mode"
+    )
+
     def open_states(self) -> Sequence[OpenState]:
+        sql = f"SELECT {self._STATE_COLUMNS} FROM states WHERE closed_at IS NULL"
         with self._lock:
-            rows = self._db.execute(
-                "SELECT id, rule, task_id, since, opened_at, last_seen, level, severity, summary"
-                " FROM states WHERE closed_at IS NULL ORDER BY opened_at, rowid_"
-            ).fetchall()
-        return [
-            OpenState(
-                id=r["id"],
-                rule=r["rule"],
-                task_id=r["task_id"],
-                since=datetime.fromisoformat(r["since"]),
-                opened_at=datetime.fromisoformat(r["opened_at"]),
-                last_seen=datetime.fromisoformat(r["last_seen"]),
-                level=r["level"],
-                severity=Severity(r["severity"]),
-                summary=r["summary"],
-            )
-            for r in rows
-        ]
+            rows = self._db.execute(sql + " ORDER BY opened_at, rowid_").fetchall()
+        return [_state(r) for r in rows]
+
+    def get_state(self, state_id: str) -> OpenState | None:
+        sql = f"SELECT {self._STATE_COLUMNS} FROM states WHERE id = ? AND closed_at IS NULL"
+        with self._lock:
+            row = self._db.execute(sql, (state_id,)).fetchone()
+        return None if row is None else _state(row)
 
     def save(self, state: OpenState) -> None:
         values = (
@@ -206,19 +203,21 @@ class SqliteLedgerStore:
             state.level,
             str(state.severity),
             state.summary,
+            state.key,
+            str(state.mode),
         )
 
         def write(db: sqlite3.Connection) -> sqlite3.Cursor:
             cur = db.execute(
                 "UPDATE states SET rule = ?, task_id = ?, since = ?, opened_at = ?,"
-                " last_seen = ?, level = ?, severity = ?, summary = ?"
+                " last_seen = ?, level = ?, severity = ?, summary = ?, key = ?, mode = ?"
                 " WHERE id = ? AND closed_at IS NULL",
                 (*values, state.id),
             )
             if cur.rowcount == 0:
                 cur = db.execute(
                     "INSERT INTO states (rule, task_id, since, opened_at, last_seen, level,"
-                    " severity, summary, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " severity, summary, key, mode, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (*values, state.id),
                 )
             return cur
@@ -232,3 +231,19 @@ class SqliteLedgerStore:
                 (_ts(at), state_id),
             )
         )
+
+
+def _state(r: sqlite3.Row) -> OpenState:
+    return OpenState(
+        id=r["id"],
+        rule=r["rule"],
+        task_id=r["task_id"],
+        since=datetime.fromisoformat(r["since"]),
+        opened_at=datetime.fromisoformat(r["opened_at"]),
+        last_seen=datetime.fromisoformat(r["last_seen"]),
+        level=r["level"],
+        severity=Severity(r["severity"]),
+        summary=r["summary"],
+        key=r["key"],
+        mode=Mode(r["mode"]),
+    )

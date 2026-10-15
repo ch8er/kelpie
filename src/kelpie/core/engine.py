@@ -28,6 +28,15 @@ from kelpie.core.states import MemoryStateStore, StateStore, StateTracker, Trans
 log = logging.getLogger(__name__)
 
 _ALERT_ACTIONS = {ActionKind.ALERT, ActionKind.ESCALATE}
+# Outcomes after which an alert counts as announced (delivered, or logged by design).
+_HANDLED = {
+    Outcome.ALERTED,
+    Outcome.SUGGESTED,
+    Outcome.NOT_EXECUTED,
+    Outcome.OBSERVED,
+    Outcome.DRY_RUN,
+    Outcome.DROPPED,
+}
 
 
 @dataclass(slots=True)
@@ -70,7 +79,9 @@ class Engine:
             retry_after=self.config.retry_after,
             max_per_subject_per_hour=self.config.max_actions_per_task_per_hour,
         )
-        self.states = StateTracker(self.state_store, self.config.state_escalations)
+        self.states = StateTracker(
+            self.state_store, self.config.state_escalations, self.config.state_resolve_after
+        )
         self.executors = {}
         self._platforms = []
         for adapter in self.adapters:
@@ -111,13 +122,11 @@ class Engine:
         for action in actions:
             if action.state is not None and action.kind in _ALERT_ACTIONS:
                 seen.add(action.state)
-                action_or_none = self._through_state(action, snapshot)
-                if action_or_none is None:
-                    results.append(self._suppress_ongoing(action, snapshot))
-                    continue
-                action = action_or_none
-            results.append(self._process(action, snapshot))
+                results.append(self._state_alert(action, snapshot))
+            else:
+                results.append(self._process(action, snapshot))
         results.extend(self._resolve_gone(seen, snapshot))
+        self._evaluated = None  # resolution is only valid right after evaluate()
         return results
 
     def _process(self, action: Action, snapshot: Snapshot) -> Dispatched:
@@ -152,32 +161,45 @@ class Engine:
 
     # --- long-lived states --------------------------------------------------------------
 
-    def _through_state(self, action: Action, snapshot: Snapshot) -> Action | None:
-        """The alert to deliver for this sighting of a state, or None if nothing is new."""
+    def _mode(self, rule: str) -> Mode:
+        return Mode.OBSERVE if self.config.dry_run else self.config.mode_for(rule)
+
+    def _state_alert(self, action: Action, snapshot: Snapshot) -> Dispatched:
+        """Deliver an alert about a long-lived state only on a transition."""
+        assert action.state is not None
+        now, mode = snapshot.now, self._mode(action.rule)
         try:
-            transition, state = self.states.observe(action, snapshot.now)
+            transition, new, current = self.states.peek(action, now, mode)
         except Exception:
             log.exception("state store unavailable; alerting without transitions")
-            return action  # the ledger cooldown still limits repeats
+            return self._process(action, snapshot)  # the ledger cooldown still limits repeats
         if transition is Transition.ONGOING:
-            return None
-        if transition is Transition.ESCALATED:
-            age = _age(snapshot.now - state.since)
-            return replace(action, reason=f"Still open after {age}: {action.reason}")
-        return action
-
-    def _suppress_ongoing(self, action: Action, snapshot: Snapshot) -> Dispatched:
-        mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
-        dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, Suppression.STATE_OPEN)
-        self._record(dispatched, snapshot.now)
+            self._safe_state(lambda: self.states.touch(current, now))
+            dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, Suppression.STATE_OPEN)
+            self._record(dispatched, now)
+            return dispatched
+        prefix = {
+            Transition.ESCALATED: f"Still open after {_age(now - new.since)}: ",
+            Transition.CHANGED: "Changed: ",
+        }.get(transition, "")
+        # Each transition has its own fingerprint, so the cooldown only stops true repeats.
+        key = f"{action.key or action.state}|{new.opened_at.isoformat()}|L{new.level}"
+        key += f"|{new.severity}|{new.mode}"
+        dispatched = self._process(
+            replace(action, reason=prefix + action.reason, key=key), snapshot
+        )
+        if dispatched.outcome in _HANDLED:
+            self._safe_state(lambda: self.states.commit(new))
+        else:  # suppressed or failed: keep the old state so the next tick tries again
+            self._safe_state(lambda: self.states.touch(current, now))
         return dispatched
 
     def _resolve_gone(self, seen: set[str], snapshot: Snapshot) -> list[Dispatched]:
-        """Close states that rules which ran fine this tick no longer report."""
+        """Close states that rules which ran fine this tick stopped reporting."""
         if self._evaluated is None:
             return []
         try:
-            gone = self.states.gone(self._evaluated, seen)
+            gone = self.states.gone(self._evaluated, seen, snapshot.now)
         except Exception:
             log.exception("state store unavailable; cannot resolve states")
             return []
@@ -189,15 +211,21 @@ class Engine:
                 state.rule,
                 f"Resolved after {_age(snapshot.now - state.since)}: {first_line}.",
                 task_id=state.task_id,
-                key=f"resolved:{state.id}",
+                key=f"resolved:{state.id}|{state.opened_at.isoformat()}",
                 params={"state": state.id},
             )
-            results.append(self._process(notice, snapshot))
-            try:
-                self.states.resolve(state, snapshot.now)
-            except Exception:
-                log.exception("could not close state %s", state.id)
+            dispatched = self._process(notice, snapshot)
+            results.append(dispatched)
+            if dispatched.outcome in _HANDLED:  # otherwise retry the notice next tick
+                self._safe_state(lambda s=state: self.states.resolve(s, snapshot.now))
         return results
+
+    @staticmethod
+    def _safe_state(write: Callable[[], None]) -> None:
+        try:
+            write()
+        except Exception:
+            log.exception("could not update alert state")
 
     def _record(self, dispatched: Dispatched, now: datetime) -> None:
         try:
