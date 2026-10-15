@@ -89,6 +89,38 @@ forbidden_modules = [
     "kelpie.metrics",
 ]
 
+[[tool.importlinter.contracts]]
+name = "Connectors build on core only"
+type = "forbidden"
+source_modules = ["kelpie.connectors"]
+forbidden_modules = [
+    "kelpie.adapters",
+    "kelpie.rules",
+    "kelpie.traces",
+    "kelpie.resources",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+]
+
+[[tool.importlinter.contracts]]
+name = "The HTTP helper stands alone"
+type = "forbidden"
+source_modules = ["kelpie.net"]
+forbidden_modules = [
+    "kelpie.core",
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.rules",
+    "kelpie.traces",
+    "kelpie.resources",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+]
+
 [tool.coverage.run]
 branch = true
 

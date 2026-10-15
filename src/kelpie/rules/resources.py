@@ -596,7 +596,7 @@ def _ratio(value: Any, name: str, kind: ResourceKind | None) -> float | None:
 def _positive_duration(value: Any, name: str) -> timedelta:
     try:
         span = parse_duration(value)
-    except (AttributeError, TypeError) as exc:
+    except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError(f"{name}: invalid duration {value!r}") from exc
     if span <= timedelta(0):
         raise ValueError(f"{name} must be positive")

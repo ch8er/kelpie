@@ -78,7 +78,9 @@ as the hidden queue, gate violations after context compaction) are in the P1 and
 - **Core knows no platform and no CI.** `kelpie.core` never imports `adapters/` or
   `connectors/`; integrations implement protocols from `kelpie.core.ports`.
 - **Don't reinvent monitoring.** Host resources come from node_exporter + Prometheus
-  (read via the Prometheus HTTP API). Traces follow the OpenTelemetry GenAI semantic
+  (read via the Prometheus HTTP API). LLM provider quotas and key health come from
+  zero-cost probes of the provider APIs (`[connectors.llm_quotas]`, providers are config
+  data, no provider SDK). Traces follow the OpenTelemetry GenAI semantic
   conventions and can be exported to Langfuse. Kelpie exposes its own `/metrics`.
 - **Wait for conditions, don't poll inside sessions.** An agent registers a condition
   (CI green, PR merged, quota reset, human task done) and exits; Kelpie wakes the task when
