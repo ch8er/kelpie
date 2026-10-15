@@ -352,6 +352,66 @@ Kelpie's ingest without a token on a private network if it cannot send one.
 **Any other OpenTelemetry SDK**: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://<kelpie>:9464/v1/traces`,
 `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf` and the bearer header as above.
 
+### Forwarding to Langfuse, Phoenix or Datadog
+
+Kelpie can pass every request it accepted on to the tracing backend you already use, so an
+exporter only needs one endpoint. Forwarding is off unless `[[traces.forward]]` is
+configured, and needs `[traces]` enabled. Each destination gets the original body, byte for
+byte, with its content type and encoding, from a queue on a background thread: ingest never
+waits for it. The queue is bounded by count (`queue_size`, 1000) and bytes (`queue_bytes`,
+64 MiB); beyond that requests are dropped (`kelpie_traces_forward_dropped_total`, which also
+counts requests still queued at shutdown). Network errors, 429 (honouring `Retry-After`) and
+5xx are retried with backoff (`retries`, 3, at most 10), then counted in
+`kelpie_traces_forward_failed_total`. Redirects are never followed, so credentials cannot be
+sent to another host; they count as failures. Header values that are secrets come from
+environment variables (`headers_env`); a missing variable, or one holding a line break,
+stops Kelpie at startup, and error messages never contain header values. Credentials in the
+endpoint URL are refused; `kelpie status` shows endpoints without their query string, and
+Kelpie warns when credentials would go over plain http to a non-loopback host. The global
+dry-run does not stop forwarding: it governs rule actions, not trace export. Destinations
+receive what your exporters send, message content included: the privacy filter above applies
+to what Kelpie stores, not to what it forwards.
+
+**Langfuse** takes OTLP/HTTP (protobuf or JSON, no gRPC) at `/api/public/otel/v1/traces`
+with Basic auth over the project's public and secret key (`cloud.langfuse.com` for the EU,
+`us.cloud.langfuse.com` for the US, your own host when self-hosted):
+
+```bash
+export LANGFUSE_AUTH="Basic $(printf '%s' 'pk-lf-...:sk-lf-...' | base64 | tr -d '\n')"
+```
+
+```toml
+[[traces.forward]]
+name = "langfuse"
+endpoint = "https://cloud.langfuse.com/api/public/otel/v1/traces"
+headers_env = { Authorization = "LANGFUSE_AUTH" }
+headers = { "x-langfuse-ingestion-version" = "4" }  # recommended by Langfuse for OTLP
+timeout = "10s"
+```
+
+**Phoenix** (Arize, self-hosted) listens on `/v1/traces` of its web port; with
+authentication enabled it expects the API key as a bearer token:
+
+```toml
+[[traces.forward]]
+name = "phoenix"
+endpoint = "http://phoenix.internal:6006/v1/traces"
+headers_env = { Authorization = "PHOENIX_AUTH" }  # "Bearer <PHOENIX_API_KEY>"; omit if auth is off
+```
+
+**Datadog**: forward to the OTLP/HTTP receiver of a Datadog Agent (or an OpenTelemetry
+Collector with the Datadog exporter) on the agent host. Datadog's agentless OTLP traces
+intake is in preview and needs an allowlisted organization and its `dd-api-key` and
+`dd-otlp-source` headers; check Datadog's docs before using it.
+
+```toml
+[[traces.forward]]
+name = "datadog"
+endpoint = "http://datadog-agent.internal:4318/v1/traces"
+queue_size = 1000  # requests waiting per destination (default)
+retries = 3        # default
+```
+
 ## Project layout
 
 ```text
@@ -378,9 +438,9 @@ What exists today: the domain model, action types, the rule protocol and registr
 adapter/connector protocols, the read side of the Hermes adapter (kanban.db and a hooks
 plugin), the engine (routing to executors, per-rule modes, action
 ledger in SQLite), `kelpie serve` with the control loop and engine metrics, OTLP trace
-ingest with span storage, `kelpie
+ingest with span storage and forwarding, `kelpie
 status`, and fixtures for the 13 farm incidents and for field evidence. Hermes actions,
-other adapters, connectors, trace forwarding, alerters and the report are stubs, `kelpie report` does not exist yet,
+other adapters, connectors, alerters and the report are stubs, `kelpie report` does not exist yet,
 and rules 1–4 (`exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`) are
 implemented; see
 [docs/plan.md](docs/plan.md) and [docs/roadmap.md](docs/roadmap.md).

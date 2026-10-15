@@ -86,6 +86,10 @@ class TraceIngest:
     def __post_init__(self) -> None:
         self._slots = threading.BoundedSemaphore(max(1, self.max_concurrent))
 
+    # Called with every accepted request as received (body, Content-Type, Content-Encoding),
+    # e.g. :meth:`kelpie.traces.forward.Forwarder.submit`. Must not block.
+    on_accepted: Callable[[bytes, str, str | None], None] | None = None
+
     def handle(self, headers: Headers, read: Callable[[int], bytes]) -> Reply:
         reply = self._handle(headers, read)
         if self.observer is not None:
@@ -121,11 +125,16 @@ class TraceIngest:
             reply = _error(503, encoding, otlp.UNAVAILABLE, "ingest busy, retry later")
             return Reply(reply.status, reply.body, encoding, {"Retry-After": "1"}, close=True)
         try:
-            return self._ingest(read(length), media, content_encoding, encoding)
+            original_type = headers.get("Content-Type") or media
+            body = read(length)
+            return self._ingest(body, media, original_type, content_encoding, encoding)
         finally:
             self._slots.release()
 
-    def _ingest(self, body: bytes, media: str, content_encoding: str, encoding: str) -> Reply:
+    def _ingest(
+        self, body: bytes, media: str, original_type: str, content_encoding: str, encoding: str
+    ) -> Reply:
+        received = body  # forwarded as received, still compressed
         if content_encoding == "gzip":
             try:
                 body = _gunzip(body, self.max_body_bytes)
@@ -156,6 +165,12 @@ class TraceIngest:
         self._observe(mapped.spans, mapped.ignored, rejected)
         total = sum(rejected.values())
         message = "; ".join(f"{n} {reason}" for reason, n in sorted(rejected.items()))
+        if self.on_accepted is not None:
+            try:
+                gzip = content_encoding if content_encoding != "identity" else None
+                self.on_accepted(received, original_type, gzip)
+            except Exception:
+                log.exception("accepted-request hook failed")
         return Reply(200, otlp.encode_response(media, total, message), media)
 
     def _observe(self, spans: Sequence[Span], ignored: int, rejected: Mapping[str, int]) -> None:
