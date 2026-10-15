@@ -109,6 +109,8 @@ class ExitContract:
             task_id=task.id,
             severity=Severity.WARNING,
             key=f"unapplied:{end.session.id}",
+            state=f"{NAME}:unapplied:{end.session.id}",
+            since=end.at,
             params={"session_id": end.session.id, "declared": str(declared)},
         )
 

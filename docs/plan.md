@@ -107,6 +107,7 @@ Metrics: tasks per hour per role, task time by stage (queue, review, waiting for
 ### Reporting
 
 - **Real-time alerts** to Slack (P0) or Telegram (P1) — only actionable items, always stating what Kelpie already did by itself. Duplicate alerts are merged.
+  Alerts about a lasting condition (an orphaned task, a block nothing will clear) go out on transitions only: when it starts, again at escalation thresholds (4h → 12h → 24h after the first alert) or when it gets worse, and a short "resolved" when it clears. Conditions still open are listed in the daily report.
 - **Daily report** — cost of chaos (idle hours, tokens burned on restarts), what Kelpie fixed by itself, what needs a human decision, before/after effect of yesterday's fixes, top 3 optimization recommendations.
 - **Dashboards** — no custom UI in the MVP. Kelpie exposes Prometheus metrics on `/metrics`, Grafana shows them, and traces open in Langfuse. A CLI: `kelpie status` (P0), `kelpie report`.
 

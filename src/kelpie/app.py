@@ -23,6 +23,7 @@ from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
 from kelpie.core.model import Snapshot
 from kelpie.core.rule import Rule
+from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SqliteLedgerStore
 from kelpie.metrics import Metrics
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
@@ -219,7 +220,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
     # No platform adapters, connectors or alerter are wired yet: with no executors every
     # effect would turn into an alert, and the defaults (dry-run, observe) send nothing.
-    engine = Engine(loaded.rules, config=settings.engine, ledger_store=store)
+    # SQLite keeps open alert states across restarts; in memory they live with the process.
+    states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
+    engine = Engine(loaded.rules, config=settings.engine, ledger_store=store, state_store=states)
     metrics = Metrics()
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     loop = ControlLoop(engine, empty_snapshot(clock), metrics)

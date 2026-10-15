@@ -136,6 +136,9 @@ class StaleBlocks:
             task_id=task.id,
             severity=Severity.WARNING,
             key=f"{kind}:{task.id}:{block.since.isoformat()}",
+            # One state per block: overdue / stale evidence / unlinked are its descriptions.
+            state=f"{NAME}:{task.id}:{block.since.isoformat()}",
+            since=block.since,
         )
 
 

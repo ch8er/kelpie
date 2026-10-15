@@ -1,4 +1,5 @@
-"""SQLite persistence. Today: the action ledger. Snapshots and spans follow.
+"""SQLite persistence: the action ledger and long-lived alert states. Snapshots and spans
+follow.
 
 The database runs in WAL mode so readers (``kelpie status``, the report) do not block the
 control loop. One connection is shared across threads behind a lock. Each insert commits
@@ -15,9 +16,10 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kelpie.core.actions import ActionKind
+from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
+from kelpie.core.states import OpenState
 
 _V1 = """
 CREATE TABLE actions (
@@ -41,8 +43,28 @@ CREATE INDEX actions_fingerprint ON actions (fingerprint, at);
 CREATE INDEX actions_subject ON actions (subject, at);
 """
 
+_V2 = """
+CREATE TABLE states (
+    rowid_     INTEGER PRIMARY KEY,
+    id         TEXT NOT NULL,
+    rule       TEXT NOT NULL,
+    task_id    TEXT,
+    since      TEXT NOT NULL,
+    opened_at  TEXT NOT NULL,
+    last_seen  TEXT NOT NULL,
+    level      INTEGER NOT NULL,
+    severity   TEXT NOT NULL,
+    summary    TEXT NOT NULL,
+    key        TEXT,
+    mode       TEXT NOT NULL,
+    closed_at  TEXT
+);
+CREATE UNIQUE INDEX states_open ON states (id) WHERE closed_at IS NULL;
+CREATE INDEX states_closed ON states (closed_at);
+"""
+
 # version -> script that upgrades from version - 1. Append, never edit a released one.
-MIGRATIONS: dict[int, str] = {1: _V1}
+MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 _COLUMNS = (
@@ -152,3 +174,76 @@ class SqliteLedgerStore:
     def since(self, after: datetime) -> Sequence[LedgerEntry]:
         sql = f"SELECT {_COLUMNS} FROM actions WHERE at > ? ORDER BY at, id"
         return self._query(sql, (_ts(after),))
+
+    # --- long-lived alert states (kelpie.core.states.StateStore) ------------------------
+
+    _STATE_COLUMNS = (
+        "id, rule, task_id, since, opened_at, last_seen, level, severity, summary, key, mode"
+    )
+
+    def open_states(self) -> Sequence[OpenState]:
+        sql = f"SELECT {self._STATE_COLUMNS} FROM states WHERE closed_at IS NULL"
+        with self._lock:
+            rows = self._db.execute(sql + " ORDER BY opened_at, rowid_").fetchall()
+        return [_state(r) for r in rows]
+
+    def get_state(self, state_id: str) -> OpenState | None:
+        sql = f"SELECT {self._STATE_COLUMNS} FROM states WHERE id = ? AND closed_at IS NULL"
+        with self._lock:
+            row = self._db.execute(sql, (state_id,)).fetchone()
+        return None if row is None else _state(row)
+
+    def save(self, state: OpenState) -> None:
+        values = (
+            state.rule,
+            state.task_id,
+            _ts(state.since),
+            _ts(state.opened_at),
+            _ts(state.last_seen),
+            state.level,
+            str(state.severity),
+            state.summary,
+            state.key,
+            str(state.mode),
+        )
+
+        def write(db: sqlite3.Connection) -> sqlite3.Cursor:
+            cur = db.execute(
+                "UPDATE states SET rule = ?, task_id = ?, since = ?, opened_at = ?,"
+                " last_seen = ?, level = ?, severity = ?, summary = ?, key = ?, mode = ?"
+                " WHERE id = ? AND closed_at IS NULL",
+                (*values, state.id),
+            )
+            if cur.rowcount == 0:
+                cur = db.execute(
+                    "INSERT INTO states (rule, task_id, since, opened_at, last_seen, level,"
+                    " severity, summary, key, mode, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (*values, state.id),
+                )
+            return cur
+
+        self._write(write)
+
+    def close_state(self, state_id: str, at: datetime) -> None:
+        self._write(
+            lambda db: db.execute(
+                "UPDATE states SET closed_at = ? WHERE id = ? AND closed_at IS NULL",
+                (_ts(at), state_id),
+            )
+        )
+
+
+def _state(r: sqlite3.Row) -> OpenState:
+    return OpenState(
+        id=r["id"],
+        rule=r["rule"],
+        task_id=r["task_id"],
+        since=datetime.fromisoformat(r["since"]),
+        opened_at=datetime.fromisoformat(r["opened_at"]),
+        last_seen=datetime.fromisoformat(r["last_seen"]),
+        level=r["level"],
+        severity=Severity(r["severity"]),
+        summary=r["summary"],
+        key=r["key"],
+        mode=Mode(r["mode"]),
+    )

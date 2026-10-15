@@ -66,6 +66,7 @@ class Suppression(StrEnum):
     COOLDOWN = "cooldown"
     RATE_LIMIT = "rate_limit"
     LEDGER_DOWN = "ledger_down"
+    STATE_OPEN = "state_open"  # a long-lived state already announced; no new threshold
 
 
 @dataclass(frozen=True, slots=True)

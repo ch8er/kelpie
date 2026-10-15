@@ -120,6 +120,8 @@ class OrphanStatus:
             task_id=task.id,
             severity=severity,
             key=f"orphan:{key}:{severity}",
+            state=f"{NAME}:{key}",
+            since=task.status_since,
             params={"dependents": len(waiting), "dependent_ids": waiting},
         )
         if candidate is not None:
