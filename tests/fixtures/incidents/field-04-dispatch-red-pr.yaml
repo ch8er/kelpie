@@ -1,0 +1,62 @@
+id: "field-04-dispatch-red-pr"
+incident: null
+title: "A ready task would redo a migration while the PR it depends on is red"
+description: >
+  Field case from another farm: a task to rebuild a migration on top of an open PR became
+  ready while that PR's CI was still red. An agent was about to pick it up and spend a whole
+  session on a base that would change. The dispatch gate parks such a task in waiting on
+  its prerequisites (the red PR, an unfinished parent task) so no session is wasted; rule 2
+  wakes it when they hold. Tasks whose prerequisites hold or cannot be judged are left alone.
+rule: dispatch_gate
+config:
+  max_condition_age: "15m"
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # The field case: its PR's head is red.
+    - {id: T-F401, title: "Redo the orders migration after #41 is green", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: developer}
+    # Ready although its parent is still in progress.
+    - {id: T-F402, title: "Wire the orders API", status: ready, status_since: "2026-03-02T11:30:00+00:00", role: developer}
+    - {id: T-F403, title: "Orders schema", status: in_progress, status_since: "2026-03-02T10:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # Distractor: its PR merged; ready to go.
+    - {id: T-F404, title: "Cleanup after #42 lands", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: developer}
+    # Distractor: the PR state is unknown (GitHub unreachable): left alone.
+    - {id: T-F405, title: "Docs after #43 lands", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: developer}
+    # Distractor: red, but the evidence is an hour old.
+    - {id: T-F406, title: "Retry logic after #44 is green", status: ready, status_since: "2026-03-02T10:00:00+00:00", role: developer}
+    # Distractor: parent finished.
+    - {id: T-F407, title: "Orders dashboard", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: developer}
+    - {id: T-F408, title: "Orders metrics", status: done, status_since: "2026-03-02T10:30:00+00:00", role: developer}
+  dependencies:
+    - {task_id: T-F402, depends_on: T-F403}
+    - {task_id: T-F407, depends_on: T-F408}
+  conditions:
+    - {id: "ready:T-F401:ci_green:example/repo#41", kind: ci_status, task_id: T-F401, params: {repo: example/repo, pr: 41, source: task_text, expect: success, sha: "aaaa", ci_state: failure}, satisfied: false, checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
+    - {id: "ready:T-F404:pr_merged:example/repo#42", kind: pr_merged, task_id: T-F404, params: {repo: example/repo, pr: 42, source: task_text, pr_state: closed}, satisfied: true, satisfied_at: "2026-03-02T11:20:00+00:00", checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
+    - {id: "ready:T-F405:pr_merged:example/repo#43", kind: pr_merged, task_id: T-F405, params: {repo: example/repo, pr: 43, source: task_text, error: network}, checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
+    - {id: "ready:T-F406:ci_green:example/repo#44", kind: ci_status, task_id: T-F406, params: {repo: example/repo, pr: 44, source: task_text, expect: success}, satisfied: false, checked_at: "2026-03-02T11:00:00+00:00", registered_at: "2026-03-02T10:00:00+00:00"}
+expected_actions:
+  - kind: wait
+    task_id: T-F401
+    reason_contains: "CI on PR example/repo#41 is not green"
+    params:
+      unmet_conditions: ["ready:T-F401:ci_green:example/repo#41"]
+      open_parents: []
+  - kind: wait
+    task_id: T-F402
+    reason_contains: "parent T-F403 is in_progress"
+    params:
+      open_parents: [T-F403]
+not_expected_actions:
+  - kind: wait
+    task_id: T-F404
+  - kind: wait
+    task_id: T-F405
+  - kind: wait
+    task_id: T-F406
+  - kind: wait
+    task_id: T-F407
+  - kind: wait
+    task_id: T-F403

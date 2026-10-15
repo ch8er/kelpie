@@ -26,6 +26,13 @@ more demand than budget every PR is confirmed within a few ticks and answers rot
 instead of the same PRs being revalidated every tick. A tick that runs out of budget logs
 a warning (once, until it suffices again) and counts ``outcome="budget"`` requests.
 
+Ready tasks (the dispatch gate). A pattern with ``applies_to = ["ready_task"]`` reads the
+title of a ready task instead ("Redo the migration after #123"): the PR it names gets a
+condition linked by ``task_id`` alone (id ``ready:<task>:<kind>:<ref>``, registered when the
+task became ready), under the same rules: only for a confirmed PR, bound to its repo,
+number and head. The ``dispatch_gate`` rule parks a ready task whose condition is unmet.
+Outcomes are counted for blocks only.
+
 The same step evaluates conditions the platform already registered (``pr_merged`` and
 ``ci_status`` with ``repo``/``pr`` params for a configured repository).
 """
@@ -52,7 +59,9 @@ DEFAULT_TICK_BUDGET = timedelta(seconds=10)
 # Blocks whose reason matched a pattern: got a condition; the PR could not be resolved
 # (bad ref, repo not allowed, 404); GitHub could not confirm it yet; the step failed on it.
 OUTCOMES = ("attached", "unresolved", "unconfirmed", "error")
-_KEYS = {"pattern", "kind", "repo"}
+_KEYS = {"pattern", "kind", "repo", "applies_to"}
+# What a pattern reads: a block reason, or the title of a ready task (the dispatch gate).
+TARGETS = ("block", "ready_task")
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +69,7 @@ class BlockConditionPattern:
     pattern: re.Pattern[str]  # case-insensitive, with a named group ``pr``
     kind: str  # pr_merged | ci_green
     repo: str | None = None  # owner/name for bare refs such as "#123"
+    applies_to: frozenset[str] = frozenset({"block"})  # TARGETS
 
     @property
     def condition_kind(self) -> ConditionKind:
@@ -102,7 +112,14 @@ def load_block_conditions(
             if repo.lower() not in allowed:
                 raise ValueError(f"{where}: repo {repo} is not in [connectors.github] repos")
             repo = repo.lower()
-        patterns.append(BlockConditionPattern(pattern, kind, repo))
+        targets = table.get("applies_to", ["block"])
+        if (
+            not isinstance(targets, list)
+            or not targets
+            or not all(isinstance(t, str) and t in TARGETS for t in targets)
+        ):
+            raise ValueError(f"{where}: applies_to must be a non-empty list of {list(TARGETS)}")
+        patterns.append(BlockConditionPattern(pattern, kind, repo, frozenset(targets)))
     return tuple(patterns)
 
 
@@ -123,7 +140,7 @@ class ConditionSync:
 
     def __call__(self, snapshot: Snapshot) -> Snapshot:
         kinds = self.connector.kinds
-        blocked = sum(1 for t in snapshot.tasks if t.status is Status.BLOCKED)
+        blocked = sum(1 for t in snapshot.tasks if t.status in {Status.BLOCKED, Status.READY})
         # Up to three lookups per PR (pull, status, check runs); none evicted within a tick.
         self.connector.client.begin_tick(
             self.max_requests,
@@ -140,10 +157,12 @@ class ConditionSync:
         for i, c in enumerate(conditions):
             if c.kind in kinds:
                 work.append((self._priority([self.connector.ref_from_params(c.params)]), "c", i))
+        known = {c.id for c in conditions}
         for j, task in enumerate(tasks):
-            if self.patterns and _bare_block(task, snapshot):
+            target = self._target(task, snapshot)
+            if target is not None:
                 try:
-                    key = self._priority([ref for _, ref in self._matches(task)])
+                    key = self._priority([ref for _, ref in self._matches(task, target)])
                 except Exception:  # reported once, by _resolve below
                     key = (2, 0.0)
                 work.append((key, "t", j))
@@ -151,21 +170,24 @@ class ConditionSync:
             if what == "c":
                 conditions[k] = self._check(conditions[k])
                 continue
+            target = self._target(tasks[k], snapshot)
+            assert target is not None
             try:
-                condition, outcome = self._resolve(tasks[k])
+                condition, outcome = self._resolve(tasks[k], target)
             except Exception as exc:  # one odd block reason must not sink the step
                 log.warning("block condition for task %s failed: %s", tasks[k].id, exc)
                 condition, outcome = None, "error"
-            if outcome is not None:
+            if target == "block" and outcome is not None:
                 outcomes[outcome] += 1
-            if condition is not None:
+            if condition is not None and condition.id not in known:
                 added[k] = condition
         self._note_budget()
         if self.observer is not None:
             self.observer.block_conditions(outcomes)
         for k, condition in added.items():
             block = tasks[k].block
-            assert block is not None
+            if block is None:
+                continue  # a ready task's prerequisite: linked by task_id alone
             tasks[k] = replace(tasks[k], block=replace(block, condition_id=condition.id))
         return replace(
             snapshot,
@@ -205,32 +227,48 @@ class ConditionSync:
             log.warning("condition %s could not be checked: %s", condition.id, exc)
             return condition
 
-    def _resolve(self, task: Task) -> tuple[Condition | None, str | None]:
+    def _target(self, task: Task, snapshot: Snapshot) -> str | None:
+        """Which text of the task the patterns read: a bare block's reason, or a ready
+        task's title (for the dispatch gate). None: neither applies."""
+        if not self.patterns:
+            return None
+        if _bare_block(task, snapshot):
+            return "block"
+        if task.status is Status.READY and any("ready_task" in p.applies_to for p in self.patterns):
+            return "ready_task"
+        return None
+
+    def _resolve(self, task: Task, target: str) -> tuple[Condition | None, str | None]:
         """The condition for the task's block reason, and the outcome (None: no match).
 
         A condition is attached only for a PR GitHub has shown to exist, now or on an
         earlier tick. While that is not known (back-off, network, 401), the block stays as
         it is, so it does not flap between "waiting" and "no condition"."""
         outcome: str | None = None
-        for p, ref in self._matches(task):
+        for p, ref in self._matches(task, target):
             outcome = outcome or "unresolved"
             if ref is None:
                 continue
-            checked = self.connector.check(_condition(task, p, ref))
+            checked = self.connector.check(_condition(task, p, ref, target))
             if self.connector.confirmed(ref):
                 return checked, "attached"
             if checked.params.get("error") not in {"not_found", "not_allowed"}:
                 outcome = "unconfirmed"
         return None, outcome
 
-    def _matches(self, task: Task) -> list[tuple[BlockConditionPattern, PrRef | None]]:
-        """Patterns matching the block reason, with the PR each names (None: unresolvable)."""
-        block = task.block
-        assert block is not None
-        reason = block.reason[:MAX_REASON]
+    def _matches(self, task: Task, target: str) -> list[tuple[BlockConditionPattern, PrRef | None]]:
+        """Patterns for ``target`` matching the task's text, with the PR each names (None:
+        unresolvable)."""
+        if target == "block":
+            assert task.block is not None
+            text = task.block.reason[:MAX_REASON]
+        else:
+            text = task.title[:MAX_REASON]
         found: list[tuple[BlockConditionPattern, PrRef | None]] = []
         for p in self.patterns:
-            m = p.pattern.search(reason)
+            if target not in p.applies_to:
+                continue
+            m = p.pattern.search(text)
             if m is None or not m["pr"]:
                 continue
             ref = parse_pr_ref(m["pr"], p.repo, self.connector.host)
@@ -238,15 +276,21 @@ class ConditionSync:
         return found
 
 
-def _condition(task: Task, pattern: BlockConditionPattern, ref: PrRef) -> Condition:
-    assert task.block is not None
-    params: dict[str, Any] = {"repo": ref.repo, "pr": ref.number, "source": "block_reason"}
+def _condition(task: Task, pattern: BlockConditionPattern, ref: PrRef, target: str) -> Condition:
+    block = target == "block"
+    source = "block_reason" if block else "task_text"
+    params: dict[str, Any] = {"repo": ref.repo, "pr": ref.number, "source": source}
     if pattern.kind == "ci_green":
         params["expect"] = "success"
+    if block:
+        assert task.block is not None
+        registered = task.block.since
+    else:
+        registered = task.status_since
     return Condition(
-        id=f"block:{task.id}:{pattern.kind}:{ref}",
+        id=f"{'block' if block else 'ready'}:{task.id}:{pattern.kind}:{ref}",
         kind=pattern.condition_kind,
         task_id=task.id,
         params=params,
-        registered_at=task.block.since,
+        registered_at=registered,
     )

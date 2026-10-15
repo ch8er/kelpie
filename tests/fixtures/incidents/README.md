@@ -129,6 +129,7 @@ Fixture conventions:
 | – | `field-01-heartbeat-runaway.yaml` | `loop_breaker` | `stop` + critical `alert` for the heartbeat loop (about 900 identical calls, about 80k input tokens each) and for the agent with 5 consecutive tool errors (`stop` carries `session_id`); nothing for the healthy agent or for the CI-polling reviewer, which is left to rule 2 within the grace period |
 | – | `field-02-idle-context-resend.yaml` | `no_progress` | `alert` with `recommendations: [longer_heartbeat_interval, cheaper_maintenance_model, bounded_session_handoff]` for the idle agent resending a 12k-token context every 5 min; nothing for the productive session |
 | – | `field-03-budget-overrun.yaml` | `loop_breaker` | `alert` warning for the agent past the soft threshold; `alert` critical (spend, hard limit) and `stop` for the live session of the agent past the hard threshold; nothing for its ended session, or for the agent under budget |
+| – | `field-04-dispatch-red-pr.yaml` | `dispatch_gate` | `wait` T-F401 (its PR's head is red) and T-F402 (parent still in progress); nothing for a merged PR, an unknown or stale PR state, a finished parent, or a task in progress |
 
 ## Adding a fixture
 

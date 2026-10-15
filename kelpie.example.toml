@@ -44,6 +44,11 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #                           # adapter that can park a task in waiting, and wait_condition in
 #                           # act mode to wake it; Kelpie warns at startup otherwise)
 #
+# [engine.rules.dispatch_gate]
+# mode = "suggest"          # act parks ready tasks (needs an adapter that can, and
+#                           # wait_condition in act mode to wake them; Kelpie warns otherwise)
+# max_condition_age = "15m" # only an unmet condition checked this recently gates a task
+#
 # [engine.rules.no_progress]
 # window = "30m"            # tokens vs. progress over this long; [traces] window must be
 #                           # at least this long (Kelpie warns at startup otherwise)
@@ -431,6 +436,15 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # pattern = 'waiting for (?:green )?ci (?:on|of) (?P<pr>\S+)'
 # kind = "ci_green"
 # repo = "example/repo"
+#
+# The dispatch gate: applies_to = ["ready_task"] reads the title of a ready task instead of a
+# block reason ("block" is the default; both may be listed). The PR it names becomes the
+# task's prerequisite, and the dispatch_gate rule parks the task until it holds.
+# [[block_conditions]]
+# pattern = 'after (?P<pr>\S+) (?:lands|is merged)'
+# kind = "pr_merged"
+# repo = "example/repo"
+# applies_to = ["ready_task"]
 
 # Real-time alerts. None are sent without a channel. An alert goes to every channel whose
 # min_severity it reaches; each message shows the transition (new, still open, changed,

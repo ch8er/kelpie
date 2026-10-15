@@ -661,6 +661,18 @@ def serialize_warnings(engine: EngineConfig, rules: Sequence[Rule]) -> list[str]
     ]
 
 
+def dispatch_gate_warnings(engine: EngineConfig) -> list[str]:
+    """The dispatch gate parks ready tasks in act mode; only rule 2 in act mode wakes them."""
+    if engine.dry_run or engine.mode_for("dispatch_gate") is not Mode.ACT:
+        return []
+    if engine.mode_for("wait_condition") is Mode.ACT:
+        return []
+    return [
+        "rule 'dispatch_gate' parks ready tasks in act mode but 'wait_condition' is not in act "
+        "mode: parked tasks are not woken when their prerequisites hold"
+    ]
+
+
 def ci_window_errors(rules: Sequence[Rule], settings: Settings) -> list[str]:
     """Rule 9 cannot judge builds the CI connector does not read: its window must fit."""
     github = settings.github
@@ -726,6 +738,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         *loaded.warnings,
         *trace_window_warnings(loaded.rules, settings.traces),
         *serialize_warnings(settings.engine, loaded.rules),
+        *dispatch_gate_warnings(settings.engine),
         *resource_interval_warnings(loaded.rules, settings.resources),
         *provider_interval_warnings(loaded.rules, settings.llm_quotas),
         *budget_provider_warnings(settings.budgets, settings.llm_quotas),

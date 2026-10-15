@@ -175,6 +175,7 @@ P0 is the MVP; P1 and P2 rules are backlog.
 | 11 | Activity without progress | Tokens spent with no status change, commit or artifact → alert with recommendations (longer heartbeat interval, cheaper maintenance model, bounded sessions with a handoff file) | field |
 | – | Return causes (P1) | Root-cause analysis of task returns from traces → recommendation | 7 |
 | 12 | Conflict warning | Two live tasks editing the same files → comment on both; optionally hold the later one until the earlier is done (needs an adapter that reports `Task.files`) | 7 |
+| – | Dispatch gate | A ready task whose prerequisite is not met (a referenced PR red or not merged, a parent task not done) → parked in waiting on it; rule 2 wakes it | field |
 | 13 | "Needs you" inbox (P1) | Everything waiting for a human, sorted by cost of delay; agents waiting for approval too long | 13 |
 | 14 | Compaction gate (P2) | Agent acts against the task's gate right after a context compaction | field |
 
@@ -184,7 +185,7 @@ evidence from other farms rather than one of the 13 incidents.
 
 Rule names in code: `exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`,
 `ping_pong`, `bottlenecks`, `resources`, `ci_economy`, `loop_breaker`, `no_progress`,
-`conflict_warning`, `needs_you`, `compaction_gate`, `return_causes`, `checkpoints`.
+`conflict_warning`, `dispatch_gate`, `needs_you`, `compaction_gate`, `return_causes`, `checkpoints`.
 
 Foundation work alongside the rules (no LLM): **traces** (OpenTelemetry GenAI spans over
 OTLP, stored locally, optionally forwarded to Langfuse, Phoenix or Datadog; adapters write
