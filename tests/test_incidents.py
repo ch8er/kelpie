@@ -12,9 +12,7 @@ from tests.incidents import all_paths, load, matches
 # Fixtures of an implemented rule that need a part of it which has not landed yet.
 # They must fail until it does (strict xfail): the PR that lands the missing part removes
 # the entry, and the suite tells it to if it forgets.
-PENDING = {
-    "06-llm-quota-and-expired-auth": "resources: provider quotas and auth expiry not implemented",
-}
+PENDING: dict[str, str] = {}
 
 PATHS = all_paths()
 IDS = [p.stem for p in PATHS]

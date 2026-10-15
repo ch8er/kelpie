@@ -19,26 +19,45 @@ most one alert without a host when the farm-wide count exceeds what the hosts al
 some host is under pressure. Queued (ready) tasks have no host yet by nature and are
 listed as the shared queue.
 
+LLM providers (incident 6) come as ``ProviderStatus`` probes (``[connectors.llm_quotas]``),
+``LimitHit`` records and ``llm_quota``/``auth`` resources from any other source. One alert
+per provider covers its quota: little left (``remaining / limit`` at or below
+``quota_warning``), none left, and limit hits counted over ``rate_limit_window``
+(``rate_limit_events_warning`` or more). A quota with nothing left is critical when agent
+tasks that use the provider are ready or running (``blocked_tasks``); which tasks use which
+provider is config data (``provider_roles``, ``provider_owners``), and with a single
+provider and no mapping every agent task uses it. Quota windows that refill within
+``ignore_resets_within`` (per-minute limits) are not reported as low or exhausted: they
+recover on their own. One alert per credential: rejected by the provider (401/403) or
+expired is critical, expiring within ``auth_expiry_warning`` is a warning. A probe that
+failed for another reason means "unknown" and raises nothing here (the connector logs and
+counts it).
+
 Every alert is about a lasting state: a stable ``state`` and ``key`` per resource, so the
 engine alerts when it opens, when it gets worse and when it ends, not on every tick.
-LLM provider quotas and credential expiry (``llm_quota``, ``auth``, ``ci_minutes``
-resources) are a separate step; ``_provider_alerts`` is where they plug in.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import timedelta
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import Resource, ResourceKind, Snapshot, Status, Task
+from kelpie.core.model import OwnerKind, Resource, ResourceKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 
 NAME = "resources"
 DEFAULT_MAX_READING_AGE = timedelta(minutes=10)
+DEFAULT_QUOTA_WARNING = 0.1
+DEFAULT_RATE_LIMIT_EVENTS = 20
+DEFAULT_RATE_LIMIT_WINDOW = timedelta(hours=24)
+DEFAULT_AUTH_EXPIRY_WARNING = timedelta(hours=72)
+DEFAULT_IGNORE_RESETS_WITHIN = timedelta(minutes=10)
+# Tasks that would run now and fail without quota or a working key.
+_ACTIVE = frozenset({Status.IN_PROGRESS, Status.READY})
 _MAX_LISTED_TASKS = 5
 
 
@@ -88,6 +107,13 @@ class Resources:
     heavy_roles: tuple[str, ...] = ()
     max_heavy_per_host: int | None = None  # None: heavy-task concurrency is not checked
     max_reading_age: timedelta = DEFAULT_MAX_READING_AGE
+    quota_warning: float | None = DEFAULT_QUOTA_WARNING  # remaining / limit; None: off
+    rate_limit_events_warning: int | None = DEFAULT_RATE_LIMIT_EVENTS  # None: off
+    rate_limit_window: timedelta = DEFAULT_RATE_LIMIT_WINDOW
+    auth_expiry_warning: timedelta = DEFAULT_AUTH_EXPIRY_WARNING
+    ignore_resets_within: timedelta = DEFAULT_IGNORE_RESETS_WITHIN
+    provider_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    provider_owners: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -270,11 +296,249 @@ class Resources:
             },
         )
 
-    # --- provider quotas and auth (separate step) ---------------------------------------
+    # --- LLM provider quotas and auth -------------------------------------------------
+
+    def _is_fresh(self, at: datetime | None, now: datetime) -> bool:
+        return at is None or now - at <= self.max_reading_age
 
     def _provider_alerts(self, snapshot: Snapshot) -> list[Action]:
-        """LLM quotas and credential expiry (incident 6) plug in here."""
-        return []
+        quotas = self._quotas(snapshot)
+        # Providers the farm uses, for the single-provider default of ``_users``.
+        known = set(quotas) | {p.name for p in snapshot.providers}
+        actions: list[Action] = []
+        for _, q in sorted(quotas.items()):
+            if (alert := self._quota_alert(q, snapshot, known)) is not None:
+                actions.append(alert)
+        for _, c in sorted(self._credentials(snapshot).items()):
+            if (alert := self._credential_alert(c, snapshot, known)) is not None:
+                actions.append(alert)
+        return actions
+
+    def _quotas(self, snapshot: Snapshot) -> dict[str, _Quota]:
+        now = snapshot.now
+        quotas: dict[str, _Quota] = {}
+        for r in snapshot.resources:
+            if r.kind is not ResourceKind.LLM_QUOTA or not self._is_fresh(r.at, now):
+                continue
+            remaining = (
+                max(r.limit - r.used, 0.0) if r.used is not None and r.limit is not None else None
+            )
+            held = quotas.get(r.name)
+            if held is None or (r.at or now) >= (held.at or now):
+                quotas[r.name] = _Quota(
+                    r.name, remaining, r.limit, r.unit, r.resets_at, r.events, r.at
+                )
+        for p in snapshot.providers:
+            if not p.ok or not self._is_fresh(p.checked_at, now):
+                continue  # unknown: no data rather than old data
+            held = quotas.get(p.name)
+            if held is None or (p.checked_at or now) >= (held.at or now):
+                hits = held.hits if held is not None else 0
+                quotas[p.name] = _Quota(
+                    p.name, p.remaining, p.limit, p.unit, p.resets_at, hits, p.checked_at
+                )
+        counts: dict[str, int] = {}
+        for hit in snapshot.limit_hits:
+            if hit.at <= now and now - hit.at <= self.rate_limit_window:
+                counts[hit.limit] = counts.get(hit.limit, 0) + 1
+        for name, n in counts.items():
+            held = quotas.get(name)
+            quotas[name] = (
+                _Quota(name, None, None, "", None, n, None)
+                if held is None
+                else replace(held, hits=held.hits + n)
+            )
+        return quotas
+
+    def _credentials(self, snapshot: Snapshot) -> dict[str, _Credential]:
+        now = snapshot.now
+        out: dict[str, _Credential] = {}
+        for r in snapshot.resources:
+            if (
+                r.kind is ResourceKind.AUTH
+                and r.expires_at is not None
+                and self._is_fresh(r.at, now)
+            ):
+                out[r.name] = _Credential(r.name, r.host, r.expires_at, False)
+        for p in snapshot.providers:
+            if not self._is_fresh(p.checked_at, now):
+                continue
+            if p.auth_ok is False or p.expires_at is not None:
+                out[p.name] = _Credential(p.name, None, p.expires_at, p.auth_ok is False)
+        return out
+
+    def _quota_alert(self, q: _Quota, snapshot: Snapshot, known: set[str]) -> Action | None:
+        now = snapshot.now
+        remaining = q.remaining
+        if q.resets_at is not None and q.resets_at - now <= self.ignore_resets_within:
+            remaining = None  # refilled already, or refills soon on its own
+        exhausted = remaining is not None and remaining <= 0
+        share = remaining / q.limit if remaining is not None and q.limit else None
+        low = (
+            not exhausted
+            and share is not None
+            and self.quota_warning is not None
+            and share <= self.quota_warning
+        )
+        many_hits = (
+            self.rate_limit_events_warning is not None and q.hits >= self.rate_limit_events_warning
+        )
+        if not (exhausted or low or many_hits):
+            return None
+        blocked = self._users(q.name, snapshot, known) if exhausted else []
+        until = f" until {_at(q.resets_at, now)}" if q.resets_at is not None else ""
+        parts: list[str] = []
+        if exhausted:
+            parts.append(f"LLM provider {q.name} has no quota left{until}.")
+            if blocked:
+                parts.append(
+                    f"{len(blocked)} agent task(s) that use it cannot make progress: "
+                    f"{_ids(blocked)}."
+                )
+        elif low and share is not None and remaining is not None and q.limit is not None:
+            unit = f" {q.unit}" if q.unit else ""
+            parts.append(
+                f"LLM provider {q.name} has {_pct(share)} of its quota left "
+                f"({_num(remaining)} of {_num(q.limit)}{unit}){until}."
+            )
+        if many_hits:
+            parts.append(
+                f"{q.name} hit its rate limit {q.hits} times in the last "
+                f"{_duration(self.rate_limit_window)}; agents spend that time backing off "
+                "and retrying."
+            )
+        parts.append(
+            "Run fewer agents on it at once"
+            + (" or move heavy work past the reset." if exhausted or low else ".")
+        )
+        state = f"{NAME}:llm_quota:{q.name}"
+        return Action(
+            ActionKind.ALERT,
+            NAME,
+            " ".join(parts),
+            severity=Severity.CRITICAL if blocked else Severity.WARNING,
+            key=state,
+            state=state,
+            params={
+                "provider": q.name,
+                "remaining": q.remaining,
+                "limit": q.limit,
+                "unit": q.unit,
+                "resets_at": q.resets_at.isoformat() if q.resets_at else None,
+                "exhausted": exhausted,
+                "limit_hits": q.hits,
+                "blocked_tasks": blocked,
+            },
+        )
+
+    def _credential_alert(
+        self, c: _Credential, snapshot: Snapshot, known: set[str]
+    ) -> Action | None:
+        now = snapshot.now
+        where = f" on {c.host}" if c.host else ""
+        if c.rejected:
+            severity = Severity.CRITICAL
+            reason = (
+                f"LLM provider {c.name} rejected its key (expired or revoked): agent sessions "
+                "that use it fail at startup until someone renews the key."
+            )
+        elif c.expires_at is not None and c.expires_at <= now:
+            severity = Severity.CRITICAL
+            reason = (
+                f"Credential {c.name}{where} expired {_duration(now - c.expires_at)} ago: "
+                "new agent sessions that use it fail at startup until someone signs in again."
+            )
+        elif c.expires_at is not None and c.expires_at - now <= self.auth_expiry_warning:
+            severity = Severity.WARNING
+            reason = (
+                f"Credential {c.name}{where} expires in {_duration(c.expires_at - now)} "
+                f"({c.expires_at.isoformat()}); renew it before agent sessions start failing."
+            )
+        else:
+            return None
+        blocked = self._users(c.name, snapshot, known) if severity is Severity.CRITICAL else []
+        if blocked:
+            reason += f" Affected: {_ids(blocked)}."
+        state = f"{NAME}:auth:{c.name}"
+        return Action(
+            ActionKind.ALERT,
+            NAME,
+            reason,
+            severity=severity,
+            key=state,
+            state=state,
+            params={
+                "credential": c.name,
+                "host": c.host,
+                "rejected": c.rejected,
+                "expires_at": c.expires_at.isoformat() if c.expires_at else None,
+                "blocked_tasks": blocked,
+            },
+        )
+
+    def _users(self, name: str, snapshot: Snapshot, known: set[str]) -> list[str]:
+        """Ready or running agent tasks that use provider (or credential) ``name``: by the
+        configured roles and owners, or every agent task when no mapping is configured
+        and ``name`` is the only provider in sight."""
+        roles = set(self.provider_roles.get(name, ()))
+        owners = set(self.provider_owners.get(name, ()))
+        everyone = not (self.provider_roles or self.provider_owners) and known == {name}
+        if not (roles or owners or everyone):
+            return []
+        out: list[str] = []
+        for t in snapshot.tasks:
+            if t.status not in _ACTIVE:
+                continue
+            owner = snapshot.owner(t.owner_id) if t.owner_id else None
+            if owner is not None and owner.kind is OwnerKind.HUMAN:
+                continue
+            if (
+                everyone
+                or (t.role is not None and t.role in roles)
+                or (owner is not None and owner.role in roles)
+                or (t.owner_id is not None and t.owner_id in owners)
+            ):
+                out.append(t.id)
+        return sorted(out)
+
+
+@dataclass(frozen=True, slots=True)
+class _Quota:
+    name: str
+    remaining: float | None
+    limit: float | None
+    unit: str
+    resets_at: datetime | None
+    hits: int
+    at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Credential:
+    name: str
+    host: str | None
+    expires_at: datetime | None
+    rejected: bool
+
+
+def _duration(span: timedelta) -> str:
+    seconds = int(span.total_seconds())
+    if seconds >= 2 * 86400:
+        return f"{seconds // 86400}d"
+    if seconds >= 3600:
+        hours, minutes = divmod(seconds, 3600)
+        return f"{hours}h{minutes // 60:02d}m" if minutes >= 60 else f"{hours}h"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{max(seconds, 0)}s"
+
+
+def _num(value: float) -> str:
+    return f"{value:,.0f}" if value == int(value) else f"{value:,.2f}"
+
+
+def _at(when: datetime, now: datetime) -> str:
+    return f"{when.isoformat()} (in {_duration(when - now)})"
 
 
 def _ids(ids: Sequence[str]) -> str:
@@ -319,14 +583,30 @@ _KINDS = {
 }
 
 
-def _ratio(value: Any, name: str, kind: ResourceKind) -> float | None:
+def _ratio(value: Any, name: str, kind: ResourceKind | None) -> float | None:
     if value is False or value is None:
         return None  # switched off
     if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
         raise ValueError(f"{name} must be a positive number (or false to switch it off)")
     if kind is not ResourceKind.LOAD and value > 1:
-        raise ValueError(f"{name} is a utilization between 0 and 1")
+        raise ValueError(f"{name} is a ratio between 0 and 1")
     return float(value)
+
+
+def _positive_duration(value: Any, name: str) -> timedelta:
+    try:
+        span = parse_duration(value)
+    except (AttributeError, TypeError) as exc:
+        raise ValueError(f"{name}: invalid duration {value!r}") from exc
+    if span <= timedelta(0):
+        raise ValueError(f"{name} must be positive")
+    return span
+
+
+def _provider_map(value: Any, name: str) -> dict[str, tuple[str, ...]]:
+    if not isinstance(value, Mapping) or not all(isinstance(k, str) and k for k in value):
+        raise ValueError(f'{name} must map provider names to lists, e.g. {{main = ["coder"]}}')
+    return {k: _strings(v, f"{name}.{k}") for k, v in value.items()}
 
 
 def _strings(value: Any, name: str) -> tuple[str, ...]:
@@ -367,15 +647,27 @@ def build(config: dict[str, Any]) -> Resources:
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError("max_heavy_per_host must be a positive integer (or false)")
             kwargs["max_heavy_per_host"] = value
-    if "max_reading_age" in config:
-        value = config.pop("max_reading_age")
-        try:
-            age = parse_duration(value)
-        except (AttributeError, TypeError) as exc:
-            raise ValueError(f"max_reading_age: invalid duration {value!r}") from exc
-        if age <= timedelta(0):
-            raise ValueError("max_reading_age must be positive")
-        kwargs["max_reading_age"] = age
+    for key in (
+        "max_reading_age",
+        "rate_limit_window",
+        "auth_expiry_warning",
+        "ignore_resets_within",
+    ):
+        if key in config:
+            kwargs[key] = _positive_duration(config.pop(key), key)
+    if "quota_warning" in config:
+        kwargs["quota_warning"] = _ratio(config.pop("quota_warning"), "quota_warning", None)
+    if "rate_limit_events_warning" in config:
+        value = config.pop("rate_limit_events_warning")
+        if value is False or value is None:
+            kwargs["rate_limit_events_warning"] = None
+        elif isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("rate_limit_events_warning must be a positive integer (or false)")
+        else:
+            kwargs["rate_limit_events_warning"] = value
+    for key in ("provider_roles", "provider_owners"):
+        if key in config:
+            kwargs[key] = _provider_map(config.pop(key), key)
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return Resources(**kwargs)

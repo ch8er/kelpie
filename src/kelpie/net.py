@@ -69,10 +69,12 @@ def get(
     headers: Mapping[str, str],
     timeout: float,
     max_bytes: int = DEFAULT_MAX_BYTES,
+    read_body: bool = True,
 ) -> Response:
     """GET ``path`` (with its query, if any) on the origin of ``url``; raises
     :class:`RequestError` on redirects, timeouts, connection errors, bodies over
-    ``max_bytes`` and header values that are not valid. Other statuses are returned."""
+    ``max_bytes`` and header values that are not valid. Other statuses are returned.
+    With ``read_body`` false the body is never read (only the status and headers count)."""
     for name, value in headers.items():
         if not valid_header_name(name) or not valid_header_value(value):
             raise RequestError("invalid_header", f"header {name!r} has an invalid name or value")
@@ -99,7 +101,11 @@ def get(
         names: dict[str, str] = {}
         for name, value in response.getheaders():
             names.setdefault(name.lower(), value)
-        body = _read_limited(response, sock, deadline, max_bytes) if status < 300 else b""
+        body = (
+            _read_limited(response, sock, deadline, max_bytes)
+            if read_body and status < 300
+            else b""
+        )
         if expired.is_set():
             raise TimeoutError
     except RequestError:

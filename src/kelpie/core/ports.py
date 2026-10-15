@@ -10,6 +10,8 @@ from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import (
     Condition,
     ConditionKind,
+    LimitHit,
+    ProviderStatus,
     Resource,
     Session,
     Snapshot,
@@ -114,6 +116,18 @@ class ResourceReader(Protocol):
     """
 
     def read(self, now: datetime) -> Sequence[Resource]: ...
+
+
+@runtime_checkable
+class ProviderReader(Protocol):
+    """Reads LLM provider quota and auth state for a snapshot: one status per provider and
+    the limit hits seen so far (kept for a while, so budgets can forecast the next one).
+
+    Must not raise: a provider that cannot be read is reported with ``ok`` False. The
+    caller owns the clock.
+    """
+
+    def read(self, now: datetime) -> tuple[Sequence[ProviderStatus], Sequence[LimitHit]]: ...
 
 
 @runtime_checkable
