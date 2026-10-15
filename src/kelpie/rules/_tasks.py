@@ -10,7 +10,7 @@ from kelpie.core.model import Condition, Session, Snapshot, Status, Task
 
 # An open session that has not sent a heartbeat for this long is treated as gone: crashed
 # sessions are exactly the ones that never report their end.
-DEFAULT_STALE_AFTER = timedelta(hours=2)
+DEFAULT_STALE_AFTER = timedelta(minutes=30)
 
 
 def last_seen(session: Session) -> datetime:

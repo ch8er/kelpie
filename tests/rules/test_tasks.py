@@ -15,13 +15,14 @@ H = timedelta(hours=1)
 
 
 def test_liveness() -> None:
-    open_fresh = Session("a", "T-1", "x", NOW - 3 * H, last_heartbeat=NOW - 0.5 * H)
-    open_stale = Session("b", "T-1", "x", NOW - 3 * H, last_heartbeat=NOW - 2 * H)
-    no_beat = Session("c", "T-1", "x", NOW - 1 * H)
+    open_fresh = Session("a", "T-1", "x", NOW - 3 * H, last_heartbeat=NOW - 0.4 * H)
+    open_stale = Session("b", "T-1", "x", NOW - 3 * H, last_heartbeat=NOW - 0.5 * H)  # 30m
+    no_beat = Session("c", "T-1", "x", NOW - 0.25 * H)
     ended = Session("d", "T-1", "x", NOW - 3 * H, ended_at=NOW - H, last_heartbeat=NOW - 2 * H)
     assert is_live(open_fresh, NOW) and is_live(no_beat, NOW)
     assert not is_live(open_stale, NOW) and not is_live(ended, NOW)
-    assert last_seen(ended) == NOW - H and last_seen(no_beat) == NOW - H
+    assert last_seen(ended) == NOW - H and last_seen(no_beat) == NOW - 0.25 * H
+    assert is_live(open_stale, NOW, stale_after=2 * H)  # configurable
     snap = Snapshot(now=NOW, sessions=(open_stale, ended, open_fresh))
     assert live_session("T-1", snap) == open_fresh
     assert live_session("T-2", snap) is None
