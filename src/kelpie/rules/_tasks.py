@@ -56,12 +56,15 @@ def dead_ends(conditions: Iterable[Condition], since: datetime) -> list[Conditio
     A connector sets the flag when what the condition waits for ended the wrong way: a PR
     closed without merging, a human's task failed or cancelled. Seen means checked after the
     wait began; age aside, so the alert holds while the connector is slow to check again.
+    A condition flagged ``params.terminal_ok`` is not a dead end: the rule that registered it
+    releases the task when its target ends (rule 12).
     """
     return [
         c
         for c in conditions
         if not c.satisfied
         and c.params.get("terminal") is True
+        and c.params.get("terminal_ok") is not True
         and c.checked_at is not None
         and c.checked_at >= since
     ]

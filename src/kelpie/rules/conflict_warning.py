@@ -9,9 +9,10 @@ waiting. Its files are ``Task.files`` as the adapter reports them (paths are com
 dropping a leading ``./``). No adapter reports them yet (Hermes gives only a count of
 changed files), so on a live farm the rule stays silent until one does. When two live tasks
 share files (after dropping files matching ``expected_shared``, glob patterns of files that
-are meant to be edited by many tasks, such as a changelog), each gets one ``comment`` per
-other task, naming the files they share then. It is sent once per pair (``once``): files
-added later, or a third task leaving, send nothing new; a new pair does.
+are meant to be edited by many tasks, such as a changelog), each gets one ``comment`` naming
+the other tasks and the files they share. It is sent once (``once``) per newest partner: a
+task joining the overlap sends a new one; files added later or a partner leaving do not. An
+overlap that lasts past the ledger's ``once_window`` (7 days) is mentioned again.
 
 With ``serialize`` (default off) the later task is also held until the earlier ones are
 done ("done" stands for merged, as on the board): a ``wait`` action parks it in ``waiting``
@@ -20,10 +21,12 @@ then run in act mode too) wakes it when they are all done. To rule out mutual wa
 a task in progress is parked, and only behind tasks that are moving (in progress, review or
 accepted, not blocked or waiting) and that do not depend on it. A task's start is its first
 session, else when it entered its current status; ties go by task id. When every task a
-parked task waits for has left the live set without all of them being done (cancelled,
-failed, requeued, or gone from the board), the conflict is gone but rule 2 cannot wake it:
-this rule wakes it instead. ``wait`` needs an adapter with ``SupportsWait``; without one the
-engine tells a human.
+parked task waits for has ended without all of them being done (cancelled, failed, or gone
+from the board), the conflict is gone but rule 2 cannot wake it: this rule wakes it
+instead. A task waited for that is requeued (ready, backlog) still holds its branch, so the
+parked task keeps waiting; rule 2's ``max_wait`` alert covers one that is abandoned. The
+conditions carry ``terminal_ok``, so rule 2 does not call such an end a dead end. ``wait``
+needs an adapter with ``SupportsWait``; without one the engine tells a human.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ LIVE = frozenset(
     {Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED, Status.BLOCKED, Status.WAITING}
 )
 MOVING = frozenset({Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED})
-_SHOWN = 5  # files named in one message
+_SHOWN = 5  # files and tasks named in one message
 _PREFIX = f"{NAME}:"  # condition ids this rule creates
 
 
@@ -62,11 +65,9 @@ class ConflictWarning:
         actions: list[Action] = []
         for tid in sorted(overlaps):
             others = overlaps[tid]
-            actions.extend(
-                self._comment(by_id[tid], o, files, by_id) for o, files in others.items()
-            )
-            if self.serialize:
+            if self.serialize:  # before the comment: the per-task rate limit favours it
                 actions.extend(self._park(by_id[tid], others, by_id, started, snapshot))
+            actions.append(self._comment(by_id[tid], others, by_id, started))
         actions.extend(self._release(snapshot, by_id))
         return actions
 
@@ -96,19 +97,34 @@ class ConflictWarning:
         return any(fnmatchcase(path, pattern) for pattern in self.expected_shared)
 
     def _comment(
-        self, task: Task, other: str, files: tuple[str, ...], by_id: dict[str, Task]
+        self,
+        task: Task,
+        others: dict[str, tuple[str, ...]],
+        by_id: dict[str, Task],
+        started: dict[str, datetime],
     ) -> Action:
-        o = by_id[other]
+        listed = "; ".join(
+            f"{o} ('{by_id[o].title}', {by_id[o].status}) changes {_names(files)}"
+            for o, files in list(others.items())[:_SHOWN]
+        )
+        more = len(others) - _SHOWN
+        listed += f"; +{more} more task(s)" if more > 0 else ""
+        # Keyed on the newest partner: a new task joining sends a new comment, files
+        # growing or a partner leaving do not.
+        newest = max(others, key=lambda o: (started.get(o, by_id[o].status_since), o))
         return Action(
             ActionKind.COMMENT,
             NAME,
-            f"Heads-up: live task {other} ('{o.title}', {o.status}) changes the same files "
-            f"as this one: {_names(files)}. Expect a merge conflict: coordinate with it, "
-            "keep your edits to these files small, and rebase as soon as one of you merges.",
+            f"Heads-up: other live tasks change the same files as this one: {listed}. "
+            "Expect a merge conflict: coordinate with them, keep your edits to these files "
+            "small, and rebase as soon as one of them merges.",
             task_id=task.id,
-            key=f"{NAME}:{task.id}:{other}",  # once per pair, whatever the files become
+            key=f"{NAME}:{task.id}:{newest}",
             once=True,
-            params={"conflicting_task": other, "files": list(files)},
+            params={
+                "conflicting_tasks": list(others),
+                "files": sorted({f for fs in others.values() for f in fs}),
+            },
         )
 
     def _park(
@@ -136,7 +152,12 @@ class ConflictWarning:
             {
                 "id": f"{_PREFIX}{task.id}:{o}",
                 "kind": ConditionKind.TASK_STATUS.value,
-                "params": {"task": o, "status": Status.DONE.value, "source": NAME},
+                "params": {
+                    "task": o,
+                    "status": Status.DONE.value,
+                    "source": NAME,
+                    "terminal_ok": True,  # this rule releases the task if o ends otherwise
+                },
             }
             for o in earlier
         ]
@@ -155,8 +176,8 @@ class ConflictWarning:
         ]
 
     def _release(self, snapshot: Snapshot, by_id: dict[str, Task]) -> list[Action]:
-        """Wake tasks this rule parked once every task they wait for has left the live set
-        without all being done (rule 2 wakes them when all are done)."""
+        """Wake tasks this rule parked once every task they wait for has ended (or left the
+        board) without all being done; rule 2 wakes them when all are done."""
         actions: list[Action] = []
         for task in snapshot.tasks:
             if task.status is not Status.WAITING:
@@ -166,8 +187,8 @@ class ConflictWarning:
                 continue  # not (only) our wait: rule 2's business
             targets = [c.params.get("task") for c in conditions]
             ended = [by_id.get(t) if isinstance(t, str) else None for t in targets]
-            if any(t is not None and t.status in LIVE for t in ended):
-                continue  # still a conflict
+            if any(t is not None and not t.status.is_terminal for t in ended):
+                continue  # still open (a requeued task passes through ready): keep waiting
             if all(t is not None and t.status is Status.DONE for t in ended):
                 continue  # all done: rule 2 wakes it on fresh evidence
             gone = ", ".join(

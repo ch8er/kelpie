@@ -32,11 +32,11 @@ expected_actions:
   - kind: comment
     task_id: T-711
     reason_contains: "T-712"
-    params: {conflicting_task: T-712, files: [src/app/routes.py, src/app/types.py]}
+    params: {conflicting_tasks: [T-712], files: [src/app/routes.py, src/app/types.py]}
   - kind: comment
     task_id: T-712
     reason_contains: "src/app/routes.py"
-    params: {conflicting_task: T-711, files: [src/app/routes.py, src/app/types.py]}
+    params: {conflicting_tasks: [T-711], files: [src/app/routes.py, src/app/types.py]}
   - kind: wait
     task_id: T-712
     params: {waits_for: [T-711]}

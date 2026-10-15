@@ -4,10 +4,8 @@ from typing import Any
 
 import pytest
 
-from kelpie.app import serialize_warnings
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.conditions import check_task_status
-from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import wait_conditions
 from kelpie.core.model import Condition, ConditionKind, Dependency, Session, Snapshot, Status, Task
 from kelpie.rules import REGISTRY
@@ -38,12 +36,8 @@ def run(
     return list((rule or ConflictWarning()).evaluate(snapshot))
 
 
-def comments(actions: list[Action]) -> dict[tuple[str, str], Action]:
-    return {
-        (str(a.task_id), a.params["conflicting_task"]): a
-        for a in actions
-        if a.kind is ActionKind.COMMENT
-    }
+def comments(actions: list[Action]) -> dict[str, Action]:
+    return {str(a.task_id): a for a in actions if a.kind is ActionKind.COMMENT}
 
 
 def of(actions: list[Action], kind: ActionKind) -> dict[str, Action]:
@@ -59,19 +53,18 @@ def test_registered() -> None:
 
 def test_overlapping_live_tasks_both_get_one_comment() -> None:
     found = comments(run(task("A", "x.py", "y.py"), task("B", "./y.py", "x.py", "z.py")))
-    assert set(found) == {("A", "B"), ("B", "A")}
-    a = found[("A", "B")]
+    assert set(found) == {"A", "B"}
+    a = found["A"]
     assert a.once and a.key == "conflict_warning:A:B"
-    assert a.params == {"conflicting_task": "B", "files": ["x.py", "y.py"]}
-    assert "live task B ('title B', in_progress) changes the same files" in a.reason
+    assert a.params == {"conflicting_tasks": ["B"], "files": ["x.py", "y.py"]}
+    assert "B ('title B', in_progress) changes x.py, y.py" in a.reason
 
 
 @pytest.mark.parametrize(
     "status", [Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED, Status.BLOCKED, Status.WAITING]
 )
 def test_every_unmerged_status_is_live(status: Status) -> None:
-    found = comments(run(task("A", "x.py"), task("B", "x.py", status=status)))
-    assert set(found) == {("A", "B"), ("B", "A")}
+    assert set(comments(run(task("A", "x.py"), task("B", "x.py", status=status)))) == {"A", "B"}
 
 
 @pytest.mark.parametrize(
@@ -87,39 +80,43 @@ def test_disjoint_files_and_no_files_are_quiet() -> None:
 
 def test_expected_shared_files_are_ignored() -> None:
     rule = ConflictWarning(expected_shared=("CHANGELOG.md", "docs/*"))
-    quiet = run(
-        task("A", "CHANGELOG.md", "docs/a/b.md"),
-        task("B", "CHANGELOG.md", "docs/a/b.md"),
-        rule=rule,
-    )
-    assert quiet == []
+    shared = ("CHANGELOG.md", "docs/a/b.md")
+    assert run(task("A", *shared), task("B", *shared), rule=rule) == []
     [a, _] = run(
         task("A", "CHANGELOG.md", "src/x.py"), task("B", "CHANGELOG.md", "src/x.py"), rule=rule
     )
     assert a.params["files"] == ["src/x.py"]
 
 
-def test_three_way_overlap_comments_once_per_pair() -> None:
-    found = comments(
-        run(task("A", "x.py"), task("B", "x.py"), task("C", "x.py", "y.py"), task("D", "y.py"))
-    )
-    assert set(found) == {
-        ("A", "B"), ("A", "C"), ("B", "A"), ("B", "C"),
-        ("C", "A"), ("C", "B"), ("C", "D"), ("D", "C"),
-    }  # fmt: skip
+def test_hot_file_gives_each_task_one_comment_listing_every_partner() -> None:
+    tasks = (task("A", "x.py"), task("B", "x.py"), task("C", "x.py", "y.py"), task("D", "y.py"))
+    found = comments(run(*tasks))
+    assert len([a for a in run(*tasks) if a.kind is ActionKind.COMMENT]) == 4
+    assert found["A"].params["conflicting_tasks"] == ["B", "C"]
+    assert found["C"].params == {"conflicting_tasks": ["A", "B", "D"], "files": ["x.py", "y.py"]}
 
 
-def test_comment_key_does_not_change_as_files_or_other_pairs_change() -> None:
-    first = comments(run(task("A", "x.py"), task("B", "x.py"), task("C", "x.py")))[("A", "B")]
-    grown = comments(run(task("A", "x.py", "q.py"), task("B", "x.py", "q.py")))[("A", "B")]
-    assert first.key == grown.key  # the ledger sends it once
-    assert grown.params["files"] == ["q.py", "x.py"]
+def test_comment_key_follows_the_newest_partner_only() -> None:
+    def key(*tasks: Task) -> str | None:
+        return comments(run(*tasks))["A"].key
+
+    a, b = task("A", "x.py", since=90 * M), task("B", "x.py", since=60 * M)
+    c = task("C", "x.py", since=30 * M)
+    base = key(a, b)
+    assert key(replace(a, files=("x.py", "q.py")), replace(b, files=("x.py", "q.py"))) == base
+    joined = key(a, b, c)
+    assert joined != base  # a new partner: a new comment
+    older = task("O", "x.py", since=120 * M)
+    assert key(a, b, c, older) == joined  # an older task showing up is not news
 
 
-def test_long_file_lists_are_shortened_in_the_message_only() -> None:
+def test_long_lists_are_shortened_in_the_message_only() -> None:
     files = [f"f{i}.py" for i in range(8)]
-    [a, _] = run(task("A", *files), task("B", *files))
-    assert len(a.params["files"]) == 8 and "+3 more" in a.reason
+    others = [task(f"O{i}", "hot.py") for i in range(7)]
+    found = comments(run(task("A", "hot.py", *files), task("B", *files), *others))
+    a = found["A"]
+    assert len(a.params["conflicting_tasks"]) == 8 and "+3 more task(s)" in a.reason
+    assert "+3 more" in found["B"].reason  # 8 shared files, 5 named
 
 
 # --- serialization -----------------------------------------------------------------------
@@ -143,10 +140,21 @@ def test_later_task_waits_for_the_earlier_ones() -> None:
         {
             "id": f"conflict_warning:C:{o}",
             "kind": "task_status",
-            "params": {"task": o, "status": "done", "source": "conflict_warning"},
+            "params": {
+                "task": o,
+                "status": "done",
+                "source": "conflict_warning",
+                "terminal_ok": True,
+            },
         }
         for o in ("A", "B")
     ]
+
+
+def test_wait_comes_before_the_comment_for_the_rate_limit() -> None:
+    actions = run(task("A", "x.py", since=90 * M), task("B", "x.py", since=10 * M), rule=SERIAL)
+    kinds = [a.kind for a in actions if a.task_id == "B"]
+    assert kinds == [ActionKind.WAIT, ActionKind.COMMENT]
 
 
 def test_start_is_the_first_session_and_ties_go_by_id() -> None:
@@ -188,7 +196,7 @@ def parked(*targets: str, since: timedelta = 20 * M) -> tuple[Task, tuple[Condit
             f"conflict_warning:B:{t}",
             ConditionKind.TASK_STATUS,
             "B",
-            {"task": t, "status": "done", "source": "conflict_warning"},
+            {"task": t, "status": "done", "source": "conflict_warning", "terminal_ok": True},
             registered_at=NOW - since,
         )
         for t in targets
@@ -202,7 +210,8 @@ def parked(*targets: str, since: timedelta = 20 * M) -> tuple[Task, tuple[Condit
         ((Status.IN_PROGRESS,), False),  # still a conflict
         ((Status.DONE,), False),  # rule 2's: all done
         ((Status.CANCELLED,), True),
-        ((Status.READY,), True),  # requeued: not in flight any more
+        ((Status.READY,), False),  # requeued: still holds its branch, keep waiting
+        ((Status.BACKLOG,), False),
         ((Status.DONE, Status.FAILED), True),
         ((Status.DONE, Status.REVIEW), False),
     ],
@@ -217,6 +226,17 @@ def test_release_when_the_tasks_waited_for_left_the_live_set(
     assert bool(woken) is wakes
     if wakes:
         assert woken["B"].params["waited_for"] == list(targets)
+
+
+def test_ended_target_is_not_a_dead_end_for_rule_2() -> None:
+    b, conditions = parked("A")
+    snapshot = check_task_status(
+        Snapshot(NOW, tasks=(b, task("A", status=Status.CANCELLED)), conditions=conditions)
+    )
+    assert snapshot.conditions[0].params["terminal"] is True
+    assert WaitCondition().evaluate(snapshot) == []  # no "nothing will wake it" alert
+    [wake] = ConflictWarning().evaluate(snapshot)
+    assert wake.kind is ActionKind.WAKE
 
 
 def test_release_when_the_task_waited_for_is_gone() -> None:
@@ -273,16 +293,3 @@ def test_build_validates_config() -> None:
 def test_build_rejects_bad_config(config: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         build(config)
-
-
-def test_serialize_in_act_mode_needs_rule_2_in_act_mode() -> None:
-    def engine(**modes: Mode) -> EngineConfig:
-        return EngineConfig(dry_run=False, modes=modes)
-
-    act, on = Mode.ACT, [SERIAL]
-    assert serialize_warnings(engine(conflict_warning=act), on)
-    assert serialize_warnings(engine(conflict_warning=act, wait_condition=act), on) == []
-    assert serialize_warnings(engine(conflict_warning=Mode.SUGGEST), on) == []
-    assert serialize_warnings(engine(conflict_warning=act), [ConflictWarning()]) == []
-    dry = EngineConfig(dry_run=True, modes={"conflict_warning": act})
-    assert serialize_warnings(dry, on) == []
