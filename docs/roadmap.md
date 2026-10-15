@@ -45,7 +45,7 @@ Fixtures listed as "new" below do not exist yet and are part of the issue.
 **Rule names** (`@register` names, also used in fixtures): `exit_contract` (rule 1),
 `wait_condition` (2), `orphan_status` (3), `stale_blocks` (4), `ping_pong` (5),
 `bottlenecks` (6), `resources` (7), `ci_economy` (9), `loop_breaker` (10), `no_progress`
-(11), `conflict_warning` (12, P1), `needs_you` (13, P1), `compaction_gate` (14, P2),
+(11), `conflict_warning` (12), `dispatch_gate` (no number, week 3), `needs_you` (13, P1), `compaction_gate` (14, P2),
 `return_causes` (incident 7), `checkpoints` (foundation). Rule 8 is the daily report in
 `report/`. P1 extensions of rules 1 and 3 (evidence for "done", stop patterns) live in
 `exit_contract` and `orphan_status`.
@@ -576,6 +576,42 @@ and `act` rule by rule. Record every rule trigger so each one can be checked by 
 
 ## Week 3
 
+### rules: conflict_warning — early conflict warning (rule 12, incident 7)
+labels: P0, week-3, area:rules
+Field evidence and incident 7: two live tasks edit the same files and only find out at
+merge. `return_causes` explains conflicts after the fact; this rule warns while both tasks
+are still in progress.
+
+**Acceptance criteria**
+- [ ] Two live tasks whose changed files overlap → `comment` on both naming the files and the other task
+- [ ] Optional serialization (config): the later task is held until the earlier one merges
+- [ ] Files on the expected-shared allowlist (same config as `return_causes`) are ignored
+- [ ] Fixtures: new `07-live-tasks-same-files.yaml` (a live task with disjoint files as the distractor)
+
+### rules: dispatch gate — do not start work whose prerequisite is not met
+labels: P0, week-3, area:rules
+A ready task that depends on something not yet true (a referenced PR not merged or red, a
+parent task not done) wastes a whole session if an agent picks it up. Field case: an agent
+was about to redo a migration while the PR it depended on was still red.
+
+**Acceptance criteria**
+- [ ] Prerequisites come from task links and dependencies the adapter exposes, and from PR references matched by config patterns in the task text
+- [ ] A ready task with an unmet prerequisite → moved to waiting with the matching condition (through the adapter, act mode only); `wait_condition` and `stale_blocks` release it when the condition is met
+- [ ] Conditions use the same binding as block conditions (repo, PR, head SHA; `pr_merged` when the task needs the PR landed)
+- [ ] Tasks whose prerequisites cannot be resolved are left alone
+- [ ] Fixtures: new `field-04-dispatch-red-pr.yaml` (ready task referencing a red PR; a ready task with a merged PR as the distractor)
+
+### traces: huge tool outputs — find, rank, recommend filters
+labels: P0, week-3, area:traces
+Build and test logs (e.g. `xcodebuild`) can put tens of thousands of tokens into the
+context on every run. Find them in traces and recommend a filter.
+
+**Acceptance criteria**
+- [ ] Tool calls ranked by output tokens per role and command prefix (redacted, no raw output stored)
+- [ ] Commands above a threshold get a filter recommendation from a config table (e.g. `xcbeautify`, errors only, tail)
+- [ ] Repeated offenders → `comment` addressed to the owner of the role's instructions; estimated savings in the daily report
+- [ ] Fixtures: new `field-05-build-log-flood.yaml`
+
 ### report: daily cost-of-chaos report
 labels: P0, week-3, area:report
 Rule 8. A daily report with: cost of chaos (idle hours, tokens burned on restarts), what
@@ -620,15 +656,17 @@ context growth per step, restarts from zero.
 - [ ] Tokens burned on restarts from zero (feeds the cost of chaos)
 - [ ] Recommendations with estimated savings in the daily report
 
-### traces: token optimization — repeated fragments, unused tools, huge outputs
+### traces: token optimization — repeated fragments, unused tools, model fit, diff-only review
 labels: P1, week-3, area:traces
-Find repeated prompt fragments, tools that are offered but never used, and huge tool
-outputs (recommend processing them with a script instead of reading them into context).
+Find repeated prompt fragments, tools that are offered but never used, roles that could run
+on a cheaper model, and reviewers re-reading whole PRs. Huge tool outputs have their own P0
+item.
 
 **Acceptance criteria**
 - [ ] Repeated prompt fragments detected across sessions of a role
 - [ ] Unused tools per role listed
-- [ ] Tool outputs above a size threshold listed with a script-processing recommendation
+- [ ] Model fit per role: roles doing routine work (triage, polling, status updates) flagged as candidates for a cheaper model; after a switch, quality is checked by returns and ping-pong rounds
+- [ ] Diff-only review: review rounds 2+ that re-read the whole PR instead of the changes since the last round
 - [ ] Recommendations with estimated savings in the daily report
 
 ### report: farm throughput metrics
@@ -761,18 +799,6 @@ session and the rule findings for the task (stop patterns included).
 - [ ] `kelpie why T-101` prints the explanation from storage or a running server; `--json` for scripts
 - [ ] Uses the same rule results as the engine (no separate logic)
 - [ ] Tests on the stop-pattern fixtures
-
-### rules: conflict_warning — early conflict warning (rule 12, incident 7)
-labels: P1, area:rules
-Field evidence and incident 7: two live tasks edit the same files and only find out at
-merge. `return_causes` explains conflicts after the fact; this rule warns while both tasks
-are still in progress.
-
-**Acceptance criteria**
-- [ ] Two live tasks whose changed files overlap → `comment` on both naming the files and the other task
-- [ ] Optional serialization (config): the later task is held until the earlier one merges
-- [ ] Files on the expected-shared allowlist (same config as `return_causes`) are ignored
-- [ ] Fixtures: new `07-live-tasks-same-files.yaml` (a live task with disjoint files as the distractor)
 
 ### rules: exit_contract — "done" requires evidence, reopened-after-done rate (rule 1, incident 2)
 labels: P1, area:rules
