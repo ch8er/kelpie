@@ -77,5 +77,4 @@ class ConnectorExecutor:
     def execute(self, action: Action) -> bool:
         if action.kind not in self.connector.actions:
             return False
-        self.connector.execute(action)
-        return True
+        return self.connector.execute(action) is not False

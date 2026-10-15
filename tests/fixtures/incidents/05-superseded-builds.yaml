@@ -1,0 +1,50 @@
+id: "05-superseded-builds"
+incident: 5
+title: "Superseded CI builds keep running and burn minutes"
+description: >
+  Agents push to their task branches several times an hour. Each push starts a full CI
+  build, and the build for the previous commit keeps running to the end although nobody
+  will read its result. On a busy farm this burned a large share of the monthly minutes
+  before they ran out. Rule 9 must cancel a superseded build that is still running, through
+  the CI connector that reported it, and count its minutes as waste.
+rule: ci_economy
+config:
+  waste_min_minutes: 20
+snapshot:
+  now: "2026-03-03T12:00:00+00:00"
+  builds:
+    # Superseded and still running: cancel it, through its connector.
+    - {id: B-1, source: ci, repo: example/repo, workflow: ci, branch: task/T-511, sha: "1111111",
+       event: push, status: running, started_at: "2026-03-03T11:30:00+00:00", minutes: 30,
+       superseded_by: B-2}
+    # The newest build of that branch: it carries the result that matters.
+    - {id: B-2, source: ci, repo: example/repo, workflow: ci, branch: task/T-511, sha: "2222222",
+       event: push, status: running, started_at: "2026-03-03T11:50:00+00:00", minutes: 10}
+    # Distractor: an older build that finished before the next one started; not waste.
+    - {id: B-3, source: ci, repo: example/repo, workflow: ci, branch: task/T-512, sha: "3333333",
+       event: push, status: success, started_at: "2026-03-03T10:00:00+00:00",
+       finished_at: "2026-03-03T10:20:00+00:00", minutes: 20, superseded_by: B-4}
+    - {id: B-4, source: ci, repo: example/repo, workflow: ci, branch: task/T-512, sha: "4444444",
+       event: push, status: success, started_at: "2026-03-03T10:30:00+00:00",
+       finished_at: "2026-03-03T10:50:00+00:00", minutes: 20}
+    # Distractor: a manual run nothing supersedes.
+    - {id: B-5, source: ci, repo: example/repo, workflow: deploy, branch: main, sha: "5555555",
+       event: workflow_dispatch, status: running, started_at: "2026-03-03T11:40:00+00:00",
+       minutes: 20}
+expected_actions:
+  - kind: cancel_build
+    executor: ci
+    params: {build_id: B-1, superseded_by: B-2}
+  - kind: alert
+    severity: info
+    reason_contains: "superseded"
+    params: {superseded_builds: [B-1], wasted_minutes: 30.0}
+not_expected_actions:
+  - kind: cancel_build
+    params: {build_id: B-2}
+  - kind: cancel_build
+    params: {build_id: B-3}
+  - kind: cancel_build
+    params: {build_id: B-5}
+  - kind: alert
+    severity: critical

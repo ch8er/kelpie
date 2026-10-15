@@ -15,7 +15,7 @@ from kelpie.core.serde import parse_datetime, parse_duration, snapshot_from_dict
 FIXTURES = Path(__file__).parent / "fixtures" / "incidents"
 REQUIRED_KEYS = {"id", "incident", "title", "description", "rule", "snapshot", "expected_actions"}
 OPTIONAL_KEYS = {"config", "not_expected_actions"}
-MATCH_KEYS = {"kind", "task_id", "severity", "reason_contains", "params"}
+MATCH_KEYS = {"kind", "task_id", "severity", "executor", "reason_contains", "params"}
 
 
 @dataclass(frozen=True)
@@ -93,6 +93,8 @@ def matches(action: Action, spec: dict[str, Any]) -> bool:
     if "task_id" in spec and action.task_id != spec["task_id"]:
         return False
     if "severity" in spec and action.severity != spec["severity"]:
+        return False
+    if "executor" in spec and action.executor != spec["executor"]:
         return False
     if "reason_contains" in spec and spec["reason_contains"].lower() not in action.reason.lower():
         return False

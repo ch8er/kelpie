@@ -1,0 +1,64 @@
+id: "05-docs-only-build"
+incident: 5
+title: "Full CI builds for docs-only changes, drafts, WIP and verified commits"
+description: >
+  Every push ran the full test matrix: a README fix, a draft that was not ready for review,
+  a WIP commit pushed without a skip marker, and a second run for a commit that had already
+  passed. None of these builds could change a decision, yet together they burned minutes
+  the farm later missed. Rule 9 must classify them with the minutes they burned in one
+  summary, and leave builds for real code changes alone.
+rule: ci_economy
+config:
+  waste_min_minutes: 20
+  docs_globs: ["docs/*", "*.md"]
+snapshot:
+  now: "2026-03-03T12:00:00+00:00"
+  builds:
+    - {id: D-1, source: ci, repo: example/repo, workflow: ci, branch: task/T-521, sha: "a1a1a1a",
+       event: pull_request, status: success, started_at: "2026-03-03T09:00:00+00:00",
+       finished_at: "2026-03-03T09:12:00+00:00", minutes: 12,
+       changed_paths: [docs/guide.md, README.md]}
+    # Distractor: docs plus code; a real build.
+    - {id: D-2, source: ci, repo: example/repo, workflow: ci, branch: task/T-522, sha: "b2b2b2b",
+       event: pull_request, status: success, started_at: "2026-03-03T09:30:00+00:00",
+       finished_at: "2026-03-03T09:45:00+00:00", minutes: 15,
+       changed_paths: [docs/guide.md, src/app.py]}
+    - {id: D-3, source: ci, repo: example/repo, workflow: ci, branch: task/T-523, sha: "c3c3c3c",
+       event: pull_request, draft: true, status: failure,
+       started_at: "2026-03-03T10:00:00+00:00", finished_at: "2026-03-03T10:08:00+00:00",
+       minutes: 8, changed_paths: [src/parser.py]}
+    # D-5 passed for commit e5e5e5e; D-4 ran the same pipeline for it again afterwards.
+    - {id: D-5, source: ci, repo: example/repo, workflow: ci, branch: task/T-524, sha: "e5e5e5e",
+       event: push, status: success, started_at: "2026-03-03T10:10:00+00:00",
+       finished_at: "2026-03-03T10:20:00+00:00", minutes: 10}
+    - {id: D-4, source: ci, repo: example/repo, workflow: ci, branch: task/T-524, sha: "e5e5e5e",
+       event: pull_request, status: success, started_at: "2026-03-03T10:30:00+00:00",
+       finished_at: "2026-03-03T10:40:00+00:00", minutes: 10}
+    - {id: D-6, source: ci, repo: example/repo, workflow: ci, branch: task/T-525, sha: "f6f6f6f",
+       event: push, commit_message: "WIP: try a cache for the parser", status: success,
+       started_at: "2026-03-03T11:00:00+00:00", finished_at: "2026-03-03T11:05:00+00:00",
+       minutes: 5}
+    # Distractor: a day-old docs-only build is outside the 24h window.
+    - {id: D-7, source: ci, repo: example/repo, workflow: ci, branch: task/T-526, sha: "a7a7a7a",
+       event: pull_request, status: success, started_at: "2026-03-02T08:00:00+00:00",
+       finished_at: "2026-03-02T08:10:00+00:00", minutes: 10, changed_paths: [docs/old.md]}
+  resources:
+    # Healthy quota: 2600 minutes left at about 2.5 minutes an hour; no forecast alert.
+    - {name: "ci:example", kind: ci_minutes, used: 400, limit: 3000, unit: minutes,
+       resets_at: "2026-04-01T00:00:00+00:00"}
+expected_actions:
+  - kind: alert
+    severity: info
+    reason_contains: "docs-only"
+    params:
+      wasted_minutes: 35.0
+      docs_only_builds: [D-1]
+      draft_builds: [D-3]
+      already_verified_builds: [D-4]
+      wip_builds: [D-6]
+not_expected_actions:
+  - kind: alert
+    severity: warning
+  - kind: alert
+    severity: critical
+  - kind: cancel_build

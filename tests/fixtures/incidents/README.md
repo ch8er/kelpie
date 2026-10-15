@@ -31,10 +31,12 @@ snapshot:                    # passed verbatim to kelpie.core.serde.snapshot_fro
   budgets_ok: true           # false: spend could not be read; budgets are the last good ones
   limit_hits: [...]          # LimitHit: provider limits reached
   providers: [...]           # ProviderStatus: LLM provider probes ([connectors.llm_quotas])
+  builds: [...]              # Build: recent CI builds, as a CI connector reports them
 expected_actions:            # must be emitted; subset match, order-insensitive
   - kind: unblock            # ActionKind value
     task_id: T-101           # optional (omit for host/global alerts)
     severity: warning        # optional Severity value
+    executor: ci             # optional; the executor the action is routed to
     reason_contains: "..."   # optional substring of Action.reason
     params: {}               # optional; subset of Action.params
 not_expected_actions:        # required, at least one item; same shape, none may match
@@ -98,6 +100,8 @@ Fixture conventions:
 | 3 | `03-disk-full.yaml` | `resources` | `alert` critical, `{host: host-a}` |
 | 4 | `04-host-overload-heavy-queue.yaml` | `resources` | `alert` warning, `{host: host-a, max_heavy: 1}`; none for healthy host-b or light T-406 |
 | 5 | `05-ci-minutes-exhausted.yaml` | `ci_economy` | `alert` critical (CI quota exhausted), `blocked_tasks` listed; no host alert for the healthy disk |
+| 5 | `05-superseded-builds.yaml` | `ci_economy` | `cancel_build` for the superseded running build B-1 (`executor: ci`), `info` waste summary; nothing for the newest build, a superseded build that finished before its successor started, or a manual run |
+| 5 | `05-docs-only-build.yaml` | `ci_economy` | `info` waste summary: docs-only D-1, draft D-3, already verified D-4, WIP D-6 (35 min); nothing for a docs-plus-code build, a build outside the window, or the healthy quota |
 | 6 | `06-llm-quota-and-expired-auth.yaml` | `resources` | `alert` warning (rate limits), `alert` critical (expired auth); none for valid or non-expiring credentials |
 | 6 | `06-subscription-limit-forecast.yaml` | `loop_breaker` | `info` alerts saying "estimate": the next provider limit (`next_limit_at`) and the budget running out within the horizon, for the subscription agent on course to hit its limit; nothing for the slow-burning agent, no `stop` |
 | 7 | `07-shared-file-conflicts.yaml` | `return_causes` | `alert` recommendation with `hot_files` (conflicts dominate returns); `comment` on in-progress tasks T-705, T-706 touching them; none for T-707 |

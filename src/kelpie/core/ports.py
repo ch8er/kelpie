@@ -104,7 +104,11 @@ class ActionConnector(Protocol):
     name: str
     actions: frozenset[ActionKind]
 
-    def execute(self, action: Action) -> None: ...
+    def execute(self, action: Action) -> bool | None:
+        """Carry out ``action``. Return False when the connector refuses it (not allowed by
+        its config, or not a target it knows), so a human is told instead; None or True
+        when it was carried out or there was nothing left to do."""
+        ...
 
 
 @runtime_checkable
