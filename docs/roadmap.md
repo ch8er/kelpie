@@ -121,8 +121,10 @@ SQLite by default; keep the schema DuckDB-compatible for analytics.
 
 **Acceptance criteria**
 - [ ] Tables for tasks (status history), sessions and conditions (the action ledger table and versioned migrations landed with engine item A)
-- [ ] Retention: prune ledger rows and snapshots older than a configurable age; bound the in-memory ledger store
-- [ ] Schema migrations versioned in code
+- [ ] Retention for raw action-ledger rows: 30 days by default plus a size cap, both configurable; the in-memory ledger store is bounded too
+- [ ] Daily aggregates kept indefinitely (per rule, action kind and mode; executed / suppressed / failed counts), because rule 8's before/after verification needs history; aggregates are written before raw rows are pruned
+- [ ] Pruning runs inside `kelpie serve` on a schedule and never blocks action dispatch (separate thread or short batched transactions; WAL)
+- [ ] The trace store will follow the same policy shape (raw rows with age + size limits, aggregates kept); note only, not built here
 - [ ] Storage lives behind a protocol in `kelpie.core`; no adapter imports
 - [ ] Tests run against a temporary database file
 
