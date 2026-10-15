@@ -137,8 +137,9 @@ def test_readings_that_cannot_be_judged_are_ignored() -> None:
             res(K.DISK, 99, 0),
             res(K.PROCESSES, 30000, None, unit="processes"),
             res(K.DISK, 99, 100, host=None),  # not a host resource
-            res(K.LLM_QUOTA, 99, 100, host="host-a"),  # provider quotas are another step
-            res(K.AUTH, 1, 1, host="host-a"),
+            res(K.LLM_QUOTA, 50, 100, host="host-a"),  # half a quota left is fine
+            res(K.LLM_QUOTA, None, 100, host="host-a"),  # nothing known
+            res(K.AUTH, 1, 1, host="host-a"),  # no expiry
         )
         == []
     )

@@ -73,6 +73,19 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #                           # (the Hermes adapter does not yet): with several hosts and tasks
 #                           # that do not say where they run, you get one alert without a host
 # max_reading_age = "10m"
+#
+# LLM providers (readings from [connectors.llm_quotas] below, or llm_quota/auth resources):
+# quota_warning = 0.1       # warn at this share of the quota left (remaining / limit)
+# rate_limit_events_warning = 20  # warn at this many limit hits per provider ...
+# rate_limit_window = "24h"       # ... within this long
+# ignore_resets_within = "10m"    # quota windows refilling this soon are not reported
+# auth_expiry_warning = "72h"     # warn this long before a credential expires
+#                                 # (expired or rejected keys are critical)
+# provider_roles = { provider-main = ["coder", "reviewer"] }  # who uses which provider:
+# provider_owners = { provider-b = ["agent-writer-1"] }        # by task/owner role or owner id.
+#   An exhausted quota is critical when ready or running agent tasks use the provider
+#   (listed as blocked_tasks). Without a mapping Kelpie does not guess which tasks use a
+#   provider: the alert stays a warning and lists no tasks.
 
 [storage]
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
@@ -125,6 +138,12 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # burn_window = "1h"        # burn rate and "runs out at" forecast over this
 # mode = "api"              # api | subscription (spend is an estimate; forecast is the
 #                           # time to the next provider limit once limit hits are known)
+# providers = ["provider-main"]  # subscription: the limits (LLM provider names in
+#                           # [connectors.llm_quotas]) whose hits drive that forecast;
+#                           # default: all of them
+# min_limit_window = "10m"  # subscription: ignore hits whose limit refills sooner than
+#                           # this (per-minute rate limits are not the usage limit);
+#                           # hits without a reset time always count
 #
 # [[budgets]]
 # name = "web-project"
@@ -170,6 +189,54 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # cpu_busy = '100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])))'
 # processes = "node_processes_pids"           # needs node_exporter --collector.processes
 # processes_max = "node_processes_max_processes"
+
+# LLM provider quotas and key health, for rule 7. Off unless providers are listed. Each
+# provider is probed with one GET of `path` at most once per `interval`. Probes must cost
+# nothing: point `path` at an endpoint that lists models, describes the key or reports
+# usage, never at one that generates text (Kelpie only sends GETs without a body; whether a
+# GET is free is the provider's rule, so check its docs). The endpoint must also require
+# the key: any 2xx answer counts as "the key works". The key is read from `token_env` (the
+# variable must be set and printable ASCII, or Kelpie refuses to start) and goes only to
+# `api_url`: https only (plain http only to loopback), redirects are never followed, and
+# the key is never logged. An https_proxy from the environment (honouring no_proxy) is used
+# as a CONNECT tunnel, so the proxy never sees the key. 401/403 mark the key as rejected;
+# 429 records a limit hit; other failures leave the quota unknown (kelpie_llm_provider_up
+# 0), never stale. A 2xx without any configured field is logged once (check the fields).
+# Probes run one after another in the control loop, staggered over the interval and
+# within a wall-clock budget per tick; providers not reached go first next tick.
+#
+# [connectors.llm_quotas]
+# tick_budget = "10s"               # all probes of one tick together (0.5s to 60s)
+#
+# [[connectors.llm_quotas.providers]]
+# name = "provider-main"            # used in alerts, metrics and provider_roles
+# kind = "headers"                  # read rate-limit headers of the answer (body ignored)
+# api_url = "https://api.provider.example"
+# path = "/v1/models"               # zero-cost endpoint (may carry a non-secret query)
+# token_env = "KELPIE_PROVIDER_MAIN_KEY"
+# auth_header = "Authorization"     # header that carries the key ...
+# auth_scheme = "Bearer"            # ... as "<scheme> <key>"; "" sends the bare key
+# headers = { x-api-version = "1" } # static, non-secret extra headers
+# unit = "requests"                 # what remaining/limit count
+# interval = "5m"                   # at least 30s
+# timeout = "10s"                   # whole request, at most 60s
+# [connectors.llm_quotas.providers.fields]  # header names; these are the defaults (IETF)
+# remaining = "ratelimit-remaining"
+# limit = "ratelimit-limit"
+# resets_at = "ratelimit-reset"     # seconds, Unix time, a duration like 1m30s, or a date
+# # used = "..."; expires_at = "..." (key expiry) are also understood
+#
+# [[connectors.llm_quotas.providers]]
+# name = "provider-b"
+# kind = "status_url"               # a JSON answer; fields are dotted paths into it
+# api_url = "https://api.provider-b.example"
+# path = "/v1/key"
+# token_env = "KELPIE_PROVIDER_B_KEY"
+# [connectors.llm_quotas.providers.fields]
+# used = "data.usage"               # remaining = limit - used when remaining is not given
+# limit = "data.limit"
+# resets_at = "data.reset_at"
+# expires_at = "data.expires_at"
 
 # Platform adapters. Kelpie reads the board and, for now, changes it only to stop a run
 # (loop_breaker in act mode, through the Hermes CLI); the other Hermes actions are not

@@ -31,12 +31,13 @@ from kelpie.connectors.human_tasks import (
     HumanTaskSettings,
     load_human_tasks,
 )
+from kelpie.connectors.llm_quotas import LlmQuotaSettings, load_llm_quotas
 from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
 from kelpie.core.model import Owner, Snapshot, SpanKind
-from kelpie.core.ports import PlatformAdapter, ResourceReader, SnapshotSource
+from kelpie.core.ports import PlatformAdapter, ProviderReader, ResourceReader, SnapshotSource
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
@@ -102,6 +103,7 @@ class Settings:
     github: GitHubSettings | None = None  # None: no [connectors.github] section
     block_conditions: tuple[BlockConditionPattern, ...] = ()
     human_tasks: HumanTaskSettings | None = None  # None: no [connectors.human_tasks]
+    llm_quotas: LlmQuotaSettings | None = None  # [connectors.llm_quotas]
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -158,7 +160,7 @@ def load_settings(path: Path | None) -> Settings:
         raise ConfigError(str(exc)) from exc
     if budgets.budgets and not traces.enabled:
         raise ConfigError("[[budgets]] read spend from traces: they need [traces] enabled")
-    github, block_conditions, human_tasks = _load_connectors(data)
+    github, block_conditions, human_tasks, llm_quotas = _load_connectors(data)
     return Settings(
         github=github,
         human_tasks=human_tasks,
@@ -170,16 +172,24 @@ def load_settings(path: Path | None) -> Settings:
         traces=traces,
         budgets=budgets,
         resources=resources,
+        llm_quotas=llm_quotas,
     )
 
 
 def _load_connectors(
     data: Mapping[str, Any],
-) -> tuple[GitHubSettings | None, tuple[BlockConditionPattern, ...], HumanTaskSettings | None]:
+) -> tuple[
+    GitHubSettings | None,
+    tuple[BlockConditionPattern, ...],
+    HumanTaskSettings | None,
+    LlmQuotaSettings | None,
+]:
+    """``[connectors.github]`` (with ``[[block_conditions]]``), ``[connectors.human_tasks]``
+    and ``[connectors.llm_quotas]``."""
     connectors = data.get("connectors", {})
     if not isinstance(connectors, Mapping):
         raise ConfigError("[connectors] must be a table")
-    if extra := set(connectors) - {"github", "human_tasks"}:
+    if extra := set(connectors) - {"github", "human_tasks", "llm_quotas"}:
         raise ConfigError(f"unknown [connectors] entries: {sorted(extra)}")
     try:
         github = load_github(connectors["github"]) if "github" in connectors else None
@@ -188,9 +198,10 @@ def _load_connectors(
         human_tasks = (
             load_human_tasks(connectors["human_tasks"]) if "human_tasks" in connectors else None
         )
+        llm_quotas = load_llm_quotas(connectors.get("llm_quotas"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    return github, patterns, human_tasks
+    return github, patterns, human_tasks, llm_quotas
 
 
 def _load_hermes(adapters: Any) -> HermesSettings | None:
@@ -376,6 +387,7 @@ def merged_snapshot(
     remember: bool = True,
     resources: ResourceReader | None = None,
     enrich: Sequence[tuple[str, Callable[[Snapshot], Snapshot]]] = (),
+    providers: ProviderReader | None = None,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
 
@@ -393,7 +405,8 @@ def merged_snapshot(
     after adapters drop them. A failed spend read is logged and counted, and that tick
     carries the last good budget state with ``budgets_ok`` false. With ``resources``, host
     readings (Prometheus) are added; a reader that raises is logged and counted, and the
-    tick goes on without them.
+    tick goes on without them. With ``providers``, LLM provider statuses and limit hits are
+    added (before budgets, which forecast from the hits), under the same rule.
     """
     last = _LastBudgets()
 
@@ -419,6 +432,7 @@ def merged_snapshot(
                 sessions=merged.sessions + part.sessions,
                 spans=merged.spans + part.spans,
                 limit_hits=merged.limit_hits + part.limit_hits,
+                providers=merged.providers + part.providers,
             )
         for name, step in enrich:
             try:
@@ -442,6 +456,18 @@ def merged_snapshot(
             except Exception as exc:
                 log.error("resource source failed: %s", type(exc).__name__)
                 metrics.resource_failed("unexpected")
+        if providers is not None:
+            try:
+                statuses, hits = providers.read(now)
+            except Exception as exc:
+                log.error("LLM provider source failed: %s", type(exc).__name__)
+                metrics.provider_failed("*", "unexpected")
+            else:
+                merged = replace(
+                    merged,
+                    providers=merged.providers + tuple(statuses),
+                    limit_hits=merged.limit_hits + tuple(hits),
+                )
         folded = merge_hook_spans(merged.spans)
         metrics.hook_spans_merged(folded.merged)
         merged = replace(merged, spans=folded.spans)
@@ -602,12 +628,42 @@ def resource_interval_warnings(rules: Sequence[Rule], resources: ResourceSetting
     ]
 
 
+def budget_provider_warnings(budgets: BudgetConfig, quotas: LlmQuotaSettings | None) -> list[str]:
+    """A budget's ``providers`` naming no configured LLM provider forecasts from nothing,
+    unless another source (an adapter) reports limit hits under that name."""
+    known = {p.name for p in quotas.providers} if quotas is not None else set()
+    return [
+        f"budget {b.name!r} providers names {name!r}, which is not a "
+        "[connectors.llm_quotas] provider: only limit hits from another source count for it"
+        for b in budgets.budgets
+        for name in b.providers or ()
+        if name not in known
+    ]
+
+
+def provider_interval_warnings(rules: Sequence[Rule], quotas: LlmQuotaSettings | None) -> list[str]:
+    """Providers probed less often than rule 'resources' keeps readings would flicker."""
+    if quotas is None:
+        return []
+    return [
+        f"[connectors.llm_quotas] provider {p.name} interval ({p.interval}) is longer than "
+        f"rule 'resources' max_reading_age ({rule.max_reading_age}): its readings would be "
+        "ignored between probes"
+        for rule in rules
+        if isinstance(rule, Resources)
+        for p in quotas.providers
+        if p.interval > rule.max_reading_age
+    ]
+
+
 def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> App:
     loaded = load_rules(settings.engine)
     for warning in [
         *loaded.warnings,
         *trace_window_warnings(loaded.rules, settings.traces),
         *resource_interval_warnings(loaded.rules, settings.resources),
+        *provider_interval_warnings(loaded.rules, settings.llm_quotas),
+        *budget_provider_warnings(settings.budgets, settings.llm_quotas),
     ]:
         log.warning(warning)
     try:
@@ -622,6 +678,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         destinations = [f.destination() for f in traces.forward] if traces.enabled else []
         prometheus = settings.resources.prometheus
         reader = prometheus.build() if prometheus is not None else None
+        quotas = settings.llm_quotas.build() if settings.llm_quotas is not None else None
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     if prometheus is not None and prometheus.sends_token_in_clear():
@@ -649,9 +706,14 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     if reader is not None:
         reader.observer = metrics
         metrics.set_resources(True)
+    if quotas is not None:
+        quotas.observer = metrics
+        metrics.set_providers(p.name for p in quotas.providers)
     enrich = _connector_steps(settings, metrics, clock)
     if not traces.enabled:
-        source = merged_snapshot(adapters, metrics, clock, resources=reader, enrich=enrich)
+        source = merged_snapshot(
+            adapters, metrics, clock, resources=reader, enrich=enrich, providers=quotas
+        )
         loop = ControlLoop(engine, source, metrics)
         return App(settings, loaded, engine, loop, metrics, store)
     span_store = _open_span_store(settings.db_path)
@@ -690,7 +752,14 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
     )
     source = merged_snapshot(
-        adapters, metrics, clock, window, settings.budgets, resources=reader, enrich=enrich
+        adapters,
+        metrics,
+        clock,
+        window,
+        settings.budgets,
+        resources=reader,
+        enrich=enrich,
+        providers=quotas,
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     return App(
@@ -947,6 +1016,21 @@ def _human_tasks_status(settings: Settings) -> list[str]:
     return [f"human_tasks: human_task conditions on the board, {who}"]
 
 
+def _providers_status(quotas: LlmQuotaSettings | None) -> str:
+    if quotas is None:
+        return "disabled (no [connectors.llm_quotas])"
+    parts = []
+    for p in quotas.providers:
+        try:
+            p.token()
+        except ValueError as exc:
+            return f"NOT ready: {exc}"
+        parts.append(
+            f"{p.name} ({p.kind} {p.display_url}{p.path.split('?')[0]}, every {p.interval})"
+        )
+    return ", ".join(parts)
+
+
 def render_status(
     settings: Settings,
     loaded: LoadedRules,
@@ -965,6 +1049,7 @@ def render_status(
         f"resources: {_resources_status(settings.resources)}",
         *_github_status(settings),
         *_human_tasks_status(settings),
+        f"providers: {_providers_status(settings.llm_quotas)}",
         "",
         f"{'#':>3}  {'rule':<17} {'prio':<4}  {'status':<16} mode",
     ]

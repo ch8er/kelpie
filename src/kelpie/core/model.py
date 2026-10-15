@@ -297,13 +297,38 @@ class BudgetStatus:
 
 @dataclass(frozen=True, slots=True)
 class LimitHit:
-    """A provider usage limit was reached (subscription mode): the run was refused until
-    ``resets_at``. ``limit`` names the limit (e.g. a rolling 5-hour or a weekly window);
-    forecasts are made per limit. Connectors fill these; none does yet."""
+    """A provider usage limit was reached: the run was refused until ``resets_at``.
+    ``limit`` names the limit (e.g. a rolling 5-hour or a weekly window; the LLM quota
+    connector uses the provider name); forecasts are made per limit."""
 
     limit: str
     at: datetime
     resets_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderStatus:
+    """The last probe of an LLM provider (``[connectors.llm_quotas]``), as of ``checked_at``.
+
+    ``ok`` is False when the probe gave no usable reading (unreachable, timed out, an error
+    status, an unexpected answer); ``error_kind`` then says why, and the quota fields are
+    unknown (None). ``auth_ok`` is False when the provider rejected the credential
+    (401/403), True when it accepted it, None when unknown. ``remaining`` and ``limit``
+    share ``unit`` and describe the window that refills at ``resets_at``; ``expires_at`` is
+    when the credential expires, if the provider reports it. A rate-limited probe (429) is
+    ``ok`` with ``remaining`` 0 and ``error_kind`` ``rate_limited``.
+    """
+
+    name: str
+    ok: bool = True
+    auth_ok: bool | None = None
+    remaining: float | None = None
+    limit: float | None = None
+    unit: str = ""
+    resets_at: datetime | None = None
+    expires_at: datetime | None = None
+    checked_at: datetime | None = None
+    error_kind: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +351,8 @@ class Snapshot:
     # False when spend could not be read this tick: ``budgets`` then holds the last good
     # statuses (stale), so a rule should neither resolve nor raise budget alerts on them.
     budgets_ok: bool = True
-    limit_hits: tuple[LimitHit, ...] = ()  # subscription mode: observed provider limits
+    limit_hits: tuple[LimitHit, ...] = ()  # observed provider limits (budgets forecast them)
+    providers: tuple[ProviderStatus, ...] = ()  # LLM provider quota and auth probes
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from kelpie.core.budgets import BudgetEvaluation, BudgetStatus
     from kelpie.core.engine import Engine
     from kelpie.core.ledger import Dispatched
+    from kelpie.core.model import ProviderStatus
 
 
 def _escape(value: str) -> str:
@@ -97,6 +98,10 @@ class Metrics:
         self.block_condition_outcomes: dict[str, int] = dict.fromkeys(
             ("attached", "unresolved", "unconfirmed", "error"), 0
         )
+        self.providers: tuple[str, ...] = ()
+        self.provider_status: dict[str, ProviderStatus] = {}
+        self.provider_failures: Counter[tuple[str, str]] = Counter()
+        self.provider_hits: Counter[str] = Counter()
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
@@ -183,6 +188,24 @@ class Metrics:
             self.resource_up = False
             self.resource_readings = 0
             self.resource_failures[cause] += 1
+
+    # --- LLM providers (kelpie.connectors.llm_quotas.source.ProbeObserver) -------------
+
+    def set_providers(self, names: Iterable[str]) -> None:
+        with self._lock:
+            self.providers = tuple(names)
+
+    def provider_probed(self, status: ProviderStatus) -> None:
+        with self._lock:
+            self.provider_status[status.name] = status
+
+    def provider_failed(self, provider: str, cause: str) -> None:
+        with self._lock:
+            self.provider_failures[(provider, cause)] += 1
+
+    def provider_limit_hit(self, provider: str) -> None:
+        with self._lock:
+            self.provider_hits[provider] += 1
 
     # --- trace forwarding (kelpie.traces.forward.ForwardObserver) ----------------------
 
@@ -371,6 +394,8 @@ class Metrics:
                 self._render_budgets(metric)
             if self.resources_enabled:
                 self._render_resources(metric)
+            if self.providers:
+                self._render_providers(metric)
             return "\n".join(out) + "\n"
 
     def _render_resources(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
@@ -393,6 +418,58 @@ class Metrics:
             [
                 f"kelpie_resource_read_failures_total{_labels(cause=c)} {n}"
                 for c, n in sorted(self.resource_failures.items())
+            ],
+        )
+
+    def _render_providers(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        probed = [(n, self.provider_status[n]) for n in self.providers if n in self.provider_status]
+        metric(
+            "kelpie_llm_provider_up",
+            "gauge",
+            "1 if the last probe of an LLM provider gave a reading (0: its quota is unknown).",
+            [f"kelpie_llm_provider_up{_labels(provider=n)} {int(s.ok)}" for n, s in probed],
+        )
+        metric(
+            "kelpie_llm_provider_auth_ok",
+            "gauge",
+            "1 if the provider accepted the key at the last probe, 0 if it rejected it.",
+            [
+                f"kelpie_llm_provider_auth_ok{_labels(provider=n)} {int(s.auth_ok)}"
+                for n, s in probed
+                if s.auth_ok is not None
+            ],
+        )
+        for field_, help_ in (
+            ("remaining", "Quota left at the last probe, in the provider's unit."),
+            ("limit", "Quota per window at the last probe, in the provider's unit."),
+        ):
+            metric(
+                f"kelpie_llm_provider_{field_}",
+                "gauge",
+                help_,
+                [
+                    f"kelpie_llm_provider_{field_}{_labels(provider=n)} {value:g}"
+                    for n, s in probed
+                    if (value := getattr(s, field_)) is not None
+                ],
+            )
+        metric(
+            "kelpie_llm_provider_probe_failures_total",
+            "counter",
+            "Failed LLM provider probes, by provider and cause.",
+            [
+                f"kelpie_llm_provider_probe_failures_total{_labels(provider=p, cause=c)} {n}"
+                for (p, c), n in sorted(self.provider_failures.items())
+            ],
+        )
+        metric(
+            "kelpie_llm_provider_limit_hits_total",
+            "counter",
+            "Times a probe found an LLM provider at its limit (once per limit period).",
+            [
+                f"kelpie_llm_provider_limit_hits_total{_labels(provider=n)} "
+                f"{self.provider_hits.get(n, 0)}"
+                for n in self.providers
             ],
         )
 

@@ -364,6 +364,44 @@ def test_subscription_budget_is_an_estimate_forecast_from_limit_hits() -> None:
     assert api.next_limit_at is None and not api.estimated
 
 
+def test_subscription_forecast_uses_only_its_providers_and_long_limit_windows() -> None:
+    usage_hits = (hit(-23, -20), hit(-17, -10), hit(-6, -1))  # limit "5h"
+    probe_hits = tuple(
+        LimitHit("provider-main", NOW - timedelta(hours=h), NOW - timedelta(hours=h - 0.05))
+        for h in (2, 1, 0.5)  # per-minute style limits: 3-minute windows
+    )
+    hits = usage_hits + probe_hits
+    config = load(budget(mode="subscription", hard=100))
+    usage = {w: ROWS for w in config.windows}
+    (all_,) = evaluate(config, usage, snapshot(limit_hits=hits)).statuses
+    assert all_.next_limit_at == NOW + timedelta(hours=2.5)  # short windows are ignored
+    only = load(budget(mode="subscription", hard=100, providers=["provider-main"]))
+    (none,) = evaluate(only, usage, snapshot(limit_hits=hits)).statuses
+    assert none.next_limit_at is None
+    short = load(
+        budget(mode="subscription", hard=100, providers=["provider-main"], min_limit_window="1m")
+    )
+    (probes,) = evaluate(short, usage, snapshot(limit_hits=hits)).statuses
+    assert probes.next_limit_at is not None
+    assert only.budgets[0].providers == ("provider-main",)
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ({"providers": []}, "non-empty list"),
+        ({"providers": "main"}, "non-empty list"),
+        ({"providers": [""]}, "non-empty list"),
+        ({"min_limit_window": "0s"}, "min_limit_window"),
+    ],
+)
+def test_subscription_provider_keys_are_checked(extra: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        load(budget(mode="subscription", **extra))
+    with pytest.raises(ValueError, match="are for mode = subscription"):
+        load(budget(providers=["main"]))
+
+
 def test_snapshot_fixtures_can_carry_budget_state() -> None:
     snap = snapshot_from_dict(
         {

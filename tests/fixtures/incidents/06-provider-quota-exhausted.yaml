@@ -1,0 +1,58 @@
+id: "06-provider-quota-exhausted"
+incident: 6
+title: "Provider quota exhausted and a rejected key, seen by the quota connector"
+description: >
+  The quota connector probes three LLM providers. The main provider reports no quota left
+  for the next three hours while coding agents still pull ready tasks and fail on every
+  call. The second provider rejects its key, so every session of the writer agent dies at
+  startup. The third provider timed out: its quota is unknown, which is not an alert.
+rule: resources
+config:
+  provider_roles:
+    provider-main: [coder]
+    provider-b: [writer]
+snapshot:
+  now: "2026-03-02T18:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: coder}
+    - {id: agent-writer-1, role: writer}
+    - {id: human-owner, role: coder, kind: human}
+  tasks:
+    - {id: T-601, title: "Implement parser", status: in_progress,
+       status_since: "2026-03-02T17:00:00+00:00", role: coder, owner_id: agent-dev-1}
+    - {id: T-602, title: "Add tests", status: ready,
+       status_since: "2026-03-02T16:00:00+00:00", role: coder}
+    - {id: T-603, title: "Write changelog", status: in_progress,
+       status_since: "2026-03-02T17:30:00+00:00", role: writer, owner_id: agent-writer-1}
+    - {id: T-604, title: "Approve design", status: in_progress,
+       status_since: "2026-03-02T15:00:00+00:00", role: coder, owner_id: human-owner}
+    - {id: T-605, title: "Old refactor", status: done,
+       status_since: "2026-03-02T12:00:00+00:00", role: coder}
+  providers:
+    - {name: provider-main, ok: true, auth_ok: true, remaining: 0, limit: 1000, unit: requests,
+       resets_at: "2026-03-02T21:00:00+00:00", checked_at: "2026-03-02T17:58:00+00:00",
+       error_kind: rate_limited}
+    - {name: provider-b, ok: false, auth_ok: false, checked_at: "2026-03-02T17:59:00+00:00",
+       error_kind: auth}
+    - {name: provider-c, ok: false, checked_at: "2026-03-02T17:59:00+00:00", error_kind: timeout}
+  limit_hits:
+    - {limit: provider-main, at: "2026-03-02T17:58:00+00:00",
+       resets_at: "2026-03-02T21:00:00+00:00"}
+expected_actions:
+  - kind: alert
+    severity: critical
+    reason_contains: "no quota left"
+    params: {provider: provider-main, blocked_tasks: [T-601, T-602]}
+  - kind: alert
+    severity: critical
+    reason_contains: "rejected its key"
+    params: {credential: provider-b, blocked_tasks: [T-603]}
+not_expected_actions:
+  - kind: alert
+    reason_contains: "provider-c"
+  - kind: alert
+    reason_contains: "T-604"
+  - kind: alert
+    reason_contains: "T-605"
+  - kind: alert
+    severity: warning
