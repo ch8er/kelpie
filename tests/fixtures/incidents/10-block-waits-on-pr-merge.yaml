@@ -1,0 +1,85 @@
+id: "10-block-waits-on-pr-merge"
+incident: 10
+title: "Reviewer blocks its own card while its PR sits in the merge queue"
+description: >
+  Incident 10 in another form, seen on a live farm: instead of registering a condition and
+  exiting, a reviewer agent blocked its own card with "waiting for CI/merge of #123" while
+  the PR waited in the merge queue. Rule 4 saw a block with nothing to check and raised most
+  of its alerts on such cards. A [[block_conditions]] pattern now recognizes the reason and,
+  during snapshot assembly, attaches a pr_merged condition resolved on GitHub (linked by
+  condition_id, as below). A pending condition means waiting, not dead: no alert until the
+  block is overdue. A block whose reason matches no pattern keeps its alert.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+  max_condition_age: "15m"
+  unlinked_alert_after: "4h"
+  max_block: "8h"
+  stale_evidence_after: "1h"
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: reviewer-1, role: reviewer}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # Waiting for the merge for 3h: the attached condition is pending and fresh.
+    - id: T-1021
+      title: "Review: add retry budget"
+      status: blocked
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for CI/merge of #123"
+        since: "2026-03-02T11:00:00+00:00"
+        condition_id: "block:T-1021:pr_merged:example/repo#123"
+    # The same kind of wait, but for 10h: the existing "condition unmet" alert.
+    - id: T-1022
+      title: "Review: split config loader"
+      status: blocked
+      status_since: "2026-03-02T04:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for CI/merge of #124"
+        since: "2026-03-02T04:00:00+00:00"
+        condition_id: "block:T-1022:pr_merged:example/repo#124"
+    # Distractor: a FIX task blocked 13h on a reason no pattern matches, no condition.
+    - id: T-1023
+      title: "FIX: flaky upload test"
+      status: blocked
+      status_since: "2026-03-02T01:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block:
+        reason: "need a decision on the upload timeout"
+        since: "2026-03-02T01:00:00+00:00"
+  conditions:
+    - id: "block:T-1021:pr_merged:example/repo#123"
+      kind: pr_merged
+      task_id: T-1021
+      params: {repo: example/repo, pr: 123, source: block_reason, pr_state: open}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T11:00:00+00:00"
+    - id: "block:T-1022:pr_merged:example/repo#124"
+      kind: pr_merged
+      task_id: T-1022
+      params: {repo: example/repo, pr: 124, source: block_reason, pr_state: open}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T04:00:00+00:00"
+expected_actions:
+  - kind: alert
+    task_id: T-1022
+    reason_contains: "limit 8h"
+  - kind: alert
+    task_id: T-1023
+    reason_contains: "has no condition Kelpie can check"
+not_expected_actions:
+  - kind: alert
+    task_id: T-1021
+  - kind: unblock
+    task_id: T-1021
+  - kind: unblock
+    task_id: T-1022

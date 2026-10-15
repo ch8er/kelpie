@@ -11,6 +11,10 @@ Only what the *last session* left behind is judged:
 - the session left the task ``blocked`` with no allowed reason and no registered
   condition → requeue.
 
+A condition attached during snapshot assembly from the block reason (``[[block_conditions]]``,
+e.g. "waiting for CI/merge of #123" resolved on GitHub) counts as registered: the agent
+declared a wait Kelpie can check, so the block is rule 4's to clear, not a reason to requeue.
+
 Blocks set by people or the platform outside an agent session are rule 4's business. A
 session that never reported its end counts as ended once its heartbeat is older than
 ``session_stale_after``: crashed sessions are exactly the ones that skip the end hook.

@@ -19,6 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from kelpie.adapters.hermes import adapter as hermes
+from kelpie.connectors.github import (
+    BlockConditionPattern,
+    ConditionSync,
+    GitHubSettings,
+    load_block_conditions,
+    load_github,
+)
 from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
@@ -81,6 +88,8 @@ class Settings:
     traces: TraceSettings = field(default_factory=TraceSettings)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)  # [[budgets]], [prices]
     resources: ResourceSettings = field(default_factory=ResourceSettings)
+    github: GitHubSettings | None = None  # None: no [connectors.github] section
+    block_conditions: tuple[BlockConditionPattern, ...] = ()
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -108,6 +117,8 @@ def load_settings(path: Path | None) -> Settings:
         "budgets",
         "prices",
         "resources",
+        "connectors",
+        "block_conditions",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -135,7 +146,10 @@ def load_settings(path: Path | None) -> Settings:
         raise ConfigError(str(exc)) from exc
     if budgets.budgets and not traces.enabled:
         raise ConfigError("[[budgets]] read spend from traces: they need [traces] enabled")
+    github, block_conditions = _load_connectors(data)
     return Settings(
+        github=github,
+        block_conditions=block_conditions,
         engine=engine,
         hermes=_load_hermes(data.get("adapters", {})),
         db_path=db_path,
@@ -144,6 +158,23 @@ def load_settings(path: Path | None) -> Settings:
         budgets=budgets,
         resources=resources,
     )
+
+
+def _load_connectors(
+    data: Mapping[str, Any],
+) -> tuple[GitHubSettings | None, tuple[BlockConditionPattern, ...]]:
+    connectors = data.get("connectors", {})
+    if not isinstance(connectors, Mapping):
+        raise ConfigError("[connectors] must be a table")
+    if extra := set(connectors) - {"github"}:
+        raise ConfigError(f"unknown [connectors] entries: {sorted(extra)}")
+    try:
+        github = load_github(connectors["github"]) if "github" in connectors else None
+        repos = github.repos if github is not None else None
+        patterns = load_block_conditions(data.get("block_conditions"), repos)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    return github, patterns
 
 
 def _load_hermes(adapters: Any) -> HermesSettings | None:
@@ -297,8 +328,12 @@ def merged_snapshot(
     budgets: BudgetConfig | None = None,
     remember: bool = True,
     resources: ResourceReader | None = None,
+    enrich: Sequence[tuple[str, Callable[[Snapshot], Snapshot]]] = (),
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
+
+    ``enrich`` are named connector steps run on the merged board (e.g. GitHub conditions);
+    one that raises is logged, counted in ``kelpie_connector_errors_total`` and skipped.
 
     An adapter that raises is logged, counted in ``kelpie_adapter_errors_total`` and left
     out of that tick; the others still count. With ``spans``, stored spans of the window
@@ -338,6 +373,12 @@ def merged_snapshot(
                 spans=merged.spans + part.spans,
                 limit_hits=merged.limit_hits + part.limit_hits,
             )
+        for name, step in enrich:
+            try:
+                merged = step(merged)
+            except Exception as exc:
+                log.error("connector %s failed to update the snapshot: %s", name, exc)
+                metrics.connector_failed(name)
         if spans is not None:
             try:
                 stored, totals = spans.spans(now), spans.totals(now)
@@ -561,10 +602,10 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     if reader is not None:
         reader.observer = metrics
         metrics.set_resources(True)
+    enrich = _connector_steps(settings, metrics, clock)
     if not traces.enabled:
-        loop = ControlLoop(
-            engine, merged_snapshot(adapters, metrics, clock, resources=reader), metrics
-        )
+        source = merged_snapshot(adapters, metrics, clock, resources=reader, enrich=enrich)
+        loop = ControlLoop(engine, source, metrics)
         return App(settings, loaded, engine, loop, metrics, store)
     span_store = _open_span_store(settings.db_path)
     metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
@@ -601,11 +642,44 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     window = SpanWindow(
         span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
     )
-    source = merged_snapshot(adapters, metrics, clock, window, settings.budgets, resources=reader)
+    source = merged_snapshot(
+        adapters, metrics, clock, window, settings.budgets, resources=reader, enrich=enrich
+    )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     return App(
         settings, loaded, engine, loop, metrics, store, span_store, ingest, retention, forwarder
     )
+
+
+def _connector_steps(
+    settings: Settings, metrics: Metrics, clock: Callable[[], datetime]
+) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+    """The GitHub step: evaluate PR/CI conditions and attach block conditions."""
+    github = settings.github
+    if github is None or not github.enabled:
+        return []
+    try:
+        token = github.token()
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+    if token is None:
+        log.warning(
+            "[connectors.github] $%s is not set: GitHub is read anonymously (60 requests an "
+            "hour, public repositories only)",
+            github.token_env,
+        )
+    else:
+        log.info("[connectors.github] token read from $%s", github.token_env)  # name only
+    connector = github.build(token, clock, metrics)
+    metrics.set_github(True)
+    step = ConditionSync(
+        connector,
+        settings.block_conditions,
+        metrics,
+        max_requests=github.max_requests_per_tick,
+        tick_budget=github.tick_budget,
+    )
+    return [("github", step)]
 
 
 def check_exposure(settings: Settings, host: str) -> None:
@@ -775,6 +849,23 @@ def _resources_status(resources: ResourceSettings) -> str:
     )
 
 
+def _github_status(settings: Settings) -> list[str]:
+    github = settings.github
+    if github is None:
+        return []
+    if not github.enabled:
+        return ["github:   disabled"]
+    try:
+        auth = f"token from ${github.token_env}" if github.token() else "anonymous"
+    except ValueError as exc:
+        auth = f"NOT ready: {exc}"
+    patterns = len(settings.block_conditions)
+    return [
+        f"github:   {github.api_url}, {auth}, repos {', '.join(github.repos)}, "
+        f"{patterns} block condition pattern(s)"
+    ]
+
+
 def render_status(
     settings: Settings,
     loaded: LoadedRules,
@@ -791,6 +882,7 @@ def render_status(
         f"ledger:   {settings.db_path or '(in memory)'}",
         f"traces:   {_traces_status(settings.traces)}",
         f"resources: {_resources_status(settings.resources)}",
+        *_github_status(settings),
         "",
         f"{'#':>3}  {'rule':<17} {'prio':<4}  {'status':<16} mode",
     ]

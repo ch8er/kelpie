@@ -106,6 +106,10 @@ Fixture conventions:
 | 10 | `10-reviewer-polls-ci.yaml` | `wait_condition` | `comment` T-1001 (register a condition and exit); no `requeue` |
 | 10 | `10-condition-satisfied-wake.yaml` | `wait_condition` | `wake` T-1011 (all conditions hold, freshly checked); `alert` T-1013 (overdue) and T-1014 (waiting on nothing); nothing for a pending condition, stale evidence, or a blocked task |
 | 10 | `10-productive-long-session.yaml` | `wait_condition` | `comment` only on the session polling a known CI check; nothing for a busy edit/test session |
+| 10 | `10-block-waits-on-pr-merge.yaml` | `stale_blocks` | reviewer self-block "waiting for CI/merge of #N" with a `pr_merged` condition attached from `[[block_conditions]]`: nothing while pending (T-1021), `alert` "limit 8h" when overdue (T-1022); unmatched FIX block 13h old keeps the "no condition" `alert` (T-1023) |
+| 10 | `10-block-pr-merged-unblock.yaml` | `stale_blocks` | `unblock` T-1031 once the PR merged; nothing for T-1032 (PR still open) |
+| 10 | `10-block-pr-closed-unmerged.yaml` | `stale_blocks` | `alert` T-1051 at once ("closed without merging"); nothing for T-1052 (PR still open) |
+| 10 | `10-block-ci-green-unblock.yaml` | `stale_blocks` | `unblock` T-1041 once the head commit is green (`ci_green` → `ci_status`); nothing for T-1042 (CI running) |
 | 11 | `11-orphan-accepted-task.yaml` | `orphan_status` | `alert` critical `{dependents: 7}`, `reassign` T-1101 |
 | 11 | `11-below-threshold.yaml` | `orphan_status` | `alert` + `reassign` to the idle developer for an ownerless in-progress task; `alert` only for a vanished owner and for a task with no role; nothing below the thresholds, for queues, blocked or done tasks, or a task a live session is working on |
 | 12 | `12-review-ping-pong.yaml` | `ping_pong` | `escalate` T-1201 (9 rounds > 3) |

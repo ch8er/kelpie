@@ -1,0 +1,65 @@
+id: "10-block-ci-green-unblock"
+incident: 10
+title: "Self-block on CI clears once the head commit is green"
+description: >
+  The ci_green variant: a reviewer blocked its card with "waiting for green CI on
+  example/repo#130". A [[block_conditions]] pattern of kind ci_green attached a ci_status
+  condition on the PR's head commit; CI finished green 30 minutes ago and the connector
+  checked it a minute ago, so rule 4 clears the block. A card whose CI is still running
+  stays blocked without an alert.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+  max_condition_age: "15m"
+  max_block: "8h"
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - id: T-1041
+      title: "Review: cache warmup"
+      status: blocked
+      status_since: "2026-03-02T12:30:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for green CI on example/repo#130"
+        since: "2026-03-02T12:30:00+00:00"
+        condition_id: "block:T-1041:ci_green:example/repo#130"
+    # Distractor: CI still running on the head commit.
+    - id: T-1042
+      title: "Review: log rotation"
+      status: blocked
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for green CI on example/repo#131"
+        since: "2026-03-02T13:00:00+00:00"
+        condition_id: "block:T-1042:ci_green:example/repo#131"
+  conditions:
+    - id: "block:T-1041:ci_green:example/repo#130"
+      kind: ci_status
+      task_id: T-1041
+      params: {repo: example/repo, pr: 130, source: block_reason, expect: success, ci_state: success}
+      satisfied: true
+      satisfied_at: "2026-03-02T13:30:00+00:00"
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:30:00+00:00"
+    - id: "block:T-1042:ci_green:example/repo#131"
+      kind: ci_status
+      task_id: T-1042
+      params: {repo: example/repo, pr: 131, source: block_reason, expect: success, ci_state: pending}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T13:00:00+00:00"
+expected_actions:
+  - kind: unblock
+    task_id: T-1041
+    reason_contains: "ci_status"
+not_expected_actions:
+  - kind: unblock
+    task_id: T-1042
+  - kind: alert
+    task_id: T-1042

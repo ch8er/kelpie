@@ -1,0 +1,138 @@
+"""A local stand-in for the GitHub REST API: no real network in tests."""
+
+from __future__ import annotations
+
+import json
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
+
+TOKEN = "ghp_SyntheticTestToken0123456789"
+
+
+@dataclass
+class Reply:
+    status: int = 200
+    body: Any = None
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class Seen:
+    path: str
+    headers: Any  # case-insensitive, like HTTP
+
+
+class FakeGitHub:
+    """Routes ``path`` (with query) to a :class:`Reply`; records every request."""
+
+    def __init__(self) -> None:
+        self.routes: dict[str, Reply] = {}
+        self.requests: list[Seen] = []
+        self.url = ""
+
+    def reply(self, path: str, body: Any = None, status: int = 200, **headers: str) -> None:
+        self.routes[path] = Reply(
+            status, body, {k.replace("_", "-"): v for k, v in headers.items()}
+        )
+
+    def pull(self, repo: str, number: int, **fields: Any) -> None:
+        body = {"number": number, "state": "open", "merged": False, "merged_at": None}
+        body["head"] = {"sha": fields.pop("sha", "a" * 40)}
+        body.update(fields)
+        self.reply(f"/repos/{repo}/pulls/{number}", body)
+
+    def ci(
+        self,
+        repo: str,
+        sha: str,
+        statuses: list[dict[str, Any]] | None = None,
+        runs: list[dict[str, Any]] | None = None,
+        total: int | None = None,
+        status_state: str | None = None,
+        status_total: int | None = None,
+    ) -> None:
+        statuses = statuses or []
+        state = status_state or ("success" if statuses else "pending")
+        self.reply(
+            f"/repos/{repo}/commits/{sha}/status?per_page=100",
+            {
+                "state": state,
+                "total_count": len(statuses) if status_total is None else status_total,
+                "statuses": statuses,
+            },
+        )
+        runs = runs or []
+        body = {"total_count": len(runs) if total is None else total, "check_runs": runs}
+        self.reply(f"/repos/{repo}/commits/{sha}/check-runs?per_page=100", body)
+
+    def paths(self) -> list[str]:
+        return [s.path for s in self.requests]
+
+
+def _handler(fake: FakeGitHub) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            fake.requests.append(Seen(self.path, self.headers))
+            reply = fake.routes.get(self.path, Reply(404, {"message": "Not Found"}))
+            body = reply.body
+            raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+            payload = b"" if body is None else raw
+            self.send_response(reply.status)
+            for name, value in reply.headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    return Handler
+
+
+@contextmanager
+def serve() -> Iterator[FakeGitHub]:
+    fake = FakeGitHub()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(fake))
+    fake.url = f"http://127.0.0.1:{server.server_address[1]}"
+    thread = threading.Thread(target=server.serve_forever, args=(0.05,), daemon=True)
+    thread.start()
+    try:
+        yield fake
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class Clock:
+    def __init__(self, now: datetime = datetime(2026, 3, 2, 12, tzinfo=UTC)) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, **kwargs: float) -> None:
+        self.now += timedelta(**kwargs)
+
+
+class Recorder:
+    """Observer for client metrics."""
+
+    def __init__(self) -> None:
+        self.outcomes: list[str] = []
+        self.rate: tuple[int, int] | None = None
+        self.blocks: dict[str, int] | None = None
+
+    def github_request(self, outcome: str) -> None:
+        self.outcomes.append(outcome)
+
+    def github_rate_limit(self, remaining: int, limit: int) -> None:
+        self.rate = (remaining, limit)
+
+    def block_conditions(self, outcomes: dict[str, int]) -> None:
+        self.blocks = {k: v for k, v in outcomes.items() if v}

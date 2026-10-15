@@ -1,0 +1,65 @@
+id: "10-block-pr-merged-unblock"
+incident: 10
+title: "Self-block on a merge clears once the PR merged"
+description: >
+  The reviewer card from 10-block-waits-on-pr-merge after its PR left the merge queue: the
+  pr_merged condition attached from the block reason "waiting for CI/merge of #125" is now
+  satisfied and was checked after the block was set, so rule 4 clears the block like any
+  other stale block. A card waiting on a PR that has not merged stays blocked.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+  max_condition_age: "15m"
+  max_block: "8h"
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - id: T-1031
+      title: "Review: add retry budget"
+      status: blocked
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for CI/merge of #125"
+        since: "2026-03-02T11:00:00+00:00"
+        condition_id: "block:T-1031:pr_merged:example/repo#125"
+    # Distractor: its PR is still in the merge queue.
+    - id: T-1032
+      title: "Review: split config loader"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for CI/merge of #126"
+        since: "2026-03-02T12:00:00+00:00"
+        condition_id: "block:T-1032:pr_merged:example/repo#126"
+  conditions:
+    - id: "block:T-1031:pr_merged:example/repo#125"
+      kind: pr_merged
+      task_id: T-1031
+      params: {repo: example/repo, pr: 125, source: block_reason, pr_state: merged}
+      satisfied: true
+      satisfied_at: "2026-03-02T13:20:00+00:00"
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T11:00:00+00:00"
+    - id: "block:T-1032:pr_merged:example/repo#126"
+      kind: pr_merged
+      task_id: T-1032
+      params: {repo: example/repo, pr: 126, source: block_reason, pr_state: open}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:00:00+00:00"
+expected_actions:
+  - kind: unblock
+    task_id: T-1031
+    reason_contains: "pr_merged"
+    params: {conditions: ["block:T-1031:pr_merged:example/repo#125"]}
+not_expected_actions:
+  - kind: unblock
+    task_id: T-1032
+  - kind: alert
+    task_id: T-1032

@@ -551,9 +551,11 @@ What exists today: the domain model, action types, the rule protocol and registr
 adapter/connector protocols, the read side of the Hermes adapter (kanban.db and a hooks
 plugin), the engine (routing to executors, per-rule modes, action
 ledger in SQLite), `kelpie serve` with the control loop and engine metrics, OTLP trace
-ingest with span storage and forwarding, `kelpie
+ingest with span storage and forwarding, a read-only GitHub PR/CI connector
+(`[connectors.github]`, plus `[[block_conditions]]` that turn block reasons naming a PR
+into conditions; see `kelpie.example.toml`), `kelpie
 status`, and fixtures for the 13 farm incidents and for field evidence. Hermes actions,
-other adapters, connectors, alerters and the report are stubs, `kelpie report` does not exist yet,
+other adapters and connectors, alerters and the report are stubs, `kelpie report` does not exist yet,
 and rules 1–4 (`exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`) are
 implemented; see
 [docs/plan.md](docs/plan.md) and [docs/roadmap.md](docs/roadmap.md).
