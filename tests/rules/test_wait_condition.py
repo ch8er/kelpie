@@ -149,7 +149,7 @@ def call(i: int, args: str = "same", outcome: str = "ok", command: str = "") -> 
 
 
 def poll_actions(rule: WaitCondition, spans: list[Span], ended: datetime | None = None) -> list:
-    session = Session("S-1", "T-1", "agent", NOW - 30 * M, ended_at=ended)
+    session = Session("S-1", "T-1", "agent", NOW - 30 * M, ended_at=ended, last_heartbeat=NOW - M)
     return list(rule.evaluate(Snapshot(now=NOW, sessions=(session,), spans=tuple(spans))))
 
 
