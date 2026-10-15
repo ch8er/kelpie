@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -52,7 +53,9 @@ class Engine:
     config: EngineConfig = field(default_factory=EngineConfig)
     ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
     ledger: ActionLedger = field(init=False)
+    rule_errors: Counter[str] = field(init=False, default_factory=Counter)
     _ledger_down_since: datetime | None = field(init=False, default=None)
+    _ledger_write_failed: bool = field(init=False, default=False)
     executors: dict[str, Executor] = field(init=False)
     _platforms: list[str] = field(init=False)
 
@@ -83,7 +86,13 @@ class Engine:
                 actions.extend(rule.evaluate(snapshot))
             except Exception:
                 log.exception("rule %s failed; skipped", rule.name)
+                self.rule_errors[rule.name] += 1
         return actions
+
+    @property
+    def ledger_available(self) -> bool:
+        """False while the last ledger read or write failed."""
+        return self._ledger_down_since is None and not self._ledger_write_failed
 
     def execute(self, actions: Sequence[Action], snapshot: Snapshot) -> list[Dispatched]:
         if snapshot.now.tzinfo is None:
@@ -123,9 +132,11 @@ class Engine:
     def _record(self, dispatched: Dispatched, now: datetime) -> None:
         try:
             self.ledger.record(dispatched, now)
+            self._ledger_write_failed = False
         except Exception:
             # The entry stays in the ledger's memory, so it still counts for this process.
             log.exception("could not persist ledger entry; kept in memory")
+            self._ledger_write_failed = True
 
     def _notice(self, why: Suppression, action: Action) -> None:
         if why is Suppression.RATE_LIMIT:

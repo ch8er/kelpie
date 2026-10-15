@@ -1,0 +1,22 @@
+# Kelpie configuration. Copy to kelpie.toml (or point --config / $KELPIE_CONFIG at it).
+# Every key is optional; the values below are the defaults unless noted.
+
+[engine]
+interval = "30s"          # how often the control loop ticks
+dry_run = true            # global override: when true nothing leaves Kelpie in any mode
+default_mode = "observe"  # observe | suggest | act, for rules without their own mode
+cooldown = "30m"          # the same action is not repeated within this window
+retry_after = "5m"        # ...except after a failure, which may be retried sooner
+max_actions_per_task_per_hour = 6  # actions with an effect per task (else session, rule)
+
+# One table per rule: an optional mode plus the rule's own parameters. Names must be in
+# the plan (kelpie.rules.PLANNED); unknown names stop Kelpie at startup, and planned rules
+# that are not implemented yet are skipped with a warning. `kelpie status` shows the result.
+#
+# [engine.rules.stale_blocks]
+# mode = "suggest"
+# unblock_grace = "5m"
+
+[storage]
+path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
+                          # $KELPIE_DB overrides this.

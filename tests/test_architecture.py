@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "kelpie"
-FORBIDDEN_IN_CORE = ("kelpie.adapters", "kelpie.connectors")
+FORBIDDEN_IN_CORE = (
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+)
 # No LLM clients in the control loop. Only report/ may use one.
 LLM_ROOTS = {"anthropic", "openai", "litellm", "langchain", "google", "ollama", "mistralai"}
 
@@ -68,7 +75,7 @@ def test_core_and_rules_do_not_import_integrations(path: Path) -> None:
     assert not bad, f"{path.name} imports {bad}"
 
 
-@pytest.mark.parametrize("path", _files("core", "rules", "server.py"), ids=_ids)
+@pytest.mark.parametrize("path", _files("core", "rules", "server.py", "app.py"), ids=_ids)
 def test_control_loop_has_no_llm(path: Path) -> None:
     bad = {m for m in _imports(path) if m.split(".")[0] in LLM_ROOTS}
     assert not bad, f"{path.name} imports LLM client {bad}"

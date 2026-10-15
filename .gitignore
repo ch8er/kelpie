@@ -12,3 +12,6 @@ htmlcov/
 *.db
 *.duckdb
 .env
+kelpie.toml
+*.db-wal
+*.db-shm

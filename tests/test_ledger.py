@@ -25,7 +25,7 @@ from tests.fakes import Emit, FakeAdapter, FakeAlerter
 from tests.test_engine import RaisingAlerter
 
 T0 = datetime(2026, 3, 2, 10, tzinfo=UTC)
-ACT = EngineConfig(default_mode=Mode.ACT)
+ACT = EngineConfig(dry_run=False, default_mode=Mode.ACT)
 
 
 def action(task_id: str | None = "T-1", reason: str = "r", **params: object) -> Action:
@@ -77,7 +77,12 @@ def test_cooldown_suppresses_then_expires_exclusively() -> None:
 
 def test_cooldown_is_per_mode_so_turning_a_rule_on_acts_at_once() -> None:
     adapter, store = FakeAdapter(), MemoryLedgerStore()
-    observing = Engine([Emit([action()])], adapters=[adapter], ledger_store=store)
+    observing = Engine(
+        [Emit([action()])],
+        adapters=[adapter],
+        config=EngineConfig(dry_run=False),
+        ledger_store=store,
+    )
     assert tick(observing, T0) == [Outcome.OBSERVED]
     acting = Engine([Emit([action()])], adapters=[adapter], config=ACT, ledger_store=store)
     assert tick(acting, T0 + timedelta(minutes=5)) == [Outcome.EXECUTED]
@@ -126,7 +131,7 @@ def test_rate_limit_counts_effects_including_failures() -> None:
 def test_rate_limit_applies_to_actions_without_task() -> None:
     alerter = FakeAlerter()
     config = EngineConfig(
-        default_mode=Mode.ACT, cooldown=timedelta(0), max_actions_per_task_per_hour=3
+        dry_run=False, default_mode=Mode.ACT, cooldown=timedelta(0), max_actions_per_task_per_hour=3
     )
     alerts = [
         Action(ActionKind.ALERT, "resources", "disk", params={"pct": 90 + i}) for i in range(20)
@@ -141,7 +146,7 @@ def test_rate_limit_applies_to_actions_without_task() -> None:
 def test_rate_limit_stops_a_looping_rule_against_a_failing_adapter() -> None:
     adapter, alerter = FakeAdapter(fail_on="requeue"), FakeAlerter()
     config = EngineConfig(
-        default_mode=Mode.ACT, cooldown=timedelta(0), max_actions_per_task_per_hour=3
+        dry_run=False, default_mode=Mode.ACT, cooldown=timedelta(0), max_actions_per_task_per_hour=3
     )
     engine = Engine(
         [Emit([action(n=i) for i in range(20)])], adapters=[adapter], alerter=alerter, config=config
@@ -211,15 +216,22 @@ def test_ledger_down_notice_once_per_outage() -> None:
     for minute in range(5):
         tick(engine, T0 + timedelta(minutes=minute))
     assert len(alerter.sent) == 1
+    assert not engine.ledger_available
     store.fail_reads = store.fail_writes = False
     assert tick(engine, T0 + timedelta(minutes=10)) == [Outcome.EXECUTED]
+    assert engine.ledger_available
     store.fail_reads = True
     tick(engine, T0 + timedelta(minutes=11))
     assert len(alerter.sent) == 2  # one notice per outage
 
 
 def test_read_failure_still_lets_observe_through() -> None:
-    engine = Engine([Emit([action()])], adapters=[FakeAdapter()], ledger_store=BrokenStore(True))
+    engine = Engine(
+        [Emit([action()])],
+        adapters=[FakeAdapter()],
+        config=EngineConfig(dry_run=False),
+        ledger_store=BrokenStore(True),
+    )
     assert tick(engine, T0) == [Outcome.OBSERVED]
 
 
@@ -292,9 +304,9 @@ def test_sqlite_is_wal_and_thread_safe(tmp_path: Path) -> None:
 def test_engine_persists_ledger_in_sqlite(tmp_path: Path) -> None:
     store = SqliteLedgerStore(tmp_path / "kelpie.db")
     engine = Engine([Emit([action()])], adapters=[FakeAdapter()], ledger_store=store)
-    tick(engine, T0)
+    tick(engine, T0)  # defaults: dry-run on, observe
     assert [(e.mode, e.outcome) for e in store.since(T0 - timedelta(seconds=1))] == [
-        (Mode.OBSERVE, Outcome.OBSERVED)
+        (Mode.OBSERVE, Outcome.DRY_RUN)
     ]
     store.close()
 
@@ -321,7 +333,7 @@ def test_dry_run_never_rate_limits_or_alerts() -> None:
 
 def test_notice_alerter_failure_does_not_escape_tick() -> None:
     config = EngineConfig(
-        default_mode=Mode.ACT, cooldown=timedelta(0), max_actions_per_task_per_hour=1
+        dry_run=False, default_mode=Mode.ACT, cooldown=timedelta(0), max_actions_per_task_per_hour=1
     )
     adapter = FakeAdapter()
     engine = Engine(

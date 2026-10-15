@@ -5,30 +5,44 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 from collections.abc import Sequence
 
 from kelpie import __version__
+from kelpie.app import ConfigError, build_app, find_config, load_rules, load_settings, render_status
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kelpie", description=__doc__)
     parser.add_argument("--version", action="version", version=f"kelpie {__version__}")
+    parser.add_argument(
+        "--config", help="TOML config (default: $KELPIE_CONFIG, else ./kelpie.toml if present)"
+    )
+    parser.add_argument("--log-level", default=os.environ.get("KELPIE_LOG_LEVEL", "INFO"))
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="run the control loop and HTTP endpoints")
     serve.add_argument("--host", default=os.environ.get("KELPIE_HOST", "0.0.0.0"))
     serve.add_argument("--port", type=int, default=int(os.environ.get("KELPIE_PORT", "9464")))
-    serve.add_argument("--log-level", default=os.environ.get("KELPIE_LOG_LEVEL", "INFO"))
+    sub.add_parser("status", help="show the rules kelpie serve would load, with their mode")
 
     args = parser.parse_args(argv)
     logging.basicConfig(
-        level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(message)s"
+        level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
+    try:
+        settings = load_settings(find_config(args.config))
+        if args.command == "status":
+            sys.stdout.write(render_status(settings, load_rules(settings.engine)))
+            return 0
+        app = build_app(settings)
+    except ConfigError as exc:
+        print(f"kelpie: config error: {exc}", file=sys.stderr)
+        return 2
 
-    if args.command == "serve":
-        from kelpie.server import serve as run
+    from kelpie.server import serve as run
 
-        run(args.host, args.port)
+    run(app, args.host, args.port)
     return 0
 
 

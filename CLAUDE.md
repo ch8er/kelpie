@@ -66,6 +66,7 @@ uv run ruff check . && uv run ruff format --check .
 uv run lint-imports
 uv run pytest --cov=kelpie
 uv run coverage report --include='src/kelpie/rules/*' --fail-under=90
-uv run kelpie serve                 # /metrics and /healthz on :9464
+uv run kelpie status                # rules that would load, with their mode
+uv run kelpie serve                 # control loop; /metrics and /healthz on :9464
 scripts/create_issues.sh --dry-run
 ```
