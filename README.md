@@ -228,6 +228,9 @@ docker compose up
 Ports are bound to `127.0.0.1` (Kelpie 9464, Prometheus 9090, Grafana 3000). Add
 `--profile local-agents` to also run node_exporter when agents share the server host.
 
+Step by step for a first live run on a Hermes farm, with `kelpie doctor`:
+[`docs/quickstart-hermes.md`](docs/quickstart-hermes.md).
+
 To watch a Hermes farm (read only, observe mode), add the section below to `kelpie.toml`
 and install the hooks plugin on the Hermes host; see
 [`src/kelpie/adapters/hermes/README.md`](src/kelpie/adapters/hermes/README.md). Hermes

@@ -34,11 +34,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve.add_argument("--host", default=os.environ.get("KELPIE_HOST", "127.0.0.1"))
     serve.add_argument("--port", type=int, default=int(os.environ.get("KELPIE_PORT", "9464")))
     sub.add_parser("status", help="show the rules kelpie serve would load, with their mode")
+    doctor = sub.add_parser(
+        "doctor", help="check a first live run: config, observe mode, board, hooks, spans, git"
+    )
+    doctor.add_argument(
+        "--prometheus",
+        default=os.environ.get("KELPIE_PROMETHEUS_URL"),
+        help="Prometheus base URL (default: $KELPIE_PROMETHEUS_URL; else localhost:9090 if up)",
+    )
 
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
+    if args.command == "doctor":
+        from kelpie.doctor import run as run_doctor
+
+        text, code = run_doctor(find_config(args.config), args.prometheus)
+        sys.stdout.write(text)
+        return code
     try:
         settings = load_settings(find_config(args.config))
         if args.command == "status":
