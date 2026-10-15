@@ -31,6 +31,8 @@ class FakeProm:
         self.status = 200
         self.delay = 0.0
         self.redirect_to: str | None = None
+        self.drip = 0.0  # seconds between body bytes (and headers, if drip_headers)
+        self.drip_headers = False
         self.raw: bytes | None = None  # sent instead of the JSON body
         self.requests: list[tuple[str, str, dict[str, str]]] = []  # path, promql, headers
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
@@ -62,12 +64,28 @@ class FakeProm:
                 body = outer.raw
                 if body is None:
                     body = json.dumps(outer.responses.get(promql, vector())).encode()
+                if outer.drip and outer.drip_headers:
+                    self._drip(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n")
+                    return
+                if outer.drip:
+                    self.send_response(outer.status)
+                    self.send_header("Content-Length", str(len(body) + 1000))
+                    self.end_headers()
+                    self._drip(body)
+                    return
                 self.send_response(outer.status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 with contextlib.suppress(OSError):  # the client may have given up (timeout test)
                     self.wfile.write(body)
+
+            def _drip(self, data: bytes) -> None:
+                with contextlib.suppress(OSError):
+                    for i in range(len(data)):
+                        self.wfile.write(data[i : i + 1])
+                        self.wfile.flush()
+                        time.sleep(outer.drip)
 
             def log_message(self, *args: object) -> None:
                 pass

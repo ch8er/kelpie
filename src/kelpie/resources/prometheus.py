@@ -7,7 +7,8 @@ and process counts become :class:`~kelpie.core.model.Resource` readings (``used`
 pairs, so a rule sees utilization) with ``at`` set to the time of the fetch.
 
 The client is deliberately narrow. Redirects are never followed and proxies from the
-environment are never used, so a bearer token goes only to the configured URL. Failure
+environment are never used, so a bearer token goes only to the configured URL. The timeout
+is a deadline for the whole request, not per read (see :class:`PrometheusClient`). Failure
 messages and logs never include the token, the response body or the query string. Any
 failure yields no readings for that fetch (a rule must see no data rather than stale data),
 counts in ``kelpie_resource_read_failures_total`` and logs one warning per cause until a
@@ -17,19 +18,20 @@ unreachable Prometheus costs at most one timeout per interval.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import logging
 import math
 import re
+import socket
+import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from typing import Protocol
 
 from kelpie import __version__
 from kelpie.core.model import Resource, ResourceKind
@@ -41,6 +43,7 @@ DEFAULT_INTERVAL = timedelta(seconds=60)
 DEFAULT_HOST_LABEL = "instance"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SERIES = 10_000
+READ_CHUNK = 4096
 GB = 1e9
 
 # Filesystems that are not storage the agents can fill.
@@ -88,15 +91,6 @@ class QueryError(Exception):
         self.detail = detail
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        return None  # urllib then raises HTTPError with the 3xx code
-
-
-# An explicit empty ProxyHandler: the token must not travel through a proxy.
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
-
-
 @dataclass(frozen=True, slots=True)
 class Sample:
     labels: Mapping[str, str]
@@ -105,53 +99,96 @@ class Sample:
 
 @dataclass(frozen=True, slots=True)
 class PrometheusClient:
+    """One GET per query over ``http.client``: no redirects, no proxies, one deadline.
+
+    ``timeout`` bounds the whole request after the TCP connection is open, however slowly
+    the server drips bytes: a watchdog shuts the socket down at the deadline, and every
+    read re-applies the time that is left. Connecting is bounded by ``timeout`` per
+    address; DNS resolution is not bounded (the stdlib cannot do it cheaply), so use an IP
+    address or a resolver you trust.
+    """
+
     url: str  # base URL, e.g. http://prometheus:9090
     timeout: float = DEFAULT_TIMEOUT
     token: str | None = field(default=None, repr=False)
 
     def query(self, promql: str) -> list[Sample]:
         """Run one instant query; raises :class:`QueryError`."""
-        base = self.url.rstrip("/")
-        endpoint = f"{base}/api/v1/query?{urllib.parse.urlencode({'query': promql})}"
-        request = urllib.request.Request(endpoint, method="GET")
-        request.add_header("User-Agent", f"kelpie/{__version__}")
-        request.add_header("Accept", "application/json")
+        parts = urllib.parse.urlsplit(self.url)
+        path = f"{parts.path.rstrip('/')}/api/v1/query?{urllib.parse.urlencode({'query': promql})}"
+        headers = {"User-Agent": f"kelpie/{__version__}", "Accept": "application/json"}
         if self.token:
-            request.add_header("Authorization", f"Bearer {self.token}")
+            headers["Authorization"] = f"Bearer {self.token}"
+        connection_class = (
+            http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        )
         deadline = time.monotonic() + self.timeout
+        expired = threading.Event()
+        conn = connection_class(parts.hostname or "", parts.port, timeout=self.timeout)
+        watchdog: threading.Timer | None = None
         try:
-            with _OPENER.open(request, timeout=self.timeout) as response:
-                body = _read_limited(response, deadline)
-        except urllib.error.HTTPError as exc:
-            if 300 <= exc.code < 400:
-                raise QueryError("redirect", f"HTTP {exc.code} redirect (not followed)") from None
-            cause = "http_auth" if exc.code in (401, 403) else "http_error"
-            raise QueryError(cause, f"HTTP {exc.code}") from None
-        except urllib.error.URLError as exc:
-            if isinstance(exc.reason, TimeoutError):
-                raise QueryError("timeout", "timed out") from None
-            name = type(exc.reason).__name__
-            raise QueryError("connection", f"connection failed ({name})") from None
-        except TimeoutError:
-            raise QueryError("timeout", "timed out") from None
+            conn.request("GET", path, headers=headers)
+            sock = conn.sock  # http.client drops conn.sock once a response will close it
+            assert sock is not None
+            watchdog = threading.Timer(
+                max(0.0, deadline - time.monotonic()), _expire, (sock, expired)
+            )
+            watchdog.daemon = True
+            watchdog.start()
+            _arm(sock, deadline)
+            response = conn.getresponse()
+            status = response.status
+            if 300 <= status < 400:
+                raise QueryError("redirect", f"HTTP {status} redirect (not followed)")
+            if status >= 400:
+                cause = "http_auth" if status in (401, 403) else "http_error"
+                raise QueryError(cause, f"HTTP {status}")
+            body = _read_limited(response, sock, deadline)
+            if expired.is_set():
+                raise TimeoutError
+        except QueryError:
+            raise
         except (OSError, http.client.HTTPException) as exc:
+            if expired.is_set() or isinstance(exc, TimeoutError):
+                raise QueryError("timeout", "timed out") from None
             raise QueryError("connection", f"connection failed ({type(exc).__name__})") from None
+        finally:
+            if watchdog is not None:
+                watchdog.cancel()
+            conn.close()
         return _parse(body)
 
 
-def _read_limited(response: Any, deadline: float) -> bytes:
+def _expire(sock: socket.socket, expired: threading.Event) -> None:
+    """Watchdog: end a request that outlived its deadline by shutting its socket down."""
+    expired.set()
+    with contextlib.suppress(OSError):
+        sock.shutdown(socket.SHUT_RDWR)
+
+
+def _arm(sock: socket.socket, deadline: float) -> None:
+    """Give the socket only the time that is left."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    sock.settimeout(remaining)
+
+
+def _read_limited(
+    response: http.client.HTTPResponse, sock: socket.socket, deadline: float
+) -> bytes:
     chunks: list[bytes] = []
     size = 0
-    while True:
-        if time.monotonic() > deadline:
-            raise TimeoutError
-        chunk = response.read(64 * 1024)
+    while not response.isclosed():  # the socket is gone once the last byte is read
+        _arm(sock, deadline)
+        chunk = response.read(READ_CHUNK)
         if not chunk:
-            return b"".join(chunks)
+            break
         size += len(chunk)
         if size > MAX_RESPONSE_BYTES:
             raise QueryError("too_large", f"response over {MAX_RESPONSE_BYTES} bytes")
         chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _parse(body: bytes) -> list[Sample]:

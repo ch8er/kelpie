@@ -314,14 +314,17 @@ def test_oversized_responses_are_refused(monkeypatch: pytest.MonkeyPatch) -> Non
     assert caught.value.cause == "too_large"
 
 
-def test_a_slow_trickle_hits_the_overall_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Slow:
-        def read(self, size: int) -> bytes:
-            time.sleep(0.05)
-            return b"x"
-
-    with pytest.raises(TimeoutError):
-        prometheus._read_limited(Slow(), time.monotonic() + 0.1)
+@pytest.mark.parametrize("headers", [False, True])
+def test_a_drip_server_cannot_outlast_the_deadline(headers: bool) -> None:
+    with fake_prometheus() as prom:
+        prom.drip = 0.3  # one byte every 0.3s: every single read is "in time"
+        prom.drip_headers = headers
+        prom.raw = b'{"status":"success","data":{"resultType":"vector","result":[]}}'
+        observer = Observer()
+        started = time.monotonic()
+        assert PrometheusSource(config(prom, timeout=1.0), observer).read(NOW) == ()
+        assert time.monotonic() - started < 2.0
+    assert observer.failures == ["timeout"]
 
 
 def test_warns_once_per_cause_and_again_after_recovery(caplog: pytest.LogCaptureFixture) -> None:
