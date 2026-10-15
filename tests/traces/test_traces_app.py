@@ -86,6 +86,7 @@ def test_values(tmp_path: Path) -> None:
         '[traces]\nwindow = "soon"\n',
         '[traces]\nwindow = "0s"\n',
         '[traces]\nretention = "1h"\n',  # shorter than the window
+        '[traces]\nretention = "1000000d"\n',  # would overflow now - retention
         "[traces]\nmax_rows = 0\n",
         "[traces]\nmax_body_bytes = true\n",
         '[traces]\nmax_rows = "10"\n',

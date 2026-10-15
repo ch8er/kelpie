@@ -14,6 +14,7 @@ from kelpie.traces.ingest import DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_CONCURRENT
 from kelpie.traces.semconv import DEFAULT_SESSION_ATTRIBUTE, DEFAULT_TASK_ATTRIBUTE, MappingOptions
 from kelpie.traces.store import DEFAULT_MAX_SNAPSHOT_SPANS
 
+MAX_RETENTION = timedelta(days=3650)
 DEFAULT_TOKEN_ENV = "KELPIE_TRACES_TOKEN"
 KEYS = frozenset(
     {
@@ -129,6 +130,8 @@ def load_traces(section: Any) -> TraceSettings:
             raise ValueError(f"[traces] {key}: {exc}") from exc
         if durations[key] <= timedelta(0):
             raise ValueError(f"[traces] {key} must be positive")
+    if durations["retention"] > MAX_RETENTION:
+        raise ValueError("[traces] retention must be at most 3650d")
     if durations["retention"] < max(durations["window"], durations["totals_window"]):
         raise ValueError("[traces] retention must cover window and totals_window")
     ints: dict[str, int] = {}

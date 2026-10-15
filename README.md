@@ -215,7 +215,7 @@ cd kelpie
 uv sync
 cp kelpie.example.toml kelpie.toml   # optional; every key has a safe default
 uv run kelpie status                 # rules that would load, with their mode
-uv run kelpie serve
+uv run kelpie serve                  # listens on 127.0.0.1:9464; --host 0.0.0.0 to expose
 ```
 
 Or run the full stack (Kelpie, Prometheus, Grafana) with Docker:
@@ -305,7 +305,8 @@ container whose port is published on 127.0.0.1, or behind a proxy that authentic
 `allow_unauthenticated = true` or `KELPIE_TRACES_ALLOW_UNAUTHENTICATED=1` on purpose;
 `docker-compose.yml` does the latter. Headers and the token are checked before the body is
 read; at most `max_concurrent_requests` (4) exports are decoded at once (more get 503 and
-are retried by the exporter), and a client that stalls for 30 seconds is disconnected.
+are retried by the exporter), and a client that stalls for 30 seconds, or has not sent the
+whole body within 60 seconds, is disconnected.
 
 ```toml
 [traces]

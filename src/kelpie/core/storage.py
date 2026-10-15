@@ -474,10 +474,10 @@ class SqliteSpanStore:
                 return 0
             with self._db:
                 n = self._db.execute(sql, args).rowcount
-                self._rows -= n
-                if n:
-                    self.epoch += 1
-                return n
+            self._rows -= n
+            if n:
+                self.epoch += 1  # after the commit: a reload must not see the rows again
+            return n
 
     def count(self) -> int:
         return self._rows  # an int read is atomic; never waits for a write batch

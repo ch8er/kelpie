@@ -31,7 +31,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="run the control loop and HTTP endpoints")
-    serve.add_argument("--host", default=os.environ.get("KELPIE_HOST", "0.0.0.0"))
+    serve.add_argument("--host", default=os.environ.get("KELPIE_HOST", "127.0.0.1"))
     serve.add_argument("--port", type=int, default=int(os.environ.get("KELPIE_PORT", "9464")))
     sub.add_parser("status", help="show the rules kelpie serve would load, with their mode")
 

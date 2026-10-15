@@ -276,6 +276,78 @@ def test_stalled_client_is_dropped_and_counted(tmp_path: Path) -> None:
         app.close()
 
 
+def test_dripping_client_hits_the_body_deadline(tmp_path: Path) -> None:
+    """A byte just under the socket timeout each time still ends at the body deadline."""
+    app = build_app(Settings(db_path=tmp_path / "k.db"), clock=lambda: NOW)
+    server = make_server("127.0.0.1", 0, app.metrics, app.ingest)
+    handler = server.RequestHandlerClass
+    handler.timeout, handler.body_deadline = 0.5, 0.6  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with socket.create_connection(server.server_address) as sock:
+            sock.sendall(
+                b"POST /v1/traces HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                b"Content-Length: 100\r\n\r\n"
+            )
+            closed = False
+            for _ in range(20):
+                time.sleep(0.2)
+                try:
+                    sock.sendall(b" ")
+                except OSError:
+                    closed = True
+                    break
+            sock.settimeout(5)
+            assert closed or sock.recv(100) == b""
+        deadline = time.monotonic() + 5
+        while 'kelpie_traces_requests_total{code="408"} 1' not in app.metrics.render():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+    finally:
+        handler.timeout, handler.body_deadline = 30, 60.0  # type: ignore[attr-defined]
+        server.shutdown()
+        server.server_close()
+        app.close()
+
+
+def test_body_in_several_chunks_is_read_whole(tmp_path: Path) -> None:
+    import urllib.request
+
+    app = build_app(Settings(db_path=tmp_path / "k.db"), clock=lambda: NOW)
+    server = make_server("127.0.0.1", 0, app.metrics, app.ingest)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        body = b"{" + b" " * 200_000 + b"}"
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}/v1/traces",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        app.close()
+
+
+def test_serve_defaults_to_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kelpie.cli as cli
+
+    seen: list[str] = []
+    monkeypatch.delenv("KELPIE_HOST", raising=False)
+    monkeypatch.delenv("KELPIE_TRACES_TOKEN", raising=False)
+    monkeypatch.delenv("KELPIE_TRACES_ALLOW_UNAUTHENTICATED", raising=False)
+    monkeypatch.delenv("KELPIE_CONFIG", raising=False)
+    monkeypatch.chdir(Path(__file__).parent)
+    monkeypatch.setattr(cli, "check_exposure", lambda settings, host: seen.append(host))
+    monkeypatch.setattr(cli, "build_app", lambda settings: (_ for _ in ()).throw(ConfigError("x")))
+    assert cli.main(["serve"]) == 2
+    assert seen == ["127.0.0.1"]
+
+
 def test_ingest_bug_is_500_and_counted(tmp_path: Path) -> None:
     import urllib.error
     import urllib.request

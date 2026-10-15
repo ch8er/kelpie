@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+import time
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import FrameType
@@ -38,6 +39,9 @@ class Handler(BaseHTTPRequestHandler):
     # Socket timeout per read: a client that stalls (slowloris) loses its connection
     # instead of holding a thread.
     timeout = 30
+    # Whole-body deadline: a client dripping a byte just under ``timeout`` must not keep an
+    # ingest slot forever.
+    body_deadline = 60.0
 
     def do_GET(self) -> None:
         match self.path:
@@ -56,7 +60,7 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(404, "not found\n", "text/plain; charset=utf-8")
             return
         try:
-            reply = ingest.handle(self.headers, self.rfile.read)
+            reply = ingest.handle(self.headers, self._read_body)
         except OSError as exc:  # the client stalled past the timeout or went away
             log.info("trace export from %s aborted: %s", self.client_address[0], exc)
             self.server.metrics.traces_request(408)
@@ -71,6 +75,26 @@ class Handler(BaseHTTPRequestHandler):
         if reply.close:
             self.close_connection = True
         self._send(reply.status, reply.body, reply.content_type, reply.headers)
+
+    def _read_body(self, length: int) -> bytes:
+        """Read ``length`` bytes within ``body_deadline``; ``TimeoutError`` past it."""
+        deadline = time.monotonic() + self.body_deadline
+        chunks: list[bytes] = []
+        left = length
+        try:
+            while left > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("request body not received within the deadline")
+                self.connection.settimeout(min(self.timeout, remaining))
+                chunk = self.rfile.read1(min(left, 65536))
+                if not chunk:
+                    break  # the client went away; the decoder rejects a short body
+                chunks.append(chunk)
+                left -= len(chunk)
+        finally:
+            self.connection.settimeout(self.timeout)
+        return b"".join(chunks)
 
     def _reply(self, code: int, body: str, content_type: str) -> None:
         self._send(code, body.encode(), content_type)
