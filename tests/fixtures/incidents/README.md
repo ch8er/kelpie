@@ -16,7 +16,7 @@ incident: 1                  # incident number, or null for foundation rules (ch
 title: "short title"
 description: >               # 2-5 sentences: what happened and why it hurt throughput
   ...
-rule: stale_blocks           # name of the rule under test (see table below)
+rule: stale_blocks           # name of the rule under test (see table below and docs/roadmap.md)
 config: {}                   # rule thresholds used by this scenario
 snapshot:                    # passed verbatim to kelpie.core.serde.snapshot_from_dict
   now: "2026-03-02T14:00:00+00:00"
@@ -72,9 +72,9 @@ Fixture conventions:
 | 2 | `02-exit-without-status.yaml` | `exit_contract` | `requeue` T-201 (session ended with no final status), `requeue` T-202 (block reason not allowed) |
 | 3 | `03-disk-full.yaml` | `resources` | `alert` critical, `{host: host-a}` |
 | 4 | `04-host-overload-heavy-queue.yaml` | `resources` | `alert` warning, `{host: host-a, max_heavy: 1}`; none for healthy host-b or light T-406 |
-| 5 | `05-ci-minutes-exhausted.yaml` | `resources` | `alert` critical, `blocked_tasks` listed; no host alert for the healthy disk |
+| 5 | `05-ci-minutes-exhausted.yaml` | `ci_economy` | `alert` critical (CI quota exhausted), `blocked_tasks` listed; no host alert for the healthy disk |
 | 6 | `06-llm-quota-and-expired-auth.yaml` | `resources` | `alert` warning (rate limits), `alert` critical (expired auth); none for valid or non-expiring credentials |
-| 7 | `07-shared-file-conflicts.yaml` | `file_contention` | `alert` with `hot_files`; `comment` on in-progress tasks touching them |
+| 7 | `07-shared-file-conflicts.yaml` | `return_causes` | `alert` recommendation with `hot_files` (conflicts dominate returns); `comment` on in-progress tasks T-705, T-706 touching them; none for T-707 |
 | 8 | `08-block-outlived-cause.yaml` | `stale_blocks` | `unblock` T-801, reason mentions the 3h delay; T-802 (PR not merged) stays blocked |
 | 9 | `09-sequential-chain-idle.yaml` | `bottlenecks` | `alert` suggesting parallelization, idle agents and `critical_path_length`; nothing for reviewer work T-906, no `escalate` |
 | 10 | `10-reviewer-polls-ci.yaml` | `wait_condition` | `comment` T-1001 (register a condition and exit); no `requeue` |

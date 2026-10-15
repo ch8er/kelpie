@@ -144,6 +144,7 @@ label_color() {
   case "$1" in
     P0) echo "b60205" ;;
     P1) echo "fbca04" ;;
+    P2) echo "c5def5" ;;
     week-*) echo "1d76db" ;;
     area:*) echo "0e8a16" ;;
     *) echo "ededed" ;;
@@ -152,8 +153,9 @@ label_color() {
 
 label_description() {
   case "$1" in
-    P0) echo "Required for the milestone" ;;
-    P1) echo "Nice to have" ;;
+    P0) echo "Now, this week" ;;
+    P1) echo "Next step" ;;
+    P2) echo "Later, on signal" ;;
     week-*) echo "Planned for ${1/week-/week }" ;;
     area:*) echo "Area: ${1#area:}" ;;
     *) echo "" ;;
