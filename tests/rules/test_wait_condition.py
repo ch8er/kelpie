@@ -56,6 +56,30 @@ def test_block_condition_counts_even_without_task_link() -> None:
     assert kinds(WaitCondition(), task, cond("c", True, task_id=None)) == [ActionKind.WAKE]
 
 
+def test_condition_from_an_earlier_wait_does_not_wake() -> None:
+    old = Condition("old", CI, task_id="T-1", satisfied=True, registered_at=NOW - 300 * M)
+    new = Condition("new", CI, task_id="T-1", satisfied=False, registered_at=NOW - 30 * M)
+    assert kinds(WaitCondition(), waiting(NOW - 60 * M), old) == [ActionKind.ALERT]
+    assert kinds(WaitCondition(), waiting(NOW - 60 * M), old, new) == []
+
+
+def test_block_condition_wins_over_task_links() -> None:
+    task = waiting(block=Block("waiting_ci", NOW - 60 * M, "c"))
+    assert kinds(WaitCondition(), task, cond("c", False, task_id=None), cond("x", True)) == []
+
+
+def test_waiting_on_nothing_has_a_grace_period() -> None:
+    rule = WaitCondition(no_condition_grace=timedelta(minutes=10))
+    assert kinds(rule, waiting(NOW - 9 * M)) == []
+    assert kinds(rule, waiting(NOW - 10 * M)) == [ActionKind.ALERT]
+
+
+def test_missing_block_condition_is_named() -> None:
+    task = waiting(block=Block("waiting_ci", NOW - 60 * M, "C-gone"))
+    [action] = WaitCondition().evaluate(Snapshot(now=NOW, tasks=(task,)))
+    assert "C-gone" in action.reason and "cannot see" in action.reason
+
+
 def test_other_tasks_conditions_are_ignored() -> None:
     assert kinds(WaitCondition(), waiting(), cond("x", True, task_id="T-2")) == [
         ActionKind.ALERT  # waiting on nothing of its own
@@ -90,8 +114,9 @@ def test_wake_key_changes_with_each_wait() -> None:
 
 def call(i: int, args: str = "same", outcome: str = "ok", command: str = "") -> Span:
     attributes = {"command": command} if command else {}
+    start = NOW - (20 - i) * M
     return Span(
-        "tr", f"s{i}", "execute_tool bash", SpanKind.TOOL, NOW - (20 - i) * M,
+        "tr", f"s{i}", "execute_tool bash", SpanKind.TOOL, start, end=start + timedelta(seconds=2),
         session_id="S-1", tool="bash", args_hash=args, outcome=outcome, attributes=attributes,
     )  # fmt: skip
 
@@ -101,41 +126,69 @@ def poll_actions(rule: WaitCondition, spans: list[Span], ended: datetime | None 
     return list(rule.evaluate(Snapshot(now=NOW, sessions=(session,), spans=tuple(spans))))
 
 
-def test_identical_calls_threshold_and_window() -> None:
-    rule = WaitCondition(poll_min_repeats=8, poll_window=timedelta(minutes=10))
-    assert poll_actions(rule, [call(i) for i in range(12, 19)]) == []  # 7 in window
-    [action] = poll_actions(rule, [call(i) for i in range(11, 19)])  # 8 in window
+CI_RULE = {"ci_status": ("gh pr checks", "gh run watch")}
+
+
+def check(i: int, **kw: object) -> Span:
+    return call(i, args="h-checks", command="gh pr checks 7", **kw)  # type: ignore[arg-type]
+
+
+def test_repeated_check_threshold_and_window() -> None:
+    rule = WaitCondition(poll_min_repeats=8, poll_patterns=CI_RULE)
+    assert poll_actions(rule, [check(i) for i in range(12, 19)]) == []  # 7 in window
+    [action] = poll_actions(rule, [check(i) for i in range(11, 19)])  # 8 in window
     assert action.kind is ActionKind.COMMENT and action.task_id == "T-1"
-    assert "condition_kind" not in action.params
-    assert poll_actions(rule, [call(i) for i in range(0, 10)]) == []  # all older than window
-
-
-def test_streak_must_be_consecutive_and_trailing() -> None:
-    rule = WaitCondition(poll_min_repeats=3, poll_window=timedelta(minutes=30))
-    assert poll_actions(rule, [call(1), call(2), call(3, "other"), call(4), call(5)]) == []
-    assert poll_actions(rule, [call(1, "x"), call(2), call(3), call(4)]) != []
-
-
-def test_condition_kind_from_command_pattern() -> None:
-    rule = WaitCondition(poll_min_repeats=3, poll_patterns={"ci_status": ("gh pr checks",)})
-    spans = [call(i, args="h", command="gh pr checks 7") for i in range(15, 18)]
-    [action] = poll_actions(rule, spans)
     assert action.params == {"session_id": "S-1", "condition_kind": "ci_status"}
     assert "`ci_status`" in action.reason
+    assert poll_actions(rule, [check(i) for i in range(0, 10)]) == []  # all older than window
 
 
-def test_error_streak_only_for_known_polling_checks() -> None:
-    rule = WaitCondition(poll_error_streak=5, poll_patterns={"ci_status": ("gh run watch",)})
-    varied = [call(i, args=f"a{i}", outcome="error") for i in range(13, 18)]
-    assert poll_actions(rule, varied) == []  # generic error streaks belong to rule 10
-    polled = [call(i, args=f"a{i}", outcome="error", command="gh run watch") for i in range(13, 18)]
-    [action] = poll_actions(rule, polled)
+def test_polling_with_other_calls_in_between_is_caught() -> None:
+    rule = WaitCondition(
+        poll_min_repeats=4, poll_window=timedelta(minutes=30), poll_patterns=CI_RULE
+    )
+    spans = [call(i, args="sleep 30") if i % 2 else check(i) for i in range(10, 18)]
+    assert len(poll_actions(rule, spans)) == 1
+
+
+def test_loops_that_are_not_known_checks_are_rule_10s() -> None:
+    rule = WaitCondition(poll_min_repeats=3, poll_patterns=CI_RULE)
+    heartbeat = [call(i, args="hb-9f2c", command="heartbeat_check") for i in range(10, 19)]
+    assert poll_actions(rule, heartbeat) == []
+    assert poll_actions(WaitCondition(poll_min_repeats=3), [check(i) for i in range(10, 19)]) == []
+
+
+def test_calls_without_known_arguments_are_never_identical() -> None:
+    rule = WaitCondition(poll_min_repeats=3, poll_patterns={"ci_status": ("bash",)})
+    unknown = [call(i, args="") for i in range(10, 19)]
+    assert poll_actions(rule, unknown) == []
+
+
+def test_error_streak_must_be_one_known_check() -> None:
+    rule = WaitCondition(poll_error_streak=5, poll_min_repeats=50, poll_patterns=CI_RULE)
+    mixed = [call(i, args="pytest", outcome="error") for i in range(13, 17)]
+    mixed.append(check(17, outcome="error"))
+    assert poll_actions(rule, mixed) == []  # 4 test failures + 1 CI check is not polling
+    [action] = poll_actions(rule, [check(i, outcome="error") for i in range(13, 18)])
     assert "failed the same check 5 times" in action.reason
 
 
+def test_one_long_blocking_check_is_caught() -> None:
+    rule = WaitCondition(poll_window=timedelta(minutes=10), poll_patterns=CI_RULE)
+    watch = Span(
+        "tr", "w", "execute_tool bash", SpanKind.TOOL, NOW - timedelta(minutes=40),
+        session_id="S-1", tool="bash", attributes={"command": "gh run watch 12"},
+    )  # fmt: skip
+    [action] = poll_actions(rule, [watch])
+    assert "blocked on one check for 40 minutes" in action.reason
+    short = Span("tr", "w", "x", SpanKind.TOOL, NOW - timedelta(minutes=5), session_id="S-1",
+                 attributes={"command": "gh run watch 12"})  # fmt: skip
+    assert poll_actions(rule, [short]) == []
+
+
 def test_ended_sessions_are_not_checked() -> None:
-    rule = WaitCondition(poll_min_repeats=2)
-    assert poll_actions(rule, [call(i) for i in range(15, 19)], ended=NOW) == []
+    rule = WaitCondition(poll_min_repeats=2, poll_patterns=CI_RULE)
+    assert poll_actions(rule, [check(i) for i in range(15, 19)], ended=NOW) == []
 
 
 def test_helpers() -> None:
@@ -145,6 +198,10 @@ def test_helpers() -> None:
     assert tool_calls([call(2), llm, call(1)]) == [call(1), call(2)]
     no_args = Span("tr", "x", "execute_tool read", SpanKind.TOOL, NOW, attributes={"command": "ls"})
     assert call_key(no_args) == ("execute_tool read", "ls")
+    assert call_key(Span("tr", "y", "edit", SpanKind.TOOL, NOW)) is None
+    streak = identical_streak([call(1, "a"), call(2), call(3)])
+    assert streak is not None and streak.length == 2 and streak.key == ("bash", "same")
+    assert identical_streak([Span("tr", "y", "edit", SpanKind.TOOL, NOW)]) is None
 
 
 # --- config -----------------------------------------------------------------------------
@@ -174,6 +231,8 @@ def test_build_from_config() -> None:
         {"poll_patterns": {"ci_status": "gh"}},
         {"poll_patterns": {"ci_status": [""]}},
         {"max_wait": [1]},
+        {"max_wait": -5},
+        {"poll_window": "0m"},
         {"poll_every": "1m"},
     ],
 )

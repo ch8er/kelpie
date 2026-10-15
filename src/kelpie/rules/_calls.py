@@ -1,4 +1,4 @@
-"""Repeated-call detection over tool spans, shared by rules 2 (wait_condition) and 10."""
+"""Tool-call helpers over spans, shared by rules 2 (wait_condition) and 10 (loop_breaker)."""
 
 from __future__ import annotations
 
@@ -8,11 +8,22 @@ from datetime import datetime
 
 from kelpie.core.model import Span, SpanKind
 
+CallKey = tuple[str, str]
 
-def call_key(span: Span) -> tuple[str, str]:
-    """What makes two tool calls "the same": tool plus arguments hash (or command)."""
-    args = span.args_hash or str(span.attributes.get("command", ""))
-    return (span.tool or span.name, args)
+
+def command(span: Span) -> str:
+    """The command a call ran, if the trace recorded one."""
+    return str(span.attributes.get("command") or "")
+
+
+def call_key(span: Span) -> CallKey | None:
+    """What makes two calls "the same": tool plus arguments (hash, else command).
+
+    None when the arguments are unknown: such calls are never considered identical, so a
+    trace without argument data cannot make a varied session look like a loop.
+    """
+    args = span.args_hash or command(span)
+    return (span.tool or span.name, args) if args else None
 
 
 def tool_calls(spans: Sequence[Span], after: datetime | None = None) -> list[Span]:
@@ -23,7 +34,7 @@ def tool_calls(spans: Sequence[Span], after: datetime | None = None) -> list[Spa
 
 @dataclass(frozen=True, slots=True)
 class Streak:
-    key: tuple[str, str]
+    key: CallKey
     calls: tuple[Span, ...]
 
     @property
@@ -32,10 +43,9 @@ class Streak:
 
 
 def identical_streak(calls: Sequence[Span]) -> Streak | None:
-    """The run of identical calls at the end of ``calls``."""
-    if not calls:
+    """The run of identical calls (same known key) at the end of ``calls``."""
+    if not calls or (key := call_key(calls[-1])) is None:
         return None
-    key = call_key(calls[-1])
     run: list[Span] = []
     for span in reversed(calls):
         if call_key(span) != key:

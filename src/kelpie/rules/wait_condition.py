@@ -3,30 +3,32 @@
 An agent that needs something external (CI, a merge, a quota reset, a human) registers a
 condition and exits; the task becomes ``waiting``. This rule:
 
-- wakes a waiting task when all of its conditions hold;
-- alerts when a task waits past ``max_wait`` or waits without any condition;
-- spots agents that wait *inside* a live session by polling the same thing over and over,
-  and tells them to register a condition and exit.
+- wakes a waiting task when every condition of its *current* wait holds;
+- alerts when a task waits past ``max_wait``, or (after a short grace) waits on nothing;
+- spots agents that wait *inside* a live session by polling a known check, and tells them
+  to register a condition and exit.
 
-Which commands count as polling, and which condition kind each maps to, is configuration
-(``poll_patterns``), never code: Kelpie does not know any particular CI.
+Polling detection only looks at calls matching ``poll_patterns`` (condition kind → command
+substrings), which is configuration, never code: Kelpie knows no particular CI. Without
+patterns it stays silent. Generic loops are rule 10's (``loop_breaker``).
 
-Keeping the platform's dispatcher from declaring a waiting agent dead is the adapter's
-job (it reports ``waiting`` tasks as alive); this rule never requeues waiting tasks.
+Keeping the dispatcher from declaring a waiting task dead is the adapter's job (see
+:class:`kelpie.core.ports.PlatformAdapter`); this rule never requeues waiting tasks.
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import Condition, Session, Snapshot, Span, Status, Task
+from kelpie.core.model import Condition, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._calls import call_key, error_streak, identical_streak, tool_calls
+from kelpie.rules._calls import CallKey, call_key, command, error_streak, tool_calls
 
 NAME = "wait_condition"
 
@@ -34,7 +36,8 @@ NAME = "wait_condition"
 @dataclass(frozen=True, slots=True)
 class WaitCondition:
     max_wait: timedelta = timedelta(hours=24)
-    # condition kind -> substrings of a polled command (matched against call arguments)
+    no_condition_grace: timedelta = timedelta(minutes=10)
+    # condition kind -> substrings of a polled command
     poll_patterns: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     # Defaults are the AgentWatchdog thresholds: 8 repeats in 10 minutes, 5 errors in a row.
     poll_min_repeats: int = 8
@@ -47,24 +50,33 @@ class WaitCondition:
         for task in snapshot.tasks:
             if task.status is Status.WAITING:
                 actions.extend(self._check_waiting(task, snapshot))
-        for session in snapshot.sessions:
-            if session.ended_at is None:
-                actions.extend(self._check_polling(session, snapshot))
+        if self.poll_patterns:
+            for session in snapshot.sessions:
+                if session.ended_at is None:
+                    actions.extend(self._check_polling(session, snapshot))
         return actions
 
     # --- waiting tasks ------------------------------------------------------------------
 
     def _check_waiting(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
-        conditions = _conditions_for(task, snapshot)
+        waited = snapshot.now - task.status_since
+        since = task.status_since.isoformat()
+        conditions, missing = _current_conditions(task, snapshot)
         if not conditions:
+            if waited < self.no_condition_grace:
+                return  # the connector may not have synced the new condition yet
+            what = (
+                f"points at condition {missing}, which Kelpie cannot see"
+                if missing
+                else "is waiting without any registered condition"
+            )
             yield Action(
                 ActionKind.ALERT,
                 NAME,
-                f"Task {task.id} is waiting without any registered condition, so nothing "
-                "will ever wake it.",
+                f"Task {task.id} {what}, so nothing will ever wake it.",
                 task_id=task.id,
                 severity=Severity.WARNING,
-                key=f"no-condition:{task.id}",
+                key=f"no-condition:{task.id}:{since}",
             )
             return
         if all(c.satisfied for c in conditions):
@@ -74,11 +86,10 @@ class WaitCondition:
                 NAME,
                 f"Every condition the task was waiting for now holds: {done}. Waking it up.",
                 task_id=task.id,
-                key=f"wake:{task.id}:{task.status_since.isoformat()}",
+                key=f"wake:{task.id}:{since}",
                 params={"conditions": [c.id for c in conditions]},
             )
             return
-        waited = snapshot.now - task.status_since
         if waited >= self.max_wait:
             pending = [c for c in conditions if not c.satisfied]
             yield Action(
@@ -88,59 +99,95 @@ class WaitCondition:
                 f"for {', '.join(f'{c.id} ({c.kind})' for c in pending)}.",
                 task_id=task.id,
                 severity=Severity.WARNING,
-                key=f"overdue:{task.id}:{task.status_since.isoformat()}",
+                key=f"overdue:{task.id}:{since}",
                 params={"pending_conditions": [c.id for c in pending]},
             )
 
     # --- polling inside a session -------------------------------------------------------
 
     def _check_polling(self, session: Session, snapshot: Snapshot) -> Iterable[Action]:
-        calls = tool_calls(
-            snapshot.spans_for_session(session.id), after=snapshot.now - self.poll_window
+        spans = snapshot.spans_for_session(session.id)
+        calls = tool_calls(spans, after=snapshot.now - self.poll_window)
+        found = (
+            self._repeated_check(calls)
+            or self._failing_check(calls)
+            or self._blocking_check(spans, snapshot)
         )
-        streak = identical_streak(calls)
-        errors = error_streak(calls)
-        if streak is not None and streak.length >= self.poll_min_repeats:
-            what = f"repeated the same call {streak.length} times"
-            kind = self._kind_for(streak.calls[-1])
-        elif len(errors) >= self.poll_error_streak and (kind := self._kind_for(errors[-1])):
-            # Only failures of a known polling check: other error streaks are rule 10's.
-            what = f"failed the same check {len(errors)} times in a row"
-        else:
+        if found is None:
             return
-        hint = (
-            f"register a `{kind}` condition and exit" if kind else "register a condition and exit"
-        )
-        params: dict[str, Any] = {"session_id": session.id}
-        if kind:
-            params["condition_kind"] = kind
+        what, kind = found
         yield Action(
             ActionKind.COMMENT,
             NAME,
-            f"This session {what} within {_minutes(self.poll_window)}, which looks like waiting "
-            f"inside the session. Please {hint}; Kelpie will wake the task when the condition "
-            "holds, and the session will not be mistaken for a dead one.",
+            f"This session {what}, which looks like waiting inside the session. Please "
+            f"register a `{kind}` condition and exit: the task will show as waiting rather "
+            "than dead, and Kelpie will wake it when the condition holds.",
             task_id=session.task_id,
             key=f"poll:{session.id}",
-            params=params,
+            params={"session_id": session.id, "condition_kind": kind},
         )
 
+    def _repeated_check(self, calls: Sequence[Span]) -> tuple[str, str] | None:
+        """The same known check called often within the window, other calls in between."""
+        groups: dict[CallKey, list[Span]] = defaultdict(list)
+        for span in calls:
+            key = call_key(span)
+            if key is not None and self._kind_for(span):
+                groups[key].append(span)
+        if not groups:
+            return None
+        best = max(groups.values(), key=len)
+        if len(best) < self.poll_min_repeats:
+            return None
+        kind = self._kind_for(best[-1])
+        assert kind is not None
+        return f"ran the same check {len(best)} times within {_minutes(self.poll_window)}", kind
+
+    def _failing_check(self, calls: Sequence[Span]) -> tuple[str, str] | None:
+        """The same known check failing over and over (e.g. "still pending" exit codes)."""
+        errors = error_streak(calls)
+        if len(errors) < self.poll_error_streak:
+            return None
+        keys = {call_key(s) for s in errors}
+        kind = self._kind_for(errors[-1])
+        if len(keys) != 1 or None in keys or kind is None:
+            return None
+        return f"failed the same check {len(errors)} times in a row", kind
+
+    def _blocking_check(self, spans: Sequence[Span], snapshot: Snapshot) -> tuple[str, str] | None:
+        """One known check that has been blocking (still running) for a whole window."""
+        for span in spans:
+            if span.kind is not SpanKind.TOOL or span.end is not None:
+                continue
+            running = snapshot.now - span.start
+            if running >= self.poll_window and (kind := self._kind_for(span)):
+                return f"has been blocked on one check for {_minutes(running)}", kind
+        return None
+
     def _kind_for(self, span: Span) -> str | None:
-        """Condition kind for a call, matching ``poll_patterns`` against its command."""
-        command = str(span.attributes.get("command") or call_key(span)[1])
+        text = command(span) or span.args_hash or ""
         return next(
-            (k for k, pats in self.poll_patterns.items() if any(p in command for p in pats)),
+            (k for k, pats in self.poll_patterns.items() if any(p in text for p in pats)),
             None,
         )
 
 
-def _conditions_for(task: Task, snapshot: Snapshot) -> list[Condition]:
-    found = {c.id: c for c in snapshot.conditions if c.task_id == task.id}
+def _current_conditions(task: Task, snapshot: Snapshot) -> tuple[list[Condition], str | None]:
+    """Conditions of the task's current wait, and a referenced id that cannot be found.
+
+    A condition named by the block wins. Otherwise conditions linked by ``task_id`` count,
+    except those registered before the task started waiting this time.
+    """
     if task.block is not None and task.block.condition_id:
         c = snapshot.condition(task.block.condition_id)
-        if c is not None:
-            found[c.id] = c
-    return sorted(found.values(), key=lambda c: c.id)
+        return ([c], None) if c is not None else ([], task.block.condition_id)
+    current = [
+        c
+        for c in snapshot.conditions
+        if c.task_id == task.id
+        and (c.registered_at is None or c.registered_at >= task.status_since)
+    ]
+    return sorted(current, key=lambda c: c.id), None
 
 
 def _hours(d: timedelta) -> str:
@@ -153,9 +200,12 @@ def _minutes(d: timedelta) -> str:
 
 def _duration(value: Any, name: str) -> timedelta:
     try:
-        return parse_duration(value)
+        result = parse_duration(value)
     except (AttributeError, TypeError) as exc:
         raise ValueError(f"{name}: invalid duration {value!r}") from exc
+    if result <= timedelta(0):
+        raise ValueError(f"{name} must be positive")
+    return result
 
 
 def _positive_int(value: Any, name: str) -> int:
@@ -168,7 +218,7 @@ def _positive_int(value: Any, name: str) -> int:
 def build(config: dict[str, Any]) -> WaitCondition:
     config = dict(config)
     kwargs: dict[str, Any] = {}
-    for key in ("max_wait", "poll_window"):
+    for key in ("max_wait", "no_condition_grace", "poll_window"):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     for key in ("poll_min_repeats", "poll_error_streak"):
