@@ -6,7 +6,7 @@ import logging
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.config import EngineConfig, Mode
@@ -23,6 +23,7 @@ from kelpie.core.ledger import (
 from kelpie.core.model import Snapshot
 from kelpie.core.ports import ActionConnector, Alerter, PlatformAdapter
 from kelpie.core.rule import Rule
+from kelpie.core.states import MemoryStateStore, StateStore, StateTracker, Transition
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +53,10 @@ class Engine:
     alerter: Alerter | None = None
     config: EngineConfig = field(default_factory=EngineConfig)
     ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
+    state_store: StateStore = field(default_factory=MemoryStateStore)
     ledger: ActionLedger = field(init=False)
+    states: StateTracker = field(init=False)
+    _evaluated: set[str] | None = field(init=False, default=None)
     rule_errors: Counter[str] = field(init=False, default_factory=Counter)
     _ledger_down_since: datetime | None = field(init=False, default=None)
     _ledger_write_failed: bool = field(init=False, default=False)
@@ -66,6 +70,7 @@ class Engine:
             retry_after=self.config.retry_after,
             max_per_subject_per_hour=self.config.max_actions_per_task_per_hour,
         )
+        self.states = StateTracker(self.state_store, self.config.state_escalations)
         self.executors = {}
         self._platforms = []
         for adapter in self.adapters:
@@ -81,12 +86,16 @@ class Engine:
 
     def evaluate(self, snapshot: Snapshot) -> list[Action]:
         actions: list[Action] = []
+        evaluated: set[str] = set()
         for rule in self.rules:
             try:
                 actions.extend(rule.evaluate(snapshot))
+                evaluated.add(rule.name)
             except Exception:
                 log.exception("rule %s failed; skipped", rule.name)
                 self.rule_errors[rule.name] += 1
+        # Only rules that ran can tell that one of their states is gone.
+        self._evaluated = evaluated
         return actions
 
     @property
@@ -98,35 +107,96 @@ class Engine:
         if snapshot.now.tzinfo is None:
             raise ValueError("snapshot.now must be timezone-aware")
         results: list[Dispatched] = []
+        seen: set[str] = set()
         for action in actions:
-            mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
+            if action.state is not None and action.kind in _ALERT_ACTIONS:
+                seen.add(action.state)
+                action_or_none = self._through_state(action, snapshot)
+                if action_or_none is None:
+                    results.append(self._suppress_ongoing(action, snapshot))
+                    continue
+                action = action_or_none
+            results.append(self._process(action, snapshot))
+        results.extend(self._resolve_gone(seen, snapshot))
+        return results
+
+    def _process(self, action: Action, snapshot: Snapshot) -> Dispatched:
+        mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
+        try:
+            hit = self.ledger.check(action, mode, snapshot.now)
+            self._ledger_down_since = None
+        except Exception:
+            log.exception("action ledger unavailable")
+            first = self._ledger_down_since is None
+            if first:  # tell a human once per outage, not once per tick
+                self._ledger_down_since = snapshot.now
+                self._notice(Suppression.LEDGER_DOWN, action)
+            # Fail closed: nothing with an effect leaves Kelpie without a ledger.
+            hit = None if mode is Mode.OBSERVE else (Suppression.LEDGER_DOWN, first)
+        if hit is not None:
+            why, first = hit
+            log.info("suppressed (%s): %s", why, action)
+            if first and why is Suppression.RATE_LIMIT:
+                self._notice(why, action)
+            dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, why, first)
+        else:
             try:
-                hit = self.ledger.check(action, mode, snapshot.now)
-                self._ledger_down_since = None
+                outcome = self._handle(action, mode, snapshot)
             except Exception:
-                log.exception("action ledger unavailable")
-                first = self._ledger_down_since is None
-                if first:  # tell a human once per outage, not once per tick
-                    self._ledger_down_since = snapshot.now
-                    self._notice(Suppression.LEDGER_DOWN, action)
-                # Fail closed: nothing with an effect leaves Kelpie without a ledger.
-                hit = None if mode is Mode.OBSERVE else (Suppression.LEDGER_DOWN, first)
-            if hit is not None:
-                why, first = hit
-                log.info("suppressed (%s): %s", why, action)
-                if first and why is Suppression.RATE_LIMIT:
-                    self._notice(why, action)
-                dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, why, first)
-            else:
-                try:
-                    outcome = self._handle(action, mode, snapshot)
-                except Exception:
-                    log.exception("action failed: %s", action)
-                    outcome = Outcome.FAILED
-                    self._safe_alert(action, executed=False, prefix="failed")
-                dispatched = Dispatched(action, mode, outcome)
-            self._record(dispatched, snapshot.now)
-            results.append(dispatched)
+                log.exception("action failed: %s", action)
+                outcome = Outcome.FAILED
+                self._safe_alert(action, executed=False, prefix="failed")
+            dispatched = Dispatched(action, mode, outcome)
+        self._record(dispatched, snapshot.now)
+        return dispatched
+
+    # --- long-lived states --------------------------------------------------------------
+
+    def _through_state(self, action: Action, snapshot: Snapshot) -> Action | None:
+        """The alert to deliver for this sighting of a state, or None if nothing is new."""
+        try:
+            transition, state = self.states.observe(action, snapshot.now)
+        except Exception:
+            log.exception("state store unavailable; alerting without transitions")
+            return action  # the ledger cooldown still limits repeats
+        if transition is Transition.ONGOING:
+            return None
+        if transition is Transition.ESCALATED:
+            age = _age(snapshot.now - state.since)
+            return replace(action, reason=f"Still open after {age}: {action.reason}")
+        return action
+
+    def _suppress_ongoing(self, action: Action, snapshot: Snapshot) -> Dispatched:
+        mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
+        dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, Suppression.STATE_OPEN)
+        self._record(dispatched, snapshot.now)
+        return dispatched
+
+    def _resolve_gone(self, seen: set[str], snapshot: Snapshot) -> list[Dispatched]:
+        """Close states that rules which ran fine this tick no longer report."""
+        if self._evaluated is None:
+            return []
+        try:
+            gone = self.states.gone(self._evaluated, seen)
+        except Exception:
+            log.exception("state store unavailable; cannot resolve states")
+            return []
+        results: list[Dispatched] = []
+        for state in gone:
+            first_line = state.summary.split(". ")[0].rstrip(".")
+            notice = Action(
+                ActionKind.ALERT,
+                state.rule,
+                f"Resolved after {_age(snapshot.now - state.since)}: {first_line}.",
+                task_id=state.task_id,
+                key=f"resolved:{state.id}",
+                params={"state": state.id},
+            )
+            results.append(self._process(notice, snapshot))
+            try:
+                self.states.resolve(state, snapshot.now)
+            except Exception:
+                log.exception("could not close state %s", state.id)
         return results
 
     def _record(self, dispatched: Dispatched, now: datetime) -> None:
@@ -211,3 +281,8 @@ class Engine:
             title += " (not executed, needs a human)"
         self.alerter.send(title, action.reason, action.severity)
         return True
+
+
+def _age(d: timedelta) -> str:
+    hours = d.total_seconds() / 3600
+    return f"{hours:.1f}h" if hours >= 1 else f"{max(0, int(d.total_seconds() // 60))}m"

@@ -537,6 +537,7 @@ recommendations. Delivered to Slack or Telegram and as Markdown/HTML.
 **Acceptance criteria**
 - [ ] Generated from storage only, deterministic for the same data
 - [ ] Sections: cost of chaos, fixed by Kelpie, needs a human, top 3 recommendations
+- [ ] "Needs a human" lists the long-lived alert states still open (state store: since, level, last seen), so states announced once are not forgotten
 - [ ] Every number links back to the underlying tasks
 - [ ] Scheduled daily; also available via `kelpie report --date`
 

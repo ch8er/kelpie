@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -36,6 +37,11 @@ class Action:
     ``key`` identifies "the same action" for de-duplication when params hold volatile
     values (e.g. ``key="disk:host-a"`` for a disk alert whose params carry ``used_pct``).
     Without it every param counts.
+
+    ``state`` marks an alert about a long-lived condition (an orphaned task, a block nothing
+    will clear). The engine then alerts on transitions only: once when the state opens,
+    again at escalation thresholds measured from ``since`` (when the condition began), and
+    a short "resolved" when the rule stops reporting it. Ignored on non-alert actions.
     """
 
     kind: ActionKind
@@ -46,3 +52,5 @@ class Action:
     key: str | None = None
     severity: Severity = Severity.INFO
     params: dict[str, Any] = field(default_factory=dict)
+    state: str | None = None
+    since: datetime | None = None

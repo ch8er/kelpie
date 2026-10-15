@@ -90,6 +90,8 @@ class WaitCondition:
                 task_id=task.id,
                 severity=Severity.WARNING,
                 key=f"no-condition:{task.id}:{since}",
+                state=f"{NAME}:no-condition:{task.id}:{since}",
+                since=task.status_since,
             )
             return
         if all(
@@ -116,6 +118,8 @@ class WaitCondition:
                 task_id=task.id,
                 severity=Severity.WARNING,
                 key=f"overdue:{task.id}:{since}",
+                state=f"{NAME}:overdue:{task.id}:{since}",
+                since=task.status_since,
                 params={"pending_conditions": [c.id for c in pending]},
             )
 

@@ -37,6 +37,12 @@ class EngineConfig:
     retry_after: timedelta = timedelta(minutes=5)  # ledger: retry delay after a failure
     # Ledger cap on actions with an effect, per task (else per session, else per rule).
     max_actions_per_task_per_hour: int = 6
+    # Long-lived state alerts re-fire only when their age passes one of these.
+    state_escalations: tuple[timedelta, ...] = (
+        timedelta(hours=4),
+        timedelta(hours=12),
+        timedelta(hours=24),
+    )
     default_mode: Mode = Mode.OBSERVE
     modes: Mapping[str, Mode] = field(default_factory=dict)
     rules: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
@@ -61,6 +67,7 @@ class EngineConfig:
             "cooldown",
             "retry_after",
             "max_actions_per_task_per_hour",
+            "state_escalations",
             "rules",
         }
         unknown = set(data) - known
@@ -86,6 +93,16 @@ class EngineConfig:
             raise ValueError("engine.cooldown and engine.retry_after must not be negative")
         if not isinstance(max_actions, int) or isinstance(max_actions, bool) or max_actions < 1:
             raise ValueError("engine.max_actions_per_task_per_hour must be a positive integer")
+        escalations = cls.state_escalations
+        if "state_escalations" in data:
+            raw = data["state_escalations"]
+            if not isinstance(raw, list | tuple):
+                raise ValueError("engine.state_escalations must be a list of durations")
+            escalations = tuple(parse_duration(v) for v in raw)
+            if any(t <= timedelta(0) for t in escalations) or list(escalations) != sorted(
+                set(escalations)
+            ):
+                raise ValueError("engine.state_escalations must be positive and increasing")
         # Core cannot import kelpie.rules, so rule names are not checked against PLANNED
         # here; whoever wires the engine (CLI/server) must do it.
         return cls(
@@ -94,6 +111,7 @@ class EngineConfig:
             cooldown=cooldown,
             retry_after=retry_after,
             max_actions_per_task_per_hour=max_actions,
+            state_escalations=escalations,
             default_mode=Mode(data.get("default_mode", Mode.OBSERVE)),
             modes=modes,
             rules=rules,

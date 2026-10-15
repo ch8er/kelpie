@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from collections import Counter
@@ -39,6 +40,7 @@ class Metrics:
         self.actions: Counter[tuple[str, str, str, str]] = Counter()
         self.rule_errors: Counter[str] = Counter()
         self.ledger_up = True
+        self.open_states: Counter[str] = Counter()
         self.dry_run = True
         self.rules: list[tuple[str, str, bool]] = []  # (name, mode, implemented)
 
@@ -72,6 +74,9 @@ class Metrics:
             {r: n - self.rule_errors.get(r, 0) for r, n in engine.rule_errors.items()}
         )
         self.ledger_up = engine.ledger_available
+        # The state store shares the ledger's fate; on failure keep the last value.
+        with contextlib.suppress(Exception):
+            self.open_states = Counter(s.rule for s in engine.states.store.open_states())
 
     def render(self) -> str:
         with self._lock:
@@ -152,6 +157,15 @@ class Metrics:
                 [
                     f"kelpie_actions_total{_labels(rule=r, kind=k, mode=m, outcome=o)} {n}"
                     for (r, k, m, o), n in sorted(self.actions.items())
+                ],
+            )
+            metric(
+                "kelpie_open_states",
+                "gauge",
+                "Long-lived alert states currently open, by rule.",
+                [
+                    f"kelpie_open_states{_labels(rule=r)} {n}"
+                    for r, n in sorted(self.open_states.items())
                 ],
             )
             metric(
