@@ -20,3 +20,32 @@ max_actions_per_task_per_hour = 6  # actions with an effect per task (else sessi
 [storage]
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
                           # $KELPIE_DB overrides this.
+
+# Platform adapters. Kelpie only reads the board and, for now, cannot change it (Hermes
+# actions are not implemented yet): keep rules in observe or suggest mode. A rule in act
+# mode with dry_run = false and Hermes as the only adapter stops Kelpie at startup.
+#
+# [adapters.hermes]
+# db_path = "~/.hermes/kanban.db"   # named boards: ~/.hermes/kanban/boards/<slug>/kanban.db
+# spool = "~/.hermes/kelpie/spool.jsonl"  # tool-call spans from the Hermes plugin; false = off
+# lookback = "24h"                  # runs, spans and finished tasks older than this are left out
+# enabled = true
+#
+# Recommended on Hermes. A valid Hermes claim counts as a heartbeat, but Hermes tolerates
+# heartbeats up to an hour old, while Kelpie's default is 30 minutes:
+#
+# [engine.rules.exit_contract]
+# session_stale_after = "60m"
+# [engine.rules.orphan_status]
+# session_stale_after = "60m"
+# [engine.rules.wait_condition]
+# session_stale_after = "60m"
+#
+# Blocks. The adapter reports Hermes typed blocks (needs_input, capability, transient) as
+# "waiting_human: <kind>: <reason>" and circuit-breaker parks as "guard: hermes circuit
+# breaker ...", both allowed by default. The alternative is to leave the adapter's wording
+# alone and list the Hermes kinds yourself (this replaces the default list):
+#
+# [engine.rules.exit_contract]
+# allowed_block_reasons = ["guard", "waiting_ci", "waiting_pr_merge", "waiting_human", "quota",
+#                          "needs_input", "capability", "transient"]

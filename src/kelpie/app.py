@@ -14,15 +14,18 @@ import time
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from kelpie.adapters.hermes import adapter as hermes
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
-from kelpie.core.model import Snapshot
+from kelpie.core.model import Owner, Snapshot
+from kelpie.core.ports import PlatformAdapter, SnapshotSource
 from kelpie.core.rule import Rule
+from kelpie.core.serde import parse_duration
 from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SqliteLedgerStore
 from kelpie.metrics import Metrics
@@ -39,8 +42,22 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class HermesSettings:
+    """``[adapters.hermes]``: where the Kanban board and the hooks spool live."""
+
+    db_path: Path = hermes.DEFAULT_DB
+    spool: Path | None = hermes.DEFAULT_SPOOL  # None: spool reading disabled
+    lookback: timedelta = hermes.DEFAULT_LOOKBACK
+    enabled: bool = True
+
+    def build(self) -> hermes.HermesAdapter:
+        return hermes.HermesAdapter(db_path=self.db_path, spool=self.spool, lookback=self.lookback)
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     engine: EngineConfig = field(default_factory=EngineConfig)
+    hermes: HermesSettings | None = None  # None: no [adapters.hermes] section
     db_path: Path | None = DEFAULT_DB  # None keeps the ledger in memory
     source: Path | None = None  # the file the settings came from, if any
 
@@ -62,7 +79,7 @@ def load_settings(path: Path | None) -> Settings:
                 data = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"cannot read config {path}: {exc}") from exc
-    unknown = set(data) - {"engine", "storage"}
+    unknown = set(data) - {"engine", "storage", "adapters"}
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
     try:
@@ -78,7 +95,45 @@ def load_settings(path: Path | None) -> Settings:
     if not isinstance(raw_db, str) or not raw_db.strip():
         raise ConfigError("storage path must be a non-empty string")
     db_path = None if raw_db == ":memory:" else Path(raw_db)
-    return Settings(engine=engine, db_path=db_path, source=path)
+    return Settings(
+        engine=engine, hermes=_load_hermes(data.get("adapters", {})), db_path=db_path, source=path
+    )
+
+
+def _load_hermes(adapters: Any) -> HermesSettings | None:
+    if not isinstance(adapters, Mapping):
+        raise ConfigError("[adapters] must be a table")
+    if extra := set(adapters) - {"hermes"}:
+        raise ConfigError(f"unknown [adapters] entries: {sorted(extra)}")
+    if "hermes" not in adapters:
+        return None
+    section = adapters["hermes"]
+    if not isinstance(section, Mapping):
+        raise ConfigError("[adapters.hermes] must be a table")
+    if extra := set(section) - {"db_path", "spool", "lookback", "enabled"}:
+        raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
+    paths: dict[str, Path | None] = {}
+    for key, default in (("db_path", hermes.DEFAULT_DB), ("spool", hermes.DEFAULT_SPOOL)):
+        value = section.get(key, str(default))
+        if key == "spool" and value is False:
+            paths[key] = None  # spool = false: no hook data
+        elif not isinstance(value, str) or not value.strip():
+            allowed = "a non-empty string or false" if key == "spool" else "a non-empty string"
+            raise ConfigError(f"[adapters.hermes] {key} must be {allowed}")
+        else:
+            paths[key] = Path(value)
+    db_path = paths["db_path"]
+    assert db_path is not None
+    try:
+        lookback = parse_duration(section.get("lookback", hermes.DEFAULT_LOOKBACK))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ConfigError(f"[adapters.hermes] lookback: {exc}") from exc
+    if lookback <= timedelta(0):
+        raise ConfigError("[adapters.hermes] lookback must be positive")
+    enabled = section.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("[adapters.hermes] enabled must be true or false")
+    return HermesSettings(db_path, paths["spool"], lookback, enabled)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,8 +198,57 @@ def utc_now() -> datetime:
 
 
 def empty_snapshot(clock: Callable[[], datetime] = utc_now) -> Callable[[], Snapshot]:
-    """Snapshot source until platform adapters are wired: just the current time."""
+    """Snapshot source without adapters: just the current time."""
     return lambda: Snapshot(now=clock())
+
+
+def merged_snapshot(
+    adapters: Sequence[PlatformAdapter],
+    metrics: Metrics,
+    clock: Callable[[], datetime] = utc_now,
+) -> Callable[[], Snapshot]:
+    """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
+
+    An adapter that raises is logged, counted in ``kelpie_adapter_errors_total`` and left
+    out of that tick; the others still count.
+    """
+
+    def source() -> Snapshot:
+        now = clock()
+        merged = Snapshot(now=now)
+        for adapter in adapters:
+            if not isinstance(adapter, SnapshotSource):
+                continue
+            try:
+                part = adapter.snapshot(now)
+            except Exception as exc:
+                log.error("adapter %s failed to snapshot: %s", adapter.name, exc)
+                metrics.adapter_failed(adapter.name)
+                continue
+            merged = Snapshot(
+                now=now,
+                tasks=merged.tasks + part.tasks,
+                owners=_unique_owners(merged.owners + part.owners),
+                dependencies=merged.dependencies + part.dependencies,
+                conditions=merged.conditions + part.conditions,
+                resources=merged.resources + part.resources,
+                sessions=merged.sessions + part.sessions,
+                spans=merged.spans + part.spans,
+            )
+        return merged
+
+    return source
+
+
+def _unique_owners(owners: tuple[Owner, ...]) -> tuple[Owner, ...]:
+    return tuple({o.id: o for o in owners}.values())
+
+
+def build_adapters(settings: Settings) -> list[PlatformAdapter]:
+    adapters: list[PlatformAdapter] = []
+    if settings.hermes is not None and settings.hermes.enabled:
+        adapters.append(settings.hermes.build())
+    return adapters
 
 
 @dataclass(slots=True)
@@ -218,18 +322,59 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         )
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
-    # No platform adapters, connectors or alerter are wired yet: with no executors every
-    # effect would turn into an alert, and the defaults (dry-run, observe) send nothing.
+    # No connectors or alerter are wired yet: an effect nobody can carry out turns into an
+    # alert, and the defaults (dry-run, observe) send nothing.
+    adapters = build_adapters(settings)
+    _refuse_unimplemented_actions(settings, loaded, adapters)
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
-    engine = Engine(loaded.rules, config=settings.engine, ledger_store=store, state_store=states)
+    engine = Engine(
+        loaded.rules,
+        adapters=adapters,
+        config=settings.engine,
+        ledger_store=store,
+        state_store=states,
+    )
     metrics = Metrics()
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
-    loop = ControlLoop(engine, empty_snapshot(clock), metrics)
+    metrics.set_adapters(a.name for a in adapters)
+    loop = ControlLoop(engine, merged_snapshot(adapters, metrics, clock), metrics)
     return App(settings, loaded, engine, loop, metrics, store)
 
 
-def render_status(settings: Settings, loaded: LoadedRules) -> str:
+def _refuse_unimplemented_actions(
+    settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter]
+) -> None:
+    """Hermes cannot carry out actions yet; an act-mode rule would only fail at runtime."""
+    only_hermes = bool(adapters) and all(isinstance(a, hermes.HermesAdapter) for a in adapters)
+    acting = sorted(s.name for s in loaded.statuses if s.implemented and s.mode is Mode.ACT)
+    if only_hermes and acting and not settings.engine.dry_run:
+        raise ConfigError(
+            f"Hermes actions are not implemented; use observe or suggest mode (rules in act "
+            f"mode: {acting})"
+        )
+
+
+def render_adapters(adapters: Sequence[PlatformAdapter]) -> list[str]:
+    lines = ["", "adapters:"]
+    for adapter in adapters:
+        check = getattr(adapter, "check", None)
+        problem = check() if callable(check) else None
+        db = getattr(adapter, "db_path", None)
+        where = f" ({db})" if db else ""
+        state = "readable" if problem is None else f"NOT readable: {problem}"
+        lines.append(f"  {adapter.name}{where}: {state}")
+        detail = getattr(adapter, "status_detail", None)
+        if callable(detail):
+            lines += [f"    {line}" for line in detail(utc_now())]
+    if not adapters:
+        lines.append("  (none configured)")
+    return lines
+
+
+def render_status(
+    settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter] = ()
+) -> str:
     """Human-readable view of what ``kelpie serve`` would load with these settings."""
     engine = settings.engine
     lines = [
@@ -249,4 +394,5 @@ def render_status(settings: Settings, loaded: LoadedRules) -> str:
             mode += " (dry-run)"
         lines.append(f"{number:>3}  {s.name:<17} {prio:<4}  {status:<16} {mode}")
     lines += [f"warning: {w}" for w in loaded.warnings]
+    lines += render_adapters(adapters)
     return "\n".join(lines) + "\n"

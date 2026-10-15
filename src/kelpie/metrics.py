@@ -39,6 +39,7 @@ class Metrics:
         self.last_tick = 0.0
         self.actions: Counter[tuple[str, str, str, str]] = Counter()
         self.rule_errors: Counter[str] = Counter()
+        self.adapter_errors: Counter[str] = Counter()
         self.ledger_up = True
         self.open_states: Counter[str] = Counter()
         self.dry_run = True
@@ -53,6 +54,15 @@ class Metrics:
             for name, _, implemented in self.rules:
                 if implemented:  # expose 0 so rate() sees the first error
                     self.rule_errors.setdefault(name, 0)
+
+    def set_adapters(self, names: Iterable[str]) -> None:
+        with self._lock:
+            for name in names:  # expose 0 so rate() sees the first error
+                self.adapter_errors.setdefault(name, 0)
+
+    def adapter_failed(self, name: str) -> None:
+        with self._lock:
+            self.adapter_errors[name] += 1
 
     def observe_tick(self, seconds: float, results: Sequence[Dispatched], engine: Engine) -> None:
         with self._lock:
@@ -147,6 +157,15 @@ class Metrics:
                 [
                     f"kelpie_rule_errors_total{_labels(rule=r)} {n}"
                     for r, n in sorted(self.rule_errors.items())
+                ],
+            )
+            metric(
+                "kelpie_adapter_errors_total",
+                "counter",
+                "Adapter snapshots that raised; the adapter is skipped for that tick.",
+                [
+                    f"kelpie_adapter_errors_total{_labels(adapter=a)} {n}"
+                    for a, n in sorted(self.adapter_errors.items())
                 ],
             )
             metric(

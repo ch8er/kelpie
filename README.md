@@ -203,9 +203,9 @@ farm throughput metrics from traces.
 
 ## Quickstart
 
-> While Kelpie is pre-alpha, `kelpie serve` runs the control loop over an empty snapshot
-> (no platform adapters are wired yet) and exposes `/metrics` and `/healthz` on port 9464.
-> It starts safe: global dry-run on, every rule in observe mode.
+> While Kelpie is pre-alpha, `kelpie serve` runs the control loop and exposes `/metrics` and
+> `/healthz` on port 9464. Without an `[adapters.hermes]` section the snapshot is empty. It
+> starts safe: global dry-run on, every rule in observe mode.
 
 Requirements: Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
@@ -228,8 +228,24 @@ docker compose up
 Ports are bound to `127.0.0.1` (Kelpie 9464, Prometheus 9090, Grafana 3000). Add
 `--profile local-agents` to also run node_exporter when agents share the server host.
 
-Install node_exporter and the platform plugin (for example the Hermes plugin) on each host
-where agents run, and point them at the Kelpie server.
+To watch a Hermes farm (read only, observe mode), add the section below to `kelpie.toml`
+and install the hooks plugin on the Hermes host; see
+[`src/kelpie/adapters/hermes/README.md`](src/kelpie/adapters/hermes/README.md). Hermes
+actions are not implemented yet, so rules cannot change the board.
+
+```toml
+[adapters.hermes]
+db_path = "~/.hermes/kanban.db"
+
+# Hermes tolerates heartbeats up to an hour old (Kelpie's default is 30 minutes).
+[engine.rules.exit_contract]
+session_stale_after = "60m"
+```
+
+`kelpie.example.toml` has the same for `orphan_status` and `wait_condition`, and the
+alternative `allowed_block_reasons` list for Hermes block kinds.
+
+Install node_exporter on each host where agents run, and point it at the Kelpie server.
 
 ## Project layout
 
@@ -254,10 +270,11 @@ docker-compose.yml      kelpie + prometheus + grafana
 ```
 
 What exists today: the domain model, action types, the rule protocol and registry,
-adapter/connector protocols, the engine (routing to executors, per-rule modes, action
+adapter/connector protocols, the read side of the Hermes adapter (kanban.db and a hooks
+plugin), the engine (routing to executors, per-rule modes, action
 ledger in SQLite), `kelpie serve` with the control loop and engine metrics, `kelpie
-status`, and fixtures for the 13 farm incidents and for field evidence. Adapters,
-connectors, traces, alerters and the report are stubs, `kelpie report` does not exist yet,
+status`, and fixtures for the 13 farm incidents and for field evidence. Hermes actions,
+other adapters, connectors, traces, alerters and the report are stubs, `kelpie report` does not exist yet,
 and rules 1–4 (`exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`) are
 implemented; see
 [docs/plan.md](docs/plan.md) and [docs/roadmap.md](docs/roadmap.md).

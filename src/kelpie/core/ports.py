@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from kelpie.core.actions import Action, ActionKind
-from kelpie.core.model import Condition, ConditionKind, Session, Status, Task
+from kelpie.core.model import Condition, ConditionKind, Session, Snapshot, Status, Task
 
 
 @runtime_checkable
@@ -39,6 +39,17 @@ class PlatformAdapter(Protocol):
     def wip_commit(self, task_id: str, message: str) -> None: ...
 
     def events(self, since: datetime) -> Iterable[PlatformEvent]: ...
+
+
+@runtime_checkable
+class SnapshotSource(Protocol):
+    """Optional adapter capability: describe the board as of ``now``.
+
+    A platform adapter that can describe its board: tasks, owners, dependencies, sessions
+    and spans as of ``now``. The caller owns the clock; the adapter never reads it.
+    """
+
+    def snapshot(self, now: datetime) -> Snapshot: ...
 
 
 @runtime_checkable
