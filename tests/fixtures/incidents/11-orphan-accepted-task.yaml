@@ -1,0 +1,56 @@
+id: "11-orphan-accepted-task"
+incident: 11
+title: "Accepted task stuck with no owner, blocking 7 dependents"
+description: >
+  A task reached accepted (reviewed, waiting to be merged/closed) but its owner field was
+  cleared, so no agent or human was responsible for moving it to done. It sat for three hours,
+  and because seven downstream tasks depended on it reaching a terminal status, a whole slice
+  of the plan was frozen behind a task nobody owned.
+rule: orphan_status
+config:
+  orphan_after: "30m"
+  critical_dependents: 3
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: reviewer-1, role: reviewer}
+    - {id: agent-merge-1, role: merger}
+  tasks:
+    - id: T-1101
+      title: "Introduce shared auth middleware"
+      status: accepted
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: merger
+      owner_id: null
+    - {id: T-1102, title: "Protect admin endpoints", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    - {id: T-1103, title: "Protect billing endpoints", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    - {id: T-1104, title: "Protect export endpoints", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    - {id: T-1105, title: "Add auth audit log", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    - {id: T-1106, title: "Session expiry handling", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    - {id: T-1107, title: "Auth e2e tests", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    - {id: T-1108, title: "Auth docs update", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    # Distractor: ownerless but only for 10 minutes (below orphan_after).
+    - {id: T-1109, title: "Bump lint config", status: accepted, status_since: "2026-03-02T15:50:00+00:00", role: merger}
+  dependencies:
+    - {task_id: T-1102, depends_on: T-1101}
+    - {task_id: T-1103, depends_on: T-1101}
+    - {task_id: T-1104, depends_on: T-1101}
+    - {task_id: T-1105, depends_on: T-1101}
+    - {task_id: T-1106, depends_on: T-1101}
+    - {task_id: T-1107, depends_on: T-1101}
+    - {task_id: T-1108, depends_on: T-1101}
+expected_actions:
+  - kind: alert
+    task_id: T-1101
+    severity: critical
+    params: {dependents: 7}
+  - kind: reassign
+    task_id: T-1101
+    reason_contains: "owner"
+not_expected_actions:
+  - kind: reassign
+    task_id: T-1109
+  - kind: alert
+    task_id: T-1109

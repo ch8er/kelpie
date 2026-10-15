@@ -1,0 +1,37 @@
+id: "08-block-outlived-cause"
+incident: 8
+title: "Block lingered 3h after its PR was merged"
+description: >
+  A task was blocked until an upstream pull request merged. The PR merged, the condition
+  connector recorded it as satisfied, but the block stayed for another three hours because
+  nobody re-checked blocked tasks. The task and its follow-ups lost half a working day.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - id: T-801
+      title: "Use new client API from upstream PR"
+      status: blocked
+      status_since: "2026-03-02T10:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block:
+        reason: "waiting_pr_merge: example/repo#80"
+        since: "2026-03-02T10:30:00+00:00"
+        condition_id: C-801
+  conditions:
+    - id: C-801
+      kind: pr_merged
+      task_id: T-801
+      params: {repo: example/repo, pr: 80}
+      satisfied: true
+      satisfied_at: "2026-03-02T12:00:00+00:00"
+      checked_at: "2026-03-02T14:58:00+00:00"
+expected_actions:
+  - kind: unblock
+    task_id: T-801
+    reason_contains: "3h"

@@ -70,4 +70,11 @@ def matches(action: Action, spec: dict[str, Any]) -> bool:
     if "reason_contains" in spec and spec["reason_contains"].lower() not in action.reason.lower():
         return False
     params = spec.get("params") or {}
-    return all(action.params.get(k) == v for k, v in params.items())
+    return all(_param_equal(action.params.get(k), v) for k, v in params.items())
+
+
+def _param_equal(actual: Any, expected: Any) -> bool:
+    """Lists compare order-insensitively; everything else by equality."""
+    if isinstance(expected, list) and isinstance(actual, list | tuple):
+        return sorted(map(repr, actual)) == sorted(map(repr, expected))
+    return actual == expected

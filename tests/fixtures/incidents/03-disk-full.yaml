@@ -1,0 +1,36 @@
+id: "03-disk-full"
+incident: 3
+title: "Disk at 99% on the agent host"
+description: >
+  Agent worktrees, build caches and logs filled the shared disk on host-a to 99%.
+  Builds and git operations started failing with cryptic errors, and agents burned
+  sessions retrying work that could not succeed. A single early alert would have saved
+  hours of failed runs.
+rule: resources
+config:
+  disk_warning: 0.85
+  disk_critical: 0.95
+snapshot:
+  now: "2026-03-02T11:00:00+00:00"
+  resources:
+    - name: "host-a:/"
+      kind: disk
+      host: host-a
+      used: 495
+      limit: 500
+      unit: GB
+    # Distractor: healthy disk on another host.
+    - name: "host-b:/"
+      kind: disk
+      host: host-b
+      used: 200
+      limit: 500
+      unit: GB
+expected_actions:
+  - kind: alert
+    severity: critical
+    reason_contains: "disk"
+    params: {host: host-a}
+not_expected_actions:
+  - kind: alert
+    params: {host: host-b}

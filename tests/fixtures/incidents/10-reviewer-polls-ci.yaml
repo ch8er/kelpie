@@ -1,0 +1,80 @@
+id: "10-reviewer-polls-ci"
+incident: 10
+title: "Reviewer polls CI inside its session and looks dead"
+description: >
+  A reviewer agent waited for CI by running `gh pr checks` in a loop roughly every 60 seconds
+  for 40 minutes inside its own session. It made no progress and sent no heartbeat, so the
+  dispatcher considered it dead and restarted it, wasting the session and tokens. The right
+  behavior is to register a ci_status condition, block on it, and exit.
+rule: wait_condition
+config:
+  poll_min_repeats: 10
+  poll_window: "45m"
+snapshot:
+  now: "2026-03-02T10:45:00+00:00"
+  owners:
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - id: T-1001
+      title: "Review: rate limiter middleware"
+      status: review
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+  sessions:
+    - id: S-1001
+      task_id: T-1001
+      owner_id: reviewer-1
+      started_at: "2026-03-02T10:02:00+00:00"
+      last_heartbeat: "2026-03-02T10:04:00+00:00"
+  spans:
+    - {trace_id: TR-1001, span_id: SP-00, name: "session reviewer-1", kind: session, start: "2026-03-02T10:02:00+00:00", task_id: T-1001, session_id: S-1001}
+    - {trace_id: TR-1001, span_id: SP-01, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:04:00+00:00", end: "2026-03-02T10:04:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-02, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:05:00+00:00", end: "2026-03-02T10:05:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-03, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:06:00+00:00", end: "2026-03-02T10:06:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-04, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:07:00+00:00", end: "2026-03-02T10:07:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-05, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:08:00+00:00", end: "2026-03-02T10:08:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-06, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:09:00+00:00", end: "2026-03-02T10:09:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-07, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:10:00+00:00", end: "2026-03-02T10:10:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-08, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:11:00+00:00", end: "2026-03-02T10:11:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-09, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:12:00+00:00", end: "2026-03-02T10:12:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-10, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:13:00+00:00", end: "2026-03-02T10:13:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-11, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:14:00+00:00", end: "2026-03-02T10:14:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-12, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:15:00+00:00", end: "2026-03-02T10:15:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-13, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:16:00+00:00", end: "2026-03-02T10:16:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-14, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:17:00+00:00", end: "2026-03-02T10:17:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-15, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:18:00+00:00", end: "2026-03-02T10:18:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-16, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:19:00+00:00", end: "2026-03-02T10:19:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-17, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:20:00+00:00", end: "2026-03-02T10:20:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-18, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:21:00+00:00", end: "2026-03-02T10:21:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-19, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:22:00+00:00", end: "2026-03-02T10:22:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-20, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:23:00+00:00", end: "2026-03-02T10:23:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-21, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:24:00+00:00", end: "2026-03-02T10:24:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-22, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:25:00+00:00", end: "2026-03-02T10:25:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-23, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:26:00+00:00", end: "2026-03-02T10:26:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-24, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:27:00+00:00", end: "2026-03-02T10:27:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-25, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:28:00+00:00", end: "2026-03-02T10:28:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-26, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:29:00+00:00", end: "2026-03-02T10:29:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-27, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:30:00+00:00", end: "2026-03-02T10:30:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-28, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:31:00+00:00", end: "2026-03-02T10:31:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-29, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:32:00+00:00", end: "2026-03-02T10:32:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-30, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:33:00+00:00", end: "2026-03-02T10:33:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-31, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:34:00+00:00", end: "2026-03-02T10:34:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-32, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:35:00+00:00", end: "2026-03-02T10:35:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-33, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:36:00+00:00", end: "2026-03-02T10:36:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-34, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:37:00+00:00", end: "2026-03-02T10:37:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-35, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:38:00+00:00", end: "2026-03-02T10:38:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-36, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:39:00+00:00", end: "2026-03-02T10:39:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-37, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:40:00+00:00", end: "2026-03-02T10:40:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-38, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:41:00+00:00", end: "2026-03-02T10:41:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-39, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:42:00+00:00", end: "2026-03-02T10:42:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-40, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:43:00+00:00", end: "2026-03-02T10:43:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+    - {trace_id: TR-1001, span_id: SP-41, parent_id: SP-00, name: "execute_tool bash", kind: tool, tool: bash, start: "2026-03-02T10:44:00+00:00", end: "2026-03-02T10:44:04+00:00", task_id: T-1001, session_id: S-1001, outcome: pending, attributes: {command: "gh pr checks 101"}}
+expected_actions:
+  - kind: comment
+    task_id: T-1001
+    reason_contains: "condition"
+    params: {condition_kind: ci_status}
+not_expected_actions:
+  - kind: requeue
+    task_id: T-1001

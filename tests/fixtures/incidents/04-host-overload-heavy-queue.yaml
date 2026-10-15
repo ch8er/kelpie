@@ -1,0 +1,36 @@
+id: "04-host-overload-heavy-queue"
+incident: 4
+title: "Host overloaded while heavy tasks queue up"
+description: >
+  host-a ran with load average far above its core count and memory nearly exhausted
+  because several heavy tasks (full builds, large test suites) were dispatched at once.
+  More heavy tasks waited in ready and would have been picked up next, making the
+  thrashing worse. Limiting heavy concurrency on the host would have kept every run faster.
+rule: resources
+config:
+  load_warning: 1.5          # load / cores
+  memory_warning: 0.9
+  heavy_label: heavy
+  max_heavy_per_host: 1
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+  tasks:
+    - {id: T-401, title: "Full integration build", status: in_progress, status_since: "2026-03-02T15:10:00+00:00", role: developer, owner_id: agent-dev-1, labels: [heavy], estimate: "2h"}
+    - {id: T-402, title: "Regenerate fixtures for all modules", status: in_progress, status_since: "2026-03-02T15:20:00+00:00", role: developer, owner_id: agent-dev-2, labels: [heavy], estimate: "1h30m"}
+    - {id: T-403, title: "Run full e2e suite", status: in_progress, status_since: "2026-03-02T15:30:00+00:00", role: developer, owner_id: agent-dev-3, labels: [heavy], estimate: "2h"}
+    - {id: T-404, title: "Rebuild search index", status: ready, status_since: "2026-03-02T15:00:00+00:00", role: developer, labels: [heavy], estimate: "1h30m"}
+    - {id: T-405, title: "Profile memory of importer", status: ready, status_since: "2026-03-02T15:05:00+00:00", role: developer, labels: [heavy], estimate: "2h"}
+    - {id: T-406, title: "Fix typo in CLI help", status: ready, status_since: "2026-03-02T15:40:00+00:00", role: developer, estimate: "15m"}
+  resources:
+    - {name: "host-a:load1", kind: load, host: host-a, used: 27.5, limit: 8, unit: load}
+    - {name: "host-a:memory", kind: memory, host: host-a, used: 30.8, limit: 32, unit: GB}
+    - {name: "host-a:cpu", kind: cpu, host: host-a, used: 98, limit: 100, unit: percent}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "heavy"
+    params: {host: host-a, max_heavy: 1}
