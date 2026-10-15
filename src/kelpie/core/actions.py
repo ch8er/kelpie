@@ -32,6 +32,10 @@ class Action:
 
     ``executor`` names the platform adapter or connector that must carry it out. When it
     is empty the engine routes by the task's ``source``.
+
+    ``key`` identifies "the same action" for de-duplication when params hold volatile
+    values (e.g. ``key="disk:host-a"`` for a disk alert whose params carry ``used_pct``).
+    Without it every param counts.
     """
 
     kind: ActionKind
@@ -39,5 +43,6 @@ class Action:
     reason: str
     task_id: str | None = None
     executor: str | None = None
+    key: str | None = None
     severity: Severity = Severity.INFO
     params: dict[str, Any] = field(default_factory=dict)

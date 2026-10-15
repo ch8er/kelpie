@@ -20,6 +20,8 @@ def parse_duration(value: str | int | float | timedelta) -> timedelta:
     """Parse ``"1d2h30m"``-style strings; bare numbers are seconds."""
     if isinstance(value, timedelta):
         return value
+    if isinstance(value, bool):
+        raise ValueError(f"invalid duration: {value!r}")
     if isinstance(value, int | float):
         return timedelta(seconds=value)
     m = _DURATION.match(value.strip())

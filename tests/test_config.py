@@ -59,3 +59,25 @@ def test_missing_engine_table_means_defaults(tmp_path: Path) -> None:
 def test_invalid_config_rejected(data: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         EngineConfig.from_mapping(data)
+
+
+def test_ledger_settings() -> None:
+    config = EngineConfig.from_mapping(
+        {"cooldown": "10m", "retry_after": "1m", "max_actions_per_task_per_hour": 2}
+    )
+    assert config.cooldown == timedelta(minutes=10)
+    assert config.retry_after == timedelta(minutes=1)
+    assert config.max_actions_per_task_per_hour == 2
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"cooldown": -1},
+        {"max_actions_per_task_per_hour": 0},
+        {"max_actions_per_task_per_hour": True},
+    ],
+)
+def test_invalid_ledger_settings_rejected(data: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        EngineConfig.from_mapping(data)

@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
-from enum import StrEnum
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 
-from kelpie.core.actions import Action, ActionKind
+from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
+from kelpie.core.ledger import (
+    ActionLedger,
+    Dispatched,
+    LedgerStore,
+    MemoryLedgerStore,
+    Outcome,
+    Suppression,
+    subject,
+)
 from kelpie.core.model import Snapshot
 from kelpie.core.ports import ActionConnector, Alerter, PlatformAdapter
 from kelpie.core.rule import Rule
@@ -17,26 +26,6 @@ from kelpie.core.rule import Rule
 log = logging.getLogger(__name__)
 
 _ALERT_ACTIONS = {ActionKind.ALERT, ActionKind.ESCALATE}
-
-
-class Outcome(StrEnum):
-    DRY_RUN = "dry_run"  # global override: logged only
-    OBSERVED = "observed"  # rule in observe mode: logged only
-    SUGGESTED = "suggested"  # sent to a human as a suggestion
-    ALERTED = "alerted"  # alert/escalation delivered
-    EXECUTED = "executed"  # carried out by an executor
-    NOT_EXECUTED = "not_executed"  # no executor could do it; a human was alerted
-    FAILED = "failed"  # the executor raised
-    DROPPED = "dropped"  # should have reached a human, but no alerter is configured
-
-
-@dataclass(frozen=True, slots=True)
-class Dispatched:
-    """What happened to an action. ``mode`` is the effective mode (observe under dry-run)."""
-
-    action: Action
-    mode: Mode
-    outcome: Outcome
 
 
 @dataclass(slots=True)
@@ -51,7 +40,9 @@ class Engine:
     skipped; it never stops the loop.
 
     Each rule runs in its configured mode (observe | suggest | act, default observe);
-    ``config.dry_run`` overrides every mode.
+    ``config.dry_run`` overrides every mode. Every action passes the action ledger first
+    (see :mod:`kelpie.core.ledger`). If the ledger itself fails, the engine fails closed:
+    only observe and dry-run actions proceed, and a human is told once per tick.
     """
 
     rules: Sequence[Rule]
@@ -59,10 +50,19 @@ class Engine:
     connectors: Iterable[ActionConnector] = ()
     alerter: Alerter | None = None
     config: EngineConfig = field(default_factory=EngineConfig)
+    ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
+    ledger: ActionLedger = field(init=False)
+    _ledger_down_since: datetime | None = field(init=False, default=None)
     executors: dict[str, Executor] = field(init=False)
     _platforms: list[str] = field(init=False)
 
     def __post_init__(self) -> None:
+        self.ledger = ActionLedger(
+            self.ledger_store,
+            cooldown=self.config.cooldown,
+            retry_after=self.config.retry_after,
+            max_per_subject_per_hour=self.config.max_actions_per_task_per_hour,
+        )
         self.executors = {}
         self._platforms = []
         for adapter in self.adapters:
@@ -92,12 +92,60 @@ class Engine:
         for action in actions:
             mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
             try:
-                outcome = self._handle(action, mode, snapshot)
+                hit = self.ledger.check(action, mode, snapshot.now)
+                self._ledger_down_since = None
             except Exception:
-                log.exception("action failed; skipped: %s", action)
-                outcome = Outcome.FAILED
-            results.append(Dispatched(action, mode, outcome))
+                log.exception("action ledger unavailable")
+                first = self._ledger_down_since is None
+                if first:  # tell a human once per outage, not once per tick
+                    self._ledger_down_since = snapshot.now
+                    self._notice(Suppression.LEDGER_DOWN, action)
+                # Fail closed: nothing with an effect leaves Kelpie without a ledger.
+                hit = None if mode is Mode.OBSERVE else (Suppression.LEDGER_DOWN, first)
+            if hit is not None:
+                why, first = hit
+                log.info("suppressed (%s): %s", why, action)
+                if first and why is Suppression.RATE_LIMIT:
+                    self._notice(why, action)
+                dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, why, first)
+            else:
+                try:
+                    outcome = self._handle(action, mode, snapshot)
+                except Exception:
+                    log.exception("action failed: %s", action)
+                    outcome = Outcome.FAILED
+                    self._safe_alert(action, executed=False, prefix="failed")
+                dispatched = Dispatched(action, mode, outcome)
+            self._record(dispatched, snapshot.now)
+            results.append(dispatched)
         return results
+
+    def _record(self, dispatched: Dispatched, now: datetime) -> None:
+        try:
+            self.ledger.record(dispatched, now)
+        except Exception:
+            # The entry stays in the ledger's memory, so it still counts for this process.
+            log.exception("could not persist ledger entry; kept in memory")
+
+    def _notice(self, why: Suppression, action: Action) -> None:
+        if why is Suppression.RATE_LIMIT:
+            reason = (
+                f"Rate limit of {self.config.max_actions_per_task_per_hour} actions/hour "
+                f"reached for {subject(action)}; further actions are suppressed this hour."
+            )
+            notice = Action(ActionKind.ALERT, "kelpie", reason, task_id=action.task_id)
+        else:
+            reason = "Action ledger unavailable; actions with effects are held back."
+            notice = Action(ActionKind.ALERT, "kelpie", reason)
+        if not self.config.dry_run:
+            self._safe_alert(replace(notice, severity=Severity.WARNING))
+
+    def _safe_alert(self, action: Action, executed: bool = True, prefix: str = "") -> None:
+        """Alert without ever raising out of the loop."""
+        try:
+            self._alert(action, executed=executed, prefix=prefix)
+        except Exception:
+            log.exception("could not send alert: %s", action)
 
     def tick(self, snapshot_source: Callable[[], Snapshot]) -> list[Dispatched]:
         snapshot = snapshot_source()

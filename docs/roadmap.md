@@ -120,7 +120,8 @@ Persist what Kelpie saw and did so that the report and before/after comparisons 
 SQLite by default; keep the schema DuckDB-compatible for analytics.
 
 **Acceptance criteria**
-- [ ] Tables for tasks (status history), sessions, conditions, and the action ledger (fingerprint, rule, reason, mode)
+- [ ] Tables for tasks (status history), sessions and conditions (the action ledger table and versioned migrations landed with engine item A)
+- [ ] Retention: prune ledger rows and snapshots older than a configurable age; bound the in-memory ledger store
 - [ ] Schema migrations versioned in code
 - [ ] Storage lives behind a protocol in `kelpie.core`; no adapter imports
 - [ ] Tests run against a temporary database file
