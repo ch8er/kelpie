@@ -104,6 +104,7 @@ Fixture conventions:
 | 11 | `11-orphan-accepted-task.yaml` | `orphan_status` | `alert` critical `{dependents: 7}`, `reassign` T-1101 |
 | 11 | `11-below-threshold.yaml` | `orphan_status` | `alert` + `reassign` to the idle developer for an ownerless in-progress task; `alert` only for a vanished owner and for a task with no role; nothing below the thresholds, for queues, blocked or done tasks, or a task a live session is working on |
 | 12 | `12-review-ping-pong.yaml` | `ping_pong` | `escalate` T-1201 (9 rounds > 3) |
+| 12 | `12-below-threshold.yaml` | `ping_pong` | `escalate` T-1211 to the configured architect at exactly 3 rounds, listing return reasons; nothing for 2 rounds, merge-conflict returns, or a done task |
 | 13 | `13-human-tasks-block-agents.yaml` | `needs_you` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5`; T-1308 (nothing blocked behind it) not escalated |
 | – | `14-checkpoint-commit-reminder.yaml` | `checkpoints` | `comment` T-1401 (no commit for 50 minutes) and T-1402 (25 changed files, over 20); nothing for a session that committed 10 minutes ago or a clean worktree |
 | – | `15-checkpoint-wip-commit-on-exit.yaml` | `checkpoints` | `wip_commit` with `[skip ci]` for T-1501 (session ended dirty) and T-1502 (session went silent), resume `comment` T-1501; nothing for a clean exit, a task that is already done, or an old dirty session while a new one is live |
