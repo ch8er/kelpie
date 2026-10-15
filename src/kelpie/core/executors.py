@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from kelpie.core.actions import Action, ActionKind
+from kelpie.core.actions import Action, ActionKind, ActionResult
+from kelpie.core.ledger import Outcome
 from kelpie.core.ports import ActionConnector, PlatformAdapter, SupportsReassign, SupportsStop
 
 
@@ -13,8 +14,9 @@ class Executor(Protocol):
     @property
     def name(self) -> str: ...
 
-    def execute(self, action: Action) -> bool:
-        """Carry out ``action``. Return False if this executor cannot do it."""
+    def execute(self, action: Action) -> bool | Outcome:
+        """Carry out ``action``. Return False if this executor cannot do it, or an
+        :class:`Outcome` other than executed (``NOTHING_TO_DO``)."""
         ...
 
 
@@ -74,7 +76,12 @@ class ConnectorExecutor:
     def name(self) -> str:
         return self.connector.name
 
-    def execute(self, action: Action) -> bool:
+    def execute(self, action: Action) -> bool | Outcome:
         if action.kind not in self.connector.actions:
             return False
-        return self.connector.execute(action) is not False
+        result = self.connector.execute(action)
+        if result is False or result is ActionResult.REFUSED:
+            return False
+        if result is ActionResult.NOTHING_TO_DO:
+            return Outcome.NOTHING_TO_DO
+        return True

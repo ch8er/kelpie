@@ -96,7 +96,8 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #
 # [engine.rules.ci_economy]
 # mode = "observe"
-# window = "24h"                 # builds looked at, and the window of the burn rate
+# window = "24h"                 # builds looked at and the burn-rate window; at most
+#                                # [connectors.github.ci] window
 # docs_globs = ["docs/*", "*.md", "*.rst"]   # a build is docs-only if every path matches
 # wip_patterns = ['^\s*\[?wip\b', '^\s*(fixup|squash)!']   # commit messages, case-insensitive
 # waste_min_minutes = 30         # summary once this many minutes were wasted in the window
@@ -333,16 +334,28 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 #
 # GitHub Actions runs for rule 9 (ci_economy). Reading needs Actions: read, Pull requests:
 # read and Contents: read. cancel_build is the only write Kelpie can make to GitHub: off
-# unless allow_cancel is set; it needs Actions: write, so grant that only on cancel_repos
-# (or use a separate read-only token when allow_cancel is off). A run is cancelled only if
-# the last scan reported it superseded (a newer push/pull_request run of the same workflow
-# and branch) and still active, and a fresh re-check right before the request agrees.
+# unless allow_cancel is set. It needs Actions: write: put that on a separate token
+# (cancel_token_env) scoped to cancel_repos only, and keep the main token read-only. A run
+# is cancelled only if the last scan offered it as cancellable (superseded by a newer
+# push/pull_request run of the same workflow, branch and PR, still active, not on the
+# default branch, not a re-run, within the cancel policy) and a fresh re-check right before
+# the request agrees.
+#
+# Rate limit: a scan runs every poll_interval and spends at most max_requests_per_tick
+# requests: 100 every 2 minutes is at most 3,000 of a token's 5,000 an hour (304s are
+# free). While fewer than rate_reserve requests are left in the hour, scans are skipped so
+# PR and CI conditions keep working.
 #
 # [connectors.github.ci]
 # repos = ["example/repo"]          # default: all repos above; must be among them
-# window = "24h"                    # runs created within this (1h to 7d)
-# max_pages = 3                     # pages of 100 runs per repo per tick (at most 10)
-# max_requests_per_tick = 30        # this step's own budget (pages, PRs, job lists)
+# window = "24h"                    # runs created within this (1h to 7d); rule 9's
+#                                   # window must not be longer
+# poll_interval = "2m"              # scan this often (30s to 1h); the last scan in between
+# rate_reserve = 1000               # skip scans while fewer requests are left this hour
+# max_pages = 3                     # pages of 100 runs per repo per scan (at most 10)
+# max_requests_per_tick = 30        # this step's own budget per scan (at most 100): page 1
+#                                   # of every repo first, then default branches, further
+#                                   # pages, PRs, PR files and job lists
 # tick_budget = "10s"
 # included_minutes = 3000           # monthly quota -> a ci_minutes resource (optional);
 #                                   # minutes used are not read (the billing API needs
@@ -352,6 +365,10 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # cancel_repos = []                 # required with allow_cancel; among repos above
 # cancel_workflows = []             # optional: only these workflow paths, e.g.
 #                                   # ".github/workflows/ci.yml"
+# cancel_branches = []              # optional globs, e.g. ["task/*"]; empty: any branch
+#                                   # but the repository's default branch (never cancelled)
+# cancel_token_env = "KELPIE_GITHUB_CANCEL_TOKEN"   # optional: a token with Actions: write
+#                                   # on cancel_repos only, used for the cancel request only
 #
 # Blocks that are really waits. When a blocked task's reason matches a pattern and names a
 # PR GitHub has confirmed to exist, Kelpie attaches a condition of that kind to the block,

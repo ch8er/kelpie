@@ -50,6 +50,7 @@ class Outcome(StrEnum):
     EXECUTED = "executed"  # carried out by an executor
     NOT_EXECUTED = "not_executed"  # no executor could do it; a human was alerted
     FAILED = "failed"  # the executor raised
+    NOTHING_TO_DO = "nothing_to_do"  # the executor found nothing left to do
     DROPPED = "dropped"  # should have reached a human, but no alerter is configured
     SUPPRESSED = "suppressed"  # held back by the ledger
 
@@ -74,6 +75,7 @@ _ONCE_DONE = frozenset(
         Outcome.ALERTED,
         Outcome.EXECUTED,
         Outcome.NOT_EXECUTED,
+        Outcome.NOTHING_TO_DO,
         Outcome.OBSERVED,
         Outcome.DRY_RUN,
     }

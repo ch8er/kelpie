@@ -21,6 +21,14 @@ class ActionKind(StrEnum):
     ALERT = "alert"
 
 
+class ActionResult(StrEnum):
+    """What an action connector made of an action (``ActionConnector.execute``)."""
+
+    DONE = "done"  # carried out
+    NOTHING_TO_DO = "nothing_to_do"  # nothing left to do (e.g. the build already finished)
+    REFUSED = "refused"  # not allowed or not a known target: a human is told instead
+
+
 class Severity(StrEnum):
     INFO = "info"
     WARNING = "warning"

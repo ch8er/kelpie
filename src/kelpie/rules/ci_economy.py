@@ -11,21 +11,25 @@ connector's business.
 
    - ``superseded``: a newer build of the same pipeline and branch started while it was
      still running (``superseded_by``);
-   - ``already_verified``: the same pipeline already passed for the same commit before it
-     started;
+   - ``already_verified``: the same pipeline already passed for the same commit and the
+     same trigger (event) before it started;
    - ``docs_only``: every changed path matches ``docs_globs``;
    - ``draft``: the change request is a draft;
    - ``wip``: the commit message matches ``wip_patterns`` (a WIP commit pushed without a
      skip marker; a skipped build would not be here).
 
    Once the wasted minutes in the window reach ``waste_min_minutes``, one ``info`` alert
-   summarizes them per category. It is a lasting state: announced when it opens, again
-   each time the wasted minutes double, and resolved when the window no longer holds that
-   much waste.
+   summarizes them per category. It is a lasting state keyed by the doubling level of the
+   wasted minutes: announced when it opens and again whenever the level changes, which
+   happens when the waste doubles and also when it halves as old builds leave the window
+   (a "Changed:" notice); resolved when the window no longer holds that much waste. Build
+   minutes are the connector's estimate (see its docs: billable job minutes where known,
+   otherwise wall-clock time), so treat the totals as an order of magnitude.
 
-2. **Superseded builds still running** → ``cancel_build`` (``cancel_superseded``), routed
-   to the connector that reported the build (``executor`` = ``Build.source``). The
-   connector re-checks the build before cancelling and may refuse.
+2. **Superseded builds still running** → ``cancel_build`` (``cancel_superseded``), only
+   for builds the connector marked ``cancellable`` (within its cancel policy), routed to
+   that connector (``executor`` = ``Build.source``). The connector re-checks the build
+   before cancelling and may refuse.
 
 3. **Quota.** The burn rate is the minutes of the builds started within ``window`` per
    hour. With minutes used known: exhausted (utilization >= ``quota_critical``) →
@@ -42,7 +46,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
@@ -110,10 +114,13 @@ class CiEconomy:
 
     def classify(self, build: Build, snapshot: Snapshot) -> str | None:
         """The waste category of ``build``, or None when it was worth its minutes."""
+        return self._classify(build, _Index(snapshot.builds))
+
+    def _classify(self, build: Build, index: _Index) -> str | None:
         if build.status is BuildStatus.SKIPPED:
             return None
         if build.superseded_by is not None:
-            newer = snapshot.build(build.superseded_by)
+            newer = index.by_id.get(build.superseded_by)
             if build.status.is_active or (
                 newer is not None
                 and newer.started_at is not None
@@ -121,7 +128,7 @@ class CiEconomy:
                 and newer.started_at < build.finished_at
             ):
                 return "superseded"
-        if self._verified_before(build, snapshot):
+        if index.verified_before(build):
             return "already_verified"
         if build.changed_paths and all(self._is_doc(p) for p in build.changed_paths):
             return "docs_only"
@@ -132,28 +139,14 @@ class CiEconomy:
             return "wip"
         return None
 
-    @staticmethod
-    def _verified_before(build: Build, snapshot: Snapshot) -> bool:
-        if build.sha is None or build.started_at is None:
-            return False
-        return any(
-            other.id != build.id
-            and other.status is BuildStatus.SUCCESS
-            and other.sha == build.sha
-            and other.repo == build.repo
-            and other.workflow == build.workflow
-            and other.finished_at is not None
-            and other.finished_at <= build.started_at
-            for other in snapshot.builds
-        )
-
     def _is_doc(self, path: str) -> bool:
         return any(fnmatch.fnmatchcase(path, g) for g in self.docs_globs)
 
     def _waste(self, recent: list[Build], snapshot: Snapshot) -> Action | None:
+        index = _Index(snapshot.builds)
         wasted: dict[str, list[Build]] = {c: [] for c in CATEGORIES}
         for build in recent:
-            if (category := self.classify(build, snapshot)) is not None:
+            if (category := self._classify(build, index)) is not None:
                 wasted[category].append(build)
         minutes = sum(b.minutes for found in wasted.values() for b in found)
         if minutes <= 0 or minutes < self.waste_min_minutes:
@@ -204,7 +197,12 @@ class CiEconomy:
     def _cancels(self, snapshot: Snapshot) -> list[Action]:
         actions: list[Action] = []
         for build in snapshot.builds:
-            if not build.status.is_active or build.superseded_by is None or not build.source:
+            if (
+                not build.cancellable
+                or not build.status.is_active
+                or build.superseded_by is None
+                or not build.source
+            ):
                 continue
             what = " ".join(
                 x
@@ -331,6 +329,31 @@ class CiEconomy:
                 "resets_at": r.resets_at.isoformat() if r.resets_at else None,
             },
         )
+
+
+class _Index:
+    """Builds indexed once per evaluation, so classifying is linear in the builds."""
+
+    def __init__(self, builds: Sequence[Build]) -> None:
+        self.by_id = {b.id: b for b in builds}
+        # The two earliest successes per pipeline, commit and trigger: enough to tell
+        # whether a build other than the one asked about passed before it started.
+        self._passed: dict[tuple[Any, ...], list[tuple[datetime, str]]] = {}
+        for b in builds:
+            if b.status is BuildStatus.SUCCESS and b.sha and b.finished_at is not None:
+                key = (b.repo, b.workflow, b.sha, b.event)
+                found = self._passed.setdefault(key, [])
+                found.append((b.finished_at, b.id))
+                found.sort()
+                del found[2:]
+
+    def verified_before(self, build: Build) -> bool:
+        """The same pipeline passed for the same commit and trigger before it started."""
+        if build.sha is None or build.started_at is None:
+            return False
+        passed = self._passed.get((build.repo, build.workflow, build.sha, build.event), [])
+        started = build.started_at
+        return any(at <= started and bid != build.id for at, bid in passed)
 
 
 def _waiting_on_ci(snapshot: Snapshot) -> list[str]:

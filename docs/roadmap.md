@@ -464,12 +464,12 @@ changes, or repeated for an already verified commit. Cancel superseded builds an
 how long the quota will last. The rule stays CI-agnostic; CI specifics live in a connector.
 
 **Acceptance criteria**
-- [ ] Depends on CI build/run records in the snapshot (see "close model gaps"): commit sha, branch, trigger event, draft flag, changed paths, duration/minutes, status, `superseded_by`
-- [ ] Each wasted build is classified (draft/WIP, superseded, docs-only, already verified) with the minutes it burned
-- [ ] Superseded running builds → `cancel_build`, executed by the CI connector (not the platform adapter) through action routing (see "action routing")
+- [x] Depends on CI build/run records in the snapshot (see "close model gaps"): commit sha, branch, trigger event, draft flag, changed paths, duration/minutes, status, `superseded_by`
+- [x] Each wasted build is classified (draft/WIP, superseded, docs-only, already verified) with the minutes it burned
+- [x] Superseded running builds → `cancel_build`, executed by the CI connector (not the platform adapter) through action routing (see "action routing")
 - [ ] Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check)
-- [ ] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks`
-- [ ] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
+- [ ] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks` — partial: the rule does both, but from GitHub only the quota (config) and the burn are known; minutes used need the billing API (admin rights), so "exhausted" fires only when another source reports usage
+- [x] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
 
 ### resources: read host metrics via Prometheus HTTP API
 labels: P0, week-2, area:resources
@@ -488,10 +488,11 @@ Evaluate `ci_status` and `pr_merged` conditions against GitHub, and supply CI da
 superseded run.
 
 **Acceptance criteria**
-- [ ] Conditions updated with `satisfied`, `satisfied_at`, `checked_at`
-- [ ] Build/run records mapped to the CI-agnostic model fields
-- [ ] Exposes the `cancel_build` action as an executor (see "action routing"); only with a token that allows it, read-only otherwise
-- [ ] Respects rate limits with caching / conditional requests; tests with mocked HTTP
+- [x] Conditions updated with `satisfied`, `satisfied_at`, `checked_at`
+- [x] Build/run records mapped to the CI-agnostic model fields
+- [x] Exposes the `cancel_build` action as an executor (see "action routing"); only with a token that allows it, read-only otherwise
+- [x] Respects rate limits with caching / conditional requests; tests with mocked HTTP
+- [ ] Remaining Actions minutes as a resource — partial: the monthly quota and its reset come from config (`included_minutes`); minutes used are not read (the billing API needs admin rights)
 
 ### rules: stale_blocks — block reasons that mean "waiting" become conditions (rule 4, incident 15)
 labels: P0, week-2, area:rules

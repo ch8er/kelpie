@@ -1,10 +1,11 @@
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
-from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.actions import Action, ActionKind, ActionResult, Severity
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Outcome
@@ -40,6 +41,7 @@ def b(bid: str, **fields: Any) -> Build:
         "started_at": NOW - 2 * H,
         "finished_at": NOW - 2 * H + 10 * M,
         "minutes": 10.0,
+        "event": "pull_request",
     }
     base.update(fields)
     return Build(bid, **base)
@@ -105,10 +107,12 @@ def test_already_verified_needs_an_earlier_success_of_the_same_pipeline() -> Non
     first = b("B-1", sha="s", finished_at=NOW - 110 * M)
     again = b("B-2", sha="s", started_at=NOW - H, finished_at=NOW - 50 * M)
     other = b("B-3", sha="s", workflow="lint", started_at=NOW - H)
-    snap = Snapshot(now=NOW, builds=(first, again, other))
+    pushed = b("B-4", sha="s", event="push", started_at=NOW - H)
+    snap = Snapshot(now=NOW, builds=(first, again, other, pushed))
     assert rule.classify(again, snap) == "already_verified"
     assert rule.classify(first, snap) is None
     assert rule.classify(other, snap) is None
+    assert rule.classify(pushed, snap) is None  # another trigger is not a repeat
     assert rule.classify(replace(again, sha=None), snap) is None
 
 
@@ -127,9 +131,23 @@ def test_cancel_only_active_superseded_builds_with_a_source() -> None:
     snap = Snapshot(
         now=NOW,
         builds=(
-            b("B-1", status=BuildStatus.QUEUED, superseded_by="B-2", finished_at=None),
+            b(
+                "B-1",
+                status=BuildStatus.QUEUED,
+                superseded_by="B-2",
+                finished_at=None,
+                cancellable=True,
+            ),
             b("B-2", status=BuildStatus.RUNNING, finished_at=None),
-            b("B-3", status=BuildStatus.RUNNING, superseded_by="B-2", source=None),
+            b(
+                "B-3",
+                status=BuildStatus.RUNNING,
+                superseded_by="B-2",
+                source=None,
+                cancellable=True,
+            ),
+            b("B-4", status=BuildStatus.RUNNING, superseded_by="B-2", finished_at=None),
+            b("B-5", status=BuildStatus.UNKNOWN, superseded_by="B-2", cancellable=True),
         ),
     )
     (cancel,) = rule.evaluate(snap)
@@ -250,7 +268,13 @@ def test_engine_routes_cancel_to_the_ci_connector_in_act_mode_only() -> None:
     snap = Snapshot(
         now=NOW,
         builds=(
-            b("B-1", status=BuildStatus.RUNNING, superseded_by="B-2", finished_at=None),
+            b(
+                "B-1",
+                status=BuildStatus.RUNNING,
+                superseded_by="B-2",
+                finished_at=None,
+                cancellable=True,
+            ),
             b("B-2", status=BuildStatus.RUNNING, finished_at=None),
         ),
     )
@@ -268,3 +292,43 @@ def test_engine_routes_cancel_to_the_ci_connector_in_act_mode_only() -> None:
         assert ci.cancelled == expected
         if expected:
             assert results[0].outcome is Outcome.EXECUTED
+
+
+def test_nothing_to_do_is_its_own_outcome() -> None:
+    class Done(FakeCI):
+        def execute(self, action: Action) -> ActionResult:  # type: ignore[override]
+            return ActionResult.NOTHING_TO_DO
+
+    snap = Snapshot(
+        now=NOW,
+        builds=(
+            b("B-1", status=BuildStatus.RUNNING, superseded_by="B-2", cancellable=True),
+            b("B-2", status=BuildStatus.RUNNING),
+        ),
+    )
+    config = EngineConfig(dry_run=False, modes={"ci_economy": Mode.ACT})
+    alerter = FakeAlerter()
+    engine = Engine(
+        [CiEconomy(waste_min_minutes=1000)], connectors=[Done()], alerter=alerter, config=config
+    )
+    (result,) = engine.tick(lambda: snap)
+    assert result.outcome is Outcome.NOTHING_TO_DO and alerter.sent == []
+    assert engine.tick(lambda: snap)[0].outcome is Outcome.SUPPRESSED  # once: done
+
+
+def test_classifying_many_builds_is_linear() -> None:
+    builds = tuple(
+        b(
+            f"B-{i}",
+            sha=f"s{i % 3000}",
+            started_at=NOW - H + i * timedelta(milliseconds=100),
+            finished_at=NOW - H + i * timedelta(milliseconds=100) + M,
+            superseded_by=f"B-{i + 1}" if i % 2 else None,
+        )
+        for i in range(6000)
+    )
+    snap = Snapshot(now=NOW, builds=builds)
+    started = time.perf_counter()
+    actions = CiEconomy().evaluate(snap)
+    assert time.perf_counter() - started < 0.5
+    assert alerts(actions, Severity.INFO)

@@ -52,6 +52,7 @@ from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanSto
 from kelpie.metrics import Metrics
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
+from kelpie.rules.ci_economy import CiEconomy
 from kelpie.rules.no_progress import NoProgress
 from kelpie.rules.resources import Resources
 from kelpie.traces.config import TraceSettings, load_traces
@@ -620,6 +621,20 @@ def trace_window_warnings(rules: Sequence[Rule], traces: TraceSettings) -> list[
     ]
 
 
+def ci_window_errors(rules: Sequence[Rule], settings: Settings) -> list[str]:
+    """Rule 9 cannot judge builds the CI connector does not read: its window must fit."""
+    github = settings.github
+    ci = github.ci if github is not None and github.enabled else None
+    if ci is None or not ci.enabled:
+        return []
+    return [
+        f"rule 'ci_economy' window ({rule.window}) is longer than [connectors.github.ci] "
+        f"window ({ci.window}): it would undercount builds and burn"
+        for rule in rules
+        if isinstance(rule, CiEconomy) and rule.window > ci.window
+    ]
+
+
 def resource_interval_warnings(rules: Sequence[Rule], resources: ResourceSettings) -> list[str]:
     """Readings older than the rule's ``max_reading_age`` are ignored: a slower fetch would
     leave the rule blind between fetches."""
@@ -665,6 +680,8 @@ def provider_interval_warnings(rules: Sequence[Rule], quotas: LlmQuotaSettings |
 
 def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> App:
     loaded = load_rules(settings.engine)
+    if errors := ci_window_errors(loaded.rules, settings):
+        raise ConfigError("; ".join(errors))
     for warning in [
         *loaded.warnings,
         *trace_window_warnings(loaded.rules, settings.traces),
@@ -815,7 +832,10 @@ def _github_steps(
         max_requests=github.max_requests_per_tick,
         tick_budget=github.tick_budget,
     )
-    ci = github.build_ci(connector)
+    try:
+        ci = github.build_ci(connector, clock)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
     if ci is None:
         return [("github", step)], []
     log.info(
@@ -1030,7 +1050,12 @@ def _github_status(settings: Settings) -> list[str]:
     ci = github.ci
     if ci is not None and ci.enabled:
         cancel = (
-            f"cancel_build on {', '.join(ci.cancel_repos)} (needs Actions: write)"
+            f"cancel_build on {', '.join(ci.cancel_repos)} (needs Actions: write; "
+            + (
+                f"token from ${ci.cancel_token_env})"
+                if ci.cancel_token_env
+                else "same token as reads)"
+            )
             if ci.allow_cancel
             else "read-only (allow_cancel = false)"
         )

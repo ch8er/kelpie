@@ -29,7 +29,7 @@ snapshot:
        minutes: 8, changed_paths: [src/parser.py]}
     # D-5 passed for commit e5e5e5e; D-4 ran the same pipeline for it again afterwards.
     - {id: D-5, source: ci, repo: example/repo, workflow: ci, branch: task/T-524, sha: "e5e5e5e",
-       event: push, status: success, started_at: "2026-03-03T10:10:00+00:00",
+       event: pull_request, status: success, started_at: "2026-03-03T10:10:00+00:00",
        finished_at: "2026-03-03T10:20:00+00:00", minutes: 10}
     - {id: D-4, source: ci, repo: example/repo, workflow: ci, branch: task/T-524, sha: "e5e5e5e",
        event: pull_request, status: success, started_at: "2026-03-03T10:30:00+00:00",
@@ -38,12 +38,16 @@ snapshot:
        event: push, commit_message: "WIP: try a cache for the parser", status: success,
        started_at: "2026-03-03T11:00:00+00:00", finished_at: "2026-03-03T11:05:00+00:00",
        minutes: 5}
+    # Distractor: the same commit built for another trigger (push) is not a repeat.
+    - {id: D-8, source: ci, repo: example/repo, workflow: ci, branch: task/T-524, sha: "e5e5e5e",
+       event: push, status: success, started_at: "2026-03-03T10:45:00+00:00",
+       finished_at: "2026-03-03T10:55:00+00:00", minutes: 10}
     # Distractor: a day-old docs-only build is outside the 24h window.
     - {id: D-7, source: ci, repo: example/repo, workflow: ci, branch: task/T-526, sha: "a7a7a7a",
        event: pull_request, status: success, started_at: "2026-03-02T08:00:00+00:00",
        finished_at: "2026-03-02T08:10:00+00:00", minutes: 10, changed_paths: [docs/old.md]}
   resources:
-    # Healthy quota: 2600 minutes left at about 2.5 minutes an hour; no forecast alert.
+    # Healthy quota: 2600 minutes left at about 3 minutes an hour; no forecast alert.
     - {name: "ci:example", kind: ci_minutes, used: 400, limit: 3000, unit: minutes,
        resets_at: "2026-04-01T00:00:00+00:00"}
 expected_actions:

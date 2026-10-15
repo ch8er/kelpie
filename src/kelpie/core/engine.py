@@ -291,9 +291,13 @@ class Engine:
 
     def _dispatch(self, action: Action, snapshot: Snapshot) -> Outcome:
         executor = self.route(action, snapshot)
+        result = None if executor is None else executor.execute(action)
         if executor is None:
             log.warning("no executor for action; alerting instead: %s", action)
-        elif executor.execute(action):
+        elif isinstance(result, Outcome):
+            log.info("%s: %s for %s", executor.name, result, action)
+            return result
+        elif result is True:
             return Outcome.EXECUTED
         else:
             # e.g. missing task_id or session_id, no target owner, or a missing capability.

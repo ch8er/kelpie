@@ -1,60 +1,84 @@
 """GitHub Actions as the CI source of rule 9 (``ci_economy``).
 
 A snapshot step reads recent workflow runs of the configured repositories and maps them
-onto the CI-agnostic :class:`~kelpie.core.model.Build` records:
+onto the CI-agnostic :class:`~kelpie.core.model.Build` records.
 
-- Only runs created within ``window`` (default 24 h) are read: the run list is paged
-  newest first, at most ``max_pages`` pages of 100 per repository, within the step's own
-  per-tick request and time budget. The query names a date, not a time, so the URL stays
-  the same for a day and unchanged pages come back as 304 (free of the GitHub rate limit).
-- ``minutes`` of a finished run are the billable minutes of its jobs (each job rounded up
-  to a minute, as GitHub bills), read once per run attempt and remembered; while a run is
-  active, or when the job lookup does not fit in the budget, the run's wall-clock time.
-- ``superseded_by``: a newer run of the same workflow, branch, head repository and event
-  (``push`` or ``pull_request`` only; deploys, schedules and manual runs are never marked)
-  was created after it.
-- ``draft`` and ``changed_paths`` come from the pull request the run belongs to (the
-  PR's current draft state; its changed files, only while the PR head is the run's commit
-  and it touches at most 100 files, else unknown). Files are remembered per PR head.
-- With ``included_minutes`` set, a ``ci_minutes`` resource carries the monthly quota and
-  its reset (``quota_reset_day``, UTC). GitHub's billing API needs an administrative
-  permission, so minutes used are not read: the rule projects the burn of the builds it
-  sees against the quota.
+Polling and budget. The step scans every ``poll_interval`` (default 2 minutes) and serves
+the last scan in between. One scan spends at most ``max_requests_per_tick`` requests (at
+most 100) and ``tick_budget`` of time, in this order: page 1 of every repository (the
+starting repository rotates every scan, so none is starved), the default branch of each
+repository (remembered for an hour), further pages, then pull requests, PR files and job
+lists for the newest active runs first. The run query names a date, not a time, so its URL
+stays the same for a day and an unchanged page comes back as a 304. Arithmetic: at most
+100 requests every 2 minutes is 3,000 an hour against GitHub's 5,000 for a token; 304s do
+not count against it. The step is skipped while ``X-RateLimit-Remaining`` is below
+``rate_reserve`` (default 1,000) and the window has not reset, so PR and CI conditions
+(the other GitHub step) keep working.
 
-The one write is ``cancel_build`` (``POST /repos/{repo}/actions/runs/{id}/cancel``), and
-it is guarded on every side:
+Mapping:
+
+- only runs created within ``window`` (default 24 h);
+- ``minutes``: for a finished run, the billable minutes of its jobs (each job rounded up
+  to a minute, as GitHub bills; runner multipliers for Windows or macOS are not applied),
+  read once per run attempt and remembered. For an active run, or when the job list does
+  not fit in the budget, the wall-clock time of the run, which overstates parallel jobs
+  and understates matrix fan-out; a run list served from the cache because GitHub could
+  not be asked is never extrapolated to now;
+- ``superseded_by``: a newer run of the same workflow, branch, head repository and event,
+  and for ``pull_request`` runs the same PR number and base branch, was created after it.
+  Only ``push`` and ``pull_request`` runs are marked (never deploys, schedules or manual
+  runs), never on the repository's default branch, never re-runs (``run_attempt`` > 1,
+  usually started by a human), and nothing at all in a repository whose default branch is
+  not known;
+- ``draft`` and ``changed_paths`` come from the pull request the run belongs to (its
+  current draft state; its files only while the PR head is the run's commit and it touches
+  at most 100 files, otherwise unknown);
+- with ``included_minutes``, a ``ci_minutes`` resource carries the monthly quota and its
+  reset (``quota_reset_day``, UTC). Minutes used are not read: GitHub's billing API needs
+  an administrative permission. Exhaustion is not guessed from runs either: a run blocked
+  by billing looks like any other run that failed at once, and a false "quota exhausted"
+  would send humans to the wrong place. The rule projects the burn against the quota.
+
+The one write is ``cancel_build`` (``POST /repos/{repo}/actions/runs/{id}/cancel``):
 
 - it runs only through the engine, so the rule's mode and the global dry-run apply;
 - ``allow_cancel`` is off by default; without it the connector declares no action;
-- the run must be one this connector reported as superseded and active in its last scan
-  (the action's ``build_id`` is looked up there, never parsed), in a repository listed in
-  ``cancel_repos`` and, if ``cancel_workflows`` is set, a workflow listed there;
+- a build is offered as ``cancellable`` only when it is superseded and active in a scan
+  whose run list GitHub answered just now, in a repository in ``cancel_repos``, a workflow
+  in ``cancel_workflows`` (if set) and a branch matching ``cancel_branches`` (if set; the
+  default branch never). The action's ``build_id`` is looked up among those, never parsed;
 - right before cancelling, both runs are fetched again, outside the cache: the run must
-  still be queued or running and the newer run must still be a newer run of the same
-  workflow, branch and event. A stale or failed re-check refuses the cancel;
-- it is idempotent: a run already cancelled by Kelpie, or one that finished in the
-  meantime (HTTP 409 or a completed status), is not touched again.
+  still be active and on the same attempt, and the newer run must still be a newer run of
+  the same group. Anything else refuses the cancel;
+- results: done; nothing to do (the run finished meanwhile, HTTP 409, or Kelpie already
+  cancelled it); refused (a policy says no: a human is told). A transient failure
+  (network, back-off, rate limit, a re-check served from the cache, 5xx, 403) raises, so
+  the engine records a failure and its ledger retries later.
 
 Token scopes (least privilege): reading needs ``Actions: read``, ``Pull requests: read``
-and ``Contents: read`` (fine-grained token) or ``repo`` for a classic token on private
-repositories. Cancelling needs ``Actions: write``; grant it only together with
-``allow_cancel`` and only on the ``cancel_repos``.
+and ``Contents: read`` (fine-grained) or ``repo`` (classic, private repositories).
+Cancelling needs ``Actions: write``. Prefer ``cancel_token_env``: a second token with
+``Actions: write`` on the ``cancel_repos`` only, used for nothing but the cancel request,
+so the token that reads everything stays read-only.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import itertools
 import logging
 import math
+import os
+import re
 from collections import OrderedDict
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from kelpie.connectors.github.client import GitHubClient, GitHubError
+from kelpie.connectors.github.client import GitHubClient, GitHubError, valid_token
 from kelpie.connectors.github.connector import valid_repo
-from kelpie.core.actions import Action, ActionKind
+from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.model import Build, BuildStatus, Resource, ResourceKind, Snapshot
 from kelpie.core.serde import parse_datetime, parse_duration
 
@@ -67,27 +91,43 @@ MAX_WINDOW = timedelta(days=7)
 DEFAULT_MAX_PAGES = 3
 MAX_PAGES = 10
 DEFAULT_REQUESTS = 30
-MAX_REQUESTS = 1000
+MAX_REQUESTS = 100
 DEFAULT_TICK_BUDGET = timedelta(seconds=10)
 MAX_TICK_BUDGET = timedelta(seconds=60)
-MAX_JOB_LOOKUPS = 10  # per tick; the rest use wall-clock minutes until a later tick
-MAX_REMEMBERED = 4096  # run minutes and PR files kept across ticks
+DEFAULT_POLL = timedelta(minutes=2)
+DEFAULT_RATE_RESERVE = 1000
+DEFAULT_BRANCH_TTL = timedelta(hours=1)
+MAX_JOB_LOOKUPS = 10  # per scan; the rest use wall-clock minutes until a later scan
+MAX_REMEMBERED = 4096  # run minutes and PR files kept across scans
 MAX_MESSAGE = 200  # characters of a commit message's first line
+MAX_DISPLAY = 255  # characters of a branch or workflow name kept on a Build
 MAX_PR_FILES = 100
 SUPERSEDABLE_EVENTS = frozenset({"push", "pull_request"})
-_ACTIVE = {"queued": BuildStatus.QUEUED, "waiting": BuildStatus.QUEUED}
-_ACTIVE |= {"requested": BuildStatus.QUEUED, "pending": BuildStatus.QUEUED}
-_ACTIVE |= {"in_progress": BuildStatus.RUNNING}
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
+_ACTIVE = {
+    "queued": BuildStatus.QUEUED,
+    "waiting": BuildStatus.QUEUED,
+    "requested": BuildStatus.QUEUED,
+    "pending": BuildStatus.QUEUED,
+    "in_progress": BuildStatus.RUNNING,
+}
 _CONCLUSIONS = {
     "success": BuildStatus.SUCCESS,
     "neutral": BuildStatus.SUCCESS,
     "skipped": BuildStatus.SKIPPED,
     "cancelled": BuildStatus.CANCELLED,
+    "failure": BuildStatus.FAILURE,
+    "timed_out": BuildStatus.FAILURE,
+    "action_required": BuildStatus.FAILURE,
+    "startup_failure": BuildStatus.FAILURE,
+    "stale": BuildStatus.FAILURE,
 }
 _KEYS = {
     "enabled",
     "repos",
     "window",
+    "poll_interval",
+    "rate_reserve",
     "max_pages",
     "max_requests_per_tick",
     "tick_budget",
@@ -96,6 +136,8 @@ _KEYS = {
     "allow_cancel",
     "cancel_repos",
     "cancel_workflows",
+    "cancel_branches",
+    "cancel_token_env",
 }
 
 
@@ -106,6 +148,8 @@ class CiSettings:
     repos: tuple[str, ...]
     enabled: bool = True
     window: timedelta = DEFAULT_WINDOW
+    poll_interval: timedelta = DEFAULT_POLL
+    rate_reserve: int = DEFAULT_RATE_RESERVE
     max_pages: int = DEFAULT_MAX_PAGES
     max_requests_per_tick: int = DEFAULT_REQUESTS
     tick_budget: timedelta = DEFAULT_TICK_BUDGET
@@ -114,6 +158,37 @@ class CiSettings:
     allow_cancel: bool = False
     cancel_repos: tuple[str, ...] = ()
     cancel_workflows: tuple[str, ...] = ()
+    cancel_branches: tuple[str, ...] = ()  # globs; empty: any branch but the default one
+    cancel_token_env: str | None = None  # a separate token for cancelling only
+
+    def cancel_token(self, environ: Mapping[str, str] = os.environ) -> str | None:
+        """The cancel-only token from ``$cancel_token_env``; None when not configured.
+
+        Raises ValueError when it is configured (with ``allow_cancel``) but unset or not
+        usable in a header. The message never contains the value."""
+        if self.cancel_token_env is None or not self.allow_cancel:
+            return None
+        token = environ.get(self.cancel_token_env, "").strip()
+        if not token:
+            raise ValueError(
+                f"[connectors.github.ci] cancel_token_env: ${self.cancel_token_env} is not set"
+            )
+        if not valid_token(token):
+            raise ValueError(
+                f"[connectors.github.ci] ${self.cancel_token_env} contains characters not "
+                "allowed in an HTTP header"
+            )
+        return token
+
+    def may_cancel(self, repo: str, workflow: str | None, branch: str, default: str) -> bool:
+        """Whether policy allows cancelling a run of ``workflow`` on ``branch``."""
+        if not self.allow_cancel or repo not in self.cancel_repos or branch == default:
+            return False
+        if self.cancel_workflows and workflow not in self.cancel_workflows:
+            return False
+        return not self.cancel_branches or any(
+            fnmatch.fnmatchcase(branch, g) for g in self.cancel_branches
+        )
 
 
 def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
@@ -127,31 +202,38 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
     repos = _repos(section.get("repos", sorted(allowed)), allowed, f"{where} repos")
     if not repos:
         raise ValueError(f"{where} repos must not be empty")
-    enabled = _bool(section, "enabled", True, where)
     allow_cancel = _bool(section, "allow_cancel", False, where)
     cancel_repos = _repos(section.get("cancel_repos", []), set(repos), f"{where} cancel_repos")
     if allow_cancel and not cancel_repos:
         raise ValueError(f"{where} allow_cancel needs cancel_repos (an allow-list)")
-    workflows = section.get("cancel_workflows", [])
-    if not isinstance(workflows, list) or not all(
-        isinstance(w, str) and w.strip() for w in workflows
-    ):
-        raise ValueError(f"{where} cancel_workflows must be a list of workflow paths")
     window = _duration(section, "window", DEFAULT_WINDOW, where)
     if not timedelta(hours=1) <= window <= MAX_WINDOW:
         raise ValueError(f"{where} window must be from 1h to 7d")
     tick_budget = _duration(section, "tick_budget", DEFAULT_TICK_BUDGET, where)
     if not timedelta(0) < tick_budget <= MAX_TICK_BUDGET:
         raise ValueError(f"{where} tick_budget must be positive and at most 60s")
+    poll = _duration(section, "poll_interval", DEFAULT_POLL, where)
+    if not timedelta(seconds=30) <= poll <= timedelta(hours=1):
+        raise ValueError(f"{where} poll_interval must be from 30s to 1h")
     included = section.get("included_minutes")
     if included is not None and (
         isinstance(included, bool) or not isinstance(included, int | float) or included <= 0
     ):
         raise ValueError(f"{where} included_minutes must be a positive number")
+    token_env = section.get("cancel_token_env")
+    if token_env is not None and (
+        not isinstance(token_env, str) or not _ENV_NAME.fullmatch(token_env)
+    ):
+        raise ValueError(f"{where} cancel_token_env must be an environment variable name")
+    reserve = section.get("rate_reserve", DEFAULT_RATE_RESERVE)
+    if isinstance(reserve, bool) or not isinstance(reserve, int) or not 0 <= reserve <= 4000:
+        raise ValueError(f"{where} rate_reserve must be an integer from 0 to 4000")
     return CiSettings(
         repos=repos,
-        enabled=enabled,
+        enabled=_bool(section, "enabled", True, where),
         window=window,
+        poll_interval=poll,
+        rate_reserve=reserve,
         max_pages=_int(section, "max_pages", DEFAULT_MAX_PAGES, MAX_PAGES, where),
         max_requests_per_tick=_int(
             section, "max_requests_per_tick", DEFAULT_REQUESTS, MAX_REQUESTS, where
@@ -161,20 +243,31 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
         quota_reset_day=_int(section, "quota_reset_day", 1, 28, where),
         allow_cancel=allow_cancel,
         cancel_repos=cancel_repos,
-        cancel_workflows=tuple(w.strip() for w in workflows),
+        cancel_workflows=_strings(section, "cancel_workflows", where),
+        cancel_branches=_strings(section, "cancel_branches", where),
+        cancel_token_env=token_env,
     )
 
 
 @dataclass(frozen=True, slots=True)
 class _Target:
-    """A superseded active run as the last scan saw it: what a cancel may touch."""
+    """A cancellable run as the last scan saw it: all a cancel may touch."""
 
     repo: str
     run_id: int
+    attempt: int
     newer_id: int
-    group: tuple[Any, ...]  # workflow id, branch, head repository, event
+    group: tuple[Any, ...]
     created_at: datetime
-    workflow: str | None
+
+
+@dataclass(slots=True)
+class _RepoScan:
+    repo: str
+    runs: dict[int, Mapping[str, Any]] = field(default_factory=dict)
+    current: bool = True  # every page came from GitHub just now, none from a stale cache
+    more: bool = False  # the last page read was full and still inside the window
+    default_branch: str | None = None
 
 
 @dataclass(slots=True)
@@ -189,17 +282,28 @@ class GitHubCI:
 
     name = SOURCE
 
-    def __init__(self, client: GitHubClient, settings: CiSettings) -> None:
+    def __init__(
+        self,
+        client: GitHubClient,
+        settings: CiSettings,
+        cancel_client: GitHubClient | None = None,
+    ) -> None:
         self.client = client
         self.settings = settings
+        self.cancel_client = cancel_client or client
         self.actions = (
             frozenset({ActionKind.CANCEL_BUILD}) if settings.allow_cancel else frozenset()
         )
+        self._builds: tuple[Build, ...] = ()
+        self._scanned_at: datetime | None = None
+        self._rotation = 0
         self._targets: dict[str, _Target] = {}
         self._cancelled: OrderedDict[str, None] = OrderedDict()
         self._minutes: OrderedDict[tuple[str, int], float] = OrderedDict()
         self._files: OrderedDict[tuple[str, int, str], tuple[str, ...] | None] = OrderedDict()
-        self._failing: set[str] = set()  # repos whose run list failed last tick (logged once)
+        self._branches: dict[str, tuple[str, datetime]] = {}  # repo -> default branch, when
+        self._failing: set[str] = set()  # repos whose run list failed (logged once)
+        self._reserve_logged = False
 
     def __repr__(self) -> str:
         return f"GitHubCI({self.client!r}, repos={list(self.settings.repos)})"
@@ -208,123 +312,187 @@ class GitHubCI:
 
     def __call__(self, snapshot: Snapshot) -> Snapshot:
         now = snapshot.now
+        if self._scanned_at is None or now - self._scanned_at >= self.settings.poll_interval:
+            if self._reserve_low(now):
+                # No new scan, and nothing may be cancelled on old evidence.
+                self._targets = {}
+                self._builds = tuple(replace(b, cancellable=False) for b in self._builds)
+            else:
+                self._reserve_logged = False
+                self._builds = tuple(self._scan(now))
+                self._scanned_at = now
+        return replace(
+            snapshot,
+            builds=snapshot.builds + self._builds,
+            resources=snapshot.resources + self._quota(now),
+        )
+
+    def _reserve_low(self, now: datetime) -> bool:
+        remaining, reset = self.client.rate_remaining, self.client.rate_reset
+        low = (
+            remaining is not None
+            and remaining < self.settings.rate_reserve
+            and (reset is None or now < reset)
+        )
+        if low and not self._reserve_logged:
+            log.warning(
+                "[connectors.github.ci] scan skipped: %s requests left this hour, below the "
+                "reserve of %s kept for conditions",
+                remaining,
+                self.settings.rate_reserve,
+            )
+            self._reserve_logged = True
+        return low
+
+    def _scan(self, now: datetime) -> list[Build]:
         s = self.settings
+        self._targets = {}  # only this scan's evidence counts
         self.client.begin_tick(
             s.max_requests_per_tick, s.tick_budget, min_cache_entries=4 * s.max_requests_per_tick
         )
-        tick = _Tick()
-        builds: list[Build] = []
-        targets: dict[str, _Target] = {}
-        for repo in s.repos:
+        start = self._rotation % len(s.repos)
+        self._rotation += 1
+        order = s.repos[start:] + s.repos[:start]
+        since = now - s.window
+        scans: list[_RepoScan] = []
+        for repo in order:  # page 1 of every repository first
+            scan = _RepoScan(repo)
             try:
-                runs, current = self._runs(repo, now)
+                self._page(scan, 1, since)
             except GitHubError as exc:
                 if repo not in self._failing:
                     log.warning("[connectors.github.ci] %s: runs not read (%s)", repo, exc.kind)
                 self._failing.add(repo)
                 continue
             self._failing.discard(repo)
-            found, superseded = self._builds(repo, runs, now, tick)
-            builds.extend(found)
-            if current:
-                targets.update(superseded)
-        # Only what this scan saw from GitHub may be cancelled: a repo whose run list failed,
-        # or came from the cache because GitHub could not be asked, has no targets.
-        self._targets = targets
-        return replace(
-            snapshot,
-            builds=snapshot.builds + tuple(builds),
-            resources=snapshot.resources + self._quota(now),
-        )
+            scans.append(scan)
+        for scan in scans:
+            scan.default_branch = self._default_branch(scan.repo, now)
+        for page in range(2, s.max_pages + 1):
+            for scan in scans:
+                if scan.more:
+                    try:
+                        self._page(scan, page, since)
+                    except GitHubError:
+                        scan.more = False  # what the earlier pages gave is still worth having
+        return self._builds_of(scans, now)
 
-    def _runs(self, repo: str, now: datetime) -> tuple[list[Mapping[str, Any]], bool]:
-        """Runs created within the window, and whether every page read was current."""
-        since = now - self.settings.window
-        runs: dict[int, Mapping[str, Any]] = {}
-        current = True
-        for page in range(1, self.settings.max_pages + 1):
-            query = {
-                "created": f">={since.date().isoformat()}",
-                "per_page": str(PER_PAGE),
-                "page": str(page),
-            }
-            try:
-                response = self.client.get(f"/repos/{repo}/actions/runs", query)
-                body = _mapping(response.body)
-                current = current and not response.stale
-            except GitHubError:
-                if page == 1:
-                    raise
-                break  # what the earlier pages gave is still worth having
-            items = _list(body.get("workflow_runs"))
-            oldest: datetime | None = None
-            for run in items:
-                run_id, created = _id(run.get("id")), _time(run.get("created_at"))
-                if run_id is None or created is None:
-                    continue
-                oldest = created if oldest is None else min(oldest, created)
-                if created >= since:
-                    runs.setdefault(run_id, run)
-            if len(items) < PER_PAGE or (oldest is not None and oldest < since):
-                break
-        return list(runs.values()), current
+    def _page(self, scan: _RepoScan, page: int, since: datetime) -> None:
+        query = {
+            "created": f">={since.date().isoformat()}",
+            "per_page": str(PER_PAGE),
+            "page": str(page),
+        }
+        response = self.client.get(f"/repos/{scan.repo}/actions/runs", query)
+        scan.current = scan.current and not response.stale
+        items = _list(_mapping(response.body).get("workflow_runs"))
+        oldest: datetime | None = None
+        for run in items:
+            run_id, created = _id(run.get("id")), _time(run.get("created_at"))
+            if run_id is None or created is None:
+                continue
+            oldest = created if oldest is None else min(oldest, created)
+            if created >= since:
+                scan.runs.setdefault(run_id, run)
+        scan.more = len(items) >= PER_PAGE and (oldest is None or oldest >= since)
 
-    def _builds(
-        self, repo: str, runs: list[Mapping[str, Any]], now: datetime, tick: _Tick
-    ) -> tuple[list[Build], dict[str, _Target]]:
-        # Active and newest first: they get the budget for PR and job lookups first.
-        def order(run: Mapping[str, Any]) -> tuple[bool, float]:
-            created = _time(run.get("created_at"))
-            return (_status(run).is_active is False, -(created.timestamp() if created else 0))
+    def _default_branch(self, repo: str, now: datetime) -> str | None:
+        known = self._branches.get(repo)
+        if known is not None and now - known[1] < DEFAULT_BRANCH_TTL:
+            return known[0]
+        try:
+            response = self.client.get(f"/repos/{repo}")
+            branch = _mapping(response.body).get("default_branch")
+        except GitHubError:
+            return known[0] if known else None
+        if not isinstance(branch, str) or not branch:
+            return known[0] if known else None
+        self._branches[repo] = (branch, response.fetched_at)
+        return branch
 
-        runs = sorted(runs, key=order)
-        groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
-        for run in runs:
-            if (group := _group(run)) is not None:
-                groups.setdefault(group, []).append(run)
-        newer: dict[int, Mapping[str, Any]] = {}
-        for members in groups.values():
-            members.sort(key=lambda r: (_time(r.get("created_at")), _id(r.get("id"))))
-            for older, newest in itertools.pairwise(members):
-                newer[_id(older.get("id")) or 0] = newest
+    def _builds_of(self, scans: list[_RepoScan], now: datetime) -> list[Build]:
+        newer: dict[tuple[str, int], Mapping[str, Any]] = {}
+        for scan in scans:
+            newer.update(self._successors(scan))
+        # Active and newest first: they get what is left of the budget for lookups.
+        work = [(scan, run) for scan in scans for run in scan.runs.values()]
+        work.sort(key=lambda w: (not _status(w[1]).is_active, -_created(w[1])))
+        tick = _Tick()
         builds: list[Build] = []
-        targets: dict[str, _Target] = {}
-        for run in runs:
-            run_id = _id(run.get("id"))
-            assert run_id is not None  # _runs keeps only runs with an id
-            build = self._build(repo, run_id, run, now, tick)
-            successor = newer.get(run_id)
+        for scan, run in work:
+            run_id = _id(run.get("id")) or 0
+            build = self._build(scan, run_id, run, now, tick)
+            successor = newer.get((scan.repo, run_id))
             if successor is not None:
-                build = replace(build, superseded_by=_build_id(repo, _id(successor.get("id"))))
-                group = _group(run)
-                created = _time(run.get("created_at"))
-                if build.status.is_active and group is not None and created is not None:
-                    targets[build.id] = _Target(
-                        repo,
-                        run_id,
-                        _id(successor.get("id")) or 0,
-                        group,
-                        created,
-                        build.workflow,
-                    )
+                newer_id = _id(successor.get("id")) or 0
+                build = replace(build, superseded_by=_build_id(scan.repo, newer_id))
+                target = self._target(scan, run_id, run, newer_id, build)
+                if target is not None:
+                    self._targets[build.id] = target
+                    build = replace(build, cancellable=True)
             builds.append(build)
-        return builds, targets
+        return builds
+
+    def _successors(self, scan: _RepoScan) -> dict[tuple[str, int], Mapping[str, Any]]:
+        """For every run that a newer run of its group supersedes, that newer run."""
+        if scan.default_branch is None:
+            return {}  # without the default branch nothing is marked
+        groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
+        for run in scan.runs.values():
+            group = _group(run)
+            if group is not None and run.get("head_branch") != scan.default_branch:
+                groups.setdefault(group, []).append(run)
+        found: dict[tuple[str, int], Mapping[str, Any]] = {}
+        for members in groups.values():
+            members.sort(key=lambda r: (_created(r), _id(r.get("id")) or 0))
+            for older, newest in itertools.pairwise(members):
+                if _created(newest) > _created(older):
+                    found[(scan.repo, _id(older.get("id")) or 0)] = newest
+        return found
+
+    def _target(
+        self,
+        scan: _RepoScan,
+        run_id: int,
+        run: Mapping[str, Any],
+        newer_id: int,
+        build: Build,
+    ) -> _Target | None:
+        branch, group, path = run.get("head_branch"), _group(run), run.get("path")
+        if (
+            not scan.current
+            or not build.status.is_active
+            or group is None
+            or not isinstance(branch, str)
+            or scan.default_branch is None
+            or not self.settings.may_cancel(
+                scan.repo, path if isinstance(path, str) else None, branch, scan.default_branch
+            )
+        ):
+            return None
+        created = _time(run.get("created_at"))
+        assert created is not None  # _page keeps only runs with a creation time
+        return _Target(scan.repo, run_id, _attempt(run), newer_id, group, created)
 
     def _build(
-        self, repo: str, run_id: int, run: Mapping[str, Any], now: datetime, tick: _Tick
+        self, scan: _RepoScan, run_id: int, run: Mapping[str, Any], now: datetime, tick: _Tick
     ) -> Build:
         status = _status(run)
         created = _time(run.get("created_at"))
         started = _time(run.get("run_started_at")) or created
-        finished = None if status.is_active else _time(run.get("updated_at"))
+        updated = _time(run.get("updated_at"))
+        finished = None if status.is_active else updated
         head = run.get("head_commit")
         message = head.get("message") if isinstance(head, Mapping) else None
         sha = _str(run.get("head_sha"))
-        draft, paths = self._pull_info(repo, run, sha, tick)
+        draft, paths = self._pull_info(scan.repo, run, sha, tick)
+        # A stale run list says nothing about now: an active run is measured to its last
+        # known update, never extrapolated.
+        end = finished or (now if scan.current else updated or started)
         return Build(
-            id=_build_id(repo, run_id),
+            id=_build_id(scan.repo, run_id),
             source=SOURCE,
-            repo=repo,
+            repo=scan.repo,
             workflow=_str(run.get("path")) or _str(run.get("name")),
             branch=_str(run.get("head_branch")),
             sha=sha,
@@ -335,7 +503,7 @@ class GitHubCI:
             status=status,
             started_at=started,
             finished_at=finished,
-            minutes=self._run_minutes(repo, run_id, run, status, started, finished, now, tick),
+            minutes=self._run_minutes(scan.repo, run_id, run, status, started, end, tick),
         )
 
     def _run_minutes(
@@ -345,22 +513,21 @@ class GitHubCI:
         run: Mapping[str, Any],
         status: BuildStatus,
         started: datetime | None,
-        finished: datetime | None,
-        now: datetime,
+        end: datetime | None,
         tick: _Tick,
     ) -> float:
-        if status is BuildStatus.QUEUED or status is BuildStatus.SKIPPED or started is None:
+        if status in {BuildStatus.QUEUED, BuildStatus.SKIPPED} or started is None or end is None:
             return 0.0
-        wall = max(0.0, ((finished or now) - started).total_seconds() / 60)
-        if status.is_active:
-            return round(wall, 1)
-        attempt = _id(run.get("run_attempt")) or 1
+        wall = round(max(0.0, (end - started).total_seconds() / 60), 1)
+        if status.is_active or status is BuildStatus.UNKNOWN:
+            return wall
+        attempt = _attempt(run)
         key = (f"{repo}:{run_id}", attempt)
         if key in self._minutes:
             self._minutes.move_to_end(key)
             return self._minutes[key]
         if tick.jobs_left <= 0:
-            return round(wall, 1)
+            return wall
         tick.jobs_left -= 1
         try:
             path = f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs"
@@ -368,11 +535,11 @@ class GitHubCI:
         except GitHubError as exc:
             if exc.kind == "budget":
                 tick.jobs_left = 0
-            return round(wall, 1)
+            return wall
         jobs = _list(body.get("jobs"))
         total = body.get("total_count")
         if isinstance(total, int) and total > len(jobs):
-            return round(wall, 1)  # not every job visible: the wall clock is the estimate
+            return wall  # not every job visible: the wall clock is the estimate
         billed = 0
         for job in jobs:
             begun, done = _time(job.get("started_at")), _time(job.get("completed_at"))
@@ -384,11 +551,9 @@ class GitHubCI:
     def _pull_info(
         self, repo: str, run: Mapping[str, Any], sha: str | None, tick: _Tick
     ) -> tuple[bool, tuple[str, ...] | None]:
-        number = None
-        for entry in _list(run.get("pull_requests")):
-            number = _id(entry.get("number"))
-            if number is not None:
-                break
+        number = next(
+            (n for e in _list(run.get("pull_requests")) if (n := _id(e.get("number")))), None
+        )
         if number is None:
             return False, None
         if (repo, number) not in tick.pulls:
@@ -416,7 +581,7 @@ class GitHubCI:
             path = f"/repos/{repo}/pulls/{number}/files"
             files = _list(self.client.get(path, {"per_page": str(MAX_PR_FILES)}).body)
         except GitHubError:
-            return draft, None  # not remembered: asked again on a later tick
+            return draft, None  # not remembered: asked again on a later scan
         names = tuple(n for f in files if isinstance(n := f.get("filename"), str))
         paths = names if len(names) == changed else None
         _remember(self._files, key, paths)
@@ -437,52 +602,46 @@ class GitHubCI:
 
     # --- action -------------------------------------------------------------------
 
-    def execute(self, action: Action) -> bool:
-        """Cancel a superseded run; see the module docs for every guard. False: refused."""
+    def execute(self, action: Action) -> ActionResult:
+        """Cancel a superseded run; see the module docs for every guard.
+
+        Raises :class:`GitHubError` on a transient failure, so the engine retries later."""
         if action.kind is not ActionKind.CANCEL_BUILD or not self.settings.allow_cancel:
-            return False
+            return ActionResult.REFUSED
         build_id = action.params.get("build_id")
         if not isinstance(build_id, str):
-            return False
+            return ActionResult.REFUSED
         if build_id in self._cancelled:
-            return True  # idempotent: already cancelled by Kelpie
+            return ActionResult.NOTHING_TO_DO  # already cancelled by Kelpie
         target = self._targets.get(build_id)
         if target is None:
-            log.warning("cancel_build %s refused: not a superseded run of the last scan", build_id)
-            return False
-        if target.repo not in self.settings.cancel_repos or (
-            self.settings.cancel_workflows and target.workflow not in self.settings.cancel_workflows
+            log.warning("cancel_build %s refused: not a cancellable run of the last scan", build_id)
+            return ActionResult.REFUSED
+        run = self._fresh(target.repo, target.run_id)
+        if not _status(run).is_active:
+            log.info("cancel_build %s: nothing to do, the run is no longer active", build_id)
+            self._targets.pop(build_id, None)
+            return ActionResult.NOTHING_TO_DO
+        if _attempt(run) != target.attempt:
+            log.warning("cancel_build %s refused: the run was re-run since the scan", build_id)
+            return ActionResult.REFUSED
+        newer = self._fresh(target.repo, target.newer_id)
+        if (
+            _group(run) != target.group
+            or _group(newer) != target.group
+            or _created(newer) <= _created(run)
         ):
-            log.warning("cancel_build %s refused: not in cancel_repos/cancel_workflows", build_id)
-            return False
-        try:
-            run = self._fresh(target.repo, target.run_id)
-            if not _status(run).is_active:
-                log.info("cancel_build %s: the run already finished", build_id)
-                self._targets.pop(build_id, None)
-                return True
-            newer = self._fresh(target.repo, target.newer_id)
-            newer_created = _time(newer.get("created_at"))
-            if (
-                _group(run) != target.group
-                or _group(newer) != target.group
-                or newer_created is None
-                or newer_created <= target.created_at
-            ):
-                log.warning("cancel_build %s refused: no longer superseded", build_id)
-                return False
-            code = self.client.post(f"/repos/{target.repo}/actions/runs/{target.run_id}/cancel")
-        except GitHubError as exc:
-            log.warning("cancel_build %s not done: %s", build_id, exc.kind)
-            return False
+            log.warning("cancel_build %s refused: no longer superseded", build_id)
+            return ActionResult.REFUSED
+        path = f"/repos/{target.repo}/actions/runs/{target.run_id}/cancel"
+        code = self.cancel_client.post(path)
         self._targets.pop(build_id, None)
         _remember(self._cancelled, build_id, None)
-        log.info(
-            "cancel_build %s: %s",
-            build_id,
-            "already finishing" if code == 409 else "cancel requested",
-        )
-        return True
+        if code == 409:
+            log.info("cancel_build %s: nothing to do, the run is already finishing", build_id)
+            return ActionResult.NOTHING_TO_DO
+        log.info("cancel_build %s: cancel requested", build_id)
+        return ActionResult.DONE
 
     def _fresh(self, repo: str, run_id: int) -> Mapping[str, Any]:
         response = self.client.get(f"/repos/{repo}/actions/runs/{run_id}", fresh=True)
@@ -504,33 +663,60 @@ def next_reset(now: datetime, day: int) -> datetime:
     return candidate.replace(year=year, month=month)
 
 
-def _build_id(repo: str, run_id: int | None) -> str:
+def _build_id(repo: str, run_id: int) -> str:
     return f"{repo}:{run_id}"
 
 
 def _status(run: Mapping[str, Any]) -> BuildStatus:
     status, conclusion = run.get("status"), run.get("conclusion")
-    if status != "completed":
+    if status == "completed":
         return (
-            _ACTIVE.get(status, BuildStatus.QUEUED)
-            if isinstance(status, str)
-            else (BuildStatus.QUEUED)
+            _CONCLUSIONS.get(conclusion, BuildStatus.UNKNOWN)
+            if isinstance(conclusion, str)
+            else BuildStatus.UNKNOWN
         )
-    if isinstance(conclusion, str) and conclusion in _CONCLUSIONS:
-        return _CONCLUSIONS[conclusion]
-    return BuildStatus.FAILURE
+    return (
+        _ACTIVE.get(status, BuildStatus.UNKNOWN)
+        if isinstance(status, str)
+        else (BuildStatus.UNKNOWN)
+    )
+
+
+def _attempt(run: Mapping[str, Any]) -> int:
+    return _id(run.get("run_attempt")) or 1
+
+
+def _created(run: Mapping[str, Any]) -> float:
+    created = _time(run.get("created_at"))
+    return created.timestamp() if created else 0.0
 
 
 def _group(run: Mapping[str, Any]) -> tuple[Any, ...] | None:
-    """Runs that supersede each other: same workflow, branch, head repository, event."""
-    event = run.get("event")
-    branch = _str(run.get("head_branch"))
-    workflow = _id(run.get("workflow_id"))
-    if event not in SUPERSEDABLE_EVENTS or branch is None or workflow is None:
+    """Runs that supersede each other: same workflow, branch (full name), head repository
+    and event, and for a pull request the same PR and base branch. None: never superseded."""
+    event, branch, workflow = run.get("event"), run.get("head_branch"), _id(run.get("workflow_id"))
+    if event not in SUPERSEDABLE_EVENTS or not isinstance(branch, str) or not branch:
         return None
+    if workflow is None or _attempt(run) > 1:
+        return None  # a re-run is a human's decision
     head_repo = run.get("head_repository")
     origin = head_repo.get("full_name") if isinstance(head_repo, Mapping) else None
-    return (workflow, branch, origin if isinstance(origin, str) else None, event)
+    if not isinstance(origin, str):
+        return None
+    pr: tuple[int, str] | None = None
+    if event == "pull_request":
+        entries = _list(run.get("pull_requests"))
+        if len(entries) != 1:
+            return None  # no PR (a fork) or several: which one triggered it is unknown
+        base = entries[0].get("base")
+        number, ref = (
+            _id(entries[0].get("number")),
+            base.get("ref") if isinstance(base, Mapping) else None,
+        )
+        if number is None or not isinstance(ref, str):
+            return None
+        pr = (number, ref)
+    return (workflow, branch, origin, event, pr)
 
 
 def _remember[K, V](cache: OrderedDict[K, V], key: K, value: V) -> None:
@@ -548,7 +734,8 @@ def _first_line(message: Any) -> str | None:
 
 
 def _str(value: Any) -> str | None:
-    return value[:255] if isinstance(value, str) and value else None
+    """A display value: truncated, so never use it to compare or group."""
+    return value[:MAX_DISPLAY] if isinstance(value, str) and value else None
 
 
 def _id(value: Any) -> int | None:
@@ -586,6 +773,13 @@ def _repos(value: Any, allowed: Collection[str], where: str) -> tuple[str, ...]:
     if outside := [r for r in repos if r not in allowed]:
         raise ValueError(f"{where}: not in the allowed repositories: {outside}")
     return repos
+
+
+def _strings(section: Mapping[str, Any], key: str, where: str) -> tuple[str, ...]:
+    value = section.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+        raise ValueError(f"{where} {key} must be a list of non-empty strings")
+    return tuple(v.strip() for v in value)
 
 
 def _bool(section: Mapping[str, Any], key: str, default: bool, where: str) -> bool:

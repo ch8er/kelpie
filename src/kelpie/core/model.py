@@ -315,6 +315,7 @@ class BuildStatus(StrEnum):
     FAILURE = "failure"
     CANCELLED = "cancelled"
     SKIPPED = "skipped"
+    UNKNOWN = "unknown"  # a state the connector does not know: never treated as active
 
     @property
     def is_active(self) -> bool:
@@ -332,7 +333,9 @@ class Build:
     of the head commit's message. ``changed_paths`` are the files the change touches;
     None when unknown. ``minutes`` is what the build has burned so far (billable minutes
     where the CI reports them). ``superseded_by`` is the id of a newer build of the same
-    pipeline and branch that started after this one.
+    pipeline and branch that started after this one. ``cancellable`` is set by the
+    connector: the build is superseded, still active, and within what the connector is
+    configured to cancel; rules only ask to cancel such builds.
     """
 
     id: str
@@ -350,6 +353,7 @@ class Build:
     finished_at: datetime | None = None
     minutes: float = 0.0
     superseded_by: str | None = None
+    cancellable: bool = False
 
 
 @dataclass(frozen=True, slots=True)

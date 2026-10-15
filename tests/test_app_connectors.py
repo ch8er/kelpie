@@ -265,3 +265,24 @@ def test_ci_economy_may_act_with_only_hermes_when_cancel_is_allowed(
     read_only = replace(github, ci=replace(github.ci, allow_cancel=False, cancel_repos=()))
     with pytest.raises(ConfigError, match="Hermes actions are not implemented"):
         build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=read_only))
+
+
+def test_cancel_token_env_must_be_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    monkeypatch.delenv("KELPIE_GH_CANCEL", raising=False)
+    text = CI_CONFIG.replace(
+        'cancel_repos = ["example/repo"]\n',
+        'cancel_repos = ["example/repo"]\ncancel_token_env = "KELPIE_GH_CANCEL"\n',
+    )
+    settings = load_settings(write(tmp_path, text))
+    with pytest.raises(ConfigError, match="KELPIE_GH_CANCEL"):
+        build_app(settings)
+    monkeypatch.setenv("KELPIE_GH_CANCEL", "ghp_SyntheticCancelToken987654321")
+    app = build_app(settings)
+    app.close()
+
+
+def test_rule_window_must_fit_the_connector_window(tmp_path: Path) -> None:
+    text = CI_CONFIG + '\n[engine.rules.ci_economy]\nwindow = "48h"\n'
+    with pytest.raises(ConfigError, match="window"):
+        build_app(load_settings(write(tmp_path, text)))

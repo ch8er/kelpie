@@ -91,11 +91,24 @@ class GitHubSettings:
         )
         return GitHubConnector(client, self.repos)
 
-    def build_ci(self, connector: GitHubConnector) -> GitHubCI | None:
-        """The CI source sharing ``connector``'s client; None when not configured."""
+    def build_ci(
+        self,
+        connector: GitHubConnector,
+        clock: Callable[[], datetime],
+        environ: Mapping[str, str] = os.environ,
+    ) -> GitHubCI | None:
+        """The CI source sharing ``connector``'s client; None when not configured. With
+        ``cancel_token_env`` the cancel request alone goes through a second client that
+        holds that token. Raises ValueError when that token is missing or unusable."""
         if self.ci is None or not self.ci.enabled:
             return None
-        return GitHubCI(connector.client, self.ci)
+        token = self.ci.cancel_token(environ)
+        cancel_client = None
+        if token is not None:
+            cancel_client = GitHubClient(
+                self.api_url, token, timeout=self.timeout, cache_ttl=self.cache_ttl, clock=clock
+            )
+        return GitHubCI(connector.client, self.ci, cancel_client)
 
 
 def load_github(section: Any) -> GitHubSettings:

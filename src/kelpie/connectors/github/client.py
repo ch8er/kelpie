@@ -214,6 +214,7 @@ class GitHubClient:
         self.budget_exhausted = False  # this tick asked for more than its budget
         self.backoff_until: datetime | None = None
         self.rate_remaining: int | None = None
+        self.rate_reset: datetime | None = None  # when the current rate-limit window ends
         self._cache: OrderedDict[str, _Entry] = OrderedDict()
 
     def __repr__(self) -> str:
@@ -394,8 +395,10 @@ class GitHubClient:
             if expired.is_set():
                 raise _Timeout
             return _Reply(response.status, response.headers, body)
-        except (OSError, http.client.HTTPException):
-            if expired.is_set():
+        except (OSError, http.client.HTTPException) as exc:
+            # The watchdog, a socket timeout armed with the time left, or the clock: each
+            # means the deadline passed, whichever noticed first.
+            if expired.is_set() or isinstance(exc, TimeoutError) or self.monotonic() >= deadline:
                 raise _Timeout from None
             raise
         finally:
@@ -502,15 +505,11 @@ class GitHubClient:
         if remaining is None:
             return
         self.rate_remaining = remaining
+        self.rate_reset = _epoch(headers.get("X-RateLimit-Reset"))
         limit = _int(headers.get("X-RateLimit-Limit"))
         self.observer.github_rate_limit(remaining, limit if limit is not None else -1)
         if remaining <= 0:
-            reset = _int(headers.get("X-RateLimit-Reset"))
-            until = (
-                datetime.fromtimestamp(reset, UTC)
-                if reset is not None
-                else now + self.error_backoff
-            )
+            until = self.rate_reset or now + self.error_backoff
             self._back_off(max(until, now + timedelta(seconds=1)), now)
 
     def _back_off(self, until: datetime, now: datetime) -> None:
@@ -551,6 +550,16 @@ def _int(value: str | None) -> int | None:
     try:
         return int(value) if value is not None else None
     except ValueError:
+        return None
+
+
+def _epoch(value: str | None) -> datetime | None:
+    seconds = _int(value)
+    if seconds is None:
+        return None
+    try:
+        return datetime.fromtimestamp(seconds, UTC)
+    except (OverflowError, ValueError, OSError):
         return None
 
 

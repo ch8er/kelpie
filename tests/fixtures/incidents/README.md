@@ -100,8 +100,8 @@ Fixture conventions:
 | 3 | `03-disk-full.yaml` | `resources` | `alert` critical, `{host: host-a}` |
 | 4 | `04-host-overload-heavy-queue.yaml` | `resources` | `alert` warning, `{host: host-a, max_heavy: 1}`; none for healthy host-b or light T-406 |
 | 5 | `05-ci-minutes-exhausted.yaml` | `ci_economy` | `alert` critical (CI quota exhausted), `blocked_tasks` listed; no host alert for the healthy disk |
-| 5 | `05-superseded-builds.yaml` | `ci_economy` | `cancel_build` for the superseded running build B-1 (`executor: ci`), `info` waste summary; nothing for the newest build, a superseded build that finished before its successor started, or a manual run |
-| 5 | `05-docs-only-build.yaml` | `ci_economy` | `info` waste summary: docs-only D-1, draft D-3, already verified D-4, WIP D-6 (35 min); nothing for a docs-plus-code build, a build outside the window, or the healthy quota |
+| 5 | `05-superseded-builds.yaml` | `ci_economy` | `cancel_build` for the superseded running cancellable build B-1 (`executor: ci`), `info` waste summary; nothing for the newest build, a superseded build that finished before its successor started, one outside the connector's cancel policy, or a manual run |
+| 5 | `05-docs-only-build.yaml` | `ci_economy` | `info` waste summary: docs-only D-1, draft D-3, already verified D-4, WIP D-6 (35 min); nothing for a docs-plus-code build, the same commit built for another trigger, a build outside the window, or the healthy quota |
 | 6 | `06-llm-quota-and-expired-auth.yaml` | `resources` | `alert` warning (rate limits), `alert` critical (expired auth); none for valid or non-expiring credentials |
 | 6 | `06-subscription-limit-forecast.yaml` | `loop_breaker` | `info` alerts saying "estimate": the next provider limit (`next_limit_at`) and the budget running out within the horizon, for the subscription agent on course to hit its limit; nothing for the slow-burning agent, no `stop` |
 | 7 | `07-shared-file-conflicts.yaml` | `return_causes` | `alert` recommendation with `hot_files` (conflicts dominate returns); `comment` on in-progress tasks T-705, T-706 touching them; none for T-707 |

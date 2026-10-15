@@ -10,7 +10,7 @@ import pytest
 
 from kelpie.connectors.github.builds import CiSettings, GitHubCI, load_ci, next_reset
 from kelpie.connectors.github.client import GitHubClient, GitHubError
-from kelpie.core.actions import Action, ActionKind
+from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.model import BuildStatus, ResourceKind, Snapshot
 from kelpie.core.ports import ActionConnector
 from tests.connectors.fake_github import TOKEN, Clock, FakeGitHub, serve
@@ -19,6 +19,7 @@ REPO = "example/repo"
 OTHER = "example/other"
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 RUNS = f"/repos/{REPO}/actions/runs"
+CANCEL_TOKEN = "ghp_SyntheticCancelToken987654321"
 
 
 def iso(dt: datetime) -> str:
@@ -49,22 +50,34 @@ def run(run_id: int, minutes_ago: float, **fields: Any) -> dict[str, Any]:
     return body
 
 
-def page_path(page: int, since: str = "2026-03-01", repo: str = REPO) -> str:
+def pr_run(
+    run_id: int, minutes_ago: float, number: int, base: str, **fields: Any
+) -> dict[str, Any]:
+    entry = {"number": number, "head": {"sha": f"{run_id:040x}"}, "base": {"ref": base}}
+    return run(run_id, minutes_ago, event="pull_request", pull_requests=[entry], **fields)
+
+
+def page_path(page: int, repo: str = REPO, since: str = "2026-03-01") -> str:
     return f"/repos/{repo}/actions/runs?created=%3E%3D{since}&page={page}&per_page=100"
 
 
-def runs_page(gh: FakeGitHub, runs: list[dict[str, Any]], page: int = 1) -> None:
-    gh.reply(page_path(page), {"total_count": len(runs), "workflow_runs": runs})
+def runs_page(gh: FakeGitHub, runs: list[dict[str, Any]], page: int = 1, repo: str = REPO) -> None:
+    gh.reply(page_path(page, repo), {"total_count": len(runs), "workflow_runs": runs})
+    gh.reply(f"/repos/{repo}", {"default_branch": "main"})
 
 
 def ci(
-    gh: FakeGitHub, clock: Clock | None = None, token: str | None = TOKEN, **settings: Any
+    gh: FakeGitHub,
+    clock: Clock | None = None,
+    repos: tuple[str, ...] = (REPO,),
+    cancel_client: GitHubClient | None = None,
+    **settings: Any,
 ) -> GitHubCI:
-    client = GitHubClient(gh.url, token, clock=clock or Clock(NOW))
-    return GitHubCI(client, CiSettings(repos=(REPO,), **settings))
+    client = GitHubClient(gh.url, TOKEN, clock=clock or Clock(NOW))
+    return GitHubCI(client, CiSettings(repos=repos, **settings), cancel_client)
 
 
-def cancel(build_id: str) -> Action:
+def cancel(build_id: Any) -> Action:
     params = {"build_id": build_id}
     return Action(ActionKind.CANCEL_BUILD, "ci_economy", "superseded", params=params)
 
@@ -81,6 +94,10 @@ def superseded_pair(gh: FakeGitHub) -> None:
     gh.reply(f"{RUNS}/1", run(1, 20))
     gh.reply(f"{RUNS}/2", run(2, 5))
     gh.reply(f"POST {RUNS}/1/cancel", {}, status=202)
+
+
+def builds_by_id(source: GitHubCI, now: datetime = NOW) -> dict[str, Any]:
+    return {b.id: b for b in source(Snapshot(now=now)).builds}
 
 
 # --- reading ------------------------------------------------------------------------
@@ -109,11 +126,11 @@ def test_runs_become_builds_and_superseded_is_marked() -> None:
                 run(9, 60 * 30),  # outside the window
             ],
         )
-        snap = ci(gh)(Snapshot(now=NOW))
-        builds = {b.id: b for b in snap.builds}
+        builds = builds_by_id(ci(gh, **ALLOWED))
         assert set(builds) == {f"{REPO}:{i}" for i in (1, 2, 3, 4, 5, 6)}
         old, new = builds[f"{REPO}:1"], builds[f"{REPO}:2"]
         assert old.superseded_by == new.id and new.superseded_by is None
+        assert old.cancellable and not new.cancellable
         assert builds[f"{REPO}:3"].superseded_by is None  # schedules are never marked
         assert builds[f"{REPO}:6"].superseded_by is None
         assert old.status is BuildStatus.RUNNING and old.source == "github"
@@ -122,18 +139,91 @@ def test_runs_become_builds_and_superseded_is_marked() -> None:
         assert builds[f"{REPO}:5"].status is BuildStatus.SUCCESS
 
 
-def test_paging_stays_within_the_budget() -> None:
+def test_superseded_false_positives() -> None:
+    long_branch = "task/" + "x" * 300
     with serve() as gh:
-        runs_page(gh, [run(1000 + i, 1 + i / 10) for i in range(100)], page=1)
-        runs_page(gh, [run(2000 + i, 20 + i / 10) for i in range(100)], page=2)
-        runs_page(gh, [run(3000, 60)], page=3)
-        source = ci(gh, max_requests_per_tick=2, max_pages=3)
-        snap = source(Snapshot(now=NOW))
-        assert len(snap.builds) == 200
-        assert [p for p in gh.paths() if "/actions/runs?" in p] == [page_path(1), page_path(2)]
+        runs_page(
+            gh,
+            [
+                # The default branch is never marked.
+                run(11, 5, head_branch="main"),
+                run(10, 20, head_branch="main"),
+                # A human re-run is never marked, nor does it supersede.
+                run(21, 5, head_branch="task/T-2"),
+                run(20, 20, head_branch="task/T-2", run_attempt=2),
+                # Two PRs from one head branch into different bases do not supersede.
+                pr_run(31, 5, 101, "main", head_branch="task/T-3"),
+                pr_run(30, 20, 102, "release", head_branch="task/T-3"),
+                # Long branch names differ only past the display cut: not the same branch.
+                run(41, 5, head_branch=long_branch + "a"),
+                run(40, 20, head_branch=long_branch + "b"),
+                # An unknown status is not active: marked, but never cancellable.
+                run(51, 5, head_branch="task/T-5"),
+                run(50, 20, head_branch="task/T-5", status="mystery"),
+            ],
+        )
+        builds = builds_by_id(ci(gh, **ALLOWED))
+        for i in (10, 20, 30, 40):
+            assert builds[f"{REPO}:{i}"].superseded_by is None, i
+        unknown = builds[f"{REPO}:50"]
+        assert unknown.status is BuildStatus.UNKNOWN and not unknown.status.is_active
+        assert unknown.superseded_by == f"{REPO}:51" and not unknown.cancellable
+        assert len(builds[f"{REPO}:40"].branch or "") == 255  # cut for display only
 
 
-def test_paging_stops_at_the_window_and_at_max_pages() -> None:
+def test_same_pr_and_base_supersedes() -> None:
+    with serve() as gh:
+        runs_page(gh, [pr_run(2, 5, 101, "main"), pr_run(1, 20, 101, "main")])
+        builds = builds_by_id(ci(gh, **ALLOWED))
+        assert builds[f"{REPO}:1"].superseded_by == f"{REPO}:2"
+        assert builds[f"{REPO}:1"].cancellable
+
+
+def test_nothing_is_marked_without_the_default_branch() -> None:
+    with serve() as gh:
+        runs_page(gh, [run(2, 5), run(1, 20)])
+        gh.reply(f"/repos/{REPO}", {"message": "Not Found"}, status=404)
+        builds = builds_by_id(ci(gh, **ALLOWED))
+        assert builds[f"{REPO}:1"].superseded_by is None
+
+
+def test_cancel_policy_marks_cancellable() -> None:
+    with serve() as gh:
+        runs_page(
+            gh, [run(2, 5), run(1, 20), run(4, 5, head_branch="x/1"), run(3, 20, head_branch="x/1")]
+        )
+        for settings, expected in (
+            ({}, set()),
+            (ALLOWED, {1, 3}),
+            ({**ALLOWED, "cancel_branches": ("task/*",)}, {1}),
+            ({**ALLOWED, "cancel_workflows": (".github/workflows/deploy.yml",)}, set()),
+            ({"allow_cancel": True, "cancel_repos": (OTHER,)}, set()),
+        ):
+            builds = builds_by_id(ci(gh, **settings))
+            got = {int(b.id.split(":")[1]) for b in builds.values() if b.cancellable}
+            assert got == expected, settings
+
+
+def test_page_one_of_every_repo_first_and_rotation() -> None:
+    with serve() as gh:
+        for repo in (REPO, OTHER):
+            runs_page(gh, [run(1000 + i, 1 + i / 10) for i in range(100)], 1, repo)
+            runs_page(gh, [run(2000 + i, 20 + i / 10) for i in range(100)], 2, repo)
+        clock = Clock(NOW)
+        # Budget: page 1 of both repos, both default branches, then one more page.
+        source = ci(gh, clock, repos=(REPO, OTHER), max_requests_per_tick=5, max_pages=3)
+        source(Snapshot(now=NOW))
+        pages = [p for p in gh.paths() if "/actions/runs?" in p]
+        assert pages == [page_path(1, REPO), page_path(1, OTHER), page_path(2, REPO)]
+        gh.requests.clear()
+        clock.advance(minutes=5)
+        source.client.cache_ttl = timedelta(0)
+        source(Snapshot(now=clock.now))
+        pages = [p for p in gh.paths() if "/actions/runs?" in p]
+        assert pages[0] == page_path(1, OTHER)  # the next scan starts elsewhere
+
+
+def test_paging_stops_at_the_window() -> None:
     with serve() as gh:
         page = [run(1000 + i, i * 10) for i in range(99)] + [run(1999, 60 * 25)]
         runs_page(gh, page, page=1)
@@ -142,24 +232,63 @@ def test_paging_stops_at_the_window_and_at_max_pages() -> None:
         assert [p for p in gh.paths() if "/actions/runs?" in p] == [page_path(1)]
 
 
-def test_a_failing_run_list_gives_no_cancel_targets(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_poll_interval_serves_the_last_scan() -> None:
+    with serve() as gh:
+        runs_page(gh, [run(1, 5)])
+        clock = Clock(NOW)
+        source = ci(gh, clock, poll_interval=timedelta(minutes=2))
+        source(Snapshot(now=NOW))
+        asked = len(gh.requests)
+        clock.advance(minutes=1)
+        assert len(source(Snapshot(now=clock.now)).builds) == 1
+        assert len(gh.requests) == asked
+        clock.advance(minutes=1)
+        source.client.cache_ttl = timedelta(0)
+        source(Snapshot(now=clock.now))
+        assert len(gh.requests) > asked
+
+
+def test_rate_reserve_skips_the_scan(caplog: pytest.LogCaptureFixture) -> None:
     with serve() as gh:
         superseded_pair(gh)
-        source = ci(gh, **ALLOWED)
+        clock = Clock(NOW)
+        source = ci(gh, clock, rate_reserve=1000, **ALLOWED)
+        assert builds_by_id(source)[f"{REPO}:1"].cancellable
+        source.client.rate_remaining = 500
+        source.client.rate_reset = NOW + timedelta(minutes=30)
+        clock.advance(minutes=5)
+        asked = len(gh.requests)
+        with caplog.at_level(logging.WARNING):
+            builds = builds_by_id(source, clock.now)
+        assert len(gh.requests) == asked and "reserve" in caplog.text
+        assert not builds[f"{REPO}:1"].cancellable
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED
+        source.client.rate_reset = clock.now  # the window reset: scan again
+        source.client.cache_ttl = timedelta(0)
+        builds_by_id(source, clock.now)
+        assert len(gh.requests) > asked
+
+
+def test_a_failing_run_list_gives_no_cancel_targets(caplog: pytest.LogCaptureFixture) -> None:
+    with serve() as gh:
+        superseded_pair(gh)
+        clock = Clock(NOW)
+        source = ci(gh, clock, **ALLOWED)
         source(Snapshot(now=NOW))
         gh.reply(page_path(1), {"message": "boom"}, status=500)
-        source.client.backoff_until = None
         source.client.cache_ttl = timedelta(0)
+        clock.advance(minutes=10)
         with caplog.at_level(logging.WARNING):
-            snap = source(Snapshot(now=NOW))
-        assert len(snap.builds) == 2  # the cached list, stale
-        assert source.execute(cancel(f"{REPO}:1")) is False
+            builds = builds_by_id(source, clock.now)
+        # The cached list, stale: kept, never cancellable, and not extrapolated to now.
+        assert len(builds) == 2 and not any(b.cancellable for b in builds.values())
+        assert builds[f"{REPO}:1"].minutes == 5.0
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED
         gh.reply(page_path(1), {"message": "no"}, status=404)
         source.client.backoff_until = None
+        clock.advance(minutes=10)
         with caplog.at_level(logging.WARNING):
-            assert source(Snapshot(now=NOW)).builds == ()
+            assert source(Snapshot(now=clock.now)).builds == ()
         assert "runs not read" in caplog.text
         assert posts(gh) == []
         assert TOKEN not in caplog.text
@@ -171,24 +300,14 @@ def test_minutes_from_jobs_are_read_once() -> None:
         runs_page(gh, [done])
         jobs = f"{RUNS}/1/attempts/1/jobs?per_page=100"
         start = NOW - timedelta(minutes=30)
+
+        def job(seconds: int, conclusion: str) -> dict[str, Any]:
+            end = start + timedelta(seconds=seconds)
+            return {"started_at": iso(start), "completed_at": iso(end), "conclusion": conclusion}
+
         gh.reply(
             jobs,
-            {
-                "total_count": 3,
-                "jobs": [
-                    {
-                        "started_at": iso(start),
-                        "completed_at": iso(start + timedelta(seconds=61)),
-                        "conclusion": "success",
-                    },
-                    {
-                        "started_at": iso(start),
-                        "completed_at": iso(start + timedelta(seconds=5)),
-                        "conclusion": "failure",
-                    },
-                    {"started_at": iso(start), "completed_at": iso(start), "conclusion": "skipped"},
-                ],
-            },
+            {"total_count": 3, "jobs": [job(61, "success"), job(5, "failure"), job(0, "skipped")]},
         )
         clock = Clock(NOW)
         source = ci(gh, clock)
@@ -207,9 +326,8 @@ def test_partial_job_list_falls_back_to_wall_clock() -> None:
 
 def test_draft_and_changed_paths_from_the_pull_request() -> None:
     with serve() as gh:
-        sha = "b" * 40
-        pr = [{"number": 7, "head": {"sha": sha}}]
-        runs_page(gh, [run(1, 5, event="pull_request", head_sha=sha, pull_requests=pr)])
+        sha = f"{1:040x}"
+        runs_page(gh, [pr_run(1, 5, 7, "main")])
         gh.pull(REPO, 7, sha=sha, draft=True, changed_files=2)
         files = f"/repos/{REPO}/pulls/7/files?per_page=100"
         gh.reply(files, [{"filename": "docs/a.md"}, {"filename": "README.md"}])
@@ -225,13 +343,12 @@ def test_draft_and_changed_paths_from_the_pull_request() -> None:
 
 def test_changed_paths_unknown_when_the_pr_moved_on_or_is_large() -> None:
     with serve() as gh:
-        pr = [{"number": 7}]
-        runs_page(gh, [run(1, 5, event="pull_request", pull_requests=pr)])
+        runs_page(gh, [pr_run(1, 5, 7, "main")])
         gh.pull(REPO, 7, sha="c" * 40, changed_files=2)
         (build,) = ci(gh)(Snapshot(now=NOW)).builds
         assert build.changed_paths is None and build.draft is False
     with serve() as gh:
-        runs_page(gh, [run(1, 5, event="pull_request", pull_requests=pr)])
+        runs_page(gh, [pr_run(1, 5, 7, "main")])
         gh.pull(REPO, 7, sha=f"{1:040x}", changed_files=500)
         (build,) = ci(gh)(Snapshot(now=NOW)).builds
         assert build.changed_paths is None
@@ -259,37 +376,48 @@ def test_cancel_a_superseded_running_run() -> None:
         superseded_pair(gh)
         source = ci(gh, **ALLOWED)
         source(Snapshot(now=NOW))
-        assert source.execute(cancel(f"{REPO}:1")) is True
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.DONE
         assert posts(gh) == [f"{RUNS}/1/cancel"]
         post = next(s for s in gh.requests if s.method == "POST")
         assert post.headers["Authorization"] == f"Bearer {TOKEN}"
-        # Idempotent: a second request does nothing.
-        assert source.execute(cancel(f"{REPO}:1")) is True
+        # A second request does nothing.
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.NOTHING_TO_DO
         assert posts(gh) == [f"{RUNS}/1/cancel"]
 
 
-def test_cancel_refused_when_not_allowed() -> None:
+def test_cancel_uses_the_separate_cancel_token() -> None:
     with serve() as gh:
         superseded_pair(gh)
-        for settings in ({}, {"allow_cancel": True, "cancel_repos": (OTHER,)}):
-            source = ci(gh, **settings)
-            source(Snapshot(now=NOW))
-            assert source.execute(cancel(f"{REPO}:1")) is False
-        source = ci(gh, cancel_workflows=(".github/workflows/deploy.yml",), **ALLOWED)
+        writer = GitHubClient(gh.url, CANCEL_TOKEN, clock=Clock(NOW))
+        source = ci(gh, cancel_client=writer, **ALLOWED)
         source(Snapshot(now=NOW))
-        assert source.execute(cancel(f"{REPO}:1")) is False
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.DONE
+        for seen in gh.requests:
+            expected = CANCEL_TOKEN if seen.method == "POST" else TOKEN
+            assert seen.headers["Authorization"] == f"Bearer {expected}"
+
+
+def test_cancel_refused_by_policy() -> None:
+    with serve() as gh:
+        superseded_pair(gh)
+        source = ci(gh)  # allow_cancel off
+        source(Snapshot(now=NOW))
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED
+        source = ci(gh, cancel_branches=("release/*",), **ALLOWED)
+        source(Snapshot(now=NOW))
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED
         assert posts(gh) == []
 
 
-def test_cancel_refused_for_runs_the_scan_did_not_report_as_superseded() -> None:
+def test_cancel_refused_for_runs_the_scan_did_not_offer() -> None:
     with serve() as gh:
         superseded_pair(gh)
         source = ci(gh, **ALLOWED)
-        assert source.execute(cancel(f"{REPO}:1")) is False  # no scan yet
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED  # no scan yet
         source(Snapshot(now=NOW))
         for build_id in (f"{REPO}:2", f"{OTHER}:1", "../../x", 1):
-            assert source.execute(cancel(build_id)) is False  # type: ignore[arg-type]
-        assert source.execute(Action(ActionKind.STOP, "x", "r", params={})) is False
+            assert source.execute(cancel(build_id)) is ActionResult.REFUSED
+        assert source.execute(Action(ActionKind.STOP, "x", "r")) is ActionResult.REFUSED
         assert posts(gh) == []
 
 
@@ -300,21 +428,23 @@ def test_recheck_before_cancel() -> None:
         source(Snapshot(now=NOW))
         # Finished meanwhile: nothing to do.
         gh.reply(f"{RUNS}/1", run(1, 20, status="completed", conclusion="success"))
-        assert source.execute(cancel(f"{REPO}:1")) is True
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.NOTHING_TO_DO
         assert posts(gh) == []
     with serve() as gh:
         superseded_pair(gh)
         source = ci(gh, **ALLOWED)
         source(Snapshot(now=NOW))
-        # The newer run is not on the same branch any more (or never was): refuse.
+        # Re-run by a human since the scan: refuse.
+        gh.reply(f"{RUNS}/1", run(1, 20, run_attempt=2))
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED
+        # The newer run is not on the same branch any more: refuse.
+        gh.reply(f"{RUNS}/1", run(1, 20))
         gh.reply(f"{RUNS}/2", run(2, 5, head_branch="task/T-9"))
-        assert source.execute(cancel(f"{REPO}:1")) is False
-        gh.reply(f"{RUNS}/2", {"message": "Not Found"}, status=404)
-        assert source.execute(cancel(f"{REPO}:1")) is False
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED
         assert posts(gh) == []
 
 
-def test_recheck_that_cannot_reach_github_refuses() -> None:
+def test_transient_failures_raise_for_a_retry() -> None:
     with serve() as gh:
         superseded_pair(gh)
         source = ci(gh, **ALLOWED)
@@ -322,17 +452,23 @@ def test_recheck_that_cannot_reach_github_refuses() -> None:
         gh.reply(f"{RUNS}/1", run(1, 20))
         source.client.get(f"{RUNS}/1")  # cached
         source.client.backoff_until = NOW + timedelta(minutes=5)
-        assert source.execute(cancel(f"{REPO}:1")) is False  # stale: refused
-        assert posts(gh) == []
+        with pytest.raises(GitHubError, match="re-checked"):  # stale
+            source.execute(cancel(f"{REPO}:1"))
+        source.client.backoff_until = None
+        gh.reply(f"POST {RUNS}/1/cancel", {"message": "oops"}, status=502)
+        with pytest.raises(GitHubError) as info:
+            source.execute(cancel(f"{REPO}:1"))
+        assert info.value.kind == "server"
+        assert len(posts(gh)) == 1
 
 
-def test_cancel_conflict_counts_as_done() -> None:
+def test_cancel_conflict_is_nothing_to_do() -> None:
     with serve() as gh:
         superseded_pair(gh)
         gh.reply(f"POST {RUNS}/1/cancel", {"message": "Cannot cancel"}, status=409)
         source = ci(gh, **ALLOWED)
         source(Snapshot(now=NOW))
-        assert source.execute(cancel(f"{REPO}:1")) is True
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.NOTHING_TO_DO
 
 
 def test_cancel_redirect_is_refused_and_not_followed(caplog: pytest.LogCaptureFixture) -> None:
@@ -341,10 +477,11 @@ def test_cancel_redirect_is_refused_and_not_followed(caplog: pytest.LogCaptureFi
         gh.reply(f"POST {RUNS}/1/cancel", None, status=307, Location="http://127.0.0.1:1/steal")
         source = ci(gh, **ALLOWED)
         source(Snapshot(now=NOW))
-        with caplog.at_level(logging.DEBUG):
-            assert source.execute(cancel(f"{REPO}:1")) is False
+        with caplog.at_level(logging.DEBUG), pytest.raises(GitHubError) as info:
+            source.execute(cancel(f"{REPO}:1"))
+        assert info.value.kind == "redirect"
         assert len(posts(gh)) == 1  # the original request only
-        assert TOKEN not in caplog.text
+        assert TOKEN not in caplog.text and TOKEN not in str(info.value)
 
 
 def test_post_errors_never_carry_the_token() -> None:
@@ -376,6 +513,8 @@ def test_load_ci_defaults_and_values() -> None:
         {
             "repos": ["Example/Repo"],
             "window": "12h",
+            "poll_interval": "5m",
+            "rate_reserve": 500,
             "max_pages": 2,
             "max_requests_per_tick": 10,
             "tick_budget": "5s",
@@ -384,11 +523,21 @@ def test_load_ci_defaults_and_values() -> None:
             "allow_cancel": True,
             "cancel_repos": [REPO],
             "cancel_workflows": [".github/workflows/ci.yml"],
+            "cancel_branches": ["task/*"],
+            "cancel_token_env": "KELPIE_GH_CANCEL",
         },
         [REPO, OTHER],
     )
     assert s.repos == (REPO,) and s.allow_cancel and s.cancel_repos == (REPO,)
     assert s.window == timedelta(hours=12) and s.included_minutes == 2000.0
+    assert s.cancel_branches == ("task/*",) and s.poll_interval == timedelta(minutes=5)
+    assert s.cancel_token({"KELPIE_GH_CANCEL": CANCEL_TOKEN}) == CANCEL_TOKEN
+    with pytest.raises(ValueError, match="is not set") as info:
+        s.cancel_token({})
+    with pytest.raises(ValueError, match="not allowed") as info:
+        s.cancel_token({"KELPIE_GH_CANCEL": "bad token"})
+    assert "bad token" not in str(info.value)
+    assert CiSettings(repos=(REPO,), cancel_token_env="X").cancel_token({}) is None
 
 
 @pytest.mark.parametrize(
@@ -403,11 +552,16 @@ def test_load_ci_defaults_and_values() -> None:
         ({"allow_cancel": "yes"}, "true or false"),
         ({"cancel_repos": [OTHER]}, "not in the allowed"),
         ({"cancel_workflows": "ci.yml"}, "cancel_workflows"),
+        ({"cancel_branches": [""]}, "cancel_branches"),
+        ({"cancel_token_env": "A-B"}, "cancel_token_env"),
         ({"window": "10m"}, "from 1h to 7d"),
         ({"window": "soon"}, "window"),
+        ({"poll_interval": "10s"}, "poll_interval"),
+        ({"rate_reserve": 5000}, "rate_reserve"),
         ({"tick_budget": "2m"}, "tick_budget"),
         ({"included_minutes": 0}, "included_minutes"),
         ({"max_pages": 11}, "max_pages"),
+        ({"max_requests_per_tick": 101}, "max_requests_per_tick"),
         ({"quota_reset_day": 31}, "quota_reset_day"),
     ],
 )
