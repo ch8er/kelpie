@@ -30,7 +30,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Owner, OwnerKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import DEFAULT_STALE_AFTER, is_live, last_seen, live_session
+from kelpie.rules._tasks import DEFAULT_STALE_AFTER, is_live, live_session, undeclared_exit
 
 NAME = "orphan_status"
 
@@ -51,40 +51,55 @@ class OrphanStatus:
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
+        orphans = [
+            (task, gone, _open_dependents(task.id, snapshot))
+            for task in snapshot.tasks
+            if (gone := self._orphaned(task, snapshot)) is not None
+        ]
+        # Most urgent first, so the scarce idle agents go where they unblock the most.
+        orphans.sort(key=lambda o: (-len(o[2]), o[0].status_since, o[0].id))
+        idle = _idle_agents(snapshot, self.session_stale_after)
         actions: list[Action] = []
-        known = {o.id for o in snapshot.owners}
-        for task in snapshot.tasks:
-            if task.status in self.owned_statuses:
-                after = self.orphan_after
-            elif task.status in self.queue_statuses:
-                after = self.queue_after
-            else:
-                continue
-            gone = task.owner_id is not None and bool(known) and task.owner_id not in known
-            if task.owner_id is not None and not gone:
-                continue
-            if snapshot.now - task.status_since < after:
-                continue
-            if live_session(task.id, snapshot, self.session_stale_after) is not None:
-                continue  # someone is on it, whatever the owner field says
-            if self._left_by_session(task, snapshot):
-                continue  # rule 1 (exit contract) requeues it
-            actions.extend(self._act(task, snapshot, gone))
+        for task, gone, waiting in orphans:
+            actions.extend(self._act(task, snapshot, gone, waiting, idle))
         return actions
 
-    def _left_by_session(self, task: Task, snapshot: Snapshot) -> bool:
-        sessions = snapshot.sessions_for(task.id)
-        if not sessions:
-            return False
-        last = max(sessions, key=lambda s: (last_seen(s), s.started_at))
-        return last.final_status is None and task.status_since <= last_seen(last)
+    def _orphaned(self, task: Task, snapshot: Snapshot) -> bool | None:
+        """None if the task is fine, else whether its owner is missing from the directory."""
+        if task.status in self.owned_statuses:
+            after = self.orphan_after
+        elif task.status in self.queue_statuses:
+            after = self.queue_after
+        else:
+            return None
+        known = {o.id for o in snapshot.owners}
+        gone = task.owner_id is not None and bool(known) and task.owner_id not in known
+        if task.owner_id is not None and not gone:
+            return None
+        if snapshot.now - task.status_since < after:
+            return None
+        if live_session(task.id, snapshot, self.session_stale_after) is not None:
+            return None  # someone is on it, whatever the owner field says
+        if undeclared_exit(task, snapshot, self.session_stale_after) is not None:
+            return None  # rule 1 (exit contract) requeues it
+        return gone
 
-    def _act(self, task: Task, snapshot: Snapshot, gone: bool) -> Iterable[Action]:
-        waiting = _open_dependents(task.id, snapshot)
+    def _act(
+        self,
+        task: Task,
+        snapshot: Snapshot,
+        gone: bool,
+        waiting: list[str],
+        idle: list[Owner],
+    ) -> Iterable[Action]:
         hours = (snapshot.now - task.status_since).total_seconds() / 3600
         who = f"owner {task.owner_id} is no longer known" if gone else "it has no owner"
         may_reassign = self.reassign and (not gone or self.reassign_unknown_owner)
-        candidate = _idle_agent(task, snapshot, self.session_stale_after) if may_reassign else None
+        candidate = None
+        if may_reassign and task.role is not None:
+            candidate = next((o for o in idle if o.role == task.role), None)
+            if candidate is not None:
+                idle.remove(candidate)  # one task per idle agent per tick
         severity = (
             Severity.CRITICAL if len(waiting) >= self.critical_dependents else Severity.WARNING
         )
@@ -131,18 +146,12 @@ def _open_dependents(task_id: str, snapshot: Snapshot) -> list[str]:
     return sorted(found)
 
 
-def _idle_agent(task: Task, snapshot: Snapshot, stale_after: timedelta) -> Owner | None:
-    """An agent of the task's role with nothing in progress and no live session."""
-    if task.role is None:
-        return None
+def _idle_agents(snapshot: Snapshot, stale_after: timedelta) -> list[Owner]:
+    """Agents with nothing in progress or review and no live session, by id."""
     busy = {t.owner_id for t in snapshot.tasks if t.status in _BUSY}
     busy |= {s.owner_id for s in snapshot.sessions if is_live(s, snapshot.now, stale_after)}
-    idle = [
-        o
-        for o in snapshot.owners
-        if o.role == task.role and o.kind is OwnerKind.AGENT and o.id not in busy
-    ]
-    return min(idle, key=lambda o: o.id, default=None)
+    idle = [o for o in snapshot.owners if o.kind is OwnerKind.AGENT and o.id not in busy]
+    return sorted(idle, key=lambda o: o.id)
 
 
 def _duration(value: Any, name: str) -> timedelta:

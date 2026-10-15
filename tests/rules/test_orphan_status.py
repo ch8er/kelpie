@@ -164,3 +164,22 @@ def test_build_from_config() -> None:
 def test_bad_config(config: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         build(config)
+
+
+def test_hand_off_during_session_then_exit_is_rule_3s() -> None:
+    # The developer moved the task to review mid-session and left without final_status:
+    # rule 1 sees a declared hand-off, so the unpicked review queue is rule 3's.
+    ended = Session("S-1", "T-1", "dev-2", NOW - 400 * M, ended_at=NOW - 290 * M)
+    review = task(status=Status.REVIEW, age=300)
+    assert kinds(act(review, sessions=(ended,))) == [ActionKind.ALERT, ActionKind.REASSIGN]
+
+
+def test_one_idle_agent_gets_one_task_most_urgent_first() -> None:
+    deps = tuple(Dependency(f"D-{i}", "T-2") for i in range(3))
+    downstream = [task(f"D-{i}", Status.BACKLOG, owner_id="x") for i in range(3)]
+    t1, t2 = task("T-1", age=300), task("T-2", age=60)  # T-2 is newer but blocks 3 tasks
+    actions = act(t1, t2, *downstream, deps=deps)
+    reassigns = [a for a in actions if a.kind is ActionKind.REASSIGN]
+    assert [(a.task_id, a.params["owner_id"]) for a in reassigns] == [("T-2", "dev-1")]
+    [t1_alert] = [a for a in actions if a.task_id == "T-1"]
+    assert "No idle agent with role 'developer'" in t1_alert.reason
