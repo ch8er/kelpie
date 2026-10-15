@@ -237,7 +237,7 @@ def load_traces(section: Any) -> TraceSettings:
         ints[key] = value
     outputs = load_outputs(section.get("outputs"))
     needed = max(2 * outputs.window, timedelta(days=outputs.repeat_days))
-    if durations["retention"] < needed:
+    if "outputs" in section and durations["retention"] < needed:
         raise ValueError(
             "[traces] retention must cover [traces.outputs] repeat_days and twice its window"
         )

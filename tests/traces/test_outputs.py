@@ -132,6 +132,7 @@ def test_redaction_shares_source_with_the_hermes_plugin() -> None:
         ("npm test", "npm test"),
         ("cat notes.txt", "cat"),
         ("sudo make install", "make install"),
+        ("sudo --user ci make test", "make test"),
         ("", None),
         ("env", None),
     ],
@@ -173,6 +174,12 @@ def test_detect_filter(command: str | None, used: str | None) -> None:
         ("python -m acme_internal_tool", "acme"),
         ("C:\\Users\\alice\\bin\\tool.exe build", "alice"),
         ("make deploy TOKEN=abc", "abc"),
+        ("sudo --user alice make test", "alice"),
+        ("env --unset AWS_PROFILE make", "AWS_PROFILE"),
+        ("time --output /home/alice/t.txt make", "t.txt"),
+        ("nice --adjustment 10 make", "10"),
+        ("make deploy-acme-prod", "acme"),
+        ("just release-acme", "acme"),
     ],
 )
 def test_prefix_keeps_no_user_data(command: str, secret: str) -> None:
@@ -433,6 +440,7 @@ def test_outputs_window_must_be_a_string_and_fit_retention() -> None:
     with pytest.raises(ValueError, match="retention must cover"):
         load_traces({"retention": "1d", "outputs": {"window": "1d"}})
     assert load_traces({"retention": "3d", "outputs": {"repeat_days": 3}}).outputs.repeat_days == 3
+    assert load_traces({"retention": "1d"}).retention == timedelta(days=1)  # no [traces.outputs]
 
 
 def test_traces_commands_flag_is_validated() -> None:

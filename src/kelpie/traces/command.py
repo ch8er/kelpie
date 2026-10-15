@@ -98,10 +98,16 @@ def redact_command(command: str) -> str | None:
 RTK = "rtk"
 # Wrappers that only run the real command, with the flags of theirs that take a value.
 _WRAPPERS: dict[str, frozenset[str]] = {
-    "sudo": frozenset({"-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D"}),
-    "time": frozenset({"-o", "-f"}),
-    "env": frozenset({"-u", "-C", "-S"}),
-    "nice": frozenset({"-n"}),
+    "sudo": frozenset(
+        {
+            *("-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D"),
+            *("--user", "--group", "--host", "--prompt", "--close-from", "--other-user"),
+            *("--role", "--type", "--chdir"),
+        }
+    ),
+    "time": frozenset({"-o", "-f", "--output", "--format"}),
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+    "nice": frozenset({"-n", "--adjustment"}),
     "nohup": frozenset(),
     "command": frozenset(),
     "exec": frozenset({"-a"}),
@@ -113,15 +119,20 @@ _RUNNERS = {"uv": "run", "poetry": "run", "pipenv": "run", "bundle": "exec", "pn
 _SUBCOMMANDS = frozenset(
     {
         "git", "gh", "npm", "pnpm", "yarn", "bun", "deno", "cargo", "go", "docker", "podman",
-        "kubectl", "helm", "make", "dotnet", "xcodebuild", "swift", "mvn", "gradle",
+        "kubectl", "helm", "dotnet", "xcodebuild", "swift", "mvn", "gradle",
         "gradlew", "terraform", "rake", "bundle", "pip", "pip3", "poetry", "uv", "flutter",
-        "dart", "composer", "mix", "rustup", "brew", "just", "nx", "turbo",
+        "dart", "composer", "mix", "rustup", "brew", "nx", "turbo",
     }
 )  # fmt: skip
 _SCRIPT_RUNNERS = frozenset({"run", "run-script"})
 # Script names kept after ``npm run``: common ones only, the rest are project-defined.
 _SCRIPTS = frozenset(
     {"build", "test", "lint", "dev", "start", "typecheck", "check", "format", "e2e", "ci"}
+)
+# make targets and just recipes are project-defined too: only common ones are kept.
+_TARGET_RUNNERS = frozenset({"make", "just"})
+_TARGETS = frozenset(
+    {"build", "test", "lint", "check", "install", "clean", "all", "format", "ci", "dev"}
 )
 _PYTHON_MODULES = frozenset({"pytest", "unittest", "pip", "mypy", "ruff", "black", "build"})
 _SUBCOMMAND = re.compile(r"^[a-z][a-z0-9:_-]*$")
@@ -165,6 +176,8 @@ def command_prefix(command: str | None) -> str | None:
     if exe.startswith("python") and rest[:1] == ["-m"]:
         module = rest[1] if len(rest) > 1 and rest[1] in _PYTHON_MODULES else None
         return f"{exe} -m {module}" if module else f"{exe} -m"
+    if exe in _TARGET_RUNNERS:
+        return f"{exe} {rest[0]}" if rest and rest[0] in _TARGETS else exe
     if exe not in _SUBCOMMANDS or not rest or not _SUBCOMMAND.match(rest[0]):
         return exe
     if rest[0] in _SCRIPT_RUNNERS:
