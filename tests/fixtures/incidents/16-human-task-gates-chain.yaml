@@ -11,6 +11,7 @@ rule: bottlenecks
 config:
   min_idle_time: "30m"
   human_gate_min_tasks: 3
+  human_gate_after: "1h"
   slots: 5
 snapshot:
   now: "2026-03-02T16:00:00+00:00"
@@ -95,7 +96,7 @@ snapshot:
 expected_actions:
   - kind: alert
     severity: warning
-    reason_contains: "3 of 5 agent slot(s) busy"
+    reason_contains: "3 of 5 agent slot(s) running"
     params:
       idle_agents: [agent-dev-4, agent-dev-5]
       human_tasks: [T-1600]

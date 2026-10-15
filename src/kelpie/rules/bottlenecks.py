@@ -21,25 +21,32 @@ all its dependencies are finished). Idle agents that the role's own queue can ab
 spare. An alert lasts as long as spare capacity exists.
 
 - **Idle with ready work** (incident 14). Agents have been idle for ``min_idle_time`` while
-  ready work they could take (ownerless and queued in their role, or with no role) has
-  waited ``idle_alert_after``: Kelpie alerts with the idle agents, the waiting work and the
-  likely cause, a hold on that work or a dispatcher that does not hand it out.
+  unheld ready work they could take (ownerless and queued in their role, or with no role)
+  has waited ``idle_alert_after``: the dispatcher is not handing it out, and Kelpie alerts
+  with the idle agents and the waiting work. Held work is parked on purpose and does not
+  count until its hold expires (below).
 - **Holds with an owner and an expiry** (incident 14). A hold is a label that parks tasks on
-  purpose (``holds``, or the bare ``hold_labels``), with an owner and an expected length
-  (``expires_after``, default ``hold_expiry``). Kelpie cannot see when a label was set, so a
-  hold's age is how long its oldest held task has not moved (``status_since``). Past the
-  expiry Kelpie alerts the owner. Lifting a hold in act mode needs an executor that owns
-  the label; none exists yet, so an expired hold is only an alert.
+  purpose, listed in ``holds`` with an owner and an expected length (``expires_after``,
+  else ``hold_expiry``, else 4h). Bare ``hold_labels`` only park tasks, with no expiry
+  unless ``hold_expiry`` is set. Kelpie cannot see when a label was set, so a hold's age is
+  how long its oldest queued task (ready, review, accepted) has not moved. Past the expiry
+  Kelpie alerts once, naming the owner, the idle agents that could take the held work and
+  the idle agent minutes since the expiry (for the cost-of-chaos report). Lifting a hold in
+  act mode needs an executor that owns the label; none exists yet, so it is only an alert.
 - **Human tasks on the critical path** (incident 16). For each open human-owned task, the
-  agent tasks behind it, through dependencies and ``human_task`` conditions, transitively.
-  At ``human_gate_min_tasks`` or more, Kelpie escalates to the human owner with the count
-  and the estimated agent hours; when agents sit idle and every ready task is a human's,
-  it also alerts with the idle capacity and the human tasks that gate the most work.
-  Kelpie never removes or rewrites a dependency: it shows its cost and asks whether the
-  link is needed. Human tasks with nothing behind them are not flagged.
+  agent tasks behind it, transitively, through dependencies and the ``human_task``
+  conditions of blocked or waiting tasks. A human task the human can do now (ready or in
+  progress, nothing open before it) that has waited ``human_gate_after`` (1h) with
+  ``human_gate_min_tasks`` (3) or more agent tasks behind it is escalated to its owner
+  with the count and the estimated agent hours. When idle agents have no ready work they
+  could take while such gates exist, Kelpie also alerts with the idle capacity and the
+  gates that hold the most work. Kelpie never removes or rewrites a dependency: it shows
+  its cost and asks whether the link is needed. Human tasks with nothing behind them are
+  not flagged, and a chain through a human task gets no parallelization advice.
 
-``slots`` (optional) is the farm's concurrency limit: once that many agents are busy, idle
-agents are not free capacity, and neither idle alert fires.
+``slots`` (optional) is the farm's concurrency limit: once that many agents have a live
+session, idle agents are not free capacity, and no idle-capacity alert fires (chain,
+overloaded role, idle with ready work, human-gated).
 
 Held tasks are left out of both the queue depth and the critical path.
 
@@ -58,7 +65,7 @@ not on every tick.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -67,7 +74,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import ConditionKind, OwnerKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import is_live, last_seen
+from kelpie.rules._tasks import is_live, last_seen, linked_conditions
 
 NAME = "bottlenecks"
 
@@ -75,6 +82,7 @@ _RUNNABLE = frozenset({Status.READY, Status.IN_PROGRESS, Status.REVIEW, Status.A
 _FROZEN = frozenset({Status.BLOCKED, Status.WAITING})  # wait for the outside world
 _SHOWN = 5  # ids kept from each end of a long chain
 _QUEUED = frozenset({Status.READY, Status.REVIEW, Status.ACCEPTED})  # hand-off queues
+DEFAULT_HOLD_EXPIRY = timedelta(hours=4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,14 +253,16 @@ class HumanGate:
     task: Task
     behind: tuple[str, ...]  # agent task ids, sorted
     estimate: timedelta | None  # summed estimates of the tasks behind that have one
+    actionable: bool  # the human can do it now: ready or in progress, nothing open before it
 
 
 def human_gates(snapshot: Snapshot) -> list[HumanGate]:
     """Open human-owned tasks with agent work behind them, the most work first.
 
     Behind means reachable through dependencies (``depends_on`` -> ``task_id``) or an unmet
-    ``human_task`` condition whose ``params.task`` names the human task, through any open
-    task. Agent tasks are open tasks not owned by a human.
+    ``human_task`` condition of a blocked or waiting task's current wait (as
+    ``linked_conditions`` reads it) whose ``params.task`` names the human task, through any
+    open task. Agent tasks are open tasks not owned by a human.
     """
     humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
     by_id = {t.id: t for t in snapshot.tasks if not t.status.is_terminal}
@@ -263,16 +273,14 @@ def human_gates(snapshot: Snapshot) -> list[HumanGate]:
     for d in snapshot.dependencies:
         if d.task_id in by_id and d.depends_on in by_id:
             successors.setdefault(d.depends_on, set()).add(d.task_id)
-    for c in snapshot.conditions:
-        target = c.params.get("task")
-        if (
-            c.kind is ConditionKind.HUMAN_TASK
-            and c.satisfied is not True
-            and isinstance(target, str)
-            and target in by_id
-            and c.task_id in by_id
-        ):
-            successors.setdefault(target, set()).add(c.task_id)
+    for t in by_id.values():
+        if t.status not in _FROZEN:
+            continue
+        for c in linked_conditions(t, snapshot)[0]:
+            target = c.params.get("task")
+            if c.kind is ConditionKind.HUMAN_TASK and c.satisfied is not True and target in by_id:
+                successors.setdefault(str(target), set()).add(t.id)
+    open_deps = _open_dependencies(snapshot, set(by_id))
     result: list[HumanGate] = []
     for gate in gates:
         seen: set[str] = set()
@@ -286,7 +294,11 @@ def human_gates(snapshot: Snapshot) -> list[HumanGate]:
         if not behind:
             continue  # nothing waits for it: not a gate
         known = [e for tid in behind if (e := by_id[tid].estimate) is not None]
-        result.append(HumanGate(gate, tuple(behind), sum(known, timedelta(0)) if known else None))
+        actionable = gate.status in {Status.READY, Status.IN_PROGRESS} and not open_deps.get(
+            gate.id
+        )
+        estimate = sum(known, timedelta(0)) if known else None
+        result.append(HumanGate(gate, tuple(behind), estimate, actionable))
     result.sort(key=lambda g: (-len(g.behind), g.task.status_since, g.task.id))
     return result
 
@@ -299,9 +311,12 @@ class Bottlenecks:
     min_idle_time: timedelta = timedelta(minutes=30)
     hold_labels: frozenset[str] = frozenset()
     holds: tuple[Hold, ...] = ()
-    hold_expiry: timedelta = timedelta(hours=4)
+    # Expected length of a hold without its own ``expires_after``. None: 4h for ``holds``
+    # entries, no expiry for bare ``hold_labels`` (they park tasks on purpose).
+    hold_expiry: timedelta | None = None
     idle_alert_after: timedelta = timedelta(minutes=30)
     human_gate_min_tasks: int = 3
+    human_gate_after: timedelta = timedelta(hours=1)  # a human task waits this long first
     slots: int | None = None
     name: str = NAME
 
@@ -312,22 +327,29 @@ class Bottlenecks:
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         held = self.held_labels
         loads = role_loads(snapshot, self.min_idle_time, held)
-        gates = human_gates(snapshot)
+        now = snapshot.now
+        gates = [
+            g
+            for g in human_gates(snapshot)
+            if g.actionable and now - g.task.status_since >= self.human_gate_after
+        ]
+        free = self._free_capacity(snapshot)
         actions: list[Action] = []
-        actions.extend(self._chain(snapshot, loads, held))
-        actions.extend(self._overloaded(loads))
-        if self._free_capacity(loads):
+        if free:
+            actions.extend(self._chain(snapshot, loads, held))
+            actions.extend(self._overloaded(loads))
             actions.extend(self._idle_with_ready_work(snapshot, loads, held))
             actions.extend(self._human_gated(snapshot, loads, held, gates))
-        actions.extend(self._expired_holds(snapshot))
-        actions.extend(self._escalate_gates(gates, snapshot.now))
+        actions.extend(self._expired_holds(snapshot, loads if free else {}))
+        actions.extend(self._escalate_gates(gates, now))
         return actions
 
-    def _free_capacity(self, loads: dict[str, RoleLoad]) -> bool:
-        if self.slots is None:
-            return True
-        busy = len({a for load in loads.values() for a in load.busy})
-        return busy < self.slots
+    def _running(self, snapshot: Snapshot) -> int:
+        """Slots in use: agents with a live session."""
+        return len({s.owner_id for s in snapshot.sessions if is_live(s, snapshot.now)})
+
+    def _free_capacity(self, snapshot: Snapshot) -> bool:
+        return self.slots is None or self._running(snapshot) < self.slots
 
     def _chain(
         self, snapshot: Snapshot, loads: dict[str, RoleLoad], held: frozenset[str]
@@ -335,8 +357,8 @@ class Bottlenecks:
         path = critical_path(snapshot, held)
         if path is None or path.length < self.min_chain_length:
             return []
-        owner = snapshot.owner(path.tasks[0].owner_id) if path.tasks[0].owner_id else None
-        if owner is not None and owner.kind is OwnerKind.HUMAN:
+        humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
+        if any(t.owner_id in humans for t in path.tasks):
             return []  # gated by a human task: splitting will not help, the gate alert says so
         roles = {t.role for t in path.tasks if t.role} or set(loads)
         idle_roles = sorted(r for r in roles if r in loads and loads[r].spare)
@@ -411,17 +433,15 @@ class Bottlenecks:
             )
         return actions
 
-    def _idle_with_ready_work(
-        self, snapshot: Snapshot, loads: dict[str, RoleLoad], held: frozenset[str]
-    ) -> list[Action]:
-        """Idle agents while ready work they could take has waited ``idle_alert_after``."""
+    def _takeable(
+        self, snapshot: Snapshot, idle_roles: Collection[str], held: bool, labels: frozenset[str]
+    ) -> list[Task]:
+        """Ownerless queued work an idle agent could take (its role, or no role), held or
+        not held by ``labels``, waiting at least ``idle_alert_after``, oldest first."""
         now = snapshot.now
-        idle_roles = {r: load.idle for r, load in loads.items() if load.idle}
-        if not idle_roles:
-            return []
         open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
         blocked_by = _open_dependencies(snapshot, open_ids)
-        work = sorted(
+        return sorted(
             (
                 t
                 for t in snapshot.tasks
@@ -429,41 +449,32 @@ class Bottlenecks:
                 and t.status in _QUEUED
                 and not (t.status is Status.READY and blocked_by.get(t.id))
                 and (t.role is None or t.role in idle_roles)
+                and bool(labels.intersection(t.labels)) is held
                 and now - t.status_since >= self.idle_alert_after
             ),
             key=lambda t: (t.status_since, t.id),
         )
+
+    def _idle_with_ready_work(
+        self, snapshot: Snapshot, loads: dict[str, RoleLoad], held: frozenset[str]
+    ) -> list[Action]:
+        """Idle agents while unheld ready work they could take has waited
+        ``idle_alert_after``. Held work is the hold alert's, once the hold expires."""
+        now = snapshot.now
+        idle_roles = {r: load.idle for r, load in loads.items() if load.idle}
+        work = self._takeable(snapshot, idle_roles, False, held) if idle_roles else []
         if not work:
             return []
-        # Work without a role suits any idle agent; otherwise only agents of its role.
-        if any(t.role is None for t in work):
-            roles = sorted(idle_roles)
-        else:
-            roles = sorted({t.role for t in work if t.role})
-        idle = sorted({a for r in roles for a in idle_roles.get(r, ())})
+        roles, idle = _who_could_take(work, idle_roles)
         oldest = work[0].status_since
-        on_hold = [t for t in work if held.intersection(t.labels)]
-        labels = sorted({label for t in on_hold for label in held.intersection(t.labels)})
-        if on_hold:
-            owners = {h.label: h.owner for h in self.holds}
-            named = ", ".join(
-                f"'{label}'" + (f" (owner {owners[label]})" if owners.get(label) else "")
-                for label in labels
-            )
-            cause = f"a hold: {named} on {len(on_hold)} of them"
-        else:
-            cause = "the dispatcher is not handing it out (paused, a guard, or no free slot)"
-        last = _last_session(snapshot)
-        idle_minutes = sum(
-            int((now - max(oldest, last.get(a, oldest))).total_seconds() // 60) for a in idle
-        )
         ids = [t.id for t in work]
         return [
             Action(
                 ActionKind.ALERT,
                 NAME,
                 f"{len(idle)} agent(s) idle ({_names(idle)}) while {len(work)} ready task(s) "
-                f"wait (oldest {_human(now - oldest)}): {_names(ids)}. Likely cause: {cause}.",
+                f"wait (oldest {_human(now - oldest)}): {_names(ids)}. Likely cause: the "
+                "dispatcher is not handing it out (paused, a guard, or no free slot).",
                 severity=Severity.WARNING,
                 key=f"{NAME}:idle-ready",
                 state=f"{NAME}:idle-ready",
@@ -474,45 +485,59 @@ class Bottlenecks:
                     "ready_tasks": ids[: _SHOWN * 2],
                     "ready_count": len(ids),
                     "oldest_wait_minutes": int((now - oldest).total_seconds() // 60),
-                    "likely_cause": "hold" if on_hold else "dispatch",
-                    "holds": labels,
-                    "held_tasks": [t.id for t in on_hold][: _SHOWN * 2],
-                    "idle_agent_minutes": idle_minutes,
+                    "likely_cause": "dispatch",
                 },
             )
         ]
 
-    def _expired_holds(self, snapshot: Snapshot) -> list[Action]:
+    def _expired_holds(self, snapshot: Snapshot, loads: dict[str, RoleLoad]) -> list[Action]:
+        """Holds past their expiry. A hold's age is how long its oldest queued task (ready,
+        review, accepted) has not moved; backlog tasks carrying the label do not count."""
         holds = {h.label: h for h in self.holds}
-        for label in self.hold_labels - holds.keys():
-            holds[label] = Hold(label)
+        if self.hold_expiry is not None:
+            for label in self.hold_labels - holds.keys():
+                holds[label] = Hold(label)
+        idle_roles = {r: load.idle for r, load in loads.items() if load.idle}
+        last = _last_session(snapshot)
         actions: list[Action] = []
         for label in sorted(holds):
             hold = holds[label]
             tasks = sorted(
-                (t for t in snapshot.tasks if not t.status.is_terminal and label in t.labels),
+                (t for t in snapshot.tasks if t.status in _QUEUED and label in t.labels),
                 key=lambda t: (t.status_since, t.id),
             )
             if not tasks:
                 continue
             since = tasks[0].status_since
-            expiry = hold.expires_after or self.hold_expiry
+            expiry = hold.expires_after or self.hold_expiry or DEFAULT_HOLD_EXPIRY
             age = snapshot.now - since
             if age < expiry:
                 continue
             ids = [t.id for t in tasks]
+            waiting = self._takeable(snapshot, idle_roles, True, frozenset({label}))
+            _, idle = _who_could_take(waiting, idle_roles) if waiting else ([], [])
+            expired_at = since + expiry
+            # Idle time the hold caused: each idle agent since the hold expired or its own
+            # last session, whichever is later.
+            idle_minutes = sum(
+                int((snapshot.now - max(expired_at, last.get(a, expired_at))).total_seconds()) // 60
+                for a in idle
+            )
             owner = f"Owner: {hold.owner}." if hold.owner else "No owner is configured for it."
+            meanwhile = (
+                f" Meanwhile {len(idle)} agent(s) sit idle ({_names(idle)})." if idle else ""
+            )
             actions.append(
                 Action(
                     ActionKind.ALERT,
                     NAME,
                     f"Hold '{label}' looks forgotten: its {len(ids)} task(s) ({_names(ids)}) "
-                    f"have not moved for {_human(age)}, past its expected {_human(expiry)}. "
-                    f"{owner} Lift the hold, or set a new expiry.",
+                    f"have not moved for {_human(age)}, past its expected {_human(expiry)}."
+                    f"{meanwhile} {owner} Lift the hold, or set a new expiry.",
                     severity=Severity.WARNING,
                     key=f"{NAME}:hold:{label}",
                     state=f"{NAME}:hold:{label}",
-                    since=since + expiry,
+                    since=expired_at,
                     params={
                         "hold": label,
                         "owner": hold.owner,
@@ -520,6 +545,8 @@ class Bottlenecks:
                         "held_count": len(ids),
                         "held_minutes": int(age.total_seconds() // 60),
                         "expires_after_minutes": int(expiry.total_seconds() // 60),
+                        "idle_agents": idle,
+                        "idle_agent_minutes": idle_minutes,
                     },
                 )
             )
@@ -532,27 +559,35 @@ class Bottlenecks:
         held: frozenset[str],
         gates: list[HumanGate],
     ) -> list[Action]:
-        """Idle agents while every ready task is a human's, and human tasks gate agent work."""
+        """Idle agents with no ready work they could take, while ready human tasks gate
+        agent work."""
         if not gates:
             return []
-        idle = sorted({a for load in loads.values() for a in load.idle})
-        if not idle:
+        idle_roles = {r: load.idle for r, load in loads.items() if load.idle}
+        if not idle_roles:
             return []
         humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
         open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
         blocked_by = _open_dependencies(snapshot, open_ids)
-        ready = [
+        takeable = [
             t
             for t in snapshot.tasks
-            if t.status is Status.READY
-            and not blocked_by.get(t.id)
+            if t.owner_id is None
+            and t.status in _QUEUED
+            and not (t.status is Status.READY and blocked_by.get(t.id))
             and not held.intersection(t.labels)
-            and (t.owner_id is None or t.owner_id in humans)
+            and (t.role is None or t.role in idle_roles)
         ]
-        if not ready or any(t.owner_id not in humans for t in ready):
-            return []  # agent work is ready: the idle-with-ready-work alert covers it
+        if takeable:
+            return []  # idle agents have work they could take: the idle-ready alert's case
+        ready_human = sorted(
+            t.id
+            for t in snapshot.tasks
+            if t.status is Status.READY and t.owner_id in humans and not blocked_by.get(t.id)
+        )
+        idle = sorted({a for agents in idle_roles.values() for a in agents})
         agents = sorted({a for load in loads.values() for a in load.agents})
-        busy = len({a for load in loads.values() for a in load.busy})
+        running = self._running(snapshot)
         total = self.slots if self.slots is not None else len(agents)
         behind = sorted({tid for g in gates for tid in g.behind})
         top = gates[:_SHOWN]
@@ -564,19 +599,19 @@ class Bottlenecks:
             Action(
                 ActionKind.ALERT,
                 NAME,
-                f"{busy} of {total} agent slot(s) busy, {_names(idle)} idle, and every ready "
-                f"task is a human's. Human tasks gate {len(behind)} agent task(s): {listed}. "
+                f"{running} of {total} agent slot(s) running, {_names(idle)} idle with no "
+                f"ready work. Human tasks gate {len(behind)} agent task(s): {listed}. "
                 "Kelpie does not change dependencies: is each link needed?",
                 severity=Severity.WARNING,
                 key=f"{NAME}:human-gated",
                 state=f"{NAME}:human-gated",
                 params={
                     "idle_agents": idle,
-                    "busy_slots": busy,
+                    "busy_slots": running,
                     "slots": total,
                     "human_tasks": [g.task.id for g in top],
                     "blocked_agent_tasks": len(behind),
-                    "ready_human_tasks": sorted(t.id for t in ready),
+                    "ready_human_tasks": ready_human,
                     "recommendation": "unblock_human_tasks",
                 },
             )
@@ -598,9 +633,8 @@ class Bottlenecks:
                     NAME,
                     f"Human task {t.id} ('{t.title}', owner {t.owner_id}, {t.status} for "
                     f"{_human(now - t.status_since)}) gates {len(gate.behind)} agent task(s)"
-                    f"{work} ({_names(gate.behind)}). It is on the critical path: do it "
-                    "first, or remove the link if the agent work does not need it. Kelpie "
-                    "does not change dependencies.",
+                    f"{work} ({_names(gate.behind)}). Do it first, or remove the link if the "
+                    "agent work does not need it. Kelpie does not change dependencies.",
                     task_id=t.id,
                     severity=Severity.WARNING,
                     key=f"{NAME}:human-gate:{t.id}",
@@ -615,6 +649,18 @@ class Bottlenecks:
                 )
             )
         return actions
+
+
+def _who_could_take(
+    work: Sequence[Task], idle_roles: dict[str, tuple[str, ...]]
+) -> tuple[list[str], list[str]]:
+    """Roles and idle agents that could take ``work``: any idle agent for work without a
+    role, otherwise the idle agents of the work's roles."""
+    if any(t.role is None for t in work):
+        roles = sorted(idle_roles)
+    else:
+        roles = sorted({t.role for t in work if t.role in idle_roles})
+    return roles, sorted({a for r in roles for a in idle_roles[r]})
 
 
 def _last_session(snapshot: Snapshot) -> dict[str, datetime]:
@@ -684,7 +730,7 @@ def build(config: dict[str, Any]) -> Bottlenecks:
             kwargs[key] = _positive_int(config.pop(key), key)
     if "slots" in config:
         kwargs["slots"] = _positive_int(config.pop("slots"), "slots")
-    for key in ("min_idle_time", "idle_alert_after"):
+    for key in ("min_idle_time", "idle_alert_after", "human_gate_after"):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     if "hold_expiry" in config:

@@ -11,7 +11,7 @@ rule: bottlenecks
 config:
   min_idle_time: "30m"
   idle_alert_after: "30m"
-  hold_expiry: "4h"
+  hold_expiry: "4h"  # the freeze below has no expires_after of its own
   holds:
     - {label: merge-hold, owner: human-owner, expires_after: "2h30m"}
     - {label: release-freeze, owner: release-manager}
@@ -35,19 +35,13 @@ snapshot:
     # Distractor: the designer is busy, so designer work is not idle capacity.
     - {id: T-1406, title: "Icon set", status: in_progress, status_since: "2026-03-02T15:00:00+00:00", role: designer, owner_id: designer-1}
   sessions:
+    # Every developer's last session ended before the hold expired at 14:30.
     - {id: S-1401, task_id: T-1390, owner_id: agent-dev-1, started_at: "2026-03-02T10:30:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: review}
     - {id: S-1402, task_id: T-1391, owner_id: agent-dev-2, started_at: "2026-03-02T10:30:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: review}
     - {id: S-1403, task_id: T-1392, owner_id: agent-dev-3, started_at: "2026-03-02T10:30:00+00:00", ended_at: "2026-03-02T12:30:00+00:00", final_status: review}
     - {id: S-1404, task_id: T-1406, owner_id: designer-1, started_at: "2026-03-02T15:00:00+00:00", last_heartbeat: "2026-03-02T16:58:00+00:00"}
 expected_actions:
-  - kind: alert
-    severity: warning
-    reason_contains: "Likely cause: a hold"
-    params:
-      idle_agents: [agent-dev-1, agent-dev-2, agent-dev-3]
-      likely_cause: hold
-      holds: [merge-hold]
-      ready_tasks: [T-1401, T-1402, T-1403, T-1404]
+  # One alert for the incident: the expired hold, with the idle capacity it costs.
   - kind: alert
     severity: warning
     reason_contains: "past its expected 2h 30m"
@@ -56,9 +50,14 @@ expected_actions:
       owner: human-owner
       held_count: 4
       held_minutes: 300
+      idle_agents: [agent-dev-1, agent-dev-2, agent-dev-3]
+      idle_agent_minutes: 450  # 3 agents x 2h30m since the hold expired at 14:30
 not_expected_actions:
   - kind: alert
     params: {hold: release-freeze}
+  # Held work is the hold alert's: no second "idle with ready work" page.
+  - kind: alert
+    params: {likely_cause: dispatch}
   - kind: alert
     params: {idle_agents: [designer-1]}
   - kind: escalate

@@ -30,7 +30,9 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # idle_alert_after = "30m"  # ...and alerts once ready work it could take waited this long
 # slots = 5                 # optional farm concurrency limit: full slots are not idle capacity
 # human_gate_min_tasks = 3  # escalate a human task with this many agent tasks behind it
-# hold_expiry = "4h"        # expected length of a hold without its own expires_after
+# human_gate_after = "1h"   # ...once it has been ready (or in progress) this long
+# hold_labels = []          # labels that park tasks on purpose; no expiry unless hold_expiry
+# hold_expiry = "4h"        # optional: expected length of a hold without its own expires_after
 # [[engine.rules.bottlenecks.holds]]   # a label that parks tasks on purpose
 # label = "merge-hold"
 # owner = "human-owner"     # named in the alert when the hold looks forgotten
