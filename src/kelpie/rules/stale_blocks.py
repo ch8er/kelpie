@@ -12,10 +12,11 @@ clears a block. A grace period, counted from when the last condition was met but
 from before the block started, avoids racing an agent or the platform that is about to
 clear the block itself.
 
-Conditions are linked by the shared rule semantics (``kelpie.rules._tasks``). A block with no
-linked condition is left alone; with ``unlinked_alert_after`` set, such a block gets an alert
-once it is that old, since nothing Kelpie can see will ever clear it. ``waiting`` tasks are
-rule 2's.
+Conditions are linked by the shared rule semantics (``kelpie.rules._tasks``). So that no
+block sits unnoticed, Kelpie alerts on blocks it cannot clear: no visible condition after
+``unlinked_alert_after`` (4h), a condition still unmet after ``max_block`` (24h), and
+conditions the connector stopped checking (``stale_evidence_after``, 1h). Each can be set to
+``false``. ``waiting`` tasks are rule 2's.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import linked_conditions
+from kelpie.rules._tasks import DEFAULT_MAX_CONDITION_AGE, fresh, linked_conditions
 
 NAME = "stale_blocks"
 
@@ -37,8 +38,11 @@ NAME = "stale_blocks"
 @dataclass(frozen=True, slots=True)
 class StaleBlocks:
     unblock_grace: timedelta = timedelta(minutes=5)
-    max_condition_age: timedelta = timedelta(minutes=15)
-    unlinked_alert_after: timedelta | None = None
+    max_condition_age: timedelta = DEFAULT_MAX_CONDITION_AGE
+    # Blocks nothing will clear on its own get an alert, so none sits unnoticed:
+    unlinked_alert_after: timedelta | None = timedelta(hours=4)  # no condition Kelpie sees
+    max_block: timedelta | None = timedelta(hours=24)  # condition still not met
+    stale_evidence_after: timedelta | None = timedelta(hours=1)  # connector stopped checking
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -51,19 +55,57 @@ class StaleBlocks:
     def _check(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
         block = task.block
         assert block is not None
+        age = snapshot.now - block.since
         conditions, missing = linked_conditions(task, snapshot)
         if not conditions:
-            if missing is None:
-                yield from self._unlinked(task, snapshot)
-            return  # a condition Kelpie cannot see: leave the block alone
-        if not all(c.satisfied for c in conditions):
+            if self.unlinked_alert_after is not None and age >= self.unlinked_alert_after:
+                what = (
+                    f"names condition {missing}, which Kelpie cannot see"
+                    if missing
+                    else "has no condition Kelpie can check"
+                )
+                yield self._alert(
+                    task,
+                    "unlinked",
+                    f"Task {task.id} has been blocked for {_human(age)} on "
+                    f"'{block.reason}' and {what}, so nothing will clear it automatically.",
+                )
             return
-        for c in conditions:
-            checked = c.checked_at
-            if checked is None or checked < block.since:
-                return  # no evidence gathered since the block was set
-            if snapshot.now - checked > self.max_condition_age:
-                return  # the connector has not looked recently
+        stale = [
+            c
+            for c in conditions
+            if c.checked_at is None or snapshot.now - c.checked_at > self.max_condition_age
+        ]
+        if (
+            stale
+            and self.stale_evidence_after is not None
+            and age >= self.stale_evidence_after
+            and all(
+                c.checked_at is None or snapshot.now - c.checked_at >= self.stale_evidence_after
+                for c in stale
+            )
+        ):
+            names = ", ".join(c.id for c in stale)
+            yield self._alert(
+                task,
+                "stale-evidence",
+                f"Task {task.id} has been blocked for {_human(age)}, but "
+                f"condition(s) {names} have not been checked for over "
+                f"{_human(self.stale_evidence_after)}: is the connector running?",
+            )
+            return
+        if not all(c.satisfied for c in conditions):
+            if self.max_block is not None and age >= self.max_block:
+                pending = ", ".join(f"{c.id} ({c.kind})" for c in conditions if not c.satisfied)
+                yield self._alert(
+                    task,
+                    "overdue",
+                    f"Task {task.id} has been blocked for {_human(age)} "
+                    f"(limit {_human(self.max_block)}) waiting for {pending}.",
+                )
+            return
+        if not all(fresh(c, block.since, snapshot.now, self.max_condition_age) for c in conditions):
+            return  # no evidence gathered since the block was set, or not recent
         met_at = max(max(c.satisfied_at or block.since, block.since) for c in conditions)
         if snapshot.now - met_at < self.unblock_grace:
             return
@@ -84,22 +126,17 @@ class StaleBlocks:
             },
         )
 
-    def _unlinked(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
+    def _alert(self, task: Task, kind: str, reason: str) -> Action:
         block = task.block
         assert block is not None
-        if self.unlinked_alert_after is None:
-            return
-        age = snapshot.now - block.since
-        if age >= self.unlinked_alert_after:
-            yield Action(
-                ActionKind.ALERT,
-                NAME,
-                f"Task {task.id} has been blocked for {_human(age)} on '{block.reason}' with "
-                "no condition Kelpie can check, so nothing will clear it automatically.",
-                task_id=task.id,
-                severity=Severity.WARNING,
-                key=f"unlinked:{task.id}:{block.since.isoformat()}",
-            )
+        return Action(
+            ActionKind.ALERT,
+            NAME,
+            reason,
+            task_id=task.id,
+            severity=Severity.WARNING,
+            key=f"{kind}:{task.id}:{block.since.isoformat()}",
+        )
 
 
 def _human(d: timedelta) -> str:
@@ -126,9 +163,15 @@ def build(config: dict[str, Any]) -> StaleBlocks:
     kwargs: dict[str, Any] = {}
     if "unblock_grace" in config:
         kwargs["unblock_grace"] = _duration(config.pop("unblock_grace"), "unblock_grace", True)
-    for key in ("max_condition_age", "unlinked_alert_after"):
+    if "max_condition_age" in config:
+        kwargs["max_condition_age"] = _duration(
+            config.pop("max_condition_age"), "max_condition_age"
+        )
+    for key in ("unlinked_alert_after", "max_block", "stale_evidence_after"):
         if key in config:
-            kwargs[key] = _duration(config.pop(key), key)
+            value = config.pop(key)
+            # false switches the alert off
+            kwargs[key] = None if value is False else _duration(value, key)
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return StaleBlocks(**kwargs)

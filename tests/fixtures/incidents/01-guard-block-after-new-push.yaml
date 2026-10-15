@@ -6,7 +6,7 @@ description: >
   fix and set a new guard block "wait for CI". The connector has not polled since the push,
   so the condition still reads satisfied with data from before the block. Clearing the block
   now would skip CI for the new commit. Likewise, a condition whose connector stopped polling
-  hours ago is not evidence. Only the block whose condition was re-checked after it was set,
+  hours ago is not evidence; it gets an alert instead. Only the block whose condition was re-checked after it was set,
   and recently, is cleared.
 rule: stale_blocks
 config:
@@ -43,6 +43,9 @@ snapshot:
     - {id: C-112, kind: ci_status, task_id: T-112, params: {repo: example/repo, pr: 52}, satisfied: true, satisfied_at: "2026-03-02T10:30:00+00:00", checked_at: "2026-03-02T11:00:00+00:00"}
     - {id: C-113, kind: ci_status, task_id: T-113, params: {repo: example/repo, pr: 53}, satisfied: true, satisfied_at: "2026-03-02T12:40:00+00:00", checked_at: "2026-03-02T13:58:00+00:00"}
 expected_actions:
+  - kind: alert
+    task_id: T-112
+    reason_contains: "is the connector running"
   - kind: unblock
     task_id: T-113
     reason_contains: "outlived its cause by 1h 20m"

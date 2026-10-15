@@ -69,12 +69,16 @@ def test_task_linked_conditions_count_and_all_must_hold() -> None:
     assert both == []
 
 
+def unblocks(actions: list) -> list:
+    return [a for a in actions if a.kind is ActionKind.UNBLOCK]
+
+
 def test_evidence_must_be_fresh_and_newer_than_the_block() -> None:
-    assert run(blocked(), cond(checked=None)) == []
+    assert unblocks(run(blocked(), cond(checked=None))) == []
     assert run(blocked(since=NOW - 10 * M), cond(at=NOW - 120 * M, checked=NOW - 30 * M)) == []
     rule = StaleBlocks(max_condition_age=15 * M)
-    assert run(blocked(), cond(checked=NOW - 16 * M), rule=rule) == []
-    assert len(run(blocked(), cond(checked=NOW - 15 * M), rule=rule)) == 1
+    assert unblocks(run(blocked(), cond(checked=NOW - 16 * M), rule=rule)) == []
+    assert len(unblocks(run(blocked(), cond(checked=NOW - 15 * M), rule=rule))) == 1
 
 
 def test_grace_counts_from_the_last_met_but_not_before_the_block() -> None:
@@ -106,13 +110,35 @@ def test_key_is_per_block() -> None:
     assert a.key != b.key
 
 
-def test_unlinked_blocks_alert_only_when_configured() -> None:
-    assert run(blocked(None)) == []
+def alerts(actions: list) -> list[str]:
+    return [a.key.split(":")[0] for a in actions if a.kind is ActionKind.ALERT]
+
+
+def test_unlinked_and_missing_condition_blocks_alert_after_threshold() -> None:
     rule = StaleBlocks(unlinked_alert_after=120 * M)
-    [alert] = run(blocked(None), rule=rule)
-    assert alert.kind is ActionKind.ALERT and "no condition Kelpie can check" in alert.reason
+    assert alerts(run(blocked(None), rule=rule)) == ["unlinked"]
     assert run(blocked(None, since=NOW - 119 * M), rule=rule) == []
-    assert run(blocked("C-404"), rule=rule) == []  # names a condition: not "unlinked"
+    [alert] = run(blocked("C-404"), rule=rule)
+    assert "C-404" in alert.reason and "cannot see" in alert.reason
+    assert run(blocked(None), rule=StaleBlocks(unlinked_alert_after=None)) == []
+
+
+def test_unmet_condition_past_max_block_alerts() -> None:
+    rule = StaleBlocks(max_block=180 * M)
+    assert alerts(run(blocked(), cond(satisfied=False, at=None), rule=rule)) == ["overdue"]
+    assert run(blocked(since=NOW - 179 * M), cond(satisfied=False, at=None), rule=rule) == []
+
+
+def test_connector_that_stopped_checking_alerts_instead_of_unblocking() -> None:
+    rule = StaleBlocks(stale_evidence_after=60 * M)
+    assert alerts(run(blocked(), cond(checked=NOW - 61 * M), rule=rule)) == ["stale-evidence"]
+    assert alerts(run(blocked(), cond(satisfied=False, checked=None), rule=rule)) == [
+        "stale-evidence"
+    ]
+    # Checked 30 minutes ago: too old to unblock (15m), too recent to alert (1h).
+    assert run(blocked(), cond(checked=NOW - 30 * M), rule=rule) == []
+    young = blocked(since=NOW - 30 * M)
+    assert run(young, cond(checked=None), rule=rule) == []  # block younger than the threshold
 
 
 @pytest.mark.parametrize(
@@ -123,13 +149,24 @@ def test_human(minutes: int, text: str) -> None:
 
 
 def test_build() -> None:
-    rule = build({"unblock_grace": "0s", "max_condition_age": "30m", "unlinked_alert_after": "4h"})
+    rule = build(
+        {
+            "unblock_grace": "0s",
+            "max_condition_age": "30m",
+            "unlinked_alert_after": "4h",
+            "max_block": False,
+            "stale_evidence_after": "2h",
+        }
+    )
     assert rule.unblock_grace == timedelta(0) and rule.max_condition_age == 30 * M
-    assert rule.unlinked_alert_after == 240 * M
+    assert rule.unlinked_alert_after == 240 * M and rule.stale_evidence_after == 120 * M
+    assert rule.max_block is None
     for bad in (
         {"unblock_grace": [1]},
         {"unblock_grace": -60},
         {"max_condition_age": "0s"},
+        {"max_block": True},
+        {"max_condition_age": False},
         {"grace": "1m"},
     ):
         with pytest.raises(ValueError):
