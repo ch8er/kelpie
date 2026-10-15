@@ -13,7 +13,7 @@ import pytest
 
 from kelpie.core import storage
 from kelpie.core.model import Span, SpanKind, SpanTotals
-from kelpie.core.spans import MemorySpanStore, SpanStore, totals
+from kelpie.core.spans import MemorySpanStore, SpanStore, TokenUsage, totals, usage
 from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
 from kelpie.traces.store import SpanRetention, SpanWindow, merge_spans
 
@@ -123,6 +123,83 @@ def test_totals_per_session(store: SpanStore) -> None:
         ),
     ]
     assert tuple(got) == totals(store.spans_since(NOW - timedelta(hours=1)))
+
+
+def llm(trace: str, span_id: str, parent: str | None, tokens: int, *, model: str = "m") -> Span:
+    t0 = NOW - timedelta(minutes=10)
+    return Span(
+        trace_id=trace,
+        span_id=span_id,
+        name="chat",
+        kind=SpanKind.LLM,
+        start=t0,
+        end=t0 + timedelta(seconds=5),
+        parent_id=parent,
+        task_id="T-1",
+        session_id="s-1",
+        model=model,
+        input_tokens=tokens,
+        output_tokens=tokens // 10,
+        cached_tokens=tokens // 2,
+    )
+
+
+def nested_trace() -> list[Span]:
+    """One trace: an agent span, a framework chat span wrapping a provider chat span
+    (one call instrumented twice), a tool span with a provider chat span inside the
+    framework span, and a sibling chat call that counts on its own."""
+    agent = replace(llm("a" * 32, "agent", None, 0), kind=SpanKind.SESSION, model=None)
+    return [
+        agent,
+        llm("a" * 32, "framework", "agent", 1000, model="fw"),
+        llm("a" * 32, "provider", "framework", 1000),
+        replace(llm("a" * 32, "tool", "framework", 0), kind=SpanKind.TOOL, model=None),
+        llm("a" * 32, "in-tool", "tool", 400),  # LLM ancestor through a tool span
+        llm("a" * 32, "sibling", "agent", 300),
+        llm("b" * 32, "other-trace", "framework", 50),  # same parent id, another trace
+    ]
+
+
+def test_nested_llm_spans_count_once(store: SpanStore) -> None:
+    store.append_spans(nested_trace(), NOW)
+    (got,) = store.totals_since(NOW - timedelta(hours=1))
+    # framework (1000) + sibling (300) + the other trace's call (its parent is not stored)
+    assert (got.llm_calls, got.input_tokens, got.output_tokens) == (3, 1350, 135)
+    assert got.cached_tokens == 500 + 150 + 25
+    assert got.spans == 7
+    assert list(store.usage_since(NOW - timedelta(hours=1))) == [
+        TokenUsage("s-1", "T-1", "fw", 1, 1000, 100, 500),
+        TokenUsage("s-1", "T-1", "m", 2, 350, 35, 175),
+    ]
+
+
+def test_nested_llm_spans_count_once_when_the_child_arrives_first(store: SpanStore) -> None:
+    spans = nested_trace()
+    children, parents = spans[2:], spans[:2]  # the framework span arrives last
+    store.append_spans(children, NOW)
+    before = store.totals_since(NOW - timedelta(hours=1))
+    # until the parent arrives, both of its LLM descendants are roots: nothing is lost
+    assert before[0].input_tokens == 1000 + 400 + 300 + 50
+    store.append_spans(parents, NOW + timedelta(seconds=1))
+    (after,) = store.totals_since(NOW - timedelta(hours=1))
+    assert after.input_tokens == 1350
+    assert sum(u.input_tokens for u in store.usage_since(NOW - timedelta(hours=1))) == 1350
+
+
+def test_nested_llm_parent_outside_the_window_still_counts_once(store: SpanStore) -> None:
+    parent = llm("c" * 32, "framework", None, 500)
+    old = replace(parent, start=NOW - timedelta(hours=3), end=NOW - timedelta(hours=3))
+    child = llm("c" * 32, "provider", "framework", 500)
+    store.append_spans([old, child], NOW)
+    # the parent left the window but is still stored: the child is its duplicate
+    assert store.totals_since(NOW - timedelta(hours=1))[0].input_tokens == 0
+    assert list(store.usage_since(NOW - timedelta(hours=1))) == []
+
+
+def test_pure_helpers_resolve_ancestry_among_the_spans_given() -> None:
+    spans = nested_trace()
+    assert totals(reversed(spans))[0].input_tokens == 1350
+    assert sum(u.input_tokens for u in usage(spans)) == 1350
 
 
 def test_prune_by_age_then_row_cap(store: SpanStore) -> None:

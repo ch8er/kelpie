@@ -24,7 +24,7 @@ from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
 from kelpie.core.model import Span, SpanKind, SpanTotals
-from kelpie.core.spans import MAX_LINK_DEPTH, SpanChanges, last_at
+from kelpie.core.spans import MAX_LINK_DEPTH, SpanChanges, TokenUsage, last_at
 from kelpie.core.states import OpenState
 
 _V1 = """
@@ -299,6 +299,22 @@ _SPAN_COLUMNS = (
     " model, tool, args_hash, input_tokens, output_tokens, cached_tokens, outcome, attributes,"
     " received_at, version"
 )
+# LLM spans of the window (first parameter: the cutoff) that have an LLM ancestor in the
+# same trace, by rowid_. The walk goes up through non-LLM parents over the whole table, so
+# a parent that arrived after its child, or lies outside the window, is still found.
+_NESTED_LLM = (
+    "WITH RECURSIVE up(id, trace_id, parent_id, depth) AS ("
+    " SELECT rowid_, trace_id, parent_id, 0 FROM spans"
+    " WHERE kind = 'llm' AND last_at >= ? AND parent_id IS NOT NULL"
+    " UNION ALL"
+    " SELECT up.id, p.trace_id, p.parent_id, up.depth + 1 FROM up"
+    " JOIN spans p ON p.trace_id = up.trace_id AND p.span_id = up.parent_id"
+    f" WHERE p.kind != 'llm' AND p.parent_id IS NOT NULL AND up.depth < {MAX_LINK_DEPTH}"
+    "), nested(id) AS ("
+    " SELECT DISTINCT up.id FROM up"
+    " JOIN spans p ON p.trace_id = up.trace_id AND p.span_id = up.parent_id"
+    " WHERE p.kind = 'llm') "
+)
 # Rows per write or delete transaction: keeps the SQLite writer slot free for the ledger.
 SPAN_BATCH = 500
 
@@ -420,18 +436,22 @@ class SqliteSpanStore:
         return SpanChanges(tuple(_span(r) for r in rows), version)
 
     def totals_since(self, after: datetime) -> Sequence[SpanTotals]:
+        root = "spans.kind = 'llm' AND n.id IS NULL"
         sql = (
+            f"{_NESTED_LLM}"
             "SELECT session_id, MAX(task_id) AS task_id, COUNT(*) AS spans,"
-            " SUM(kind = 'llm') AS llm_calls, SUM(kind = 'tool') AS tool_calls,"
+            f" SUM({root}) AS llm_calls, SUM(kind = 'tool') AS tool_calls,"
             " SUM(kind = 'tool' AND outcome = 'error') AS tool_errors,"
-            " SUM(CASE WHEN kind = 'llm' THEN input_tokens ELSE 0 END) AS input_tokens,"
-            " SUM(CASE WHEN kind = 'llm' THEN output_tokens ELSE 0 END) AS output_tokens,"
-            " SUM(CASE WHEN kind = 'llm' THEN cached_tokens ELSE 0 END) AS cached_tokens,"
+            f" SUM(CASE WHEN {root} THEN input_tokens ELSE 0 END) AS input_tokens,"
+            f" SUM(CASE WHEN {root} THEN output_tokens ELSE 0 END) AS output_tokens,"
+            f" SUM(CASE WHEN {root} THEN cached_tokens ELSE 0 END) AS cached_tokens,"
             " MIN(start) AS first_start,"
             " MAX(last_at) AS last_end"
-            " FROM spans WHERE last_at >= ? AND session_id IS NOT NULL AND session_id != ''"
+            " FROM spans LEFT JOIN nested n ON n.id = spans.rowid_"
+            " WHERE last_at >= ? AND session_id IS NOT NULL AND session_id != ''"
             " GROUP BY session_id ORDER BY session_id"
         )
+        after_ts = _ts(after)
         return [
             SpanTotals(
                 session_id=r["session_id"],
@@ -446,7 +466,32 @@ class SqliteSpanStore:
                 first_start=datetime.fromisoformat(r["first_start"]),
                 last_end=datetime.fromisoformat(r["last_end"]),
             )
-            for r in self._read(sql, (_ts(after),))
+            for r in self._read(sql, (after_ts, after_ts))
+        ]
+
+    def usage_since(self, after: datetime) -> Sequence[TokenUsage]:
+        sql = (
+            f"{_NESTED_LLM}"
+            "SELECT session_id, task_id, model, COUNT(*) AS calls,"
+            " SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,"
+            " SUM(cached_tokens) AS cached_tokens"
+            " FROM spans LEFT JOIN nested n ON n.id = spans.rowid_"
+            " WHERE kind = 'llm' AND last_at >= ? AND n.id IS NULL"
+            " GROUP BY session_id, task_id, model"
+            " ORDER BY COALESCE(session_id, ''), COALESCE(task_id, ''), COALESCE(model, '')"
+        )
+        after_ts = _ts(after)
+        return [
+            TokenUsage(
+                session_id=r["session_id"],
+                task_id=r["task_id"],
+                model=r["model"],
+                calls=r["calls"],
+                input_tokens=r["input_tokens"],
+                output_tokens=r["output_tokens"],
+                cached_tokens=r["cached_tokens"],
+            )
+            for r in self._read(sql, (after_ts, after_ts))
         ]
 
     def prune(self, before: datetime, max_rows: int) -> int:

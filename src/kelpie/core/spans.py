@@ -9,12 +9,18 @@ retention both use it, so a long session span stays visible while it is still ru
 
 Stores stamp every insert and link update with a growing *version* and count deletes in
 ``epoch``, so a reader can keep a cache and fetch only what changed (:meth:`changes`).
+
+Token sums (:func:`totals`, :func:`usage`) count *root* LLM spans only: an LLM span with an
+LLM ancestor in the same trace is the same model call seen by a second instrumentation (a
+framework ``chat`` span around a provider ``chat`` span) and is left out. Spans of one trace
+arrive out of order across requests, so this is decided when the sums are read, from the
+stored ``parent_id`` chain, never at ingest.
 """
 
 from __future__ import annotations
 
 import threading
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Protocol
@@ -58,6 +64,11 @@ class SpanStore(Protocol):
         """Per-session aggregates over the spans :meth:`spans_since` would return."""
         ...
 
+    def usage_since(self, after: datetime) -> Sequence[TokenUsage]:
+        """Token usage of root LLM spans whose last time is at or after ``after``, per
+        session, task and model (budgets price it per model)."""
+        ...
+
     def prune(self, before: datetime, max_rows: int) -> int:
         """Delete spans whose last time is before ``before``, then the oldest ones beyond
         ``max_rows``. Returns the number of rows deleted."""
@@ -73,39 +84,106 @@ class SpanStore(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """Tokens of root LLM spans for one (session, task, model); ``input_tokens`` includes
+    ``cached_tokens``, as in :class:`kelpie.core.model.SpanTotals`."""
+
+    session_id: str | None
+    task_id: str | None
+    model: str | None
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+
+
 MAX_LINK_DEPTH = 32  # parent chains deeper than this are not followed
 
 
-def totals(spans: Iterable[Span]) -> tuple[SpanTotals, ...]:
+def nested_llm(index: Mapping[SpanKey, Span], spans: Iterable[Span]) -> set[SpanKey]:
+    """Keys of the LLM spans in ``spans`` that have an LLM ancestor in ``index`` (the same
+    trace, followed through ``parent_id`` across non-LLM spans)."""
+    nested: set[SpanKey] = set()
+    for span in spans:
+        if span.kind is not SpanKind.LLM:
+            continue
+        parent_id = span.parent_id
+        for _ in range(MAX_LINK_DEPTH + 1):
+            parent = index.get((span.trace_id, parent_id)) if parent_id else None
+            if parent is None:
+                break
+            if parent.kind is SpanKind.LLM:
+                nested.add(span_key(span))
+                break
+            parent_id = parent.parent_id
+    return nested
+
+
+def totals(
+    spans: Iterable[Span], index: Mapping[SpanKey, Span] | None = None
+) -> tuple[SpanTotals, ...]:
     """Aggregate spans per session (spans without a session are left out), sorted by id.
 
-    Tokens are summed over LLM spans only: an agent or workflow span may repeat the usage
-    of its model calls, and counting both would double the session's tokens. An LLM span
-    nested in another LLM span (a framework wrapping a provider call, both instrumented)
-    is still counted twice; Kelpie does not resolve ancestry here.
+    Tokens and LLM calls are summed over root LLM spans only: an agent or workflow span
+    may repeat the usage of its model calls, and an LLM span nested in another LLM span is
+    the same call instrumented twice. Ancestors are looked up in ``index`` (default: the
+    spans given).
     """
+    spans = list(spans)
+    nested = nested_llm(index if index is not None else _index(spans), spans)
     acc: dict[str, _Acc] = {}
     for span in spans:
         if not span.session_id:
             continue
         a = acc.setdefault(span.session_id, _Acc())
-        a.add(span)
+        a.add(span, span_key(span) not in nested)
     return tuple(acc[sid].result(sid) for sid in sorted(acc))
+
+
+def usage(
+    spans: Iterable[Span], index: Mapping[SpanKey, Span] | None = None
+) -> tuple[TokenUsage, ...]:
+    """Token usage of the root LLM spans among ``spans`` per (session, task, model)."""
+    spans = list(spans)
+    nested = nested_llm(index if index is not None else _index(spans), spans)
+    acc: dict[tuple[str | None, str | None, str | None], TokenUsage] = {}
+    for span in spans:
+        if span.kind is not SpanKind.LLM or span_key(span) in nested:
+            continue
+        key = (span.session_id, span.task_id, span.model)
+        u = acc.get(key) or TokenUsage(*key)
+        acc[key] = replace(
+            u,
+            calls=u.calls + 1,
+            input_tokens=u.input_tokens + span.input_tokens,
+            output_tokens=u.output_tokens + span.output_tokens,
+            cached_tokens=u.cached_tokens + span.cached_tokens,
+        )
+    return tuple(acc[k] for k in sorted(acc, key=_usage_order))
+
+
+def _usage_order(key: tuple[str | None, str | None, str | None]) -> tuple[str, ...]:
+    return tuple(v or "" for v in key)
+
+
+def _index(spans: Iterable[Span]) -> dict[SpanKey, Span]:
+    return {span_key(s): s for s in spans}
 
 
 @dataclass(slots=True)
 class _Acc:
     total: SpanTotals | None = None
 
-    def add(self, span: Span) -> None:
+    def add(self, span: Span, root: bool) -> None:
         t = self.total or SpanTotals(session_id=span.session_id or "")
         end = last_at(span)
-        llm = span.kind is SpanKind.LLM
+        llm = span.kind is SpanKind.LLM and root
         self.total = replace(
             t,
             task_id=max(filter(None, (t.task_id, span.task_id)), default=None),
             spans=t.spans + 1,
-            llm_calls=t.llm_calls + (span.kind is SpanKind.LLM),
+            llm_calls=t.llm_calls + llm,
             tool_calls=t.tool_calls + (span.kind is SpanKind.TOOL),
             tool_errors=t.tool_errors + (span.kind is SpanKind.TOOL and span.outcome == "error"),
             input_tokens=t.input_tokens + llm * span.input_tokens,
@@ -151,7 +229,15 @@ class MemorySpanStore:
         return SpanChanges(tuple(s for _, s in found), version)
 
     def totals_since(self, after: datetime) -> Sequence[SpanTotals]:
-        return totals(self.spans_since(after))
+        return totals(self.spans_since(after), self._index())
+
+    def usage_since(self, after: datetime) -> Sequence[TokenUsage]:
+        return usage(self.spans_since(after), self._index())
+
+    def _index(self) -> dict[SpanKey, Span]:
+        # Ancestors are looked up over every stored span, not only the window's.
+        with self._lock:
+            return {k: s for k, (s, _) in self._spans.items()}
 
     def prune(self, before: datetime, max_rows: int) -> int:
         with self._lock:

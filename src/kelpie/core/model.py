@@ -222,9 +222,11 @@ class SpanTotals:
     """Per-session aggregates over stored spans, so rules and the report can see tokens and
     call counts over a long window without loading every raw span.
 
-    Tokens are summed over LLM spans. ``input_tokens`` follows the GenAI conventions and
-    includes cached tokens (``cached_tokens`` is the part served from a cache); OTLP
-    ingest normalizes sources that report it the other way (Claude Code).
+    Tokens and ``llm_calls`` count root LLM spans: an LLM span with an LLM ancestor in the
+    same trace (a second instrumentation of the same call) is left out. ``input_tokens``
+    follows the GenAI conventions and includes cached tokens (``cached_tokens`` is the
+    part served from a cache); OTLP ingest normalizes sources that report it the other
+    way (Claude Code).
     """
 
     session_id: str
