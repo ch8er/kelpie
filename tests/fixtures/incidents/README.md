@@ -120,6 +120,8 @@ Fixture conventions:
 | 12 | `12-review-ping-pong.yaml` | `ping_pong` | `escalate` T-1201 (9 rounds > 3) |
 | 12 | `12-below-threshold.yaml` | `ping_pong` | `escalate` T-1211 to the configured architect at exactly 3 rounds, listing return reasons; nothing for 2 rounds, merge-conflict returns, or a done task |
 | 13 | `13-human-tasks-block-agents.yaml` | `needs_you` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5`; T-1308 (nothing blocked behind it) not escalated |
+| 14 | `14-forgotten-merge-hold.yaml` | `bottlenecks` | `alert` idle developers with ready work, likely cause the `merge-hold` hold; `alert` the hold is past its 2h30m expiry, owner named; nothing for a fresh freeze or the busy designer |
+| 16 | `16-human-task-gates-chain.yaml` | `bottlenecks` | `alert` 3 of 5 slots busy and only human tasks ready, `human_tasks: [T-1600]`, 28 agent tasks behind; `escalate` T-1600 to its owner with `agent_hours`; nothing for the human task with nothing behind it, no parallelization advice |
 | – | `14-checkpoint-commit-reminder.yaml` | `checkpoints` | `comment` T-1401 (no commit for 50 minutes) and T-1402 (25 changed files, over 20); nothing for a session that committed 10 minutes ago or a clean worktree |
 | – | `15-checkpoint-wip-commit-on-exit.yaml` | `checkpoints` | `wip_commit` with `[skip ci]` for T-1501 (session ended dirty) and T-1502 (session went silent), resume `comment` T-1501; nothing for a clean exit, a task that is already done, or an old dirty session while a new one is live |
 | – | `16-checkpoint-resume-from-commit.yaml` | `checkpoints` | `comment` T-1601 (resume from commit a1b2c3d on task/T-1601); nothing when the previous session committed nothing or the task was never worked on |

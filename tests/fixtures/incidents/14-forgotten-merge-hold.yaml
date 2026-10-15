@@ -1,0 +1,64 @@
+id: "14-forgotten-merge-hold"
+incident: 14
+title: "A merge hold promised to be lifted in 2.5 h was forgotten"
+description: >
+  A human put a deliberate merge hold on the board and promised to lift it in about 2.5
+  hours. Nobody did. Approved PRs waited to be merged, the follow-up tasks behind the hold
+  sat in ready, and the developers had no work for about five hours: one task closed in
+  that time. Kelpie must name the hold as the likely cause of the idle farm and say that
+  the hold is past its expected length, with its owner.
+rule: bottlenecks
+config:
+  min_idle_time: "30m"
+  idle_alert_after: "30m"
+  hold_expiry: "4h"
+  holds:
+    - {label: merge-hold, owner: human-owner, expires_after: "2h30m"}
+    - {label: release-freeze, owner: release-manager}
+snapshot:
+  now: "2026-03-02T17:00:00+00:00"
+  owners:
+    - {id: human-owner, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: designer-1, role: designer}
+  tasks:
+    # Approved PRs waiting to be merged, parked by the hold.
+    - {id: T-1401, title: "Merge: settings page", status: accepted, status_since: "2026-03-02T12:00:00+00:00", role: developer, labels: [merge-hold]}
+    - {id: T-1402, title: "Merge: export job", status: accepted, status_since: "2026-03-02T12:10:00+00:00", role: developer, labels: [merge-hold]}
+    # Follow-up work the dispatcher does not hand out while the hold is on.
+    - {id: T-1403, title: "Settings page: dark mode", status: ready, status_since: "2026-03-02T12:00:00+00:00", role: developer, labels: [merge-hold]}
+    - {id: T-1404, title: "Export job: retries", status: ready, status_since: "2026-03-02T12:05:00+00:00", role: developer, labels: [merge-hold]}
+    # Distractor: a freeze set an hour ago, well within its 4h default expiry.
+    - {id: T-1405, title: "Release notes", status: ready, status_since: "2026-03-02T16:00:00+00:00", role: designer, labels: [release-freeze]}
+    # Distractor: the designer is busy, so designer work is not idle capacity.
+    - {id: T-1406, title: "Icon set", status: in_progress, status_since: "2026-03-02T15:00:00+00:00", role: designer, owner_id: designer-1}
+  sessions:
+    - {id: S-1401, task_id: T-1390, owner_id: agent-dev-1, started_at: "2026-03-02T10:30:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: review}
+    - {id: S-1402, task_id: T-1391, owner_id: agent-dev-2, started_at: "2026-03-02T10:30:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: review}
+    - {id: S-1403, task_id: T-1392, owner_id: agent-dev-3, started_at: "2026-03-02T10:30:00+00:00", ended_at: "2026-03-02T12:30:00+00:00", final_status: review}
+    - {id: S-1404, task_id: T-1406, owner_id: designer-1, started_at: "2026-03-02T15:00:00+00:00", last_heartbeat: "2026-03-02T16:58:00+00:00"}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "Likely cause: a hold"
+    params:
+      idle_agents: [agent-dev-1, agent-dev-2, agent-dev-3]
+      likely_cause: hold
+      holds: [merge-hold]
+      ready_tasks: [T-1401, T-1402, T-1403, T-1404]
+  - kind: alert
+    severity: warning
+    reason_contains: "past its expected 2h 30m"
+    params:
+      hold: merge-hold
+      owner: human-owner
+      held_count: 4
+      held_minutes: 300
+not_expected_actions:
+  - kind: alert
+    params: {hold: release-freeze}
+  - kind: alert
+    params: {idle_agents: [designer-1]}
+  - kind: escalate

@@ -167,7 +167,7 @@ P0 is the MVP; P1 and P2 rules are backlog.
 | 3 | Orphan statuses | Task sits in a status with no owner for more than N min → alert and reassign to an owner of its role | 11 |
 | 4 | Stale blocks | The block's cause is resolved in the outside world → unblock | 1, 8 |
 | 5 | Ping-pong | After K review rounds → escalate to the architect or a human | 12 |
-| 6 | Bottlenecks | Role utilization and critical path → alert with a rebalancing suggestion | 9, 10 |
+| 6 | Bottlenecks | Role utilization and critical path → alert with a rebalancing suggestion; idle with ready work, holds with an owner and an expiry, human tasks on the critical path | 9, 10, 14, 16 |
 | 7 | Resources | Disk, memory, processes, heavy-task concurrency, LLM provider quotas and auth health → alert before the agents stop | 3, 4, 6 |
 | 8 | Daily report | "Cost of chaos" plus before/after verification of every fix | all |
 | 9 | CI economy | Finds wasted builds (drafts/WIP, superseded, docs-only, already verified commit), cancels superseded ones, forecasts quota burn; proposing a better CI config PR is P1 | 5 |

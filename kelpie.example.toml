@@ -25,6 +25,17 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # wip_ci = "skip_ci"        # WIP commit on exit: "skip_ci" ([skip ci]) or "draft_pr"
 # act_within = "24h"        # WIP commit and resume note only this long after the exit
 #
+# [engine.rules.bottlenecks]
+# min_idle_time = "30m"     # an agent counts as idle this long after its last session
+# idle_alert_after = "30m"  # ...and alerts once ready work it could take waited this long
+# slots = 5                 # optional farm concurrency limit: full slots are not idle capacity
+# human_gate_min_tasks = 3  # escalate a human task with this many agent tasks behind it
+# hold_expiry = "4h"        # expected length of a hold without its own expires_after
+# [[engine.rules.bottlenecks.holds]]   # a label that parks tasks on purpose
+# label = "merge-hold"
+# owner = "human-owner"     # named in the alert when the hold looks forgotten
+# expires_after = "2h30m"
+#
 # [engine.rules.no_progress]
 # window = "30m"            # tokens vs. progress over this long; [traces] window must be
 #                           # at least this long (Kelpie warns at startup otherwise)
