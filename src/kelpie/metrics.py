@@ -50,6 +50,7 @@ class Metrics:
         self.spans_rejected_total: Counter[str] = Counter()
         self.span_rows: Callable[[], int] | None = None  # the span store's count
         self.span_store_errors = 0
+        self.forward: dict[str, Counter[str]] = {}  # destination -> {forwarded, failed, dropped}
         self.snapshot_span_count = 0
         self.snapshot_spans_dropped = 0
         self.snapshot_hook_merged = 0
@@ -105,6 +106,27 @@ class Metrics:
     def span_store_failed(self) -> None:
         with self._lock:
             self.span_store_errors += 1
+
+    # --- trace forwarding (kelpie.traces.forward.ForwardObserver) ----------------------
+
+    def set_forward_destinations(self, names: Iterable[str]) -> None:
+        with self._lock:
+            for name in names:  # expose 0 so rate() sees the first event
+                self.forward.setdefault(name, Counter(forwarded=0, failed=0, dropped=0))
+
+    def _forward(self, destination: str, what: str) -> None:
+        with self._lock:
+            self.forward.setdefault(destination, Counter())[what] += 1
+
+    def forwarded(self, destination: str) -> None:
+        self._forward(destination, "forwarded")
+
+    def forward_failed(self, destination: str) -> None:
+        self._forward(destination, "failed")
+
+    def forward_dropped(self, destination: str, count: int = 1) -> None:
+        with self._lock:
+            self.forward.setdefault(destination, Counter())["dropped"] += count
 
     def adapter_failed(self, name: str) -> None:
         with self._lock:
@@ -241,7 +263,33 @@ class Metrics:
             )
             if self.traces_enabled:
                 self._render_traces(metric)
+            if self.forward:
+                self._render_forward(metric)
             return "\n".join(out) + "\n"
+
+    def _render_forward(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        for what, name, help_ in (
+            ("forwarded", "kelpie_traces_forwarded_total", "OTLP requests forwarded."),
+            (
+                "failed",
+                "kelpie_traces_forward_failed_total",
+                "OTLP requests that could not be forwarded after retries.",
+            ),
+            (
+                "dropped",
+                "kelpie_traces_forward_dropped_total",
+                "OTLP requests dropped because the destination's queue was full.",
+            ),
+        ):
+            metric(
+                name,
+                "counter",
+                help_,
+                [
+                    f"{name}{_labels(destination=d)} {c[what]}"
+                    for d, c in sorted(self.forward.items())
+                ],
+            )
 
     def _span_rows(self) -> int:
         try:

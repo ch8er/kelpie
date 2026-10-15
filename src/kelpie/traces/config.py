@@ -1,15 +1,27 @@
-"""``[traces]`` configuration: OTLP ingest, the snapshot window and span retention."""
+"""``[traces]`` configuration: OTLP ingest, the snapshot window, span retention and
+``[[traces.forward]]`` destinations."""
 
 from __future__ import annotations
 
 import ipaddress
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from kelpie.core.serde import parse_duration
+from kelpie.traces.forward import (
+    DEFAULT_QUEUE_BYTES,
+    DEFAULT_QUEUE_SIZE,
+    DEFAULT_RETRIES,
+    DEFAULT_TIMEOUT,
+    MAX_RETRIES,
+    Destination,
+    valid_header_name,
+    valid_header_value,
+)
 from kelpie.traces.ingest import DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_CONCURRENT
 from kelpie.traces.semconv import DEFAULT_SESSION_ATTRIBUTE, DEFAULT_TASK_ATTRIBUTE, MappingOptions
 from kelpie.traces.store import DEFAULT_MAX_SNAPSHOT_SPANS
@@ -30,10 +42,78 @@ KEYS = frozenset(
         "max_snapshot_spans",
         "max_concurrent_requests",
         "allow_unauthenticated",
+        "forward",
     }
 )
 ALLOW_UNAUTHENTICATED_ENV = "KELPIE_TRACES_ALLOW_UNAUTHENTICATED"
 _TRUE = frozenset({"1", "true", "yes", "on"})
+FORWARD_KEYS = frozenset(
+    {
+        "name",
+        "endpoint",
+        "headers",
+        "headers_env",
+        "timeout",
+        "queue_size",
+        "queue_bytes",
+        "retries",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardSettings:
+    """One ``[[traces.forward]]`` destination. Secret header values come from env vars."""
+
+    name: str
+    endpoint: str
+    headers: Mapping[str, str] = field(default_factory=dict)  # static, non-secret
+    headers_env: Mapping[str, str] = field(default_factory=dict)  # header -> env var name
+    timeout: timedelta = timedelta(seconds=DEFAULT_TIMEOUT)
+    queue_size: int = DEFAULT_QUEUE_SIZE
+    retries: int = DEFAULT_RETRIES
+    queue_bytes: int = DEFAULT_QUEUE_BYTES
+
+    @property
+    def display_endpoint(self) -> str:
+        """The endpoint without its query string (which may carry a key)."""
+        parts = urlsplit(self.endpoint)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+    @property
+    def sends_secrets_in_clear(self) -> bool:
+        """Credentials from env vars over plain http to a non-loopback host."""
+        parts = urlsplit(self.endpoint)
+        return bool(self.headers_env) and parts.scheme == "http" and not _loopback(parts)
+
+    def destination(self, environ: Mapping[str, str] = os.environ) -> Destination:
+        """Resolve header values; raises ValueError when a named env var is not set or
+        holds a value that cannot be a header (the message names the variable, never the
+        value)."""
+        headers = dict(self.headers)
+        for header, var in self.headers_env.items():
+            value = environ.get(var, "").strip()
+            if not value:
+                raise ValueError(f"[[traces.forward]] {self.name}: ${var} ({header}) is not set")
+            if not valid_header_value(value):
+                raise ValueError(
+                    f"[[traces.forward]] {self.name}: ${var} ({header}) contains a line break "
+                    "or another control character"
+                )
+            headers[header] = value
+        return Destination(
+            name=self.name,
+            endpoint=self.endpoint,
+            headers=headers,
+            timeout=self.timeout.total_seconds(),
+            queue_size=self.queue_size,
+            retries=self.retries,
+            queue_bytes=self.queue_bytes,
+        )
+
+
+def _loopback(parts: SplitResult) -> bool:
+    return is_loopback(parts.hostname or "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +132,7 @@ class TraceSettings:
     max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT
     # Accept spans without a token on a non-loopback address (e.g. behind a proxy).
     allow_unauthenticated: bool = False
+    forward: tuple[ForwardSettings, ...] = ()  # empty: forwarding disabled
 
     @property
     def options(self) -> MappingOptions:
@@ -145,6 +226,11 @@ def load_traces(section: Any) -> TraceSettings:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"[traces] {key} must be a positive integer")
         ints[key] = value
+    forward = _load_forward(section.get("forward", []))
+    if forward and not enabled:
+        raise ValueError(
+            "[[traces.forward]] needs OTLP ingest: remove it or set [traces] enabled = true"
+        )
     return TraceSettings(
         enabled=enabled,
         token_env=strings["token_env"],
@@ -159,6 +245,7 @@ def load_traces(section: Any) -> TraceSettings:
         max_snapshot_spans=ints["max_snapshot_spans"],
         max_concurrent_requests=ints["max_concurrent_requests"],
         allow_unauthenticated=_flag(section, "allow_unauthenticated"),
+        forward=forward,
     )
 
 
@@ -167,3 +254,75 @@ def _flag(section: Mapping[str, Any], key: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"[traces] {key} must be true or false")
     return value
+
+
+def _load_forward(raw: Any) -> tuple[ForwardSettings, ...]:
+    if not isinstance(raw, list) or not all(isinstance(x, Mapping) for x in raw):
+        raise ValueError("[[traces.forward]] must be an array of tables")
+    out: list[ForwardSettings] = []
+    for i, entry in enumerate(raw):
+        where = f"[[traces.forward]] #{i + 1}"
+        if extra := set(entry) - FORWARD_KEYS:
+            raise ValueError(f"unknown {where} keys: {sorted(extra)}")
+        endpoint = entry.get("endpoint")
+        if not isinstance(endpoint, str):
+            raise ValueError(f"{where}: endpoint is required")
+        parsed = urlsplit(endpoint.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(f"{where}: endpoint must be an http(s) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError(
+                f"{where}: endpoint must not contain credentials; use headers_env "
+                "(e.g. Authorization from an env var)"
+            )
+        name = entry.get("name", parsed.hostname)
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{where}: name must be a non-empty string")
+        headers: dict[str, dict[str, str]] = {}
+        for key in ("headers", "headers_env"):
+            table = entry.get(key, {})
+            if not isinstance(table, Mapping) or not all(
+                isinstance(k, str) and k and isinstance(v, str) and v for k, v in table.items()
+            ):
+                raise ValueError(f"{where}: {key} must be a table of non-empty strings")
+            if bad := [k for k in table if not valid_header_name(k)]:
+                raise ValueError(f"{where}: {key} has invalid header names {bad}")
+            if key == "headers" and (
+                bad := [k for k, v in table.items() if not valid_header_value(v)]
+            ):
+                raise ValueError(f"{where}: headers {bad} contain control characters")
+            headers[key] = dict(table)
+        try:
+            timeout = parse_duration(entry.get("timeout", DEFAULT_TIMEOUT))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError(f"{where} timeout: {exc}") from exc
+        if timeout <= timedelta(0):
+            raise ValueError(f"{where}: timeout must be positive")
+        ints: dict[str, int] = {}
+        for key, default, low, high in (
+            ("queue_size", DEFAULT_QUEUE_SIZE, 1, None),
+            ("queue_bytes", DEFAULT_QUEUE_BYTES, 1, None),
+            ("retries", DEFAULT_RETRIES, 0, MAX_RETRIES),
+        ):
+            value = entry.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, int) or value < low:
+                raise ValueError(f"{where}: {key} must be an integer >= {low}")
+            if high is not None and value > high:
+                raise ValueError(f"{where}: {key} must be at most {high}")
+            ints[key] = value
+        out.append(
+            ForwardSettings(
+                name=name.strip(),
+                endpoint=endpoint.strip(),
+                headers=headers["headers"],
+                headers_env=headers["headers_env"],
+                timeout=timeout,
+                queue_size=ints["queue_size"],
+                retries=ints["retries"],
+                queue_bytes=ints["queue_bytes"],
+            )
+        )
+    names = [f.name for f in out]
+    if len(names) != len(set(names)):
+        raise ValueError("[[traces.forward]] names must be unique (they label metrics)")
+    return tuple(out)

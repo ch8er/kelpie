@@ -49,6 +49,19 @@ allow_unauthenticated = false  # true: no token needed even on a non-loopback ad
 task_attribute = "kelpie.task_id"        # span or resource attribute naming the task
 session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else session.id
 
+# Forward accepted OTLP requests, unchanged, to other backends (off unless configured; one
+# table per destination; secret header values come from env vars). See README "Traces".
+#
+# [[traces.forward]]
+# name = "langfuse"                       # metric label; default: the endpoint's host
+# endpoint = "https://cloud.langfuse.com/api/public/otel/v1/traces"
+# headers_env = { Authorization = "LANGFUSE_AUTH" }   # "Basic base64(pk:sk)"
+# headers = { "x-langfuse-ingestion-version" = "4" }
+# timeout = "10s"
+# queue_size = 1000                       # requests waiting; beyond that they are dropped
+# queue_bytes = 67108864                  # ...and bytes waiting (64 MiB)
+# retries = 3                             # for network errors, 429 and 5xx (at most 10)
+
 # Platform adapters. Kelpie only reads the board and, for now, cannot change it (Hermes
 # actions are not implemented yet): keep rules in observe or suggest mode. A rule in act
 # mode with dry_run = false and Hermes as the only adapter stops Kelpie at startup.

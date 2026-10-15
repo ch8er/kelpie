@@ -32,6 +32,7 @@ from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
 from kelpie.traces.config import TraceSettings, load_traces
+from kelpie.traces.forward import Forwarder
 from kelpie.traces.hooks import merge_hook_spans
 from kelpie.traces.ingest import IGNORED, TraceIngest
 from kelpie.traces.store import SpanRetention, SpanWindow, merge_spans
@@ -369,9 +370,12 @@ class App:
     span_store: SpanStore | None = None
     ingest: TraceIngest | None = None  # None: [traces] enabled = false
     retention: SpanRetention | None = None
+    forwarder: Forwarder | None = None
 
     def close(self) -> None:
         self.loop.stop()
+        if self.forwarder is not None:
+            self.forwarder.close()
         # Closing the span store first stops a running prune at its next batch.
         for store in (self.span_store, self.store):
             close = getattr(store, "close", None)
@@ -394,6 +398,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     traces = settings.traces
     try:
         token = traces.token()
+        destinations = [f.destination() for f in traces.forward] if traces.enabled else []
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     # No connectors or alerter are wired yet: an effect nobody can carry out turns into an
@@ -433,13 +438,28 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         max_concurrent=traces.max_concurrent_requests,
         max_age=traces.retention,
     )
+    forwarder = None
+    for f in traces.forward:
+        if f.sends_secrets_in_clear:
+            log.warning(
+                "[[traces.forward]] %s sends credentials over plain http to %s; use https",
+                f.name,
+                f.display_endpoint,
+            )
+    if destinations:
+        forwarder = Forwarder(destinations, metrics)
+        metrics.set_forward_destinations(d.name for d in destinations)
+        ingest.on_accepted = forwarder.submit
+        forwarder.start()
     retention = SpanRetention(span_store, clock, traces.retention, traces.max_rows, metrics)
     window = SpanWindow(
         span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
     )
     source = merged_snapshot(adapters, metrics, clock, window)
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
-    return App(settings, loaded, engine, loop, metrics, store, span_store, ingest, retention)
+    return App(
+        settings, loaded, engine, loop, metrics, store, span_store, ingest, retention, forwarder
+    )
 
 
 def check_exposure(settings: Settings, host: str) -> None:
@@ -489,6 +509,15 @@ def render_adapters(adapters: Sequence[PlatformAdapter]) -> list[str]:
     return lines
 
 
+def _dry_run_status(settings: Settings) -> str:
+    if not settings.engine.dry_run:
+        return "off"
+    traces = settings.traces
+    if traces.enabled and traces.forward:
+        return "on (no rule action leaves Kelpie; accepted traces are still forwarded)"
+    return "on (nothing leaves Kelpie)"
+
+
 def _traces_status(traces: TraceSettings) -> str:
     if not traces.enabled:
         return "disabled"
@@ -499,7 +528,8 @@ def _traces_status(traces: TraceSettings) -> str:
     auth = (
         f"bearer token from ${traces.token_env}" if token else f"open (${traces.token_env} unset)"
     )
-    return f"POST /v1/traces, {auth}, window {traces.window}, retention {traces.retention}"
+    forward = "".join(f", forward to {f.name} ({f.display_endpoint})" for f in traces.forward)
+    return f"POST /v1/traces, {auth}, window {traces.window}, retention {traces.retention}{forward}"
 
 
 def render_status(
@@ -509,7 +539,7 @@ def render_status(
     engine = settings.engine
     lines = [
         f"config:   {settings.source or '(defaults)'}",
-        f"dry-run:  {'on (nothing leaves Kelpie)' if engine.dry_run else 'off'}",
+        f"dry-run:  {_dry_run_status(settings)}",
         f"interval: {engine.interval}",
         f"ledger:   {settings.db_path or '(in memory)'}",
         f"traces:   {_traces_status(settings.traces)}",
