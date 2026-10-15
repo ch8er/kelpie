@@ -343,11 +343,11 @@ reserved for hook spans and stripped from OTLP attributes.
 
 **Hermes.** The Kelpie hooks plugin already reports every tool call (see the Hermes
 adapter README). If Hermes also exports the same calls over OTLP, each call is kept once
-(see below and the adapter README for the session id this needs). For model calls and token usage, Hermes' bundled Langfuse plugin only
-talks to Langfuse; the community [hermes-otel](https://github.com/briancaffey/hermes-otel)
-plugin can export to any OTLP/HTTP endpoint (`type: otlp` backend in
-`~/.hermes/hermes_otel.yaml`). We have not verified how it sets request headers, so run
-Kelpie's ingest without a token on a private network if it cannot send one.
+(matched by tool call id). For model calls and token usage, Hermes' bundled Langfuse plugin
+only talks to Langfuse; the community [hermes-otel](https://github.com/briancaffey/hermes-otel)
+plugin can export to any OTLP/HTTP endpoint, with headers (`type: otlp` backend in
+`~/.hermes/hermes_otel.yaml`). Settings for Kelpie are in the Hermes adapter README,
+"hermes-otel".
 
 **Any other OpenTelemetry SDK**: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://<kelpie>:9464/v1/traces`,
 `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf` and the bearer header as above.
