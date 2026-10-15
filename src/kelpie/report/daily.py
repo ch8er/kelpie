@@ -61,7 +61,19 @@ from kelpie.core.spans import (
     usage,
 )
 from kelpie.core.states import OpenState
+from kelpie.report.fixes import FixEvent
 from kelpie.report.store import StateRow
+from kelpie.report.verify import (
+    DEFAULT_MIN_SAMPLE,
+    DEFAULT_REVIEW_ROLES,
+    Evidence,
+    Metric,
+    Verification,
+    filter_events,
+    mode_events,
+    verify,
+)
+from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
 from kelpie.traces.outputs import (
     OutputGroup,
     OutputSettings,
@@ -141,6 +153,10 @@ class ReportInputs:
     attribution: Attribution | None = None
     modes: Mapping[str, Mode] = field(default_factory=dict)
     hour_usd: float | None = None
+    fixes: Sequence[FixEvent] = ()  # recorded fixes (manual, config) to verify
+    verify_window: timedelta = DEFAULT_VERIFY_WINDOW
+    review_roles: tuple[str, ...] = DEFAULT_REVIEW_ROLES
+    min_sample: int = DEFAULT_MIN_SAMPLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +225,7 @@ class DailyReport:
     priced: bool = True  # False: no [prices] table, dollars unknown
     hour_usd: float | None = None
     tz: tzinfo = UTC  # times are shown in the report's time zone
+    verifications: tuple[Verification, ...] = ()  # fixes of the day and the day before
 
     @property
     def chaos_hours(self) -> float:
@@ -245,8 +262,9 @@ def build_report(inputs: ReportInputs) -> DailyReport:
     counted = counted_llm(index, spans)
     pricer = _Pricer(inputs.prices)
     spend = pricer.price(usage(spans, counted))
-    chaos = _chaos(inputs, spans, counted, pricer, start, end)
-    fixed, would_fix, not_done = _actions(inputs.actions)
+    actions = [e for e in inputs.actions if start <= e.at < end]
+    chaos = _chaos(inputs, actions, spans, counted, pricer, start, end)
+    fixed, would_fix, not_done = _actions(actions)
     open_states = _open_states(inputs.states, end)
     filters, groups = _outputs(inputs, end, spans)
     completed = tuple(
@@ -275,7 +293,49 @@ def build_report(inputs: ReportInputs) -> DailyReport:
         priced=bool(inputs.prices.entries),
         hour_usd=inputs.hour_usd,
         tz=inputs.tz,
+        verifications=_verifications(inputs, index, start, end),
     )
+
+
+def _verifications(
+    inputs: ReportInputs, index: Mapping[SpanKey, Span], start: datetime, end: datetime
+) -> tuple[Verification, ...]:
+    """Before/after of every fix made on the report's day or the day before."""
+    known = [s for s in inputs.spans if last_at(s) < end]
+    board = Snapshot(
+        now=end,
+        tasks=tuple(inputs.tasks),
+        owners=tuple(inputs.owners),
+        sessions=tuple(inputs.sessions),
+    )
+    roles, platforms = session_context(board, inputs.attribution)
+    found = calls(known, roles, platforms)
+    since = start - timedelta(days=1)
+    events = [
+        *inputs.fixes,
+        *mode_events(e for e in inputs.actions if e.at < end),
+        *filter_events(found, replace(inputs.outputs, window=inputs.verify_window)),
+    ]
+    events = sorted(
+        (e for e in events if since <= e.at < end), key=lambda e: (e.at, e.kind, e.note)
+    )
+    if not events:
+        return ()
+    evidence = Evidence(
+        end=end,
+        states=inputs.states,
+        chaos_rules=frozenset(CHAOS_CAUSES),
+        spans=known,
+        counted=counted_llm(index, known),
+        sessions=inputs.sessions,
+        tasks=inputs.tasks,
+        roles=roles,
+        calls=found,
+        window=inputs.verify_window,
+        min_sample=inputs.min_sample,
+        review_roles=inputs.review_roles,
+    )
+    return tuple(verify(e, evidence) for e in events)
 
 
 class _Pricer:
@@ -332,6 +392,7 @@ def _outputs(
 
 def _chaos(
     inputs: ReportInputs,
+    actions: Sequence[LedgerEntry],
     spans: Sequence[Span],
     counted: Mapping[SpanKey, str | None],
     pricer: _Pricer,
@@ -367,7 +428,7 @@ def _chaos(
             tasks[state.rule].add(state.task_id)
         if (session := session_of(state)) is not None:
             burn(state.rule, session, a, b)
-    for entry in inputs.actions:
+    for entry in actions:
         if entry.rule != "exit_contract" or entry.kind is not ActionKind.REQUEUE:
             continue
         if entry.outcome in (Outcome.SUPPRESSED, Outcome.NOTHING_TO_DO):
@@ -601,6 +662,10 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             lines.append(f"{i}. **{a.title}**{tail}: {a.detail}.{linked}")
     else:
         lines.append("None: nothing above the thresholds.")
+    lines += ["", "## Before/after of recent fixes", ""]
+    lines += _verification_lines(report) or [
+        "No fixes on this day or the day before (note one with `kelpie fix`)."
+    ]
     if report.outputs:
         lines += ["", "## Largest tool outputs", ""]
         lines += ["| Role | Command or tool | Calls | Tokens | Per call | Filtered calls |"]
@@ -649,6 +714,49 @@ def _headline(report: DailyReport) -> str:
 
 def _local(at: datetime, report: DailyReport) -> str:
     return at.astimezone(report.tz).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _verification_lines(report: DailyReport) -> list[str]:
+    out: list[str] = []
+    for v in report.verifications:
+        e = v.event
+        scope = ", ".join(
+            x for x in (e.rule and f"rule {e.rule}", e.role and f"role {e.role}") if x
+        )
+        hours = v.after.total_seconds() / 3600
+        out += [
+            f"**{_local(e.at, report)}, {e.kind}**: {e.note}"
+            + (f" ({scope})" if scope else "")
+            + f". After: {hours:.1f}h of data"
+            + (", small sample: a direction, not a result." if v.small_sample else "."),
+            "",
+            "| Metric | Before | After | Change | n before / after |",
+            "|---|---:|---:|---:|---:|",
+        ]
+        for m in v.metrics:
+            small = " (small sample)" if m.small else ""
+            out.append(
+                f"| {m.name}{small} | {_value(m.before, m.unit)} | {_value(m.after, m.unit)} "
+                f"| {_change(m)} | {m.n_before} / {m.n_after} |"
+            )
+        out.append("")
+    return out[:-1] if out else out
+
+
+def _value(value: float | None, unit: str) -> str:
+    if value is None:
+        return "n/a"
+    if unit == "share":
+        return f"{value:.0%}"
+    return f"{value:,.1f}" if value < 100 else f"{value:,.0f}"
+
+
+def _change(m: Metric) -> str:
+    change = m.change
+    if change is None:
+        return "n/a"
+    mark = {True: " better", False: " worse", None: ""}[m.improved]
+    return f"{change:+.0%}{mark}"
 
 
 def _usd(spend: Spend, report: DailyReport) -> str:

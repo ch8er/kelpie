@@ -60,13 +60,18 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
     database cannot be read (a missing database is an empty one)."""
     tz = sources.report.tz
     start, end = day_bounds(day, tz)
-    history = start - timedelta(days=max(sources.outputs.repeat_days - 1, 0))
-    actions, states, spans, attribution = [], [], [], None
+    # Earlier days: repeated output offenders, and the before-window of yesterday's fixes.
+    history = start - max(
+        timedelta(days=max(sources.outputs.repeat_days - 1, 0)),
+        timedelta(days=1) + sources.report.verify_window,
+    )
+    actions, states, spans, fixes, attribution = [], [], [], [], None
     if sources.db_path is not None and sources.db_path.exists():
         with ReportStore(sources.db_path) as store:
-            actions = store.actions(start, end)
-            states = store.states(start, end)
+            actions = store.actions(history, end)
+            states = store.states(history, end)
             spans = store.spans(history, end)
+            fixes = store.fixes(start - timedelta(days=1), end)
             attribution = store.attribution()
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same
     # call reported both ways is kept once.
@@ -88,6 +93,10 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         attribution=attribution,
         modes=sources.modes,
         hour_usd=sources.report.hour_usd,
+        fixes=fixes,
+        verify_window=sources.report.verify_window,
+        review_roles=sources.report.review_roles,
+        min_sample=sources.report.min_sample,
     )
 
 

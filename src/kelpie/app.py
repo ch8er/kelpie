@@ -54,6 +54,7 @@ from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
 from kelpie.report.config import ReportSettings, load_report
+from kelpie.report.fixes import record_config_change
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
 from kelpie.rules.ci_economy import CiEconomy
@@ -750,6 +751,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         )
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
+    if settings.db_path is not None and settings.source is not None:
+        record_config_change(settings.db_path, settings.source, clock())  # daily report
     traces = settings.traces
     try:
         token = traces.token()

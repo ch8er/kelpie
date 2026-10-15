@@ -12,6 +12,7 @@ from kelpie.app import Settings, build_adapters, merged_snapshot, utc_now
 from kelpie.core.budgets import BudgetMode
 from kelpie.core.config import Mode
 from kelpie.metrics import Metrics
+from kelpie.report.fixes import MANUAL, FixEvent, FixStore
 from kelpie.report.run import ReportSources, default_day, generate, send, write
 from kelpie.rules import REGISTRY
 
@@ -69,3 +70,34 @@ def run(
         # failed, dropped, or no channel takes [report] severity (min_severity)
         return markdown, "kelpie: the summary did not reach every channel (see the log)\n", 1
     return markdown, "", 0
+
+
+def note_fix(
+    settings: Settings,
+    note: str,
+    rule: str | None = None,
+    command: str | None = None,
+    role: str | None = None,
+    when: str | None = None,
+    clock: Callable[[], datetime] = utc_now,
+) -> tuple[str, int]:
+    """``kelpie fix``: record a manual fix for the daily report to verify."""
+    if settings.db_path is None:
+        return "kelpie: fixes need a database ([storage] path is :memory:)\n", 2
+    try:
+        at = datetime.fromisoformat(when) if when else clock()
+    except ValueError:
+        return f"kelpie: --at must be an ISO time, got {when!r}\n", 2
+    if at.tzinfo is None:
+        at = at.astimezone()  # local time, as typed
+    if rule is not None and rule not in REGISTRY:
+        return f"kelpie: unknown rule {rule!r}\n", 2
+    event = FixEvent(at, MANUAL, note, rule, command, role)
+    try:
+        with FixStore(settings.db_path) as store:
+            store.add(event)
+    except ValueError as exc:
+        return f"kelpie: {exc}\n", 2
+    except (OSError, sqlite3.Error) as exc:
+        return f"kelpie: cannot write to {settings.db_path}: {exc}\n", 1
+    return f"fix noted at {at.isoformat(timespec='minutes')}: {event.note.strip()}\n", 0
