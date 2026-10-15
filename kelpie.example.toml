@@ -24,6 +24,12 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # max_changed_files = 20    # ...or once it has more changed files than this
 # wip_ci = "skip_ci"        # WIP commit on exit: "skip_ci" ([skip ci]) or "draft_pr"
 # act_within = "24h"        # WIP commit and resume note only this long after the exit
+#
+# [engine.rules.no_progress]
+# window = "1h"                        # spans of the last hour vs. progress in that hour;
+#                                      # [traces] window must be at least this long
+# min_tokens_without_progress = 50000  # alert at this many tokens with no status change,
+#                                      # commit or artifact
 
 [storage]
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
