@@ -116,7 +116,7 @@ Rework and wasted sessions are the largest token leak on our farm (46 of 63 task
 
 - **Rule 12. Early conflict warning:** two live tasks editing the same files → warn both, or serialize the later one until the earlier merges (7)
 - **Dispatch gate:** a ready task whose prerequisite is not met (a referenced PR not merged, its CI red, a parent task not done) is put into "waiting" with that condition instead of being picked up; rule 4 releases it when the condition is met. Field case: an agent was about to redo a migration while the PR it depended on was still red
-- **Huge tool outputs:** commands whose output floods the context (build and test logs, e.g. `xcodebuild`) are found in traces, ranked by tokens, and get a concrete filter recommendation (e.g. `xcbeautify`, errors only, tail); repeated offenders → `comment` to the agent's role instructions owner
+- **Huge tool outputs:** commands whose output floods the context (build and test logs, e.g. `xcodebuild`) are found in traces, ranked by tokens, and get a concrete filter recommendation — [RTK](https://github.com/rtk-ai/rtk) where it supports the platform, otherwise `xcbeautify`, errors only, tail; Kelpie measures and verifies the savings before/after and does not build its own filter; repeated offenders → `comment` to the agent's role instructions owner
 
 ### P1. Basic token optimization — recommendations in the daily report, from traces, no LLM
 
@@ -143,6 +143,7 @@ Metrics: tasks per hour per role, task time by stage (queue, review, waiting for
 - Visibility dashboards: Claude Code Agent View, hermes-monitor, Minions
 - Single-session loop and budget thresholds: [AgentWatchdog](https://github.com/jusong/agentwatchdog) (Claude Code only); rule 10 reuses its thresholds as defaults — 8 repeats in 10 minutes and 5 errors in a row — and applies them across platforms
 - Deep optimization of a single agent: HALO, Langfuse, Papaya — via trace export
+- Filtering command output before it reaches the agent: [RTK](https://github.com/rtk-ai/rtk) (open-source CLI proxy, claims 60–90% fewer tokens on common dev commands); Kelpie recommends it and measures the effect. Its paid tier (team governance, usage observability) is the closest overlap with budgets and spend
 
 ### Market and money
 
