@@ -36,12 +36,15 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #                           # use observe or suggest
 # identical_calls = 8       # identical consecutive tool calls (same tool + arguments)...
 # identical_window = "10m"  # ...with the last ones this close together
-# consecutive_errors = 5    # failed tool calls in a row
+# consecutive_errors = 5    # failed tool calls in a row...
+# error_window = "10m"      # ...the last one at most this long ago...
+# min_error_span = "60s"    # ...and the streak at least this long (not one parallel batch)
+# stop_on_shared_budgets = false  # hard day/project budgets only alert; true also stops
 # forecast_horizon = "2h"   # info alert when a budget (or a subscription limit) is this near
 # poll_grace = "15m"        # polling that matches poll_patterns: rule 2 coaches first; stop
 #                           # only this long after its comment, or at poll_hard_limit calls
 # poll_hard_limit = 30
-# [engine.rules.loop_breaker.poll_patterns]   # keep equal to [engine.rules.wait_condition]
+# [engine.rules.loop_breaker.poll_patterns]   # optional: taken from wait_condition's unless set
 # ci_status = ["gh pr checks"]
 # [engine.rules.loop_breaker.agents.agent-ops-1]   # per agent (owner id) ...
 # identical_calls = 20

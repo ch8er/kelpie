@@ -6,21 +6,27 @@ checks, all ending in ``stop`` (carrying ``session_id``) plus an ``alert``:
 - **identical calls**: ``identical_calls`` consecutive tool calls with the same tool and
   arguments, the last ones within ``identical_window`` (default 8 in 10 minutes, the
   AgentWatchdog thresholds);
-- **error streak**: ``consecutive_errors`` failed tool calls in a row (default 5);
+- **error streak**: ``consecutive_errors`` failed tool calls in a row (default 5), the last
+  one at most ``error_window`` ago and the streak spanning at least ``min_error_span``
+  (so one parallel batch of failing reads is not a streak);
 - **budgets**: read from ``Snapshot.budgets`` (see :mod:`kelpie.core.budgets`), never
-  priced here. A soft state is a warning, a hard state stops every live session that spent
-  within the budget's window. A budget that will run out within ``forecast_horizon`` (or a
-  subscription's next provider limit) is an info alert. While ``budgets_ok`` is false the
-  statuses are stale: nothing budget-related is emitted.
+  priced here. A soft state is a warning. A hard task or agent budget stops every live
+  session that spent within its window; a hard day or project budget is shared by many
+  sessions, so it only alerts unless ``stop_on_shared_budgets`` is true. A budget that will
+  run out within ``forecast_horizon`` (or a subscription's next provider limit) is an info
+  alert. While ``budgets_ok`` is false the statuses are stale: nothing budget-related is
+  emitted.
 
 Precedence with rule 2 (``wait_condition``): a run of identical calls that matches
 ``poll_patterns`` is polling, which rule 2 coaches with a ``comment`` once the same check
 ran ``poll_comment_after`` times. This rule leaves it alone, and stops it only if it goes
 on for ``poll_grace`` after that point (the coaching was ignored), or reaches
-``poll_hard_limit`` identical calls. ``poll_patterns`` has the same shape as rule 2's
-(condition kind -> command substrings) and must be kept equal to it; defaults come from
-rule 2's own. A failing poll is the same case: the error streak of one polled check is left
-to the identical-calls precedence above.
+``poll_hard_limit`` identical calls (never below ``identical_calls``). ``poll_patterns``
+has the same shape as rule 2's (condition kind -> command substrings). Unless this rule
+sets its own, ``kelpie.app.load_rules`` gives it rule 2's, so the two cannot disagree by
+accident (a warning is logged if both are set and differ); defaults come from rule 2's
+own. A failing poll is the same case: the error streak of one polled check is left to the
+identical-calls precedence above.
 
 Thresholds are overridable per agent (owner id) or role: ``agents`` and ``roles`` map a
 name to a table with any of the threshold keys. An agent entry wins over a role entry.
@@ -72,6 +78,11 @@ class Thresholds:
     identical_calls: int = _RULE2.poll_min_repeats
     identical_window: timedelta = _RULE2.poll_window
     consecutive_errors: int = _RULE2.poll_error_streak
+    # An error streak counts only while it is recent (its last error at most error_window
+    # ago) and spans at least min_error_span from first to last error, so one parallel
+    # batch of failing calls is not a streak.
+    error_window: timedelta = timedelta(minutes=10)
+    min_error_span: timedelta = timedelta(seconds=60)
     # Polling (calls matching poll_patterns): rule 2 comments at poll_comment_after identical
     # calls; stop only poll_grace after that, or at poll_hard_limit identical calls.
     poll_comment_after: int = _RULE2.poll_min_repeats
@@ -79,7 +90,7 @@ class Thresholds:
     poll_hard_limit: int = 30
 
 
-_DURATION_KEYS = ("identical_window", "poll_grace")
+_DURATION_KEYS = ("identical_window", "poll_grace", "error_window", "min_error_span")
 _COUNT_KEYS = ("identical_calls", "consecutive_errors", "poll_comment_after", "poll_hard_limit")
 _THRESHOLD_KEYS = frozenset(f.name for f in fields(Thresholds))
 
@@ -91,6 +102,8 @@ class LoopBreaker:
     agents: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)  # owner id -> overrides
     roles: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)  # role -> overrides
     forecast_horizon: timedelta = timedelta(hours=2)
+    # A hard day or project budget is shared by many sessions: alert only, unless set.
+    stop_on_shared_budgets: bool = False
     session_stale_after: timedelta = DEFAULT_STALE_AFTER
     name: str = NAME
 
@@ -106,7 +119,10 @@ class LoopBreaker:
             limits = self._thresholds(session, snapshot)
             trips = [
                 trip
-                for trip in (self._loop(calls, limits), self._errors(calls, limits))
+                for trip in (
+                    self._loop(calls, limits, snapshot.now),
+                    self._errors(calls, limits, snapshot.now),
+                )
                 if trip is not None
             ]
             if not trips:
@@ -124,19 +140,21 @@ class LoopBreaker:
     def _thresholds(self, session: Session, snapshot: Snapshot) -> Thresholds:
         owner = snapshot.owner(session.owner_id)
         task = snapshot.task(session.task_id)
-        role = owner.role if owner else (task.role if task else None)
+        role = (owner.role if owner else None) or (task.role if task else None)
         found = self.roles.get(role, {}) if role else {}
         found = {**found, **self.agents.get(session.owner_id, {})}
         return replace(self.thresholds, **found) if found else self.thresholds
 
     # --- loops and error streaks --------------------------------------------------------
 
-    def _loop(self, calls: Sequence[Span], limits: Thresholds) -> _Trip | None:
+    def _loop(self, calls: Sequence[Span], limits: Thresholds, now: datetime) -> _Trip | None:
         streak = identical_streak(calls)
         n = limits.identical_calls
         if streak is None or streak.length < n:
             return None
         last = streak.calls[-1]
+        if now - last.start > limits.identical_window:
+            return None  # history: the run moved on, or the agent went quiet
         if last.start - streak.calls[-n].start > limits.identical_window:
             return None  # slow repetition, e.g. a legitimate periodic check
         tool = streak.key[0]
@@ -163,10 +181,14 @@ class LoopBreaker:
             since=streak.calls[0].start,
         )
 
-    def _errors(self, calls: Sequence[Span], limits: Thresholds) -> _Trip | None:
+    def _errors(self, calls: Sequence[Span], limits: Thresholds, now: datetime) -> _Trip | None:
         errors = error_streak(calls)
         if len(errors) < limits.consecutive_errors:
             return None
+        if now - errors[-1].start > limits.error_window:
+            return None  # history
+        if errors[-1].start - errors[0].start < limits.min_error_span:
+            return None  # one parallel batch of failing calls, not a retry streak
         keys = {call_key(s) for s in errors}
         if len(keys) == 1 and None not in keys and poll_kind(self.poll_patterns, errors[-1]):
             return None  # one polled check failing: handled with the identical calls above
@@ -190,7 +212,7 @@ class LoopBreaker:
                 ActionKind.ALERT,
                 NAME,
                 f"Runaway run: {subject} made {trip.what} {trip.detail}.{spent} "
-                "Stop requested; check the task before resuming it.",
+                "Stop proposed; check the task before resuming it.",
                 task_id=session.task_id,
                 severity=Severity.CRITICAL,
                 key=f"{trip.kind}:{session.id}",
@@ -247,13 +269,26 @@ class LoopBreaker:
                 params={**params, "runs_out_at": _iso(b.runs_out_at)},
             )
         elif b.state is BudgetState.HARD:
+            # A task or agent budget is that subject's own: stop its sessions. A day or
+            # project budget is shared by many unrelated sessions: alert, and stop only
+            # when asked to.
+            may_stop = (
+                b.scope in (BudgetScope.TASK, BudgetScope.AGENT) or self.stop_on_shared_budgets
+            )
             live = [
                 s
                 for s in snapshot.sessions
-                if s.id in b.session_ids and is_live(s, snapshot.now, self.session_stale_after)
+                if may_stop
+                and s.id in b.session_ids
+                and is_live(s, snapshot.now, self.session_stale_after)
             ]
-            names = ", ".join(s.id for s in live)
-            tail = f" Stop requested for session(s) {names}." if live else " No live session."
+            names = ", ".join(sorted(s.id for s in live))
+            if live:
+                tail = f" Stop proposed for session(s) {names}."
+            elif may_stop:
+                tail = " No live session to stop."
+            else:
+                tail = " Shared budget: no session is stopped automatically, a human decides."
             yield Action(
                 ActionKind.ALERT,
                 NAME,
@@ -261,12 +296,13 @@ class LoopBreaker:
                 f"hard limit {_amount(b.hard, b.unit)}{_runs_out(b, snapshot.now)}.{tail}",
                 task_id=task_id,
                 severity=Severity.CRITICAL,
-                key=f"budget:{base}:hard",
+                # The sessions to stop are part of the key: one caught later is announced.
+                key=f"budget:{base}:hard:{names}",
                 state=f"{NAME}:budget:{base}",
                 params={
                     **params,
                     "runs_out_at": _iso(b.runs_out_at),
-                    "session_ids": [s.id for s in live],
+                    "session_ids": sorted(s.id for s in live),
                 },
             )
             for s in live:
@@ -415,9 +451,27 @@ def build(config: dict[str, Any]) -> LoopBreaker:
             kwargs[key] = _duration(config.pop(key), key)
     if "poll_patterns" in config:
         kwargs["poll_patterns"] = parse_poll_patterns(config.pop("poll_patterns"))
+    if "stop_on_shared_budgets" in config:
+        flag = config.pop("stop_on_shared_budgets")
+        if not isinstance(flag, bool):
+            raise ValueError("stop_on_shared_budgets must be true or false")
+        kwargs["stop_on_shared_budgets"] = flag
     for key in ("agents", "roles"):
         if key in config:
             kwargs[key] = _overrides(config.pop(key), key)
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
-    return LoopBreaker(**kwargs)
+    rule = LoopBreaker(**kwargs)
+    _check_limits(rule.thresholds, "thresholds")
+    for table, entries in (("agents", rule.agents), ("roles", rule.roles)):
+        for name, found in entries.items():
+            _check_limits(replace(rule.thresholds, **found), f"{table}.{name}")
+    return rule
+
+
+def _check_limits(limits: Thresholds, where: str) -> None:
+    if limits.poll_hard_limit < limits.identical_calls:
+        raise ValueError(
+            f"{where}: poll_hard_limit ({limits.poll_hard_limit}) must not be below "
+            f"identical_calls ({limits.identical_calls})"
+        )

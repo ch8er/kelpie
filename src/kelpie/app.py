@@ -239,7 +239,7 @@ def load_rules(
     rules: list[Rule] = []
     for name in (p.name for p in planned if p.name in registry):  # plan order
         try:
-            rules.append(registry[name](dict(config.rules.get(name, {}))))
+            rules.append(registry[name](_rule_config(name, config)))
         except Exception as exc:
             raise ConfigError(f"bad config for rule {name!r}: {exc}") from exc
     statuses = [
@@ -253,6 +253,31 @@ def load_rules(
         for p in planned
     ]
     return LoadedRules(rules, statuses, warnings)
+
+
+def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
+    """A rule's config section. ``loop_breaker`` polls the same checks rule 2 coaches, so it
+    inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own."""
+    section = dict(config.rules.get(name, {}))
+    if name != "loop_breaker":
+        return section
+    shared = config.rules.get("wait_condition", {}).get("poll_patterns")
+    if shared is None:
+        return section
+    if "poll_patterns" not in section:
+        section["poll_patterns"] = shared
+    elif _normalized(section["poll_patterns"]) != _normalized(shared):
+        log.warning(
+            "loop_breaker.poll_patterns differs from wait_condition.poll_patterns: calls "
+            "matching only one of them are coached by rule 2 or stopped by rule 10 inconsistently"
+        )
+    return section
+
+
+def _normalized(patterns: Any) -> Any:
+    if isinstance(patterns, Mapping):
+        return {str(k): list(v) for k, v in patterns.items() if isinstance(v, list | tuple)}
+    return patterns
 
 
 def utc_now() -> datetime:

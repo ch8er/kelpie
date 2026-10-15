@@ -145,6 +145,10 @@ def test_config_parsing() -> None:
         {"agents": {"a": "x"}},
         {"agents": {"a": {"bogus": 1}}},
         {"roles": {"r": {"identical_calls": 0}}},
+        {"identical_calls": 40},  # above the default poll_hard_limit of 30
+        {"agents": {"a": {"identical_calls": 50}}},
+        {"roles": {"r": {"poll_hard_limit": 4}}},
+        {"stop_on_shared_budgets": "yes"},
     ],
 )
 def test_bad_config_is_rejected(config: dict[str, Any]) -> None:
@@ -167,6 +171,15 @@ def test_identical_calls_stop_the_session_and_alert() -> None:
     alert = actions[0]
     assert alert.state == "loop_breaker:identical_calls:S-1" and alert.since is not None
     assert alert.params["owner_id"] == "agent-1"
+
+
+def test_old_history_is_not_a_loop_or_an_error_streak() -> None:
+    old = [replace(s, start=s.start - 3 * H, end=None) for s in run(8)]
+    assert evaluate(snap(old)) == []
+    old_errors = [replace(s, start=s.start - 3 * H, end=None) for s in errors(5)]
+    assert evaluate(snap(old_errors)) == []
+    assert stops(evaluate(snap(old), identical_window="4h")) != []
+    assert stops(evaluate(snap(old_errors), error_window="4h")) != []
 
 
 def test_below_threshold_or_slow_is_not_a_loop() -> None:
@@ -248,6 +261,14 @@ def test_shorter_or_interrupted_error_streaks_are_fine() -> None:
     assert evaluate(snap(spans)) == []  # only 3 errors since the success
 
 
+def test_one_parallel_batch_of_failures_is_not_a_streak() -> None:
+    batch = [
+        call(i, NOW - M + timedelta(seconds=i), args=f"r{i}", outcome="error") for i in range(6)
+    ]
+    assert evaluate(snap(batch)) == []
+    assert stops(evaluate(snap(batch), min_error_span="3s")) != []
+
+
 def test_loop_and_errors_together_give_one_stop() -> None:
     actions = evaluate(snap(errors(8, same=True)))
     assert len(stops(actions)) == 1
@@ -301,8 +322,10 @@ def test_overrides_per_agent_and_role() -> None:
     assert (
         evaluate(snap(spans, owners=owners), roles={"maintenance": {"identical_calls": 20}}) == []
     )
-    # A task role is used when the owner is unknown.
+    # A task role is used when the owner is unknown, or has no role of its own.
     assert evaluate(snap(spans), roles={"dev": {"identical_calls": 20}}) == []
+    blank = (Owner("agent-1", ""),)
+    assert evaluate(snap(spans, owners=blank), roles={"dev": {"identical_calls": 20}}) == []
     # The agent entry wins over the role entry.
     both = {
         "roles": {"maintenance": {"identical_calls": 20}},
@@ -370,16 +393,43 @@ def test_hard_state_stops_live_sessions_only_and_alerts_with_the_spend() -> None
     alert = actions[0]
     assert alert.severity is Severity.CRITICAL
     assert alert.state == "loop_breaker:budget:agent-daily:agent-1"  # same state as soft
-    assert alert.key.endswith(":hard") and "$55.50" in alert.reason and "$50.00" in alert.reason
+    assert (
+        alert.key.endswith(":hard:S-1, S-2")
+        and "$55.50" in alert.reason
+        and "$50.00" in alert.reason
+    )
     assert "has run out" in alert.reason
     assert alert.params["session_ids"] == ["S-1", "S-2"] and alert.params["runs_out_at"]
     assert {s.params["session_id"] for s in stops(actions)} == {"S-1", "S-2"}
 
 
+def test_shared_budgets_alert_but_stop_nothing_unless_asked() -> None:
+    for scope in (BudgetScope.DAY, BudgetScope.PROJECT):
+        shared = status(
+            scope=scope, subject="farm", state=BudgetState.HARD, spent=900.0, hard=800.0
+        )
+        [alert] = with_budgets(shared)
+        assert alert.severity is Severity.CRITICAL and alert.params["session_ids"] == []
+        assert "no session is stopped automatically" in alert.reason
+        actions = with_budgets(shared, config={"stop_on_shared_budgets": True})
+        assert [s.params["session_id"] for s in stops(actions)] == ["S-1"]
+    # Task and agent budgets stop by default.
+    for scope in (BudgetScope.TASK, BudgetScope.AGENT):
+        assert stops(with_budgets(status(scope=scope, state=BudgetState.HARD)))
+
+
+def test_a_session_caught_later_changes_the_alert_key() -> None:
+    hard = status(state=BudgetState.HARD, session_ids=("S-1", "S-2"))
+    one = with_budgets(hard, sessions=(session("S-1"),))[0]
+    both = with_budgets(hard, sessions=(session("S-1"), session("S-2", task_id="T-2")))[0]
+    assert one.state == both.state and one.key != both.key
+    assert "Stop proposed for session(s) S-1, S-2" in both.reason
+
+
 def test_hard_state_without_live_sessions_only_alerts() -> None:
     actions = with_budgets(status(state=BudgetState.HARD, session_ids=("S-9",)))
     assert kinds(actions) == [(ActionKind.ALERT, Severity.CRITICAL)]
-    assert "No live session" in actions[0].reason
+    assert "No live session to stop" in actions[0].reason
 
 
 def test_stale_budgets_emit_nothing() -> None:
