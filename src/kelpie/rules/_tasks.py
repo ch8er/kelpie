@@ -8,6 +8,9 @@ from datetime import datetime, timedelta
 
 from kelpie.core.model import Condition, Session, Snapshot, Status, Task
 
+# Condition data older than this is not evidence: the connector may have stopped polling.
+DEFAULT_MAX_CONDITION_AGE = timedelta(minutes=15)
+
 # An open session that has not sent a heartbeat for this long is treated as gone: crashed
 # sessions are exactly the ones that never report their end.
 DEFAULT_STALE_AFTER = timedelta(minutes=30)
@@ -32,6 +35,17 @@ def live_session(
     )
 
 
+def fresh(
+    condition: Condition,
+    since: datetime,
+    now: datetime,
+    max_age: timedelta = DEFAULT_MAX_CONDITION_AGE,
+) -> bool:
+    """Whether the condition was checked after ``since`` and recently enough to act on."""
+    checked = condition.checked_at
+    return checked is not None and checked >= since and now - checked <= max_age
+
+
 def linked_conditions(task: Task, snapshot: Snapshot) -> tuple[list[Condition], str | None]:
     """Conditions of the task's current block or wait, and a referenced id Kelpie cannot see.
 
@@ -53,7 +67,15 @@ def linked_conditions(task: Task, snapshot: Snapshot) -> tuple[list[Condition], 
 
 # Statuses a session can declare as its end. in_progress/ready/backlog are not an end.
 DECLARED = frozenset(
-    {Status.DONE, Status.FAILED, Status.CANCELLED, Status.REVIEW, Status.ACCEPTED, Status.BLOCKED}
+    {
+        Status.DONE,
+        Status.FAILED,
+        Status.CANCELLED,
+        Status.REVIEW,
+        Status.ACCEPTED,
+        Status.BLOCKED,
+        Status.WAITING,
+    }
 )
 HANDOFF = frozenset({Status.REVIEW, Status.ACCEPTED})  # queues for the next stage
 

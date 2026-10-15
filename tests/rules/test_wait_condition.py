@@ -34,8 +34,35 @@ def waiting(since: datetime = NOW - 60 * M, block: Block | None = None) -> Task:
     return Task("T-1", "t", Status.WAITING, since, block=block)
 
 
-def cond(cid: str, satisfied: bool | None, task_id: str | None = "T-1") -> Condition:
-    return Condition(cid, CI, task_id=task_id, satisfied=satisfied)
+def cond(
+    cid: str,
+    satisfied: bool | None,
+    task_id: str | None = "T-1",
+    checked: datetime | None = NOW - M,
+) -> Condition:
+    return Condition(cid, CI, task_id=task_id, satisfied=satisfied, checked_at=checked)
+
+
+def test_wake_needs_fresh_evidence() -> None:
+    rule = WaitCondition(max_condition_age=15 * M)
+    assert kinds(rule, waiting(), cond("a", True, checked=None)) == []
+    assert kinds(rule, waiting(NOW - 60 * M), cond("a", True, checked=NOW - 61 * M)) == []
+    assert kinds(rule, waiting(), cond("a", True, checked=NOW - 16 * M)) == []
+    assert kinds(rule, waiting(), cond("a", True, checked=NOW - 15 * M)) == [ActionKind.WAKE]
+
+
+def test_no_polling_comment_for_a_task_already_waiting() -> None:
+    rule = WaitCondition(poll_min_repeats=2, poll_patterns={"ci_status": ("gh pr checks",)})
+    spans = tuple(
+        Span("tr", f"s{i}", "x", SpanKind.TOOL, NOW - (5 - i) * M, end=NOW - (5 - i) * M,
+             session_id="S-1", tool="bash", attributes={"command": "gh pr checks 1"})
+        for i in range(3)
+    )  # fmt: skip
+    live = Session("S-1", "T-1", "a", NOW - 10 * M, last_heartbeat=NOW - M)
+    snap = Snapshot(now=NOW, tasks=(waiting(),), sessions=(live,), spans=spans)
+    assert [a.kind for a in rule.evaluate(snap)] == [ActionKind.ALERT]  # waiting on nothing
+    stale = Session("S-1", "T-9", "a", NOW - 300 * M, last_heartbeat=NOW - 200 * M)
+    assert rule.evaluate(Snapshot(now=NOW, sessions=(stale,), spans=spans)) == []
 
 
 def kinds(rule: WaitCondition, *items: object) -> list[str]:
@@ -233,6 +260,7 @@ def test_build_from_config() -> None:
         {"max_wait": [1]},
         {"max_wait": -5},
         {"poll_window": "0m"},
+        {"max_condition_age": "0s"},
         {"poll_every": "1m"},
     ],
 )

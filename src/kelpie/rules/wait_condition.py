@@ -3,7 +3,8 @@
 An agent that needs something external (CI, a merge, a quota reset, a human) registers a
 condition and exits; the task becomes ``waiting``. This rule:
 
-- wakes a waiting task when every condition of its *current* wait holds;
+- wakes a waiting task when every condition of its *current* wait holds, on fresh evidence
+  (checked since the wait began and within ``max_condition_age``);
 - alerts when a task waits past ``max_wait``, or (after a short grace) waits on nothing;
 - spots agents that wait *inside* a live session by polling a known check, and tells them
   to register a condition and exit.
@@ -29,7 +30,13 @@ from kelpie.core.model import Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._calls import CallKey, call_key, command, error_streak, tool_calls
-from kelpie.rules._tasks import linked_conditions
+from kelpie.rules._tasks import (
+    DEFAULT_MAX_CONDITION_AGE,
+    DEFAULT_STALE_AFTER,
+    fresh,
+    is_live,
+    linked_conditions,
+)
 
 NAME = "wait_condition"
 
@@ -44,6 +51,8 @@ class WaitCondition:
     poll_min_repeats: int = 8
     poll_window: timedelta = timedelta(minutes=10)
     poll_error_streak: int = 5
+    max_condition_age: timedelta = DEFAULT_MAX_CONDITION_AGE
+    session_stale_after: timedelta = DEFAULT_STALE_AFTER
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -52,8 +61,11 @@ class WaitCondition:
             if task.status is Status.WAITING:
                 actions.extend(self._check_waiting(task, snapshot))
         if self.poll_patterns:
+            waiting = {t.id for t in snapshot.tasks if t.status is Status.WAITING}
             for session in snapshot.sessions:
-                if session.ended_at is None:
+                if session.task_id in waiting:
+                    continue  # already did the right thing; the wake will follow
+                if is_live(session, snapshot.now, self.session_stale_after):
                     actions.extend(self._check_polling(session, snapshot))
         return actions
 
@@ -80,7 +92,10 @@ class WaitCondition:
                 key=f"no-condition:{task.id}:{since}",
             )
             return
-        if all(c.satisfied for c in conditions):
+        if all(
+            c.satisfied and fresh(c, task.status_since, snapshot.now, self.max_condition_age)
+            for c in conditions
+        ):
             done = ", ".join(f"{c.id} ({c.kind})" for c in conditions)
             yield Action(
                 ActionKind.WAKE,
@@ -201,7 +216,13 @@ def _positive_int(value: Any, name: str) -> int:
 def build(config: dict[str, Any]) -> WaitCondition:
     config = dict(config)
     kwargs: dict[str, Any] = {}
-    for key in ("max_wait", "no_condition_grace", "poll_window"):
+    for key in (
+        "max_wait",
+        "no_condition_grace",
+        "poll_window",
+        "max_condition_age",
+        "session_stale_after",
+    ):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     for key in ("poll_min_repeats", "poll_error_streak"):
