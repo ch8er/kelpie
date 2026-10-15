@@ -185,6 +185,8 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # git_timeout = "5s"                # limit for each git call; 2x per snapshot in total
 # cli = "hermes"                    # Hermes executable used to stop a run (name on PATH or a path)
 # cli_timeout = "10s"               # limit for that command (at most 60s); it runs inside the tick
+# human_owners = ["alice"]         # assignees that are people, not agents (see
+#                                   # [connectors.human_tasks]); case-insensitive
 #
 # Recommended on Hermes. A valid Hermes claim counts as a heartbeat, but Hermes tolerates
 # heartbeats up to an hour old, while Kelpie's default is 30 minutes:
@@ -211,6 +213,14 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # repositories only. The token is read from the named env var and sent only to api_url;
 # redirects are never followed. Uncommented, token_env must be set or Kelpie refuses to
 # start; by default $GITHUB_TOKEN is used when set, else GitHub is read anonymously.
+#
+# Human tasks: a `human_task` condition (params.task = the id of a task owned by a human
+# on the same board) holds once that task is done, failed or cancelled, so an agent task
+# can wait on a person without polling; rule 2 then wakes it. Needs no service, only the
+# board the adapter reads. Who is a human is adapter config (human_owners above).
+#
+# [connectors.human_tasks]
+# enabled = true                    # false keeps the section but evaluates nothing
 #
 # [connectors.github]
 # repos = ["example/repo"]          # owner/name; nothing else is ever queried

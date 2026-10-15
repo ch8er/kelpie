@@ -19,6 +19,7 @@ git_state = true                         # read git state of live task workspace
 git_timeout = "5s"                       # limit for each git call; 2x per snapshot in total
 cli = "hermes"                           # Hermes executable used by `stop` (name on PATH or a path)
 cli_timeout = "10s"                      # limit for that command (at most 60s)
+human_owners = ["alice"]                 # assignees that are people, not agents (optional)
 
 # Hermes tolerates heartbeats up to an hour old; Kelpie's default is 30 minutes.
 [engine.rules.exit_contract]
@@ -34,6 +35,14 @@ is readable and how old the last spool line is (or that the spool is missing). O
 watches one board. Kelpie opens `kanban.db` read-only (`mode=ro`, `query_only`), one short
 read transaction per snapshot, and never writes to it; Hermes writers in WAL mode are not
 blocked and uncommitted rows are not seen.
+
+**Human owners.** Hermes assigns tasks to profiles and has no notion of a person, so
+`human_owners` names the assignees that are people (compared case-insensitively, as
+Hermes lowercases profile names). Their tasks get an owner of kind `human` in the snapshot,
+which the human task connector (`[connectors.human_tasks]`) needs: a `human_task`
+condition holds once such a task is done, failed or cancelled. Rules that treat humans
+differently (`ping_pong`, `bottlenecks`, `orphan_status`) use the same list. Hermes itself
+registers no conditions, so nothing creates a `human_task` condition from a Hermes board yet.
 
 Kelpie must run on a host that can read `db_path` (the Hermes host, or a mounted copy).
 SQLite WAL needs the `-shm` file next to the database to be readable.

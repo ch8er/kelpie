@@ -81,7 +81,7 @@ import json
 import logging
 import sqlite3
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -266,6 +266,8 @@ class HermesAdapter:
     git_timeout: timedelta = DEFAULT_GIT_TIMEOUT  # per git call
     cli: str = DEFAULT_CLI  # the Hermes executable that carries out ``stop``
     cli_timeout: float = CLI_TIMEOUT  # seconds; a stop runs inside the control loop tick
+    # Assignees that are people, not agents (Hermes lowercases profile names).
+    human_owners: Collection[str] = ()
     name: str = "hermes"
     # workspace -> snapshot time until which it is not read (its git timed out)
     _git_backoff: dict[Path, datetime] = field(
@@ -274,6 +276,7 @@ class HermesAdapter:
 
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path).expanduser()
+        self.human_owners = frozenset(h.strip().casefold() for h in self.human_owners)
         if self.spool is not None:
             self.spool = Path(self.spool).expanduser()
 
@@ -370,7 +373,12 @@ class HermesAdapter:
         if self.git_state:  # outside the read transaction: git may be slow
             sessions = self._with_git_state(sessions, tasks, rows, now)
         owners = tuple(
-            Owner(id=p, role=p, kind=OwnerKind.AGENT) for p in sorted(owner_ids | profiles)
+            Owner(
+                id=p,
+                role=p,
+                kind=OwnerKind.HUMAN if p.casefold() in self.human_owners else OwnerKind.AGENT,
+            )
+            for p in sorted(owner_ids | profiles)
         )
         return Snapshot(
             now=now,
