@@ -30,9 +30,9 @@ from enum import StrEnum
 from typing import Protocol
 
 from kelpie.core.actions import Action, Severity
-from kelpie.core.config import Mode
+from kelpie.core.config import DEFAULT_STATE_ESCALATIONS, Mode
 
-DEFAULT_ESCALATIONS = (timedelta(hours=4), timedelta(hours=12), timedelta(hours=24))
+DEFAULT_ESCALATIONS = DEFAULT_STATE_ESCALATIONS
 DEFAULT_RESOLVE_AFTER = timedelta(minutes=10)
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 
