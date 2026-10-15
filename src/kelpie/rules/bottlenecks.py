@@ -11,14 +11,23 @@ Kelpie looks at the farm as a queueing system and finds where capacity is wasted
   review and accepted hand-offs nobody owns) reaches ``min_queue_depth`` while none of its
   agents is idle but agents of other roles are: Kelpie alerts with a rebalancing suggestion.
 
-Per role, an agent is *busy* with a live session or an in-progress/review task it owns, and
-*idle* otherwise; it counts as idle only after ``min_idle_time`` since its last session
-(an agent that never ran counts at once). A role's *queue depth* is the number of ownerless
-tasks waiting in a hand-off status (``ready`` only once all its dependencies are finished).
-Idle agents that the role's own queue can absorb are not spare.
+Per role, an agent is *busy* with a live session or any open task it owns (in progress,
+ready, accepted, waiting, blocked, and also the whole of a review: a reviewer who owns a
+review task is busy until it moves). Otherwise it is *idle*, but only counts as such after
+``min_idle_time`` (default 30m) since its last session, so a short gap between two tasks does
+not open and close the alert (an agent that never ran counts at once). A role's *queue
+depth* is the number of ownerless tasks waiting in a hand-off status (``ready`` only once
+all its dependencies are finished). Idle agents that the role's own queue can absorb are not
+spare. An alert lasts as long as spare capacity exists.
+
+Tasks carrying any of ``hold_labels`` (e.g. a merge-first label that parks many tasks on
+purpose) are left out of both the queue depth and the critical path.
 
 The critical path is the longest chain by task count (ties go to the larger sum of
-estimates), computed with Kahn's algorithm in O(tasks + dependencies). Dependencies on
+estimates, then the larger id), computed with Kahn's algorithm in O(tasks + dependencies).
+Only a chain that can actually run counts: its head must be ready, in progress, in review or
+accepted, and no task in it may be blocked, waiting or held (a held, blocked or waiting task
+freezes everything behind it). Later steps may still sit in the backlog. Dependencies on
 finished or unknown tasks are satisfied and ignored; tasks on a dependency cycle (or behind
 one) never run and are left out of the path.
 
@@ -42,7 +51,9 @@ from kelpie.rules._tasks import is_live, last_seen
 
 NAME = "bottlenecks"
 
-_WORKING = frozenset({Status.IN_PROGRESS, Status.REVIEW})  # an owner of these is busy
+_RUNNABLE = frozenset({Status.READY, Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED})
+_FROZEN = frozenset({Status.BLOCKED, Status.WAITING})  # wait for the outside world
+_SHOWN = 5  # ids kept from each end of a long chain
 _QUEUED = frozenset({Status.READY, Status.REVIEW, Status.ACCEPTED})  # hand-off queues
 
 
@@ -55,7 +66,12 @@ class RoleLoad:
     busy: tuple[str, ...]
     idle: tuple[str, ...]  # idle for at least ``min_idle_time``, sorted
     queue: tuple[str, ...]  # ids of ownerless tasks waiting for the role, oldest first
-    oldest_wait: timedelta | None
+    waiting_since: datetime | None  # when the oldest queued task began waiting
+    now: datetime
+
+    @property
+    def oldest_wait(self) -> timedelta | None:
+        return None if self.waiting_since is None else self.now - self.waiting_since
 
     @property
     def spare(self) -> tuple[str, ...]:
@@ -63,7 +79,11 @@ class RoleLoad:
         return self.idle[len(self.queue) :]
 
 
-def role_loads(snapshot: Snapshot, min_idle_time: timedelta = timedelta(0)) -> dict[str, RoleLoad]:
+def role_loads(
+    snapshot: Snapshot,
+    min_idle_time: timedelta = timedelta(0),
+    hold_labels: frozenset[str] = frozenset(),
+) -> dict[str, RoleLoad]:
     """Idle agents and queue depth per role, in one pass over owners, sessions and tasks."""
     now = snapshot.now
     live_owners: set[str] = set()
@@ -74,7 +94,8 @@ def role_loads(snapshot: Snapshot, min_idle_time: timedelta = timedelta(0)) -> d
         seen = last_seen(s)
         if s.owner_id not in last_session or seen > last_session[s.owner_id]:
             last_session[s.owner_id] = seen
-    working = {t.owner_id for t in snapshot.tasks if t.owner_id and t.status in _WORKING}
+    # An agent that owns any open task is taken, even if it has not started it yet.
+    assigned = {t.owner_id for t in snapshot.tasks if t.owner_id and not t.status.is_terminal}
     open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
     blocked_by = _open_dependencies(snapshot, open_ids)
 
@@ -82,6 +103,8 @@ def role_loads(snapshot: Snapshot, min_idle_time: timedelta = timedelta(0)) -> d
     for t in snapshot.tasks:
         if t.role is None or t.owner_id is not None or t.status not in _QUEUED:
             continue
+        if hold_labels.intersection(t.labels):
+            continue  # parked on purpose
         if t.status is Status.READY and blocked_by.get(t.id):
             continue  # not runnable yet
         queues.setdefault(t.role, []).append(t)
@@ -94,7 +117,7 @@ def role_loads(snapshot: Snapshot, min_idle_time: timedelta = timedelta(0)) -> d
     loads: dict[str, RoleLoad] = {}
     for role in sorted(members.keys() | queues.keys()):
         agents = sorted(members.get(role, ()))
-        busy = [a for a in agents if a in live_owners or a in working]
+        busy = [a for a in agents if a in live_owners or a in assigned]
         idle = [
             a
             for a in agents
@@ -107,7 +130,8 @@ def role_loads(snapshot: Snapshot, min_idle_time: timedelta = timedelta(0)) -> d
             tuple(busy),
             tuple(idle),
             tuple(t.id for t in waiting),
-            now - waiting[0].status_since if waiting else None,
+            waiting[0].status_since if waiting else None,
+            now,
         )
     return loads
 
@@ -131,8 +155,14 @@ class CriticalPath:
         return len(self.tasks)
 
 
-def critical_path(snapshot: Snapshot) -> CriticalPath | None:
-    """The longest chain of open tasks over the dependency graph; None without open tasks."""
+def critical_path(
+    snapshot: Snapshot, hold_labels: frozenset[str] = frozenset()
+) -> CriticalPath | None:
+    """The longest runnable chain of open tasks over the dependency graph, or None.
+
+    A task is *frozen* when it is blocked, waiting or held (``hold_labels``), and so is
+    everything behind it; a chain must also start from a runnable or in-flight task.
+    """
     by_id = {t.id: t for t in snapshot.tasks if not t.status.is_terminal}
     waiting_for = _open_dependencies(snapshot, set(by_id))
     successors: dict[str, list[str]] = {}
@@ -143,17 +173,24 @@ def critical_path(snapshot: Snapshot) -> CriticalPath | None:
 
     # best[id] = (tasks on the longest chain ending here, summed estimate seconds, previous)
     best: dict[str, tuple[int, float, str | None]] = {}
+    frozen: set[str] = set()
     ready = deque(sorted(tid for tid, n in missing.items() if n == 0))
     while ready:  # Kahn: tasks on a cycle (or behind one) never reach zero and are skipped
         tid = ready.popleft()
-        own = by_id[tid].estimate
-        prev = max(
-            waiting_for.get(tid, ()),
-            key=lambda p: (best[p][0], best[p][1], p),
-            default=None,
-        )
-        base = best[prev] if prev is not None else (0, 0.0, None)
-        best[tid] = (base[0] + 1, base[1] + (own.total_seconds() if own else 0.0), prev)
+        task = by_id[tid]
+        preds = waiting_for.get(tid, ())
+        if (
+            task.status in _FROZEN
+            or hold_labels.intersection(task.labels)
+            or (not preds and task.status not in _RUNNABLE)  # a head nobody is releasing
+            or not frozen.isdisjoint(preds)
+        ):
+            frozen.add(tid)
+        else:
+            prev = max(preds, key=lambda p: (best[p][0], best[p][1], p), default=None)
+            base = best[prev] if prev is not None else (0, 0.0, None)
+            own = task.estimate.total_seconds() if task.estimate else 0.0
+            best[tid] = (base[0] + 1, base[1] + own, prev)
         for nxt in successors.get(tid, ()):
             missing[nxt] -= 1
             if missing[nxt] == 0:
@@ -177,18 +214,19 @@ class Bottlenecks:
     min_idle_agents: int = 2
     min_chain_length: int = 4
     min_queue_depth: int = 3
-    min_idle_time: timedelta = timedelta(minutes=10)
+    min_idle_time: timedelta = timedelta(minutes=30)
+    hold_labels: frozenset[str] = frozenset()
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
-        loads = role_loads(snapshot, self.min_idle_time)
+        loads = role_loads(snapshot, self.min_idle_time, self.hold_labels)
         actions: list[Action] = []
         actions.extend(self._chain(snapshot, loads))
         actions.extend(self._overloaded(loads))
         return actions
 
     def _chain(self, snapshot: Snapshot, loads: dict[str, RoleLoad]) -> list[Action]:
-        path = critical_path(snapshot)
+        path = critical_path(snapshot, self.hold_labels)
         if path is None or path.length < self.min_chain_length:
             return []
         roles = {t.role for t in path.tasks if t.role} or set(loads)
@@ -203,15 +241,16 @@ class Bottlenecks:
             Action(
                 ActionKind.ALERT,
                 NAME,
-                f"{len(idle_agents)} idle agent(s) ({', '.join(idle_agents)}) while the work "
-                f"is a chain of {path.length} tasks ({' -> '.join(ids)}){eta}. Consider "
+                f"{len(idle_agents)} idle agent(s) ({_names(idle_agents)}) while the work is a "
+                f"chain of {path.length} tasks ({ids[0]} -> ... -> {tail}){eta}. Consider "
                 f"splitting it so independent parts can run in parallel.",
                 severity=Severity.INFO,
                 key=f"{NAME}:chain:{tail}",
                 state=f"{NAME}:chain:{tail}",
                 params={
                     "critical_path_length": path.length,
-                    "critical_path": ids,
+                    "critical_path_head": ids[:_SHOWN],
+                    "critical_path_tail": ids[-_SHOWN:],
                     "critical_path_minutes": (
                         None if path.estimate is None else int(path.estimate.total_seconds() // 60)
                     ),
@@ -232,19 +271,24 @@ class Bottlenecks:
                 continue
             idle_agents = sorted(a for r in helpers for a in loads[r].spare)
             assert load.oldest_wait is not None
-            capacity = f"all {len(load.agents)} agent(s) busy" if load.agents else "no agents"
+            capacity = (
+                f"{len(load.busy)} of {len(load.agents)} agent(s) busy, none idle"
+                if load.agents
+                else "no agents"
+            )
             actions.append(
                 Action(
                     ActionKind.ALERT,
                     NAME,
                     f"Role '{role}' is the bottleneck: {len(load.queue)} task(s) queued "
                     f"(oldest waiting {_human(load.oldest_wait)}) and {capacity}, "
-                    f"while {', '.join(idle_agents)} "
+                    f"while {_names(idle_agents)} "
                     f"({', '.join(helpers)}) sit idle. Consider rebalancing: assign idle "
                     f"agents to '{role}' work.",
                     severity=Severity.WARNING,
                     key=f"{NAME}:overloaded:{role}",
                     state=f"{NAME}:overloaded:{role}",
+                    since=min(load.waiting_since, load.now),
                     params={
                         "overloaded_role": role,
                         "queue_depth": len(load.queue),
@@ -257,6 +301,11 @@ class Bottlenecks:
                 )
             )
         return actions
+
+
+def _names(names: Sequence[str], shown: int = 5) -> str:
+    more = len(names) - shown
+    return ", ".join(names[:shown]) + (f" +{more} more" if more > 0 else "")
 
 
 def _human(d: timedelta) -> str:
@@ -292,6 +341,13 @@ def build(config: dict[str, Any]) -> Bottlenecks:
             kwargs[key] = _positive_int(config.pop(key), key)
     if "min_idle_time" in config:
         kwargs["min_idle_time"] = _duration(config.pop("min_idle_time"), "min_idle_time")
+    if "hold_labels" in config:
+        labels = config.pop("hold_labels")
+        if not isinstance(labels, list | tuple) or not all(
+            isinstance(label, str) and label for label in labels
+        ):
+            raise ValueError("hold_labels must be a list of non-empty strings")
+        kwargs["hold_labels"] = frozenset(labels)
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return Bottlenecks(**kwargs)

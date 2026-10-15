@@ -2,10 +2,11 @@ id: "10-review-queue-bottleneck"
 incident: 10
 title: "Review queue piles up while developers sit idle"
 description: >
-  Four developers finished their tasks and handed them to review, but the farm has a single
-  reviewer. Four reviews queued behind one busy reviewer for over two hours while two
-  developers had nothing to do. The bottleneck was the reviewer role, and the idle capacity
-  was in another role; nothing was broken, so nothing alerted.
+  Developers handed their work to review, but the farm has a single reviewer. Four reviews
+  queued behind the busy reviewer for over two hours while two of the three developers had
+  nothing to do (the third was busy). One ready developer task would absorb one of the idle
+  developers, so only the other is spare capacity. The bottleneck was the reviewer role, and
+  the idle capacity was in another role; nothing was broken, so nothing alerted.
 rule: bottlenecks
 config:
   min_queue_depth: 3
