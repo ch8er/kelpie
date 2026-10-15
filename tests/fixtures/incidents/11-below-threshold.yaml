@@ -1,0 +1,52 @@
+id: "11-below-threshold"
+incident: 11
+title: "Ownerless tasks: thresholds, queues, terminal states and vanished owners"
+description: >
+  The boundaries of the orphan-status rule. A task ownerless for 29 minutes (threshold 30),
+  tasks waiting in backlog/ready queues (which are unowned by design), and a done task
+  without an owner must not trigger anything. A task whose owner no longer exists in the
+  farm is an orphan too: it gets a warning (no dependents) and is reassigned to the least
+  loaded developer. A task with no role cannot be reassigned, so only the alert goes out.
+rule: orphan_status
+config:
+  orphan_after: "30m"
+  critical_dependents: 3
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: human-lead, role: developer, kind: human}
+  tasks:
+    # Ownerless for 29 minutes: below the threshold.
+    - {id: T-1111, title: "Tidy imports", status: in_progress, status_since: "2026-03-02T15:31:00+00:00", role: developer}
+    # Queues are unowned by design.
+    - {id: T-1112, title: "Write ADR", status: backlog, status_since: "2026-03-02T08:00:00+00:00", role: developer}
+    - {id: T-1113, title: "Add retries", status: ready, status_since: "2026-03-02T08:00:00+00:00", role: developer}
+    # Terminal.
+    - {id: T-1114, title: "Old task", status: done, status_since: "2026-03-02T08:00:00+00:00", role: developer}
+    # Owner vanished an hour ago (agent removed from the farm).
+    - {id: T-1115, title: "Fix pagination bug", status: in_progress, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-9}
+    # Ownerless with no role: alert only.
+    - {id: T-1116, title: "Investigate flaky job", status: blocked, status_since: "2026-03-02T14:00:00+00:00"}
+    # agent-dev-1 is busier than agent-dev-2; the human is never picked automatically.
+    - {id: T-1117, title: "Busy work", status: in_progress, status_since: "2026-03-02T15:50:00+00:00", role: developer, owner_id: agent-dev-1}
+expected_actions:
+  - kind: alert
+    task_id: T-1115
+    severity: warning
+    reason_contains: "no longer known"
+    params: {dependents: 0}
+  - kind: reassign
+    task_id: T-1115
+    params: {owner_id: agent-dev-2}
+  - kind: alert
+    task_id: T-1116
+    reason_contains: "a human needs to pick it up"
+not_expected_actions:
+  - {kind: alert, task_id: T-1111}
+  - {kind: alert, task_id: T-1112}
+  - {kind: alert, task_id: T-1113}
+  - {kind: alert, task_id: T-1114}
+  - {kind: reassign, task_id: T-1116}
+  - {kind: alert, task_id: T-1117}
