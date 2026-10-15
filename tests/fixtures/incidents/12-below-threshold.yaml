@@ -1,0 +1,59 @@
+id: "12-below-threshold"
+incident: 12
+title: "Review rounds below the limit stay with the agents"
+description: >
+  Review rounds are normal: most tasks settle after one or two. Only a task that reaches the
+  limit is escalated, and the escalation goes to the configured architect role. A task that
+  was returned many times for other reasons (merge conflicts) is not a review loop, and a
+  finished task no longer needs a decision.
+rule: ping_pong
+config:
+  max_review_rounds: 3
+  escalate_to: architect
+snapshot:
+  now: "2026-03-02T19:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: reviewer-1, role: reviewer}
+    - {id: agent-arch-1, role: architect}
+  tasks:
+    # Exactly at the limit: escalated.
+    - id: T-1211
+      title: "Split the scheduler module"
+      status: in_progress
+      status_since: "2026-03-02T18:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      review_rounds: 3
+      returns:
+        - {at: "2026-03-02T14:00:00+00:00", reason: "extract the queue", category: review}
+        - {at: "2026-03-02T15:30:00+00:00", reason: "queue API too wide", category: review}
+        - {at: "2026-03-02T17:00:00+00:00", reason: "inline the queue again", category: review}
+    # One round short of the limit.
+    - {id: T-1212, title: "Add retry budget", status: in_progress, status_since: "2026-03-02T18:00:00+00:00", role: developer, owner_id: agent-dev-1, review_rounds: 2}
+    # Returned often, but for merge conflicts, not by the reviewer.
+    - id: T-1213
+      title: "Bump client library"
+      status: in_progress
+      status_since: "2026-03-02T18:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      returns:
+        - {at: "2026-03-02T10:00:00+00:00", reason: "conflict in lockfile", category: merge_conflict}
+        - {at: "2026-03-02T12:00:00+00:00", reason: "conflict in lockfile", category: merge_conflict}
+        - {at: "2026-03-02T14:00:00+00:00", reason: "conflict in lockfile", category: merge_conflict}
+        - {at: "2026-03-02T16:00:00+00:00", reason: "conflict in lockfile", category: merge_conflict}
+    # Many rounds, but the task is finished.
+    - {id: T-1214, title: "Tidy logging", status: done, status_since: "2026-03-02T17:30:00+00:00", role: developer, owner_id: agent-dev-1, review_rounds: 6}
+expected_actions:
+  - kind: escalate
+    task_id: T-1211
+    reason_contains: "inline the queue again"
+    params: {review_rounds: 3, escalate_to: architect}
+not_expected_actions:
+  - kind: escalate
+    task_id: T-1212
+  - kind: escalate
+    task_id: T-1213
+  - kind: escalate
+    task_id: T-1214
