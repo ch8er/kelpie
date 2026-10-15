@@ -23,6 +23,7 @@ kelpie = "kelpie.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.3",
+    "types-pyyaml>=6.0",
     "ruff>=0.8",
 ]
 
