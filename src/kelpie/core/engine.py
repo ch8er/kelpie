@@ -294,10 +294,10 @@ class Engine:
         result = None if executor is None else executor.execute(action)
         if executor is None:
             log.warning("no executor for action; alerting instead: %s", action)
-        elif isinstance(result, Outcome):
-            log.info("%s: %s for %s", executor.name, result, action)
+        elif result is Outcome.NOTHING_TO_DO:  # the only outcome an executor may give
+            log.info("%s: nothing to do for %s", executor.name, action)
             return result
-        elif result is True:
+        elif result is True or (result and not isinstance(result, Outcome)):
             return Outcome.EXECUTED
         else:
             # e.g. missing task_id or session_id, no target owner, or a missing capability.

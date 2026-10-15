@@ -332,3 +332,30 @@ def test_classifying_many_builds_is_linear() -> None:
     actions = CiEconomy().evaluate(snap)
     assert time.perf_counter() - started < 0.5
     assert alerts(actions, Severity.INFO)
+
+
+def test_engine_takes_only_nothing_to_do_from_an_executor() -> None:
+    class Odd(FakeCI):
+        def execute(self, action: Action) -> Any:  # type: ignore[override]
+            return ActionResult.DONE
+
+    class Bad:
+        name = "ci"
+
+        def execute(self, action: Action) -> Outcome:
+            return Outcome.SUGGESTED
+
+    snap = Snapshot(
+        now=NOW,
+        builds=(
+            b("B-1", status=BuildStatus.RUNNING, superseded_by="B-2", cancellable=True),
+            b("B-2", status=BuildStatus.RUNNING),
+        ),
+    )
+    config = EngineConfig(dry_run=False, modes={"ci_economy": Mode.ACT})
+    rule = CiEconomy(waste_min_minutes=1000)
+    engine = Engine([rule], connectors=[Odd()], alerter=FakeAlerter(), config=config)
+    assert engine.tick(lambda: snap)[0].outcome is Outcome.EXECUTED
+    engine = Engine([rule], alerter=FakeAlerter(), config=config)
+    engine.executors["ci"] = Bad()  # type: ignore[assignment]
+    assert engine.tick(lambda: snap)[0].outcome is Outcome.NOT_EXECUTED

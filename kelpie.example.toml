@@ -352,6 +352,7 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 #                                   # window must not be longer
 # poll_interval = "2m"              # scan this often (30s to 1h); the last scan in between
 # rate_reserve = 1000               # skip scans while fewer requests are left this hour
+#                                   # (at most a fifth of the hourly limit)
 # max_pages = 3                     # pages of 100 runs per repo per scan (at most 10)
 # max_requests_per_tick = 30        # this step's own budget per scan (at most 100): page 1
 #                                   # of every repo first, then default branches, further

@@ -263,7 +263,7 @@ def test_ci_economy_may_act_with_only_hermes_when_cancel_is_allowed(
     app = build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=github))
     app.close()
     read_only = replace(github, ci=replace(github.ci, allow_cancel=False, cancel_repos=()))
-    with pytest.raises(ConfigError, match="Hermes actions are not implemented"):
+    with pytest.raises(ConfigError, match="Hermes actions other than stop"):
         build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=read_only))
 
 
@@ -279,7 +279,12 @@ def test_cancel_token_env_must_be_set(tmp_path: Path, monkeypatch: pytest.Monkey
         build_app(settings)
     monkeypatch.setenv("KELPIE_GH_CANCEL", "ghp_SyntheticCancelToken987654321")
     app = build_app(settings)
-    app.close()
+    try:
+        ci = app.engine.executors["github"].connector  # type: ignore[attr-defined]
+        assert ci.cancel_client is not ci.client
+        assert ci.cancel_client.observer is ci.client.observer  # POSTs are counted too
+    finally:
+        app.close()
 
 
 def test_rule_window_must_fit_the_connector_window(tmp_path: Path) -> None:

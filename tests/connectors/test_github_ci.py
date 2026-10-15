@@ -434,14 +434,46 @@ def test_recheck_before_cancel() -> None:
         superseded_pair(gh)
         source = ci(gh, **ALLOWED)
         source(Snapshot(now=NOW))
-        # Re-run by a human since the scan: refuse.
+        # Re-run by a human since the scan: nothing to do.
         gh.reply(f"{RUNS}/1", run(1, 20, run_attempt=2))
-        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED
-        # The newer run is not on the same branch any more: refuse.
-        gh.reply(f"{RUNS}/1", run(1, 20))
-        gh.reply(f"{RUNS}/2", run(2, 5, head_branch="task/T-9"))
-        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.NOTHING_TO_DO
+        assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED  # target dropped
         assert posts(gh) == []
+    for newer in (
+        run(2, 5, head_branch="task/T-9"),  # not on the same branch any more
+        None,  # gone (404)
+    ):
+        with serve() as gh:
+            superseded_pair(gh)
+            source = ci(gh, **ALLOWED)
+            source(Snapshot(now=NOW))
+            if newer is None:
+                gh.reply(f"{RUNS}/2", {"message": "Not Found"}, status=404)
+            else:
+                gh.reply(f"{RUNS}/2", newer)
+            assert source.execute(cancel(f"{REPO}:1")) is ActionResult.NOTHING_TO_DO
+            assert posts(gh) == []
+
+
+def test_cancel_forbidden_is_refused_with_a_clear_log(caplog: pytest.LogCaptureFixture) -> None:
+    with serve() as gh:
+        superseded_pair(gh)
+        gh.reply(f"POST {RUNS}/1/cancel", {"message": "Resource not accessible"}, status=403)
+        source = ci(gh, **ALLOWED)
+        source(Snapshot(now=NOW))
+        with caplog.at_level(logging.ERROR):
+            assert source.execute(cancel(f"{REPO}:1")) is ActionResult.REFUSED
+        assert "Actions: write" in caplog.text and TOKEN not in caplog.text
+
+
+def test_rate_reserve_is_capped_by_the_limit() -> None:
+    with serve() as gh:
+        source = ci(gh, rate_reserve=1000)
+        assert source.reserve() == 1000
+        source.client.rate_limit = 60  # anonymous
+        assert source.reserve() == 12
+        source.client.rate_limit = 5000
+        assert source.reserve() == 1000
 
 
 def test_transient_failures_raise_for_a_retry() -> None:

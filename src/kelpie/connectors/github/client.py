@@ -215,6 +215,7 @@ class GitHubClient:
         self.backoff_until: datetime | None = None
         self.rate_remaining: int | None = None
         self.rate_reset: datetime | None = None  # when the current rate-limit window ends
+        self.rate_limit: int | None = None  # X-RateLimit-Limit of the last answer
         self._cache: OrderedDict[str, _Entry] = OrderedDict()
 
     def __repr__(self) -> str:
@@ -507,6 +508,7 @@ class GitHubClient:
         self.rate_remaining = remaining
         self.rate_reset = _epoch(headers.get("X-RateLimit-Reset"))
         limit = _int(headers.get("X-RateLimit-Limit"))
+        self.rate_limit = limit
         self.observer.github_rate_limit(remaining, limit if limit is not None else -1)
         if remaining <= 0:
             until = self.rate_reset or now + self.error_backoff

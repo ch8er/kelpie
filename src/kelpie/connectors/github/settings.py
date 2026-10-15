@@ -96,6 +96,7 @@ class GitHubSettings:
         connector: GitHubConnector,
         clock: Callable[[], datetime],
         environ: Mapping[str, str] = os.environ,
+        observer: GitHubObserver | None = None,
     ) -> GitHubCI | None:
         """The CI source sharing ``connector``'s client; None when not configured. With
         ``cancel_token_env`` the cancel request alone goes through a second client that
@@ -106,7 +107,12 @@ class GitHubSettings:
         cancel_client = None
         if token is not None:
             cancel_client = GitHubClient(
-                self.api_url, token, timeout=self.timeout, cache_ttl=self.cache_ttl, clock=clock
+                self.api_url,
+                token,
+                timeout=self.timeout,
+                cache_ttl=self.cache_ttl,
+                clock=clock,
+                observer=observer or connector.client.observer,
             )
         return GitHubCI(connector.client, self.ci, cancel_client)
 

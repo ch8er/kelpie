@@ -12,8 +12,8 @@ lists for the newest active runs first. The run query names a date, not a time, 
 stays the same for a day and an unchanged page comes back as a 304. Arithmetic: at most
 100 requests every 2 minutes is 3,000 an hour against GitHub's 5,000 for a token; 304s do
 not count against it. The step is skipped while ``X-RateLimit-Remaining`` is below
-``rate_reserve`` (default 1,000) and the window has not reset, so PR and CI conditions
-(the other GitHub step) keep working.
+``rate_reserve`` (default 1,000, at most a fifth of ``X-RateLimit-Limit``) and the window
+has not reset, so PR and CI conditions (the other GitHub step) keep working.
 
 Mapping:
 
@@ -50,10 +50,12 @@ The one write is ``cancel_build`` (``POST /repos/{repo}/actions/runs/{id}/cancel
 - right before cancelling, both runs are fetched again, outside the cache: the run must
   still be active and on the same attempt, and the newer run must still be a newer run of
   the same group. Anything else refuses the cancel;
-- results: done; nothing to do (the run finished meanwhile, HTTP 409, or Kelpie already
-  cancelled it); refused (a policy says no: a human is told). A transient failure
-  (network, back-off, rate limit, a re-check served from the cache, 5xx, 403) raises, so
-  the engine records a failure and its ledger retries later.
+- results: done; nothing to do (the run finished, was re-run or is no longer superseded
+  meanwhile, the newer run is gone, HTTP 409, or Kelpie already cancelled it); refused (a
+  policy says no, or GitHub answers the cancel with 403 because the token lacks
+  ``Actions: write``: a human is told). A transient failure (network, back-off, rate
+  limit, a re-check served from the cache, 5xx, a 403 on a read) raises, so the engine
+  records a failure and its ledger retries later.
 
 Token scopes (least privilege): reading needs ``Actions: read``, ``Pull requests: read``
 and ``Contents: read`` (fine-grained) or ``repo`` (classic, private repositories).
@@ -96,6 +98,7 @@ DEFAULT_TICK_BUDGET = timedelta(seconds=10)
 MAX_TICK_BUDGET = timedelta(seconds=60)
 DEFAULT_POLL = timedelta(minutes=2)
 DEFAULT_RATE_RESERVE = 1000
+MAX_RESERVE_SHARE = 0.2  # of X-RateLimit-Limit: a small limit is not all reserve
 DEFAULT_BRANCH_TTL = timedelta(hours=1)
 MAX_JOB_LOOKUPS = 10  # per scan; the rest use wall-clock minutes until a later scan
 MAX_REMEMBERED = 4096  # run minutes and PR files kept across scans
@@ -327,19 +330,24 @@ class GitHubCI:
             resources=snapshot.resources + self._quota(now),
         )
 
+    def reserve(self) -> int:
+        """The reserve in effect: ``rate_reserve``, at most a fifth of the hourly limit."""
+        limit = self.client.rate_limit
+        if limit is None or limit <= 0:
+            return self.settings.rate_reserve
+        return min(self.settings.rate_reserve, int(limit * MAX_RESERVE_SHARE))
+
     def _reserve_low(self, now: datetime) -> bool:
         remaining, reset = self.client.rate_remaining, self.client.rate_reset
         low = (
-            remaining is not None
-            and remaining < self.settings.rate_reserve
-            and (reset is None or now < reset)
+            remaining is not None and remaining < self.reserve() and (reset is None or now < reset)
         )
         if low and not self._reserve_logged:
             log.warning(
                 "[connectors.github.ci] scan skipped: %s requests left this hour, below the "
                 "reserve of %s kept for conditions",
                 remaining,
-                self.settings.rate_reserve,
+                self.reserve(),
             )
             self._reserve_logged = True
         return low
@@ -623,18 +631,38 @@ class GitHubCI:
             self._targets.pop(build_id, None)
             return ActionResult.NOTHING_TO_DO
         if _attempt(run) != target.attempt:
-            log.warning("cancel_build %s refused: the run was re-run since the scan", build_id)
-            return ActionResult.REFUSED
-        newer = self._fresh(target.repo, target.newer_id)
+            log.info("cancel_build %s: nothing to do, the run was re-run since the scan", build_id)
+            self._targets.pop(build_id, None)
+            return ActionResult.NOTHING_TO_DO
+        try:
+            newer = self._fresh(target.repo, target.newer_id)
+        except GitHubError as exc:
+            if exc.kind != "not_found":
+                raise
+            log.info("cancel_build %s: nothing to do, the newer run is gone", build_id)
+            self._targets.pop(build_id, None)
+            return ActionResult.NOTHING_TO_DO
         if (
             _group(run) != target.group
             or _group(newer) != target.group
             or _created(newer) <= _created(run)
         ):
-            log.warning("cancel_build %s refused: no longer superseded", build_id)
-            return ActionResult.REFUSED
+            log.info("cancel_build %s: nothing to do, no longer superseded", build_id)
+            self._targets.pop(build_id, None)
+            return ActionResult.NOTHING_TO_DO
         path = f"/repos/{target.repo}/actions/runs/{target.run_id}/cancel"
-        code = self.cancel_client.post(path)
+        try:
+            code = self.cancel_client.post(path)
+        except GitHubError as exc:
+            if exc.kind != "forbidden":
+                raise
+            log.error(
+                "cancel_build %s refused by GitHub (HTTP 403): the cancel token lacks "
+                "Actions: write on %s",
+                build_id,
+                target.repo,
+            )
+            return ActionResult.REFUSED
         self._targets.pop(build_id, None)
         _remember(self._cancelled, build_id, None)
         if code == 409:
