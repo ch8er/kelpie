@@ -46,7 +46,7 @@ class HermesSettings:
     """``[adapters.hermes]``: where the Kanban board and the hooks spool live."""
 
     db_path: Path = hermes.DEFAULT_DB
-    spool: Path = hermes.DEFAULT_SPOOL
+    spool: Path | None = hermes.DEFAULT_SPOOL  # None: spool reading disabled
     lookback: timedelta = hermes.DEFAULT_LOOKBACK
     enabled: bool = True
 
@@ -112,12 +112,18 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError("[adapters.hermes] must be a table")
     if extra := set(section) - {"db_path", "spool", "lookback", "enabled"}:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
-    paths: dict[str, Path] = {}
+    paths: dict[str, Path | None] = {}
     for key, default in (("db_path", hermes.DEFAULT_DB), ("spool", hermes.DEFAULT_SPOOL)):
         value = section.get(key, str(default))
-        if not isinstance(value, str) or not value.strip():
-            raise ConfigError(f"[adapters.hermes] {key} must be a non-empty string")
-        paths[key] = Path(value)
+        if key == "spool" and value is False:
+            paths[key] = None  # spool = false: no hook data
+        elif not isinstance(value, str) or not value.strip():
+            allowed = "a non-empty string or false" if key == "spool" else "a non-empty string"
+            raise ConfigError(f"[adapters.hermes] {key} must be {allowed}")
+        else:
+            paths[key] = Path(value)
+    db_path = paths["db_path"]
+    assert db_path is not None
     try:
         lookback = parse_duration(section.get("lookback", hermes.DEFAULT_LOOKBACK))
     except (ValueError, TypeError, AttributeError) as exc:
@@ -127,7 +133,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
     enabled = section.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError("[adapters.hermes] enabled must be true or false")
-    return HermesSettings(paths["db_path"], paths["spool"], lookback, enabled)
+    return HermesSettings(db_path, paths["spool"], lookback, enabled)
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +325,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     # No connectors or alerter are wired yet: an effect nobody can carry out turns into an
     # alert, and the defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
+    _refuse_unimplemented_actions(settings, loaded, adapters)
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     engine = Engine(
@@ -335,6 +342,19 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     return App(settings, loaded, engine, loop, metrics, store)
 
 
+def _refuse_unimplemented_actions(
+    settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter]
+) -> None:
+    """Hermes cannot carry out actions yet; an act-mode rule would only fail at runtime."""
+    only_hermes = bool(adapters) and all(isinstance(a, hermes.HermesAdapter) for a in adapters)
+    acting = sorted(s.name for s in loaded.statuses if s.implemented and s.mode is Mode.ACT)
+    if only_hermes and acting and not settings.engine.dry_run:
+        raise ConfigError(
+            f"Hermes actions are not implemented; use observe or suggest mode (rules in act "
+            f"mode: {acting})"
+        )
+
+
 def render_adapters(adapters: Sequence[PlatformAdapter]) -> list[str]:
     lines = ["", "adapters:"]
     for adapter in adapters:
@@ -344,6 +364,9 @@ def render_adapters(adapters: Sequence[PlatformAdapter]) -> list[str]:
         where = f" ({db})" if db else ""
         state = "readable" if problem is None else f"NOT readable: {problem}"
         lines.append(f"  {adapter.name}{where}: {state}")
+        detail = getattr(adapter, "status_detail", None)
+        if callable(detail):
+            lines += [f"    {line}" for line in detail(utc_now())]
     if not adapters:
         lines.append("  (none configured)")
     return lines

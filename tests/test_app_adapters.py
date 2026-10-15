@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +23,7 @@ from kelpie.app import (
     render_status,
 )
 from kelpie.cli import main
+from kelpie.core.config import EngineConfig
 from kelpie.core.model import Dependency, Owner, Snapshot, Status, Task
 from kelpie.metrics import Metrics
 from tests.adapters.kanban import Board
@@ -71,9 +74,17 @@ def test_hermes_disabled_builds_no_adapter(tmp_path: Path) -> None:
     assert settings.hermes is not None and build_adapters(settings) == []
 
 
+def test_spool_false_disables_spool_reading(tmp_path: Path) -> None:
+    settings = load_settings(write(tmp_path, "[adapters.hermes]\nspool = false\n"))
+    assert settings.hermes is not None and settings.hermes.spool is None
+    (adapter,) = build_adapters(settings)
+    assert isinstance(adapter, HermesAdapter) and adapter.spool is None
+
+
 @pytest.mark.parametrize(
     "text",
     [
+        "[adapters.hermes]\nspool = true\n",
         "adapters = 5\n",
         "[adapters.other]\n",
         "[adapters]\nhermes = 'x'\n",
@@ -204,3 +215,33 @@ def test_cli_status_shows_adapters(tmp_path: Path, capsys: pytest.CaptureFixture
     assert main(["--config", str(path), "status"]) == 0
     out = capsys.readouterr().out
     assert "adapters:" in out and "NOT readable" in out
+
+
+def test_act_mode_with_only_hermes_is_refused(tmp_path: Path) -> None:
+    config = EngineConfig.from_mapping(
+        {"dry_run": False, "rules": {"exit_contract": {"mode": "act"}}}
+    )
+    hermes = HermesSettings(db_path=tmp_path / "kanban.db")
+    with pytest.raises(ConfigError, match="Hermes actions are not implemented"):
+        build_app(Settings(engine=config, db_path=None, hermes=hermes))
+    # Allowed: dry-run on, observe/suggest modes, or no Hermes at all.
+    for ok in (
+        EngineConfig.from_mapping({"dry_run": True, "rules": {"exit_contract": {"mode": "act"}}}),
+        EngineConfig.from_mapping(
+            {"dry_run": False, "rules": {"exit_contract": {"mode": "suggest"}}}
+        ),
+    ):
+        build_app(Settings(engine=ok, db_path=None, hermes=hermes)).close()
+    build_app(Settings(engine=config, db_path=None)).close()
+
+
+def test_status_shows_spool_age(tmp_path: Path) -> None:
+    Board(tmp_path / "kanban.db").close()
+    spool = tmp_path / "spool.jsonl"
+    hermes = HermesSettings(db_path=tmp_path / "kanban.db", spool=spool)
+    settings = Settings(db_path=None, hermes=hermes)
+    text = render_status(settings, load_rules(settings.engine), build_adapters(settings))
+    assert "spool: missing" in text
+    spool.write_text(json.dumps({"type": "tool", "at": time.time() - 120}) + "\n")
+    text = render_status(settings, load_rules(settings.engine), build_adapters(settings))
+    assert "spool: last line 2m ago" in text

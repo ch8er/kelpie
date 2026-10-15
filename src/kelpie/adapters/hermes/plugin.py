@@ -16,8 +16,8 @@ Kanban workers get ``HERMES_KANBAN_TASK`` and ``HERMES_KANBAN_RUN_ID`` in their 
 (``hermes_cli/kanban_db_dispatch.py``); those identify the task and the run.
 
 Privacy: raw arguments and results are never written. A tool call is recorded as the tool
-name, a hash of its canonical arguments and, for shell-like tools, the first 200
-characters of the command (disable with ``KELPIE_HERMES_SPOOL_COMMANDS=0``).
+name, a hash of its canonical arguments and, for shell-like tools, a redacted prefix of the
+command (see :func:`redact_command`; disable with ``KELPIE_HERMES_SPOOL_COMMANDS=0``).
 
 Hooks are fire-and-forget: nothing here raises, blocks on the network or returns a value.
 """
@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,76 @@ def args_hash(args: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:16]
 
 
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_KEY_VALUE = re.compile(r"^(-{0,2}[A-Za-z_][\w.-]*)=(.*)$")
+_SENSITIVE_KEY = re.compile(r"token|secret|passw|key|auth|credential|cookie", re.IGNORECASE)
+_SECRET_FLAGS = frozenset(
+    {
+        "-p",
+        "--token",
+        "--password",
+        "--passwd",
+        "--secret",
+        "--api-key",
+        "--apikey",
+        "--access-token",
+        "--auth-token",
+    }
+)
+_URL_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]+@")
+_QUERY_SECRET = re.compile(
+    r"([?&][\w-]*(?:token|key|secret|passw|auth)[\w-]*=)[^&\s]+", re.IGNORECASE
+)
+_LONG_RUN = re.compile(r"[A-Za-z0-9_\-+/=]{24,}")
+_MASK = "***"
+_MAX_TOKENS = 4
+
+
+def redact_command(command: str) -> str | None:
+    """A shell command reduced to what is safe to keep: its first line, without leading
+    ``VAR=value`` assignments, at most four tokens, secrets masked.
+
+    Masked: values after ``Bearer``, ``Authorization:``, ``--token``, ``--password`` and
+    ``-p``; values of ``key=value`` pairs whose key looks like a credential; URL userinfo;
+    any run of 24 or more token characters; and the content of quoted arguments. Best
+    effort: the aim is that tokens never reach the spool, while ``gh pr checks 5`` or
+    ``pytest -q`` stay recognizable.
+    """
+    lines = command.strip().splitlines()
+    tokens = lines[0].split() if lines else []
+    while tokens and _ASSIGN.match(tokens[0]):
+        tokens.pop(0)
+    out: list[str] = []
+    mask_next = 0
+    for tok in tokens:
+        if mask_next:
+            out.append(_MASK)
+            mask_next -= 1
+            continue
+        bare = tok.strip("'\"")
+        low = bare.lower()
+        if low.startswith("authorization:"):
+            glued = len(bare) > len("authorization:")
+            out.append("Authorization:" + (_MASK if glued else ""))
+            mask_next = 1 if glued else 2  # (scheme and) credential
+        elif low == "bearer" or low in _SECRET_FLAGS:
+            out.append(bare)
+            mask_next = 1
+        elif (kv := _KEY_VALUE.match(bare)) and _SENSITIVE_KEY.search(kv.group(1)):
+            out.append(f"{kv.group(1)}={_MASK}")
+        elif bare.startswith("-p") and len(bare) > 2 and not bare.startswith("--"):
+            out.append("-p" + _MASK)  # -psecret
+        elif tok[:1] in {"'", '"'}:
+            out.append(tok[0] + "…")  # quoted text is free-form: drop it
+        else:
+            out.append(tok)
+    text = " ".join(out[:_MAX_TOKENS])
+    text = _URL_USERINFO.sub(rf"\1{_MASK}@", text)
+    text = _QUERY_SECRET.sub(rf"\1{_MASK}", text)
+    text = _LONG_RUN.sub(_MASK, text)
+    return text[:COMMAND_LIMIT] or None
+
+
 def _command(args: Any) -> str | None:
     if os.environ.get(COMMANDS_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
         return None
@@ -68,7 +139,7 @@ def _command(args: Any) -> str | None:
     for key in _COMMAND_KEYS:
         value = args.get(key)
         if isinstance(value, str) and value:
-            return value[:COMMAND_LIMIT]
+            return redact_command(value)
     return None
 
 
@@ -79,7 +150,8 @@ def _text(value: Any) -> str | None:
 def _ids(kwargs: dict[str, Any]) -> dict[str, str | None]:
     env = os.environ
     return {
-        "task_id": _text(env.get("HERMES_KANBAN_TASK") or kwargs.get("task_id")),
+        # The ``task_id`` keyword of Hermes hooks is its internal id, not a kanban task.
+        "task_id": _text(env.get("HERMES_KANBAN_TASK")),
         "run_id": _text(env.get("HERMES_KANBAN_RUN_ID") or kwargs.get("run_id")),
         "session_id": _text(kwargs.get("session_id") or env.get("HERMES_SESSION_ID")),
     }

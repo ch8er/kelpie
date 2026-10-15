@@ -236,7 +236,14 @@ actions are not implemented yet, so rules cannot change the board.
 ```toml
 [adapters.hermes]
 db_path = "~/.hermes/kanban.db"
+
+# Hermes tolerates heartbeats up to an hour old (Kelpie's default is 30 minutes).
+[engine.rules.exit_contract]
+session_stale_after = "60m"
 ```
+
+`kelpie.example.toml` has the same for `orphan_status` and `wait_condition`, and the
+alternative `allowed_block_reasons` list for Hermes block kinds.
 
 Install node_exporter on each host where agents run, and point it at the Kelpie server.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -10,7 +11,7 @@ import pytest
 
 from kelpie.adapters.hermes import HermesAdapter
 from kelpie.adapters.hermes.adapter import HermesError
-from kelpie.core.model import OwnerKind, SpanKind, Status
+from kelpie.core.model import OwnerKind, Session, SpanKind, Status
 from kelpie.core.ports import PlatformAdapter, SnapshotSource
 from tests.adapters.kanban import Board
 
@@ -91,7 +92,7 @@ def test_status_since_fallbacks(board: Board) -> None:
     assert since == {"t_run": ago(hours=5), "t_done": ago(hours=1), "t_new": ago(days=2)}
 
 
-def test_block_reason_and_since_from_event(board: Board) -> None:
+def test_typed_block_is_a_wait_for_an_operator(board: Board) -> None:
     board.task("t_1", "blocked", ago(days=1), assignee="dev", block_kind="needs_input")
     board.event("t_1", "claimed", ago(hours=4))
     board.event(
@@ -99,27 +100,81 @@ def test_block_reason_and_since_from_event(board: Board) -> None:
     )
     block = adapter(board).snapshot(NOW).tasks[0].block
     assert block is not None
-    assert block.reason == "needs_input: which API version?"
+    assert block.reason == "waiting_human: needs_input: which API version?"
     assert block.since == ago(hours=2)
 
 
-def test_block_without_event_uses_kind(board: Board) -> None:
+@pytest.mark.parametrize("kind", ["needs_input", "capability", "transient"])
+def test_every_typed_block_kind_is_allowed_by_exit_contract(board: Board, kind: str) -> None:
+    board.task("t_1", "blocked", ago(days=1), block_kind=kind)
+    board.event("t_1", "blocked", ago(hours=2), {"kind": kind, "reason": None})
+    block = adapter(board).snapshot(NOW).tasks[0].block
+    assert block is not None and block.reason == f"waiting_human: {kind}"
+
+
+def test_untyped_legacy_block_stays_raw(board: Board) -> None:
+    board.task("t_1", "blocked", ago(days=1))
+    board.event("t_1", "blocked", ago(hours=1), {"reason": "waiting_ci"})
+    board.task("t_2", "blocked", ago(days=1))
+    board.event("t_2", "blocked", ago(hours=1), {"reason": "initial_status"})
+    blocks = {t.id: t.block for t in adapter(board).snapshot(NOW).tasks}
+    assert blocks["t_1"] is not None and blocks["t_1"].reason == "waiting_ci"
+    assert blocks["t_2"] is not None and blocks["t_2"].reason == "initial_status"
+
+
+def test_block_without_any_event_has_no_reason(board: Board) -> None:
+    # tasks.block_kind survives unblock, so it is not evidence without a block event.
     board.task("t_1", "blocked", ago(hours=6), block_kind="capability")
     board.task("t_2", "blocked", ago(hours=6))
-    board.event("t_3", "blocked", ago(hours=1), {"reason": "initial_status"})  # no such task
     blocks = {t.id: t.block for t in adapter(board).snapshot(NOW).tasks}
-    assert blocks["t_1"] is not None and blocks["t_1"].reason == "capability"
+    assert blocks["t_1"] is not None and blocks["t_1"].reason == ""
     assert blocks["t_1"].since == ago(hours=6)
     assert blocks["t_2"] is not None and blocks["t_2"].reason == ""
 
 
-def test_stale_block_event_is_ignored(board: Board) -> None:
-    # An older block event, then a later status change (e.g. a circuit breaker parked it).
-    board.task("t_1", "blocked", ago(days=1))
-    board.event("t_1", "blocked", ago(hours=5), {"kind": "transient", "reason": "old"})
-    board.event("t_1", "crashed", ago(hours=1))
+def test_circuit_breaker_park_ignores_leftover_block_kind(board: Board) -> None:
+    board.task(
+        "t_1",
+        "blocked",
+        ago(days=1),
+        block_kind="needs_input",  # from a block that was unblocked long ago
+        failures=3,
+        last_error="worker crashed",
+    )
+    board.event("t_1", "blocked", ago(hours=9), {"kind": "needs_input", "reason": "old"})
+    board.event("t_1", "unblocked", ago(hours=8))
+    board.event("t_1", "claimed", ago(hours=2))
+    board.event("t_1", "crashed", ago(hours=1, minutes=1), {"error": "worker crashed"})
+    board.event(
+        "t_1",
+        "gave_up",
+        ago(hours=1),
+        {"failures": 3, "effective_limit": 3, "error": "worker crashed"},
+    )
     block = adapter(board).snapshot(NOW).tasks[0].block
-    assert block is not None and block.reason == "" and block.since == ago(hours=1)
+    assert block is not None
+    assert block.reason == "guard: hermes circuit breaker (3/3): worker crashed"
+    assert block.since == ago(hours=1)
+
+
+def test_circuit_breaker_falls_back_to_columns(board: Board) -> None:
+    board.task("t_1", "blocked", ago(days=1), failures=2, last_error="boom")
+    board.event("t_1", "gave_up", ago(hours=1), {"failures": 2})
+    block = adapter(board).snapshot(NOW).tasks[0].block
+    assert block is not None and block.reason == "guard: hermes circuit breaker: boom"
+    board.task("t_2", "blocked", ago(days=1))
+    board.event("t_2", "gave_up", ago(hours=1))
+    reason = next(t for t in adapter(board).snapshot(NOW).tasks if t.id == "t_2").block
+    assert reason is not None and reason.reason == "guard: hermes circuit breaker"
+
+
+def test_non_status_events_do_not_move_status_since(board: Board) -> None:
+    board.task("t_1", "running", ago(days=1), started=ago(hours=5))
+    board.event("t_1", "claimed", ago(hours=3))
+    for kind in ("heartbeat", "claim_extended", "spawned", "commented", "edited", "assigned"):
+        board.event("t_1", kind, ago(minutes=1))
+    board.event("t_1", "never_heard_of_it", ago(hours=1))  # unknown kinds count as changes
+    assert adapter(board).snapshot(NOW).tasks[0].status_since == ago(hours=1)
 
 
 def test_block_payload_garbage(board: Board) -> None:
@@ -131,13 +186,6 @@ def test_block_payload_garbage(board: Board) -> None:
     board.conn.commit()
     block = adapter(board).snapshot(NOW).tasks[0].block
     assert block is not None and block.reason == "" and block.since == ago(hours=1)
-
-
-def test_reason_only_block(board: Board) -> None:
-    board.task("t_1", "blocked", ago(days=1))
-    board.event("t_1", "blocked", ago(hours=1), {"reason": "waiting_ci"})
-    block = adapter(board).snapshot(NOW).tasks[0].block
-    assert block is not None and block.reason == "waiting_ci"
 
 
 def test_dependencies(board: Board) -> None:
@@ -352,3 +400,104 @@ def test_rotated_spool_is_read_too(board: Board, tmp_path: Path) -> None:
     spool.write_text(tool_line(ago(minutes=1), tool="b") + "\n")
     (tmp_path / "spool.jsonl.1").write_text(tool_line(ago(minutes=9), tool="a") + "\n")
     assert [s.tool for s in adapter(board, spool).snapshot(NOW).spans] == ["a", "b"]
+
+
+# --- liveness ---------------------------------------------------------------------------
+
+
+def only_session(board: Board, spool: Path | None = None) -> Session:
+    (s,) = adapter(board, spool).snapshot(NOW).sessions
+    return s
+
+
+def test_heartbeat_is_the_latest_of_run_task_and_spool(board: Board, tmp_path: Path) -> None:
+    board.task("t_1", "running", ago(days=1), assignee="dev")
+    rid = board.run("t_1", "dev", ago(hours=3), heartbeat=ago(minutes=50))
+    assert only_session(board).last_heartbeat == ago(minutes=50)
+    board.update("t_1", current_run_id=rid, last_heartbeat_at=ago(minutes=40))
+    assert only_session(board).last_heartbeat == ago(minutes=40)
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(tool_line(ago(minutes=5), run_id=str(rid)) + "\n")
+    assert only_session(board, spool).last_heartbeat == ago(minutes=5)
+
+
+def test_task_heartbeat_of_another_run_does_not_count(board: Board) -> None:
+    board.task("t_1", "running", ago(days=1))
+    old = board.run("t_1", "dev", ago(hours=5), heartbeat=ago(hours=4))
+    new = board.run("t_1", "dev", ago(hours=1), heartbeat=ago(minutes=50))
+    board.update("t_1", current_run_id=new, last_heartbeat_at=ago(minutes=1))
+    beats = {s.id: s.last_heartbeat for s in adapter(board).snapshot(NOW).sessions}
+    assert beats[f"hermes-run-{old}"] == ago(hours=4)
+    assert beats[f"hermes-run-{new}"] == ago(minutes=1)
+
+
+def test_valid_claim_counts_as_a_heartbeat(board: Board) -> None:
+    board.task("t_1", "running", ago(days=1), assignee="dev")
+    rid = board.run("t_1", "dev", ago(hours=3), heartbeat=ago(minutes=45))
+    board.update("t_1", current_run_id=rid, claim_expires=NOW + timedelta(minutes=10))
+    assert only_session(board).last_heartbeat == NOW
+
+
+def test_expired_claim_or_other_run_is_not_a_heartbeat(board: Board) -> None:
+    board.task("t_1", "running", ago(days=1), assignee="dev")
+    rid = board.run("t_1", "dev", ago(hours=3), heartbeat=ago(minutes=45))
+    board.update("t_1", current_run_id=rid, claim_expires=ago(minutes=1))
+    assert only_session(board).last_heartbeat == ago(minutes=45)
+    board.update("t_1", current_run_id=rid + 1, claim_expires=NOW + timedelta(minutes=10))
+    assert only_session(board).last_heartbeat == ago(minutes=45)
+
+
+def test_claim_of_an_ended_run_is_not_a_heartbeat(board: Board) -> None:
+    board.task("t_1", "ready", ago(days=1))
+    rid = board.run("t_1", "dev", ago(hours=3), ended=ago(hours=1), outcome="crashed")
+    board.update("t_1", current_run_id=rid, claim_expires=NOW + timedelta(minutes=10))
+    assert only_session(board).last_heartbeat is None
+
+
+# --- lookback, spool files, snapshot isolation ------------------------------------------
+
+
+def test_done_tasks_outside_the_lookback_are_left_out(board: Board) -> None:
+    board.task("t_old", "done", ago(days=9), completed=ago(days=3))
+    board.task("t_new", "done", ago(days=9), completed=ago(hours=2))
+    board.task("t_nodate", "done", ago(days=9))
+    assert {t.id for t in adapter(board).snapshot(NOW).tasks} == {"t_new", "t_nodate"}
+
+
+def test_old_rotated_spool_is_not_read(board: Board, tmp_path: Path) -> None:
+    spool = tmp_path / "spool.jsonl"
+    rotated = tmp_path / "spool.jsonl.1"
+    rotated.write_text(tool_line(ago(minutes=9), tool="a") + "\n")
+    os.utime(rotated, (NOW.timestamp() - 3 * 86400, NOW.timestamp() - 3 * 86400))
+    assert adapter(board, spool).snapshot(NOW).spans == ()
+
+
+def test_status_detail_reports_spool_age(board: Board, tmp_path: Path) -> None:
+    spool = tmp_path / "spool.jsonl"
+    assert adapter(board, spool).status_detail(NOW) == [f"spool: missing ({spool})"]
+    assert adapter(board, None).status_detail(NOW) == ["spool: disabled"]
+    spool.write_text("garbage\n")
+    assert "no readable lines" in adapter(board, spool).status_detail(NOW)[0]
+    spool.write_text(tool_line(ago(hours=3)) + "\n" + tool_line(ago(minutes=7)) + "\nnot json\n")
+    assert adapter(board, spool).status_detail(NOW) == [f"spool: last line 7m ago ({spool})"]
+
+
+def test_snapshot_while_hermes_holds_an_open_write_transaction(board: Board) -> None:
+    """Hermes writes concurrently (WAL): a snapshot neither blocks the writer nor sees
+    its uncommitted rows, and the writer can still commit afterwards."""
+    board.task("t_1", "ready", ago(days=1))
+    assert board.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    writer = sqlite3.connect(board.path, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "INSERT INTO tasks (id, title, status, created_at) VALUES ('t_2', 'x', 'ready', 1)"
+        )
+        writer.execute("UPDATE tasks SET status = 'done' WHERE id = 't_1'")
+        snap = adapter(board).snapshot(NOW)
+        assert [(t.id, t.status) for t in snap.tasks] == [("t_1", Status.READY)]
+        writer.execute("COMMIT")  # not blocked by the reader
+    finally:
+        writer.close()
+    after = adapter(board).snapshot(NOW)
+    assert {t.id: t.status for t in after.tasks} == {"t_1": Status.DONE, "t_2": Status.READY}

@@ -22,9 +22,18 @@ Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
 
 ``role`` is the assignee profile: Hermes routes work by profile, so a profile is both the
 owner and its role. ``status_since`` is the time of the latest status-changing event of the
-task (``task_events``), else ``started_at``/``completed_at``/``created_at``. A blocked task
-carries a :class:`~kelpie.core.model.Block` built from its latest block event
-(``"<kind>: <reason>"``, e.g. ``needs_input: which API version?``).
+task (any ``task_events`` kind except the non-status ones in ``NON_STATUS_EVENTS``), else
+``started_at``/``completed_at``/``created_at``. Done tasks older than ``lookback`` are left out.
+
+Blocks. A ``blocked`` task gets a :class:`~kelpie.core.model.Block` only from evidence that is
+current, that is a ``blocked`` event at or after ``status_since``:
+
+- typed block (``needs_input``, ``capability``, ``transient``; Hermes parks these for an
+  operator): ``waiting_human: <kind>: <reason>``, which the exit contract allows;
+- untyped legacy block: the raw reason text;
+- no such event (the circuit breaker parked the task, ``tasks.block_kind`` is left over from an
+  earlier block): from the latest status event; ``gave_up`` gives
+  ``guard: hermes circuit breaker (<failures>/<limit>): <error>``, anything else an empty reason.
 
 Sessions: one per ``task_runs`` row (``hermes-run-<id>``), for runs that are open or ended
 within ``lookback``::
@@ -33,11 +42,20 @@ within ``lookback``::
     completed                                      DONE
     review_requested                               REVIEW
     blocked                                        BLOCKED
-    crashed, timed_out, spawn_failed, gave_up,
-    reclaimed, changes_requested, scheduled,
+    crashed, timed_out, stale, rate_limited,
+    spawn_failed, gave_up, reclaimed,
+    changes_requested, scheduled,
     NULL (still open or ended without outcome)     None  (the session declared nothing)
 
 ``exit_reason`` is the outcome, followed by the run's error text when there is one.
+
+Liveness. ``Session.last_heartbeat`` is the latest of the run's ``last_heartbeat_at``, the
+task's ``last_heartbeat_at`` (when the run is the task's ``current_run_id``) and the newest
+spool tool call of the run. A valid Hermes claim counts as a heartbeat: an open run that is the
+task's ``current_run_id`` with ``claim_expires`` in the future has ``last_heartbeat = now``
+(Hermes extends claims for workers that are alive in a long LLM call). Hermes tolerates stale
+heartbeats for longer than Kelpie's 30 minute default, so set ``session_stale_after = "60m"``
+for the rules that take it.
 """
 
 from __future__ import annotations
@@ -92,30 +110,34 @@ OUTCOME_STATUS: Mapping[str, Status] = {
     "blocked": Status.BLOCKED,
 }
 
-# Event kinds in ``task_events`` after which a task is in a (possibly) new status.
-STATUS_EVENTS = (
-    "created",
-    "claimed",
-    "promoted",
-    "promoted_manual",
-    "completed",
-    "review_requested",
-    "review_reopened",
-    "changes_requested",
-    "blocked",
-    "dependency_wait",
-    "block_loop_detected",
-    "auto_blocked",
-    "unblocked",
-    "scheduled",
-    "reclaimed",
-    "crashed",
-    "timed_out",
-    "gave_up",
-    "spawn_failed",
-    "status",
+# ``task_events`` kinds that do not change a task's status; every other kind does.
+NON_STATUS_EVENTS = (
+    "heartbeat",
+    "claim_extended",
+    "commented",
+    "edited",
+    "assigned",
+    "specified",
+    "attached",
+    "attachment_removed",
+    "reprioritized",
+    "spawned",
+    "worker_registered",
+    "pid_alive",
+    "reclaim_deferred",
+    "respawn_guarded",
+    "skipped_nonspawnable",
+    "claim_rejected",
+    "linked",
+    "unlinked",
+    "archive_worker_termination",
+    "suspected_hallucinated_references",
+    "completion_blocked_hallucination",
+    "completion_blocked_empty_result",
 )
-BLOCK_EVENTS = ("blocked", "dependency_wait", "block_loop_detected", "auto_blocked")
+BLOCK_EVENTS = ("blocked", "auto_blocked")
+# Hermes block kinds that wait for an operator (``dependency`` waits in ``todo``).
+TYPED_BLOCKS = ("needs_input", "capability", "transient")
 
 
 class HermesError(RuntimeError):
@@ -141,14 +163,36 @@ def _payload(raw: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _block_reason(payload: Mapping[str, Any], block_kind: str | None) -> str:
-    kind = payload.get("kind") or block_kind
-    reason = payload.get("reason")
-    kind_text = str(kind) if kind else ""
-    reason_text = str(reason).strip() if reason else ""
-    if kind_text and reason_text:
-        return f"{kind_text}: {reason_text}"
-    return kind_text or reason_text
+def _col(row: sqlite3.Row, name: str) -> Any:
+    """A column that older Hermes schemas may not have."""
+    return row[name] if name in row.keys() else None  # noqa: SIM118
+
+
+def _block_text(row: sqlite3.Row, status_event: sqlite3.Row | None, block_event: Any) -> str:
+    if block_event is not None:  # a block event at/after the block's start: current evidence
+        payload = _payload(block_event["payload"])
+        kind = str(payload.get("kind") or _col(row, "block_kind") or "")
+        reason = str(payload.get("reason") or "").strip()
+        if kind in TYPED_BLOCKS:  # Hermes parks these for an operator
+            return f"waiting_human: {kind}" + (f": {reason}" if reason else "")
+        return ": ".join(x for x in (kind, reason) if x)
+    # No current block event: ``tasks.block_kind`` may be left over from an earlier block.
+    if status_event is not None and status_event["kind"] == "gave_up":
+        p = _payload(status_event["payload"])
+        failures = p.get("failures", _col(row, "consecutive_failures"))
+        limit = p.get("effective_limit")
+        error = str(p.get("error") or _col(row, "last_failure_error") or "").strip()
+        count = f" ({failures}/{limit})" if failures and limit else ""
+        return f"guard: hermes circuit breaker{count}" + (f": {error}" if error else "")
+    return ""
+
+
+def _age(delta: timedelta) -> str:
+    seconds = max(0, int(delta.total_seconds()))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
 
 
 @dataclass(slots=True)
@@ -174,12 +218,45 @@ class HermesAdapter:
             return str(exc)
         return None
 
+    def status_detail(self, now: datetime) -> list[str]:
+        """Extra lines for ``kelpie status``: how fresh the hooks spool is."""
+        if self.spool is None:
+            return ["spool: disabled"]
+        if not self.spool.exists():
+            return [f"spool: missing ({self.spool})"]
+        last = self._last_spool_at()
+        if last is None:
+            return [f"spool: no readable lines ({self.spool})"]
+        return [f"spool: last line {_age(now - last)} ago ({self.spool})"]
+
+    def _last_spool_at(self) -> datetime | None:
+        if self.spool is None:
+            return None
+        try:
+            with self.spool.open("rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 65536))
+                tail = f.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            return None
+        for line in reversed(tail):
+            try:
+                at = _utc(json.loads(line)["at"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if at is not None:
+                return at
+        return None
+
     def _connect(self) -> _Connection:
         if not self.db_path.is_file():
             raise HermesError(f"Hermes kanban database not found: {self.db_path}")
         try:
             conn = sqlite3.connect(
-                f"file:{self.db_path}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000
+                self.db_path.resolve().as_uri() + "?mode=ro",
+                uri=True,
+                timeout=BUSY_TIMEOUT_MS / 1000,
+                isolation_level=None,  # transactions are explicit (see _Connection)
             )
             conn.row_factory = sqlite3.Row
             conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
@@ -192,12 +269,17 @@ class HermesAdapter:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
         cutoff = now - self.lookback
+        spans = self._spans(cutoff)
+        beats: dict[str, datetime] = {}
+        for span in spans:
+            if span.session_id and span.end is not None:
+                beats[span.session_id] = max(span.end, beats.get(span.session_id, span.end))
         try:
-            with self._connect() as conn:
-                tasks, owner_ids = self._tasks(conn)
+            with self._connect() as conn:  # one read transaction: a consistent view
+                tasks, owner_ids, rows = self._tasks(conn, cutoff)
                 ids = {t.id for t in tasks}
                 dependencies = self._dependencies(conn, ids)
-                sessions, profiles = self._sessions(conn, ids, cutoff)
+                sessions, profiles = self._sessions(conn, ids, rows, cutoff, now, beats)
         except sqlite3.Error as exc:
             raise HermesError(f"cannot read Hermes kanban database {self.db_path}: {exc}") from exc
         owners = tuple(
@@ -209,15 +291,22 @@ class HermesAdapter:
             owners=owners,
             dependencies=dependencies,
             sessions=sessions,
-            spans=self._spans(cutoff),
+            spans=spans,
         )
 
-    def _tasks(self, conn: _Connection) -> tuple[tuple[Task, ...], set[str]]:
-        rows = conn.execute("SELECT * FROM tasks WHERE status != 'archived' ORDER BY id").fetchall()
-        latest = self._latest_events(conn, STATUS_EVENTS)
+    def _tasks(
+        self, conn: _Connection, cutoff: datetime
+    ) -> tuple[tuple[Task, ...], set[str], dict[str, sqlite3.Row]]:
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE status != 'archived'"
+            " AND (status != 'done' OR completed_at IS NULL OR completed_at >= ?) ORDER BY id",
+            (int(cutoff.timestamp()),),
+        ).fetchall()
+        latest = self._latest_events(conn, NON_STATUS_EVENTS, exclude=True)
         blocks = self._latest_events(conn, BLOCK_EVENTS)
         tasks: list[Task] = []
         owners: set[str] = set()
+        known: dict[str, sqlite3.Row] = {}
         for row in rows:
             status = STATUS_MAP.get(row["status"])
             if status is None:
@@ -233,9 +322,19 @@ class HermesAdapter:
             event = latest.get(row["id"])
             since = _utc(event["created_at"]) if event else None
             since = since or fallback or created
+            block = None
+            if status is Status.BLOCKED:
+                found = blocks.get(row["id"])
+                at = _utc(found["created_at"]) if found else None
+                current = found if at is not None and at >= since else None
+                block = Block(
+                    reason=_block_text(row, event, current),
+                    since=at if current is not None and at is not None else since,
+                )
             assignee = (row["assignee"] or "").strip() or None
             if assignee:
                 owners.add(assignee)
+            known[row["id"]] = row
             tasks.append(
                 Task(
                     id=row["id"],
@@ -245,30 +344,21 @@ class HermesAdapter:
                     role=assignee,
                     owner_id=assignee,
                     source=self.name,
-                    block=self._block(row, status, since, blocks.get(row["id"])),
+                    block=block,
                 )
             )
-        return tuple(tasks), owners
+        return tuple(tasks), owners, known
 
     @staticmethod
-    def _block(
-        row: sqlite3.Row, status: Status, since: datetime, event: sqlite3.Row | None
-    ) -> Block | None:
-        if status is not Status.BLOCKED:
-            return None
-        kind = row["block_kind"] if "block_kind" in row.keys() else None  # noqa: SIM118
-        at = _utc(event["created_at"]) if event else None
-        if event is None or at is None or at < since:
-            return Block(reason=kind or "", since=since)
-        return Block(reason=_block_reason(_payload(event["payload"]), kind), since=at)
-
-    @staticmethod
-    def _latest_events(conn: _Connection, kinds: Sequence[str]) -> dict[str, sqlite3.Row]:
+    def _latest_events(
+        conn: _Connection, kinds: Sequence[str], exclude: bool = False
+    ) -> dict[str, sqlite3.Row]:
+        op = "NOT IN" if exclude else "IN"
         rows = conn.execute(
             "SELECT task_id, kind, payload, created_at FROM ("
             " SELECT *, ROW_NUMBER() OVER ("
             "  PARTITION BY task_id ORDER BY created_at DESC, id DESC) AS rn"
-            f" FROM task_events WHERE kind IN ({_in_clause(kinds)})) WHERE rn = 1",
+            f" FROM task_events WHERE kind {op} ({_in_clause(kinds)})) WHERE rn = 1",
             tuple(kinds),
         ).fetchall()
         return {r["task_id"]: r for r in rows}
@@ -287,12 +377,15 @@ class HermesAdapter:
 
     @staticmethod
     def _sessions(
-        conn: _Connection, ids: set[str], cutoff: datetime
+        conn: _Connection,
+        ids: set[str],
+        tasks: Mapping[str, sqlite3.Row],
+        cutoff: datetime,
+        now: datetime,
+        spool_beats: Mapping[str, datetime],
     ) -> tuple[tuple[Session, ...], set[str]]:
         rows = conn.execute(
-            "SELECT r.*, t.assignee AS assignee FROM task_runs r "
-            "LEFT JOIN tasks t ON t.id = r.task_id "
-            "WHERE r.ended_at IS NULL OR r.ended_at >= ? ORDER BY r.id",
+            "SELECT * FROM task_runs WHERE ended_at IS NULL OR ended_at >= ? ORDER BY id",
             (int(cutoff.timestamp()),),
         ).fetchall()
         sessions: list[Session] = []
@@ -301,32 +394,43 @@ class HermesAdapter:
             started = _utc(r["started_at"])
             if r["task_id"] not in ids or started is None:
                 continue
+            task = tasks[r["task_id"]]
             profile = (r["profile"] or "").strip()
             if profile:
                 profiles.add(profile)
             outcome = r["outcome"]
             reason = " ".join(str(x).strip() for x in (outcome, r["error"]) if x and str(x).strip())
+            session_id = f"hermes-run-{r['id']}"
+            beats = [_utc(r["last_heartbeat_at"]), spool_beats.get(session_id)]
+            if _col(task, "current_run_id") == r["id"]:
+                beats.append(_utc(_col(task, "last_heartbeat_at")))
+                expires = _col(task, "claim_expires")
+                if r["ended_at"] is None and expires is not None and expires > now.timestamp():
+                    beats.append(now)  # a valid claim counts as a heartbeat
             sessions.append(
                 Session(
-                    id=f"hermes-run-{r['id']}",
+                    id=session_id,
                     task_id=r["task_id"],
-                    owner_id=profile or (r["assignee"] or "").strip() or "unknown",
+                    owner_id=profile or (task["assignee"] or "").strip() or "unknown",
                     started_at=started,
                     ended_at=_utc(r["ended_at"]),
                     final_status=OUTCOME_STATUS.get(outcome) if outcome else None,
                     exit_reason=reason[:300] or None,
-                    last_heartbeat=_utc(r["last_heartbeat_at"]),
+                    last_heartbeat=max((b for b in beats if b is not None), default=None),
                 )
             )
         return tuple(sessions), profiles
 
     # --- hooks spool ---------------------------------------------------------------------
 
-    def _spool_lines(self) -> Iterator[str]:
+    def _spool_lines(self, cutoff: datetime) -> Iterator[str]:
         if self.spool is None:
             return
-        for path in (self.spool.with_name(self.spool.name + ".1"), self.spool):
+        rotated = self.spool.with_name(self.spool.name + ".1")
+        for path in (rotated, self.spool):
             try:
+                if path is rotated and path.stat().st_mtime < cutoff.timestamp():
+                    continue  # nothing in it can be inside the lookback
                 with path.open(encoding="utf-8", errors="replace") as f:
                     yield from f
             except OSError:
@@ -334,7 +438,7 @@ class HermesAdapter:
 
     def _spans(self, cutoff: datetime) -> tuple[Span, ...]:
         spans: list[Span] = []
-        for line in self._spool_lines():
+        for line in self._spool_lines(cutoff):
             span = _span_from_line(line, cutoff)
             if span is not None:
                 spans.append(span)
@@ -401,16 +505,25 @@ def _span_from_line(line: str, cutoff: datetime) -> Span | None:
 
 
 class _Connection:
-    """``sqlite3.Connection`` that is closed (not just committed) by ``with``."""
+    """A read transaction on a read-only connection, closed by ``with``."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     def __enter__(self) -> _Connection:
+        try:
+            self._conn.execute("BEGIN")
+        except sqlite3.Error:
+            self._conn.close()
+            raise
         return self
 
-    def __exit__(self, *exc: object) -> None:
-        self._conn.close()
+    def __exit__(self, exc_type: object, *exc: object) -> None:
+        try:
+            if exc_type is None:
+                self._conn.execute("COMMIT")
+        finally:
+            self._conn.close()
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
         return self._conn.execute(sql, params)

@@ -64,11 +64,14 @@ def test_tool_call_line(spool: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert rec["command"] == "pytest -q"
 
 
-def test_ids_from_kwargs_without_kanban_env(spool: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_outside_a_kanban_worker_task_id_is_none(
+    spool: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("HERMES_SESSION_ID", "env-sess")
+    # Hermes' own ``task_id`` keyword is an internal id, not a kanban task.
     plugin.post_tool_call(tool_name="read_file", args={"path": "a"}, task_id="x", run_id=3)
     (rec,) = lines(spool)
-    assert rec["task_id"] == "x" and rec["run_id"] == "3" and rec["session_id"] == "env-sess"
+    assert rec["task_id"] is None and rec["run_id"] == "3" and rec["session_id"] == "env-sess"
     assert rec["command"] is None and rec["duration_ms"] is None
 
 
@@ -99,14 +102,69 @@ def test_same_args_same_hash_regardless_of_key_order(spool: Path) -> None:
     assert first["args_hash"] == second["args_hash"] != third["args_hash"]
 
 
-def test_command_is_truncated_and_can_be_disabled(
+def test_command_is_capped_and_can_be_disabled(
     spool: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plugin.post_tool_call(tool_name="terminal", args={"command": "x" * 500})
+    plugin.post_tool_call(tool_name="terminal", args={"command": "echo " + "a." * 150})
     assert len(lines(spool)[0]["command"]) == plugin.COMMAND_LIMIT
     monkeypatch.setenv(plugin.COMMANDS_ENV, "0")
     plugin.post_tool_call(tool_name="terminal", args={"command": "ls"})
     assert lines(spool)[1]["command"] is None
+
+
+# (command, secret that must not reach the spool)
+SECRET_COMMANDS = [
+    ("GH_TOKEN=ghp_abc123SECRET gh pr checks 5", "ghp_abc123SECRET"),
+    ('curl -H "Authorization: Bearer xyzSECRETxyz" https://api.example.test/x', "xyzSECRETxyz"),
+    ("curl -H 'Authorization:Bearer glued-SECRET' https://api.example.test", "glued-SECRET"),
+    ("git clone https://user:pa55SECRET@host.example.test/repo", "pa55SECRET"),
+    ("tool --token s3cretVALUE run", "s3cretVALUE"),
+    ("tool --password=hunter2SECRET run", "hunter2SECRET"),
+    ("mysql -p hunter3SECRET db", "hunter3SECRET"),
+    ("mysql -phunter4SECRET db", "hunter4SECRET"),
+    ("env API_KEY=k3yvalueSECRET make test", "k3yvalueSECRET"),
+    ("curl https://api.example.test/v1?access_token=qs5ECRETq&x=1", "qs5ECRETq"),
+    ("deploy Zx9Qe7Lm2Vb4Nc6Ty8Uh1Jk3ABC", "Zx9Qe7Lm2Vb4Nc6Ty8Uh1Jk3"),
+    ('git commit -m "rotate token abcSECRET"', "abcSECRET"),
+    ("echo hi\nexport TOKEN=second-line-SECRET", "second-line-SECRET"),
+    ("export TOKEN=zzSECRETzz; gh pr checks", "zzSECRETzz"),
+]
+
+
+@pytest.mark.parametrize(("command", "secret"), SECRET_COMMANDS)
+def test_secrets_never_reach_the_spool(spool: Path, command: str, secret: str) -> None:
+    plugin.post_tool_call(tool_name="terminal", args={"command": command})
+    assert secret not in spool.read_text()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("gh pr checks 5", "gh pr checks 5"),
+        ("GH_TOKEN=abc gh pr checks 5", "gh pr checks 5"),
+        ("  pytest -q tests/test_x.py -k foo\nsecond line", "pytest -q tests/test_x.py -k"),
+        ("git status", "git status"),
+        ('curl -H "Authorization: Bearer xyz" https://h.test', "curl -H Authorization: ***"),
+        (
+            "git clone https://user:pass@host.example.test/repo",
+            "git clone https://***@host.example.test/repo",
+        ),
+    ],
+)
+def test_redaction_keeps_commands_recognizable(command: str, expected: str) -> None:
+    assert plugin.redact_command(command) == expected
+
+
+def test_poll_patterns_still_match_redacted_commands(spool: Path) -> None:
+    plugin.post_tool_call(
+        tool_name="terminal", args={"command": "GH_TOKEN=abc123 gh pr checks 5 --watch"}
+    )
+    assert lines(spool)[0]["command"].startswith("gh pr checks")
+
+
+def test_redact_empty() -> None:
+    assert plugin.redact_command("") is None
+    assert plugin.redact_command("FOO=bar") is None
 
 
 def test_session_end_line(spool: Path, monkeypatch: pytest.MonkeyPatch) -> None:

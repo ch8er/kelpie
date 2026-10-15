@@ -24,7 +24,10 @@ CREATE TABLE tasks (
     current_run_id INTEGER,
     last_heartbeat_at INTEGER,
     session_id TEXT,
-    block_kind TEXT
+    block_kind TEXT,
+    claim_expires INTEGER,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    last_failure_error TEXT
 );
 CREATE TABLE task_links (
     parent_id TEXT NOT NULL,
@@ -64,6 +67,7 @@ class Board:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.conn = sqlite3.connect(path)
+        self.conn.execute("PRAGMA journal_mode=WAL")  # as Hermes runs it
         self.conn.executescript(SCHEMA)
         self.conn.commit()
 
@@ -78,10 +82,13 @@ class Board:
         started: datetime | None = None,
         completed: datetime | None = None,
         block_kind: str | None = None,
+        failures: int = 0,
+        last_error: str | None = None,
     ) -> None:
         self.conn.execute(
             "INSERT INTO tasks (id, title, assignee, status, created_at, started_at,"
-            " completed_at, block_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " completed_at, block_kind, consecutive_failures, last_failure_error)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 id,
                 title,
@@ -91,8 +98,17 @@ class Board:
                 epoch(started) if started else None,
                 epoch(completed) if completed else None,
                 block_kind,
+                failures,
+                last_error,
             ),
         )
+        self.conn.commit()
+
+    def update(self, task_id: str, **columns: datetime | int | str | None) -> None:
+        """Change task columns; datetimes are stored as epoch seconds."""
+        values = [epoch(v) if isinstance(v, datetime) else v for v in columns.values()]
+        assignments = ", ".join(f"{name} = ?" for name in columns)
+        self.conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", (*values, task_id))
         self.conn.commit()
 
     def event(
