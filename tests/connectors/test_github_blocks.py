@@ -12,8 +12,11 @@ from kelpie.connectors.github.blocks import ConditionSync, load_block_conditions
 from kelpie.connectors.github.client import GitHubClient
 from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.core.actions import ActionKind
+from kelpie.core.executors import wait_conditions
 from kelpie.core.model import Block, Condition, ConditionKind, Snapshot, Status, Task
+from kelpie.rules.dispatch_gate import DispatchGate
 from kelpie.rules.stale_blocks import StaleBlocks
+from kelpie.rules.wait_condition import WaitCondition
 from tests.connectors.fake_github import TOKEN, Clock, FakeGitHub, Recorder, serve
 from tests.incidents import load
 
@@ -410,3 +413,33 @@ def test_ready_condition_already_registered_is_not_duplicated() -> None:
         gh.pull(REPO, 13)
         out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,), conditions=(existing,)))
     assert [c.id for c in out.conditions] == [existing.id]
+
+
+def test_dispatch_gate_park_then_wake_follows_the_prs_current_head() -> None:
+    """GitHub step -> dispatch gate -> wait -> adapter registers -> fixing push -> rule 2."""
+    old, new = "1" * 40, "2" * 40
+    clock = Clock(NOW)
+    task = ready("T-1", "Redo the migration after #12 is green")
+    with serve() as gh:
+        connector = GitHubConnector(GitHubClient(gh.url, TOKEN, clock=clock), [REPO])
+        step = ConditionSync(connector, load_block_conditions(READY_PATTERNS, [REPO]))
+        gh.pull(REPO, 12, sha=old)
+        gh.ci(REPO, old, statuses=[{"state": "failure", "updated_at": "2026-03-02T11:50:00Z"}])
+        red = step(Snapshot(now=NOW, tasks=(task,)))
+        [wait] = DispatchGate().evaluate(red)
+        assert wait.kind is ActionKind.WAIT
+        [registered] = wait_conditions(wait)
+        assert "sha" not in registered.params  # follows the head, not the red commit
+        parked_at = NOW + timedelta(minutes=1)
+        registered = replace(registered, registered_at=parked_at)
+        waiting = replace(task, status=Status.WAITING, status_since=parked_at)
+        # The fix is pushed and goes green.
+        gh.pull(REPO, 12, sha=new)
+        gh.ci(REPO, new, statuses=[{"state": "success", "updated_at": "2026-03-02T12:05:00Z"}])
+        clock.advance(minutes=10)
+        green = step(Snapshot(now=clock.now, tasks=(waiting,), conditions=(registered,)))
+    [checked] = green.conditions
+    assert checked.satisfied is True and checked.params["sha"] == new
+    [wake] = WaitCondition().evaluate(green)
+    assert wake.kind is ActionKind.WAKE and wake.task_id == "T-1"
+    assert DispatchGate().evaluate(green) == []

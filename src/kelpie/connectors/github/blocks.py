@@ -31,7 +31,9 @@ title of a ready task instead ("Redo the migration after #123"): the PR it names
 condition linked by ``task_id`` alone (id ``ready:<task>:<kind>:<ref>``, registered when the
 task became ready), under the same rules: only for a confirmed PR, bound to its repo,
 number and head. The ``dispatch_gate`` rule parks a ready task whose condition is unmet.
-Outcomes are counted for blocks only.
+Outcomes are counted for blocks only: a ready task whose PR cannot be resolved simply has
+no prerequisite. A condition id the snapshot already holds (the adapter registered it when
+the task was parked) is not attached again.
 
 The same step evaluates conditions the platform already registered (``pr_merged`` and
 ``ci_status`` with ``repo``/``pr`` params for a configured repository).
@@ -140,12 +142,15 @@ class ConditionSync:
 
     def __call__(self, snapshot: Snapshot) -> Snapshot:
         kinds = self.connector.kinds
-        blocked = sum(1 for t in snapshot.tasks if t.status in {Status.BLOCKED, Status.READY})
+        gated = {Status.BLOCKED}
+        if any("ready_task" in p.applies_to for p in self.patterns):
+            gated.add(Status.READY)
+        texts = sum(1 for t in snapshot.tasks if t.status in gated)
         # Up to three lookups per PR (pull, status, check runs); none evicted within a tick.
         self.connector.client.begin_tick(
             self.max_requests,
             self.tick_budget,
-            min_cache_entries=3 * (blocked + len(snapshot.conditions)),
+            min_cache_entries=3 * (texts + len(snapshot.conditions)),
         )
         conditions = list(snapshot.conditions)
         tasks = list(snapshot.tasks)

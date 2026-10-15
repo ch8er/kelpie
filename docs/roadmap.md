@@ -599,11 +599,11 @@ parent task not done) wastes a whole session if an agent picks it up. Field case
 was about to redo a migration while the PR it depended on was still red.
 
 **Acceptance criteria**
-- [ ] Prerequisites come from task links and dependencies the adapter exposes, and from PR references matched by config patterns in the task text
-- [ ] A ready task with an unmet prerequisite → moved to waiting with the matching condition (through the adapter, act mode only); `wait_condition` and `stale_blocks` release it when the condition is met
-- [ ] Conditions use the same binding as block conditions (repo, PR, head SHA; `pr_merged` when the task needs the PR landed)
-- [ ] Tasks whose prerequisites cannot be resolved are left alone
-- [ ] Fixtures: new `field-04-dispatch-red-pr.yaml` (ready task referencing a red PR; a ready task with a merged PR as the distractor)
+- [x] Prerequisites come from task links and dependencies the adapter exposes (parents only with `gate_on_parents`), and from PR references matched by config patterns in the task text (`[[block_conditions]]` with `applies_to = ["ready_task"]`)
+- [x] A ready task with an unmet prerequisite → moved to waiting with the matching condition (through the adapter, act mode only); `wait_condition` wakes it when the condition is met (the task is waiting, not blocked, so `stale_blocks` has no part)
+- [x] Conditions use the same binding as block conditions (repo, PR, the PR's current head; `pr_merged` when the task needs the PR landed)
+- [x] Tasks whose prerequisites cannot be resolved are left alone
+- [x] Fixtures: new `field-04-dispatch-red-pr.yaml` (ready task referencing a red PR; a ready task with a merged PR as the distractor)
 
 ### traces: huge tool outputs — find, rank, recommend filters
 labels: P0, week-3, area:traces

@@ -1,3 +1,4 @@
+import itertools
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -8,12 +9,14 @@ from kelpie.core.model import (
     Condition,
     ConditionKind,
     Dependency,
+    Owner,
     Session,
     Snapshot,
     Status,
     Task,
 )
 from kelpie.rules import REGISTRY
+from kelpie.rules.bottlenecks import Bottlenecks
 from kelpie.rules.dispatch_gate import DispatchGate, build
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
@@ -101,24 +104,114 @@ def test_every_condition_kind_is_described(
         assert kept["status"] == "review"  # an input for task_status
 
 
+PARENTS = DispatchGate(gate_on_parents=True)
+
+
 def test_open_parent_gets_a_task_status_condition() -> None:
-    deps = (
-        Dependency("T", "P"),
-        Dependency("T", "D"),
-        Dependency("T", "GONE"),
-        Dependency("T", "T"),
-    )
+    deps = (Dependency("T", "P"), Dependency("T", "D"), Dependency("T", "GONE"))
     tasks = (task("T"), task("P", Status.IN_PROGRESS), task("D", Status.DONE))
-    [action] = run(*tasks, deps=deps)
+    [action] = run(*tasks, deps=deps, rule=PARENTS)
     assert action.params["open_parents"] == ["P"]
     assert action.params["conditions"] == [
         {
             "id": "dispatch_gate:T:P",
             "kind": "task_status",
-            "params": {"task": "P", "status": "done", "source": "dispatch_gate"},
+            "params": {
+                "task": "P",
+                "status": "done",
+                "source": "dispatch_gate",
+                "terminal_ok": True,
+            },
         }
     ]
     assert "parent P is in_progress" in action.reason
+
+
+def test_parents_do_not_gate_by_default() -> None:
+    tasks = (task("T"), task("P", Status.IN_PROGRESS))
+    assert run(*tasks, deps=(Dependency("T", "P"),)) == []
+
+
+def test_parents_on_a_cycle_never_gate() -> None:
+    deps = (Dependency("A", "B"), Dependency("B", "A"), Dependency("A", "A"))
+    assert run(task("A"), task("B"), deps=deps, rule=PARENTS) == []
+
+
+def test_default_keeps_rule_6_chain_alert_visible() -> None:
+    ids = [f"C{i}" for i in range(5)]
+    tasks = (task(ids[0], Status.IN_PROGRESS), *(task(i) for i in ids[1:]))
+    deps = tuple(Dependency(b, a) for a, b in itertools.pairwise(ids))
+    snapshot = Snapshot(
+        NOW,
+        tasks=tasks,
+        owners=tuple(Owner(f"d{i}", "developer") for i in range(4)),
+        dependencies=deps,
+    )
+    assert DispatchGate().evaluate(snapshot) == []  # nothing parked: the chain stays visible
+    assert Bottlenecks().evaluate(snapshot)
+
+
+def parked(*parents: str, since: timedelta = 20 * M) -> tuple[Task, tuple[Condition, ...]]:
+    t = task("T", Status.WAITING, since=since)
+    conditions = tuple(
+        Condition(
+            f"dispatch_gate:T:{p}",
+            ConditionKind.TASK_STATUS,
+            "T",
+            {"task": p, "status": "done", "source": "dispatch_gate", "terminal_ok": True},
+            registered_at=NOW - since,
+        )
+        for p in parents
+    )
+    return t, conditions
+
+
+@pytest.mark.parametrize(
+    ("statuses", "linked", "wakes"),
+    [
+        ((Status.IN_PROGRESS,), True, False),  # still gating
+        ((Status.DONE,), True, False),  # rule 2's
+        ((Status.CANCELLED,), True, True),
+        ((Status.IN_PROGRESS,), False, True),  # the dependency was removed
+        ((Status.DONE, Status.FAILED), True, True),
+    ],
+)
+def test_release_when_no_parent_still_gates(
+    statuses: tuple[Status, ...], linked: bool, wakes: bool
+) -> None:
+    names = tuple(f"P{i}" for i in range(len(statuses)))
+    t, conditions = parked(*names)
+    others = tuple(task(n, s) for n, s in zip(names, statuses, strict=True))
+    deps = tuple(Dependency("T", n) for n in names) if linked else ()
+    woken = [
+        a for a in run(t, *others, conditions=conditions, deps=deps) if a.kind is ActionKind.WAKE
+    ]
+    assert bool(woken) is wakes
+
+
+def test_release_when_the_parent_left_the_board() -> None:
+    t, conditions = parked("P")
+    [wake] = run(t, conditions=conditions, deps=(Dependency("T", "P"),))
+    assert wake.kind is ActionKind.WAKE and wake.params["waited_for"] == ["P"]
+
+
+def test_no_release_for_waits_that_are_not_only_parent_waits() -> None:
+    t, conditions = parked("P")
+    other = cond("C-pr", task_id="T", registered=20 * M)
+    assert run(t, conditions=(*conditions, other)) == []
+
+
+def test_derived_pr_conditions_drop_the_head_sha_platform_ones_keep_it() -> None:
+    derived = cond("C", ConditionKind.CI_STATUS, source="task_text", sha="old", ci_state="failure")
+    [action] = run(task("T"), conditions=(derived,))
+    assert action.params["conditions"][0]["params"] == {
+        "repo": "example/repo",
+        "pr": 7,
+        "source": "task_text",
+    }
+    pinned = cond("C", ConditionKind.CI_STATUS, sha="abc")  # registered by the platform
+    [kept] = run(task("T"), conditions=(pinned,))
+    assert kept.params["conditions"][0]["params"]["sha"] == "abc"
 
 
 @pytest.mark.parametrize(
@@ -170,3 +263,10 @@ def test_max_condition_age_is_configurable() -> None:
 def test_build_rejects_bad_config(config: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         build(config)
+
+
+def test_build_parses_gate_on_parents() -> None:
+    assert build({"gate_on_parents": True}).gate_on_parents is True
+    assert build({}).gate_on_parents is False
+    with pytest.raises(ValueError):
+        build({"gate_on_parents": "yes"})

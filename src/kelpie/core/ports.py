@@ -83,7 +83,9 @@ class SupportsWait(Protocol):
     The adapter registers ``conditions`` for the task (they show up in later snapshots with
     ``task_id`` set and ``registered_at`` no earlier than the wait) and reports the task as
     waiting, so rule 2 (``wait_condition``) wakes it when every condition holds. A task an
-    agent is running is stopped first. Used by the dispatch gate and by rule 12's
+    agent is running is stopped first. A condition whose id the adapter already holds is
+    registered again under that id with the new params (the dispatch gate passes on
+    conditions the platform registered). Used by the dispatch gate and by rule 12's
     serialization of conflicting tasks.
     """
 

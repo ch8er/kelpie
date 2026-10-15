@@ -7,8 +7,15 @@ still red. The gate parks such a task in ``waiting`` on its prerequisites instea
 
 Prerequisites of a ready task nobody is working on yet (no live session):
 
-- **Parent tasks** (``snapshot.dependencies``) that are not finished: a ``task_status``
-  condition per parent, waiting for ``done``.
+- **Parent tasks** (``snapshot.dependencies``) that are not finished, only with
+  ``gate_on_parents`` (default off). Dispatchers normally do not hand out a task with open
+  parents, and rule 6 treats such a task as not runnable yet; parking it would only freeze
+  the chain behind it and hide rule 6's critical-path alert. Turn it on for a dispatcher
+  that ignores dependencies. Each open parent gets a ``task_status`` condition waiting for
+  ``done``; a parent on a dependency cycle with the task never gates it. When every parent
+  ended without all being done, left the board, or is no longer a parent, this rule wakes
+  the task itself (the conditions carry ``terminal_ok``, so rule 2 does not call that a
+  dead end).
 - **Conditions linked to the task** by ``task_id`` for its current status (as
   ``linked_conditions`` reads them): those the platform registered, and those the GitHub
   step attaches from PR references in the task's title (``[[block_conditions]]`` with
@@ -18,7 +25,11 @@ Prerequisites of a ready task nobody is working on yet (no live session):
 
 A task whose prerequisites cannot be resolved is left alone: a condition that is unknown
 (``satisfied`` None), stale, or can never be met (``params.terminal``, rules 2 and 4 alert
-on those) never gates it, and neither does a parent that is not on the board. The ``wait``
+on those) never gates it, and neither does a parent that is not on the board. PR conditions
+derived from text are passed on without the head ``sha`` they were checked at, so the
+condition follows the PR's current head and a fixing push wakes the task. Once woken, a
+task is not gated again on the same PR reference (its condition id is kept by the adapter):
+a human who moves a gated task back to ready overrides the gate. The ``wait``
 action carries every unmet prerequisite and is sent once per stay in ready; it needs an
 adapter with ``SupportsWait``, and the engine tells a human otherwise.
 """
@@ -43,28 +54,71 @@ _SHOWN = 5
 @dataclass(frozen=True, slots=True)
 class DispatchGate:
     max_condition_age: timedelta = DEFAULT_MAX_CONDITION_AGE
+    gate_on_parents: bool = False  # for dispatchers that hand out tasks with open parents
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         by_id = {t.id: t for t in snapshot.tasks}
-        parents: dict[str, list[str]] = {}
+        parents: dict[str, set[str]] = {}
         for d in snapshot.dependencies:
-            parents.setdefault(d.task_id, []).append(d.depends_on)
+            parents.setdefault(d.task_id, set()).add(d.depends_on)
         live = {s.task_id for s in snapshot.sessions if is_live(s, snapshot.now)}
         actions: list[Action] = []
         for task in snapshot.tasks:
             if task.status is not Status.READY or task.id in live:
                 continue
-            open_parents = sorted(
-                {
+            open_parents = (
+                sorted(
                     p
                     for p in parents.get(task.id, ())
-                    if p in by_id and p != task.id and not by_id[p].status.is_terminal
-                }
+                    if p in by_id
+                    and not by_id[p].status.is_terminal
+                    and task.id not in _ancestors(p, parents)  # a cycle: never parks
+                )
+                if self.gate_on_parents
+                else []
             )
             unmet = [c for c in linked_conditions(task, snapshot)[0] if self._unmet(c, snapshot)]
             if open_parents or unmet:
                 actions.append(self._park(task, open_parents, unmet, by_id))
+        actions.extend(self._release(snapshot, by_id, parents))
+        return actions
+
+    def _release(
+        self, snapshot: Snapshot, by_id: dict[str, Task], parents: dict[str, set[str]]
+    ) -> list[Action]:
+        """Wake a task parked only on parents once none of them still gates it (ended,
+        gone from the board, or no longer a parent) without all being done; rule 2 wakes
+        it when all are done."""
+        actions: list[Action] = []
+        for task in snapshot.tasks:
+            if task.status is not Status.WAITING:
+                continue
+            conditions, _ = linked_conditions(task, snapshot)
+            prefix = f"{NAME}:{task.id}:"
+            if not conditions or not all(c.id.startswith(prefix) for c in conditions):
+                continue
+            targets = [str(c.params.get("task")) for c in conditions]
+            still = [
+                t
+                for t in targets
+                if t in by_id and not by_id[t].status.is_terminal and t in parents.get(task.id, ())
+            ]
+            if still:
+                continue
+            if all(t in by_id and by_id[t].status is Status.DONE for t in targets):
+                continue  # rule 2's: every condition holds
+            actions.append(
+                Action(
+                    ActionKind.WAKE,
+                    NAME,
+                    f"Task {task.id} no longer waits on a parent: {_names(targets)} ended, left "
+                    "the board or are no longer its parents. Waking it.",
+                    task_id=task.id,
+                    key=f"{NAME}:release:{task.id}:{task.status_since.isoformat()}",
+                    params={"waited_for": targets},
+                )
+            )
         return actions
 
     def _unmet(self, condition: Condition, snapshot: Snapshot) -> bool:
@@ -90,7 +144,12 @@ class DispatchGate:
             {
                 "id": f"{NAME}:{task.id}:{p}",
                 "kind": ConditionKind.TASK_STATUS.value,
-                "params": {"task": p, "status": Status.DONE.value, "source": NAME},
+                "params": {
+                    "task": p,
+                    "status": Status.DONE.value,
+                    "source": NAME,
+                    "terminal_ok": True,  # this rule releases the task if p ends otherwise
+                },
             }
             for p in open_parents
         ]
@@ -117,12 +176,35 @@ class DispatchGate:
 # Keys connectors write into ``Condition.params`` as results of a check; a condition the
 # adapter registers again starts without them. ``sha`` stays: it binds CI to the PR's head.
 _RESULTS = frozenset({"error", "terminal", "observed_status", "pr_state", "ci_state"})
+# Conditions the GitHub step derives from text are rebuilt every tick for the PR's current
+# head; re-registered with ``sha`` they would stay pinned to the commit seen when parked,
+# and a fixing push would never wake the task.
+_DERIVED = frozenset({"task_text", "block_reason"})
 _HUMAN_RESULTS = frozenset({"status", "owner", "task_left_board"})  # human_tasks connector
 
 
 def _clean(c: Condition) -> dict[str, Any]:
     drop = _RESULTS | (_HUMAN_RESULTS if c.kind is ConditionKind.HUMAN_TASK else frozenset())
+    if c.params.get("source") in _DERIVED:
+        drop |= {"sha"}
     return {k: v for k, v in c.params.items() if k not in drop}
+
+
+def _ancestors(task_id: str, parents: dict[str, set[str]]) -> set[str]:
+    """Every task ``task_id`` waits for, transitively."""
+    seen: set[str] = set()
+    todo = [task_id]
+    while todo:
+        for p in parents.get(todo.pop(), ()):
+            if p not in seen:
+                seen.add(p)
+                todo.append(p)
+    return seen
+
+
+def _names(names: Sequence[str]) -> str:
+    more = len(names) - _SHOWN
+    return ", ".join(names[:_SHOWN]) + (f" +{more} more" if more > 0 else "")
 
 
 def _describe(c: Condition) -> str:
@@ -152,6 +234,11 @@ def build(config: dict[str, Any]) -> DispatchGate:
         if age <= timedelta(0):
             raise ValueError("max_condition_age must be positive")
         kwargs["max_condition_age"] = age
+    if "gate_on_parents" in config:
+        value = config.pop("gate_on_parents")
+        if not isinstance(value, bool):
+            raise ValueError("gate_on_parents must be true or false")
+        kwargs["gate_on_parents"] = value
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return DispatchGate(**kwargs)
