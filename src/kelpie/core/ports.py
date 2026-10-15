@@ -32,9 +32,9 @@ class PlatformAdapter(Protocol):
 
 @runtime_checkable
 class SupportsReassign(Protocol):
-    """Optional adapter capability. ``owner_id=None`` returns the task to the pool."""
+    """Optional adapter capability: hand a task to another owner."""
 
-    def reassign(self, task_id: str, owner_id: str | None, reason: str) -> None: ...
+    def reassign(self, task_id: str, owner_id: str, reason: str) -> None: ...
 
 
 @runtime_checkable

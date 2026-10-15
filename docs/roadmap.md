@@ -36,7 +36,7 @@ as "new" below do not exist yet and are part of the issue.
 **Rule names** (`@register` names, also used in fixtures): `exit_contract` (rule 1),
 `wait_condition` (2), `orphan_status` (3), `stale_blocks` (4), `ping_pong` (5),
 `bottlenecks` (6), `resources` (7), `ci_economy` (9), `return_causes` (incident 7),
-`checkpoints` (foundation). Rule 8 is the daily report in `report/`.
+`human_tasks` (incident 13), `checkpoints` (foundation). Rule 8 is the daily report in `report/`.
 
 ## Week 1
 
@@ -313,7 +313,7 @@ alert with a rebalancing suggestion.
 - [ ] Overloaded role with idle roles elsewhere → `alert` with a rebalancing suggestion
 - [ ] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`
 
-### rules: bottlenecks — humans in the task graph with cost of delay (rule 6, incident 13)
+### rules: human_tasks — humans in the task graph with cost of delay (incident 13)
 labels: P0, week-2, area:rules
 Human tasks are part of the task graph. When a human task blocks agent work, escalate to
 the human owner with the cost of delay (blocked agent tasks and idle agent hours so far).
@@ -361,7 +361,7 @@ how long the quota will last. The rule stays CI-agnostic; CI specifics live in a
 - [ ] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
 
 ### rules: ci_economy — propose a better CI configuration (rule 9, incident 5)
-labels: P1, week-2, area:rules
+labels: P0, week-2, area:rules
 Turn the wasted-build statistics into a concrete fix: a proposed pull request with a
 better CI configuration (skip drafts, path filters for docs-only changes, cancel in
 progress on new pushes, skip already verified commits).

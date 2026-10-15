@@ -74,10 +74,12 @@ class Engine:
                 self.adapter.comment(tid, action.reason)
             case ActionKind.WIP_COMMIT:
                 self.adapter.wip_commit(tid, action.reason)
-            case ActionKind.REASSIGN if isinstance(self.adapter, SupportsReassign):
-                self.adapter.reassign(tid, action.params.get("owner_id"), action.reason)
+            case ActionKind.REASSIGN if action.params.get("owner_id") and isinstance(
+                self.adapter, SupportsReassign
+            ):
+                self.adapter.reassign(tid, action.params["owner_id"], action.reason)
             case ActionKind.REASSIGN:
-                # Adapter cannot reassign: ask a human instead.
+                # No target owner or adapter cannot reassign: ask a human instead.
                 self._alert(action)
             case ActionKind.ALERT | ActionKind.ESCALATE:
                 self._alert(action)

@@ -14,7 +14,8 @@ and used only for root-cause analysis in the daily report. Kelpie runs on top of
 platforms, not instead of them; its value is logic over the task graph and automatic
 repair, not a watchdog timer.
 
-Priorities in the plan and roadmap: **P0** now · **P1** next · **P2** later, on signal.
+Priorities in the plan and roadmap: **P0** now · **P1** next · **P2** later, on signal ·
+**No** out of scope.
 
 ## Architecture: a core and three kinds of adapters
 
@@ -57,11 +58,14 @@ deploy/         Prometheus and Grafana config for docker-compose.yml
 | 3 | Orphan statuses (`orphan_status`) [11] | ownerless status > N min → alert / reassign |
 | 4 | Stale blocks (`stale_blocks`) [1, 8] | cause fixed in the outside world → unblock |
 | 5 | Ping-pong (`ping_pong`) [12] | > K review rounds → escalate to architect or human |
-| 6 | Bottlenecks (`bottlenecks`) [9, 10, 13] | idle time per role, humans in the graph → rebalancing suggestion |
+| 6 | Bottlenecks (`bottlenecks`) [9, 10] | idle time per role, critical path → alert with a rebalancing suggestion |
 | 7 | Resources (`resources`) [3, 4, 6] | disk, memory, processes, provider quotas, auth expiry → alert before agents stop |
 | 8 | Daily report (`report/`) | cost of chaos + before/after verification of every fix |
 | 9 | CI economy (`ci_economy`) [5] | wasted builds (drafts/WIP, superseded, docs-only, already verified commit) → cancel superseded, forecast quota, propose a better CI config PR |
-| – | Return causes (`return_causes`) [7] | root causes of returns from traces → recommendation |
+
+Also derived from incidents, not numbered in the plan (priority set in the roadmap):
+`return_causes` [7] — root causes of returns from traces → recommendation (P1);
+`human_tasks` [13] — humans in the task graph, with cost of delay (P0).
 
 Foundation (P0, no LLM): **traces** (OTLP, GenAI semconv, local SQLite/DuckDB, optional
 Langfuse/Phoenix/Datadog export; adapters write spans from hooks if a platform emits none)

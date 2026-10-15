@@ -40,7 +40,7 @@ The rules in Kelpie come from 13 real incidents on one farm:
 | 10 | Agent waited for an external event inside its session; the dispatcher declared it dead | Wait for condition + "waiting" heartbeat; bottlenecks |
 | 11 | Task stuck in a status with no owner, 7 tasks blocked | Orphan statuses |
 | 12 | 9 review rounds on a single task | Ping-pong → escalation |
-| 13 | Human tasks blocked agents | Bottlenecks: humans in the task graph, with cost of delay |
+| 13 | Human tasks blocked agents | Humans in the task graph, with cost of delay |
 
 Kelpie must also measure the effect of a fix by itself. Example from the farm: after a
 manual fix, review time dropped from 48 to 27 minutes, and failures from 9 of 29 to 1 of 11.
@@ -142,14 +142,16 @@ agents run.
 | 3 | Orphan statuses | Task sits in a status with no owner for more than N min → alert and reassign to an owner of its role | 11 |
 | 4 | Stale blocks | The block's cause is resolved in the outside world → unblock | 1, 8 |
 | 5 | Ping-pong | After K review rounds → escalate to the architect or a human | 12 |
-| 6 | Bottlenecks | Role utilization and critical path → alert with a rebalancing suggestion; humans in the task graph, escalated with the cost of delay | 9, 10, 13 |
+| 6 | Bottlenecks | Role utilization and critical path → alert with a rebalancing suggestion | 9, 10 |
 | 7 | Resources | Disk, memory, processes, heavy-task concurrency, LLM provider quotas and auth health → alert before the agents stop | 3, 4, 6 |
 | 8 | Daily report | "Cost of chaos" plus before/after verification of every fix | all |
 | 9 | CI economy | Finds wasted builds (drafts/WIP, superseded, docs-only, already verified commit), cancels superseded ones, forecasts quota burn, proposes a better CI config PR | 5 |
 | – | Return causes (P1) | Root-cause analysis of task returns from traces → recommendation | 7 |
+| – | Human tasks | Humans in the task graph: escalate to the human owner with the cost of delay | 13 |
 
 Rule names in code: `exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`,
-`ping_pong`, `bottlenecks`, `resources`, `ci_economy`, `return_causes`, `checkpoints`.
+`ping_pong`, `bottlenecks`, `resources`, `ci_economy`, `return_causes`, `human_tasks`,
+`checkpoints`.
 
 Foundation work alongside the rules (no LLM): **traces** (OpenTelemetry GenAI spans over
 OTLP, stored locally, optionally forwarded to Langfuse, Phoenix or Datadog; adapters write

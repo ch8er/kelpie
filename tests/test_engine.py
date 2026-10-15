@@ -47,7 +47,7 @@ class FakeAdapter:
 
 @dataclass
 class ReassigningAdapter(FakeAdapter):
-    def reassign(self, task_id: str, owner_id: str | None, reason: str) -> None:
+    def reassign(self, task_id: str, owner_id: str, reason: str) -> None:
         self._record(f"reassign:{owner_id}", task_id)
 
 
@@ -120,9 +120,14 @@ def test_reassign_uses_capability_when_available() -> None:
     assert adapter.calls == [("reassign:agent-2", "T-1")]
 
 
-def test_reassign_falls_back_to_alert() -> None:
-    adapter, alerter = FakeAdapter(), FakeAlerter()
-    run([act(ActionKind.REASSIGN)], adapter, alerter)
+@pytest.mark.parametrize(
+    ("adapter", "params"),
+    [(FakeAdapter(), {"owner_id": "agent-2"}), (ReassigningAdapter(), {})],
+    ids=["adapter-cannot-reassign", "no-target-owner"],
+)
+def test_reassign_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, str]) -> None:
+    alerter = FakeAlerter()
+    run([act(ActionKind.REASSIGN, **params)], adapter, alerter)
     assert adapter.calls == []
     assert alerter.sent == [("[emit] reassign T-1", Severity.INFO)]
 

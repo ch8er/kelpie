@@ -80,7 +80,7 @@ Fixture conventions:
 | 10 | `10-reviewer-polls-ci.yaml` | `wait_condition` | `comment` T-1001 (register a condition and exit); no `requeue` |
 | 11 | `11-orphan-accepted-task.yaml` | `orphan_status` | `alert` critical `{dependents: 7}`, `reassign` T-1101 |
 | 12 | `12-review-ping-pong.yaml` | `ping_pong` | `escalate` T-1201 (9 rounds > 3) |
-| 13 | `13-human-tasks-block-agents.yaml` | `bottlenecks` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5`; T-1308 (nothing blocked behind it) not escalated |
+| 13 | `13-human-tasks-block-agents.yaml` | `human_tasks` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5`; T-1308 (nothing blocked behind it) not escalated |
 
 ## Adding a fixture
 

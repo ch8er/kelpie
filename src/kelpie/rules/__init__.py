@@ -50,10 +50,12 @@ PLANNED: tuple[PlannedRule, ...] = (
     ),
     PlannedRule("stale_blocks", "4. Block cause resolved externally -> unblock", (1, 8)),
     PlannedRule("ping_pong", "5. More than K review rounds -> escalate", (12,)),
-    PlannedRule("bottlenecks", "6. Idle time per role, humans in the task graph", (9, 10, 13)),
+    PlannedRule("bottlenecks", "6. Idle time per role, rebalancing suggestion", (9, 10)),
     PlannedRule("resources", "7. Disk, memory, processes, provider quotas, auth expiry", (3, 4, 6)),
     PlannedRule("ci_economy", "9. Wasted CI builds, superseded runs, quota forecast", (5,)),
+    # Derived from incidents but not numbered in the plan.
     PlannedRule("return_causes", "Root causes of task returns -> recommendation", (7,)),
+    PlannedRule("human_tasks", "Humans in the task graph, with cost of delay", (13,)),
     PlannedRule("checkpoints", "Commit reminder, WIP commit on exit, resume from commit", ()),
 )
 
