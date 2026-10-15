@@ -91,11 +91,18 @@ def test_the_key_does_not_change_with_the_reading() -> None:
     assert "(0.50 of 100)" in b.reason
 
 
-def test_exhausted_single_provider_blocks_every_active_agent_task() -> None:
+def test_exhausted_without_a_mapping_is_a_warning_without_tasks() -> None:
     a = one(run(providers=(provider(remaining=0, limit=100, resets_at=LATER),)))
+    assert a.severity is Severity.WARNING
+    assert a.params["blocked_tasks"] == [] and a.params["exhausted"] is True
+    assert "no quota left until 2026-03-02T15:00:00+00:00 (in 3h)" in a.reason
+
+
+def test_exhausted_mapped_provider_blocks_active_agent_tasks() -> None:
+    rule = build({"provider_roles": {"main": ["coder", "writer", "reviewer"]}})
+    a = one(run(rule, providers=(provider(remaining=0, limit=100, resets_at=LATER),)))
     assert a.severity is Severity.CRITICAL
     assert a.params["blocked_tasks"] == ["T-1", "T-2", "T-6"]  # not human, done or blocked
-    assert "no quota left until 2026-03-02T15:00:00+00:00 (in 3h)" in a.reason
     assert "3 agent task(s)" in a.reason
 
 
@@ -180,7 +187,8 @@ def test_repeated_limit_hits_are_one_warning_with_a_count() -> None:
     rule = build({"rate_limit_events_warning": 3})
     a = one(run(rule, limit_hits=hits(3), providers=(provider(remaining=80, limit=100),)))
     assert a.severity is Severity.WARNING
-    assert "main hit its rate limit 3 times in the last 24h" in a.reason
+    assert "main was seen at its limit 3 time(s) in the last 24h" in a.reason
+    assert "hit its rate limit" not in a.reason
     assert a.params["limit_hits"] == 3
     assert run(rule, limit_hits=hits(2)) == []
 
@@ -197,6 +205,7 @@ def test_hits_add_to_resource_events_and_can_be_switched_off() -> None:
     quota = Resource("main", ResourceKind.LLM_QUOTA, used=1, limit=100, events=19, at=NOW)
     a = one(run(resources=(quota,), limit_hits=hits(1)))
     assert a.params["limit_hits"] == 20
+    assert "main hit its rate limit 19 times and was seen at its limit 1 time(s)" in a.reason
     assert run(build({"rate_limit_events_warning": False}), resources=(quota,)) == []
 
 
@@ -205,12 +214,13 @@ def test_hits_add_to_resource_events_and_can_be_switched_off() -> None:
 
 def test_a_rejected_key_is_critical_with_the_affected_tasks() -> None:
     status = provider(ok=False, auth_ok=False, error_kind="auth")
-    a = one(run(providers=(status,)))
+    assert one(run(providers=(status,))).params["blocked_tasks"] == []  # no mapping
+    a = one(run(build({"provider_owners": {"main": ["agent-1", "agent-2"]}}), providers=(status,)))
     assert a.severity is Severity.CRITICAL
     assert "rejected its key" in a.reason
     assert a.state == a.key == "resources:auth:main"
-    assert a.params["blocked_tasks"] == ["T-1", "T-2", "T-6"]
-    assert "Affected: T-1, T-2, T-6." in a.reason
+    assert a.params["blocked_tasks"] == ["T-1", "T-6"]
+    assert "Affected: T-1, T-6." in a.reason
     assert run(providers=(provider(),)) == []  # accepted again: the state ends
 
 

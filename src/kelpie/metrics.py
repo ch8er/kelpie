@@ -465,7 +465,7 @@ class Metrics:
         metric(
             "kelpie_llm_provider_limit_hits_total",
             "counter",
-            "Provider limits seen reached by the probe (once per limit period).",
+            "Times a probe found an LLM provider at its limit (once per limit period).",
             [
                 f"kelpie_llm_provider_limit_hits_total{_labels(provider=n)} "
                 f"{self.provider_hits.get(n, 0)}"

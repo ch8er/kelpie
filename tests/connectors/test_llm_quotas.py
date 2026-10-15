@@ -198,6 +198,7 @@ def test_missing_and_unusable_values_are_left_unknown() -> None:
         ("1e400", None),
         ("99999999999999999999", None),  # too far ahead
         ("2999-01-01T00:00:00Z", None),
+        ("1111-11-11T11:11:11Z", None),  # too far back
         (True, None),
     ],
 )
@@ -318,6 +319,7 @@ def test_warns_once_per_cause_and_again_after_recovery(caplog: pytest.LogCapture
     caplog.set_level(logging.INFO)
     with fake_provider() as server:
         source = LlmQuotaSource([config(server.url, interval=timedelta(minutes=1))])
+        server.headers = {"RateLimit-Remaining": "5"}
         server.status = 500
         for i in range(3):
             source.read(NOW + timedelta(minutes=i))
@@ -343,7 +345,8 @@ def test_one_failing_provider_does_not_hide_the_others() -> None:
                 config(good.url, name="up"),
             ]
         )
-        statuses, _ = source.read(NOW)
+        source.read(NOW)  # the second provider's first probe is staggered
+        statuses, _ = source.read(NOW + timedelta(minutes=3))
     assert [(s.name, s.ok, s.error_kind) for s in statuses] == [
         ("down", False, "connection"),
         ("up", True, None),
@@ -426,7 +429,7 @@ def test_a_key_with_a_line_break_stops_the_build() -> None:
         }
     )
     assert settings is not None
-    with pytest.raises(ValueError, match=r"\$KEY_VAR contains a line break") as caught:
+    with pytest.raises(ValueError, match=r"\$KEY_VAR must be printable ASCII") as caught:
         settings.build(environ={"KEY_VAR": KEY + "\nX-Injected: 1"})
     assert KEY not in str(caught.value)
     with pytest.raises(ValueError, match=r"\$KEY_VAR is not set"):
@@ -460,3 +463,106 @@ def test_oversized_responses_are_refused(monkeypatch: pytest.MonkeyPatch) -> Non
         server.headers = {"RateLimit-Remaining": "3"}
         status, _, _ = probe(server)
     assert status.ok and status.remaining == 3
+
+
+# --- tick budget, staggering, state across failures ----------------------------------
+
+
+class FakeGet:
+    """Stands in for net.get: answers from ``headers`` and uses up its whole timeout."""
+
+    def __init__(self) -> None:
+        self.clock = 0.0
+        self.calls: list[tuple[str, float, dict[str, Any]]] = []
+        self.status = 200
+        self.headers: dict[str, str] = {"ratelimit-remaining": "5"}
+
+    def monotonic(self) -> float:
+        return self.clock
+
+    def __call__(
+        self, url: str, path: str, headers: Any, timeout: float, *a: Any, **kw: Any
+    ) -> net.Response:
+        self.calls.append((url, timeout, kw))
+        self.clock += timeout
+        return net.Response(self.status, dict(self.headers))
+
+    def urls(self) -> list[str]:
+        urls = [u.removeprefix("https://").removesuffix(".example") for u, _, _ in self.calls]
+        self.calls.clear()
+        return urls
+
+
+def fake_source(fake: FakeGet, *names: str, budget: float, interval: float = 3) -> LlmQuotaSource:
+    providers = [
+        config(f"https://{n}.example", name=n, timeout=4.0, interval=timedelta(minutes=interval))
+        for n in names
+    ]
+    return LlmQuotaSource(providers, http_get=fake, tick_budget=budget, monotonic=fake.monotonic)
+
+
+def test_probes_share_a_tick_budget_and_deferred_ones_go_first(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeGet()
+    source = fake_source(fake, "a", "b", "c", budget=8.2)
+    # First probes are staggered over the 3-minute interval: a now, b at +1m, c at +2m.
+    source.read(NOW)
+    assert fake.urls() == ["a"]
+    # At +5m all are due (b since +1m, c since +2m, a since +3m): two probes fit.
+    source.read(NOW + timedelta(minutes=5))
+    assert fake.urls() == ["b", "c"]
+    assert "1 provider(s) deferred" in caplog.text
+    # a, deferred, goes first; then b (due at +8m); c (due at +8m) is deferred now.
+    statuses, _ = source.read(NOW + timedelta(minutes=10))
+    assert fake.urls() == ["a", "b"]
+    assert [s.name for s in statuses] == ["a", "b", "c"]  # c keeps its last status
+    source.read(NOW + timedelta(minutes=11))
+    assert fake.urls() == ["c"]
+
+
+def test_each_probe_gets_at_most_the_budget_left_and_may_use_a_proxy() -> None:
+    fake = FakeGet()
+    source = fake_source(fake, "a", "b", budget=6.0, interval=1)
+    source.read(NOW)
+    source.read(NOW + timedelta(minutes=2))
+    assert [t for _, t, _ in fake.calls] == [4.0, 4.0, 2.0]
+    assert all(kw["proxy"] is True for _, _, kw in fake.calls)
+
+
+def test_a_failed_probe_does_not_end_a_limit_period() -> None:
+    fake = FakeGet()
+    fake.headers = {"ratelimit-remaining": "0"}
+    source = fake_source(fake, "a", budget=10, interval=1)
+    source.read(NOW)
+    fake.status = 500
+    source.read(NOW + timedelta(minutes=1))
+    fake.status = 200
+    _, hits = source.read(NOW + timedelta(minutes=2))
+    assert len(hits) == 1
+
+
+def test_an_answer_without_any_configured_field_is_logged_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeGet()
+    fake.headers = {}
+    source = fake_source(fake, "a", budget=10, interval=1)
+    for i in range(3):
+        (status,), _ = source.read(NOW + timedelta(minutes=i))
+    assert status.ok
+    assert caplog.text.count("without any of the configured fields") == 1
+
+
+def test_static_headers_replace_built_ins_whatever_their_case() -> None:
+    cfg = config(
+        "https://a.example",
+        headers={"accept": "text/plain", "USER-AGENT": "custom"},
+        auth_header="x-api-key",
+        auth_scheme="",
+    )
+    assert cfg.request_headers() == {
+        "USER-AGENT": "custom",
+        "accept": "text/plain",
+        "x-api-key": KEY,
+    }

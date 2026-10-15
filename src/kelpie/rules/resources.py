@@ -25,8 +25,10 @@ per provider covers its quota: little left (``remaining / limit`` at or below
 ``quota_warning``), none left, and limit hits counted over ``rate_limit_window``
 (``rate_limit_events_warning`` or more). A quota with nothing left is critical when agent
 tasks that use the provider are ready or running (``blocked_tasks``); which tasks use which
-provider is config data (``provider_roles``, ``provider_owners``), and with a single
-provider and no mapping every agent task uses it. Quota windows that refill within
+provider is config data (``provider_roles``, ``provider_owners``). Without a mapping for a
+provider Kelpie does not guess: the alert stays a warning and lists no tasks. Rate-limit
+errors (``events`` of a resource) and limits seen reached (``LimitHit`` records, e.g. from
+probes) are counted together and worded apart. Quota windows that refill within
 ``ignore_resets_within`` (per-minute limits) are not reported as low or exhausted: they
 recover on their own. One alert per credential: rejected by the provider (401/403) or
 expired is critical, expiring within ``auth_expiry_warning`` is a warning. A probe that
@@ -302,15 +304,12 @@ class Resources:
         return at is None or now - at <= self.max_reading_age
 
     def _provider_alerts(self, snapshot: Snapshot) -> list[Action]:
-        quotas = self._quotas(snapshot)
-        # Providers the farm uses, for the single-provider default of ``_users``.
-        known = set(quotas) | {p.name for p in snapshot.providers}
         actions: list[Action] = []
-        for _, q in sorted(quotas.items()):
-            if (alert := self._quota_alert(q, snapshot, known)) is not None:
+        for _, q in sorted(self._quotas(snapshot).items()):
+            if (alert := self._quota_alert(q, snapshot)) is not None:
                 actions.append(alert)
         for _, c in sorted(self._credentials(snapshot).items()):
-            if (alert := self._credential_alert(c, snapshot, known)) is not None:
+            if (alert := self._credential_alert(c, snapshot)) is not None:
                 actions.append(alert)
         return actions
 
@@ -333,9 +332,9 @@ class Resources:
                 continue  # unknown: no data rather than old data
             held = quotas.get(p.name)
             if held is None or (p.checked_at or now) >= (held.at or now):
-                hits = held.hits if held is not None else 0
+                events = held.events if held is not None else 0
                 quotas[p.name] = _Quota(
-                    p.name, p.remaining, p.limit, p.unit, p.resets_at, hits, p.checked_at
+                    p.name, p.remaining, p.limit, p.unit, p.resets_at, events, p.checked_at
                 )
         counts: dict[str, int] = {}
         for hit in snapshot.limit_hits:
@@ -344,9 +343,9 @@ class Resources:
         for name, n in counts.items():
             held = quotas.get(name)
             quotas[name] = (
-                _Quota(name, None, None, "", None, n, None)
+                _Quota(name, None, None, "", None, 0, None, n)
                 if held is None
-                else replace(held, hits=held.hits + n)
+                else replace(held, seen=n)
             )
         return quotas
 
@@ -367,7 +366,7 @@ class Resources:
                 out[p.name] = _Credential(p.name, None, p.expires_at, p.auth_ok is False)
         return out
 
-    def _quota_alert(self, q: _Quota, snapshot: Snapshot, known: set[str]) -> Action | None:
+    def _quota_alert(self, q: _Quota, snapshot: Snapshot) -> Action | None:
         now = snapshot.now
         remaining = q.remaining
         if q.resets_at is not None and q.resets_at - now <= self.ignore_resets_within:
@@ -381,11 +380,12 @@ class Resources:
             and share <= self.quota_warning
         )
         many_hits = (
-            self.rate_limit_events_warning is not None and q.hits >= self.rate_limit_events_warning
+            self.rate_limit_events_warning is not None
+            and q.events + q.seen >= self.rate_limit_events_warning
         )
         if not (exhausted or low or many_hits):
             return None
-        blocked = self._users(q.name, snapshot, known) if exhausted else []
+        blocked = self._users(q.name, snapshot) if exhausted else []
         until = f" until {_at(q.resets_at, now)}" if q.resets_at is not None else ""
         parts: list[str] = []
         if exhausted:
@@ -402,8 +402,12 @@ class Resources:
                 f"({_num(remaining)} of {_num(q.limit)}{unit}){until}."
             )
         if many_hits:
+            counted = [
+                *([f"hit its rate limit {q.events} times"] if q.events else []),
+                *([f"was seen at its limit {q.seen} time(s)"] if q.seen else []),
+            ]
             parts.append(
-                f"{q.name} hit its rate limit {q.hits} times in the last "
+                f"{q.name} {' and '.join(counted)} in the last "
                 f"{_duration(self.rate_limit_window)}; agents spend that time backing off "
                 "and retrying."
             )
@@ -426,14 +430,12 @@ class Resources:
                 "unit": q.unit,
                 "resets_at": q.resets_at.isoformat() if q.resets_at else None,
                 "exhausted": exhausted,
-                "limit_hits": q.hits,
+                "limit_hits": q.events + q.seen,
                 "blocked_tasks": blocked,
             },
         )
 
-    def _credential_alert(
-        self, c: _Credential, snapshot: Snapshot, known: set[str]
-    ) -> Action | None:
+    def _credential_alert(self, c: _Credential, snapshot: Snapshot) -> Action | None:
         now = snapshot.now
         where = f" on {c.host}" if c.host else ""
         if c.rejected:
@@ -456,7 +458,7 @@ class Resources:
             )
         else:
             return None
-        blocked = self._users(c.name, snapshot, known) if severity is Severity.CRITICAL else []
+        blocked = self._users(c.name, snapshot) if severity is Severity.CRITICAL else []
         if blocked:
             reason += f" Affected: {_ids(blocked)}."
         state = f"{NAME}:auth:{c.name}"
@@ -476,14 +478,12 @@ class Resources:
             },
         )
 
-    def _users(self, name: str, snapshot: Snapshot, known: set[str]) -> list[str]:
-        """Ready or running agent tasks that use provider (or credential) ``name``: by the
-        configured roles and owners, or every agent task when no mapping is configured
-        and ``name`` is the only provider in sight."""
+    def _users(self, name: str, snapshot: Snapshot) -> list[str]:
+        """Ready or running agent tasks that use provider (or credential) ``name``, by the
+        configured roles and owners; none without a mapping."""
         roles = set(self.provider_roles.get(name, ()))
         owners = set(self.provider_owners.get(name, ()))
-        everyone = not (self.provider_roles or self.provider_owners) and known == {name}
-        if not (roles or owners or everyone):
+        if not (roles or owners):
             return []
         out: list[str] = []
         for t in snapshot.tasks:
@@ -493,8 +493,7 @@ class Resources:
             if owner is not None and owner.kind is OwnerKind.HUMAN:
                 continue
             if (
-                everyone
-                or (t.role is not None and t.role in roles)
+                (t.role is not None and t.role in roles)
                 or (owner is not None and owner.role in roles)
                 or (t.owner_id is not None and t.owner_id in owners)
             ):
@@ -509,8 +508,9 @@ class _Quota:
     limit: float | None
     unit: str
     resets_at: datetime | None
-    hits: int
+    events: int  # rate-limit errors reported by a source (Resource.events)
     at: datetime | None
+    seen: int = 0  # LimitHit records within the rate-limit window
 
 
 @dataclass(frozen=True, slots=True)

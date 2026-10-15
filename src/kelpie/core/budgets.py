@@ -64,11 +64,26 @@ FARM = "farm"
 LABEL = "label:"
 DEFAULT_WINDOW = timedelta(hours=24)
 DEFAULT_BURN_WINDOW = timedelta(hours=1)
+# Limit hits whose window (resets_at - at) is shorter than this are per-minute rate limits,
+# not the usage limit a subscription forecast is about.
+DEFAULT_MIN_LIMIT_WINDOW = timedelta(minutes=10)
 ZERO = timedelta(0)
 MAX_FORECAST = timedelta(days=3650)  # a forecast further out than this is no forecast
 PER_TOKENS = 1_000_000  # prices are USD per this many tokens
 BUDGET_KEYS = frozenset(
-    {"name", "scope", "match", "window", "burn_window", "unit", "soft", "hard", "mode"}
+    {
+        "name",
+        "scope",
+        "match",
+        "window",
+        "burn_window",
+        "unit",
+        "soft",
+        "hard",
+        "mode",
+        "providers",
+        "min_limit_window",
+    }
 )
 PRICE_KEYS = frozenset({"input", "output", "cached_input"})
 
@@ -93,6 +108,20 @@ class Budget:
     match: str | None = None
     burn_window: timedelta = DEFAULT_BURN_WINDOW
     mode: BudgetMode = BudgetMode.API
+    # Subscription mode: the limits (LimitHit.limit, e.g. LLM provider names) whose hits
+    # drive next_limit_at (None: all), and the shortest limit window that counts.
+    providers: tuple[str, ...] | None = None
+    min_limit_window: timedelta = DEFAULT_MIN_LIMIT_WINDOW
+
+    def limit_hits(self, hits: Iterable[LimitHit]) -> list[LimitHit]:
+        """The hits this budget forecasts from: its providers' (all without a list), minus
+        hits whose limit refills sooner than ``min_limit_window`` after the hit."""
+        return [
+            h
+            for h in hits
+            if (self.providers is None or h.limit in self.providers)
+            and (h.resets_at is None or h.resets_at - h.at >= self.min_limit_window)
+        ]
 
     @property
     def limit(self) -> float:
@@ -282,7 +311,34 @@ def _load_budget(data: Mapping[str, Any], index: int, retention: timedelta) -> B
         raise ValueError(f"{where} needs soft, hard or both")
     if soft is not None and hard is not None and hard <= soft:
         raise ValueError(f"{where}: hard must be greater than soft")
-    return Budget(name, scope, unit, window, soft, hard, match, burn_window, mode)
+    providers: tuple[str, ...] | None = None
+    if "providers" in data:
+        raw = data["providers"]
+        if (
+            not isinstance(raw, list)
+            or not raw
+            or not all(isinstance(p, str) and p.strip() for p in raw)
+        ):
+            raise ValueError(f"{where} providers must be a non-empty list of provider names")
+        providers = tuple(p.strip() for p in raw)
+    min_limit_window = DEFAULT_MIN_LIMIT_WINDOW
+    if "min_limit_window" in data:
+        min_limit_window = _duration(data["min_limit_window"], f"{where} min_limit_window")
+    if mode is not BudgetMode.SUBSCRIPTION and ("providers" in data or "min_limit_window" in data):
+        raise ValueError(f"{where}: providers and min_limit_window are for mode = subscription")
+    return Budget(
+        name,
+        scope,
+        unit,
+        window,
+        soft,
+        hard,
+        match,
+        burn_window,
+        mode,
+        providers,
+        min_limit_window,
+    )
 
 
 # --- evaluation --------------------------------------------------------------------------
@@ -375,7 +431,9 @@ def _status(
         remaining=remaining,
         burn_rate=rate,
         runs_out_at=threshold_forecast(remaining, rate, now),
-        next_limit_at=next_limit_at(snapshot.limit_hits, now) if subscription else None,
+        next_limit_at=(
+            next_limit_at(budget.limit_hits(snapshot.limit_hits), now) if subscription else None
+        ),
         window=budget.window,
         cost_unknown_tokens=spend.cost_unknown_tokens,
         estimated=subscription,

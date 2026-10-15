@@ -32,6 +32,8 @@ def test_minimal_provider_gets_defaults() -> None:
     assert (p.auth_header, p.auth_scheme) == ("Authorization", "Bearer")
     assert p.interval == timedelta(minutes=5) and p.timeout == timedelta(seconds=10)
     assert p.display_url == "https://provider.example"
+    assert settings.tick_budget == timedelta(seconds=10)
+    assert settings.build(environ={"MAIN_KEY": "k"}).tick_budget == 10.0
     built = p.build({"MAIN_KEY": "k"})
     assert built.request_headers()["Authorization"] == "Bearer k"
 
@@ -95,7 +97,7 @@ def test_full_status_url_provider() -> None:
         ({"providers": [entry(headers={"bad name": "x"})]}, "not a header name"),
         ({"providers": [entry(headers={"authorization": "x"})]}, "cannot set"),
         ({"providers": [entry(headers={"Host": "x"})]}, "cannot set"),
-        ({"providers": [entry(headers={"x-a": "1\n2"})]}, "without control"),
+        ({"providers": [entry(headers={"x-a": "1\n2"})]}, "printable ASCII"),
         ({"providers": [entry(kind="status_url")]}, "needs [fields]"),
         ({"providers": [entry(fields={})]}, "non-empty table"),
         ({"providers": [entry(fields={"spent": "x"})]}, "unknown fields"),
@@ -106,6 +108,8 @@ def test_full_status_url_provider() -> None:
         ({"providers": [entry(interval="soon")]}, "interval"),
         ({"providers": [entry(timeout="0s")]}, "positive"),
         ({"providers": [entry(timeout="2m")]}, "at most"),
+        ({"providers": [entry()], "tick_budget": "2m"}, "tick_budget must be between"),
+        ({"providers": [entry()], "tick_budget": "soon"}, "tick_budget"),
     ],
 )
 def test_invalid_config(section: Any, message: str) -> None:

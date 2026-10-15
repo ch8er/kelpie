@@ -1,7 +1,11 @@
 """Probes of LLM provider APIs: quota left, when it refills, whether the key still works.
 
 Each provider is probed with one GET of a configured ``path`` on its ``api_url``, at most
-once per ``interval``; between probes the last status is reused. Two generic shapes:
+once per ``interval``; between probes the last status is reused. First probes are staggered
+over the interval so providers do not all answer in the same tick. All probes of one tick
+share a wall-clock budget (``tick_budget``): each gets at most the time left (and at most its
+own ``timeout``); providers not reached keep their last status and go first next tick. Two
+generic shapes:
 
 - ``headers``: the answer's rate-limit headers are read (names configurable; by default
   the IETF ``RateLimit-Remaining``/``-Limit``/``-Reset`` fields). The body is never read.
@@ -11,6 +15,8 @@ once per ``interval``; between probes the last status is reused. Two generic sha
 Probes must not cost tokens: point ``path`` at an endpoint that lists models, describes the
 key or reports usage, never at one that generates text. Kelpie only ever sends a GET without
 a body, so it cannot start a generation, but whether a GET is free is the provider's rule.
+The endpoint must also require the key: a 2xx is taken as "the key works". A 2xx that carries
+none of the configured fields is logged once per provider (the fields are probably wrong).
 
 401/403 mean the key was rejected (``auth_ok`` False). 429 means the limit is reached now: a
 :class:`~kelpie.core.model.LimitHit` is recorded (once per limit period) with the reset time
@@ -19,8 +25,9 @@ from the headers or ``Retry-After``. So is a probe that reads ``remaining`` 0. A
 with ``ok`` False: the quota is unknown, never the last known value. One warning is logged
 per provider and cause until the provider answers again; failures are counted in metrics.
 
-The key goes only to ``api_url``'s origin (:mod:`kelpie.net`: no redirects, no proxies,
-one deadline). It is never logged and is not part of any repr or error message.
+The key goes only to ``api_url``'s origin (:mod:`kelpie.net`: no redirects, one deadline;
+an environment https proxy is used only as a CONNECT tunnel, so it never sees the key). It
+is never logged and is not part of any repr or error message.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ import json
 import logging
 import math
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -44,11 +52,14 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_INTERVAL = timedelta(minutes=5)
+DEFAULT_TICK_BUDGET = 10.0  # seconds for all probes of one tick
+MIN_PROBE_TIME = 0.5  # a probe needs at least this much of the tick budget to start
 MAX_RESPONSE_BYTES = 256 * 1024
 # Limit hits are kept this long (and at most this many per provider) for budget forecasts.
 HIT_HISTORY = timedelta(days=8)
 MAX_HITS = 500
-# Dates further out than this are taken as nonsense (a unit mix-up), not as a reading.
+# Dates further away than this (either way) are taken as nonsense (a unit mix-up), not as a
+# reading.
 MAX_FUTURE = timedelta(days=400)
 FIELDS = ("remaining", "used", "limit", "resets_at", "expires_at")
 DEFAULT_HEADER_FIELDS: Mapping[str, str] = {
@@ -82,15 +93,18 @@ class ProviderConfig:
     timeout: float = DEFAULT_TIMEOUT
 
     def request_headers(self) -> dict[str, str]:
-        headers = {
-            "User-Agent": f"kelpie/{__version__}",
-            "Accept": "application/json",
-            **self.headers,
-        }
-        headers[self.auth_header] = (
-            f"{self.auth_scheme} {self.token}" if self.auth_scheme else self.token
-        )
-        return headers
+        """Built-in headers, then the static ones, then the key; a later header replaces an
+        earlier one of the same name whatever its case, so none is ever sent twice."""
+        merged: dict[str, tuple[str, str]] = {}
+        key = f"{self.auth_scheme} {self.token}" if self.auth_scheme else self.token
+        for name, value in (
+            ("User-Agent", f"kelpie/{__version__}"),
+            ("Accept", "application/json"),
+            *self.headers.items(),
+            (self.auth_header, key),
+        ):
+            merged[name.lower()] = (name, value)
+        return dict(merged.values())
 
     def request_path(self) -> str:
         return urlsplit(self.api_url).path.rstrip("/") + self.path
@@ -115,10 +129,16 @@ class LlmQuotaSource:
         providers: Sequence[ProviderConfig],
         observer: ProbeObserver | None = None,
         http_get: HttpGet = net.get,
+        tick_budget: float = DEFAULT_TICK_BUDGET,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.providers = tuple(providers)
         self.observer = observer
+        self.tick_budget = tick_budget
         self._get = http_get
+        self._monotonic = monotonic
+        self._deferred_warned = False
+        self._fields_warned: set[str] = set()
         self._status: dict[str, ProviderStatus] = {}
         self._next_at: dict[str, datetime] = {}
         self._hits: dict[str, list[LimitHit]] = {}
@@ -126,13 +146,31 @@ class LlmQuotaSource:
         self._warned: dict[str, set[str]] = {}
 
     def read(self, now: datetime) -> tuple[tuple[ProviderStatus, ...], tuple[LimitHit, ...]]:
-        for provider in self.providers:
-            due = self._next_at.get(provider.name)
-            if due is not None and now < due:
-                continue
+        count = len(self.providers)
+        for i, provider in enumerate(self.providers):
+            # Stagger the first probes over the interval.
+            self._next_at.setdefault(provider.name, now + provider.interval * i / count)
+        due = sorted(
+            (self._next_at[p.name], i, p)
+            for i, p in enumerate(self.providers)
+            if self._next_at[p.name] <= now
+        )
+        started = self._monotonic()
+        for n, (_, _, provider) in enumerate(due):
+            left = self.tick_budget - (self._monotonic() - started)
+            if left < MIN_PROBE_TIME:
+                if not self._deferred_warned:
+                    self._deferred_warned = True
+                    log.warning(
+                        "LLM provider probes used up the tick budget (%gs): %d provider(s) "
+                        "deferred to the next tick; lower their timeouts or raise tick_budget",
+                        self.tick_budget,
+                        len(due) - n,
+                    )
+                break  # the rest keep their last status and their (older) due time
             self._next_at[provider.name] = now + provider.interval
             try:
-                status = self._probe(provider, now)
+                status = self._probe(provider, now, min(provider.timeout, left))
             except Exception as exc:  # never crash a tick
                 status = _failed(provider.name, now, "unexpected", type(exc).__name__)
             self._record(provider, status, now)
@@ -145,15 +183,16 @@ class LlmQuotaSource:
 
     # --- one probe ------------------------------------------------------------------
 
-    def _probe(self, provider: ProviderConfig, now: datetime) -> ProviderStatus:
+    def _probe(self, provider: ProviderConfig, now: datetime, timeout: float) -> ProviderStatus:
         try:
             response = self._get(
                 provider.api_url,
                 provider.request_path(),
                 provider.request_headers(),
-                provider.timeout,
+                timeout,
                 MAX_RESPONSE_BYTES,
                 read_body=provider.kind is ProbeKind.STATUS_URL,
+                proxy=True,
             )
         except net.RequestError as exc:
             return _failed(provider.name, now, exc.cause, exc.detail)
@@ -210,6 +249,8 @@ class LlmQuotaSource:
     def _record(self, provider: ProviderConfig, status: ProviderStatus, now: datetime) -> None:
         name = provider.name
         self._status[name] = status
+        if self.observer is not None:
+            self.observer.provider_probed(status)
         cause = status.error_kind if not status.ok else None
         warned = self._warned.setdefault(name, set())
         if cause is not None:
@@ -226,7 +267,22 @@ class LlmQuotaSource:
         elif warned:
             log.info("LLM provider %s answers again", name)
             warned.clear()
-        limited = status.ok and status.remaining is not None and status.remaining <= 0
+        if (
+            status.ok
+            and status.error_kind is None
+            and status.remaining is status.limit is status.resets_at is status.expires_at is None
+            and name not in self._fields_warned
+        ):
+            self._fields_warned.add(name)
+            log.warning(
+                "LLM provider %s answered without any of the configured fields %s; check "
+                "kind, path and fields",
+                name,
+                sorted(provider.fields.values()),
+            )
+        if not status.ok:
+            return  # unknown: keep the limited state of the last reading
+        limited = status.remaining is not None and status.remaining <= 0
         if limited:
             kept = self._hits.setdefault(name, [])
             last = kept[-1] if kept else None
@@ -238,8 +294,6 @@ class LlmQuotaSource:
             elif last is not None and status.resets_at is not None:
                 kept[-1] = replace(last, resets_at=status.resets_at)
         self._limited[name] = limited
-        if self.observer is not None:
-            self.observer.provider_probed(status)
 
 
 def _failed(name: str, now: datetime, cause: str, detail: str) -> ProviderStatus:
@@ -334,7 +388,7 @@ def _time(raw: Any, now: datetime) -> datetime | None:
             at = _date(text)
     except (OverflowError, OSError, ValueError):
         return None
-    if at is None or at - now > MAX_FUTURE:
+    if at is None or abs(at - now) > MAX_FUTURE:
         return None
     return at
 

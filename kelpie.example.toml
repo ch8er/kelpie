@@ -84,8 +84,8 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # provider_roles = { provider-main = ["coder", "reviewer"] }  # who uses which provider:
 # provider_owners = { provider-b = ["agent-writer-1"] }        # by task/owner role or owner id.
 #   An exhausted quota is critical when ready or running agent tasks use the provider
-#   (listed as blocked_tasks). Without a mapping and with one provider, every agent task
-#   uses it.
+#   (listed as blocked_tasks). Without a mapping Kelpie does not guess which tasks use a
+#   provider: the alert stays a warning and lists no tasks.
 
 [storage]
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
@@ -138,6 +138,11 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # burn_window = "1h"        # burn rate and "runs out at" forecast over this
 # mode = "api"              # api | subscription (spend is an estimate; forecast is the
 #                           # time to the next provider limit once limit hits are known)
+# providers = ["provider-main"]  # subscription: the limits (LLM provider names in
+#                           # [connectors.llm_quotas]) whose hits drive that forecast;
+#                           # default: all of them
+# min_limit_window = "10m"  # subscription: ignore hits whose limit refills sooner than
+#                           # this (per-minute rate limits are not the usage limit)
 #
 # [[budgets]]
 # name = "web-project"
@@ -188,12 +193,19 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # provider is probed with one GET of `path` at most once per `interval`. Probes must cost
 # nothing: point `path` at an endpoint that lists models, describes the key or reports
 # usage, never at one that generates text (Kelpie only sends GETs without a body; whether a
-# GET is free is the provider's rule, so check its docs). The key is read from `token_env`
-# (the variable must be set or Kelpie refuses to start) and goes only to `api_url`:
-# https only (plain http only to loopback), redirects and environment proxies are never
-# followed, and the key is never logged. 401/403 mark the key as rejected; 429 records a
-# limit hit; other failures leave the quota unknown (kelpie_llm_provider_up 0), never stale.
-# Probes run one after another in the control loop: keep timeouts short.
+# GET is free is the provider's rule, so check its docs). The endpoint must also require
+# the key: any 2xx answer counts as "the key works". The key is read from `token_env` (the
+# variable must be set and printable ASCII, or Kelpie refuses to start) and goes only to
+# `api_url`: https only (plain http only to loopback), redirects are never followed, and
+# the key is never logged. An https_proxy from the environment (honouring no_proxy) is used
+# as a CONNECT tunnel, so the proxy never sees the key. 401/403 mark the key as rejected;
+# 429 records a limit hit; other failures leave the quota unknown (kelpie_llm_provider_up
+# 0), never stale. A 2xx without any configured field is logged once (check the fields).
+# Probes run one after another in the control loop, staggered over the interval and
+# within a wall-clock budget per tick; providers not reached go first next tick.
+#
+# [connectors.llm_quotas]
+# tick_budget = "10s"               # all probes of one tick together (0.5s to 60s)
 #
 # [[connectors.llm_quotas.providers]]
 # name = "provider-main"            # used in alerts, metrics and provider_roles

@@ -11,6 +11,8 @@
 
 Keys are read from environment variables when the connector is built; a variable that is
 not set stops Kelpie at startup. ``api_url`` must be https (plain http only to loopback).
+``tick_budget`` (in ``[connectors.llm_quotas]``) caps the wall-clock time all probes of one
+tick may take together.
 """
 
 from __future__ import annotations
@@ -28,8 +30,10 @@ from kelpie import net
 from kelpie.connectors.llm_quotas.source import (
     DEFAULT_HEADER_FIELDS,
     DEFAULT_INTERVAL,
+    DEFAULT_TICK_BUDGET,
     DEFAULT_TIMEOUT,
     FIELDS,
+    MIN_PROBE_TIME,
     LlmQuotaSource,
     ProbeKind,
     ProbeObserver,
@@ -38,7 +42,7 @@ from kelpie.connectors.llm_quotas.source import (
 from kelpie.core.serde import parse_duration
 
 SECTION = "[connectors.llm_quotas]"
-SECTION_KEYS = frozenset({"providers"})
+SECTION_KEYS = frozenset({"providers", "tick_budget"})
 PROVIDER_KEYS = frozenset(
     {
         "name",
@@ -98,7 +102,9 @@ class ProviderSettings:
         if not value:
             raise ValueError(f"{where} is not set")
         if not net.valid_header_value(value):
-            raise ValueError(f"{where} contains a line break or another control character")
+            raise ValueError(
+                f"{where} must be printable ASCII (no line breaks or other control characters)"
+            )
         return value
 
     def build(self, environ: Mapping[str, str] = os.environ) -> ProviderConfig:
@@ -121,11 +127,16 @@ class ProviderSettings:
 @dataclass(frozen=True, slots=True)
 class LlmQuotaSettings:
     providers: tuple[ProviderSettings, ...] = ()
+    tick_budget: timedelta = timedelta(seconds=DEFAULT_TICK_BUDGET)
 
     def build(
         self, observer: ProbeObserver | None = None, environ: Mapping[str, str] = os.environ
     ) -> LlmQuotaSource:
-        return LlmQuotaSource([p.build(environ) for p in self.providers], observer)
+        return LlmQuotaSource(
+            [p.build(environ) for p in self.providers],
+            observer,
+            tick_budget=self.tick_budget.total_seconds(),
+        )
 
 
 def load_llm_quotas(section: Any) -> LlmQuotaSettings | None:
@@ -145,7 +156,12 @@ def load_llm_quotas(section: Any) -> LlmQuotaSettings | None:
     names = [p.name for p in providers]
     if len(set(names)) != len(names):
         raise ValueError(f"{SECTION} provider names must be unique")
-    return LlmQuotaSettings(providers)
+    budget = _duration(section, "tick_budget", timedelta(seconds=DEFAULT_TICK_BUDGET), SECTION)
+    if budget < timedelta(seconds=MIN_PROBE_TIME) or budget > MAX_TIMEOUT:
+        raise ValueError(
+            f"{SECTION} tick_budget must be between {MIN_PROBE_TIME}s and {MAX_TIMEOUT}"
+        )
+    return LlmQuotaSettings(providers, budget)
 
 
 def _loopback(host: str) -> bool:
@@ -255,7 +271,7 @@ def _headers(value: Any, auth_header: str, where: str) -> dict[str, str]:
         if lowered in _RESERVED_HEADERS or lowered == auth_header.lower():
             raise ValueError(f"{where} headers cannot set {key}")
         if not isinstance(text, str) or not net.valid_header_value(text):
-            raise ValueError(f"{where} headers: {key} needs a value without control characters")
+            raise ValueError(f"{where} headers: {key} needs a printable ASCII value")
         out[key] = text
     return out
 
