@@ -14,7 +14,7 @@ class ActionKind(StrEnum):
     WIP_COMMIT = "wip_commit"
     WAKE = "wake"
     REASSIGN = "reassign"
-    PAUSE = "pause"
+    STOP = "stop"
     ESCALATE = "escalate"
     ALERT = "alert"
 

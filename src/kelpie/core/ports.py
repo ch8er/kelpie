@@ -38,10 +38,13 @@ class SupportsReassign(Protocol):
 
 
 @runtime_checkable
-class SupportsPause(Protocol):
-    """Optional adapter capability: stop a running task/session until a human resumes it."""
+class SupportsStop(Protocol):
+    """Optional adapter capability: stop (pause) the task's running session.
 
-    def pause(self, task_id: str, reason: str) -> None: ...
+    The task keeps its status; a human or a later action resumes it.
+    """
+
+    def stop(self, task_id: str, reason: str) -> None: ...
 
 
 @runtime_checkable

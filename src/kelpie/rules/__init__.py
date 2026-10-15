@@ -61,7 +61,7 @@ PLANNED: tuple[PlannedRule, ...] = (
     PlannedRule("bottlenecks", 6, _P0, "Idle time per role -> rebalancing suggestion", (9, 10)),
     PlannedRule("resources", 7, _P0, "Disk, memory, processes, quotas, auth expiry", (3, 4, 6)),
     PlannedRule("ci_economy", 9, _P0, "Wasted CI builds, superseded runs, quota forecast", (5,)),
-    PlannedRule("loop_breaker", 10, _P0, "Identical calls, error streaks, token budget -> pause"),
+    PlannedRule("loop_breaker", 10, _P0, "Identical calls, error streaks, token budget -> stop"),
     PlannedRule("no_progress", 11, _P0, "Tokens spent without status, commit or artifact"),
     PlannedRule("conflict_warning", 12, _P1, "Live tasks editing the same files -> warn", (7,)),
     PlannedRule("needs_you", 13, _P1, "Everything waiting for a human, by cost of delay", (13,)),

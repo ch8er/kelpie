@@ -9,7 +9,7 @@ description: >
   Platform-level guards do not cover every platform, so Kelpie's loop and budget breaker
   works on traces: identical consecutive calls (tool + args hash, AgentWatchdog default of
   8 in 10 minutes), error streaks (5 in a row) and a per-agent token budget. Each trip
-  pauses the run through the adapter and raises an alert.
+  stops the run through the adapter and raises an alert.
 rule: loop_breaker
 config:
   identical_calls: 8          # same tool + same args_hash, consecutive...
@@ -88,7 +88,7 @@ snapshot:
     - {trace_id: TR-F103, span_id: H-5, name: "execute_tool edit", kind: tool, tool: edit, args_hash: "h5", start: "2026-03-03T07:22:00+00:00", end: "2026-03-03T07:22:01+00:00", task_id: T-F103, session_id: S-F103, outcome: ok}
     - {trace_id: TR-F103, span_id: H-6, name: "execute_tool bash", kind: tool, tool: bash, args_hash: "h4", start: "2026-03-03T07:30:00+00:00", end: "2026-03-03T07:31:00+00:00", task_id: T-F103, session_id: S-F103, outcome: ok}
 expected_actions:
-  - kind: pause
+  - kind: stop
     task_id: T-F101
     reason_contains: "identical"
   - kind: alert
@@ -96,14 +96,14 @@ expected_actions:
     severity: critical
     reason_contains: "budget"
     params: {owner_id: agent-ops-1}
-  - kind: pause
+  - kind: stop
     task_id: T-F102
     reason_contains: "error"
   - kind: alert
     task_id: T-F102
     reason_contains: "error"
 not_expected_actions:
-  - kind: pause
+  - kind: stop
     task_id: T-F103
   - kind: alert
     task_id: T-F103

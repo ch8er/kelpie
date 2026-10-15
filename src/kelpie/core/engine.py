@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import Snapshot
-from kelpie.core.ports import Alerter, PlatformAdapter, SupportsPause, SupportsReassign
+from kelpie.core.ports import Alerter, PlatformAdapter, SupportsReassign, SupportsStop
 from kelpie.core.rule import Rule
 
 log = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ _TASK_ACTIONS = {
     ActionKind.WIP_COMMIT,
     ActionKind.WAKE,
     ActionKind.REASSIGN,
-    ActionKind.PAUSE,
+    ActionKind.STOP,
 }
 
 
@@ -82,10 +82,10 @@ class Engine:
             case ActionKind.REASSIGN:
                 # No target owner or adapter cannot reassign: ask a human instead.
                 self._alert(action)
-            case ActionKind.PAUSE if isinstance(self.adapter, SupportsPause):
-                self.adapter.pause(tid, action.reason)
-            case ActionKind.PAUSE:
-                # Adapter cannot pause: a human has to stop the run.
+            case ActionKind.STOP if isinstance(self.adapter, SupportsStop):
+                self.adapter.stop(tid, action.reason)
+            case ActionKind.STOP:
+                # Adapter cannot stop the run: a human has to.
                 self._alert(action)
             case ActionKind.ALERT | ActionKind.ESCALATE:
                 self._alert(action)
