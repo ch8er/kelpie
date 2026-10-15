@@ -50,6 +50,8 @@ class Metrics:
         self.spans_rejected_total: Counter[str] = Counter()
         self.span_rows: Callable[[], int] | None = None  # the span store's count
         self.span_store_errors = 0
+        self.snapshot_span_count = 0
+        self.snapshot_spans_dropped = 0
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
@@ -89,6 +91,11 @@ class Metrics:
     def set_span_rows_source(self, count: Callable[[], int]) -> None:
         with self._lock:
             self.span_rows = count
+
+    def snapshot_spans(self, count: int, dropped: int) -> None:
+        with self._lock:
+            self.snapshot_span_count = count
+            self.snapshot_spans_dropped += dropped
 
     def span_store_failed(self) -> None:
         with self._lock:
@@ -271,6 +278,18 @@ class Metrics:
             "gauge",
             "Spans in the span store.",
             [f"kelpie_span_store_rows {self._span_rows()}"],
+        )
+        metric(
+            "kelpie_snapshot_spans",
+            "gauge",
+            "Stored spans in the last snapshot ([traces] window, capped).",
+            [f"kelpie_snapshot_spans {self.snapshot_span_count}"],
+        )
+        metric(
+            "kelpie_snapshot_spans_dropped_total",
+            "counter",
+            "Stored spans left out of snapshots by [traces] max_snapshot_spans (oldest first).",
+            [f"kelpie_snapshot_spans_dropped_total {self.snapshot_spans_dropped}"],
         )
         metric(
             "kelpie_span_store_errors_total",

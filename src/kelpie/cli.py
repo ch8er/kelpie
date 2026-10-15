@@ -13,6 +13,7 @@ from kelpie.app import (
     ConfigError,
     build_adapters,
     build_app,
+    check_exposure,
     find_config,
     load_rules,
     load_settings,
@@ -44,6 +45,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             rules = load_rules(settings.engine)
             sys.stdout.write(render_status(settings, rules, build_adapters(settings)))
             return 0
+        load_rules(settings.engine)  # rule errors first: they are the likelier mistake
+        check_exposure(settings, args.host)
         app = build_app(settings)
     except ConfigError as exc:
         print(f"kelpie: config error: {exc}", file=sys.stderr)

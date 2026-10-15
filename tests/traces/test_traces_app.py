@@ -54,7 +54,7 @@ def write(tmp_path: Path, text: str) -> Path:
 def test_defaults() -> None:
     t = load_settings(None).traces
     assert t == TraceSettings()
-    assert t.enabled and t.window == timedelta(hours=2) and t.retention == timedelta(days=7)
+    assert t.enabled and t.window == timedelta(minutes=30) and t.retention == timedelta(days=7)
     assert t.max_body_bytes == 8 * 1024 * 1024 and t.max_rows == 1_000_000
     assert (t.task_attribute, t.session_attribute) == ("kelpie.task_id", "kelpie.session_id")
     assert t.token({}) is None
@@ -118,13 +118,16 @@ def test_disabled_traces_have_no_ingest(tmp_path: Path) -> None:
 
 
 @pytest.fixture
-def serving_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, object]]:
+def serving_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[tuple[str, object, list[datetime]]]:
     monkeypatch.setenv("KELPIE_TRACES_TOKEN", "synthetic-token")
-    app = build_app(Settings(db_path=tmp_path / "kelpie.db"), clock=lambda: NOW)
+    clock = [NOW]
+    app = build_app(Settings(db_path=tmp_path / "kelpie.db"), clock=lambda: clock[0])
     server = make_server("127.0.0.1", 0, app.metrics, app.ingest)
     thread = threading.Thread(target=run, args=(app, server), daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}", app
+    yield f"http://127.0.0.1:{server.server_address[1]}", app, clock
     server.shutdown()
     thread.join(5)
 
@@ -165,8 +168,8 @@ def serving(server: KelpieHTTPServer) -> Serving:
     return Serving(server)
 
 
-def test_end_to_end(serving_app: tuple[str, object]) -> None:
-    base, app = serving_app
+def test_end_to_end(serving_app: tuple[str, object, list[datetime]]) -> None:
+    base, app, clock = serving_app
     session = {"kelpie.task_id": "T-1", "kelpie.session_id": "run-1"}
     spans = [
         S(sid(1), name="invoke_agent", attrs={"gen_ai.operation.name": "invoke_agent", **session}),
@@ -187,6 +190,7 @@ def test_end_to_end(serving_app: tuple[str, object]) -> None:
         post(base, b"{}", JSON, "synthetic-token", path="/v1/metrics")
     assert exc.value.code == 404
 
+    clock[0] = NOW + timedelta(minutes=2)  # totals are recomputed once a minute
     snapshot = app.loop.snapshot_source()  # type: ignore[attr-defined]
     assert [s.kind for s in snapshot.spans] == [
         SpanKind.SESSION,
@@ -317,11 +321,12 @@ def test_large_ingest_does_not_stall_ticks(tmp_path: Path) -> None:
             durations.append(time.monotonic() - t0)
             if not sender.is_alive():
                 done.set()
+            time.sleep(0.01)  # a real loop ticks every 30s; a busy loop only starves the GIL
         sender.join()
         ingest_seconds = time.monotonic() - started
     assert result == [200]
     assert app.span_store is not None and app.span_store.count() == 10_000
-    # Each tick reads at most the 2h window; it never waits for the whole insert.
+    # Ticks read only what changed (other connection); none waits for the whole insert.
     assert len(durations) >= 2
     assert max(durations[:-1]) < max(1.0, ingest_seconds * 0.9)
     app.close()

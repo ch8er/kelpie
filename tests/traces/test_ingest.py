@@ -133,7 +133,7 @@ def test_bearer_token(headers: dict[str, str], status: int) -> None:
     reply = target.handle(h, io.BytesIO(body).read)
     assert reply.status == status
     if status == 401:
-        assert reply.headers == {"WWW-Authenticate": "Bearer"} and not reply.close
+        assert reply.headers == {"WWW-Authenticate": "Bearer"} and reply.close
         assert store.count() == 0
         assert reply.body.startswith(b"\x08\x10")  # google.rpc.Status code 16
 

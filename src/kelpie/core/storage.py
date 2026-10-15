@@ -24,7 +24,7 @@ from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
 from kelpie.core.model import Span, SpanKind, SpanTotals
-from kelpie.core.spans import MAX_LINK_DEPTH, last_at
+from kelpie.core.spans import MAX_LINK_DEPTH, SpanChanges, last_at
 from kelpie.core.states import OpenState
 
 _V1 = """
@@ -90,10 +90,12 @@ CREATE TABLE spans (
     cached_tokens INTEGER NOT NULL DEFAULT 0,
     outcome       TEXT,
     attributes    TEXT NOT NULL,
-    received_at   TEXT NOT NULL
+    received_at   TEXT NOT NULL,
+    version       INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX spans_id ON spans (trace_id, span_id);
 CREATE INDEX spans_last ON spans (last_at);
+CREATE INDEX spans_version ON spans (version);
 CREATE INDEX spans_session ON spans (session_id, start);
 CREATE INDEX spans_task ON spans (task_id, start);
 """
@@ -295,13 +297,13 @@ def _state(r: sqlite3.Row) -> OpenState:
 _SPAN_COLUMNS = (
     "trace_id, span_id, parent_id, name, kind, start, end_at, last_at, task_id, session_id,"
     " model, tool, args_hash, input_tokens, output_tokens, cached_tokens, outcome, attributes,"
-    " received_at"
+    " received_at, version"
 )
 # Rows per write or delete transaction: keeps the SQLite writer slot free for the ledger.
 SPAN_BATCH = 500
 
 
-def _span_row(span: Span, received: str) -> tuple[object, ...]:
+def _span_row(span: Span, received: str, version: int) -> tuple[object, ...]:
     return (
         span.trace_id,
         span.span_id,
@@ -322,6 +324,7 @@ def _span_row(span: Span, received: str) -> tuple[object, ...]:
         span.outcome,
         json.dumps(span.attributes, sort_keys=True, separators=(",", ":"), default=str),
         received,
+        version,
     )
 
 
@@ -349,20 +352,38 @@ def _span(r: sqlite3.Row) -> Span:
 
 
 class SqliteSpanStore:
-    """Spans in the Kelpie database, behind a connection and lock of their own."""
+    """Spans in the Kelpie database, behind connections and locks of their own.
+
+    Writes (ingest, links, retention) go through one connection in short batches; reads
+    (snapshots, totals) through a second one. With WAL, a long read never blocks a write,
+    and ingest never waits for a snapshot. Every insert or link update stamps the rows
+    with a new ``version``, so :meth:`changes` returns only what changed since the last
+    read; ``epoch`` grows with every delete, which tells a cache to reload.
+    """
 
     def __init__(
         self, path: Path | str, busy_timeout_ms: int = 5000, batch: int = SPAN_BATCH
     ) -> None:
         self._lock = threading.Lock()
+        self._read_lock = threading.Lock()
+        self._closing = threading.Event()
         self._db = _open(path, busy_timeout_ms)
+        self._reader = _open(path, busy_timeout_ms)
+        self._reader.execute("PRAGMA query_only = 1")
         self._batch = max(1, batch)
         # Kept in step with every write under the lock, so count() needs no table scan.
         self._rows = int(self._db.execute("SELECT COUNT(*) FROM spans").fetchone()[0])
+        self._version = int(
+            self._db.execute("SELECT COALESCE(MAX(version), 0) FROM spans").fetchone()[0]
+        )
+        self.epoch = 0
 
     def close(self) -> None:
+        self._closing.set()  # a running prune stops at its next batch
         with self._lock:
             self._db.close()
+        with self._read_lock:
+            self._reader.close()
 
     def append_spans(self, spans: Sequence[Span], received_at: datetime) -> int:
         received = _ts(received_at)
@@ -372,18 +393,31 @@ class SqliteSpanStore:
         )
         added = 0
         for i in range(0, len(spans), self._batch):
-            rows = [_span_row(s, received) for s in spans[i : i + self._batch]]
+            chunk = spans[i : i + self._batch]
             with self._lock, self._db:  # one short transaction per batch
-                n = self._db.executemany(sql, rows).rowcount
-                self._rows += n
-                added += n
+                version = self._version + 1
+                n = self._db.executemany(sql, [_span_row(s, received, version) for s in chunk])
+                self._version = version
+                self._rows += n.rowcount
+                added += n.rowcount
         return added
+
+    def _read(self, sql: str, args: tuple[object, ...]) -> list[sqlite3.Row]:
+        with self._read_lock:
+            return self._reader.execute(sql, args).fetchall()
 
     def spans_since(self, after: datetime) -> Sequence[Span]:
         sql = f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? ORDER BY start, rowid_"
-        with self._lock:
-            rows = self._db.execute(sql, (_ts(after),)).fetchall()
-        return [_span(r) for r in rows]
+        return [_span(r) for r in self._read(sql, (_ts(after),))]
+
+    def changes(self, after: datetime, since: int) -> SpanChanges:
+        sql = (
+            f"SELECT {_SPAN_COLUMNS} FROM spans WHERE version > ? AND last_at >= ?"
+            " ORDER BY version, rowid_"
+        )
+        rows = self._read(sql, (since, _ts(after)))
+        version = max((int(r["version"]) for r in rows), default=since)
+        return SpanChanges(tuple(_span(r) for r in rows), version)
 
     def totals_since(self, after: datetime) -> Sequence[SpanTotals]:
         sql = (
@@ -398,8 +432,6 @@ class SqliteSpanStore:
             " FROM spans WHERE last_at >= ? AND session_id IS NOT NULL AND session_id != ''"
             " GROUP BY session_id ORDER BY session_id"
         )
-        with self._lock:
-            rows = self._db.execute(sql, (_ts(after),)).fetchall()
         return [
             SpanTotals(
                 session_id=r["session_id"],
@@ -414,12 +446,12 @@ class SqliteSpanStore:
                 first_start=datetime.fromisoformat(r["first_start"]),
                 last_end=datetime.fromisoformat(r["last_end"]),
             )
-            for r in rows
+            for r in self._read(sql, (_ts(after),))
         ]
 
     def prune(self, before: datetime, max_rows: int) -> int:
         """Batched deletes, each its own short transaction; the lock is released between
-        batches so ingest and snapshot reads interleave with a long prune."""
+        batches so ingest interleaves with a long prune, and closing the store stops it."""
         deleted = 0
         old = (
             "DELETE FROM spans WHERE rowid_ IN (SELECT rowid_ FROM spans WHERE last_at < ? LIMIT ?)"
@@ -437,29 +469,30 @@ class SqliteSpanStore:
         return deleted
 
     def _delete(self, sql: str, args: tuple[object, ...]) -> int:
-        with self._lock, self._db:
-            n = self._db.execute(sql, args).rowcount
-            self._rows -= n
-            return n
-
-    def _write_count(self, sql: str, args: tuple[object, ...]) -> int:
-        with self._lock, self._db:
-            return self._db.execute(sql, args).rowcount
+        with self._lock:
+            if self._closing.is_set():
+                return 0
+            with self._db:
+                n = self._db.execute(sql, args).rowcount
+                self._rows -= n
+                if n:
+                    self.epoch += 1
+                return n
 
     def count(self) -> int:
-        with self._lock:
-            return self._rows
+        return self._rows  # an int read is atomic; never waits for a write batch
 
     def inherit_links(self, trace_ids: Collection[str]) -> int:
         """One UPDATE per tree level and batch of traces (correlated subqueries rather than
-        ``UPDATE ... FROM``, which older SQLite builds lack)."""
+        ``UPDATE ... FROM``, which older SQLite builds lack). Updated rows get a new
+        version, so snapshot caches pick up their links."""
         ids = sorted(set(trace_ids))
         updated = 0
         parent = "p.trace_id = spans.trace_id AND p.span_id = spans.parent_id"
         for i in range(0, len(ids), self._batch):
             chunk = ids[i : i + self._batch]
             sql = (
-                "UPDATE spans SET"
+                "UPDATE spans SET version = ?,"
                 f" task_id = COALESCE(task_id, (SELECT p.task_id FROM spans p WHERE {parent})),"
                 " session_id = COALESCE(session_id,"
                 f" (SELECT p.session_id FROM spans p WHERE {parent}))"
@@ -469,8 +502,15 @@ class SqliteSpanStore:
                 " OR (spans.session_id IS NULL AND p.session_id IS NOT NULL)))"
             )
             for _ in range(MAX_LINK_DEPTH):
-                n = self._write_count(sql, tuple(chunk))
-                if not n:
+                if not (n := self._update(sql, tuple(chunk))):
                     break
                 updated += n
         return updated
+
+    def _update(self, sql: str, args: tuple[object, ...]) -> int:
+        with self._lock, self._db:
+            version = self._version + 1
+            n = self._db.execute(sql, (version, *args)).rowcount
+            if n:
+                self._version = version
+            return n

@@ -12,6 +12,9 @@ services:
     environment:
       KELPIE_PORT: "9464"
       KELPIE_DB: /data/kelpie.db
+      # OTLP ingest without a token is allowed here only because the port below is
+      # published on 127.0.0.1. Set KELPIE_TRACES_TOKEN (and drop this) before exposing it.
+      KELPIE_TRACES_ALLOW_UNAUTHENTICATED: "1"
       # Mount a config and set KELPIE_CONFIG to change the defaults (dry-run on, observe).
     volumes:
       - kelpie-data:/data

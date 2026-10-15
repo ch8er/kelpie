@@ -255,9 +255,14 @@ with `application/x-protobuf` or `application/json` bodies, optionally gzip-comp
 Kelpie's model following the
 [GenAI semantic conventions](https://github.com/open-telemetry/semantic-conventions-genai)
 and stored in the Kelpie database; each control-loop tick sees the spans of the last
-`window` (2 hours) plus per-session totals (calls, errors, tokens) over `totals_window`
-(24 hours). Spans older than `retention` (7 days) or beyond `max_rows` are pruned once an
-hour in the background.
+`window` (30 minutes; rules look back about 10) plus per-session totals (calls, errors,
+tokens) over `totals_window` (24 hours, refreshed once a minute). Ticks read only the spans
+that changed since the previous tick, through a separate database connection, so they do
+not hold up ingest; at most `max_snapshot_spans` (50,000, newest first) reach a snapshot
+(`kelpie_snapshot_spans_dropped_total` counts the rest). Spans older than `retention`
+(7 days) or beyond `max_rows` are pruned once an hour in the background. Spans that start or
+end more than an hour in the future, or ended before `retention`, are rejected as
+`invalid_time`.
 
 | `gen_ai.operation.name` | Kelpie span kind |
 | --- | --- |
@@ -271,7 +276,10 @@ calls; spans that are not GenAI steps (HTTP spans and the like) are used to link
 children and then dropped. Mapped: model (`gen_ai.response.model`, else
 `gen_ai.request.model`), `gen_ai.usage.input_tokens`, `output_tokens` and
 `cache_read.input_tokens`, `gen_ai.tool.name`, outcome (`error` when the span status is
-ERROR or `error.type` is set). Tool calls get an `args_hash` of their arguments (the same
+ERROR or `error.type` is set). Input tokens include cached tokens, as in the conventions;
+Claude Code's Anthropic-style counts are normalized to that on arrival. Session totals sum
+LLM spans; an LLM span nested in another LLM span (two instrumentation layers) is counted
+twice. Tool calls get an `args_hash` of their arguments (the same
 hash the Hermes hooks plugin writes), which the loop breaker compares.
 
 **Task and session.** `task_id` comes from the `kelpie.task_id` attribute and `session_id`
@@ -280,20 +288,29 @@ configurable). Span attributes win over resource attributes, so an agent host ca
 whole process with `OTEL_RESOURCE_ATTRIBUTES=kelpie.task_id=T-42`. A span without them
 inherits its parent's, also when the parent arrives in a later request.
 
-**Privacy.** Kelpie never stores message content: input and output messages, system
-instructions, tool definitions, tool arguments and results, prompts and completions in
-older or vendor-specific forms, error messages and user identity attributes are dropped on
-arrival. Tool arguments are reduced to `args_hash` first. Other attributes are kept, bounded
-(64 keys, 256 characters per value).
+**Privacy.** Kelpie keeps span attributes only from an allowlist: GenAI request
+parameters, response id, model and finish reasons, usage counters, tool name, call id and
+type, agent and conversation ids, `error.type`, `server.address`/`port`, `service.name`,
+`session.id`, `kelpie.*`, and Claude Code's timing and status fields. Everything else is
+dropped on arrival, whatever the instrumentation calls it: messages, prompts, completions,
+reasoning, tool arguments and results (OpenTelemetry GenAI, OpenLLMetry, OpenInference,
+Vercel AI SDK, Langfuse, MLflow and others), error messages, and user or organization
+identity. Tool arguments are reduced to `args_hash` first. Kept values are scalars, cut to
+256 characters, at most 64 keys per span. Span events are ignored.
 
 **Authentication.** Set `KELPIE_TRACES_TOKEN` and exporters must send
-`Authorization: Bearer <token>`; without it the endpoint is open and Kelpie logs a warning
-at startup. Keep the port on a private network either way.
+`Authorization: Bearer <token>`. Without a token, `kelpie serve` only starts on a loopback
+address (`--host 127.0.0.1`); to accept spans without a token on another address (inside a
+container whose port is published on 127.0.0.1, or behind a proxy that authenticates), set
+`allow_unauthenticated = true` or `KELPIE_TRACES_ALLOW_UNAUTHENTICATED=1` on purpose;
+`docker-compose.yml` does the latter. Headers and the token are checked before the body is
+read; at most `max_concurrent_requests` (4) exports are decoded at once (more get 503 and
+are retried by the exporter), and a client that stalls for 30 seconds is disconnected.
 
 ```toml
 [traces]
 token_env = "KELPIE_TRACES_TOKEN"  # configuring it makes the variable mandatory
-window = "2h"
+window = "30m"
 retention = "7d"
 ```
 
@@ -315,7 +332,8 @@ Tool arguments are redacted by Claude Code by default; with `OTEL_LOG_TOOL_DETAI
 Bash command and file path are hashed into `args_hash` and dropped.
 
 **Hermes.** The Kelpie hooks plugin already reports every tool call (see the Hermes
-adapter README). For model calls and token usage, Hermes' bundled Langfuse plugin only
+adapter README). If Hermes also exports the same calls over OTLP, both copies reach the
+snapshot for now: de-duplication of hook and OTLP spans comes with the hooks helper. For model calls and token usage, Hermes' bundled Langfuse plugin only
 talks to Langfuse; the community [hermes-otel](https://github.com/briancaffey/hermes-otel)
 plugin can export to any OTLP/HTTP endpoint (`type: otlp` backend in
 `~/.hermes/hermes_otel.yaml`). We have not verified how it sets request headers, so run

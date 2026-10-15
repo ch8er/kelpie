@@ -11,7 +11,7 @@ from kelpie.adapters.hermes import plugin
 from kelpie.core.model import SpanKind
 from kelpie.traces.args import args_hash, args_hash_of_attribute
 from kelpie.traces.otlp import PROTOBUF, decode
-from kelpie.traces.semconv import Mapped, MappingOptions, is_private, map_spans
+from kelpie.traces.semconv import Mapped, MappingOptions, is_kept, map_spans
 from tests.traces.otlp_builders import NOW, S, request, sid
 
 
@@ -207,66 +207,113 @@ def test_plugin_and_traces_hash_share_source() -> None:
     assert inspect.getsource(plugin.args_hash) == inspect.getsource(traces_args.args_hash)
 
 
-CONTENT = {
-    "gen_ai.input.messages": '[{"role": "user", "parts": ["secret plan"]}]',
-    "gen_ai.output.messages": "secret answer",
-    "gen_ai.system_instructions": "secret system",
-    "gen_ai.tool.definitions": "[]",
-    "gen_ai.prompt": "secret",
-    "gen_ai.prompt.0.content": "secret",
-    "gen_ai.completion.0.content": "secret",
-    "llm.input_messages.0.message.content": "secret",
-    "input.value": "secret",
-    "output.value": "secret",
-    "user_prompt": "secret",
-    "error.message": "secret in error",
-    "exception.stacktrace": "secret",
-    "user.email": "someone@example.invalid",
-    "enduser.id": "someone",
-    "vendor.request.messages": "secret",
-    "custom_prompt_text": "secret",
+# Content and identity attributes, by the vendor that emits them. None may survive.
+CONTENT_BY_VENDOR: dict[str, dict[str, Any]] = {
+    "otel-genai": {
+        "gen_ai.input.messages": '[{"role": "user", "parts": ["secret plan"]}]',
+        "gen_ai.output.messages": "secret answer",
+        "gen_ai.system_instructions": "secret system",
+        "gen_ai.tool.definitions": "[secret]",
+        "gen_ai.tool.call.result": "secret result",
+        "gen_ai.prompt": "secret",
+        "gen_ai.retrieval.query.text": "secret",
+    },
+    "openllmetry": {
+        "gen_ai.prompt.0.content": "secret",
+        "gen_ai.completion.0.content": "secret",
+        "traceloop.entity.input": "secret",
+        "traceloop.entity.output": "secret",
+    },
+    "openinference": {
+        "llm.input_messages.0.message.content": "secret",
+        "input.value": "secret",
+        "output.value": "secret",
+    },
+    "vercel-ai-sdk": {
+        "ai.response.text": "secret",
+        "ai.response.toolCalls": "secret",
+        "ai.response.reasoning": "secret",
+        "ai.toolCall.args": "secret",
+        "ai.toolCall.result": "secret",
+    },
+    "langfuse": {"langfuse.observation.input": "secret", "langfuse.observation.output": "x"},
+    "mlflow": {"mlflow.spanInputs": "secret", "mlflow.spanOutputs": "secret"},
+    "identity": {
+        "user.email": "someone@example.invalid",
+        "user.id": "someone",
+        "user.name": "someone",
+        "user.full_name": "someone",
+        "organization.id": "someone-org",
+        "enduser.id": "someone",
+    },
+    "errors": {"error.message": "secret in error", "exception.stacktrace": "secret"},
+    "unknown-vendor": {"acme.request.body": "secret", "custom_prompt_text": "secret"},
 }
 
 
-def test_message_content_and_identity_are_dropped() -> None:
-    s = one({"gen_ai.operation.name": "chat", **CONTENT, "kept": "yes"})
-    assert set(s.attributes) == {"gen_ai.operation.name", "kept", "service.name"}
+@pytest.mark.parametrize("vendor", sorted(CONTENT_BY_VENDOR))
+def test_content_and_identity_are_dropped(vendor: str) -> None:
+    s = one({"gen_ai.operation.name": "chat", **CONTENT_BY_VENDOR[vendor]})
+    assert set(s.attributes) == {"gen_ai.operation.name", "service.name"}
     assert "secret" not in repr(s) and "someone" not in repr(s)
 
 
-@pytest.mark.parametrize("key", sorted(CONTENT))
-def test_is_private(key: str) -> None:
-    assert is_private(key)
+def test_claude_code_content_is_dropped() -> None:
+    attrs = {
+        "tool_name": "Bash",
+        "tool_parameters": '{"command": "cat secret.txt"}',
+        "full_command": "cat secret.txt",
+        "file_path": "/home/someone/secret.txt",
+        "user_prompt": "secret",
+        "error": "secret failure text",
+        "user.email": "someone@example.invalid",
+        "user.account_uuid": "someone",
+        "organization.id": "someone-org",
+        "duration_ms": 12,
+    }
+    s = one(attrs, name="claude_code.tool")
+    assert set(s.attributes) == {"duration_ms", "service.name"}
+    assert "secret" not in repr(s) and "someone" not in repr(s)
+    assert s.args_hash == args_hash({"command": "cat secret.txt"})  # tool_parameters wins
 
 
 @pytest.mark.parametrize(
-    "key", ["gen_ai.operation.name", "gen_ai.tool.call.id", "error.type", "service.name"]
+    ("key", "claude_code", "kept"),
+    [
+        ("gen_ai.operation.name", False, True),
+        ("gen_ai.tool.call.id", False, True),
+        ("gen_ai.usage.reasoning.output_tokens", False, True),
+        ("gen_ai.response.finish_reasons", False, True),
+        ("error.type", False, True),
+        ("kelpie.team", False, True),
+        ("duration_ms", False, False),  # Claude Code keys only on claude_code.* spans
+        ("duration_ms", True, True),
+        ("gen_ai.input.messages", False, False),
+        ("ai.response.text", True, False),
+    ],
 )
-def test_not_private(key: str) -> None:
-    assert not is_private(key)
+def test_is_kept(key: str, claude_code: bool, kept: bool) -> None:
+    assert is_kept(key, claude_code) is kept
 
 
-def test_attributes_are_bounded() -> None:
-    attrs: dict[str, Any] = {f"k{i:03}": i for i in range(100)}
+def test_kept_values_are_bounded_scalars() -> None:
+    attrs: dict[str, Any] = {f"gen_ai.usage.k{i:03}": i for i in range(100)}
     attrs["gen_ai.operation.name"] = "chat"
-    attrs["long"] = "x" * 1000
-    attrs["list"] = list(range(40))
-    attrs["map"] = {"a": 1}
-    s = one(attrs)
-    assert len(s.attributes) == 64
+    assert len(one(attrs).attributes) == 64
     s = one(
         {
             "gen_ai.operation.name": "chat",
-            "long": "x" * 1000,
-            "list": list(range(40)),
-            "nested": [[1], "a"],
-            "map": {"a": 1},
+            "gen_ai.response.id": "x" * 1000,
+            "gen_ai.response.finish_reasons": ["stop", {"a": 1}, *["length"] * 30],
+            "gen_ai.usage.cache_write.input_tokens": "lots",  # usage must be numeric
+            "gen_ai.agent.name": ["not", "a", "scalar"],
+            "kelpie.extra": {"a": 1},
         }
     )
-    assert len(s.attributes["long"]) == 256
-    assert s.attributes["list"] == list(range(16))
-    assert s.attributes["nested"] == ["a"]
-    assert "map" not in s.attributes
+    assert len(s.attributes["gen_ai.response.id"]) == 256
+    assert s.attributes["gen_ai.response.finish_reasons"] == ["stop", *["length"] * 15]
+    for key in ("gen_ai.usage.cache_write.input_tokens", "gen_ai.agent.name", "kelpie.extra"):
+        assert key not in s.attributes
 
 
 def test_name_is_bounded_and_end_never_before_start() -> None:
@@ -322,7 +369,8 @@ def test_claude_code_spans() -> None:
     assert result.ignored == 2  # the interaction root and the execution child
     llm, tool = result.spans
     assert llm.kind is SpanKind.LLM and llm.model == "synthetic-model"
-    assert (llm.input_tokens, llm.output_tokens, llm.cached_tokens) == (12, 30, 4000)
+    # Anthropic usage excludes cache reads and writes; stored as semconv (includes them)
+    assert (llm.input_tokens, llm.output_tokens, llm.cached_tokens) == (4112, 30, 4000)
     assert llm.session_id == "cc-1" and llm.outcome == "ok"
     assert llm.attributes["cache_creation_tokens"] == 100
     assert tool.kind is SpanKind.TOOL and tool.tool == "Bash" and tool.outcome == "error"

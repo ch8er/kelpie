@@ -35,6 +35,9 @@ class KelpieHTTPServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     server: KelpieHTTPServer
+    # Socket timeout per read: a client that stalls (slowloris) loses its connection
+    # instead of holding a thread.
+    timeout = 30
 
     def do_GET(self) -> None:
         match self.path:
@@ -54,8 +57,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             reply = ingest.handle(self.headers, self.rfile.read)
+        except OSError as exc:  # the client stalled past the timeout or went away
+            log.info("trace export from %s aborted: %s", self.client_address[0], exc)
+            self.server.metrics.traces_request(408)
+            self.close_connection = True
+            return
         except Exception:  # a bug in ingest must not look like a client error or kill Kelpie
             log.exception("trace ingest failed")
+            self.server.metrics.traces_request(500)
             self.close_connection = True
             self._reply(500, "internal error\n", "text/plain; charset=utf-8")
             return

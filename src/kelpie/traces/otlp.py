@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -78,7 +79,7 @@ def _decode_protobuf(body: bytes) -> Decoded:
     request = ExportTraceServiceRequest()
     try:
         request.ParseFromString(body)
-    except (ProtobufDecodeError, RuntimeError, ValueError) as exc:
+    except (ProtobufDecodeError, RuntimeError, ValueError, RecursionError) as exc:
         raise DecodeError(f"invalid protobuf ExportTraceServiceRequest: {exc}") from exc
     out = Decoded()
     for rs in request.resource_spans:
@@ -137,8 +138,8 @@ def _pb_value(v: AnyValue, depth: int) -> Any:
 def _decode_json(body: bytes) -> Decoded:
     try:
         payload = json.loads(body)
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise DecodeError(f"invalid JSON: {exc}") from exc
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        raise DecodeError(f"invalid JSON: {type(exc).__name__}") from exc
     if not isinstance(payload, dict):
         raise DecodeError("ExportTraceServiceRequest must be a JSON object")
     out = Decoded()
@@ -257,14 +258,12 @@ def _json_value(v: Any, depth: int) -> Any:
 # --- shared -----------------------------------------------------------------------------
 
 
+_HEX = re.compile(r"[0-9a-f]+")
+
+
 def _is_hex(value: str, length: int) -> bool:
-    if len(value) != length or value.strip("0") == "":
-        return False
-    try:
-        int(value, 16)
-    except ValueError:
-        return False
-    return True
+    """Exactly ``length`` lowercase hex digits, not all zero (an invalid id in OTLP)."""
+    return len(value) == length and _HEX.fullmatch(value) is not None and value.strip("0") != ""
 
 
 def _add(

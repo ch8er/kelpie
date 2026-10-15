@@ -367,12 +367,13 @@ class App:
 
     def close(self) -> None:
         self.loop.stop()
-        if self.retention is not None:
-            self.retention.join(5.0)
-        for store in (self.store, self.span_store):
+        # Closing the span store first stops a running prune at its next batch.
+        for store in (self.span_store, self.store):
             close = getattr(store, "close", None)
             if callable(close):
                 close()
+        if self.retention is not None:
+            self.retention.join(5.0)
 
 
 def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> App:
@@ -414,7 +415,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     metrics.set_span_rows_source(span_store.count)
     if token is None:
         log.warning(
-            "OTLP ingest on /v1/traces accepts spans without a token; set $%s", traces.token_env
+            "OTLP ingest on /v1/traces accepts spans without a token; set $%s",
+            traces.token_env,
         )
     ingest = TraceIngest(
         store=span_store,
@@ -423,12 +425,24 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         token=token,
         max_body_bytes=traces.max_body_bytes,
         options=traces.options,
+        max_concurrent=traces.max_concurrent_requests,
+        max_age=traces.retention,
     )
     retention = SpanRetention(span_store, clock, traces.retention, traces.max_rows, metrics)
-    window = SpanWindow(span_store, traces.window, traces.totals_window)
+    window = SpanWindow(
+        span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
+    )
     source = merged_snapshot(adapters, metrics, clock, window)
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     return App(settings, loaded, engine, loop, metrics, store, span_store, ingest, retention)
+
+
+def check_exposure(settings: Settings, host: str) -> None:
+    """Refuse to serve an unauthenticated ingest endpoint on a non-loopback address."""
+    try:
+        settings.traces.check_exposure(host)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _open_span_store(db_path: Path | None) -> SpanStore:
