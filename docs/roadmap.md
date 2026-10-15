@@ -176,9 +176,9 @@ webhook URL from an environment variable. Telegram comes first; Slack may follow
 subscription.
 
 **Acceptance criteria**
-- [ ] Severity is reflected in the message (info / warning / critical)
-- [ ] Message shows what Kelpie already did and what needs a human
-- [ ] Tests mock HTTP; no network access
+- [x] Severity is reflected in the message (info / warning / critical)
+- [x] Message shows what Kelpie already did and what needs a human
+- [x] Tests mock HTTP; no network access
 
 ### core: condition registration API
 labels: P0, week-1, area:core

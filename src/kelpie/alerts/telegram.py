@@ -43,13 +43,13 @@ _CHAT = re.compile(r"-?\d{1,20}|@[A-Za-z0-9_]{4,64}")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _KEYS = {"type", "name", "token_env", "chat_id", "timeout", "min_severity", "api_url"}
 
-_TRANSITION = {
+TRANSITION = {
     Transition.NEW: "",
     Transition.ESCALATED: "Still open. ",
     Transition.CHANGED: "Changed. ",
     Transition.RESOLVED: "Resolved. ",
 }
-_DID = {
+DID = {
     Did.NOTIFIED: "Kelpie did: only sent this alert (no other change).",
     Did.SUGGESTED: "Kelpie did: nothing, mode suggest. A human decides.",
     Did.FAILED: "Kelpie did: tried, and it failed. Needs a human.",
@@ -93,8 +93,8 @@ def format_message(message: AlertMessage) -> str:
     head = f"[{message.severity.value.upper()}] "
     head += f"{truncate(clean(message.rule), MAX_HEAD)}: " if message.rule else ""
     # Each part has its own cap, so the last line (what Kelpie did) always survives.
-    body = truncate(clean(_TRANSITION[message.transition] + message.body.strip()), MAX_BODY)
-    lines = [head + truncate(clean(message.subject), MAX_HEAD), body, _DID[message.did]]
+    body = truncate(clean(TRANSITION[message.transition] + message.body.strip()), MAX_BODY)
+    lines = [head + truncate(clean(message.subject), MAX_HEAD), body, DID[message.did]]
     return truncate("\n".join(lines))
 
 
@@ -189,12 +189,12 @@ def _api_url(value: Any, where: str) -> str:
         )
     if not host or parts.scheme not in ("http", "https"):
         raise ValueError(f"{where}: api_url must be an http(s) URL")
-    if parts.scheme == "http" and not _loopback(host):
+    if parts.scheme == "http" and not loopback(host):
         raise ValueError(f"{where}: api_url must be https (plain http only to loopback)")
     return f"{parts.scheme}://{parts.netloc}"
 
 
-def _loopback(host: str) -> bool:
+def loopback(host: str) -> bool:
     if host == "localhost":
         return True
     try:

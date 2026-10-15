@@ -195,7 +195,7 @@ farm throughput metrics from traces.
 
 ## Reporting (planned)
 
-- **Real-time alerts** to Telegram (Slack follows on the same delivery layer): only actionable
+- **Real-time alerts** to Telegram and Slack: only actionable
   items, always stating what Kelpie already did by itself; duplicate alerts are merged.
   See [Alerts](#alerts).
 - **Daily report**: cost of chaos (idle hours, tokens burned on restarts), what Kelpie
@@ -217,9 +217,16 @@ type = "telegram"
 token_env = "KELPIE_TELEGRAM_TOKEN"   # the bot token is read from this variable
 chat_id = "-1001234567890"
 min_severity = "warning"
+
+[[alerts.channels]]
+type = "slack"
+webhook_env = "KELPIE_SLACK_WEBHOOK"  # an incoming-webhook URL is read from this variable
+min_severity = "critical"
 ```
 
-The token is never logged or shown, and a missing one stops Kelpie at startup. Every message
+The token and the webhook URL are never logged or shown, and a missing or malformed one stops
+Kelpie at startup (a Slack webhook must be https on `hooks.slack.com`). Slack messages are
+plain text with `&`, `<` and `>` escaped, so task text cannot become a mention. Every message
 states the transition (new, still open, changed, resolved) and what Kelpie already did.
 See `kelpie.example.toml`.
 

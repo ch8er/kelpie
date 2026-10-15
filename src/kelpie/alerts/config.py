@@ -13,6 +13,11 @@
     timeout = "10s"
     min_severity = "warning"              # info | warning | critical
 
+    [[alerts.channels]]
+    type = "slack"
+    webhook_env = "KELPIE_SLACK_WEBHOOK"  # the incoming-webhook URL is read from this variable
+    min_severity = "critical"
+
 An alert goes to every channel whose ``min_severity`` it reaches. Secrets are read from the
 environment when the channels are built; a missing or malformed one stops Kelpie at startup.
 """
@@ -25,20 +30,21 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from kelpie.alerts import telegram
+from kelpie.alerts import slack, telegram
 from kelpie.alerts.delivery import (
     DEFAULT_QUEUE_SIZE,
     DEFAULT_WINDOW,
     AlertObserver,
     Delivery,
 )
+from kelpie.alerts.slack import SlackSettings
 from kelpie.alerts.telegram import TelegramSettings
 from kelpie.core.serde import parse_duration
 
 SECTION = "[alerts]"
 MAX_QUEUE = 1000
 
-ChannelSettings = TelegramSettings  # a union as more channel types arrive (slack, ...)
+ChannelSettings = TelegramSettings | SlackSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +101,12 @@ def _channels(entries: Any) -> tuple[ChannelSettings, ...]:
         if not isinstance(entry, Mapping):
             raise ValueError(f"{where} must be a table")
         kind = entry.get("type")
-        if kind != telegram.TYPE:
-            raise ValueError(f"{where}: type must be one of ['{telegram.TYPE}']")
-        channels.append(telegram.load_telegram(entry, where))
+        if kind == telegram.TYPE:
+            channels.append(telegram.load_telegram(entry, where))
+        elif kind == slack.TYPE:
+            channels.append(slack.load_slack(entry, where))
+        else:
+            raise ValueError(f"{where}: type must be one of ['{telegram.TYPE}', '{slack.TYPE}']")
     names = [c.name for c in channels]
     if len(set(names)) != len(names):
         raise ValueError(f"{SECTION} channel names must be unique (set name = ...)")

@@ -410,3 +410,14 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # min_severity = "warning"             # info | warning | critical
 # # name = "telegram"                  # only needed with two telegram channels
 # # api_url = "https://api.telegram.org"  # e.g. a local Bot API server (http only on loopback)
+#
+# [[alerts.channels]]
+# type = "slack"
+# webhook_env = "KELPIE_SLACK_WEBHOOK" # variable holding a Slack incoming-webhook URL
+#                                      # (https://hooks.slack.com/services/...). The URL is a
+#                                      # secret: checked at startup, never logged or shown
+# timeout = "10s"
+# min_severity = "critical"            # info | warning | critical
+# # name = "slack"                     # only needed with two slack channels
+# # allow_host = "relay.example.org"   # another host for the webhook (plain http only if it
+# #                                    # is loopback); for relays and tests
