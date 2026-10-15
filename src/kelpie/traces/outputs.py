@@ -41,7 +41,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from fnmatch import fnmatchcase
 
 from kelpie.core.model import Snapshot, Span, SpanKind
@@ -355,23 +355,28 @@ def normalize_platform(name: str | None) -> str | None:
     return name.strip().lower().replace("_", "-").replace(" ", "-") or None
 
 
-def rank(found: Sequence[Call], settings: OutputSettings | None = None) -> list[OutputGroup]:
-    """Groups per role and key, the most unfiltered output tokens first."""
+def rank(
+    found: Sequence[Call], settings: OutputSettings | None = None, tz: tzinfo = UTC
+) -> list[OutputGroup]:
+    """Groups per role and key, the most unfiltered output tokens first; ``hot_days`` are
+    dates in ``tz``."""
     settings = settings or OutputSettings()
     by_group: dict[tuple[str | None, str], list[Call]] = {}
     for call in found:
         by_group.setdefault((call.role, call.key), []).append(call)
-    groups = [_group(role, key, mine, settings) for (role, key), mine in by_group.items()]
+    groups = [_group(role, key, mine, settings, tz) for (role, key), mine in by_group.items()]
     groups.sort(key=lambda g: (-g.tokens, -g.filtered_tokens, g.key, g.role or ""))
     return groups
 
 
-def _group(role: str | None, key: str, mine: list[Call], settings: OutputSettings) -> OutputGroup:
+def _group(
+    role: str | None, key: str, mine: list[Call], settings: OutputSettings, tz: tzinfo
+) -> OutputGroup:
     plain = [c for c in mine if c.filter is None]
     filtered = [c for c in mine if c.filter is not None]
     per_day: dict[date, list[int]] = {}
     for c in plain:
-        per_day.setdefault(c.at.date(), []).append(c.tokens)
+        per_day.setdefault(c.at.astimezone(tz).date(), []).append(c.tokens)
     hot = tuple(
         sorted(
             d

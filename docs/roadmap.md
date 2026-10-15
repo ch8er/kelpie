@@ -614,7 +614,8 @@ context on every run. Find them in traces and recommend a filter.
 - [x] Tool calls ranked by output tokens per role and command prefix (redacted, no raw output stored)
 - [x] Commands above a threshold get a filter recommendation from a config table: RTK (github.com/rtk-ai/rtk) where it supports the platform, otherwise e.g. `xcbeautify`, errors only, tail; Kelpie does not build its own filter
 - [x] Before/after: tokens per command prefix compared across the day a filter was introduced
-- [ ] Repeated offenders → `comment` addressed to the owner of the role's instructions; estimated savings in the daily report
+- [ ] Repeated offenders → `comment` addressed to the owner of the role's instructions (listed under "needs a human" in the daily report; the `comment` action needs a rule)
+- [x] Estimated savings in the daily report
 - [x] Fixtures: new `field-05-build-log-flood.yaml`
 
 ### report: daily cost-of-chaos report
@@ -624,11 +625,11 @@ Kelpie fixed by itself, what needs a human decision, and the top 3 optimization
 recommendations. Delivered to Slack or Telegram and as Markdown/HTML.
 
 **Acceptance criteria**
-- [ ] Generated from storage only, deterministic for the same data
-- [ ] Sections: cost of chaos, fixed by Kelpie, needs a human, top 3 recommendations
-- [ ] Cost of chaos and cost per completed task in dollars next to hours, from the budgets and spend sources; marked as an estimate in subscription mode
-- [ ] "Needs a human" lists the long-lived alert states still open (state store: since, level, last seen), so states announced once are not forgotten
-- [ ] Every number links back to the underlying tasks
+- [x] Generated from storage only, deterministic for the same data (plus the adapters' current board for tasks and hook spans)
+- [x] Sections: cost of chaos, fixed by Kelpie, needs a human, top 3 recommendations
+- [x] Cost of chaos and cost per completed task in dollars next to hours, from the budgets and spend sources; marked as an estimate in subscription mode
+- [x] "Needs a human" lists the long-lived alert states still open (state store: since, level, last seen), so states announced once are not forgotten
+- [x] Every number links back to the underlying tasks
 - [ ] Scheduled daily; also available via `kelpie report --date`
 
 ### report: before/after verification of fixes

@@ -53,6 +53,7 @@ from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
+from kelpie.report.config import ReportSettings, load_report
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
 from kelpie.rules.ci_economy import CiEconomy
@@ -116,6 +117,7 @@ class Settings:
     human_tasks: HumanTaskSettings | None = None  # None: no [connectors.human_tasks]
     llm_quotas: LlmQuotaSettings | None = None  # [connectors.llm_quotas]
     alerts: AlertSettings = field(default_factory=AlertSettings)  # [alerts]
+    report: ReportSettings = field(default_factory=ReportSettings)  # [report]
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -146,6 +148,7 @@ def load_settings(path: Path | None) -> Settings:
         "connectors",
         "block_conditions",
         "alerts",
+        "report",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -176,6 +179,7 @@ def load_settings(path: Path | None) -> Settings:
     github, block_conditions, human_tasks, llm_quotas = _load_connectors(data)
     try:
         alerts = load_alerts(data.get("alerts"))
+        report = load_report(data.get("report"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     return Settings(
@@ -191,6 +195,7 @@ def load_settings(path: Path | None) -> Settings:
         resources=resources,
         llm_quotas=llm_quotas,
         alerts=alerts,
+        report=report,
     )
 
 

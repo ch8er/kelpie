@@ -463,3 +463,13 @@ def test_hermes_plugin_records_output_size_not_output(
     assert first["output_chars"] == 60 and "s3cret" not in spool.read_text()
     assert second["output_chars"] == len('{"lines":["a","b"]}')
     assert third["output_chars"] is None
+
+
+def test_hot_days_are_local_dates() -> None:
+    from zoneinfo import ZoneInfo
+
+    # 23:30 and 00:30 UTC are one evening in New York: one hot day there, two in UTC
+    late = datetime(2026, 3, 2, 23, 30, tzinfo=UTC)
+    found = [_call("npm test", 9000, late + timedelta(hours=i)) for i in range(2)]
+    assert len(rank(found)[0].hot_days) == 2
+    assert len(rank(found, tz=ZoneInfo("America/New_York"))[0].hot_days) == 1

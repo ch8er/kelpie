@@ -35,6 +35,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve.add_argument("--host", default=os.environ.get("KELPIE_HOST", "127.0.0.1"))
     serve.add_argument("--port", type=int, default=int(os.environ.get("KELPIE_PORT", "9464")))
     sub.add_parser("status", help="show the rules kelpie serve would load, with their mode")
+    report = sub.add_parser("report", help='the daily "cost of chaos" report as Markdown')
+    report.add_argument("--date", help="YYYY-MM-DD (default: yesterday in [report] timezone)")
+    report.add_argument(
+        "--send", action="store_true", help="send the summary to [[alerts.channels]] too"
+    )
     doctor = sub.add_parser(
         "doctor", help="check a first live run: config, observe mode, board, hooks, spans, git"
     )
@@ -56,6 +61,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     try:
         settings = load_settings(find_config(args.config))
+        if args.command == "report":
+            from kelpie.report.cli import run as run_report
+
+            out, err, code = run_report(settings, args.date, args.send)
+            sys.stdout.write(out)
+            sys.stderr.write(err)
+            return code
         if args.command == "status":
             rules = load_rules(settings.engine)
             adapters = build_adapters(settings)
