@@ -9,7 +9,7 @@ RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.12-slim-bookworm
 WORKDIR /app
-RUN useradd --system --uid 10001 kelpie
+RUN useradd --system --uid 10001 kelpie && mkdir /data && chown kelpie /data
 COPY --from=build --chown=kelpie /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 USER kelpie

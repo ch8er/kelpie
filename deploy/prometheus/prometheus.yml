@@ -8,6 +8,7 @@ scrape_configs:
       - targets: ["kelpie:9464"]
 
   # node_exporter on every host that runs agents. Replace with your hosts.
+  # The "node-exporter:9100" target exists only with `docker compose --profile local-agents up`.
   - job_name: node
     static_configs:
       - targets: ["node-exporter:9100"]

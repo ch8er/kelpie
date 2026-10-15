@@ -1,6 +1,8 @@
 import threading
 import urllib.request
 
+import pytest
+
 from kelpie.cli import main
 from kelpie.server import make_server
 
@@ -22,9 +24,8 @@ def test_metrics_endpoint() -> None:
         server.server_close()
 
 
-def test_cli_version(capsys) -> None:
-    try:
+def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
         main(["--version"])
-    except SystemExit as exc:
-        assert exc.code == 0
+    assert exc.value.code == 0
     assert "kelpie" in capsys.readouterr().out

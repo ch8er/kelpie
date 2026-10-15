@@ -22,7 +22,7 @@ MATCH_KEYS = {"kind", "task_id", "severity", "reason_contains", "params"}
 class Incident:
     path: Path
     id: str
-    number: int
+    number: int | None
     rule: str
     config: dict[str, Any]
     snapshot: Snapshot

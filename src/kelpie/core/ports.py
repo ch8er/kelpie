@@ -31,6 +31,13 @@ class PlatformAdapter(Protocol):
 
 
 @runtime_checkable
+class SupportsReassign(Protocol):
+    """Optional adapter capability. ``owner_id=None`` returns the task to the pool."""
+
+    def reassign(self, task_id: str, owner_id: str | None, reason: str) -> None: ...
+
+
+@runtime_checkable
 class ConditionConnector(Protocol):
     """Evaluates external conditions: GitHub PR/CI, LLM provider quotas, human tasks."""
 

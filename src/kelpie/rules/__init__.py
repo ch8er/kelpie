@@ -7,6 +7,8 @@ the rest, so a fixture starts gating CI the moment its rule lands.
 
 from __future__ import annotations
 
+import importlib
+import pkgutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -44,4 +46,14 @@ PLANNED: tuple[PlannedRule, ...] = (
     PlannedRule("bottlenecks", "Idle time and bottlenecks by role", (9, 13)),
     PlannedRule("resources", "Disk, memory, processes, LLM quotas, expiring auth", (3, 4, 5, 6)),
     PlannedRule("file_contention", "Shared-file conflicts driving returns", (7,)),
+    PlannedRule("checkpoints", "Commit reminder, WIP commit on exit, resume from commit", ()),
 )
+
+
+def load_rules() -> None:
+    """Import every submodule so their ``@register`` decorators run."""
+    for module in pkgutil.iter_modules(__path__):
+        importlib.import_module(f"{__name__}.{module.name}")
+
+
+load_rules()

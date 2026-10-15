@@ -33,3 +33,13 @@ def test_register_and_reject_duplicates(monkeypatch: pytest.MonkeyPatch) -> None
 def test_planned_rules_are_unique() -> None:
     names = [r.name for r in PLANNED]
     assert len(names) == len(set(names))
+
+
+def test_every_rule_module_is_imported() -> None:
+    import pkgutil
+    import sys
+
+    import kelpie.rules as rules
+
+    for module in pkgutil.iter_modules(rules.__path__):
+        assert f"kelpie.rules.{module.name}" in sys.modules

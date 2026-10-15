@@ -13,8 +13,8 @@ PATHS = all_paths()
 IDS = [p.stem for p in PATHS]
 
 
-def test_all_thirteen_incidents_present() -> None:
-    assert sorted(load(p).number for p in PATHS) == list(range(1, 14))
+def test_all_thirteen_incidents_covered() -> None:
+    assert set(range(1, 14)) <= {load(p).number for p in PATHS}
 
 
 @pytest.mark.parametrize("path", PATHS, ids=IDS)
@@ -22,6 +22,7 @@ def test_fixture_is_valid(path: Path) -> None:
     incident = load(path)
     assert incident.rule in {r.name for r in PLANNED}
     assert incident.expected, "fixture must expect at least one action"
+    assert incident.not_expected, "fixture must include a negative case"
 
 
 @pytest.mark.parametrize("path", PATHS, ids=IDS)

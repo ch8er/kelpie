@@ -22,6 +22,9 @@ class HermesAdapter:
     db_path: Path = DEFAULT_DB
     name: str = "hermes"
 
+    def __post_init__(self) -> None:
+        self.db_path = self.db_path.expanduser()
+
     def list_tasks(self) -> Sequence[Task]:
         raise NotImplementedError
 
