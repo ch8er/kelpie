@@ -6,8 +6,9 @@ description: >
   them touched the same few shared files (a route registry and a central types module).
   Agents working in parallel kept editing these hot files, so every merge invalidated
   someone else's work. This fixture uses a smaller representative sample (8 of 10 returns
-  are merge conflicts) with the same shape.
-rule: file_contention
+  are merge conflicts) with the same shape. Kelpie analyzes return causes and issues a
+  recommendation (alert listing the hot files) and warns in-progress tasks touching them.
+rule: return_causes
 config:
   window: "24h"
   conflict_ratio_threshold: 0.5

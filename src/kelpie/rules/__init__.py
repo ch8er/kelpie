@@ -37,15 +37,23 @@ class PlannedRule:
     incidents: tuple[int, ...]
 
 
+# Numbering follows docs/plan.md ("P0. MVP — core rules"); rule 8 is the daily report.
 PLANNED: tuple[PlannedRule, ...] = (
-    PlannedRule("exit_contract", "Session ended without final status / bad block -> requeue", (2,)),
-    PlannedRule("wait_condition", "Register condition and exit; detect in-session polling", (10,)),
-    PlannedRule("orphan_status", "Status without owner longer than N min -> alert/reassign", (11,)),
-    PlannedRule("stale_blocks", "Block cause resolved externally -> unblock", (1, 8)),
-    PlannedRule("ping_pong", "More than K review rounds -> escalate", (12,)),
-    PlannedRule("bottlenecks", "Idle time and bottlenecks by role", (9, 13)),
-    PlannedRule("resources", "Disk, memory, processes, LLM quotas, expiring auth", (3, 4, 5, 6)),
-    PlannedRule("file_contention", "Shared-file conflicts driving returns", (7,)),
+    PlannedRule(
+        "exit_contract", "1. Session ended without final status / bad block -> requeue", (2,)
+    ),
+    PlannedRule(
+        "wait_condition", "2. Register condition and exit; detect in-session waiting", (10,)
+    ),
+    PlannedRule(
+        "orphan_status", "3. Status without owner longer than N min -> alert/reassign", (11,)
+    ),
+    PlannedRule("stale_blocks", "4. Block cause resolved externally -> unblock", (1, 8)),
+    PlannedRule("ping_pong", "5. More than K review rounds -> escalate", (12,)),
+    PlannedRule("bottlenecks", "6. Idle time per role, humans in the task graph", (9, 10, 13)),
+    PlannedRule("resources", "7. Disk, memory, processes, provider quotas, auth expiry", (3, 4, 6)),
+    PlannedRule("ci_economy", "9. Wasted CI builds, superseded runs, quota forecast", (5,)),
+    PlannedRule("return_causes", "Root causes of task returns -> recommendation", (7,)),
     PlannedRule("checkpoints", "Commit reminder, WIP commit on exit, resume from commit", ()),
 )
 

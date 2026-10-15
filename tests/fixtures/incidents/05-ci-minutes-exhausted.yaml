@@ -5,8 +5,9 @@ description: >
   The monthly CI minutes quota was fully consumed and would not reset for weeks.
   Every task that needed a CI run sat blocked waiting for a check that would never start,
   some for about 11 hours, with no signal to humans that the root cause was billing,
-  not the code.
-rule: resources
+  not the code. Rule 9 (CI economy) must flag the exhausted quota and the tasks it blocks;
+  detecting wasted builds needs CI build records, which the model does not have yet.
+rule: ci_economy
 config:
   quota_critical: 1.0
 snapshot:

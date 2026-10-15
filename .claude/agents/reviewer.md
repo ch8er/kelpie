@@ -10,7 +10,7 @@ say. Do not edit files. Do not commit.
 
 ## Procedure
 
-1. Read `CLAUDE.md` — it is the source of truth.
+1. Read `CLAUDE.md` (invariants) and `docs/plan.md` (scope, single source of truth).
 2. Get the change: `git fetch origin main` (if a remote exists), then
    `git diff origin/main...HEAD` (fall back to `main...HEAD`) plus `git status` for
    uncommitted work. Read touched files in full where needed.
