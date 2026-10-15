@@ -638,9 +638,9 @@ Kelpie computes the effect of every fix by itself. Example from the farm: after 
 fix, review time dropped from 48 to 27 minutes, and failures from 9 of 29 to 1 of 11.
 
 **Acceptance criteria**
-- [ ] Fix events recorded with timestamps (rule enabled, config change, manual fix noted via CLI)
-- [ ] Daily report shows the before/after effect of yesterday's fixes on idle time, review time, failures, returns and tokens
-- [ ] Small samples are labelled as such
+- [x] Fix events recorded with timestamps (rule enabled, config change, manual fix noted via CLI)
+- [x] Daily report shows the before/after effect of yesterday's fixes on idle time, review time, failures, returns and tokens
+- [x] Small samples are labelled as such
 
 ### core: `kelpie status` CLI
 labels: P0, week-3, area:core

@@ -203,7 +203,7 @@ farm throughput metrics from traces.
   completed task, what Kelpie fixed by itself (and would have fixed in act mode), what
   needs a human (alert states still open, actions Kelpie could not carry out, repeated
   huge-output offenders), the top 3 recommendations and the largest tool outputs. See
-  [Daily report](#daily-report). Before/after of yesterday's fixes is planned.
+  [Daily report](#daily-report), including the before/after effect of yesterday's fixes.
 - **Dashboards**: no custom UI. Kelpie exposes Prometheus metrics on `/metrics`, Grafana
   shows them, traces open in Langfuse. CLI: `kelpie status` and `kelpie report`.
 
@@ -229,6 +229,22 @@ report; no LLM is involved.
 - **Top 3 recommendations**: output filters for huge tool outputs (RTK first; see
   `[traces.outputs]`), rules that would have fixed part of the chaos in act mode, and fixed
   remedies for the largest causes, ranked by dollars (hours count when `hour_usd` is set).
+
+**Before/after of fixes.** Every fix made on the report's day or the day before is measured
+over `[report] verify_window` (a day) before and after it: stuck condition-hours per day
+(only the fix's rule when it names one), tokens per day, task returns per day, review time
+(sessions of `review_roles`), sessions that failed or ended without a status, and for a
+command fix the output tokens per call. A side with fewer than `min_sample` observations,
+or an after-window under a quarter of the window, is labelled a small sample. Fixes come
+from `kelpie fix "lifted the merge hold" [--rule R] [--command PREFIX] [--role ROLE]
+[--at TIME]`, from config changes (`kelpie serve` notes when its config file changed), from
+rule mode changes in the action ledger (observe to act, dry-run off) and from output
+filters that appear in traces (`rtk`, `| xcbeautify`). Board-based metrics (review time,
+failures, returns) need the adapters to look back `1d + 2 x verify_window` when the report
+runs (Hermes: `lookback = "72h"` with the defaults), and spans must be kept as long
+(`[traces] retention`, 7d by default). `kelpie fix --at` without an offset is read in
+`[report] timezone`; it needs the database `kelpie serve` creates. Mode changes are placed
+at the first ledger entry in the new mode, so a quiet rule's switch shows up late.
 
 Schedule it on the host, shortly after midnight in the report's time zone, e.g. with cron:
 `5 0 * * * kelpie --config /etc/kelpie.toml report --send`. Adapters only look back so far

@@ -5,11 +5,27 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-KEYS = frozenset({"timezone", "dir", "task_url", "hour_usd", "channels", "severity"})
+from kelpie.core.serde import parse_duration
+from kelpie.report.verify import DEFAULT_MIN_SAMPLE, DEFAULT_REVIEW_ROLES, DEFAULT_WINDOW
+
+KEYS = frozenset(
+    {
+        "timezone",
+        "dir",
+        "task_url",
+        "hour_usd",
+        "channels",
+        "severity",
+        "verify_window",
+        "review_roles",
+        "min_sample",
+    }
+)
 SEVERITIES = ("info", "warning", "critical")
 
 
@@ -19,7 +35,10 @@ class ReportSettings:
     ``kelpie-report-<date>.md`` (None: stdout only). ``task_url``: a link template with
     ``{id}`` for task ids. ``hour_usd``: what an hour of stuck work costs (e.g. an agent
     slot), to put chaos hours into dollars; None leaves hours as hours. ``channels``: the
-    ``[[alerts.channels]]`` that get the summary (None: all), sent at ``severity``."""
+    ``[[alerts.channels]]`` that get the summary (None: all), sent at ``severity``.
+    Before/after of fixes: ``verify_window`` on each side, review time from the sessions of
+    ``review_roles``, and fewer than ``min_sample`` observations on a side is a small
+    sample."""
 
     timezone: str = "UTC"
     dir: Path | None = None
@@ -27,6 +46,9 @@ class ReportSettings:
     hour_usd: float | None = None
     channels: tuple[str, ...] | None = None
     severity: str = "warning"
+    verify_window: timedelta = DEFAULT_WINDOW
+    review_roles: tuple[str, ...] = DEFAULT_REVIEW_ROLES
+    min_sample: int = DEFAULT_MIN_SAMPLE
 
     @property
     def tz(self) -> ZoneInfo:
@@ -72,6 +94,19 @@ def load_report(section: Any) -> ReportSettings:
     severity = section.get("severity", "warning")
     if severity not in SEVERITIES:
         raise ValueError(f"[report] severity must be one of {list(SEVERITIES)}")
+    raw = section.get("verify_window", "1d")
+    try:
+        window = parse_duration(raw) if isinstance(raw, str) else None
+    except ValueError:
+        window = None
+    if window is None or window <= timedelta(0):
+        raise ValueError('[report] verify_window must be a duration such as "1d"')
+    roles = section.get("review_roles", list(DEFAULT_REVIEW_ROLES))
+    if not isinstance(roles, list) or not all(isinstance(r, str) and r.strip() for r in roles):
+        raise ValueError("[report] review_roles must be a list of role names")
+    sample = section.get("min_sample", DEFAULT_MIN_SAMPLE)
+    if isinstance(sample, bool) or not isinstance(sample, int) or sample <= 0:
+        raise ValueError("[report] min_sample must be a positive integer")
     return ReportSettings(
         timezone=tz.strip(),
         dir=None if out_dir is None else Path(out_dir.strip()).expanduser(),
@@ -79,4 +114,7 @@ def load_report(section: Any) -> ReportSettings:
         hour_usd=None if hour is None else float(hour),
         channels=None if channels is None else tuple(c.strip() for c in channels),
         severity=severity,
+        verify_window=window,
+        review_roles=tuple(r.strip() for r in roles),
+        min_sample=sample,
     )

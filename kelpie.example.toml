@@ -492,3 +492,6 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # hour_usd = 2.5                   # what a stuck task-hour costs; unset: hours stay hours
 # channels = ["telegram"]          # [[alerts.channels]] that get the summary (unset: all)
 # severity = "warning"             # sent at this severity (channels filter by min_severity)
+# verify_window = "1d"             # before/after of fixes: this long on each side
+# review_roles = ["reviewer"]      # whose sessions make "review time"
+# min_sample = 10                  # fewer observations on a side: a small sample

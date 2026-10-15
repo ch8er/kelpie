@@ -19,6 +19,7 @@ from kelpie.core.states import OpenState
 
 # The ledger's and state store's own row mappings, so the two cannot drift apart.
 from kelpie.core.storage import SCHEMA_VERSION, SchemaOutdated, SqliteSpanStore, _entry, _state
+from kelpie.report.fixes import FixEvent, read_fixes
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +85,9 @@ class ReportStore:
         """Stored spans whose last time falls in ``[start, end)``."""
         store = self._span_store()
         return [s for s in store.spans_since(start) if _last(s) < end]
+
+    def fixes(self, start: datetime, end: datetime) -> list[FixEvent]:
+        return read_fixes(self._db, start, end)
 
     def attribution(self) -> Attribution:
         return self._span_store().attribution()
