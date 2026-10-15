@@ -332,9 +332,18 @@ export OTEL_RESOURCE_ATTRIBUTES="kelpie.task_id=T-42"   # optional: link to a bo
 Tool arguments are redacted by Claude Code by default; with `OTEL_LOG_TOOL_DETAILS=1` its
 Bash command and file path are hashed into `args_hash` and dropped.
 
+**Platforms without OpenTelemetry** get spans from their adapter's hooks
+(`kelpie.traces.hooks`: task → session → tool spans with the same `args_hash`). When a
+platform reports a tool call both ways, Kelpie keeps the OTLP span and fills in what only
+the hook knows (`args_hash`, the redacted `command`). Pairs are matched one to one by session
+and `gen_ai.tool.call.id`, else by session, tool, `args_hash` and a start or end within
+2 seconds; `kelpie_snapshot_hook_spans_merged` counts them per tick. Hook spans are not
+written to the span store, so `span_totals` cover OTLP spans only. `kelpie.source` is
+reserved for hook spans and stripped from OTLP attributes.
+
 **Hermes.** The Kelpie hooks plugin already reports every tool call (see the Hermes
-adapter README). If Hermes also exports the same calls over OTLP, both copies reach the
-snapshot for now: de-duplication of hook and OTLP spans comes with the hooks helper. For model calls and token usage, Hermes' bundled Langfuse plugin only
+adapter README). If Hermes also exports the same calls over OTLP, each call is kept once
+(see below and the adapter README for the session id this needs). For model calls and token usage, Hermes' bundled Langfuse plugin only
 talks to Langfuse; the community [hermes-otel](https://github.com/briancaffey/hermes-otel)
 plugin can export to any OTLP/HTTP endpoint (`type: otlp` backend in
 `~/.hermes/hermes_otel.yaml`). We have not verified how it sets request headers, so run

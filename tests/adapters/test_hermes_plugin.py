@@ -52,10 +52,12 @@ def test_tool_call_line(spool: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         result={"stdout": "SECRET OUTPUT"},
         task_id="internal-uuid",
         session_id="sess-1",
+        tool_call_id="call_7",
         duration_ms=250,
         status="ok",
     )
     (rec,) = lines(spool)
+    assert rec["tool_call_id"] == "call_7"
     canonical = json.dumps(args, sort_keys=True, separators=(",", ":"))
     assert rec["type"] == "tool" and isinstance(rec["at"], float)
     assert rec["task_id"] == "t_1" and rec["run_id"] == "42" and rec["session_id"] == "sess-1"
@@ -69,10 +71,13 @@ def test_outside_a_kanban_worker_task_id_is_none(
 ) -> None:
     monkeypatch.setenv("HERMES_SESSION_ID", "env-sess")
     # Hermes' own ``task_id`` keyword is an internal id, not a kanban task.
-    plugin.post_tool_call(tool_name="read_file", args={"path": "a"}, task_id="x", run_id=3)
+    plugin.post_tool_call(
+        tool_name="read_file", args={"path": "a"}, task_id="x", run_id=3, tool_call_id=""
+    )
     (rec,) = lines(spool)
     assert rec["task_id"] is None and rec["run_id"] == "3" and rec["session_id"] == "env-sess"
     assert rec["command"] is None and rec["duration_ms"] is None
+    assert rec["tool_call_id"] is None  # Hermes passes "" when there is none
 
 
 def test_error_outcome_and_params_alias(spool: Path) -> None:

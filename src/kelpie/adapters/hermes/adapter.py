@@ -5,7 +5,10 @@ Describes a Hermes farm to Kelpie from two sources:
 - the Kanban SQLite database (``~/.hermes/kanban.db``), opened strictly read-only, one
   short-lived connection per snapshot (Hermes writes to it concurrently, WAL mode);
 - the hooks spool written by the Hermes plugin (:mod:`kelpie.adapters.hermes.plugin`),
-  which supplies tool-call spans.
+  turned into task, session and tool spans by
+  :func:`kelpie.traces.hooks.spans_from_hook_events` (a Hermes run is a session,
+  ``hermes-run-<id>``). When Hermes also exports OTLP spans for the same calls, the app
+  keeps the OTLP ones, completed from the hooks (:func:`kelpie.traces.hooks.merge_hook_spans`).
 
 Actions (requeue, unblock, comment, WIP commit) are not implemented yet: run Kelpie in
 ``observe`` or ``suggest`` mode.
@@ -104,6 +107,7 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.core.ports import PlatformEvent
+from kelpie.traces.hooks import SESSION_END, TOOL, HookEvent, spans_from_hook_events
 
 log = logging.getLogger(__name__)
 
@@ -323,7 +327,7 @@ class HermesAdapter:
         spans = self._spans(cutoff)
         beats: dict[str, datetime] = {}
         for span in spans:
-            if span.session_id and span.end is not None:
+            if span.kind is SpanKind.TOOL and span.session_id and span.end is not None:
                 beats[span.session_id] = max(span.end, beats.get(span.session_id, span.end))
         try:
             with self._connect() as conn:  # one read transaction: a consistent view
@@ -607,12 +611,8 @@ class HermesAdapter:
                 continue
 
     def _spans(self, cutoff: datetime) -> tuple[Span, ...]:
-        spans: list[Span] = []
-        for line in self._spool_lines(cutoff):
-            span = _span_from_line(line, cutoff)
-            if span is not None:
-                spans.append(span)
-        return tuple(spans)
+        events = (_event_from_line(line, cutoff) for line in self._spool_lines(cutoff))
+        return spans_from_hook_events((e for e in events if e is not None), prefix="hermes")
 
     # --- PlatformAdapter -----------------------------------------------------------------
 
@@ -640,36 +640,35 @@ class HermesAdapter:
         raise NotImplementedError(NOT_IMPLEMENTED)
 
 
-def _span_from_line(line: str, cutoff: datetime) -> Span | None:
-    """One spool line to a tool span; malformed or foreign lines give ``None``."""
+def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
+    """One spool line to a hook event; malformed, foreign or old lines give ``None``."""
     try:
         rec = json.loads(line)
-        if not isinstance(rec, dict) or rec.get("type") != "tool":
+        if not isinstance(rec, dict) or rec.get("type") not in (TOOL, SESSION_END):
             return None
-        end = _utc(rec["at"])
-        if end is None or end < cutoff:
+        at = _utc(rec["at"])
+        if at is None or at < cutoff:
             return None
         duration = rec.get("duration_ms")
         millis = duration if isinstance(duration, int | float) and duration >= 0 else 0
         run_id = rec.get("run_id")
         task_id = rec.get("task_id")
         tool = rec.get("tool")
+        call_id = rec.get("tool_call_id")
         attributes: dict[str, Any] = {}
         if isinstance(rec.get("command"), str):
             attributes["command"] = rec["command"]
-        digest = hashlib.sha256(line.strip().encode("utf-8", "replace")).hexdigest()[:16]
-        return Span(
-            trace_id=f"hermes-run-{run_id}" if run_id else f"hermes-task-{task_id or 'none'}",
-            span_id=f"hermes-tool-{digest}",
-            name=f"tool {tool}" if tool else "tool",
-            kind=SpanKind.TOOL,
-            start=end - timedelta(milliseconds=millis),
-            end=end,
-            task_id=str(task_id) if task_id else None,
+        return HookEvent(
+            kind=rec["type"],
+            at=at,
+            key=hashlib.sha256(line.strip().encode("utf-8", "replace")).hexdigest()[:16],
             session_id=f"hermes-run-{run_id}" if run_id else None,
+            task_id=str(task_id) if task_id else None,
             tool=str(tool) if tool else None,
             args_hash=str(rec["args_hash"]) if rec.get("args_hash") else None,
+            duration=timedelta(milliseconds=millis),
             outcome=str(rec["outcome"]) if rec.get("outcome") else None,
+            tool_call_id=str(call_id) if call_id else None,
             attributes=attributes,
         )
     except (ValueError, KeyError, TypeError, OverflowError):

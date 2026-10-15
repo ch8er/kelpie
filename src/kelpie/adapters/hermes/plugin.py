@@ -7,8 +7,10 @@ file to ``~/.hermes/plugins/kelpie/__init__.py`` next to a ``plugin.yaml`` (see 
 Hooks (names from ``VALID_HOOKS`` in ``hermes_cli/plugins.py`` of Hermes):
 
 - ``post_tool_call``: keyword arguments ``tool_name``, ``args``, ``result``, ``task_id``,
-  ``session_id``, ``duration_ms``, ``status`` (``"ok"`` | ``"error"``), ``error_type``,
-  ``error_message`` and more (``model_tools._emit_post_tool_call_hook``).
+  ``session_id``, ``tool_call_id``, ``duration_ms``, ``status`` (``"ok"`` | ``"error"``),
+  ``error_type``, ``error_message`` and more (``model_tools._emit_post_tool_call_hook``;
+  missing ids arrive as ``""``). ``tool_call_id`` lets Kelpie match a call that Hermes
+  also reports over OTLP, so it is not counted twice.
 - ``on_session_end``: observer, fired per turn. Its kwargs are not documented in the Hermes
   source we could read, so every field is read defensively.
 
@@ -52,6 +54,8 @@ def _max_bytes() -> int:
         return DEFAULT_MAX_BYTES
 
 
+# Identical to kelpie.traces.args.args_hash (a test compares the source): a call reported by
+# this hook and over OTLP must hash the same. Keep both copies in sync.
 def args_hash(args: Any) -> str:
     """First 16 hex digits of the SHA-256 of the canonical JSON of ``args``."""
     try:
@@ -195,6 +199,7 @@ def post_tool_call(**kwargs: Any) -> None:
             "at": time.time(),
             **_ids(kwargs),
             "tool": _text(kwargs.get("tool_name") or kwargs.get("tool")),
+            "tool_call_id": _text(kwargs.get("tool_call_id")),
             "args_hash": args_hash(args),
             "command": _command(args),
             "outcome": "error" if status in {"error", "failed", "failure"} else "ok",

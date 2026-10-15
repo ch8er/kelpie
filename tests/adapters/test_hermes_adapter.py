@@ -378,16 +378,33 @@ def test_spans_from_spool(board: Board, tmp_path: Path) -> None:
         )
     )
     spans = adapter(board, spool).snapshot(NOW).spans
-    assert len(spans) == 2
-    s = spans[0]
+    task, session, s, bare = spans
     assert s.kind is SpanKind.TOOL and s.tool == "terminal" and s.outcome == "ok"
-    assert s.session_id == "hermes-run-7" and s.task_id == "t_1" and s.trace_id == "hermes-run-7"
-    assert s.args_hash == "abcd" and s.attributes == {"command": "ls"}
+    assert s.session_id == "hermes-run-7" and s.task_id == "t_1"
+    assert s.args_hash == "abcd" and s.attributes["command"] == "ls"
+    assert s.attributes["kelpie.source"] == "hooks" and s.name == "execute_tool terminal"
     assert s.end == ago(minutes=5) and s.duration == timedelta(milliseconds=1500)
-    bare = spans[1]
     assert bare.session_id is None and bare.task_id is None and bare.tool is None
-    assert bare.attributes == {} and bare.trace_id == "hermes-task-none"
+    assert "command" not in bare.attributes and bare.trace_id == "hermes-task-none"
     assert s.span_id != bare.span_id
+    # task -> session -> tool, one trace per task
+    assert task.kind is SpanKind.TASK and task.task_id == "t_1"
+    assert session.kind is SpanKind.SESSION and session.parent_id == task.span_id
+    assert s.parent_id == session.span_id
+    assert s.trace_id == session.trace_id == task.trace_id == "hermes-task-t_1"
+
+
+def test_tool_call_id_and_session_end(board: Board, tmp_path: Path) -> None:
+    spool = tmp_path / "spool.jsonl"
+    end = {"type": "session_end", "at": ago(minutes=1).timestamp(), "run_id": "7"}
+    spool.write_text(
+        tool_line(ago(minutes=5), tool_call_id="call_1") + "\n" + json.dumps(end) + "\n"
+    )
+    spans = adapter(board, spool).snapshot(NOW).spans
+    (session,) = [s for s in spans if s.kind is SpanKind.SESSION]
+    (tool,) = [s for s in spans if s.kind is SpanKind.TOOL]
+    assert tool.attributes["gen_ai.tool.call.id"] == "call_1"
+    assert session.end == ago(minutes=1)
 
 
 def test_spool_missing_or_disabled(board: Board, tmp_path: Path) -> None:
@@ -399,7 +416,8 @@ def test_rotated_spool_is_read_too(board: Board, tmp_path: Path) -> None:
     spool = tmp_path / "spool.jsonl"
     spool.write_text(tool_line(ago(minutes=1), tool="b") + "\n")
     (tmp_path / "spool.jsonl.1").write_text(tool_line(ago(minutes=9), tool="a") + "\n")
-    assert [s.tool for s in adapter(board, spool).snapshot(NOW).spans] == ["a", "b"]
+    spans = adapter(board, spool).snapshot(NOW).spans
+    assert [s.tool for s in spans if s.kind is SpanKind.TOOL] == ["a", "b"]
 
 
 # --- liveness ---------------------------------------------------------------------------

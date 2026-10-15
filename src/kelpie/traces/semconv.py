@@ -175,8 +175,14 @@ CLAUDE_CODE_KEYS = frozenset(
 _KINDS = frozenset(k.value for k in SpanKind)
 
 
+# Set by Kelpie itself (hook spans carry ``kelpie.source = "hooks"``); never taken from OTLP.
+RESERVED_KEYS = frozenset({"kelpie.source"})
+
+
 def is_kept(key: str, claude_code: bool = False) -> bool:
     """True for attributes on the allowlist (values are checked separately)."""
+    if key in RESERVED_KEYS:
+        return False
     return (
         key in KEPT_KEYS
         or key.startswith(NUMERIC_PREFIXES)
