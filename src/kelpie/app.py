@@ -32,6 +32,7 @@ from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
 from kelpie.traces.config import TraceSettings, load_traces
+from kelpie.traces.hooks import merge_hook_spans
 from kelpie.traces.ingest import IGNORED, TraceIngest
 from kelpie.traces.store import SpanRetention, SpanWindow, merge_spans
 
@@ -251,6 +252,8 @@ def merged_snapshot(
     out of that tick; the others still count. With ``spans``, stored spans of the window
     (OTLP ingest) and per-session totals are added; a span id already seen is kept once. A
     span store that fails is logged and counted, and the tick goes on without its spans.
+    Tool calls reported both by hooks and over OTLP are kept once, as the OTLP span
+    completed with the hook's arguments hash and command.
     """
 
     def source() -> Snapshot:
@@ -285,7 +288,9 @@ def merged_snapshot(
                 merged = replace(
                     merged, spans=merge_spans(stored, merged.spans), span_totals=totals
                 )
-        return merged
+        folded = merge_hook_spans(merged.spans)
+        metrics.hook_spans_merged(folded.merged)
+        return replace(merged, spans=folded.spans)
 
     return source
 

@@ -82,7 +82,7 @@ not tied to a run.
 ### Spool format
 
 ```json
-{"type":"tool","at":1772463000.5,"task_id":"t_1","run_id":"42","session_id":"...","tool":"terminal","args_hash":"3f2a9c01d4e5b678","command":"gh pr checks 5","outcome":"ok","duration_ms":250}
+{"type":"tool","at":1772463000.5,"task_id":"t_1","run_id":"42","session_id":"...","tool":"terminal","tool_call_id":"call_1","args_hash":"3f2a9c01d4e5b678","command":"gh pr checks 5","outcome":"ok","duration_ms":250}
 {"type":"session_end","at":1772463100.1,"task_id":"t_1","run_id":"42","session_id":"...","completed":true,"interrupted":false}
 ```
 
@@ -115,7 +115,7 @@ mode `0600`. Hooks never raise and do no network I/O.
 | `task_events`, latest status-changing event | `status_since` (non-status events such as `heartbeat`, `commented`, `claim_extended` are ignored) |
 | `task_links` (parent, child) | `Dependency(child, depends_on=parent)` (links to archived parents dropped) |
 | `task_runs` row | `Session` `hermes-run-<id>` |
-| spool `tool` lines | `Span(kind=tool)` linked to the session and task |
+| spool `tool` lines | `Span(kind=tool)` linked to the session and task, built by `kelpie.traces.hooks` with a task span and a session span around them; `tool_call_id` kept as `gen_ai.tool.call.id` |
 
 Blocks (`Block.reason`), from a `blocked` event at or after `status_since`:
 
@@ -240,4 +240,19 @@ Notes:
   fires on workers that vanished before the sweep (stale heartbeat, expired claim) and on
   bad blocks.
 - `on_session_end` fires per turn in Hermes, not once per worker process; Kelpie takes
-  session ends from `task_runs`, not from the spool, and ignores `session_end` lines.
+  session ends from `task_runs`, not from the spool. `session_end` lines only close the
+  run's session span when no tool call follows them.
+- If Hermes also exports OTLP spans to Kelpie (for example through the hermes-otel plugin),
+  a tool call reported both ways is kept once: the OTLP span, completed with the hook's
+  `args_hash` and redacted `command` so rules 2 and 10 still see them. Pairs are matched one
+  to one by session and `tool_call_id`, else by session, tool, `args_hash` and a start or
+  end within 2 seconds (`kelpie_snapshot_hook_spans_merged` shows how many were folded in
+  the last tick). This only works when the OTLP spans carry the same session id as the
+  hooks, `hermes-run-<run id>`. Hermes gives each kanban worker `HERMES_KANBAN_RUN_ID` and
+  `HERMES_KANBAN_TASK`; export, in whatever starts the worker,
+  `OTEL_RESOURCE_ATTRIBUTES="kelpie.session_id=hermes-run-${HERMES_KANBAN_RUN_ID},kelpie.task_id=${HERMES_KANBAN_TASK}"`.
+  Not verified: that hermes-otel builds its OpenTelemetry resource with the SDK defaults
+  (which read `OTEL_RESOURCE_ATTRIBUTES`), and that your Hermes setup lets you wrap the
+  worker command. Without a matching session id both copies stay in the snapshot.
+- Hook spans live in the snapshot only, not in the span store, so `span_totals` (per-session
+  calls and tokens over 24 hours) count OTLP spans only.

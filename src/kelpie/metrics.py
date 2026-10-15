@@ -52,6 +52,7 @@ class Metrics:
         self.span_store_errors = 0
         self.snapshot_span_count = 0
         self.snapshot_spans_dropped = 0
+        self.snapshot_hook_merged = 0
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
@@ -96,6 +97,10 @@ class Metrics:
         with self._lock:
             self.snapshot_span_count = count
             self.snapshot_spans_dropped += dropped
+
+    def hook_spans_merged(self, count: int) -> None:
+        with self._lock:
+            self.snapshot_hook_merged = count
 
     def span_store_failed(self) -> None:
         with self._lock:
@@ -290,6 +295,12 @@ class Metrics:
             "counter",
             "Stored spans left out of snapshots by [traces] max_snapshot_spans (oldest first).",
             [f"kelpie_snapshot_spans_dropped_total {self.snapshot_spans_dropped}"],
+        )
+        metric(
+            "kelpie_snapshot_hook_spans_merged",
+            "gauge",
+            "Hook tool spans in the last snapshot folded into an OTLP span of the same call.",
+            [f"kelpie_snapshot_hook_spans_merged {self.snapshot_hook_merged}"],
         )
         metric(
             "kelpie_span_store_errors_total",
