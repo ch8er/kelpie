@@ -1,0 +1,47 @@
+id: "10-review-queue-bottleneck"
+incident: 10
+title: "Review queue piles up while developers sit idle"
+description: >
+  Developers handed their work to review, but the farm has a single reviewer. Four reviews
+  queued behind the busy reviewer for over two hours while two of the three developers had
+  nothing to do (the third was busy). One ready developer task would absorb one of the idle
+  developers, so only the other is spare capacity. The bottleneck was the reviewer role, and
+  the idle capacity was in another role; nothing was broken, so nothing alerted.
+rule: bottlenecks
+config:
+  min_queue_depth: 3
+  min_idle_time: "10m"
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: reviewer-1, role: reviewer}
+    - {id: human-owner, role: owner, kind: human}
+  tasks:
+    - {id: T-1001, title: "Review: pagination", status: review, status_since: "2026-03-02T15:30:00+00:00", role: reviewer, owner_id: reviewer-1}
+    - {id: T-1002, title: "Review: caching layer", status: review, status_since: "2026-03-02T13:40:00+00:00", role: reviewer}
+    - {id: T-1003, title: "Review: config loader", status: review, status_since: "2026-03-02T14:10:00+00:00", role: reviewer}
+    - {id: T-1004, title: "Review: metrics export", status: review, status_since: "2026-03-02T14:50:00+00:00", role: reviewer}
+    - {id: T-1005, title: "Review: retry policy", status: review, status_since: "2026-03-02T15:20:00+00:00", role: reviewer}
+    - {id: T-1006, title: "Rework date parsing", status: in_progress, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # Distractor: a single ready developer task, absorbed by the idle developers.
+    - {id: T-1007, title: "Add CLI flag", status: ready, status_since: "2026-03-02T15:50:00+00:00", role: developer}
+  sessions:
+    - {id: S-1, task_id: T-1002, owner_id: agent-dev-2, started_at: "2026-03-02T12:00:00+00:00", ended_at: "2026-03-02T13:40:00+00:00", final_status: review}
+    - {id: S-2, task_id: T-1003, owner_id: agent-dev-3, started_at: "2026-03-02T12:30:00+00:00", ended_at: "2026-03-02T14:10:00+00:00", final_status: review}
+expected_actions:
+  - kind: alert
+    reason_contains: "reviewer"
+    params:
+      overloaded_role: reviewer
+      queue_depth: 4
+      idle_roles: [developer]
+      idle_agents: [agent-dev-3]
+not_expected_actions:
+  - kind: alert
+    params: {overloaded_role: developer}
+  - kind: alert
+    task_id: T-1001
+  - kind: escalate
