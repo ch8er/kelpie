@@ -3,7 +3,15 @@ attach conditions during snapshot assembly, so both read the linkage alike."""
 
 from __future__ import annotations
 
-from kelpie.core.model import Condition, Snapshot, Task
+from kelpie.core.model import Condition, Snapshot, Status, Task
+
+
+def bare_block(task: Task, snapshot: Snapshot) -> bool:
+    """A blocked task whose block names no condition and has none linked."""
+    if task.status is not Status.BLOCKED or task.block is None or task.block.condition_id:
+        return False
+    conditions, _ = linked_conditions(task, snapshot)
+    return not conditions
 
 
 def linked_conditions(task: Task, snapshot: Snapshot) -> tuple[list[Condition], str | None]:

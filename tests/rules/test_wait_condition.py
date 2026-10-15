@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -49,6 +50,24 @@ def test_wake_needs_fresh_evidence() -> None:
     assert kinds(rule, waiting(NOW - 60 * M), cond("a", True, checked=NOW - 61 * M)) == []
     assert kinds(rule, waiting(), cond("a", True, checked=NOW - 16 * M)) == []
     assert kinds(rule, waiting(), cond("a", True, checked=NOW - 15 * M)) == [ActionKind.WAKE]
+
+
+def test_terminal_unmet_condition_alerts_at_once() -> None:
+    rule = WaitCondition(max_condition_age=15 * M)
+    dead = Condition(
+        "a",
+        ConditionKind.HUMAN_TASK,
+        task_id="T-1",
+        params={"task": "H-1", "status": "cancelled", "terminal": True},
+        satisfied=False,
+        checked_at=NOW - M,
+    )
+    assert kinds(rule, waiting(), dead) == [ActionKind.ALERT]
+    # Seen before the wait began, or no flag: ordinary waiting.
+    assert kinds(rule, waiting(NOW - 10 * M), replace(dead, checked_at=NOW - 11 * M)) == []
+    assert kinds(rule, waiting(), replace(dead, params={"task": "H-1"})) == []
+    # The alert holds while the connector is slow to check again.
+    assert kinds(rule, waiting(), replace(dead, checked_at=NOW - 50 * M)) == [ActionKind.ALERT]
 
 
 def test_no_polling_comment_for_a_task_already_waiting() -> None:

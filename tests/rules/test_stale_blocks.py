@@ -41,7 +41,9 @@ def run(task: Task, *conditions: Condition, rule: StaleBlocks | None = None) -> 
 
 
 def test_pr_closed_without_merge_alerts_at_once_on_fresh_evidence() -> None:
-    closed = replace(cond(satisfied=False, at=None), params={"pr_state": "closed"})
+    closed = replace(
+        cond(satisfied=False, at=None), params={"pr_state": "closed", "terminal": True}
+    )
     (action,) = run(blocked(since=NOW - 10 * M), closed)
     assert action.kind is ActionKind.ALERT and "closed without merging" in action.reason
     # Evidence from before the block, or a PR still open: no early alert.
@@ -52,6 +54,28 @@ def test_pr_closed_without_merge_alerts_at_once_on_fresh_evidence() -> None:
     # Seen closed during the block but not re-checked lately: the alert stays.
     (kept,) = run(blocked(since=NOW - 60 * M), old)
     assert kept.key == action.key.replace((NOW - 10 * M).isoformat(), (NOW - 60 * M).isoformat())
+
+
+def test_any_terminal_unmet_condition_alerts_at_once() -> None:
+    """The flag, not the PR state, is what makes a condition a dead end (human tasks too)."""
+    human = Condition(
+        "C-1",
+        ConditionKind.HUMAN_TASK,
+        "T-1",
+        params={"task": "T-42", "status": "failed", "terminal": True},
+        satisfied=False,
+        checked_at=NOW - M,
+    )
+    (action,) = run(blocked(since=NOW - 10 * M), human)
+    assert action.kind is ActionKind.ALERT
+    assert "human task T-42 ended as failed" in action.reason
+    # Without the flag a closed PR is just an unmet condition; a met one is never a dead end.
+    plain = replace(human, params={"task": "T-42", "status": "in_progress"})
+    assert run(blocked(since=NOW - 10 * M), plain) == []
+    legacy = replace(cond(satisfied=False, at=None), params={"pr_state": "closed"})
+    assert run(blocked(since=NOW - 10 * M), legacy) == []
+    met = replace(human, satisfied=True, satisfied_at=NOW - 5 * M)
+    assert [a.kind for a in run(blocked(since=NOW - 60 * M), met)] == [ActionKind.UNBLOCK]
 
 
 def test_registered() -> None:

@@ -40,7 +40,7 @@ from datetime import timedelta
 from typing import Any, Protocol
 
 from kelpie.connectors.github.connector import GitHubConnector, PrRef, parse_pr_ref, valid_repo
-from kelpie.core.conditions import linked_conditions
+from kelpie.core.conditions import bare_block as _bare_block
 from kelpie.core.model import Condition, ConditionKind, Snapshot, Status, Task
 
 log = logging.getLogger(__name__)
@@ -236,14 +236,6 @@ class ConditionSync:
             ref = parse_pr_ref(m["pr"], p.repo, self.connector.host)
             found.append((p, ref if ref is not None and self.connector.allows(ref.repo) else None))
         return found
-
-
-def _bare_block(task: Task, snapshot: Snapshot) -> bool:
-    """A blocked task whose block names no condition and has none linked."""
-    if task.status is not Status.BLOCKED or task.block is None or task.block.condition_id:
-        return False
-    conditions, _ = linked_conditions(task, snapshot)
-    return not conditions
 
 
 def _condition(task: Task, pattern: BlockConditionPattern, ref: PrRef) -> Condition:

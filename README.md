@@ -554,7 +554,8 @@ plugin; stops a run through the Hermes CLI), the engine (routing to executors, p
 ledger in SQLite), `kelpie serve` with the control loop and engine metrics, OTLP trace
 ingest with span storage and forwarding, a read-only GitHub PR/CI connector
 (`[connectors.github]`, plus `[[block_conditions]]` that turn block reasons naming a PR
-into conditions; see `kelpie.example.toml`), `kelpie
+into conditions; see `kelpie.example.toml`), a human task connector
+(`[connectors.human_tasks]`: `human_task` conditions on human-owned tasks of the board), `kelpie
 status`, and fixtures for the 13 farm incidents and for field evidence. Other Hermes actions,
 other adapters and connectors, alerters and the report are stubs, `kelpie report` does not exist yet,
 and rules 1–4 (`exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`) are

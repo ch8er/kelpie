@@ -26,6 +26,11 @@ from kelpie.connectors.github import (
     load_block_conditions,
     load_github,
 )
+from kelpie.connectors.human_tasks import (
+    HumanTaskConnector,
+    HumanTaskSettings,
+    load_human_tasks,
+)
 from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
@@ -70,6 +75,7 @@ class HermesSettings:
     git_timeout: timedelta = hermes.DEFAULT_GIT_TIMEOUT  # per git call
     cli: str = hermes.DEFAULT_CLI  # Hermes executable that carries out ``stop``
     cli_timeout: timedelta = timedelta(seconds=hermes.CLI_TIMEOUT)  # one stop command
+    human_owners: frozenset[str] = frozenset()  # assignees that are people, not agents
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -80,6 +86,7 @@ class HermesSettings:
             git_timeout=self.git_timeout,
             cli=self.cli,
             cli_timeout=self.cli_timeout.total_seconds(),
+            human_owners=self.human_owners,
         )
 
 
@@ -94,6 +101,7 @@ class Settings:
     resources: ResourceSettings = field(default_factory=ResourceSettings)
     github: GitHubSettings | None = None  # None: no [connectors.github] section
     block_conditions: tuple[BlockConditionPattern, ...] = ()
+    human_tasks: HumanTaskSettings | None = None  # None: no [connectors.human_tasks]
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -150,9 +158,10 @@ def load_settings(path: Path | None) -> Settings:
         raise ConfigError(str(exc)) from exc
     if budgets.budgets and not traces.enabled:
         raise ConfigError("[[budgets]] read spend from traces: they need [traces] enabled")
-    github, block_conditions = _load_connectors(data)
+    github, block_conditions, human_tasks = _load_connectors(data)
     return Settings(
         github=github,
+        human_tasks=human_tasks,
         block_conditions=block_conditions,
         engine=engine,
         hermes=_load_hermes(data.get("adapters", {})),
@@ -166,19 +175,22 @@ def load_settings(path: Path | None) -> Settings:
 
 def _load_connectors(
     data: Mapping[str, Any],
-) -> tuple[GitHubSettings | None, tuple[BlockConditionPattern, ...]]:
+) -> tuple[GitHubSettings | None, tuple[BlockConditionPattern, ...], HumanTaskSettings | None]:
     connectors = data.get("connectors", {})
     if not isinstance(connectors, Mapping):
         raise ConfigError("[connectors] must be a table")
-    if extra := set(connectors) - {"github"}:
+    if extra := set(connectors) - {"github", "human_tasks"}:
         raise ConfigError(f"unknown [connectors] entries: {sorted(extra)}")
     try:
         github = load_github(connectors["github"]) if "github" in connectors else None
         repos = github.repos if github is not None else None
         patterns = load_block_conditions(data.get("block_conditions"), repos)
+        human_tasks = (
+            load_human_tasks(connectors["human_tasks"]) if "human_tasks" in connectors else None
+        )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    return github, patterns
+    return github, patterns, human_tasks
 
 
 def _load_hermes(adapters: Any) -> HermesSettings | None:
@@ -200,6 +212,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "git_timeout",
         "cli",
         "cli_timeout",
+        "human_owners",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     paths: dict[str, Path | None] = {}
@@ -241,8 +254,25 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError(f"[adapters.hermes] cli_timeout: {exc}") from exc
     if not timedelta(0) < cli_timeout <= timedelta(minutes=1):
         raise ConfigError("[adapters.hermes] cli_timeout must be positive and at most 60s")
+    humans = section.get("human_owners", [])
+    if (
+        not isinstance(humans, list)
+        or not all(isinstance(h, str) and h.strip() for h in humans)
+        or len({h.strip().casefold() for h in humans}) != len(humans)
+    ):
+        raise ConfigError(
+            "[adapters.hermes] human_owners must be a list of distinct non-empty strings"
+        )
     return HermesSettings(
-        db_path, paths["spool"], lookback, enabled, git_state, git_timeout, cli, cli_timeout
+        db_path,
+        paths["spool"],
+        lookback,
+        enabled,
+        git_state,
+        git_timeout,
+        cli,
+        cli_timeout,
+        frozenset(h.strip() for h in humans),
     )
 
 
@@ -671,7 +701,17 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
 def _connector_steps(
     settings: Settings, metrics: Metrics, clock: Callable[[], datetime]
 ) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
-    """The GitHub step: evaluate PR/CI conditions and attach block conditions."""
+    """Connector steps: GitHub (PR/CI conditions, block conditions), human tasks."""
+    steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = []
+    if settings.human_tasks is not None and settings.human_tasks.enabled:
+        steps.append(("human_tasks", HumanTaskConnector(settings.human_tasks.block_patterns)))
+    steps.extend(_github_steps(settings, metrics, clock))
+    return steps
+
+
+def _github_steps(
+    settings: Settings, metrics: Metrics, clock: Callable[[], datetime]
+) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
     github = settings.github
     if github is None or not github.enabled:
         return []
@@ -892,6 +932,21 @@ def _github_status(settings: Settings) -> list[str]:
     ]
 
 
+def _human_tasks_status(settings: Settings) -> list[str]:
+    human = settings.human_tasks
+    if human is None:
+        return []
+    if not human.enabled:
+        return ["human_tasks: disabled"]
+    owners = settings.hermes.human_owners if settings.hermes is not None else frozenset()
+    who = (
+        f"hermes human owners {', '.join(sorted(owners))}"
+        if owners
+        else "no human owners configured"
+    )
+    return [f"human_tasks: human_task conditions on the board, {who}"]
+
+
 def render_status(
     settings: Settings,
     loaded: LoadedRules,
@@ -909,6 +964,7 @@ def render_status(
         f"traces:   {_traces_status(settings.traces)}",
         f"resources: {_resources_status(settings.resources)}",
         *_github_status(settings),
+        *_human_tasks_status(settings),
         "",
         f"{'#':>3}  {'rule':<17} {'prio':<4}  {'status':<16} mode",
     ]

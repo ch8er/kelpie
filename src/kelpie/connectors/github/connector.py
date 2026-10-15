@@ -5,7 +5,7 @@ a ``ci_status`` condition may name the commit (``sha``) instead of taking the PR
 ``expect`` (``success``, the default, or ``failure``).
 
 - ``pr_merged`` holds once the PR is merged (``satisfied_at`` = ``merged_at``). A closed,
-  unmerged PR never satisfies it (``params.pr_state = "closed"``).
+  unmerged PR never satisfies it (``params.pr_state = "closed"``, ``params.terminal = True``).
 - ``ci_status`` looks at the head commit: the combined commit status and the check runs.
   Green means every reported status and check run finished successfully (``neutral`` and
   ``skipped`` count as success) and at least one was reported. ``satisfied_at`` is the
@@ -151,10 +151,12 @@ class GitHubConnector:
         ref = self.ref_from_params(condition.params)
         if condition.kind not in self.kinds or ref is None:
             return condition
-        params = {k: v for k, v in condition.params.items() if k != "error"}
+        params = {k: v for k, v in condition.params.items() if k not in {"error", "terminal"}}
         try:
             pull = self.pull(ref)
             params["pr_state"] = pull.state
+            if condition.kind is ConditionKind.PR_MERGED and pull.state == "closed":
+                params["terminal"] = True  # closed unmerged: it can never be met
             if condition.kind is ConditionKind.PR_MERGED:
                 merged = pull.state == "merged"
                 return replace(
