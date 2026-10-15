@@ -96,7 +96,6 @@ Spend becomes a metric Kelpie watches, not a number someone checks in a billing 
 ### P1. Rules backlog — after weeks 2–3, on the subscription
 
 - Rule 3, extended with stop patterns: in review with nothing driving it; a successful run with no next action; a blocker chain ending in a cancelled or inaccessible task; recovery tasks recovering themselves. Plus a `kelpie why <task>` CLI that explains why a task is not moving (11)
-- Rule 12. Early conflict warning: two live tasks editing the same files → warn or serialize (7)
 - Rule 1, extended: "done" requires evidence (test output, green CI or a live check); track the reopened-after-done rate (2)
 - Rule 13. "Needs you" inbox: everything waiting for a human across platforms, sorted by cost of delay; detects agents waiting for approval longer than N minutes (13)
 - Rule 9, extended: turn the wasted-build statistics into a proposed PR with a better CI configuration (5)
@@ -111,9 +110,22 @@ Spend becomes a metric Kelpie watches, not a number someone checks in a billing 
 - **Checkpoints:** if more than N minutes have passed since the last commit, or more than M files changed, the agent gets a reminder to commit. If it exits without committing, Kelpie makes a WIP commit to the task branch and writes a progress note. WIP commits do not trigger CI: they go to a draft PR or carry `[skip ci]`.
 - **Resume instead of restart:** a restarted task receives the progress note and the git log and continues from the last commit instead of starting from zero.
 
-### P1. Basic token optimization — from traces, no LLM
+### P0. Token savings that act — week 3
 
-Cache hit rate and where caching breaks, context growth per step, repeated prompt fragments, unused tools, huge tool outputs (recommend processing them with a script), restarts from zero. All of this goes into the daily report as recommendations.
+Rework and wasted sessions are the largest token leak on our farm (46 of 63 task returns were conflicts in shared files), so these three act instead of only reporting:
+
+- **Rule 12. Early conflict warning:** two live tasks editing the same files → warn both, or serialize the later one until the earlier merges (7)
+- **Dispatch gate:** a ready task whose prerequisite is not met (a referenced PR not merged, its CI red, a parent task not done) is put into "waiting" with that condition instead of being picked up; rule 4 releases it when the condition is met. Field case: an agent was about to redo a migration while the PR it depended on was still red
+- **Huge tool outputs:** commands whose output floods the context (build and test logs, e.g. `xcodebuild`) are found in traces, ranked by tokens, and get a concrete filter recommendation (e.g. `xcbeautify`, errors only, tail); repeated offenders → `comment` to the agent's role instructions owner
+
+### P1. Basic token optimization — recommendations in the daily report, from traces, no LLM
+
+Each recommendation comes with estimated savings and is verified before/after:
+
+- **Cache breaks:** cache hit rate per role and model, and the steps where it drops (changing data in the system prompt, reordered tools)
+- **Model fit per role:** roles doing routine work (triage, polling, status updates) that could run on a cheaper model; after a switch, quality is checked by returns and ping-pong rounds
+- **Diff-only review:** reviewers re-reading the whole PR on rounds 2+ instead of the changes since the last round
+- Context growth per step, repeated prompt fragments, unused tools, restarts from zero
 
 ### P1. Farm optimization
 
@@ -152,7 +164,7 @@ The credit goes to building Kelpie in Claude Code cloud sessions: it is spent fi
 | Week 1 (done Oct 15) | Engine safety (A–D), core, traces and checkpoints, Hermes adapter, rules 1–4 | credit, $112 |
 | Week 2 | Rules 5–7, 9–11, budgets and spend, resource reading via Prometheus, condition connectors, live run on our farm | credit |
 | Week 3 | "Cost of chaos" report with dollars, basic token optimization, throughput metrics, documentation | credit, then subscription |
-| After the credit | The rest of the open core, in this order: stop patterns and `kelpie why`, rule 12, rule 13, evidence for "done", full token optimization, Telegram alerter, Claude Code adapter, return causes, LLM root-cause section | subscription |
+| After the credit | The rest of the open core, in this order: stop patterns and `kelpie why`, rule 13, evidence for "done", full token optimization, Telegram alerter, Claude Code adapter, return causes, LLM root-cause section | subscription |
 | Paid tier | Fleet dashboard, hosting, billing | only after the 10 conversations confirm demand |
 
 On the subscription, development sessions share limits with any farm that runs on the same subscription: run them when the farm is idle, or use a separate account.
@@ -204,7 +216,8 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 **Week 3, Oct 29 – Nov 4** (the credit expires on Nov 5)
 
 - [ ] Daily "cost of chaos" report with dollars, cost per completed task, and before/after verification of fixes
-- [ ] Basic token optimization from traces and throughput metrics
+- [ ] Token savings that act: rule 12 (conflict warning), dispatch gate, huge tool outputs
+- [ ] Token optimization recommendations (cache breaks, model fit per role, diff-only review) and throughput metrics
 - [ ] Documentation and publication of the open core
 - [ ] 10 conversations with farm owners
 
