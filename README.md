@@ -280,9 +280,11 @@ children and then dropped. Mapped: model (`gen_ai.response.model`, else
 `gen_ai.request.model`), `gen_ai.usage.input_tokens`, `output_tokens` and
 `cache_read.input_tokens`, `gen_ai.tool.name`, outcome (`error` when the span status is
 ERROR or `error.type` is set). Input tokens include cached tokens, as in the conventions;
-Claude Code's Anthropic-style counts are normalized to that on arrival. Session totals sum
-LLM spans; an LLM span nested in another LLM span (two instrumentation layers) is counted
-twice. Tool calls get an `args_hash` of their arguments (the same
+Claude Code's Anthropic-style counts are normalized to that on arrival. Session totals and
+budgets sum root LLM spans only: an LLM span with an LLM ancestor in the same trace (a
+framework `chat` span around a provider `chat` span, both instrumented) is the same call and
+is counted once. This is decided when the sums are read, so it holds when the parent
+arrives after its child. Tool calls get an `args_hash` of their arguments (the same
 hash the Hermes hooks plugin writes), which the loop breaker compares.
 
 **Task and session.** `task_id` comes from the `kelpie.task_id` attribute and `session_id`
@@ -414,6 +416,69 @@ endpoint = "http://datadog-agent.internal:4318/v1/traces"
 queue_size = 1000  # requests waiting per destination (default)
 retries = 3        # default
 ```
+
+## Budgets and spend
+
+Kelpie prices the token usage it sees in traces and tracks it against budgets declared in
+the config. Each budget has a scope, a unit (`usd` or `tokens`), a soft threshold (alert),
+a hard threshold (stop, in act mode) or both, and a rolling window:
+
+| scope | subject | default window |
+| --- | --- | --- |
+| `day` | the whole farm | 24h |
+| `agent` | the owner of the session, as the platform adapter reports it | 24h |
+| `task` | the span's task (else its session's task) | the span `retention` (the task's lifetime as far as Kelpie stores it) |
+| `project` | tasks matched by `match`: `label:<name>` or a task id glob such as `WEB-*` | 24h |
+
+Without `match`, an agent or task budget applies to every agent or task on its own; with
+`match` (a name or a glob) only to those it matches. A project budget always needs `match`.
+
+```toml
+[[budgets]]
+name = "farm-daily"
+scope = "day"
+unit = "usd"
+soft = 50
+hard = 100
+
+[[budgets]]
+name = "per-agent"
+scope = "agent"
+unit = "tokens"
+hard = 5_000_000
+burn_window = "30m"      # burn rate over the last 30 minutes (default 1h)
+
+[prices."model-a"]       # USD per 1M tokens; exact names win over globs
+input = 3
+output = 15
+cached_input = 0.3       # cached input tokens are priced separately (default: input)
+
+[prices."model-b*"]      # globs are tried in config order
+input = 1
+output = 5
+```
+
+Spend is token usage of root LLM spans (see "Traces") over the window, priced per model.
+Tokens of a model with no price still count for `tokens` budgets; for `usd` budgets their
+cost is unknown and left out, never guessed, and `kelpie_budget_cost_unknown_tokens` shows
+how many there are. Usage is read from the span store once a minute.
+
+Every tick carries the state of each budget and subject in `Snapshot.budgets`: spent,
+remaining (to the hard threshold, else the soft one), the burn rate per hour over
+`burn_window`, `runs_out_at` (when the budget runs out at that rate) and the state (`ok`,
+`soft`, `hard`). The loop and budget breaker (rule 10) acts on it. The same values are on
+`/metrics` (`kelpie_budget_spent`, `kelpie_budget_remaining`,
+`kelpie_budget_burn_rate_per_hour`, `kelpie_budget_runs_out_seconds`, `kelpie_budget_state`)
+and in `kelpie status`.
+
+**Subscriptions.** With `mode = "subscription"` there is no bill: spend is an estimate
+priced from traces (flagged as such), and the forecast becomes the time to the next provider
+limit, from observed limit hits: the typical time from a limit's reset to its next hit,
+counted from the current period's start. Limit hits come from the provider quota connector,
+which does not exist yet; until it does, subscription budgets use the threshold forecast.
+
+Not yet: Claude Code's OpenTelemetry cost and token *metrics* (Kelpie ingests traces only)
+and provider cost APIs are planned spend sources.
 
 ## Project layout
 
