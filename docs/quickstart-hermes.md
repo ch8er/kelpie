@@ -120,8 +120,8 @@ docker compose up -d
 ```
 
 This starts Kelpie, Prometheus (`127.0.0.1:9090`, scrapes `kelpie:9464`) and Grafana
-(`127.0.0.1:3000`, a Prometheus data source is provisioned; no dashboards ship yet, so use
-Explore with the `kelpie_*` metrics).
+(`127.0.0.1:3000`, a Prometheus data source and the **Kelpie** dashboard are provisioned from
+`deploy/grafana/dashboards/kelpie.json`; open Dashboards, Kelpie).
 
 The container sees neither `~/.hermes` nor a config. Add a `docker-compose.override.yml`
 (**unverified**; adjust paths) and use `/hermes/...` paths in `kelpie.toml`:

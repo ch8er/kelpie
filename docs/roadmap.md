@@ -534,9 +534,9 @@ labels: P0, week-2, area:report
 No custom UI in the MVP. Kelpie exposes Prometheus metrics, Grafana shows them, and traces
 open in Langfuse.
 
-**Acceptance criteria**
 - [ ] `/metrics` in Prometheus text format: tick duration, actions per rule, tasks per status, idle time per role
-- [ ] Grafana dashboard JSON provisioned by docker compose
+- [x] `/metrics`: idle agents per role (count)
+- [x] Grafana dashboard JSON provisioned by docker compose
 - [ ] Dashboard links to traces in Langfuse when configured
 
 ### core: budgets and spend — thresholds, burn-rate forecast, spend sources

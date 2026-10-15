@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from kelpie import __version__
+from kelpie.core.model import Snapshot, Status
+from kelpie.rules.bottlenecks import role_loads
 
 if TYPE_CHECKING:
     from kelpie.app import RuleStatus
@@ -69,6 +71,9 @@ class Metrics:
         self.adapter_errors: Counter[str] = Counter()
         self.ledger_up = True
         self.open_states: Counter[str] = Counter()
+        self.tasks: Counter[str] = Counter()
+        self.idle_agents: Counter[str] = Counter()  # role -> idle agents (0 if all busy)
+        self.fleet_seen = False
         self.dry_run = True
         self.rules: list[tuple[str, str, bool]] = []  # (name, mode, implemented)
         self.traces_enabled = False
@@ -255,8 +260,16 @@ class Metrics:
         with self._lock:
             self.adapter_errors[name] += 1
 
-    def observe_tick(self, seconds: float, results: Sequence[Dispatched], engine: Engine) -> None:
+    def observe_tick(
+        self,
+        seconds: float,
+        results: Sequence[Dispatched],
+        engine: Engine,
+        snapshot: Snapshot | None = None,
+    ) -> None:
         with self._lock:
+            if snapshot is not None:
+                self._fleet(snapshot)
             self.ticks += 1
             self.tick_seconds += seconds
             self.last_tick = time.time()
@@ -264,6 +277,15 @@ class Metrics:
                 a = d.action
                 self.actions[(a.rule, str(a.kind), str(d.mode), str(d.outcome))] += 1
             self._sync(engine)
+
+    def _fleet(self, snapshot: Snapshot) -> None:
+        """Tasks per status and idle agents per role, from the tick's snapshot.
+
+        Idle agents are counted as the bottlenecks rule counts them."""
+        self.fleet_seen = True
+        self.tasks = Counter(dict.fromkeys(Status, 0))
+        self.tasks.update(t.status for t in snapshot.tasks)
+        self.idle_agents = Counter({r: len(load.idle) for r, load in role_loads(snapshot).items()})
 
     def tick_failed(self, engine: Engine) -> None:
         with self._lock:
@@ -378,6 +400,22 @@ class Metrics:
                     for r, n in sorted(self.open_states.items())
                 ],
             )
+            if self.fleet_seen:
+                metric(
+                    "kelpie_tasks",
+                    "gauge",
+                    "Tasks in the last snapshot, by normalized status.",
+                    [f"kelpie_tasks{_labels(status=str(k))} {n}" for k, n in self.tasks.items()],
+                )
+                metric(
+                    "kelpie_idle_agents",
+                    "gauge",
+                    "Agent owners with no live session and no open task, by role.",
+                    [
+                        f"kelpie_idle_agents{_labels(role=r)} {n}"
+                        for r, n in sorted(self.idle_agents.items())
+                    ],
+                )
             metric(
                 "kelpie_ledger_up",
                 "gauge",

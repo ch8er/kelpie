@@ -1,7 +1,13 @@
 apiVersion: 1
+# Earlier versions provisioned this data source without a uid. Grafana deletes it first and
+# creates it again below with the fixed uid the dashboard refers to.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
 datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090
+    uid: kelpie-prometheus
     isDefault: true

@@ -545,13 +545,21 @@ class ControlLoop:
 
     def tick_once(self) -> None:
         started = time.monotonic()
+        taken: list[Snapshot] = []
+
+        def source() -> Snapshot:
+            taken.append(self.snapshot_source())
+            return taken[-1]
+
         try:
-            results = self.engine.tick(self.snapshot_source)
+            results = self.engine.tick(source)
         except Exception:
             log.exception("engine tick failed")
             self.metrics.tick_failed(self.engine)
             return
-        self.metrics.observe_tick(time.monotonic() - started, results, self.engine)
+        self.metrics.observe_tick(
+            time.monotonic() - started, results, self.engine, taken[-1] if taken else None
+        )
 
     def run(self) -> None:
         interval = self.engine.config.interval.total_seconds()
