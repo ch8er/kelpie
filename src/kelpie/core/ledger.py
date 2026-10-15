@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -30,6 +31,11 @@ from typing import Any, Protocol
 
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.config import Mode
+
+log = logging.getLogger(__name__)
+
+# Entries kept in memory while the store cannot be written; oldest are dropped beyond this.
+MAX_UNSAVED = 1000
 
 
 class Outcome(StrEnum):
@@ -73,10 +79,25 @@ class Dispatched:
     first_suppression: bool = False  # first rate-limit hit for this subject this hour
 
 
+def canonical(value: Any) -> Any:
+    """JSON-safe copy: mapping keys become strings, sets and tuples become lists."""
+    if isinstance(value, Mapping):
+        return {str(k): canonical(v) for k, v in value.items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        items = [canonical(v) for v in value]
+        return sorted(items, key=repr) if isinstance(value, set | frozenset) else items
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    return str(value)
+
+
+def to_json(value: Any) -> str:
+    return json.dumps(canonical(value), sort_keys=True, separators=(",", ":"))
+
+
 def fingerprint(action: Action) -> str:
     detail: Any = action.key if action.key is not None else action.params
-    key = [action.rule, action.kind, action.task_id, action.executor, detail]
-    raw = json.dumps(key, sort_keys=True, default=str, separators=(",", ":"))
+    raw = to_json([action.rule, action.kind, action.task_id, action.executor, detail])
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
@@ -102,7 +123,8 @@ class LedgerEntry:
     task_id: str | None = None
     executor: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
-    suppressed: int = 0  # later repeats held back by the ledger
+    suppressed: int = 0  # later repeats held back by the ledger (count only, not reasons)
+    suppression: Suppression | None = None  # set on entries stored as SUPPRESSED
 
     @classmethod
     def of(cls, dispatched: Dispatched, at: datetime) -> LedgerEntry:
@@ -118,7 +140,8 @@ class LedgerEntry:
             reason=a.reason,
             task_id=a.task_id,
             executor=a.executor,
-            params=dict(a.params),
+            params=canonical(a.params),
+            suppression=dispatched.suppression,
         )
 
 
@@ -131,8 +154,9 @@ class LedgerStore(Protocol):
 
     def by_subject(self, subject: str, after: datetime) -> Sequence[LedgerEntry]: ...
 
-    def bump_suppressed(self, fingerprint: str) -> bool:
-        """Count one more suppression on the latest entry; False if there is none."""
+    def bump_suppressed(self, fingerprint: str, mode: Mode, after: datetime) -> bool:
+        """Count a suppression on the latest entry with this fingerprint and mode newer than
+        ``after``. Return False if there is none."""
         ...
 
     def since(self, after: datetime) -> Sequence[LedgerEntry]: ...
@@ -151,13 +175,8 @@ class MemoryLedgerStore:
     def by_subject(self, subject: str, after: datetime) -> Sequence[LedgerEntry]:
         return [e for e in self.entries if e.subject == subject and e.at > after]
 
-    def bump_suppressed(self, fingerprint: str) -> bool:
-        for i in range(len(self.entries) - 1, -1, -1):
-            if self.entries[i].fingerprint == fingerprint:
-                e = self.entries[i]
-                self.entries[i] = replace(e, suppressed=e.suppressed + 1)
-                return True
-        return False
+    def bump_suppressed(self, fingerprint: str, mode: Mode, after: datetime) -> bool:
+        return _bump(self.entries, fingerprint, mode, after)
 
     def since(self, after: datetime) -> Sequence[LedgerEntry]:
         return [e for e in self.entries if e.at > after]
@@ -173,18 +192,24 @@ class ActionLedger:
     _limited: set[tuple[str, datetime]] = field(default_factory=set)
 
     def check(self, action: Action, mode: Mode, now: datetime) -> tuple[Suppression, bool] | None:
-        """Return ``(why, first)`` if ``action`` must be suppressed, else None."""
+        """Return ``(why, first)`` if ``action`` must be suppressed, else None.
+
+        The rate limit only guards effects, so it does not apply in observe mode.
+        """
         fp = fingerprint(action)
         horizon = now - max(self.cooldown, self.retry_after)
-        for e in self._with_unsaved(self.store.by_fingerprint(fp, horizon), fp=fp):
+        stored = self.store.by_fingerprint(fp, horizon)
+        for e in self._with_unsaved(stored, horizon, fp=fp):
             if e.mode is not mode or e.outcome is Outcome.SUPPRESSED:
                 continue
             window = self.retry_after if e.outcome is Outcome.FAILED else self.cooldown
             if e.at > now - window:
                 return Suppression.COOLDOWN, False
+        if mode is Mode.OBSERVE:
+            return None
         subj = subject(action)
         hour_ago = now - timedelta(hours=1)
-        recent = self._with_unsaved(self.store.by_subject(subj, hour_ago), subj=subj)
+        recent = self._with_unsaved(self.store.by_subject(subj, hour_ago), hour_ago, subj=subj)
         if sum(1 for e in recent if e.outcome in EFFECTS) >= self.max_per_subject_per_hour:
             # Remember the hit per subject and clock hour to flag only the first one.
             hour = now.replace(minute=0, second=0, microsecond=0)
@@ -198,15 +223,15 @@ class ActionLedger:
         """Persist a decision. Raises if the store fails; the entry stays in memory."""
         if dispatched.outcome is Outcome.SUPPRESSED:
             fp = fingerprint(dispatched.action)
-            for i in range(len(self._unsaved) - 1, -1, -1):
-                if self._unsaved[i].fingerprint == fp:
-                    e = self._unsaved[i]
-                    self._unsaved[i] = replace(e, suppressed=e.suppressed + 1)
-                    self.flush()
-                    return
-            if self.store.bump_suppressed(fp):
+            after = now - max(self.cooldown, self.retry_after, timedelta(hours=1))
+            if _bump(self._unsaved, fp, dispatched.mode, after) or self.store.bump_suppressed(
+                fp, dispatched.mode, after
+            ):
+                self.flush()
                 return
         self._unsaved.append(LedgerEntry.of(dispatched, now))
+        if len(self._unsaved) > MAX_UNSAVED:
+            log.error("ledger backlog full; dropping %s", self._unsaved.pop(0))
         self.flush()
 
     def flush(self) -> None:
@@ -215,11 +240,27 @@ class ActionLedger:
             self._unsaved.pop(0)
 
     def _with_unsaved(
-        self, entries: Sequence[LedgerEntry], fp: str | None = None, subj: str | None = None
+        self,
+        entries: Sequence[LedgerEntry],
+        after: datetime,
+        fp: str | None = None,
+        subj: str | None = None,
     ) -> list[LedgerEntry]:
         extra = [
             e
             for e in self._unsaved
-            if (fp is not None and e.fingerprint == fp) or (subj is not None and e.subject == subj)
+            if e.at > after
+            and (
+                (fp is not None and e.fingerprint == fp) or (subj is not None and e.subject == subj)
+            )
         ]
         return [*entries, *extra]
+
+
+def _bump(entries: list[LedgerEntry], fingerprint: str, mode: Mode, after: datetime) -> bool:
+    for i in range(len(entries) - 1, -1, -1):
+        e = entries[i]
+        if e.fingerprint == fingerprint and e.mode is mode and e.at > after:
+            entries[i] = replace(e, suppressed=e.suppressed + 1)
+            return True
+    return False

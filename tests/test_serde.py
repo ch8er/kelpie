@@ -12,6 +12,8 @@ def test_parse_duration() -> None:
     assert parse_duration(90) == timedelta(seconds=90)
     with pytest.raises(ValueError):
         parse_duration("soon")
+    with pytest.raises(ValueError):
+        parse_duration(True)
 
 
 def test_naive_datetime_rejected() -> None:

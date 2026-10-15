@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from kelpie.core.actions import Action, ActionKind, Severity
@@ -52,6 +52,7 @@ class Engine:
     config: EngineConfig = field(default_factory=EngineConfig)
     ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
     ledger: ActionLedger = field(init=False)
+    _ledger_down_since: datetime | None = field(init=False, default=None)
     executors: dict[str, Executor] = field(init=False)
     _platforms: list[str] = field(init=False)
 
@@ -88,20 +89,23 @@ class Engine:
         if snapshot.now.tzinfo is None:
             raise ValueError("snapshot.now must be timezone-aware")
         results: list[Dispatched] = []
-        ledger_down = False
         for action in actions:
             mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
             try:
                 hit = self.ledger.check(action, mode, snapshot.now)
+                self._ledger_down_since = None
             except Exception:
                 log.exception("action ledger unavailable")
+                first = self._ledger_down_since is None
+                if first:  # tell a human once per outage, not once per tick
+                    self._ledger_down_since = snapshot.now
+                    self._notice(Suppression.LEDGER_DOWN, action)
                 # Fail closed: nothing with an effect leaves Kelpie without a ledger.
-                hit = None if mode is Mode.OBSERVE else (Suppression.LEDGER_DOWN, not ledger_down)
-                ledger_down = True
+                hit = None if mode is Mode.OBSERVE else (Suppression.LEDGER_DOWN, first)
             if hit is not None:
                 why, first = hit
                 log.info("suppressed (%s): %s", why, action)
-                if first:
+                if first and why is Suppression.RATE_LIMIT:
                     self._notice(why, action)
                 dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, why, first)
             else:
@@ -110,10 +114,7 @@ class Engine:
                 except Exception:
                     log.exception("action failed: %s", action)
                     outcome = Outcome.FAILED
-                    try:
-                        self._alert(action, executed=False, prefix="failed")
-                    except Exception:
-                        log.exception("could not alert about the failed action")
+                    self._safe_alert(action, executed=False, prefix="failed")
                 dispatched = Dispatched(action, mode, outcome)
             self._record(dispatched, snapshot.now)
             results.append(dispatched)
@@ -132,17 +133,19 @@ class Engine:
                 f"Rate limit of {self.config.max_actions_per_task_per_hour} actions/hour "
                 f"reached for {subject(action)}; further actions are suppressed this hour."
             )
+            notice = Action(ActionKind.ALERT, "kelpie", reason, task_id=action.task_id)
         else:
             reason = "Action ledger unavailable; actions with effects are held back."
-        self._alert(
-            Action(
-                ActionKind.ALERT,
-                "kelpie",
-                reason,
-                task_id=action.task_id,
-                severity=Severity.WARNING,
-            )
-        )
+            notice = Action(ActionKind.ALERT, "kelpie", reason)
+        if not self.config.dry_run:
+            self._safe_alert(replace(notice, severity=Severity.WARNING))
+
+    def _safe_alert(self, action: Action, executed: bool = True, prefix: str = "") -> None:
+        """Alert without ever raising out of the loop."""
+        try:
+            self._alert(action, executed=executed, prefix=prefix)
+        except Exception:
+            log.exception("could not send alert: %s", action)
 
     def tick(self, snapshot_source: Callable[[], Snapshot]) -> list[Dispatched]:
         snapshot = snapshot_source()

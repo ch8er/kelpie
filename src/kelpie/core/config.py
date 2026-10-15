@@ -78,7 +78,8 @@ class EngineConfig:
             raise ValueError("engine.cooldown and engine.retry_after must not be negative")
         if not isinstance(max_actions, int) or isinstance(max_actions, bool) or max_actions < 1:
             raise ValueError("engine.max_actions_per_task_per_hour must be a positive integer")
-        # Rule names are checked against kelpie.rules.PLANNED by the CLI; core cannot import it.
+        # Core cannot import kelpie.rules, so rule names are not checked against PLANNED
+        # here; whoever wires the engine (CLI/server) must do it.
         return cls(
             interval=interval,
             dry_run=dry_run,

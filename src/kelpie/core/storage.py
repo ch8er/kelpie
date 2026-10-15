@@ -17,7 +17,7 @@ from pathlib import Path
 
 from kelpie.core.actions import ActionKind
 from kelpie.core.config import Mode
-from kelpie.core.ledger import LedgerEntry, Outcome
+from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
 
 _V1 = """
 CREATE TABLE actions (
@@ -33,20 +33,21 @@ CREATE TABLE actions (
     task_id     TEXT,
     executor    TEXT,
     params      TEXT NOT NULL,
-    suppressed  INTEGER NOT NULL DEFAULT 0
+    suppressed  INTEGER NOT NULL DEFAULT 0,
+    suppression TEXT
 );
 CREATE INDEX actions_at ON actions (at);
 CREATE INDEX actions_fingerprint ON actions (fingerprint, at);
 CREATE INDEX actions_subject ON actions (subject, at);
 """
 
-# version -> script that upgrades from version - 1. Append, never edit.
+# version -> script that upgrades from version - 1. Append, never edit a released one.
 MIGRATIONS: dict[int, str] = {1: _V1}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 _COLUMNS = (
     "at, fingerprint, subject, rule, kind, mode, outcome, reason, task_id, executor,"
-    " params, suppressed"
+    " params, suppressed, suppression"
 )
 
 
@@ -71,6 +72,7 @@ def _entry(row: sqlite3.Row) -> LedgerEntry:
         executor=row["executor"],
         params=json.loads(row["params"]),
         suppressed=row["suppressed"],
+        suppression=Suppression(row["suppression"]) if row["suppression"] else None,
     )
 
 
@@ -88,9 +90,16 @@ class SqliteLedgerStore:
         if version > SCHEMA_VERSION:
             raise RuntimeError(f"database schema {version} is newer than {SCHEMA_VERSION}")
         for target in range(version + 1, SCHEMA_VERSION + 1):
-            with self._db:
-                self._db.executescript(MIGRATIONS[target])
-                self._db.execute(f"PRAGMA user_version = {target}")
+            # executescript commits any open transaction first, so wrap the script and the
+            # version bump in one explicit transaction: a failed migration leaves no trace.
+            try:
+                self._db.executescript(
+                    f"BEGIN;\n{MIGRATIONS[target]}\nPRAGMA user_version = {target};\nCOMMIT;"
+                )
+            except sqlite3.Error:
+                if self._db.in_transaction:
+                    self._db.rollback()
+                raise
 
     def close(self) -> None:
         with self._lock:
@@ -116,8 +125,9 @@ class SqliteLedgerStore:
             entry.reason,
             entry.task_id,
             entry.executor,
-            json.dumps(entry.params, sort_keys=True, default=str),
+            to_json(entry.params),
             entry.suppressed,
+            entry.suppression,
         )
         sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * len(values))})"
         self._write(lambda db: db.execute(sql, values))
@@ -130,12 +140,14 @@ class SqliteLedgerStore:
         sql = f"SELECT {_COLUMNS} FROM actions WHERE subject = ? AND at > ? ORDER BY at, id"
         return self._query(sql, (subject, _ts(after)))
 
-    def bump_suppressed(self, fingerprint: str) -> bool:
+    def bump_suppressed(self, fingerprint: str, mode: Mode, after: datetime) -> bool:
         sql = (
             "UPDATE actions SET suppressed = suppressed + 1 WHERE id = ("
-            "SELECT id FROM actions WHERE fingerprint = ? ORDER BY at DESC, id DESC LIMIT 1)"
+            "SELECT id FROM actions WHERE fingerprint = ? AND mode = ? AND at > ?"
+            " ORDER BY at DESC, id DESC LIMIT 1)"
         )
-        return self._write(lambda db: db.execute(sql, (fingerprint,))).rowcount > 0
+        args = (fingerprint, str(mode), _ts(after))
+        return self._write(lambda db: db.execute(sql, args)).rowcount > 0
 
     def since(self, after: datetime) -> Sequence[LedgerEntry]:
         sql = f"SELECT {_COLUMNS} FROM actions WHERE at > ? ORDER BY at, id"

@@ -22,6 +22,7 @@ from kelpie.core.ledger import (
 from kelpie.core.model import Snapshot
 from kelpie.core.storage import SCHEMA_VERSION, SqliteLedgerStore
 from tests.fakes import Emit, FakeAdapter, FakeAlerter
+from tests.test_engine import RaisingAlerter
 
 T0 = datetime(2026, 3, 2, 10, tzinfo=UTC)
 ACT = EngineConfig(default_mode=Mode.ACT)
@@ -195,7 +196,26 @@ def test_read_failure_fails_closed_and_tells_a_human_once() -> None:
         (Outcome.SUPPRESSED, Suppression.LEDGER_DOWN)
     ] * 2
     assert adapter.calls == []
-    assert [t for t, _ in alerter.sent] == ["[kelpie] alert T-1"]
+    assert [t for t, _ in alerter.sent] == ["[kelpie] alert"]
+
+
+def test_ledger_down_notice_once_per_outage() -> None:
+    alerter, store = FakeAlerter(), BrokenStore(fail_reads=True)
+    engine = Engine(
+        [Emit([action()])],
+        adapters=[FakeAdapter()],
+        alerter=alerter,
+        config=ACT,
+        ledger_store=store,
+    )
+    for minute in range(5):
+        tick(engine, T0 + timedelta(minutes=minute))
+    assert len(alerter.sent) == 1
+    store.fail_reads = store.fail_writes = False
+    assert tick(engine, T0 + timedelta(minutes=10)) == [Outcome.EXECUTED]
+    store.fail_reads = True
+    tick(engine, T0 + timedelta(minutes=11))
+    assert len(alerter.sent) == 2  # one notice per outage
 
 
 def test_read_failure_still_lets_observe_through() -> None:
@@ -231,9 +251,11 @@ def test_sqlite_roundtrip_reopen_and_ordering(tmp_path: Path) -> None:
     plain = got[0].fingerprint  # the two entries without params share a fingerprint
     assert len(reopened.by_fingerprint(plain, T0)) == 1
     assert len(reopened.by_fingerprint(plain, T0 + timedelta(microseconds=1))) == 0  # exclusive
-    assert reopened.bump_suppressed(got[2].fingerprint)
+    assert reopened.bump_suppressed(got[2].fingerprint, Mode.ACT, T0)
     assert reopened.since(T0 + timedelta(minutes=1))[0].suppressed == 1
-    assert not reopened.bump_suppressed("missing")
+    assert not reopened.bump_suppressed(got[2].fingerprint, Mode.OBSERVE, T0)  # other mode
+    assert not reopened.bump_suppressed(got[2].fingerprint, Mode.ACT, T0 + timedelta(hours=1))
+    assert not reopened.bump_suppressed("missing", Mode.ACT, T0)
     assert len(reopened.by_subject("session:S-1", T0)) == 1
     reopened.close()
 
@@ -278,4 +300,73 @@ def test_engine_persists_ledger_in_sqlite(tmp_path: Path) -> None:
 
 
 def test_memory_store_bump_without_entry() -> None:
-    assert not MemoryLedgerStore().bump_suppressed("missing")
+    assert not MemoryLedgerStore().bump_suppressed("missing", Mode.ACT, T0)
+
+
+def test_dry_run_never_rate_limits_or_alerts() -> None:
+    store, alerter = MemoryLedgerStore(), FakeAlerter()
+    ledger = ActionLedger(store, cooldown=timedelta(0), max_per_subject_per_hour=1)
+    ledger.record(done(action(n=0)), T0)  # subject already saturated
+    config = EngineConfig(default_mode=Mode.ACT, dry_run=True, max_actions_per_task_per_hour=1)
+    engine = Engine(
+        [Emit([action(n=1)])],
+        adapters=[FakeAdapter()],
+        alerter=alerter,
+        config=config,
+        ledger_store=store,
+    )
+    assert tick(engine, T0) == [Outcome.DRY_RUN]
+    assert alerter.sent == []
+
+
+def test_notice_alerter_failure_does_not_escape_tick() -> None:
+    config = EngineConfig(
+        default_mode=Mode.ACT, cooldown=timedelta(0), max_actions_per_task_per_hour=1
+    )
+    adapter = FakeAdapter()
+    engine = Engine(
+        [Emit([action(n=1), action(n=2), action("T-2")])],
+        adapters=[adapter],
+        alerter=RaisingAlerter(),
+        config=config,
+    )
+    assert tick(engine, T0) == [Outcome.EXECUTED, Outcome.SUPPRESSED, Outcome.EXECUTED]
+    assert adapter.calls == [("requeue", "T-1"), ("requeue", "T-2")]
+
+
+def test_mixed_param_keys_are_fingerprinted_and_stored(tmp_path: Path) -> None:
+    weird = action(**{"a": {1: "x", "b": "y"}, "s": {3, 1}})
+    assert fingerprint(weird) == fingerprint(weird)
+    store = SqliteLedgerStore(tmp_path / "kelpie.db")
+    ledger = ActionLedger(store)
+    ledger.record(done(weird), T0)
+    [saved] = store.since(T0 - timedelta(seconds=1))
+    assert saved.params == {"a": {"1": "x", "b": "y"}, "s": [1, 3]}
+    store.close()
+
+
+def test_failed_migration_leaves_database_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.core.storage as storage
+
+    path = tmp_path / "kelpie.db"
+    broken = storage.MIGRATIONS[1] + "\nCREATE TABLE oops (;"
+    monkeypatch.setitem(storage.MIGRATIONS, 1, broken)
+    with pytest.raises(sqlite3.Error):
+        SqliteLedgerStore(path)
+    db = sqlite3.connect(path)
+    assert db.execute("PRAGMA user_version").fetchone()[0] == 0
+    assert db.execute("SELECT name FROM sqlite_master WHERE name = 'actions'").fetchone() is None
+    db.close()
+    monkeypatch.undo()
+    SqliteLedgerStore(path).close()  # a later start migrates cleanly
+
+
+def test_unsaved_entries_expire_from_the_rate_window() -> None:
+    store = BrokenStore()
+    ledger = ActionLedger(store, cooldown=timedelta(0), max_per_subject_per_hour=1)
+    with pytest.raises(sqlite3.OperationalError):
+        ledger.record(done(action(n=1)), T0)
+    assert ledger.check(action(n=2), Mode.ACT, T0) == (Suppression.RATE_LIMIT, True)
+    assert ledger.check(action(n=2), Mode.ACT, T0 + timedelta(hours=2)) is None
