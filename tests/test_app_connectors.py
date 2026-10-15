@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 
 from kelpie.app import (
     ConfigError,
+    HermesSettings,
     Settings,
     build_app,
     load_rules,
@@ -17,6 +19,8 @@ from kelpie.app import (
     render_status,
 )
 from kelpie.connectors.github import ConditionSync, GitHubSettings
+from kelpie.core.actions import Action, ActionKind
+from kelpie.core.config import EngineConfig
 from kelpie.core.model import Snapshot
 from kelpie.metrics import Metrics
 from tests.connectors.fake_github import TOKEN
@@ -197,3 +201,67 @@ def test_condition_sync_is_a_snapshot_step(tmp_path: Path) -> None:
     connector = settings.github.build(None, lambda: NOW)
     step = ConditionSync(connector, settings.block_conditions)
     assert step(Snapshot(now=NOW)) == Snapshot(now=NOW)
+
+
+CI_CONFIG = CONFIG.replace(
+    'repos = ["example/repo"]\n',
+    'repos = ["example/repo"]\n\n[connectors.github.ci]\nallow_cancel = true\n'
+    'cancel_repos = ["example/repo"]\n',
+    1,
+)
+
+
+def test_build_app_wires_the_ci_source_and_cancel_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    text = CI_CONFIG + '\n[engine]\ndry_run = false\n\n[engine.rules.ci_economy]\nmode = "act"\n'
+    settings = load_settings(write(tmp_path, text))
+    assert settings.github is not None and settings.github.ci is not None
+    assert settings.github.ci.allow_cancel
+    app = build_app(settings)
+    try:
+        assert "github" in app.engine.executors
+        status = render_status(app.settings, app.loaded)
+        assert "github ci: builds of example/repo, cancel_build on example/repo" in status
+    finally:
+        app.close()
+
+
+def test_ci_source_read_only_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    text = CONFIG.replace(
+        'repos = ["example/repo"]\n', 'repos = ["example/repo"]\n\n[connectors.github.ci]\n', 1
+    )
+    app = build_app(load_settings(write(tmp_path, text)))
+    try:
+        action = Action(ActionKind.CANCEL_BUILD, "ci_economy", "r", params={"build_id": "x"})
+        assert app.engine.executors["github"].execute(action) is False
+        assert "read-only (allow_cancel = false)" in render_status(app.settings, app.loaded)
+    finally:
+        app.close()
+
+
+def test_bad_ci_config(tmp_path: Path) -> None:
+    text = CONFIG.replace(
+        'repos = ["example/repo"]\n',
+        'repos = ["example/repo"]\n\n[connectors.github.ci]\nallow_cancel = true\n',
+        1,
+    )
+    with pytest.raises(ConfigError, match="cancel_repos"):
+        load_settings(write(tmp_path, text))
+
+
+def test_ci_economy_may_act_with_only_hermes_when_cancel_is_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    hermes = HermesSettings(db_path=tmp_path / "kanban.db")
+    engine = EngineConfig.from_mapping({"dry_run": False, "rules": {"ci_economy": {"mode": "act"}}})
+    github = load_settings(write(tmp_path, CI_CONFIG)).github
+    assert github is not None and github.ci is not None
+    app = build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=github))
+    app.close()
+    read_only = replace(github, ci=replace(github.ci, allow_cancel=False, cancel_repos=()))
+    with pytest.raises(ConfigError, match="Hermes actions are not implemented"):
+        build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=read_only))

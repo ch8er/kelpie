@@ -1,4 +1,8 @@
-"""Read-only GitHub REST client: one host, one token, no redirects, rate-limit aware.
+"""GitHub REST client: one host, one token, no redirects, rate-limit aware.
+
+Reads are GETs. The only write is :meth:`GitHubClient.post`, used by the CI connector to
+cancel a superseded workflow run; it is never cached, never retried and never sent during
+a back-off.
 
 Security:
 
@@ -237,12 +241,18 @@ class GitHubClient:
             return None
         return None if entry is None else self.clock() - entry.fetched_at
 
-    def get(self, path: str, query: Mapping[str, str] | None = None) -> Response:
-        """GET ``path`` (relative to the API base). Raises :class:`GitHubError`."""
+    def get(
+        self, path: str, query: Mapping[str, str] | None = None, *, fresh: bool = False
+    ) -> Response:
+        """GET ``path`` (relative to the API base). Raises :class:`GitHubError`.
+
+        ``fresh`` skips the cache TTL and the tick budget, for a re-check right before a
+        write: GitHub is asked again (conditionally, with the cached ETag). If it cannot be
+        asked, the answer is the cached one marked ``stale`` or an error, as for any read."""
         url = self._url(path, query)
         now = self.clock()
         entry = self._cache.get(url)
-        if entry is not None and now - entry.fetched_at < self.cache_ttl:
+        if not fresh and entry is not None and now - entry.fetched_at < self.cache_ttl:
             self.observer.github_request("cached")
             if isinstance(entry.body, _Failure):  # errors are answers too: asked once per TTL
                 failure = entry.body
@@ -253,7 +263,10 @@ class GitHubClient:
         try:
             if self.backoff_until is not None and now < self.backoff_until:
                 raise GitHubError("backoff", f"GET {path}: backing off after errors")
-            deadline = self._spend(path)
+            if fresh:  # a re-check before a write: outside the tick budget
+                deadline = self.monotonic() + self.timeout.total_seconds()
+            else:
+                deadline = self._spend(path)
             return self._fetch(url, path, entry, now, deadline)
         except GitHubError as exc:
             self.observer.github_request(exc.kind)
@@ -262,6 +275,40 @@ class GitHubClient:
             if entry is not None and exc.kind in _TRANSIENT:
                 return Response(entry.body, entry.fetched_at, stale=True)
             raise
+
+    def post(self, path: str) -> int:
+        """POST ``path`` with an empty body; the HTTP status of a 2xx or 409 answer.
+
+        Not cached and not part of the tick budget (the engine's action ledger limits how
+        often an action is carried out). Refused during a back-off. Other answers raise
+        :class:`GitHubError`, as for reads; a redirect is never followed."""
+        url = self._url(path, None)
+        now = self.clock()
+        if self.backoff_until is not None and now < self.backoff_until:
+            self.observer.github_request("backoff")
+            raise GitHubError("backoff", f"POST {path}: backing off after errors")
+        deadline = self.monotonic() + self.timeout.total_seconds()
+        try:
+            reply = self._exchange(url, None, deadline, method="POST")
+        except _TooLarge:  # pragma: no cover - error bodies are truncated, not refused
+            raise GitHubError("bad_response", f"POST {path}: response too large") from None
+        except _Timeout:
+            self._back_off(now + self.error_backoff, now)
+            self.observer.github_request("network")
+            raise GitHubError("network", f"POST {path}: timed out") from None
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            self._back_off(now + self.error_backoff, now)
+            self.observer.github_request("network")
+            raise GitHubError(
+                "network", f"POST {path}: connection failed ({type(exc).__name__})"
+            ) from None
+        self._note_rate_limit(reply.headers, now)
+        if 200 <= reply.status < 300 or reply.status == 409:
+            self.observer.github_request("ok")
+            return reply.status
+        error = self._http_error(reply, f"POST {path}", now)
+        self.observer.github_request(error.kind)
+        raise error
 
     def _spend(self, path: str) -> float:
         """Take one request from the tick's budget; the deadline for the whole request."""
@@ -319,8 +366,8 @@ class GitHubClient:
         conn.set_tunnel(self._host, self._port, headers=tunnel_headers)
         return conn
 
-    def _exchange(self, url: str, etag: str | None, deadline: float) -> _Reply:
-        """One GET with a deadline for all of it: connect, headers and body."""
+    def _exchange(self, url: str, etag: str | None, deadline: float, method: str = "GET") -> _Reply:
+        """One request with a deadline for all of it: connect, headers and body."""
         target = urllib.parse.urlsplit(url)
         path = target.path + (f"?{target.query}" if target.query else "")
         remaining = deadline - self.monotonic()
@@ -333,7 +380,10 @@ class GitHubClient:
         watchdog.daemon = True
         watchdog.start()
         try:
-            conn.request("GET", path, headers=self._headers(etag))
+            headers = self._headers(etag)
+            if method != "GET":
+                headers["Content-Length"] = "0"
+            conn.request(method, path, headers=headers)
             sock = conn.sock  # http.client drops conn.sock once a response will close it
             if sock is not None:
                 held.append(sock)
@@ -403,7 +453,7 @@ class GitHubClient:
             self.observer.github_request("not_modified")
             return Response(entry.body, now)
         if reply.status != 200:
-            raise self._http_error(reply, path, now)
+            raise self._http_error(reply, f"GET {path}", now)
         try:
             body = json.loads(reply.body)
         except (ValueError, RecursionError):  # not JSON, or nested too deep to decode
@@ -418,9 +468,9 @@ class GitHubClient:
         while len(self._cache) > self.max_cache_entries:
             self._cache.popitem(last=False)
 
-    def _http_error(self, reply: _Reply, path: str, now: datetime) -> GitHubError:
+    def _http_error(self, reply: _Reply, request: str, now: datetime) -> GitHubError:
         code = reply.status
-        where = f"GET {path}: HTTP {code}"
+        where = f"{request}: HTTP {code}"
         if 300 <= code < 400:
             return GitHubError("redirect", f"{where} redirect (not followed)", code)
         if code == 401:  # a revoked token fails every request: stop asking for a while

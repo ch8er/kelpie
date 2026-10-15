@@ -86,6 +86,26 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #   An exhausted quota is critical when ready or running agent tasks use the provider
 #   (listed as blocked_tasks). Without a mapping Kelpie does not guess which tasks use a
 #   provider: the alert stays a warning and lists no tasks.
+#
+# Rule 9 (CI economy): CI builds that burned minutes for nothing (superseded, repeated for
+# a verified commit, docs-only, drafts, WIP commits) in one lasting info summary;
+# cancel_build for superseded builds still running (executed by the CI connector, only in
+# act mode and only with [connectors.github.ci] allow_cancel); a CI minutes forecast
+# (warning before the quota runs out, critical with the waiting tasks once it has). Needs
+# builds from [connectors.github.ci] below.
+#
+# [engine.rules.ci_economy]
+# mode = "observe"
+# window = "24h"                 # builds looked at, and the window of the burn rate
+# docs_globs = ["docs/*", "*.md", "*.rst"]   # a build is docs-only if every path matches
+# wip_patterns = ['^\s*\[?wip\b', '^\s*(fixup|squash)!']   # commit messages, case-insensitive
+# waste_min_minutes = 30         # summary once this many minutes were wasted in the window
+# cancel_superseded = true
+# quota_critical = 1.0           # used / quota at which the quota counts as exhausted
+# forecast_horizon = "7d"        # warn when the quota runs out within this (before reset)
+# quota_period = "30d"           # without a usage reading: warn if the burn over this
+#                                # period would exceed the quota
+# max_reading_age = "1h"
 
 [storage]
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
@@ -310,6 +330,28 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # max_requests_per_tick = 50        # beyond this, cached answers or an unknown result
 # tick_budget = "10s"               # wall-clock time for GitHub per tick (at most 60s)
 # enabled = true                    # false keeps the section but does not query GitHub
+#
+# GitHub Actions runs for rule 9 (ci_economy). Reading needs Actions: read, Pull requests:
+# read and Contents: read. cancel_build is the only write Kelpie can make to GitHub: off
+# unless allow_cancel is set; it needs Actions: write, so grant that only on cancel_repos
+# (or use a separate read-only token when allow_cancel is off). A run is cancelled only if
+# the last scan reported it superseded (a newer push/pull_request run of the same workflow
+# and branch) and still active, and a fresh re-check right before the request agrees.
+#
+# [connectors.github.ci]
+# repos = ["example/repo"]          # default: all repos above; must be among them
+# window = "24h"                    # runs created within this (1h to 7d)
+# max_pages = 3                     # pages of 100 runs per repo per tick (at most 10)
+# max_requests_per_tick = 30        # this step's own budget (pages, PRs, job lists)
+# tick_budget = "10s"
+# included_minutes = 3000           # monthly quota -> a ci_minutes resource (optional);
+#                                   # minutes used are not read (the billing API needs
+#                                   # admin rights): the rule projects the burn instead
+# quota_reset_day = 1               # day of the month the quota resets (UTC)
+# allow_cancel = false
+# cancel_repos = []                 # required with allow_cancel; among repos above
+# cancel_workflows = []             # optional: only these workflow paths, e.g.
+#                                   # ".github/workflows/ci.yml"
 #
 # Blocks that are really waits. When a blocked task's reason matches a pattern and names a
 # PR GitHub has confirmed to exist, Kelpie attaches a condition of that kind to the block,

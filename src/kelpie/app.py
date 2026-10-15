@@ -37,7 +37,13 @@ from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
 from kelpie.core.model import Owner, Snapshot, SpanKind
-from kelpie.core.ports import PlatformAdapter, ProviderReader, ResourceReader, SnapshotSource
+from kelpie.core.ports import (
+    ActionConnector,
+    PlatformAdapter,
+    ProviderReader,
+    ResourceReader,
+    SnapshotSource,
+)
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
@@ -433,6 +439,7 @@ def merged_snapshot(
                 spans=merged.spans + part.spans,
                 limit_hits=merged.limit_hits + part.limit_hits,
                 providers=merged.providers + part.providers,
+                builds=merged.builds + part.builds,
             )
         for name, step in enrich:
             try:
@@ -686,20 +693,22 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "[resources.prometheus] sends a bearer token over plain http to %s; use https",
             prometheus.display_url,
         )
-    # No connectors or alerter are wired yet: an effect nobody can carry out turns into an
-    # alert, and the defaults (dry-run, observe) send nothing.
+    # No alerter is wired yet: an effect nobody can carry out turns into an alert, and the
+    # defaults (dry-run, observe) send nothing. The only connector action is cancel_build.
     adapters = build_adapters(settings)
     _refuse_unimplemented_actions(settings, loaded, adapters)
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
+    metrics = Metrics()
+    enrich, connectors = _connector_steps(settings, metrics, clock)
     engine = Engine(
         loaded.rules,
         adapters=adapters,
+        connectors=connectors,
         config=settings.engine,
         ledger_store=store,
         state_store=states,
     )
-    metrics = Metrics()
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     metrics.set_adapters(a.name for a in adapters)
     metrics.set_budgets_enabled(bool(settings.budgets.budgets))
@@ -709,7 +718,6 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     if quotas is not None:
         quotas.observer = metrics
         metrics.set_providers(p.name for p in quotas.providers)
-    enrich = _connector_steps(settings, metrics, clock)
     if not traces.enabled:
         source = merged_snapshot(
             adapters, metrics, clock, resources=reader, enrich=enrich, providers=quotas
@@ -769,21 +777,23 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
 
 def _connector_steps(
     settings: Settings, metrics: Metrics, clock: Callable[[], datetime]
-) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
-    """Connector steps: GitHub (PR/CI conditions, block conditions), human tasks."""
+) -> tuple[list[tuple[str, Callable[[Snapshot], Snapshot]]], list[ActionConnector]]:
+    """Connector steps (human tasks; GitHub PR/CI conditions and block conditions; with
+    ``[connectors.github.ci]`` recent builds and the CI quota) and the connectors that can
+    carry out actions."""
     steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = []
     if settings.human_tasks is not None and settings.human_tasks.enabled:
         steps.append(("human_tasks", HumanTaskConnector(settings.human_tasks.block_patterns)))
-    steps.extend(_github_steps(settings, metrics, clock))
-    return steps
+    github_steps, connectors = _github_steps(settings, metrics, clock)
+    return steps + github_steps, connectors
 
 
 def _github_steps(
     settings: Settings, metrics: Metrics, clock: Callable[[], datetime]
-) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+) -> tuple[list[tuple[str, Callable[[Snapshot], Snapshot]]], list[ActionConnector]]:
     github = settings.github
     if github is None or not github.enabled:
-        return []
+        return [], []
     try:
         token = github.token()
     except ValueError as exc:
@@ -805,7 +815,17 @@ def _github_steps(
         max_requests=github.max_requests_per_tick,
         tick_budget=github.tick_budget,
     )
-    return [("github", step)]
+    ci = github.build_ci(connector)
+    if ci is None:
+        return [("github", step)], []
+    log.info(
+        "[connectors.github.ci] builds of %s; cancel_build %s",
+        ", ".join(ci.settings.repos),
+        f"allowed on {', '.join(ci.settings.cancel_repos)}"
+        if ci.settings.allow_cancel
+        else "off (allow_cancel = false)",
+    )
+    return [("github", step), ("github_ci", ci)], [ci]
 
 
 def check_exposure(settings: Settings, host: str) -> None:
@@ -833,12 +853,20 @@ HERMES_ACT_RULES = frozenset({"loop_breaker"})
 def _refuse_unimplemented_actions(
     settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter]
 ) -> None:
-    """Hermes carries out ``stop`` only; any other act-mode rule would only fail at runtime."""
+    """Hermes carries out ``stop`` only; any other act-mode rule would only fail at runtime.
+
+    ``ci_economy`` acts through the CI connector (``cancel_build``), not the platform, so
+    it may act when ``[connectors.github.ci] allow_cancel`` is set."""
     only_hermes = bool(adapters) and all(isinstance(a, hermes.HermesAdapter) for a in adapters)
+    ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
+    by_connector = {"ci_economy"} if ci is not None and ci.enabled and ci.allow_cancel else set()
     acting = sorted(
         s.name
         for s in loaded.statuses
-        if s.implemented and s.mode is Mode.ACT and s.name not in HERMES_ACT_RULES
+        if s.implemented
+        and s.mode is Mode.ACT
+        and s.name not in HERMES_ACT_RULES
+        and s.name not in by_connector
     )
     if only_hermes and acting and not settings.engine.dry_run:
         raise ConfigError(
@@ -995,10 +1023,19 @@ def _github_status(settings: Settings) -> list[str]:
     except ValueError as exc:
         auth = f"NOT ready: {exc}"
     patterns = len(settings.block_conditions)
-    return [
+    lines = [
         f"github:   {github.api_url}, {auth}, repos {', '.join(github.repos)}, "
         f"{patterns} block condition pattern(s)"
     ]
+    ci = github.ci
+    if ci is not None and ci.enabled:
+        cancel = (
+            f"cancel_build on {', '.join(ci.cancel_repos)} (needs Actions: write)"
+            if ci.allow_cancel
+            else "read-only (allow_cancel = false)"
+        )
+        lines.append(f"github ci: builds of {', '.join(ci.repos)}, {cancel}")
+    return lines
 
 
 def _human_tasks_status(settings: Settings) -> list[str]:

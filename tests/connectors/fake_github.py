@@ -25,10 +25,12 @@ class Reply:
 class Seen:
     path: str
     headers: Any  # case-insensitive, like HTTP
+    method: str = "GET"
 
 
 class FakeGitHub:
-    """Routes ``path`` (with query) to a :class:`Reply`; records every request."""
+    """Routes ``path`` (with query) to a :class:`Reply`; records every request. A POST
+    route is keyed ``"POST <path>"``."""
 
     def __init__(self) -> None:
         self.routes: dict[str, Reply] = {}
@@ -77,8 +79,16 @@ class FakeGitHub:
 def _handler(fake: FakeGitHub) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            fake.requests.append(Seen(self.path, self.headers))
-            reply = fake.routes.get(self.path, Reply(404, {"message": "Not Found"}))
+            self._answer("GET", self.path)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            self._answer("POST", f"POST {self.path}")
+
+        def _answer(self, method: str, route: str) -> None:
+            fake.requests.append(Seen(self.path, self.headers, method))
+            reply = fake.routes.get(route, Reply(404, {"message": "Not Found"}))
             body = reply.body
             raw = body if isinstance(body, bytes) else json.dumps(body).encode()
             payload = b"" if body is None else raw
