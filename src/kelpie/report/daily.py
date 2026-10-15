@@ -79,7 +79,7 @@ CHAOS_CAUSES: Mapping[str, str] = {
     "wait_condition": "waits past their limit",
     "exit_contract": "exits without a final status",
     "ping_pong": "review ping-pong",
-    "bottlenecks": "idle capacity next to a bottleneck",
+    "bottlenecks": "idle capacity (bottlenecks, holds, human gates)",
     "loop_breaker": "runaway loops",
     "no_progress": "activity without progress",
 }
@@ -93,7 +93,8 @@ REMEDIES: Mapping[str, str] = {
     "checking or a limit that is too short",
     "exit_contract": "make agents set a final status before they exit (role instructions)",
     "ping_pong": "escalate review ping-pong earlier or tighten the acceptance criteria",
-    "bottlenecks": "rebalance roles: move idle agents to the overloaded role or relieve it",
+    "bottlenecks": "rebalance roles, give holds an owner and an expiry, and move human tasks "
+    "off the critical path",
     "loop_breaker": "let loop_breaker stop runaway sessions (act mode)",
     "no_progress": "longer heartbeat interval, a cheaper model for maintenance calls, "
     "bounded sessions with a handoff file",

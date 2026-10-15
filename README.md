@@ -216,7 +216,8 @@ report; no LLM is involved.
 
 - **Cost of chaos, hours**: long-lived alert states of the rules that describe stuck work
   (ownerless tasks, blocks that outlived their cause, waits past their limit, review
-  ping-pong, idle capacity next to a bottleneck, runaway loops, activity without progress),
+  ping-pong, idle capacity behind bottlenecks, holds and human gates, runaway loops,
+  activity without progress),
   from when Kelpie first reported the condition to when it last saw it, clipped to the
   day (a lower bound: a grace period or an allowed wait is not counted). The unit is
   condition-hours; `[report] hour_usd` prices them.
