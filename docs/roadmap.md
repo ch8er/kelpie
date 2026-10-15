@@ -454,17 +454,6 @@ how long the quota will last. The rule stays CI-agnostic; CI specifics live in a
 - [ ] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks`
 - [ ] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
 
-### rules: ci_economy — propose a better CI configuration (rule 9, incident 5)
-labels: P0, week-2, area:rules
-Turn the wasted-build statistics into a concrete fix: a proposed pull request with a
-better CI configuration (skip drafts, path filters for docs-only changes, cancel in
-progress on new pushes, skip already verified commits).
-
-**Acceptance criteria**
-- [ ] Recommendation lists each suggested change with the minutes it would have saved
-- [ ] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff)
-- [ ] No CI-specific syntax in `kelpie.rules`
-
 ### resources: read host metrics via Prometheus HTTP API
 labels: P0, week-2, area:resources
 No custom collector: query node_exporter metrics through the Prometheus HTTP API and turn
@@ -664,6 +653,17 @@ coding agents; self-hosted farms on Hermes, OpenClaw, Paperclip).
 
 P1 work that the plan does not schedule in a week. Week 3 holds only the P1 items the
 plan lists there (token optimization, throughput metrics, 10 conversations).
+
+### rules: ci_economy — propose a better CI configuration (rule 9, incident 5)
+labels: P1, area:rules
+Turn the wasted-build statistics into a concrete fix: a proposed pull request with a
+better CI configuration (skip drafts, path filters for docs-only changes, cancel in
+progress on new pushes, skip already verified commits).
+
+**Acceptance criteria**
+- [ ] Recommendation lists each suggested change with the minutes it would have saved
+- [ ] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff)
+- [ ] No CI-specific syntax in `kelpie.rules`
 
 ### rules: return_causes — root causes of task returns (incident 7)
 labels: P1, area:rules
