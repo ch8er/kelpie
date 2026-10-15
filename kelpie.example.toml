@@ -463,3 +463,14 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # # name = "slack"                     # only needed with two slack channels
 # # allow_host = "relay.example.org"   # another host for the webhook (plain http only if it
 # #                                    # is loopback); for relays and tests
+
+# Daily "cost of chaos" report: `kelpie report [--date YYYY-MM-DD] [--send]`, scheduled on
+# the host (cron or a timer shortly after midnight). See README "Daily report".
+#
+# [report]
+# timezone = "UTC"                 # where a day starts and ends (IANA name)
+# dir = "/var/lib/kelpie/reports"  # writes kelpie-report-<date>.md; unset: stdout only
+# task_url = "https://board.example.org/tasks/{id}"  # links task ids in the Markdown
+# hour_usd = 2.5                   # what a stuck task-hour costs; unset: hours stay hours
+# channels = ["telegram"]          # [[alerts.channels]] that get the summary (unset: all)
+# severity = "warning"             # sent at this severity (channels filter by min_severity)

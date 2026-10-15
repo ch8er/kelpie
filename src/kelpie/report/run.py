@@ -1,0 +1,110 @@
+"""``kelpie report``: build one day's report from storage and the board, write it as
+Markdown, and optionally send its summary through the alert channels.
+
+Scheduling is left to the host (cron or a systemd timer running ``kelpie report --send``
+shortly after midnight in ``[report] timezone``): the board's adapters only look back so
+far (Hermes: ``lookback``, 24h by default), so tasks completed on an older day may be
+missing from its report.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Protocol
+
+from kelpie.core.budgets import PriceTable
+from kelpie.core.config import Mode
+from kelpie.core.model import Snapshot
+from kelpie.report.config import ReportSettings
+from kelpie.report.daily import (
+    DailyReport,
+    ReportInputs,
+    build_report,
+    day_bounds,
+    render_markdown,
+    render_summary,
+)
+from kelpie.report.store import ReportStore
+from kelpie.traces.hooks import merge_hook_spans
+from kelpie.traces.outputs import OutputSettings
+
+
+class Sender(Protocol):
+    """What the report needs of :class:`kelpie.alerts.Delivery`."""
+
+    def send(self, text: str, severity: str, channels: Sequence[str] | None = None) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ReportSources:
+    """Configuration the report reads, taken from the app's settings."""
+
+    db_path: Path | None
+    report: ReportSettings
+    prices: PriceTable
+    outputs: OutputSettings
+    estimated: bool  # a subscription-mode budget: dollars are estimates
+    modes: Mapping[str, Mode]
+
+
+def default_day(now: datetime, settings: ReportSettings) -> date:
+    """Yesterday in the report's time zone."""
+    return now.astimezone(settings.tz).date() - timedelta(days=1)
+
+
+def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInputs:
+    """Everything the day's report needs; raises OSError/sqlite3.Error/RuntimeError when the
+    database cannot be read (a missing database is an empty one)."""
+    tz = sources.report.tz
+    start, end = day_bounds(day, tz)
+    history = start - timedelta(days=max(sources.outputs.repeat_days - 1, 0))
+    actions, states, spans, attribution = [], [], [], None
+    if sources.db_path is not None and sources.db_path.exists():
+        with ReportStore(sources.db_path) as store:
+            actions = store.actions(start, end)
+            states = store.states(start, end)
+            spans = store.spans(history, end)
+            attribution = store.attribution()
+    # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same
+    # call reported both ways is kept once.
+    merged = merge_hook_spans(
+        [*spans, *(s for s in board.spans if history <= (s.end or s.start) < end)]
+    ).spans
+    return ReportInputs(
+        day=day,
+        tz=tz,
+        actions=actions,
+        states=states,
+        spans=merged,
+        tasks=board.tasks,
+        owners=board.owners,
+        sessions=board.sessions,
+        prices=sources.prices,
+        estimated=sources.estimated,
+        outputs=sources.outputs,
+        attribution=attribution,
+        modes=sources.modes,
+        hour_usd=sources.report.hour_usd,
+    )
+
+
+def write(markdown: str, settings: ReportSettings, day: date) -> Path | None:
+    """Write the report to ``[report] dir``; None when no directory is configured."""
+    if settings.dir is None:
+        return None
+    settings.dir.mkdir(parents=True, exist_ok=True)
+    path = settings.dir / f"kelpie-report-{day.isoformat()}.md"
+    path.write_text(markdown, encoding="utf-8")
+    return path
+
+
+def send(report: DailyReport, settings: ReportSettings, sender: Sender) -> None:
+    sender.send(render_summary(report), settings.severity, settings.channels)
+
+
+def generate(sources: ReportSources, day: date, board: Snapshot) -> tuple[DailyReport, str]:
+    report = build_report(load_inputs(sources, day, board))
+    return report, render_markdown(report, sources.report.task_url)

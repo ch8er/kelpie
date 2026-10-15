@@ -193,16 +193,43 @@ minutes or M changed files, WIP commit on exit to a draft PR or with `[skip ci]`
 from the last commit with a progress note). Next step (P1): basic token optimization and
 farm throughput metrics from traces.
 
-## Reporting (planned)
+## Reporting
 
 - **Real-time alerts** to Telegram and Slack: only actionable
   items, always stating what Kelpie already did by itself; duplicate alerts are merged.
   See [Alerts](#alerts).
-- **Daily report**: cost of chaos (idle hours, tokens burned on restarts), what Kelpie
-  fixed by itself, what needs a human decision, before/after effect of yesterday's fixes,
-  top 3 optimization recommendations.
+- **Daily report** (`kelpie report`): cost of chaos in task-hours and dollars, cost per
+  completed task, what Kelpie fixed by itself (and would have fixed in act mode), what
+  needs a human (alert states still open, actions Kelpie could not carry out, repeated
+  huge-output offenders), the top 3 recommendations and the largest tool outputs. See
+  [Daily report](#daily-report). Before/after of yesterday's fixes is planned.
 - **Dashboards**: no custom UI. Kelpie exposes Prometheus metrics on `/metrics`, Grafana
   shows them, traces open in Langfuse. CLI: `kelpie status` and `kelpie report`.
+
+## Daily report
+
+`kelpie report [--date YYYY-MM-DD] [--send]` builds one day's report (default: yesterday in
+`[report] timezone`) from Kelpie's database, read-only, and from the board as the adapters
+report it now. It prints Markdown, writes `kelpie-report-<date>.md` to `[report] dir`, and
+with `--send` posts a short summary to the alert channels. The same data gives the same
+report; no LLM is involved.
+
+- **Cost of chaos, hours**: long-lived alert states of the rules that describe stuck work
+  (ownerless tasks, blocks that outlived their cause, waits past their limit, review
+  ping-pong, idle capacity next to a bottleneck, runaway loops, activity without progress),
+  from when the condition began to when Kelpie last saw it, clipped to the day. The unit is
+  task-hours; `[report] hour_usd` prices them.
+- **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
+  flagged, and by every session `exit_contract` requeued (a restart), priced with
+  `[prices]`. In subscription mode the dollars are marked as an estimate.
+- **Cost per completed task**: the day's priced spend over the tasks that reached `done`.
+- **Top 3 recommendations**: output filters for huge tool outputs (RTK first; see
+  `[traces.outputs]`), rules that would have fixed part of the chaos in act mode, and fixed
+  remedies for the largest causes, ranked by dollars (hours count when `hour_usd` is set).
+
+Schedule it on the host, shortly after midnight in the report's time zone, e.g. with cron:
+`5 0 * * * kelpie --config /etc/kelpie.toml report --send`. Adapters only look back so far
+(Hermes: `lookback`, 24h), so run it daily rather than for days long past.
 
 ## Alerts
 
