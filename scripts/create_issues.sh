@@ -145,6 +145,7 @@ label_color() {
     P0) echo "b60205" ;;
     P1) echo "fbca04" ;;
     P2) echo "c5def5" ;;
+    adapter) echo "5319e7" ;;
     week-*) echo "1d76db" ;;
     area:*) echo "0e8a16" ;;
     *) echo "ededed" ;;
@@ -156,6 +157,7 @@ label_description() {
     P0) echo "Now, this week" ;;
     P1) echo "Next step" ;;
     P2) echo "Later, on signal" ;;
+    adapter) echo "Platform adapter" ;;
     week-*) echo "Planned for ${1/week-/week }" ;;
     area:*) echo "Area: ${1#area:}" ;;
     *) echo "" ;;

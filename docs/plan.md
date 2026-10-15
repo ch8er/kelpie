@@ -20,7 +20,7 @@ Priorities: **P0** — now, this week · **P1** — next step · **P2** — late
 | 4 | Host overloaded, heavy-task queue 1.5–2 h | main throughput brake | Environment resources plus a concurrency limit for heavy tasks |
 | 5 | CI minutes ran out | 11 h of idle time | External conditions: CI economy and quota burn forecast (rule 9) |
 | 6 | LLM provider limits and expired login | up to 200 limit hits per day | Provider quotas and auth health, concurrency tuned to the limit |
-| 7 | Conflicts in shared files | 46 of 63 task returns | Root-cause analysis of returns from traces → recommendation; early conflict warning (rule 12, P1) |
+| 7 | Conflicts in shared files | 46 of 63 task returns | Root-cause analysis of returns from traces → recommendation (P1); early conflict warning (rule 12, P1) |
 | 8 | Blocks stayed after the cause was fixed | 3 h | Stale blocks, same as #1 |
 | 9 | Idle agents due to a sequential task graph | half a day | Role utilization and critical path |
 | 10 | Agent waited for an external event inside its session; the dispatcher declared it dead | reviews took 40–90 min, 4 of 10 failed | "Wait for condition" and a "waiting" heartbeat |
@@ -50,11 +50,18 @@ Kelpie is a **service, not an LLM agent**. Control is done by deterministic rule
 
 ### Architecture: a core and three kinds of adapters
 
-- **Platforms** — where tasks, statuses and sessions come from: Hermes first (`post_tool_call` and `on_session_end` hooks plus reading `kanban.db`), then Claude Code, Paperclip, OpenClaw, Codex, and a generic GitHub Issues / Linear task-queue adapter.
+- **Platforms** — where tasks, statuses and sessions come from: Hermes first (`post_tool_call` and `on_session_end` hooks plus reading `kanban.db`), then Claude Code, Paperclip, OpenClaw, Codex, and a generic GitHub Issues / Linear task-queue adapter. The other platforms are a P2 backlog, one adapter each; Claude Code is the first candidate.
 - **Environment resources** — node_exporter on every machine that runs agents, scraped by Prometheus. Kelpie reads resources through the Prometheus API. Laptop, cloud VM or container — no difference. We do not write our own collector.
 - **External conditions** — what tasks wait for: PRs, CI, deploys, API responses, LLM provider quotas, human approval. CI is just one connector.
 
 Deployment: one `kelpie serve` process (or docker compose with Kelpie, Prometheus and Grafana). The server can run anywhere; adapters and node_exporter run where the agents run. The watchdog should not die together with what it watches, so the server should eventually live on a separate machine.
+
+### P0. Engine safety — first PRs of week 1, before any rule acts on a real farm
+
+- **A. Action ledger:** every action gets a fingerprint; the same action is not re-emitted within a cooldown; at most N actions per task per hour; the ledger is persisted in storage. It powers alert de-duplication and the before/after report, and keeps Kelpie itself from looping.
+- **B. Routing:** each task carries its `source` (the adapter it came from) and each action an executor target (a platform adapter or a connector). The engine holds a registry of executors instead of a single adapter, so connectors can expose actions too (e.g. `cancel_build` executed by the CI connector for rule 9).
+- **C. Stop capability:** `SupportsStop` (stop or pause a session) and the `stop` action, needed for rule 10.
+- **D. Per-rule mode** in config: `observe | suggest | act`, default `observe`. Global dry-run overrides every rule.
 
 ### P0. MVP — core rules
 
@@ -69,7 +76,7 @@ The numbers in brackets are the farm incidents each rule is validated against.
 7. Environment resources: disk, memory, processes or provider quotas running out, auth expiring → alert before the agents stop (3, 4, 6)
 8. Daily "cost of chaos" report and before/after verification of every fix
 9. CI economy: finds builds that burn minutes for nothing — on drafts and WIP commits, superseded by a newer push, triggered by docs-only changes, or repeated for an already verified commit. Cancels superseded builds by itself, forecasts how long the quota will last, and proposes a PR with a better CI configuration (5)
-10. Loop and budget breaker, cross-platform, built on traces: N identical consecutive tool calls (same tool and same arguments hash; default 8 in 10 minutes), 5 consecutive tool errors, or a per-agent daily/nightly token budget exceeded → pause the run through the adapter and alert. Defaults reuse the AgentWatchdog thresholds (field evidence: heartbeat runaway)
+10. Loop and budget breaker, cross-platform, built on traces: N identical consecutive tool calls (same tool and same arguments hash; default 8 in 10 minutes), 5 consecutive tool errors, or a per-agent daily/nightly token budget exceeded → stop the run through the adapter and alert. Defaults reuse the AgentWatchdog thresholds (field evidence: heartbeat runaway)
 11. Activity without progress: tokens spent by sessions that produce no status change, commit or artifact → alert with recommendations: a longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file (field evidence: idle context resend)
 
 ### P1. Rules backlog — week 3 only if the budget allows
@@ -99,9 +106,9 @@ Metrics: tasks per hour per role, task time by stage (queue, review, waiting for
 
 ### Reporting
 
-- **Real-time alerts** to Slack or Telegram — only actionable items, always stating what Kelpie already did by itself. Duplicate alerts are merged.
+- **Real-time alerts** to Slack (P0) or Telegram (P1) — only actionable items, always stating what Kelpie already did by itself. Duplicate alerts are merged.
 - **Daily report** — cost of chaos (idle hours, tokens burned on restarts), what Kelpie fixed by itself, what needs a human decision, before/after effect of yesterday's fixes, top 3 optimization recommendations.
-- **Dashboards** — no custom UI in the MVP. Kelpie exposes Prometheus metrics on `/metrics`, Grafana shows them, and traces open in Langfuse. A CLI: `kelpie status`, `kelpie report`.
+- **Dashboards** — no custom UI in the MVP. Kelpie exposes Prometheus metrics on `/metrics`, Grafana shows them, and traces open in Langfuse. A CLI: `kelpie status` (P0), `kelpie report`.
 
 ### Use what exists, do not build
 
@@ -156,6 +163,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 
 **Week 1, Oct 15–21**
 
+- [ ] Engine safety first: action ledger, routing to executors, stop capability, per-rule mode (A–D)
 - [ ] Repository, `CLAUDE.md`, cloud environment, fixtures from the farm incidents
 - [ ] Core: model of tasks, statuses, owners, conditions and resources
 - [ ] Traces: OTLP intake following GenAI semantic conventions, storage, export to Langfuse
