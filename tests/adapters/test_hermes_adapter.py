@@ -519,3 +519,24 @@ def test_snapshot_while_hermes_holds_an_open_write_transaction(board: Board) -> 
         writer.close()
     after = adapter(board).snapshot(NOW)
     assert {t.id: t.status for t in after.tasks} == {"t_1": Status.DONE, "t_2": Status.READY}
+
+
+@pytest.mark.parametrize(
+    ("value", "kept"), [(40_000, 40_000), (0, 0), (-1, None), (True, None), ("9", None)]
+)
+def test_spool_output_size_becomes_a_span_attribute(
+    board: Board, tmp_path: Path, value: object, kept: int | None
+) -> None:
+    from kelpie.traces.outputs import calls
+
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(tool_line(ago(minutes=5), output_chars=value) + "\n")
+    spans = adapter(board, spool).snapshot(NOW).spans
+    [tool] = [s for s in spans if s.kind is SpanKind.TOOL]
+    assert tool.attributes.get("kelpie.tool.output_chars") == kept
+    found = calls(spans)
+    if kept is None:
+        assert found == []
+    else:
+        [call] = found
+        assert (call.key, call.tokens, call.estimated) == ("ls", kept // 4, True)

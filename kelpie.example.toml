@@ -131,6 +131,8 @@ allow_unauthenticated = false  # true: no token needed even on a non-loopback ad
                           # listen on anything but 127.0.0.1/::1.
 task_attribute = "kelpie.task_id"        # span or resource attribute naming the task
 session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else session.id
+commands = true           # keep the prefix of shell commands on tool spans ("make test",
+                          # "xcodebuild"), redacted; the command itself is never stored
 
 # Forward accepted OTLP requests, unchanged, to other backends (off unless configured; one
 # table per destination; secret header values come from env vars). See README "Traces".
@@ -144,6 +146,27 @@ session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else ses
 # queue_size = 1000                       # requests waiting; beyond that they are dropped
 # queue_bytes = 67108864                  # ...and bytes waiting (64 MiB)
 # retries = 3                             # for network errors, 429 and 5xx (at most 10)
+
+# Huge tool outputs: tool calls ranked by output tokens per role and command prefix, with a
+# filter recommendation (RTK first) and before/after; the daily report reads them.
+# Only the size of an output is recorded, never the output. All keys optional; see
+# kelpie.traces.outputs.
+#
+# [traces.outputs]
+# threshold_tokens = 4000   # recommend a filter when calls average at least this...
+# min_calls = 3             # ...over at least this many unfiltered calls
+# repeat_days = 2           # above the threshold on this many days: a repeated offender
+# window = "1d"             # each side of a before/after comparison
+# min_sample = 5            # fewer calls on a side: labelled a small sample
+# owners = { developer = "human-owner" }  # role -> who owns that role's instructions
+#
+# Replaces the default table (rtk, xcbeautify, errors-only, range); first match wins.
+# [[traces.outputs.filters]]
+# name = "rtk"
+# how = "install RTK and its hook for this platform"
+# commands = ["git", "cargo", "npm", "pytest"]   # globs over the prefix or executable
+# platforms = ["hermes", "claude-code"]          # omit: any platform
+# reduction = 0.6                                # expected share of tokens removed
 
 # Budgets: spend priced from traces (needs [traces]). See README "Budgets and spend".
 # scope: day (whole farm) | agent | task | project; unit: usd | tokens; soft and/or hard

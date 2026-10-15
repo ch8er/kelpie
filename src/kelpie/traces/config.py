@@ -1,5 +1,5 @@
-"""``[traces]`` configuration: OTLP ingest, the snapshot window, span retention and
-``[[traces.forward]]`` destinations."""
+"""``[traces]`` configuration: OTLP ingest, the snapshot window, span retention,
+``[[traces.forward]]`` destinations and ``[traces.outputs]`` (huge tool outputs)."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from kelpie.traces.forward import (
     valid_header_value,
 )
 from kelpie.traces.ingest import DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_CONCURRENT
+from kelpie.traces.outputs import Filter, OutputSettings, normalize_platform
 from kelpie.traces.semconv import DEFAULT_SESSION_ATTRIBUTE, DEFAULT_TASK_ATTRIBUTE, MappingOptions
 from kelpie.traces.store import DEFAULT_MAX_SNAPSHOT_SPANS
 
@@ -43,8 +44,14 @@ KEYS = frozenset(
         "max_concurrent_requests",
         "allow_unauthenticated",
         "forward",
+        "commands",
+        "outputs",
     }
 )
+OUTPUT_KEYS = frozenset(
+    {"threshold_tokens", "min_calls", "repeat_days", "window", "min_sample", "owners", "filters"}
+)
+FILTER_KEYS = frozenset({"name", "how", "commands", "reduction", "platforms"})
 ALLOW_UNAUTHENTICATED_ENV = "KELPIE_TRACES_ALLOW_UNAUTHENTICATED"
 _TRUE = frozenset({"1", "true", "yes", "on"})
 FORWARD_KEYS = frozenset(
@@ -133,10 +140,12 @@ class TraceSettings:
     # Accept spans without a token on a non-loopback address (e.g. behind a proxy).
     allow_unauthenticated: bool = False
     forward: tuple[ForwardSettings, ...] = ()  # empty: forwarding disabled
+    commands: bool = True  # keep the grouping prefix of shell commands on tool spans
+    outputs: OutputSettings = field(default_factory=OutputSettings)
 
     @property
     def options(self) -> MappingOptions:
-        return MappingOptions(self.task_attribute, self.session_attribute)
+        return MappingOptions(self.task_attribute, self.session_attribute, self.commands)
 
     def token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The bearer token ingest requires, or None when it is open.
@@ -226,6 +235,12 @@ def load_traces(section: Any) -> TraceSettings:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"[traces] {key} must be a positive integer")
         ints[key] = value
+    outputs = load_outputs(section.get("outputs"))
+    needed = max(2 * outputs.window, timedelta(days=outputs.repeat_days))
+    if "outputs" in section and durations["retention"] < needed:
+        raise ValueError(
+            "[traces] retention must cover [traces.outputs] repeat_days and twice its window"
+        )
     forward = _load_forward(section.get("forward", []))
     if forward and not enabled:
         raise ValueError(
@@ -246,6 +261,8 @@ def load_traces(section: Any) -> TraceSettings:
         max_concurrent_requests=ints["max_concurrent_requests"],
         allow_unauthenticated=_flag(section, "allow_unauthenticated"),
         forward=forward,
+        commands=_flag_default(section, "commands"),
+        outputs=outputs,
     )
 
 
@@ -254,6 +271,108 @@ def _flag(section: Mapping[str, Any], key: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"[traces] {key} must be true or false")
     return value
+
+
+def _flag_default(section: Mapping[str, Any], key: str, default: bool = True) -> bool:
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"[traces] {key} must be true or false")
+    return value
+
+
+def load_outputs(section: Any) -> OutputSettings:
+    """Parse ``[traces.outputs]``; ``[[traces.outputs.filters]]`` replaces the default
+    filter table as a whole (order matters: the first match wins)."""
+    if section is None:
+        return OutputSettings()
+    if not isinstance(section, Mapping):
+        raise ValueError("[traces.outputs] must be a table")
+    if extra := set(section) - OUTPUT_KEYS:
+        raise ValueError(f"unknown [traces.outputs] keys: {sorted(extra)}")
+    defaults = OutputSettings()
+    ints: dict[str, int] = {}
+    for key in ("threshold_tokens", "min_calls", "repeat_days", "min_sample"):
+        value = section.get(key, getattr(defaults, key))
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"[traces.outputs] {key} must be a positive integer")
+        ints[key] = value
+    raw_window = section.get("window", "1d")
+    if not isinstance(raw_window, str):
+        raise ValueError('[traces.outputs] window must be a duration string such as "1d"')
+    try:
+        window = parse_duration(raw_window)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"[traces.outputs] window: {exc}") from exc
+    if window <= timedelta(0):
+        raise ValueError("[traces.outputs] window must be positive")
+    owners = section.get("owners", {})
+    if not isinstance(owners, Mapping) or not all(
+        isinstance(k, str) and k and isinstance(v, str) and v.strip() for k, v in owners.items()
+    ):
+        raise ValueError("[traces.outputs] owners must map roles to owner names")
+    filters = defaults.filters
+    if "filters" in section:
+        filters = _load_filters(section["filters"])
+    return OutputSettings(
+        threshold_tokens=ints["threshold_tokens"],
+        min_calls=ints["min_calls"],
+        repeat_days=ints["repeat_days"],
+        min_sample=ints["min_sample"],
+        window=window,
+        filters=filters,
+        owners={k: v.strip() for k, v in owners.items()},
+    )
+
+
+def _load_filters(raw: Any) -> tuple[Filter, ...]:
+    if not isinstance(raw, list) or not raw or not all(isinstance(x, Mapping) for x in raw):
+        raise ValueError("[[traces.outputs.filters]] must be a non-empty array of tables")
+    out: list[Filter] = []
+    for i, entry in enumerate(raw):
+        where = f"[[traces.outputs.filters]] #{i + 1}"
+        if extra := set(entry) - FILTER_KEYS:
+            raise ValueError(f"unknown {where} keys: {sorted(extra)}")
+        strings = {}
+        for key in ("name", "how"):
+            value = entry.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{where}: {key} must be a non-empty string")
+            strings[key] = value.strip()
+        lists: dict[str, tuple[str, ...] | None] = {}
+        for key in ("commands", "platforms"):
+            value = entry.get(key)
+            if value is None and key == "platforms":
+                lists[key] = None
+                continue
+            if (
+                not isinstance(value, list)
+                or not value
+                or not all(isinstance(v, str) and v.strip() for v in value)
+            ):
+                raise ValueError(f"{where}: {key} must be a non-empty list of strings")
+            lists[key] = tuple(v.strip() for v in value)
+        reduction = entry.get("reduction")
+        if isinstance(reduction, bool) or not isinstance(reduction, int | float):
+            raise ValueError(f"{where}: reduction must be a number between 0 and 1")
+        if not 0 < reduction < 1:
+            raise ValueError(f"{where}: reduction must be between 0 and 1")
+        platforms = lists["platforms"]
+        commands = lists["commands"]
+        assert commands is not None
+        out.append(
+            Filter(
+                name=strings["name"],
+                how=strings["how"],
+                commands=commands,
+                reduction=float(reduction),
+                platforms=None if platforms is None else tuple(map(_platform, platforms)),
+            )
+        )
+    return tuple(out)
+
+
+def _platform(name: str) -> str:
+    return normalize_platform(name) or name
 
 
 def _load_forward(raw: Any) -> tuple[ForwardSettings, ...]:

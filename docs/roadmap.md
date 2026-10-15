@@ -611,11 +611,11 @@ Build and test logs (e.g. `xcodebuild`) can put tens of thousands of tokens into
 context on every run. Find them in traces and recommend a filter.
 
 **Acceptance criteria**
-- [ ] Tool calls ranked by output tokens per role and command prefix (redacted, no raw output stored)
-- [ ] Commands above a threshold get a filter recommendation from a config table: RTK (github.com/rtk-ai/rtk) where it supports the platform, otherwise e.g. `xcbeautify`, errors only, tail; Kelpie does not build its own filter
-- [ ] Before/after: tokens per command prefix compared across the day a filter was introduced
+- [x] Tool calls ranked by output tokens per role and command prefix (redacted, no raw output stored)
+- [x] Commands above a threshold get a filter recommendation from a config table: RTK (github.com/rtk-ai/rtk) where it supports the platform, otherwise e.g. `xcbeautify`, errors only, tail; Kelpie does not build its own filter
+- [x] Before/after: tokens per command prefix compared across the day a filter was introduced
 - [ ] Repeated offenders → `comment` addressed to the owner of the role's instructions; estimated savings in the daily report
-- [ ] Fixtures: new `field-05-build-log-flood.yaml`
+- [x] Fixtures: new `field-05-build-log-flood.yaml`
 
 ### report: daily cost-of-chaos report
 labels: P0, week-3, area:report

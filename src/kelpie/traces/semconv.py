@@ -52,19 +52,34 @@ organization identity. Tool call arguments (``gen_ai.tool.call.arguments``, Clau
 ``tool_parameters`` or ``full_command``/``file_path``) are reduced to ``args_hash`` (see
 :mod:`kelpie.traces.args`) before they are discarded. Kept values are scalars (strings cut
 to 256 characters) or, for finish reasons, short lists; at most 64 keys.
+
+**Tool output and commands** (huge tool outputs, :mod:`kelpie.traces.outputs`). A tool span
+records how big its result was, never the result: ``kelpie.tool.output_tokens`` from
+Claude Code's ``result_tokens``, and ``kelpie.tool.output_chars``, the length of
+``gen_ai.tool.call.result`` (or OpenInference ``output.value``) before it is dropped. A
+shell command in the arguments (``command``/``cmd`` in ``gen_ai.tool.call.arguments`` or
+``tool_parameters``, or Claude Code's ``full_command``) is reduced to its grouping prefix,
+``kelpie.tool.command_prefix`` (``make test``, ``xcodebuild``; redacted first, see
+:mod:`kelpie.traces.command`; off with ``[traces] commands = false``), and
+``kelpie.tool.filter`` names an output filter the full command already pipes through
+(``rtk``, ``xcbeautify``, ``tail``, ...); the command itself is dropped. Kelpie computes
+these four itself: values an exporter sends under the same names are dropped.
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kelpie.core.model import Span, SpanKind
 from kelpie.traces.args import args_hash, args_hash_of_attribute
+from kelpie.traces.command import command_of, command_prefix, detect_filter, redact_command
 from kelpie.traces.otlp import RawSpan
 
 log = logging.getLogger(__name__)
@@ -105,6 +120,17 @@ CC_TOOL = ("tool_name",)
 CC_TOOL_CALL_ID = "tool_use_id"
 CC_PARAMETERS = "tool_parameters"  # JSON of the tool input, with OTEL_LOG_TOOL_DETAILS=1
 CC_ARGS = ("full_command", "file_path")  # only present with OTEL_LOG_TOOL_DETAILS=1
+
+CC_COMMAND = "full_command"
+CC_RESULT_TOKENS = "result_tokens"
+RESULTS = ("gen_ai.tool.call.result", "output.value")  # content: measured, never kept
+OUTPUT_TOKENS_ATTRIBUTE = "kelpie.tool.output_tokens"
+OUTPUT_CHARS_ATTRIBUTE = "kelpie.tool.output_chars"
+FILTER_ATTRIBUTE = "kelpie.tool.filter"
+COMMAND_ATTRIBUTE = "kelpie.tool.command_prefix"
+TOOL_DETAILS = frozenset(
+    {OUTPUT_TOKENS_ATTRIBUTE, OUTPUT_CHARS_ATTRIBUTE, FILTER_ATTRIBUTE, COMMAND_ATTRIBUTE}
+)
 
 MAX_ATTRIBUTES = 64
 MAX_VALUE_CHARS = 256
@@ -176,7 +202,7 @@ _KINDS = frozenset(k.value for k in SpanKind)
 
 
 # Set by Kelpie itself (hook spans carry ``kelpie.source = "hooks"``); never taken from OTLP.
-RESERVED_KEYS = frozenset({"kelpie.source"})
+RESERVED_KEYS = frozenset({"kelpie.source", *TOOL_DETAILS})
 
 
 def is_kept(key: str, claude_code: bool = False) -> bool:
@@ -195,6 +221,7 @@ def is_kept(key: str, claude_code: bool = False) -> bool:
 class MappingOptions:
     task_attribute: str = DEFAULT_TASK_ATTRIBUTE
     session_attribute: str = DEFAULT_SESSION_ATTRIBUTE
+    commands: bool = True  # keep a redacted prefix of shell commands on tool spans
 
 
 @dataclass(slots=True)
@@ -263,6 +290,9 @@ def map_spans(raw: Sequence[RawSpan], options: MappingOptions | None = None) -> 
         if span is None:
             out.ignored += 1
         else:
+            if not opts.commands and COMMAND_ATTRIBUTE in span.attributes:
+                kept = {k: v for k, v in span.attributes.items() if k != COMMAND_ATTRIBUTE}
+                span = replace(span, attributes=kept)
             out.spans.append(span)
     return out
 
@@ -363,6 +393,8 @@ def _span(r: RawSpan, task_id: str | None, session_id: str | None) -> Span | Non
     consumed = {*model_keys, *tool_keys, KIND_ATTRIBUTE, *INPUT_TOKENS, *OUTPUT_TOKENS}
     consumed.update(CACHED_TOKENS)
     attributes = _kept(attrs, consumed, claude_code)
+    if kind is SpanKind.TOOL:
+        attributes.update(_tool_details(attrs, claude_code))
     if claude_code and (call_id := attrs.get(CC_TOOL_CALL_ID)) not in (None, ""):
         attributes.setdefault(TOOL_CALL_ID, str(call_id)[:MAX_VALUE_CHARS])
     for key in KEPT_RESOURCE:
@@ -392,6 +424,57 @@ def _span(r: RawSpan, task_id: str | None, session_id: str | None) -> Span | Non
         outcome="error" if failed else "ok",
         attributes=attributes,
     )
+
+
+def _tool_details(attrs: Mapping[str, Any], claude_code: bool) -> dict[str, Any]:
+    """Output size, redacted command and filter of a tool call (see the module docs)."""
+    out: dict[str, Any] = {}
+    if claude_code and (tokens := _count(attrs.get(CC_RESULT_TOKENS))) is not None:
+        out[OUTPUT_TOKENS_ATTRIBUTE] = tokens
+    result = _first(attrs, RESULTS)
+    if result is not None:
+        out[OUTPUT_CHARS_ATTRIBUTE] = _size(result)
+    raw = _raw_command(attrs, claude_code)
+    if raw:
+        if (prefix := command_prefix(redact_command(raw))) is not None:
+            out[COMMAND_ATTRIBUTE] = prefix
+        if (used := detect_filter(raw)) is not None:
+            out[FILTER_ATTRIBUTE] = used
+    return out
+
+
+def _raw_command(attrs: Mapping[str, Any], claude_code: bool) -> str | None:
+    keys = (ARGUMENTS, CC_PARAMETERS) if claude_code else (ARGUMENTS,)
+    for key in keys:
+        value = attrs.get(key)
+        if isinstance(value, str):
+            with contextlib.suppress(ValueError):
+                value = json.loads(value)
+        if (found := command_of(value)) is not None:
+            return found
+    if claude_code and isinstance(full := attrs.get(CC_COMMAND), str) and full:
+        return full
+    return None
+
+
+def _count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        n = int(value)
+    except (ValueError, OverflowError):
+        return None
+    return max(0, min(n, 2**62))
+
+
+def _size(value: Any) -> int:
+    """Characters of a tool result (structured results as compact JSON)."""
+    if isinstance(value, str):
+        return len(value)
+    try:
+        return len(json.dumps(value, separators=(",", ":"), default=str))
+    except (TypeError, ValueError):
+        return len(str(value))
 
 
 def _kept(attrs: Mapping[str, Any], consumed: set[str], claude_code: bool) -> dict[str, Any]:
