@@ -22,7 +22,9 @@ kelpie = "kelpie.cli:main"
 
 [dependency-groups]
 dev = [
+    "import-linter>=2.1",
     "pytest>=8.3",
+    "pytest-cov>=6.0",
     "types-pyyaml>=6.0",
     "ruff>=0.8",
 ]
@@ -40,6 +42,21 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.importlinter]
+root_package = "kelpie"
+
+[[tool.importlinter.contracts]]
+name = "Core and rules do not depend on integrations"
+type = "forbidden"
+source_modules = ["kelpie.core", "kelpie.rules"]
+forbidden_modules = ["kelpie.adapters", "kelpie.connectors"]
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
