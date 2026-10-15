@@ -106,6 +106,7 @@ FIX_KINDS = frozenset(
         ActionKind.REQUEUE,
         ActionKind.UNBLOCK,
         ActionKind.WAKE,
+        ActionKind.WAIT,
         ActionKind.REASSIGN,
         ActionKind.STOP,
         ActionKind.CANCEL_BUILD,
