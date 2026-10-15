@@ -20,3 +20,12 @@ max_actions_per_task_per_hour = 6  # actions with an effect per task (else sessi
 [storage]
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
                           # $KELPIE_DB overrides this.
+
+# Platform adapters. Kelpie only reads the board and, for now, cannot change it (Hermes
+# actions are not implemented yet), so keep rules in observe or suggest mode.
+#
+# [adapters.hermes]
+# db_path = "~/.hermes/kanban.db"   # named boards: ~/.hermes/kanban/boards/<slug>/kanban.db
+# spool = "~/.hermes/kelpie/spool.jsonl"  # tool-call spans written by the Hermes plugin
+# lookback = "24h"                  # runs and spans older than this are left out
+# enabled = true

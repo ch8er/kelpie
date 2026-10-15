@@ -238,7 +238,7 @@ def test_never_writes(board: Board) -> None:
     a.snapshot(NOW)
     assert board.path.read_bytes() == before
     # The connection is read-only even though the file is writable.
-    with a._connect() as conn, pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+    with a._connect() as conn, pytest.raises(sqlite3.OperationalError, match=r"readonly|read-only"):
         conn.execute("DELETE FROM tasks")
     assert board.conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 1
 

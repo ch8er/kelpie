@@ -9,7 +9,15 @@ import sys
 from collections.abc import Sequence
 
 from kelpie import __version__
-from kelpie.app import ConfigError, build_app, find_config, load_rules, load_settings, render_status
+from kelpie.app import (
+    ConfigError,
+    build_adapters,
+    build_app,
+    find_config,
+    load_rules,
+    load_settings,
+    render_status,
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -33,7 +41,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = load_settings(find_config(args.config))
         if args.command == "status":
-            sys.stdout.write(render_status(settings, load_rules(settings.engine)))
+            rules = load_rules(settings.engine)
+            sys.stdout.write(render_status(settings, rules, build_adapters(settings)))
             return 0
         app = build_app(settings)
     except ConfigError as exc:
