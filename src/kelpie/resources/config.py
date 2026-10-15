@@ -150,9 +150,9 @@ def _load_prometheus(section: Any) -> PrometheusSettings:
     url = _string(section, "url", "")
     parts = urlsplit(url)
     try:
-        port = parts.port  # raises ValueError on a bad port
+        port = parts.port
     except ValueError:
-        port = None
+        raise ValueError("[resources.prometheus] url has an invalid port") from None
     if parts.scheme not in ("http", "https") or not parts.hostname or port == 0:
         raise ValueError("[resources.prometheus] url must be an http(s) URL with a host")
     if parts.username is not None or parts.password is not None:

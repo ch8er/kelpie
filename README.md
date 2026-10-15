@@ -250,6 +250,33 @@ alternative `allowed_block_reasons` list for Hermes block kinds.
 
 Install node_exporter on each host where agents run, and point it at the Kelpie server.
 
+## Host resources (optional)
+
+Rule 7 (`resources`) warns before a host runs out of disk, memory, CPU or processes and
+suggests a limit on heavy tasks when a host is overloaded. It reads node_exporter metrics
+through the Prometheus HTTP API (`GET /api/v1/query`); Kelpie has no collector of its own.
+Off unless configured:
+
+```toml
+[resources.prometheus]
+url = "http://prometheus:9090"
+hosts = { host-a = "host-a:9100" }   # Kelpie host name = value of the `instance` label
+# token_env = "KELPIE_PROMETHEUS_TOKEN"  # bearer token from this env var, sent only to `url`
+
+[engine.rules.resources]
+mode = "suggest"
+disk_warning = 0.85
+disk_critical = 0.95
+heavy_label = "heavy"               # tasks with this label are heavy
+max_heavy_per_host = 2              # alert when an overloaded host runs more at once
+```
+
+Redirects and proxies are never followed, and the token is never logged. If Prometheus is
+down, rules see no host readings (never stale ones), the failure is counted in
+`kelpie_resource_read_failures_total` and logged once per cause. Queries are configurable
+under `[resources.prometheus.queries]`; see `kelpie.example.toml`. LLM provider quotas and
+auth health are not part of this step yet.
+
 ## Traces (OTLP)
 
 `kelpie serve` accepts OpenTelemetry traces on the same port: `POST /v1/traces`, OTLP/HTTP
@@ -500,6 +527,7 @@ src/kelpie/
   adapters/     PlatformAdapter implementations (Hermes first)
   connectors/   ConditionConnector implementations (GitHub, LLM quotas, human tasks)
   traces/       OTLP ingest, span storage, optional export (Langfuse, Phoenix, Datadog)
+  resources/    optional host metrics source (Prometheus HTTP API, node_exporter)
   report/       daily cost-of-chaos report, before/after comparisons
   cli.py, server.py     `kelpie` CLI and HTTP server (/metrics, /healthz, /v1/traces)
 tests/
