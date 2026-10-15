@@ -724,7 +724,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         reader = prometheus.build() if prometheus is not None else None
         quotas = settings.llm_quotas.build() if settings.llm_quotas is not None else None
         metrics = Metrics()
-        alerts = settings.alerts.build(metrics)
+        if problems := settings.alerts.problems():  # the delivery threads start last
+            raise ValueError(problems[0])
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     if prometheus is not None and prometheus.sends_token_in_clear():
@@ -747,7 +748,6 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         config=settings.engine,
         ledger_store=store,
         state_store=states,
-        alerter=alerts.alerter() if alerts is not None else None,
     )
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     metrics.set_adapters(a.name for a in adapters)
@@ -763,7 +763,15 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             adapters, metrics, clock, resources=reader, enrich=enrich, providers=quotas
         )
         loop = ControlLoop(engine, source, metrics)
-        return App(settings, loaded, engine, loop, metrics, store, alerts=alerts)
+        return App(
+            settings,
+            loaded,
+            engine,
+            loop,
+            metrics,
+            store,
+            alerts=_start_alerts(settings, engine, metrics),
+        )
     span_store = _open_span_store(settings.db_path)
     metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
     metrics.set_span_rows_source(span_store.count)
@@ -810,6 +818,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         providers=quotas,
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
+    alerts = _start_alerts(settings, engine, metrics)
     return App(
         settings,
         loaded,
@@ -823,6 +832,18 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         forwarder,
         alerts,
     )
+
+
+def _start_alerts(settings: Settings, engine: Engine, metrics: Metrics) -> Delivery | None:
+    """Start the alert channels (their worker threads) and give the engine its alerter. Done
+    last in ``build_app``, so a startup error before this point leaves no thread behind."""
+    try:
+        alerts = settings.alerts.build(metrics)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if alerts is not None:
+        engine.alerter = alerts.alerter()
+    return alerts
 
 
 def _connector_steps(

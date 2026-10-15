@@ -233,3 +233,21 @@ def test_free_text_is_sent_as_it_is_and_cut_to_the_limit() -> None:
     text = fake.requests[0][2]["text"]
     assert text.startswith("Daily report\nxxx") and utf16_len(text) <= MAX_TEXT
     assert "Kelpie did" not in text
+
+
+def test_lone_surrogates_do_not_crash_formatting_or_sending() -> None:
+    bad = message(subject="task \ud800 x", body="reason \udfff \ud83d end")
+    text = format_message(bad)
+    text.encode("utf-8")  # must be encodable
+    assert "reason" in text and "end" in text
+    assert utf16_len("\ud800") == 1
+    format_message(message(text="free \ud800 text")).encode("utf-8")
+    with fake_telegram() as fake:
+        channel(fake).send(bad)
+    assert len(fake.requests) == 1
+
+
+def test_a_huge_body_never_cuts_off_what_kelpie_did() -> None:
+    text = format_message(message(body="y" * 20_000, subject="s" * 5000, did=Did.FAILED))
+    assert "tried, and it failed" in text.split("\n")[-1]
+    assert utf16_len(text) <= MAX_TEXT

@@ -22,9 +22,11 @@ class FakeChannel:
         self.errors: list[Exception] = []  # raised one per call, in order
         self.gate: threading.Event | None = None  # when set, send blocks until opened
         self.calls = 0
+        self.delay = 0.0
 
     def send(self, message: AlertMessage) -> None:
         self.calls += 1
+        time.sleep(self.delay)
         if self.gate is not None:
             self.gate.wait(5)
         if self.errors:
@@ -176,3 +178,65 @@ def test_public_send_takes_free_text_for_named_channels_or_all_that_pass() -> No
     assert [m.text for m in a.sent] == ["Daily report\n3 fixes", "Daily report\nboth"]
     assert [m.text for m in b.sent] == ["Daily report\nneeds you"]
     delivery.close()
+
+
+def test_a_flap_within_the_window_is_delivered_but_a_true_repeat_is_not() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    delivery = Delivery([channel], metrics, window=timedelta(hours=1), backoff=0.001)
+    alerter = delivery.alerter()
+    opened = ("[orphans] alert task-1", "task-1 has no owner.", "warning")
+    resolved = ("[orphans] alert task-1", "Resolved after 5m: task-1 has no owner.", "info")
+    alerter.send(*opened)
+    alerter.send(*opened)  # identical to the last one sent: a duplicate
+    alerter.send(*resolved)  # a different alert for the subject resets the dedup
+    alerter.send(*opened)  # opened again within the window: delivered
+    wait_for(lambda: len(channel.sent) == 3)
+    assert [m.transition for m in channel.sent] == [
+        Transition.NEW,
+        Transition.RESOLVED,
+        Transition.NEW,
+    ]
+    assert metrics.alerts_dropped[("a", "duplicate")] == 1
+    delivery.close()
+
+
+def test_an_alert_that_failed_for_good_does_not_block_its_own_repeat() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.errors = [PermanentError("rejected", "HTTP 400"), TransientError("x", "", 3600.0)]
+    delivery = Delivery([channel], metrics, window=timedelta(hours=1), backoff=0.001)
+    alerter = delivery.alerter()
+    alerter.send("[r] alert", "one", "warning")
+    wait_for(lambda: metrics.alerts_failed[("a", "rejected")] == 1)
+    alerter.send("[r] alert", "one", "warning")  # retried by the caller later: not a duplicate
+    wait_for(lambda: metrics.alerts_failed[("a", "x")] == 1)
+    assert channel.calls == 2  # a retry_after beyond the cap fails at once, no capped retries
+    alerter.send("[r] alert", "one", "warning")
+    wait_for(lambda: len(channel.sent) == 1)
+    delivery.close()
+
+
+def test_close_delivers_the_queue_within_the_timeout() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.delay = 0.02
+    delivery = Delivery([channel], metrics, backoff=0.001)
+    for i in range(5):
+        delivery.alerter().send("[r] alert", f"m{i}", "warning")
+    delivery.close(timeout=3.0)
+    assert len(channel.sent) == 5
+    assert metrics.alerts_dropped[("a", "shutdown")] == 0
+
+
+def test_close_counts_what_it_could_not_deliver_as_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.delay = 0.3
+    delivery = Delivery([channel], metrics, backoff=0.001)
+    for i in range(6):
+        delivery.alerter().send("[r] alert", f"m{i}", "warning")
+    with caplog.at_level(logging.WARNING):
+        delivery.close(timeout=0.2)
+    dropped = metrics.alerts_dropped[("a", "shutdown")]
+    assert dropped >= 3
+    assert len(channel.sent) + dropped == 6
+    assert len([r for r in caplog.records if "at shutdown" in r.getMessage()]) == 1

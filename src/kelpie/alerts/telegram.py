@@ -34,6 +34,8 @@ DEFAULT_API_URL = "https://api.telegram.org"
 DEFAULT_TIMEOUT = timedelta(seconds=10)
 MAX_TIMEOUT = timedelta(minutes=1)
 MAX_TEXT = 4096
+MAX_BODY = 3500  # leaves room for the heading and the "Kelpie did" line
+MAX_HEAD = 200
 MAX_RESPONSE = 64 * 1024
 _TOKEN = re.compile(r"\d{1,20}:[A-Za-z0-9_-]{20,128}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -59,8 +61,13 @@ def redact(text: str, token: str) -> str:
     return text.replace(token, "<redacted>") if token else text
 
 
+def clean(text: str) -> str:
+    """No lone surrogates (they cannot be encoded) and no control characters."""
+    return _CONTROL.sub(" ", text.encode("utf-8", "replace").decode("utf-8"))
+
+
 def utf16_len(text: str) -> int:
-    return len(text.encode("utf-16-le")) // 2
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
 
 
 def truncate(text: str, limit: int = MAX_TEXT) -> str:
@@ -82,15 +89,13 @@ def format_message(message: AlertMessage) -> str:
     """Plain text: severity and subject, the transition, the reason, what Kelpie did.
     Free text (``message.text``) is sent as it is."""
     if message.text is not None:
-        return truncate(_CONTROL.sub(" ", message.text))
+        return truncate(clean(message.text))
     head = f"[{message.severity.value.upper()}] "
-    head += f"{message.rule}: " if message.rule else ""
-    lines = [
-        head + message.subject,
-        _TRANSITION[message.transition] + message.body.strip(),
-        _DID[message.did],
-    ]
-    return truncate(_CONTROL.sub(" ", "\n".join(lines)))
+    head += f"{truncate(clean(message.rule), MAX_HEAD)}: " if message.rule else ""
+    # Each part has its own cap, so the last line (what Kelpie did) always survives.
+    body = truncate(clean(_TRANSITION[message.transition] + message.body.strip()), MAX_BODY)
+    lines = [head + truncate(clean(message.subject), MAX_HEAD), body, _DID[message.did]]
+    return truncate("\n".join(lines))
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +222,7 @@ class TelegramChannel:
             "disable_web_page_preview": True,
             "disable_notification": message.severity is Severity.INFO,
         }
+        # A timeout after the server got the POST is retried, so a message can arrive twice.
         try:
             response = net.post(
                 self._settings.api_url,
