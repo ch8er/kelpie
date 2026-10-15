@@ -19,7 +19,8 @@ Kanban workers get ``HERMES_KANBAN_TASK`` and ``HERMES_KANBAN_RUN_ID`` in their 
 
 Privacy: raw arguments and results are never written. A tool call is recorded as the tool
 name, a hash of its canonical arguments and, for shell-like tools, a redacted prefix of the
-command (see :func:`redact_command`; disable with ``KELPIE_HERMES_SPOOL_COMMANDS=0``).
+command (see :func:`redact_command`; disable with ``KELPIE_HERMES_SPOOL_COMMANDS=0``), and
+the size of its result in characters (``output_chars``), never the result itself.
 
 Hooks are fire-and-forget: nothing here raises, blocks on the network or returns a value.
 """
@@ -190,6 +191,17 @@ def _duration_ms(value: Any) -> int | None:
         return None
 
 
+def _output_chars(result: Any) -> int | None:
+    if result is None:
+        return None
+    if isinstance(result, str):
+        return len(result)
+    try:
+        return len(json.dumps(result, separators=(",", ":"), default=str))
+    except (TypeError, ValueError):
+        return len(str(result))
+
+
 def post_tool_call(**kwargs: Any) -> None:
     try:
         args = kwargs.get("args", kwargs.get("params"))
@@ -204,6 +216,7 @@ def post_tool_call(**kwargs: Any) -> None:
             "command": _command(args),
             "outcome": "error" if status in {"error", "failed", "failure"} else "ok",
             "duration_ms": _duration_ms(kwargs.get("duration_ms")),
+            "output_chars": _output_chars(kwargs.get("result")),
         }
         append(record)
     except Exception:  # hooks must never break the agent

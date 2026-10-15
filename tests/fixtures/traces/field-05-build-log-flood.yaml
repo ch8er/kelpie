@@ -1,0 +1,97 @@
+id: "field-05-build-log-flood"
+incident: null
+title: "Build and test logs flood the agents' context"
+description: >
+  Field evidence (synthetic reconstruction). An iOS developer agent ran the full
+  `xcodebuild` test log into its context six times a day, about 45k tokens each time, two
+  days in a row; a web developer agent ran `npm test` with verbose output. Each of these
+  calls costs more than many model calls, and every later call of the session re-reads it.
+  Kelpie ranks them, recommends an existing filter (RTK where it covers the command and the
+  platform, xcbeautify for xcodebuild) and verifies the effect: the developer switched
+  `git diff` to `rtk git diff` halfway through the second day. Small `git status` outputs
+  and a reviewer reading short files are the distractors: frequent calls alone must not
+  trigger a recommendation.
+# [traces.outputs]
+config:
+  threshold_tokens: 4000
+  min_calls: 3
+  repeat_days: 2
+  min_sample: 5
+  owners: {ios-developer: human-owner}
+snapshot:
+  now: "2026-03-03T20:00:00+00:00"
+  owners:
+    - {id: agent-ios-1, role: ios-developer}
+    - {id: agent-dev-1, role: developer}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - {id: T-F501, title: "Fix login screen layout", status: in_progress,
+       status_since: "2026-03-02T08:00:00+00:00", role: ios-developer, owner_id: agent-ios-1,
+       source: hermes}
+    - {id: T-F502, title: "Add checkout form validation", status: in_progress,
+       status_since: "2026-03-02T08:00:00+00:00", role: developer, owner_id: agent-dev-1,
+       source: hermes}
+    - {id: T-F503, title: "Review checkout form validation", status: in_progress,
+       status_since: "2026-03-02T08:00:00+00:00", role: reviewer, owner_id: reviewer-1,
+       source: hermes}
+  sessions:
+    - {id: S-F501, task_id: T-F501, owner_id: agent-ios-1, started_at: "2026-03-02T08:00:00+00:00"}
+    - {id: S-F502, task_id: T-F502, owner_id: agent-dev-1, started_at: "2026-03-02T08:00:00+00:00"}
+    - {id: S-F503, task_id: T-F503, owner_id: reviewer-1, started_at: "2026-03-02T08:00:00+00:00"}
+  spans:
+    # Hook spans (Hermes spool): redacted command and the result's length in characters.
+    - {trace_id: TR-F501, span_id: XB-D1, name: "execute_tool terminal", kind: tool,
+       tool: terminal, start: "2026-03-02T09:00:00+00:00", end: "2026-03-02T09:06:00+00:00",
+       task_id: T-F501, session_id: S-F501,
+       attributes: {command: "xcodebuild -scheme App test", kelpie.tool.output_chars: 180000},
+       repeat: {count: 6, every: "1h"}}
+    - {trace_id: TR-F501, span_id: XB-D2, name: "execute_tool terminal", kind: tool,
+       tool: terminal, start: "2026-03-03T09:00:00+00:00", end: "2026-03-03T09:06:00+00:00",
+       task_id: T-F501, session_id: S-F501,
+       attributes: {command: "xcodebuild -scheme App test", kelpie.tool.output_chars: 176000},
+       repeat: {count: 6, every: "1h"}}
+    # OTLP spans: the prefix and size computed at ingest.
+    - {trace_id: TR-F502, span_id: NPM, name: "execute_tool shell", kind: tool, tool: shell,
+       start: "2026-03-02T10:00:00+00:00", end: "2026-03-02T10:01:00+00:00",
+       task_id: T-F502, session_id: S-F502,
+       attributes: {kelpie.tool.command_prefix: "npm test", kelpie.tool.output_chars: 32000},
+       repeat: {count: 5, every: "2h"}}
+    - {trace_id: TR-F502, span_id: GD-BEFORE, name: "execute_tool shell", kind: tool,
+       tool: shell, start: "2026-03-03T08:00:00+00:00", end: "2026-03-03T08:00:01+00:00",
+       task_id: T-F502, session_id: S-F502,
+       attributes: {kelpie.tool.command_prefix: "git diff", kelpie.tool.output_chars: 36000},
+       repeat: {count: 6, every: "30m"}}
+    - {trace_id: TR-F502, span_id: GD-AFTER, name: "execute_tool shell", kind: tool,
+       tool: shell, start: "2026-03-03T12:00:00+00:00", end: "2026-03-03T12:00:01+00:00",
+       task_id: T-F502, session_id: S-F502,
+       attributes: {kelpie.tool.command_prefix: "git diff", kelpie.tool.filter: rtk,
+                    kelpie.tool.output_chars: 6000},
+       repeat: {count: 6, every: "30m"}}
+    # Distractors: frequent but small.
+    - {trace_id: TR-F502, span_id: GS, name: "execute_tool shell", kind: tool, tool: shell,
+       start: "2026-03-02T09:00:00+00:00", end: "2026-03-02T09:00:01+00:00",
+       task_id: T-F502, session_id: S-F502,
+       attributes: {kelpie.tool.command_prefix: "git status", kelpie.tool.output_chars: 1200},
+       repeat: {count: 20, every: "30m"}}
+    - {trace_id: TR-F503, span_id: RD, name: "execute_tool read_file", kind: tool,
+       tool: read_file, start: "2026-03-03T09:00:00+00:00", end: "2026-03-03T09:00:01+00:00",
+       task_id: T-F503, session_id: S-F503,
+       attributes: {kelpie.tool.output_chars: 8000}, repeat: {count: 10, every: "20m"}}
+    # No size recorded: not counted.
+    - {trace_id: TR-F503, span_id: UNK, name: "execute_tool shell", kind: tool, tool: shell,
+       start: "2026-03-03T09:00:00+00:00", end: "2026-03-03T09:00:01+00:00",
+       task_id: T-F503, session_id: S-F503, attributes: {kelpie.tool.command_prefix: "make"}}
+expected:
+  top: {role: ios-developer, key: xcodebuild}
+  recommendations:
+    - {role: ios-developer, key: xcodebuild, filter: xcbeautify, repeated: true,
+       owner: human-owner}
+    - {role: developer, key: "npm test", filter: rtk, repeated: false}
+  before_after:
+    - {role: developer, key: "git diff", filter: rtk, change_below: -0.7, small_sample: false}
+not_expected:
+  recommendations:
+    - {role: developer, key: "git status"}
+    - {role: developer, key: "git diff"}  # switched to rtk: verified, not recommended again
+    - {role: reviewer, key: "tool:read_file"}
+    - {key: make}

@@ -118,6 +118,7 @@ from kelpie.core.model import (
 )
 from kelpie.core.ports import PlatformEvent
 from kelpie.traces.hooks import SESSION_END, TOOL, HookEvent, spans_from_hook_events
+from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE
 
 log = logging.getLogger(__name__)
 
@@ -745,6 +746,9 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
         attributes: dict[str, Any] = {}
         if isinstance(rec.get("command"), str):
             attributes["command"] = rec["command"]
+        chars = rec.get("output_chars")
+        if isinstance(chars, int) and not isinstance(chars, bool) and chars >= 0:
+            attributes[OUTPUT_CHARS_ATTRIBUTE] = chars
         return HookEvent(
             kind=rec["type"],
             at=at,

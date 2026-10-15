@@ -171,8 +171,11 @@ def test_tool_span_hashes_arguments_and_never_keeps_them() -> None:
     assert s.kind is SpanKind.TOOL and s.tool == "shell"
     assert s.args_hash == args_hash(args) == plugin.args_hash(args)
     assert s.attributes["gen_ai.tool.call.id"] == "call-1"
+    # Only the grouping prefix and the size of the result survive (huge tool outputs).
+    assert s.attributes["kelpie.tool.command_prefix"] == "pytest"
+    assert s.attributes["kelpie.tool.output_chars"] == len("3 passed")
     flat = repr(s)
-    assert "pytest" not in flat and "/work" not in flat and "passed" not in flat
+    assert "-q" not in flat and "/work" not in flat and "passed" not in flat
 
 
 def test_structured_and_non_json_arguments() -> None:
@@ -272,7 +275,8 @@ def test_claude_code_content_is_dropped() -> None:
         "duration_ms": 12,
     }
     s = one(attrs, name="claude_code.tool")
-    assert set(s.attributes) == {"duration_ms", "service.name"}
+    assert set(s.attributes) == {"duration_ms", "service.name", "kelpie.tool.command_prefix"}
+    assert s.attributes["kelpie.tool.command_prefix"] == "cat"
     assert "secret" not in repr(s) and "someone" not in repr(s)
     assert s.args_hash == args_hash({"command": "cat secret.txt"})  # tool_parameters wins
 
@@ -376,4 +380,5 @@ def test_claude_code_spans() -> None:
     assert tool.kind is SpanKind.TOOL and tool.tool == "Bash" and tool.outcome == "error"
     assert tool.args_hash == args_hash({"full_command": "make test"})
     assert tool.attributes["gen_ai.tool.call.id"] == "toolu_1"
-    assert "make test" not in repr(tool) and "secret" not in repr(result)
+    assert tool.attributes["kelpie.tool.command_prefix"] == "make test"
+    assert "secret" not in repr(result)
