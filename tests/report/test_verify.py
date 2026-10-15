@@ -353,6 +353,8 @@ def test_new_regressions_are_flagged_and_notes_escaped() -> None:
     markdown = render_markdown(build_report(inputs(fixes=(event,), states=states)))
     assert "new, worse" in markdown
     assert "\n# injected" not in markdown and "line one # injected \\| heading" in markdown
+    keep = FixEvent(FIX, MANUAL, "-50% CI minutes")
+    assert ": -50% CI minutes" in render_markdown(build_report(inputs(fixes=(keep,))))
     assert "all causes; ci_economy has none" in markdown
 
 

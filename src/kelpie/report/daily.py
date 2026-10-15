@@ -751,7 +751,7 @@ def _verification_lines(report: DailyReport) -> list[str]:
 def _inline(text: str) -> str:
     """Free text (a fix note) as one Markdown-safe line."""
     flat = " ".join(text.split())
-    return flat.replace("|", "\\|").lstrip("#>-*+ ") or "(no note)"
+    return flat.replace("|", "\\|") or "(no note)"  # after "**time, kind**:", never a block
 
 
 def _value(value: float | None, unit: str) -> str:

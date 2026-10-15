@@ -60,18 +60,20 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
     database cannot be read (a missing database is an empty one)."""
     tz = sources.report.tz
     start, end = day_bounds(day, tz)
+    day_before, _ = day_bounds(day - timedelta(days=1), tz)  # 23 or 25h around DST
     # Earlier days: repeated output offenders, and the before-window of yesterday's fixes.
-    history = start - max(
-        timedelta(days=max(sources.outputs.repeat_days - 1, 0)),
-        timedelta(days=1) + sources.report.verify_window,
-    )
+    # An hour of slack: a calendar day around a DST change is 23 or 25 hours.
+    history = min(
+        start - timedelta(days=max(sources.outputs.repeat_days - 1, 0)),
+        day_before - sources.report.verify_window,
+    ) - timedelta(hours=1)
     actions, states, spans, fixes, attribution = [], [], [], [], None
     if sources.db_path is not None and sources.db_path.exists():
         with ReportStore(sources.db_path) as store:
             actions = store.actions(history, end)
             states = store.states(history, end)
             spans = store.spans(history, end)
-            fixes = store.fixes(start - timedelta(days=1), end)
+            fixes = store.fixes(day_before, end)
             attribution = store.attribution()
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same
     # call reported both ways is kept once.

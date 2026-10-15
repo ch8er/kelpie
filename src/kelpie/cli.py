@@ -102,7 +102,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if settings.db_path is not None and settings.source is not None:
         from kelpie.report.fixes import record_config_change
 
-        # A config that started: the daily report verifies its effect (never raises).
+        # The app is built from this config: the daily report verifies its effect (never
+        # raises).
         record_config_change(settings.db_path, settings.source, datetime.now(UTC))
 
     from kelpie.server import serve as run
