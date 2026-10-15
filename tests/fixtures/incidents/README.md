@@ -98,6 +98,7 @@ Fixture conventions:
 | 7 | `07-shared-file-conflicts.yaml` | `return_causes` | `alert` recommendation with `hot_files` (conflicts dominate returns); `comment` on in-progress tasks T-705, T-706 touching them; none for T-707 |
 | 8 | `08-block-outlived-cause.yaml` | `stale_blocks` | `unblock` T-801, reason mentions the 3h delay; T-802 (PR not merged) stays blocked |
 | 9 | `09-sequential-chain-idle.yaml` | `bottlenecks` | `alert` suggesting parallelization, idle agents and `critical_path_length`; nothing for reviewer work T-906, no `escalate` |
+| 10 | `10-review-queue-bottleneck.yaml` | `bottlenecks` | `alert` for the overloaded reviewer role (4 queued reviews) with the idle developers that its own queue cannot absorb; nothing for the developer role or the review T-1001 already being worked on |
 | 10 | `10-reviewer-polls-ci.yaml` | `wait_condition` | `comment` T-1001 (register a condition and exit); no `requeue` |
 | 10 | `10-condition-satisfied-wake.yaml` | `wait_condition` | `wake` T-1011 (all conditions hold, freshly checked); `alert` T-1013 (overdue) and T-1014 (waiting on nothing); nothing for a pending condition, stale evidence, or a blocked task |
 | 10 | `10-productive-long-session.yaml` | `wait_condition` | `comment` only on the session polling a known CI check; nothing for a busy edit/test session |
