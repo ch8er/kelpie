@@ -1,0 +1,60 @@
+id: "field-03-budget-overrun"
+incident: null
+title: "API-key agents cross the soft and the hard spend threshold"
+description: >
+  Field evidence (synthetic reconstruction). Agents on pay-per-token API keys can burn a
+  day's budget in hours when a loop or a huge context goes unnoticed; nobody looks at the
+  billing page until the invoice. Every agent has the same daily budget of $50 with a soft
+  threshold of $40. One agent has passed the soft threshold: a warning alert, nothing else.
+  Another has passed the hard threshold: its live session is stopped and a critical alert
+  carries the spend; its older, already ended session is not stopped. An agent well under
+  budget is left alone. The budget statuses are computed by the core (kelpie.core.budgets)
+  and the rule only reads them.
+rule: loop_breaker
+config: {}
+snapshot:
+  now: "2026-03-04T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-4, role: developer}
+    - {id: agent-dev-5, role: developer}
+    - {id: agent-dev-6, role: developer}
+  tasks:
+    - {id: T-F301, title: "Port report exporter", status: done, status_since: "2026-03-04T09:00:00+00:00", role: developer, owner_id: agent-dev-5}
+    - {id: T-F302, title: "Rewrite importer", status: in_progress, status_since: "2026-03-04T09:05:00+00:00", role: developer, owner_id: agent-dev-5}
+    - {id: T-F304, title: "Refactor query layer", status: in_progress, status_since: "2026-03-04T11:00:00+00:00", role: developer, owner_id: agent-dev-4}
+    - {id: T-F306, title: "Fix flaky test", status: in_progress, status_since: "2026-03-04T14:00:00+00:00", role: developer, owner_id: agent-dev-6}
+  sessions:
+    # Ended earlier today; it spent within the window but there is nothing left to stop.
+    - {id: S-F301, task_id: T-F301, owner_id: agent-dev-5, started_at: "2026-03-04T06:00:00+00:00", ended_at: "2026-03-04T09:00:00+00:00", final_status: done}
+    - {id: S-F302, task_id: T-F302, owner_id: agent-dev-5, started_at: "2026-03-04T09:05:00+00:00", last_heartbeat: "2026-03-04T14:59:30+00:00"}
+    - {id: S-F304, task_id: T-F304, owner_id: agent-dev-4, started_at: "2026-03-04T11:00:00+00:00", last_heartbeat: "2026-03-04T14:59:00+00:00"}
+    - {id: S-F306, task_id: T-F306, owner_id: agent-dev-6, started_at: "2026-03-04T14:00:00+00:00", last_heartbeat: "2026-03-04T14:58:00+00:00"}
+  budgets:
+    # Soft threshold passed ($41.20 of $40); about 1.5 h to the hard threshold.
+    - {budget: agent-daily, scope: agent, subject: agent-dev-4, unit: usd, spent: 41.2, state: soft, soft: 40.0, hard: 50.0, remaining: 8.8, burn_rate: 6.0, runs_out_at: "2026-03-04T16:28:00+00:00", window: "24h", session_ids: [S-F304]}
+    # Hard threshold passed: stop what is still running.
+    - {budget: agent-daily, scope: agent, subject: agent-dev-5, unit: usd, spent: 52.8, state: hard, soft: 40.0, hard: 50.0, remaining: 0.0, burn_rate: 9.5, runs_out_at: "2026-03-04T15:00:00+00:00", window: "24h", session_ids: [S-F301, S-F302]}
+    # Distractor: well under budget, nothing running out soon.
+    - {budget: agent-daily, scope: agent, subject: agent-dev-6, unit: usd, spent: 12.0, state: ok, soft: 40.0, hard: 50.0, remaining: 38.0, burn_rate: 1.0, runs_out_at: "2026-03-05T05:00:00+00:00", window: "24h", session_ids: [S-F306]}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "soft threshold"
+    params: {budget: agent-daily, subject: agent-dev-4, owner_id: agent-dev-4, spent: 41.2}
+  - kind: alert
+    severity: critical
+    reason_contains: "hard threshold"
+    params: {budget: agent-daily, subject: agent-dev-5, owner_id: agent-dev-5, spent: 52.8, hard: 50.0, unit: usd, session_ids: [S-F302]}
+  - kind: stop
+    task_id: T-F302
+    reason_contains: "hard limit"
+    params: {session_id: S-F302, trigger: budget}
+not_expected_actions:
+  - kind: stop
+    task_id: T-F301
+  - kind: stop
+    task_id: T-F304
+  - kind: stop
+    task_id: T-F306
+  - kind: alert
+    params: {subject: agent-dev-6}

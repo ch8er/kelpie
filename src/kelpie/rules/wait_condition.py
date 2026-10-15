@@ -29,7 +29,14 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._calls import CallKey, call_key, command, error_streak, tool_calls
+from kelpie.rules._calls import (
+    CallKey,
+    call_key,
+    error_streak,
+    parse_poll_patterns,
+    poll_kind,
+    tool_calls,
+)
 from kelpie.rules._tasks import (
     DEFAULT_MAX_CONDITION_AGE,
     DEFAULT_STALE_AFTER,
@@ -185,11 +192,7 @@ class WaitCondition:
         return None
 
     def _kind_for(self, span: Span) -> str | None:
-        text = command(span) or span.args_hash or ""
-        return next(
-            (k for k, pats in self.poll_patterns.items() if any(p in text for p in pats)),
-            None,
-        )
+        return poll_kind(self.poll_patterns, span)
 
 
 def _hours(d: timedelta) -> str:
@@ -233,13 +236,7 @@ def build(config: dict[str, Any]) -> WaitCondition:
         if key in config:
             kwargs[key] = _positive_int(config.pop(key), key)
     if "poll_patterns" in config:
-        raw = config.pop("poll_patterns")
-        if not isinstance(raw, Mapping) or not all(
-            isinstance(v, list | tuple) and all(isinstance(p, str) and p for p in v)
-            for v in raw.values()
-        ):
-            raise ValueError("poll_patterns must map condition kinds to lists of strings")
-        kwargs["poll_patterns"] = {str(k): tuple(v) for k, v in raw.items()}
+        kwargs["poll_patterns"] = parse_poll_patterns(config.pop("poll_patterns"))
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return WaitCondition(**kwargs)

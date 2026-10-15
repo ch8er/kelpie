@@ -1,0 +1,44 @@
+id: "06-subscription-limit-forecast"
+incident: 6
+title: "Subscription agent is on course to hit the provider's usage limit"
+description: >
+  Companion to the LLM-quota incident for agents on a subscription, where there is no bill
+  but there are limits: a run that hits the rolling limit is refused until it resets and the
+  task sits idle. Kelpie prices the tokens from traces (an estimate, not a bill) and
+  forecasts the next limit from the limits hit so far. One agent's estimated spend and its
+  forecast limit are both within the next hours: an info alert saying so, before anything is
+  refused. A second agent on the same subscription burns slowly and has no limit in sight.
+rule: loop_breaker
+config:
+  forecast_horizon: "3h"
+snapshot:
+  now: "2026-03-05T10:00:00+00:00"
+  owners:
+    - {id: agent-dev-7, role: developer}
+    - {id: agent-dev-8, role: developer}
+  tasks:
+    - {id: T-0601, title: "Generate API client", status: in_progress, status_since: "2026-03-05T08:00:00+00:00", role: developer, owner_id: agent-dev-7}
+    - {id: T-0602, title: "Update changelog", status: in_progress, status_since: "2026-03-05T09:00:00+00:00", role: developer, owner_id: agent-dev-8}
+  sessions:
+    - {id: S-0601, task_id: T-0601, owner_id: agent-dev-7, started_at: "2026-03-05T08:00:00+00:00", last_heartbeat: "2026-03-05T09:59:30+00:00"}
+    - {id: S-0602, task_id: T-0602, owner_id: agent-dev-8, started_at: "2026-03-05T09:00:00+00:00", last_heartbeat: "2026-03-05T09:58:00+00:00"}
+  budgets:
+    - {budget: subscription-weekly, scope: agent, subject: agent-dev-7, unit: tokens, spent: 3000000, state: ok, soft: 8000000, hard: 10000000, remaining: 7000000, burn_rate: 2400000, runs_out_at: "2026-03-05T12:55:00+00:00", next_limit_at: "2026-03-05T11:20:00+00:00", window: "168h", estimated: true, session_ids: [S-0601]}
+    # Distractor: slow burn, the next limit is days away.
+    - {budget: subscription-weekly, scope: agent, subject: agent-dev-8, unit: tokens, spent: 900000, state: ok, soft: 8000000, hard: 10000000, remaining: 9100000, burn_rate: 150000, runs_out_at: "2026-03-10T10:00:00+00:00", next_limit_at: "2026-03-09T18:00:00+00:00", window: "168h", estimated: true, session_ids: [S-0602]}
+  limit_hits:
+    - {limit: "5h-window", at: "2026-03-04T21:10:00+00:00", resets_at: "2026-03-05T02:10:00+00:00"}
+    - {limit: "5h-window", at: "2026-03-05T05:30:00+00:00", resets_at: "2026-03-05T10:30:00+00:00"}
+expected_actions:
+  - kind: alert
+    severity: info
+    reason_contains: "estimate"
+    params: {budget: subscription-weekly, subject: agent-dev-7, estimated: true, next_limit_at: "2026-03-05T11:20:00+00:00"}
+  - kind: alert
+    severity: info
+    reason_contains: "runs out"
+    params: {subject: agent-dev-7, runs_out_at: "2026-03-05T12:55:00+00:00"}
+not_expected_actions:
+  - kind: alert
+    params: {subject: agent-dev-8}
+  - kind: stop

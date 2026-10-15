@@ -30,6 +30,23 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #                           # at least this long (Kelpie warns at startup otherwise)
 # min_tokens_without_progress = 100000  # alert at this many tokens and no progress
 # claim_grace = "2m"        # a status change this soon after the session start is the claim
+#
+# [engine.rules.loop_breaker]
+# mode = "suggest"          # stop needs a platform adapter that can stop a run; until then
+#                           # use observe or suggest
+# identical_calls = 8       # identical consecutive tool calls (same tool + arguments)...
+# identical_window = "10m"  # ...with the last ones this close together
+# consecutive_errors = 5    # failed tool calls in a row
+# forecast_horizon = "2h"   # info alert when a budget (or a subscription limit) is this near
+# poll_grace = "15m"        # polling that matches poll_patterns: rule 2 coaches first; stop
+#                           # only this long after its comment, or at poll_hard_limit calls
+# poll_hard_limit = 30
+# [engine.rules.loop_breaker.poll_patterns]   # keep equal to [engine.rules.wait_condition]
+# ci_status = ["gh pr checks"]
+# [engine.rules.loop_breaker.agents.agent-ops-1]   # per agent (owner id) ...
+# identical_calls = 20
+# [engine.rules.loop_breaker.roles.maintenance]    # ... or per role; agent wins
+# consecutive_errors = 8
 
 # Rule 7: disk, memory, CPU, load and process thresholds per host, and a limit on heavy
 # tasks while a host is overloaded. Utilization is used / limit (load: per core). Each

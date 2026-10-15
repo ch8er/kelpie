@@ -98,6 +98,7 @@ Fixture conventions:
 | 4 | `04-host-overload-heavy-queue.yaml` | `resources` | `alert` warning, `{host: host-a, max_heavy: 1}`; none for healthy host-b or light T-406 |
 | 5 | `05-ci-minutes-exhausted.yaml` | `ci_economy` | `alert` critical (CI quota exhausted), `blocked_tasks` listed; no host alert for the healthy disk |
 | 6 | `06-llm-quota-and-expired-auth.yaml` | `resources` | `alert` warning (rate limits), `alert` critical (expired auth); none for valid or non-expiring credentials |
+| 6 | `06-subscription-limit-forecast.yaml` | `loop_breaker` | `info` alerts saying "estimate": the next provider limit (`next_limit_at`) and the budget running out within the horizon, for the subscription agent on course to hit its limit; nothing for the slow-burning agent, no `stop` |
 | 7 | `07-shared-file-conflicts.yaml` | `return_causes` | `alert` recommendation with `hot_files` (conflicts dominate returns); `comment` on in-progress tasks T-705, T-706 touching them; none for T-707 |
 | 8 | `08-block-outlived-cause.yaml` | `stale_blocks` | `unblock` T-801, reason mentions the 3h delay; T-802 (PR not merged) stays blocked |
 | 9 | `09-sequential-chain-idle.yaml` | `bottlenecks` | `alert` suggesting parallelization, idle agents and `critical_path_length`; nothing for reviewer work T-906, no `escalate` |
@@ -113,8 +114,9 @@ Fixture conventions:
 | – | `14-checkpoint-commit-reminder.yaml` | `checkpoints` | `comment` T-1401 (no commit for 50 minutes) and T-1402 (25 changed files, over 20); nothing for a session that committed 10 minutes ago or a clean worktree |
 | – | `15-checkpoint-wip-commit-on-exit.yaml` | `checkpoints` | `wip_commit` with `[skip ci]` for T-1501 (session ended dirty) and T-1502 (session went silent), resume `comment` T-1501; nothing for a clean exit, a task that is already done, or an old dirty session while a new one is live |
 | – | `16-checkpoint-resume-from-commit.yaml` | `checkpoints` | `comment` T-1601 (resume from commit a1b2c3d on task/T-1601); nothing when the previous session committed nothing or the task was never worked on |
-| – | `field-01-heartbeat-runaway.yaml` | `loop_breaker` | `stop` + critical `alert` for the heartbeat loop (about 900 identical calls, about 80k input tokens each) and for the agent with 5 consecutive tool errors (`stop` carries `session_id`); nothing for the healthy agent or for the CI-polling reviewer, which is left to rule 2 |
+| – | `field-01-heartbeat-runaway.yaml` | `loop_breaker` | `stop` + critical `alert` for the heartbeat loop (about 900 identical calls, about 80k input tokens each) and for the agent with 5 consecutive tool errors (`stop` carries `session_id`); nothing for the healthy agent or for the CI-polling reviewer, which is left to rule 2 within the grace period |
 | – | `field-02-idle-context-resend.yaml` | `no_progress` | `alert` with `recommendations: [longer_heartbeat_interval, cheaper_maintenance_model, bounded_session_handoff]` for the idle agent resending a 12k-token context every 5 min; nothing for the productive session |
+| – | `field-03-budget-overrun.yaml` | `loop_breaker` | `alert` warning for the agent past the soft threshold; `alert` critical (spend, hard limit) and `stop` for the live session of the agent past the hard threshold; nothing for its ended session, or for the agent under budget |
 
 ## Adding a fixture
 
