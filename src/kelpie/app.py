@@ -31,6 +31,7 @@ from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
+from kelpie.rules.no_progress import NoProgress
 from kelpie.traces.config import TraceSettings, load_traces
 from kelpie.traces.forward import Forwarder
 from kelpie.traces.hooks import merge_hook_spans
@@ -385,9 +386,21 @@ class App:
             self.retention.join(5.0)
 
 
+def trace_window_warnings(rules: Sequence[Rule], traces: TraceSettings) -> list[str]:
+    """Rules that look further back than the spans each tick sees would undercount."""
+    if not traces.enabled:
+        return []
+    return [
+        f"rule 'no_progress' window ({rule.window}) is longer than [traces] window "
+        f"({traces.window}): it sees only the newest spans and undercounts tokens"
+        for rule in rules
+        if isinstance(rule, NoProgress) and rule.window > traces.window
+    ]
+
+
 def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> App:
     loaded = load_rules(settings.engine)
-    for warning in loaded.warnings:
+    for warning in [*loaded.warnings, *trace_window_warnings(loaded.rules, settings.traces)]:
         log.warning(warning)
     try:
         store: LedgerStore = (

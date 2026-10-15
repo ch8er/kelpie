@@ -1,22 +1,32 @@
-"""Token accounting over spans, shared by rules 10 (loop_breaker) and 11 (no_progress)."""
+"""Token accounting over spans (used by rule 11, no_progress)."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from kelpie.core.model import Span, SpanKind
 
+SpanIndex = Mapping[tuple[str, str], Span]
 
-def outermost_llm_spans(spans: Sequence[Span]) -> list[Span]:
-    """LLM spans that have no LLM ancestor among ``spans`` (same trace, via ``parent_id``).
+
+def span_index(spans: Sequence[Span]) -> SpanIndex:
+    """Spans by (trace id, span id): build it once per snapshot and share it."""
+    return {(s.trace_id, s.span_id): s for s in spans}
+
+
+def outermost_llm_spans(spans: Sequence[Span], index: SpanIndex | None = None) -> list[Span]:
+    """LLM spans of ``spans`` that have no LLM ancestor in the same trace.
 
     An instrumented client can wrap another one (a framework call around a provider call),
     and both spans then report the same tokens. Counting only the outermost span of each
-    chain keeps a wrapped call from being counted twice. A chain that cannot be followed to
-    the end (the parent is not among ``spans``) is judged by the ancestors that are visible.
+    chain keeps a wrapped call from being counted twice. Ancestry is followed through
+    ``parent_id`` over ``index`` (default: ``spans`` themselves), so pass the index of all
+    snapshot spans: a span of another session or without one may sit between two LLM spans.
+    A chain that cannot be followed to the end (a parent missing from the index) is judged
+    by the ancestors that are visible.
     """
-    by_id = {(s.trace_id, s.span_id): s for s in spans}
+    by_id = span_index(spans) if index is None else index
 
     def has_llm_ancestor(span: Span) -> bool:
         seen = {span.span_id}
@@ -34,12 +44,14 @@ def outermost_llm_spans(spans: Sequence[Span]) -> list[Span]:
     return [s for s in spans if s.kind is SpanKind.LLM and not has_llm_ancestor(s)]
 
 
-def tokens_since(spans: Sequence[Span], since: datetime) -> int:
+def tokens_since(spans: Sequence[Span], since: datetime, index: SpanIndex | None = None) -> int:
     """Input plus output tokens of the outermost LLM spans that started at or after ``since``.
 
-    Ancestry is judged over all of ``spans``, so a span whose wrapper started before
-    ``since`` is not counted either way. ``input_tokens`` already includes cached tokens.
+    A span whose wrapper started before ``since`` is not counted either way.
+    ``input_tokens`` already includes cached tokens.
     """
     return sum(
-        s.input_tokens + s.output_tokens for s in outermost_llm_spans(spans) if s.start >= since
+        s.input_tokens + s.output_tokens
+        for s in outermost_llm_spans(spans, index)
+        if s.start >= since
     )

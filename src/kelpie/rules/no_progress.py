@@ -3,20 +3,21 @@
 Idle agents keep spending tokens without moving any task: a session with nothing to do wakes
 up every few minutes and resends its whole context to the model. Watchdogs that look for
 dead agents never see it, because the agent is alive and busy. This rule compares, per
-session and over a sliding ``window`` (default 1h), the tokens spent with the progress the
+session and over a sliding ``window`` (default 30m), the tokens spent with the progress the
 session made:
 
 - **tokens**: input plus output tokens of the session's LLM spans that started in the window.
   Nested LLM spans are counted once (``kelpie.rules._tokens``). Only raw spans carry
   timestamps, so the rule reads ``snapshot.spans`` and not the coarser ``span_totals``;
   ``[traces] window`` (30m by default) must therefore be at least this rule's ``window``,
-  otherwise the tokens are undercounted;
-- **progress**: a task status change after the session started (``task.status_since``), a
-  commit (``Session.last_commit_at``) or an artifact (``Session.artifacts``), inside the
-  window. Claiming the task is not progress: the status change that starts a session
-  happens at or before ``started_at``.
+  otherwise the tokens are undercounted (Kelpie warns at startup);
+- **progress**: a task status change after the session started (``task.status_since`` later
+  than ``started_at`` plus ``claim_grace``, default 2m), a commit (``Session.last_commit_at``)
+  or an artifact (``Session.artifacts``), inside the window. Claiming the task is not
+  progress: the status change that starts a session happens at, or just around,
+  ``started_at``.
 
-Tokens of at least ``min_tokens_without_progress`` (default 50k) with no progress → one
+Tokens of at least ``min_tokens_without_progress`` (default 100k) with no progress → one
 ``alert`` with the tokens burned and recommendations. Stopping a runaway loop is rule 10's
 job; this rule only warns. Sessions that ended before the window began are ignored.
 
@@ -41,7 +42,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Session, Snapshot
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tokens import tokens_since
+from kelpie.rules._tokens import span_index, tokens_since
 
 NAME = "no_progress"
 
@@ -54,20 +55,22 @@ RECOMMENDATIONS = (
 
 @dataclass(frozen=True, slots=True)
 class NoProgress:
-    window: timedelta = timedelta(hours=1)
-    min_tokens_without_progress: int = 50_000
+    window: timedelta = timedelta(minutes=30)  # the default [traces] window
+    min_tokens_without_progress: int = 100_000
+    claim_grace: timedelta = timedelta(minutes=2)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         window_start = snapshot.now - self.window
+        index = span_index(snapshot.spans)
         actions: list[Action] = []
         for session in snapshot.sessions:
             if session.ended_at is not None and session.ended_at < window_start:
                 continue
-            tokens = tokens_since(snapshot.spans_for_session(session.id), window_start)
+            tokens = tokens_since(snapshot.spans_for_session(session.id), window_start, index)
             if tokens < self.min_tokens_without_progress:
                 continue
-            last = _last_progress(session, snapshot)
+            last = self._last_progress(session, snapshot)
             if last is None or last < window_start:
                 stalled_since = max(last or session.started_at, session.started_at)
                 actions.append(self._alert(session, tokens, stalled_since))
@@ -94,17 +97,16 @@ class NoProgress:
             since=stalled_since,
         )
 
-
-def _last_progress(session: Session, snapshot: Snapshot) -> datetime | None:
-    """The latest sign of progress of the session, at any time; None if it made none."""
-    signals: list[datetime] = []
-    task = snapshot.task(session.task_id)
-    if task is not None and task.status_since > session.started_at:
-        signals.append(task.status_since)
-    if session.last_commit_at is not None:
-        signals.append(session.last_commit_at)
-    signals.extend(a.at for a in session.artifacts)
-    return max(signals, default=None)
+    def _last_progress(self, session: Session, snapshot: Snapshot) -> datetime | None:
+        """The latest sign of progress of the session, at any time; None if it made none."""
+        signals: list[datetime] = []
+        task = snapshot.task(session.task_id)
+        if task is not None and task.status_since > session.started_at + self.claim_grace:
+            signals.append(task.status_since)
+        if session.last_commit_at is not None:
+            signals.append(session.last_commit_at)
+        signals.extend(a.at for a in session.artifacts)
+        return max(signals, default=None)
 
 
 def _fmt(d: timedelta) -> str:
@@ -115,13 +117,13 @@ def _fmt(d: timedelta) -> str:
     return "".join(f"{n}{u}" for n, u in ((hours, "h"), (minutes, "m"), (secs, "s")) if n) or "0s"
 
 
-def _positive_duration(value: Any, name: str) -> timedelta:
+def _duration(value: Any, name: str, allow_zero: bool = False) -> timedelta:
     try:
         result = parse_duration(value)
     except (AttributeError, TypeError) as exc:
         raise ValueError(f"{name}: invalid duration {value!r}") from exc
-    if result <= timedelta(0):
-        raise ValueError(f"{name} must be positive")
+    if result < timedelta(0) or (result == timedelta(0) and not allow_zero):
+        raise ValueError(f"{name} must be {'non-negative' if allow_zero else 'positive'}")
     return result
 
 
@@ -130,7 +132,9 @@ def build(config: dict[str, Any]) -> NoProgress:
     config = dict(config)
     kwargs: dict[str, Any] = {}
     if "window" in config:
-        kwargs["window"] = _positive_duration(config.pop("window"), "window")
+        kwargs["window"] = _duration(config.pop("window"), "window")
+    if "claim_grace" in config:
+        kwargs["claim_grace"] = _duration(config.pop("claim_grace"), "claim_grace", True)
     if "min_tokens_without_progress" in config:
         n = config.pop("min_tokens_without_progress")
         if not isinstance(n, int) or isinstance(n, bool) or n < 1:

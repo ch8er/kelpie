@@ -2,16 +2,22 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from kelpie.app import trace_window_warnings
 from kelpie.core.actions import ActionKind, Severity
+from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.engine import Engine
+from kelpie.core.ledger import Outcome, Suppression
 from kelpie.core.model import Artifact, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.rules import REGISTRY
 from kelpie.rules._tokens import outermost_llm_spans, tokens_since
 from kelpie.rules.no_progress import NoProgress, _fmt, build
+from kelpie.traces.config import TraceSettings
+from tests.fakes import FakeAdapter, FakeAlerter
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 M = timedelta(minutes=1)
 START = NOW - 180 * M  # session start, before every window used below
-RULE = NoProgress(window=60 * M, min_tokens_without_progress=1000)
+RULE = NoProgress(window=60 * M, min_tokens_without_progress=1000, claim_grace=2 * M)
 
 
 def llm(
@@ -20,7 +26,7 @@ def llm(
     tokens_in: int = 900,
     tokens_out: int = 100,
     parent: str | None = None,
-    session: str = "S-1",
+    session: str | None = "S-1",
     trace: str = "TR-1",
     kind: SpanKind = SpanKind.LLM,
 ) -> Span:
@@ -125,6 +131,22 @@ def test_parent_in_another_trace_is_not_an_ancestor() -> None:
     assert len(outermost_llm_spans([outer, other])) == 2
 
 
+def test_untagged_span_between_two_llm_spans_does_not_break_the_chain() -> None:
+    outer = llm("OUT", NOW - 10 * M, 600, 100)
+    middle = llm("MID", NOW - 10 * M, 0, 0, parent="OUT", session=None, kind=SpanKind.TOOL)
+    inner = llm("IN", NOW - 10 * M, 600, 100, parent="MID")
+    assert run(outer, middle, inner) == []  # 700 tokens, not 1400
+
+
+def test_trace_shared_by_two_sessions_counts_each_chain_once() -> None:
+    outer = llm("OUT", NOW - 10 * M, 600, 100, session="S-other")
+    inner = llm("IN", NOW - 10 * M, 600, 100, parent="OUT", session="S-1")
+    assert run(outer, inner) == []  # the wrapper's tokens belong to S-other
+    own = llm("B", NOW - M, 900, 100, session="S-1", trace="TR-2")
+    [a] = run(outer, inner, own)
+    assert a.params["tokens"] == 1000  # only its own, unrelated call
+
+
 def test_wrapper_before_the_window_hides_its_child_without_being_counted() -> None:
     outer = llm("OUT", NOW - 90 * M)
     inner = llm("IN", NOW - 10 * M, parent="OUT")
@@ -138,12 +160,22 @@ def test_status_change_during_the_session_is_progress() -> None:
     assert len(run(*spans, status_since=NOW - 60 * M - timedelta(seconds=1))) == 1
 
 
-def test_status_change_at_or_before_session_start_is_not_progress() -> None:
+def test_claiming_the_task_is_not_progress() -> None:
+    session = Session("S-1", "T-1", "a-1", NOW - 30 * M)  # claim_grace is 2m
+    spans = (llm("A", NOW - 10 * M),)
+    assert len(run(*spans, session=session, status_since=NOW - 45 * M)) == 1  # before the start
+    assert len(run(*spans, session=session, status_since=NOW - 30 * M)) == 1  # at the start
+    assert len(run(*spans, session=session, status_since=NOW - 28 * M)) == 1  # end of the grace
+    assert run(*spans, session=session, status_since=NOW - 28 * M + timedelta(seconds=1)) == []
+
+
+def test_claim_grace_is_configurable() -> None:
     session = Session("S-1", "T-1", "a-1", NOW - 30 * M)
     spans = (llm("A", NOW - 10 * M),)
-    assert len(run(*spans, session=session, status_since=NOW - 30 * M)) == 1
-    assert len(run(*spans, session=session, status_since=NOW - 45 * M)) == 1
-    assert run(*spans, session=session, status_since=NOW - 29 * M) == []
+    none = NoProgress(60 * M, 1000, claim_grace=timedelta(0))
+    assert run(*spans, session=session, status_since=NOW - 29 * M, rule=none) == []
+    long = NoProgress(60 * M, 1000, claim_grace=10 * M)
+    assert len(run(*spans, session=session, status_since=NOW - 21 * M, rule=long)) == 1
 
 
 def test_commit_is_progress_inside_the_window_only() -> None:
@@ -239,10 +271,12 @@ def test_fmt(d: timedelta, text: str) -> None:
 
 
 def test_build_defaults_and_overrides() -> None:
-    assert build({}) == NoProgress()
-    assert NoProgress().window == 60 * M and NoProgress().min_tokens_without_progress == 50_000
-    rule = build({"window": "2h", "min_tokens_without_progress": 200_000})
-    assert rule == NoProgress(window=120 * M, min_tokens_without_progress=200_000)
+    default = NoProgress()
+    assert build({}) == default
+    assert default.window == 30 * M and default.min_tokens_without_progress == 100_000
+    assert default.claim_grace == 2 * M
+    rule = build({"window": "2h", "min_tokens_without_progress": 200_000, "claim_grace": 0})
+    assert rule == NoProgress(120 * M, 200_000, claim_grace=timedelta(0))
 
 
 @pytest.mark.parametrize(
@@ -252,6 +286,8 @@ def test_build_defaults_and_overrides() -> None:
         {"window": None},
         {"window": 0},
         {"window": "-5m"},
+        {"claim_grace": "-1m"},
+        {"claim_grace": "soon"},
         {"min_tokens_without_progress": 0},
         {"min_tokens_without_progress": "100"},
         {"min_tokens_without_progress": True},
@@ -262,3 +298,45 @@ def test_build_defaults_and_overrides() -> None:
 def test_build_rejects_bad_config(config: dict) -> None:
     with pytest.raises(ValueError):
         build(config)
+
+
+# --- startup check and engine ------------------------------------------------------------
+
+
+def test_warns_when_window_is_longer_than_the_traces_window() -> None:
+    traces = TraceSettings(window=30 * M)
+    [warning] = trace_window_warnings([NoProgress(window=60 * M)], traces)
+    assert "1:00:00" in warning and "0:30:00" in warning and "no_progress" in warning
+    assert trace_window_warnings([NoProgress(window=30 * M)], traces) == []
+    assert trace_window_warnings([NoProgress(window=60 * M)], TraceSettings(enabled=False)) == []
+    assert trace_window_warnings([], traces) == []
+
+
+def test_engine_announces_once_stays_quiet_and_resolves_after_progress() -> None:
+    alerter = FakeAlerter()
+    engine = Engine(
+        [RULE],
+        adapters=[FakeAdapter()],
+        alerter=alerter,
+        config=EngineConfig(dry_run=False, default_mode=Mode.ACT),
+    )
+    task = Task("T-1", "t", Status.IN_PROGRESS, START)
+    spans = tuple(llm(f"S{i}", NOW - i * M, 100, 0) for i in range(20))  # 2000 tokens
+
+    def tick(minutes: int, committed: bool = False) -> list:
+        at = NOW + minutes * M
+        session = Session("S-1", "T-1", "a-1", START, last_commit_at=at - M if committed else None)
+        snap = Snapshot(now=at, tasks=(task,), sessions=(session,), spans=spans)
+        return engine.tick(lambda: snap)
+
+    [first] = tick(0)
+    assert first.outcome is Outcome.ALERTED and len(alerter.sent) == 1
+    for minutes in (5, 10, 15, 20):
+        [later] = tick(minutes)
+        assert later.suppression is Suppression.STATE_OPEN  # ONGOING: no new announcement
+    assert len(alerter.sent) == 1
+    assert tick(25, committed=True) == []  # progress: the rule reports nothing
+    assert len(engine.states.store.open_states()) == 1  # a short gap is not a resolution
+    [resolved] = tick(40, committed=True)
+    assert resolved.action.reason.startswith("Resolved") and len(alerter.sent) == 2
+    assert engine.states.store.open_states() == []
