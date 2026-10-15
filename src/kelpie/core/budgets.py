@@ -1,17 +1,19 @@
 """Budgets and spend: config objects, the price table and budget state per subject.
 
 Pure: no I/O and no clock. The app reads token usage from the span store
-(:meth:`kelpie.core.spans.SpanStore.usage_since`, root LLM spans only, so nested
+(:meth:`kelpie.core.spans.SpanStore.usage_since`: counted LLM spans only, so nested
 instrumentations are not counted twice) and calls :func:`evaluate` while it assembles a
 snapshot; rules read the result from ``Snapshot.budgets``.
 
 Subjects. ``day``: the whole farm (subject ``farm``). ``task``: the span's task, else its
-session's. ``agent``: the owner of the span's session, as an adapter reports the session;
-spend of sessions no adapter knows is not attributed to an agent (it still counts for
-``day``). ``project``: the model has no project field, so a project is its ``match``:
-``label:<name>`` (tasks carrying that label, as adapters report them) or a glob over task
-ids (``WEB-*``). Without ``match``, a task or agent budget applies to each task or agent on
-its own; with ``match`` (a name or a glob), only to those it matches.
+session's. ``agent``: the owner of the span's session. ``project``: the model has no
+project field, so a project is its ``match``: ``label:<name>`` (tasks carrying that label)
+or a glob over task ids (``WEB-*``). Without ``match``, a task or agent budget applies to
+each task or agent on its own; with ``match`` (a name or a glob), only to those it matches.
+Owners, session tasks and labels come from the snapshot and from what the span store
+remembers of them (:class:`kelpie.core.spans.Attribution`), so spend of a finished session
+or an archived task keeps its subject. Spend whose subject is still unknown is reported
+per budget as ``unattributed`` (it always counts for ``day``).
 
 Windows are rolling: ``window`` (24h by default; task budgets default to the span
 retention, i.e. the task's lifetime as far as Kelpie still stores it) and ``burn_window``
@@ -35,16 +37,15 @@ from kelpie.core.model import (
     BudgetStatus,
     BudgetUnit,
     LimitHit,
-    Session,
     Snapshot,
-    Task,
 )
 from kelpie.core.serde import parse_duration
-from kelpie.core.spans import TokenUsage
+from kelpie.core.spans import Attribution, TokenUsage
 
 __all__ = [
     "Budget",
     "BudgetConfig",
+    "BudgetEvaluation",
     "BudgetMode",
     "BudgetScope",
     "BudgetState",
@@ -287,6 +288,17 @@ def _load_budget(data: Mapping[str, Any], index: int, retention: timedelta) -> B
 # --- evaluation --------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class BudgetEvaluation:
+    """:func:`evaluate`'s result: ``statuses`` go into ``Snapshot.budgets``;
+    ``unattributed`` is, per budget, the tokens in its window whose subject is unknown
+    (a session no adapter ever reported an owner for, a span with no task, a task whose
+    labels were never seen), so they could not be charged to any subject."""
+
+    statuses: tuple[BudgetStatus, ...] = ()
+    unattributed: Mapping[str, int] = field(default_factory=dict)
+
+
 @dataclass(slots=True)
 class _Spend:
     spent: float = 0.0
@@ -294,26 +306,54 @@ class _Spend:
     sessions: set[str] = field(default_factory=set)
 
 
+@dataclass(frozen=True, slots=True)
+class _Known:
+    """Attribution the snapshot reports now, over what the span store remembers."""
+
+    owners: Mapping[str, str]
+    session_tasks: Mapping[str, str]
+    labels: Mapping[str, tuple[str, ...]]
+
+    @classmethod
+    def of(cls, snapshot: Snapshot, remembered: Attribution | None) -> _Known:
+        base = remembered or Attribution()
+        return cls(
+            owners={**base.owners, **{s.id: s.owner_id for s in snapshot.sessions}},
+            session_tasks={**base.session_tasks, **{s.id: s.task_id for s in snapshot.sessions}},
+            labels={**base.labels, **{t.id: t.labels for t in snapshot.tasks}},
+        )
+
+
+_UNKNOWN = object()  # the row's subject cannot be told
+
+
 def evaluate(
-    config: BudgetConfig, usage: Mapping[timedelta, Sequence[TokenUsage]], snapshot: Snapshot
-) -> tuple[BudgetStatus, ...]:
+    config: BudgetConfig,
+    usage: Mapping[timedelta, Sequence[TokenUsage]],
+    snapshot: Snapshot,
+    attribution: Attribution | None = None,
+) -> BudgetEvaluation:
     """Budget state per budget and subject, in config order then by subject.
 
-    ``usage`` maps each of ``config.windows`` to the token usage of that rolling window
-    ending at ``snapshot.now``; a missing window counts as no usage. Sessions, tasks and
-    limit hits come from the snapshot.
+    ``usage`` maps each of ``config.windows`` to the counted token usage of that rolling
+    window ending at ``snapshot.now``; a missing window counts as no usage. Owners, tasks
+    and labels come from the snapshot, then from ``attribution`` (what the span store
+    remembers of sessions and tasks adapters no longer report). Limit hits come from the
+    snapshot.
     """
-    sessions = {s.id: s for s in snapshot.sessions}
-    tasks = {t.id: t for t in snapshot.tasks}
+    known = _Known.of(snapshot, attribution)
     out: list[BudgetStatus] = []
+    unattributed: dict[str, int] = {}
     for budget in config.budgets:
-        window = _spend(budget, config.prices, usage.get(budget.window, ()), sessions, tasks)
-        recent = _spend(budget, config.prices, usage.get(budget.burn_window, ()), sessions, tasks)
+        window, lost = _spend(budget, config.prices, usage.get(budget.window, ()), known)
+        recent, _ = _spend(budget, config.prices, usage.get(budget.burn_window, ()), known)
+        if budget.scope is not BudgetScope.DAY:
+            unattributed[budget.name] = lost
         for subject in sorted(set(window) | set(budget.fixed_subjects())):
             spend = window.get(subject) or _Spend()
             burned = recent[subject].spent if subject in recent else 0.0
             out.append(_status(budget, subject, spend, burned, snapshot))
-    return tuple(out)
+    return BudgetEvaluation(tuple(out), unattributed)
 
 
 def _status(
@@ -322,10 +362,7 @@ def _status(
     now = snapshot.now
     remaining = max(budget.limit - spend.spent, 0.0)
     rate = burned / (budget.burn_window / timedelta(hours=1))
-    runs_out = threshold_forecast(remaining, rate, now)
     subscription = budget.mode is BudgetMode.SUBSCRIPTION
-    if subscription and any(h.at <= now for h in snapshot.limit_hits):
-        runs_out = next_limit_at(snapshot.limit_hits, now)
     return BudgetStatus(
         budget=budget.name,
         scope=budget.scope,
@@ -337,7 +374,8 @@ def _status(
         hard=budget.hard,
         remaining=remaining,
         burn_rate=rate,
-        runs_out_at=runs_out,
+        runs_out_at=threshold_forecast(remaining, rate, now),
+        next_limit_at=next_limit_at(snapshot.limit_hits, now) if subscription else None,
         window=budget.window,
         cost_unknown_tokens=spend.cost_unknown_tokens,
         estimated=subscription,
@@ -346,20 +384,21 @@ def _status(
 
 
 def _spend(
-    budget: Budget,
-    prices: PriceTable,
-    rows: Iterable[TokenUsage],
-    sessions: Mapping[str, Session],
-    tasks: Mapping[str, Task],
-) -> dict[str, _Spend]:
+    budget: Budget, prices: PriceTable, rows: Iterable[TokenUsage], known: _Known
+) -> tuple[dict[str, _Spend], int]:
+    """Spend per subject, and the tokens whose subject is unknown."""
     acc: dict[str, _Spend] = {}
+    lost = 0
     for row in rows:
-        subject = _subject(budget, row, sessions, tasks)
-        if subject is None:
+        tokens = row.input_tokens + row.output_tokens
+        subject = _subject(budget, row, known)
+        if subject is _UNKNOWN:
+            lost += tokens
             continue
+        if not isinstance(subject, str):
+            continue  # known, and not this budget's
         spend = acc.setdefault(subject, _Spend())
         price = prices.price_for(row.model)
-        tokens = row.input_tokens + row.output_tokens
         if price is None:
             spend.cost_unknown_tokens += tokens
         if budget.unit is BudgetUnit.TOKENS:
@@ -368,37 +407,31 @@ def _spend(
             spend.spent += price.cost(row)
         if row.session_id:
             spend.sessions.add(row.session_id)
-    return acc
+    return acc, lost
 
 
-def _subject(
-    budget: Budget,
-    row: TokenUsage,
-    sessions: Mapping[str, Session],
-    tasks: Mapping[str, Task],
-) -> str | None:
-    session = sessions.get(row.session_id) if row.session_id else None
+def _subject(budget: Budget, row: TokenUsage, known: _Known) -> str | object | None:
+    """The row's subject; None when it is known and not this budget's; ``_UNKNOWN``."""
+    session = row.session_id or ""
     match budget.scope:
         case BudgetScope.DAY:
             return FARM
         case BudgetScope.AGENT:
-            subject = session.owner_id if session is not None else None
+            subject = known.owners.get(session)
         case BudgetScope.TASK | BudgetScope.PROJECT:
-            subject = row.task_id or (session.task_id if session is not None else None)
+            subject = row.task_id or known.session_tasks.get(session)
     if not subject:
-        return None
+        return _UNKNOWN
     if budget.match is None:
         return subject
-    if budget.scope is BudgetScope.PROJECT:
-        return budget.match if _in_project(budget.match, subject, tasks) else None
-    return subject if fnmatchcase(subject, budget.match) else None
-
-
-def _in_project(match: str, task_id: str, tasks: Mapping[str, Task]) -> bool:
-    if match.startswith(LABEL):
-        task = tasks.get(task_id)
-        return task is not None and match[len(LABEL) :] in task.labels
-    return fnmatchcase(task_id, match)
+    if budget.scope is not BudgetScope.PROJECT:
+        return subject if fnmatchcase(subject, budget.match) else None
+    if not budget.match.startswith(LABEL):
+        return budget.match if fnmatchcase(subject, budget.match) else None
+    labels = known.labels.get(subject)
+    if labels is None:
+        return _UNKNOWN
+    return budget.match if budget.match[len(LABEL) :] in labels else None
 
 
 # --- forecasts ---------------------------------------------------------------------------

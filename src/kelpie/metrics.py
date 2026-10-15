@@ -14,7 +14,7 @@ from kelpie import __version__
 
 if TYPE_CHECKING:
     from kelpie.app import RuleStatus
-    from kelpie.core.budgets import BudgetStatus
+    from kelpie.core.budgets import BudgetEvaluation, BudgetStatus
     from kelpie.core.engine import Engine
     from kelpie.core.ledger import Dispatched
 
@@ -27,6 +27,30 @@ def _labels(**labels: str) -> str:
     if not labels:
         return ""
     return "{" + ",".join(f'{k}="{_escape(v)}"' for k, v in labels.items()) + "}"
+
+
+# Task budgets can have a subject per task: only these many per budget are exported (the
+# highest spend), plus every task past a threshold.
+MAX_TASK_SERIES = 20
+
+
+def _bounded(statuses: Iterable[BudgetStatus]) -> tuple[BudgetStatus, ...]:
+    """Keep the series count bounded: per-task subjects only when past a threshold or
+    among the top :data:`MAX_TASK_SERIES` by spend; agent, project and day always."""
+    statuses = tuple(statuses)
+    top: set[tuple[str, str]] = set()
+    by_budget: dict[str, list[BudgetStatus]] = {}
+    for b in statuses:
+        if str(b.scope) == "task":
+            by_budget.setdefault(b.budget, []).append(b)
+    for rows in by_budget.values():
+        rows.sort(key=lambda b: -b.spent)
+        top.update((b.budget, b.subject) for b in rows[:MAX_TASK_SERIES])
+    return tuple(
+        b
+        for b in statuses
+        if str(b.scope) != "task" or str(b.state) != "ok" or (b.budget, b.subject) in top
+    )
 
 
 class Metrics:
@@ -59,6 +83,8 @@ class Metrics:
         self.budgets_enabled = False
         self.budgets: tuple[BudgetStatus, ...] = ()
         self.budgets_at: datetime | None = None
+        self.budgets_unattributed: dict[str, int] = {}
+        self.budgets_stale_now = False
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
@@ -118,9 +144,16 @@ class Metrics:
         with self._lock:
             self.budgets_enabled = enabled
 
-    def set_budgets(self, statuses: Sequence[BudgetStatus], now: datetime) -> None:
+    def set_budgets(self, result: BudgetEvaluation, now: datetime) -> None:
         with self._lock:
-            self.budgets, self.budgets_at = tuple(statuses), now
+            self.budgets, self.budgets_at = _bounded(result.statuses), now
+            self.budgets_unattributed = dict(result.unattributed)
+            self.budgets_stale_now = False
+
+    def budgets_stale(self) -> None:
+        """Spend could not be read this tick: the last values stay, marked stale."""
+        with self._lock:
+            self.budgets_stale_now = True
 
     # --- trace forwarding (kelpie.traces.forward.ForwardObserver) ----------------------
 
@@ -335,13 +368,25 @@ class Metrics:
         metric(
             "kelpie_budget_runs_out_seconds",
             "gauge",
-            "Seconds until the budget runs out at the current burn rate (subscription mode: "
-            "until the next provider limit); 0 once it has; absent without a forecast.",
+            "Seconds until the budget runs out at the current burn rate; 0 once it has; "
+            "absent without a forecast.",
             [
                 f"kelpie_budget_runs_out_seconds{lbl}"
                 f" {max((b.runs_out_at - at).total_seconds(), 0.0):.0f}"
                 for b, lbl in rows
                 if b.runs_out_at is not None and at is not None
+            ],
+        )
+        metric(
+            "kelpie_budget_next_limit_seconds",
+            "gauge",
+            "Subscription mode: seconds until the next provider limit forecast from observed "
+            "limit hits; 0 while a limit is in force; absent without a forecast.",
+            [
+                f"kelpie_budget_next_limit_seconds{lbl}"
+                f" {max((b.next_limit_at - at).total_seconds(), 0.0):.0f}"
+                for b, lbl in rows
+                if b.next_limit_at is not None and at is not None
             ],
         )
         metric(
@@ -364,6 +409,23 @@ class Metrics:
                 f"{_labels(budget=b.budget, subject=b.subject)} {b.cost_unknown_tokens}"
                 for b, _ in rows
             ],
+        )
+        metric(
+            "kelpie_budget_unattributed_tokens",
+            "gauge",
+            "Tokens in the budget's window whose subject (agent, task or project) is unknown, "
+            "so no subject was charged for them.",
+            [
+                f"kelpie_budget_unattributed_tokens{_labels(budget=name)} {n}"
+                for name, n in sorted(self.budgets_unattributed.items())
+            ],
+        )
+        metric(
+            "kelpie_budget_stale",
+            "gauge",
+            "1 when spend could not be read on the last tick: budget values are from the last "
+            "good read.",
+            [f"kelpie_budget_stale {int(self.budgets_stale_now)}"],
         )
 
     def _span_rows(self) -> int:

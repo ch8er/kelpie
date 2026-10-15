@@ -4,10 +4,12 @@ snapshot, /metrics, kelpie status and a smoke tick."""
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+import sqlite3
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,7 +24,14 @@ from kelpie.app import (
     render_status,
 )
 from kelpie.cli import main
-from kelpie.core.budgets import BudgetState
+from kelpie.core import storage
+from kelpie.core.budgets import (
+    BudgetEvaluation,
+    BudgetScope,
+    BudgetState,
+    BudgetStatus,
+    BudgetUnit,
+)
 from kelpie.core.model import LimitHit, Session, Snapshot, Span, SpanKind
 from kelpie.core.spans import MemorySpanStore, SpanStore, TokenUsage
 from kelpie.core.storage import SqliteSpanStore
@@ -215,8 +224,8 @@ def test_subscription_budget_forecasts_from_limit_hits(tmp_path: Path) -> None:
         LimitHit("5h", NOW - 6 * H, NOW - H),
     )
     got = statuses(store, tmp_path, replace(BOARD, limit_hits=hits))
-    assert got["per-task", "T-1"].runs_out_at == NOW + timedelta(hours=2.5)
-    assert got["farm-daily", "farm"].runs_out_at != NOW + timedelta(hours=2.5)  # api mode
+    assert got["per-task", "T-1"].next_limit_at == NOW + timedelta(hours=2.5)
+    assert got["farm-daily", "farm"].next_limit_at is None  # api mode
 
 
 def test_usage_is_read_once_a_minute() -> None:
@@ -231,20 +240,89 @@ def test_usage_is_read_once_a_minute() -> None:
     assert usage == (TokenUsage("run-1", None, "model-a", 1, 200_000, 20_000, 100_000),)
 
 
-class BrokenUsage(MemorySpanStore):
-    def usage_since(self, after: datetime) -> list[TokenUsage]:
-        raise OSError("disk I/O error")
+class FlakyUsage(MemorySpanStore):
+    broken = False
+
+    def usage_since(self, now: datetime, windows: Sequence[timedelta]) -> list:
+        if self.broken:
+            raise OSError("disk I/O error")
+        return super().usage_since(now, windows)
+
+    def record_attribution(self, *args: Any) -> int:
+        if self.broken:
+            raise OSError("database is locked")
+        return super().record_attribution(*args)
 
 
-def test_usage_failure_keeps_the_tick(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_usage_failure_keeps_the_last_budgets_marked_stale(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     settings = load_settings(write(tmp_path, CONFIG))
     metrics = Metrics()
     metrics.set_traces(True)
-    window = SpanWindow(BrokenUsage(), timedelta(minutes=30), timedelta(hours=24))
-    snap = merged_snapshot([BOARD], metrics, lambda: NOW, window, settings.budgets)()
-    assert snap.budgets == () and snap.sessions == BOARD.sessions
-    assert "kelpie_span_store_errors_total 1" in metrics.render()
-    assert "failed to read token usage" in caplog.text
+    metrics.set_budgets_enabled(True)
+    store = FlakyUsage()
+    store.append_spans(SPANS, NOW)
+    clock = [NOW]
+    window = SpanWindow(store, timedelta(minutes=30), timedelta(hours=24))
+    source = merged_snapshot([BOARD], metrics, lambda: clock[0], window, settings.budgets)
+    good = source()
+    assert good.budgets_ok and len(good.budgets) == 5
+    assert "kelpie_budget_stale 0" in metrics.render()
+    store.broken = True
+    clock[0] = NOW + timedelta(minutes=2)  # past the once-a-minute cache
+    snap = source()
+    assert not snap.budgets_ok and snap.budgets == good.budgets  # last good, stale
+    assert snap.sessions == BOARD.sessions
+    text = metrics.render()
+    assert "kelpie_span_store_errors_total 2" in text  # the write and the read
+    assert "kelpie_budget_stale 1" in text
+    assert 'kelpie_budget_spent{budget="farm-daily",subject="farm",unit="usd"}' in text
+    assert "failed to read spend" in caplog.text
+    assert "failed to record session owners" in caplog.text
+    store.broken = False
+    clock[0] = NOW + timedelta(minutes=4)
+    assert source().budgets_ok and "kelpie_budget_stale 0" in metrics.render()
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_spend_stays_attributed_after_the_adapter_drops_a_session(
+    tmp_path: Path, kind: str
+) -> None:
+    store: SpanStore = (
+        MemorySpanStore() if kind == "memory" else SqliteSpanStore(tmp_path / "kelpie.db")
+    )
+    store.append_spans(SPANS, NOW)
+    settings = load_settings(write(tmp_path, CONFIG))
+    window = SpanWindow(store, timedelta(minutes=30), timedelta(hours=24))
+    clock = [NOW]
+    board = BoardAdapter(name="board", sessions=BOARD.sessions)
+    metrics = Metrics()
+    metrics.set_budgets_enabled(True)
+    source = merged_snapshot([board], metrics, lambda: clock[0], window, settings.budgets)
+    first = {(s.budget, s.subject): s.spent for s in source().budgets}
+    board.sessions = ()  # finished runs leave the board
+    clock[0] = NOW + timedelta(minutes=2)
+    later = {(s.budget, s.subject): s.spent for s in source().budgets}
+    assert later["per-agent", "agent-dev-1"] == first["per-agent", "agent-dev-1"] > 0
+    assert later["per-task", "T-1"] == first["per-task", "T-1"] > 0
+    assert 'kelpie_budget_unattributed_tokens{budget="per-agent"} 0' in metrics.render()
+    close = getattr(store, "close", None)
+    if callable(close):
+        close()
+
+
+def test_unattributed_tokens_metric(tmp_path: Path) -> None:
+    store = MemorySpanStore()
+    store.append_spans(SPANS, NOW)
+    settings = load_settings(write(tmp_path, CONFIG))
+    metrics = Metrics()
+    metrics.set_budgets_enabled(True)
+    window = SpanWindow(store, timedelta(minutes=30), timedelta(hours=24))
+    merged_snapshot([], metrics, lambda: NOW, window, settings.budgets)()  # no owners known
+    text = metrics.render()
+    assert 'kelpie_budget_unattributed_tokens{budget="per-agent"} 1760000' in text
+    assert 'kelpie_budget_unattributed_tokens{budget="farm-daily"}' not in text
 
 
 # --- metrics, status and a smoke tick ----------------------------------------------------
@@ -281,7 +359,7 @@ def test_status_shows_budgets_and_their_state(tmp_path: Path) -> None:
     store.close()
     settings = replace(load_settings(write(tmp_path, CONFIG)), db_path=db)
     current = read_budgets(settings, [BOARD], clock=lambda: NOW)
-    assert current is not None and len(current) == 5
+    assert not isinstance(current, str) and len(current) == 5
     text = render_status(settings, load_rules(settings.engine), [], current, now=NOW)
     assert "budgets:" in text
     assert "  farm-daily: day, usd, api, window 1 day, 0:00:00" in text
@@ -291,8 +369,8 @@ def test_status_shows_budgets_and_their_state(tmp_path: Path) -> None:
     assert "    T-1: soft, spent " in text and "usd (estimate)" in text
     assert "runs out now" in text
     assert "110,000 tokens without a price" in text
-    unreadable = render_status(settings, load_rules(settings.engine), [], None, now=NOW)
-    assert "spend unavailable: the span store cannot be read" in unreadable
+    unreadable = render_status(settings, load_rules(settings.engine), [], "it broke", now=NOW)
+    assert "spend unavailable: it broke" in unreadable
     empty = render_status(settings, load_rules(settings.engine), [], (), now=NOW)
     assert "(no spend in the window)" in empty
 
@@ -300,11 +378,23 @@ def test_status_shows_budgets_and_their_state(tmp_path: Path) -> None:
 def test_status_without_a_database_shows_no_spend(tmp_path: Path) -> None:
     settings = replace(load_settings(write(tmp_path, CONFIG)), db_path=tmp_path / "none.db")
     current = read_budgets(settings, clock=lambda: NOW)
-    assert current is not None and {s.spent for s in current} == {0}
+    assert not isinstance(current, str) and {s.spent for s in current} == {0}
     assert not (tmp_path / "none.db").exists()
     assert read_budgets(Settings()) == ()
     broken = replace(settings, db_path=tmp_path)  # a directory: cannot be opened
-    assert read_budgets(broken, clock=lambda: NOW) is None
+    assert "cannot open the span store" in str(read_budgets(broken, clock=lambda: NOW))
+
+
+def test_status_reads_an_old_database_without_upgrading_it(tmp_path: Path) -> None:
+    db_path = tmp_path / "old.db"
+    db = sqlite3.connect(db_path)
+    db.executescript("".join(storage.MIGRATIONS[v] for v in (1, 2, 3)) + "PRAGMA user_version = 3;")
+    db.close()
+    settings = replace(load_settings(write(tmp_path, CONFIG)), db_path=db_path)
+    problem = read_budgets(settings, clock=lambda: NOW)
+    assert problem == "the database predates budgets; run kelpie serve once to upgrade it"
+    db = sqlite3.connect(db_path)
+    assert db.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_cli_status_prints_budgets(
@@ -335,3 +425,21 @@ def test_smoke_tick_with_budgets(tmp_path: Path, caplog: pytest.LogCaptureFixtur
     finally:
         app.close()
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_task_series_are_bounded() -> None:
+    def status(subject: str, spent: float, scope: BudgetScope = BudgetScope.TASK) -> Any:
+        state = BudgetState.SOFT if subject == "T-hot" else BudgetState.OK
+        return BudgetStatus("b", scope, subject, BudgetUnit.TOKENS, spent, state)
+
+    tasks = [status(f"T-{i:02}", 100 + i) for i in range(30)]
+    agents = [status(f"agent-{i:02}", i, BudgetScope.AGENT) for i in range(30)]
+    metrics = Metrics()
+    metrics.set_budgets_enabled(True)
+    result = BudgetEvaluation((*tasks, status("T-hot", 1), *agents))
+    metrics.set_budgets(result, NOW)
+    text = metrics.render()
+    spent = [line for line in text.splitlines() if line.startswith("kelpie_budget_spent{")]
+    assert len(spent) == 20 + 1 + 30  # top 20 tasks, the one past a threshold, all agents
+    assert 'subject="T-29"' in text and 'subject="T-09"' not in text
+    assert 'subject="T-hot"' in text and 'subject="agent-00"' in text

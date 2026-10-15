@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol
 
-from kelpie.core.model import Span, SpanTotals
-from kelpie.core.spans import SpanKey, SpanStore, TokenUsage, last_at, span_key
+from kelpie.core.model import Session, Span, SpanTotals, Task
+from kelpie.core.spans import Attribution, SpanKey, SpanStore, TokenUsage, last_at, span_key
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +58,8 @@ class SpanWindow:
     _totals_at: datetime | None = None
     _usage: dict[timedelta, tuple[TokenUsage, ...]] = field(default_factory=dict)
     _usage_at: datetime | None = None
+    _attribution: Attribution = field(default_factory=Attribution)
+    _attribution_at: datetime | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def spans(self, now: datetime) -> tuple[Span, ...]:
@@ -95,18 +97,43 @@ class SpanWindow:
     def usage(
         self, now: datetime, windows: Collection[timedelta]
     ) -> Mapping[timedelta, Sequence[TokenUsage]]:
-        """Token usage of root LLM spans per rolling window ending at ``now`` (budgets),
-        one store query per distinct window, at most every ``totals_every``."""
-        wanted = set(windows)
+        """Counted token usage per rolling window ending at ``now`` (budgets), read from
+        the store at most every ``totals_every``."""
+        wanted = sorted(set(windows))
         with self._lock:
             at = self._usage_at
             fresh = at is not None and timedelta(0) <= now - at < self.totals_every
-            if fresh and wanted <= set(self._usage):
+            if fresh and set(wanted) <= set(self._usage):
                 return {w: self._usage[w] for w in wanted}
-        found = {w: tuple(self.store.usage_since(now - w)) for w in sorted(wanted)}
+        found = dict(zip(wanted, self.store.usage_since(now, wanted), strict=True))
         with self._lock:
             self._usage, self._usage_at = found, now
         return found
+
+    def attribution(self, now: datetime) -> Attribution:
+        """What the store remembers of session owners and task labels, read at most every
+        ``totals_every`` (the store writes only what changed, see :meth:`remember`)."""
+        with self._lock:
+            at = self._attribution_at
+            if at is not None and timedelta(0) <= now - at < self.totals_every:
+                return self._attribution
+        found = self.store.attribution()
+        with self._lock:
+            self._attribution, self._attribution_at = found, now
+        return found
+
+    def remember(self, sessions: Iterable[Session], tasks: Iterable[Task], now: datetime) -> int:
+        """Record who owns each session and which labels each task has, so budgets keep
+        attributing their spend after adapters stop reporting them."""
+        written = self.store.record_attribution(
+            ((s.id, s.owner_id, s.task_id) for s in sessions),
+            {t.id: t.labels for t in tasks},
+            now,
+        )
+        if written:
+            with self._lock:
+                self._attribution_at = None  # read again next time
+        return written
 
 
 def merge_spans(*groups: Iterable[Span]) -> tuple[Span, ...]:

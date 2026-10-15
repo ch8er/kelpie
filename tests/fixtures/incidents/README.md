@@ -27,6 +27,9 @@ snapshot:                    # passed verbatim to kelpie.core.serde.snapshot_fro
   resources: [...]           # Resource
   sessions: [...]            # Session
   spans: [...]               # Span; an entry may carry the fixture-only `repeat` key (below)
+  budgets: [...]             # BudgetStatus, as Kelpie computes it from [[budgets]] (rule 10)
+  budgets_ok: true           # false: spend could not be read; budgets are the last good ones
+  limit_hits: [...]          # LimitHit: provider limits reached (subscription mode)
 expected_actions:            # must be emitted; subset match, order-insensitive
   - kind: unblock            # ActionKind value
     task_id: T-101           # optional (omit for host/global alerts)

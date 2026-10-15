@@ -24,7 +24,7 @@ from kelpie.core.budgets import (
 )
 from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.serde import snapshot_from_dict
-from kelpie.core.spans import TokenUsage
+from kelpie.core.spans import Attribution, TokenUsage
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 WEEK = timedelta(days=7)
@@ -185,7 +185,7 @@ ROWS = (
 
 def by_subject(config: BudgetConfig, usage: Any = None) -> dict[tuple[str, str], Any]:
     usage = usage if usage is not None else {w: ROWS for w in config.windows}
-    return {(s.budget, s.subject): s for s in evaluate(config, usage, snapshot())}
+    return {(s.budget, s.subject): s for s in evaluate(config, usage, snapshot()).statuses}
 
 
 def cost(tokens: int) -> float:
@@ -250,6 +250,41 @@ def test_project_budget_by_label_or_task_glob() -> None:
     assert got["none", "label:mobile"].spent == 0
 
 
+def test_unattributed_spend_is_reported_per_budget() -> None:
+    config = load(
+        budget(name="day", unit="tokens"),
+        budget(name="agents", scope="agent", unit="tokens"),
+        budget(name="tasks", scope="task", unit="tokens"),
+        budget(name="web", scope="project", match="label:web", unit="tokens"),
+        budget(name="glob", scope="project", match="T-*", unit="tokens"),
+    )
+    result = evaluate(config, {w: ROWS for w in config.windows}, snapshot())
+    assert dict(result.unattributed) == {
+        "agents": 55_000 + 11_000,  # run-x has no known owner; one row has no session
+        "tasks": 11_000,  # no task at all
+        "web": 110_000 + 55_000 + 11_000,  # T-3, T-9: labels never seen
+        "glob": 11_000,
+    }
+
+
+def test_remembered_attribution_keeps_spend_of_dropped_sessions_and_tasks() -> None:
+    config = load(
+        budget(name="agents", scope="agent", unit="tokens"),
+        budget(name="web", scope="project", match="label:web", unit="tokens"),
+    )
+    remembered = Attribution(
+        owners={"run-x": "agent-old", "run-1": "stale-owner"},
+        session_tasks={"run-x": "T-9"},
+        labels={"T-9": ("web",), "T-3": (), "T-1": ()},
+    )
+    result = evaluate(config, {w: ROWS for w in config.windows}, snapshot(), remembered)
+    got = {(s.budget, s.subject): s.spent for s in result.statuses}
+    assert got["agents", "agent-old"] == 55_000
+    assert got["agents", "agent-dev-1"] == 1_650_000  # the snapshot wins over memory
+    assert got["web", "label:web"] == 1_650_000 + 55_000  # T-1 labels from the snapshot
+    assert dict(result.unattributed) == {"agents": 11_000, "web": 11_000}
+
+
 def test_states_remaining_and_forecast() -> None:
     config = load(
         budget(name="soft", unit="tokens", soft=1_000_000, hard=None),
@@ -272,7 +307,7 @@ def test_states_remaining_and_forecast() -> None:
 
 
 def test_missing_usage_counts_as_none() -> None:
-    (status,) = evaluate(load(budget()), {}, snapshot())
+    (status,) = evaluate(load(budget()), {}, snapshot()).statuses
     assert (status.spent, status.burn_rate, status.runs_out_at) == (0, 0, None)
 
 
@@ -317,15 +352,16 @@ def test_next_limit_edge_cases() -> None:
 def test_subscription_budget_is_an_estimate_forecast_from_limit_hits() -> None:
     config = load(budget(mode="subscription", hard=100))
     usage = {w: ROWS for w in config.windows}
-    (plain,) = evaluate(config, usage, snapshot())
-    assert plain.estimated and plain.runs_out_at is not None  # threshold forecast meanwhile
+    (plain,) = evaluate(config, usage, snapshot()).statuses
+    assert plain.estimated and plain.next_limit_at is None  # no limit hits yet
     hits = (hit(-23, -20), hit(-17, -10), hit(-6, -1))
-    (sub,) = evaluate(config, usage, snapshot(limit_hits=hits))
-    assert sub.runs_out_at == NOW + timedelta(hours=2.5)
+    (sub,) = evaluate(config, usage, snapshot(limit_hits=hits)).statuses
+    assert sub.next_limit_at == NOW + timedelta(hours=2.5)
+    assert sub.runs_out_at == plain.runs_out_at  # the threshold forecast stays
     assert sub.spent == plain.spent  # thresholds still apply to the estimate
     # api budgets ignore limit hits
-    (api,) = evaluate(load(budget(hard=100)), usage, snapshot(limit_hits=hits))
-    assert api.runs_out_at == plain.runs_out_at and not api.estimated
+    (api,) = evaluate(load(budget(hard=100)), usage, snapshot(limit_hits=hits)).statuses
+    assert api.next_limit_at is None and not api.estimated
 
 
 def test_snapshot_fixtures_can_carry_budget_state() -> None:

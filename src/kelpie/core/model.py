@@ -265,13 +265,14 @@ class BudgetStatus:
     """Spend of one subject against one budget at snapshot time (``kelpie.core.budgets``
     computes it). ``remaining`` and ``runs_out_at`` are measured against ``hard``, or
     ``soft`` when the budget has no hard threshold; ``remaining`` never goes below 0.
-    ``burn_rate`` is ``unit`` per hour over the budget's recent ``burn_window``.
-    ``runs_out_at`` is None when nothing is being spent; when the limit is already reached
-    it is ``now``. ``estimated`` is set in subscription mode, where there is no bill and the
-    spend is priced from traces; its ``runs_out_at`` is the forecast next provider limit
-    once limit hits have been observed. ``cost_unknown_tokens`` are tokens of models with
-    no price in ``[prices]``: a ``usd`` budget leaves them out of ``spent``.
-    ``session_ids`` are the sessions that spent within the window."""
+    ``burn_rate`` is ``unit`` per hour over the budget's recent ``burn_window``;
+    ``runs_out_at`` is when the remaining budget runs out at that rate: ``now`` once it
+    has, None when nothing is being spent. ``estimated`` is set in subscription mode,
+    where there is no bill and the spend is priced from traces; ``next_limit_at`` is then
+    the forecast next provider limit from observed limit hits (None without enough of
+    them). ``cost_unknown_tokens`` are tokens of models with no price in ``[prices]``: a
+    ``usd`` budget leaves them out of ``spent``. ``session_ids`` are the sessions that
+    spent within the window."""
 
     budget: str
     scope: BudgetScope
@@ -284,6 +285,7 @@ class BudgetStatus:
     remaining: float = 0.0
     burn_rate: float = 0.0
     runs_out_at: datetime | None = None
+    next_limit_at: datetime | None = None
     window: timedelta = timedelta(hours=24)
     cost_unknown_tokens: int = 0
     estimated: bool = False
@@ -318,6 +320,9 @@ class Snapshot:
     # Budget state per budget and subject ([[budgets]]), computed when the snapshot is
     # assembled; rules read it instead of pricing spans themselves.
     budgets: tuple[BudgetStatus, ...] = ()
+    # False when spend could not be read this tick: ``budgets`` then holds the last good
+    # statuses (stale), so a rule should neither resolve nor raise budget alerts on them.
+    budgets_ok: bool = True
     limit_hits: tuple[LimitHit, ...] = ()  # subscription mode: observed provider limits
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
