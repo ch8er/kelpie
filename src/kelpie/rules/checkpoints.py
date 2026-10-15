@@ -71,7 +71,9 @@ class Checkpoints:
     def _remind(self, task: Task, session: Session, snapshot: Snapshot) -> Iterable[Action]:
         if not session.dirty_worktree and not session.changed_files:
             return
-        since_commit = snapshot.now - (session.last_commit_at or session.started_at)
+        # A fresh worktree's HEAD is the base commit, often older than the session.
+        anchor_at = max(session.last_commit_at or session.started_at, session.started_at)
+        since_commit = snapshot.now - anchor_at
         too_many = (session.changed_files or 0) > self.max_changed_files
         if since_commit < self.commit_every and not too_many:
             return
@@ -80,7 +82,7 @@ class Checkpoints:
             if too_many
             else f"no commit for {_minutes(since_commit)}"
         )
-        anchor = (session.last_commit_at or session.started_at).isoformat()
+        anchor = anchor_at.isoformat()
         yield Action(
             ActionKind.COMMENT,
             NAME,
@@ -123,7 +125,7 @@ class Checkpoints:
             where = "the WIP commit Kelpie saved"
             commit = None
         else:
-            committed = [s for s in snapshot.sessions_for(task.id) if s.last_commit]
+            committed = [s for s in snapshot.sessions_for(task.id) if _committed(s)]
             if not committed:
                 return  # nothing to resume from
             session = max(committed, key=lambda s: s.last_commit_at or s.started_at)
@@ -142,6 +144,13 @@ class Checkpoints:
             once=True,
             params={"commit": commit, "branch": branch, "session_id": session.id},
         )
+
+
+def _committed(session: Session) -> bool:
+    """The session made a commit (not just started from the base commit)."""
+    if not session.last_commit:
+        return False
+    return session.last_commit_at is None or session.last_commit_at >= session.started_at
 
 
 def _note(session: Session) -> str:

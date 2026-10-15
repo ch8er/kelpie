@@ -44,6 +44,9 @@ def test_reminder_boundaries() -> None:
     # Never committed: counts from the session start.
     [a] = run(task(), live(), rule=rule)
     assert "no commit for 90 minutes" in a.reason
+    # HEAD is the base commit from days ago: still counts from the session start.
+    young = live(started_at=NOW - 5 * M, last_commit_at=NOW - 3 * 24 * 60 * M)
+    assert run(task(), young, rule=rule) == []
 
 
 def test_clean_worktree_gets_no_reminder() -> None:
@@ -130,6 +133,12 @@ def test_resume_note_from_the_last_commit() -> None:
     # Rule 1 is about to requeue an undeclared exit: the note comes in the same tick.
     [a] = run(task(Status.IN_PROGRESS, since=NOW - 180 * M), previous)
     assert "abc1234" in a.reason
+    # HEAD is only the base commit the session started from: nothing to resume from.
+    base = Session(
+        "S-1", "T-1", "dev", NOW - 180 * M, ended_at=NOW - 60 * M,
+        last_commit="0ld0ba5", last_commit_at=NOW - 3 * 24 * 60 * M,
+    )  # fmt: skip
+    assert run(queued, base) == []
     # Nothing committed and a clean worktree: nothing to resume from.
     bare = Session("S-1", "T-1", "dev", NOW - 180 * M, ended_at=NOW - 60 * M)
     assert run(queued, bare) == []
