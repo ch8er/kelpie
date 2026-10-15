@@ -69,43 +69,45 @@ profiles need the plugin in each profile's `HERMES_HOME`; point them all at one 
 
 ## 4. OTLP traces (optional)
 
-Skip this if you have no OpenTelemetry exporter on the farm; the hooks already give Kelpie
-tool calls. Otherwise start Kelpie with a token and point exporters at it:
+Skip this if you do not use the hermes-otel plugin; the hooks already give Kelpie tool
+calls. When a tool call arrives both ways Kelpie keeps it once (matched by tool call id).
+Otherwise start Kelpie with a token:
 
 ```bash
 export KELPIE_TRACES_TOKEN=$(openssl rand -hex 24)
 uv run kelpie serve        # 127.0.0.1:9464; POST /v1/traces, /metrics, /healthz
 ```
 
-In whatever starts the Hermes workers (HTTP, not gRPC):
+and add an OTLP backend to `~/.hermes/hermes_otel.yaml` (OTLP over HTTP; use the same token):
 
-```bash
-export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:9464/v1/traces
-export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf
-export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ${KELPIE_TRACES_TOKEN}"
-# Optional: ties OTLP spans to hook spans so a tool call is counted once.
-export OTEL_RESOURCE_ATTRIBUTES="kelpie.task_id=${HERMES_KANBAN_TASK},kelpie.session_id=hermes-run-${HERMES_KANBAN_RUN_ID}"
+```yaml
+backends:
+  - type: otlp
+    endpoint: http://127.0.0.1:9464/v1/traces
+    headers:
+      Authorization: "Bearer <the KELPIE_TRACES_TOKEN value>"
+    metrics: false
+    logs: false
 ```
 
-The optional line must run where `HERMES_KANBAN_TASK` and `HERMES_KANBAN_RUN_ID` are set (the
-worker's environment). Unverified: that your exporter (for example the hermes-otel plugin)
-reads `OTEL_RESOURCE_ATTRIBUTES`, that it accepts the space in the header value (some SDKs
-want `Bearer%20<token>`), and that you can wrap the worker command.
+Restart the Hermes gateway or dispatcher afterwards. The key layout above follows the
+hermes-otel source; check it against the version you installed.
 
 ## 5. Run and check
 
 ```bash
-uv run kelpie serve &              # if not already running (step 4)
+# Kelpie must be running: `uv run kelpie serve` in a second shell (or step 4's shell).
 uv run kelpie doctor               # PASS|FAIL|SKIP per check, "fix:" under each FAIL; exit 1 on FAIL
 uv run kelpie status               # rules, their mode, board readable, spool age
 curl -s localhost:9464/metrics | grep -E '^kelpie_(dry_run|engine_ticks_total|actions_total|snapshot_spans)'
 ```
 
 `kelpie doctor` checks: config and rules load; dry-run on and every rule in observe; the board
-is readable; the spool has a line from the last hour; spans arrived in the last hour;
-worktrees of live tasks are readable by git; Prometheus answers (`--prometheus URL` or
-`KELPIE_PROMETHEUS_URL`, otherwise `localhost:9090` is tried and skipped if absent). Run it
-while a task is running, otherwise "hooks fire" and "OTLP spans arrive" fail on a quiet farm.
+is readable; the spool has a line from the last hour; spans arrived in the last hour (SKIP if
+none ever did: OTLP is optional); worktrees of live tasks are readable by git; Prometheus
+answers (`--prometheus URL` or `KELPIE_PROMETHEUS_URL`, otherwise `localhost:9090` is tried
+and skipped if absent). "hooks fire" and "OTLP spans arrive" are SKIP while no task is
+running; run doctor while one is, to make them count.
 Run it in the directory (and with the `KELPIE_DB`) that `kelpie serve` uses: it reads the span
 store from there.
 

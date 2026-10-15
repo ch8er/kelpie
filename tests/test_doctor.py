@@ -124,7 +124,18 @@ def test_board_missing_fails(farm: Farm) -> None:
     assert "db_path" in check.fix
 
 
-def test_hooks_missing_unreadable_and_old_spool_fail(farm: Farm) -> None:
+def test_hooks_and_spans_skip_on_a_quiet_farm(farm: Farm) -> None:
+    farm.board.task("t_1", "ready", NOW - timedelta(hours=2))
+    farm.spool_line(timedelta(hours=3))
+    farm.add_span(timedelta(hours=5))
+    checks = farm.checks()
+    assert checks["hooks fire"].status == checks["OTLP spans arrive"].status == "SKIP"
+    assert "no task is running" in checks["hooks fire"].detail
+    assert "0 running" in checks["kanban.db"].detail
+
+
+def test_hooks_missing_unreadable_and_old_spool_fail_while_a_task_runs(farm: Farm) -> None:
+    farm.board.task("t_1", "running", NOW - timedelta(hours=2))
     assert farm.checks()["hooks fire"].detail.startswith("spool missing")
     farm.spool.write_text("not json\n")
     assert "no readable lines" in farm.checks()["hooks fire"].detail
@@ -144,14 +155,24 @@ def test_hooks_skipped_when_spool_disabled(farm: Farm) -> None:
     assert checks["hooks fire"].status == "SKIP"
 
 
-def test_spans_missing_old_and_disabled(farm: Farm) -> None:
-    assert farm.checks()["OTLP spans arrive"].status == "FAIL"  # no database yet
+def test_spans_never_arrived_is_a_skip_and_creates_nothing(farm: Farm) -> None:
+    farm.board.task("t_1", "running", NOW - timedelta(hours=2))
+    check = farm.checks()["OTLP spans arrive"]
+    assert check.status == "SKIP"
+    assert "optional" in check.detail
     assert not farm.db.exists()  # read-only: a missing store is not created
+
+
+def test_spans_that_stopped_fail_while_a_task_runs(farm: Farm) -> None:
+    farm.board.task("t_1", "running", NOW - timedelta(hours=2))
     farm.add_span(timedelta(hours=5))
     check = farm.checks()["OTLP spans arrive"]
     assert check.status == "FAIL"
     assert "5h old" in check.detail
-    assert "/v1/traces" in check.fix
+    assert "hermes-otel" in check.fix
+
+
+def test_spans_skipped_when_traces_are_disabled(farm: Farm) -> None:
     farm.extra = "[traces]\nenabled = false\n"
     assert farm.checks()["OTLP spans arrive"].status == "SKIP"
 
@@ -166,14 +187,13 @@ def test_worktrees_pass_and_fail(farm: Farm, tmp_path: Path) -> None:
         farm.board.task(task, "running", NOW - timedelta(hours=1))
         farm.board.update(task, workspace_kind="worktree", workspace_path=str(path))
     check = farm.checks()["worktrees readable"]
-    assert check.status == "PASS"
+    assert check.status == "FAIL"
     assert check.detail.startswith("1 ok, 1 failed")
     assert "git failed" in check.detail
-    farm.board.update("t_1", status="done")  # only the broken workspace is left
-    check = farm.checks()["worktrees readable"]
-    assert check.status == "FAIL"
-    assert check.detail.startswith("0 ok, 1 failed")
     assert "git_state = false" in check.fix
+    farm.board.update("t_2", status="done")  # only the good workspace is left
+    check = farm.checks()["worktrees readable"]
+    assert (check.status, check.detail) == ("PASS", "1 ok, 0 failed")
 
 
 def test_worktrees_skipped_without_worktrees_or_with_git_state_off(farm: Farm) -> None:
@@ -211,6 +231,12 @@ def test_prometheus_given_but_down_fails(farm: Farm) -> None:
     assert "--prometheus" in check.fix
 
 
+def test_prometheus_only_http_urls(farm: Farm) -> None:
+    check = farm.checks("file:///etc/passwd")["Prometheus reachable"]
+    assert check.status == "FAIL"
+    assert "only http" in check.detail
+
+
 def test_prometheus_url_from_environment(farm: Farm) -> None:
     found = run_checks(farm.config(), environ={"KELPIE_PROMETHEUS_URL": DOWN})
     assert {c.name: c.status for c in found}["Prometheus reachable"] == "FAIL"
@@ -222,7 +248,6 @@ def test_cli_prints_lines_and_exits_1_on_failure(
     farm.make_healthy()
     assert main(["--config", str(farm.config()), "doctor", "--prometheus", DOWN]) == 1
     out = capsys.readouterr().out
-    print(out)
     assert "PASS  config loads: " in out
     assert "FAIL  Prometheus reachable: " in out
     assert "\n  fix: start Prometheus" in out
