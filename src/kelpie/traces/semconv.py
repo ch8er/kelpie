@@ -36,7 +36,10 @@ Claude Code reports Anthropic usage, where ``input_tokens`` excludes cache reads
 ``kelpie.session_id``), else ``gen_ai.conversation.id``, else ``session.id`` (Claude Code).
 Span attributes are looked up first, then resource attributes, so an agent host can set
 them once with ``OTEL_RESOURCE_ATTRIBUTES``. A span without a link inherits its nearest
-ancestor's within the same request.
+ancestor's within the same request; after storing, ingest also fills links from stored
+parents and into stored children (:meth:`kelpie.core.spans.SpanStore.inherit_links`),
+because exporters send a trace in several requests. Spans that are dropped (not GenAI
+steps) are not stored, so that cross-request inheritance does not pass through them.
 
 **Privacy.** Kelpie never stores message content. Dropped before anything is kept:
 input/output messages, system instructions, tool definitions, tool call arguments and

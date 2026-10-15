@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,7 +24,7 @@ from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
 from kelpie.core.model import Span, SpanKind, SpanTotals
-from kelpie.core.spans import last_at
+from kelpie.core.spans import MAX_LINK_DEPTH, last_at
 from kelpie.core.states import OpenState
 
 _V1 = """
@@ -386,8 +386,10 @@ class SqliteSpanStore:
             "SELECT session_id, MAX(task_id) AS task_id, COUNT(*) AS spans,"
             " SUM(kind = 'llm') AS llm_calls, SUM(kind = 'tool') AS tool_calls,"
             " SUM(kind = 'tool' AND outcome = 'error') AS tool_errors,"
-            " SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,"
-            " SUM(cached_tokens) AS cached_tokens, MIN(start) AS first_start,"
+            " SUM(CASE WHEN kind = 'llm' THEN input_tokens ELSE 0 END) AS input_tokens,"
+            " SUM(CASE WHEN kind = 'llm' THEN output_tokens ELSE 0 END) AS output_tokens,"
+            " SUM(CASE WHEN kind = 'llm' THEN cached_tokens ELSE 0 END) AS cached_tokens,"
+            " MIN(start) AS first_start,"
             " MAX(last_at) AS last_end"
             " FROM spans WHERE last_at >= ? AND session_id IS NOT NULL AND session_id != ''"
             " GROUP BY session_id ORDER BY session_id"
@@ -437,3 +439,28 @@ class SqliteSpanStore:
     def count(self) -> int:
         with self._lock:
             return int(self._db.execute("SELECT COUNT(*) FROM spans").fetchone()[0])
+
+    def inherit_links(self, trace_ids: Collection[str]) -> int:
+        """One UPDATE per tree level and batch of traces (correlated subqueries rather than
+        ``UPDATE ... FROM``, which older SQLite builds lack)."""
+        ids = sorted(set(trace_ids))
+        updated = 0
+        parent = "p.trace_id = spans.trace_id AND p.span_id = spans.parent_id"
+        for i in range(0, len(ids), self._batch):
+            chunk = ids[i : i + self._batch]
+            sql = (
+                "UPDATE spans SET"
+                f" task_id = COALESCE(task_id, (SELECT p.task_id FROM spans p WHERE {parent})),"
+                " session_id = COALESCE(session_id,"
+                f" (SELECT p.session_id FROM spans p WHERE {parent}))"
+                f" WHERE trace_id IN ({', '.join('?' * len(chunk))})"
+                " AND parent_id IS NOT NULL AND EXISTS (SELECT 1 FROM spans p WHERE"
+                f" {parent} AND ((spans.task_id IS NULL AND p.task_id IS NOT NULL)"
+                " OR (spans.session_id IS NULL AND p.session_id IS NOT NULL)))"
+            )
+            for _ in range(MAX_LINK_DEPTH):
+                n = self._write_count(sql, tuple(chunk))
+                if not n:
+                    break
+                updated += n
+        return updated

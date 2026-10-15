@@ -120,6 +120,8 @@ class TraceIngest:
         mapped = map_spans(decoded.spans, self.options)
         try:
             added = self.store.append_spans(mapped.spans, self.clock())
+            if mapped.spans:
+                self.store.inherit_links({s.trace_id for s in mapped.spans})
         except Exception as exc:  # the store is down: let the exporter retry
             log.error("cannot store %d spans: %s", len(mapped.spans), exc)
             return _error(503, encoding, otlp.UNAVAILABLE, "span store unavailable")

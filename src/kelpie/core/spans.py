@@ -11,7 +11,7 @@ retention both use it, so a long session span stays visible while it is still ru
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Protocol
@@ -49,9 +49,23 @@ class SpanStore(Protocol):
 
     def count(self) -> int: ...
 
+    def inherit_links(self, trace_ids: Collection[str]) -> int:
+        """Fill a missing ``task_id``/``session_id`` from the parent span, for stored spans
+        of these traces, down to every descendant. Exporters send a trace in several
+        requests (a child usually ends, and is exported, before its parent), so linkage
+        within one request is not enough. Returns the number of updates (0: nothing new)."""
+        ...
+
+
+MAX_LINK_DEPTH = 32  # parent chains deeper than this are not followed
+
 
 def totals(spans: Iterable[Span]) -> tuple[SpanTotals, ...]:
-    """Aggregate spans per session (spans without a session are left out), sorted by id."""
+    """Aggregate spans per session (spans without a session are left out), sorted by id.
+
+    Tokens are summed over LLM spans only: an agent or workflow span may repeat the usage
+    of its model calls, and counting both would double the session's tokens.
+    """
     acc: dict[str, _Acc] = {}
     for span in spans:
         if not span.session_id:
@@ -68,6 +82,7 @@ class _Acc:
     def add(self, span: Span) -> None:
         t = self.total or SpanTotals(session_id=span.session_id or "")
         end = last_at(span)
+        llm = span.kind is SpanKind.LLM
         self.total = replace(
             t,
             task_id=max(filter(None, (t.task_id, span.task_id)), default=None),
@@ -75,9 +90,9 @@ class _Acc:
             llm_calls=t.llm_calls + (span.kind is SpanKind.LLM),
             tool_calls=t.tool_calls + (span.kind is SpanKind.TOOL),
             tool_errors=t.tool_errors + (span.kind is SpanKind.TOOL and span.outcome == "error"),
-            input_tokens=t.input_tokens + span.input_tokens,
-            output_tokens=t.output_tokens + span.output_tokens,
-            cached_tokens=t.cached_tokens + span.cached_tokens,
+            input_tokens=t.input_tokens + llm * span.input_tokens,
+            output_tokens=t.output_tokens + llm * span.output_tokens,
+            cached_tokens=t.cached_tokens + llm * span.cached_tokens,
             first_start=min(span.start, t.first_start or span.start),
             last_end=max(end, t.last_end or end),
         )
@@ -125,3 +140,27 @@ class MemorySpanStore:
     def count(self) -> int:
         with self._lock:
             return len(self._spans)
+
+    def inherit_links(self, trace_ids: Collection[str]) -> int:
+        wanted = set(trace_ids)
+        updated: set[SpanKey] = set()
+        with self._lock:
+            for _ in range(MAX_LINK_DEPTH):
+                changed = False
+                for key, span in list(self._spans.items()):
+                    if span.trace_id not in wanted or not span.parent_id:
+                        continue
+                    if span.task_id and span.session_id:
+                        continue
+                    parent = self._spans.get((span.trace_id, span.parent_id))
+                    if parent is None:
+                        continue
+                    task = span.task_id or parent.task_id
+                    session = span.session_id or parent.session_id
+                    if (task, session) != (span.task_id, span.session_id):
+                        self._spans[key] = replace(span, task_id=task, session_id=session)
+                        updated.add(key)
+                        changed = True
+                if not changed:
+                    break
+        return len(updated)
