@@ -244,15 +244,36 @@ Notes:
   run's session span when no tool call follows them.
 - If Hermes also exports OTLP spans to Kelpie (for example through the hermes-otel plugin),
   a tool call reported both ways is kept once: the OTLP span, completed with the hook's
-  `args_hash` and redacted `command` so rules 2 and 10 still see them. Pairs are matched one
-  to one by session and `tool_call_id`, else by session, tool, `args_hash` and a start or
-  end within 2 seconds (`kelpie_snapshot_hook_spans_merged` shows how many were folded in
-  the last tick). This only works when the OTLP spans carry the same session id as the
-  hooks, `hermes-run-<run id>`. Hermes gives each kanban worker `HERMES_KANBAN_RUN_ID` and
-  `HERMES_KANBAN_TASK`; export, in whatever starts the worker,
-  `OTEL_RESOURCE_ATTRIBUTES="kelpie.session_id=hermes-run-${HERMES_KANBAN_RUN_ID},kelpie.task_id=${HERMES_KANBAN_TASK}"`.
-  Not verified: that hermes-otel builds its OpenTelemetry resource with the SDK defaults
-  (which read `OTEL_RESOURCE_ATTRIBUTES`), and that your Hermes setup lets you wrap the
-  worker command. Without a matching session id both copies stay in the snapshot.
+  `args_hash`, redacted `command` and session so rules 2 and 10 still see them. Pairs are
+  matched one to one by `tool_call_id` alone (whatever session the OTLP span names), else by
+  session, tool, `args_hash` and a start or end within 2 seconds
+  (`kelpie_snapshot_hook_spans_merged` shows how many were folded in the last tick).
+
+### hermes-otel
+
+Read from the hermes-otel source (`briancaffey/hermes-otel` at `297569e`, 2026-10-14), not
+from a live run:
+
+- **Session id.** Spans carry `session.id` (and `session_id`) = Hermes' own chat session
+  id, not the Kanban run; `gen_ai.conversation.id` is set on log events only. So OTLP spans
+  never carry Kelpie's `hermes-run-<run id>`, and no environment setup is needed for
+  de-duplication: matching uses the tool call id.
+- **Tool call id.** Tool spans carry `gen_ai.tool.call.id` = Hermes' `tool_call_id`. On an
+  older Hermes core that does not pass one, hermes-otel falls back to the hook's `task_id`
+  (the same for every call in the session), while Kelpie's hook has no id; those calls then
+  fall back to session/tool/`args_hash` matching, which fails because the sessions differ,
+  so they are counted twice. Use a Hermes core that passes `tool_call_id`.
+- **Task and run.** In a Kanban worker the resource carries `hermes.kanban.task_id`,
+  `hermes.kanban.run_id` and `hermes.kanban.board` (from `HERMES_KANBAN_*`). To link OTLP
+  spans to board tasks, set `[traces] task_attribute = "hermes.kanban.task_id"`. The resource
+  is built with `Resource.create`, so `OTEL_RESOURCE_ATTRIBUTES` is merged in as well.
+- **Trace ids.** One trace per turn; in a Kanban worker the turn root's parent is the
+  dispatcher's claim span, passed through `TRACEPARENT`.
+- **Exporting to Kelpie.** A `type: otlp` backend in `~/.hermes/hermes_otel.yaml` with
+  `endpoint: http://<kelpie>:9464/v1/traces`, `headers: {Authorization: "Bearer <token>"}`,
+  and `metrics: false`, `logs: false` (Kelpie accepts traces only).
+- **Privacy.** hermes-otel sends tool argument previews (`input.value`,
+  `gen_ai.tool.call.arguments`) and message content; Kelpie hashes or drops them on ingest,
+  but anything forwarded from Kelpie keeps them (see the traces README).
 - Hook spans live in the snapshot only, not in the span store, so `span_totals` (per-session
   calls and tokens over 24 hours) count OTLP spans only.

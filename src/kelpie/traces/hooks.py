@@ -19,9 +19,10 @@ one task share a trace. Every hook span carries ``kelpie.source = "hooks"``.
 **No double counting.** A platform may report the same tool call through hooks and OTLP.
 :func:`merge_hook_spans` keeps one span per call: the OTLP span (it has timing and tokens),
 completed with what only the hook knows (``args_hash`` when OTLP has none, ``command`` and
-other hook attributes), so rules that read those still work. Pairs are matched one to one,
-within a session and tool: first by tool call id, then, when one side has no call id, by
-arguments hash (or no hash on the OTLP side) and a start or end within
+other hook attributes, and the session when OTLP names another or none), so rules that
+read those still work. Pairs are matched one to one: by tool call id alone, since exporters
+rarely carry Kelpie's session id; else, when one side has no call id, within a session and
+tool by arguments hash (or no hash on the OTLP side) and a start or end within
 :data:`MATCH_WINDOW`, nearest first. Two different call ids are never merged.
 """
 
@@ -189,12 +190,14 @@ def merge_hook_spans(spans: Sequence[Span]) -> Merged:
     if not hooks or not others:
         return Merged(tuple(spans), 0)
     # Bucket candidates so matching stays linear in practice, not hooks x OTLP spans.
-    by_call: dict[tuple[str | None, str], list[int]] = defaultdict(list)
+    # A call id is enough on its own: OTLP spans need not carry Kelpie's session id.
+    by_call: dict[str, list[int]] = defaultdict(list)
     by_tool: dict[tuple[str | None, str | None], _Times] = defaultdict(_Times)
     for o in others:
         if call := _call_id(spans[o]):
-            by_call[(spans[o].session_id, call)].append(o)
-        by_tool[(spans[o].session_id, spans[o].tool)].add(o, spans[o])
+            by_call[call].append(o)
+        if spans[o].session_id:
+            by_tool[(spans[o].session_id, spans[o].tool)].add(o, spans[o])
     for times in by_tool.values():
         times.sort()
     pairs: list[tuple[float, int, int]] = []
@@ -205,7 +208,7 @@ def merge_hook_spans(spans: Sequence[Span]) -> Merged:
         if (times := by_tool.get((hook.session_id, hook.tool))) is not None:
             candidates.update(times.near(hook))
         if call:
-            candidates.update(by_call.get((hook.session_id, call), ()))
+            candidates.update(by_call.get(call, ()))
         for o in candidates:
             distance = _distance(hook, spans[o])
             if distance is not None:
@@ -260,17 +263,19 @@ def _hook_tool(s: Span) -> bool:
 
 
 def _otlp_tool(s: Span) -> bool:
-    return s.kind is SpanKind.TOOL and not is_hook_span(s) and bool(s.session_id)
+    return s.kind is SpanKind.TOOL and not is_hook_span(s) and bool(s.session_id or _call_id(s))
 
 
 def _distance(hook: Span, other: Span) -> float | None:
     """How well two tool spans match: -1 for the same call id, else seconds apart; None
-    when they cannot be the same call."""
-    if hook.session_id != other.session_id:
-        return None
+    when they cannot be the same call. The same call id matches whatever the sessions say;
+    without call ids on both sides the session must agree."""
     a, b = _call_id(hook), _call_id(other)
     if a and b:
-        return -1.0 if a == b else None
+        same_tool = not (hook.tool and other.tool and hook.tool != other.tool)
+        return -1.0 if a == b and same_tool else None
+    if not other.session_id or hook.session_id != other.session_id:
+        return None
     if hook.tool != other.tool or not hook.tool:
         return None
     if other.args_hash and hook.args_hash != other.args_hash:
@@ -291,6 +296,8 @@ def _fold(otlp: Span, hook: Span) -> Span:
         args_hash=otlp.args_hash or hook.args_hash,
         tool=otlp.tool or hook.tool,
         task_id=otlp.task_id or hook.task_id,
+        session_id=hook.session_id
+        or otlp.session_id,  # the platform's run, not the exporter's chat
         attributes={**otlp.attributes, **extra},
     )
 
