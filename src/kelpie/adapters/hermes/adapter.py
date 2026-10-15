@@ -49,6 +49,13 @@ within ``lookback``::
 
 ``exit_reason`` is the outcome, followed by the run's error text when there is one.
 
+Progress note and git state. ``Session.summary`` is ``task_runs.summary``. The git fields
+(``last_commit``, ``last_commit_at``, ``branch``, ``changed_files``, ``dirty_worktree``) come
+from the workspace as it is now, so they go only on the latest run of a task that is not
+finished and whose ``workspace_kind`` is ``worktree`` or ``dir`` with an existing absolute
+``workspace_path``; see :mod:`kelpie.adapters.hermes.git_state` (read-only, with a timeout,
+any failure leaves a field ``None``). ``branch`` is ``tasks.branch_name``, else git's.
+
 Liveness. ``Session.last_heartbeat`` is the latest of the run's ``last_heartbeat_at``, the
 task's ``last_heartbeat_at`` (when the run is the task's ``current_run_id``) and the newest
 spool tool call of the run. A valid Hermes claim counts as a heartbeat: an open run that is the
@@ -65,11 +72,12 @@ import json
 import logging
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from kelpie.adapters.hermes.git_state import DEFAULT_TIMEOUT, read_git_state
 from kelpie.core.model import (
     Block,
     Dependency,
@@ -89,7 +97,10 @@ log = logging.getLogger(__name__)
 DEFAULT_DB = Path("~/.hermes/kanban.db")
 DEFAULT_SPOOL = Path("~/.hermes/kelpie/spool.jsonl")
 DEFAULT_LOOKBACK = timedelta(hours=24)
+DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
 BUSY_TIMEOUT_MS = 5000
+# ``tasks.workspace_kind`` values that name a directory of the task's own (``scratch`` does not).
+WORKSPACE_KINDS = ("worktree", "dir")
 
 NOT_IMPLEMENTED = "Hermes actions are not implemented yet; run Kelpie in observe or suggest mode"
 
@@ -168,6 +179,17 @@ def _col(row: sqlite3.Row, name: str) -> Any:
     return row[name] if name in row.keys() else None  # noqa: SIM118
 
 
+def _workspace(row: sqlite3.Row) -> Path | None:
+    """The task's own directory, if it is one that exists on this host."""
+    if _col(row, "workspace_kind") not in WORKSPACE_KINDS:
+        return None
+    raw = str(_col(row, "workspace_path") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() and path.is_dir() else None
+
+
 def _block_text(row: sqlite3.Row, status_event: sqlite3.Row | None, block_event: Any) -> str:
     if block_event is not None:  # a block event at/after the block's start: current evidence
         payload = _payload(block_event["payload"])
@@ -200,6 +222,8 @@ class HermesAdapter:
     db_path: Path = DEFAULT_DB
     spool: Path | None = DEFAULT_SPOOL  # None: no hook data, no spans
     lookback: timedelta = DEFAULT_LOOKBACK
+    git_state: bool = True  # read the git state of the workspaces of live tasks
+    git_timeout: timedelta = DEFAULT_GIT_TIMEOUT  # per git call
     name: str = "hermes"
 
     def __post_init__(self) -> None:
@@ -282,6 +306,8 @@ class HermesAdapter:
                 sessions, profiles = self._sessions(conn, ids, rows, cutoff, now, beats)
         except sqlite3.Error as exc:
             raise HermesError(f"cannot read Hermes kanban database {self.db_path}: {exc}") from exc
+        if self.git_state:  # outside the read transaction: git may be slow
+            sessions = self._with_git_state(sessions, tasks, rows)
         owners = tuple(
             Owner(id=p, role=p, kind=OwnerKind.AGENT) for p in sorted(owner_ids | profiles)
         )
@@ -417,9 +443,44 @@ class HermesAdapter:
                     final_status=OUTCOME_STATUS.get(outcome) if outcome else None,
                     exit_reason=reason[:300] or None,
                     last_heartbeat=max((b for b in beats if b is not None), default=None),
+                    summary=str(_col(r, "summary") or "").strip() or None,
                 )
             )
         return tuple(sessions), profiles
+
+    def _with_git_state(
+        self,
+        sessions: tuple[Session, ...],
+        tasks: Sequence[Task],
+        rows: Mapping[str, sqlite3.Row],
+    ) -> tuple[Session, ...]:
+        """Attach the workspace's git state to the latest run of each live task.
+
+        Git describes the worktree as it is now, so older runs of a task get nothing, and
+        neither do finished tasks: their worktree says nothing about a session any more.
+        """
+        live = {t.id for t in tasks if not t.status.is_terminal}
+        latest: dict[str, Session] = {}
+        for s in sessions:  # run ids only grow, and sessions come in run id order
+            if s.task_id in live:
+                latest[s.task_id] = s
+        timeout = self.git_timeout.total_seconds()
+        attached: dict[str, Session] = {}
+        for task_id, s in latest.items():
+            row = rows[task_id]
+            if (path := _workspace(row)) is None:
+                continue
+            branch = str(_col(row, "branch_name") or "").strip() or None
+            state = read_git_state(path, timeout, branch=branch)
+            attached[s.id] = replace(
+                s,
+                last_commit=state.last_commit,
+                last_commit_at=state.last_commit_at,
+                branch=state.branch,
+                changed_files=state.changed_files,
+                dirty_worktree=state.dirty,
+            )
+        return tuple(attached.get(s.id, s) for s in sessions)
 
     # --- hooks spool ---------------------------------------------------------------------
 

@@ -49,9 +49,17 @@ class HermesSettings:
     spool: Path | None = hermes.DEFAULT_SPOOL  # None: spool reading disabled
     lookback: timedelta = hermes.DEFAULT_LOOKBACK
     enabled: bool = True
+    git_state: bool = True  # read git state of the workspaces of live tasks
+    git_timeout: timedelta = hermes.DEFAULT_GIT_TIMEOUT  # per git call
 
     def build(self) -> hermes.HermesAdapter:
-        return hermes.HermesAdapter(db_path=self.db_path, spool=self.spool, lookback=self.lookback)
+        return hermes.HermesAdapter(
+            db_path=self.db_path,
+            spool=self.spool,
+            lookback=self.lookback,
+            git_state=self.git_state,
+            git_timeout=self.git_timeout,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +118,14 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
     section = adapters["hermes"]
     if not isinstance(section, Mapping):
         raise ConfigError("[adapters.hermes] must be a table")
-    if extra := set(section) - {"db_path", "spool", "lookback", "enabled"}:
+    if extra := set(section) - {
+        "db_path",
+        "spool",
+        "lookback",
+        "enabled",
+        "git_state",
+        "git_timeout",
+    }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     paths: dict[str, Path | None] = {}
     for key, default in (("db_path", hermes.DEFAULT_DB), ("spool", hermes.DEFAULT_SPOOL)):
@@ -133,7 +148,16 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
     enabled = section.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError("[adapters.hermes] enabled must be true or false")
-    return HermesSettings(db_path, paths["spool"], lookback, enabled)
+    git_state = section.get("git_state", True)
+    if not isinstance(git_state, bool):
+        raise ConfigError("[adapters.hermes] git_state must be true or false")
+    try:
+        git_timeout = parse_duration(section.get("git_timeout", hermes.DEFAULT_GIT_TIMEOUT))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ConfigError(f"[adapters.hermes] git_timeout: {exc}") from exc
+    if git_timeout <= timedelta(0):
+        raise ConfigError("[adapters.hermes] git_timeout must be positive")
+    return HermesSettings(db_path, paths["spool"], lookback, enabled, git_state, git_timeout)
 
 
 @dataclass(frozen=True, slots=True)

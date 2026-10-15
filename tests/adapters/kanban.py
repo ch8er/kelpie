@@ -27,7 +27,10 @@ CREATE TABLE tasks (
     block_kind TEXT,
     claim_expires INTEGER,
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    last_failure_error TEXT
+    last_failure_error TEXT,
+    workspace_kind TEXT NOT NULL DEFAULT 'scratch',
+    workspace_path TEXT,
+    branch_name TEXT
 );
 CREATE TABLE task_links (
     parent_id TEXT NOT NULL,
@@ -135,10 +138,11 @@ class Board:
         heartbeat: datetime | None = None,
         outcome: str | None = None,
         error: str | None = None,
+        summary: str | None = None,
     ) -> int:
         cur = self.conn.execute(
             "INSERT INTO task_runs (task_id, profile, status, last_heartbeat_at, started_at,"
-            " ended_at, outcome, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " ended_at, outcome, summary, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id,
                 profile,
@@ -147,6 +151,7 @@ class Board:
                 epoch(started),
                 epoch(ended) if ended else None,
                 outcome,
+                summary,
                 error,
             ),
         )

@@ -14,6 +14,8 @@ db_path = "~/.hermes/kanban.db"          # named boards: ~/.hermes/kanban/boards
 spool = "~/.hermes/kelpie/spool.jsonl"   # written by the plugin below; false = do not read one
 lookback = "24h"                         # runs, spans and finished tasks older than this are left out
 enabled = true                           # default when the section exists
+git_state = true                         # read git state of live task workspaces (see below)
+git_timeout = "5s"                       # limit for each git call
 
 # Hermes tolerates heartbeats up to an hour old; Kelpie's default is 30 minutes.
 [engine.rules.exit_contract]
@@ -147,6 +149,32 @@ Liveness (`Session.last_heartbeat`): the latest of the run's `last_heartbeat_at`
 `last_heartbeat_at` (for the task's current run) and the newest spool tool call of the run. A
 valid Hermes claim counts as a heartbeat: an open run that is the task's `current_run_id` with
 `claim_expires` in the future is alive as of the snapshot.
+
+### Progress note and git state
+
+`Session.summary` is `task_runs.summary` of the run (empty means none). The `checkpoints`
+rule needs more than that: the last commit, the branch and the uncommitted files of the
+session. Hermes does not store those, so Kelpie asks git (`git_state = true`, the default).
+
+Git describes the workspace as it is now, so it is attached only to the **latest run of a
+task that is not finished** (not `done`, not `archived`), and only when the task has
+`workspace_kind` `worktree` or `dir` and a `workspace_path` that is an existing absolute
+directory on the Kelpie host. `scratch` workspaces and older runs get nothing.
+
+| `Session` field | Source |
+| --- | --- |
+| `last_commit` | `git -C <path> rev-parse --short HEAD` |
+| `last_commit_at` | `git -C <path> log -1 --format=%cI` (committer date) |
+| `changed_files`, `dirty_worktree` | `git --no-optional-locks -C <path> status --porcelain`: number of lines (untracked files count), dirty when above 0 |
+| `branch` | `tasks.branch_name`, else `git -C <path> rev-parse --abbrev-ref HEAD` (a detached `HEAD` gives none) |
+
+Git is invoked read-only: only the commands above, `status` with `--no-optional-locks` so
+that it does not refresh the index under a running worker, `core.fsmonitor` switched off, no
+prompts, no pager. Each call is limited by `git_timeout`. A failure (not a repository, no
+commits yet, git missing, timeout, a directory owned by another user) leaves that field
+unset and never fails the snapshot; after a timeout or a missing git the other calls for
+that workspace are skipped. Set `git_state = false` to turn all of it off. Cost: up to four
+short git processes per live task per snapshot.
 
 Notes:
 
