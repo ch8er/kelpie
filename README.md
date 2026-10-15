@@ -195,13 +195,33 @@ farm throughput metrics from traces.
 
 ## Reporting (planned)
 
-- **Real-time alerts** to Slack (P0) or Telegram (P1): only actionable items, always stating what
-  Kelpie already did by itself; duplicate alerts are merged.
+- **Real-time alerts** to Telegram (Slack follows on the same delivery layer): only actionable
+  items, always stating what Kelpie already did by itself; duplicate alerts are merged.
+  See [Alerts](#alerts).
 - **Daily report**: cost of chaos (idle hours, tokens burned on restarts), what Kelpie
   fixed by itself, what needs a human decision, before/after effect of yesterday's fixes,
   top 3 optimization recommendations.
 - **Dashboards**: no custom UI. Kelpie exposes Prometheus metrics on `/metrics`, Grafana
   shows them, traces open in Langfuse. CLI: `kelpie status` and `kelpie report`.
+
+## Alerts
+
+Alerts are off until a channel is configured. Each `[[alerts.channels]]` entry has its own
+`min_severity`; an alert goes to every channel it reaches. Delivery runs on a background
+worker per channel (bounded queue, retries on 429 and 5xx), so a slow chat service never
+stalls the control loop; drops are counted in `kelpie_alerts_dropped_total`.
+
+```toml
+[[alerts.channels]]
+type = "telegram"
+token_env = "KELPIE_TELEGRAM_TOKEN"   # the bot token is read from this variable
+chat_id = "-1001234567890"
+min_severity = "warning"
+```
+
+The token is never logged or shown, and a missing one stops Kelpie at startup. Every message
+states the transition (new, still open, changed, resolved) and what Kelpie already did.
+See `kelpie.example.toml`.
 
 ## Quickstart
 

@@ -169,8 +169,11 @@ already did by itself; duplicates are merged instead of repeated.
 - [ ] Untrusted task text is escaped before it reaches any alerter
 
 ### core: Slack alerter
-labels: P0, week-1, area:core
-Implement the `Alerter` protocol for Slack incoming webhooks on top of the alert pipeline.
+labels: P0, area:core
+Add Slack incoming webhooks as a second channel on the shared delivery layer
+(`kelpie.alerts`, built with the Telegram alerter): `type = "slack"` in `[[alerts.channels]]`,
+webhook URL from an environment variable. Telegram comes first; Slack may follow on the
+subscription.
 
 **Acceptance criteria**
 - [ ] Severity is reflected in the message (info / warning / critical)
@@ -748,15 +751,18 @@ shared-file conflicts: the hot files, and a warning to in-progress tasks touchin
 - [ ] Configurable allowlist of files that are expected to be shared
 - [ ] Fixtures: existing `07-shared-file-conflicts.yaml`; new `07-disjoint-files.yaml`
 
-### core: Telegram alerter
-labels: P1, area:core
-Implement the `Alerter` protocol for Telegram (bot token and chat id) on top of the alert
-pipeline, with the same content as the Slack alerter.
+### core: Telegram alerter and the shared delivery layer
+labels: P0, week-2, area:core
+Implement the `Alerter` protocol as a router over channels (`kelpie.alerts`): per channel a
+minimum severity, a bounded queue with one worker, retries on 429 and 5xx, and drop counters.
+Telegram (bot token and chat id) is the first channel.
 
 **Acceptance criteria**
-- [ ] Severity, what Kelpie already did and what needs a human are shown
-- [ ] Message length and formatting limits handled; untrusted text escaped
-- [ ] Tests mock HTTP; no network access
+- [x] Severity, the transition, what Kelpie already did and what needs a human are shown
+- [x] Message length limit handled; untrusted text sent as plain text
+- [x] The bot token never appears in logs, errors, reprs, metrics or `kelpie status`
+- [x] Delivery never blocks or crashes the control loop; drops are counted per channel
+- [x] Tests use a local fake server; no network access
 
 ### project: check the Kelpie name (domains and USPTO)
 labels: P1, area:project

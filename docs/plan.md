@@ -133,7 +133,7 @@ Metrics: tasks per hour per role, task time by stage (queue, review, waiting for
 
 ### Reporting
 
-- **Real-time alerts** to Slack (P0) or Telegram (P1) — only actionable items, always stating what Kelpie already did by itself. Duplicate alerts are merged.
+- **Real-time alerts** to Telegram and Slack (both P0), through one delivery layer: a channel is a config entry with its own minimum severity, and an alert goes to every channel that passes. Only actionable items, always stating what Kelpie already did by itself. Duplicate alerts are merged. Telegram comes first; Slack may follow on the subscription.
   Alerts about a lasting condition (an orphaned task, a block nothing will clear) go out on transitions only: when it starts, again at escalation thresholds (4h → 12h → 24h after the first alert) or when it gets worse, and a short "resolved" when it clears. Conditions still open are listed in the daily report.
 - **Daily report** — cost of chaos (idle hours, tokens burned on restarts), what Kelpie fixed by itself, what needs a human decision, before/after effect of yesterday's fixes, top 3 optimization recommendations.
 - **Dashboards** — no custom UI in the MVP. Kelpie exposes Prometheus metrics on `/metrics`, Grafana shows them, and traces open in Langfuse. A CLI: `kelpie status` (P0), `kelpie report`.
@@ -165,7 +165,7 @@ The credit goes to building Kelpie in Claude Code cloud sessions: it is spent fi
 | Week 1 (done Oct 15) | Engine safety (A–D), core, traces and checkpoints, Hermes adapter, rules 1–4 | credit, $112 |
 | Week 2 | Rules 5–7, 9–11, budgets and spend, resource reading via Prometheus, condition connectors, live run on our farm | credit |
 | Week 3 | "Cost of chaos" report with dollars, basic token optimization, throughput metrics, documentation | credit, then subscription |
-| After the credit | The rest of the open core, in this order: stop patterns and `kelpie why`, rule 13, evidence for "done", full token optimization, Telegram alerter, Claude Code adapter, return causes, LLM root-cause section | subscription |
+| After the credit | The rest of the open core, in this order: stop patterns and `kelpie why`, rule 13, evidence for "done", full token optimization, Claude Code adapter, return causes, LLM root-cause section | subscription |
 | Paid tier | Fleet dashboard, hosting, billing | only after the 10 conversations confirm demand |
 
 On the subscription, development sessions share limits with any farm that runs on the same subscription: run them when the farm is idle, or use a separate account.
@@ -222,4 +222,4 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Documentation and publication of the open core
 - [ ] 10 conversations with farm owners
 
-Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1 item (the rules backlog, `kelpie why`, the Telegram alerter, the Claude Code adapter, return causes, the LLM root-cause section, the naming check) follows weeks 2–3 on the subscription, in the order given in the budget table.
+Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1 item (the rules backlog, `kelpie why`, the Claude Code adapter, return causes, the LLM root-cause section, the naming check) follows weeks 2–3 on the subscription, in the order given in the budget table.

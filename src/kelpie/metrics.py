@@ -107,6 +107,10 @@ class Metrics:
         self.provider_status: dict[str, ProviderStatus] = {}
         self.provider_failures: Counter[tuple[str, str]] = Counter()
         self.provider_hits: Counter[str] = Counter()
+        self.alert_channels: tuple[str, ...] = ()
+        self.alerts_sent: Counter[str] = Counter()
+        self.alerts_failed: Counter[tuple[str, str]] = Counter()
+        self.alerts_dropped: Counter[tuple[str, str]] = Counter()
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
@@ -193,6 +197,24 @@ class Metrics:
             self.resource_up = False
             self.resource_readings = 0
             self.resource_failures[cause] += 1
+
+    # --- alert channels (kelpie.alerts.delivery.AlertObserver) -------------------------
+
+    def set_alert_channels(self, names: Iterable[str]) -> None:
+        with self._lock:
+            self.alert_channels = tuple(names)
+
+    def alert_sent(self, channel: str) -> None:
+        with self._lock:
+            self.alerts_sent[channel] += 1
+
+    def alert_failed(self, channel: str, cause: str) -> None:
+        with self._lock:
+            self.alerts_failed[(channel, cause)] += 1
+
+    def alert_dropped(self, channel: str, reason: str) -> None:
+        with self._lock:
+            self.alerts_dropped[(channel, reason)] += 1
 
     # --- LLM providers (kelpie.connectors.llm_quotas.source.ProbeObserver) -------------
 
@@ -434,6 +456,8 @@ class Metrics:
                 self._render_resources(metric)
             if self.providers:
                 self._render_providers(metric)
+            if self.alert_channels:
+                self._render_alerts(metric)
             return "\n".join(out) + "\n"
 
     def _render_resources(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
@@ -456,6 +480,35 @@ class Metrics:
             [
                 f"kelpie_resource_read_failures_total{_labels(cause=c)} {n}"
                 for c, n in sorted(self.resource_failures.items())
+            ],
+        )
+
+    def _render_alerts(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        metric(
+            "kelpie_alerts_sent_total",
+            "counter",
+            "Alerts delivered, by channel.",
+            [
+                f"kelpie_alerts_sent_total{_labels(channel=n)} {self.alerts_sent.get(n, 0)}"
+                for n in self.alert_channels
+            ],
+        )
+        metric(
+            "kelpie_alerts_failed_total",
+            "counter",
+            "Alerts that could not be delivered after retries, by channel and cause.",
+            [
+                f"kelpie_alerts_failed_total{_labels(channel=n, cause=c)} {v}"
+                for (n, c), v in sorted(self.alerts_failed.items())
+            ],
+        )
+        metric(
+            "kelpie_alerts_dropped_total",
+            "counter",
+            "Alerts dropped before delivery (queue_full, duplicate), by channel and reason.",
+            [
+                f"kelpie_alerts_dropped_total{_labels(channel=n, reason=r)} {v}"
+                for (n, r), v in sorted(self.alerts_dropped.items())
             ],
         )
 

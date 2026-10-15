@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from kelpie.adapters.hermes import adapter as hermes
+from kelpie.alerts.config import AlertSettings, load_alerts
+from kelpie.alerts.delivery import Delivery
 from kelpie.connectors.github import (
     BlockConditionPattern,
     ConditionSync,
@@ -111,6 +113,7 @@ class Settings:
     block_conditions: tuple[BlockConditionPattern, ...] = ()
     human_tasks: HumanTaskSettings | None = None  # None: no [connectors.human_tasks]
     llm_quotas: LlmQuotaSettings | None = None  # [connectors.llm_quotas]
+    alerts: AlertSettings = field(default_factory=AlertSettings)  # [alerts]
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -140,6 +143,7 @@ def load_settings(path: Path | None) -> Settings:
         "resources",
         "connectors",
         "block_conditions",
+        "alerts",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -168,6 +172,10 @@ def load_settings(path: Path | None) -> Settings:
     if budgets.budgets and not traces.enabled:
         raise ConfigError("[[budgets]] read spend from traces: they need [traces] enabled")
     github, block_conditions, human_tasks, llm_quotas = _load_connectors(data)
+    try:
+        alerts = load_alerts(data.get("alerts"))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return Settings(
         github=github,
         human_tasks=human_tasks,
@@ -180,6 +188,7 @@ def load_settings(path: Path | None) -> Settings:
         budgets=budgets,
         resources=resources,
         llm_quotas=llm_quotas,
+        alerts=alerts,
     )
 
 
@@ -603,9 +612,12 @@ class App:
     ingest: TraceIngest | None = None  # None: [traces] enabled = false
     retention: SpanRetention | None = None
     forwarder: Forwarder | None = None
+    alerts: Delivery | None = None  # [[alerts.channels]]
 
     def close(self) -> None:
         self.loop.stop()
+        if self.alerts is not None:
+            self.alerts.close()
         if self.forwarder is not None:
             self.forwarder.close()
         # Closing the span store first stops a running prune at its next batch.
@@ -711,6 +723,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         prometheus = settings.resources.prometheus
         reader = prometheus.build() if prometheus is not None else None
         quotas = settings.llm_quotas.build() if settings.llm_quotas is not None else None
+        metrics = Metrics()
+        if problems := settings.alerts.problems():  # the delivery threads start last
+            raise ValueError(problems[0])
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     if prometheus is not None and prometheus.sends_token_in_clear():
@@ -718,13 +733,13 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "[resources.prometheus] sends a bearer token over plain http to %s; use https",
             prometheus.display_url,
         )
-    # No alerter is wired yet: an effect nobody can carry out turns into an alert, and the
-    # defaults (dry-run, observe) send nothing. The only connector action is cancel_build.
+    # Without [[alerts.channels]] there is no alerter: an effect nobody can carry out turns
+    # into an alert that is only logged. The defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
     _refuse_unimplemented_actions(settings, loaded, adapters)
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
-    metrics = Metrics()
+    metrics.set_alert_channels(c.name for c in settings.alerts.channels)
     enrich, connectors = _connector_steps(settings, metrics, clock)
     engine = Engine(
         loaded.rules,
@@ -748,7 +763,15 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             adapters, metrics, clock, resources=reader, enrich=enrich, providers=quotas
         )
         loop = ControlLoop(engine, source, metrics)
-        return App(settings, loaded, engine, loop, metrics, store)
+        return App(
+            settings,
+            loaded,
+            engine,
+            loop,
+            metrics,
+            store,
+            alerts=_start_alerts(settings, engine, metrics),
+        )
     span_store = _open_span_store(settings.db_path)
     metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
     metrics.set_span_rows_source(span_store.count)
@@ -795,9 +818,32 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         providers=quotas,
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
+    alerts = _start_alerts(settings, engine, metrics)
     return App(
-        settings, loaded, engine, loop, metrics, store, span_store, ingest, retention, forwarder
+        settings,
+        loaded,
+        engine,
+        loop,
+        metrics,
+        store,
+        span_store,
+        ingest,
+        retention,
+        forwarder,
+        alerts,
     )
+
+
+def _start_alerts(settings: Settings, engine: Engine, metrics: Metrics) -> Delivery | None:
+    """Start the alert channels (their worker threads) and give the engine its alerter. Done
+    last in ``build_app``, so a startup error before this point leaves no thread behind."""
+    try:
+        alerts = settings.alerts.build(metrics)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if alerts is not None:
+        engine.alerter = alerts.alerter()
+    return alerts
 
 
 def _connector_steps(
@@ -1101,6 +1147,16 @@ def _providers_status(quotas: LlmQuotaSettings | None) -> str:
     return ", ".join(parts)
 
 
+def _alerts_status(alerts: AlertSettings) -> list[str]:
+    """Channels, never their secrets (only the variable names)."""
+    if not alerts.channels:
+        return ["alerts:   disabled (no [[alerts.channels]])"]
+    problems = alerts.problems()
+    lines = [f"alerts:   {c.name}: {c.describe()}" for c in alerts.channels]
+    lines += [f"alerts:   NOT ready: {p}" for p in problems]
+    return lines
+
+
 def render_status(
     settings: Settings,
     loaded: LoadedRules,
@@ -1120,6 +1176,7 @@ def render_status(
         *_github_status(settings),
         *_human_tasks_status(settings),
         f"providers: {_providers_status(settings.llm_quotas)}",
+        *_alerts_status(settings.alerts),
         "",
         f"{'#':>3}  {'rule':<17} {'prio':<4}  {'status':<16} mode",
     ]
