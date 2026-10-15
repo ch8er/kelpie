@@ -298,6 +298,14 @@ def test_execute_after_one_evaluate_resolves_only_once() -> None:
     assert e.execute([], Snapshot(now=T0 + 2 * H)) == []
 
 
+def test_state_escalations_default_from_mapping() -> None:
+    # Regression: reading the default through the slotted class gave a member descriptor,
+    # and the state store failed on every tick when the key was absent from the config.
+    config = EngineConfig.from_mapping({})
+    assert config.state_escalations == (4 * H, 12 * H, 24 * H)
+    assert config.state_escalations == EngineConfig().state_escalations
+
+
 def test_state_escalations_config() -> None:
     config = EngineConfig.from_mapping({"state_escalations": ["1h", "6h"]})
     assert config.state_escalations == (H, 6 * H)

@@ -10,6 +10,14 @@ from typing import Any
 
 from kelpie.core.serde import parse_duration
 
+# Module constant, not a class attribute: with slots=True a field's class attribute is a
+# member descriptor, so `cls.state_escalations` is not the default value.
+DEFAULT_STATE_ESCALATIONS: tuple[timedelta, ...] = (
+    timedelta(hours=4),
+    timedelta(hours=12),
+    timedelta(hours=24),
+)
+
 
 class Mode(StrEnum):
     """How far a rule may go.
@@ -42,11 +50,7 @@ class EngineConfig:
     once_window: timedelta = timedelta(days=7)
     once_attempts: int = 3
     # Long-lived state alerts re-fire only when their age passes one of these.
-    state_escalations: tuple[timedelta, ...] = (
-        timedelta(hours=4),
-        timedelta(hours=12),
-        timedelta(hours=24),
-    )
+    state_escalations: tuple[timedelta, ...] = DEFAULT_STATE_ESCALATIONS
     # A state no rule reported for this long is resolved (absorbs one-tick gaps).
     state_resolve_after: timedelta = timedelta(minutes=10)
     default_mode: Mode = Mode.OBSERVE
@@ -110,7 +114,7 @@ class EngineConfig:
             raise ValueError("engine.once_attempts must be a positive integer")
         if once_attempts < 1:
             raise ValueError("engine.once_attempts must be a positive integer")
-        escalations = cls.state_escalations
+        escalations = DEFAULT_STATE_ESCALATIONS
         if "state_escalations" in data:
             raw = data["state_escalations"]
             if not isinstance(raw, list | tuple):
