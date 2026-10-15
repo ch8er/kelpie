@@ -45,7 +45,9 @@ def check_task_status(snapshot: Snapshot) -> Snapshot:
     status value, default ``done``) holds once that task has that status. A task that ended
     in another terminal status can never get there: ``params.terminal``. A task not on the
     board, or bad params, is unknown (``params.error``). ``observed_status`` records what
-    was seen. Platform-agnostic and pure: the board is the evidence.
+    was seen. ``satisfied_at`` is when the task entered that status, which may be before the
+    wait began (rules judge freshness by ``checked_at``). A condition naming its own task is
+    invalid. Platform-agnostic and pure: the board is the evidence.
     """
     if not any(c.kind is ConditionKind.TASK_STATUS for c in snapshot.conditions):
         return snapshot
@@ -61,7 +63,12 @@ def check_task_status(snapshot: Snapshot) -> Snapshot:
 def _check_task_status(condition: Condition, snapshot: Snapshot) -> Condition:
     params = {k: v for k, v in condition.params.items() if k not in _TASK_STATUS_RESULTS}
     ref, wanted = params.get("task"), params.get("status", Status.DONE.value)
-    valid = isinstance(ref, str) and bool(ref) and wanted in Status.__members__.values()
+    valid = (
+        isinstance(ref, str)
+        and bool(ref)
+        and ref != condition.task_id  # a task cannot wait for itself
+        and wanted in Status.__members__.values()
+    )
     target = snapshot.task(ref) if valid and isinstance(ref, str) else None
     if target is None:
         params["error"] = "not_found" if valid else "invalid_params"

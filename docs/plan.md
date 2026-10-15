@@ -20,7 +20,7 @@ Priorities: **P0** — now, this week · **P1** — next step · **P2** — late
 | 4 | Host overloaded, heavy-task queue 1.5–2 h | main throughput brake | Environment resources plus a concurrency limit for heavy tasks |
 | 5 | CI minutes ran out | 11 h of idle time | External conditions: CI economy and quota burn forecast (rule 9) |
 | 6 | LLM provider limits and expired login | up to 200 limit hits per day | Provider quotas and auth health, concurrency tuned to the limit |
-| 7 | Conflicts in shared files | 46 of 63 task returns | Root-cause analysis of returns from traces → recommendation (P1); early conflict warning (rule 12, P1) |
+| 7 | Conflicts in shared files | 46 of 63 task returns | Root-cause analysis of returns from traces → recommendation (P1); early conflict warning (rule 12) |
 | 8 | Blocks stayed after the cause was fixed | 3 h | Stale blocks, same as #1 |
 | 9 | Idle agents due to a sequential task graph | half a day | Role utilization and critical path |
 | 10 | Agent waited for an external event inside its session; the dispatcher declared it dead | reviews took 40–90 min, 4 of 10 failed | "Wait for condition" and a "waiting" heartbeat |
@@ -40,7 +40,7 @@ The same failure modes show up outside our farm, on other platforms. Two of them
 - **Runaway loops and overnight budget burn.** A heartbeat/maintenance loop repeated the same tool call about 900 times overnight, each time resending about 80k input tokens. Single-session guards exist only for some platforms: [AgentWatchdog](https://github.com/jusong/agentwatchdog) covers Claude Code only, and OpenClaw closed the request for such a guard as "not planned" ([openclaw/openclaw#159329](https://github.com/openclaw/openclaw/issues/159329)). A cross-platform breaker built on traces is therefore in scope.
 - **Activity without progress.** Idle agents keep spending tokens without moving any task, e.g. resending a 12k-token context every 5 minutes with no status change, commit or artifact.
 - **Tasks that stop silently** (P1): in review with nothing driving them, a successful run with no next action, blocker chains that end in a cancelled or inaccessible task, recovery tasks that recover themselves.
-- **Conflicts discovered too late** (P1): two live tasks edit the same files and only find out at merge (incident 7).
+- **Conflicts discovered too late** (rule 12, P0 in week 3): two live tasks edit the same files and only find out at merge (incident 7).
 - **"Done" without evidence** (P1): tasks marked done without test output, green CI or a live check, then reopened.
 - **Humans as the hidden queue** (P1): approvals and human tasks wait unnoticed across platforms (incident 13).
 - **Gate violations after context compaction** (P2): right after a compaction the agent forgets the task's gate, e.g. edits code while the task is in plan review.

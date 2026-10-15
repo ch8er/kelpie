@@ -63,14 +63,14 @@ as the hidden queue, gate violations after context compaction) are in the P1 and
   `Snapshot` (tasks, owners, dependencies, conditions, resources, sessions, spans) and runs
   every rule over it. No LLM is involved in deciding what to do.
 - **Rules are pure functions.** A rule takes a snapshot and returns a list of `Action`s
-  (`requeue`, `unblock`, `comment`, `wip_commit`, `wake`, `reassign`, `stop`, `escalate`,
-  `alert`).
+  (`requeue`, `unblock`, `comment`, `wip_commit`, `wake`, `wait`, `reassign`, `stop`,
+  `cancel_build`, `escalate`, `alert`).
   It does no I/O and reads time only from `snapshot.now`, so each rule is tested with
   plain YAML fixtures.
 - **Actions only go through executors.** The engine routes each action to the platform
   adapter the task came from, or to a connector that can act (a CI connector cancels a
   superseded build); rules never touch a platform directly. Optional capabilities (reassign,
-  stop) fall back to an alert when an adapter lacks them. Every action is fingerprinted in
+  stop, wait) fall back to an alert when an adapter lacks them. Every action is fingerprinted in
   an action ledger with a cooldown and a per-task rate limit, so Kelpie cannot loop on its
   own output.
 - **Observe first.** Each rule runs in `observe`, `suggest` or `act` mode (default
@@ -174,7 +174,7 @@ P0 is the MVP; P1 and P2 rules are backlog.
 | 10 | Loop and budget breaker | N identical consecutive tool calls (same tool and arguments hash; default 8 in 10 min), 5 tool errors in a row, or a per-agent daily/nightly token budget exceeded → stop the run through the adapter and alert | field |
 | 11 | Activity without progress | Tokens spent with no status change, commit or artifact → alert with recommendations (longer heartbeat interval, cheaper maintenance model, bounded sessions with a handoff file) | field |
 | – | Return causes (P1) | Root-cause analysis of task returns from traces → recommendation | 7 |
-| 12 | Conflict warning | Two live tasks editing the same files → comment on both; optionally hold the later one until the earlier is done | 7 |
+| 12 | Conflict warning | Two live tasks editing the same files → comment on both; optionally hold the later one until the earlier is done (needs an adapter that reports `Task.files`) | 7 |
 | 13 | "Needs you" inbox (P1) | Everything waiting for a human, sorted by cost of delay; agents waiting for approval too long | 13 |
 | 14 | Compaction gate (P2) | Agent acts against the task's gate right after a context compaction | field |
 

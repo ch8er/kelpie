@@ -56,6 +56,7 @@ from kelpie.metrics import Metrics
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
 from kelpie.rules.ci_economy import CiEconomy
+from kelpie.rules.conflict_warning import ConflictWarning
 from kelpie.rules.no_progress import NoProgress
 from kelpie.rules.resources import Resources
 from kelpie.traces.config import TraceSettings, load_traces
@@ -642,6 +643,19 @@ def trace_window_warnings(rules: Sequence[Rule], traces: TraceSettings) -> list[
     ]
 
 
+def serialize_warnings(engine: EngineConfig, rules: Sequence[Rule]) -> list[str]:
+    """Rule 12 parks tasks in act mode; only rule 2 in act mode wakes them when done."""
+    serializing = any(isinstance(r, ConflictWarning) and r.serialize for r in rules)
+    if not serializing or engine.dry_run or engine.mode_for("conflict_warning") is not Mode.ACT:
+        return []
+    if engine.mode_for("wait_condition") is Mode.ACT:
+        return []
+    return [
+        "rule 'conflict_warning' serializes tasks in act mode but 'wait_condition' is not in "
+        "act mode: parked tasks are not woken when the tasks they wait for are done"
+    ]
+
+
 def ci_window_errors(rules: Sequence[Rule], settings: Settings) -> list[str]:
     """Rule 9 cannot judge builds the CI connector does not read: its window must fit."""
     github = settings.github
@@ -706,6 +720,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     for warning in [
         *loaded.warnings,
         *trace_window_warnings(loaded.rules, settings.traces),
+        *serialize_warnings(settings.engine, loaded.rules),
         *resource_interval_warnings(loaded.rules, settings.resources),
         *provider_interval_warnings(loaded.rules, settings.llm_quotas),
         *budget_provider_warnings(settings.budgets, settings.llm_quotas),

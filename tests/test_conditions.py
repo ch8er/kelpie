@@ -10,7 +10,8 @@ H = timedelta(hours=1)
 
 
 def board(*conditions: Condition, status: Status = Status.IN_PROGRESS) -> Snapshot:
-    return Snapshot(NOW, tasks=(Task("T-1", "t", status, NOW - H),), conditions=conditions)
+    tasks = (Task("T-1", "t", status, NOW - H), Task("T-2", "t", Status.WAITING, NOW - H))
+    return Snapshot(NOW, tasks=tasks, conditions=conditions)
 
 
 def cond(cid: str = "C", **params: object) -> Condition:
@@ -49,6 +50,7 @@ def test_other_status_is_unmet_and_a_different_end_is_terminal() -> None:
         ({"task": ""}, "invalid_params"),
         ({"task": 3}, "invalid_params"),
         ({"task": "T-1", "status": "merged"}, "invalid_params"),
+        ({"task": "T-2"}, "invalid_params"),  # the condition's own task
     ],
 )
 def test_unknown_when_the_task_cannot_be_judged(params: dict[str, object], error: str) -> None:
