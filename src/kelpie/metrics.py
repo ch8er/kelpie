@@ -48,7 +48,7 @@ class Metrics:
         self.traces_requests: Counter[str] = Counter()
         self.spans_received_total: Counter[str] = Counter()
         self.spans_rejected_total: Counter[str] = Counter()
-        self.span_rows = 0
+        self.span_rows: Callable[[], int] | None = None  # the span store's count
         self.span_store_errors = 0
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
@@ -86,13 +86,9 @@ class Metrics:
         with self._lock:
             self.spans_rejected_total[reason] += count
 
-    def span_rows_added(self, count: int) -> None:
+    def set_span_rows_source(self, count: Callable[[], int]) -> None:
         with self._lock:
-            self.span_rows += count
-
-    def set_span_rows(self, rows: int) -> None:
-        with self._lock:
-            self.span_rows = rows
+            self.span_rows = count
 
     def span_store_failed(self) -> None:
         with self._lock:
@@ -235,6 +231,12 @@ class Metrics:
                 self._render_traces(metric)
             return "\n".join(out) + "\n"
 
+    def _span_rows(self) -> int:
+        try:
+            return self.span_rows() if self.span_rows is not None else 0
+        except Exception:
+            return 0
+
     def _render_traces(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
         metric(
             "kelpie_traces_requests_total",
@@ -267,8 +269,8 @@ class Metrics:
         metric(
             "kelpie_span_store_rows",
             "gauge",
-            "Spans in the span store (exact after each retention run, counted up in between).",
-            [f"kelpie_span_store_rows {self.span_rows}"],
+            "Spans in the span store.",
+            [f"kelpie_span_store_rows {self._span_rows()}"],
         )
         metric(
             "kelpie_span_store_errors_total",

@@ -46,8 +46,6 @@ class IngestObserver(Protocol):
 
     def spans_rejected(self, reason: str, count: int) -> None: ...
 
-    def span_rows_added(self, count: int) -> None: ...
-
 
 class Headers(Protocol):
     def get(self, name: str, default: str | None = None) -> str | None: ...
@@ -146,7 +144,6 @@ class TraceIngest:
             self.observer.spans_received(kind, n)
         for reason, n in sorted(rejected.items()):
             self.observer.spans_rejected(reason, n)
-        self.observer.span_rows_added(added)
 
 
 def _authorized(header: str | None, token: str) -> bool:

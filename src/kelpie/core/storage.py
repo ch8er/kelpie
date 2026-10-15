@@ -357,6 +357,8 @@ class SqliteSpanStore:
         self._lock = threading.Lock()
         self._db = _open(path, busy_timeout_ms)
         self._batch = max(1, batch)
+        # Kept in step with every write under the lock, so count() needs no table scan.
+        self._rows = int(self._db.execute("SELECT COUNT(*) FROM spans").fetchone()[0])
 
     def close(self) -> None:
         with self._lock:
@@ -372,7 +374,9 @@ class SqliteSpanStore:
         for i in range(0, len(spans), self._batch):
             rows = [_span_row(s, received) for s in spans[i : i + self._batch]]
             with self._lock, self._db:  # one short transaction per batch
-                added += self._db.executemany(sql, rows).rowcount
+                n = self._db.executemany(sql, rows).rowcount
+                self._rows += n
+                added += n
         return added
 
     def spans_since(self, after: datetime) -> Sequence[Span]:
@@ -420,17 +424,23 @@ class SqliteSpanStore:
         old = (
             "DELETE FROM spans WHERE rowid_ IN (SELECT rowid_ FROM spans WHERE last_at < ? LIMIT ?)"
         )
-        while n := self._write_count(old, (_ts(before), self._batch)):
+        while n := self._delete(old, (_ts(before), self._batch)):
             deleted += n
         excess = self.count() - max(0, max_rows)
         oldest = (
             "DELETE FROM spans WHERE rowid_ IN"
             " (SELECT rowid_ FROM spans ORDER BY last_at, rowid_ LIMIT ?)"
         )
-        while excess > 0 and (n := self._write_count(oldest, (min(excess, self._batch),))):
+        while excess > 0 and (n := self._delete(oldest, (min(excess, self._batch),))):
             deleted += n
             excess -= n
         return deleted
+
+    def _delete(self, sql: str, args: tuple[object, ...]) -> int:
+        with self._lock, self._db:
+            n = self._db.execute(sql, args).rowcount
+            self._rows -= n
+            return n
 
     def _write_count(self, sql: str, args: tuple[object, ...]) -> int:
         with self._lock, self._db:
@@ -438,7 +448,7 @@ class SqliteSpanStore:
 
     def count(self) -> int:
         with self._lock:
-            return int(self._db.execute("SELECT COUNT(*) FROM spans").fetchone()[0])
+            return self._rows
 
     def inherit_links(self, trace_ids: Collection[str]) -> int:
         """One UPDATE per tree level and batch of traces (correlated subqueries rather than

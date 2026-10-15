@@ -209,11 +209,7 @@ def test_window_and_merge() -> None:
 
 class Observer:
     def __init__(self) -> None:
-        self.rows: list[int] = []
         self.failures = 0
-
-    def set_span_rows(self, rows: int) -> None:
-        self.rows.append(rows)
 
     def span_store_failed(self) -> None:
         self.failures += 1
@@ -226,12 +222,12 @@ def test_retention_runs_at_most_once_per_interval() -> None:
     retention = SpanRetention(store, lambda: NOW, timedelta(days=7), 100, observer)
     assert retention.maybe_start()
     retention.join(5)
-    assert store.count() == 1 and observer.rows == [1]
+    assert store.count() == 1
     assert not retention.maybe_start()  # within the hour
     retention.every = timedelta(0)
     assert retention.maybe_start()
     retention.join(5)
-    assert observer.rows == [1, 1]
+    assert store.count() == 1 and observer.failures == 0
 
 
 class BrokenStore(MemorySpanStore):

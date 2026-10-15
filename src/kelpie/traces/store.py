@@ -23,8 +23,6 @@ PRUNE_EVERY = timedelta(hours=1)
 
 
 class StoreObserver(Protocol):
-    def set_span_rows(self, rows: int) -> None: ...
-
     def span_store_failed(self) -> None: ...
 
 
@@ -104,8 +102,6 @@ class SpanRetention:
             if self.observer is not None:
                 self.observer.span_store_failed()
             return 0
-        if self.observer is not None:
-            self.observer.set_span_rows(rows)
         if deleted:
             log.info(
                 "pruned %d spans in %.2fs (%d left)", deleted, time.monotonic() - started, rows

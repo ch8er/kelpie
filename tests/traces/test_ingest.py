@@ -35,7 +35,6 @@ class Observer:
         self.codes: list[int] = []
         self.received: Counter[str] = Counter()
         self.rejected: Counter[str] = Counter()
-        self.rows = 0
 
     def traces_request(self, code: int) -> None:
         self.codes.append(code)
@@ -45,9 +44,6 @@ class Observer:
 
     def spans_rejected(self, reason: str, count: int) -> None:
         self.rejected[reason] += count
-
-    def span_rows_added(self, count: int) -> None:
-        self.rows += count
 
 
 def ingest(**kw: Any) -> tuple[TraceIngest, MemorySpanStore, Observer]:
@@ -81,7 +77,7 @@ def test_accepts_both_encodings(encoding: str) -> None:
         SpanKind.TOOL,
     ]
     assert observer.received == Counter({"llm": 1, "tool": 1, "ignored": 1})
-    assert observer.rows == 2 and observer.codes == [200]
+    assert observer.codes == [200]
 
 
 def test_partial_success_reports_rejected_spans() -> None:
@@ -112,11 +108,11 @@ def test_partial_success_in_protobuf() -> None:
 
 
 def test_retry_is_idempotent() -> None:
-    target, store, observer = ingest()
+    target, store, _ = ingest()
     body = request(SPANS)
     post(target, body)
     post(target, body)
-    assert store.count() == 2 and observer.rows == 2
+    assert store.count() == 2
 
 
 @pytest.mark.parametrize(

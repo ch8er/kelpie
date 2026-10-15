@@ -411,7 +411,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         return App(settings, loaded, engine, loop, metrics, store)
     span_store = _open_span_store(settings.db_path)
     metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
-    metrics.set_span_rows(span_store.count())
+    metrics.set_span_rows_source(span_store.count)
     if token is None:
         log.warning(
             "OTLP ingest on /v1/traces accepts spans without a token; set $%s", traces.token_env
