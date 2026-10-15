@@ -69,8 +69,12 @@ class Condition:
     task_id: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
     satisfied: bool | None = None
+    # When the condition last became true (reset when it flips back).
     satisfied_at: datetime | None = None
     checked_at: datetime | None = None
+    # When the condition was registered. Connectors should set it so that a task waiting
+    # again is not woken by a condition left over from its previous wait.
+    registered_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

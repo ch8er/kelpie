@@ -184,3 +184,11 @@ def test_custom_allowed_reasons() -> None:
 def test_bad_config(config: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         build(config)
+
+
+def test_block_with_task_linked_condition_is_allowed() -> None:
+    from kelpie.core.model import Condition, ConditionKind
+
+    c = Condition("C-9", ConditionKind.CI_STATUS, task_id="T-1", satisfied=False)
+    snap = Snapshot(now=NOW, tasks=(blocked("stuck"),), sessions=(session(),), conditions=(c,))
+    assert ExitContract().evaluate(snap) == []

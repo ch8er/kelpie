@@ -27,6 +27,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._tasks import DEFAULT_STALE_AFTER, is_live, last_seen, linked_conditions
 
 NAME = "exit_contract"
 
@@ -49,14 +50,15 @@ class _Exit:
 
 @dataclass(frozen=True, slots=True)
 class ExitContract:
-    """``allowed_block_reasons`` match the whole reason, or its first word followed by ``:``
-    or a space, ignoring case ("guard: wait for CI" is a ``guard`` block). A block tied to a
-    registered condition is always allowed. ``session_exit_grace`` gives the platform time to
-    record a status after an exit, and applies to blocks left behind too."""
+    """``allowed_block_reasons`` match the whole reason, or its first word followed by
+    ``:`` or a space, ignoring case ("guard: wait for CI" is a ``guard`` block). A block
+    tied to a registered condition (named by the block or linked to the task) is always
+    allowed. ``session_exit_grace`` gives the platform time to record a status after an
+    exit, and applies to blocks left behind too."""
 
     allowed_block_reasons: tuple[str, ...] = DEFAULT_ALLOWED_BLOCK_REASONS
     session_exit_grace: timedelta = timedelta(minutes=10)
-    session_stale_after: timedelta = timedelta(hours=2)
+    session_stale_after: timedelta = DEFAULT_STALE_AFTER
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -65,23 +67,19 @@ class ExitContract:
             if task.status in {Status.IN_PROGRESS, Status.BLOCKED, *_HANDOFF}:
                 end = self._last_exit(task, snapshot)
                 if end is not None and snapshot.now - end.at >= self.session_exit_grace:
-                    actions.extend(self._judge(task, end))
+                    actions.extend(self._judge(task, end, snapshot))
         return actions
 
     def _last_exit(self, task: Task, snapshot: Snapshot) -> _Exit | None:
         """The task's most recent session if it is over, else None (someone is on it)."""
         exits: list[_Exit] = []
         for s in snapshot.sessions_for(task.id):
-            if s.ended_at is not None:
-                exits.append(_Exit(s, s.ended_at, silent=False))
-                continue
-            seen = s.last_heartbeat or s.started_at
-            if snapshot.now - seen < self.session_stale_after:
+            if is_live(s, snapshot.now, self.session_stale_after):
                 return None  # a live session: the task is being worked on
-            exits.append(_Exit(s, seen, silent=True))
+            exits.append(_Exit(s, last_seen(s), silent=s.ended_at is None))
         return max(exits, key=lambda e: (e.at, e.session.started_at), default=None)
 
-    def _judge(self, task: Task, end: _Exit) -> Iterable[Action]:
+    def _judge(self, task: Task, end: _Exit, snapshot: Snapshot) -> Iterable[Action]:
         last = end.session
         if task.status_since > end.at:
             return  # changed by someone after the session
@@ -91,7 +89,9 @@ class ExitContract:
             block = task.block
             if not changed_during and last.final_status is not Status.BLOCKED:
                 return  # the block predates the session: not this session's doing
-            if block is not None and (block.condition_id or self._allowed(block.reason)):
+            # Tied to a condition (via the block or the task) means something will clear it.
+            conditions, missing = linked_conditions(task, snapshot)
+            if conditions or missing or (block is not None and self._allowed(block.reason)):
                 return
             yield self._requeue_block(task, last)
         elif last.final_status is not None:
