@@ -1,5 +1,7 @@
 from datetime import timedelta
 
+import pytest
+
 from kelpie.core.serde import parse_datetime
 from tests.incidents import expand_repeats
 
@@ -21,3 +23,11 @@ def test_expand_repeats_shifts_copies() -> None:
     starts = [parse_datetime(s["start"]) for s in spans[1:]]
     assert starts[2] - starts[0] == timedelta(seconds=80)
     assert parse_datetime(spans[3]["end"]) - starts[2] == timedelta(seconds=5)
+
+
+@pytest.mark.parametrize(
+    "repeat", [{"count": 0, "every": "1m"}, {"count": 2}, {"count": 2, "every": "1m", "x": 1}]
+)
+def test_expand_repeats_rejects_bad_spec(repeat: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="repeat"):
+        expand_repeats([{"span_id": "a", "start": "2026-03-02T00:00:00+00:00", "repeat": repeat}])

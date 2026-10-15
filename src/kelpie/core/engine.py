@@ -20,7 +20,6 @@ _TASK_ACTIONS = {
     ActionKind.WIP_COMMIT,
     ActionKind.WAKE,
     ActionKind.REASSIGN,
-    ActionKind.STOP,
 }
 
 
@@ -81,18 +80,22 @@ class Engine:
                 self.adapter.reassign(tid, action.params["owner_id"], action.reason)
             case ActionKind.REASSIGN:
                 # No target owner or adapter cannot reassign: ask a human instead.
-                self._alert(action)
-            case ActionKind.STOP if isinstance(self.adapter, SupportsStop):
-                self.adapter.stop(tid, action.reason)
+                self._alert(action, executed=False)
+            case ActionKind.STOP if action.params.get("session_id") and isinstance(
+                self.adapter, SupportsStop
+            ):
+                self.adapter.stop(action.params["session_id"], action.reason)
             case ActionKind.STOP:
-                # Adapter cannot stop the run: a human has to.
-                self._alert(action)
+                # No session to stop or adapter cannot stop it: a human has to.
+                self._alert(action, executed=False)
             case ActionKind.ALERT | ActionKind.ESCALATE:
                 self._alert(action)
 
-    def _alert(self, action: Action) -> None:
+    def _alert(self, action: Action, executed: bool = True) -> None:
         if self.alerter is None:
             log.warning("no alerter configured; dropped: %s", action)
             return
         title = f"[{action.rule}] {action.kind}" + (f" {action.task_id}" if action.task_id else "")
+        if not executed:
+            title += " (not executed, needs a human)"
         self.alerter.send(title, action.reason, action.severity)

@@ -52,12 +52,13 @@ calls overnight, would make a fixture unreadable. A span entry may instead carry
 `repeat: {count: N, every: <duration>}`. `tests/incidents.py` removes the key and expands
 the entry into `count` spans before `snapshot_from_dict` sees it: copy `i` has `start`
 (and `end`, if set) shifted by `i × every` and `span_id` suffixed with `-<i>`; every other
-field is copied unchanged. Example:
+field is copied unchanged. `repeat` must contain exactly `count` (>= 1) and `every`.
+Tokens belong on `kind: llm` spans. Example:
 
 ```yaml
   spans:
     - {trace_id: TR-1, span_id: SP-HB, name: "execute_tool heartbeat", kind: tool, tool: heartbeat,
-       args_hash: h-1, input_tokens: 80000, start: "2026-03-02T00:00:00+00:00",
+       args_hash: h-1, start: "2026-03-02T00:00:00+00:00",
        end: "2026-03-02T00:00:02+00:00", session_id: S-1, repeat: {count: 900, every: "30s"}}
 ```
 
@@ -99,7 +100,7 @@ Fixture conventions:
 | 11 | `11-orphan-accepted-task.yaml` | `orphan_status` | `alert` critical `{dependents: 7}`, `reassign` T-1101 |
 | 12 | `12-review-ping-pong.yaml` | `ping_pong` | `escalate` T-1201 (9 rounds > 3) |
 | 13 | `13-human-tasks-block-agents.yaml` | `needs_you` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5`; T-1308 (nothing blocked behind it) not escalated |
-| – | `field-01-heartbeat-runaway.yaml` | `loop_breaker` | `stop` + critical `alert` for the heartbeat loop (about 900 identical calls, about 80k input tokens each) and for the agent with 5 consecutive tool errors; nothing for the healthy agent |
+| – | `field-01-heartbeat-runaway.yaml` | `loop_breaker` | `stop` + critical `alert` for the heartbeat loop (about 900 identical calls, about 80k input tokens each) and for the agent with 5 consecutive tool errors (`stop` carries `session_id`); nothing for the healthy agent or for the CI-polling reviewer, which is left to rule 2 |
 | – | `field-02-idle-context-resend.yaml` | `no_progress` | `alert` with `recommendations: [longer_heartbeat_interval, cheaper_maintenance_model, bounded_session_handoff]` for the idle agent resending a 12k-token context every 5 min; nothing for the productive session |
 
 ## Adding a fixture

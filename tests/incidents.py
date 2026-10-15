@@ -42,12 +42,14 @@ def expand_repeats(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if repeat is None:
             out.append(span)
             continue
+        if set(repeat) != {"count", "every"} or int(repeat["count"]) < 1:
+            raise ValueError(f"repeat needs exactly count >= 1 and every: {repeat!r}")
         base = {k: v for k, v in span.items() if k != "repeat"}
         every = parse_duration(repeat["every"])
         for i in range(int(repeat["count"])):
             copy = dict(base, span_id=f"{base['span_id']}-{i}")
             for key in ("start", "end"):
-                if key in base:
+                if base.get(key) is not None:
                     copy[key] = (parse_datetime(base[key]) + i * every).isoformat()
             out.append(copy)
     return out

@@ -44,7 +44,8 @@ snapshot:
       started_at: "2026-03-02T08:00:00+00:00"
       last_heartbeat: "2026-03-02T09:58:00+00:00"
       last_commit_at: "2026-03-02T09:40:00+00:00"
-      artifacts: ["reports/coverage-billing.html"]
+      artifacts:
+        - {path: reports/coverage-billing.html, at: "2026-03-02T09:30:00+00:00"}
   spans:
     # 48 wake-ups, one every 5 minutes, each resending the full 12k-token context.
     - trace_id: TR-F201

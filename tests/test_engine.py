@@ -59,8 +59,8 @@ class ReassigningAdapter(FakeAdapter):
 
 @dataclass
 class StoppingAdapter(FakeAdapter):
-    def stop(self, task_id: str, reason: str) -> None:
-        self._record("stop", task_id)
+    def stop(self, session_id: str, reason: str) -> None:
+        self._record("stop", session_id)
 
 
 @dataclass
@@ -143,20 +143,25 @@ def test_reassign_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, st
     alerter = FakeAlerter()
     run([act(ActionKind.REASSIGN, **params)], adapter, alerter)
     assert adapter.calls == []
-    assert alerter.sent == [("[emit] reassign T-1", Severity.INFO)]
+    assert alerter.sent == [("[emit] reassign T-1 (not executed, needs a human)", Severity.INFO)]
 
 
-def test_stop_uses_capability_when_available() -> None:
+def test_stop_targets_session_even_without_task() -> None:
     adapter = StoppingAdapter()
-    run([act(ActionKind.STOP)], adapter)
-    assert adapter.calls == [("stop", "T-1")]
+    run([act(ActionKind.STOP, task_id=None, session_id="S-1")], adapter)
+    assert adapter.calls == [("stop", "S-1")]
 
 
-def test_stop_falls_back_to_alert() -> None:
-    adapter, alerter = FakeAdapter(), FakeAlerter()
-    run([act(ActionKind.STOP)], adapter, alerter)
+@pytest.mark.parametrize(
+    ("adapter", "params"),
+    [(FakeAdapter(), {"session_id": "S-1"}), (StoppingAdapter(), {})],
+    ids=["adapter-cannot-stop", "no-session"],
+)
+def test_stop_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, str]) -> None:
+    alerter = FakeAlerter()
+    run([act(ActionKind.STOP, **params)], adapter, alerter)
     assert adapter.calls == []
-    assert alerter.sent == [("[emit] stop T-1", Severity.INFO)]
+    assert alerter.sent == [("[emit] stop T-1 (not executed, needs a human)", Severity.INFO)]
 
 
 def test_alert_and_escalate_go_to_alerter() -> None:

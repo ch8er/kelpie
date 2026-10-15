@@ -142,6 +142,14 @@ class Resource:
 
 
 @dataclass(frozen=True, slots=True)
+class Artifact:
+    """Something a session produced (report, build output, file), with when it appeared."""
+
+    path: str
+    at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Session:
     """One agent run against one task, from start to exit."""
 
@@ -155,7 +163,7 @@ class Session:
     last_heartbeat: datetime | None = None
     last_commit_at: datetime | None = None
     dirty_worktree: bool = False
-    artifacts: tuple[str, ...] = ()
+    artifacts: tuple[Artifact, ...] = ()
 
 
 class SpanKind(StrEnum):

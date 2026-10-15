@@ -76,7 +76,7 @@ The numbers in brackets are the farm incidents each rule is validated against.
 7. Environment resources: disk, memory, processes or provider quotas running out, auth expiring → alert before the agents stop (3, 4, 6)
 8. Daily "cost of chaos" report and before/after verification of every fix
 9. CI economy: finds builds that burn minutes for nothing — on drafts and WIP commits, superseded by a newer push, triggered by docs-only changes, or repeated for an already verified commit. Cancels superseded builds by itself, forecasts how long the quota will last, and proposes a PR with a better CI configuration (5)
-10. Loop and budget breaker, cross-platform, built on traces: N identical consecutive tool calls (same tool and same arguments hash; default 8 in 10 minutes), 5 consecutive tool errors, or a per-agent daily/nightly token budget exceeded → stop the run through the adapter and alert. Defaults reuse the AgentWatchdog thresholds (field evidence: heartbeat runaway)
+10. Loop and budget breaker, cross-platform, built on traces: N identical consecutive tool calls (same tool and same arguments hash; default 8 in 10 minutes), 5 consecutive tool errors, or a per-agent daily/nightly token budget exceeded → stop the run through the adapter and alert. Defaults reuse the AgentWatchdog thresholds. Polling that rule 2 recognizes is coached by rule 2 first and stopped only if it continues (field evidence: heartbeat runaway)
 11. Activity without progress: tokens spent by sessions that produce no status change, commit or artifact → alert with recommendations: a longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file (field evidence: idle context resend)
 
 ### P1. Rules backlog — week 3 only if the budget allows
@@ -133,7 +133,7 @@ The whole credit goes to building Kelpie in Claude Code cloud sessions: it is sp
 
 | Week | What we build | Budget, approx. |
 | --- | --- | --- |
-| 1, Oct 15–21 | Core, traces and checkpoints, Hermes adapter, rules 1–4 | $100 |
+| 1, Oct 15–21 | Engine safety (A–D), core, traces and checkpoints, Hermes adapter, rules 1–4 | $100 |
 | 2, Oct 22–28 | Rules 5–7, 9–11, resource reading via Prometheus, condition connectors | $90 |
 | 3, Oct 29 – Nov 4 | "Cost of chaos" report, basic token optimization, throughput metrics, documentation | $60 |
 
@@ -185,4 +185,5 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Basic token optimization from traces and throughput metrics
 - [ ] Documentation and publication of the open core
 - [ ] 10 conversations with farm owners
-- [ ] Only if the budget allows: P1 rules backlog (stop patterns and `kelpie why`, rules 12 and 13, evidence for "done")
+
+Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1 item (the rules backlog, `kelpie why`, the Telegram alerter, return causes, the LLM root-cause section, the naming check) is backlog: week 3 only if the budget allows.

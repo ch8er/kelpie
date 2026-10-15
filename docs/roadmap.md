@@ -33,9 +33,10 @@ documented in [`tests/fixtures/incidents/README.md`](../tests/fixtures/incidents
 Fixtures listed as "new" below do not exist yet and are part of the issue.
 
 **Labels.**
-- Priority, as in the plan: `P0` (now, this milestone), `P1` (next step), `P2` (later, on signal).
+- Priority, as in the plan: `P0` (now, this week), `P1` (next step), `P2` (later, on signal).
 - Schedule: `week-1` (Oct 15–21), `week-2` (Oct 22–28), `week-3` (Oct 29 – Nov 4). Issues
-  in the P1 rules backlog (week 3 only if the budget allows) and P2 issues have no week.
+  in the P1 backlog (week 3 only if the budget allows) and P2 issues have no week. Only P0
+  issues and the P1 items the plan explicitly lists in week 3 carry a week label.
 - Area: `area:core|rules|adapters|traces|connectors|report|resources|deploy|docs|project`
   (`area:project` is non-code work: validation, naming, business).
 - `adapter`: one issue per additional platform adapter (all P2, no week; Hermes is the
@@ -375,13 +376,14 @@ planned"). Kelpie's breaker is built on traces, so it works for any platform tha
 them (OTLP or spans written by an adapter from hooks). It stops the run and tells a human.
 
 **Acceptance criteria**
-- [ ] N identical consecutive tool calls in a session (same `tool` and same `Span.args_hash`; default 8 within 10 minutes) → `stop` + critical `alert`
+- [ ] N identical consecutive tool calls in a session (same `tool` and same `Span.args_hash`; default 8 within 10 minutes) → `stop` (with `session_id`) + critical `alert`
+- [ ] Precedence with rule 2: calls matching `wait_condition`'s `poll_patterns` are left to rule 2 (a coaching `comment`); the run is stopped only if polling continues after that comment for a grace period or passes a higher hard limit
 - [ ] 5 consecutive tool errors in a session → `stop` + critical `alert`
 - [ ] Per-agent daily and nightly token budget exceeded (budgets and window boundaries in config) → `stop` + critical `alert` with the tokens spent
 - [ ] Defaults are the AgentWatchdog thresholds (8 repeats in 10 minutes, 5 errors in a row); every threshold can be overridden per agent or role
 - [ ] Reuses the repeated-call helper from the `wait_condition` polling check; reads only spans and sessions, no platform-specific code
 - [ ] The same tool with different arguments, a varied long session and an agent under budget are not flagged
-- [ ] Fixtures: existing `field-01-heartbeat-runaway.yaml` (about 900 identical heartbeat calls with about 80k input tokens each, plus 5 consecutive tool errors; a healthy agent as the distractor)
+- [ ] Fixtures: existing `field-01-heartbeat-runaway.yaml` (about 900 identical heartbeat calls with about 80k input tokens each, plus 5 consecutive tool errors; a healthy agent and a CI-polling reviewer left to rule 2 as distractors)
 
 ### rules: no_progress — tokens spent without progress (rule 11, field evidence)
 labels: P0, week-2, area:rules
@@ -456,18 +458,6 @@ progress on new pushes, skip already verified commits).
 - [ ] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff)
 - [ ] No CI-specific syntax in `kelpie.rules`
 
-### rules: return_causes — root causes of task returns (incident 7)
-labels: P1, week-2, area:rules
-46 of 63 task returns were merge conflicts in a few shared files. Analyze why tasks come
-back, from returns and traces, and turn the dominant causes into a recommendation (for
-shared-file conflicts: the hot files, and a warning to in-progress tasks touching them).
-
-**Acceptance criteria**
-- [ ] Returns grouped by cause category; share of each cause computed over a window
-- [ ] Dominant shared-file conflicts → `alert` with `hot_files` and a recommendation; in-progress tasks touching them → `comment`
-- [ ] Configurable allowlist of files that are expected to be shared
-- [ ] Fixtures: existing `07-shared-file-conflicts.yaml`; new `07-disjoint-files.yaml`
-
 ### resources: read host metrics via Prometheus HTTP API
 labels: P0, week-2, area:resources
 No custom collector: query node_exporter metrics through the Prometheus HTTP API and turn
@@ -510,16 +500,6 @@ so agent tasks can wait on humans without polling.
 - [ ] Works with human-owned tasks on the same board via the adapter
 - [ ] Satisfied condition wakes the dependent agent task through the `wait_condition` rule
 
-### core: Telegram alerter
-labels: P1, week-2, area:core
-Implement the `Alerter` protocol for Telegram (bot token and chat id) on top of the alert
-pipeline, with the same content as the Slack alerter.
-
-**Acceptance criteria**
-- [ ] Severity, what Kelpie already did and what needs a human are shown
-- [ ] Message length and formatting limits handled; untrusted text escaped
-- [ ] Tests mock HTTP; no network access
-
 ### report: Kelpie metrics on /metrics and a Grafana dashboard
 labels: P0, week-2, area:report
 No custom UI in the MVP. Kelpie exposes Prometheus metrics, Grafana shows them, and traces
@@ -529,16 +509,6 @@ open in Langfuse.
 - [ ] `/metrics` in Prometheus text format: tick duration, actions per rule, tasks per status, idle time per role
 - [ ] Grafana dashboard JSON provisioned by docker compose
 - [ ] Dashboard links to traces in Langfuse when configured
-
-### project: check the Kelpie name (domains and USPTO)
-labels: P1, week-2, area:project
-Before publishing, check that the name is usable. The PyPI package is `kelpie-sre` because
-`kelpie` is taken.
-
-**Acceptance criteria**
-- [ ] Domain availability checked and the result recorded
-- [ ] USPTO search for conflicting marks in software classes recorded
-- [ ] Decision: keep the name or pick an alternative before the release
 
 ### deploy: run on our own farm and record every rule trigger
 labels: P0, week-2, area:deploy
@@ -582,16 +552,6 @@ A quick terminal view of the farm from Kelpie's storage, without a custom UI.
 - [ ] Shows tasks per status, waiting conditions, open alerts and the last actions per rule
 - [ ] Works against a running server or directly against the storage file
 - [ ] Plain text by default, `--json` for scripts
-
-### report: optional LLM root-cause section
-labels: P1, week-3, area:report
-Optionally ask an LLM to analyze root causes for the day's incidents. Never used in the
-control loop.
-
-**Acceptance criteria**
-- [ ] Disabled by default; report is complete without it
-- [ ] Prompt contains only aggregated, redacted data
-- [ ] Clearly marked as generated text in the report
 
 ### traces: token optimization — caching, context growth, restarts
 labels: P1, week-3, area:traces
@@ -665,6 +625,51 @@ coding agents; self-hosted farms on Hermes, OpenClaw, Paperclip).
 - [ ] Follow-up issues filed for confirmed needs
 
 ## Backlog (P1, week 3 only if the budget allows)
+
+P1 work that the plan does not schedule in a week. Week 3 holds only the P1 items the
+plan lists there (token optimization, throughput metrics, 10 conversations).
+
+### rules: return_causes — root causes of task returns (incident 7)
+labels: P1, area:rules
+46 of 63 task returns were merge conflicts in a few shared files. Analyze why tasks come
+back, from returns and traces, and turn the dominant causes into a recommendation (for
+shared-file conflicts: the hot files, and a warning to in-progress tasks touching them).
+
+**Acceptance criteria**
+- [ ] Returns grouped by cause category; share of each cause computed over a window
+- [ ] Dominant shared-file conflicts → `alert` with `hot_files` and a recommendation; in-progress tasks touching them → `comment`
+- [ ] Configurable allowlist of files that are expected to be shared
+- [ ] Fixtures: existing `07-shared-file-conflicts.yaml`; new `07-disjoint-files.yaml`
+
+### core: Telegram alerter
+labels: P1, area:core
+Implement the `Alerter` protocol for Telegram (bot token and chat id) on top of the alert
+pipeline, with the same content as the Slack alerter.
+
+**Acceptance criteria**
+- [ ] Severity, what Kelpie already did and what needs a human are shown
+- [ ] Message length and formatting limits handled; untrusted text escaped
+- [ ] Tests mock HTTP; no network access
+
+### project: check the Kelpie name (domains and USPTO)
+labels: P1, area:project
+Before publishing, check that the name is usable. The PyPI package is `kelpie-sre` because
+`kelpie` is taken.
+
+**Acceptance criteria**
+- [ ] Domain availability checked and the result recorded
+- [ ] USPTO search for conflicting marks in software classes recorded
+- [ ] Decision: keep the name or pick an alternative before the release
+
+### report: optional LLM root-cause section
+labels: P1, area:report
+Optionally ask an LLM to analyze root causes for the day's incidents. Never used in the
+control loop.
+
+**Acceptance criteria**
+- [ ] Disabled by default; report is complete without it
+- [ ] Prompt contains only aggregated, redacted data
+- [ ] Clearly marked as generated text in the report
 
 ### rules: orphan_status — stop patterns (rule 3, incident 11)
 labels: P1, area:rules

@@ -193,7 +193,7 @@ farm throughput metrics from traces.
 
 ## Reporting (planned)
 
-- **Real-time alerts** to Slack or Telegram: only actionable items, always stating what
+- **Real-time alerts** to Slack (P0) or Telegram (P1): only actionable items, always stating what
   Kelpie already did by itself; duplicate alerts are merged.
 - **Daily report**: cost of chaos (idle hours, tokens burned on restarts), what Kelpie
   fixed by itself, what needs a human decision, before/after effect of yesterday's fixes,
