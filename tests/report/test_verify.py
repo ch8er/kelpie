@@ -94,10 +94,16 @@ def test_small_samples_are_labelled() -> None:
 
 def test_short_after_window_is_a_small_sample() -> None:
     late = datetime(2026, 3, 2, 22, tzinfo=UTC)  # 2 hours before the report day ends
-    report = build_report(inputs(fixes=(FixEvent(late, MANUAL, "late fix"),)))
+    spans = [
+        Span("tr", f"s{i}", "chat", SpanKind.LLM, at, at, session_id="D-1", model="m",
+             input_tokens=100)
+        for i, at in enumerate((late - timedelta(hours=1), late + timedelta(hours=1)))
+    ]  # fmt: skip
+    report = build_report(inputs(fixes=(FixEvent(late, MANUAL, "late fix"),), spans=spans))
     [v] = report.verifications
     assert v.after == timedelta(hours=2)
     assert metric(report, "tokens per day").small
+    assert not any(m.name.startswith("task returns") for m in v.metrics)  # no data: no row
 
 
 def test_only_recent_fixes_are_verified() -> None:
@@ -141,11 +147,11 @@ def test_stuck_hours_of_the_fixed_rule() -> None:
     )
     event = FixEvent(FIX, MANUAL, "conditions for CI blocks", rule="stale_blocks")
     report = build_report(inputs(fixes=(event,), states=states))
-    stuck = metric(report, "stuck task-hours")
-    assert stuck.name == "stuck task-hours per day (stale_blocks)"
+    stuck = metric(report, "stuck condition-hours")
+    assert stuck.name == "stuck condition-hours per day (stale_blocks)"
     assert (stuck.before, stuck.after) == (pytest.approx(12), pytest.approx(1))
     everything = build_report(inputs(states=states))
-    assert metric(everything, "stuck task-hours").after == pytest.approx(9)
+    assert metric(everything, "stuck condition-hours").after == pytest.approx(9)
 
 
 def test_tokens_returns_and_command_output() -> None:

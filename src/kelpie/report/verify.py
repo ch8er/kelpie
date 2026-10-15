@@ -8,7 +8,8 @@ observe to act, or dry-run turned off), or an output filter that appeared in tra
 (:func:`kelpie.traces.outputs.filter_introductions`).
 
 Each fix is measured over ``window`` before it and the same length after it (shorter when
-the report ends sooner): stuck task-hours per day (chaos states, only the fix's rule when it
+the report ends sooner): stuck condition-hours per day (counted like the report's cost of
+chaos) (chaos states, only the fix's rule when it
 names one), tokens per day (the fix's role when it names one), returns per day, review time
 (mean session length of ``review_roles``), sessions that failed or ended without a final
 status, and for a command fix the output tokens per call of that command. A side with fewer
@@ -138,7 +139,8 @@ def verify(event: FixEvent, ev: Evidence) -> Verification:
                 ba.small_sample,
             )
         )
-    return Verification(event, tuple(m for m in metrics if m is not None), after_end - at)
+    shown = tuple(m for m in metrics if m.n_before or m.n_after)  # no data: no row
+    return Verification(event, shown, after_end - at)
 
 
 Window = tuple[datetime, datetime]
@@ -157,7 +159,7 @@ def _stuck(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) -> 
             s = row.state
             if s.rule not in rules:
                 continue
-            lo, hi = max(s.since, w[0]), min(s.last_seen, w[1])
+            lo, hi = max(s.since, s.opened_at, w[0]), min(s.last_seen, w[1])
             if hi > lo:
                 total += (hi - lo).total_seconds() / 3600
                 n += 1
@@ -165,9 +167,9 @@ def _stuck(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) -> 
 
     (hb, nb), (ha, na) = hours(b), hours(a)
     name = (
-        f"stuck task-hours per day ({event.rule})"
+        f"stuck condition-hours per day ({event.rule})"
         if len(rules) == 1
-        else ("stuck task-hours per day")
+        else ("stuck condition-hours per day")
     )
     return Metric(name, "h/day", hb, ha, nb, na, short)
 

@@ -575,7 +575,7 @@ def _recommendations(
             )
         else:
             title = f"Reduce {line.cause}"
-            detail = f"{REMEDIES[line.rule]}; {line.hours:.1f} condition-hours"
+            detail = REMEDIES[line.rule]
         candidates.append(Advice(title, detail, line.spend.usd, line.hours, line.tasks))
     return tuple(_top(candidates, inputs.hour_usd))
 
