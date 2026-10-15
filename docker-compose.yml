@@ -8,6 +8,7 @@ services:
     build: .
     image: kelpie-sre:dev
     restart: unless-stopped
+    init: true  # forward signals and reap children; Kelpie also handles SIGTERM itself
     environment:
       KELPIE_PORT: "9464"
       KELPIE_DB: /data/kelpie.db

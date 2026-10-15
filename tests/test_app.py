@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 import urllib.request
 from collections.abc import Sequence
@@ -25,7 +26,7 @@ from kelpie.core.engine import Engine
 from kelpie.core.model import Snapshot
 from kelpie.metrics import Metrics
 from kelpie.rules import PlannedRule, Priority
-from kelpie.server import make_server
+from kelpie.server import make_server, run
 
 NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
 PLANNED = (
@@ -124,8 +125,28 @@ def test_storage_path_from_config_and_env(tmp_path: Path, monkeypatch: pytest.Mo
 
 @pytest.mark.parametrize(
     "text",
-    ["[engin]\n", "[engine]\ndry_run = 'no'\n", "not toml ["],
-    ids=["section", "value", "syntax"],
+    [
+        "[engin]\n",
+        "[engine]\ndry_run = 'no'\n",
+        "not toml [",
+        'storage = "x"\n',
+        "engine = 5\n",
+        "[storage]\npath = 5\n",
+        '[storage]\npaht = "y.db"\n',
+        '[storage]\npath = ""\n',
+        "[engine]\ninterval = [1]\n",
+    ],
+    ids=[
+        "section",
+        "value",
+        "syntax",
+        "storage-not-table",
+        "engine-not-table",
+        "path-type",
+        "storage-typo",
+        "empty-path",
+        "interval-type",
+    ],
 )
 def test_bad_config_is_a_config_error(tmp_path: Path, text: str) -> None:
     with pytest.raises(ConfigError):
@@ -191,6 +212,8 @@ def test_rule_errors_and_tick_failures_are_counted() -> None:
 def test_loop_runs_in_background_and_stops() -> None:
     loop = loop_for([AlphaRule()], EngineConfig(interval=EngineConfig().interval / 3000))
     loop.start()
+    with pytest.raises(RuntimeError, match="already started"):
+        loop.start()
     try:
         for _ in range(200):
             if loop.metrics.ticks >= 2:
@@ -199,6 +222,7 @@ def test_loop_runs_in_background_and_stops() -> None:
     finally:
         loop.stop()
     assert loop.metrics.ticks >= 2
+    assert not loop.running
 
 
 def test_metrics_escape_label_values() -> None:
@@ -211,18 +235,36 @@ def test_build_app_serves_engine_metrics(tmp_path: Path) -> None:
     app = build_app(Settings(db_path=tmp_path / "kelpie.db"), clock=lambda: NOW)
     app.loop.tick_once()
     server = make_server("127.0.0.1", 0, app.metrics)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=run, args=(app, server), daemon=True)
     thread.start()
-    try:
-        url = f"http://127.0.0.1:{server.server_address[1]}/metrics"
-        with urllib.request.urlopen(url) as resp:
-            body = resp.read().decode()
-    finally:
-        server.shutdown()
-        server.server_close()
-    assert "kelpie_engine_ticks_total 1" in body
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    with urllib.request.urlopen(f"{base}/metrics") as resp:
+        body = resp.read().decode()
+    with urllib.request.urlopen(f"{base}/healthz") as resp:
+        assert resp.read() == b"ok\n"
+    assert app.loop.running
+    server.shutdown()
+    thread.join(5)
+    assert not thread.is_alive() and not app.loop.running
+    with pytest.raises(sqlite3.ProgrammingError):  # the ledger was closed on shutdown
+        app.store.since(NOW)
+    assert "kelpie_engine_ticks_total" in body
     assert "kelpie_dry_run 1" in body
-    assert 'kelpie_rule_loaded{rule="exit_contract",mode="observe"}' in body
+    assert 'kelpie_rule_loaded{rule="compaction_gate",mode=""} 0' in body
+    assert_valid_exposition(body)
+
+
+def assert_valid_exposition(text: str) -> None:
+    """Every sample belongs to a family declared once with HELP and TYPE."""
+    declared: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("# TYPE "):
+            declared.append(line.split()[2])
+        elif line and not line.startswith("#"):
+            name = line.split("{")[0].split()[0]
+            assert any(name == d or name.startswith(d + "_") for d in declared[-1:]), line
+    assert len(declared) == len(set(declared))
+    assert text.count("# HELP ") == len(declared)
 
 
 # --- status and CLI ---------------------------------------------------------------------
@@ -250,3 +292,39 @@ def test_cli_rejects_unknown_rule(tmp_path: Path, capsys: pytest.CaptureFixture[
     path = write(tmp_path, '[engine.rules.nope]\nmode = "act"\n')
     assert main(["--config", str(path), "serve"]) == 2
     assert "unknown rules in config: ['nope']" in capsys.readouterr().err
+
+
+def test_unopenable_ledger_is_a_config_error(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="cannot open ledger"):
+        build_app(Settings(db_path=tmp_path / "missing-dir" / "kelpie.db"))
+
+
+def test_rules_load_in_plan_order() -> None:
+    registry = {"beta": alpha_factory, "alpha": alpha_factory}
+    loaded = load_rules(EngineConfig(), registry, PLANNED)
+    assert [s.name for s in loaded.statuses if s.implemented] == ["alpha", "beta"]
+    assert len(loaded.rules) == 2
+
+
+def test_factory_crash_is_a_config_error() -> None:
+    def broken(config: dict[str, Any]) -> AlphaRule:
+        raise KeyError("x")
+
+    with pytest.raises(ConfigError, match="bad config for rule 'alpha'"):
+        load_rules(EngineConfig(), {"alpha": broken}, PLANNED)
+
+
+def test_rule_errors_start_at_zero_and_ledger_down_is_reported() -> None:
+    from kelpie.core.ledger import MemoryLedgerStore
+
+    class WriteFails(MemoryLedgerStore):
+        def append(self, entry: Any) -> None:
+            raise sqlite3.OperationalError("disk full")
+
+    metrics = Metrics()
+    metrics.set_rules(load_rules(EngineConfig(), REGISTRY, PLANNED).statuses, dry_run=True)
+    assert 'kelpie_rule_errors_total{rule="alpha"} 0' in metrics.render()
+    engine = Engine([AlphaRule()], config=EngineConfig(), ledger_store=WriteFails())
+    loop = ControlLoop(engine, lambda: Snapshot(now=NOW), metrics)
+    loop.tick_once()
+    assert "kelpie_ledger_up 0" in metrics.render()

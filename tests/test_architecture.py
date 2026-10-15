@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "kelpie"
-FORBIDDEN_IN_CORE = ("kelpie.adapters", "kelpie.connectors")
+FORBIDDEN_IN_CORE = (
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+)
 # No LLM clients in the control loop. Only report/ may use one.
 LLM_ROOTS = {"anthropic", "openai", "litellm", "langchain", "google", "ollama", "mistralai"}
 

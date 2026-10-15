@@ -1,9 +1,10 @@
+import tomllib
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from kelpie.core.config import EngineConfig, Mode, load_config
+from kelpie.core.config import EngineConfig, Mode
 
 
 def test_defaults_are_safe() -> None:
@@ -30,7 +31,7 @@ unblock_grace = "5m"
 max_review_rounds = 3
 """
     )
-    config = load_config(path)
+    config = EngineConfig.from_mapping(tomllib.loads(path.read_text())["engine"])
     assert config.interval == timedelta(minutes=1)
     assert config.dry_run
     assert config.mode_for("stale_blocks") is Mode.ACT
@@ -39,10 +40,9 @@ max_review_rounds = 3
     assert config.rules["ping_pong"] == {"max_review_rounds": 3}
 
 
-def test_missing_engine_table_means_defaults(tmp_path: Path) -> None:
-    path = tmp_path / "kelpie.toml"
-    path.write_text("")
-    assert load_config(path) == EngineConfig()
+def test_engine_must_be_a_table() -> None:
+    with pytest.raises(ValueError, match="table"):
+        EngineConfig.from_mapping(5)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -54,6 +54,7 @@ def test_missing_engine_table_means_defaults(tmp_path: Path) -> None:
         {"dry_run": "false"},
         {"rules": {"x": "act"}},
         {"interval": 0},
+        {"interval": [1]},
     ],
 )
 def test_invalid_config_rejected(data: dict[str, object]) -> None:

@@ -49,7 +49,14 @@ root_package = "kelpie"
 name = "Core and rules do not depend on integrations"
 type = "forbidden"
 source_modules = ["kelpie.core", "kelpie.rules"]
-forbidden_modules = ["kelpie.adapters", "kelpie.connectors"]
+forbidden_modules = [
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+]
 
 [tool.coverage.run]
 branch = true

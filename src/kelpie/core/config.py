@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 
 from kelpie.core.serde import parse_duration
@@ -48,6 +46,13 @@ class EngineConfig:
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> EngineConfig:
+        """Build from the ``[engine]`` table (``kelpie.app.load_settings`` reads the file)."""
+        if not isinstance(data, Mapping):
+            raise ValueError("[engine] must be a table")
+        return cls._from_mapping(data)
+
+    @classmethod
+    def _from_mapping(cls, data: Mapping[str, Any]) -> EngineConfig:
         """Parse ``{interval, dry_run, default_mode, rules: {name: {mode, ...params}}}``."""
         known = {
             "interval",
@@ -93,10 +98,3 @@ class EngineConfig:
             modes=modes,
             rules=rules,
         )
-
-
-def load_config(path: Path) -> EngineConfig:
-    """Load the ``[engine]`` table of a TOML file; a missing table means all defaults."""
-    with path.open("rb") as f:
-        data = tomllib.load(f)
-    return EngineConfig.from_mapping(data.get("engine", {}))

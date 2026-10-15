@@ -6,7 +6,10 @@ OTLP ingest will be mounted here.
 from __future__ import annotations
 
 import logging
+import signal
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import FrameType
 
 from kelpie.app import App
 from kelpie.metrics import Metrics
@@ -51,9 +54,28 @@ def make_server(host: str, port: int, metrics: Metrics | None = None) -> KelpieH
     return KelpieHTTPServer((host, port), metrics or Metrics())
 
 
+def run(app: App, server: KelpieHTTPServer) -> None:
+    """Serve until ``server.shutdown()``; then stop the loop and close the ledger."""
+    app.loop.start()
+    try:
+        server.serve_forever()
+    finally:
+        app.close()
+        server.server_close()
+        log.info("kelpie stopped")
+
+
 def serve(app: App, host: str = "0.0.0.0", port: int = 9464) -> None:
     server = make_server(host, port, app.metrics)
-    app.loop.start()
+
+    def on_signal(signum: int, frame: FrameType | None) -> None:
+        log.info("received %s, shutting down", signal.Signals(signum).name)
+        # shutdown() blocks until serve_forever returns, so it cannot run in this thread.
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    # In a container Kelpie is PID 1, where SIGTERM has no default action.
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
     log.info(
         "kelpie listening on http://%s:%d (%d rules, dry-run %s)",
         host,
@@ -61,10 +83,4 @@ def serve(app: App, host: str = "0.0.0.0", port: int = 9464) -> None:
         len(app.loaded.rules),
         "on" if app.settings.engine.dry_run else "off",
     )
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        app.loop.stop()
-        server.server_close()
+    run(app, server)

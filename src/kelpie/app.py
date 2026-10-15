@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import threading
 import time
 import tomllib
@@ -65,10 +66,16 @@ def load_settings(path: Path | None) -> Settings:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
     try:
         engine = EngineConfig.from_mapping(data.get("engine", {}))
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise ConfigError(str(exc)) from exc
     storage = data.get("storage", {})
+    if not isinstance(storage, Mapping):
+        raise ConfigError("[storage] must be a table")
+    if extra := set(storage) - {"path"}:
+        raise ConfigError(f"unknown [storage] keys: {sorted(extra)}")
     raw_db = os.environ.get("KELPIE_DB") or storage.get("path", str(DEFAULT_DB))
+    if not isinstance(raw_db, str) or not raw_db.strip():
+        raise ConfigError("storage path must be a non-empty string")
     db_path = None if raw_db == ":memory:" else Path(raw_db)
     return Settings(engine=engine, db_path=db_path, source=path)
 
@@ -76,7 +83,7 @@ def load_settings(path: Path | None) -> Settings:
 @dataclass(frozen=True, slots=True)
 class RuleStatus:
     name: str
-    planned: PlannedRule | None
+    planned: PlannedRule
     implemented: bool
     mode: Mode
     configured: bool  # has a [engine.rules.<name>] section
@@ -112,10 +119,10 @@ def load_rules(
         for name in sorted(configured - set(registry))
     ]
     rules: list[Rule] = []
-    for name in sorted(registry):
+    for name in (p.name for p in planned if p.name in registry):  # plan order
         try:
             rules.append(registry[name](dict(config.rules.get(name, {}))))
-        except (TypeError, ValueError) as exc:
+        except Exception as exc:
             raise ConfigError(f"bad config for rule {name!r}: {exc}") from exc
     statuses = [
         RuleStatus(
@@ -155,7 +162,7 @@ class ControlLoop:
             results = self.engine.tick(self.snapshot_source)
         except Exception:
             log.exception("engine tick failed")
-            self.metrics.tick_failed()
+            self.metrics.tick_failed(self.engine)
             return
         self.metrics.observe_tick(time.monotonic() - started, results, self.engine)
 
@@ -167,6 +174,8 @@ class ControlLoop:
             self._stop.wait(max(0.0, interval - (time.monotonic() - started)))
 
     def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("control loop already started")
         self._thread = threading.Thread(target=self.run, name="kelpie-control-loop", daemon=True)
         self._thread.start()
 
@@ -174,6 +183,12 @@ class ControlLoop:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout)
+            if self._thread.is_alive():
+                log.warning("control loop still busy after %.1fs; exiting anyway", timeout)
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
 
 @dataclass(slots=True)
@@ -185,14 +200,23 @@ class App:
     metrics: Metrics
     store: LedgerStore
 
+    def close(self) -> None:
+        self.loop.stop()
+        close = getattr(self.store, "close", None)
+        if callable(close):
+            close()
+
 
 def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> App:
     loaded = load_rules(settings.engine)
     for warning in loaded.warnings:
         log.warning(warning)
-    store: LedgerStore = (
-        MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
-    )
+    try:
+        store: LedgerStore = (
+            MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
+        )
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
     # No platform adapters, connectors or alerter are wired yet: with no executors every
     # effect would turn into an alert, and the defaults (dry-run, observe) send nothing.
     engine = Engine(loaded.rules, config=settings.engine, ledger_store=store)
@@ -214,8 +238,8 @@ def render_status(settings: Settings, loaded: LoadedRules) -> str:
         f"{'#':>3}  {'rule':<17} {'prio':<4}  {'status':<16} mode",
     ]
     for s in loaded.statuses:
-        number = str(s.planned.number) if s.planned and s.planned.number else "-"
-        prio = s.planned.priority if s.planned else ""
+        number = str(s.planned.number) if s.planned.number else "-"
+        prio = s.planned.priority
         status = "loaded" if s.implemented else "not implemented"
         mode = str(s.mode) if s.implemented else "-"
         if s.implemented and engine.dry_run and s.mode is not Mode.OBSERVE:

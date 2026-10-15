@@ -44,8 +44,13 @@ class Metrics:
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
-            self.rules = [(s.name, str(s.mode), s.implemented) for s in statuses]
+            self.rules = [
+                (s.name, str(s.mode) if s.implemented else "", s.implemented) for s in statuses
+            ]
             self.dry_run = dry_run
+            for name, _, implemented in self.rules:
+                if implemented:  # expose 0 so rate() sees the first error
+                    self.rule_errors.setdefault(name, 0)
 
     def observe_tick(self, seconds: float, results: Sequence[Dispatched], engine: Engine) -> None:
         with self._lock:
@@ -55,12 +60,18 @@ class Metrics:
             for d in results:
                 a = d.action
                 self.actions[(a.rule, str(a.kind), str(d.mode), str(d.outcome))] += 1
-            self.rule_errors = Counter(engine.rule_errors)
-            self.ledger_up = engine.ledger_available
+            self._sync(engine)
 
-    def tick_failed(self) -> None:
+    def tick_failed(self, engine: Engine) -> None:
         with self._lock:
             self.tick_failures += 1
+            self._sync(engine)
+
+    def _sync(self, engine: Engine) -> None:
+        self.rule_errors.update(
+            {r: n - self.rule_errors.get(r, 0) for r, n in engine.rule_errors.items()}
+        )
+        self.ledger_up = engine.ledger_available
 
     def render(self) -> str:
         with self._lock:
@@ -90,7 +101,8 @@ class Metrics:
             metric(
                 "kelpie_rule_loaded",
                 "gauge",
-                "Planned rules: 1 if implemented and loaded, 0 if not implemented yet.",
+                "Planned rules: 1 if loaded, 0 if not implemented yet. mode is the configured "
+                "mode (empty if not implemented); dry-run overrides it, see kelpie_dry_run.",
                 [
                     f"kelpie_rule_loaded{_labels(rule=n, mode=m)} {int(impl)}"
                     for n, m, impl in self.rules
@@ -135,7 +147,8 @@ class Metrics:
             metric(
                 "kelpie_actions_total",
                 "counter",
-                "Actions emitted by rules, by what happened to them.",
+                "Actions emitted by rules, by what happened to them. mode is the effective "
+                "mode (observe under dry-run).",
                 [
                     f"kelpie_actions_total{_labels(rule=r, kind=k, mode=m, outcome=o)} {n}"
                     for (r, k, m, o), n in sorted(self.actions.items())
@@ -144,7 +157,7 @@ class Metrics:
             metric(
                 "kelpie_ledger_up",
                 "gauge",
-                "1 if the action ledger was readable on the last tick.",
+                "1 unless the last action-ledger read or write failed.",
                 [f"kelpie_ledger_up {int(self.ledger_up)}"],
             )
             return "\n".join(out) + "\n"
