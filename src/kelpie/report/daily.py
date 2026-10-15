@@ -18,11 +18,11 @@ live re-opens its states. Two conditions on one task both count: the unit is
 a ``loop_breaker`` (identical calls, error streak) or ``no_progress`` state while it lasted,
 and every session that ``exit_contract`` requeued (it ended without a status, so its work
 is redone: a restart; a requeue that found nothing to do is not one). Each model call is
-burned at most once, by the first cause in :data:`CHAOS_CAUSES` order that covers it, so
-the chaos never exceeds the day's spend; nested instrumentations are not double counted
-either (:mod:`kelpie.core.spans`). Tokens are priced by ``[prices]``; tokens of models
-without a price are reported as unpriced. In subscription mode there is no bill: dollars
-are an estimate and marked so.
+burned at most once: by the first state that covers it (in :data:`CHAOS_CAUSES` order),
+else by a restart, so the chaos never exceeds the day's spend; nested instrumentations are
+not double counted either (:mod:`kelpie.core.spans`). Tokens are priced by ``[prices]``;
+tokens of models without a price are reported as unpriced. In subscription mode there is
+no bill: dollars are an estimate and marked so.
 
 **Cost per completed task.** The day's priced spend divided by the tasks that reached
 ``done`` during the day, as the board reports them now.

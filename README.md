@@ -217,7 +217,8 @@ report; no LLM is involved.
 - **Cost of chaos, hours**: long-lived alert states of the rules that describe stuck work
   (ownerless tasks, blocks that outlived their cause, waits past their limit, review
   ping-pong, idle capacity next to a bottleneck, runaway loops, activity without progress),
-  from when the condition began to when Kelpie last saw it, clipped to the day. The unit is
+  from when Kelpie first reported the condition to when it last saw it, clipped to the
+  day (a lower bound: a grace period or an allowed wait is not counted). The unit is
   condition-hours; `[report] hour_usd` prices them.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
   flagged, and by every session `exit_contract` requeued (a restart), priced with
