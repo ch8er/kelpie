@@ -94,6 +94,7 @@ source_modules = [
     "kelpie.app",
     "kelpie.server",
     "kelpie.metrics",
+    "kelpie.net",
     "kelpie.doctor",
     "kelpie.why",
 ]

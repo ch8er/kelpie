@@ -65,7 +65,8 @@ jobs:
         run: uv run coverage report --include='src/kelpie/rules/*' --fail-under=90
 
   # Scenarios: real `kelpie serve` against a simulated Hermes farm with fake GitHub,
-  # Telegram and Slack (tests/sim). A scenario fails on any ERROR line in Kelpie's log.
+  # Telegram and Slack (kelpie.sim, tests/sim). A scenario fails on any ERROR line in
+  # Kelpie's log.
   e2e:
     needs: changes
     if: needs.changes.outputs.code == 'true'

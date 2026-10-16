@@ -124,6 +124,40 @@ def test_control_loop_has_no_llm(path: Path) -> None:
     assert not bad, f"{path.name} imports LLM client {bad}"
 
 
+SIMULATOR_FREE = (
+    "core",
+    "rules",
+    "adapters",
+    "connectors",
+    "alerts",
+    "traces",
+    "resources",
+    "report",
+    "app.py",
+    "server.py",
+    "metrics.py",
+    "net.py",
+    "doctor.py",
+    "why.py",
+    "cli.py",  # the demo command imports it lazily, inside the command
+)
+
+
+@pytest.mark.parametrize("path", _files(*SIMULATOR_FREE), ids=_ids)
+def test_the_simulator_stays_out_of_kelpie_itself(path: Path) -> None:
+    """kelpie.sim (fake GitHub, fake hermes CLI) is for the demo and tests only."""
+    tree = ast.parse(path.read_text())
+    top = {
+        m
+        for node in tree.body
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for m in _imports_in(ast.unparse(node), _module_name(path).rpartition(".")[0])
+    }
+    found = top if path.name == "cli.py" else _imports(path)
+    bad = {m for m in found if m.startswith(("kelpie.sim", "kelpie.demo"))}
+    assert not bad, f"{path.name} imports {bad}"
+
+
 def test_detector_sees_relative_and_dynamic_imports() -> None:
     source = (
         "from ..adapters import hermes\n"

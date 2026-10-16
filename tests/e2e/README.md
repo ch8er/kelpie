@@ -1,9 +1,9 @@
 # End-to-end scenarios
 
 Each test here runs the real `kelpie serve` (a subprocess, a generated TOML config, the
-installed `kelpie` entry point) against a simulated Hermes farm. Its parts are packaged in [`kelpie.sim`](../../src/kelpie/sim)
-(the demo uses them too); [`tests/sim`](../sim) adds the subprocess harness and the alert
-channels:
+installed `kelpie` entry point) against a simulated Hermes farm. Its parts are packaged in
+[`kelpie.sim`](../../src/kelpie/sim) (the demo uses them too); [`tests/sim`](../sim) adds the
+subprocess harness and the alert channels:
 
 - a `kanban.db` with the Hermes schema, times relative to the real now;
 - a fake `hermes` executable that records its calls and applies `kanban block` /

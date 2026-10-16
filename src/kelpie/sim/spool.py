@@ -21,7 +21,10 @@ from unittest import mock
 
 from kelpie.adapters.hermes import plugin
 
-_LOCK = threading.Lock()  # the plugin reads os.environ: one writer at a time
+# The plugin reads os.environ, so a hook call changes the process environment while it runs:
+# one writer at a time, and nothing else in the process may read HERMES_* meanwhile (the e2e
+# tests run Kelpie in another process; the demo runs everything in one thread).
+_LOCK = threading.Lock()
 
 
 class Spool:

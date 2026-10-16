@@ -798,7 +798,7 @@ Kelpie is published free; the first question of every visitor is "what does it d
 `kelpie demo` answers it in two minutes on any laptop, before any adapter is configured.
 
 **Acceptance criteria**
-- [ ] `pip install kelpie-sre && kelpie demo` runs the tests/sim farm (packaged, no network, no Hermes) and replays a short story: a stale block cleared, a runaway loop stopped, a forgotten hold, a human task gating agents, then the daily report with cost of chaos
+- [ ] `pip install kelpie-sre && kelpie demo` runs the farm simulator (`kelpie.sim`, packaged, no network, no Hermes) and replays a short story: a stale block cleared, a runaway loop stopped, a forgotten hold, a human task gating agents, then the daily report with cost of chaos
 - [ ] Narrated terminal output: what happened on the farm, what Kelpie noticed, what it would do in observe vs act
 - [ ] Finishes in under two minutes; optional `--web` opens the report as HTML
 - [ ] The README's first screen shows the demo command and its output
