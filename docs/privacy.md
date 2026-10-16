@@ -128,7 +128,8 @@ most four arguments are kept, and only these:
 - after a wrapper that only runs another command (`sudo`, `env`, `nice`, `time`, `nohup`,
   `command`, `exec`, `rtk`), its flag names, `NAME=***` for its assignments, and the wrapped
   executable, read like the first one: `sudo -u root make test` → `sudo -u *** make test`.
-  These do not count against the four.
+  These do not count against the four. A wrapper flag Kelpie does not know may take a value,
+  so after one everything is masked (`sudo -X val make` → `sudo -X *** ***`).
 
 Arguments are split on spaces and tabs only, as the shell does; an argument with an escaped
 quote (`\"`) masks the rest of the line.

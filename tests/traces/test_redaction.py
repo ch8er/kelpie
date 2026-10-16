@@ -140,6 +140,21 @@ LEAKS = [
     ("sudo --user=hunter2 make", "hunter2"),
     ("env -S 'make hunter2' x", "hunter2"),
     ("sudo env A=1 nice -n 5 curl -u admin:hunter2 h", "hunter2"),
+    # a wrapper's flags: unknown ones and clusters ending in one that takes a value
+    ("sudo -T hunter2 make", "hunter2"),
+    ("sudo -R hunter2 make", "hunter2"),
+    ("sudo --chroot hunter2 make", "hunter2"),
+    ("sudo -X hunter2 make", "hunter2"),
+    ("sudo --frobnicate hunter2 make", "hunter2"),
+    ("sudo -Xhunter2 make", "hunter2"),
+    ("env -P hunter2 make", "hunter2"),
+    ("rtk --token hunter2 git status", "hunter2"),
+    ("sudo -iu hunter2", "hunter2"),
+    ("sudo -Hu hunter2 make", "hunter2"),
+    ("sudo -Eu hunter2 make", "hunter2"),
+    ("env -iC /x/hunter2 make", "hunter2"),
+    ("nice -123456 hunter2", "123456"),
+    ("nice -123456 hunter2", "hunter2"),
     # only spaces and tabs split words; an escaped quote masks the rest
     ("cmd\u00a0hunter2", "hunter2"),
     ("tool x\u2003hunter2", "hunter2"),
@@ -204,6 +219,11 @@ def test_commands_stay_recognizable(cmd: str, expected: str) -> None:
         ("env -u X make", "make"),
         ("sudo env A=1 nice -n 5 git status", "git status"),
         ("rtk git status --short", "git status"),
+        ("sudo -iu root make test", "make test"),
+        ("sudo -E -- make test", "make test"),
+        ("env -i PATH=x make test", "make test"),
+        ("nice -5 make", "make"),
+        ("sudo -u root -g wheel nice -n 5 make test", "make test"),
     ],
 )
 def test_prefixes_still_work(cmd: str, prefix: str) -> None:

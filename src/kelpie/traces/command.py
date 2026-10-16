@@ -41,21 +41,39 @@ _FLAG = re.compile(r"^(?:-[A-Za-z0-9]|--[A-Za-z][A-Za-z0-9-]{0,40})$")
 _SEPARATORS = frozenset({"|", "||", "|&", "&&", ";", "&"})
 _PYTHON_MODULES = frozenset({"pytest", "unittest", "pip", "mypy", "ruff", "black", "build"})
 # Wrappers that only run the real command, with the flags of theirs that take a value.
+# Wrappers that only run the real command: their flags that take a value, and those that
+# do not. Any other flag of a wrapper may take one: the rest of the command is masked.
 _WRAPPERS = {
-    "sudo": frozenset(
-        {
-            *("-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D"),
-            *("--user", "--group", "--host", "--prompt", "--close-from", "--other-user"),
-            *("--role", "--type", "--chdir"),
-        }
+    "sudo": (
+        frozenset(
+            {
+                *("-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D", "-T", "-R"),
+                *("--user", "--group", "--host", "--prompt", "--close-from", "--other-user"),
+                *("--role", "--type", "--chdir", "--command-timeout", "--chroot"),
+            }
+        ),
+        frozenset(
+            {
+                *("-A", "-b", "-E", "-H", "-i", "-K", "-k", "-n", "-P", "-S", "-s", "-B"),
+                *("--askpass", "--background", "--preserve-env", "--set-home", "--login"),
+                *("--remove-timestamp", "--reset-timestamp", "--non-interactive"),
+                *("--preserve-groups", "--stdin", "--shell", "--bell"),
+            }
+        ),
     ),
-    "time": frozenset({"-o", "-f", "--output", "--format"}),
-    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
-    "nice": frozenset({"-n", "--adjustment"}),
-    "nohup": frozenset(),
-    "command": frozenset(),
-    "exec": frozenset({"-a"}),
-    "rtk": frozenset(),
+    "time": (
+        frozenset({"-o", "-f", "--output", "--format"}),
+        frozenset({"-p", "-v", "-a", "-q", "--portability", "--verbose", "--append", "--quiet"}),
+    ),
+    "env": (
+        frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+        frozenset({"-i", "-0", "-v", "--ignore-environment", "--null", "--debug"}),
+    ),
+    "nice": (frozenset({"-n", "--adjustment"}), frozenset()),
+    "nohup": (frozenset(), frozenset()),
+    "command": (frozenset(), frozenset({"-p", "-v", "-V"})),
+    "exec": (frozenset({"-a"}), frozenset({"-c", "-l"})),
+    "rtk": (frozenset(), frozenset()),
 }
 _MAX_WRAPPED = 8  # wrapper tokens kept on top of _MAX_TOKENS
 _BLANKS = re.compile(r"[ \t]+")  # what bash splits words on
@@ -74,6 +92,27 @@ def _quoted_span(tokens: list[str], i: int) -> int:
         if tokens[j].count(quote) % 2 == 1:
             return j + 1
     return len(tokens)
+
+
+def _wrapper_flag(
+    tok: str, valued: frozenset[str], plain: frozenset[str]
+) -> tuple[str, bool, bool]:
+    """A wrapper's flag as kept, whether the next argument is its value, and whether it is
+    unknown (so its value, or what follows, cannot be told apart from the command)."""
+    if tok == "--":
+        return tok, False, False
+    if tok[:2] == "--" or tok[1:2] == "-":
+        known = tok in valued or tok in plain
+        return (tok if _FLAG.match(tok) else _MASK), tok not in plain, not known
+    for k in range(1, len(tok)):  # a cluster: -iu root, -Eu root, -uroot
+        flag = "-" + tok[k]
+        if flag in plain:
+            continue
+        last = k == len(tok) - 1
+        if flag in valued:
+            return (tok, True, False) if last else (tok[: k + 1] + _MASK, False, False)
+        return tok[: k + 1] + ("" if last else _MASK), True, True
+    return tok, False, False
 
 
 def redact_command(command: str) -> str | None:
@@ -112,15 +151,18 @@ def redact_command(command: str) -> str | None:
             before = len(out)
             if _ASSIGN.match(tok):
                 out.append(f"{name}={_MASK}")  # env FOO=bar
-            elif _FLAG.match(tok):
-                out.append(tok)
-                if tok in wrapper and end < len(tokens):
+            elif eq and tok[:1] == "-":
+                out.append(f"{name}={_MASK}" if _FLAG.match(name) else _MASK)
+            elif tok[:1] == "-" and tok[1:].isdigit() and len(tok) < 5:
+                out.append(tok)  # nice -5
+            elif tok[:1] == "-" and len(tok) > 1 and end == i + 1:
+                kept, value, unknown = _wrapper_flag(tok, *wrapper)
+                out.append(kept)
+                if value and end < len(tokens):
                     out.append(_MASK)  # its value: sudo -u root
                     end = _quoted_span(tokens, end)
-            elif eq and _FLAG.match(name):
-                out.append(f"{name}={_MASK}")
-            elif tok[:1] == "-" and tok[1:2].isalpha() and tok[1:2] != "-":
-                out.append(tok[:2] + _MASK)
+                if unknown:  # whatever comes next may be its value
+                    wrapper, words = None, False
             else:
                 wrapper, exe = None, True  # the wrapped command: read it as an executable
                 continue
@@ -210,11 +252,11 @@ def command_prefix(command: str | None) -> str | None:
         if _ASSIGN.match(tokens[0]):
             tokens.pop(0)
         elif word in _WRAPPERS:
-            valued = _WRAPPERS[word]
+            valued = _WRAPPERS[word][0]
             tokens.pop(0)
             while tokens and (tokens[0].startswith("-") or _ASSIGN.match(tokens[0])):
                 flag = tokens.pop(0)
-                if flag in valued and tokens:
+                if tokens and (flag in valued or tokens[0] == _MASK):  # -iu ***: its value
                     tokens.pop(0)
         elif _RUNNERS.get(word) is not None and len(tokens) > 1 and tokens[1] == _RUNNERS[word]:
             del tokens[:2]
