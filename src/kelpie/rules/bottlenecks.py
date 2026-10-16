@@ -61,9 +61,9 @@ reassign it, listed in ``assigned_busy_tasks``); otherwise ``dispatch``. The fla
 every task of the snapshot, whichever adapter reported it.
 
 **Open pull requests** (``snapshot.pull_requests``, from the GitHub pull requests step). An
-open task is linked to the open PRs whose head branch is the task's ``branch`` (usually one;
-a branch name heading several PRs links them all, since Kelpie cannot tell which is the
-task's) and carries their labels as its own: a hold label on a PR holds its task, aged from
+open task is linked to the open PRs that belong to it (``PullRequest.task_ids``: its code is
+in the PR's title or head branch, never a mention in its description or comments, incident
+17) and carries their labels as its own: a hold label on a PR holds its task, aged from
 when the label went on (when the code host says) or the task's last move, whichever is
 later. A held PR that no open task stands for (a fork's excepted) is held work of its hold
 too. With ``ready_prs`` (default off: turn it on where agents merge PRs), a PR no open task
@@ -235,21 +235,19 @@ def _open_dependencies(snapshot: Snapshot, open_ids: set[str]) -> dict[str, set[
 def link_pull_requests(
     snapshot: Snapshot,
 ) -> tuple[dict[str, tuple[PullRequest, ...]], tuple[PullRequest, ...]]:
-    """Open tasks linked to the open PRs of their branch, and the PRs no open task stands
-    for.
+    """Open tasks linked to the open PRs that belong to them, and the PRs no open task
+    stands for.
 
-    A task is linked to every open PR whose head branch is its ``branch`` (usually one; the
-    same branch name may head PRs in several repositories, or several PRs of one, and Kelpie
-    cannot tell which is the task's, so a hold on any of them holds it). A PR whose task is
-    finished, or that no task names (a fork's, for one), stands on its own."""
-    by_branch: dict[str, list[PullRequest]] = {}
+    A PR belongs to the tasks in its ``task_ids``: the code connector found their code in
+    its title or head branch (incident 17: never a mention in its description or comments).
+    A PR whose tasks are all finished, or that names none, stands on its own."""
+    open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
+    by_task: dict[str, list[PullRequest]] = {}
     for pr in snapshot.pull_requests:
-        if pr.branch:
-            by_branch.setdefault(pr.branch, []).append(pr)
-    linked: dict[str, tuple[PullRequest, ...]] = {}
-    for t in snapshot.tasks:
-        if not t.status.is_terminal and (prs := by_branch.get(t.branch or "")):
-            linked[t.id] = tuple(prs)
+        for tid in pr.task_ids:
+            if tid in open_ids:
+                by_task.setdefault(tid, []).append(pr)
+    linked = {tid: tuple(prs) for tid, prs in by_task.items()}
     taken = {(pr.repo, pr.number) for prs in linked.values() for pr in prs}
     loose = tuple(pr for pr in snapshot.pull_requests if (pr.repo, pr.number) not in taken)
     return linked, loose

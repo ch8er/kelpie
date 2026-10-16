@@ -27,13 +27,15 @@ instead of the same PRs being revalidated every tick. A tick that runs out of bu
 a warning (once, until it suffices again) and counts ``outcome="budget"`` requests.
 
 Ready tasks (the dispatch gate). A pattern with ``applies_to = ["ready_task"]`` reads the
-title and body (description) of a ready task instead ("Redo the migration after #123"), the
-first ``MAX_TASK_TEXT`` characters: every PR it names (up to ``MAX_READY_REFS`` that can be
+title of a ready task instead ("Redo the migration after #123"), the first
+``MAX_TASK_TEXT`` characters: every PR it names (up to ``MAX_READY_REFS`` that can be
 looked up, in pattern order) gets a condition linked by ``task_id`` alone (id
 ``ready:<task>:<kind>:<ref>``, registered when the task became ready), under the same rules:
 only for a confirmed PR, bound to its repo, number and head. The ``dispatch_gate`` rule
-parks a ready task whose condition is unmet. Patterns run on up to 8000 characters per ready
-task each tick: keep them simple (no nested quantifiers, no leading ``.*``). Outcomes are
+parks a ready task whose condition is unmet. The description (``Task.body``) and comments
+are never read: on a live farm 8 of 10 PRs matched from mentions there were not the task's
+(incident 17). Patterns run on up to ``MAX_TASK_TEXT`` characters per ready task each tick:
+keep them simple (no nested quantifiers, no leading ``.*``). Outcomes are
 counted for blocks only: a ready task whose PR cannot be resolved simply has no
 prerequisite. A condition id the snapshot already holds (the adapter registered it when the
 task was parked) is not attached again.
@@ -59,7 +61,7 @@ log = logging.getLogger(__name__)
 
 KINDS = {"pr_merged": ConditionKind.PR_MERGED, "ci_green": ConditionKind.CI_STATUS}
 MAX_REASON = 2000  # characters of a block reason the patterns look at
-MAX_TASK_TEXT = 8000  # characters of a ready task's title and body the patterns look at
+MAX_TASK_TEXT = 1000  # characters of a ready task's title the patterns look at
 MAX_READY_REFS = 5  # PRs looked up per ready task (resolvable refs, in pattern order)
 DEFAULT_MAX_REQUESTS = 50
 DEFAULT_TICK_BUDGET = timedelta(seconds=10)
@@ -67,7 +69,7 @@ DEFAULT_TICK_BUDGET = timedelta(seconds=10)
 # (bad ref, repo not allowed, 404); GitHub could not confirm it yet; the step failed on it.
 OUTCOMES = ("attached", "unresolved", "unconfirmed", "error")
 _KEYS = {"pattern", "kind", "repo", "applies_to"}
-# What a pattern reads: a block reason, or the title and body of a ready task (the gate).
+# What a pattern reads: a block reason, or the title of a ready task (the gate).
 TARGETS = ("block", "ready_task")
 
 
@@ -248,7 +250,7 @@ class ConditionSync:
 
     def _target(self, task: Task, snapshot: Snapshot) -> str | None:
         """Which text of the task the patterns read: a bare block's reason, or a ready
-        task's title and body (for the dispatch gate). None: neither applies."""
+        task's title (for the dispatch gate). None: neither applies."""
         if not self.patterns:
             return None
         if _bare_block(task, snapshot):
@@ -265,8 +267,8 @@ class ConditionSync:
     ) -> tuple[list[Condition], str | None]:
         """The conditions for the task's text, and the outcome (None: no match).
 
-        A block gets the first PR that resolves; a ready task every one its title and body
-        name (up to ``MAX_READY_REFS``), since a description can list several prerequisites.
+        A block gets the first PR that resolves; a ready task every one its title names
+        (up to ``MAX_READY_REFS``), since a title can name several prerequisites.
         A condition is attached only for a PR GitHub has shown to exist, now or on an
         earlier tick. While that is not known (back-off, network, 401), the block stays as
         it is, so it does not flap between "waiting" and "no condition"."""
@@ -296,7 +298,9 @@ class ConditionSync:
             assert task.block is not None
             text = task.block.reason[:MAX_REASON]
         else:
-            text = "\n".join(x for x in (task.title, task.body) if x)[:MAX_TASK_TEXT]
+            # The title only: mentions in a description or comments never link a PR to
+            # a task (incident 17).
+            text = task.title[:MAX_TASK_TEXT]
         found: list[tuple[BlockConditionPattern, PrRef | None]] = []
         seen: set[tuple[str, str]] = set()
         for p in self.patterns:

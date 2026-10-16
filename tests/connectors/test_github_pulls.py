@@ -348,3 +348,46 @@ def test_a_spent_budget_is_reported_once(caplog: pytest.LogCaptureFixture) -> No
         s(Snapshot(now=clock.now))
     assert sum(p.mergeable is True for p in snap.pull_requests) == 1
     assert caplog.text.count("request budget ran out") == 1
+
+
+# --- which task a PR belongs to (incident 17) -------------------------------------------
+
+
+def test_the_step_links_prs_to_the_snapshot_tasks() -> None:
+    from kelpie.core.model import Status, Task
+
+    tasks = (
+        Task("t_7a", "Fix it", Status.REVIEW, NOW),
+        Task("t_8b", "Other", Status.REVIEW, NOW),
+    )
+    with serve() as gh:
+        gh.reply(
+            LIST,
+            [
+                item(1, "hermes/t_7a"),
+                # Its description names t_8b: a mention never links (incident 17).
+                item(2, "feature/other", body="Unblocks t_8b, see also t_7a"),
+            ],
+        )
+        s = step(gh, settings=PullSettings(max_details=0))
+        snap = s(Snapshot(now=NOW, tasks=tasks))
+        again = s(Snapshot(now=NOW + timedelta(seconds=30), tasks=tasks))
+    assert {p.number: p.task_ids for p in snap.pull_requests} == {1: ("t_7a",), 2: ()}
+    assert again.pull_requests == snap.pull_requests  # worked out once, served again
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("(", "task_code"),
+        ("", "task_code"),
+        (" ", "task_code"),
+        ("(IOS)-[0-9]+", "capturing"),
+        ("(?:[A-Z]+-?)+[0-9]+", "repeat a group"),
+        (3, "task_code"),
+    ],
+)
+def test_task_code_is_validated(raw: object, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        load_pulls({"task_code": raw})
+    assert load_pulls({"task_code": "[A-Z]+-[0-9]+"}).task_code is not None

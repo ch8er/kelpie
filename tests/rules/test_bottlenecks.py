@@ -1147,19 +1147,19 @@ def with_prs(snapshot: Snapshot, *prs: PullRequest) -> Snapshot:
 MERGERS = Bottlenecks(ready_prs=True)  # agents merge PRs on this farm
 
 
-def test_tasks_link_to_the_open_prs_of_their_branch() -> None:
+def test_tasks_link_to_the_open_prs_that_name_them() -> None:
     tasks = (
         on_branch("A", Status.REVIEW, "feat/a"),
-        on_branch("B", Status.READY, "shared"),  # two PRs head "shared": both are B's
+        on_branch("B", Status.READY, "shared"),
         on_branch("C", Status.DONE, "feat/c"),  # finished: its PR stands on its own
-        task("D", Status.READY),  # no branch
+        task("D", Status.READY),
     )
     prs = (
-        pr(1, "feat/a", "merge-hold"),
-        pr(2, "shared", "x"),
-        pr(3, "shared", "y", repo="example/other"),
-        pr(4, "feat/c"),
-        pr(5, None),
+        pr(1, "feat/a", "merge-hold", task_ids=("A",)),
+        pr(2, "shared", "x", task_ids=("B",)),
+        pr(3, "other", "y", repo="example/other", task_ids=("B", "Z")),  # Z: not on the board
+        pr(4, "feat/c", task_ids=("C",)),
+        pr(5, "feat/d"),  # names no task: a branch alone never links (incident 17)
     )
     linked, loose = link_pull_requests(with_prs(snap(tasks), *prs))
     assert {t: [p.number for p in ps] for t, ps in linked.items()} == {"A": [1], "B": [2, 3]}
@@ -1179,17 +1179,22 @@ def test_a_hold_label_on_a_pr_holds_its_task() -> None:
     base = snap(tasks, owners)
     # Without the PR the review task is plain queued work.
     assert of(run(base, rule), "idle-ready")
-    actions = run(with_prs(base, pr(7, "feat/a", "merge-first", mergeable=False)), rule)
+    actions = run(
+        with_prs(base, pr(7, "feat/a", "merge-first", mergeable=False, task_ids=("A",))), rule
+    )
     assert of(actions, "idle-ready") == []
     [hold] = of(actions, "hold")
     assert hold.params["held_tasks"] == ["A"] and hold.params["held_count"] == 1
     assert "held_prs" not in hold.params  # the PR is its task's, not more held work
 
 
-def test_a_hold_on_any_pr_of_a_shared_branch_holds_the_task() -> None:
+def test_a_hold_on_any_pr_of_the_task_holds_it() -> None:
     rule = Bottlenecks(holds=(Hold("merge-hold", "lead", 2 * H),), ready_prs=True)
     tasks = (on_branch("T1", Status.REVIEW, "fix/ci", since=3 * H),)
-    prs = (pr(1, "fix/ci", "merge-hold"), pr(2, "fix/ci", repo="example/other"))
+    prs = (
+        pr(1, "fix/ci", "merge-hold", task_ids=("T1",)),
+        pr(2, "fix/ci", repo="example/other", task_ids=("T1",)),
+    )
     actions = run(with_prs(snap(tasks, agents("developer", "d1")), *prs), rule)
     assert of(actions, "idle-ready") == []  # neither the task nor the other PR is ready work
     [hold] = of(actions, "hold")
@@ -1200,10 +1205,22 @@ def test_pr_label_time_ages_the_hold() -> None:
     rule = Bottlenecks(holds=(Hold("merge-first", "lead", 2 * H),))
     tasks = (on_branch("A", Status.REVIEW, "feat/a", since=5 * H),)
     owners = agents("developer", "d1")
-    fresh = pr(7, "feat/a", "merge-first", labeled=(LabelEvent("merge-first", NOW - 90 * M),))
+    fresh = pr(
+        7,
+        "feat/a",
+        "merge-first",
+        task_ids=("A",),
+        labeled=(LabelEvent("merge-first", NOW - 90 * M),),
+    )
     # The task has waited 5h, but the hold went on 90 minutes ago: not expired yet.
     assert of(run(with_prs(snap(tasks, owners), fresh), rule), "hold") == []
-    old = pr(7, "feat/a", "merge-first", labeled=(LabelEvent("merge-first", NOW - 3 * H),))
+    old = pr(
+        7,
+        "feat/a",
+        "merge-first",
+        task_ids=("A",),
+        labeled=(LabelEvent("merge-first", NOW - 3 * H),),
+    )
     [hold] = of(run(with_prs(snap(tasks, owners), old), rule), "hold")
     assert hold.params["held_minutes"] == 180
     # The task moved after the label went on: the hold is as old as the move.
@@ -1294,7 +1311,8 @@ def test_a_mergeable_pr_keeps_the_assigned_busy_cause() -> None:
 
 def test_a_pr_whose_task_is_open_is_not_counted_twice() -> None:
     tasks = (on_branch("A", Status.REVIEW, "feat/a", since=3 * H),)
-    [action] = run(with_prs(snap(tasks, agents("developer", "d1")), pr(1, "feat/a")), MERGERS)
+    linked = pr(1, "feat/a", task_ids=("A",))
+    [action] = run(with_prs(snap(tasks, agents("developer", "d1")), linked), MERGERS)
     assert action.params["ready_tasks"] == ["A"] and "ready_prs" not in action.params
 
 

@@ -4,8 +4,9 @@ title: "A merge hold set as a PR label was forgotten"
 description: >
   The farm's merge hold is a label on pull requests, not on board tasks. A human put it on
   three PRs five hours ago and promised to lift it within two and a half hours. Two of the
-  PRs belong to review tasks on the board (linked by their head branch), the third has no
-  open task. The developers sat idle. Kelpie must age the hold from when the label went on,
+  PRs belong to review tasks on the board (their code is in the PR branch), the third has no
+  open task. The developers sat idle. A PR belongs to a task only through the task's code in
+  its title or branch (task_ids, from the connector). Kelpie must age the hold from when the label went on,
   count the PR without a task as held work too, and name the owner. On this farm agents
   merge PRs (ready_prs), so a mergeable PR without the label is ordinary ready work; a
   fork's PR is not.
@@ -32,12 +33,12 @@ snapshot:
     - {id: S-1411, task_id: T-1413, owner_id: agent-dev-1, started_at: "2026-03-02T11:00:00+00:00", ended_at: "2026-03-02T13:00:00+00:00", final_status: done}
     - {id: S-1412, task_id: T-1412, owner_id: agent-dev-2, started_at: "2026-03-02T09:00:00+00:00", ended_at: "2026-03-02T11:00:00+00:00", final_status: review}
   pull_requests:
-    - {repo: example/repo, number: 41, branch: "hermes/T-1411", labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
-    - {repo: example/repo, number: 42, branch: "hermes/T-1412", labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
+    - {repo: example/repo, number: 41, branch: "hermes/T-1411", task_ids: [T-1411], labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
+    - {repo: example/repo, number: 42, branch: "hermes/T-1412", task_ids: [T-1412], labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
     # Held PR with no open task.
     - {repo: example/repo, number: 43, branch: "release/notes", labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
     # Mergeable, unheld, unchanged for 3h: ready work nobody merges.
-    - {repo: example/repo, number: 44, branch: "hermes/T-1413", mergeable: true, updated_at: "2026-03-02T14:00:00+00:00"}
+    - {repo: example/repo, number: 44, branch: "hermes/T-1413", task_ids: [T-1413], mergeable: true, updated_at: "2026-03-02T14:00:00+00:00"}
     # A fork's PR, mergeable and unchanged for hours: not the farm's work.
     - {repo: example/repo, number: 46, fork: true, mergeable: true, updated_at: "2026-03-02T09:00:00+00:00"}
     # Draft: never ready work.
