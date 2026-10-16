@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import AlertEvent, Did, Transition
 from kelpie.core.executors import Executor
 from kelpie.core.ledger import Outcome as LedgerOutcome
 from kelpie.core.model import Snapshot
@@ -136,7 +137,12 @@ class RemoteFarm:
         for source in sorted(self._failing - failing):
             if source.split("/")[0] in fresh:  # read again, or no longer reported
                 self._failing.discard(source)
-                self._alert(Severity.INFO, f"board {source} unreadable", "Resolved.")
+                self._alert(
+                    Severity.INFO,
+                    f"board {source} unreadable",
+                    f"Agent {source.split('/')[0]} reads its {source.split('/')[1]} board again.",
+                    transition=Transition.RESOLVED,
+                )
         self._fresh = fresh
         self._tell_late()
         return Snapshot(
@@ -178,7 +184,12 @@ class RemoteFarm:
             )
         elif not skewed and health.skew_told and report is not None:
             health.skew_told = False
-            self._alert(Severity.INFO, f"agent {view.name} clock", "Resolved: clock in range.")
+            self._alert(
+                Severity.INFO,
+                f"agent {view.name} clock off",
+                f"The clock of agent {view.name} is in range again.",
+                transition=Transition.RESOLVED,
+            )
         since = health.last_fresh or self.started
         silent = not fresh and now - since > settings.silent_after
         if silent and not health.silent_told:
@@ -199,7 +210,8 @@ class RemoteFarm:
             self._alert(
                 Severity.INFO,
                 f"agent {view.name} silent",
-                f"Resolved: agent {view.name} reports again.",
+                f"Agent {view.name} reports again.",
+                transition=Transition.RESOLVED,
             )
         if self.observer is not None:
             self.observer.agent_state(view.name, fresh, at)
@@ -285,22 +297,35 @@ class RemoteFarm:
                 continue
             self._alert(
                 Severity.INFO,
-                f"[{action.rule}] {action.kind} {late.agent}:{target} done after all",
+                f"{action.kind} {late.agent}:{target}",
                 f"Carried out after all on agent {late.agent}, after Kelpie had reported it "
-                f"as failed: {action.kind} {target}. {late.result.detail or ''}".strip(),
+                f"as failed: {action.kind} {target}.",
+                rule=action.rule,
+                did=Did.DONE,
+                did_text=late.result.detail,
             )
 
-    def _alert(self, severity: Severity, title: str, body: str) -> None:
-        log.log(
-            logging.INFO if severity is Severity.INFO else logging.WARNING, "%s: %s", title, body
-        )
+    def _alert(
+        self,
+        severity: Severity,
+        subject: str,
+        reason: str,
+        *,
+        rule: str = "kelpie",
+        transition: Transition = Transition.NEW,
+        did: Did = Did.NOTIFIED,
+        did_text: str | None = None,
+    ) -> None:
+        level = logging.INFO if severity is Severity.INFO else logging.WARNING
+        log.log(level, "[%s] %s (%s): %s", rule, subject, transition, reason)
         alerter = self.alerter()
         if self.dry_run or alerter is None:
             return
+        event = AlertEvent(rule, subject, reason, severity, transition, did, did_text)
         try:
-            alerter.send(title if title.startswith("[") else f"[kelpie] {title}", body, severity)
+            alerter.send(event)
         except Exception:
-            log.exception("could not send alert: %s", title)
+            log.exception("could not send alert: %s", subject)
 
 
 @dataclass(frozen=True, slots=True)

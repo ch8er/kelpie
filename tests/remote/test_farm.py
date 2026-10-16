@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import AlertEvent, Did, Transition
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Outcome as LedgerOutcome
 from kelpie.core.model import (
@@ -60,9 +61,14 @@ class Clock:
 class Alerter:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str, str]] = []
+        self.events: list[AlertEvent] = []
 
-    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
-        self.sent.append((title, body, severity))
+    def send(self, event: AlertEvent) -> None:
+        self.events.append(event)
+        resolved = "Resolved: " if event.transition is Transition.RESOLVED else ""
+        self.sent.append(
+            (f"[{event.rule}] {event.subject}", resolved + event.reason, event.severity)
+        )
 
 
 class Observer:
@@ -474,8 +480,10 @@ def test_a_late_done_is_told() -> None:
     rig.report("laptop")
     rig.report("vm-1")
     rig.tick()
-    assert rig.titles() == ["[loop_breaker] stop laptop:s1 done after all"]
+    assert rig.titles() == ["[loop_breaker] stop laptop:s1"]
     assert "Carried out after all" in rig.alerter.sent[0][1]
+    assert rig.alerter.events[0].did is Did.DONE
+    assert rig.alerter.events[0].did_text == "exits soon"
 
 
 # --- the engine ---------------------------------------------------------------------------
@@ -681,8 +689,8 @@ def test_deferred_effects_are_not_announced_as_done() -> None:
     sent: list[str | None] = []
 
     class Alerts:
-        def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
-            sent.append(did)
+        def send(self, event: AlertEvent) -> None:
+            sent.append(event.did_text)
 
     engine = Engine(
         [],
