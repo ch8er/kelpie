@@ -5,32 +5,41 @@ Pure: no I/O and no clock. Traces keep no prompt or tool content
 (:mod:`kelpie.traces.semconv`), only sizes, tool names, argument hashes and command
 prefixes, so each analysis works on those:
 
-**Repeated fragments.** The same content loaded into many sessions of a role: tool calls
-with the same tool (or command prefix) and the same ``args_hash`` (the same file, the same
-query) whose output size stays within ``fragment_tolerance`` of the group's median (the
-content did not change), each at least ``fragment_min_tokens``, in at least
-``fragment_min_sessions`` sessions of the day. Text repeated inside prompts themselves
-cannot be seen: prompts are not stored.
+**Repeated fragments.** The same content loaded into many sessions of a role: calls of a
+read-like tool (not a shell command: those are runs, and huge outputs have their own
+analysis) with the same ``args_hash`` (the same file, the same query) whose output size
+stays within ``fragment_tolerance`` of the group's median (the content did not change),
+each at least ``fragment_min_tokens``, in at least ``fragment_min_sessions`` sessions of the
+day. Text repeated inside prompts themselves cannot be seen: prompts are not stored.
 
 **Unused tools.** Tools offered to a role that it never calls. Traces record the tools
 *called*; which tools were *offered* (their definitions) is not stored. A platform or hook
-can name them in ``kelpie.tools.offered`` (comma-separated, on any span of the session);
-without it the report says the list is unknown.
+can name them in ``kelpie.tools.offered``: a comma-separated *span* attribute (resource
+attributes other than ``service.name`` are not kept) on any span of the session, cut at 256
+characters like every kept value. Without it unused tools are unknown, and the report
+shows nothing for the role.
 
 **Model fit.** A role on one model with at least ``routine_min_calls`` calls a day whose
-median output is at most ``routine_output_tokens`` (triage, polling, status updates) is a
-candidate for a cheaper model: the cheapest model of ``[prices]`` (exact names) cheaper on
-both input and output. **After a switch** (the role's most used model differs from the day
+median output is at most ``routine_output_tokens`` and whose tool calls return at most
+``routine_max_tool_tokens`` on average (triage, polling, status updates; a coding loop
+reads files and runs tests) is a candidate for a cheaper model: the cheapest model of
+``[prices]`` (exact names) cheaper on both input and output that the farm already runs
+(seen in its traces) or that ``allowed_models`` names. Short outputs alone do not make work
+routine, so the report prices a switch only for ``routine_roles`` that the operator named.
+**After a switch** (the role's most used model differs from the day
 before) quality is compared before and after the first call on the new model (from it to
 the end of the day, and over as long but at least a day before it): task returns and review
 returns (ping-pong rounds) per task of the role active in each window. Worse by at
 least ``worse_by`` returns and per task: the switch is flagged and no further downgrade is
-suggested.
+suggested. With less than ``min_after`` since the switch, or fewer than two tasks after
+it, it is too early to tell, and no further downgrade is suggested either.
 
 **Diff-only review.** Sessions of review roles on a task that made measured reads, in
 start order, are its review rounds. A read is a call matching ``review_reads`` (file reads,
-``git diff``, ``gh pr diff``, ...) with an ``args_hash``. In round 2 and later, a read with
-the same key and hash as in an earlier round re-reads what was already reviewed:
+``git diff``, ``gh pr diff``, ...) with an ``args_hash``; a hash also read for another task
+is a shared file (instructions such as an agents file), not the PR, and is left out. In
+round 2 and later, a read with the same key and hash as in an earlier round re-reads what
+was already reviewed:
 ``min(earlier size, size)`` tokens (all of an unchanged file, the old part of a grown diff).
 A round whose re-read tokens are at least ``rereview_share`` of its reads re-read the whole
 PR instead of the changes since the last round. Reads without an ``args_hash`` (platforms
@@ -41,7 +50,7 @@ from __future__ import annotations
 
 import statistics
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from fnmatch import fnmatchcase
@@ -49,7 +58,7 @@ from fnmatch import fnmatchcase
 from kelpie.core.budgets import PriceTable
 from kelpie.core.model import Span, SpanKind, Task
 from kelpie.core.spans import SpanKey, TokenUsage, last_at, span_key
-from kelpie.traces.outputs import FILE_TOOLS, call_key, output_tokens
+from kelpie.traces.outputs import FILE_TOOLS, TOOL_KEY, call_key, output_tokens
 from kelpie.traces.semconv import MAX_VALUE_CHARS
 
 UNKNOWN_ROLE = "unknown"
@@ -75,6 +84,10 @@ class FitSettings:
     fragment_tolerance: float = 0.05
     routine_output_tokens: int = 400
     routine_min_calls: int = 20
+    routine_max_tool_tokens: int = 1000  # mean tool output per call
+    routine_roles: tuple[str, ...] = ()  # roles whose switch to a cheaper model is priced
+    allowed_models: tuple[str, ...] = ()  # candidates besides the models the farm runs
+    min_after: timedelta = timedelta(hours=12)  # before that, a switch is too early to tell
     worse_by: int = 2
     review_reads: tuple[str, ...] = REVIEW_READS
     rereview_share: float = 0.5
@@ -163,7 +176,7 @@ def fragments(found: Iterable[Read], settings: FitSettings | None = None) -> lis
     cfg = settings or FitSettings()
     groups: dict[tuple[str, str, str], list[Read]] = defaultdict(list)
     for r in found:
-        if r.args_hash and r.tokens >= cfg.fragment_min_tokens:
+        if r.args_hash and r.key.startswith(TOOL_KEY) and r.tokens >= cfg.fragment_min_tokens:
             groups[(r.role, r.key, r.args_hash)].append(r)
     out = []
     for (role, key, digest), mine in groups.items():
@@ -274,28 +287,45 @@ def role_models(
     return out
 
 
-def routine(found: Iterable[RoleModel], settings: FitSettings | None = None) -> list[RoleModel]:
-    """Roles doing routine work on a model: many calls, short outputs."""
+def routine(
+    found: Iterable[RoleModel],
+    settings: FitSettings | None = None,
+    tool_tokens: Mapping[str, float] | None = None,
+) -> list[RoleModel]:
+    """Roles doing routine work on a model: many calls, short outputs, small tool outputs
+    (``tool_tokens``: mean tool output per call of each role, :func:`tool_tokens`)."""
     cfg = settings or FitSettings()
+    tool_tokens = tool_tokens or {}
     return [
         r
         for r in found
         if r.model
         and r.calls >= cfg.routine_min_calls
         and r.median_output <= cfg.routine_output_tokens
+        and tool_tokens.get(r.role, 0.0) <= cfg.routine_max_tool_tokens
     ]
 
 
-def cheaper_model(prices: PriceTable, model: str | None) -> str | None:
-    """The cheapest model named exactly in ``prices`` that is cheaper than ``model`` on
-    both input and output; None when there is none or ``model`` has no price."""
+def tool_tokens(found: Iterable[Read]) -> dict[str, float]:
+    """Mean output tokens per tool call of each role."""
+    sizes: dict[str, list[int]] = defaultdict(list)
+    for r in found:
+        sizes[r.role].append(r.tokens)
+    return {role: statistics.fmean(v) for role, v in sizes.items()}
+
+
+def cheaper_model(prices: PriceTable, model: str | None, candidates: Collection[str]) -> str | None:
+    """The cheapest of ``candidates`` (models the farm runs, or allowed ones) named exactly
+    in ``prices`` that is cheaper than ``model`` on both input and output; None when there
+    is none or ``model`` has no price."""
     current = prices.price_for(model)
     if current is None:
         return None
     found = [
         (p.input + p.output, name)
         for name, p in prices.entries
-        if not any(c in name for c in "*?[")
+        if name in candidates
+        and not any(c in name for c in "*?[")  # exact names only
         and name != model
         and p.input < current.input
         and p.output <= current.output
@@ -322,6 +352,12 @@ class Switch:
     before: Quality
     after: Quality
     worse: bool
+    early: bool = False  # too little time or too few tasks since the switch to tell
+
+    @property
+    def hold(self) -> bool:
+        """No further downgrade for the role: worse, or too early to tell."""
+        return self.worse or self.early
 
 
 def model_switches(
@@ -370,7 +406,8 @@ def model_switches(
             and after.per_task(after.returns + after.review_returns)
             > before.per_task(before.returns + before.review_returns)
         )
-        out.append(Switch(role, old, new, at, before, after, worse))
+        early = end - at < cfg.min_after or after.tasks < 2
+        out.append(Switch(role, old, new, at, before, after, worse, early and not worse))
     return out
 
 
@@ -429,9 +466,13 @@ def review_rounds(
     to the earlier rounds."""
     cfg = settings or FitSettings()
     sessions: dict[str, list[Read]] = defaultdict(list)
+    tasks_of: dict[tuple[str, str], set[str]] = defaultdict(set)
     for r in found:
+        if r.args_hash and r.task_id:
+            tasks_of[(r.key, r.args_hash)].add(r.task_id)
         if r.role in review_roles and r.task_id:
             sessions[r.session_id].append(r)
+    shared = {k for k, ids in tasks_of.items() if len(ids) > 1}  # not the PR's own files
     by_task: dict[str, list[list[Read]]] = defaultdict(list)
     for mine in sessions.values():
         by_task[mine[0].task_id or ""].append(mine)
@@ -446,7 +487,7 @@ def review_rounds(
             for r in wanted:
                 if r.args_hash is None:
                     unhashed += 1
-                else:
+                elif (r.key, r.args_hash) not in shared:
                     first.setdefault((r.key, r.args_hash), r.tokens)
             tokens = sum(first.values())
             reread = sum(min(seen[k], v) for k, v in first.items() if k in seen)

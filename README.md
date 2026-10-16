@@ -241,13 +241,17 @@ report; no LLM is involved.
   flagged, and by every session `exit_contract` requeued (a restart), priced with
   `[prices]`. In subscription mode the dollars are marked as an estimate.
 - **Cost per completed task**: the day's priced spend over the tasks that reached `done`.
-- **Context and model fit** (from traces, `kelpie.traces.fit`): content loaded unchanged
-  into many sessions of a role (same tool, arguments hash and size), tools offered but
-  never called (when the platform lists them in `kelpie.tools.offered`), roles doing
-  routine work that a cheaper model in `[prices]` could do (checked after a switch by task
-  returns and review returns), and review rounds 2+ that re-read what an earlier round
-  already read instead of the changes since. Recommendations with estimated savings compete
-  for the top 3.
+- **Context and model fit** (from traces, `kelpie.traces.fit`): content a read-like tool
+  loaded unchanged into many sessions of a role (same tool, arguments hash and size); tools
+  offered but never called, when the platform lists them in the span attribute
+  `kelpie.tools.offered` (comma-separated, cut at 256 characters; traces do not record
+  offered tools otherwise); roles with many short calls and small tool outputs, with the
+  cheapest model the farm already runs (checked after a switch by task returns and review
+  returns; a switch is priced only for roles named in `routine_roles`); and review rounds
+  2+ that re-read what an earlier round already read instead of the changes since (files
+  shared across tasks, such as instructions, left out). Recommendations with estimated
+  savings compete for the top 3; they overlap with the token optimization section and are
+  not additive.
 - **Top 3 recommendations**: output filters for huge tool outputs (RTK first; see
   `[traces.outputs]`), rules that would have fixed part of the chaos in act mode, and fixed
   remedies for the largest causes, ranked by dollars (hours count when `hour_usd` is set).

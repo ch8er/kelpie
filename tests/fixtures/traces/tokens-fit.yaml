@@ -5,11 +5,13 @@ description: >
   Synthetic farm day. Every developer session reads the same 20k-token contributing guide;
   the developer platform lists the tools it offers, three of which are never called. A
   triage agent polls on the large model with short answers all day (a cheaper-model
-  candidate). A writer role moved to a smaller model yesterday and its tasks have come back
-  more often since (the switch is flagged and no further downgrade is suggested). A reviewer
-  re-reads the whole PR in round 2. Distractors: `git status` outputs that differ each time,
-  a file read in only two sessions, a reviewer with long answers, and a round 2 that reads
-  only a new file.
+  candidate; the farm runs the small model, the tiny one is only priced). A writer role
+  moved to the small model yesterday and its tasks have come back more often since (the
+  switch is flagged and no further downgrade is suggested). A reviewer re-reads the whole PR
+  in round 2. Distractors: `git status` outputs that differ each time, the same `pytest` run
+  in every session (a command, not a read), a file read in only two sessions, a reviewer
+  with long answers, a shared agents file every review reads, and a round 2 that reads only
+  a new file.
 config:
   prices:
     model-large: {input: 3.0, output: 15.0, cached_input: 0.3}
@@ -75,6 +77,10 @@ snapshot:
        args_hash: h-status, start: "2026-03-02T08:02:00+00:00", end: "2026-03-02T08:02:05+00:00",
        task_id: T-D1, session_id: S-D1,
        attributes: {kelpie.tool.command_prefix: "git status", kelpie.tool.output_tokens: 600}}
+    - {trace_id: TR-D1, span_id: D1-T9, name: "execute_tool Bash", kind: tool, tool: Bash,
+       args_hash: h-pytest, start: "2026-03-02T08:02:40+00:00", end: "2026-03-02T08:02:50+00:00",
+       task_id: T-D1, session_id: S-D1,
+       attributes: {kelpie.tool.command_prefix: pytest, kelpie.tool.output_tokens: 3000}}
     - {trace_id: TR-D1, span_id: D1-L2, name: chat, kind: llm, model: model-large,
        start: "2026-03-02T08:03:00+00:00", end: "2026-03-02T08:04:00+00:00",
        task_id: T-D1, session_id: S-D1, input_tokens: 52000, output_tokens: 800,
@@ -93,6 +99,10 @@ snapshot:
     - {trace_id: TR-D2, span_id: D2-T3, name: "execute_tool Read", kind: tool, tool: Read,
        args_hash: h-two, start: "2026-03-02T10:02:30+00:00", end: "2026-03-02T10:02:35+00:00",
        task_id: T-D2, session_id: S-D2, attributes: {kelpie.tool.output_tokens: 4000}}
+    - {trace_id: TR-D2, span_id: D2-T9, name: "execute_tool Bash", kind: tool, tool: Bash,
+       args_hash: h-pytest, start: "2026-03-02T10:02:40+00:00", end: "2026-03-02T10:02:50+00:00",
+       task_id: T-D2, session_id: S-D2,
+       attributes: {kelpie.tool.command_prefix: pytest, kelpie.tool.output_tokens: 3000}}
     - {trace_id: TR-D2, span_id: D2-L2, name: chat, kind: llm, model: model-large,
        start: "2026-03-02T10:03:00+00:00", end: "2026-03-02T10:04:00+00:00",
        task_id: T-D2, session_id: S-D2, input_tokens: 56000, output_tokens: 800,
@@ -110,6 +120,10 @@ snapshot:
     - {trace_id: TR-D3, span_id: D3-T3, name: "execute_tool Read", kind: tool, tool: Read,
        args_hash: h-two, start: "2026-03-02T13:02:30+00:00", end: "2026-03-02T13:02:35+00:00",
        task_id: T-D3, session_id: S-D3, attributes: {kelpie.tool.output_tokens: 4000}}
+    - {trace_id: TR-D3, span_id: D3-T9, name: "execute_tool Bash", kind: tool, tool: Bash,
+       args_hash: h-pytest, start: "2026-03-02T13:02:40+00:00", end: "2026-03-02T13:02:50+00:00",
+       task_id: T-D3, session_id: S-D3,
+       attributes: {kelpie.tool.command_prefix: pytest, kelpie.tool.output_tokens: 3000}}
     - {trace_id: TR-D3, span_id: D3-L2, name: chat, kind: llm, model: model-large,
        start: "2026-03-02T13:03:00+00:00", end: "2026-03-02T13:04:00+00:00",
        task_id: T-D3, session_id: S-D3, input_tokens: 58000, output_tokens: 800,
@@ -136,6 +150,9 @@ snapshot:
     - {trace_id: TR-R1, span_id: R1-L1, name: chat, kind: llm, model: model-large,
        start: "2026-03-01T16:00:00+00:00", end: "2026-03-01T16:01:00+00:00",
        task_id: T-D1, session_id: S-R1, input_tokens: 20000, output_tokens: 1500}
+    - {trace_id: TR-R1, span_id: R1-T0, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-agents, start: "2026-03-01T16:00:10+00:00", end: "2026-03-01T16:00:10+00:00",
+       task_id: T-D1, session_id: S-R1, attributes: {kelpie.tool.output_tokens: 3000}}
     - {trace_id: TR-R1, span_id: R1-T1, name: "execute_tool Read", kind: tool, tool: Read,
        args_hash: h-a, start: "2026-03-01T16:01:00+00:00", end: "2026-03-01T16:01:05+00:00",
        task_id: T-D1, session_id: S-R1, attributes: {kelpie.tool.output_tokens: 9000}}
@@ -146,6 +163,9 @@ snapshot:
        args_hash: h-diff, start: "2026-03-01T16:03:00+00:00", end: "2026-03-01T16:03:05+00:00",
        task_id: T-D1, session_id: S-R1,
        attributes: {kelpie.tool.command_prefix: "gh pr diff", kelpie.tool.output_tokens: 36000}}
+    - {trace_id: TR-R2, span_id: R2-T0, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-agents, start: "2026-03-02T11:00:10+00:00", end: "2026-03-02T11:00:10+00:00",
+       task_id: T-D1, session_id: S-R2, attributes: {kelpie.tool.output_tokens: 3000}}
     - {trace_id: TR-R2, span_id: R2-T1, name: "execute_tool Read", kind: tool, tool: Read,
        args_hash: h-a, start: "2026-03-02T11:00:30+00:00", end: "2026-03-02T11:00:35+00:00",
        task_id: T-D1, session_id: S-R2, attributes: {kelpie.tool.output_tokens: 9000}}
@@ -161,9 +181,15 @@ snapshot:
        task_id: T-D1, session_id: S-R2, input_tokens: 40000, output_tokens: 1500,
        cached_tokens: 30000, repeat: {count: 12, every: 5m}}
     # Distractor: round 2 of T-D3 reads only a new file; one read reports no arguments.
+    - {trace_id: TR-R4, span_id: R4-T0, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-agents, start: "2026-03-01T17:00:10+00:00", end: "2026-03-01T17:00:10+00:00",
+       task_id: T-D3, session_id: S-R4, attributes: {kelpie.tool.output_tokens: 3000}}
     - {trace_id: TR-R4, span_id: R4-T1, name: "execute_tool Read", kind: tool, tool: Read,
        args_hash: h-d, start: "2026-03-01T17:01:00+00:00", end: "2026-03-01T17:01:05+00:00",
        task_id: T-D3, session_id: S-R4, attributes: {kelpie.tool.output_tokens: 8000}}
+    - {trace_id: TR-R5, span_id: R5-T0, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-agents, start: "2026-03-02T15:00:10+00:00", end: "2026-03-02T15:00:10+00:00",
+       task_id: T-D3, session_id: S-R5, attributes: {kelpie.tool.output_tokens: 3000}}
     - {trace_id: TR-R5, span_id: R5-T1, name: "execute_tool Read", kind: tool, tool: Read,
        args_hash: h-c, start: "2026-03-02T15:00:30+00:00", end: "2026-03-02T15:00:35+00:00",
        task_id: T-D3, session_id: S-R5, attributes: {kelpie.tool.output_tokens: 6000}}
@@ -180,19 +206,20 @@ expected:
   unused: {developer: [Edit, NotebookEdit, WebSearch]}
   unknown_tools: [reviewer, triage, writer]
   routine:
-    - {role: triage, model: model-large, calls: 24, cheaper: model-tiny}
-    - {role: writer, model: model-small, calls: 24, cheaper: model-tiny}
+    - {role: triage, model: model-large, calls: 24, cheaper: model-small}
+    - {role: writer, model: model-small, calls: 24, cheaper: null}
   switches:
     - {role: writer, old: model-large, new: model-small, worse: true}
   review:
     - {task_id: T-D1, round: 2, session_id: S-R2, tokens: 64000, reread: 60000, whole: true}
     - {task_id: T-D3, round: 2, session_id: S-R5, tokens: 6000, reread: 0, whole: false}
-  advice:
-    - "Try `model-tiny` for triage"
+  advice:  # with routine_roles = [triage, writer]
+    - "Try `model-small` for triage"
     - "Review only the changes since the last round (reviewer)"
     - "Put what every developer session loads into its cached instructions"
 not_expected:
-  fragment_hashes: [h-status, h-two]
+  fragment_hashes: [h-status, h-two, h-pytest]
   routine_roles: [reviewer, developer]
   advice:
+    - "Try `model-tiny` for triage"
     - "Try `model-tiny` for writer"
