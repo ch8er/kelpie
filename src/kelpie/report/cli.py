@@ -6,12 +6,14 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 
 from kelpie.app import Settings, build_adapters, merged_snapshot, utc_now
 from kelpie.core.budgets import BudgetMode
 from kelpie.core.config import Mode
 from kelpie.metrics import Metrics
+from kelpie.report.daily import day_bounds
 from kelpie.report.fixes import MANUAL, FixEvent, FixStore
 from kelpie.report.run import ReportSources, default_day, generate, send, write
 from kelpie.report.store import ReportStore
@@ -19,6 +21,7 @@ from kelpie.rules import REGISTRY
 
 log = logging.getLogger(__name__)
 FUTURE_SKEW = timedelta(minutes=5)  # clocks of the operator's machine and the farm
+REPORT_SLACK = timedelta(hours=1)
 MAX_LIST_DAYS = 3650
 
 
@@ -35,6 +38,21 @@ def sources(settings: Settings) -> ReportSources:
     )
 
 
+def report_settings(settings: Settings, day: date, now: datetime) -> Settings:
+    """``settings`` with the adapters looking back as far as the report of ``day`` needs:
+    sessions and done tasks from the before-window of the day before's fixes on, plus an
+    hour of slack (DST, a run a few minutes after midnight). Only the report reads this far
+    back; ``kelpie serve``'s rules keep ``[adapters.hermes] lookback``."""
+    hermes = settings.hermes
+    if hermes is None:
+        return settings
+    day_before, _ = day_bounds(day - timedelta(days=1), settings.report.tz)
+    needed = now - (day_before - settings.report.verify_window) + REPORT_SLACK
+    if needed <= hermes.lookback:
+        return settings
+    return replace(settings, hermes=replace(hermes, lookback=needed))
+
+
 def run(
     settings: Settings,
     day_text: str | None,
@@ -44,12 +62,15 @@ def run(
     """``(stdout, stderr, exit code)``: the report on stdout, problems on stderr (so
     ``kelpie report > day.md`` under cron keeps them apart); 2: bad input, 1: the database
     could not be read or the summary did not reach every channel."""
+    now = clock()
     try:
-        day = date.fromisoformat(day_text) if day_text else default_day(clock(), settings.report)
+        day = date.fromisoformat(day_text) if day_text else default_day(now, settings.report)
     except ValueError:
         return "", f"kelpie: --date must be YYYY-MM-DD, got {day_text!r}\n", 2
     metrics = Metrics()
-    board = merged_snapshot(build_adapters(settings), metrics, clock)()
+    board = merged_snapshot(
+        build_adapters(report_settings(settings, day, clock())), metrics, clock
+    )()
     try:
         report, markdown = generate(sources(settings), day, board)
     except (OSError, sqlite3.Error, RuntimeError) as exc:

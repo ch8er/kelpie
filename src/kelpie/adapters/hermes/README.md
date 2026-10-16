@@ -14,6 +14,7 @@ Hermes as the only adapter stops Kelpie at startup.
 db_path = "~/.hermes/kanban.db"          # named boards: ~/.hermes/kanban/boards/<slug>/kanban.db
 spool = "~/.hermes/kelpie/spool.jsonl"   # written by the plugin below; false = do not read one
 lookback = "24h"                         # runs, spans and finished tasks older than this are left out
+                                         # (the rules' window; kelpie report reads as far back as its day needs)
 enabled = true                           # default when the section exists
 git_state = true                         # read git state of live task workspaces (see below)
 git_timeout = "5s"                       # limit for each git call; 2x per snapshot in total

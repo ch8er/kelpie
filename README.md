@@ -243,15 +243,18 @@ from `kelpie fix "lifted the merge hold" [--rule R] [--command PREFIX] [--role R
 [--at TIME]` (check with `kelpie fix --list [--days N]`), from config changes (`kelpie serve` notes when its config file changed), from
 rule mode changes in the action ledger (observe to act, dry-run off) and from output
 filters that appear in traces (`rtk`, `| xcbeautify`). Board-based metrics (review time,
-failures, returns) need the adapters to look back `1d + 2 x verify_window` when the report
-runs (Hermes: `lookback = "72h"` with the defaults), and spans must be kept as long
-(`[traces] retention`, 7d by default). `kelpie fix --at` without an offset is read in
+failures, returns) need the board as far back as the before-window of the day before's
+fixes: `kelpie report` widens the Hermes lookback to that by itself (about 73h for
+yesterday with the defaults; further for an older `--date`), only for the report, so the
+rules of `kelpie serve` keep `[adapters.hermes] lookback`. Spans must be kept as long
+(`[traces] retention`, 7d by default), and the Hermes hook spool (20 MB, one rotation) must
+still hold that much. `kelpie fix --at` without an offset is read in
 `[report] timezone`; it needs the database `kelpie serve` creates. Mode changes are placed
 at the first ledger entry in the new mode, so a quiet rule's switch shows up late.
 
 Schedule it on the host, shortly after midnight in the report's time zone, e.g. with cron:
-`5 0 * * * kelpie --config /etc/kelpie.toml report --send`. Adapters only look back so far
-(Hermes: `lookback`, 24h), so run it daily rather than for days long past.
+`5 0 * * * kelpie --config /etc/kelpie.toml report --send`. For days long past the board
+may no longer hold everything (Hermes keeps runs; the hook spool rotates), so run it daily.
 
 ## Alerts
 

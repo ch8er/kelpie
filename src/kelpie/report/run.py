@@ -2,9 +2,9 @@
 Markdown, and optionally send its summary through the alert channels.
 
 Scheduling is left to the host (cron or a systemd timer running ``kelpie report --send``
-shortly after midnight in ``[report] timezone``): the board's adapters only look back so
-far (Hermes: ``lookback``, 24h by default), so tasks completed on an older day may be
-missing from its report.
+shortly after midnight in ``[report] timezone``). ``kelpie report`` widens the board's
+lookback to what the day needs (:func:`kelpie.report.cli.report_settings`); for days long
+past the hook spool may have rotated, so run it daily.
 """
 
 from __future__ import annotations
