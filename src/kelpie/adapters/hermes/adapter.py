@@ -25,10 +25,13 @@ Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
     done                    -> DONE
     archived                -> (skipped)
 
-``role`` is the assignee profile: Hermes routes work by profile, so a profile is both the
-owner and its role. ``status_since`` is the time of the latest status-changing event of the
-task (any ``task_events`` kind except the non-status ones in ``NON_STATUS_EVENTS``), else
-``started_at``/``completed_at``/``created_at``. Done tasks older than ``lookback`` are left out.
+``body`` is ``tasks.body`` (the description; none for finished tasks), at most ``MAX_BODY``
+characters; the dispatch gate's patterns read it with the title. ``role`` is the assignee
+profile: Hermes routes work by profile, so a profile is both the owner and its role.
+``status_since`` is the time of the latest status-changing event of the task (any
+``task_events`` kind except the non-status ones in ``NON_STATUS_EVENTS``), else
+``started_at``/``completed_at``/``created_at``. Done tasks older than ``lookback`` are left
+out.
 
 Blocks. A ``blocked`` task gets a :class:`~kelpie.core.model.Block` only from evidence that is
 current, that is a ``blocked`` event at or after ``status_since``:
@@ -127,6 +130,7 @@ DEFAULT_SPOOL = Path("~/.hermes/kelpie/spool.jsonl")
 DEFAULT_LOOKBACK = timedelta(hours=24)
 DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
 BUSY_TIMEOUT_MS = 5000
+MAX_BODY = 8000  # characters of a task's description kept in the snapshot
 # The ``tasks.workspace_kind`` whose directory is the task's own: ``dir`` may point to a shared
 # or human checkout, ``scratch`` is not a repository.
 WORKSPACE_KINDS = ("worktree",)
@@ -229,6 +233,16 @@ def _workspace(row: sqlite3.Row) -> Path | None:
     except (OSError, RuntimeError):
         return None
     return path if path.is_dir() else None
+
+
+def _body(row: sqlite3.Row) -> str | None:
+    """The task's description (``tasks.body``), the first ``MAX_BODY`` characters. Bytes
+    (a BLOB-typed body) are decoded as Hermes does, with replacement characters."""
+    raw = _col(row, "body")
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    text = raw.strip() if isinstance(raw, str) else ""
+    return text[:MAX_BODY] or None
 
 
 def _block_text(row: sqlite3.Row, status_event: sqlite3.Row | None, block_event: Any) -> str:
@@ -441,6 +455,7 @@ class HermesAdapter:
                     owner_id=assignee,
                     source=self.name,
                     block=block,
+                    body=None if status.is_terminal else _body(row),
                 )
             )
         return tuple(tasks), owners, known

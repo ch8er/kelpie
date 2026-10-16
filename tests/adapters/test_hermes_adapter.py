@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from kelpie.adapters.hermes import HermesAdapter
-from kelpie.adapters.hermes.adapter import HermesError
+from kelpie.adapters.hermes.adapter import MAX_BODY, HermesError
 from kelpie.core.model import OwnerKind, Session, SpanKind, Status
 from kelpie.core.ports import PlatformAdapter, SnapshotSource
 from tests.adapters.kanban import Board
@@ -540,3 +540,48 @@ def test_spool_output_size_becomes_a_span_attribute(
     else:
         [call] = found
         assert (call.key, call.tokens, call.estimated) == ("ls", kept // 4, True)
+
+
+def test_body_is_the_description_trimmed_and_capped(board: Board) -> None:
+    board.task("t_1", "ready", ago(days=1), assignee="dev", body="  Redo after #12 lands\n")
+    board.task("t_2", "ready", ago(days=1), assignee="dev", body="   ")
+    board.task("t_3", "ready", ago(days=1), assignee="dev")
+    board.task("t_4", "ready", ago(days=1), assignee="dev", body="x" * (MAX_BODY + 50))
+    tasks = {t.id: t for t in adapter(board).snapshot(NOW).tasks}
+    assert tasks["t_1"].body == "Redo after #12 lands"
+    assert tasks["t_2"].body is None and tasks["t_3"].body is None
+    assert tasks["t_4"].body is not None and len(tasks["t_4"].body) == MAX_BODY
+
+
+def test_older_schema_without_body(tmp_path: Path) -> None:
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, assignee TEXT,"
+        " status TEXT NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER,"
+        " completed_at INTEGER);"
+        "CREATE TABLE task_links (parent_id TEXT, child_id TEXT);"
+        "CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, run_id INTEGER,"
+        " kind TEXT, payload TEXT, created_at INTEGER);"
+        "CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT,"
+        " status TEXT, last_heartbeat_at INTEGER, started_at INTEGER, ended_at INTEGER,"
+        " outcome TEXT, summary TEXT, error TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO tasks VALUES ('t_1', 'T', 'dev', 'ready', ?, NULL, NULL)",
+        (int(ago(days=1).timestamp()),),
+    )
+    conn.commit()
+    conn.close()
+    (task,) = HermesAdapter(db_path=db, spool=None, git_state=False).snapshot(NOW).tasks
+    assert task.body is None
+
+
+def test_bytes_body_is_decoded_and_finished_tasks_keep_none(board: Board) -> None:
+    board.task("t_1", "ready", ago(days=1), assignee="dev")
+    board.task("t_2", "done", ago(days=1), assignee="dev", completed=ago(hours=1), body="old")
+    board.conn.execute("UPDATE tasks SET body = ? WHERE id = 't_1'", (b"after #7 lands \xff",))
+    board.conn.commit()
+    tasks = {t.id: t for t in adapter(board).snapshot(NOW).tasks}
+    assert tasks["t_1"].body == "after #7 lands \ufffd"
+    assert tasks["t_2"].body is None

@@ -110,6 +110,7 @@ class Task:
     labels: tuple[str, ...] = ()
     returns: tuple[Return, ...] = ()
     host: str | None = None  # where the task runs, if the adapter knows (a config name)
+    body: str | None = None  # the task's description, if the adapter knows it
 
 
 class ResourceKind(StrEnum):

@@ -441,9 +441,10 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # kind = "ci_green"
 # repo = "example/repo"
 #
-# The dispatch gate: applies_to = ["ready_task"] reads the title of a ready task instead of a
-# block reason ("block" is the default; both may be listed). The PR it names becomes the
-# task's prerequisite, and the dispatch_gate rule parks the task until it holds.
+# The dispatch gate: applies_to = ["ready_task"] reads the title and description of a ready
+# task instead of a block reason ("block" is the default; both may be listed). Every PR it
+# names (up to 5) becomes a prerequisite, and the dispatch_gate rule parks the task until
+# they hold.
 # [[block_conditions]]
 # pattern = 'after (?P<pr>\S+) (?:lands|is merged)'
 # kind = "pr_merged"
