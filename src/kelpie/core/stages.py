@@ -3,9 +3,10 @@ report's throughput (:mod:`kelpie.report.throughput`). Pure, over the core model
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import datetime
 
-from kelpie.core.model import Owner, Status, Task
+from kelpie.core.model import Owner, Session, Status, Task
 
 STAGES = ("working", "queue", "review", "waiting", "ownerless")
 UNKNOWN_ROLE = "unknown"
@@ -45,3 +46,34 @@ def task_roles(tasks: Iterable[Task], owners: Iterable[Owner]) -> dict[str, str]
         if role:
             out[t.id] = role
     return out
+
+
+def rework_role(
+    task: Task,
+    returned_at: datetime,
+    sessions: Sequence[Session],
+    role_of: Callable[[Session], str | None],
+    review_roles: Iterable[str],
+    end: datetime,
+) -> str:
+    """The role that redoes a task sent back at ``returned_at``: not the reviewer that sent
+    it back, but the role of the first non-review session running at or starting after the
+    return (by start), else of the last one before it, else the task's own role unless that
+    is a review role (a task in review is often assigned to its reviewer by then); else
+    :data:`UNKNOWN_ROLE`. ``role_of`` gives a session's role from its owner, never from the
+    task (that would be the reviewer again); None skips the session. A session without an
+    end runs until ``end``."""
+    reviewers = set(review_roles)
+    doers = sorted(
+        (s.started_at, max(s.ended_at or s.last_heartbeat or end, s.started_at), role)
+        for s in sessions
+        if (role := role_of(s)) is not None and role not in reviewers
+    )
+    after = [role for start, stop, role in doers if stop > returned_at]
+    if after:
+        return after[0]
+    if doers:
+        return doers[-1][2]
+    if task.role and task.role not in reviewers:
+        return task.role
+    return UNKNOWN_ROLE

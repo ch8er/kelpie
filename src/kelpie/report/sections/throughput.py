@@ -62,10 +62,13 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         "session that ended. Mean queue: tasks of the role waiting for an agent (ready, or in "
         "progress with no session running), averaged over the day; queue at end: those still "
         "waiting at midnight (the live gauge counts ownerless tasks only). Rework: share of "
-        "the role's active tasks sent back within the day (the live gauges give returns per "
-        "done task). Reopened: done tasks moved back out of done within the day, over the "
-        "day's completions (those still done plus those reopened; rule 1's \"done\" needs "
-        "evidence).",
+        "the tasks the role worked on that came back to it within the day, counted for the "
+        "role that redid the work, not the reviewer that sent it back; - for a role that "
+        "only reviews (the live returns gauge counts returns the same way; its done count "
+        "goes by the task's role). "
+        "Reopened: done tasks moved back out of done within "
+        "the day, over the day's completions (those still done plus those reopened; "
+        'rule 1\'s "done" needs evidence).',
         "",
         "| Role | Agents | Utilization | Completed | Tasks/hour | Hand-offs/hour | "
         f"Mean queue | Queue at end | Rework | Reopened | Cost per completed task{est} |",

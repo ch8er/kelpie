@@ -922,6 +922,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         reader = prometheus.build() if prometheus is not None else None
         quotas = settings.llm_quotas.build() if settings.llm_quotas is not None else None
         metrics = Metrics()
+        metrics.review_roles = settings.report.review_roles
         if problems := settings.alerts.problems():  # the delivery threads start last
             raise ValueError(problems[0])
     except ValueError as exc:

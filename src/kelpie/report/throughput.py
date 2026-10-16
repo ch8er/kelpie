@@ -33,8 +33,11 @@ the day) and per hour; *hand-offs*, sessions of the role's agents that ended wit
 day with a declared status, and per hour (a reviewer's throughput is reviews, not tasks
 done; a review that sends a task back declares no status, so every review session that
 ended counts); *session utilization*, the hours the role's agents had a session running
-over agents x hours; *rework rate*, the share of the role's tasks active within the day
-that were sent back (a return) within it.
+over agents x hours; *rework rate*, the share of the tasks the role worked on within the
+day (its agents ran a non-review session on them; with no session known, the task's own
+role) that came back to it: a return counts for the role that redoes the work, not the
+reviewer that sent it back (:func:`kelpie.core.stages.rework_role`; a task in review often
+carries the reviewer's role by then). A role that only reviews has no rework rate.
 
 **Live** (``/metrics``) gauges measure related but different things from the current
 snapshot (agents with work, the ownerless queue, returns per done task); see
@@ -50,7 +53,7 @@ from datetime import datetime
 from itertools import pairwise
 
 from kelpie.core.model import Owner, OwnerKind, Session, Status, Task
-from kelpie.core.stages import STAGES, UNKNOWN_ROLE, status_stage, task_roles
+from kelpie.core.stages import STAGES, UNKNOWN_ROLE, rework_role, status_stage, task_roles
 from kelpie.core.states import OpenState
 
 OWNERLESS_RULES = frozenset({"orphan_status"})
@@ -69,7 +72,8 @@ class RoleThroughput:
     handoffs: int = 0
     stages: Mapping[str, float] = field(default_factory=dict)  # task-hours per stage
     active: tuple[str, ...] = ()  # tasks with stage time or completed within the day
-    reworked: tuple[str, ...] = ()  # active tasks sent back within the day
+    reworked: tuple[str, ...] = ()  # tasks the role redid after a return within the day
+    worked: tuple[str, ...] = ()  # tasks the role worked on (not as a reviewer) in the day
     returns: int = 0
     reopened: int = 0  # done tasks moved back out of done within the day
     queue_now: int = 0  # tasks of the role in the queue stage at the end of the day
@@ -93,7 +97,9 @@ class RoleThroughput:
 
     @property
     def rework_rate(self) -> float | None:
-        return len(self.reworked) / len(self.active) if self.active else None
+        """Share of the tasks the role worked on that came back to it; None for a role
+        that only reviews."""
+        return len(self.reworked) / len(self.worked) if self.worked else None
 
 
 def session_end(session: Session, end: datetime) -> datetime:
@@ -120,8 +126,12 @@ def throughput(
     owner_roles = {o.id: o.role for o in owners}
     extra = session_roles or {}
 
+    def own_role(s: Session) -> str | None:
+        """The role of the session's owner; never the task's (rework attribution)."""
+        return owner_roles.get(s.owner_id) or extra.get(s.id)
+
     def role_of_session(s: Session) -> str | None:
-        return owner_roles.get(s.owner_id) or extra.get(s.id) or roles_of_task.get(s.task_id)
+        return own_role(s) or roles_of_task.get(s.task_id)
 
     by_task: dict[str, list[Session]] = defaultdict(list)
     for s in sessions:
@@ -145,10 +155,23 @@ def throughput(
             a.completed.append(task.id)
         if stages or done:
             a.active.append(task.id)
-            back = sum(1 for r in task.returns if start <= r.at < end)
-            if back:
-                a.reworked.append(task.id)
-                a.returns += back
+            # Rework: who worked the task within the day (non-review sessions), and for
+            # each return the role that redid it (core.stages.rework_role).
+            worked = {
+                r
+                for s in mine
+                if (r := own_role(s)) and r not in review_roles and _overlaps(s, start, end)
+            }
+            if not worked and role not in review_roles:
+                worked = {role}  # no session known: the task's own role did it
+            for r in worked:
+                acc[r].worked.add(task.id)
+            for back in task.returns:
+                if start <= back.at < end:
+                    r = rework_role(task, back.at, mine, own_role, review_roles, end)
+                    acc[r].reworked.add(task.id)
+                    acc[r].worked.add(task.id)
+                    acc[r].returns += 1
         a.reopened += sum(1 for at in task.reopened_at if start <= at < end)
         if _stage_at(task, mine, windows, end, review_roles, role_of_session, end) == "queue":
             a.queue_now += 1
@@ -174,7 +197,7 @@ def throughput(
     out = []
     for role in sorted(acc):
         a = acc[role]
-        if not (a.agents or a.active or a.handoffs):
+        if not (a.agents or a.active or a.handoffs or a.worked):
             continue
         out.append(
             RoleThroughput(
@@ -187,12 +210,17 @@ def throughput(
                 stages={s: a.stages[s] for s in STAGES if a.stages[s] > 0},
                 active=tuple(sorted(a.active)),
                 reworked=tuple(sorted(a.reworked)),
+                worked=tuple(sorted(a.worked)),
                 returns=a.returns,
                 reopened=a.reopened,
                 queue_now=a.queue_now,
             )
         )
     return out
+
+
+def _overlaps(s: Session, start: datetime, end: datetime) -> bool:
+    return s.started_at < end and session_end(s, end) > start
 
 
 @dataclass(slots=True)
@@ -203,7 +231,8 @@ class _Acc:
     handoffs: int = 0
     stages: Counter[str] = field(default_factory=Counter)
     active: list[str] = field(default_factory=list)
-    reworked: list[str] = field(default_factory=list)
+    reworked: set[str] = field(default_factory=set)
+    worked: set[str] = field(default_factory=set)
     returns: int = 0
     reopened: int = 0
     queue_now: int = 0
