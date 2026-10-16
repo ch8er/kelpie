@@ -238,3 +238,8 @@ def test_a_table_that_cannot_be_copied_fails_only_its_section() -> None:
         {},  # type: ignore[dict-item]
     )
     assert [s.title for s in found] == ["test-x"] and "failed" in found[0].lines[0]
+
+
+def test_keys_must_not_be_a_bare_string() -> None:
+    with pytest.raises(TypeError):
+        register_section("test-letters", keys="threshold")

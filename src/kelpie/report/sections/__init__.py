@@ -115,6 +115,9 @@ def register_section(
     reads (none by default); a table with any other key is noted in the report instead of
     reaching the builder, which still checks the values."""
 
+    if isinstance(keys, str):
+        raise TypeError("keys must be a collection of key names, not a string")
+
     def decorator(builder: SectionBuilder) -> SectionBuilder:
         if name in SECTIONS:
             raise ValueError(f"report section already registered: {name}")

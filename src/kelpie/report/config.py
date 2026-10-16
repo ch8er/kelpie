@@ -42,9 +42,9 @@ class ReportSettings:
     Before/after of fixes: ``verify_window`` on each side, review time from the sessions of
     ``review_roles``, and fewer than ``min_sample`` observations on a side is a small
     sample. ``at``: when ``kelpie serve`` runs yesterday's report (local time; None: only
-    ``kelpie report`` or cron). ``sections``: ``[report.sections.<name>]`` tables, passed
-    as they are to that report section (``SectionContext.config``), which checks its own
-    keys."""
+    ``kelpie report`` or cron). ``sections``: ``[report.sections.<name>]`` tables for that
+    report section (``SectionContext.config``); keys are checked against what the section
+    declares, values by the section."""
 
     timezone: str = "UTC"
     dir: Path | None = None
