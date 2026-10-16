@@ -587,6 +587,7 @@ def test_idle_agents_with_old_ready_work_alert_dispatch() -> None:
         "ready_count": 2,
         "oldest_wait_minutes": 45,
         "likely_cause": "dispatch",
+        "assigned_busy_tasks": [],
     }
     assert "dispatcher" in action.reason
 
@@ -981,3 +982,97 @@ def test_build_parses_ready_is_queued() -> None:
     assert build({"ready_is_queued": True}).ready_is_queued is True
     with pytest.raises(ValueError):
         build({"ready_is_queued": "yes"})
+
+
+HERMES = Bottlenecks(ready_is_queued=True)
+
+
+def test_human_owned_ready_work_is_never_queued() -> None:
+    owners = (Owner("alice", "alice", OwnerKind.HUMAN), *agents("developer", "dev-1", "dev-2"))
+    tasks = tuple(
+        task(f"H{i}", Status.READY, role="alice", owner="alice", since=H) for i in range(3)
+    )
+    assert run(snap(tasks, owners), HERMES) == []
+    assert role_loads(snap(tasks, owners), ready_is_queued=True).get("alice") is None
+
+
+def test_assigned_backlog_or_blocked_work_does_not_make_an_owner_busy() -> None:
+    tasks = (
+        task("A", Status.READY, owner="dev-1", since=2 * H),
+        task("B", Status.BACKLOG, owner="dev-1"),
+        task("C", Status.BLOCKED, owner="dev-1"),
+    )
+    owners = agents("developer", "dev-1", "dev-2")
+    load = role_loads(snap(tasks, owners), ready_is_queued=True)["developer"]
+    assert load.busy == () and load.queue == ("A",)
+    [alert] = run(snap(tasks, owners), HERMES)
+    assert alert.params["likely_cause"] == "dispatch" and alert.params["assigned_busy_tasks"] == []
+
+
+def test_assigned_review_lane_counts_as_queued() -> None:
+    reviews = tuple(
+        task(f"R{i}", Status.REVIEW, role="reviewer", owner="rev-1", since=(40 + i) * M)
+        for i in range(4)
+    )
+    busy_dev = (task("W", Status.IN_PROGRESS, owner="dev-1"),)
+    owners = agents("reviewer", "rev-1", "rev-2") + agents("developer", "dev-1", "dev-2")
+    sessions = (live("rev-2", "X"), live("dev-1", "W"))
+    actions = run(snap(reviews + busy_dev, owners, sessions=sessions), HERMES)
+    load = role_loads(snap(reviews, owners, sessions=sessions), ready_is_queued=True)["reviewer"]
+    assert load.queue == ("R3", "R2", "R1", "R0")  # oldest first
+    [idle] = of(actions, "idle-ready")  # rev-1 owns them all but is not running any
+    assert idle.params["idle_agents"] == ["rev-1"] and idle.params["likely_cause"] == "dispatch"
+
+
+def test_slots_count_running_tasks_not_agents() -> None:
+    tasks = (
+        *(task(f"W{i}", Status.IN_PROGRESS, owner="dev-1") for i in range(3)),
+        task("A", Status.READY, owner="dev-1", since=H),
+    )
+    owners = agents("developer", "dev-1", "dev-2")
+    sessions = tuple(live("dev-1", f"W{i}") for i in range(3))
+    # Three running tasks fill three slots, though only one agent runs them.
+    assert (
+        run(snap(tasks, owners, sessions=sessions), Bottlenecks(ready_is_queued=True, slots=3))
+        == []
+    )
+    [alert] = run(
+        snap(tasks, owners, sessions=sessions), Bottlenecks(ready_is_queued=True, slots=4)
+    )
+    assert alert.params["likely_cause"] == "assigned_busy"
+    assert alert.params["assigned_busy_tasks"] == ["A"]
+
+
+def test_recently_active_owner_is_not_called_busy() -> None:
+    sessions = (Session("S", "Z", "dev-1", NOW - H, ended_at=NOW - 10 * M),)  # not idle yet
+    tasks = (task("A", Status.READY, owner="dev-1", since=H),)
+    [alert] = run(snap(tasks, agents("developer", "dev-1", "dev-2"), sessions=sessions), HERMES)
+    assert alert.params["likely_cause"] == "dispatch"
+
+
+def test_mixed_work_lists_the_tasks_behind_busy_agents() -> None:
+    tasks = (
+        task("A", Status.READY, owner="dev-1", since=H),
+        task("W", Status.IN_PROGRESS, owner="dev-1"),
+        task("B", Status.READY, since=H),
+    )
+    sessions = (live("dev-1", "W"),)
+    [alert] = run(snap(tasks, agents("developer", "dev-1", "dev-2"), sessions=sessions), HERMES)
+    assert alert.params["likely_cause"] == "dispatch"
+    assert alert.params["assigned_busy_tasks"] == ["A"]
+
+
+def test_assigned_queued_work_suppresses_the_human_gated_alert_only_when_takeable() -> None:
+    owners = HUMANS + agents("developer", "dev-1", "dev-2")
+    gated = (human("H"), task("X"), task("Y"))
+    deps = chain("H", "X", "Y")
+    assigned = (task("A", Status.READY, owner="dev-1", since=5 * M),)
+    assert of(run(snap(gated + assigned, owners, deps), HERMES), "human-gated") == []
+    assert of(run(snap(gated + assigned, owners, deps)), "human-gated")  # default: dev-1 busy
+
+
+def test_expired_hold_counts_idle_agents_for_assigned_held_work() -> None:
+    rule = Bottlenecks(ready_is_queued=True, holds=(Hold("merge-hold", "lead", H),))
+    held = labelled("A", Status.READY, "merge-hold", since=2 * H, owner_id="dev-1")
+    [alert] = of(run(snap((held,), agents("developer", "dev-1", "dev-2")), rule), "hold")
+    assert alert.params["idle_agents"] == ["dev-1", "dev-2"]

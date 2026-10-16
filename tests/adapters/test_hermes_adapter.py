@@ -611,3 +611,10 @@ def test_roles_from_the_table_or_the_profile_without_instance_number(board: Boar
 def test_role_of_ignores_names_that_are_only_a_number() -> None:
     a = HermesAdapter(spool=None)
     assert a.role_of("-1") == "-1" and a.role_of("x-") == "x-" and a.role_of("Dev-3") == "dev"
+
+
+def test_role_values_are_casefolded_and_name_heuristic_can_be_off(board: Board) -> None:
+    a = HermesAdapter(db_path=board.path, spool=None, roles={"bot": "Dev"})
+    assert a.role_of("bot") == "dev" == a.role_of("dev-1")
+    off = HermesAdapter(db_path=board.path, spool=None, role_from_name=False)
+    assert off.role_of("dev-1") == "dev-1"

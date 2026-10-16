@@ -307,6 +307,7 @@ class HermesAdapter:
     # Profile -> role (Hermes lowercases profiles). Others: the profile without a trailing
     # "-<number>" (dev-1 -> dev), else the profile itself.
     roles: Mapping[str, str] = field(default_factory=dict)
+    role_from_name: bool = True  # dev-1, dev-2 -> dev; false: a profile is its own role
     name: str = "hermes"
     # workspace -> snapshot time until which it is not read (its git timed out)
     _git_backoff: dict[Path, datetime] = field(
@@ -319,7 +320,7 @@ class HermesAdapter:
         self.base_refs = tuple(self.base_refs)
         if bad := [r for r in self.base_refs if not valid_base_ref(r)]:
             raise ValueError(f"invalid base refs: {bad}")
-        self.roles = {k.strip().casefold(): v.strip() for k, v in self.roles.items()}
+        self.roles = {k.strip().casefold(): v.strip().casefold() for k, v in self.roles.items()}
         if self.spool is not None:
             self.spool = Path(self.spool).expanduser()
 
@@ -329,7 +330,7 @@ class HermesAdapter:
         key = profile.strip().casefold()
         if key in self.roles:
             return self.roles[key]
-        m = _INSTANCE.match(key)
+        m = _INSTANCE.match(key) if self.role_from_name else None
         return m[1] if m else key
 
     # --- reading -------------------------------------------------------------------------

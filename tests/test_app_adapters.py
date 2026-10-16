@@ -354,3 +354,11 @@ def test_hermes_roles_table(tmp_path: Path) -> None:
 def test_hermes_roles_rejected(tmp_path: Path, text: str) -> None:
     with pytest.raises(ConfigError, match="roles"):
         load_settings(write(tmp_path, text))
+
+
+def test_hermes_role_from_name_setting(tmp_path: Path) -> None:
+    path = write(tmp_path, "[adapters.hermes]\nrole_from_name = false\n")
+    (adapter,) = build_adapters(load_settings(path))
+    assert isinstance(adapter, HermesAdapter) and adapter.role_of("dev-1") == "dev-1"
+    with pytest.raises(ConfigError, match="role_from_name"):
+        load_settings(write(tmp_path, '[adapters.hermes]\nrole_from_name = "no"\n'))

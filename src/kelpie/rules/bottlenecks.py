@@ -13,15 +13,17 @@ Kelpie looks at the farm as a queueing system and finds where capacity is wasted
 
 Per role, an agent is *busy* with a live session or any open task it owns (in progress,
 ready, accepted, waiting, blocked, and also the whole of a review: a reviewer who owns a
-review task is busy until it moves). Otherwise it is *idle*, but only counts as such after
+review task is busy until it moves; with ``ready_is_queued``, below, only a live session or
+a task in progress makes it busy). Otherwise it is *idle*, but only counts as such after
 ``min_idle_time`` (default 30m) since its last session, so a short gap between two tasks does
 not open and close the alert (an agent that never ran counts at once). A role's *queue
 depth* is the number of ownerless tasks waiting in a hand-off status (``ready`` only once
-all its dependencies are finished). Idle agents that the role's own queue can absorb are not
+all its dependencies are finished), plus, with ``ready_is_queued``, ready and review tasks
+assigned to an agent but not started. Idle agents that the role's own queue can absorb are not
 spare. An alert lasts as long as spare capacity exists.
 
 - **Idle with ready work** (incident 14). Agents have been idle for ``min_idle_time`` while
-  unheld ready work they could take (ownerless and queued in their role, or with no role)
+  unheld ready work they could take (queued in their role, or with no role)
   has waited ``idle_alert_after``: the dispatcher is not handing it out, and Kelpie alerts
   with the idle agents and the waiting work. Held work is parked on purpose and does not
   count until its hold expires (below).
@@ -46,13 +48,17 @@ spare. An alert lasts as long as spare capacity exists.
   behind a human task gets no parallelization advice.
 
 ``ready_is_queued`` (default off; on for Hermes, which assigns a task to a profile before it
-is dispatched) counts an assigned ready task that no live session works on as queued work of
-its role, and not as its owner being busy. Such work waiting while its own owner is busy and
-others of the role idle has the likely cause ``assigned_busy`` (reassign it); otherwise
-``dispatch``.
+is dispatched, in the ready and the review lane) counts a ready or review task assigned to an
+agent (not a human) that no live session works on as queued work of its role, and makes an
+agent busy only through a live session or a task in progress (assigned backlog or blocked
+work holds no worker). Waiting work all assigned to busy agents while others of the role
+idle has the likely cause ``assigned_busy`` (a per-agent limit or the farm's cap holds it;
+reassign it, listed in ``assigned_busy_tasks``); otherwise ``dispatch``. The flag applies to
+every task of the snapshot, whichever adapter reported it.
 
-``slots`` (optional) is the farm's concurrency limit: once that many agents have a live
-session, idle agents are not free capacity, and no idle-capacity alert fires (chain,
+``slots`` (optional) is the farm's concurrency limit in running tasks (live sessions; Hermes
+``kanban.max_in_progress``): once that many sessions are live, idle agents are not free
+capacity, and no idle-capacity alert fires (chain,
 idle with ready work, human-gated); an overloaded role is still reported, with the advice
 to give its work the next free slot instead of rebalancing.
 
@@ -101,7 +107,7 @@ class RoleLoad:
     agents: tuple[str, ...]
     busy: tuple[str, ...]
     idle: tuple[str, ...]  # idle for at least ``min_idle_time``, sorted
-    queue: tuple[str, ...]  # ids of ownerless tasks waiting for the role, oldest first
+    queue: tuple[str, ...]  # ids of tasks queued for the role (see role_loads), oldest first
     waiting_since: datetime | None  # when the oldest queued task began waiting
     now: datetime
 
@@ -115,13 +121,18 @@ class RoleLoad:
         return self.idle[len(self.queue) :]
 
 
+_DISPATCHED = frozenset({Status.READY, Status.REVIEW})  # lanes a dispatcher hands out
+
+
 def queued_assigned(snapshot: Snapshot) -> set[str]:
-    """Ready tasks that have an owner but no live session: assigned, not started yet."""
+    """Ready or review tasks assigned to an agent but with no live session: assigned, not
+    started yet (platforms that assign before dispatching, like Hermes)."""
     live = {s.task_id for s in snapshot.sessions if is_live(s, snapshot.now)}
+    agents = {o.id for o in snapshot.owners if o.kind is OwnerKind.AGENT}
     return {
         t.id
         for t in snapshot.tasks
-        if t.status is Status.READY and t.owner_id is not None and t.id not in live
+        if t.status in _DISPATCHED and t.owner_id in agents and t.id not in live
     }
 
 
@@ -133,8 +144,10 @@ def role_loads(
 ) -> dict[str, RoleLoad]:
     """Idle agents and queue depth per role, in one pass over owners, sessions and tasks.
 
-    With ``ready_is_queued`` an assigned ready task nobody has started is queued work of its
-    role and does not make its owner busy (platforms that assign before dispatching)."""
+    By default an agent that owns any open task is busy, and queues hold ownerless tasks.
+    With ``ready_is_queued`` (platforms that assign before dispatching, like Hermes) an agent
+    is busy only with a live session or a task in progress, and a ready or review task
+    assigned to an agent but not started is queued work of its role."""
     now = snapshot.now
     live_owners: set[str] = set()
     last_session: dict[str, datetime] = {}
@@ -145,12 +158,12 @@ def role_loads(
         if s.owner_id not in last_session or seen > last_session[s.owner_id]:
             last_session[s.owner_id] = seen
     waiting_assigned = queued_assigned(snapshot) if ready_is_queued else set()
-    # An agent that owns any open task is taken, even if it has not started it yet.
-    assigned = {
-        t.owner_id
-        for t in snapshot.tasks
-        if t.owner_id and not t.status.is_terminal and t.id not in waiting_assigned
-    }
+    if ready_is_queued:  # assignment is not work: only a running task takes an agent
+        assigned = {
+            t.owner_id for t in snapshot.tasks if t.owner_id and t.status is Status.IN_PROGRESS
+        }
+    else:  # an agent that owns any open task is taken, even if it has not started it yet
+        assigned = {t.owner_id for t in snapshot.tasks if t.owner_id and not t.status.is_terminal}
     open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
     blocked_by = _open_dependencies(snapshot, open_ids)
 
@@ -384,8 +397,10 @@ class Bottlenecks:
         return actions
 
     def _running(self, snapshot: Snapshot) -> int:
-        """Slots in use: agents with a live session."""
-        return len({s.owner_id for s in snapshot.sessions if is_live(s, snapshot.now)})
+        """Slots in use: live sessions (one per running task; an agent may run several, as a
+        Hermes profile can, and a farm's cap such as Hermes ``max_in_progress`` counts
+        tasks)."""
+        return sum(1 for s in snapshot.sessions if is_live(s, snapshot.now))
 
     def _free_capacity(self, snapshot: Snapshot) -> bool:
         return self.slots is None or self._running(snapshot) < self.slots
@@ -517,19 +532,18 @@ class Bottlenecks:
         # Work assigned to an agent that is not idle waits for that agent, while others of
         # its role sit idle: a reassignment helps. Otherwise the dispatcher is not handing
         # the work out.
-        idle_set = set(idle)
-        stuck = [t for t in work if t.owner_id is not None and t.owner_id not in idle_set]
+        busy = {a for load in loads.values() for a in load.busy}
+        stuck = [t for t in work if t.owner_id is not None and t.owner_id in busy]
         if stuck and len(stuck) == len(work):
             cause = "assigned_busy"
+            owners = _names(sorted({str(t.owner_id) for t in stuck}))
             why = (
-                f"they are assigned to busy agents "
-                f"({_names(sorted({str(t.owner_id) for t in stuck}))}), which may be capped at "
-                "their running work: reassign them to idle agents of the role, or check the "
-                "dispatcher's per-agent limit"
+                f"the work is assigned to busy agents ({owners}): a per-agent limit, or the "
+                "farm's global cap, keeps it waiting; reassign it to idle agents of the role"
             )
         else:
             cause = "dispatch"
-            why = "the dispatcher is not handing it out (paused, a guard, or no free slot)"
+            why = "the dispatcher is not handing the work out (paused, a guard, or no free slot)"
         return [
             Action(
                 ActionKind.ALERT,
@@ -547,6 +561,7 @@ class Bottlenecks:
                     "ready_count": len(ids),
                     "oldest_wait_minutes": int((now - oldest).total_seconds() // 60),
                     "likely_cause": cause,
+                    "assigned_busy_tasks": [t.id for t in stuck][: _SHOWN * 2],
                 },
             )
         ]

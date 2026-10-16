@@ -336,7 +336,10 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # (first human by id): set escalate_to explicitly.
 #
 # Roles (rule 6 compares capacity per role). Hermes has none: a profile's role is its name
-# without a trailing "-<number>" (dev-1, dev-2 -> dev), unless listed here.
+# without a trailing "-<number>" (dev-1, dev-2 -> dev), unless listed here; set
+# role_from_name = false under [adapters.hermes] to keep every profile its own role. Config
+# keyed by role (loop_breaker roles, heavy_roles, provider_roles, review_roles) uses these
+# role names, so per-profile keys such as "dev-1" stop matching once it maps to "dev".
 # [adapters.hermes.roles]
 # reviewer-bot = "reviewer"
 # merger = "reviewer"
