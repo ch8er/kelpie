@@ -1006,7 +1006,8 @@ def _github_steps(
         raise ConfigError(str(exc)) from None
     steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = [("github", step)]
     if github.pulls is not None and github.pulls.enabled:
-        watch = _hold_labels(settings.engine)
+        # Rule 6's hold labels: the PR labels whose time the pull request step reads.
+        watch = frozenset(_hold_labels(settings.engine.rules.get("bottlenecks", {})))
         steps.append(("github_pulls", PullRequestSync(connector, github.pulls, watch)))
         log.info(
             "[connectors.github.pulls] open PRs of %s; hold labels read: %s",
@@ -1023,17 +1024,6 @@ def _github_steps(
         else "off (allow_cancel = false)",
     )
     return [*steps, ("github_ci", ci)], [ci]
-
-
-def _hold_labels(engine: EngineConfig) -> frozenset[str]:
-    """Rule 6's hold labels (``holds`` and ``hold_labels``): the PR labels whose time the
-    pull request step reads."""
-    section = engine.rules.get("bottlenecks", {})
-    labels = {str(x) for x in section.get("hold_labels", []) if isinstance(x, str)}
-    for hold in section.get("holds", []):
-        if isinstance(hold, Mapping) and isinstance(hold.get("label"), str):
-            labels.add(hold["label"])
-    return frozenset(labels)
 
 
 def check_exposure(settings: Settings, host: str) -> None:
