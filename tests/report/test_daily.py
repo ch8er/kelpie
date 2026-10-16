@@ -18,7 +18,7 @@ from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.budgets import Price, PriceTable
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
-from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
+from kelpie.core.model import Owner, OwnerKind, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.states import OpenState
 from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
 from kelpie.report.config import ReportSettings, load_report
@@ -752,3 +752,11 @@ def test_agent_text_cannot_inject_markdown_into_the_report() -> None:
     # links: escaped text, percent-encoded id
     assert "[x\\` \\[click\\](https://evil.example) " in linked
     assert "(https://b.example/x%60%20%5Bclick%5D%28https%3A%2F%2Fevil.example%29" in linked
+
+
+def test_a_person_listed_by_an_old_hold_alert_is_not_idle_capacity() -> None:
+    hold = opened("bottlenecks:hold:merge-hold", "bottlenecks", at(10), at(10), at(14))
+    alert = hold_alert(at(10), 0, ["agent-dev-1", "alice"])
+    owners = [Owner("alice", "owner", OwnerKind.HUMAN), Owner("agent-dev-1", "developer")]
+    [line] = build_report(day_inputs(states=[hold], actions=[alert], owners=owners)).chaos
+    assert line.hours == pytest.approx(4.0)  # one agent for 10:00-14:00, not two

@@ -44,7 +44,7 @@ from kelpie.core.conditions import check_task_status
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
-from kelpie.core.model import Owner, Snapshot, SpanKind
+from kelpie.core.model import Owner, OwnerKind, Snapshot, SpanKind
 from kelpie.core.ports import (
     ActionConnector,
     PlatformAdapter,
@@ -654,7 +654,16 @@ def _with_budgets(
 
 
 def _unique_owners(owners: tuple[Owner, ...]) -> tuple[Owner, ...]:
-    return tuple({o.id: o for o in owners}.values())
+    """One owner per id across adapters: the last one reported, but a person stays a
+    person. An adapter that does not know who is human (Claude Code task lists name owners
+    without a kind) must not turn a human assignee into an agent, or rules would count
+    them as idle capacity."""
+    found: dict[str, Owner] = {}
+    for o in owners:
+        prev = found.get(o.id)
+        human = o.kind is OwnerKind.HUMAN or (prev is not None and prev.kind is OwnerKind.HUMAN)
+        found[o.id] = replace(o, kind=OwnerKind.HUMAN) if human else o
+    return tuple(found.values())
 
 
 def build_adapters(settings: Settings) -> list[PlatformAdapter]:
