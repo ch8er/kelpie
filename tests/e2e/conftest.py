@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.sim import channels, github
+from kelpie.sim import github
+from tests.sim import channels
 from tests.sim.farm import Farm
 
 

@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+from kelpie.sim.github import Run, sha_of
 from tests.sim.farm import REPO, Farm
-from tests.sim.github import Run, sha_of
 from tests.sim.kelpie import wait_for
 
 ACT = {"mode": "act"}

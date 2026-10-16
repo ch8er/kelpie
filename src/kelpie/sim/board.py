@@ -1,9 +1,9 @@
 """The simulated Hermes board: a ``kanban.db`` with the Hermes schema, written as Hermes
 writes it (WAL mode, one transaction per change) and read back for assertions.
 
-The tables Kelpie reads come from :mod:`tests.adapters.kanban` (trimmed copies of Hermes'
-``SCHEMA_SQL``); ``task_comments`` is added because the Hermes CLI writes the reason of a
-block there.
+The tables are trimmed copies of ``SCHEMA_SQL`` in Hermes' ``hermes_cli/kanban_db.py``: the
+columns Kelpie reads (:data:`KANBAN_SCHEMA`, also the schema of the adapter's unit tests), plus
+``task_comments``, where the Hermes CLI writes the reason of a block. The rows are made up.
 """
 
 from __future__ import annotations
@@ -17,7 +17,53 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from tests.adapters.kanban import SCHEMA as KANBAN_SCHEMA
+KANBAN_SCHEMA = """
+CREATE TABLE tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    body TEXT,
+    assignee TEXT,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    completed_at INTEGER,
+    current_run_id INTEGER,
+    last_heartbeat_at INTEGER,
+    session_id TEXT,
+    block_kind TEXT,
+    claim_expires INTEGER,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    last_failure_error TEXT,
+    workspace_kind TEXT NOT NULL DEFAULT 'scratch',
+    workspace_path TEXT,
+    branch_name TEXT
+);
+CREATE TABLE task_links (
+    parent_id TEXT NOT NULL,
+    child_id TEXT NOT NULL,
+    PRIMARY KEY (parent_id, child_id)
+);
+CREATE TABLE task_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    run_id INTEGER,
+    kind TEXT NOT NULL,
+    payload TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE task_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    profile TEXT,
+    status TEXT NOT NULL,
+    last_heartbeat_at INTEGER,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    outcome TEXT,
+    summary TEXT,
+    error TEXT
+);
+"""
 
 SCHEMA = (
     KANBAN_SCHEMA

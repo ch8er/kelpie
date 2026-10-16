@@ -12,53 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA = """
-CREATE TABLE tasks (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    body TEXT,
-    assignee TEXT,
-    status TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    started_at INTEGER,
-    completed_at INTEGER,
-    current_run_id INTEGER,
-    last_heartbeat_at INTEGER,
-    session_id TEXT,
-    block_kind TEXT,
-    claim_expires INTEGER,
-    consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    last_failure_error TEXT,
-    workspace_kind TEXT NOT NULL DEFAULT 'scratch',
-    workspace_path TEXT,
-    branch_name TEXT
-);
-CREATE TABLE task_links (
-    parent_id TEXT NOT NULL,
-    child_id TEXT NOT NULL,
-    PRIMARY KEY (parent_id, child_id)
-);
-CREATE TABLE task_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT NOT NULL,
-    run_id INTEGER,
-    kind TEXT NOT NULL,
-    payload TEXT,
-    created_at INTEGER NOT NULL
-);
-CREATE TABLE task_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT NOT NULL,
-    profile TEXT,
-    status TEXT NOT NULL,
-    last_heartbeat_at INTEGER,
-    started_at INTEGER NOT NULL,
-    ended_at INTEGER,
-    outcome TEXT,
-    summary TEXT,
-    error TEXT
-);
-"""
+from kelpie.sim.board import KANBAN_SCHEMA as SCHEMA
 
 
 def epoch(dt: datetime) -> int:

@@ -18,15 +18,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from tests.sim import hermes_cli, toml
-from tests.sim.board import Board
+from kelpie.sim import hermes_cli, toml
+from kelpie.sim.board import Board
+from kelpie.sim.github import BILLING_TOKEN, FakeGitHub
+from kelpie.sim.github import TOKEN as GITHUB_TOKEN
+from kelpie.sim.spool import Spool
 from tests.sim.channels import Channels
-from tests.sim.github import BILLING_TOKEN, FakeGitHub
-from tests.sim.github import TOKEN as GITHUB_TOKEN
 from tests.sim.kelpie import KelpieServe, wait_for
-from tests.sim.spool import Spool
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 GITHUB_TOKEN_ENV = "KELPIE_SIM_GITHUB_TOKEN"
 BILLING_TOKEN_ENV = "KELPIE_SIM_GITHUB_BILLING_TOKEN"
 REPO = "example/repo"
@@ -56,7 +55,7 @@ class Farm:
         bin_dir = root / "bin"
         bin_dir.mkdir()
         self.hermes_log = hermes_home / hermes_cli.CALLS
-        self.hermes_path = hermes_cli.install(bin_dir, REPO_ROOT, self.hermes_log)
+        self.hermes_path = hermes_cli.install(bin_dir, self.hermes_log)
         self.channels = channels
         self.github = github
         self.kelpie: KelpieServe | None = None
