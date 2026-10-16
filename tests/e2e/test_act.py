@@ -105,8 +105,9 @@ def test_runaway_loop_is_stopped_through_the_hermes_cli(farm: Farm) -> None:
     assert farm.messages("t_ok") == []
     # Critical: both channels hear about each runaway, once.
     slack = farm.channels.slack_texts()
-    assert sum("t_loop" in t for t in slack) == 1
-    assert sum("t_errors" in t for t in slack) == 1
+    runaway = [t for t in slack if t.startswith("[CRITICAL]") and "Runaway run" in t]
+    assert sum("t_loop" in t for t in runaway) == 1
+    assert sum("t_errors" in t for t in runaway) == 1
 
 
 @pytest.mark.xfail(strict=True, reason=ISSUE_70)
@@ -121,6 +122,7 @@ def test_a_stop_is_announced_as_done(farm: Farm) -> None:
     assert about_loop, "no message about the runaway"
     assert all("Stop proposed" not in t for t in about_loop)
     assert all("only sent this alert" not in t for t in about_loop)
+    assert any(re.search(r"\b(stopped|blocked)\b", t, re.IGNORECASE) for t in about_loop)
 
 
 def test_a_refused_stop_reaches_a_human(farm: Farm) -> None:
@@ -152,6 +154,7 @@ class Builds:
     new: Run
     main_old: Run
     done: Run
+    lint: Run
 
 
 def superseded_builds(farm: Farm) -> Builds:
@@ -169,6 +172,14 @@ def superseded_builds(farm: Farm) -> Builds:
         )
 
     old = run("task/t_1", "t_1-a", 25, message="Add the retry policy")
+    # Same branch, another workflow, still running: a different group, never superseded.
+    lint = gh.run(
+        REPO,
+        workflow=".github/workflows/lint.yml",
+        branch="task/t_1",
+        sha=sha_of("t_1-a"),
+        created=farm.ago(minutes=24),
+    )
     new = run("task/t_1", "t_1-b", 4, message="Address review comments")
     # Look-alikes: the default branch is never cancelled; a finished build cannot be.
     main_old = run("main", "m-a", 20)
@@ -182,7 +193,7 @@ def superseded_builds(farm: Farm) -> Builds:
         updated=farm.ago(minutes=30),
     )
     run("task/t_2", "t_2-b", 10)
-    return Builds(old, new, main_old, done)
+    return Builds(old, new, main_old, done, lint)
 
 
 def ci_config(farm: Farm) -> dict[str, Any]:
@@ -211,7 +222,7 @@ def test_superseded_build_is_cancelled_on_github(farm: Farm) -> None:
 
     wait_for("the cancel request", lambda: bool(gh.cancelled), timeout=30)
     summary = farm.wait_message("ci_economy", "superseded")
-    assert "25 min" in summary
+    assert re.search(r"\b2[5-9] min\b", summary)  # 25 min, plus however long startup took
     kelpie.wait_ticks(3)
     farm.stop()
 
@@ -221,6 +232,7 @@ def test_superseded_build_is_cancelled_on_github(farm: Farm) -> None:
     assert runs[builds.new.id].status == "in_progress"
     assert runs[builds.main_old.id].status == "in_progress"
     assert runs[builds.done.id].conclusion == "success"
+    assert runs[builds.lint.id].status == "in_progress"
     posts = [r.path for r in gh.requests if r.method == "POST"]
     assert posts == [f"/repos/{REPO}/actions/runs/{builds.old.id}/cancel"]
     assert farm.hermes_calls() == []
@@ -234,4 +246,9 @@ def test_a_cancel_is_announced_as_done(farm: Farm) -> None:
     farm.wait_message("ci_economy", "superseded")
     farm.stop()
 
-    assert farm.messages("cancel", str(builds.old.id)), "nothing says the build was cancelled"
+    announced = [
+        t
+        for t in farm.channels.telegram_texts()
+        if re.search(r"\bcancell?ed\b", t) and f"{REPO}:{builds.old.id}" in t
+    ]
+    assert announced, "nothing says the build was cancelled"

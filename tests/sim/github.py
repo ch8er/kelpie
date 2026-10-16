@@ -2,11 +2,14 @@
 
 It holds repositories, pull requests, CI results per commit and GitHub Actions runs, answers
 the endpoints Kelpie's GitHub connector reads, and carries out the one write Kelpie makes
-(``POST .../actions/runs/{id}/cancel``): the run is then completed as ``cancelled``. Every
-request is recorded with its method, path and whether it carried the expected token.
+(``POST .../actions/runs/{id}/cancel``): the run is then completed as ``cancelled`` at once
+(real GitHub answers 202 and keeps the run in progress until the runner stops, so a later
+scan may still see it active; the farm never produces that case). Every request is recorded
+with its method, path and the bearer token it carried; one without the farm's token gets
+401, as GitHub answers bad credentials.
 
-Query strings are ignored, except that the run list honours nothing but its own contents:
-every run of the repository is returned (the farm only creates recent ones).
+Query strings are ignored: the run list returns every run of the repository (the farm only
+creates recent ones), on one page.
 """
 
 from __future__ import annotations
