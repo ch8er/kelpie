@@ -41,7 +41,8 @@ def tokens(ctx: SectionContext, settings: TokenSettings | None = None) -> Sectio
         owners=tuple(inputs.owners),
         sessions=tuple(inputs.sessions),
     )
-    roles, tasks = session_roles(board, inputs.attribution)
+    fallback, tasks = session_roles(board, inputs.attribution)
+    roles = {**fallback, **ctx.roles}  # the report's owner roles; else the task's role
     day = session_steps(ctx.spans, ctx.counted, roles, tasks)
     if not day:
         return None

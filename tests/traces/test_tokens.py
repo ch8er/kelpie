@@ -33,6 +33,7 @@ from kelpie.traces.tokens import (
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "traces" / "tokens-cache-context.yaml"
 T0 = datetime(2026, 3, 2, 9, tzinfo=UTC)
 CALL = timedelta(seconds=30)
+ONLY = {"tokens": tokens_section}  # this section alone
 
 
 # --- fixture ---------------------------------------------------------------------------
@@ -158,7 +159,7 @@ def test_fixture_cache_growth_and_restarts() -> None:
 
 def test_fixture_in_the_daily_report() -> None:
     data, snapshot = _load()
-    report = build_report(_inputs(data, snapshot))
+    report = build_report(_inputs(data, snapshot), ONLY)
     [section] = [s for s in report.sections if s.title == "Token optimization"]
     titles = [a.title for a in section.advice]
     for title in data["expected"]["advice"]:
@@ -187,7 +188,7 @@ def test_fixture_in_the_daily_report() -> None:
 
 
 def test_no_model_calls_no_section() -> None:
-    report = build_report(ReportInputs(day=date(2026, 3, 2), tz=UTC))
+    report = build_report(ReportInputs(day=date(2026, 3, 2), tz=UTC), ONLY)
     assert not [s for s in report.sections if s.title == "Token optimization"]
 
 
@@ -202,7 +203,8 @@ def test_section_without_prices_still_reports_tokens() -> None:
             tasks=inputs.tasks,
             owners=inputs.owners,
             sessions=inputs.sessions,
-        )
+        ),
+        ONLY,
     )
     [section] = [s for s in report.sections if s.title == "Token optimization"]
     assert section.advice and all(a.usd == 0 for a in section.advice)
@@ -398,8 +400,8 @@ def test_steps_skip_spans_without_a_session_and_nested_calls() -> None:
 
 def test_section_builder_is_pure_over_its_context() -> None:
     data, snapshot = _load()
-    report = build_report(_inputs(data, snapshot))
-    again = build_report(_inputs(data, snapshot))
+    report = build_report(_inputs(data, snapshot), ONLY)
+    again = build_report(_inputs(data, snapshot), ONLY)
     first = [s for s in report.sections if s.title == "Token optimization"]
     assert first == [s for s in again.sections if s.title == "Token optimization"]
     assert isinstance(first[0], Section)
@@ -426,7 +428,8 @@ def test_a_fixed_cached_prefix_is_a_partial_miss_with_its_own_advice() -> None:
         for i, n in enumerate(sizes)
     ]
     prices = PriceTable((("m", Price(input=3.0, output=15.0, cached_input=0.3)),))
-    report = build_report(ReportInputs(day=date(2026, 3, 2), tz=UTC, spans=spans, prices=prices))
+    inputs = ReportInputs(day=date(2026, 3, 2), tz=UTC, spans=spans, prices=prices)
+    report = build_report(inputs, ONLY)
     [section] = [s for s in report.sections if s.title == "Token optimization"]
     [advice] = section.advice
     assert advice.title == "Cache the growing conversation for unknown on `m`"
