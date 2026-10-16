@@ -219,6 +219,8 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Daily "cost of chaos" report with dollars, cost per completed task, and before/after verification of fixes
 - [ ] Token savings that act: rule 12 (conflict warning), dispatch gate, huge tool outputs
 - [ ] Token optimization recommendations (cache breaks, model fit per role, diff-only review) and throughput metrics
+- [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring
+- [ ] Whole-codebase security audit after the code-health pass (blocks the release)
 - [ ] Documentation and publication of the open core
 - [ ] 10 conversations with farm owners
 
