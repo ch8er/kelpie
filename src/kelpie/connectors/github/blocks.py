@@ -48,10 +48,10 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from kelpie.connectors.github.connector import GitHubConnector, PrRef, parse_pr_ref, valid_repo
 from kelpie.core.conditions import bare_block as _bare_block
@@ -132,6 +132,75 @@ def load_block_conditions(
     return tuple(patterns)
 
 
+class Match(NamedTuple):
+    """One pattern's hit in a task's text: the PR it names, or why none resolves."""
+
+    pattern: BlockConditionPattern
+    ref: PrRef | None  # None: the PR cannot be resolved (see ``problem``)
+    text: str  # what the pattern captured (agent text: escape it before printing)
+    problem: str | None = None  # "unparsable" | "not_allowed" when ref is None
+
+
+def target_of(
+    task: Task, snapshot: Snapshot, patterns: Sequence[BlockConditionPattern]
+) -> str | None:
+    """Which text of the task the patterns read: a bare block's reason, or a ready task's
+    title (for the dispatch gate). None: neither applies."""
+    if not patterns:
+        return None
+    if _bare_block(task, snapshot):
+        return "block"
+    if task.status is Status.READY and any("ready_task" in p.applies_to for p in patterns):
+        return "ready_task"
+    return None
+
+
+def text_matches(
+    task: Task,
+    target: str,
+    patterns: Sequence[BlockConditionPattern],
+    host: str,
+    allows: Callable[[str], bool],
+) -> list[Match]:
+    """Patterns for ``target`` matching the task's text, with the PR each names (``ref`` None:
+    unresolvable). Pure: no network, so ``kelpie why`` uses it offline."""
+    if target == "block":
+        assert task.block is not None
+        text = task.block.reason[:MAX_REASON]
+    else:
+        # The title only: mentions in a description or comments never link a PR to
+        # a task (incident 17).
+        text = task.title[:MAX_TASK_TEXT]
+    found: list[Match] = []
+    seen: set[tuple[str, str]] = set()
+    for p in patterns:
+        if target not in p.applies_to:
+            continue
+        matches = [p.pattern.search(text)] if target == "block" else p.pattern.finditer(text)
+        for m in matches:
+            if m is None or not m["pr"]:
+                continue
+            ref = parse_pr_ref(m["pr"], p.repo, host)
+            key = (p.kind, str(ref) if ref is not None else m["pr"])
+            if key in seen:
+                continue
+            seen.add(key)
+            if ref is None:
+                found.append(Match(p, None, m["pr"], "unparsable"))
+            elif not allows(ref.repo):
+                found.append(Match(p, None, m["pr"], "not_allowed"))
+            else:
+                found.append(Match(p, ref, m["pr"]))
+            if target != "block" and sum(x.ref is not None for x in found) >= MAX_READY_REFS:
+                log.debug(
+                    "task %s names more PRs than %s; the rest are ignored",
+                    task.id,
+                    MAX_READY_REFS,
+                )
+                return found
+    return found
+
+
 class BlockConditionObserver(Protocol):
     def block_conditions(self, outcomes: Mapping[str, int]) -> None: ...
 
@@ -174,18 +243,18 @@ class ConditionSync:
                 work.append((self._priority([self.connector.ref_from_params(c.params)]), "c", i))
         known = {c.id for c in conditions}
         # Patterns run once per task per tick: their cost grows with the text they read.
-        matched: dict[int, tuple[str, list[tuple[BlockConditionPattern, PrRef | None]] | None]] = {}
+        matched: dict[int, tuple[str, list[Match] | None]] = {}
         for j, task in enumerate(tasks):
             target = self._target(task, snapshot)
             if target is not None:
-                found_refs: list[tuple[BlockConditionPattern, PrRef | None]] | None
+                found_refs: list[Match] | None
                 try:
                     found_refs = self._matches(task, target)
                 except Exception as exc:  # one odd text must not sink the step
                     log.warning("block condition for task %s failed: %s", task.id, exc)
                     found_refs = None  # counted as an error below
                 matched[j] = (target, found_refs)
-                work.append((self._priority([r for _, r in found_refs or ()]), "t", j))
+                work.append((self._priority([m.ref for m in found_refs or ()]), "t", j))
         for _, what, k in sorted(work, key=lambda w: w[0]):
             if what == "c":
                 conditions[k] = self._check(conditions[k])
@@ -249,21 +318,13 @@ class ConditionSync:
             return condition
 
     def _target(self, task: Task, snapshot: Snapshot) -> str | None:
-        """Which text of the task the patterns read: a bare block's reason, or a ready
-        task's title (for the dispatch gate). None: neither applies."""
-        if not self.patterns:
-            return None
-        if _bare_block(task, snapshot):
-            return "block"
-        if task.status is Status.READY and any("ready_task" in p.applies_to for p in self.patterns):
-            return "ready_task"
-        return None
+        return target_of(task, snapshot, self.patterns)
 
     def _resolve(
         self,
         task: Task,
         target: str,
-        refs: list[tuple[BlockConditionPattern, PrRef | None]],
+        refs: list[Match],
     ) -> tuple[list[Condition], str | None]:
         """The conditions for the task's text, and the outcome (None: no match).
 
@@ -274,7 +335,7 @@ class ConditionSync:
         it is, so it does not flap between "waiting" and "no condition"."""
         outcome: str | None = None
         found: list[Condition] = []
-        for p, ref in refs:
+        for p, ref, _text, _problem in refs:
             outcome = outcome or "unresolved"
             if ref is None:
                 continue
@@ -291,40 +352,8 @@ class ConditionSync:
                 outcome = "unconfirmed"
         return found, outcome
 
-    def _matches(self, task: Task, target: str) -> list[tuple[BlockConditionPattern, PrRef | None]]:
-        """Patterns for ``target`` matching the task's text, with the PR each names (None:
-        unresolvable)."""
-        if target == "block":
-            assert task.block is not None
-            text = task.block.reason[:MAX_REASON]
-        else:
-            # The title only: mentions in a description or comments never link a PR to
-            # a task (incident 17).
-            text = task.title[:MAX_TASK_TEXT]
-        found: list[tuple[BlockConditionPattern, PrRef | None]] = []
-        seen: set[tuple[str, str]] = set()
-        for p in self.patterns:
-            if target not in p.applies_to:
-                continue
-            matches = [p.pattern.search(text)] if target == "block" else p.pattern.finditer(text)
-            for m in matches:
-                if m is None or not m["pr"]:
-                    continue
-                ref = parse_pr_ref(m["pr"], p.repo, self.connector.host)
-                key = (p.kind, str(ref) if ref is not None else m["pr"])
-                if key in seen:
-                    continue
-                seen.add(key)
-                allowed = ref is not None and self.connector.allows(ref.repo)
-                found.append((p, ref if allowed else None))
-                if target != "block" and sum(r is not None for _, r in found) >= MAX_READY_REFS:
-                    log.debug(
-                        "task %s names more PRs than %s; the rest are ignored",
-                        task.id,
-                        MAX_READY_REFS,
-                    )
-                    return found
-        return found
+    def _matches(self, task: Task, target: str) -> list[Match]:
+        return text_matches(task, target, self.patterns, self.connector.host, self.connector.allows)
 
 
 def _condition(task: Task, pattern: BlockConditionPattern, ref: PrRef, target: str) -> Condition:
