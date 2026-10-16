@@ -70,9 +70,10 @@ as the hidden queue, gate violations after context compaction) are in the P1 and
 - **Actions only go through executors.** The engine routes each action to the platform
   adapter the task came from, or to a connector that can act (a CI connector cancels a
   superseded build); rules never touch a platform directly. Optional capabilities (reassign,
-  stop, wait) fall back to an alert when an adapter lacks them. Every action is fingerprinted in
-  an action ledger with a cooldown and a per-task rate limit, so Kelpie cannot loop on its
-  own output.
+  stop, wait) fall back to an alert when an adapter lacks them, and so does any action an
+  adapter refuses with `UnsupportedAction` (its platform does not allow it). Every action is
+  fingerprinted in an action ledger with a cooldown and a per-task rate limit, so Kelpie
+  cannot loop on its own output.
 - **Observe first.** Each rule runs in `observe`, `suggest` or `act` mode (default
   `observe`); a global dry-run switch overrides them all.
 - **Core knows no platform and no CI.** `kelpie.core` never imports `adapters/` or

@@ -16,6 +16,7 @@ from kelpie.core.ports import (
     SupportsReassign,
     SupportsStop,
     SupportsWait,
+    UnsupportedAction,
 )
 from tests.fakes import (
     Broken,
@@ -386,3 +387,57 @@ def test_repeated_failure_of_a_plain_action_alerts_once_per_cooldown() -> None:
     )
     assert _ticks(engine, adapter, [True, True, True]) == [Outcome.FAILED] * 3
     assert len(alerter.sent) == 1
+
+
+class _Unsupported(FakeAdapter):
+    def requeue(self, task_id: str, reason: str) -> None:
+        raise UnsupportedAction("this platform cannot requeue")
+
+    def wip_commit(
+        self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
+    ) -> None:
+        raise NotImplementedError("not written yet")  # not UnsupportedAction: a failure
+
+    def stop(self, session_id: str, reason: str) -> None:
+        raise UnsupportedAction("cannot stop this kind of session")
+
+
+def test_unsupported_action_falls_back_to_an_alert(caplog: pytest.LogCaptureFixture) -> None:
+    adapter, alerter = _Unsupported(), FakeAlerter()
+    engine = Engine(
+        [
+            Emit(
+                [
+                    act(ActionKind.REQUEUE),
+                    act(ActionKind.COMMENT),
+                    act(ActionKind.STOP, session_id="s-1"),
+                    act(ActionKind.WIP_COMMIT),
+                ]
+            )
+        ],
+        adapters=[adapter],
+        alerter=alerter,
+        config=ACT,
+    )
+    results = engine.tick(lambda: Snapshot(now=NOW))
+    assert [r.outcome for r in results] == [
+        Outcome.NOT_EXECUTED,
+        Outcome.EXECUTED,
+        Outcome.NOT_EXECUTED,
+        Outcome.FAILED,  # a plain NotImplementedError is a failure, retried later
+    ]
+    assert adapter.calls == [("comment", "T-1")]
+    assert [title for title, _ in alerter.sent][:2] == [
+        "[emit] requeue T-1 (not executed, needs a human)",
+        "[emit] stop T-1 (not executed, needs a human)",
+    ]
+    assert len(alerter.sent) == 3  # the failed wip_commit is reported too
+    assert "fake does not support requeue: this platform cannot requeue" in caplog.text
+    # Within the cooldown an unsupported action is held; a failure is retried (retry_after).
+    later = engine.tick(lambda: Snapshot(now=NOW + timedelta(minutes=10)))
+    assert [r.outcome for r in later] == [
+        Outcome.SUPPRESSED,
+        Outcome.SUPPRESSED,
+        Outcome.SUPPRESSED,
+        Outcome.FAILED,
+    ]

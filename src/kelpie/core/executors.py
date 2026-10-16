@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -14,7 +15,10 @@ from kelpie.core.ports import (
     SupportsReassign,
     SupportsStop,
     SupportsWait,
+    UnsupportedAction,
 )
+
+log = logging.getLogger(__name__)
 
 
 class Executor(Protocol):
@@ -29,7 +33,11 @@ class Executor(Protocol):
 
 @dataclass(slots=True)
 class PlatformExecutor:
-    """Maps task actions onto a :class:`PlatformAdapter` and its optional capabilities."""
+    """Maps task actions onto a :class:`PlatformAdapter` and its optional capabilities.
+
+    An adapter that raises :class:`UnsupportedAction` lacks the capability, as if it did not
+    implement the protocol: the engine alerts a human instead (logged with the adapter's
+    reason)."""
 
     adapter: PlatformAdapter
 
@@ -38,6 +46,13 @@ class PlatformExecutor:
         return self.adapter.name
 
     def execute(self, action: Action) -> bool:
+        try:
+            return self._execute(action)
+        except UnsupportedAction as exc:
+            log.warning("%s does not support %s: %s", self.name, action.kind, exc)
+            return False
+
+    def _execute(self, action: Action) -> bool:
         adapter = self.adapter
         if action.kind is ActionKind.STOP:
             # Stops target a session; heartbeat loops may have no task at all.
