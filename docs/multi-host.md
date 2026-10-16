@@ -109,11 +109,17 @@ namespace.
 
 ### Limits
 
-- **Connections:** at most `[hub] max_connections` (default 64) open at once; more are
-  closed on accept, before any thread work.
-- **Per agent:** one report and one poll in flight. A second concurrent poll with the same
-  token gets 409 and the hub logs a warning (two processes share a token, or a stolen one
-  is in use).
+- **Strangers:** connections that have not presented a valid token are capped at
+  `[hub] max_connections` (default 64; when full, the oldest is cut to make room, since an
+  agent sends its token at once) and 16 per address (per /64 for IPv6), and get 3 seconds
+  in all, TLS handshake and headers included. A connection gives its slot back once its
+  token checks out. Someone with several addresses who opens connections faster than an
+  agent completes its handshake can still crowd agents out; put the hub behind a firewall
+  that admits only the agents' networks where that matters.
+- **Per agent:** one report, two polls and two trace exports in flight; more get 409. A
+  new poll (its body read) replaces a held one, whose connection may be dead; if that
+  keeps happening, or reports come from two agent processes at once, the hub warns (two
+  processes share a token, or a stolen one is in use). Poll bodies are capped at 2 MiB.
 - **Bodies:** `Content-Length` required, at most `[hub] max_body_bytes` (default 16 MiB)
   before and after decompression. `Content-Encoding: gzip` is inflated with that bound, so
   a small compressed bomb is refused. 411/413/415 otherwise; one request per connection;
@@ -121,8 +127,12 @@ namespace.
 - **Counts:** per adapter at most 20,000 tasks, 50,000 sessions, 100,000 spans, 20,000
   conditions and dependencies; ids of at most 256 printable characters; JSON nesting is
   bounded by the decoder (a too-deep body is a 400).
-- **Ordering:** a report whose `sent_at` is not later than the last accepted one is
-  refused (an old retry never overwrites a newer board).
+- **Ordering:** each agent process numbers its reports (a random boot id and a counter); a
+  report not newer than the last one of the same process is refused, so an old retry never
+  overwrites a newer board. The agent's clock plays no part in ordering.
+- **Values:** every field is type-checked; times must fall in 2000–2200 and durations in
+  0–3650 days; text loses control characters and lone surrogates; ids with them are refused;
+  duplicate ids within one board are refused.
 - **The agent** caps what it reads back (1 MiB per reply) and refuses a reply that is not
   the expected JSON.
 - Agent and server must run the same release: unknown fields are refused (strict decoding,
@@ -267,7 +277,7 @@ and `requeue` are idempotent there; `comment` may repeat once.
 | Adapter fails on an agent | That part is left out and listed as unobserved; the error is logged on the server and counted in `kelpie_adapter_errors_total{adapter="a/hermes"}`. |
 | Agent clock off by more than `max_clock_skew` | Its reports are not merged; one alert naming the offset. |
 | Wrong or missing token | 401, logged with the peer address; nothing is read. |
-| Token used by two processes | 409 for the second poll, a warning in the log. |
+| Token used by two processes | Polls replace each other and reports alternate; a warning in the log. |
 | Oversized, malformed or out-of-order body | 400/411/413/415; the agent logs the reply and keeps its loop going. |
 | Version mismatch | 400 naming the unknown field; the agent logs it. |
 | Server or agent restart | Agents re-send everything on the next report; see "at most once" for pending actions. |

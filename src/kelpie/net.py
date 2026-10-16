@@ -32,6 +32,7 @@ import http.client
 import logging
 import re
 import socket
+import ssl
 import threading
 import time
 import urllib.parse
@@ -141,7 +142,10 @@ _warned_proxies: set[str] = set()
 
 
 def _connection(
-    parts: urllib.parse.SplitResult, timeout: float, proxy: bool
+    parts: urllib.parse.SplitResult,
+    timeout: float,
+    proxy: bool,
+    context: ssl.SSLContext | None = None,
 ) -> http.client.HTTPConnection:
     host = parts.hostname or ""
     if parts.scheme != "https":  # never through a proxy
@@ -149,8 +153,10 @@ def _connection(
     port = parts.port or 443
     via = https_proxy(host) if proxy else None
     if via is None:
-        return http.client.HTTPSConnection(host, port, timeout=timeout)
-    conn = http.client.HTTPSConnection(via.hostname or "", via.port or 80, timeout=timeout)
+        return http.client.HTTPSConnection(host, port, timeout=timeout, context=context)
+    conn = http.client.HTTPSConnection(
+        via.hostname or "", via.port or 80, timeout=timeout, context=context
+    )
     tunnel_headers = {}
     if via.username:
         pair = f"{urllib.parse.unquote(via.username)}:{urllib.parse.unquote(via.password or '')}"
@@ -182,11 +188,22 @@ def post(
     timeout: float,
     max_bytes: int = DEFAULT_MAX_BYTES,
     proxy: bool = False,
+    context: ssl.SSLContext | None = None,
 ) -> Response:
     """POST ``body`` to ``path`` (see :func:`request`). The body of a non-2xx answer is
     read too (up to ``max_bytes``): APIs say there how long to wait."""
     return request(
-        "POST", url, path, headers, timeout, max_bytes, True, proxy, body=body, body_on_error=True
+        "POST",
+        url,
+        path,
+        headers,
+        timeout,
+        max_bytes,
+        True,
+        proxy,
+        body=body,
+        body_on_error=True,
+        context=context,
     )
 
 
@@ -201,6 +218,7 @@ def request(
     proxy: bool = False,
     body: bytes | None = None,
     body_on_error: bool = False,
+    context: ssl.SSLContext | None = None,
 ) -> Response:
     """Send ``method`` ``path`` (with its query, if any) on the origin of ``url``; raises
     :class:`RequestError` on redirects, timeouts, connection errors, 2xx bodies over
@@ -208,7 +226,9 @@ def request(
     their body cut at ``max_bytes``.
     With ``read_body`` false the body is never read (only the status and headers count);
     otherwise it is read for 2xx answers, and for others only with ``body_on_error``.
-    ``proxy`` allows an environment https proxy as a CONNECT tunnel (https only)."""
+    ``proxy`` allows an environment https proxy as a CONNECT tunnel (https only).
+    ``context`` verifies an https server against other trust than the system's (a private
+    CA); verification is never turned off."""
     seen: set[str] = set()
     for name, value in headers.items():
         if not valid_header_name(name) or not valid_header_value(value):
@@ -226,7 +246,7 @@ def request(
         raise RequestError("invalid_request", "invalid port") from None
     deadline = time.monotonic() + timeout
     guard = _Guard()
-    conn = _connection(parts, timeout, proxy)
+    conn = _connection(parts, timeout, proxy, context)
     conn._create_connection = _tracked(guard, deadline)  # type: ignore[attr-defined]
     watchdog = threading.Timer(timeout, guard.expire)
     watchdog.daemon = True

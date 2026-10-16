@@ -72,11 +72,11 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from kelpie.adapters.claude_code import hook
 from kelpie.adapters.claude_code.process import process_state
-from kelpie.core.actions import ActionResult
+from kelpie.core.actions import ActionKind, ActionResult
 from kelpie.core.model import (
     Dependency,
     Owner,
@@ -296,6 +296,9 @@ class ClaudeCodeAdapter:
         default=None, repr=False, compare=False
     )
     name: str = NAME
+    # The action kinds it carries out (``kelpie agent`` offers only these): stop via the hook's
+    # marker. Task lists are only read.
+    actions: ClassVar[frozenset[ActionKind]] = frozenset({ActionKind.STOP})
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
     # Sessions seen running, kept watched after their lines leave ``lookback``.
     _watched: dict[str, _Watched] = field(
