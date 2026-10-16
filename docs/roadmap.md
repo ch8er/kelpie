@@ -704,6 +704,40 @@ User and contributor documentation for the first public release.
 - [x] Configuration reference for every rule and threshold
 - [x] Guides for writing a rule, an adapter and a connector, with the fixture format
 
+### project: code health — performance, duplication, refactoring
+labels: P0, week-3, area:project
+Five tracks wrote code in parallel, so helpers are likely duplicated (git calls, time
+windows, block-reason parsing, condition binding, alert text). Do this after the live farm
+run is debugged and before the security audit, so the audit covers the final code.
+
+**Acceptance criteria**
+- [ ] Profile a tick and the daily report on a large synthetic farm (e.g. 2,000 tasks, 1M spans, 6 months of ledger); publish the numbers in the PR; fix the top hotspots
+- [ ] Per-tick time budget as a test (fails if a tick on the large farm exceeds it)
+- [ ] Duplicate-code report (e.g. pylint duplicate-code or jscpd) before and after; shared helpers consolidated in core/ or the owning package
+- [ ] No behaviour change: unit and e2e suites pass unchanged; one refactor per PR, each small enough to review
+- [ ] Dead code and unused config keys removed; CLAUDE.md layout updated if modules move
+
+### project: whole-codebase security audit before the first public release
+labels: P0, week-3, area:project
+Each track reviewed only its own part. Before publishing, one end-to-end look at the whole
+codebase. Start it once the live farm run is debugged, so the audit covers the code that
+actually ships. Blocks the release.
+
+Threat model: agents on the farm are untrusted — they control task titles and bodies,
+block reasons, git config in worktrees, spool contents and tool output sizes. Kelpie holds
+GitHub, Telegram, Slack and LLM provider tokens.
+
+**Acceptance criteria**
+- [ ] Subprocess calls (Hermes CLI, git): no injection, minimal environment, no token leakage
+- [ ] No SQL built from strings with untrusted data
+- [ ] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section
+- [ ] Outbound HTTP: no redirects with credentials, TLS verified, response size limits
+- [ ] OTLP and `/metrics` endpoints: auth, bind address, body limits
+- [ ] File paths from config and data: no traversal, safe symlink handling
+- [ ] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host
+- [ ] Clear fixes as small PRs; design questions as issues
+- [ ] `docs/security.md`: threat model, what Kelpie trusts, what it never stores
+
 ### deploy: publish kelpie-sre 0.1.0a1
 labels: P0, week-3, area:deploy
 Publish the open core: first public pre-release on PyPI and a container image.
