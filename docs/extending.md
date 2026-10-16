@@ -235,7 +235,11 @@ Add the rule's parameters to [configuration.md](configuration.md), a commented t
 
 A platform adapter connects Kelpie to an agent platform: it describes the board as a
 snapshot and carries out task actions. The Hermes adapter
-(`src/kelpie/adapters/hermes/`) is the reference.
+(`src/kelpie/adapters/hermes/`) is the reference for a board with write actions and the
+Claude Code adapter (`src/kelpie/adapters/claude_code/`) for a read-only one. The step by
+step how-to and the checklist are in
+[CONTRIBUTING.md](../CONTRIBUTING.md#adding-a-platform-adapter); this section is the
+reference.
 
 ### Protocols
 

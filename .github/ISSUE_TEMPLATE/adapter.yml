@@ -1,0 +1,92 @@
+name: New platform adapter
+description: Propose or request support for another agent platform.
+title: "adapter: "
+labels: ["adapter"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        An adapter turns an agent platform into a snapshot Kelpie's rules can read, and
+        carries out the few actions the platform allows. The how-to and checklist are in
+        [CONTRIBUTING.md](https://github.com/ch8er/kelpie/blob/main/CONTRIBUTING.md#adding-a-platform-adapter);
+        the reference is
+        [docs/extending.md](https://github.com/ch8er/kelpie/blob/main/docs/extending.md#writing-a-platform-adapter).
+        The existing adapters (`src/kelpie/adapters/hermes/`, `src/kelpie/adapters/claude_code/`)
+        are the examples. Answer what you know; "unknown" is a fine answer.
+  - type: input
+    id: platform
+    attributes:
+      label: Platform name
+      placeholder: "e.g. OpenClaw"
+    validations:
+      required: true
+  - type: input
+    id: link
+    attributes:
+      label: Link
+      description: Project page, repository or documentation.
+      placeholder: "https://..."
+    validations:
+      required: true
+  - type: textarea
+    id: storage
+    attributes:
+      label: How the platform stores tasks, statuses, owners and sessions
+      description: >
+        Through an API, a database, files, a CLI? Where do they live, what do the statuses
+        look like and how do they map to Kelpie's (backlog, ready, in_progress, review,
+        blocked, waiting, accepted, done, failed, cancelled)? Who owns a task, and how can
+        you tell an agent from a person? Is a run or session something with a start, an end
+        and a heartbeat?
+    validations:
+      required: true
+  - type: textarea
+    id: snapshot
+    attributes:
+      label: What a snapshot could contain
+      description: >
+        Tasks, owners, dependencies, sessions, tool-call spans, conditions. Which of them
+        can the platform tell you, and with what timestamps (in particular, when a task
+        entered its current status)?
+    validations:
+      required: true
+  - type: checkboxes
+    id: actions
+    attributes:
+      label: Actions the platform supports
+      description: What can be done to a task or session from outside, safely.
+      options:
+        - label: stop or pause a running session
+        - label: requeue a task
+        - label: block or unblock a task
+        - label: comment on a task
+        - label: park a task on a condition (waiting) and wake it
+        - label: reassign a task
+        - label: none (read-only)
+  - type: textarea
+    id: traces
+    attributes:
+      label: Traces
+      description: >
+        Does the platform export OpenTelemetry (OTLP) spans, following the GenAI semantic
+        conventions? Does it have hooks or plugins that run on each tool call or session
+        event, or only logs?
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you contribute it?
+      options:
+        - "Yes, I can write the adapter"
+        - "Yes, I can help (testing, platform knowledge, sample data)"
+        - "No, I can only describe the platform"
+    validations:
+      required: true
+  - type: checkboxes
+    id: guide
+    attributes:
+      label: Adapter guide
+      options:
+        - label: >
+            I have read the
+            [adapter guide in CONTRIBUTING.md](https://github.com/ch8er/kelpie/blob/main/CONTRIBUTING.md#adding-a-platform-adapter).
+          required: true

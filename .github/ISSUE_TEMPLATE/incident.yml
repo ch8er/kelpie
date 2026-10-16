@@ -1,0 +1,125 @@
+name: Incident from my farm
+description: Something went wrong on your agent farm that Kelpie should catch (or did not).
+title: "incident: "
+labels: ["incident"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. Real incidents are how Kelpie's rules get better: a good report becomes a
+        synthetic fixture in
+        [`tests/fixtures/incidents/`](https://github.com/ch8er/kelpie/tree/main/tests/fixtures/incidents)
+        (format: its
+        [README](https://github.com/ch8er/kelpie/blob/main/tests/fixtures/incidents/README.md)),
+        which pins the behavior as a regression test.
+
+        **Anonymize everything before you post.** Replace task, agent, host and repository
+        names with generic ones (`T-101`, `agent-dev-1`, `host-a`, `example/repo`) and
+        remove tokens, paths, URLs and anything personal.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      description: Which agent platform was involved?
+      options:
+        - Hermes
+        - Claude Code
+        - OpenClaw
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >
+        The sequence of events, in order, with rough times or durations. Which tasks,
+        agents or sessions were involved (anonymized), and what each one did.
+      placeholder: |
+        An agent finished its work and exited without setting a status. The task stayed
+        in_progress for about 6 hours and two dependent tasks never started...
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: >
+        What it cost: time lost, tasks blocked, tokens or dollars spent. Rough numbers are
+        fine.
+      placeholder: |
+        - Time lost: about 6 hours of idle agents
+        - Tasks blocked: 2
+        - Tokens / dollars: none, or roughly 3M tokens / $20
+    validations:
+      required: true
+  - type: textarea
+    id: noticed-and-fixed
+    attributes:
+      label: How it was noticed and fixed
+      description: Who or what noticed it, how long after it began, and what resolved it.
+    validations:
+      required: true
+  - type: input
+    id: rule
+    attributes:
+      label: Which Kelpie rule should have caught it
+      description: >
+        If you know. Rule names are shown by `kelpie status`. Leave it empty if unsure, or
+        write "new rule".
+      placeholder: "e.g. exit_contract"
+  - type: input
+    id: version
+    attributes:
+      label: Kelpie version
+      description: Output of `kelpie --version`.
+      placeholder: "kelpie 0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode of the rule(s) involved
+      options:
+        - observe
+        - suggest
+        - act
+        - Kelpie was not running
+    validations:
+      required: true
+  - type: dropdown
+    id: dry-run
+    attributes:
+      label: Global dry-run
+      description: "`[engine] dry_run` in your config (it overrides every rule's mode)."
+      options:
+        - "on (dry_run = true)"
+        - "off (dry_run = false)"
+        - unknown
+    validations:
+      required: true
+  - type: textarea
+    id: excerpts
+    attributes:
+      label: "`kelpie why` and report excerpts"
+      description: >
+        Output of `kelpie why <task>` for the affected task, and the relevant lines of the
+        daily report or alerts, if any. Anonymized.
+      render: text
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Draft fixture (optional)
+      description: >
+        A snapshot that reproduces the incident, in the fixture format of
+        `tests/fixtures/incidents/README.md`. A rough sketch is welcome; we will tidy it.
+      render: yaml
+  - type: checkboxes
+    id: anonymized
+    attributes:
+      label: Anonymized
+      options:
+        - label: >
+            This report contains no personal data, real hostnames, repository names or
+            secrets (tokens, keys, internal URLs).
+          required: true
