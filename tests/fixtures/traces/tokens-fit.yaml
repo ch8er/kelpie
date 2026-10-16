@@ -1,0 +1,198 @@
+id: "tokens-fit"
+incident: null
+title: "Repeated fragments, unused tools, model fit and whole-PR re-review"
+description: >
+  Synthetic farm day. Every developer session reads the same 20k-token contributing guide;
+  the developer platform lists the tools it offers, three of which are never called. A
+  triage agent polls on the large model with short answers all day (a cheaper-model
+  candidate). A writer role moved to a smaller model yesterday and its tasks have come back
+  more often since (the switch is flagged and no further downgrade is suggested). A reviewer
+  re-reads the whole PR in round 2. Distractors: `git status` outputs that differ each time,
+  a file read in only two sessions, a reviewer with long answers, and a round 2 that reads
+  only a new file.
+config:
+  prices:
+    model-large: {input: 3.0, output: 15.0, cached_input: 0.3}
+    model-small: {input: 0.25, output: 1.25, cached_input: 0.025}
+    model-tiny: {input: 0.1, output: 0.4, cached_input: 0.01}
+day: "2026-03-02"
+snapshot:
+  now: "2026-03-02T23:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: reviewer-1, role: reviewer}
+    - {id: triage-1, role: triage}
+    - {id: writer-1, role: writer}
+  tasks:
+    - {id: T-D1, title: "Add export endpoint", status: review,
+       status_since: "2026-03-02T08:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-D2, title: "Fix pagination", status: in_progress,
+       status_since: "2026-03-02T10:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-D3, title: "Rename settings keys", status: review,
+       status_since: "2026-03-02T13:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-G1, title: "Triage incoming issues", status: in_progress,
+       status_since: "2026-03-02T09:00:00+00:00", role: triage, owner_id: triage-1}
+    - id: T-W1
+      title: "Write release notes"
+      status: in_progress
+      status_since: "2026-03-01T10:00:00+00:00"
+      role: writer
+      owner_id: writer-1
+      returns:
+        - {at: "2026-03-01T10:30:00+00:00", reason: "missing section", category: tests}
+        - {at: "2026-03-02T11:00:00+00:00", reason: "wrong version", category: tests}
+    - id: T-W2
+      title: "Write upgrade guide"
+      status: in_progress
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: writer
+      owner_id: writer-1
+      returns:
+        - {at: "2026-03-02T13:00:00+00:00", reason: "unclear steps", category: review}
+        - {at: "2026-03-02T14:30:00+00:00", reason: "unclear steps again", category: review}
+  sessions:
+    - {id: S-D1, task_id: T-D1, owner_id: agent-dev-1, started_at: "2026-03-02T08:00:00+00:00"}
+    - {id: S-D2, task_id: T-D2, owner_id: agent-dev-1, started_at: "2026-03-02T10:00:00+00:00"}
+    - {id: S-D3, task_id: T-D3, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00"}
+    - {id: S-G1, task_id: T-G1, owner_id: triage-1, started_at: "2026-03-02T09:00:00+00:00"}
+    - {id: S-W0, task_id: T-W1, owner_id: writer-1, started_at: "2026-03-01T10:00:00+00:00"}
+    - {id: S-W1, task_id: T-W1, owner_id: writer-1, started_at: "2026-03-02T09:00:00+00:00"}
+    - {id: S-W2, task_id: T-W2, owner_id: writer-1, started_at: "2026-03-02T12:00:00+00:00"}
+    - {id: S-R1, task_id: T-D1, owner_id: reviewer-1, started_at: "2026-03-01T16:00:00+00:00"}
+    - {id: S-R2, task_id: T-D1, owner_id: reviewer-1, started_at: "2026-03-02T11:00:00+00:00"}
+    - {id: S-R4, task_id: T-D3, owner_id: reviewer-1, started_at: "2026-03-01T17:00:00+00:00"}
+    - {id: S-R5, task_id: T-D3, owner_id: reviewer-1, started_at: "2026-03-02T15:00:00+00:00"}
+  spans:
+    # --- developer: the same guide in every session, git status that differs -----------
+    - {trace_id: TR-D1, span_id: D1-L1, name: chat, kind: llm, model: model-large,
+       start: "2026-03-02T08:00:00+00:00", end: "2026-03-02T08:01:00+00:00",
+       task_id: T-D1, session_id: S-D1, input_tokens: 30000, output_tokens: 800,
+       attributes: {kelpie.tools.offered: "Read,Edit,Bash,WebSearch,NotebookEdit"}}
+    - {trace_id: TR-D1, span_id: D1-T1, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-guide, start: "2026-03-02T08:01:10+00:00", end: "2026-03-02T08:01:20+00:00",
+       task_id: T-D1, session_id: S-D1, attributes: {kelpie.tool.output_tokens: 20000}}
+    - {trace_id: TR-D1, span_id: D1-T2, name: "execute_tool Bash", kind: tool, tool: Bash,
+       args_hash: h-status, start: "2026-03-02T08:02:00+00:00", end: "2026-03-02T08:02:05+00:00",
+       task_id: T-D1, session_id: S-D1,
+       attributes: {kelpie.tool.command_prefix: "git status", kelpie.tool.output_tokens: 600}}
+    - {trace_id: TR-D1, span_id: D1-L2, name: chat, kind: llm, model: model-large,
+       start: "2026-03-02T08:03:00+00:00", end: "2026-03-02T08:04:00+00:00",
+       task_id: T-D1, session_id: S-D1, input_tokens: 52000, output_tokens: 800,
+       cached_tokens: 30000}
+    - {trace_id: TR-D2, span_id: D2-L1, name: chat, kind: llm, model: model-large,
+       start: "2026-03-02T10:00:00+00:00", end: "2026-03-02T10:01:00+00:00",
+       task_id: T-D2, session_id: S-D2, input_tokens: 30000, output_tokens: 800,
+       attributes: {kelpie.tools.offered: "Read,Edit,Bash,WebSearch,NotebookEdit"}}
+    - {trace_id: TR-D2, span_id: D2-T1, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-guide, start: "2026-03-02T10:01:10+00:00", end: "2026-03-02T10:01:20+00:00",
+       task_id: T-D2, session_id: S-D2, attributes: {kelpie.tool.output_tokens: 20100}}
+    - {trace_id: TR-D2, span_id: D2-T2, name: "execute_tool Bash", kind: tool, tool: Bash,
+       args_hash: h-status, start: "2026-03-02T10:02:00+00:00", end: "2026-03-02T10:02:05+00:00",
+       task_id: T-D2, session_id: S-D2,
+       attributes: {kelpie.tool.command_prefix: "git status", kelpie.tool.output_tokens: 1500}}
+    - {trace_id: TR-D2, span_id: D2-T3, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-two, start: "2026-03-02T10:02:30+00:00", end: "2026-03-02T10:02:35+00:00",
+       task_id: T-D2, session_id: S-D2, attributes: {kelpie.tool.output_tokens: 4000}}
+    - {trace_id: TR-D2, span_id: D2-L2, name: chat, kind: llm, model: model-large,
+       start: "2026-03-02T10:03:00+00:00", end: "2026-03-02T10:04:00+00:00",
+       task_id: T-D2, session_id: S-D2, input_tokens: 56000, output_tokens: 800,
+       cached_tokens: 30000}
+    - {trace_id: TR-D3, span_id: D3-L1, name: chat, kind: llm, model: model-large,
+       start: "2026-03-02T13:00:00+00:00", end: "2026-03-02T13:01:00+00:00",
+       task_id: T-D3, session_id: S-D3, input_tokens: 30000, output_tokens: 800}
+    - {trace_id: TR-D3, span_id: D3-T1, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-guide, start: "2026-03-02T13:01:10+00:00", end: "2026-03-02T13:01:20+00:00",
+       task_id: T-D3, session_id: S-D3, attributes: {kelpie.tool.output_tokens: 19950}}
+    - {trace_id: TR-D3, span_id: D3-T2, name: "execute_tool Bash", kind: tool, tool: Bash,
+       args_hash: h-status, start: "2026-03-02T13:02:00+00:00", end: "2026-03-02T13:02:05+00:00",
+       task_id: T-D3, session_id: S-D3,
+       attributes: {kelpie.tool.command_prefix: "git status", kelpie.tool.output_tokens: 3000}}
+    - {trace_id: TR-D3, span_id: D3-T3, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-two, start: "2026-03-02T13:02:30+00:00", end: "2026-03-02T13:02:35+00:00",
+       task_id: T-D3, session_id: S-D3, attributes: {kelpie.tool.output_tokens: 4000}}
+    - {trace_id: TR-D3, span_id: D3-L2, name: chat, kind: llm, model: model-large,
+       start: "2026-03-02T13:03:00+00:00", end: "2026-03-02T13:04:00+00:00",
+       task_id: T-D3, session_id: S-D3, input_tokens: 58000, output_tokens: 800,
+       cached_tokens: 30000}
+    # --- triage: polling with short answers on the large model --------------------------
+    - {trace_id: TR-G1, span_id: G1-L, name: chat, kind: llm, model: model-large,
+       start: "2026-03-02T09:00:00+00:00", end: "2026-03-02T09:00:20+00:00",
+       task_id: T-G1, session_id: S-G1, input_tokens: 6000, output_tokens: 150,
+       repeat: {count: 24, every: 20m}}
+    # --- writer: large model yesterday, small model today, more returns since -----------
+    - {trace_id: TR-W0, span_id: W0-L, name: chat, kind: llm, model: model-large,
+       start: "2026-03-01T10:00:00+00:00", end: "2026-03-01T10:00:20+00:00",
+       task_id: T-W1, session_id: S-W0, input_tokens: 5000, output_tokens: 200,
+       repeat: {count: 10, every: 10m}}
+    - {trace_id: TR-W1, span_id: W1-L, name: chat, kind: llm, model: model-small,
+       start: "2026-03-02T09:00:00+00:00", end: "2026-03-02T09:00:20+00:00",
+       task_id: T-W1, session_id: S-W1, input_tokens: 5000, output_tokens: 200,
+       repeat: {count: 12, every: 10m}}
+    - {trace_id: TR-W2, span_id: W2-L, name: chat, kind: llm, model: model-small,
+       start: "2026-03-02T12:00:00+00:00", end: "2026-03-02T12:00:20+00:00",
+       task_id: T-W2, session_id: S-W2, input_tokens: 5000, output_tokens: 200,
+       repeat: {count: 12, every: 10m}}
+    # --- reviewer: round 1 yesterday, round 2 re-reads all of it ------------------------
+    - {trace_id: TR-R1, span_id: R1-L1, name: chat, kind: llm, model: model-large,
+       start: "2026-03-01T16:00:00+00:00", end: "2026-03-01T16:01:00+00:00",
+       task_id: T-D1, session_id: S-R1, input_tokens: 20000, output_tokens: 1500}
+    - {trace_id: TR-R1, span_id: R1-T1, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-a, start: "2026-03-01T16:01:00+00:00", end: "2026-03-01T16:01:05+00:00",
+       task_id: T-D1, session_id: S-R1, attributes: {kelpie.tool.output_tokens: 9000}}
+    - {trace_id: TR-R1, span_id: R1-T2, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-b, start: "2026-03-01T16:02:00+00:00", end: "2026-03-01T16:02:05+00:00",
+       task_id: T-D1, session_id: S-R1, attributes: {kelpie.tool.output_tokens: 15000}}
+    - {trace_id: TR-R1, span_id: R1-T3, name: "execute_tool Bash", kind: tool, tool: Bash,
+       args_hash: h-diff, start: "2026-03-01T16:03:00+00:00", end: "2026-03-01T16:03:05+00:00",
+       task_id: T-D1, session_id: S-R1,
+       attributes: {kelpie.tool.command_prefix: "gh pr diff", kelpie.tool.output_tokens: 36000}}
+    - {trace_id: TR-R2, span_id: R2-T1, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-a, start: "2026-03-02T11:00:30+00:00", end: "2026-03-02T11:00:35+00:00",
+       task_id: T-D1, session_id: S-R2, attributes: {kelpie.tool.output_tokens: 9000}}
+    - {trace_id: TR-R2, span_id: R2-T2, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-b, start: "2026-03-02T11:01:00+00:00", end: "2026-03-02T11:01:05+00:00",
+       task_id: T-D1, session_id: S-R2, attributes: {kelpie.tool.output_tokens: 15000}}
+    - {trace_id: TR-R2, span_id: R2-T3, name: "execute_tool Bash", kind: tool, tool: Bash,
+       args_hash: h-diff, start: "2026-03-02T11:02:00+00:00", end: "2026-03-02T11:02:05+00:00",
+       task_id: T-D1, session_id: S-R2,
+       attributes: {kelpie.tool.command_prefix: "gh pr diff", kelpie.tool.output_tokens: 40000}}
+    - {trace_id: TR-R2, span_id: R2-L, name: chat, kind: llm, model: model-large,
+       start: "2026-03-02T11:03:00+00:00", end: "2026-03-02T11:04:00+00:00",
+       task_id: T-D1, session_id: S-R2, input_tokens: 40000, output_tokens: 1500,
+       cached_tokens: 30000, repeat: {count: 12, every: 5m}}
+    # Distractor: round 2 of T-D3 reads only a new file; one read reports no arguments.
+    - {trace_id: TR-R4, span_id: R4-T1, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-d, start: "2026-03-01T17:01:00+00:00", end: "2026-03-01T17:01:05+00:00",
+       task_id: T-D3, session_id: S-R4, attributes: {kelpie.tool.output_tokens: 8000}}
+    - {trace_id: TR-R5, span_id: R5-T1, name: "execute_tool Read", kind: tool, tool: Read,
+       args_hash: h-c, start: "2026-03-02T15:00:30+00:00", end: "2026-03-02T15:00:35+00:00",
+       task_id: T-D3, session_id: S-R5, attributes: {kelpie.tool.output_tokens: 6000}}
+    - {trace_id: TR-R5, span_id: R5-T2, name: "execute_tool Read", kind: tool, tool: Read,
+       start: "2026-03-02T15:00:40+00:00", end: "2026-03-02T15:00:45+00:00",
+       task_id: T-D3, session_id: S-R5, attributes: {kelpie.tool.output_tokens: 2000}}
+    - {trace_id: TR-R5, span_id: R5-L, name: chat, kind: llm, model: model-large,
+       start: "2026-03-02T15:01:00+00:00", end: "2026-03-02T15:02:00+00:00",
+       task_id: T-D3, session_id: S-R5, input_tokens: 20000, output_tokens: 1500,
+       cached_tokens: 15000, repeat: {count: 12, every: 5m}}
+expected:
+  fragments:
+    - {role: developer, key: "tool:Read", args_hash: h-guide, sessions: 3, tokens: 60050}
+  unused: {developer: [Edit, NotebookEdit, WebSearch]}
+  unknown_tools: [reviewer, triage, writer]
+  routine:
+    - {role: triage, model: model-large, calls: 24, cheaper: model-tiny}
+    - {role: writer, model: model-small, calls: 24, cheaper: model-tiny}
+  switches:
+    - {role: writer, old: model-large, new: model-small, worse: true}
+  review:
+    - {task_id: T-D1, round: 2, session_id: S-R2, tokens: 64000, reread: 60000, whole: true}
+    - {task_id: T-D3, round: 2, session_id: S-R5, tokens: 6000, reread: 0, whole: false}
+  advice:
+    - "Try `model-tiny` for triage"
+    - "Review only the changes since the last round (reviewer)"
+    - "Put what every developer session loads into its cached instructions"
+not_expected:
+  fragment_hashes: [h-status, h-two]
+  routine_roles: [reviewer, developer]
+  advice:
+    - "Try `model-tiny` for writer"
