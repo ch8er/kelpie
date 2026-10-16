@@ -56,7 +56,7 @@ def test_status_mapping(board: Board, hermes: str, expected: Status) -> None:
     board.task("t_1", hermes, ago(days=1), assignee="dev")
     task = adapter(board).snapshot(NOW).tasks[0]
     assert task.status is expected
-    assert task.owner_id == "dev" and task.role == "dev"
+    assert task.owner_id is None and task.role == "dev"  # assigned, not claimed by a run
     assert task.source == "hermes"
     assert (task.block is not None) == (expected is Status.BLOCKED)
 
@@ -594,14 +594,14 @@ def test_roles_from_the_table_or_the_profile_without_instance_number(board: Boar
     board.task("t_6", "ready", ago(days=1), assignee="")
     a = HermesAdapter(db_path=board.path, spool=None, roles={"Reviewer-Bot": "reviewer"})
     snap = a.snapshot(NOW)
-    roles = {t.id: (t.owner_id, t.role) for t in snap.tasks}
+    roles = {t.id: t.role for t in snap.tasks}
     assert roles == {
-        "t_1": ("dev-1", "dev"),
-        "t_2": ("dev-2", "dev"),
-        "t_3": ("reviewer-bot", "reviewer"),
-        "t_4": ("ops", "ops"),
-        "t_5": ("build-2024-1", "build-2024"),
-        "t_6": (None, None),
+        "t_1": "dev",
+        "t_2": "dev",
+        "t_3": "reviewer",
+        "t_4": "ops",
+        "t_5": "build-2024",
+        "t_6": None,
     }
     assert {o.id: o.role for o in snap.owners}["dev-2"] == "dev"
 
@@ -616,3 +616,60 @@ def test_role_values_are_casefolded_and_name_heuristic_can_be_off(board: Board) 
     assert a.role_of("bot") == "dev" == a.role_of("dev-1")
     off = HermesAdapter(db_path=board.path, spool=None, role_from_name=False)
     assert off.role_of("dev-1") == "dev-1"
+
+
+# --- owner: a live run claims the task (issue 68) ---------------------------------------
+
+
+def test_owner_is_the_profile_only_while_a_live_run_claims_the_task(board: Board) -> None:
+    board.task("t_run", "running", ago(days=1), assignee="dev-1")
+    board.update("t_run", current_run_id=board.run("t_run", "dev-1", ago(minutes=20)))
+    board.task("t_rev", "review", ago(days=1), assignee="reviewer-1")
+    board.update("t_rev", current_run_id=board.run("t_rev", "reviewer-1", ago(minutes=5)))
+    board.task("t_ended", "running", ago(days=1), assignee="dev-2")
+    rid = board.run("t_ended", "dev-2", ago(hours=2), status="done", ended=ago(hours=1))
+    board.update("t_ended", current_run_id=rid)  # its run ended: nobody holds it
+    board.task("t_ready", "ready", ago(days=1), assignee="dev-3")
+    board.task("t_blocked", "blocked", ago(days=1), assignee="dev-3")
+    snap = adapter(board).snapshot(NOW)
+    owners = {t.id: t.owner_id for t in snap.tasks}
+    assert owners == {
+        "t_run": "dev-1",
+        "t_rev": "reviewer-1",
+        "t_ended": None,
+        "t_ready": None,
+        "t_blocked": None,
+    }
+    # Assigned profiles are still owners of the farm (capacity per role), claimed or not.
+    assert {"dev-1", "dev-2", "dev-3", "reviewer-1"} <= {o.id for o in snap.owners}
+
+
+def test_a_human_assignee_owns_the_task_without_a_run(board: Board) -> None:
+    board.task("t_1", "ready", ago(days=1), assignee="alice")
+    a = HermesAdapter(db_path=board.path, spool=None, human_owners=frozenset({"Alice"}))
+    (task,) = a.snapshot(NOW).tasks
+    assert task.owner_id == "alice"
+
+
+def test_older_schema_without_current_run_counts_running_as_claimed(board: Board) -> None:
+    board.task("t_1", "running", ago(days=1), assignee="dev")
+    board.task("t_2", "ready", ago(days=1), assignee="dev")
+    board.conn.execute("ALTER TABLE tasks DROP COLUMN current_run_id")
+    board.conn.commit()
+    owners = {t.id: t.owner_id for t in adapter(board).snapshot(NOW).tasks}
+    assert owners == {"t_1": "dev", "t_2": None}
+
+
+def test_owner_is_the_profile_of_the_claiming_run(board: Board) -> None:
+    board.task("t_1", "review", ago(days=1), assignee="dev-2")  # routed back to its developer
+    board.update("t_1", current_run_id=board.run("t_1", "reviewer", ago(minutes=5)))
+    (task,) = adapter(board).snapshot(NOW).tasks
+    assert task.owner_id == "reviewer" and task.assignee == "dev-2" and task.role == "dev"
+
+
+def test_assignee_is_reported_whether_claimed_or_not(board: Board) -> None:
+    board.task("t_1", "ready", ago(days=1), assignee="dev-1")
+    board.task("t_2", "ready", ago(days=1), assignee="")
+    tasks = {t.id: t for t in adapter(board).snapshot(NOW).tasks}
+    assert tasks["t_1"].assignee == "dev-1" and tasks["t_1"].owner_id is None
+    assert tasks["t_2"].assignee is None

@@ -50,6 +50,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import OwnerKind, Resource, ResourceKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._tasks import responsible
 
 NAME = "resources"
 DEFAULT_MAX_READING_AGE = timedelta(minutes=10)
@@ -489,13 +490,14 @@ class Resources:
         for t in snapshot.tasks:
             if t.status not in _ACTIVE:
                 continue
-            owner = snapshot.owner(t.owner_id) if t.owner_id else None
+            holder = responsible(t)  # routed work waits on the provider too
+            owner = snapshot.owner(holder) if holder else None
             if owner is not None and owner.kind is OwnerKind.HUMAN:
                 continue
             if (
                 (t.role is not None and t.role in roles)
                 or (owner is not None and owner.role in roles)
-                or (t.owner_id is not None and t.owner_id in owners)
+                or (holder is not None and holder in owners)
             ):
                 out.append(t.id)
         return sorted(out)

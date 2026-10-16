@@ -83,6 +83,7 @@ from kelpie.rules._tasks import (
     last_exit,
     linked_conditions,
     live_session,
+    responsible,
     undeclared_exit,
 )
 
@@ -157,8 +158,9 @@ class OrphanStatus:
         else:
             return None
         known = {o.id for o in snapshot.owners}
-        gone = task.owner_id is not None and bool(known) and task.owner_id not in known
-        if task.owner_id is not None and not gone:
+        who = responsible(task)  # a task routed to someone is not ownerless
+        gone = who is not None and bool(known) and who not in known
+        if who is not None and not gone:
             return None
         if snapshot.now - task.status_since < after:
             return None
@@ -177,7 +179,8 @@ class OrphanStatus:
         idle: list[Owner],
     ) -> Iterable[Action]:
         hours = (snapshot.now - task.status_since).total_seconds() / 3600
-        who = f"owner {task.owner_id} is no longer known" if gone else "it has no owner"
+        role = "owner" if task.owner_id else "assignee"
+        who = f"{role} {responsible(task)} is no longer known" if gone else "it has no owner"
         may_reassign = self.reassign and (not gone or self.reassign_unknown_owner)
         candidate = None
         if may_reassign and task.role is not None:
@@ -298,9 +301,10 @@ class OrphanStatus:
         after = self.review_idle_after
         if after is None or not self.reviewer_roles:
             return None  # which roles review is farm configuration; without it, off
-        if task.status is not Status.REVIEW or task.owner_id is None:
+        holder = responsible(task)
+        if task.status is not Status.REVIEW or holder is None:
             return None
-        owner = snapshot.owner(task.owner_id)
+        owner = snapshot.owner(holder)
         if owner is None or owner.kind is OwnerKind.HUMAN or owner.role in self.reviewer_roles:
             return None  # unknown owner (the ownerless check's), or a reviewer has it
         if task.role in self.reviewer_roles:

@@ -184,3 +184,12 @@ def test_one_idle_agent_gets_one_task_most_urgent_first() -> None:
     assert [(a.task_id, a.params["owner_id"]) for a in reassigns] == [("T-2", "dev-1")]
     [t1_alert] = [a for a in actions if a.task_id == "T-1"]
     assert "No idle agent with role 'developer'" in t1_alert.reason
+
+
+def test_a_task_routed_to_someone_is_not_ownerless() -> None:
+    """Hermes reports the profile a review task is routed to as ``assignee`` until a run
+    claims it: waiting for dispatch is not an orphan."""
+    assert act(task(status=Status.REVIEW, age=300, assignee="dev-1")) == []
+    assert act(task(age=300, assignee="dev-1")) == []
+    gone = act(task(status=Status.REVIEW, age=300, assignee="dev-9"))
+    assert gone and "assignee dev-9 is no longer known" in gone[0].reason

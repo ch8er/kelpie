@@ -200,7 +200,7 @@ def test_incident_11_ownerless_review_with_dependents_is_critical(farm: Farm) ->
     b.claim("t_auth", "dev", farm.ago(hours=5))
     b.hand_off("t_auth", farm.ago(hours=3))
     # Assumption: the review is up for any reviewer, so the task has no assignee (if Hermes
-    # kept the developer as assignee, the adapter would call it owned).
+    # kept the developer as assignee, the task would be routed to it, not ownerless).
     b.update("t_auth", assignee=None)
     for i in range(4):
         b.task(f"t_dep{i}", "todo", farm.ago(hours=6), title=f"Protect endpoint {i}")
@@ -244,8 +244,8 @@ def idle_dev(farm: Farm, task_id: str, ended_hours: float) -> None:
 
 
 def test_incident_14_idle_farm_with_ready_work_is_alerted(farm: Farm) -> None:
-    """The idle half of incident 14, with ``ready_is_queued`` (the Hermes setting: the
-    assignee of a ready task routes it, nobody has claimed it). The hold itself cannot be
+    """The idle half of incident 14: the assignee of a ready task routes it, nobody has
+    claimed it, so the adapter reports it ownerless (issue 68). The hold itself cannot be
     modelled on Hermes: holds are task labels, and the Hermes adapter reports none."""
     b = farm.board
     idle_dev(farm, "t_prev", ended_hours=3)
@@ -254,14 +254,7 @@ def test_incident_14_idle_farm_with_ready_work_is_alerted(farm: Farm) -> None:
         b.event(f"t_ready{i}", "promoted", farm.ago(hours=5))
     before = farm.board.statuses()
 
-    rules = {
-        "bottlenecks": {
-            **SUGGEST,
-            "min_idle_time": "30m",
-            "idle_alert_after": "30m",
-            "ready_is_queued": True,
-        }
-    }
+    rules = {"bottlenecks": {**SUGGEST, "min_idle_time": "30m", "idle_alert_after": "30m"}}
     farm.serve(farm.config(rules))
 
     text = farm.wait_message("bottlenecks", "t_ready0", timeout=5)
@@ -302,7 +295,6 @@ HUMAN_GATE_RULES = {
         "min_idle_time": "30m",
         "human_gate_min_tasks": 3,
         "human_gate_after": "1h",
-        "ready_is_queued": True,
     },
     "needs_you": {**SUGGEST, "human_wait_alert_after": "1h"},
 }

@@ -20,6 +20,11 @@ DEFAULT_MAX_CONDITION_AGE = timedelta(minutes=15)
 DEFAULT_STALE_AFTER = timedelta(minutes=30)
 
 
+def responsible(task: Task) -> str | None:
+    """Who answers for a task: its owner, else whom the platform routed it to."""
+    return task.owner_id or task.assignee
+
+
 def last_seen(session: Session) -> datetime:
     """The last sign of life of a session."""
     return session.ended_at or session.last_heartbeat or session.started_at

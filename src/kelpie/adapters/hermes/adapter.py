@@ -28,12 +28,15 @@ Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
     archived                -> (skipped)
 
 ``body`` is ``tasks.body`` (the description; none for finished tasks), at most ``MAX_BODY``
-characters; the dispatch gate's patterns read it with the title. ``owner_id`` is the assignee
-profile and ``role`` the profile's role. Hermes has no roles, so ``roles``
+characters; the dispatch gate's patterns read it with the title. ``assignee`` is the assignee
+profile and ``role`` its role: on Hermes an assignee only routes a task until it is
+dispatched. ``owner_id`` is the profile of the live run that claims the task (its
+``current_run_id`` names a run that has not ended), none while nothing runs, and the
+assignee itself for a human owner (``human_owners``). Hermes has no roles, so ``roles``
 (``[adapters.hermes.roles]``) maps profiles to roles, and any other profile's role is its name
 without a trailing ``-<number>`` (``dev-1``, ``dev-2`` -> ``dev``; ``role_from_name = false``
-turns that off), else the profile itself. Hermes assigns a task to a profile before
-dispatching it: set rule 6's ``ready_is_queued`` to count assigned ready work as queued.
+turns that off), else the profile itself. Unclaimed tasks are therefore queued work of their
+role for rule 6 (rule 6's ``ready_is_queued`` is not needed for Hermes).
 ``status_since`` is the time of the latest status-changing event of the task (any
 ``task_events`` kind except the non-status ones in ``NON_STATUS_EVENTS``), else
 ``started_at``/``completed_at``/``created_at``. Done tasks older than ``lookback`` are left
@@ -542,6 +545,7 @@ class HermesAdapter:
         blocks = self._latest_events(conn, BLOCK_EVENTS)
         parks = self._latest_events(conn, ("scheduled",))
         key = self._key() if parks else None
+        claimed = self._claimed(conn, rows)
         tasks: list[Task] = []
         owners: set[str] = set()
         known: dict[str, sqlite3.Row] = {}
@@ -602,6 +606,11 @@ class HermesAdapter:
             assignee = (row["assignee"] or "").strip() or None
             if assignee:
                 owners.add(assignee)
+            # The assignee only routes a task (its role, ``assignee``); the profile of a live
+            # run that claims it owns it. A person assigned a task owns it outright (human
+            # tasks have no runs).
+            human = assignee is not None and assignee.casefold() in self.human_owners
+            owner = assignee if human else claimed.get(row["id"])
             known[row["id"]] = row
             tasks.append(
                 Task(
@@ -610,7 +619,8 @@ class HermesAdapter:
                     status=status,
                     status_since=since,
                     role=self.role_of(assignee) if assignee else None,
-                    owner_id=assignee,
+                    owner_id=owner,
+                    assignee=assignee,
                     source=self.name,
                     block=block,
                     body=None if status.is_terminal else _body(row),
@@ -618,6 +628,31 @@ class HermesAdapter:
                 )
             )
         return tuple(tasks), owners, known, tuple(waits)
+
+    @staticmethod
+    def _claimed(conn: _Connection, rows: Sequence[sqlite3.Row]) -> dict[str, str]:
+        """Tasks a live run claims (the task's ``current_run_id`` names a run of the task
+        that has not ended), with the run's profile, else the assignee. An expired claim
+        still counts until Hermes reclaims the task and ends the run: whether its worker is
+        alive is the sessions' business (heartbeats), not ownership. Older schemas without
+        ``current_run_id``: running tasks, by their assignee."""
+        if not rows or "current_run_id" not in rows[0].keys():  # noqa: SIM118
+            return {
+                r["id"]: a
+                for r in rows
+                if r["status"] == "running" and (a := (r["assignee"] or "").strip())
+            }
+        found = conn.execute(
+            "SELECT t.id, r.profile, t.assignee FROM tasks t"
+            " JOIN task_runs r ON r.id = t.current_run_id AND r.task_id = t.id"
+            " WHERE r.ended_at IS NULL"
+        ).fetchall()
+        claimed: dict[str, str] = {}
+        for r in found:
+            who = (r["profile"] or "").strip() or (r["assignee"] or "").strip()
+            if who:
+                claimed[r["id"]] = who
+        return claimed
 
     @staticmethod
     def _latest_events(

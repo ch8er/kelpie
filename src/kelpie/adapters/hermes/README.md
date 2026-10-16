@@ -210,7 +210,7 @@ mode `0600`. Hooks never raise and do no network I/O.
 | task `triage`, `todo`, `scheduled` | `backlog` (`scheduled` is a timed queue, not a Kelpie wait) |
 | `ready` / `running` / `blocked` / `review` / `done` | `ready` / `in_progress` / `blocked` / `review` / `done` |
 | `archived`; `done` older than `lookback` | left out |
-| `assignee` | `owner_id`, and `role` (Hermes routes work by profile) |
+| `assignee` | `assignee` and `role` (Hermes routes work by profile); `owner_id` is the profile of the live run that claims the task (`current_run_id` names a run that has not ended), none while nothing runs, or the assignee itself for a `human_owners` name |
 | `task_events`, latest status-changing event | `status_since` (non-status events such as `heartbeat`, `commented`, `claim_extended` are ignored) |
 | `task_links` (parent, child) | `Dependency(child, depends_on=parent)` (links to archived parents dropped) |
 | `task_runs` row | `Session` `hermes-run-<id>` |

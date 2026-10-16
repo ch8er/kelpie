@@ -1,10 +1,10 @@
-id: "14-hermes-assigned-ready-idle"
+id: "14-assigned-ready-idle"
 incident: 14
-title: "Hermes: assigned ready tasks wait while their profiles sit idle"
+title: "Assigned ready tasks wait while their owners sit idle"
 description: >
-  On Hermes every task is assigned to a profile before the dispatcher spawns it, so ready
-  work never looks ownerless. During the merge-hold incident the developer profiles owned
-  ready tasks and backlog children but ran nothing for hours. With ready_is_queued the
+  On a platform that reports the agent a task is assigned to as its owner before anything
+  runs, ready work never looks ownerless. During the merge-hold incident the developer
+  agents owned ready tasks and backlog children but ran nothing for hours. With ready_is_queued the
   assigned, unstarted work counts as queued and its idle owners as idle, so Kelpie names the
   stall; a ready task whose run already started, and a human's ready task, are left alone.
 rule: bottlenecks

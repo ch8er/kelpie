@@ -101,7 +101,7 @@ class Task:
     status: Status
     status_since: datetime
     role: str | None = None
-    owner_id: str | None = None
+    owner_id: str | None = None  # who holds it now (a platform may route it before that)
     source: str | None = None  # name of the platform adapter the task came from
     block: Block | None = None
     review_rounds: int = 0
@@ -115,6 +115,10 @@ class Task:
     host: str | None = None  # where the task runs, if the adapter knows (a config name)
     body: str | None = None  # the task's description, if the adapter knows it
     branch: str | None = None  # the task's working branch, if the adapter knows it
+    # Whom the platform routed the task to, when that is known apart from ``owner_id``: a
+    # platform that assigns work before it is claimed (Hermes) sets the owner only once a
+    # run claims it. None: the owner is all there is.
+    assignee: str | None = None
 
 
 class ResourceKind(StrEnum):
