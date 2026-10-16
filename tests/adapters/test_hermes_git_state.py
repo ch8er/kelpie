@@ -1070,3 +1070,21 @@ def test_capped_run_timeout_leaves_no_reader_errors(
         gs._run_capped(["sh", "-c", "sleep 5"], 0.2, None, repo, 100)
     time.sleep(0.2)
     assert errors == []
+
+
+@pytest.mark.parametrize("trick", ["alternates", "objects-link", "refs-link"])
+def test_borrowed_objects_or_refs_are_refused(repo: Path, tmp_path: Path, trick: str) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    git(ws, "init", "-q", "-b", "main")
+    dot = ws / ".git"
+    if trick == "alternates":
+        (dot / "objects" / "info" / "alternates").write_text(f"{repo / '.git' / 'objects'}\n")
+    elif trick == "objects-link":
+        shutil.rmtree(dot / "objects")
+        (dot / "objects").symlink_to(repo / ".git" / "objects")
+    else:
+        shutil.rmtree(dot / "refs")
+        (dot / "refs").symlink_to(repo / ".git" / "refs")
+    state = read_git_state(ws, 5.0)
+    assert state.problem is Problem.LAYOUT and state.paths is None

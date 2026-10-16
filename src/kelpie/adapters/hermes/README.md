@@ -280,10 +280,14 @@ objects. Git runs programs named in that config (filter drivers, `core.fsmonitor
 - Only two `.git` layouts are read: an ordinary `.git` directory without a `commondir` file,
   and a linked worktree whose `.git` file names `<common>/worktrees/<id>`, whose `commondir`
   and `gitdir` files lead back to `<common>` and to this `.git`, with `<common>` outside the
-  workspace. Anything else (a `.git` symlink, separate git dirs, submodule checkouts) is
-  refused with one warning ("untrusted .git layout"), so an agent cannot point Kelpie at
-  another repository and have its file names reported. `GIT_WORK_TREE` is always the
-  workspace, so `core.worktree` in its config cannot make git list another directory.
+  workspace, and neither borrowing objects or refs (`objects/info/alternates`, or a symlinked
+  `objects`, `refs`, `packed-refs` or `HEAD`). Anything else (a `.git` symlink, separate git
+  dirs, submodule checkouts) is refused with one warning ("untrusted .git layout").
+  `GIT_WORK_TREE` is always the workspace, so `core.worktree` in its config cannot make git
+  list another directory. This narrows what an agent can make Kelpie report, but Kelpie is
+  not a boundary between repositories: an agent that can read another repository can copy
+  its objects into its own and have their file names reported (in rule 12's comments, to its
+  own tasks). Give Kelpie git access no wider than the agents' own.
 - Output is read up to a cap (8 Mi characters of `status`, 2 Mi per `diff-tree`) and git
   is killed beyond it; at most 1000 paths are kept per task.
 - Every filter driver found is emptied for the `status` call (`-c filter.<name>.clean=`,

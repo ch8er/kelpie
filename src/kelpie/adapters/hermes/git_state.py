@@ -38,9 +38,12 @@ git is killed beyond; at most ``MAX_PATHS`` paths are kept (first in sorted orde
 all linked worktrees of one repository share it (separate clones do not). ``GIT_WORK_TREE`` is
 always the workspace, so a ``core.worktree`` in its config cannot make git list another
 directory. Only two ``.git`` layouts are read (see :func:`common_dir`): an ordinary ``.git``
-directory and a linked worktree whose ``.git`` file and git directory point at each other;
-anything else (a symlink, a ``commondir`` in a plain ``.git``, separate git dirs, submodule
-checkouts) gets ``Problem.LAYOUT`` and no git state.
+directory and a linked worktree whose ``.git`` file and git directory point at each other,
+neither borrowing objects or refs through alternates or symlinks; anything else gets
+``Problem.LAYOUT`` and no git state. This narrows what an agent can make Kelpie report, but
+does not make Kelpie a boundary between repositories: an agent that can read another
+repository can copy its objects into its own. Run Kelpie with git access no wider than the
+agents' own (the same user, or narrower).
 """
 
 from __future__ import annotations
@@ -377,11 +380,14 @@ def read_git_state(
 def common_dir(path: Path) -> str | None:
     """The repository's common git directory for the workspace at ``path`` (shared by all
     worktrees of one repository), or ``None`` when ``.git`` has a layout Kelpie does not
-    trust. Accepted: a ``.git`` directory without a ``commondir`` file (an ordinary checkout),
+    trust (see the module doc for what this does and does not guarantee). Accepted: a ``.git``
+    directory without a ``commondir`` file (an ordinary checkout),
     and a linked worktree's ``.git`` file whose ``gitdir`` is ``<common>/worktrees/<id>``,
     where ``<id>/commondir`` leads back to ``<common>``, ``<id>/gitdir`` leads back to this
     ``.git``, and ``<common>`` lies outside the workspace. Refused: a ``.git`` symlink, a
-    ``commondir`` inside a plain ``.git``, separate git dirs and submodule checkouts."""
+    ``commondir`` inside a plain ``.git``, separate git dirs and submodule checkouts, and any
+    git directory that borrows objects or refs (``objects/info/alternates``, or ``objects``,
+    ``refs``, ``packed-refs`` or ``HEAD`` as a symlink)."""
     dotgit = path / ".git"
     try:
         if dotgit.is_symlink():
@@ -389,7 +395,8 @@ def common_dir(path: Path) -> str | None:
         if dotgit.is_dir():
             if os.path.lexists(dotgit / "commondir"):
                 return None  # would make git read objects and refs from elsewhere
-            return str(dotgit.resolve())
+            common = dotgit.resolve()
+            return str(common) if _self_contained(common) else None
         with dotgit.open("rb") as f:
             raw = f.read(4096).decode("utf-8", "replace").strip()
         if not raw.startswith("gitdir:"):
@@ -408,9 +415,21 @@ def common_dir(path: Path) -> str | None:
         back = Path((gitdir / "gitdir").read_text("utf-8", "replace").strip())
         if (back if back.is_absolute() else gitdir / back).resolve() != dotgit.resolve():
             return None
+        if (gitdir / "HEAD").is_symlink() or not _self_contained(common):
+            return None
         return str(common)
     except (OSError, ValueError):
         return None
+
+
+def _self_contained(common: Path) -> bool:
+    """Whether a git directory keeps its own objects and refs: no alternates, and no
+    ``objects``, ``refs``, ``packed-refs`` or ``HEAD`` that is a symlink to elsewhere."""
+    if os.path.lexists(common / "objects" / "info" / "alternates"):
+        return False
+    return not any(
+        (common / name).is_symlink() for name in ("objects", "refs", "packed-refs", "HEAD")
+    )
 
 
 def _read(
