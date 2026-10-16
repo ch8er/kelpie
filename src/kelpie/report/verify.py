@@ -33,6 +33,7 @@ from kelpie.core.ledger import LedgerEntry, Outcome
 from kelpie.core.model import Session, Span, Status, Task
 from kelpie.core.spans import SpanKey, last_at, span_key
 from kelpie.core.states import OpenState
+from kelpie.report import md
 from kelpie.report.fixes import FILTER, MODE, FixEvent
 from kelpie.report.store import StateRow
 from kelpie.traces.outputs import Call, OutputSettings, before_after, filter_introductions
@@ -119,7 +120,7 @@ def mode_events(entries: Iterable[LedgerEntry]) -> list[FixEvent]:
 
 def filter_events(calls: Sequence[Call], settings: OutputSettings) -> list[FixEvent]:
     return [
-        FixEvent(b.at, FILTER, f"`{b.key}` now runs through {b.filter}", None, b.key, b.role)
+        FixEvent(b.at, FILTER, f"{b.key} now runs through {b.filter}", None, b.key, b.role)
         for b in filter_introductions(calls, settings)
     ]
 
@@ -143,7 +144,7 @@ def verify(event: FixEvent, ev: Evidence) -> Verification:
         ba = before_after(found, event.command, at, settings, event.role)
         metrics.append(
             Metric(
-                f"output tokens per `{event.command}` call",
+                f"output tokens per {md.code(event.command, cell=True)} call",
                 "tokens",
                 ba.before.mean if ba.before.calls else None,
                 ba.after.mean if ba.after.calls else None,

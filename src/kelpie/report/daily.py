@@ -47,8 +47,6 @@ the same rules: pure, deterministic, no clock and no LLM.
 from __future__ import annotations
 
 import logging
-import re
-import unicodedata
 import urllib.parse
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -73,6 +71,7 @@ from kelpie.core.spans import (
     usage,
 )
 from kelpie.core.states import OpenState
+from kelpie.report import md
 from kelpie.report.fixes import FixEvent
 from kelpie.report.sections import (
     SECTIONS,
@@ -679,11 +678,11 @@ def _recommendations(
     for rec in filters:
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
-        role = f" ({group.role})" if group.role else ""
+        role = f" ({md.text(group.role)})" if group.role else ""
         maybe = "" if rec.platform_known else " if RTK supports your agent platform"
         candidates.append(
             Advice(
-                title=f"Filter `{group.key}` output{role} with {rec.filter.name}{maybe}",
+                title=f"Filter {md.code(group.key)} output{role} with {rec.filter.name}{maybe}",
                 detail=(
                     f"{group.calls} calls put {group.tokens:,} tokens into the context, "
                     f"{round(group.mean):,} per call; {rec.filter.how}. Expected saving: about "
@@ -818,9 +817,10 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
         lines += ["|---|---|---:|---:|---:|---:|"]
         for g in report.outputs:
             approx = "~" if g.estimated else ""
-            used = f"{g.filtered_calls} ({', '.join(g.filters)})" if g.filtered_calls else "0"
+            filters = md.text(", ".join(g.filters))
+            used = f"{g.filtered_calls} ({filters})" if g.filtered_calls else "0"
             lines.append(
-                f"| {_text(g.role or '?')} | {_code(g.key)} | {g.calls} | "
+                f"| {md.text(g.role or '?')} | {md.code(g.key, cell=True)} | {g.calls} | "
                 f"{approx}{g.tokens:,} | "
                 f"{approx}{round(g.mean):,} | {used} |"
             )
@@ -868,7 +868,9 @@ def _verification_lines(report: DailyReport) -> list[str]:
     for v in report.verifications:
         e = v.event
         scope = ", ".join(
-            x for x in (e.rule and f"rule {e.rule}", e.role and f"role {e.role}") if x
+            x
+            for x in (e.rule and f"rule {md.text(e.rule)}", e.role and f"role {md.text(e.role)}")
+            if x
         )
         hours = v.after.total_seconds() / 3600
         title = f"**{_local(e.at, report)}, {e.kind}**: {_inline(e.note)}" + (
@@ -896,35 +898,7 @@ def _verification_lines(report: DailyReport) -> list[str]:
 
 def _inline(text: str) -> str:
     """Free text (a fix note) as one Markdown-safe line."""
-    return _text(text) or "(no note)"  # after "**time, kind**:", never a block
-
-
-_MD_SPECIAL = re.compile(r"([\\`\[\]<>|])")
-MAX_NAME = 80  # characters of an agent-chosen name shown in a code span
-
-
-def _text(text: str) -> str:
-    """Text agents may control (task ids, titles, block reasons in alert summaries) as one
-    Markdown-safe line: no line breaks or control characters, and nothing that opens a
-    link, an image, HTML, a code span or a table cell. Plain words read as they are."""
-    flat = " ".join(_printable(text).split())
-    return _MD_SPECIAL.sub(r"\\\1", flat.replace("&", "&amp;"))
-
-
-def _code(text: str) -> str:
-    """An agent-chosen name (task id, command prefix) as a code span it cannot close; a
-    ``|`` is escaped, since tables split cells on it even inside code spans."""
-    flat = " ".join(_printable(text).split()).replace("|", "\\|")
-    if len(flat) > MAX_NAME:
-        flat = flat[: MAX_NAME - 3] + "..."
-    runs = [len(r) for r in re.findall(r"`+", flat)]
-    fence = "`" * (max(runs, default=0) + 1)
-    pad = " " if flat.startswith("`") or flat.endswith("`") else ""
-    return f"{fence}{pad}{flat}{pad}{fence}"
-
-
-def _printable(text: str) -> str:
-    return "".join(c for c in text if unicodedata.category(c) not in {"Cc", "Cf"} or c in "\t\n")
+    return md.text(text) or "(no note)"  # after "**time, kind**:", never a block
 
 
 def _value(value: float | None, unit: str) -> str:
@@ -996,7 +970,7 @@ def _inbox(
 def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
     out = []
     for i in report.inbox:
-        who = _text(i.person) if i.person else "nobody assigned"
+        who = md.text(i.person) if i.person else "nobody assigned"
         out.append(
             f"- **Needs you, {who}**: {i.cost_hours:.1f} agent-hours waited, "
             f"{i.blocked_agent_tasks} agent task(s) held; by cost of delay: {tasks(i.tasks)}"
@@ -1011,7 +985,7 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
         out.append(
             f"- **{s.severity}** `{s.rule}`{task}: open {o.open_hours:.1f}h since "
             f"{_local(s.since, report)}{level}, "
-            f"last seen {_local(s.last_seen, report)}: {_text(s.summary)}"
+            f"last seen {_local(s.last_seen, report)}: {md.text(s.summary)}"
         )
     for f in report.not_done:
         out.append(
@@ -1019,10 +993,11 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
             f"x{f.count} {tasks(f.tasks)}".rstrip()
         )
     for r in report.offenders:
-        owner = f"{r.owner}: " if r.owner else ""
+        owner = f"{md.text(r.owner)}: " if r.owner else ""
         g = r.group
+        role = md.text(g.role or "agents")
         out.append(
-            f"- {owner}add {r.filter.name} for {_code(g.key)} to the {_text(g.role or 'agents')}' "
+            f"- {owner}add {r.filter.name} for {md.code(g.key)} to the {role}' "
             f"instructions: above the threshold on {len(g.hot_days)} days "
             f"{tasks(g.tasks)}".rstrip()
         )
@@ -1042,6 +1017,6 @@ class _TaskLinks:
 
     def _one(self, task_id: str) -> str:
         if self.url is None:
-            return _code(task_id)
+            return md.code(task_id, cell=True)  # task lists also fill table cells
         target = self.url.replace("{id}", urllib.parse.quote(task_id, safe=""))
-        return f"[{_text(task_id)}]({target})"
+        return f"[{md.link_text(task_id)}]({target})"
