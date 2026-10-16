@@ -82,6 +82,7 @@ class Run:
             "id": self.id,
             "name": self.workflow.rsplit("/", 1)[-1],
             "path": self.workflow,
+            "workflow_id": int(sha_of(self.workflow)[:8], 16),  # stable per workflow file
             "head_branch": self.branch,
             "head_sha": self.sha,
             "head_repository": {"full_name": repo},
