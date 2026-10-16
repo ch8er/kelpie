@@ -6,8 +6,9 @@ from __future__ import annotations
 from collections import defaultdict
 
 from kelpie.core.spans import TokenUsage, usage
-from kelpie.report.sections import Section, SectionContext, register_section
-from kelpie.report.throughput import STAGES, UNKNOWN_ROLE, task_roles, throughput
+from kelpie.core.stages import STAGES, UNKNOWN_ROLE, task_roles
+from kelpie.report.sections import Section, SectionContext, Spend, register_section
+from kelpie.report.throughput import throughput
 
 TITLE = "Farm throughput"
 STAGE_NAMES = {
@@ -17,6 +18,21 @@ STAGE_NAMES = {
     "waiting": "Waiting for conditions",
     "ownerless": "Ownerless",
 }
+
+
+def _cell(text: str) -> str:
+    return " ".join(text.split()).replace("|", "\\|")
+
+
+def _per_task(spend: Spend, completed: int) -> str:
+    if not completed:
+        return "*none done*"
+    if not spend.tokens:
+        return "*no spend*"
+    if spend.unpriced_tokens == spend.tokens:
+        return "*unpriced*"
+    out = f"${spend.usd / completed:,.2f}"
+    return out + (f" +{spend.unpriced_tokens:,} unpriced" if spend.unpriced_tokens else "")
 
 
 @register_section("throughput")
@@ -44,24 +60,48 @@ def throughput_section(ctx: SectionContext) -> Section | None:
     est = " (estimate)" if inputs.estimated else ""
     lines = [
         "Per role, for the day. Utilization: agent-hours with a session running over agents "
-        "x hours. Hand-offs: sessions that ended with a declared status (reviews count "
-        "here). Mean queue: tasks waiting for an agent, averaged over the day. Rework: share "
-        "of the role's active tasks sent back within the day.",
+        "x hours (the live `kelpie_role_agents_with_work` counts agents with any open task "
+        "instead). Hand-offs: sessions that ended with a declared status, and every review "
+        "session that ended. Mean queue: tasks of the role waiting for an agent (ready, or in "
+        "progress with no session running), averaged over the day; queue at end: those still "
+        "waiting at midnight (the live gauge counts ownerless tasks only). Rework: share of "
+        "the role's active tasks sent back within the day (the live gauges give returns per "
+        "done task).",
         "",
         "| Role | Agents | Utilization | Completed | Tasks/hour | Hand-offs/hour | "
         f"Mean queue | Queue at end | Rework | Cost per completed task{est} |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    listed = {r.role for r in roles}
+    unpriced = 0
     for r in roles:
         util = "-" if r.utilization is None else f"{r.utilization:.0%}"
-        rework = "-" if r.rework_rate is None else f"{r.rework_rate:.0%} ({r.returns} returns)"
-        cost = ctx.price(spent.get(r.role, ())).usd
-        per = f"${cost / len(r.completed):,.2f}" if r.completed and cost > 0 else "-"
+        rework = "-" if r.rework_rate is None else f"{r.rework_rate:.0%} ({r.returns} return(s))"
+        spend = ctx.price(spent.get(r.role, ()))
+        unpriced += spend.unpriced_tokens
         lines.append(
-            f"| {r.role} | {r.agents} | {util} | {len(r.completed)} | {r.tasks_per_hour:.2f} | "
-            f"{r.handoffs_per_hour:.2f} | {r.mean_queue:.1f} | {r.queue_now} | {rework} | "
-            f"{per} |"
+            f"| {_cell(r.role)} | {r.agents} | {util} | {len(r.completed)} | "
+            f"{r.tasks_per_hour:.2f} | {r.handoffs_per_hour:.2f} | {r.mean_queue:.1f} | "
+            f"{r.queue_now} | {rework} | {_per_task(spend, len(r.completed))} |"
         )
+    lines += [
+        "",
+        "Cost per completed task: all the role's spend of the day (work still in progress, "
+        "reviews) over the tasks it completed, so it is noisy with one or two completions. "
+        "*none done*: no task completed; *no spend*: no model calls linked to the role; "
+        "*unpriced*: only models without a price in [prices]; `+N unpriced`: tokens left out "
+        "of the dollars.",
+    ]
+    others = sorted(r for r in spent if r not in listed)
+    if others:
+        extra = ctx.price(u for r in others for u in spent[r])
+        unpriced += extra.unpriced_tokens
+        lines.append(
+            f"Spend of roles not listed ({', '.join(_cell(r) for r in others)}): "
+            f"{extra.tokens:,} tokens, ${extra.usd:,.2f}{est}."
+        )
+    if unpriced:
+        lines.append(f"{unpriced:,} tokens of models without a price are not in the dollars.")
     staged = [r for r in roles if r.stages]
     if staged:
         lines += [
@@ -73,11 +113,14 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         ]
         for r in staged:
             cells = " | ".join(f"{r.stages.get(s, 0.0):.1f}" for s in STAGES)
-            lines.append(f"| {r.role} | {cells} |")
+            lines.append(f"| {_cell(r.role)} | {cells} |")
     lines += [
         "",
         "Stages are rebuilt from the board's current statuses, the sessions and their "
         "declared end statuses, and Kelpie's own alert states: the board keeps no status "
-        "history, so a status change between sessions is placed at the next known change.",
+        "history, so a status change between sessions is placed at the next known change. "
+        "A task counts from its first known moment of the day, so queue time before its "
+        "first pickup is left out (a lower bound); the board only looks back so far "
+        "(Hermes `lookback`), and a session with no end or heartbeat counts until midnight.",
     ]
     return Section(TITLE, tuple(lines))

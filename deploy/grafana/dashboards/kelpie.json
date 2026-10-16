@@ -1706,7 +1706,7 @@
     {
       "id": 56,
       "type": "timeseries",
-      "title": "Utilization by role",
+      "title": "Agents with work by role (share)",
       "datasource": {
         "type": "prometheus",
         "uid": "kelpie-prometheus"
@@ -1724,7 +1724,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "kelpie_role_busy_agents / (kelpie_role_agents > 0)",
+          "expr": "kelpie_role_agents_with_work / (kelpie_role_agents > 0)",
           "legendFormat": "{{role}}"
         }
       ],
@@ -1734,12 +1734,12 @@
         },
         "overrides": []
       },
-      "description": "Agents with a live session or an open task over the role's agents, as the bottlenecks rule counts them."
+      "description": "Share of the role's agents with a live session or an open task, as the bottlenecks rule counts them. Not the daily report's utilization (session hours over agent-hours)."
     },
     {
       "id": 57,
       "type": "timeseries",
-      "title": "Queue length by role",
+      "title": "Ownerless queue by role",
       "datasource": {
         "type": "prometheus",
         "uid": "kelpie-prometheus"
@@ -1757,7 +1757,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "kelpie_role_queue_tasks",
+          "expr": "kelpie_role_ownerless_queue_tasks",
           "legendFormat": "{{role}}"
         }
       ],
@@ -1767,7 +1767,7 @@
         },
         "overrides": []
       },
-      "description": "Ownerless tasks waiting for the role (ready, review, accepted)."
+      "description": "Ownerless tasks waiting for the role (ready, review, accepted). The daily report's queue also counts owned tasks waiting for their agent."
     },
     {
       "id": 58,
@@ -1800,12 +1800,12 @@
         },
         "overrides": []
       },
-      "description": "Open tasks per stage: working (a session runs), queue, review, waiting (for conditions), ownerless. Averaged over a range, this is the time tasks spend in each stage."
+      "description": "Open tasks per stage now: working (a session runs), queue, review, waiting (for conditions), ownerless. Averaged over a range, the average number of tasks in each stage."
     },
     {
       "id": 59,
       "type": "timeseries",
-      "title": "Rework: returns per completed task by role (24h)",
+      "title": "Returns per done task by role (24h)",
       "datasource": {
         "type": "prometheus",
         "uid": "kelpie-prometheus"
@@ -1833,7 +1833,7 @@
         },
         "overrides": []
       },
-      "description": "Returns of the role's tasks in the last 24h over its tasks done in that time."
+      "description": "Returns of the role's tasks in the last 24h over its tasks done in that time. Not the daily report's rework rate (share of active tasks sent back)."
     }
   ],
   "templating": {

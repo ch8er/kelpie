@@ -223,9 +223,11 @@ farm throughput metrics from traces.
   hand-offs per hour, utilization, mean and current queue length, rework rate and cost per
   completed task, plus task-hours by stage (working, queue, review, waiting for conditions,
   ownerless), in the daily report's "Farm throughput" section. Live on `/metrics`:
-  `kelpie_role_agents`, `kelpie_role_busy_agents`, `kelpie_role_queue_tasks`,
+  `kelpie_role_agents`, `kelpie_role_agents_with_work`, `kelpie_role_ownerless_queue_tasks`,
   `kelpie_role_tasks_done_24h`, `kelpie_role_returns_24h` and `kelpie_tasks_by_stage`, with
-  a Throughput row in the Grafana dashboard. The board keeps no status history, so stages
+  a Throughput row in the Grafana dashboard; these are snapshots of now (agents with any
+  work, ownerless tasks only, returns per done task), not the report's day-long
+  utilization, queue and rework rate. The board keeps no status history, so stages
   are rebuilt from current statuses, sessions and Kelpie's alert states.
 
 ## Daily report

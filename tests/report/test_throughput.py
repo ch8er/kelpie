@@ -31,13 +31,14 @@ from kelpie.core.model import (
     Status,
     Task,
 )
+from kelpie.core.stages import live_stage
 from kelpie.core.states import OpenState
 from kelpie.metrics import Metrics
 from kelpie.report.daily import ReportInputs, build_report, render_markdown
 from kelpie.report.sections import SECTIONS
 from kelpie.report.sections.throughput import throughput_section
 from kelpie.report.store import StateRow
-from kelpie.report.throughput import RoleThroughput, live_stage, session_end, throughput
+from kelpie.report.throughput import RoleThroughput, session_end, throughput
 
 DAY = date(2026, 3, 2)
 START = datetime(2026, 3, 2, tzinfo=UTC)
@@ -139,7 +140,8 @@ def test_stage_hours_and_per_role_numbers() -> None:
     assert dev.agents == 2 and dev.utilization == pytest.approx(4.5 / 48)
     assert dev.mean_queue == pytest.approx(5 / 24)
     rev = roles["reviewer"]
-    assert rev.handoffs == 1 and rev.handoffs_per_hour == pytest.approx(1 / 24)
+    # S2 sent T1 back without a declared status: a review all the same
+    assert rev.handoffs == 2 and rev.handoffs_per_hour == pytest.approx(2 / 24)
     assert rev.utilization == pytest.approx(1.5 / 24) and rev.active == ()
     assert rev.rework_rate is None
 
@@ -161,9 +163,9 @@ def test_the_section_in_the_daily_report() -> None:
     markdown = render_markdown(report)
     # 100k input and 2k output at $3 and $15 per million, one completed task
     assert (
-        "| developer | 2 | 9% | 1 | 0.04 | 0.12 | 0.2 | 1 | 25% (1 returns) | $0.33 |" in markdown
+        "| developer | 2 | 9% | 1 | 0.04 | 0.12 | 0.2 | 1 | 25% (1 return(s)) | $0.33 |" in markdown
     )
-    assert "| reviewer | 1 | 6% | 0 | 0.00 | 0.04 | 0.0 | 0 | - | - |" in markdown
+    assert "| reviewer | 1 | 6% | 0 | 0.00 | 0.08 | 0.0 | 0 | - | *none done* |" in markdown
     assert "| developer | 4.5 | 5.0 | 4.0 | 14.0 | 15.0 |" in markdown
     assert SECTIONS["throughput"] is throughput_section
 
@@ -207,8 +209,43 @@ def test_metrics_export_throughput_gauges() -> None:
     assert 'kelpie_role_agents{role="developer"} 2' in text
     assert 'kelpie_role_tasks_done_24h{role="developer"} 1' in text  # T5 is older than 24h
     assert 'kelpie_role_returns_24h{role="developer"} 1' in text
-    assert 'kelpie_role_queue_tasks{role="developer"} 1' in text  # T4: ready, no owner
+    assert 'kelpie_role_ownerless_queue_tasks{role="developer"} 1' in text  # T4
+    assert 'kelpie_role_agents_with_work{role="developer"} 1' in text  # dev-2: S7 live
     assert 'kelpie_tasks_by_stage{role="developer",stage="ownerless"} 1' in text
     assert 'kelpie_tasks_by_stage{role="developer",stage="working"} 1' in text  # T3 live
     assert 'kelpie_tasks_by_stage{role="reviewer",stage="queue"} 0' in text
     assert 'kelpie_role_agents{role="reviewer"} 1' in text
+
+
+def test_cost_markers_and_unlisted_spend() -> None:
+    lone = Span(
+        "t2",
+        "c2",
+        "chat",
+        SpanKind.LLM,
+        at(9),
+        at(9.01),
+        session_id="S-X",
+        model="mystery",
+        input_tokens=5_000,
+        output_tokens=100,
+    )
+    inputs = ReportInputs(
+        day=DAY,
+        tz=UTC,
+        tasks=TASKS,
+        owners=OWNERS,
+        sessions=SESSIONS,
+        spans=(*SPANS, lone),
+        prices=PRICES,
+    )
+    markdown = render_markdown(build_report(inputs, ONLY))
+    assert "Spend of roles not listed (unknown): 5,100 tokens, $0.00." in markdown
+    assert "5,100 tokens of models without a price are not in the dollars." in markdown
+    assert "noisy with one or two completions" in markdown
+    unpriced = ReportInputs(
+        day=DAY, tz=UTC, tasks=TASKS, owners=OWNERS, sessions=SESSIONS, spans=SPANS
+    )
+    assert "| *unpriced* |" in render_markdown(build_report(unpriced, ONLY))
+    quiet = ReportInputs(day=DAY, tz=UTC, tasks=TASKS, owners=OWNERS, sessions=SESSIONS)
+    assert "| *no spend* |" in render_markdown(build_report(quiet, ONLY))

@@ -22,18 +22,23 @@ every known change; each segment gets one stage, the first that applies:
 
 A task is counted from its first known moment within the day (its first session, alert
 state or current status, whichever is earliest): when it was created is not known, so queue
-time before its first pickup is a lower bound. Hours are task-hours: two tasks in the queue
-for an hour are two queue hours, and the *mean queue length* of a role is its queue hours
-over the day's hours.
+time before its first pickup is left out and the queue is a lower bound. The board only
+looks back so far (Hermes ``lookback``): older sessions and finished tasks are missing. A
+session without an end or a heartbeat counts as running until the end of the day. Hours
+are task-hours: two tasks in the queue for an hour are two queue hours, and the *mean queue
+length* of a role is its queue hours over the day's hours.
 
 **Per role** (the task's role, else its owner's): tasks completed (reached ``done`` within
 the day) and per hour; *hand-offs*, sessions of the role's agents that ended within the
 day with a declared status, and per hour (a reviewer's throughput is reviews, not tasks
-done); *utilization*, the hours the role's agents had a session running over agents x
-hours; *rework rate*, the share of the role's tasks active within the day that were sent
-back (a return) within it.
+done; a review that sends a task back declares no status, so every review session that
+ended counts); *session utilization*, the hours the role's agents had a session running
+over agents x hours; *rework rate*, the share of the role's tasks active within the day
+that were sent back (a return) within it.
 
-**Live** (``/metrics``): :func:`live_stage` puts each open task of a snapshot in a stage.
+**Live** (``/metrics``) gauges measure related but different things from the current
+snapshot (agents with work, the ownerless queue, returns per done task); see
+:mod:`kelpie.metrics`. Stages are shared: :mod:`kelpie.core.stages`.
 """
 
 from __future__ import annotations
@@ -45,20 +50,11 @@ from datetime import datetime
 from itertools import pairwise
 
 from kelpie.core.model import Owner, OwnerKind, Session, Status, Task
+from kelpie.core.stages import STAGES, UNKNOWN_ROLE, status_stage, task_roles
 from kelpie.core.states import OpenState
 
-STAGES = ("working", "queue", "review", "waiting", "ownerless")
-UNKNOWN_ROLE = "unknown"
 OWNERLESS_RULES = frozenset({"orphan_status"})
 WAITING_RULES = frozenset({"wait_condition", "stale_blocks"})
-_STATUS_STAGES: Mapping[Status, str] = {
-    Status.READY: "queue",
-    Status.IN_PROGRESS: "queue",
-    Status.REVIEW: "review",
-    Status.ACCEPTED: "review",
-    Status.BLOCKED: "waiting",
-    Status.WAITING: "waiting",
-}
 _UNDECLARED = frozenset({Status.IN_PROGRESS, Status.READY, Status.BACKLOG})
 type _RoleOf = Callable[[Session], str | None]
 
@@ -97,17 +93,6 @@ class RoleThroughput:
     @property
     def rework_rate(self) -> float | None:
         return len(self.reworked) / len(self.active) if self.active else None
-
-
-def task_roles(tasks: Iterable[Task], owners: Iterable[Owner]) -> dict[str, str]:
-    """Each task's role: its own, else its owner's."""
-    by_owner = {o.id: o.role for o in owners}
-    out = {}
-    for t in tasks:
-        role = t.role or (by_owner.get(t.owner_id) if t.owner_id else None)
-        if role:
-            out[t.id] = role
-    return out
 
 
 def session_end(session: Session, end: datetime) -> datetime:
@@ -176,14 +161,10 @@ def throughput(
         if b_ > a_:
             busy[s.owner_id].append((a_, b_))
         role = role_of_session(s)
-        if (
-            role
-            and s.ended_at is not None
-            and start <= s.ended_at < end
-            and s.final_status is not None
-            and s.final_status not in _UNDECLARED
-        ):
-            acc[role].handoffs += 1
+        ended = s.ended_at is not None and start <= s.ended_at < end
+        declared = s.final_status is not None and s.final_status not in _UNDECLARED
+        if role and ended and (declared or role in review_roles):
+            acc[role].handoffs += 1  # a review that sends a task back declares nothing
     for role, ids in agents.items():
         acc[role].agents = len(ids)
         acc[role].busy = sum(_union(busy.get(i, [])) for i in ids)
@@ -288,22 +269,8 @@ def _stage_at(
         if any(a <= at < b for a, b in windows.get((task.id, kind), ())):
             return kind
     if at >= task.status_since:
-        status = task.status
-        if status is Status.IN_PROGRESS and task.owner_id is None:
-            return "ownerless"
-    else:
-        before = [s for s in sessions if session_end(s, end) <= at]
-        last = max(before, key=lambda s: (session_end(s, end), s.id)) if before else None
-        status = last.final_status if last and last.final_status else Status.READY
-    return _STATUS_STAGES.get(status)
-
-
-def live_stage(task: Task, live: bool) -> str | None:
-    """The stage of an open task now: ``live`` when a session is running on it."""
-    if task.status.is_terminal or task.status is Status.BACKLOG:
-        return None
-    if live:
-        return "working"
-    if task.status is Status.IN_PROGRESS and task.owner_id is None:
-        return "ownerless"
-    return _STATUS_STAGES.get(task.status)
+        return status_stage(task, task.status)
+    before = [s for s in sessions if session_end(s, end) <= at]
+    last = max(before, key=lambda s: (session_end(s, end), s.id)) if before else None
+    status = last.final_status if last and last.final_status else Status.READY
+    return status_stage(task, status) if status is not Status.IN_PROGRESS else "queue"

@@ -8,11 +8,11 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from kelpie import __version__
 from kelpie.core.model import Snapshot, Status
-from kelpie.report.throughput import STAGES, live_stage, task_roles
+from kelpie.core.stages import STAGES, UNKNOWN_ROLE, live_stage, task_roles
 from kelpie.rules._tasks import is_live
 from kelpie.rules.bottlenecks import RoleLoad, role_loads
 
@@ -22,6 +22,16 @@ if TYPE_CHECKING:
     from kelpie.core.engine import Engine
     from kelpie.core.ledger import Dispatched
     from kelpie.core.model import ProviderStatus
+
+
+class RoleGauges(NamedTuple):
+    """Live throughput gauges of one role."""
+
+    agents: int
+    with_work: int  # live session or an open task
+    ownerless_queue: int
+    done_24h: int
+    returns_24h: int
 
 
 def _escape(value: str) -> str:
@@ -75,9 +85,8 @@ class Metrics:
         self.open_states: Counter[str] = Counter()
         self.tasks: Counter[str] = Counter()
         self.idle_agents: Counter[str] = Counter()  # role -> idle agents (0 if all busy)
-        # throughput per role (kelpie.report.throughput): agents, busy agents, queue,
-        # tasks done and returns over the last 24h; open tasks per stage and role
-        self.roles: dict[str, tuple[int, int, int, int, int]] = {}
+        # throughput per role now; open tasks per stage and role
+        self.roles: dict[str, RoleGauges] = {}
         self.stages: Counter[tuple[str, str]] = Counter()
         self.fleet_seen = False
         self.dry_run = True
@@ -319,8 +328,10 @@ class Metrics:
         self._throughput(snapshot, loads)
 
     def _throughput(self, snapshot: Snapshot, loads: Mapping[str, RoleLoad]) -> None:
-        """Agents, busy agents and queue per role (as the bottlenecks rule counts them),
-        tasks done and returns over the last 24h, and open tasks per stage."""
+        """Agents, agents with work and the ownerless queue per role (as the bottlenecks
+        rule counts them), tasks done and returns over the last 24h, and open tasks per
+        stage. Not the daily report's utilization, queue or rework rate: those are measured
+        over a day (:mod:`kelpie.report.throughput`)."""
         now, day = snapshot.now, timedelta(days=1)
         of_task = task_roles(snapshot.tasks, snapshot.owners)
         done: Counter[str] = Counter()
@@ -328,7 +339,7 @@ class Metrics:
         self.stages = Counter()
         live = {s.task_id for s in snapshot.sessions if is_live(s, now)}
         for t in snapshot.tasks:
-            role = of_task.get(t.id, "unknown")
+            role = of_task.get(t.id, UNKNOWN_ROLE)
             if t.status is Status.DONE and now - day <= t.status_since <= now:
                 done[role] += 1
             returns[role] += sum(1 for r in t.returns if now - day <= r.at <= now)
@@ -338,12 +349,12 @@ class Metrics:
             for stage in STAGES:
                 self.stages[(stage, role)] += 0  # every stage of every known role
         self.roles = {
-            role: (
-                len(loads[role].agents) if role in loads else 0,
-                len(loads[role].busy) if role in loads else 0,
-                len(loads[role].queue) if role in loads else 0,
-                done[role],
-                returns[role],
+            role: RoleGauges(
+                agents=len(loads[role].agents) if role in loads else 0,
+                with_work=len(loads[role].busy) if role in loads else 0,
+                ownerless_queue=len(loads[role].queue) if role in loads else 0,
+                done_24h=done[role],
+                returns_24h=returns[role],
             )
             for role in sorted(set(loads) | set(done) | {r for r, n in returns.items() if n})
         }
@@ -502,19 +513,37 @@ class Metrics:
 
     def _render_throughput(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
         names = (
-            ("kelpie_role_agents", "Agent owners per role."),
-            ("kelpie_role_busy_agents", "Agents with a live session or an open task, by role."),
-            ("kelpie_role_queue_tasks", "Ownerless tasks waiting for the role (ready, review)."),
-            ("kelpie_role_tasks_done_24h", "Tasks of the role that reached done in the last 24h."),
-            ("kelpie_role_returns_24h", "Returns of the role's tasks in the last 24h (rework)."),
+            ("kelpie_role_agents", "agents", "Agent owners per role."),
+            (
+                "kelpie_role_agents_with_work",
+                "with_work",
+                "Agents with a live session or an open task, by role.",
+            ),
+            (
+                "kelpie_role_ownerless_queue_tasks",
+                "ownerless_queue",
+                "Ownerless tasks waiting for the role (ready, review, accepted).",
+            ),
+            (
+                "kelpie_role_tasks_done_24h",
+                "done_24h",
+                "Tasks of the role that reached done in the last 24h.",
+            ),
+            (
+                "kelpie_role_returns_24h",
+                "returns_24h",
+                "Returns (sent back) of the role's tasks in the last 24h.",
+            ),
         )
-        for i, (name, help_) in enumerate(names):
-            samples = [f"{name}{_labels(role=r)} {v[i]}" for r, v in self.roles.items()]
+        for name, field, help_ in names:
+            samples = [
+                f"{name}{_labels(role=r)} {getattr(v, field)}" for r, v in self.roles.items()
+            ]
             metric(name, "gauge", help_, samples)
         metric(
             "kelpie_tasks_by_stage",
             "gauge",
-            "Open tasks per stage (working, queue, review, waiting, ownerless) and role.",
+            "Open tasks now per stage (working, queue, review, waiting, ownerless) and role.",
             [
                 f"kelpie_tasks_by_stage{_labels(role=r, stage=s)} {n}"
                 for (s, r), n in sorted(self.stages.items(), key=lambda kv: kv[0][::-1])
