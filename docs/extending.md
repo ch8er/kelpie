@@ -246,7 +246,7 @@ All in `src/kelpie/core/ports.py`.
 | `SnapshotSource` | in practice | `snapshot(now) -> Snapshot`: tasks, owners, dependencies, sessions, spans and conditions as of `now`. Only adapters with it contribute to snapshots. |
 | `SupportsReassign` | optional | `reassign(task_id, owner_id, reason)` |
 | `SupportsWait` | optional | `wait(task_id, conditions, reason)`: register the conditions and report the task as waiting. |
-| `SupportsStop` | optional | `stop(session_id, reason)`: stop or pause a running session; the task keeps its status. |
+| `SupportsStop` | optional | `stop(session_id, reason)`: stop or pause a running session; the task keeps its status. May return what the stop means on the platform (a few words a human reads after "Stopped run <id>; "), and returns `ActionResult.NOTHING_TO_DO` when the session was already over. An exception's `public_reason` is the only part of it a chat message shows. |
 
 Capabilities are checked with `isinstance` at runtime. An action that needs a capability
 the adapter lacks is not lost: the engine sends it to a human as "not executed". A method

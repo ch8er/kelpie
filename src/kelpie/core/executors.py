@@ -64,6 +64,10 @@ class PlatformExecutor:
             detail = adapter.stop(session_id, action.reason)
             if detail is ActionResult.NOTHING_TO_DO:
                 return Outcome.NOTHING_TO_DO  # the session was over: nothing was stopped
+            if detail is ActionResult.REFUSED:
+                return False  # a human is told instead
+            if detail is ActionResult.DONE or detail is None:  # (a StrEnum is a str too)
+                return True
             return detail if isinstance(detail, str) and detail.strip() else True
         tid = action.task_id
         if tid is None:

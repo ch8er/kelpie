@@ -122,7 +122,12 @@ _EVENT_TYPES = frozenset({"session_start", "prompt", "tool", "turn_end", "sessio
 
 
 class ClaudeCodeError(RuntimeError):
-    """The Claude Code task lists cannot be read."""
+    """The Claude Code task lists cannot be read, or a stop failed. ``public_reason`` (when
+    set) is the part a chat message may show."""
+
+    def __init__(self, message: str, public_reason: str | None = None) -> None:
+        super().__init__(message)
+        self.public_reason = public_reason
 
 
 def list_dir_name(task_list: str) -> str:
@@ -653,9 +658,15 @@ class ClaudeCodeAdapter:
         try:
             write_marker(self.stop_dir, session_id, reason, now.timestamp())
         except OSError as exc:
-            raise ClaudeCodeError(f"cannot write the stop marker for {session_id}: {exc}") from exc
+            raise ClaudeCodeError(
+                f"cannot write the stop marker for {session_id}: {exc}",
+                "the stop marker could not be written",
+            ) from exc
         log.info("claude-code: stop requested for session %s", session_id)
-        return "the session stops at its next tool call, until a human types a prompt in it"
+        return (
+            "the session stops at its next tool call, until a human types a prompt in it or "
+            "the stop expires"
+        )
 
     def requeue(self, task_id: str, reason: str) -> None:
         raise UnsupportedAction(UNSUPPORTED)

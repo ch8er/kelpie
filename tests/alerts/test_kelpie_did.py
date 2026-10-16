@@ -336,3 +336,27 @@ def test_the_did_line_survives_a_long_body_whole() -> None:
     for fmt in (telegram.format_message, slack.format_message):
         text = fmt(parse_alert("[loop] alert T-1", body, "critical", did=did))
         assert text.splitlines()[-1] == did and len(text) <= telegram.MAX_TEXT
+
+
+@pytest.mark.parametrize(
+    ("result", "outcome", "line"),
+    [
+        (ActionResult.DONE, Outcome.EXECUTED, "Stopped run S-1."),
+        (None, Outcome.EXECUTED, "Stopped run S-1."),
+        (ActionResult.REFUSED, Outcome.NOT_EXECUTED, "Failed: nothing here can stop run S-1, "
+         "needs a human."),
+    ],
+)  # fmt: skip
+def test_a_stop_result_is_never_read_as_its_own_detail(
+    result: ActionResult | None, outcome: Outcome, line: str
+) -> None:
+    class Answering(StoppingAdapter):
+        def stop(self, session_id: str, reason: str) -> ActionResult | None:  # type: ignore[override]
+            return result
+
+    recorder = Recorder()
+    engine = Engine([Emit([stop()])], adapters=[Answering()], alerter=recorder, config=ACT)
+    (dispatched,) = engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION,)))
+    assert dispatched.outcome is outcome
+    (m,) = recorder.messages
+    assert m.did_text == line

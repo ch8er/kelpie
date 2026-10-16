@@ -359,3 +359,25 @@ def test_engine_takes_only_nothing_to_do_from_an_executor() -> None:
     engine = Engine([rule], alerter=FakeAlerter(), config=config)
     engine.executors["ci"] = Bad()  # type: ignore[assignment]
     assert engine.tick(lambda: snap)[0].outcome is Outcome.NOT_EXECUTED
+
+
+def test_the_waste_summary_announces_the_cancels_of_its_tick() -> None:
+    from kelpie.core.alerts import ANNOUNCES
+
+    running = {"status": BuildStatus.RUNNING, "finished_at": None, "minutes": 30.0}
+    snap = Snapshot(
+        now=NOW,
+        builds=(
+            b("B-1", superseded_by="B-2", cancellable=True, **running),
+            b("B-2", **running),
+        ),
+    )
+    actions = CiEconomy(waste_min_minutes=10).evaluate(snap)
+    cancel = next(a for a in actions if a.kind is ActionKind.CANCEL_BUILD)
+    (waste,) = alerts(actions)
+    assert waste.params[ANNOUNCES] == [cancel.key]
+    assert "still runs" not in cancel.reason and "after burning 30 min" in cancel.reason
+    quiet = CiEconomy(waste_min_minutes=10, cancel_superseded=False).evaluate(snap)
+    (alone,) = alerts(quiet)
+    assert ANNOUNCES not in alone.params  # nothing to announce
+    assert (alone.key, alone.state) == (waste.key, waste.state)  # same alert otherwise

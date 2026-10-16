@@ -16,7 +16,7 @@ import pytest
 
 from kelpie.adapters.claude_code import ClaudeCodeAdapter, hook
 from kelpie.adapters.claude_code.adapter import ClaudeCodeError, write_marker
-from kelpie.core.actions import ActionKind
+from kelpie.core.actions import ActionKind, ActionResult
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Outcome
@@ -204,7 +204,11 @@ def adapter(tmp_path: Path, **kw: Any) -> ClaudeCodeAdapter:
 
 def test_adapter_stop_writes_a_private_marker(env: Path, tmp_path: Path) -> None:
     call("SessionStart", source="startup")
-    adapter(tmp_path).stop(S1, "too many calls")
+    done = adapter(tmp_path).stop(S1, "too many calls")
+    assert done == (
+        "the session stops at its next tool call, until a human types a prompt in it or "
+        "the stop expires"
+    )
     path = env / f"{S1}.json"
     data = json.loads(path.read_text())
     assert data["reason"] == "too many calls" and abs(data["at"] - time.time()) < 60
@@ -218,7 +222,7 @@ def test_adapter_stop_writes_a_private_marker(env: Path, tmp_path: Path) -> None
 def test_adapter_leaves_an_ended_session_alone(env: Path, tmp_path: Path) -> None:
     call("SessionStart", source="startup")
     call("SessionEnd", reason="other")
-    adapter(tmp_path).stop(S1, "late")
+    assert adapter(tmp_path).stop(S1, "late") is ActionResult.NOTHING_TO_DO
     assert not env.exists()
 
 
