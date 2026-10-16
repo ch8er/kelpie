@@ -122,7 +122,8 @@ _EVENT_TYPES = frozenset(
 )
 # A stop not enforced: the session still records tool calls this long after its marker.
 STOP_GRACE = timedelta(minutes=2)
-STOP_VERSION = 2  # the first spool format whose plugin enforces stop markers
+STOP_VERSION = 2  # the first plugin (index.js) version that enforces stop markers
+STOP_LINES = ("stopped", "resumed")
 
 
 class OpenClawError(RuntimeError):
@@ -189,6 +190,7 @@ class SpoolEvent:
     success: bool | None = None
     reason: str | None = None
     version: int = 0  # the hook's spool format version (``v``)
+    plugin: int = 0  # the version of the plugin (index.js) the Gateway had loaded
 
 
 def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> SpoolEvent | None:
@@ -237,6 +239,7 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         success=success if isinstance(success, bool) else None,
         reason=_text(rec.get("reason")),
         version=version if isinstance(version, int) and not isinstance(version, bool) else 0,
+        plugin=_count(rec.get("plugin")) or 0,
     )
 
 
@@ -249,6 +252,7 @@ class OpenClawAdapter:
     lookback: timedelta = DEFAULT_LOOKBACK
     token_spans: bool = True  # LLM spans from ``llm`` lines (off when OTLP reports tokens)
     stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused (alerts instead)
+    stop_ttl: timedelta = timedelta(seconds=DEFAULT_STOP_TTL)  # must match the plugin's stopTtl
     cli: str | None = DEFAULT_CLI  # runs ``sessions.abort``; None: markers only
     cli_timeout: float = CLI_TIMEOUT
     name: str = NAME
@@ -368,7 +372,7 @@ class OpenClawAdapter:
         cutoff = now - self.lookback
         events = sorted(self._events(cutoff, now + FUTURE_SKEW), key=lambda e: e.at)
         board = self._board_or_last(now)
-        sessions = self._sessions(events, board.cards, self._markers(events))
+        sessions = self._sessions(events, board.cards, now, self._markers(events))
         tasks = tuple(c.task for c in board.cards)
         owners = {t.owner_id for t in tasks if t.owner_id} | {s.owner_id for s in sessions}
         return Snapshot(
@@ -414,6 +418,7 @@ class OpenClawAdapter:
         self,
         events: Sequence[SpoolEvent],
         cards: Sequence[Card],
+        now: datetime,
         markers: dict[str, datetime] | None = None,
     ) -> tuple[Session, ...]:
         secret = self._peer_key()
@@ -432,7 +437,9 @@ class OpenClawAdapter:
             grouped.setdefault(e.session_id, []).append(e)
         sessions: list[Session] = []
         for sid, evs in grouped.items():
-            last = evs[-1]
+            # What the plugin did about a stop says nothing about whether the session lives.
+            real = [e for e in evs if e.type not in STOP_LINES] or evs
+            last = real[-1]
             ended = last.type == "session_end"
             key = next((e.session_key for e in reversed(evs) if e.session_key), None)
             agent = next((e.agent for e in reversed(evs) if e.agent), None)
@@ -440,11 +447,12 @@ class OpenClawAdapter:
             owner = card.owner_id if card is not None else None
             run_end = next((e for e in reversed(evs) if e.type == "run_end"), None)
             failure = "run failed" if run_end is not None and run_end.success is False else None
-            stop = next((e for e in reversed(evs) if e.type in ("stopped", "resumed")), None)
-            if stop is not None and stop.type == "stopped":
-                failure = " ".join(x for x in ("stopped by kelpie", failure) if x)
+            stop = next((e for e in reversed(evs) if e.type in STOP_LINES), None)
             marked = (markers or {}).get(sid)
-            if marked is not None and not ended and _ignored_stop(evs, marked):
+            held = marked is not None and now - marked <= self.stop_ttl
+            if stop is not None and stop.type == "stopped" and held:
+                failure = " ".join(x for x in ("stopped by kelpie", failure) if x)
+            if marked is not None and not ended and _ignored_stop(evs, marked, self.stop_ttl):
                 self._warn(
                     f"unenforced:{sid}",
                     "openclaw: session %s still calls tools %s after its stop; is the Kelpie "
@@ -596,51 +604,81 @@ class OpenClawAdapter:
         if self.stop_dir is None:
             raise UnsupportedAction("stop is turned off ([adapters.openclaw] stop_dir = false)")
         now = datetime.now(UTC)
-        own = sorted(
-            (
-                e
-                for e in self._events(now - self.lookback, now + FUTURE_SKEW)
-                if e.session_id == session_id
-            ),
-            key=lambda e: e.at,
-        )
+        events = sorted(self._events(now - self.lookback, now + FUTURE_SKEW), key=lambda e: e.at)
+        own = [e for e in events if e.session_id == session_id]
         if not own:
             raise UnsupportedAction(
                 f"session {session_id} is not in the hooks spool, so the Kelpie plugin cannot "
                 "stop it"
             )
-        last = own[-1]
-        if last.type == "session_end":
+        real = [e for e in own if e.type not in STOP_LINES] or own
+        if real[-1].type == "session_end":
             log.info("openclaw: session %s has ended; nothing to stop", session_id)
             return ActionResult.NOTHING_TO_DO
-        if last.version < STOP_VERSION:
+        if own[-1].plugin < STOP_VERSION:
             raise UnsupportedAction(
-                f"session {session_id} runs a Kelpie plugin without stop support; copy the "
-                "current plugin and restart the Gateway"
+                f"session {session_id} runs a Kelpie plugin without stop support (or one copied "
+                "but not yet loaded); copy the current plugin and restart the Gateway"
             )
+        # With conversation access (the plugin then records each run's usage and end), the
+        # plugin also refuses scheduled runs and lets the operator's message lift the stop.
+        access = any(e.type in ("llm", "run_end") for e in events)
+        if access:
+            held = (
+                "every tool call and every run but the operator's message is refused until the "
+                "operator messages it, the session is reset or the stop expires"
+            )
+        else:
+            held = (
+                "every tool call is refused until the session is reset or the stop expires (the "
+                "plugin has no conversation access: scheduled runs still start, and a message "
+                "does not lift the stop)"
+            )
+        problem: OSError | None = None
         try:
             write_marker(self.stop_dir, session_id, reason, now.timestamp())
-        except OSError as exc:
+            log.info("openclaw: stop requested for session %s", session_id)
+        except OSError as exc:  # an agent can sabotage the marker: still end the run below
+            problem = exc
+        aborted = self._abort(session_id, own, events)
+        if problem is not None:
             raise OpenClawError(
-                f"cannot write the stop marker for {session_id}: {exc}",
-                "the stop marker could not be written",
-            ) from exc
-        log.info("openclaw: stop requested for session %s", session_id)
-        held = "every tool call and every run but its owner's message is refused until the owner "
-        held += "messages it or the stop expires"
+                f"cannot write the stop marker for {session_id}: {problem} ({aborted})",
+                f"the stop marker could not be written ({aborted})",
+            ) from problem
+        if aborted == "its current run was aborted":
+            return f"{aborted}; {held}"
+        return f"{held}; {aborted}" if aborted else held
+
+    def _abort(
+        self, session_id: str, own: Sequence[SpoolEvent], events: Sequence[SpoolEvent]
+    ) -> str:
+        """Abort the session's run in flight; what happened, in a few words ("" when nothing
+        was running). The session key is not used when a newer session has taken it (a
+        stopped id after ``/new`` or a rollover): only the session's own run id is."""
         key = next((e.session_key for e in reversed(own) if e.session_key), None)
         run = next((e.run_id for e in reversed(own) if e.run_id), None)
+        if key is not None and any(
+            e.session_key == key and e.session_id != session_id and e.at > own[-1].at
+            for e in events
+        ):
+            key = None
         if self.cli is None or (key is None and run is None):
-            why = "cli = false" if self.cli is None else "no session key or run in the spool"
-            return f"{held}; its current run was not aborted ({why})"
+            why = "cli = false" if self.cli is None else "no current session key or run"
+            return f"its current run was not aborted ({why})"
         try:
             status = abort_session(self.cli, key, run, timeout=self.cli_timeout)
         except OpenClawCliError as exc:
             log.warning("openclaw: cannot abort the run of session %s: %s", session_id, exc)
-            return f"{held}; its current run could not be aborted ({exc.public_reason})"
-        if status == "aborted":
-            return f"its current run was aborted; {held}"
-        return held
+            return f"its current run could not be aborted ({exc.public_reason})"
+        log.info(
+            "openclaw: sessions.abort for session %s (key %s, run %s): %s",
+            session_id,
+            key,
+            run,
+            status,
+        )
+        return "its current run was aborted" if status == "aborted" else ""
 
     def requeue(self, task_id: str, reason: str) -> None:
         raise UnsupportedAction(UNSUPPORTED)
@@ -690,15 +728,15 @@ def _rank(task: Task | None) -> int:
     return 0 if task.status.is_terminal else 1
 
 
-def _ignored_stop(events: Sequence[SpoolEvent], marked: datetime) -> bool:
+def _ignored_stop(events: Sequence[SpoolEvent], marked: datetime, ttl: timedelta) -> bool:
     """The session went on calling tools well after its stop marker, and the plugin never
     refused anything: the stop is not enforced."""
     after = [e for e in events if e.at >= marked]
-    if any(e.type in ("stopped", "resumed") for e in after):
+    if any(e.type in STOP_LINES for e in after):
         return False
     # A call counts by its start (a long call begun before the stop is not a miss), and only
     # while the marker holds for the plugin (it ignores markers older than its TTL).
-    expires = marked + timedelta(seconds=DEFAULT_STOP_TTL)
+    expires = marked + ttl
     return any(
         e.type == "tool"
         and marked + STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) < expires

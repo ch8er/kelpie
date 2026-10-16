@@ -64,6 +64,7 @@ def test_tool_call(spool: Path) -> None:
         "at": 1792191669.5,
         "session_id": SID,
         "v": hook.HOOK_VERSION,
+        "plugin": None,
         "session_key": "agent:main:main",
         "agent": "main",
         "run_id": "run-1",

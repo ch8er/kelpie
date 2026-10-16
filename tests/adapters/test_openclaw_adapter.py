@@ -40,7 +40,7 @@ class Spool:
         self.path = path
 
     def write(self, hook: str, at: datetime, event: dict[str, Any], **ctx: Any) -> None:
-        data = {"hook": hook, "at": at.timestamp(), "event": event, "ctx": ctx}
+        data = {"hook": hook, "at": at.timestamp(), "plugin": 2, "event": event, "ctx": ctx}
         old = os.environ.get(kelpie_hook.SPOOL_ENV)
         os.environ[kelpie_hook.SPOOL_ENV] = str(self.path)
         try:

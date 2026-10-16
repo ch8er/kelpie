@@ -13,16 +13,18 @@
 // While that marker holds (stopTtl seconds after its "at"), this plugin, in-process and
 // without starting Python:
 // - refuses every tool call of the session (before_tool_call: block, "Stopped by Kelpie: ...");
-// - refuses every new run of the session that is not an owner's message (before_agent_run:
-//   heartbeats, cron wakes, inter-session deliveries; needs conversation access);
-// - lifts the stop when the owner sends the session a message (before_agent_run with trigger
-//   "user" and senderIsOwner): the message goes through, the marker is deleted;
-// - lifts it when the session is reset, started anew or deleted (session_end).
+// - refuses every new run of the session that is not the operator's message
+//   (before_agent_run: heartbeats, cron wakes, inter-session deliveries, other senders; needs
+//   conversation access), answering with a fixed text that names no reason;
+// - lifts the stop when the operator sends the session a message (before_agent_run with
+//   trigger "user" and senderIsOwner): the message goes through, the marker is deleted;
+// - lifts it when the session is reset, started anew or deleted (session_end), and carries it
+//   to the new session id when the session rolls over (idle, daily, compaction).
 // Kelpie also aborts the run in flight through the Gateway (sessions.abort); see stop.py.
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readSync, unlinkSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +46,17 @@ const MAX_MARKER = 4096; // bytes; a larger marker file is ignored
 const MAX_REASON = 500;
 const FUTURE_SKEW = 300; // seconds; a marker dated further ahead is ignored
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+// The plugin's own version, in every spool line ("plugin"): 2 enforces stop markers. It is the
+// version of this file as the Gateway loaded it, so a copied but not yet reloaded plugin shows.
+const PLUGIN_VERSION = 2;
+// What a refused run is replaced with. OpenClaw delivers it to whoever sent the message and
+// keeps it in the transcript, so it says nothing about why (the reason stays in "reason",
+// which OpenClaw keeps out of transcripts, broadcasts and logs).
+const REFUSED_RUN =
+  "This session is paused by its operator's monitoring (Kelpie). It resumes when the operator sends it a message.";
+// Characters a reason must not carry: controls, format characters (bidi overrides, zero
+// width), line and paragraph separators.
+const UNSAFE = /[\p{Cc}\p{Cf}\u2028\u2029]+/gu;
 // session_end reasons that lift a stop: a person reset or replaced the conversation. Idle,
 // daily and compaction rollovers and Gateway shutdowns or restarts do not.
 const LIFTING_ENDS = new Set(["new", "reset", "deleted"]);
@@ -226,7 +239,13 @@ export function createForwarder(settings, logger, run = spawn) {
     try {
       const reduce = REDUCE[hook];
       if (!reduce) return;
-      const message = { hook, at: Date.now() / 1000, event: reduce(event || {}), ctx: reduceCtx(ctx) };
+      const message = {
+        hook,
+        at: Date.now() / 1000,
+        plugin: PLUGIN_VERSION,
+        event: reduce(event || {}),
+        ctx: reduceCtx(ctx),
+      };
       let payload;
       try {
         payload = toJson(message);
@@ -249,7 +268,7 @@ export function createForwarder(settings, logger, run = spawn) {
 }
 
 function cleanReason(reason) {
-  const clean = reason.replace(/[\x00-\x1f\x7f]+/g, " ").trim() || "no reason given";
+  const clean = reason.replace(UNSAFE, " ").trim() || "no reason given";
   return clean.length <= MAX_REASON ? clean : `${clean.slice(0, MAX_REASON - 3)}...`;
 }
 
@@ -266,6 +285,11 @@ export function createStops(settings, logger) {
   }
 
   function active(sessionId, now = Date.now() / 1000) {
+    return read(sessionId, now)?.reason;
+  }
+
+  // The marker while it holds: { at, reason }.
+  function read(sessionId, now = Date.now() / 1000) {
     const file = path(sessionId);
     if (!file) return undefined;
     let fd;
@@ -283,30 +307,62 @@ export function createStops(settings, logger) {
       const at = data?.at;
       if (typeof at !== "number" || typeof data.reason !== "string") return undefined;
       if (!(now - ttl <= at && at <= now + FUTURE_SKEW)) return undefined;
-      return cleanReason(data.reason);
-    } catch (err) {
-      if (!warned.has(file)) {
-        warned.add(file);
-        logger?.warn?.(`kelpie: unreadable stop marker ${file}: ${err?.message || err}`);
-      }
+      return { at, reason: cleanReason(data.reason) };
+    } catch {
+      once(file, `kelpie: unreadable stop marker ${file}`); // never its content
       return undefined;
     } finally {
       closeSync(fd);
     }
   }
 
+  function once(key, message) {
+    if (warned.has(key)) return;
+    warned.add(key);
+    try {
+      logger?.warn?.(message);
+    } catch {
+      // a throwing logger must not take the Gateway down with it
+    }
+  }
+
+  // Delete the marker; true when there was one to delete. A marker that is there but cannot
+  // be deleted (another user's directory) is reported once: the stop then holds.
   function lift(sessionId) {
     const file = path(sessionId);
     if (!file) return false;
     try {
       unlinkSync(file);
       return true;
-    } catch {
+    } catch (err) {
+      if (err?.code !== "ENOENT") once(`lift:${file}`, `kelpie: cannot lift stop marker ${file} (${err?.code})`);
       return false;
     }
   }
 
-  return { active, lift, path };
+  // A session that rolls over (idle, daily, compaction) goes on under a new id: the stop
+  // follows it, with the same time and reason. True when a marker was carried.
+  function carry(fromId, toId) {
+    const marker = read(fromId);
+    const target = path(toId);
+    if (!marker || !target || fromId === toId) return false;
+    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(marker), { mode: 0o600, flag: "wx" });
+      renameSync(tmp, target);
+      return true;
+    } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // nothing to clean up
+      }
+      once(`carry:${target}`, `kelpie: cannot carry a stop to ${target} (${err?.code})`);
+      return false;
+    }
+  }
+
+  return { active, lift, carry, path };
 }
 
 export default {
@@ -324,8 +380,16 @@ export default {
     }
     api.on("session_end", (event, ctx) => {
       forward("session_end", event, ctx);
-      if (LIFTING_ENDS.has(event?.reason) && stops.lift(event?.sessionId ?? ctx?.sessionId)) {
-        forward("kelpie_resumed", { event: "session_end" }, { ...ctx, sessionId: event?.sessionId ?? ctx?.sessionId });
+      try {
+        const sessionId = event?.sessionId ?? ctx?.sessionId;
+        if (LIFTING_ENDS.has(event?.reason)) {
+          if (stops.lift(sessionId)) forward("kelpie_resumed", { event: "session_end" }, { ...ctx, sessionId });
+        } else if (event?.nextSessionId && stops.carry(sessionId, event.nextSessionId)) {
+          const next = { ...ctx, sessionId: event.nextSessionId, sessionKey: event.nextSessionKey ?? ctx?.sessionKey };
+          forward("kelpie_stopped", { event: "session_end" }, next);
+        }
+      } catch {
+        // never throws into the Gateway
       }
     });
     // Never throws (OpenClaw fails a throwing before_tool_call closed: the tool would be refused).
@@ -343,17 +407,14 @@ export default {
       try {
         const reason = stops.active(ctx?.sessionId);
         if (reason === undefined) return { outcome: "pass" };
+        // The operator (OpenClaw's senderIsOwner: an admin-scoped client such as the CLI or
+        // Control UI) resumes the session: the message goes through.
         if (ctx?.trigger === "user" && event?.senderIsOwner === true) {
-          stops.lift(ctx.sessionId); // the owner resumes the session: the message goes through
-          forward("kelpie_resumed", { event: "before_agent_run" }, ctx);
+          if (stops.lift(ctx.sessionId)) forward("kelpie_resumed", { event: "before_agent_run" }, ctx);
           return { outcome: "pass" };
         }
         forward("kelpie_stopped", { event: "before_agent_run" }, ctx);
-        return {
-          outcome: "block",
-          reason: `Stopped by Kelpie: ${reason}`,
-          message: `Stopped by Kelpie: ${reason}. The session resumes when its owner sends it a message.`,
-        };
+        return { outcome: "block", reason: `Stopped by Kelpie: ${reason}`, message: REFUSED_RUN };
       } catch {
         return { outcome: "pass" };
       }

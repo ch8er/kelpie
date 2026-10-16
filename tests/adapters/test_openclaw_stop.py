@@ -91,7 +91,7 @@ def test_marker_round_trip(tmp_path: Path) -> None:
     assert stat.S_IMODE(d.stat().st_mode) == 0o700
     data = json.loads(path.read_text())
     assert data["at"] == 1792191669.5
-    assert data["reason"].startswith("loop  found") and len(data["reason"]) == oc_stop.MAX_REASON
+    assert data["reason"].startswith("loop found") and len(data["reason"]) == oc_stop.MAX_REASON
     assert oc_stop.read_marker(d, SID) == datetime.fromtimestamp(1792191669.5, UTC)
     assert oc_stop.read_marker(d, "../etc") is None
     with pytest.raises(ValueError):
@@ -221,13 +221,60 @@ def test_an_ended_session_is_left_alone(tmp_path: Path, spool: Spool, cli: Path)
     assert not (tmp_path / "kelpie" / "stop").exists()
 
 
-def test_a_marker_that_cannot_be_written(tmp_path: Path, spool: Spool) -> None:
+def test_a_marker_that_cannot_be_written(tmp_path: Path, spool: Spool, cli: Path) -> None:
+    """An agent can put a directory where its marker goes: the run is still aborted."""
     live(spool)
-    blocker = tmp_path / "file"
-    blocker.write_text("")
+    (tmp_path / "kelpie" / "stop" / f"{SID}.json").mkdir(parents=True)
     with pytest.raises(OpenClawError) as err:
-        adapter(tmp_path, spool, stop_dir=blocker / "stop").stop(SID, "loop")
-    assert err.value.public_reason == "the stop marker could not be written"
+        adapter(tmp_path, spool).stop(SID, "loop")
+    assert err.value.public_reason == (
+        "the stop marker could not be written (its current run was aborted)"
+    )
+    assert len(calls(cli)) == 1
+
+
+def test_an_end_followed_by_a_lift_is_still_an_end(tmp_path: Path, spool: Spool, cli: Path) -> None:
+    """The plugin writes session_end, then resumed, on a reset: the session is over."""
+    live(spool)
+    now = datetime.now(UTC)
+    spool.write("session_end", now, {"reason": "reset"}, sessionId=SID, sessionKey=MAIN)
+    spool.write("kelpie_resumed", now, {"event": "session_end"}, sessionId=SID, sessionKey=MAIN)
+    (s,) = adapter(tmp_path, spool).snapshot(now).sessions
+    assert (s.ended_at is not None, s.exit_reason) == (True, "reset")
+    assert adapter(tmp_path, spool).stop(SID, "loop") is ActionResult.NOTHING_TO_DO
+    assert calls(cli) == []
+
+
+def test_a_key_taken_by_a_newer_session_is_not_aborted(
+    tmp_path: Path, spool: Spool, cli: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live(spool)
+    spool.tool("newer", datetime.now(UTC))  # the same key, under a new session id
+    answers(monkeypatch, {"ok": True, "status": "aborted"})
+    adapter(tmp_path, spool).stop(SID, "loop")
+    (call,) = calls(cli)
+    assert json.loads(call["argv"][4]) == {"runId": "r1", "clearQueued": True}
+
+
+def test_what_the_stop_says_depends_on_conversation_access(
+    tmp_path: Path, spool: Spool, cli: Path
+) -> None:
+    live(spool)
+    said = adapter(tmp_path, spool).stop(SID, "loop")
+    assert isinstance(said, str) and "no conversation access" in said
+    assert "operator's message" not in said
+    spool.write("agent_end", datetime.now(UTC), {"success": True}, sessionId="other")
+    said = adapter(tmp_path, spool).stop(SID, "loop")
+    assert isinstance(said, str) and "until the operator messages it" in said
+
+
+def test_a_plugin_not_yet_loaded_is_refused(tmp_path: Path, spool: Spool) -> None:
+    """The hook stamps v2, but the Gateway still runs an index.js without stops."""
+    spool.path.parent.mkdir(parents=True)
+    line = {"type": "tool", "at": time.time(), "session_id": SID, "v": 2}
+    spool.path.write_text(json.dumps(line) + "\n")
+    with pytest.raises(UnsupportedAction, match="not yet loaded"):
+        adapter(tmp_path, spool).stop(SID, "loop")
 
 
 # --- what the session shows -------------------------------------------------------------
@@ -235,6 +282,7 @@ def test_a_marker_that_cannot_be_written(tmp_path: Path, spool: Spool) -> None:
 
 def test_stopped_and_resumed(tmp_path: Path, spool: Spool) -> None:
     live(spool)
+    oc_stop.write_marker(tmp_path / "kelpie" / "stop", SID, "loop", time.time())
     spool.write("kelpie_stopped", datetime.now(UTC), {"event": "before_tool_call"}, sessionId=SID)
     (s,) = adapter(tmp_path, spool).snapshot(datetime.now(UTC)).sessions
     assert s.exit_reason == "stopped by kelpie"
@@ -284,9 +332,11 @@ def test_stop_config() -> None:
         "openclaw",
         timedelta(seconds=20),
     )
-    s = load_openclaw({"stop_dir": False, "cli": False, "cli_timeout": "5s"})
+    s = load_openclaw({"stop_dir": False, "cli": False, "cli_timeout": "5s", "stop_ttl": "2h"})
     a = s.build()
-    assert (a.stop_dir, a.cli, a.cli_timeout) == (None, None, 5.0)
-    for bad in ({"cli": ""}, {"cli_timeout": "2m"}, {"cli_timeout": "0s"}, {"stop_dir": 1}):
+    assert (a.stop_dir, a.cli, a.cli_timeout, a.stop_ttl) == (None, None, 5.0, timedelta(hours=2))
+    assert load_openclaw({}).stop_ttl == timedelta(hours=24)
+    bad_ones = ({"cli": ""}, {"cli_timeout": "2m"}, {"cli_timeout": "0s"}, {"stop_ttl": "0s"})
+    for bad in (*bad_ones, {"stop_dir": 1}):
         with pytest.raises(ValueError):
             load_openclaw(bad)

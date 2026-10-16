@@ -464,6 +464,8 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
         "at": _at(data.get("at"), clock),
         "session_id": session,
         "v": HOOK_VERSION,
+        # The version of the plugin as the Gateway loaded it (index.js): what enforces stops.
+        "plugin": _count(data.get("plugin")),
         "session_key": _session_key(_field(data, "sessionKey")),
         "agent": _id(_field(data, "agentId")),
         "run_id": _id(_field(data, "runId")),

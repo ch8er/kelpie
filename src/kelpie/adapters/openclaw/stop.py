@@ -9,8 +9,10 @@ starts another. A stop is therefore two steps.
    (``plugin/index.js``): while it holds, every tool call of the session is refused
    (``before_tool_call``) and, with conversation access, every new run that is not a message
    from the session's owner (``before_agent_run``: heartbeats, cron wakes, inter-session
-   deliveries). A message from the owner lifts the stop and goes through; so does a reset,
-   ``/new`` or deletion of the session, deleting the marker, or ``stop_ttl`` (24 hours).
+   deliveries). A message from the operator lifts the stop and goes through; so does a
+   reset, ``/new`` or deletion of the session, deleting the marker, or the plugin's
+   ``stopTtl`` (24 hours; ``[adapters.openclaw] stop_ttl`` must match it). An idle, daily or
+   compaction rollover carries the marker to the successor session id.
 2. **An abort of the run in flight**, through the Gateway's own operator method:
    ``openclaw gateway call sessions.abort --params '{"key": <sessionKey>, "clearQueued":
    true}' --json``. It ends the current run (and its subagents) and drops queued follow-ups,
@@ -43,6 +45,8 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
+import unicodedata
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,7 +61,6 @@ ERROR_TAIL = 300
 SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # used with fullmatch, as in the plugin
 ENV_EXACT = frozenset({"PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR"})
 ENV_PREFIXES = ("LC_", "XDG_", "OPENCLAW_")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 class OpenClawCliError(RuntimeError):
@@ -70,8 +73,12 @@ class OpenClawCliError(RuntimeError):
 
 
 def clean_reason(reason: str) -> str:
-    """As the plugin shows it: control characters folded, at most ``MAX_REASON``."""
-    text = _CONTROL.sub(" ", reason).strip() or "no reason given"
+    """As the plugin shows it: control and format characters (bidi overrides, zero width)
+    and line separators folded into spaces, at most ``MAX_REASON``."""
+    text = "".join(
+        " " if unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") else c for c in reason
+    )
+    text = re.sub(r" {2,}", " ", text).strip() or "no reason given"
     return text if len(text) <= MAX_REASON else text[: MAX_REASON - 3] + "..."
 
 
@@ -144,11 +151,13 @@ def abort_session(
     under the key (or the spool holds only a reduced key), by the latest run id. Returns the
     Gateway's last ``status``. Raises :class:`OpenClawCliError` when a call fails."""
     status = "no-active-run"
+    end = time.monotonic() + timeout  # one budget for both calls: they run inside the tick
     # A key the hook reduced (a chat peer replaced by "~<hash>") is not the Gateway's key.
     if session_key and "~" not in session_key:
         status = abort_run(cli, {"key": session_key}, timeout=timeout, environ=environ)
-    if status == "no-active-run" and run_id:
-        status = abort_run(cli, {"runId": run_id}, timeout=timeout, environ=environ)
+    left = end - time.monotonic()
+    if status == "no-active-run" and run_id and left > 1:
+        status = abort_run(cli, {"runId": run_id}, timeout=left, environ=environ)
     return status
 
 
@@ -187,7 +196,12 @@ def abort_run(
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         _kill_group(proc)
-        proc.communicate()
+        try:  # a grandchild that left the group may hold the pipes: do not wait for it
+            proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
         raise OpenClawCliError(
             f"openclaw gateway call sessions.abort timed out after {timeout:g}s",
             f"the Gateway did not answer within {timeout:g}s",

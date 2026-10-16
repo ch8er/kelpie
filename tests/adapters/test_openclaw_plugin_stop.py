@@ -110,8 +110,9 @@ def test_a_stop_refuses_tools_and_machine_runs(tmp_path: Path) -> None:
     }
     for refused in (heartbeat, cron, stranger):
         assert refused["outcome"] == "block"
-        assert refused["reason"].startswith("Stopped by Kelpie")
-        assert "owner sends it a message" in refused["message"]
+        assert refused["reason"].startswith("Stopped by Kelpie: Runaway run")
+        # What the sender and the transcript get: never the reason.
+        assert "Runaway" not in refused["message"] and "paused" in refused["message"]
     assert path.exists()
     events = [(r["type"], r["event"]) for r in spool_lines(tmp_path)]
     assert sorted(events) == [
@@ -187,6 +188,42 @@ def test_broken_markers_do_not_stop(tmp_path: Path, setup: str) -> None:
     result = run(tmp_path, [*steps, tool(), tool(), agent_run("heartbeat")])
     assert result["out"] == [None, None, {"outcome": "pass"}]
     assert len(result["warnings"]) <= 1  # an unreadable marker is reported once
+
+
+def test_a_rollover_carries_the_stop(tmp_path: Path) -> None:
+    marker(tmp_path, reason="loop")
+    nxt = "2d4e6f80-0000-4000-8000-000000000002"
+    end = {"sessionId": SID, "sessionKey": "agent:main:main", "nextSessionId": nxt}
+    later = {**CTX, "sessionId": nxt}
+    result = run(
+        tmp_path,
+        [
+            {"call": ["session_end", {**end, "reason": "daily"}, CTX]},
+            {"call": ["before_tool_call", {}, later]},
+        ],
+    )
+    assert result["out"][1] == {"block": True, "blockReason": "Stopped by Kelpie: loop"}
+    carried = json.loads((tmp_path / "stop" / f"{nxt}.json").read_text())
+    assert carried["reason"] == "loop"
+    assert (tmp_path / "stop" / f"{SID}.json").stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "stop" / f"{nxt}.json").stat().st_mode & 0o777 == 0o600
+    stopped = [r for r in spool_lines(tmp_path) if r["type"] == "stopped"]
+    assert sorted((r["session_id"], r["event"]) for r in stopped) == [
+        (nxt, "before_tool_call"),
+        (nxt, "session_end"),
+    ]
+
+
+def test_reasons_are_cleaned(tmp_path: Path) -> None:
+    marker(tmp_path, reason="a\u202eb\u200bc\u2028d\x1b[31m")
+    (out,) = run(tmp_path, [tool()])["out"]
+    assert out["blockReason"] == "Stopped by Kelpie: a b c d [31m"
+
+
+def test_every_line_carries_the_plugin_version(tmp_path: Path) -> None:
+    marker(tmp_path)
+    run(tmp_path, [tool()])
+    assert [r["plugin"] for r in spool_lines(tmp_path)] == [2]
 
 
 def test_a_shorter_ttl(tmp_path: Path) -> None:
