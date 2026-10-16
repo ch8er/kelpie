@@ -36,6 +36,10 @@ from kelpie.core.states import MemoryStateStore, StateStore, StateTracker, Trans
 log = logging.getLogger(__name__)
 
 _ALERT_ACTIONS = {ActionKind.ALERT, ActionKind.ESCALATE}
+# An action that failed or that nothing could carry out needs a human: its alert goes out at
+# least at this severity, so channels that skip info still hear about it.
+_NEEDS_HUMAN = Severity.WARNING
+_RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 # Outcomes after which an alert counts as announced (delivered, or logged by design).
 _HANDLED = {
     Outcome.ALERTED,
@@ -336,9 +340,12 @@ class Engine:
             return False
         title = f"[{action.rule}] {prefix + ' ' if prefix else ''}{action.kind}"  # see alerts.py
         title += f" {action.task_id}" if action.task_id else ""
+        severity = action.severity
         if not executed:
             title += NOT_EXECUTED_SUFFIX
-        self.alerter.send(title, action.reason, action.severity)
+            if _RANK[severity] < _RANK[_NEEDS_HUMAN]:
+                severity = _NEEDS_HUMAN
+        self.alerter.send(title, action.reason, severity)
         return True
 
 

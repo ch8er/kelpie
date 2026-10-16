@@ -140,7 +140,7 @@ def test_reassign_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, st
     alerter = FakeAlerter()
     run([act(ActionKind.REASSIGN, **params)], adapter, alerter)
     assert adapter.calls == []
-    assert alerter.sent == [("[emit] reassign T-1 (not executed, needs a human)", Severity.INFO)]
+    assert alerter.sent == [("[emit] reassign T-1 (not executed, needs a human)", Severity.WARNING)]
 
 
 def test_stop_targets_session_even_without_task() -> None:
@@ -158,7 +158,7 @@ def test_stop_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, str]) 
     alerter = FakeAlerter()
     run([act(ActionKind.STOP, **params)], adapter, alerter)
     assert adapter.calls == []
-    assert alerter.sent == [("[emit] stop T-1 (not executed, needs a human)", Severity.INFO)]
+    assert alerter.sent == [("[emit] stop T-1 (not executed, needs a human)", Severity.WARNING)]
 
 
 WAIT_CONDITIONS = [
@@ -192,7 +192,7 @@ def test_wait_falls_back_to_alert(adapter: FakeAdapter, params: dict[str, object
     alerter = FakeAlerter()
     run([act(ActionKind.WAIT, **params)], adapter, alerter)
     assert adapter.calls == []
-    assert alerter.sent == [("[emit] wait T-1 (not executed, needs a human)", Severity.INFO)]
+    assert alerter.sent == [("[emit] wait T-1 (not executed, needs a human)", Severity.WARNING)]
 
 
 def test_alert_and_escalate_go_to_alerter() -> None:
@@ -209,7 +209,7 @@ def test_task_action_without_task_id_becomes_alert() -> None:
     adapter, alerter = FakeAdapter(), FakeAlerter()
     run([act(ActionKind.REQUEUE, task_id=None), act(ActionKind.UNBLOCK)], adapter, alerter)
     assert adapter.calls == [("unblock", "T-1")]
-    assert alerter.sent == [("[emit] requeue (not executed, needs a human)", Severity.INFO)]
+    assert alerter.sent == [("[emit] requeue (not executed, needs a human)", Severity.WARNING)]
 
 
 def test_routes_by_task_source() -> None:
@@ -441,3 +441,45 @@ def test_unsupported_action_falls_back_to_an_alert(caplog: pytest.LogCaptureFixt
         Outcome.SUPPRESSED,
         Outcome.FAILED,
     ]
+
+
+@pytest.mark.parametrize(
+    ("severity", "sent"),
+    [
+        (Severity.INFO, Severity.WARNING),
+        (Severity.WARNING, Severity.WARNING),
+        (Severity.CRITICAL, Severity.CRITICAL),
+    ],
+)
+def test_a_failed_action_needs_a_human_at_warning_or_above(
+    severity: Severity, sent: Severity
+) -> None:
+    """A failed stop of a runaway (the stop action itself is info) must reach channels that
+    skip info; its own severity is kept when it is higher."""
+    adapter, alerter = FakeAdapter(fail_on="requeue"), FakeAlerter()
+    action = replace(act(ActionKind.REQUEUE), severity=severity)
+    engine = Engine([Emit([action])], adapters=[adapter], alerter=alerter, config=ACT)
+    assert [d.outcome for d in engine.tick(lambda: Snapshot(now=NOW))] == [Outcome.FAILED]
+    assert alerter.sent == [("[emit] failed requeue T-1 (not executed, needs a human)", sent)]
+
+
+def test_an_action_nothing_can_carry_out_needs_a_human_at_warning() -> None:
+    alerter = FakeAlerter()
+    engine = Engine(
+        [Emit([act(ActionKind.REQUEUE, executor="missing")])],
+        adapters=[FakeAdapter()],
+        alerter=alerter,
+        config=ACT,
+    )
+    engine.tick(lambda: Snapshot(now=NOW))
+    assert alerter.sent == [("[emit] requeue T-1 (not executed, needs a human)", Severity.WARNING)]
+
+
+def test_a_suggestion_keeps_its_own_severity() -> None:
+    alerter = FakeAlerter()
+    config = EngineConfig(dry_run=False, default_mode=Mode.SUGGEST)
+    engine = Engine(
+        [Emit([act(ActionKind.REQUEUE)])], adapters=[FakeAdapter()], alerter=alerter, config=config
+    )
+    engine.tick(lambda: Snapshot(now=NOW))
+    assert alerter.sent == [("[emit] suggest requeue T-1", Severity.INFO)]
