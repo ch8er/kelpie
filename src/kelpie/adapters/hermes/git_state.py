@@ -5,11 +5,11 @@ includes, ``.gitattributes``, ``.git/info/attributes``, the objects) is untruste
 programs named in that config (filter drivers, fsmonitor, gpg for signed commits), so this
 module asks git only things that do not need them, and switches off what it can:
 
-- up to five git commands per workspace: ``config --get-regexp '^filter\\.'`` (lists filter
-  drivers, runs nothing), ``status --porcelain=v2 -z`` with every listed driver emptied,
-  ``cat-file commit <oid>`` (no gpg, no filters, unlike ``log``), and, with base refs,
-  ``merge-base`` and ``diff-tree -r --name-only`` (plumbing that compares trees by object id:
-  no textconv, no external diff, no filters);
+- per workspace: ``config --get-regexp '^filter\\.'`` (lists filter drivers, runs nothing),
+  ``status --porcelain=v2 -z`` with every listed driver emptied, ``cat-file commit <oid>`` (no
+  gpg, no filters, unlike ``log``), and, with base refs, ``rev-parse --verify`` per ref,
+  ``merge-base --all`` and ``diff-tree -r --name-only`` per merge-base (plumbing that compares
+  trees by object id: no textconv, no external diff, no filters), so 3 + refs + 1 + bases;
 - ``-c`` overrides on every call: no fsmonitor, no global attributes file, no hooks, no
   submodule recursion; ``--attr-source=<empty tree>`` where git supports it (2.40+), so the
   worktree's ``.gitattributes`` is not read;
@@ -26,12 +26,18 @@ raises. ``last_commit`` is the first ``ABBREV`` hex digits of the ``HEAD`` objec
 
 ``paths`` are the files the task touches: the uncommitted entries of ``status`` (untracked
 included, a new untracked directory as one ``dir/`` entry; both sides of a rename) plus,
-when ``base_refs`` are given, the files changed between ``HEAD`` and its newest merge-base
-with any of them (``git merge-base HEAD <ref>...``, so a stale ``origin/main`` next to a
-fresh ``main`` does not pull in commits the branch merely rebased onto). Base refs that do
-not resolve are skipped; when none resolves (or the history is too shallow) only the
-uncommitted paths count. At most ``MAX_PATHS`` paths are kept, the first in sorted order,
-and ``paths_truncated`` says so.
+when ``base_refs`` are given, the files changed between ``HEAD`` and its merge-bases with the
+refs that resolve (``git merge-base --all HEAD <oids>``; with several merge-bases, only files
+changed against each of them). When no ref resolves or there is no merge-base (shallow
+history), or that step fails, only uncommitted paths count and ``paths_partial`` is set; the
+rest of the state is kept. Output is read up to ``MAX_STATUS_BYTES``/``MAX_DIFF_BYTES`` and
+git is killed beyond; at most ``MAX_PATHS`` paths are kept (first in sorted order) and
+``paths_truncated`` says so. Control characters in names become ``?``.
+
+``repo`` is the repository's common git directory, read from ``.git`` without running git:
+all worktrees of one repository share it. ``GIT_WORK_TREE`` is always the workspace, so a
+``core.worktree`` in its config cannot make git list another directory; a ``.git`` file must
+name a git directory whose ``gitdir`` points back at it, and a ``.git`` symlink is refused.
 """
 
 from __future__ import annotations
@@ -43,10 +49,11 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +85,11 @@ SAFE_CONFIG = (
     "submodule.recurse=false",
 )
 FILTER_KEYS = ("clean", "smudge", "process")
+_CHUNK = 65536
+MAX_ERR_CHARS = 4096  # stderr kept per call
+MAX_STATUS_BYTES = 8 << 20  # status output read per workspace (beyond: counts are lower bounds)
+MAX_DIFF_BYTES = 2 << 20  # diff-tree output read per merge-base
+MAX_BASES = 3  # merge-bases compared when the history has several
 
 _OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _VERSION = re.compile(r"(\d+)\.(\d+)")
@@ -113,7 +125,9 @@ class GitState:
     branch: str | None = None
     changed_files: int | None = None  # entries of ``status`` (untracked included)
     paths: tuple[str, ...] | None = None  # files the task touches, sorted (see module doc)
-    paths_truncated: bool = False  # more than MAX_PATHS; the first ones by sort order are kept
+    paths_truncated: bool = False  # more than MAX_PATHS (or output caps): only the first kept
+    paths_partial: bool = False  # committed changes could not be read: uncommitted only
+    repo: str | None = None  # the repository's common git directory: same repo, same key
     problem: Problem | None = None
 
     @property
@@ -153,6 +167,9 @@ def git_env(path: Path | None = None) -> dict[str, str]:
     if path is not None:
         # An empty or broken ``.git`` must not make git use a repository further up.
         env["GIT_CEILING_DIRECTORIES"] = str(path.parent)
+        # The worktree is the workspace itself: ``core.worktree`` in its config cannot point
+        # git (and the paths it reports) at another directory.
+        env["GIT_WORK_TREE"] = str(path)
     return env
 
 
@@ -189,6 +206,83 @@ def _run(
         _kill_group(proc)
         raise _Stop(Problem.BUDGET if cut else Problem.TIMEOUT) from exc
     return proc.returncode, out, err
+
+
+def _run_capped(
+    cmd: list[str], timeout: float, deadline: float | None, path: Path, max_bytes: int
+) -> tuple[int, str, str, bool]:
+    """Like :func:`_run`, but stop reading after ``max_bytes`` of stdout and kill git:
+    ``(returncode, stdout, stderr, truncated)``. A truncated stdout may end mid-record."""
+    limit, cut = timeout, False
+    if deadline is not None:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise _Stop(Problem.BUDGET)
+        if left < timeout:
+            limit, cut = left, True
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=git_env(path),
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise _Stop(Problem.NO_GIT) from exc
+    except (OSError, ValueError) as exc:
+        log.debug("hermes: cannot run git: %s", exc)
+        raise _Stop(Problem.FAILED) from exc
+    out: list[str] = []
+    err: list[str] = []
+    state = {"size": 0, "truncated": False}
+
+    def read_out() -> None:
+        assert proc.stdout is not None
+        while chunk := proc.stdout.read(_CHUNK):
+            out.append(chunk)
+            state["size"] += len(chunk)
+            if state["size"] >= max_bytes:
+                state["truncated"] = True
+                _signal_group(proc)
+                break
+
+    def read_err() -> None:
+        assert proc.stderr is not None
+        kept = 0
+        while chunk := proc.stderr.read(_CHUNK):
+            if kept < MAX_ERR_CHARS:
+                err.append(chunk[: MAX_ERR_CHARS - kept])
+                kept += len(err[-1])
+
+    readers = [threading.Thread(target=f, daemon=True) for f in (read_out, read_err)]
+    for r in readers:
+        r.start()
+    end = time.monotonic() + limit
+    for r in readers:
+        r.join(max(0.0, end - time.monotonic()))
+    if any(r.is_alive() for r in readers):
+        _kill_group(proc)
+        raise _Stop(Problem.BUDGET if cut else Problem.TIMEOUT)
+    proc.wait()
+    for pipe in (proc.stdout, proc.stderr):
+        if pipe is not None:
+            pipe.close()
+    truncated = bool(state["truncated"])
+    text = "".join(out)
+    if truncated:
+        text = text[:max_bytes]
+    return (0 if truncated else proc.returncode), text, "".join(err), truncated
+
+
+def _signal_group(proc: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
 
 
 def _kill_group(proc: subprocess.Popen[str]) -> None:
@@ -244,20 +338,53 @@ def read_git_state(
     """Git state of the worktree at ``path``.
 
     ``branch`` is a branch name known from elsewhere (the Kanban task); it wins over git's.
-    ``base_refs`` (validated with :func:`valid_base_ref`) are the branches work starts from.
     ``timeout`` limits each git call; ``deadline`` (``time.monotonic()``) limits all of them.
+    ``base_refs`` (validated with :func:`valid_base_ref`) are the branches work starts from.
     Only a directory with its own ``.git`` is read: git is never left to search parent
-    directories for a repository.
+    directories for a repository. A ``.git`` file (linked worktree) must point at a git
+    directory that points back at it, and a ``.git`` symlink is not followed.
     """
-    if not os.path.lexists(path / ".git"):
+    dotgit = path / ".git"
+    if not os.path.lexists(dotgit):
         return GitState(branch=branch)
+    repo = common_dir(path)
+    if repo is None:
+        return GitState(branch=branch, problem=Problem.UNSAFE)
     problem = probe_git(timeout)
     if problem is not None:
-        return GitState(branch=branch, problem=problem)
+        return GitState(branch=branch, repo=repo, problem=problem)
     try:
-        return _read(path, timeout, deadline, branch, base_refs)
+        return replace(_read(path, timeout, deadline, branch, base_refs), repo=repo)
     except _Stop as stop:
-        return GitState(branch=branch, problem=stop.problem)
+        return GitState(branch=branch, repo=repo, problem=stop.problem)
+
+
+def common_dir(path: Path) -> str | None:
+    """The repository's common git directory for the workspace at ``path`` (shared by all
+    worktrees of one repository), or ``None`` when ``.git`` is not one Kelpie trusts: a
+    symlink, or a gitfile whose ``gitdir`` does not point back at ``path/.git``."""
+    dotgit = path / ".git"
+    try:
+        if dotgit.is_symlink():
+            return None
+        if dotgit.is_dir():
+            return str(dotgit.resolve())
+        with dotgit.open("rb") as f:
+            raw = f.read(4096).decode("utf-8", "replace").strip()
+        if not raw.startswith("gitdir:"):
+            return None
+        gitdir = Path(raw.removeprefix("gitdir:").strip())
+        gitdir = (gitdir if gitdir.is_absolute() else path / gitdir).resolve()
+        back = (gitdir / "gitdir").read_text("utf-8", "replace").strip()
+        if Path(back).resolve() != dotgit.resolve():
+            return None
+        commondir = gitdir / "commondir"
+        if commondir.is_file():
+            rel = Path(commondir.read_text("utf-8", "replace").strip())
+            return str((rel if rel.is_absolute() else gitdir / rel).resolve())
+        return str(gitdir)
+    except (OSError, ValueError):
+        return None
 
 
 def _read(
@@ -269,20 +396,26 @@ def _read(
 ) -> GitState:
     trees = [EMPTY_TREE, EMPTY_TREE_SHA256]  # the empty tree of a SHA-1, then SHA-256 repo
 
-    def git(command: str, *args: str, extra: tuple[str, ...] = ()) -> tuple[int, str]:
+    def git(
+        command: str, *args: str, extra: tuple[str, ...] = (), cap: int | None = None
+    ) -> tuple[int, str, bool]:
         config = [arg for c in (*SAFE_CONFIG, *extra) for arg in ("-c", c)]
+        truncated = False
         while True:
             options = [f"--attr-source={trees[0]}"] if _ATTR_SOURCE else []
             cmd = ["git", "-C", str(path), *config, *options, command, *args]
-            code, out, err = _run(cmd, timeout, deadline, path)
+            if cap is None:
+                code, out, err = _run(cmd, timeout, deadline, path)
+            else:
+                code, out, err, truncated = _run_capped(cmd, timeout, deadline, path, cap)
             if code == 0 or not options or "attr-source" not in err or len(trees) == 1:
                 break
             trees.pop(0)  # not a SHA-1 repository
         if code != 0 and (command, code) != ("config", 1):  # 1: nothing matched
             log.debug("hermes: git %s exited %s in %s: %s", command, code, path, err.strip())
-        return code, out
+        return code, out, truncated
 
-    code, out = git("config", "-z", "--name-only", "--get-regexp", r"^filter\.")
+    code, out, _ = git("config", "-z", "--name-only", "--get-regexp", r"^filter\.")
     if code not in (0, 1):  # 1: no filter driver
         return GitState(branch=branch, problem=Problem.FAILED)
     drivers = _filter_drivers(out if code == 0 else "")
@@ -290,7 +423,7 @@ def _read(
         return GitState(branch=branch, problem=Problem.UNSAFE)
     off = tuple(f"filter.{d}.{k}=" for d in sorted(drivers) for k in FILTER_KEYS)
     off += tuple(f"filter.{d}.required=false" for d in sorted(drivers))
-    code, out = git(
+    code, out, truncated = git(
         "status",
         "--porcelain=v2",
         "-z",
@@ -298,40 +431,86 @@ def _read(
         "--untracked-files=normal",
         "--ignore-submodules=all",
         extra=off,
+        cap=MAX_STATUS_BYTES,
     )
     if code != 0:
         return GitState(branch=branch, problem=Problem.FAILED)
-    oid, head, changed, paths = _parse_status(out)
+    oid, head, changed, paths = _parse_status(out, complete=not truncated)
     committed_at = None
+    partial = False
     if oid is not None:
-        code, raw = git("cat-file", "commit", oid)
+        code, raw, _ = git("cat-file", "commit", oid)
         committed_at = _committed_at(raw) if code == 0 else None
         refs = [r for r in base_refs if valid_base_ref(r)]
         if refs:
-            # Only refs that resolve: merge-base fails as a whole on one unknown name.
-            known = []
-            for ref in refs:
-                code, _ = git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
-                if code == 0:
-                    known.append(ref)
-            if known:
-                code, out = git("merge-base", oid, *known)
-                base = out.strip()
-                if code == 0 and _OID.fullmatch(base):
-                    code, out = git(
-                        "diff-tree", "-r", "--name-only", "--no-renames", "-z", base, oid
-                    )
-                    if code == 0:
-                        paths.update(p for p in out.split("\0") if p)
-    ordered = sorted(paths)
+            try:  # optional: a failure here keeps what was read above
+                committed, cut = _branch_paths(git, oid, refs, path)
+            except _Stop as stop:
+                log.debug("hermes: committed paths of %s not read: %s", path, stop.problem)
+                partial = True
+            else:
+                partial = committed is None
+                paths |= committed or set()
+                truncated = truncated or cut
+    ordered = sorted(_printable(p) for p in paths)
     return GitState(
         last_commit=oid[:ABBREV] if oid else None,
         last_commit_at=committed_at,
         branch=branch or head,
         changed_files=changed,
         paths=tuple(ordered[:MAX_PATHS]),
-        paths_truncated=len(ordered) > MAX_PATHS,
+        paths_truncated=truncated or len(ordered) > MAX_PATHS,
+        paths_partial=partial,
     )
+
+
+def _branch_paths(git: Any, oid: str, refs: list[str], path: Path) -> tuple[set[str] | None, bool]:
+    """Files changed between ``oid`` and its merge-bases with ``refs``, and whether output was
+    cut. With several merge-bases (criss-cross histories) only files changed against every
+    one of them count. ``None``: no ref resolves or there is no merge-base (shallow)."""
+    oids: list[str] = []
+    for ref in refs:
+        code, out, _ = git(
+            "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}"
+        )
+        value = out.strip()
+        if code == 0 and _OID.fullmatch(value):
+            oids.append(value)  # pass the oid on: the ref cannot change in between
+    if not oids:
+        warn_once(
+            (str(path), "no-base"),
+            "hermes: none of base_refs %s resolves in %s; only uncommitted files are compared",
+            list(refs),
+            path,
+        )
+        return None, False
+    code, out, _ = git("merge-base", "--all", "--end-of-options", oid, *oids)
+    bases = [b for b in out.split() if _OID.fullmatch(b)][:MAX_BASES]
+    if code != 0 or not bases:
+        return None, False
+    common: set[str] | None = None
+    cut = False
+    for base in bases:
+        code, out, truncated = git(
+            "diff-tree", "-r", "--name-only", "--no-renames", "-z", base, oid, cap=MAX_DIFF_BYTES
+        )
+        if code != 0:
+            return None, False
+        records = out.split("\0")
+        if truncated:
+            records = records[:-1]  # the last one may be cut short
+            cut = True
+        found = {r for r in records if r}
+        common = found if common is None else common & found
+    return common or set(), cut
+
+
+_UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _printable(name: str) -> str:
+    """A path as Kelpie shows it: control characters (newlines in a file name) become ``?``."""
+    return _UNPRINTABLE.sub("?", name)
 
 
 def _filter_drivers(listing: str) -> set[str] | None:
@@ -350,14 +529,18 @@ def _filter_drivers(listing: str) -> set[str] | None:
     return names
 
 
-def _parse_status(out: str) -> tuple[str | None, str | None, int, set[str]]:
+def _parse_status(out: str, complete: bool = True) -> tuple[str | None, str | None, int, set[str]]:
     """``(oid of HEAD, branch, number of entries, paths)`` from
     ``status --porcelain=v2 -z --branch``: NUL-terminated records; a rename (``2``) is followed
-    by one more record, its original path. Paths are taken verbatim (``-z`` does not quote)."""
+    by one more record, its original path. Paths are taken verbatim (``-z`` does not quote).
+    When the output was cut (``complete`` false) the last record is dropped."""
     oid = head = None
     changed = 0
     paths: set[str] = set()
-    records = iter(out.split("\0"))
+    parts = out.split("\0")
+    if not complete:
+        parts = parts[:-1]
+    records = iter(parts)
     for record in records:
         if record.startswith("# branch.oid "):
             value = record.removeprefix("# branch.oid ").strip()

@@ -303,3 +303,11 @@ def test_build_validates_config() -> None:
 def test_build_rejects_bad_config(config: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         build(config)
+
+
+def test_same_path_in_different_repositories_is_no_conflict() -> None:
+    a = replace(task("A", "README.md", "src/x.py"), repo="/repos/one/.git")
+    b = replace(task("B", "README.md"), repo="/repos/two/.git")
+    c = replace(task("C", "src/x.py"), repo="/repos/one/.git")
+    found = comments(run(a, b, c))
+    assert set(found) == {("A", "C"), ("C", "A")}

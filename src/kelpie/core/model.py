@@ -107,6 +107,9 @@ class Task:
     review_rounds: int = 0
     estimate: timedelta | None = None
     files: tuple[str, ...] = ()
+    # Which repository ``files`` are relative to (an adapter's key, e.g. a git directory);
+    # files of different repositories never conflict.
+    repo: str | None = None
     labels: tuple[str, ...] = ()
     returns: tuple[Return, ...] = ()
     host: str | None = None  # where the task runs, if the adapter knows (a config name)

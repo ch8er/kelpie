@@ -8,6 +8,7 @@ import stat
 import subprocess
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -349,7 +350,9 @@ def test_unborn_branch_comes_from_status(tmp_path: Path) -> None:
     git(fresh, "init", "-q", "-b", "start")
     (fresh / "x.txt").write_text("x\n")
     state = read_git_state(fresh, 5.0)
-    assert state == GitState(branch="start", changed_files=1, paths=("x.txt",))
+    assert state == GitState(
+        branch="start", changed_files=1, paths=("x.txt",), repo=str((fresh / ".git").resolve())
+    )
 
 
 def test_parent_repository_is_not_searched(repo: Path) -> None:
@@ -438,7 +441,7 @@ def test_filter_driver_that_cannot_be_overridden_stops_the_read(repo: Path, tmp_
     (repo / ".git" / "info" / "attributes").write_text("*.txt filter=a=b\n")
     make_stat_dirty(repo, 1_600_000_000)
     state = read_git_state(repo, 5.0, branch="hermes/t_1")
-    assert state == GitState(branch="hermes/t_1", problem=Problem.UNSAFE)
+    assert replace(state, repo=None) == GitState(branch="hermes/t_1", problem=Problem.UNSAFE)
     assert not marker.exists()
 
 
@@ -558,6 +561,7 @@ def test_git_env_is_minimal(monkeypatch: pytest.MonkeyPatch) -> None:
         "GIT_ALLOW_PROTOCOL": "none",
     }
     assert gs.git_env(Path("/w/wt"))["GIT_CEILING_DIRECTORIES"] == "/w"
+    assert gs.git_env(Path("/w/wt"))["GIT_WORK_TREE"] == "/w/wt"
 
 
 def test_secrets_do_not_reach_git(
@@ -578,8 +582,10 @@ def test_secrets_do_not_reach_git(
     only(board)
     seen = dump.read_text()
     assert "LC_ALL=C" in seen and "GIT_CONFIG_NOSYSTEM=1" in seen
-    for leaked in ("s3cret", "/elsewhere", "GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE="):
+    for leaked in ("s3cret", "/elsewhere", "GIT_DIR=", "GIT_INDEX_FILE="):
         assert leaked not in seen
+    # GIT_WORK_TREE is Kelpie's own: the workspace itself, never the inherited value.
+    assert f"GIT_WORK_TREE={repo}" in seen
 
 
 def alive(pid: int) -> bool:
@@ -891,3 +897,119 @@ def test_adapter_puts_paths_on_the_task(board: Board, repo: Path) -> None:
 def test_adapter_rejects_invalid_base_refs(board: Board) -> None:
     with pytest.raises(ValueError, match="base refs"):
         HermesAdapter(db_path=board.path, spool=None, base_refs=("--upload-pack=x",))
+
+
+def test_core_worktree_cannot_point_git_elsewhere(repo: Path, tmp_path: Path) -> None:
+    other = tmp_path / "private"
+    other.mkdir()
+    (other / "private-name.txt").write_text("secret\n")
+    git(repo, "config", "core.worktree", str(other))
+    (repo / "mine.txt").write_text("x\n")
+    state = read_git_state(repo, 5.0)
+    assert state.paths is not None and "private-name.txt" not in state.paths
+    assert "mine.txt" in state.paths
+
+
+def test_gitfile_must_point_back_at_the_workspace(repo: Path, tmp_path: Path) -> None:
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "-b", "task", str(linked))
+    (linked / "wip.py").write_text("x\n")
+    state = read_git_state(linked, 5.0)
+    assert state.problem is None and state.paths == ("wip.py",)
+    assert state.repo == str((repo / ".git").resolve())  # same repo as the main checkout
+    assert read_git_state(repo, 5.0).repo == state.repo
+    # A .git file naming another repository's git directory is not trusted.
+    stranger = tmp_path / "stranger"
+    stranger.mkdir()
+    (stranger / ".git").write_text(f"gitdir: {repo / '.git'}\n")
+    assert read_git_state(stranger, 5.0).problem is Problem.UNSAFE
+    linked_gitdir = (linked / ".git").read_text().split(":", 1)[1].strip()
+    hijack = tmp_path / "hijack"
+    hijack.mkdir()
+    (hijack / ".git").write_text(f"gitdir: {linked_gitdir}\n")  # points at linked's, not back
+    assert read_git_state(hijack, 5.0).problem is Problem.UNSAFE
+
+
+def test_symlinked_dot_git_is_not_followed(repo: Path, tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / ".git").symlink_to(repo / ".git")
+    assert read_git_state(other, 5.0).problem is Problem.UNSAFE
+
+
+def test_unmerged_detached_and_newline_paths(repo: Path) -> None:
+    branch_off(repo, "side")
+    commit(repo, "a.txt", message="side")
+    git(repo, "checkout", "-q", "main")
+    commit(repo, "a.txt", message="main")
+    subprocess.run(["git", "-C", str(repo), "merge", "-q", "side"], capture_output=True)
+    (repo / "odd\nname.txt").write_text("x\n")
+    state = read_git_state(repo, 5.0)
+    assert state.paths == ("a.txt", "odd?name.txt")  # unmerged entry; newline shown as ?
+    git(repo, "merge", "--abort")
+    git(repo, "checkout", "-q", "--detach")
+    detached = read_git_state(repo, 5.0, base_refs=("main",))
+    assert detached.branch is None and detached.paths == ("odd?name.txt",)
+
+
+def test_files_step_failure_keeps_the_rest(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    branch_off(repo)
+    commit(repo, "mine.py")
+    (repo / "wip.py").write_text("x\n")
+    real = gs._run_capped
+
+    def slow_diff(cmd: list[str], *args: object, **kw: object) -> object:
+        if "diff-tree" in cmd:
+            raise gs._Stop(Problem.TIMEOUT)
+        return real(cmd, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(gs, "_run_capped", slow_diff)
+    state = read_git_state(repo, 5.0, base_refs=("main",))
+    assert state.problem is None and state.last_commit is not None
+    assert state.changed_files == 1 and state.paths == ("wip.py",) and state.paths_partial
+
+
+def test_no_merge_base_or_unknown_refs_is_partial(repo: Path, tmp_path: Path) -> None:
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    git(unrelated, "init", "-q", "-b", "other")
+    git(unrelated, "config", "user.email", "a@example.invalid")
+    git(unrelated, "config", "user.name", "A")
+    git(unrelated, "config", "commit.gpgsign", "false")
+    commit(unrelated, "x.py")
+    git(repo, "fetch", "-q", str(unrelated), "other:other")  # no common history with main
+    git(repo, "checkout", "-q", "other")
+    state = read_git_state(repo, 5.0, base_refs=("main",))
+    assert state.paths == () and state.paths_partial
+    assert read_git_state(repo, 5.0, base_refs=("nope",)).paths_partial
+
+
+def test_huge_output_is_cut_not_read_whole(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gs, "MAX_STATUS_BYTES", 200)
+    for i in range(50):
+        (repo / f"untracked-file-number-{i:03d}.txt").write_text("x\n")
+    state = read_git_state(repo, 5.0)
+    assert state.paths_truncated and state.paths is not None
+    assert 0 < len(state.paths) < 50
+    assert all(p.startswith("untracked-file-number-") and p.endswith(".txt") for p in state.paths)
+
+
+def test_capped_diff_marks_truncation(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    branch_off(repo)
+    commit(repo, *(f"src/module_{i:03d}.py" for i in range(40)))
+    monkeypatch.setattr(gs, "MAX_DIFF_BYTES", 120)
+    state = read_git_state(repo, 5.0, base_refs=("main",))
+    assert state.paths_truncated and state.paths is not None
+    assert 0 < len(state.paths) < 40 and all(p.endswith(".py") for p in state.paths)
+
+
+def test_open_task_without_a_recent_run_still_gets_files(board: Board, repo: Path) -> None:
+    branch_off(repo)
+    commit(repo, "src/routes.py")
+    live_task(board, repo, branch="task", status="review")
+    board.run("t_1", "dev", ago(days=3), status="done", ended=ago(days=2))  # outside lookback
+    adapter = HermesAdapter(db_path=board.path, spool=None, base_refs=("main",))
+    snap = adapter.snapshot(NOW)
+    (task,) = snap.tasks
+    assert task.files == ("src/routes.py",) and task.repo == str((repo / ".git").resolve())
+    assert snap.sessions == ()

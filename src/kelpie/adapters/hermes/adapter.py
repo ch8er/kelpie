@@ -251,6 +251,13 @@ def _body(row: sqlite3.Row) -> str | None:
     return text[:MAX_BODY] or None
 
 
+def _with_files(task: Task, state: GitState | None) -> Task:
+    """The task with its worktree's files and repository, when git could say."""
+    if state is None or state.paths is None:
+        return task
+    return replace(task, files=state.paths, repo=state.repo)
+
+
 def _block_text(row: sqlite3.Row, status_event: sqlite3.Row | None, block_event: Any) -> str:
     if block_event is not None:  # a block event at/after the block's start: current evidence
         payload = _payload(block_event["payload"])
@@ -396,8 +403,8 @@ class HermesAdapter:
         except sqlite3.Error as exc:
             raise HermesError(f"cannot read Hermes kanban database {self.db_path}: {exc}") from exc
         if self.git_state:  # outside the read transaction: git may be slow
-            sessions, files = self._with_git_state(sessions, tasks, rows, now)
-            tasks = tuple(replace(t, files=files[t.id]) if t.id in files else t for t in tasks)
+            sessions, states = self._with_git_state(sessions, tasks, rows, now)
+            tasks = tuple(_with_files(t, states.get(t.id)) for t in tasks)
         owners = tuple(
             Owner(
                 id=p,
@@ -550,51 +557,51 @@ class HermesAdapter:
         tasks: Sequence[Task],
         rows: Mapping[str, sqlite3.Row],
         now: datetime,
-    ) -> tuple[tuple[Session, ...], dict[str, tuple[str, ...]]]:
-        """Attach the workspace's git state to the latest run of each live task, and return
-        the files each such task touches (for ``Task.files``).
+    ) -> tuple[tuple[Session, ...], dict[str, GitState]]:
+        """Read the workspace of every unfinished task, attach its git state to the task's
+        latest run (if one is in the snapshot), and return the state per task id (for
+        ``Task.files`` and ``Task.repo``).
 
         Git describes the worktree as it is now, so older runs of a task get nothing, and
-        neither do finished tasks: their worktree says nothing about a session any more.
+        neither do finished tasks: their worktree says nothing about a session any more. A
+        task in review with no run inside ``lookback`` still gets its files: open work is
+        what new work conflicts with.
         """
-        live = {t.id for t in tasks if not t.status.is_terminal}
         latest: dict[str, Session] = {}
         for s in sessions:  # run ids only grow, and sessions come in run id order
-            if s.task_id in live:
-                latest[s.task_id] = s
-        users: dict[Path, list[tuple[Session, str | None]]] = {}
-        for task_id, s in latest.items():
-            row = rows[task_id]
+            latest[s.task_id] = s
+        users: dict[Path, list[tuple[str, str | None]]] = {}
+        for t in tasks:
+            if t.status.is_terminal:
+                continue
+            row = rows[t.id]
             if (path := _workspace(row)) is not None:
                 branch = str(_col(row, "branch_name") or "").strip() or None
-                users.setdefault(path, []).append((s, branch))
+                users.setdefault(path, []).append((t.id, branch))
         self._git_backoff = {p: t for p, t in self._git_backoff.items() if t > now}
         states: dict[str, GitState] = {}
-        jobs: dict[Path, tuple[Session, str | None]] = {}
+        jobs: dict[Path, tuple[str, str | None]] = {}
         for path, found in users.items():
             if len(found) > 1:
                 warn_once(
                     (str(path), "shared"),
                     "hermes: workspace %s is used by tasks %s; no git state for them",
                     path,
-                    ", ".join(sorted(s.task_id for s, _ in found)),
+                    ", ".join(sorted(tid for tid, _ in found)),
                 )
-                states.update((s.id, GitState(branch=b)) for s, b in found)
+                states.update((tid, GitState(branch=b)) for tid, b in found)
             elif path in self._git_backoff:
                 log.debug(
                     "hermes: %s skipped until %s (git timed out)", path, self._git_backoff[path]
                 )
-                states.update((s.id, GitState(branch=b)) for s, b in found)
+                states.update((tid, GitState(branch=b)) for tid, b in found)
             else:
                 jobs[path] = found[0]
         if jobs:
             states.update(self._read_git(jobs, now))
         attached: dict[str, Session] = {}
-        files: dict[str, tuple[str, ...]] = {}
-        for s in sessions:
-            if (state := states.get(s.id)) is not None:
-                if state.paths is not None:
-                    files[s.task_id] = state.paths
+        for task_id, s in latest.items():
+            if (state := states.get(task_id)) is not None:
                 attached[s.id] = replace(
                     s,
                     last_commit=state.last_commit,
@@ -603,18 +610,18 @@ class HermesAdapter:
                     changed_files=state.changed_files,
                     dirty_worktree=state.dirty,
                 )
-        return tuple(attached.get(s.id, s) for s in sessions), files
+        return tuple(attached.get(s.id, s) for s in sessions), states
 
     def _read_git(
-        self, jobs: Mapping[Path, tuple[Session, str | None]], now: datetime
+        self, jobs: Mapping[Path, tuple[str, str | None]], now: datetime
     ) -> dict[str, GitState]:
-        """Git state per session id; each path read once, all within the snapshot's budget."""
+        """Git state per task id; each path read once, all within the snapshot's budget."""
         timeout = self.git_timeout.total_seconds()
         deadline = time.monotonic() + GIT_BUDGET_FACTOR * timeout
         problem = probe_git(timeout)
         if problem is not None:
             self._report(None, problem)
-            return {s.id: GitState(branch=b, problem=problem) for s, b in jobs.values()}
+            return {tid: GitState(branch=b, problem=problem) for tid, b in jobs.values()}
         with ThreadPoolExecutor(GIT_WORKERS, thread_name_prefix="kelpie-git") as pool:
             futures = {
                 path: pool.submit(
@@ -629,7 +636,7 @@ class HermesAdapter:
             }
         states: dict[str, GitState] = {}
         for path, future in futures.items():
-            session, branch = jobs[path]
+            task_id, branch = jobs[path]
             try:
                 state = future.result()
             except Exception:  # a bug in parsing must not fail the snapshot
@@ -640,12 +647,11 @@ class HermesAdapter:
             if state.paths_truncated:
                 warn_once(
                     (str(path), "truncated"),
-                    "hermes: %s changes more than %s files; only the first are compared",
+                    "hermes: %s changes more files than Kelpie reads; only the first are compared",
                     path,
-                    len(state.paths or ()),
                 )
             self._report(path, state.problem)
-            states[session.id] = state
+            states[task_id] = state
         return states
 
     def _report(self, path: Path | None, problem: Problem | None) -> None:
