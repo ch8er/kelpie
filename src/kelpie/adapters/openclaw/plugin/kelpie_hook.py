@@ -13,7 +13,8 @@ seen in a live Gateway run):
 
 - ``session_start`` (``sessionId``, ``sessionKey``, ``resumedFrom``) -> ``session_start``
 - ``after_tool_call`` (``toolName``, ``params``, ``toolCallId``, ``error``, ``durationMs``;
-  the plugin adds ``outputChars``, the size of the result) -> ``tool``
+  the plugin adds ``outputChars``, the size of the result, and for arguments over 1 MiB sends
+  ``paramsDigest``, its own hash of them, instead) -> ``tool``
 - ``llm_output`` (``provider``, ``model``, ``usage``; needs the plugin's conversation access)
   -> ``llm``: the run's token usage
 - ``agent_end`` (``success``, ``durationMs``; needs conversation access) -> ``run_end``
@@ -21,9 +22,9 @@ seen in a live Gateway run):
 
 Every line carries the OpenClaw ``sessionId`` (``session_id``: Kelpie's session id, it changes
 on ``/new``, reset and daily rollover), ``sessionKey`` (``session_key``, e.g.
-``agent:main:main``; Workboard cards link to it), ``agentId`` (``agent``) and ``runId``
-(``run_id``) when OpenClaw supplies them. ``llm`` and ``run_end`` lines also carry the run's
-``trigger`` (``user``, ``heartbeat``, ``cron``).
+``agent:main:main``; Workboard cards link to it; see :func:`safe_session_key`), ``agentId``
+(``agent``) and ``runId`` (``run_id``) when OpenClaw supplies them. ``llm`` and ``run_end``
+lines also carry the run's ``trigger`` (``user``, ``heartbeat``, ``cron``).
 
 Privacy: prompts, tool arguments and results, messages and assistant text are never written.
 A tool call is the tool name, a hash of its arguments, for ``exec``-like tools a redacted
@@ -277,6 +278,47 @@ def redact_command(command: str) -> str | None:
 # --- shared redaction: end ---
 
 
+# Session keys that name no person: the agent's main session (and its heartbeat lane),
+# subagents, cron jobs, hooks and OpenClaw's internal background sessions.
+_PLAIN_KEYS = frozenset(
+    {"main", "subagent", "cron", "hook", "heartbeat", "internal-session-effects", "global"}
+)
+_KEY_WORD = re.compile(r"[a-z][a-z0-9_-]{0,31}")  # used with fullmatch
+
+
+def safe_session_key(key: Any) -> str | None:
+    """A session key without the identity of the person it is with.
+
+    OpenClaw keys per-peer conversations as ``agent:<id>:<channel>:direct:<peerId>`` (and
+    groups as ``...:group:<groupId>``), where the peer id is a phone number or a chat user id.
+    Keys of the shapes in ``_PLAIN_KEYS`` (``agent:main:main``,
+    ``agent:main:subagent:workboard-...``, ``cron:<job>``) are kept; in any other key the part
+    after the channel and its kind (and at least the last part, so ``agent:main:direct:alice``
+    loses ``alice``) becomes ``~`` and 12 hex digits of its SHA-256, e.g.
+    ``agent:main:whatsapp:direct:~3f2a9c01d4e5``: the same peer gives the same key, nobody
+    can read the peer back. Kelpie applies the same function to Workboard's keys.
+    """
+    text = _id(key)
+    if text is None:
+        return None
+    parts = text.split(":")
+    if parts[0] in _PLAIN_KEYS or text == "unknown":
+        return text
+    if parts[0] == "agent" and len(parts) >= 3:
+        if parts[2] in _PLAIN_KEYS:
+            return text
+        kept = 2  # the channel and its kind, when they are plain words; never the last part
+        while kept < min(len(parts) - 1, 4) and _KEY_WORD.fullmatch(parts[kept]):
+            kept += 1
+        rest = ":".join(parts[kept:])
+        return ":".join([*parts[:kept], "~" + _digest(rest)])
+    return "~" + _digest(text)
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
+
+
 def _command(args: Any) -> str | None:
     if os.environ.get(COMMANDS_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
         return None
@@ -336,7 +378,7 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
         "at": _at(data.get("at"), clock),
         "session_id": session,
         "v": HOOK_VERSION,
-        "session_key": _id(_field(data, "sessionKey")),
+        "session_key": safe_session_key(_field(data, "sessionKey")),
         "agent": _id(_field(data, "agentId")),
         "run_id": _id(_field(data, "runId")),
     }
@@ -345,10 +387,11 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
     elif kind == "tool":
         args = event.get("params")
         failed = event.get("error") not in (None, "")
+        digest = event.get("paramsDigest")  # arguments too large to pass: hashed by the plugin
         rec.update(
             tool=_id(event.get("toolName")),
             tool_call_id=_id(_field(data, "toolCallId")),
-            args_hash=args_hash(args),
+            args_hash=_id(digest) if isinstance(digest, str) else args_hash(args),
             command=_command(args),
             outcome="error" if failed else "ok",
             duration_ms=_count(event.get("durationMs")),

@@ -24,8 +24,10 @@ loop detection, off by default, counts per run)::
                     lines of the same session follow it
     last_heartbeat  latest line of any kind
     exit_reason     the ``session_end`` reason; a failed last run adds "run failed"
-    task_id         the Workboard card linked to the session's ``sessionKey``, else
-                    ``session:<sessionKey>`` (not a board task)
+    task_id         the Workboard card linked to the session's ``sessionKey`` (several cards
+                    can name one key, e.g. the main chat session: a running card wins, then
+                    any open card, then a finished one, the most recently updated first),
+                    else ``session:<sessionKey>`` (not a board task)
     owner_id        the card's owner, else the OpenClaw agent id, else ``openclaw``
 
 A session waiting for its next message or heartbeat writes nothing, so a quiet session counts
@@ -35,7 +37,9 @@ default heartbeat runs every 30 minutes.
 Spans: a TOOL span per ``tool`` line, SESSION and TASK spans around them, and, from ``llm``
 lines (plugin with conversation access), one LLM span per run with the run's tokens
 (OpenClaw's ``input`` excludes cache reads and writes; Kelpie's ``input_tokens`` includes
-them, as the GenAI conventions do).
+them, as the GenAI conventions do). ``token_spans = False`` leaves the LLM spans out: OpenClaw's
+own OTLP export (``diagnostics-otel``) reports the same tokens without a session, and the
+daily report would count a run twice if both reached it.
 """
 
 from __future__ import annotations
@@ -44,8 +48,9 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import stat
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,8 +58,9 @@ from typing import Any
 
 from kelpie.adapters.openclaw import workboard
 from kelpie.adapters.openclaw.workboard import Card, WorkboardError
-from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Task
+from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
+from kelpie.traces.command import redact_command
 from kelpie.traces.hooks import (
     HOOKS,
     SESSION_END,
@@ -87,7 +93,7 @@ UNSUPPORTED = (
     "Kelpie alerts a human instead (run the rule in observe or suggest mode)"
 )
 
-_EVENT_TYPES = frozenset({"session_start", "tool", "llm", "run_end", "session_end", "stopped"})
+_EVENT_TYPES = frozenset({"session_start", "tool", "llm", "run_end", "session_end"})
 
 
 class OpenClawError(RuntimeError):
@@ -183,7 +189,8 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         tool=_text(rec.get("tool")),
         tool_call_id=_text(rec.get("tool_call_id")),
         args_hash=_text(rec.get("args_hash")),
-        command=rec["command"].strip()[:MAX_COMMAND] or None
+        # Redacted again: agents can write spool lines, and this text reaches alerts.
+        command=redact_command(rec["command"][:MAX_COMMAND])
         if isinstance(rec.get("command"), str)
         else None,
         outcome=outcome if outcome in ("ok", "error") else None,
@@ -205,10 +212,11 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
 @dataclass(slots=True)
 class OpenClawAdapter:
     state_dir: Path = DEFAULT_STATE_DIR
-    # The Workboard database; None: no board tasks. Default: <state_dir>/plugins/workboard/...
+    # The Workboard database; None: no board tasks (the config defaults it under state_dir).
     workboard_db: Path | None = None
     spool: Path | None = DEFAULT_SPOOL  # None: no hook data, no sessions
     lookback: timedelta = DEFAULT_LOOKBACK
+    token_spans: bool = True  # LLM spans from ``llm`` lines (off when OTLP reports tokens)
     name: str = NAME
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
 
@@ -220,6 +228,26 @@ class OpenClawAdapter:
             self.spool = Path(self.spool).expanduser()
 
     # --- status --------------------------------------------------------------------------
+
+    def check(self) -> str | None:
+        """``None`` if the Workboard can be read (or is not used), else why not. A Workboard
+        that does not exist yet is not a problem: sessions only."""
+        db = self.workboard_db
+        if db is None or not db.exists():
+            return None
+        try:
+            conn = workboard.connect(db)
+        except WorkboardError as exc:
+            return str(exc)
+        try:
+            missing = workboard.missing_columns(conn)
+        except sqlite3.Error as exc:
+            return f"cannot read Workboard database {db}: {exc}"
+        finally:
+            conn.close()
+        if missing:
+            return f"Workboard database {db} lacks {', '.join(missing)}"
+        return None
 
     def status_detail(self, now: datetime) -> list[str]:
         """Extra lines for ``kelpie status``: the Workboard and how fresh the spool is."""
@@ -260,8 +288,8 @@ class OpenClawAdapter:
     # --- reading -------------------------------------------------------------------------
 
     def board(self, now: datetime) -> workboard.Board:
-        """The Workboard as of ``now`` (empty when not configured or not there yet).
-        Raises :class:`OpenClawError` when it is there but cannot be read."""
+        """The Workboard as of ``now`` (empty when not configured or not there yet). Raises
+        :class:`OpenClawError` when it is there but cannot be read (see :meth:`snapshot`)."""
         db = self.workboard_db
         if db is None:
             return workboard.Board(cards=(), dependencies=())
@@ -274,16 +302,29 @@ class OpenClawAdapter:
             )
             return workboard.Board(cards=(), dependencies=())
         try:
-            return workboard.read_board(db, now - self.lookback, now, self.name)
+            board = workboard.read_board(db, now - self.lookback, now, self.name)
         except WorkboardError as exc:
             raise OpenClawError(str(exc), "the OpenClaw Workboard could not be read") from exc
+        for status in board.unknown:  # agents control the text: one warning per status
+            self._warn(
+                f"status:{status}",
+                "openclaw: Workboard cards with unknown status %r are left out (warned once)",
+                status,
+            )
+        return board
 
     def snapshot(self, now: datetime) -> Snapshot:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
         cutoff = now - self.lookback
         events = sorted(self._events(cutoff, now + FUTURE_SKEW), key=lambda e: e.at)
-        board = self.board(now)
+        try:
+            board = self.board(now)
+        except OpenClawError as exc:
+            # Sessions matter more than the board (they are what a stop acts on): keep them.
+            # Agents can write the file, so a broken board must not blind Kelpie to loops.
+            self._warn(f"board:{exc}", "openclaw: %s; sessions only until it can be read", exc)
+            board = workboard.Board(cards=(), dependencies=())
         sessions = self._sessions(events, board.cards)
         tasks = tuple(c.task for c in board.cards)
         owners = {t.owner_id for t in tasks if t.owner_id} | {s.owner_id for s in sessions}
@@ -297,7 +338,10 @@ class OpenClawAdapter:
         )
 
     def _sessions(self, events: Sequence[SpoolEvent], cards: Sequence[Card]) -> tuple[Session, ...]:
-        by_key = {c.session_key: c.task for c in cards if c.session_key}
+        by_key: dict[str, Task] = {}
+        for c in cards:  # newest first: on a tie the most recently updated card wins
+            if c.session_key and _rank(c.task) > _rank(by_key.get(c.session_key)):
+                by_key[c.session_key] = c.task
         grouped: dict[str, list[SpoolEvent]] = {}
         for e in events:
             grouped.setdefault(e.session_id, []).append(e)
@@ -356,16 +400,23 @@ class OpenClawAdapter:
                 )
             )
         spans = spans_from_hook_events(hook_events, prefix=self.name)
-        return spans + self._llm_spans(events, spans)
+        if not self.token_spans:
+            return spans
+        return spans + self._llm_spans(events, spans, task_of)
 
-    def _llm_spans(self, events: Sequence[SpoolEvent], spans: Sequence[Span]) -> tuple[Span, ...]:
-        """One LLM span per ``llm`` line (a run's token usage), under its session's span."""
+    def _llm_spans(
+        self, events: Sequence[SpoolEvent], spans: Sequence[Span], task_of: Mapping[str, str]
+    ) -> tuple[Span, ...]:
+        """One LLM span per ``llm`` line (a run's token usage), under its session's span when
+        there is one (a session whose only lines in ``lookback`` are runs without tool calls
+        has none: its LLM spans still carry the session and its task)."""
         parents = {s.session_id: s for s in spans if s.kind is SpanKind.SESSION and s.session_id}
         out: list[Span] = []
         for e in events:
             if e.type != "llm":
                 continue
             parent = parents.get(e.session_id)
+            task = task_of.get(e.session_id)
             attributes: dict[str, Any] = {"gen_ai.operation.name": "chat", SOURCE: HOOKS}
             if e.provider:
                 attributes["gen_ai.provider.name"] = e.provider
@@ -373,14 +424,16 @@ class OpenClawAdapter:
                 attributes["openclaw.trigger"] = e.trigger
             out.append(
                 Span(
-                    trace_id=parent.trace_id if parent is not None else e.session_id,
+                    trace_id=parent.trace_id
+                    if parent is not None
+                    else (f"{self.name}-task-{task}" if task else e.session_id),
                     span_id=f"{self.name}-llm-{e.key}",
                     parent_id=parent.span_id if parent is not None else None,
                     name=f"chat {e.model}" if e.model else "chat",
                     kind=SpanKind.LLM,
                     start=e.at,
                     end=e.at,
-                    task_id=parent.task_id if parent is not None else None,
+                    task_id=task,
                     session_id=e.session_id,
                     model=e.model,
                     input_tokens=e.input + e.cache_read + e.cache_write,
@@ -438,6 +491,16 @@ class OpenClawAdapter:
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
     ) -> None:
         raise UnsupportedAction(UNSUPPORTED)
+
+
+def _rank(task: Task | None) -> int:
+    """Which of the cards naming one session key the session works on: a running card, then
+    an open one, then a finished one."""
+    if task is None:
+        return -1
+    if task.status is Status.IN_PROGRESS:
+        return 2
+    return 0 if task.status.is_terminal else 1
 
 
 def workboard_path(state_dir: Path) -> Path:

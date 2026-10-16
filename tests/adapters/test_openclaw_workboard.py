@@ -128,7 +128,91 @@ def test_links(board: Workboard) -> None:
         Dependency(task_id="child", depends_on="parent"),
         Dependency(task_id="other", depends_on="blocker"),
     }
-    assert {c.task.id: c.task.subtasks for c in found.cards}["parent"] == ("child",)
+    # A Workboard parent is a prerequisite of its children, not a split: no subtasks.
+    assert all(c.task.subtasks == () for c in found.cards)
+
+
+def test_a_block_reason_is_from_this_block(board: Workboard) -> None:
+    board.card("c", "running", ago(days=4))
+    board.attempt("c", "blocked", ago(days=4), ago(days=3), error="old: no creds")
+    board.move("c", "blocked", ago(days=3))
+    board.move("c", "ready", ago(days=2))
+    board.move("c", "blocked", ago(minutes=30))
+    board.comment("c", "Needs a decision on the schema", ago(minutes=30))
+    block = tasks(board)["c"].task.block
+    assert block is not None and block.reason == "Needs a decision on the schema"
+
+
+def test_the_claim_token_never_leaves_sqlite(
+    board: Workboard, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claim = {"ownerId": "dev", "token": "SECRET-TOKEN", "expiresAt": NOW.timestamp() * 1000 + 1}
+    board.card("c", "running", ago(hours=1), claim=claim)
+    seen: list[object] = []
+    real = workboard.connect
+
+    def spying(path: Path, deadline: float = workboard.READ_DEADLINE) -> sqlite3.Connection:
+        conn = real(path, deadline)
+        conn.row_factory = lambda cur, row: seen.append(row) or sqlite3.Row(cur, row)
+        return conn
+
+    monkeypatch.setattr(workboard, "connect", spying)
+    assert tasks(board)["c"].task.owner_id == "dev"
+    assert seen and "SECRET-TOKEN" not in repr(seen)
+
+
+def test_malformed_claims(board: Workboard) -> None:
+    board.card("a", "running", ago(hours=1), agent="dev")
+    with sqlite3.connect(board.path) as db:
+        db.execute("UPDATE workboard_cards SET claim_json = ? WHERE id = 'a'", ("[" * 5000,))
+    assert tasks(board)["a"].task.owner_id == "dev"
+
+
+def test_cards_with_unusable_ids_are_left_out(board: Workboard) -> None:
+    board.card("x" * 300, "todo", ago(hours=1))
+    board.card("ok", "todo", ago(hours=1))
+    board.card("weird", "parked", ago(hours=1))
+    board.link("ok", "parent", "x" * 300, ago(hours=1))
+    found = read_board(board.path, CUTOFF, NOW, "openclaw")
+    assert [c.task.id for c in found.cards] == ["ok"]
+    assert found.dependencies == ()
+    assert found.unknown == ("parked",)
+
+
+def test_text_is_cut_in_the_query(board: Workboard) -> None:
+    board.card("c", "blocked", ago(hours=1), title="t" * 5000, notes="n" * 20000)
+    board.comment("c", "c" * 9000, ago(minutes=1))
+    task = tasks(board)["c"].task
+    assert len(task.title) == workboard.MAX_TITLE and len(task.body or "") == workboard.MAX_BODY
+    assert task.block is not None and len(task.block.reason) == workboard.MAX_REASON
+
+
+def test_a_view_in_place_of_a_table_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "workboard.sqlite"
+    Workboard(path)
+    with sqlite3.connect(path) as db:
+        db.execute("ALTER TABLE workboard_cards RENAME TO real_cards")
+        db.execute("CREATE VIEW workboard_cards AS SELECT * FROM real_cards")
+    with pytest.raises(WorkboardError, match="lacks workboard_cards"):
+        read_board(path, CUTOFF, NOW, "openclaw")
+
+
+def test_a_slow_read_is_interrupted(board: Workboard) -> None:
+    conn = workboard.connect(board.path, deadline=-1)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="interrupt"):
+            conn.execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) "
+                "SELECT count(*) FROM n"
+            ).fetchone()
+    finally:
+        conn.close()
+
+
+def test_session_keys_are_reduced_like_the_hooks(board: Workboard) -> None:
+    board.card("dm", "running", ago(hours=1), session_key="agent:main:whatsapp:direct:+15550100")
+    key = tasks(board)["dm"].session_key
+    assert key is not None and "+1555" not in key and key.startswith("agent:main:whatsapp:direct:~")
 
 
 def test_labels_body_and_session(board: Workboard) -> None:

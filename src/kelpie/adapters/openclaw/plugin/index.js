@@ -9,6 +9,7 @@
 // events beyond MAX_QUEUED waiting ones are dropped (counted in the log).
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,9 @@ const HOOK = join(dirname(fileURLToPath(import.meta.url)), "kelpie_hook.py");
 const HOOK_TIMEOUT_MS = 10000;
 const MAX_RUNNING = 8;
 const MAX_QUEUED = 256;
+// Tool arguments larger than this (as JSON) are not sent to the hook: the plugin hashes them
+// itself (paramsDigest) and the hook records that hash.
+const MAX_PARAMS = 1024 * 1024;
 // Variables the hook process gets: nothing else of the Gateway's environment (which holds
 // provider keys) reaches it.
 const ENV_KEEP = ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT"];
@@ -34,14 +38,37 @@ function toJson(value) {
   return JSON.stringify(value, (_key, v) => (typeof v === "bigint" ? v.toString() : v));
 }
 
+// The size of a tool result in characters: its text parts when it has the usual
+// { content: [{ text }] } shape (no serialisation of large results on the event loop), else
+// its JSON.
 function outputChars(result) {
   if (result === undefined || result === null) return undefined;
   if (typeof result === "string") return result.length;
+  if (Array.isArray(result.content)) {
+    let total = 0;
+    for (const part of result.content) {
+      if (typeof part?.text === "string") total += part.text.length;
+    }
+    return total;
+  }
   try {
     return toJson(result).length;
   } catch {
     return undefined;
   }
+}
+
+// Tool arguments for the hook: as they are, or, when larger than MAX_PARAMS (or not JSON),
+// left out with a digest of their JSON in their place (loop detection compares digests).
+function paramsFor(params) {
+  let json;
+  try {
+    json = toJson(params ?? null);
+  } catch {
+    return { params: null };
+  }
+  if (json === undefined || json.length <= MAX_PARAMS) return { params };
+  return { params: null, paramsDigest: createHash("sha256").update(json).digest("hex").slice(0, 16) };
 }
 
 // The fields kelpie_hook.py reads, per hook; nothing else is passed on.
@@ -55,7 +82,7 @@ const REDUCE = {
   }),
   after_tool_call: (e) => ({
     toolName: e.toolName,
-    params: e.params,
+    ...paramsFor(e.params),
     runId: e.runId,
     toolCallId: e.toolCallId,
     error: e.error ? "error" : undefined, // whether it failed, never the message
@@ -91,42 +118,63 @@ export function createForwarder(settings, logger, run = spawn) {
   for (const key of ENV_KEEP) if (process.env[key] !== undefined) env[key] = process.env[key];
   if (settings.spool) env.KELPIE_OPENCLAW_SPOOL = expand(settings.spool);
   if (settings.commands === false) env.KELPIE_OPENCLAW_SPOOL_COMMANDS = "0";
+  if (Number.isInteger(settings.maxBytes) && settings.maxBytes > 0) {
+    env.KELPIE_OPENCLAW_SPOOL_MAX_BYTES = String(settings.maxBytes);
+  }
   const python = settings.python || "python3";
   const queue = [];
   let running = 0;
   let dropped = 0;
   let failed = 0;
 
+  // Runs from hook handlers and from child-process callbacks: nothing may escape it (an
+  // uncaught exception in a callback ends the Gateway).
   function next() {
-    while (running < MAX_RUNNING && queue.length > 0) {
-      const payload = queue.shift();
-      running += 1;
-      let child;
-      const done = () => {
-        running -= 1;
-        next();
-      };
-      try {
-        child = run(python, [HOOK], { env, stdio: ["pipe", "ignore", "ignore"], timeout: HOOK_TIMEOUT_MS });
-      } catch (err) {
-        report(err);
-        done();
-        continue;
+    try {
+      while (running < MAX_RUNNING && queue.length > 0) {
+        start(queue.shift());
       }
-      let settled = false;
-      const finish = () => {
-        if (!settled) {
-          settled = true;
-          done();
-        }
-      };
+    } catch (err) {
+      report(err);
+    }
+  }
+
+  function start(payload) {
+    running += 1;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      running -= 1;
+      setImmediate(next); // never recurse from inside a callback
+    };
+    let child;
+    try {
+      // -I: the hook runs isolated (no user site, no current or script directory on sys.path).
+      child = run(python, ["-I", HOOK], {
+        env,
+        stdio: ["pipe", "ignore", "ignore"],
+        timeout: HOOK_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+      });
+    } catch (err) {
+      report(err);
+      finish();
+      return;
+    }
+    try {
       child.on("error", (err) => {
         report(err);
         finish();
       });
       child.on("close", finish);
+      // Without file descriptors spawn returns a child with no stdio; "error" follows.
+      if (!child.stdin) return;
       child.stdin.on("error", () => {});
       child.stdin.end(payload);
+    } catch (err) {
+      report(err);
+      finish();
     }
   }
 

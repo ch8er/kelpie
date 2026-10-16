@@ -74,6 +74,16 @@ CALLS: list[tuple[str, dict[str, Any], dict[str, Any]]] = [
         {"messages": [{"role": "user", "content": "SECRET"}], "success": True, "runId": "run-1"},
         TOOL_CTX,
     ),
+    (
+        "after_tool_call",
+        {
+            "toolName": "write",
+            "params": {"path": "big.txt", "content": "x" * (2 * 1024 * 1024)},
+            "toolCallId": "call_3",
+            "result": {"content": [{"type": "text", "text": "ok"}]},
+        },
+        {**TOOL_CTX, "toolName": "write", "toolCallId": "call_3"},
+    ),
     ("before_reset", {"reason": "new"}, TOOL_CTX),  # not registered: ignored
 ]
 
@@ -103,7 +113,7 @@ loop.params = { self: loop };
 handlers.after_tool_call(loop, { sessionId: "s" });
 setTimeout(() => {
   console.log(JSON.stringify({ registered: Object.keys(handlers).sort(), warnings }));
-}, 3000);
+}, 1500);
 """
 
 
@@ -142,16 +152,17 @@ def test_forwards_reduced_events(tmp_path: Path) -> None:
     for r in recs:
         by_type.setdefault(r["type"], []).append(r)
     assert sorted(by_type) == ["llm", "run_end", "session_start", "tool"]
-    tools = sorted(by_type["tool"], key=lambda r: r["tool_call_id"] or "")
-    exec_call, read_call = tools[-2:]
+    tools = {r["tool_call_id"]: r for r in by_type["tool"] if r["tool_call_id"]}
+    exec_call, read_call, big = tools["call_1"], tools["call_2"], tools["call_3"]
+    # Over 1 MiB of arguments: hashed by the plugin, not passed; result size from its text.
+    assert len(big["args_hash"]) == 16 and big["output_chars"] == 2
+    assert "xxxx" not in text
     assert (exec_call["tool"], exec_call["command"], exec_call["outcome"]) == (
         "exec",
         "curl -u *** ***",
         "ok",
     )
-    assert exec_call["output_chars"] == len(
-        json.dumps(CALLS[1][1]["result"], separators=(",", ":"))
-    )
+    assert exec_call["output_chars"] == len("SECRET OUTPUT")
     assert (read_call["outcome"], read_call["output_chars"]) == ("error", None)
     odd = {r["tool"]: r for r in recs if r["session_id"] == "s"}
     assert odd["x"]["args_hash"] == kelpie_hook.args_hash({"a": "1"})  # BigInt as text
@@ -159,6 +170,34 @@ def test_forwards_reduced_events(tmp_path: Path) -> None:
     assert all(r["session_id"] == SID for r in recs if r["session_id"] != "s")
     (llm,) = by_type["llm"]
     assert (llm["input"], llm["output"], llm["trigger"]) == (4000, 40, "heartbeat")
+
+
+def test_no_file_descriptors_does_not_crash_the_gateway(tmp_path: Path) -> None:
+    """With the descriptor limit reached, spawn fails in callbacks: nothing may escape."""
+    spool = tmp_path / "spool.jsonl"
+    script = tmp_path / "fds.mjs"
+    harness = HARNESS.replace("const calls = ", "const calls0 = ").replace(
+        "for (const [name", "const calls = Array(40).fill(calls0[1]);\nfor (const [name"
+    )
+    script.write_text(
+        harness
+        % {
+            "index": json.dumps((PLUGIN / "index.js").as_uri()),
+            "config": json.dumps({"python": sys.executable, "spool": str(spool)}),
+            "calls": json.dumps(CALLS),
+        }
+    )
+    for limit in (22, 26, 30):  # where the first version of the plugin threw (Node 24)
+        done = subprocess.run(
+            ["bash", "-c", f"ulimit -n {limit} && exec {NODE} {script}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert done.returncode == 0, done.stderr[-2000:]
+        assert "TypeError" not in done.stderr
+        assert '"registered"' in done.stdout
 
 
 def test_commands_off_and_a_missing_python(tmp_path: Path) -> None:

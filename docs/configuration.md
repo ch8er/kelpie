@@ -89,9 +89,7 @@ configure what exists.
 | `KELPIE_CLAUDE_STOP_DIR` | Claude Code hook | Where the hook looks for stop markers; must match `[adapters.claude_code] stop_dir`. |
 | `KELPIE_CLAUDE_STOP_TTL` | Claude Code hook | Seconds a stop marker holds (default 86400). |
 | `CLAUDE_CODE_TASK_LIST_ID`, `KELPIE_TASK_ID`, `KELPIE_AGENT` | Claude Code sessions | The shared task list; a task id from a launcher; the agent's name. Read by the hook. |
-| `KELPIE_OPENCLAW_SPOOL` | OpenClaw hook | Spool path on the Gateway host (default `~/.openclaw/kelpie/spool.jsonl`). The plugin sets it from its `spool` setting. |
-| `KELPIE_OPENCLAW_SPOOL_COMMANDS` | OpenClaw hook | `0`, `false`, `no` or `off`: record no command prefix. The plugin sets it from `commands = false`. |
-| `KELPIE_OPENCLAW_SPOOL_MAX_BYTES` | OpenClaw hook | Spool size that triggers rotation (default 20 MiB). |
+| `KELPIE_OPENCLAW_SPOOL`, `KELPIE_OPENCLAW_SPOOL_COMMANDS`, `KELPIE_OPENCLAW_SPOOL_MAX_BYTES` | OpenClaw hook | Spool path, `0` for no command prefix, rotation size. Not read from the Gateway's environment: the plugin sets them from its own settings `spool`, `commands` and `maxBytes` (`plugins.entries.kelpie.config`). |
 
 Variables named by `token_env`, `webhook_env`, `headers_env`, `cancel_token_env` and
 `billing_token_env` keys are read as configured.
@@ -571,6 +569,7 @@ cards of OpenClaw's Workboard plugin as tasks. Absent: no OpenClaw sessions. Det
 | `workboard` | `"<state_dir>/plugins/workboard/workboard.sqlite"` | path or `false` | The Workboard database, opened read-only. Missing: sessions only (a warning once). `false`: not read. |
 | `spool` | `"~/.openclaw/kelpie/spool.jsonl"` | path or `false` | Spool written by the plugin. `false`: no sessions, no hook spans. |
 | `lookback` | `"24h"` | duration, > 0 | Sessions and finished cards older than this are left out. |
+| `token_spans` | `true` | bool | LLM spans with each run's tokens from the plugin (it needs conversation access). Set `false` if OpenClaw's `diagnostics-otel` also sends its token spans to Kelpie: the daily report would count a run twice. |
 | `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
 
 ## [traces]

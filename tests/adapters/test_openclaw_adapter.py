@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -161,6 +162,54 @@ def test_sessions_link_to_workboard_cards(tmp_path: Path, spool: Spool, board: W
     assert tool.task_id == "c1"
 
 
+def test_cards_sharing_a_session_key(tmp_path: Path, spool: Spool, board: Workboard) -> None:
+    """Cards created from the main chat all name agent:main:main: the running one wins."""
+    board.card("old", "done", ago(hours=5), session_key=MAIN, completed_at=ago(hours=4))
+    board.card("open", "todo", ago(hours=3), session_key=MAIN)
+    board.card("live", "running", ago(hours=6), session_key=MAIN)
+    board.move("old", "done", ago(minutes=1))  # updated most recently
+    spool.tool("s1", ago(minutes=1))
+    (s,) = adapter(tmp_path, spool).snapshot(NOW).sessions
+    assert s.task_id == "live"
+    board.move("live", "done", ago(seconds=30))
+    (s,) = adapter(tmp_path, spool).snapshot(NOW).sessions
+    assert s.task_id == "open"
+
+
+def test_llm_spans_keep_their_task_without_a_session_span(
+    tmp_path: Path, spool: Spool, board: Workboard
+) -> None:
+    key = "agent:dev:subagent:workboard-default-c1"
+    board.card("c1", "running", ago(hours=1), session_key=key)
+    spool.write(
+        "llm_output", ago(minutes=1), {"usage": {"input": 10}}, sessionId="s9", sessionKey=key
+    )
+    (llm,) = adapter(tmp_path, spool).snapshot(NOW).spans
+    assert (llm.kind, llm.task_id, llm.session_id, llm.trace_id) == (
+        SpanKind.LLM,
+        "c1",
+        "s9",
+        "openclaw-task-c1",
+    )
+
+
+def test_token_spans_can_be_turned_off(tmp_path: Path, spool: Spool) -> None:
+    spool.write("llm_output", ago(minutes=1), {"usage": {"input": 10}}, sessionId="s1")
+    spans = adapter(tmp_path, spool, token_spans=False).snapshot(NOW).spans
+    assert all(sp.kind is not SpanKind.LLM for sp in spans)
+
+
+def test_a_forged_command_is_redacted_again(tmp_path: Path, spool: Spool) -> None:
+    spool.path.parent.mkdir(parents=True)
+    line = {"type": "tool", "at": ago(minutes=1).timestamp(), "session_id": "s1"}
+    line |= {"tool": "exec", "command": "curl -u admin:hunter2 https://x.test"}
+    spool.path.write_text(json.dumps(line) + "\n")
+    (tool,) = [
+        sp for sp in adapter(tmp_path, spool).snapshot(NOW).spans if sp.kind is SpanKind.TOOL
+    ]
+    assert tool.attributes["command"] == "curl -u *** ***"
+
+
 def test_spans(tmp_path: Path, spool: Spool) -> None:
     params = {"command": "curl -u admin:hunter2 https://x.test"}
     spool.tool("s1", ago(minutes=3), "exec", params, call="call_1")
@@ -246,13 +295,42 @@ def test_without_workboard(tmp_path: Path, spool: Spool, caplog: pytest.LogCaptu
     assert off.status_detail(NOW)[0] == "workboard: not read"
 
 
-def test_an_unreadable_workboard_fails_the_snapshot(tmp_path: Path, spool: Spool) -> None:
+def test_an_unreadable_workboard_leaves_sessions(
+    tmp_path: Path, spool: Spool, caplog: pytest.LogCaptureFixture
+) -> None:
     db = tmp_path / "plugins" / "workboard" / "workboard.sqlite"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"not sqlite" * 100)
+    spool.tool("s1", ago(minutes=1))
+    a = adapter(tmp_path, spool)
     with pytest.raises(OpenClawError) as err:
-        adapter(tmp_path, spool).snapshot(NOW)
+        a.board(NOW)
     assert err.value.public_reason == "the OpenClaw Workboard could not be read"
+    with caplog.at_level(logging.WARNING):
+        snap = a.snapshot(NOW)
+        a.snapshot(NOW)
+    assert (snap.tasks, [s.id for s in snap.sessions]) == ((), ["s1"])
+    assert sum("sessions only" in r.message for r in caplog.records) == 1
+    assert a.check() is not None
+
+
+def test_check(tmp_path: Path, spool: Spool, board: Workboard) -> None:
+    assert adapter(tmp_path, spool).check() is None
+    assert adapter(tmp_path, spool, workboard_db=tmp_path / "none.sqlite").check() is None
+    with sqlite3.connect(board.path) as db:
+        db.execute("ALTER TABLE workboard_cards DROP COLUMN agent_id")
+    assert "workboard_cards.agent_id" in (adapter(tmp_path, spool).check() or "")
+
+
+def test_unknown_statuses_are_warned_once(
+    tmp_path: Path, spool: Spool, board: Workboard, caplog: pytest.LogCaptureFixture
+) -> None:
+    board.card("c1", "parked", ago(hours=1))
+    a = adapter(tmp_path, spool)
+    with caplog.at_level(logging.WARNING):
+        a.snapshot(NOW)
+        a.snapshot(NOW)
+    assert sum("'parked'" in r.message for r in caplog.records) == 1
 
 
 def test_status_detail(tmp_path: Path, spool: Spool) -> None:
@@ -294,6 +372,7 @@ def test_config_defaults() -> None:
     s = load_openclaw({})
     assert s.enabled and s.spool == Path("~/.openclaw/kelpie/spool.jsonl")
     assert s.workboard == Path("~/.openclaw/plugins/workboard/workboard.sqlite")
+    assert load_openclaw({"token_spans": False}).build().token_spans is False
     s = load_openclaw(
         {"state_dir": "/srv/oc", "workboard": False, "spool": False, "lookback": "2h"}
     )
@@ -311,6 +390,7 @@ def test_config_defaults() -> None:
         ([], "must be a table"),
         ({"bogus": 1}, "unknown"),
         ({"enabled": "yes"}, "enabled"),
+        ({"token_spans": 1}, "token_spans"),
         ({"state_dir": ""}, "state_dir"),
         ({"workboard": True}, "workboard"),
         ({"spool": 3}, "spool"),

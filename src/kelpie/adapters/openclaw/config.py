@@ -18,17 +18,18 @@ from kelpie.adapters.openclaw.adapter import (
 from kelpie.core.serde import parse_duration
 
 SECTION = "[adapters.openclaw]"
-KEYS = frozenset({"enabled", "state_dir", "workboard", "spool", "lookback"})
+KEYS = frozenset({"enabled", "state_dir", "workboard", "spool", "lookback", "token_spans"})
 
 
 @dataclass(frozen=True, slots=True)
 class OpenClawSettings:
     state_dir: Path = DEFAULT_STATE_DIR
-    # The Workboard database; None: not read. Default: under state_dir.
+    # The Workboard database; None: not read (load_openclaw defaults it under state_dir).
     workboard: Path | None = None
     spool: Path | None = DEFAULT_SPOOL  # None: spool reading disabled
     lookback: timedelta = DEFAULT_LOOKBACK
     enabled: bool = True
+    token_spans: bool = True
 
     def build(self) -> OpenClawAdapter:
         return OpenClawAdapter(
@@ -36,6 +37,7 @@ class OpenClawSettings:
             workboard_db=self.workboard,
             spool=self.spool,
             lookback=self.lookback,
+            token_spans=self.token_spans,
         )
 
 
@@ -55,8 +57,10 @@ def load_openclaw(section: Any) -> OpenClawSettings:
     if extra := set(section) - KEYS:
         raise ValueError(f"unknown {SECTION} keys: {sorted(extra)}")
     enabled = section.get("enabled", True)
-    if not isinstance(enabled, bool):
-        raise ValueError(f"{SECTION} enabled must be true or false")
+    token_spans = section.get("token_spans", True)
+    for key, value in (("enabled", enabled), ("token_spans", token_spans)):
+        if not isinstance(value, bool):
+            raise ValueError(f"{SECTION} {key} must be true or false")
     state_dir = section.get("state_dir", str(DEFAULT_STATE_DIR))
     if not isinstance(state_dir, str) or not state_dir.strip():
         raise ValueError(f"{SECTION} state_dir must be a non-empty string")
@@ -74,4 +78,5 @@ def load_openclaw(section: Any) -> OpenClawSettings:
         spool=spool,
         lookback=lookback,
         enabled=enabled,
+        token_spans=token_spans,
     )

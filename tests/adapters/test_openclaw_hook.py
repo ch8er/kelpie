@@ -205,6 +205,49 @@ def test_a_symlinked_spool_is_not_followed(spool: Path, tmp_path: Path) -> None:
     assert target.read_text() == ""
 
 
+@pytest.mark.parametrize(
+    ("key", "kept"),
+    [
+        ("agent:main:main", True),
+        ("agent:main:main:heartbeat", True),
+        ("agent:dev:subagent:workboard-default-c1", True),
+        ("agent:main:cron:nightly:run:8821", True),
+        ("cron:nightly", True),
+        ("hook:2b9c", True),
+        ("agent:main:internal-session-effects:skill-workshop-review_x", True),
+        ("unknown", True),
+        ("agent:main:whatsapp:direct:+15550100", False),
+        ("agent:main:telegram:group:-100123", False),
+        ("agent:main:direct:alice", False),
+        ("agent:main:discord:channel:123:thread:9", False),
+        ("something else", False),
+    ],
+)
+def test_session_keys_lose_their_peer(key: str, kept: bool) -> None:
+    out = hook.safe_session_key(key)
+    assert out is not None
+    if kept:
+        assert out == key
+    else:
+        peer = key.split(":")[-1]
+        assert peer not in out.split(":") and out.split(":")[-1].startswith("~")
+        assert out == hook.safe_session_key(key)  # stable: the same peer, the same key
+
+
+def test_the_spool_holds_the_reduced_key(spool: Path) -> None:
+    key = "agent:main:whatsapp:direct:+15550100"
+    run(forwarded("after_tool_call", {"toolName": "read", "params": {}}, sessionKey=key))
+    assert "+1555" not in spool.read_text()
+    assert lines(spool)[0]["session_key"].startswith("agent:main:whatsapp:direct:~")
+
+
+def test_a_digest_from_the_plugin_replaces_the_hash(spool: Path) -> None:
+    event = {"toolName": "write", "params": None, "paramsDigest": "0123456789abcdef"}
+    run(forwarded("after_tool_call", event))
+    (rec,) = lines(spool)
+    assert rec["args_hash"] == "0123456789abcdef"
+
+
 def test_args_hash_matches_otlp_ingest() -> None:
     for args in ({"b": 1, "a": [1, 2]}, None, "text", {"x": object()}):
         assert hook.args_hash(args) == args_hash(args)
