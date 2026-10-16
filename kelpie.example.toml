@@ -45,7 +45,8 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # slots = 5                 # optional farm concurrency limit: full slots are not idle capacity
 # human_gate_after = "1h"   # a human task gates agent work once ready (or in progress) this long
 # human_gate_min_tasks = 3  # with escalate_human_gates: escalate gates with this many tasks
-# ready_is_queued = false   # true on Hermes: assigned ready tasks nobody started are queued
+# ready_is_queued = false   # true where an adapter reports the assignee of a task nobody
+#                           # started as its owner (not Hermes): such tasks are then queued
 #                           # work of their role, not a busy owner
 # escalate_human_gates = false  # true: also escalate each human gate here; by default
 #                               # needs_you escalates human work, one message per person
@@ -387,8 +388,6 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # session_stale_after = "60m"
 # [engine.rules.checkpoints]
 # session_stale_after = "60m"
-# [engine.rules.bottlenecks]
-# ready_is_queued = true    # Hermes assigns a task to a profile before it dispatches it
 #
 # Blocks. The adapter reports Hermes typed blocks (needs_input, capability, transient) as
 # "waiting_human: <kind>: <reason>" and circuit-breaker parks as "guard: hermes circuit

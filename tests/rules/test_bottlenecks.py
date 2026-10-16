@@ -992,7 +992,7 @@ def test_build_parses_ready_is_queued() -> None:
         build({"ready_is_queued": "yes"})
 
 
-HERMES = Bottlenecks(ready_is_queued=True)
+ASSIGNED = Bottlenecks(ready_is_queued=True)
 
 
 def test_human_owned_ready_work_is_never_queued() -> None:
@@ -1000,7 +1000,7 @@ def test_human_owned_ready_work_is_never_queued() -> None:
     tasks = tuple(
         task(f"H{i}", Status.READY, role="alice", owner="alice", since=H) for i in range(3)
     )
-    assert run(snap(tasks, owners), HERMES) == []
+    assert run(snap(tasks, owners), ASSIGNED) == []
     assert role_loads(snap(tasks, owners), ready_is_queued=True).get("alice") is None
 
 
@@ -1013,7 +1013,7 @@ def test_assigned_backlog_or_blocked_work_does_not_make_an_owner_busy() -> None:
     owners = agents("developer", "dev-1", "dev-2")
     load = role_loads(snap(tasks, owners), ready_is_queued=True)["developer"]
     assert load.busy == () and load.queue == ("A",)
-    [alert] = run(snap(tasks, owners), HERMES)
+    [alert] = run(snap(tasks, owners), ASSIGNED)
     assert alert.params["likely_cause"] == "dispatch" and alert.params["assigned_busy_tasks"] == []
     assert "1 queued task(s)" in alert.reason
 
@@ -1026,7 +1026,7 @@ def test_assigned_review_lane_counts_as_queued() -> None:
     busy_dev = (task("W", Status.IN_PROGRESS, owner="dev-1"),)
     owners = agents("reviewer", "rev-1", "rev-2") + agents("developer", "dev-1", "dev-2")
     sessions = (live("rev-2", "X"), live("dev-1", "W"))
-    actions = run(snap(reviews + busy_dev, owners, sessions=sessions), HERMES)
+    actions = run(snap(reviews + busy_dev, owners, sessions=sessions), ASSIGNED)
     load = role_loads(snap(reviews, owners, sessions=sessions), ready_is_queued=True)["reviewer"]
     assert load.queue == ("R3", "R2", "R1", "R0")  # oldest first
     [idle] = of(actions, "idle-ready")  # rev-1 owns them all but is not running any
@@ -1055,7 +1055,7 @@ def test_slots_count_running_tasks_not_agents() -> None:
 def test_recently_active_owner_is_not_called_busy() -> None:
     sessions = (Session("S", "Z", "dev-1", NOW - H, ended_at=NOW - 10 * M),)  # not idle yet
     tasks = (task("A", Status.READY, owner="dev-1", since=H),)
-    [alert] = run(snap(tasks, agents("developer", "dev-1", "dev-2"), sessions=sessions), HERMES)
+    [alert] = run(snap(tasks, agents("developer", "dev-1", "dev-2"), sessions=sessions), ASSIGNED)
     assert alert.params["likely_cause"] == "dispatch"
 
 
@@ -1066,7 +1066,7 @@ def test_mixed_work_lists_the_tasks_behind_busy_agents() -> None:
         task("B", Status.READY, since=H),
     )
     sessions = (live("dev-1", "W"),)
-    [alert] = run(snap(tasks, agents("developer", "dev-1", "dev-2"), sessions=sessions), HERMES)
+    [alert] = run(snap(tasks, agents("developer", "dev-1", "dev-2"), sessions=sessions), ASSIGNED)
     assert alert.params["likely_cause"] == "dispatch"
     assert alert.params["assigned_busy_tasks"] == ["A"]
 
@@ -1076,7 +1076,7 @@ def test_assigned_queued_work_suppresses_the_human_gated_alert_only_when_takeabl
     gated = (human("H"), task("X"), task("Y"))
     deps = chain("H", "X", "Y")
     assigned = (task("A", Status.READY, owner="dev-1", since=5 * M),)
-    assert of(run(snap(gated + assigned, owners, deps), HERMES), "human-gated") == []
+    assert of(run(snap(gated + assigned, owners, deps), ASSIGNED), "human-gated") == []
     assert of(run(snap(gated + assigned, owners, deps)), "human-gated")  # default: dev-1 busy
 
 
@@ -1320,3 +1320,17 @@ def test_build_pull_request_params() -> None:
         build({"ready_prs": "no"})
     with pytest.raises(ValueError, match="pr_role"):
         build({"pr_role": ""})
+
+
+def test_work_routed_to_a_busy_agent_suggests_reassigning() -> None:
+    """Hermes: ready work routed to a busy profile (``assignee``) and claimed by nobody
+    waits for that profile while others idle."""
+    tasks = (
+        Task("A", "A", Status.READY, NOW - H, "developer", assignee="dev-1"),
+        task("W", Status.IN_PROGRESS, owner="dev-1"),
+    )
+    sessions = (live("dev-1", "W"),)
+    [alert] = run(snap(tasks, agents("developer", "dev-1", "dev-2"), sessions=sessions))
+    assert alert.key == "bottlenecks:idle-ready"
+    assert alert.params["likely_cause"] == "assigned_busy" and "dev-1" in alert.reason
+    assert alert.params["assigned_busy_tasks"] == ["A"]

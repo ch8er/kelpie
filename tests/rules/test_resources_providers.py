@@ -314,3 +314,14 @@ def test_provider_config_is_read() -> None:
     assert rule.ignore_resets_within == timedelta(minutes=1)
     assert rule.provider_roles == {"main": ("coder",)}
     assert rule.provider_owners == {"main": ("agent-1",)}
+
+
+def test_work_routed_to_a_mapped_agent_counts_before_it_is_claimed() -> None:
+    """Hermes: when a quota runs out, runs end and the tasks go back to ready, routed to
+    their profile (``assignee``) but claimed by nobody: they are still the blocked work."""
+    status = provider(ok=False, auth_ok=False, error_kind="auth")
+    routed = (task("T-7", Status.READY, assignee="agent-2"),)
+    a = one(
+        run(build({"provider_owners": {"main": ["agent-2"]}}), providers=(status,), tasks=routed)
+    )
+    assert a.params["blocked_tasks"] == ["T-7"]

@@ -50,8 +50,9 @@ spare. An alert lasts as long as spare capacity exists.
   not flagged, a human task parked by a hold is not escalated, and a chain with agent work
   behind a human task gets no parallelization advice.
 
-``ready_is_queued`` (default off; on for Hermes, which assigns a task to a profile before it
-is dispatched, in the ready and the review lane) counts a ready or review task assigned to an
+``ready_is_queued`` (default off; for platforms that report the assignee of a task nobody has
+started as its owner; the Hermes adapter does not, since it sets the owner only while a run
+claims the task) counts a ready or review task assigned to an
 agent (not a human) that no live session works on as queued work of its role, and makes an
 agent busy only through a live session or a task in progress (assigned backlog or blocked
 work holds no worker). Waiting work all assigned to busy agents while others of the role
@@ -105,7 +106,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import ConditionKind, OwnerKind, PullRequest, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import is_live, last_seen, linked_conditions
+from kelpie.rules._tasks import is_live, last_seen, linked_conditions, responsible
 
 NAME = "bottlenecks"
 
@@ -143,7 +144,7 @@ _DISPATCHED = frozenset({Status.READY, Status.REVIEW})  # lanes a dispatcher han
 
 def queued_assigned(snapshot: Snapshot) -> set[str]:
     """Ready or review tasks assigned to an agent but with no live session: assigned, not
-    started yet (platforms that assign before dispatching, like Hermes)."""
+    started yet (platforms that report the assignee of an unstarted task as its owner)."""
     live = {s.task_id for s in snapshot.sessions if is_live(s, snapshot.now)}
     agents = {o.id for o in snapshot.owners if o.kind is OwnerKind.AGENT}
     return {
@@ -162,7 +163,7 @@ def role_loads(
     """Idle agents and queue depth per role, in one pass over owners, sessions and tasks.
 
     By default an agent that owns any open task is busy, and queues hold ownerless tasks.
-    With ``ready_is_queued`` (platforms that assign before dispatching, like Hermes) an agent
+    With ``ready_is_queued`` (platforms that report the assignee as owner) an agent
     is busy only with a live session or a task in progress, and a ready or review task
     assigned to an agent but not started is queued work of its role."""
     now = snapshot.now
@@ -425,7 +426,8 @@ class Bottlenecks:
     human_gate_after: timedelta = timedelta(hours=1)  # a human task waits this long first
     escalate_human_gates: bool = False  # per-gate escalation; rule 13 owns per person
     slots: int | None = None
-    # Assigned ready tasks nobody started are queued work (Hermes assigns before dispatch).
+    # Assigned ready tasks nobody started are queued work (for platforms that report the
+    # assignee of an unstarted task as its owner; not Hermes, which reports ``assignee``).
     ready_is_queued: bool = False
     # Open PRs the code host says can be merged now count as ready work (needs the GitHub
     # pull requests step); ``pr_role`` is the role that merges them (None: any idle agent).
@@ -651,7 +653,8 @@ class Bottlenecks:
         # its role sit idle: a reassignment helps. Otherwise the dispatcher is not handing
         # the work out.
         busy = {a for load in loads.values() for a in load.busy}
-        stuck = [t for t in work if t.owner_id is not None and t.owner_id in busy]
+        # The owner, or whom the platform routed the task to (it waits for that agent).
+        stuck = [t for t in work if (who := responsible(t)) is not None and who in busy]
         # The cause comes from the tasks; mergeable PRs add their own.
         role = f"the {self.pr_role} role" if self.pr_role else "any agent"
         merge = (
@@ -662,7 +665,7 @@ class Bottlenecks:
             cause, why = "merge", merge
         elif stuck and len(stuck) == len(work):
             cause = "assigned_busy"
-            owners = _names(sorted({str(t.owner_id) for t in stuck}))
+            owners = _names(sorted({str(responsible(t)) for t in stuck}))
             why = (
                 f"the work is assigned to busy agents ({owners}): a per-agent limit, or the "
                 "farm's global cap, keeps it waiting; reassign it to idle agents of the role"
@@ -692,7 +695,7 @@ class Bottlenecks:
                     **({"ready_prs": [pr.ref for pr in prs][: _SHOWN * 2]} if prs else {}),
                     **(
                         {"assigned_busy_tasks": [t.id for t in stuck][: _SHOWN * 2]}
-                        if self.ready_is_queued
+                        if self.ready_is_queued or stuck
                         else {}
                     ),
                 },

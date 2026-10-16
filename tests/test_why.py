@@ -93,7 +93,7 @@ def test_review_with_nothing_driving_it(farm: Path, capsys: pytest.CaptureFixtur
     text = render(ex)
     assert "Task t_review: Add CSV export" in text
     assert "status   review for 4h 00m" in text
-    assert "dev (agent, role dev)" in text and "none live" in text
+    assert "owner    none, routed to dev (agent, role dev)" in text and "none live" in text
     assert "final status review" in text
     assert "orphan_status [observe] alert warning" in text and "nothing is driving it" in text
     assert "behind it: 1 task(s): t_child" in text
@@ -160,8 +160,10 @@ def test_reads_states_and_ledger_without_writing(
     assert "blocked for 6h 01m" in out
     assert main(why("t_review", "--json")) == 0
     data = json.loads(capsys.readouterr().out)
-    assert [s["rule"] for s in data["states"]] == ["orphan_status"]
+    # Rule 3 names the cause; rule 6 also sees routed review work wait while dev is idle.
+    assert [s["rule"] for s in data["states"]] == ["orphan_status", "bottlenecks"]
     assert data["ledger"] and data["problems"] == []
+    assert data["task"]["owner_id"] is None and data["task"]["assignee"] == "dev"
 
 
 def test_config_error_exits_2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -23,8 +23,8 @@ STATUS_STAGES: Mapping[Status, str] = {
 
 def status_stage(task: Task, status: Status) -> str | None:
     """The stage of ``task`` in ``status`` with no session running: ``in_progress`` without
-    an owner is ownerless."""
-    if status is Status.IN_PROGRESS and task.owner_id is None:
+    an owner (nor anyone it is routed to) is ownerless."""
+    if status is Status.IN_PROGRESS and task.owner_id is None and task.assignee is None:
         return "ownerless"
     return STATUS_STAGES.get(status)
 

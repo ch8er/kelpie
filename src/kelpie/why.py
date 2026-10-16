@@ -362,15 +362,18 @@ def _mode(f: Finding, dry_run: bool) -> str:
     return f"{f.mode}, dry-run" if dry_run and f.mode is not Mode.OBSERVE else str(f.mode)
 
 
+def _who(ex: Explanation, owner_id: str) -> str:
+    owner = ex.snapshot.owner(owner_id)
+    if owner is None:
+        return f"{owner_id} (not in the owner directory)"
+    return f"{owner.id} ({owner.kind}, role {owner.role})"
+
+
 def render(ex: Explanation) -> str:
     t, now = ex.task, ex.snapshot.now
-    owner = ex.snapshot.owner(t.owner_id) if t.owner_id else None
-    if t.owner_id is None:
-        who = "none"
-    elif owner is None:
-        who = f"{t.owner_id} (not in the owner directory)"
-    else:
-        who = f"{owner.id} ({owner.kind}, role {owner.role})"
+    who = _who(ex, t.owner_id) if t.owner_id else "none"
+    if t.assignee and t.assignee != t.owner_id:  # routed, not (yet) claimed
+        who += f", routed to {_who(ex, t.assignee)}"
     held = sorted(ex.hold_labels.intersection(t.labels))
     lines = [
         f"Task {t.id}: {t.title}",
@@ -439,6 +442,7 @@ def as_json(ex: Explanation) -> dict[str, Any]:
             "status_since": t.status_since.isoformat(),
             "age_seconds": int((now - t.status_since).total_seconds()),
             "owner_id": t.owner_id,
+            "assignee": t.assignee,
             "role": t.role,
             "labels": list(t.labels),
             "held_by": sorted(ex.hold_labels.intersection(t.labels)),
