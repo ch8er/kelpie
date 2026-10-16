@@ -154,7 +154,7 @@ docker compose exec kelpie kelpie doctor --prometheus http://prometheus:9090
 | 9464 | `GET /metrics` | Prometheus metrics of Kelpie | none |
 | 9464 | `GET /healthz` | `ok` while the server runs | none |
 | 9464 | `POST /v1/traces` | OTLP/HTTP trace ingest (protobuf or JSON, optionally gzip; no gRPC); off with `[hub]` | bearer token, see below |
-| 9465 | `POST /v1/agent/*`, `/v1/traces` | Hub for `kelpie agent` (only with `[hub]`; HTTPS) | per-agent token |
+| 9465 | `POST /v1/agent/*`, `/v1/traces` | Hub for `kelpie agent` (only with `[hub]`; HTTPS, or plain HTTP on a private address with `allow_plain_http`) | per-agent token |
 | 4318 (agent machine, loopback) | `POST /v1/traces` | `kelpie agent`'s OTLP relay | none (loopback only) |
 | 9090 | | Prometheus (compose) | none |
 | 3000 | | Grafana (compose) | Grafana login |

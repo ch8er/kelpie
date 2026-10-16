@@ -18,9 +18,10 @@ Pick the case that matches your farm:
 | [Laptop + cloud VM](#laptop--cloud-vm) | multi-host | the VM (it stays up when the laptop sleeps) |
 | [Two VMs](#two-vms) | multi-host | either VM, or a third small machine |
 
-Install Kelpie on every machine as in [install.md](install.md). Every machine must run the
-**same Kelpie release**: agents and server refuse each other's reports otherwise, and say so
-in the log.
+Install Kelpie on every machine as in [install.md](install.md). Run the **same Kelpie
+release** everywhere: an agent and a server that speak different protocol versions refuse
+each other's messages and say so in the log, and releases with the same protocol may still
+disagree on fields.
 
 ## Laptop only
 
@@ -51,16 +52,24 @@ openssl rand -hex 32   # for the VM's own agent
 
 **2. TLS for the hub.** The laptop reaches the VM over the internet, so the hub serves HTTPS.
 
-- If the VM has a DNS name, use a certificate for it (e.g. from your ACME client).
-- Otherwise make a self-signed one and give the agents the certificate itself as `ca_file`:
+- If the VM has a DNS name, use a certificate for it (e.g. from your ACME client), and
+  `server = "https://<that name>:9465"` on both agents (the VM's own agent may need an
+  `/etc/hosts` entry pointing the name at 127.0.0.1 if the VM cannot reach its public
+  address).
+- Otherwise make a self-signed certificate for the VM's public IP address and for
+  127.0.0.1 (its own agent connects over loopback):
 
 ```bash
 openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
-  -subj "/CN=kelpie.example.internal" -addext "subjectAltName=DNS:kelpie.example.internal" \
+  -subj "/CN=kelpie-hub" -addext "subjectAltName=IP:203.0.113.10,IP:127.0.0.1" \
   -keyout /etc/kelpie/tls.key -out /etc/kelpie/tls.crt
+chmod 600 /etc/kelpie/tls.key && chown kelpie /etc/kelpie/tls.key   # the server's user
 ```
 
-The name in the certificate must be the name the agents use in `server`; it is checked.
+  Copy **only `tls.crt`** to the laptop (never the key); both agents use it as `ca_file`.
+  The laptop's `server` is `https://203.0.113.10:9465` (the VM's address), the VM's own
+  agent's is `https://127.0.0.1:9465`. Agents check that the certificate names the address
+  or name in `server`.
 
 If both machines are on one private network you control (e.g. Tailscale), you may skip TLS
 there. Set `allow_plain_http = true` on both sides and use the private address, as in
@@ -90,22 +99,32 @@ token_env = "KELPIE_AGENT_VM_TOKEN"
 # [engine], [alerts], [connectors.*], [[budgets]], [report] as in single-host mode.
 ```
 
+Give the server its tokens from a file only its user can read, not from shell history,
+e.g. a systemd unit with `EnvironmentFile=/etc/kelpie/tokens.env` (mode 0600):
+
 ```bash
-export KELPIE_AGENT_LAPTOP_TOKEN=...   # the laptop's token
-export KELPIE_AGENT_VM_TOKEN=...       # the VM agent's token
-kelpie --config /etc/kelpie/kelpie.toml serve --host 127.0.0.1
+# /etc/kelpie/tokens.env
+KELPIE_AGENT_LAPTOP_TOKEN=<the laptop's token>
+KELPIE_AGENT_VM_TOKEN=<the VM agent's token>
 ```
 
-`--host 127.0.0.1` keeps `/metrics` local to the VM (Prometheus on the VM scrapes it). Open
-port 9465 in the VM's firewall to the laptop (or to the internet: everything on it needs a
-token).
+```bash
+kelpie --config /etc/kelpie/kelpie.toml serve      # /metrics stays on 127.0.0.1:9464
+```
+
+`kelpie serve` binds `/metrics` to 127.0.0.1 by default, which keeps it local to the VM
+(Prometheus on the VM scrapes it); never open 9464 to the internet. Open 9465 in the VM's
+firewall, to the laptop's addresses where you can: everything on it needs a token, but
+fewer strangers mean fewer connections to cut. In the container image (`KELPIE_HOST` is
+`0.0.0.0` there), publish 9465 next to 9464, mount the certificate and key, and pass the
+token variables.
 
 **4. The VM's own agent** (`/etc/kelpie/agent.toml`):
 
 ```toml
 [agent]
 name = "vm"
-server = "https://kelpie.example.internal:9465"
+server = "https://127.0.0.1:9465"      # the laptop: https://203.0.113.10:9465
 ca_file = "/etc/kelpie/tls.crt"        # only for a self-signed certificate
 token_env = "KELPIE_AGENT_TOKEN"
 
@@ -117,19 +136,19 @@ path = "/var/lib/kelpie-agent/agent.db"   # where the Hermes park key lives
 ```
 
 ```bash
-KELPIE_AGENT_TOKEN=<the VM agent's token> kelpie --config /etc/kelpie/agent.toml agent
+kelpie --config /etc/kelpie/agent.toml agent   # KELPIE_AGENT_TOKEN from an EnvironmentFile
 ```
-
-(`server = "https://127.0.0.1:9465"` would fail the certificate's name check; use the
-certificate's name and, if needed, an `/etc/hosts` entry pointing it at 127.0.0.1.)
 
 **5. The laptop's agent:** the same file with `name = "laptop"`, the laptop's adapter
 paths and the laptop's token. Run it as the user that runs the agents, so it can read their
 boards and run the `hermes` CLI.
 
 **6. Traces.** Each agent runs an OTLP relay on `127.0.0.1:4318`. Point exporters on that
-machine at `http://127.0.0.1:4318/v1/traces` without a token (Hermes' Langfuse plugin,
-Claude Code's `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`). The relay forwards
+machine at `http://127.0.0.1:4318/v1/traces` without a token: for Claude Code,
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces` and
+`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`, without the `Authorization` header of
+[quickstart-claude-code.md](quickstart-claude-code.md); for Hermes, its Langfuse plugin's
+OTLP endpoint. The relay forwards
 the spans to the hub under the agent's token. With a hub, the main port's `/v1/traces` is
 off: spans whose ids no agent token vouches for could be filed under any machine. If something
 else already listens on 4318 (an OpenTelemetry collector), set `[agent] relay` to another
@@ -155,7 +174,8 @@ either, or on a third small machine. That way it survives the agent VMs filling 
 (incident 3), which is the point of a separate watchdog.
 
 Inside a network you control, plain HTTP is allowed if both sides ask for it. The hub
-listens on a private address (RFC 1918, `100.64.0.0/10` as Tailscale uses, IPv6 ULA; never
+listens on a private address (RFC 1918, `100.64.0.0/10` only when it is your tailnet,
+since it is also carrier-grade NAT space, IPv6 ULA; never
 `0.0.0.0`), and the agent's server name resolves only to such addresses (checked at
 startup):
 
@@ -188,8 +208,8 @@ db_path = "/home/agents/.hermes/kanban.db"
 
 vm-a runs its own `kelpie agent` (`name = "vm-a"`, same `server`). Tokens cross the
 network in clear text over plain HTTP, and both sides log a warning about it. Use TLS (as in
-the previous case) whenever anything else shares that network. Steps 6–8 of the previous
-case apply as they are.
+the previous case) whenever anything else shares that network, and let only the agent VMs
+reach 9465 (security group or firewall). Steps 6–8 of the previous case apply as they are.
 
 ## Moving from single host to multi-host
 

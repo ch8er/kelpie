@@ -953,7 +953,7 @@ and the report.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `name` | required | This machine on the farm: 1–63 of `a-z`, `0-9`, `-`. Its task ids become `<name>:<id>`. Must match an `[[hub.agents]]` entry. |
+| `name` | required | This machine on the farm: 1–63 of `a-z`, `0-9`, `-`, not starting or ending with `-`. Its task ids become `<name>:<id>`. Must match an `[[hub.agents]]` entry. |
 | `server` | required | `https://host[:port]` of the hub (port 9465 by default), no path. `http://` only with `allow_plain_http`. |
 | `token_env` | `KELPIE_AGENT_TOKEN` | Variable holding this agent's token: at least 32 printable characters, random (`openssl rand -hex 32`). |
 | `ca_file` | system trust store | Certificate (or CA) the hub's certificate must chain to. The host name is always checked. |
@@ -974,7 +974,7 @@ the agents' relays).
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `listen` | `"0.0.0.0:9465"` | Address and port of the hub listener. |
-| `tls_cert`, `tls_key` | — | Certificate and key (PEM) for HTTPS. Required unless `allow_plain_http`. |
+| `tls_cert`, `tls_key` | — | Certificate and key (PEM) for HTTPS. Required unless `allow_plain_http`; the two exclude each other. |
 | `allow_plain_http` | `false` | Plain HTTP; `listen` must then be a loopback or private address, never `0.0.0.0`. |
 | `silent_after` | `90s` | No fresh report for this long: one alert "agent X silent"; "resolved" when it is back (10s–1h). |
 | `action_timeout` | `30s` | How long an action waits for the agent's result, and each agent's total per tick (1s–2m). |
