@@ -70,6 +70,9 @@ _KINDS: Mapping[ConditionKind, str] = {
     ConditionKind.CUSTOM: "other",
 }
 MIN_HOURS = 1.0  # a smaller wait is no headline
+MAX_REASON = 2000  # characters of a block reason matched, as the GitHub step does
+# "owner/name#12" or a pull request URL in a pattern's ``pr`` group: the repository
+_REPO_IN_REF = re.compile(r"([\w.-]+/[\w.-]+)(?:#|/pull/)\d+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,11 +167,15 @@ class WaitCauses:
         """A wait the block reason declares (``[[block_conditions]]``), unchecked."""
         if task.block is None:
             return None
+        reason = task.block.reason[:MAX_REASON]
         for b in self._block_kinds:
-            if (m := b.pattern.search(task.block.reason)) is not None:
-                repo = m.groupdict().get("repo") or b.repo
-                params = {"repo": repo} if repo else {}
-                return Condition(f"block:{task.id}:{b.kind}", b.kind, task.id, params)
+            m = b.pattern.search(reason)
+            if m is None or not m.groupdict().get("pr"):
+                continue  # as the GitHub step: a match must name a PR
+            ref = _REPO_IN_REF.search(m["pr"])
+            repo = ref.group(1).lower() if ref else b.repo
+            params = {"repo": repo} if repo else {}
+            return Condition(f"block:{task.id}:{b.kind}", b.kind, task.id, params)
         return None
 
 

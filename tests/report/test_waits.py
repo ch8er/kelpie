@@ -274,7 +274,7 @@ def test_a_wait_a_block_reason_declares_counts_by_its_pattern_kind() -> None:
             ConditionKind.CI_STATUS,
             "example/app",
         ),
-        BlockKind(re.compile(r"merge of (?P<repo>\S+)#(?P<pr>\d+)", re.I), ConditionKind.PR_MERGED),
+        BlockKind(re.compile(r"merge of (?P<pr>\S+#\d+)", re.I), ConditionKind.PR_MERGED),
     )
     of = WaitCauses((), (inbox(waiting=["B1"]),), (), kinds)
     ci_wait = Task("B1", "B1", Status.BLOCKED, at(8), block=Block("Waiting for CI of #12", at(8)))
@@ -288,3 +288,25 @@ def test_a_wait_a_block_reason_declares_counts_by_its_pattern_kind() -> None:
     assert of(other) == UNKNOWN
     known = WaitCauses((Condition("q", ConditionKind.QUOTA_RESET, "B1"),), (), (), kinds)
     assert known(ci_wait) == "quota"  # a registered unmet condition comes first
+
+
+def test_a_declared_ci_wait_heads_the_report() -> None:
+    import re
+
+    from kelpie.report.waits import BlockKind
+
+    kinds = (BlockKind(re.compile(r"CI of (?P<pr>\S*)", re.I), ConditionKind.CI_STATUS),)
+    reason = "waiting for CI of https://github.example/example/app/pull/12"
+    blocked = tuple(
+        Task(f"B{i}", "b", Status.BLOCKED, at(8), role="reviewer", block=Block(reason, at(8)))
+        for i in range(3)
+    )
+    report = build_report(
+        inputs(tasks=blocked, sessions=(), conditions=(), actions=(), block_kinds=kinds),
+        sections={},
+    )
+    assert report.biggest_wait is not None and report.biggest_wait.cause == "ci"
+    assert "waiting for CI (3 task(s), mostly on `example/app`)" in render_markdown(report)
+    empty = Block("CI of ", at(8))  # no PR named: no declared wait
+    of = WaitCauses((), (), (), kinds)
+    assert of(Task("E", "e", Status.BLOCKED, at(8), block=empty)) == UNKNOWN
