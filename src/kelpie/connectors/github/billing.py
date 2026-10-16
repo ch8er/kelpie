@@ -77,6 +77,7 @@ _HINTS = {
 }
 _HINT_400 = "is the account on GitHub's enhanced billing platform?"
 MAX_NAMED = 5  # SKUs named in the "none counted" warning
+MAX_SKU = 64  # characters of a SKU name kept from GitHub's answer
 _SEPARATORS = re.compile(r"[\s-]+")
 
 
@@ -114,9 +115,9 @@ def _item_date(raw: Any) -> date | None:
         if len(raw.strip()) == 10:
             return date.fromisoformat(raw.strip())
         at = datetime.fromisoformat(raw.strip())
-    except ValueError:
+        return at.astimezone(UTC).date() if at.tzinfo is not None else at.date()
+    except (ValueError, OverflowError):  # out of range, or off the calendar's edge in UTC
         return None
-    return at.astimezone(UTC).date() if at.tzinfo is not None else at.date()
 
 
 class Tally(NamedTuple):
@@ -153,7 +154,7 @@ def minutes_since(
             continue
         if not isinstance(sku, str) or sku_name(sku) not in wanted:
             if isinstance(sku, str) and _within(item.get("date"), start, month, until):
-                others.add(sku_name(sku))
+                others.add(sku_name(sku)[:MAX_SKU])
             continue
         quantity = item.get("quantity")
         if (

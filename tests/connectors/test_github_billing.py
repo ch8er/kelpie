@@ -133,7 +133,17 @@ def test_item_dates_are_read_in_utc(raw: str, counted: bool) -> None:
     assert tally.minutes == (1.0 if counted else 0.0)
 
 
-@pytest.mark.parametrize("raw", ["2026-13-01T00:00:00Z", "March 1", "", 20260301])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "2026-13-01T00:00:00Z",
+        "March 1",
+        "",
+        20260301,
+        "0001-01-01T00:00:00+05:00",  # before the first UTC day
+        "9999-12-31T23:00:00-05:00",  # after the last
+    ],
+)
 def test_an_unreadable_date_is_left_out(raw: Any) -> None:
     tally = minutes_since(report(item("2026-03-02", 1, date=raw)), date(2026, 3, 1))
     assert tally == Tally(0.0, 1, 0, frozenset())
@@ -513,9 +523,7 @@ def test_the_billing_token_goes_to_the_billing_report_only(
                         **BASE,
                         "billing_user": "farm-owner",
                         "billing_token_env": "BILL",
-                        "allow_cancel": True,
-                        "cancel_repos": [REPO],
-                        "cancel_token_env": "CANCEL",
+                        "cancel_token_env": "CANCEL",  # warned even while allow_cancel is off
                     },
                 }
             )

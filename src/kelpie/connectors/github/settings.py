@@ -128,8 +128,8 @@ class GitHubSettings:
         billing_token = self.ci.billing_token(environ)
         if billing_token is not None and self.ci.billing_account is not None:
             others = {self.token_env: environ.get(self.token_env, "").strip()}
-            if self.ci.cancel_token_env is not None:
-                others[self.ci.cancel_token_env] = token or ""
+            if self.ci.cancel_token_env is not None:  # also while allow_cancel is off
+                others[self.ci.cancel_token_env] = environ.get(self.ci.cancel_token_env, "").strip()
             for name, value in others.items():
                 if value and value == billing_token:
                     log.warning(
