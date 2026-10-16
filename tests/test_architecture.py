@@ -137,6 +137,7 @@ SIMULATOR_FREE = (
     "server.py",
     "metrics.py",
     "net.py",
+    "remote",
     "doctor.py",
     "why.py",
     "cli.py",  # the demo command imports it lazily, inside the command

@@ -95,6 +95,7 @@ source_modules = [
     "kelpie.server",
     "kelpie.metrics",
     "kelpie.net",
+    "kelpie.remote",
     "kelpie.doctor",
     "kelpie.why",
 ]
