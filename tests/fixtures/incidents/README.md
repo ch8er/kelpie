@@ -33,6 +33,9 @@ snapshot:                    # passed verbatim to kelpie.core.serde.snapshot_fro
   providers: [...]           # ProviderStatus: LLM provider probes ([connectors.llm_quotas])
   builds: [...]              # Build: recent CI builds, as a CI connector reports them
   pull_requests: [...]       # PullRequest: open PRs, as a code-host connector reports them
+  closed_pull_requests: [...]  # PullRequest with closed_at (and merged_at when merged):
+                             # PRs closed within the connector's lookback
+  pull_requests_complete: true # the code host listed both in full (omitted: no code host)
   output_offenders: [...]    # OutputOffender: repeated huge tool outputs ([traces.outputs])
 expected_actions:            # must be emitted; subset match, order-insensitive
   - kind: unblock            # ActionKind value

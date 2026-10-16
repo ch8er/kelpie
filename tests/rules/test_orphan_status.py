@@ -1,9 +1,19 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from kelpie.core.actions import ActionKind, Severity
-from kelpie.core.model import Dependency, Owner, OwnerKind, Session, Snapshot, Status, Task
+from kelpie.core.model import (
+    Dependency,
+    Owner,
+    OwnerKind,
+    PullRequest,
+    Session,
+    Snapshot,
+    Status,
+    Task,
+)
 from kelpie.rules import REGISTRY
 from kelpie.rules.orphan_status import OrphanStatus, build
 
@@ -24,9 +34,38 @@ def act(
     owners: tuple[Owner, ...] = (DEV,),
     sessions: tuple[Session, ...] = (),
     rule: OrphanStatus | None = None,
+    prs: tuple[PullRequest, ...] = (),
+    closed: tuple[PullRequest, ...] | None = None,
+    complete: bool = True,
 ) -> list:
-    snap = Snapshot(now=NOW, tasks=tasks, owners=owners, dependencies=deps, sessions=sessions)
+    snap = Snapshot(
+        now=NOW,
+        tasks=tasks,
+        owners=owners,
+        dependencies=deps,
+        sessions=sessions,
+        pull_requests=prs,
+        closed_pull_requests=LANDED if closed is None else closed,
+        pull_requests_complete=complete,
+    )
     return list((rule or OrphanStatus()).evaluate(snap))
+
+
+def merged_pr(number: int, *task_ids: str, merged: bool = True) -> PullRequest:
+    at = NOW - 6 * 60 * M
+    return PullRequest(
+        "example/repo",
+        number,
+        f"{task_ids[0]}: work",
+        f"feature/{task_ids[0]}",
+        task_ids=task_ids,
+        closed_at=at,
+        merged_at=at if merged else None,
+        into_default=True,
+    )
+
+
+LANDED = (merged_pr(1, "S1"), merged_pr(2, "S2"))  # the subtasks' PRs, merged
 
 
 def kinds(actions: list) -> list[str]:
@@ -225,15 +264,26 @@ def test_a_parent_whose_subtasks_are_done_is_asked_to_close() -> None:
     assert "close it?" in alert.reason and "the last 2h ago" in alert.reason
     assert alert.since == NOW - 120 * M
     assert close.task_id == "P" and close.params["pattern"] == "parent-left-open"
+    assert (
+        alert.params["merged_prs"]
+        == close.params["merged_prs"]
+        == [
+            "example/repo#1",
+            "example/repo#2",
+        ]
+    )
+    assert "their PRs are merged (example/repo#1, example/repo#2)" in alert.reason
 
 
 def test_parent_thresholds_and_exceptions() -> None:
     assert act(parent(), done("S1", 300), done("S2", 59)) == []  # the last one just finished
     assert act(parent(), done("S1", 300), task("S2", Status.IN_PROGRESS, owner_id="dev-1")) == []
-    assert act(parent(), done("S1", 300)) != []  # S2 left the board: finished
+    # S2 left the board: finished, but its PRs cannot be linked, so nothing is closed.
+    assert patterns(act(parent(), done("S1", 300), closed=LANDED[:1])) == ["parent-unverified"]
     assert act(task("P", Status.BACKLOG, 600, subtasks=("S9",))) == []  # none known
     # None known, but ready: the platform woke it when they were done (past lookback).
-    assert act(task("P", Status.READY, 600, subtasks=("S9",)))
+    alone = act(task("P", Status.READY, 600, subtasks=("S9",)), closed=(merged_pr(3, "P"),))
+    assert patterns(alone) == ["parent-unverified"]  # S9's own PR is unknown
     live = (Session("x", "P", "dev-1", NOW - 10 * M, last_heartbeat=NOW - M),)
     assert act(parent(), done("S1", 300), done("S2", 300), sessions=live) == []
     off = OrphanStatus(parent_close_after=None)
@@ -242,18 +292,21 @@ def test_parent_thresholds_and_exceptions() -> None:
 
 
 def test_a_parent_with_an_open_pr_of_its_own_is_not_done() -> None:
-    from kelpie.core.model import PullRequest
-
     tasks = (parent(), done("S1", 300), done("S2", 300))
     pr = PullRequest("example/repo", 7, "P: integration", "feature/P", task_ids=("P",))
-    snap = Snapshot(now=NOW, tasks=tasks, owners=(DEV,), pull_requests=(pr,))
-    assert list(OrphanStatus().evaluate(snap)) == []
+    assert act(*tasks, prs=(pr,)) == []
 
 
 def test_a_finished_parent_gets_no_other_alert() -> None:
     # In progress and ownerless for hours: the parent check speaks for it, once.
     found = act(parent(Status.IN_PROGRESS), done("S1", 300), done("S2", 300))
     assert [a.params.get("pattern") for a in found] == ["parent-left-open", "parent-left-open"]
+
+
+def patterns(actions: list) -> list[str]:
+    """The patterns of the alerts, after checking nothing proposes closing."""
+    assert ActionKind.CLOSE not in kinds(actions)
+    return [a.params.get("pattern") for a in actions]
 
 
 def test_a_card_stuck_before_work_with_dependents_alerts() -> None:
@@ -283,11 +336,50 @@ def test_a_parent_held_by_more_than_its_subtasks_is_not_done() -> None:
     extra = (task("C", Status.IN_PROGRESS, owner_id="dev-1"),)
     assert act(parent(), *kids, *extra, deps=(Dependency("P", "C"),)) == []
     # A subtask's PR is still open.
-    from kelpie.core.model import PullRequest
-
     pr = PullRequest("example/repo", 9, "S2: polish", "feature/S2", task_ids=("S2",))
-    snap = Snapshot(now=NOW, tasks=(parent(), *kids), owners=(DEV,), pull_requests=(pr,))
-    assert list(OrphanStatus().evaluate(snap)) == []
+    assert act(parent(), *kids, prs=(pr,)) == []
+
+
+def test_a_parent_is_closed_only_when_every_pr_of_its_family_is_merged() -> None:
+    """Incident 17, live review: subtasks done, their PRs returned for conflicts."""
+    kids = (done("S1", 300), done("S2", 300))
+    returned = merged_pr(4, "S2", merged=False)  # closed without merging
+    [alert] = act(parent(), *kids, closed=(*LANDED, returned))
+    assert patterns([alert]) == ["parent-prs-unmerged"]
+    assert alert.params["unmerged_prs"] == ["example/repo#4"] and "close it?" not in alert.reason
+    assert "not merged" in alert.reason and "their work has not landed" in alert.reason
+    # A merged revert undoes the work.
+    revert = replace(merged_pr(7, "S1"), title='Revert "S1: work"')
+    assert patterns(act(parent(), *kids, closed=(*LANDED, revert))) == ["parent-prs-unmerged"]
+    # An open PR of the family: the parent is not finished at all.
+    open_pr = PullRequest("example/repo", 5, "S1: follow-up", "feature/S1-b", task_ids=("S1",))
+    assert act(parent(), *kids, prs=(open_pr,)) == []
+
+
+@pytest.mark.parametrize(
+    ("kw", "gap"),
+    [
+        ({"complete": False}, "the code host's PRs are not fully known"),
+        ({"complete": None}, "the code host's PRs are not fully known"),
+        ({"closed": ()}, "no merged PR for S1, S2"),
+        ({"closed": LANDED[:1]}, "no merged PR for S2"),
+        ({"closed": (replace(LANDED[0], into_default=False), LANDED[1])}, "no merged PR for S1"),
+    ],
+)
+def test_a_parent_whose_work_is_not_known_to_have_landed_is_not_closed(
+    kw: dict[str, object], gap: str
+) -> None:
+    [alert] = act(parent(), done("S1", 300), done("S2", 300), **kw)  # type: ignore[arg-type]
+    assert patterns([alert]) == ["parent-unverified"]
+    assert gap in alert.reason and "check its PRs" in alert.reason
+
+
+def test_one_merged_pr_can_cover_several_subtasks() -> None:
+    found = act(parent(), done("S1", 300), done("S2", 300), closed=(merged_pr(6, "S1", "S2"),))
+    assert ActionKind.CLOSE in kinds(found)
+    unknown_target = replace(merged_pr(6, "S1", "S2"), into_default=None)
+    found = act(parent(), done("S1", 300), done("S2", 300), closed=(unknown_target,))
+    assert patterns(found) == ["parent-unverified"]
 
 
 @pytest.mark.parametrize("status", [Status.BLOCKED, Status.WAITING, Status.REVIEW])

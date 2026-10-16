@@ -388,7 +388,9 @@ class LabelEvent:
 
 @dataclass(frozen=True, slots=True)
 class PullRequest:
-    """An open pull (merge) request, as a code-host connector reports it.
+    """A pull (merge) request, as a code-host connector reports it: open
+    (``Snapshot.pull_requests``) or recently closed (``Snapshot.closed_pull_requests``,
+    ``closed_at`` set, and ``merged_at`` when it was merged).
 
     ``branch`` is its head branch. ``task_ids`` are the tasks it belongs to.
     ``mergeable`` is True when the host says it can be merged now (no conflicts, required
@@ -413,6 +415,15 @@ class PullRequest:
     # The tasks it belongs to: their code is in its title or head branch (never a mention in
     # its description or comments, incident 17).
     task_ids: tuple[str, ...] = ()
+    closed_at: datetime | None = None
+    merged_at: datetime | None = None
+    # Whether it targets the repository's default branch (False: a stacked PR into another
+    # branch); None when unknown.
+    into_default: bool | None = None
+
+    @property
+    def merged(self) -> bool:
+        return self.merged_at is not None
 
     @property
     def ref(self) -> str:
@@ -488,6 +499,13 @@ class Snapshot:
     providers: tuple[ProviderStatus, ...] = ()  # LLM provider quota and auth probes
     builds: tuple[Build, ...] = ()  # recent CI builds (CI connectors)
     pull_requests: tuple[PullRequest, ...] = ()  # open PRs (code-host connectors)
+    # PRs closed (merged or not) within the connector's lookback.
+    closed_pull_requests: tuple[PullRequest, ...] = ()
+    # True when the code-host connectors' last two scans read the open and recently closed
+    # PRs of every repository they watch in full, and nothing moved while they read them:
+    # only then does a task with no unmerged PR in the snapshot really have none (a parent is
+    # proposed for closing only then). False otherwise; None when no connector lists PRs.
+    pull_requests_complete: bool | None = None
     # Repeated huge-output offenders over [traces.outputs] repeat_days (span store).
     output_offenders: tuple[OutputOffender, ...] = ()
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(

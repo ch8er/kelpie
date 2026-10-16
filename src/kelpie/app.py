@@ -1102,8 +1102,20 @@ def _github_steps(
         # Rule 6's hold labels: the PR labels whose time the pull request step reads.
         watch = frozenset(_hold_labels(settings.engine.rules.get("bottlenecks", {})))
         steps.append(("github_pulls", PullRequestSync(connector, github.pulls, watch)))
+        # A cache entry dates from its request, a few seconds into a tick: keep a margin.
+        if github.cache_ttl + github.tick_budget >= github.pulls.poll_interval:
+            log.warning(
+                "[connectors.github] cache_ttl (%s) plus tick_budget (%s) is not below "
+                "[connectors.github.pulls] poll_interval (%s): PR lists come from the cache, "
+                "so they are seldom known in full and rule 3 seldom proposes closing a parent",
+                _span(github.cache_ttl),
+                _span(github.tick_budget),
+                _span(github.pulls.poll_interval),
+            )
         log.info(
-            "[connectors.github.pulls] open PRs of %s; hold labels read: %s",
+            "[connectors.github.pulls] open PRs, and those closed within %s, of %s; hold "
+            "labels read: %s",
+            _span(github.pulls.closed_lookback),
             ", ".join(sorted(connector.repos)),
             ", ".join(sorted(watch)) or "none",
         )
@@ -1433,3 +1445,12 @@ def render_status(
     lines += render_budgets(settings, budgets, now or utc_now())
     lines += render_adapters(adapters)
     return "\n".join(lines) + "\n"
+
+
+def _span(d: timedelta) -> str:
+    """A config duration as it is written, e.g. ``7d``, ``36h``, ``90m``."""
+    seconds = int(d.total_seconds())
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"

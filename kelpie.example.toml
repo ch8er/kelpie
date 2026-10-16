@@ -49,6 +49,7 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # recovery_labels = ["recovery"]  # labels that mark a recovery task
 # recovery_titles = []      # ...or title patterns, e.g. '^recover (?P<target>T-\d+)'
 # parent_close_after = "1h" # stop pattern: subtasks all finished, parent still open -> close it?
+#                           # (only when every PR of the family is merged; needs [connectors.github.pulls])
 # prework_after = "4h"      # stop pattern: a card in triage/scheduled holding up dependents
 # hold_labels = []          # held tasks are skipped by the stop patterns; unset: bottlenecks'
 # ignore_tasks = []         # task ids or globs rule 3 never looks at (boards without labels)
@@ -490,6 +491,8 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # one request each, within max_requests_per_tick
 # task_code = '^[A-Z][A-Z0-9]+-[0-9]+'  # task codes at the start of task titles (besides
 #                                   # the id); no nested repeats
+# closed_lookback = "7d"            # closed PRs listed this far back (1h to 30d): rule 3
+#                                   # proposes closing a parent only when its PRs are merged
 # enabled = true
 #
 # Rate limit: a scan runs every poll_interval and spends at most max_requests_per_tick

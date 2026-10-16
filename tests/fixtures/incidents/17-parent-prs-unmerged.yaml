@@ -1,0 +1,72 @@
+id: "17-parent-prs-unmerged"
+incident: 17
+title: "A parent whose subtasks are done but whose PRs are not merged stays open"
+description: >
+  From a live 24 h review in observe mode: every subtask of a parent was done on the board,
+  but two of their PRs had been returned for conflicts and were not merged, and Kelpie still
+  proposed closing the parent. Closing it would have dropped work that never landed. A
+  parent is proposed for closing only when the code host's open and recently closed PRs are
+  known and every PR linked to the parent or a subtask (by task code in its title or branch)
+  is merged, each subtask with a merged PR of its own. Here APP-040's subtask APP-051a has
+  an open PR with conflicts (the parent is not finished at all), and APP-051b's PR was closed
+  without merging; APP-080's only subtask PR was closed without merging, so Kelpie names the
+  unmerged PR and proposes nothing; APP-060, whose subtasks' PRs are all merged, is asked to
+  close.
+rule: orphan_status
+config: {}
+snapshot:
+  now: "2026-03-02T18:00:00+00:00"
+  owners:
+    - {id: agent-orch-1, role: orchestrator}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # The farm case: subtasks done, their PRs returned for conflicts.
+    - {id: t_a040, title: "APP-040 Sign-in flow", status: ready, status_since: "2026-03-02T12:00:00+00:00", role: orchestrator, assignee: agent-orch-1, subtasks: [t_a051a, t_a051b]}
+    - {id: t_a051a, title: "APP-051a Sign-in screen", status: done, status_since: "2026-03-02T10:00:00+00:00", role: developer, branch: "app/APP-051a"}
+    - {id: t_a051b, title: "APP-051b Session refresh", status: done, status_since: "2026-03-02T11:00:00+00:00", role: developer, branch: "app/APP-051b"}
+    # A parent whose work did land.
+    - {id: t_a060, title: "APP-060 Settings", status: ready, status_since: "2026-03-02T12:00:00+00:00", role: orchestrator, assignee: agent-orch-1, subtasks: [t_a061, t_a062]}
+    - {id: t_a061, title: "APP-061 Settings list", status: done, status_since: "2026-03-02T10:00:00+00:00", role: developer, branch: "app/APP-061"}
+    - {id: t_a062, title: "APP-062 Settings sync", status: done, status_since: "2026-03-02T11:00:00+00:00", role: developer, branch: "app/APP-062"}
+    # Subtask done, its PR returned and closed without merging.
+    - {id: t_a080, title: "APP-080 Onboarding", status: ready, status_since: "2026-03-02T12:00:00+00:00", role: orchestrator, assignee: agent-orch-1, subtasks: [t_a081]}
+    - {id: t_a081, title: "APP-081 Welcome screen", status: done, status_since: "2026-03-02T10:00:00+00:00", role: developer, branch: "app/APP-081"}
+    - {id: t_a070, title: "APP-070 Release", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+  dependencies:
+    - {task_id: t_a070, depends_on: t_a040}
+    - {task_id: t_a070, depends_on: t_a060}
+  pull_requests:
+    # Returned for conflicts, still open.
+    - {repo: example/app, number: 297, title: "APP-051a: sign-in screen", branch: "app/APP-051a", task_ids: [t_a051a], mergeable: false, updated_at: "2026-03-02T13:00:00+00:00"}
+  closed_pull_requests:
+    # Returned for conflicts and closed without merging.
+    - {repo: example/app, number: 305, title: "APP-051b: session refresh", branch: "app/APP-051b", task_ids: [t_a051b], closed_at: "2026-03-02T13:30:00+00:00"}
+    - {repo: example/app, number: 320, title: "APP-081: welcome screen", branch: "app/APP-081", task_ids: [t_a081], closed_at: "2026-03-02T11:30:00+00:00"}
+    - {repo: example/app, number: 311, title: "APP-061: settings list", branch: "app/APP-061", task_ids: [t_a061], closed_at: "2026-03-02T09:50:00+00:00", merged_at: "2026-03-02T09:50:00+00:00", into_default: true}
+    - {repo: example/app, number: 312, title: "APP-062: settings sync", branch: "app/APP-062", task_ids: [t_a062], closed_at: "2026-03-02T10:50:00+00:00", merged_at: "2026-03-02T10:50:00+00:00", into_default: true}
+  pull_requests_complete: true
+expected_actions:
+  - kind: alert
+    task_id: t_a060
+    reason_contains: "close it?"
+    params:
+      pattern: parent-left-open
+      merged_prs: ["example/app#311", "example/app#312"]
+  - kind: close
+    task_id: t_a060
+  - kind: alert
+    task_id: t_a080
+    reason_contains: "not merged"
+    params:
+      pattern: parent-prs-unmerged
+      unmerged_prs: ["example/app#320"]
+not_expected_actions:
+  - kind: alert
+    task_id: t_a040
+  - kind: close
+    task_id: t_a040
+  - kind: close
+    task_id: t_a080
+  - kind: alert
+    task_id: t_a080
+    reason_contains: "close it?"
