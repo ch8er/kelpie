@@ -34,6 +34,7 @@ def test_defaults(tmp_path: Path) -> None:
     (adapter,) = build_adapters(settings(tmp_path, "[adapters.claude_code]\n"))
     assert isinstance(adapter, ClaudeCodeAdapter)
     assert adapter.tasks_dir == Path("~/.claude/tasks").expanduser()
+    assert adapter.stop_dir == Path("~/.claude/kelpie/stop").expanduser()
 
 
 def test_values_and_both_adapters(tmp_path: Path) -> None:
@@ -47,13 +48,19 @@ tasks_dir = "{tmp_path}/tasks"
 task_lists = ["farm", "team-a"]
 spool = false
 lookback = "72h"
+stop_dir = false
 """,
     )
     adapters = build_adapters(s)
     assert [a.name for a in adapters] == ["hermes", "claude-code"]
     cc = adapters[1]
     assert isinstance(cc, ClaudeCodeAdapter)
-    assert (cc.task_lists, cc.spool, cc.lookback) == (("farm", "team-a"), None, timedelta(hours=72))
+    assert (cc.task_lists, cc.spool, cc.lookback, cc.stop_dir) == (
+        ("farm", "team-a"),
+        None,
+        timedelta(hours=72),
+        None,
+    )
 
 
 def test_disabled_builds_nothing(tmp_path: Path) -> None:
@@ -73,6 +80,8 @@ def test_disabled_builds_nothing(tmp_path: Path) -> None:
         ("[adapters.claude_code]\ntask_lists = ['']", "task_lists"),
         ("[adapters.claude_code]\nlookback = 'soon'", "lookback"),
         ("[adapters.claude_code]\nlookback = '0s'", "lookback"),
+        ("[adapters.claude_code]\nstop_dir = true", "stop_dir"),
+        ("[adapters.claude_code]\nstop_dir = ' '", "stop_dir"),
         ("[adapters.claude]\n", r"unknown \[adapters\] entries"),
     ],
 )

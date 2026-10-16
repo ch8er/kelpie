@@ -3,9 +3,10 @@
 Lets Kelpie watch a farm of [Claude Code](https://code.claude.com/docs) sessions. Kelpie reads
 the shared task lists (`~/.claude/tasks/<list>/`) and a spool written by a command hook;
 Claude Code's own OpenTelemetry spans arrive through OTLP ingest and join the same sessions.
-No action is carried out yet: `requeue`, `unblock`, `comment` and `wip_commit` raise
-`UnsupportedAction`, so in `act` mode the engine alerts a human instead ("not executed,
-needs a human").
+The one action carried out is `stop` (see [Stopping a session](#stopping-a-session)).
+Claude Code has no operator command for the others: `requeue`, `unblock`, `comment` and
+`wip_commit` raise `UnsupportedAction`, so in `act` mode the engine alerts a human instead
+("not executed, needs a human").
 
 What was checked against a real Claude Code (2.1.301, in a cloud session): the hook input
 fields of every event below (read from its hook schema), the task file format and location
@@ -20,6 +21,7 @@ task_lists = ["farm"]                     # CLAUDE_CODE_TASK_LIST_ID values to r
 tasks_dir = "~/.claude/tasks"             # Claude Code's config dir + /tasks
 spool = "~/.claude/kelpie/spool.jsonl"    # written by the hook below; false = do not read one
 lookback = "24h"                          # sessions and completed tasks older than this are left out
+stop_dir = "~/.claude/kelpie/stop"        # where stop markers go; false = refuse stop (alerts instead)
 enabled = true                            # default when the section exists
 ```
 
@@ -39,8 +41,8 @@ and task updates of a team member without the variable are not tied to the team'
 
 `hook.py` in this directory is a self-contained command hook (standard library only, no
 syntax newer than Python 3.8, so the host's `python3` will do; tested on 3.12 only). It reads
-the hook input from stdin, appends one JSON line to the spool, writes nothing to stdout and
-always exits 0. Install it on each host that runs Claude Code:
+the hook input from stdin, appends one JSON line to the spool, writes to stdout only to
+enforce a stop and always exits 0. Install it on each host that runs Claude Code:
 
 ```bash
 mkdir -p -m 700 ~/.claude/kelpie
@@ -52,6 +54,7 @@ and register it in `~/.claude/settings.json` (or the project's `.claude/settings
 ```json
 {
   "hooks": {
+    "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/kelpie/hook.py", "timeout": 10}]}],
     "SessionStart": [{"hooks": [{"type": "command", "command": "python3 ~/.claude/kelpie/hook.py", "timeout": 10}]}],
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python3 ~/.claude/kelpie/hook.py", "timeout": 10}]}],
     "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 ~/.claude/kelpie/hook.py", "timeout": 10}]}],
@@ -71,6 +74,8 @@ optional), read from the session's environment, which hooks inherit:
 | `KELPIE_CLAUDE_SPOOL` | `~/.claude/kelpie/spool.jsonl` | spool file |
 | `KELPIE_CLAUDE_SPOOL_MAX_BYTES` | `20971520` | at this size the spool moves to `<spool>.1` |
 | `KELPIE_CLAUDE_SPOOL_COMMANDS` | `1` | `0` stops recording the command prefix |
+| `KELPIE_CLAUDE_STOP_DIR` | `~/.claude/kelpie/stop` | where the hook looks for stop markers; must match `stop_dir` |
+| `KELPIE_CLAUDE_STOP_TTL` | `86400` | seconds a stop marker holds |
 | `CLAUDE_CODE_TASK_LIST_ID` | (none) | the shared task list (see above) |
 | `KELPIE_TASK_ID` | (none) | a task id the launcher assigned (e.g. an issue), when the task is not on a list |
 | `KELPIE_AGENT` | (none) | the agent's name on the farm |
@@ -84,7 +89,8 @@ optional), read from the session's environment, which hooks inherit:
 ```
 
 Other types: `prompt` (`UserPromptSubmit`, with its `source`), `turn_end` (`Stop`, and
-`StopFailure` with its `error` kind).
+`StopFailure` with its `error` kind), `stopped` (the hook refused a tool call or prompt because
+of a stop marker, with the `event`).
 
 ### Privacy
 
@@ -106,6 +112,69 @@ token), as is one after a short flag not listed above; `KELPIE_CLAUDE_SPOOL_COMM
 records no command. For `TaskUpdate` calls only the task id, status and owner are kept, never
 subjects or descriptions. The spool is created with mode `0600` (not through a symlink); keep
 its directory `0700` as above.
+
+## Stopping a session
+
+`loop_breaker` in `act` mode (runaway loops, error streaks, hard budgets) stops a session with
+the `stop` action. Claude Code has no command to stop another process's session, and Kelpie
+does not signal processes, so the stop goes through the hook, which Claude Code consults
+before every tool call:
+
+1. The adapter writes `<stop_dir>/<session_id>.json` (`{"at": ..., "reason": ...}`, mode
+   `0600`, atomically).
+2. On the session's next `PreToolUse` the hook answers `{"continue": false, "stopReason": ...}`
+   with `permissionDecision: "deny"`: the tool does not run and Claude Code ends the turn,
+   showing the reason and how to resume to the human (the model only reads "Stopped by
+   Kelpie: <reason>", not how to lift it). Every later tool call of the session (subagents included) gets the same
+   answer while the marker holds, and so does a prompt submitted by a machine
+   (`UserPromptSubmit` with `source` other than `user`: `claude -p`, the SDK, `/loop` and
+   scheduled wakeups, peer messages; a missing `source` counts as a machine).
+3. The stop is lifted when a human types a prompt in the session (the hook removes the marker),
+   when the session ends, when someone deletes the marker file, or after
+   `KELPIE_CLAUDE_STOP_TTL` (24 hours). A headless `claude -p` run exits at the end of the
+   stopped turn, and its `SessionEnd` lifts the stop: a launcher that starts the work again
+   (a new session, or `--resume`) is not held back, unlike a Hermes task, which stays blocked.
+
+Limits:
+
+- **Cooperative.** A session in the middle of a long model response stops when that response
+  asks for a tool, or at the end of the turn; spend stops then, not when Kelpie decides. A
+  session that never calls a tool again is not interrupted, but also no longer loops on tools.
+- **Same host, same user.** The marker directory is `0700` and markers `0600`, owned by the
+  user Kelpie runs as, so the sessions must run as that same user on the same host (or with
+  `stop_dir` shared), and `~` must mean the same home for both, or set `stop_dir` and
+  `KELPIE_CLAUDE_STOP_DIR` explicitly to the same path.
+- **Hook required, and current.** The hook must be registered for `PreToolUse` and be this
+  version (spool lines carry `"v": 1`). A session whose hook predates stop support is refused
+  with `UnsupportedAction` (a human is alerted). After upgrading Kelpie, copy `hook.py` again
+  and add the `PreToolUse` entry. A stop that is written but not enforced (tool calls go on
+  more than 2 minutes after the marker, and the hook never refused one) is logged once per
+  session and shows as `exit_reason = "stop not enforced"`.
+- **Routing.** A stop reaches this adapter when the session claimed a task on a watched list,
+  or when Claude Code is the only platform adapter. With Hermes configured as well, a stop of a
+  session without a watched task has no route and becomes an alert, and one whose
+  `KELPIE_TASK_ID` names a Hermes task goes to Hermes, which fails it (a human is alerted).
+- **Cost.** `PreToolUse` starts `python3` before every tool call (tens of milliseconds). If the
+  hook times out, Claude Code runs the tool anyway: that call is not stopped, nothing hangs.
+- **Repeats.** A hard budget stays exceeded, so `loop_breaker` stops the session again after
+  each action cooldown (30 minutes by default); a human prompt lifts the stop until then.
+- **Known sessions only.** A session that is not in the spool (no Kelpie hook runs there, or it
+  is older than `lookback`) is refused with `UnsupportedAction`, so a human is alerted
+  instead; so is every stop with `stop_dir = false`. An ended session is left alone.
+- The stop holds for the whole session id, and the task keeps its status: rule 1 later
+  reports the task if nobody resumes it.
+
+Verified against Claude Code 2.1.301's hook output schema: `continue`, `stopReason`,
+`decision`/`reason`, and for `PreToolUse` `hookSpecificOutput.permissionDecision` (`allow`,
+`deny`, `ask`) with `permissionDecisionReason`; `continue: false` sets Claude Code's
+`preventContinuation`. Not yet seen live: how the interactive UI shows the stop; that a prompt
+typed in the interactive UI carries `source: "user"` (the field is optional; without it the
+hook treats the prompt as a machine's and keeps the stop, so the human must delete the marker
+file); and that `claude -p` prompts carry a source other than `user`.
+
+Stopping is idempotent: a second stop rewrites the marker with the new reason. The session's
+`exit_reason` reads `stopped by kelpie` once the hook has refused something, until a human
+prompt resumes it.
 
 ## What Kelpie sees
 

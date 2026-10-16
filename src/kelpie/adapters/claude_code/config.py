@@ -11,13 +11,14 @@ from typing import Any
 from kelpie.adapters.claude_code.adapter import (
     DEFAULT_LOOKBACK,
     DEFAULT_SPOOL,
+    DEFAULT_STOP_DIR,
     DEFAULT_TASKS_DIR,
     ClaudeCodeAdapter,
 )
 from kelpie.core.serde import parse_duration
 
 SECTION = "[adapters.claude_code]"
-KEYS = frozenset({"enabled", "tasks_dir", "task_lists", "spool", "lookback"})
+KEYS = frozenset({"enabled", "tasks_dir", "task_lists", "spool", "lookback", "stop_dir"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +28,7 @@ class ClaudeCodeSettings:
     spool: Path | None = DEFAULT_SPOOL  # None: spool reading disabled
     lookback: timedelta = DEFAULT_LOOKBACK
     enabled: bool = True
+    stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused
 
     def build(self) -> ClaudeCodeAdapter:
         return ClaudeCodeAdapter(
@@ -34,6 +36,7 @@ class ClaudeCodeSettings:
             task_lists=self.task_lists,
             spool=self.spool,
             lookback=self.lookback,
+            stop_dir=self.stop_dir,
         )
 
 
@@ -52,6 +55,9 @@ def load_claude_code(section: Any) -> ClaudeCodeSettings:
     spool = section.get("spool", str(DEFAULT_SPOOL))
     if spool is not False and (not isinstance(spool, str) or not spool.strip()):
         raise ValueError(f"{SECTION} spool must be a non-empty string or false")
+    stop_dir = section.get("stop_dir", str(DEFAULT_STOP_DIR))
+    if stop_dir is not False and (not isinstance(stop_dir, str) or not stop_dir.strip()):
+        raise ValueError(f"{SECTION} stop_dir must be a non-empty string or false")
     lists = section.get("task_lists", [])
     if (
         not isinstance(lists, list)
@@ -71,4 +77,5 @@ def load_claude_code(section: Any) -> ClaudeCodeSettings:
         spool=None if spool is False else Path(spool),
         lookback=lookback,
         enabled=enabled,
+        stop_dir=None if stop_dir is False else Path(stop_dir),
     )

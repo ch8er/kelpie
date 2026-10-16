@@ -3,8 +3,9 @@
 Self-contained on purpose (standard library only, no ``kelpie`` imports): Claude Code runs it
 as a command hook, usually in a Python without Kelpie installed. Copy this file to
 ``~/.claude/kelpie/hook.py`` and register it for the events below in ``settings.json``
-(see README.md). It reads the hook input (JSON) from stdin, writes nothing to stdout and
-always exits 0: a hook must never change what the agent does.
+(see README.md). It reads the hook input (JSON) from stdin and always exits 0. It never
+changes what the agent does, except to enforce a stop (below): only then does it write to
+stdout.
 
 Events (field names verified against the hook input schema of Claude Code 2.1.301):
 
@@ -25,6 +26,14 @@ Task list updates. For a ``TaskUpdate`` tool call the line also carries the task
 status and the owner the session set (``task``, ``task_status``, ``task_owner``), never the
 subject or description: that is how Kelpie knows which task a session works on and what it
 declared at the end.
+
+Stop. Kelpie stops a session by writing ``<stop dir>/<session_id>.json`` (``stop_dir``,
+default ``~/.claude/kelpie/stop``). While that marker holds (``KELPIE_CLAUDE_STOP_TTL``,
+default 24 hours), every ``PreToolUse`` of the session is answered with ``continue: false``
+and a ``deny`` (the tool does not run and the turn ends), and so is a prompt that a machine
+submits (``UserPromptSubmit`` with a ``source`` other than ``user``: ``-p``, SDK, loop and
+schedule wakeups, peer messages). A prompt a human types clears the marker and goes through,
+and so does the end of the session. Only then does the hook write to stdout.
 
 Privacy: prompts, tool arguments, results and messages are never written. A tool call is the
 tool name, a hash of its arguments, for ``Bash`` a redacted prefix of the command (see
@@ -60,6 +69,17 @@ MAX_COMMAND_INPUT = 2048  # characters of a command line that redaction looks at
 MAX_INPUT = 16 * 1024 * 1024  # a hook input larger than this is not read
 MAX_ID = 128  # ids and short enums are cut to this many characters
 _COMMAND_KEYS = ("command", "cmd")
+STOP_DIR_ENV = "KELPIE_CLAUDE_STOP_DIR"
+STOP_TTL_ENV = "KELPIE_CLAUDE_STOP_TTL"
+DEFAULT_STOP_DIR = "~/.claude/kelpie/stop"
+DEFAULT_STOP_TTL = 24 * 3600  # seconds a stop marker holds unless a human clears it
+MAX_MARKER = 4096  # bytes; a larger marker file is ignored
+MAX_REASON = 500
+FUTURE_SKEW = 300  # seconds; a marker dated further ahead is ignored
+_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # used with fullmatch
+# Spool format version, in every line. 1: the hook enforces stop markers (PreToolUse).
+HOOK_VERSION = 1
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 TASK_TOOL = "TaskUpdate"
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "deleted"})
 
@@ -228,6 +248,7 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
         "type": kind,
         "at": time.time() if now is None else now,
         "session_id": session,
+        "v": HOOK_VERSION,
         "agent_id": _id(data.get("agent_id")),
         # Claude Code's own fallback when no list is set (outside a team): the session id.
         "task_list": _env("CLAUDE_CODE_TASK_LIST_ID") or session,
@@ -303,13 +324,140 @@ def append(rec: dict[str, Any]) -> None:
         os.close(fd)
 
 
-def main(stdin: Any = None) -> int:
+def stop_dir() -> Path:
+    return Path(os.environ.get(STOP_DIR_ENV) or DEFAULT_STOP_DIR).expanduser()
+
+
+def _stop_ttl() -> float:
+    try:
+        return max(1.0, float(os.environ.get(STOP_TTL_ENV, DEFAULT_STOP_TTL)))
+    except ValueError:
+        return float(DEFAULT_STOP_TTL)
+
+
+def marker_path(session_id: str) -> Path | None:
+    """Where Kelpie's stop marker for a session lives; ``None`` for an unusable id."""
+    return stop_dir() / f"{session_id}.json" if _SESSION_ID.fullmatch(session_id) else None
+
+
+def clean_reason(reason: str) -> str:
+    text = _CONTROL.sub(" ", reason).strip() or "no reason given"
+    return text if len(text) <= MAX_REASON else text[: MAX_REASON - 3] + "..."
+
+
+def active_stop(session_id: str, now: float) -> str | None:
+    """The reason of the session's stop marker while it holds, else ``None``."""
+    path = marker_path(session_id)
+    if path is None:
+        return None
+    try:
+        # O_NOFOLLOW: a symlink planted in place of a marker is not followed.
+        fd = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        )
+    except OSError:
+        return None
+    try:
+        raw = os.read(fd, MAX_MARKER + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_MARKER:
+        return None
+    data = json.loads(raw.decode("utf-8", "replace"))
+    at = data.get("at") if isinstance(data, dict) else None
+    reason = data.get("reason") if isinstance(data, dict) else None
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or not isinstance(reason, str):
+        return None
+    if not now - _stop_ttl() <= at <= now + FUTURE_SKEW:
+        return None
+    return clean_reason(reason)
+
+
+def clear_stop(session_id: str) -> None:
+    path = marker_path(session_id)
+    if path is not None:
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+def stop_output(event: str, reason: str, session_id: str) -> dict[str, Any]:
+    """What the hook answers Claude Code while a stop marker holds."""
+    short = f"Stopped by Kelpie: {reason}."
+    # How to resume goes only to the human (stopReason, a blocked prompt's reason); the model
+    # reads permissionDecisionReason and is not told how to lift its own stop.
+    text = (
+        f"{short} To resume, a human types a new prompt in this session "
+        f"or removes {marker_path(session_id)}."
+    )
+    out: dict[str, Any] = {"continue": False, "stopReason": text}
+    if event == "PreToolUse":
+        out["hookSpecificOutput"] = {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": short,
+        }
+    else:
+        out.update(decision="block", reason=text)
+    return out
+
+
+def _stop_check(data: dict[str, Any], now: float) -> dict[str, Any] | None:
+    """Apply a stop marker to this hook input; the answer to print, if any."""
+    event = data.get("hook_event_name")
+    session = _id(data.get("session_id"))
+    if session is None:
+        return None
+    human = event == "UserPromptSubmit" and data.get("source") == "user"
+    if human or event == "SessionEnd":
+        clear_stop(session)  # a human resumes the session, or it is over
+        return None
+    if event not in ("PreToolUse", "UserPromptSubmit"):
+        return None
+    reason = active_stop(session, now)
+    if reason is None:
+        return None
+    with contextlib.suppress(Exception):  # the stop matters more than its record
+        append(
+            {
+                "type": "stopped",
+                "at": now,
+                "session_id": session,
+                "v": HOOK_VERSION,
+                "agent_id": _id(data.get("agent_id")),
+                "event": event,
+            }
+        )
+    return stop_output(str(event), reason, session)
+
+
+def _answer(text: str, stdout: Any = None) -> None:
+    """Write the answer unbuffered: nothing is left to flush at exit, so a closed reader
+    cannot turn into a non-zero exit."""
+    if stdout is not None:
+        stdout.write(text)
+        return
+    data = text.encode("utf-8")
+    while data:
+        data = data[os.write(1, data) :]
+
+
+def main(stdin: Any = None, stdout: Any = None) -> int:
     try:
         raw = (stdin or sys.stdin).read(MAX_INPUT + 1)
         if len(raw) > MAX_INPUT:
             return 0
         data = json.loads(raw)
-        if isinstance(data, dict) and (rec := record(data)) is not None:
+        if not isinstance(data, dict):
+            return 0
+        now = time.time()
+        try:
+            answer = _stop_check(data, now)
+        except Exception:  # an unreadable marker must not keep the event from the spool
+            answer = None
+        if answer is not None:
+            _answer(json.dumps(answer) + "\n", stdout)
+            return 0
+        if (rec := record(data, now)) is not None:
             append(rec)
     except Exception:  # a hook must never break the agent
         pass

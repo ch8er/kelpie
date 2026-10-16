@@ -99,7 +99,7 @@ def farm(tmp_path: Path) -> Farm:
 def test_capabilities(farm: Farm) -> None:
     adapter = farm.adapter()
     assert isinstance(adapter, SnapshotSource)
-    assert not isinstance(adapter, SupportsStop)  # a later step
+    assert isinstance(adapter, SupportsStop)
     assert adapter.name == "claude-code"
 
 
