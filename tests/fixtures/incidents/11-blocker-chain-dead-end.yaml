@@ -2,12 +2,13 @@ id: "11-blocker-chain-dead-end"
 incident: 11
 title: "Blocker chains that end in a cancelled or inaccessible task"
 description: >
-  A coder blocked its task on a human's approval task, which the human cancelled. Three more
-  tasks waited behind it through dependencies and a task_status wait, so a whole chain was
-  frozen behind a task that could never be done; rule 4 only saw the first link. In a second
-  chain a task waited on a task that had been archived off the board. A lone task in front
-  of a dead end (rule 4's), a chain whose end is still open, and a task whose parent was
-  cancelled (a finished parent satisfies a dependency) are left alone.
+  A task waited on a task that had been archived off the board, and another task waited
+  behind it: the chain could never move, and no other rule saw the missing task until its
+  wait ran past max_wait. In a second chain a coder blocked its task on a human's approval
+  task, which the human cancelled, with three tasks behind it; rule 4 alerts on that block at
+  once and lists the stuck tasks, so rule 3 stays quiet there instead of alerting twice. A
+  lone task in front of a dead end (rule 4's), a chain whose end is still open, and a task
+  whose parent was cancelled (a finished parent satisfies a dependency) are left alone.
 rule: orphan_status
 config:
   dead_end_chains: true
@@ -99,20 +100,12 @@ snapshot:
       registered_at: "2026-03-02T13:00:00+00:00"
 expected_actions:
   - kind: alert
-    task_id: T-1161
-    severity: critical
-    reason_contains: "T-1160 ended as cancelled"
-    params:
-      pattern: dead-end-chain
-      dead_end: T-1160
-      chain: [T-1164, T-1163, T-1162, T-1161, T-1160]
-      stuck_ids: [T-1162, T-1163, T-1164]
-  - kind: alert
     task_id: T-1171
     severity: warning
     reason_contains: "is not on the board"
-    params: {pattern: dead-end-chain, dead_end: T-9999, stuck_ids: [T-1172]}
+    params: {pattern: dead-end-chain, dead_end: T-9999, chain: [T-1172, T-1171, T-9999], stuck_ids: [T-1172]}
 not_expected_actions:
+  - {kind: alert, task_id: T-1161}
   - {kind: alert, task_id: T-1181}
   - {kind: alert, task_id: T-1191}
   - {kind: alert, task_id: T-1192}

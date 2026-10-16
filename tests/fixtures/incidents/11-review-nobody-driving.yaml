@@ -7,11 +7,13 @@ description: >
   worked on it and it waited for no condition. Nothing on the farm would ever pick it up,
   and the task depending on it was frozen for four hours. Review tasks that a reviewer has,
   that sit in the reviewer queue, that a live session works on, that wait for CI, that a
-  human owns, or that only just entered review are left alone.
+  human owns, that are held on purpose (a hold label) or that only just entered review are
+  left alone. The pattern is off unless reviewer_roles names the roles that review.
 rule: orphan_status
 config:
   review_idle_after: "2h"
   reviewer_roles: [reviewer]
+  hold_labels: [merge-first]
   critical_dependents: 3
 snapshot:
   now: "2026-03-02T16:00:00+00:00"
@@ -34,6 +36,8 @@ snapshot:
     - {id: T-1135, title: "Search index", status: review, status_since: "2026-03-02T12:00:00+00:00", role: developer, owner_id: agent-dev-1}
     # Only an hour in review.
     - {id: T-1136, title: "Audit log", status: review, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # Held on purpose until another change merges.
+    - {id: T-1139, title: "Rename API fields", status: review, status_since: "2026-03-02T10:00:00+00:00", role: developer, owner_id: agent-dev-2, labels: [merge-first]}
     # A human owns it.
     - {id: T-1138, title: "Pricing page copy", status: review, status_since: "2026-03-02T10:00:00+00:00", role: developer, owner_id: human-lead}
   dependencies:
@@ -63,4 +67,5 @@ not_expected_actions:
   - {kind: alert, task_id: T-1136}
   - {kind: alert, task_id: T-1137}
   - {kind: alert, task_id: T-1138}
+  - {kind: alert, task_id: T-1139}
   - {kind: reassign, task_id: T-1131}

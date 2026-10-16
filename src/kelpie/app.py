@@ -415,8 +415,15 @@ def load_rules(
 
 def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
     """A rule's config section. ``loop_breaker`` polls the same checks rule 2 coaches, so it
-    inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own."""
+    inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own; ``orphan_status``
+    inherits ``bottlenecks``' hold labels the same way."""
     section = dict(config.rules.get(name, {}))
+    if name == "orphan_status" and "hold_labels" not in section:
+        # Held tasks are parked on purpose: rule 3's stop patterns skip what rule 6 calls held.
+        held = _hold_labels(config.rules.get("bottlenecks", {}))
+        if held:
+            section["hold_labels"] = held
+        return section
     if name != "loop_breaker":
         return section
     shared = config.rules.get("wait_condition", {}).get("poll_patterns")
@@ -430,6 +437,18 @@ def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
             "matching only one of them are coached by rule 2 or stopped by rule 10 inconsistently"
         )
     return section
+
+
+def _hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
+    """``bottlenecks``' ``hold_labels`` and ``holds`` labels; malformed entries are left to
+    the bottlenecks rule, which refuses them at startup."""
+    labels = bottlenecks.get("hold_labels", [])
+    found = [x for x in labels if isinstance(x, str)] if isinstance(labels, list) else []
+    holds = bottlenecks.get("holds", [])
+    for hold in holds if isinstance(holds, list) else []:
+        if isinstance(hold, Mapping) and isinstance(hold.get("label"), str):
+            found.append(hold["label"])
+    return sorted(set(found))
 
 
 def _normalized(patterns: Any) -> Any:

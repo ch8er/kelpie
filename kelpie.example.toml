@@ -28,15 +28,16 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # [engine.rules.orphan_status]
 # orphan_after = "30m"      # ownerless in an owned status (in_progress) this long -> alert
 # queue_after = "2h"        # ...in a hand-off queue (review, accepted)
+# reviewer_roles = []       # roles that review; empty: the review stop pattern is off
 # review_idle_after = "2h"  # stop pattern: review with no reviewer, session or open condition
-# reviewer_roles = ["reviewer"]
 # next_action_after = "30m" # stop pattern: a run ended with success and nothing moved the task
-#                           # (or its dependents stay in backlog); false switches either off
-# dead_end_chains = true    # stop pattern: a chain of waits ending in a cancelled or
-#                           # inaccessible task
+# dependents_not_woken = false  # also: a done task's dependents stay in backlog (opt-in)
+# dead_end_chains = true    # stop pattern: a chain of waits ending in a task off the board
 # max_recovery_depth = 1    # stop pattern: recovery tasks recovering recovery tasks
 # recovery_labels = ["recovery"]  # labels that mark a recovery task
 # recovery_titles = []      # ...or title patterns, e.g. '^recover (?P<target>T-\d+)'
+# hold_labels = []          # held tasks are skipped by the stop patterns; unset: bottlenecks'
+# ignore_tasks = []         # task ids or globs rule 3 never looks at (boards without labels)
 #
 # [engine.rules.bottlenecks]
 # min_idle_time = "30m"     # an agent counts as idle this long after its last session

@@ -19,11 +19,16 @@ merging), a condition naming a task the board does not show (``params.error`` is
 cannot see. A terminal or missing-task flag counts once it was checked after the wait began.
 Tasks in progress, in review or accepted are moving (or are another pattern's business), so a
 chain stops at them.
+
+Known limit: a dependency on a cancelled or failed parent is not a dead end. The model counts
+any finished parent as satisfying a dependency (as rules 6 and the dispatch gate do), so the
+child is free to start; whether it should is a planning decision Kelpie does not make.
 """
 
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -47,6 +52,13 @@ class DeadEnd:
     ref: str  # the task id (or condition id) the wait ends in
     why: str  # e.g. "was cancelled", "is not on the board"
     since: datetime | None = None  # when it ended, if known
+    # TERMINAL (a condition flagged terminal) and MISSING (a condition Kelpie cannot see) are
+    # what rules 2 and 4 alert on for the task in front; NOT_FOUND (a task the board does not
+    # show) is only rule 3's.
+    kind: str = "terminal"
+
+
+TERMINAL, MISSING, NOT_FOUND = "terminal", "missing", "not_found"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +110,7 @@ class BlockerGraph:
         conditions, missing = linked_conditions(task, self.snapshot)
         verb = "blocked on" if task.status is Status.BLOCKED else "waiting on"
         if missing is not None:
-            dead = DeadEnd(missing, "is a condition Kelpie cannot see")
+            dead = DeadEnd(missing, "is a condition Kelpie cannot see", kind=MISSING)
             return [*edges, Edge(f"{verb} condition", dead=dead)]
         since = task.block.since if task.block is not None else task.status_since
         ended = {c.id for c in dead_ends(conditions, since)}
@@ -119,9 +131,9 @@ class BlockerGraph:
                 return Edge(via, dead=DeadEnd(ref, f"ended as {status}", at))
             seen = c.checked_at is not None and c.checked_at >= since
             if target is None and c.params.get("error") == "not_found" and seen:
-                return Edge(
-                    via, dead=DeadEnd(ref, "is not on the board (archived or out of reach)")
-                )
+                why = "is not on the board (archived or out of reach)"
+                gone = DeadEnd(ref, why, kind=NOT_FOUND)
+                return Edge(via, dead=gone)
             if target is not None:
                 return Edge(via, task=ref)
             return Edge(via, external=f"{ref} (unknown)")
@@ -136,7 +148,11 @@ class BlockerGraph:
         queue: deque[tuple[str, ...]] = deque([(task_id,)])
         while queue:
             path = queue.popleft()
-            for e in self.edges.get(path[-1], ()):
+            edges = self.edges.get(path[-1], ())
+            if not edges and len(path) > 1:  # a waiting task that waits for nothing visible
+                status = self.by_id[path[-1]].status
+                found.append(Chain(path, Edge(f"is {status} with nothing Kelpie can check")))
+            for e in edges:
                 if e.task is None:
                     found.append(Chain(path, e))
                 elif e.task not in seen:
@@ -158,3 +174,27 @@ class BlockerGraph:
                     paths[waiter] = (waiter, *path)
                     queue.append(paths[waiter])
         return paths
+
+
+def behind_lookup(
+    snapshot: Snapshot, stale_after: timedelta = DEFAULT_STALE_AFTER
+) -> Callable[[str], list[str]]:
+    """Ids of the tasks waiting behind a task, sorted; the graph is built on first use, so a
+    rule that never needs it pays nothing."""
+    graph: BlockerGraph | None = None
+
+    def lookup(task_id: str) -> list[str]:
+        nonlocal graph
+        if graph is None:
+            graph = BlockerGraph(snapshot, stale_after)
+        return sorted(graph.behind(task_id))
+
+    return lookup
+
+
+def behind_text(ids: list[str], shown: int = 5) -> str:
+    """ " N task(s) wait behind it: a, b." for an alert, or "" when nothing does."""
+    if not ids:
+        return ""
+    names = ", ".join(ids[:shown]) + (f" and {len(ids) - shown} more" if len(ids) > shown else "")
+    return f" {len(ids)} task(s) wait behind it: {names}."

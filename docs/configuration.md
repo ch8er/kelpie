@@ -221,9 +221,21 @@ Alerts (critical when many open tasks depend on it) and proposes an idle agent o
 | `reassign` | `true` | bool | Propose a `reassign` to an idle agent of the task's role. |
 | `reassign_unknown_owner` | `false` | bool | Also reassign when the owner is missing from the owner directory (it may live on another platform). |
 | `session_stale_after` | `"30m"` | duration, > 0 | See [live session](#rules). |
+| `reviewer_roles` | `[]` | list of roles | Roles that review. Empty: the review stop pattern is off. |
+| `review_idle_after` | `"2h"` | duration, > 0, or `false` | Stop pattern: a review task owned by an agent outside `reviewer_roles`, not in a reviewer role's queue, with no live session and no open condition this long (from the later of the status change and the last session end). |
+| `next_action_after` | `"30m"` | duration, > 0, or `false` | Stop pattern: the last session ended declaring `done`, `review` or `accepted`, but the task still sits in another open status (not `in_progress`, which rule 1 reports) this long after. |
+| `dependents_not_woken` | `false` | bool | Stop pattern, opt-in: a `done` task whose dependents still sit in `backlog` with every parent finished, `next_action_after` after it finished. Off by default because a backlog also holds work parked on purpose (Hermes maps `triage`, `todo` and `scheduled` to it). |
+| `dead_end_chains` | `true` | bool | Stop pattern: a chain of waiting tasks (dependencies, `task_status` and `human_task` conditions) that ends in a task the board does not show, with tasks stuck behind it. Conditions that can never be met or that Kelpie cannot see are rules 2 and 4's alerts, which list the stuck tasks in `params.stuck_ids`. A dependency on a cancelled or failed parent is not detected: a finished parent satisfies a dependency. |
+| `max_recovery_depth` | `1` | count, >= 1, or `false` | Stop pattern: recovery tasks whose title names another recovery task as its target, chained deeper than this, or recovery tasks that cycle (through titles, dependencies or conditions). A staged plan of recovery tasks that only follow each other is not a loop. |
+| `recovery_labels` | `["recovery"]` | list of labels | Labels that mark a recovery task. |
+| `recovery_titles` | `[]` | list of regexes | Titles that mark a recovery task, case-insensitive; a named group `target` names the task it recovers. The only way on Hermes, which has no labels. |
+| `hold_labels` | bottlenecks' | list of labels | Tasks with one of these labels are parked on purpose: no stop pattern looks at them. Unset: `bottlenecks` `hold_labels` and `holds` labels. |
+| `ignore_tasks` | `[]` | list of ids or globs | Tasks rule 3 never looks at, e.g. `["t_parked*"]`: the escape hatch on boards without labels (Hermes), where holds cannot be expressed. |
 
 Statuses: `in_progress`, `review`, `accepted`. Terminal statuses and `blocked`, `waiting`,
-`backlog`, `ready` are refused.
+`backlog`, `ready` are refused. Each stop-pattern alert carries `params.pattern`
+(`review-undriven`, `no-next-action`, `dependents-not-woken`, `dead-end-chain`,
+`recovery-loop`).
 
 ### 4. stale_blocks
 

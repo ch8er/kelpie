@@ -13,6 +13,7 @@ from kelpie.app import (
     ConfigError,
     ControlLoop,
     Settings,
+    _hold_labels,
     build_app,
     dispatch_gate_warnings,
     find_config,
@@ -331,6 +332,22 @@ def test_rule_errors_start_at_zero_and_ledger_down_is_reported() -> None:
     loop = ControlLoop(engine, lambda: Snapshot(now=NOW), metrics)
     loop.tick_once()
     assert "kelpie_ledger_up 0" in metrics.render()
+
+
+def test_orphan_status_inherits_hold_labels_from_bottlenecks() -> None:
+    bottlenecks = {"hold_labels": ["freeze"], "holds": [{"label": "merge-hold"}]}
+
+    def holds(rules: dict) -> frozenset[str]:
+        loaded = load_rules(EngineConfig(rules=rules))
+        rule = next(r for r in loaded.rules if r.name == "orphan_status")
+        return rule.hold_labels  # type: ignore[attr-defined]
+
+    assert holds({"bottlenecks": bottlenecks}) == {"freeze", "merge-hold"}
+    own = {"bottlenecks": bottlenecks, "orphan_status": {"hold_labels": ["parked"]}}
+    assert holds(own) == {"parked"}  # its own list wins
+    assert holds({"orphan_status": {}}) == frozenset()
+    # Malformed entries are left to the bottlenecks rule, which refuses them at startup.
+    assert _hold_labels({"hold_labels": "bad", "holds": ["junk", {"label": 1}]}) == []
 
 
 def test_loop_breaker_inherits_poll_patterns_from_wait_condition(

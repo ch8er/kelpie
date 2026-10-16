@@ -22,45 +22,59 @@ Stop patterns (P1): tasks that have an owner, or need none, and that nothing wil
 again. Each is a lasting-state alert (``Action.state``) keyed by the task and the status
 stay it is about, so it is announced once and resolved when the task moves; ``params.pattern``
 names the pattern. A task gets at most one per-task alert (ownerless first, then b, then a).
-A threshold set to ``false`` switches its pattern off.
+A threshold set to ``false`` switches its pattern off. Tasks carrying a label in
+``hold_labels`` are parked on purpose and skipped by every stop pattern; without its own list,
+rule 3 uses rule 6's (``bottlenecks`` ``hold_labels`` and ``holds``). Tasks matching
+``ignore_tasks`` (ids or glob patterns) are skipped by the whole rule: the escape hatch for
+platforms without labels, such as Hermes, where holds cannot be expressed.
 
 a) **In review with nothing driving it** (``review_idle_after``, 2h, counted from the later of
-   the status change and the last session's end): a ``review`` task whose known owner is an
-   agent outside ``reviewer_roles``, whose own role is not a reviewer role either (no reviewer
-   queue), with no live session and no open condition (an unmet condition that can still be
-   met). A human owner counts as a reviewer: waiting for a person is the inbox's business.
+   the status change and the last session's end). Off until ``reviewer_roles`` names the
+   roles that review: a ``review`` task whose known owner is an agent outside those roles,
+   whose own role is not one of them either (no reviewer queue), with no live session and no
+   open condition (an unmet condition that can still be met). A human owner counts as a
+   reviewer: waiting for a person is the inbox's business.
 b) **A successful run with no next action** (``next_action_after``, 30m): the task's last
    session ended declaring ``done``, ``review`` or ``accepted``, but the task still sits in
-   another open status (not blocked or waiting) and nothing changed it since, so nobody acts
-   on the result. Also a task finished ``done`` whose dependents still sit in ``backlog``
-   with every parent on the board finished: one alert per finished parent, naming them.
+   another open status (not in progress, which rule 1 reports as an unapplied status, nor
+   blocked or waiting) and nothing changed it since, so nobody acts on the result. With
+   ``dependents_not_woken`` (off: a platform's backlog also holds work parked on purpose), a
+   task finished ``done`` whose dependents still sit in ``backlog`` with every parent on the
+   board finished: one alert per finished parent, naming them.
 c) **A blocker chain that ends in a dead end** (``dead_end_chains``, on): tasks that wait,
-   through other waiting tasks (dependencies, ``task_status`` and ``human_task`` conditions),
-   on a task that was cancelled or failed, a task the board does not show, or a condition
-   that can never be met (see ``kelpie.rules._chains``). One alert per dead end, on the task
-   directly in front of it, listing every task stuck behind it. A dead end in front of a
-   single task with nothing behind it is rules 2 and 4's.
-d) **Recovery tasks recovering themselves** (``max_recovery_depth``, 1): a recovery task (a
-   label in ``recovery_labels``, or a title matching one of ``recovery_titles``) whose target
-   is itself a recovery task, chained deeper than ``max_recovery_depth``, or a cycle (a task
-   that recovers itself). A recovery task's targets are the id its title names (the pattern's
-   named group ``target``), the tasks that depend on it, and the tasks whose condition names
-   it. One alert per loop, keyed by the task the loop started from.
+   through other waiting tasks (dependencies, ``task_status`` and ``human_task``
+   conditions), on a task the board does not show (archived, deleted or out of reach; see
+   ``kelpie.rules._chains``). One alert per dead end, on the task directly in front of it,
+   listing every task stuck behind it. Dead ends that rules 2 and 4 already report on the
+   front task (a condition that can never be met, a condition Kelpie cannot see) are left to
+   them; they carry the stuck tasks in ``params.stuck_ids``. A dependency on a cancelled or
+   failed parent is not a dead end: a finished parent satisfies a dependency.
+d) **Recovery tasks recovering themselves** (``max_recovery_depth``, 1). Needs recovery tasks
+   to be recognisable: a label in ``recovery_labels`` (default ``recovery``) or a title
+   matching one of ``recovery_titles``; Hermes has no labels, so there only titles work. A
+   recovery task names what it recovers through the pattern's named group ``target``; a
+   chain of such recovery tasks (the target of one is another, not finished ``done``) deeper
+   than ``max_recovery_depth`` alerts. Open tasks that depend on a recovery task, or wait on
+   it through a condition, are its targets too, but only count for a cycle: recovery tasks
+   that merely follow each other (a staged plan) are not a loop unless they cycle. One alert
+   per loop, keyed by the task the loop started from.
 """
 
 from __future__ import annotations
 
 import re
+from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from fnmatch import fnmatchcase
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Condition, ConditionKind, Owner, OwnerKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._chains import BlockerGraph
+from kelpie.rules._chains import NOT_FOUND, BlockerGraph
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     HANDOFF,
@@ -76,6 +90,9 @@ NAME = "orphan_status"
 _NEVER = {Status.BLOCKED, Status.WAITING, Status.BACKLOG, Status.READY}
 _BUSY = {Status.IN_PROGRESS, Status.REVIEW}
 _SUCCESS = frozenset({Status.DONE, *HANDOFF})  # a session end that hands the task on
+# in_progress: rule 1 reports a declared status that was never applied; parked tasks are
+# their conditions' business.
+_NOT_FOLLOWED_UP = frozenset({Status.IN_PROGRESS, Status.BLOCKED, Status.WAITING})
 _TASK_REFS = frozenset({ConditionKind.TASK_STATUS, ConditionKind.HUMAN_TASK})
 _SHOWN = 5  # ids named in an alert's text; params carry all of them
 
@@ -92,19 +109,22 @@ class OrphanStatus:
     session_stale_after: timedelta = DEFAULT_STALE_AFTER
     # Stop patterns; None (``false`` in config) switches one off.
     review_idle_after: timedelta | None = timedelta(hours=2)
-    reviewer_roles: tuple[str, ...] = ("reviewer",)
+    reviewer_roles: tuple[str, ...] = ()  # empty: review-undriven is off
     next_action_after: timedelta | None = timedelta(minutes=30)
+    dependents_not_woken: bool = False
     dead_end_chains: bool = True
     max_recovery_depth: int | None = 1
     recovery_labels: tuple[str, ...] = ("recovery",)
     recovery_titles: tuple[re.Pattern[str], ...] = ()
+    hold_labels: frozenset[str] = frozenset()
+    ignore_tasks: tuple[str, ...] = ()  # task ids or glob patterns
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         orphans = [
             (task, gone, _open_dependents(task.id, snapshot))
             for task in snapshot.tasks
-            if (gone := self._orphaned(task, snapshot)) is not None
+            if not self._ignored(task) and (gone := self._orphaned(task, snapshot)) is not None
         ]
         # Most urgent first, so the scarce idle agents go where they unblock the most.
         orphans.sort(key=lambda o: (-len(o[2]), o[0].status_since, o[0].id))
@@ -114,12 +134,12 @@ class OrphanStatus:
             actions.extend(self._act(task, snapshot, gone, waiting, idle))
         orphaned = {task.id for task, _, _ in orphans}
         for task in snapshot.tasks:
-            if task.id in orphaned or task.status.is_terminal:
+            if task.id in orphaned or task.status.is_terminal or self._skipped(task):
                 continue
             found = self._unfollowed_run(task, snapshot) or self._undriven_review(task, snapshot)
             if found is not None:
                 actions.append(found)
-        if self.next_action_after is not None:
+        if self.next_action_after is not None and self.dependents_not_woken:
             actions.extend(self._unwoken_dependents(snapshot, self.next_action_after))
         if self.dead_end_chains:
             actions.extend(self._dead_end_chains(snapshot))
@@ -198,6 +218,13 @@ class OrphanStatus:
 
     # -- stop patterns ------------------------------------------------------------------
 
+    def _ignored(self, task: Task) -> bool:
+        return any(fnmatchcase(task.id, p) for p in self.ignore_tasks)
+
+    def _skipped(self, task: Task) -> bool:
+        """Held on purpose, or ignored: no stop pattern looks at it."""
+        return bool(self.hold_labels.intersection(task.labels)) or self._ignored(task)
+
     def _severity(self, dependents: int) -> Severity:
         return Severity.CRITICAL if dependents >= self.critical_dependents else Severity.WARNING
 
@@ -238,7 +265,7 @@ class OrphanStatus:
     def _unfollowed_run(self, task: Task, snapshot: Snapshot) -> Action | None:
         """b) The last session ended with success and the task did not move on."""
         after = self.next_action_after
-        if after is None or task.status in {Status.BLOCKED, Status.WAITING}:
+        if after is None or task.status in _NOT_FOLLOWED_UP:
             return None
         end = last_exit(task, snapshot, self.session_stale_after)
         if end is None or end.silent:
@@ -264,7 +291,9 @@ class OrphanStatus:
     def _undriven_review(self, task: Task, snapshot: Snapshot) -> Action | None:
         """a) In review with no session, no reviewer and no open condition."""
         after = self.review_idle_after
-        if after is None or task.status is not Status.REVIEW or task.owner_id is None:
+        if after is None or not self.reviewer_roles:
+            return None  # which roles review is farm configuration; without it, off
+        if task.status is not Status.REVIEW or task.owner_id is None:
             return None
         owner = snapshot.owner(task.owner_id)
         if owner is None or owner.kind is OwnerKind.HUMAN or owner.role in self.reviewer_roles:
@@ -304,7 +333,7 @@ class OrphanStatus:
         stuck: dict[str, list[str]] = {}
         for tid, ids in sorted(parents.items()):
             task = by_id.get(tid)
-            if task is None or task.status is not Status.BACKLOG:
+            if task is None or task.status is not Status.BACKLOG or self._skipped(task):
                 continue
             ps = [by_id[p] for p in ids]
             if not all(p.status.is_terminal for p in ps):
@@ -320,6 +349,8 @@ class OrphanStatus:
                 stuck.setdefault(last.id, []).append(tid)
         for pid, waiting in sorted(stuck.items()):
             parent = by_id[pid]
+            if self._skipped(parent):
+                continue
             yield self._stop_alert(
                 "dependents-not-woken",
                 parent,
@@ -335,11 +366,18 @@ class OrphanStatus:
         """c) Chains of waiting tasks that end in something that can never come."""
         graph = BlockerGraph(snapshot, self.session_stale_after)
         for tid in sorted(graph.edges):
-            dead_edges = [e for e in graph.edges[tid] if e.dead is not None]
-            behind = graph.behind(tid) if dead_edges else {}
-            if not behind:
-                continue  # no dead end, or one right in front of a lone task: rules 2 and 4
             front = graph.by_id[tid]
+            if self._skipped(front):
+                continue
+            # Conditions that can never be met, or that Kelpie cannot see, in front of a task
+            # are rules 2 and 4's alerts (with the stuck tasks); a vanished task is rule 3's.
+            dead_edges = [
+                e for e in graph.edges[tid] if e.dead is not None and e.dead.kind == NOT_FOUND
+            ]
+            behind = graph.behind(tid) if dead_edges else {}
+            behind = {k: p for k, p in behind.items() if not self._skipped(graph.by_id[k])}
+            if not behind:
+                continue  # no dead end of its own, or nothing (not held) waits behind it
             stuck = sorted(behind)
             longest = max(behind.values(), key=lambda p: (len(p), p))
             for edge in dead_edges:
@@ -369,43 +407,62 @@ class OrphanStatus:
             return True
         return any(p.search(task.title) for p in self.recovery_titles)
 
-    def _recovery_targets(self, task: Task, snapshot: Snapshot) -> list[str]:
-        targets: set[str] = set()
+    def _recovery_links(
+        self, task: Task, snapshot: Snapshot, by_id: dict[str, Task]
+    ) -> tuple[list[str], list[str]]:
+        """What a recovery task recovers: the ids its title names (explicit), and the open
+        tasks that wait on it through a dependency or a condition (implicit)."""
+        explicit: set[str] = set()
         for pattern in self.recovery_titles:
             match = pattern.search(task.title)
             if match and "target" in pattern.groupindex and match.group("target"):
-                targets.add(match.group("target"))
-        targets |= {d.task_id for d in snapshot.dependencies if d.depends_on == task.id}
-        targets |= {
+                explicit.add(match.group("target"))
+        # A target that finished done was recovered: no loop through it.
+        explicit = {x for x in explicit if x not in by_id or by_id[x].status is not Status.DONE}
+        waiting = {d.task_id for d in snapshot.dependencies if d.depends_on == task.id}
+        waiting |= {
             c.task_id
             for c in snapshot.conditions
             if c.task_id is not None and _names_task(c, task.id)
         }
-        return sorted(targets)
+        implicit = {x for x in waiting if x in by_id and not by_id[x].status.is_terminal}
+        return sorted(explicit), sorted(implicit)
 
     def _recovery_loops(self, snapshot: Snapshot, max_depth: int) -> Iterable[Action]:
         """d) Recovery tasks whose target is a recovery task, or themselves."""
+        by_id = {t.id: t for t in snapshot.tasks}
         recovery = {t.id: t for t in snapshot.tasks if self._is_recovery(t)}
-        targets = {tid: self._recovery_targets(t, snapshot) for tid, t in recovery.items()}
-        inner = {  # targeted by another open recovery task
+        links = {tid: self._recovery_links(t, snapshot, by_id) for tid, t in recovery.items()}
+        chained = {tid: [x for x in ex if x in recovery] for tid, (ex, _) in links.items()}
+        anyway = {
+            tid: sorted({x for x in (*ex, *im) if x in recovery}) for tid, (ex, im) in links.items()
+        }
+        inner = {  # explicitly recovered by another open recovery task
             x
-            for tid, ts in targets.items()
+            for tid, xs in chained.items()
             if not recovery[tid].status.is_terminal
-            for x in ts
-            if x != tid and x in recovery
+            for x in xs
+            if x != tid
         }
         loops: dict[str, tuple[list[str], bool]] = {}
         for tid in sorted(recovery):
-            if recovery[tid].status.is_terminal:
+            task = recovery[tid]
+            if task.status.is_terminal or self._skipped(task):
                 continue
-            if tid in inner and not _on_cycle(tid, targets):
+            cycle = _cycle(tid, anyway)
+            if cycle is not None:
+                chain, origin = cycle, min(cycle)
+            elif tid in inner:
                 continue  # an inner link of a longer chain: reported from its top
-            chain, origin, cycle = _follow(tid, targets)
-            if not cycle and len(chain) <= max_depth:
-                continue
+            else:
+                chain = _follow(tid, chained)
+                ex, im = links[chain[-1]]
+                origin = next((x for x in (*ex, *im) if x not in recovery), chain[-1])
+                if len(chain) <= max_depth:
+                    continue
             best = loops.get(origin)
             if best is None or len(chain) > len(best[0]):
-                loops[origin] = (chain, cycle)
+                loops[origin] = (chain, cycle is not None)
         for origin, (chain, cycle) in sorted(loops.items()):
             top = recovery[chain[0]]
             if cycle:
@@ -439,35 +496,27 @@ def _names_task(condition: Condition, task_id: str) -> bool:
     return condition.kind in _TASK_REFS and condition.params.get("task") == task_id
 
 
-def _follow(start: str, targets: dict[str, list[str]]) -> tuple[list[str], str, bool]:
-    """The recovery chain from ``start``: the tasks in it, its origin, and whether it loops.
-
-    Follows the first target that is a recovery task. The origin is the first target that
-    is not one (or the last recovery task, if it names no target); for a cycle it is the
-    smallest id on the cycle, so the key stays stable whichever task the walk started at.
-    """
+def _follow(start: str, links: dict[str, list[str]]) -> list[str]:
+    """The chain of recovery tasks from ``start``, following the first link not yet in it."""
     chain = [start]
-    while True:
-        nxt = next((x for x in targets[chain[-1]] if x in targets), None)
-        if nxt is None:
-            return chain, next(iter(targets[chain[-1]]), chain[-1]), False
-        if nxt in chain:
-            origin = min(chain[chain.index(nxt) :])
-            return [*chain, nxt], origin, True
+    while (nxt := next((x for x in links[chain[-1]] if x not in chain), None)) is not None:
         chain.append(nxt)
+    return chain
 
 
-def _on_cycle(start: str, targets: dict[str, list[str]]) -> bool:
-    seen: set[str] = set()
-    frontier = [x for x in targets.get(start, ()) if x in targets]
-    while frontier:
-        tid = frontier.pop()
-        if tid == start:
-            return True
-        if tid not in seen:
-            seen.add(tid)
-            frontier.extend(x for x in targets.get(tid, ()) if x in targets)
-    return False
+def _cycle(start: str, links: dict[str, list[str]]) -> list[str] | None:
+    """The shortest cycle through ``start`` (``[start, ..., start]``), or None."""
+    queue: deque[list[str]] = deque([[start]])
+    seen = {start}
+    while queue:
+        path = queue.popleft()
+        for x in links.get(path[-1], ()):
+            if x == start:
+                return [*path, start]
+            if x not in seen:
+                seen.add(x)
+                queue.append([*path, x])
+    return None
 
 
 def _open(condition: Condition) -> bool:
@@ -568,12 +617,14 @@ def build(config: dict[str, Any]) -> OrphanStatus:
         if n is not False and (not isinstance(n, int) or isinstance(n, bool) or n < 1):
             raise ValueError("max_recovery_depth must be a positive integer or false")
         kwargs["max_recovery_depth"] = None if n is False else n
-    for key in ("reassign", "reassign_unknown_owner", "dead_end_chains"):
+    for key in ("reassign", "reassign_unknown_owner", "dead_end_chains", "dependents_not_woken"):
         if key in config:
             kwargs[key] = _flag(config.pop(key), key)
-    for key in ("reviewer_roles", "recovery_labels"):
+    for key in ("reviewer_roles", "recovery_labels", "ignore_tasks"):
         if key in config:
             kwargs[key] = _strings(config.pop(key), key)
+    if "hold_labels" in config:
+        kwargs["hold_labels"] = frozenset(_strings(config.pop("hold_labels"), "hold_labels"))
     if "recovery_titles" in config:
         patterns = _strings(config.pop("recovery_titles"), "recovery_titles")
         try:

@@ -6,7 +6,8 @@ description: >
   next recovery was opened for the recovery, not for the migration; three levels deep, the
   farm was busy recovering its own recovery tasks while the original problem sat untouched.
   Two other recovery tasks named each other as their target. A single recovery task for a
-  stuck task, and a task whose title only looks like a recovery, are left alone.
+  stuck task, a staged plan of recovery-labelled steps that follow each other through
+  dependencies, and a task whose title only looks like a recovery are left alone.
 rule: orphan_status
 config:
   max_recovery_depth: 1
@@ -43,6 +44,13 @@ snapshot:
     - {id: T-1129, title: "Rotate certificates", status: blocked, status_since: "2026-03-02T15:00:00+00:00", role: ops, owner_id: agent-ops-2, block: {reason: "guard: cert store locked", since: "2026-03-02T15:00:00+00:00"}}
     # Only looks like a recovery: no label, and the title names no task.
     - {id: T-1130, title: "Recover the deleted cache", status: ready, status_since: "2026-03-02T15:00:00+00:00", role: ops}
+    # A staged plan: three recovery steps in order, not recovering each other.
+    - {id: T-1132, title: "Restore the index: export", status: done, status_since: "2026-03-02T14:00:00+00:00", role: ops, labels: [recovery]}
+    - {id: T-1133, title: "Restore the index: rebuild", status: in_progress, status_since: "2026-03-02T15:00:00+00:00", role: ops, owner_id: agent-ops-2, labels: [recovery]}
+    - {id: T-1134, title: "Restore the index: verify", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: ops, labels: [recovery]}
+  dependencies:
+    - {task_id: T-1133, depends_on: T-1132}
+    - {task_id: T-1134, depends_on: T-1133}
   sessions:
     - {id: S-1128, task_id: T-1128, owner_id: agent-ops-1, started_at: "2026-03-02T15:30:00+00:00", last_heartbeat: "2026-03-02T15:59:00+00:00"}
 expected_actions:
@@ -62,3 +70,6 @@ not_expected_actions:
   - {kind: alert, task_id: T-1128}
   - {kind: alert, task_id: T-1129}
   - {kind: alert, task_id: T-1130}
+  - {kind: alert, task_id: T-1132}
+  - {kind: alert, task_id: T-1133}
+  - {kind: alert, task_id: T-1134}
