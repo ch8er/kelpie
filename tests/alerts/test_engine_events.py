@@ -7,7 +7,7 @@ import pytest
 
 from kelpie.alerts import slack, telegram
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.alerts import AlertEvent, Did, Transition
+from kelpie.core.alerts import AlertEvent, Did, Transition, lead_in
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.model import Snapshot
@@ -134,3 +134,12 @@ def test_effects_carry_what_kelpie_did_as_fields() -> None:
     )
     (failed,) = alerter.events
     assert (failed.subject, failed.did) == ("requeue T-]1", Did.FAILED)
+
+
+def test_the_transition_is_worded_once_in_lead_in() -> None:
+    assert lead_in(Transition.NEW) == ""
+    assert lead_in(Transition.CHANGED) == "Changed: "
+    assert lead_in(Transition.ESCALATED, 4 * H) == "Still open after 4.0h: "
+    assert lead_in(Transition.RESOLVED, timedelta(minutes=5)) == "Resolved after 5m: "
+    assert lead_in(Transition.ESCALATED) == "Still open. "  # no age known
+    assert lead_in(Transition.RESOLVED) == "Resolved. "

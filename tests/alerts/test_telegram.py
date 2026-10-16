@@ -74,7 +74,7 @@ def test_message_shows_severity_transition_and_what_kelpie_did() -> None:
         transition=Transition.RESOLVED,
         age=timedelta(hours=1),
     )
-    # The engine's own wording says it: the channel's label is not added a second time.
+    # The transition is worded from the fields (core.alerts.lead_in), once.
     assert format_message(resolved).split("\n")[1] == "Resolved after 1.0h: gone."
     still = message(reason="no owner", transition=Transition.ESCALATED, age=timedelta(hours=4))
     assert format_message(still).split("\n")[1] == "Still open after 4.0h: no owner"
