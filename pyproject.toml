@@ -59,7 +59,15 @@ forbidden_modules = [
     "kelpie.cli",
     "kelpie.metrics",
     "kelpie.traces",
+    "kelpie.report",
 ]
+
+[[tool.importlinter.contracts]]
+name = "Live metrics do not depend on the report (it may use an LLM)"
+type = "forbidden"
+source_modules = ["kelpie.metrics"]
+forbidden_modules = ["kelpie.report"]
+allow_indirect_imports = true  # only for typing, through kelpie.app
 
 [[tool.importlinter.contracts]]
 name = "Traces build on core only"

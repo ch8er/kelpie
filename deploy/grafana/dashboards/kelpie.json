@@ -1656,6 +1656,184 @@
         "overrides": []
       },
       "description": "Alerts dropped before delivery: duplicate (merged), queue_full or shutdown. A series appears with its first event."
+    },
+    {
+      "id": 54,
+      "type": "row",
+      "title": "Throughput",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 108
+      },
+      "panels": []
+    },
+    {
+      "id": 55,
+      "type": "timeseries",
+      "title": "Tasks completed per hour by role (24h average)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 109
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_role_tasks_done_24h / 24",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Tasks of the role that reached done in the last 24h, per hour. The board's own lookback bounds how far back done tasks are visible."
+    },
+    {
+      "id": 56,
+      "type": "timeseries",
+      "title": "Agents with work by role (share)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 109
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_role_agents_with_work / (kelpie_role_agents > 0)",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "description": "Share of the role's agents with a live session or an open task, as the bottlenecks rule counts them. Not the daily report's utilization (session hours over agent-hours)."
+    },
+    {
+      "id": 57,
+      "type": "timeseries",
+      "title": "Ownerless queue by role",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 109
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_role_ownerless_queue_tasks",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Ownerless tasks waiting for the role (ready, review, accepted). The daily report's queue also counts owned tasks waiting for their agent."
+    },
+    {
+      "id": 58,
+      "type": "timeseries",
+      "title": "Open tasks by stage",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 116
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (stage) (kelpie_tasks_by_stage)",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Open tasks per stage now: working (a session runs), queue, review, waiting (for conditions), ownerless. Averaged over a range, the average number of tasks in each stage."
+    },
+    {
+      "id": 59,
+      "type": "timeseries",
+      "title": "Returns per done task by role (24h)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 116
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_role_returns_24h / (kelpie_role_tasks_done_24h > 0)",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Returns of the role's tasks in the last 24h over its tasks done in that time. Not the daily report's rework rate (share of active tasks sent back)."
     }
   ],
   "templating": {
