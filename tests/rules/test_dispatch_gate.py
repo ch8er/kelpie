@@ -65,7 +65,7 @@ def test_registered() -> None:
 
 
 def test_unmet_pr_condition_parks_the_ready_task() -> None:
-    c = cond("C", pr_state="open", error="x", sha="abc")
+    c = cond("C", pr_state="open", error="x", sha="abc", head_sha="def")
     [action] = run(task("T"), conditions=(c,))
     assert action.kind is ActionKind.WAIT and action.task_id == "T" and action.once
     assert action.key == f"dispatch_gate:T:{(NOW - 60 * M).isoformat()}"

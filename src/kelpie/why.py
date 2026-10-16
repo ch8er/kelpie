@@ -12,7 +12,13 @@ skipped.
 - the task's status and how long it has been there (with the platform's own status when it
   differs, such as Hermes ``triage`` or ``scheduled`` behind ``backlog``), owner, labels
   (held ones flagged), block and sessions;
-- its linked conditions and their state;
+- its linked conditions, each with its target (repository, PR, head commit when known), kind,
+  state and when it was last checked. ``kelpie serve`` keeps the conditions it attaches to
+  blocks (``[[block_conditions]]``) in memory only, so ``why`` rebuilds them: offline it
+  shows what a block reason or ready task title would attach (the pattern match needs no
+  network) marked "not checked", and with ``--refresh`` the PR is resolved and checked as on
+  a tick. A pattern hit that attaches nothing is listed with the reason; "none" is printed
+  only when nothing matched;
 - what it waits for, link by link up to the first dead end (``kelpie.rules._chains``, the
   same graph rule 3 uses) and what waits behind it;
 - the rule findings about it: actions on the task, or naming it in their params (a chain,
@@ -33,8 +39,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+import unicodedata
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -48,10 +55,12 @@ from kelpie.app import (
     merged_snapshot,
     utc_now,
 )
+from kelpie.connectors.github.blocks import target_of, text_matches
+from kelpie.connectors.github.connector import PrRef, web_host
 from kelpie.core.actions import Action
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry
-from kelpie.core.model import Condition, Session, Snapshot, Status, Task
+from kelpie.core.model import Condition, ConditionKind, Session, Snapshot, Status, Task
 from kelpie.core.spans import SpanStore
 from kelpie.core.states import OpenState
 from kelpie.core.storage import (
@@ -69,9 +78,16 @@ from kelpie.traces.store import SpanWindow
 log = logging.getLogger(__name__)
 
 DEFAULT_ENTRIES = 10
-SCHEMA_VERSION = 1  # of the --json object
+GITHUB_KINDS = frozenset({ConditionKind.PR_MERGED, ConditionKind.CI_STATUS})
+SCHEMA_VERSION = 1  # of the --json object (fields are only ever added within a version)
 TEXT_SESSIONS = 3  # sessions shown in the text view, newest first
 JSON_SESSIONS = 10  # ...and in --json
+_JOINERS = frozenset("\u200c\u200d")  # ZWNJ, ZWJ
+_BIDI = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+NOT_CHECKED = "not checked (offline; --refresh checks {})"  # {}: "it" or "them"
+# Rules whose verdict on a block rests on it having no condition: offline they judge the
+# bare block, while serve attaches the condition the reason would give.
+CONDITION_RULES = frozenset({"exit_contract", "stale_blocks"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +115,26 @@ class Finding:
 
     action: Action
     mode: Mode
+    note: str | None = None  # a caveat about the verdict (offline: a condition is not attached)
+
+
+@dataclass(frozen=True, slots=True)
+class Expected:
+    """A ``[[block_conditions]]`` hit on the task's text that has no condition in the snapshot:
+    what ``kelpie serve`` would attach (``not_checked``: offline, the PR is not looked up),
+    or why it attaches nothing (``not_attached``: GitHub did not confirm the PR;
+    ``unresolvable``: the text names no PR Kelpie may read)."""
+
+    kind: str  # pr_merged | ci_green
+    source: str  # block_reason | task_text
+    status: str  # not_checked | not_attached | unresolvable
+    detail: str
+    repo: str | None = None
+    pr: int | None = None
+    captured: str = ""  # what the pattern captured: agent text
+    condition_kind: str = ""  # the ConditionKind value the condition has (ci_green: ci_status)
+    fallback: bool = False  # a block gets the first PR GitHub confirms; this one only if not
+    same_pr: bool = False  # names the PR of an earlier hit (another kind): never used
 
 
 @dataclass(slots=True)
@@ -119,6 +155,9 @@ class Explanation:
     # rule 3's threshold for a card stuck before work; None when off or not loaded
     prework_after: timedelta | None = None
     loaded_rules: frozenset[str] = frozenset()
+    refreshed: bool = False  # the network connector steps ran (--refresh)
+    expected: list[Expected] = field(default_factory=list)
+    block_patterns: int = 0  # [[block_conditions]] patterns that apply to the task's text
 
 
 class _Capture(logging.Handler):
@@ -251,6 +290,99 @@ def read_history(
     return states, entries, []
 
 
+def expected_conditions(
+    settings: Settings, snapshot: Snapshot, task: Task, refreshed: bool
+) -> tuple[list[Expected], int]:
+    """The ``[[block_conditions]]`` hits on the task's block reason (or a ready task's title)
+    that have no condition in the snapshot, and how many patterns apply to that text.
+
+    Matching a pattern needs no network, so it is done here from the config alone, exactly
+    as the GitHub step does it; only looking the PR up needs ``--refresh``."""
+    github, patterns = settings.github, settings.block_conditions
+    if github is None or not github.enabled or not patterns:
+        return [], 0
+    target = target_of(task, snapshot, patterns)
+    if target is None:
+        return [], 0
+    host, repos = web_host(github.api_url), {r.lower() for r in github.repos}
+    applying = sum(target in p.applies_to for p in patterns)
+    known = {c.id for c in snapshot.conditions}
+    source = "block_reason" if target == "block" else "task_text"
+    out: list[Expected] = []
+    seen: list[PrRef] = []  # a block takes the first PR GitHub confirms; later ones back it up
+    for m in text_matches(task, target, patterns, host, lambda repo: repo.lower() in repos):
+        kind = m.pattern.kind
+        if m.ref is None:
+            if m.problem == "not_allowed":
+                why = f"names {_text(m.text, 80)}, a repository outside [connectors.github] repos"
+            else:
+                why = f"names {_text(m.text, 80)}, which is not a PR reference Kelpie can read"
+            out.append(
+                Expected(
+                    kind,
+                    source,
+                    "unresolvable",
+                    why,
+                    None,
+                    None,
+                    m.text,
+                    m.pattern.condition_kind.value,
+                )
+            )
+            continue
+        cid = f"{'block' if target == 'block' else 'ready'}:{task.id}:{kind}:{m.ref}"
+        if cid in known:
+            continue
+        if refreshed:
+            status = "not_attached"
+            why = (
+                "GitHub did not confirm the PR (not found, unreachable or rate limited); "
+                "kelpie serve retries every tick and attaches it once it does"
+            )
+        else:
+            status, why = "not_checked", NOT_CHECKED.format("them")
+        # Confirmation is per PR: another kind on a PR seen above is never used. A later PR
+        # is a fallback only while the first is unknown; after --refresh none was confirmed.
+        same_pr = target == "block" and m.ref in seen
+        fallback = target == "block" and not same_pr and bool(seen) and status == "not_checked"
+        if same_pr:
+            why = "same PR as above"
+        elif fallback:
+            above = "the PR above is" if len(seen) == 1 else "the PRs above are"
+            why = f"used only if {above} not confirmed"
+        if m.ref not in seen:
+            seen.append(m.ref)
+        out.append(
+            Expected(
+                kind,
+                source,
+                status,
+                why,
+                m.ref.repo,
+                m.ref.number,
+                m.text,
+                m.pattern.condition_kind.value,
+                fallback,
+                same_pr,
+            )
+        )
+    return out, applying
+
+
+def _offline_note(expected: Sequence[Expected]) -> str | None:
+    """The caveat for rule verdicts on a block that serve would give a condition: offline the
+    rules judge the bare block. Not a prediction: the PR is only confirmed by GitHub."""
+    first = next(
+        (e for e in expected if e.status == "not_checked" and not (e.fallback or e.same_pr)), None
+    )
+    if first is None or first.source != "block_reason":
+        return None
+    return (
+        f"offline: serve treats this block as a wait on {_pr(first.repo, first.pr)} once "
+        "GitHub confirms the PR; --refresh to verify"
+    )
+
+
 def explain_snapshot(
     loaded: LoadedRules, snapshot: Snapshot, task_id: str, dry_run: bool = True
 ) -> Explanation | None:
@@ -302,6 +434,15 @@ def explain(
     ex = explain_snapshot(loaded, read.snapshot, task_id, settings.engine.dry_run)
     if ex is None:
         return Failure("not_found", f"task {task_id} is not on the board", read.problems, 1)
+    ex.refreshed = refresh
+    ex.expected, ex.block_patterns = expected_conditions(settings, read.snapshot, ex.task, refresh)
+    if note := _offline_note(ex.expected):
+        ex.findings = [
+            replace(f, note=note)
+            if f.action.rule in CONDITION_RULES and f.action.task_id == ex.task.id
+            else f
+            for f in ex.findings
+        ]
     state_ids = [f.action.state for f in ex.findings if f.action.state is not None]
     ex.states, ex.entries, unread = read_history(settings.db_path, task_id, state_ids, entries)
     ex.problems = [*read.problems, *ex.problems, *unread]
@@ -337,18 +478,69 @@ def _session(s: Session, now: datetime, stale_after: timedelta) -> str:
     return f"{s.id} by {s.owner_id}: ended {_age(now - s.ended_at)} ago, {final}{reason}"
 
 
-def _condition(c: Condition, now: datetime) -> str:
+def _shown(ch: str) -> bool:
+    """Whether a character is printed as it is. Control characters, bidi controls and line
+    or paragraph separators are escaped; the joiners of emoji sequences and the space
+    separators (no-break space, narrow no-break space) are text, not control."""
+    if ch in _JOINERS or unicodedata.category(ch) == "Zs":
+        return True
+    return ch.isprintable() and ch not in _BIDI
+
+
+def _text(value: object, limit: int | None = None) -> str:
+    """Agent-provided text on one line: control characters shown escaped, long text cut."""
+    flat = "".join(ch if _shown(ch) else ch.encode("unicode_escape").decode() for ch in str(value))
+    return flat if limit is None or len(flat) <= limit else flat[: limit - 3] + "..."
+
+
+def _pr(repo: object, pr: object, sha: object = None) -> str | None:
+    """``owner/name#N`` (and the head commit, when the condition knows it)."""
+    if not repo or pr is None:
+        return None
+    target = f"{_text(repo)}#{_text(pr)}"
+    return f"{target} @ {_text(str(sha)[:12])}" if sha else target
+
+
+def _target(c: Condition) -> str | None:
+    p = c.params
+    return _pr(p.get("repo"), p.get("pr"), p.get("sha") or p.get("head_sha"))
+
+
+def _condition(c: Condition, now: datetime, offline: bool = False) -> str:
     state = {True: "met", False: "unmet", None: "unknown"}[c.satisfied]
     extra = []
+    if pr_state := c.params.get("pr_state"):
+        extra.append(f"PR {_text(pr_state)}")
+    if ci_state := c.params.get("ci_state"):
+        extra.append(f"CI {_text(ci_state)}")
     if c.params.get("terminal") is True:
         extra.append("can never be met")
     if error := c.params.get("error"):
-        extra.append(f"error {error}")
-    if (target := c.params.get("task")) is not None:
-        extra.append(f"task {target}")
-    checked = f"checked {_age(now - c.checked_at)} ago" if c.checked_at else "never checked"
+        extra.append(f"error {_text(error)}")
+    if (task := c.params.get("task")) is not None:
+        extra.append(f"task {_text(task)}")
+    if c.checked_at:
+        checked = f"checked {_age(now - c.checked_at)} ago"
+    elif offline and c.satisfied is None and c.kind in GITHUB_KINDS:
+        checked = NOT_CHECKED.format("it")
+    else:
+        checked = "never checked"
     detail = f" ({', '.join(extra)})" if extra else ""
-    return f"{c.id} [{c.kind}]: {state}{detail}, {checked}"
+    where = f" {target}" if (target := _target(c)) else ""
+    return f"{_text(c.id)} [{c.kind}]{where}: {state}{detail}, {checked}"
+
+
+def _expected(e: Expected) -> str:
+    source = "block reason" if e.source == "block_reason" else "ready task title"
+    if e.status == "unresolvable":
+        return f"{e.kind} from the {source} {e.detail}: nothing is attached"
+    if e.fallback:
+        verb = "fallback"
+    elif e.same_pr:
+        verb = "unused"
+    else:
+        verb = "would attach" if e.status == "not_checked" else "matched"
+    return f"{verb} {e.kind} on {_pr(e.repo, e.pr)} (from the {source}): {e.detail}"
 
 
 def _chain(chain: Chain, snapshot: Snapshot) -> str:
@@ -404,9 +596,16 @@ def render(ex: Explanation) -> str:
     lines.append("Conditions")
     if ex.missing_condition:
         lines.append(f"  {ex.missing_condition}: named by the block, Kelpie cannot see it")
-    lines += [f"  {_condition(c, now)}" for c in ex.conditions]
-    if not ex.conditions and not ex.missing_condition:
-        lines.append("  none")
+    lines += [f"  {_condition(c, now, not ex.refreshed)}" for c in ex.conditions]
+    lines += [f"  {_expected(e)}" for e in ex.expected]
+    if not ex.conditions and not ex.missing_condition and not ex.expected:
+        if ex.block_patterns and t.block is not None:
+            lines.append(
+                f"  none (the block reason matches none of the {ex.block_patterns} "
+                "[[block_conditions]] patterns)"
+            )
+        else:
+            lines.append("  none")
 
     lines.append("Waits for")
     lines += [f"  {_chain(c, ex.snapshot)}" for c in ex.chains] or ["  nothing Kelpie can see"]
@@ -418,6 +617,8 @@ def render(ex: Explanation) -> str:
     for f in ex.findings:
         a = f.action
         lines.append(f"  {a.rule} [{_mode(f, ex.dry_run)}] {a.kind} {a.severity}: {a.reason}")
+        if f.note:
+            lines.append(f"    note: {f.note}")
     if not ex.findings:
         lines.append("  no rule acts on this task")
         lines += [f"  {hint}" for hint in _hints(ex)]
@@ -436,7 +637,15 @@ def render(ex: Explanation) -> str:
     if not ex.entries:
         lines.append("  none")
     lines += [f"note: {p}" for p in ex.problems]
-    return "\n".join(lines) + "\n"
+    # Block reasons, titles, rule reasons and the like carry agents' text. Newlines in a
+    # line (rule reasons are paragraphs) start continuation lines behind a bar, so that none
+    # can pass for a section or an entry; every line is escaped.
+    out: list[str] = []
+    for line in lines:
+        first, *more = line.replace("\r\n", "\n").split("\n")
+        out.append(_text(first))
+        out += [f"    | {_text(part)}" for part in more if part.strip()]
+    return "\n".join(out) + "\n"
 
 
 def _raw(t: Task) -> str:
@@ -494,6 +703,13 @@ def _hints(ex: Explanation) -> list[str]:
     return out
 
 
+def _json_target(c: Condition) -> dict[str, Any] | None:
+    repo, pr = c.params.get("repo"), c.params.get("pr")
+    if not repo or pr is None:
+        return None
+    return {"repo": repo, "pr": pr, "sha": c.params.get("sha") or c.params.get("head_sha")}
+
+
 def as_json(ex: Explanation) -> dict[str, Any]:
     t, now = ex.task, ex.snapshot.now
     sessions = sorted(ex.snapshot.sessions_for(t.id), key=lambda s: s.started_at, reverse=True)
@@ -538,9 +754,27 @@ def as_json(ex: Explanation) -> dict[str, Any]:
                 "kind": c.kind.value,
                 "satisfied": c.satisfied,
                 "checked_at": c.checked_at.isoformat() if c.checked_at else None,
+                "state": {True: "met", False: "unmet", None: "unknown"}[c.satisfied],
+                "target": _json_target(c),
                 "params": c.params,
             }
             for c in ex.conditions
+        ],
+        "refreshed": ex.refreshed,
+        "expected_conditions": [
+            {
+                "kind": e.kind,
+                "condition_kind": e.condition_kind,
+                "fallback": e.fallback,
+                "same_pr": e.same_pr,
+                "source": e.source,
+                "status": e.status,
+                "repo": e.repo,
+                "pr": e.pr,
+                "captured": e.captured,
+                "detail": e.detail,
+            }
+            for e in ex.expected
         ],
         "missing_condition": ex.missing_condition,
         "chains": [
@@ -565,6 +799,7 @@ def as_json(ex: Explanation) -> dict[str, Any]:
                 "reason": f.action.reason,
                 "state": f.action.state,
                 "params": f.action.params,
+                "note": f.note,
             }
             for f in ex.findings
         ],

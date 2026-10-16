@@ -7,11 +7,14 @@ import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from kelpie.app import LoadedRules, build_app, find_config, load_rules, load_settings
+from kelpie.app import LoadedRules, Settings, build_app, find_config, load_rules, load_settings
 from kelpie.cli import main
+from kelpie.connectors.github.blocks import load_block_conditions
+from kelpie.connectors.github.settings import GitHubSettings
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import (
@@ -25,14 +28,20 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.why import (
+    Expected,
     Explanation,
     Finding,
     _age,
     _chain,
+    _condition,
+    _expected,
     _mentions,
     _mode,
+    _offline_note,
+    _text,
     as_json,
     evaluate_rules,
+    expected_conditions,
     explain,
     explain_snapshot,
     read_history,
@@ -439,3 +448,342 @@ def test_a_young_card_waiting_for_its_own_parent_says_so() -> None:
                      prework_after=timedelta(hours=4),
                      loaded_rules=frozenset({"orphan_status"}))  # fmt: skip
     assert _hints(ex)[1] == "orphan_status leaves it: it waits for parents of its own (P)"
+
+
+# -- block conditions (#126) -------------------------------------------------------------------
+
+
+def _bc_settings(*patterns: dict[str, object], enabled: bool = True) -> Settings:
+    github = GitHubSettings(repos=("example/repo",), enabled=enabled)
+    return SimpleNamespace(  # type: ignore[return-value]
+        github=github, block_conditions=load_block_conditions(list(patterns), github.repos)
+    )
+
+
+MERGE = {"pattern": r"merge of (?P<pr>\S+)", "kind": "pr_merged", "repo": "example/repo"}
+
+
+def _blocked(reason: str, status: Status = Status.BLOCKED, title: str = "t") -> Snapshot:
+    block = Block(reason, NOW - timedelta(hours=1)) if status is Status.BLOCKED else None
+    task = Task("T-1", title, status, NOW - timedelta(hours=1), block=block)
+    return Snapshot(now=NOW, tasks=(task,))
+
+
+def test_expected_offline_names_the_pr_without_the_network() -> None:
+    snap, settings = _blocked("waiting for merge of #57"), _bc_settings(MERGE)
+    [e], n = expected_conditions(settings, snap, snap.tasks[0], refreshed=False)
+    assert n == 1
+    assert (e.status, e.repo, e.pr, e.kind) == ("not_checked", "example/repo", 57, "pr_merged")
+    assert _expected(e) == (
+        "would attach pr_merged on example/repo#57 (from the block reason): "
+        "not checked (offline; --refresh checks them)"
+    )
+    [e], _ = expected_conditions(settings, snap, snap.tasks[0], refreshed=True)
+    assert e.status == "not_attached" and _expected(e).startswith("matched pr_merged on")
+
+
+def test_expected_says_why_a_hit_attaches_nothing_and_escapes_agent_text() -> None:
+    settings = _bc_settings(MERGE)
+    snap = _blocked("merge of other/repo#5")
+    [e], _ = expected_conditions(settings, snap, snap.tasks[0], False)
+    assert e.status == "unresolvable" and "outside [connectors.github] repos" in _expected(e)
+    snap = _blocked("merge of \x1b[31m\x07oops")
+    [e], _ = expected_conditions(settings, snap, snap.tasks[0], False)
+    line = _expected(e)
+    assert "\x1b" not in line and "\x07" not in line and "\\x1b[31m\\x07oops" in line
+    assert line.endswith("nothing is attached") and e.captured.startswith("\x1b")
+
+
+def test_expected_none_when_nothing_applies() -> None:
+    snap = _blocked("stuck")
+    assert expected_conditions(_bc_settings(MERGE), snap, snap.tasks[0], False) == ([], 1)
+    off = _bc_settings(MERGE, enabled=False)
+    assert expected_conditions(off, snap, snap.tasks[0], False) == ([], 0)
+    nothing = SimpleNamespace(github=None, block_conditions=())
+    assert expected_conditions(nothing, snap, snap.tasks[0], False) == ([], 0)  # type: ignore[arg-type]
+    # A block that already has its condition is not matched again.
+    cond = Condition("block:T-1:pr_merged:example/repo#57", ConditionKind.PR_MERGED, "T-1")
+    task = Task(
+        "T-1", "t", Status.BLOCKED, NOW, block=Block("merge of #57", NOW, condition_id=cond.id)
+    )
+    held = Snapshot(now=NOW, tasks=(task,), conditions=(cond,))
+    assert expected_conditions(_bc_settings(MERGE), held, task, False) == ([], 0)
+
+
+def test_expected_reads_a_ready_task_title_for_the_gate() -> None:
+    gate = {**MERGE, "applies_to": ["ready_task"]}
+    snap = _blocked("", Status.READY, title="Redo it after merge of #7")
+    [e], n = expected_conditions(_bc_settings(gate), snap, snap.tasks[0], False)
+    assert n == 1 and e.source == "task_text" and e.pr == 7
+    assert "ready task title" in _expected(e)
+
+
+def test_render_conditions_with_target_and_offline_wording() -> None:
+    task = Task("T-1", "t", Status.WAITING, NOW - timedelta(hours=1))
+    unchecked = Condition("a", ConditionKind.PR_MERGED, "T-1", {"repo": "example/repo", "pr": 9})
+    checked = Condition(
+        "b", ConditionKind.CI_STATUS, "T-1",
+        {"repo": "example/repo", "pr": 9, "sha": "0123456789abcdef0123", "ci_state": "pending"},
+        satisfied=False, checked_at=NOW - timedelta(minutes=3),
+    )  # fmt: skip
+    snap = Snapshot(now=NOW, tasks=(task,), conditions=(unchecked, checked))
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    offline = "a [pr_merged] example/repo#9: unknown, not checked (offline; --refresh checks it)"
+    assert offline in render(ex)
+    ex.refreshed = True
+    text = render(ex)
+    assert "a [pr_merged] example/repo#9: unknown, never checked" in text
+    assert "b [ci_status] example/repo#9 @ 0123456789ab: unmet (CI pending), checked 3m ago" in text
+    target = as_json(ex)["conditions"][1]["target"]
+    assert target == {"repo": "example/repo", "pr": 9, "sha": "0123456789abcdef0123"}
+
+
+def test_none_names_the_patterns_it_checked() -> None:
+    snap = _blocked("stuck")
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    ex.block_patterns = 2
+    expected = "none (the block reason matches none of the 2 [[block_conditions]] patterns)"
+    assert expected in render(ex)
+
+
+# -- review follow-ups for #126 --------------------------------------------------------------
+
+
+GITHUB_CONFIG = """
+[connectors.github]
+repos = ["example/repo"]
+
+[[block_conditions]]
+pattern = 'merge of (?P<pr>\\S+)'
+kind = "pr_merged"
+repo = "example/repo"
+"""
+
+
+@pytest.fixture
+def pr_farm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.delenv("KELPIE_CONFIG", raising=False)
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    monkeypatch.chdir(tmp_path)
+    board = Board(tmp_path / "kanban.db")
+    board.task("t_pr", "blocked", ago(days=1), assignee="dev")
+    board.event("t_pr", "claimed", ago(hours=7))
+    board.run("t_pr", "dev", ago(hours=7), status="blocked", ended=ago(hours=6),
+              outcome="blocked")  # fmt: skip
+    board.event("t_pr", "blocked", ago(hours=6), {"reason": "waiting for merge of #5"})
+    board.close()
+    config = CONFIG.format(db=json.dumps(str(tmp_path / "kanban.db"))) + GITHUB_CONFIG
+    (tmp_path / "kelpie.toml").write_text(config)
+    return tmp_path
+
+
+def test_offline_rule_verdicts_on_a_block_carry_a_note(
+    pr_farm: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = load_settings(find_config(None))
+    ex = explain(settings, "t_pr", clock=lambda: NOW)
+    assert isinstance(ex, Explanation)
+    noted = [f for f in ex.findings if f.note]
+    assert {f.action.rule for f in noted} >= {"stale_blocks"}
+    assert {f.action.rule for f in noted} <= {"exit_contract", "stale_blocks"}
+    want = (
+        "offline: serve treats this block as a wait on example/repo#5 once GitHub confirms "
+        "the PR; --refresh to verify"
+    )
+    assert all(f.note == want for f in noted)
+    text = render(ex)
+    assert f"    note: {want}" in text
+    assert "would attach pr_merged on example/repo#5" in text
+    data = as_json(ex)
+    assert {f["rule"] for f in data["findings"] if f["note"] == want} == {
+        f.action.rule for f in noted
+    }
+
+
+def test_a_note_is_for_condition_rules_only() -> None:
+    note = "x"
+    other = Finding(Action(ActionKind.ALERT, "bottlenecks", "r", task_id="T-1"), Mode.OBSERVE)
+    assert other.note is None and replace(other, note=note).note == note
+    first = Expected("pr_merged", "block_reason", "not_checked", "d", "a/b", 1, "#1", "pr_merged")
+    assert _offline_note([first]) is not None
+    assert _offline_note([replace(first, status="not_attached")]) is None
+    assert _offline_note([replace(first, source="task_text")]) is None
+    assert _offline_note([replace(first, fallback=True)]) is None
+    assert _offline_note([]) is None
+
+
+def test_a_block_takes_the_first_pr_and_the_rest_are_fallbacks() -> None:
+    second = {"pattern": r"PR (?P<pr>#\d+)", "kind": "ci_green", "repo": "example/repo"}
+    settings = _bc_settings(MERGE, second)
+    snap = _blocked("waiting for merge of #5, see PR #6")
+    task = snap.tasks[0]
+    found, n = expected_conditions(settings, snap, task, refreshed=False)
+    assert n == 2 and [(e.pr, e.fallback) for e in found] == [(5, False), (6, True)]
+    lines = [_expected(e) for e in found]
+    assert lines[0].startswith("would attach pr_merged on example/repo#5")
+    assert lines[1] == (
+        "fallback ci_green on example/repo#6 (from the block reason): used only if the PR "
+        "above is not confirmed"
+    )
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    ex.expected = found
+    entries = as_json(ex)["expected_conditions"]
+    assert [(e["kind"], e["condition_kind"], e["fallback"]) for e in entries] == [
+        ("pr_merged", "pr_merged", False),
+        ("ci_green", "ci_status", True),
+    ]
+    assert _offline_note(found) is not None and "example/repo#5" in str(_offline_note(found))
+
+
+def test_agent_text_cannot_forge_a_section_or_a_control_sequence() -> None:
+    evil = "x\n  Conditions\n  fake [pr_merged]: met\x1b[2K"
+    block = Block(evil, NOW - timedelta(hours=1))
+    task = Task("T-1", "title\nLedger (latest first)\x07", Status.BLOCKED, NOW, block=block)
+    ex = explain_snapshot(LoadedRules([], [], []), Snapshot(now=NOW, tasks=(task,)), "T-1")
+    assert ex is not None
+    ex.problems = ["bad\nnote: forged"]
+    lines = render(ex).splitlines()
+    assert lines.count("Conditions") == 1 and lines.count("Ledger (latest first)") == 1
+    assert not any(line.startswith("  fake") for line in lines)
+    assert not any("\x1b" in line or "\x07" in line for line in lines)
+    assert sum(line.startswith("note:") for line in lines) == 1
+    # The block reason's later lines sit behind a bar, escaped.
+    assert "    |   Conditions" in lines
+    assert any(line.startswith("    |   fake [pr_merged]: met\\x1b[2K") for line in lines)
+
+
+def test_condition_params_are_escaped_and_ids_are_not_cut() -> None:
+    long_id = "block:T-1:pr_merged:" + "x" * 200
+    c = Condition(
+        long_id, ConditionKind.TASK_STATUS, "T-1",
+        {"error": "e\nf", "pr_state": "\x1b[1m", "ci_state": "c\r", "task": "T\x00"},
+    )  # fmt: skip
+    line = _condition(c, NOW)
+    assert line.startswith(long_id) and "..." not in line
+    assert "error e\\nf" in line and "PR \\x1b[1m" in line and "task T\\x00" in line
+    assert not any(ch in line for ch in "\n\r\x1b\x00")
+
+
+def test_expected_skips_what_is_attached_and_follows_the_patterns() -> None:
+    gate = {**MERGE, "applies_to": ["ready_task"]}
+    ready = _blocked("", Status.READY, title="Redo it after merge of #7")
+    task = ready.tasks[0]
+    held = Condition("ready:T-1:pr_merged:example/repo#7", ConditionKind.PR_MERGED, "T-1")
+    registered = replace(ready, conditions=(held,))
+    assert expected_conditions(_bc_settings(gate), registered, task, False) == ([], 1)
+    # Patterns that read blocks only never look at a ready task's title.
+    assert expected_conditions(_bc_settings(MERGE), ready, task, False) == ([], 0)
+    many = _blocked("", Status.READY, title=" ".join(f"merge of #{i}" for i in range(1, 9)))
+    found, _ = expected_conditions(_bc_settings(gate), many, many.tasks[0], False)
+    assert [e.pr for e in found] == [1, 2, 3, 4, 5]  # MAX_READY_REFS; the rest are ignored
+    assert not any(e.fallback for e in found)
+
+
+# -- second review pass ------------------------------------------------------------------------
+
+
+def _ci(pattern: str = r"merge of (?P<pr>\S+)") -> dict[str, object]:
+    return {"pattern": pattern, "kind": "ci_green", "repo": "example/repo"}
+
+
+def test_fallback_only_while_the_first_pr_is_unknown() -> None:
+    other = {"pattern": r"PR (?P<pr>#\d+)", "kind": "ci_green", "repo": "example/repo"}
+    third = {"pattern": r"also (?P<pr>#\d+)", "kind": "pr_merged", "repo": "example/repo"}
+    snap = _blocked("merge of #5, PR #6, also #7")
+    task = snap.tasks[0]
+    # Offline the first PR is not confirmed: later ones are fallbacks ("the PRs above").
+    found, _ = expected_conditions(_bc_settings(MERGE, other), snap, task, refreshed=False)
+    assert [e.detail for e in found][1] == "used only if the PR above is not confirmed"
+    found, _ = expected_conditions(_bc_settings(MERGE, other, third), snap, task, False)
+    assert [e.fallback for e in found] == [False, True, True]
+    assert found[2].detail == "used only if the PRs above are not confirmed"
+    # After --refresh no PR was confirmed, so none is a fallback: each is simply unconfirmed.
+    found, _ = expected_conditions(_bc_settings(MERGE, other), snap, task, refreshed=True)
+    assert [(e.status, e.fallback) for e in found] == [("not_attached", False)] * 2
+    assert all(_expected(e).startswith("matched ") for e in found)
+    assert all("GitHub did not confirm the PR" in _expected(e) for e in found)
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    ex.expected, ex.refreshed = found, True
+    assert all(f["fallback"] is False for f in as_json(ex)["expected_conditions"])
+
+
+def test_the_same_pr_as_another_kind_is_never_a_fallback() -> None:
+    snap = _blocked("waiting for merge of #5")
+    found, n = expected_conditions(_bc_settings(MERGE, _ci()), snap, snap.tasks[0], False)
+    assert n == 2
+    assert [(e.kind, e.fallback, e.same_pr) for e in found] == [
+        ("pr_merged", False, False),
+        ("ci_green", False, True),
+    ]
+    assert _expected(found[1]) == (
+        "unused ci_green on example/repo#5 (from the block reason): same PR as above"
+    )
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    ex.expected = found
+    assert [e["same_pr"] for e in as_json(ex)["expected_conditions"]] == [False, True]
+    assert _offline_note(found) is not None
+    refreshed, _ = expected_conditions(_bc_settings(MERGE, _ci()), snap, snap.tasks[0], True)
+    assert [e.same_pr for e in refreshed] == [False, True]
+
+
+def test_rule_reasons_keep_their_paragraphs() -> None:
+    snap = _blocked("stuck")
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    reason = "First paragraph.\n\nSecond \x1b[2Kparagraph.\n   \nThird."
+    action = Action(ActionKind.ALERT, "checkpoints", reason, task_id="T-1")
+    ex.findings = [Finding(action, Mode.OBSERVE)]
+    lines = render(ex).splitlines()
+    i = next(i for i, line in enumerate(lines) if line.startswith("  checkpoints"))
+    assert lines[i].endswith("First paragraph.")
+    assert lines[i + 1 : i + 4] == [
+        "    | Second \\x1b[2Kparagraph.",
+        "    | Third.",
+        "Open alert states",
+    ]
+    assert "\\n" not in "\n".join(lines)
+
+
+def test_rule_reasons_with_crlf_line_ends_keep_no_carriage_return() -> None:
+    snap = _blocked("stuck")
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    action = Action(ActionKind.ALERT, "checkpoints", "One.\r\n\r\nTwo.", task_id="T-1")
+    ex.findings = [Finding(action, Mode.OBSERVE)]
+    out = render(ex)
+    assert "\\r" not in out and "    | Two." in out
+
+
+def test_text_escapes_controls_but_keeps_emoji_joiners_and_spaces() -> None:
+    zwj = "\N{ZERO WIDTH JOINER}"
+    family = f"\N{MAN}{zwj}\N{WOMAN}{zwj}\N{GIRL}"
+    spaces = "a\N{NO-BREAK SPACE}b\N{NARROW NO-BREAK SPACE}c\N{IDEOGRAPHIC SPACE}d"
+    assert _text(family) == family and _text(spaces) == spaces
+    assert _text("\N{ZERO WIDTH NON-JOINER}") == "\N{ZERO WIDTH NON-JOINER}"
+    # Escaped: C0/C1 controls, bidi controls, line and paragraph separators.
+    bad_chars = [
+        "\x00",
+        "\x1b",
+        "\x7f",
+        "\x85",
+        "\t",
+        "\N{RIGHT-TO-LEFT OVERRIDE}",
+        "\N{LEFT-TO-RIGHT EMBEDDING}",
+        "\N{LEFT-TO-RIGHT ISOLATE}",
+        "\N{POP DIRECTIONAL ISOLATE}",
+        "\N{LEFT-TO-RIGHT MARK}",
+        "\N{RIGHT-TO-LEFT MARK}",
+        "\N{ARABIC LETTER MARK}",
+        "\N{LINE SEPARATOR}",
+        "\N{PARAGRAPH SEPARATOR}",
+        "\N{ZERO WIDTH NO-BREAK SPACE}",
+    ]
+    for bad in bad_chars:
+        out = _text(f"a{bad}b")
+        assert bad not in out and out.startswith("a\\") and out.endswith("b"), repr(bad)
+    assert _text("x\N{RIGHT-TO-LEFT OVERRIDE}y") == "x\\u202ey"

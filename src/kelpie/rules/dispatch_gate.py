@@ -179,7 +179,7 @@ class DispatchGate:
 # Keys connectors write into ``Condition.params`` as results of a check; a condition the
 # adapter registers again starts without them. ``sha`` stays on conditions the platform
 # registered (their own head binding) and is dropped from those derived from text (below).
-_RESULTS = frozenset({"error", "terminal", "observed_status", "pr_state", "ci_state"})
+_RESULTS = frozenset({"error", "terminal", "observed_status", "pr_state", "ci_state", "head_sha"})
 # Conditions the GitHub step derives from text are rebuilt every tick for the PR's current
 # head; re-registered with ``sha`` they would stay pinned to the commit seen when parked,
 # and a fixing push would never wake the task.

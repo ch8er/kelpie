@@ -155,6 +155,8 @@ class GitHubConnector:
         try:
             pull = self.pull(ref)
             params["pr_state"] = pull.state
+            if pull.head_sha:
+                params["head_sha"] = pull.head_sha  # a result key: dispatch_gate drops it
             if condition.kind is ConditionKind.PR_MERGED and pull.state == "closed":
                 params["terminal"] = True  # closed unmerged: it can never be met
             if condition.kind is ConditionKind.PR_MERGED:

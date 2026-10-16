@@ -221,3 +221,13 @@ def test_unexpected_response_shape_is_unknown() -> None:
         gh.reply(f"/repos/{REPO}/pulls/7", ["not", "a", "pull"])
         out = connector(gh).check(cond(ConditionKind.PR_MERGED))
     assert out.satisfied is None and out.params["error"] == "bad_response"
+
+
+def test_check_records_the_head_commit_only_when_the_pr_reports_one() -> None:
+    with serve() as gh:
+        gh.pull(REPO, 7, sha="b" * 40)
+        out = connector(gh).check(cond(ConditionKind.PR_MERGED))
+        assert out.params["head_sha"] == "b" * 40 and "sha" not in out.params
+        gh.pull(REPO, 8, head=None)
+        out = connector(gh).check(cond(ConditionKind.PR_MERGED, pr=8))
+        assert out.params["pr_state"] == "open" and "head_sha" not in out.params
