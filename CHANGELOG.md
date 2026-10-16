@@ -23,4 +23,4 @@ dry-run with every rule in `observe` mode.
 - **Daily report**: cost of chaos, what Kelpie did or would have done, what needs a
   human, before/after of recorded fixes (`kelpie fix`), token recommendations, and an
   optional LLM root-cause section (off by default).
-- `kelpie serve`, `status`, `doctor`, `report`, `fix`; docker compose stack.
+- `kelpie serve`, `status`, `doctor`, `report`, `fix`, `why`; docker compose stack.

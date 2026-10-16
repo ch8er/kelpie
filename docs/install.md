@@ -69,7 +69,9 @@ closes the database. Run it under any process supervisor you already use.
 
 The compose file starts Kelpie, Prometheus and Grafana. The image is built locally from the
 `Dockerfile` (`kelpie-sre:dev`); with `KELPIE_IMAGE=ghcr.io/ch8er/kelpie:<version>` and
-`docker compose up -d --no-build` it runs a published one instead.
+`docker compose up -d --no-build` it runs a published one instead. Do not combine
+`KELPIE_IMAGE` with `docker compose build` or `up --build`: that tags a local build with
+the published name.
 
 ```bash
 cp .env.example .env     # set GRAFANA_ADMIN_PASSWORD

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -124,3 +125,17 @@ def test_only_the_jobs_that_need_it_can_write() -> None:
 def test_the_image_is_latest_only_for_a_final_release() -> None:
     meta = next(s for s in workflow()["jobs"]["image"]["steps"] if s.get("id") == "meta")
     assert "enable=${{ needs.verify.outputs.prerelease == 'false' }}" in meta["with"]["tags"]
+
+
+def test_every_action_is_pinned_to_a_commit() -> None:
+    for name, job in workflow()["jobs"].items():
+        for step in job["steps"]:
+            if "uses" in step:
+                assert re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", step["uses"]), (name, step)
+
+
+def test_only_our_wheel_comes_from_testpypi() -> None:
+    [check] = [s for s in workflow()["jobs"]["testpypi-install"]["steps"] if "run" in s]
+    script = check["run"]
+    assert "unsafe-best-match" not in script and "--index-url" not in script
+    assert 'sha256sum "/tmp/testpypi/$name"' in script and '[ "$got" = "$want" ]' in script
