@@ -12,13 +12,16 @@ Builds on ``kelpie.core`` only.
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
+import types
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum, StrEnum
-from typing import Any
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
+from kelpie.core import model
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import ConditionKind, Snapshot
 from kelpie.core.ports import (
@@ -43,6 +46,9 @@ MAX_ACTIONS = 64  # per poll reply
 MAX_RESULTS = 256  # per poll request
 MAX_WAIT = 25.0  # seconds a poll may be held open
 MAX_TTL = 300.0  # seconds an action may wait to be started
+MAX_TEXT = 64 * 1024  # characters of a free-text field (title, body, summary)
+MAX_DEPTH = 32  # nesting of any JSON body
+MAX_PARAMS_DEPTH = 8  # nesting inside free-form maps (condition params, span attributes)
 # Per adapter snapshot: more is refused (a board that large needs a shorter lookback).
 MAX_COUNTS = {
     "tasks": 20_000,
@@ -57,7 +63,8 @@ _AGENT_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _ADAPTER_NAME = re.compile(r"[a-z0-9_-]{1,64}")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # in text: line breaks and tabs stay
 _ID_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
-_BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}")
+_BRANCH_PART = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,99}")
+_BOOT = re.compile(r"[0-9a-f]{8,64}")
 
 # What an agent's snapshot may hold: the board as its adapters see it. Builds, pull
 # requests, providers, resources and budgets come from the server's own connectors.
@@ -105,6 +112,7 @@ class Outcome(StrEnum):
     NOTHING_TO_DO = "nothing_to_do"  # e.g. the session had already ended
     NOT_EXECUTED = "not_executed"  # the adapter cannot do it (a human is told)
     FAILED = "failed"  # it raised (``detail``: the public reason only)
+    EXPIRED = "expired"  # its ttl ran out before it started: not carried out, may be retried
 
 
 def valid_agent_name(name: object) -> bool:
@@ -163,9 +171,26 @@ def encode_snapshot(snapshot: Snapshot) -> dict[str, Any]:
     return {k: v for k, v in plain.items() if k in SNAPSHOT_FIELDS}
 
 
+def depth_ok(data: object, limit: int = MAX_DEPTH) -> bool:
+    """Whether ``data`` (parsed JSON) nests at most ``limit`` levels; iterative, so a deep
+    body cannot exhaust the stack."""
+    stack: list[tuple[object, int]] = [(data, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict | list):
+            if depth > limit:
+                return False
+            values = item.values() if isinstance(item, dict) else item
+            stack.extend((v, depth + 1) for v in values)
+    return True
+
+
 def decode_snapshot(data: object) -> Snapshot:
     """A snapshot an agent sent. Unknown fields fail (agent and server must run the same
-    release), and so do parts other than the board's."""
+    release), and so do parts other than the board's. Every field is checked against its
+    type (ids: 1 to 256 printable characters; numbers finite; text without control
+    characters; free-form maps shallow and of plain values), so nothing an agent sends can
+    make a rule, the ledger or an alert fail."""
     if not isinstance(data, dict):
         raise ProtocolError("snapshot must be an object")
     if extra := set(data) - SNAPSHOT_FIELDS:
@@ -176,10 +201,117 @@ def decode_snapshot(data: object) -> Snapshot:
         items = data.get(key, [])
         if not isinstance(items, list) or len(items) > limit:
             raise ProtocolError(f"snapshot: {key} must be a list of at most {limit}")
+    if not depth_ok(data):
+        raise ProtocolError(f"snapshot: nested deeper than {MAX_DEPTH} levels")
     try:
-        return from_dict(Snapshot, data)
-    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        snapshot = from_dict(Snapshot, data)
+        return _checked(snapshot, "snapshot")
+    except ProtocolError:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
         raise ProtocolError(f"snapshot: {_clip(str(exc), 300)}") from None
+
+
+def _is_id(name: str) -> bool:
+    return name in ("id", "assignee", "subtasks", "depends_on") or name.endswith("_id")
+
+
+def _checked[T](obj: T, where: str) -> T:
+    """``obj`` (a model dataclass) with every field checked, text cleaned."""
+    cls = type(obj)
+    hints = _model_hints(cls)
+    changes: dict[str, Any] = {}
+    for f in dataclasses.fields(obj):  # type: ignore[arg-type]
+        if not f.init:
+            continue
+        value = getattr(obj, f.name)
+        clean = _value(hints[f.name], value, f"{where}.{f.name}", _is_id(f.name))
+        if clean is not value:
+            changes[f.name] = clean
+    return dataclasses.replace(obj, **changes) if changes else obj  # type: ignore[type-var]
+
+
+def _value(tp: Any, value: Any, where: str, is_id: bool) -> Any:
+    if value is None:
+        return None
+    origin = get_origin(tp)
+    if origin in (Union, types.UnionType):
+        inner = [a for a in get_args(tp) if a is not type(None)]
+        return _value(inner[0], value, where, is_id)
+    if origin is tuple:
+        if not isinstance(value, tuple):
+            raise ProtocolError(f"{where} must be a list")
+        (item_tp, _) = get_args(tp)
+        items = [_value(item_tp, v, where, is_id) for v in value]
+        return value if all(a is b for a, b in zip(items, value, strict=True)) else tuple(items)
+    if origin is dict or tp is Any:
+        return _plain(value, where, 1)
+    if dataclasses.is_dataclass(tp):
+        return _checked(value, where)
+    if tp is str:
+        if not isinstance(value, str):
+            raise ProtocolError(f"{where} must be a string")
+        if is_id:
+            return _id(value, where)
+        clean = _text(value, MAX_TEXT)
+        return value if clean == value else clean
+    if tp is bool:
+        if not isinstance(value, bool):
+            raise ProtocolError(f"{where} must be true or false")
+        return value
+    if tp is int:
+        if isinstance(value, bool) or not isinstance(value, int) or abs(value) > 2**53:
+            raise ProtocolError(f"{where} must be an integer")
+        return value
+    if tp is float:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ProtocolError(f"{where} must be a number")
+        if not math.isfinite(value) or abs(value) > 1e15:
+            raise ProtocolError(f"{where} must be a finite number")
+        return float(value)
+    if tp in (datetime, timedelta) or (isinstance(tp, type) and issubclass(tp, Enum)):
+        if not isinstance(value, tp):
+            raise ProtocolError(f"{where} has the wrong type")
+        return value
+    raise ProtocolError(f"{where} has a type agents may not send")
+
+
+def _plain(value: Any, where: str, depth: int) -> Any:
+    """A free-form value: maps with short string keys, lists, strings, finite numbers,
+    booleans and null, at most :data:`MAX_PARAMS_DEPTH` levels deep."""
+    if depth > MAX_PARAMS_DEPTH:
+        raise ProtocolError(f"{where} nests deeper than {MAX_PARAMS_DEPTH} levels")
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if abs(value) > 2**63:
+            raise ProtocolError(f"{where} holds an integer out of range")
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ProtocolError(f"{where} holds a number that is not finite")
+        return value
+    if isinstance(value, str):
+        return _text(value, MAX_TEXT)
+    if isinstance(value, list | tuple):
+        return [_plain(v, where, depth + 1) for v in value]
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, v in value.items():
+            if not isinstance(key, str) or not key or len(key) > MAX_ID:
+                raise ProtocolError(f"{where} keys must be strings of 1 to {MAX_ID} characters")
+            out[_ID_CONTROL.sub(" ", key)] = _plain(v, where, depth + 1)
+        return out
+    raise ProtocolError(f"{where} holds a value of an unsupported type")
+
+
+_HINTS: dict[type, dict[str, Any]] = {}
+
+
+def _model_hints(cls: type) -> dict[str, Any]:
+    if cls not in _HINTS:
+        _HINTS[cls] = get_type_hints(cls, vars(model))
+    return _HINTS[cls]
 
 
 # --- reports ------------------------------------------------------------------------------
@@ -201,6 +333,10 @@ class Report:
     sent_at: datetime
     interval: timedelta  # between the agent's reports
     adapters: tuple[AdapterReport, ...]
+    # Order of reports, independent of the agent's clock: a random id per agent process and
+    # a counter within it.
+    boot: str = ""
+    seq: int = 0
 
 
 def encode_report(
@@ -208,6 +344,8 @@ def encode_report(
     sent_at: datetime,
     interval: timedelta,
     adapters: Iterable[AdapterReport],
+    boot: str = "",
+    seq: int = 0,
 ) -> dict[str, Any]:
     parts: list[dict[str, Any]] = []
     for a in adapters:
@@ -222,12 +360,18 @@ def encode_report(
         "agent_version": agent_version,
         "sent_at": sent_at.isoformat(),
         "interval": interval.total_seconds(),
+        "boot": boot,
+        "seq": seq,
         "adapters": parts,
     }
 
 
 def decode_report(data: object) -> Report:
-    body = _object(data, "report", {"version", "agent_version", "sent_at", "interval", "adapters"})
+    body = _object(
+        data,
+        "report",
+        {"version", "agent_version", "sent_at", "interval", "boot", "seq", "adapters"},
+    )
     _check_version(body)
     version = body.get("agent_version")
     if not isinstance(version, str) or len(version) > 64:
@@ -238,6 +382,11 @@ def decode_report(data: object) -> Report:
         raise ProtocolError("report: interval must be a number of seconds")
     if not 1 <= interval <= 300:
         raise ProtocolError("report: interval must be 1 to 300 seconds")
+    boot, seq = body.get("boot"), body.get("seq")
+    if not isinstance(boot, str) or _BOOT.fullmatch(boot) is None:
+        raise ProtocolError("report: boot must be 8 to 64 hex characters")
+    if isinstance(seq, bool) or not isinstance(seq, int) or not 0 <= seq < 2**53:
+        raise ProtocolError("report: seq must be a non-negative integer")
     raw = body.get("adapters")
     if not isinstance(raw, list) or not 1 <= len(raw) <= 16:
         raise ProtocolError("report: adapters must be a list of 1 to 16 entries")
@@ -250,7 +399,9 @@ def decode_report(data: object) -> Report:
         if any(p.name == name for p in parts):
             raise ProtocolError(f"adapter {name}: reported twice")
         kinds = part.get("actions")
-        if not isinstance(kinds, list) or not all(k in PLATFORM_ACTIONS for k in kinds):
+        if not isinstance(kinds, list) or not all(
+            isinstance(k, str) and k in PLATFORM_ACTIONS for k in kinds
+        ):
             raise ProtocolError(f"adapter {name}: actions must be platform action kinds")
         error = part.get("error")
         if error is not None and not isinstance(error, str):
@@ -267,7 +418,7 @@ def decode_report(data: object) -> Report:
                 None if error is None else _text(error, MAX_REASON),
             )
         )
-    return Report(version, sent_at, timedelta(seconds=interval), tuple(parts))
+    return Report(version, sent_at, timedelta(seconds=interval), tuple(parts), boot, seq)
 
 
 # --- actions ------------------------------------------------------------------------------
@@ -304,7 +455,7 @@ def wire_params(kind: ActionKind, params: Mapping[str, Any]) -> dict[str, Any]:
         if key == "conditions":
             out[key] = _conditions(value)
         elif key == "branch":
-            if _BRANCH.fullmatch(value) is None or ".." in value or value.endswith((".lock", "/")):
+            if not _branch(value):
                 raise ProtocolError(f"{kind}: branch must be a git branch name")
             out[key] = value
         elif isinstance(value, str):
@@ -346,7 +497,11 @@ def decode_action(data: object, offered: Mapping[str, frozenset[ActionKind]]) ->
     if not isinstance(adapter, str) or adapter not in offered:
         raise ProtocolError("action: not an adapter of this agent")
     kind = body.get("kind")
-    if kind not in PLATFORM_ACTIONS or ActionKind(kind) not in offered[adapter]:
+    if (
+        not isinstance(kind, str)
+        or kind not in PLATFORM_ACTIONS
+        or ActionKind(kind) not in offered[adapter]
+    ):
         raise ProtocolError(f"action: {adapter} does not carry out {_clip(str(kind), 32)!r}")
     kind = ActionKind(kind)
     rule = body.get("rule")
@@ -378,6 +533,20 @@ def decode_action(data: object, offered: Mapping[str, frozenset[ActionKind]]) ->
     )
 
 
+def _branch(name: str) -> bool:
+    """A branch name ``git check-ref-format --branch`` accepts, narrowed to plain names:
+    components of letters, digits, ``._-``, not starting with ``.`` or ``-``, no ``..``,
+    none ending in ``.lock`` or ``.``."""
+    parts = name.split("/")
+    return (
+        0 < len(name) <= 200
+        and ".." not in name
+        and all(
+            _BRANCH_PART.fullmatch(p) is not None and not p.endswith((".lock", ".")) for p in parts
+        )
+    )
+
+
 def _conditions(raw: list[Any]) -> list[dict[str, Any]]:
     if len(raw) > MAX_CONDITIONS:
         raise ProtocolError(f"wait: at most {MAX_CONDITIONS} conditions")
@@ -392,10 +561,14 @@ def _conditions(raw: list[Any]) -> list[dict[str, Any]]:
             raise ProtocolError("wait: condition params must be an object of at most 16 keys")
         clean: dict[str, Any] = {}
         for key, value in params.items():
-            if not isinstance(key, str) or len(key) > 64:
+            if not isinstance(key, str) or not key or len(key) > 64 or _ID_CONTROL.search(key):
                 raise ProtocolError("wait: condition param names must be short strings")
-            if isinstance(value, str):
+            if key == "task" and kind == ConditionKind.TASK_STATUS:
+                value = _id(value, "wait: task_status task")
+            elif isinstance(value, str):
                 value = _text(value, 1024)
+            elif isinstance(value, float) and not math.isfinite(value):
+                raise ProtocolError("wait: condition params must be finite numbers")
             elif value is not None and not isinstance(value, bool | int | float):
                 raise ProtocolError("wait: condition params must be scalars")
             clean[key] = value

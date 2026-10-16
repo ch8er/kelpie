@@ -125,9 +125,10 @@ def test_report_round_trip() -> None:
         AdapterReport("hermes", frozenset({ActionKind.STOP}), board()),
         AdapterReport("claude-code", frozenset(), error="OSError"),
     ]
-    report = decode_report(encode_report("0.0.1", NOW, timedelta(seconds=15), parts))
+    report = decode_report(encode_report("0.0.1", NOW, timedelta(seconds=15), parts, "c0ffee00", 7))
     assert report.sent_at == NOW
     assert report.interval == timedelta(seconds=15)
+    assert (report.boot, report.seq) == ("c0ffee00", 7)
     assert report.adapters[0].snapshot == board()
     assert report.adapters[1].error == "OSError"
     assert report.adapters[1].snapshot is None
@@ -161,7 +162,12 @@ def test_report_round_trip() -> None:
 )
 def test_bad_reports_are_refused(change: dict[str, object]) -> None:
     body = encode_report(
-        "0.0.1", NOW, timedelta(seconds=15), [AdapterReport("h", frozenset(), error="x")]
+        "0.0.1",
+        NOW,
+        timedelta(seconds=15),
+        [AdapterReport("h", frozenset(), error="x")],
+        "c0ffee00",
+        1,
     )
     body.update(change)
     with pytest.raises(ProtocolError):
@@ -280,3 +286,82 @@ def test_results_and_polls_round_trip() -> None:
 )
 def test_agent_names(name: str, valid: bool) -> None:
     assert valid_agent_name(name) is valid
+
+
+def task(**kw: object) -> dict[str, object]:
+    return {"id": "t", "title": "x", "status": "ready", "status_since": NOW.isoformat(), **kw}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"tasks": [task(id=["unhashable"])]},
+        {"tasks": [task(review_rounds="abc")]},
+        {"tasks": [task(review_rounds=True)]},
+        {"tasks": [task(id="x" * 5006)]},
+        {"tasks": [task(id="t\n\x1b[2J")]},
+        {"tasks": [task(estimate=1e999)]},
+        {"tasks": [task(files=[1, 2])]},
+        {"conditions": [{"id": "c", "kind": "custom", "params": {"a": float("nan")}}]},
+        {
+            "conditions": [
+                {
+                    "id": "c",
+                    "kind": "custom",
+                    "params": {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {}}}}}}}}},
+                }
+            ]
+        },
+        {
+            "spans": [
+                {
+                    "trace_id": "t",
+                    "span_id": "s",
+                    "name": "n",
+                    "kind": "tool",
+                    "start": NOW.isoformat(),
+                    "input_tokens": 1.5,
+                }
+            ]
+        },
+    ],
+)
+def test_snapshot_fields_are_checked(data: dict[str, object]) -> None:
+    with pytest.raises(ProtocolError):
+        decode_snapshot({"now": NOW.isoformat(), **data})
+
+
+def test_free_text_is_cleaned_not_refused() -> None:
+    snap = decode_snapshot({"now": NOW.isoformat(), "tasks": [task(title="a\x1b[2Jb\nc")]})
+    assert snap.tasks[0].title == "a [2Jb\nc"
+
+
+@pytest.mark.parametrize(
+    ("branch", "ok"),
+    [
+        ("kelpie/wip-t_1a", True),
+        ("feature/a.b", True),
+        ("a/.b", False),
+        ("a.lock/b", False),
+        ("a//b", False),
+        ("a@{1}", False),
+        ("a.", False),
+        ("-x", False),
+    ],
+)
+def test_branch_names(branch: str, ok: bool) -> None:
+    raw = wire(kind="wip_commit", params={"branch": branch})
+    if ok:
+        assert decode_action(raw, OFFERED).params["branch"] == branch
+    else:
+        with pytest.raises(ProtocolError):
+            decode_action(raw, OFFERED)
+
+
+def test_unhashable_kinds_are_a_protocol_error() -> None:
+    with pytest.raises(ProtocolError):
+        decode_action(wire(kind=["stop"]), OFFERED)
+    body = encode_report("0.0.1", NOW, timedelta(seconds=15), [], "c0ffee00", 1)
+    body["adapters"] = [{"name": "h", "actions": [["stop"]], "error": "x"}]
+    with pytest.raises(ProtocolError):
+        decode_report(body)

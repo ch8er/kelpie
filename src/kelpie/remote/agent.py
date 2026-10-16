@@ -14,6 +14,7 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import secrets
 import ssl
 import threading
 import time
@@ -41,6 +42,7 @@ from kelpie.remote.protocol import (
     adapter_actions,
     decode_action,
     decode_actions,
+    depth_ok,
     encode_poll,
     encode_report,
 )
@@ -88,6 +90,8 @@ class Agent:
         self._done: OrderedDict[str, tuple[float, Result]] = OrderedDict()
         self._unsent: list[Result] = []
         self._stop = threading.Event()
+        self._boot = secrets.token_hex(8)  # orders this process's reports at the hub
+        self._seq = 0
 
     # --- reports --------------------------------------------------------------------------
 
@@ -107,7 +111,8 @@ class Agent:
             except Exception as exc:
                 log.error("adapter %s failed to snapshot: %s", adapter.name, exc)
                 parts.append(AdapterReport(adapter.name, kinds, error=type(exc).__name__))
-        body = encode_report(__version__, now, self.settings.interval, parts)
+        self._seq += 1
+        body = encode_report(__version__, now, self.settings.interval, parts, self._boot, self._seq)
         self._send(REPORT_PATH, body, self.settings.timeout.total_seconds())
 
     # --- actions --------------------------------------------------------------------------
@@ -155,7 +160,7 @@ class Agent:
         if received is not None and time.monotonic() - received > wire.ttl:
             # The hub gave up waiting: a late start would surprise whoever was told it failed.
             log.warning("action %s expired before it could start; not carried out", wire.id)
-            return Result(wire.id, Outcome.NOT_EXECUTED, "it expired before the agent got to it")
+            return Result(wire.id, Outcome.EXPIRED)  # not remembered: a retry may run it
         log.info(
             "executing %s on %s %s (rule %s)",
             wire.kind,
@@ -260,20 +265,27 @@ class Agent:
         if response.status != 200:
             raise AgentError(f"{path}: HTTP {response.status} {_error_text(response.body)}")
         try:
-            return json.loads(response.body)
+            reply = json.loads(response.body)
         except (ValueError, RecursionError):
             raise AgentError(f"{path}: the hub's reply is not JSON") from None
+        if not depth_ok(reply):
+            raise AgentError(f"{path}: the hub's reply nests too deep")
+        return reply
 
 
-def tls_context(settings: AgentSettings) -> ssl.SSLContext | None:
-    """Verification against ``[agent] ca_file`` when set; None: the system trust store."""
-    if settings.ca_file is None:
-        return None
+def tls_context(settings: AgentSettings) -> ssl.SSLContext:
+    """Verification of the hub's certificate and host name, against ``[agent] ca_file`` when
+    set, else the system trust store; TLS 1.2 at least. Always an explicit context, so a
+    library that swapped Python's default for an unverified one changes nothing here."""
     try:
-        context = ssl.create_default_context(cafile=str(settings.ca_file))
+        context = ssl.create_default_context(
+            cafile=None if settings.ca_file is None else str(settings.ca_file)
+        )
     except (OSError, ssl.SSLError) as exc:
         raise ValueError(f"[agent] ca_file {settings.ca_file}: {exc}") from None
     context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
     return context
 
 

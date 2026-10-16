@@ -30,6 +30,6 @@ def test_agent_needs_its_token(
 def test_agent_needs_an_adapter(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("KELPIE_AGENT_TOKEN", "k" * 40)
+    monkeypatch.setenv("KELPIE_AGENT_TOKEN", "0123456789abcdef" * 3)
     code, err = run(tmp_path, AGENT, capsys)
     assert code == 2 and "at least one enabled [adapters.*]" in err

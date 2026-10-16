@@ -60,23 +60,34 @@ MAX_MAX_BODY_BYTES = 256 * 1024 * 1024
 DEFAULT_MAX_CONNECTIONS = 64
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PRINTABLE = re.compile(r"[\x21-\x7e]+")
-# Shared address space (RFC 6598): Tailscale and carrier-grade NAT. Not ``is_private`` in
-# Python 3.12.
-_SHARED = ipaddress.ip_network("100.64.0.0/10")
+# Where plain http may go: loopback, RFC 1918, RFC 6598 (Tailscale, carrier-grade NAT) and
+# IPv6 unique local addresses. An explicit list: ``is_private`` also covers ranges that
+# route over the internet (6to4, Teredo).
+_PRIVATE = tuple(
+    ipaddress.ip_network(n)
+    for n in (
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",
+        "::1/128",
+        "fc00::/7",
+    )
+)
+MIN_TOKEN_SYMBOLS = 10  # distinct characters in a token: "a" * 32 is not a secret
 
 
 def private_address(host: str) -> bool:
-    """A loopback or private IP literal (RFC 1918, RFC 6598, IPv6 ULA and link-local); never
-    an unspecified address such as 0.0.0.0, which binds every interface."""
+    """A loopback or private IP literal (see :data:`_PRIVATE`); never an unspecified address
+    such as 0.0.0.0, which binds every interface."""
     try:
         ip = ipaddress.ip_address(host.strip("[]"))
     except ValueError:
         return False
-    if ip.is_unspecified:
-        return False
-    if ip.is_loopback or ip.is_private or ip.is_link_local:
-        return True
-    return isinstance(ip, ipaddress.IPv4Address) and ip in _SHARED
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return any(ip.version == n.version and ip in n for n in _PRIVATE)
 
 
 def read_token(env: str, what: str, environ: Mapping[str, str] = os.environ) -> str:
@@ -84,10 +95,14 @@ def read_token(env: str, what: str, environ: Mapping[str, str] = os.environ) -> 
     token = environ.get(env, "").strip()
     if not token:
         raise ValueError(f"{what}: ${env} is not set")
-    if len(token) < MIN_TOKEN or _PRINTABLE.fullmatch(token) is None:
+    if (
+        len(token) < MIN_TOKEN
+        or _PRINTABLE.fullmatch(token) is None
+        or len(set(token)) < MIN_TOKEN_SYMBOLS
+    ):
         raise ValueError(
-            f"{what}: ${env} must hold at least {MIN_TOKEN} printable ASCII characters "
-            "(e.g. the output of `openssl rand -hex 32`)"
+            f"{what}: ${env} must hold at least {MIN_TOKEN} printable ASCII characters, "
+            "random (e.g. the output of `openssl rand -hex 32`)"
         )
     return token
 
@@ -219,7 +234,9 @@ def load_agent(section: Any) -> AgentSettings | None:
         raise ValueError("[agent] ca_file only applies to an https server")
     actions = section.get("actions")
     if actions is not None:
-        if not isinstance(actions, list) or not all(a in PLATFORM_ACTIONS for a in actions):
+        if not isinstance(actions, list) or not all(
+            isinstance(a, str) and a in PLATFORM_ACTIONS for a in actions
+        ):
             raise ValueError(
                 f"[agent] actions must be a list of platform actions among "
                 f"{sorted(str(a) for a in PLATFORM_ACTIONS)}"

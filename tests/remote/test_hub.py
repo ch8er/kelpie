@@ -2,6 +2,7 @@ import gzip
 import http.client
 import json
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -13,23 +14,26 @@ from typing import Any
 
 import pytest
 
+from kelpie import net
 from kelpie.core.actions import ActionKind
 from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.ports import UnsupportedAction
 from kelpie.remote.agent import Agent, AgentError, tls_context
 from kelpie.remote.config import AgentSettings, HubAgent, HubSettings
-from kelpie.remote.hub import AgentUnavailable, Hub, HubServer
+from kelpie.remote.hub import AgentUnavailable, Hub, HubServer, OutOfOrder
 from kelpie.remote.protocol import (
     ACTIONS_PATH,
     REPORT_PATH,
     Outcome,
+    Report,
+    Result,
     WireAction,
     encode_action,
 )
 from tests.fakes import StoppingAdapter
 
-TOKEN = "t" * 40
-OTHER = "o" * 40
+TOKEN = "0123456789abcdef" * 3
+OTHER = "fedcba9876543210" * 3
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 
 
@@ -156,13 +160,23 @@ def test_report_reaches_the_hub(server: HubServer, hub: Hub, clock: Clock) -> No
     assert other.report is None
 
 
-def test_an_older_report_is_refused(server: HubServer, clock: Clock) -> None:
+def test_reports_are_ordered_by_process_and_counter_not_clock(hub: Hub, clock: Clock) -> None:
+    def report(boot: str, seq: int, sent_at: datetime) -> Report:
+        return Report("0.0.1", sent_at, timedelta(seconds=15), (), boot, seq)
+
+    hub.receive_report("laptop", report("aaaaaaaa", 2, NOW + timedelta(days=1)))  # clock ahead
+    with pytest.raises(OutOfOrder):
+        hub.receive_report("laptop", report("aaaaaaaa", 2, NOW + timedelta(days=2)))
+    hub.receive_report("laptop", report("aaaaaaaa", 3, NOW))  # NTP fixed the clock: fine
+    hub.receive_report("laptop", report("bbbbbbbb", 1, NOW))  # a restarted agent
+
+
+def test_an_agent_counts_its_reports(server: HubServer, hub: Hub, clock: Clock) -> None:
     agent = agent_for(server, BoardAdapter(), clock)
     agent.report()
-    with pytest.raises(AgentError, match="409"):
-        agent.report()  # same sent_at
-    clock.now += timedelta(seconds=1)
-    agent.report()
+    agent.report()  # same clock, next seq
+    view = next(v for v in hub.agents() if v.name == "laptop")
+    assert view.report is not None and view.report.seq == 2
 
 
 def test_an_adapter_that_fails_is_reported_as_failed(
@@ -235,8 +249,40 @@ def test_an_expired_action_is_not_started(server: HubServer, clock: Clock) -> No
     agent = agent_for(server, adapter, clock)
     raw = encode_action(replace(stop_action(), id="a1", ttl=0.5))
     result = agent.execute(raw, received=time.monotonic() - 1)
-    assert result is not None and result.outcome is Outcome.NOT_EXECUTED
+    assert result is not None and result.outcome is Outcome.EXPIRED
     assert adapter.stops == 0
+    assert agent.execute(raw) is not None and adapter.stops == 1  # not remembered: may run
+
+
+def test_an_expired_action_is_retried_afresh(server: HubServer, hub: Hub, clock: Clock) -> None:
+    thread, out = send_async(hub, stop_action(), timeout=2)
+    wait_queued(hub)
+    (action,) = hub.poll("laptop", [], 0)
+    hub.poll("laptop", [Result(action.id, Outcome.EXPIRED)], 0)
+    thread.join(5)
+    assert "not carried out" in out["error"].public_reason
+    assert hub._agents["laptop"].pending == {}
+    assert hub.late_results(timedelta(0)) == []
+
+
+def test_different_comments_are_different_actions(
+    server: HubServer, hub: Hub, clock: Clock
+) -> None:
+    def comment(text: str) -> WireAction:
+        return WireAction("", "fake", ActionKind.COMMENT, "rule", text, "t_1a")
+
+    with pytest.raises(AgentUnavailable):
+        hub.send("laptop", comment("text A"), timeout=0.1)
+    thread, _ = send_async(hub, comment("text A"), timeout=0.3)
+    wait_queued(hub)
+    (first,) = hub.poll("laptop", [], 0)
+    thread.join(5)
+    hub.poll("laptop", [Result(first.id, Outcome.DONE, "posted A")], 0)
+    thread, _ = send_async(hub, comment("completely different text B"), timeout=0.3)
+    wait_queued(hub)
+    (second,) = hub.poll("laptop", [], 0)
+    assert second.id != first.id and second.reason == "completely different text B"
+    thread.join(5)
 
 
 def test_an_action_not_picked_up_is_withdrawn(server: HubServer, hub: Hub, clock: Clock) -> None:
@@ -325,8 +371,101 @@ def post(
 
 def test_requests_without_a_valid_token(server: HubServer) -> None:
     assert post(server, REPORT_PATH, b"{}", token=None)[0] == 401
-    assert post(server, REPORT_PATH, b"{}", token="x" * 40)[0] == 401
+    assert post(server, REPORT_PATH, b"{}", token="0123456789abcdeX" * 3)[0] == 401
     assert post(server, "/v1/other", b"{}")[0] == 404
+
+
+def raw_request(server: HubServer, data: bytes) -> bytes:
+    with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5) as sock:
+        sock.sendall(data)
+        chunks = []
+        while chunk := sock.recv(65536):
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def test_framing_errors(server: HubServer) -> None:
+    head = f"POST {REPORT_PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n"
+    head += "Content-Type: application/json\r\n"
+    assert raw_request(server, (head + "\r\n").encode()).startswith(b"HTTP/1.0 411")
+    bad = head + "Content-Length: -5\r\n\r\n"
+    assert raw_request(server, bad.encode()).startswith(b"HTTP/1.0 400")
+    short = head + "Content-Length: 100\r\n\r\n{}"
+    with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5) as sock:
+        sock.sendall(short.encode())
+        sock.shutdown(socket.SHUT_WR)
+        assert sock.recv(100).startswith(b"HTTP/1.0 400")
+
+
+def test_gzip_must_be_whole_and_alone(server: HubServer) -> None:
+    gz = {"Content-Encoding": "gzip"}
+    assert post(server, REPORT_PATH, b"not gzip", gz)[0] == 400
+    assert post(server, REPORT_PATH, gzip.compress(b"{}")[:-6], gz)[0] == 400
+    assert post(server, REPORT_PATH, gzip.compress(b"{}") + gzip.compress(b"{}"), gz)[0] == 400
+
+
+def test_deep_bodies_are_refused(server: HubServer) -> None:
+    status, body = post(server, REPORT_PATH, b"[" * 7000 + b"]" * 7000)
+    assert status == 400 and "deep" in body["error"]
+
+
+def test_strangers_cannot_hold_the_connections(
+    server: HubServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.remote.hub as hub_module
+
+    server.max_connections = 3
+    idle = [socket.create_connection(("127.0.0.1", server.server_address[1])) for _ in range(3)]
+    deadline = time.monotonic() + 5
+    while server.unauthenticated() < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5) as extra:
+        assert extra.recv(10) == b""  # closed at accept
+    for sock in idle:
+        sock.close()
+    deadline = time.monotonic() + 5
+    while server.unauthenticated() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server.unauthenticated() == 0
+    assert hub_module.MAX_PER_PEER == 16
+
+
+def test_a_slow_stranger_is_cut_at_the_deadline(
+    server: HubServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.remote.hub as hub_module
+
+    monkeypatch.setattr(hub_module, "PREAUTH_DEADLINE", 0.5)
+    with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5) as sock:
+        sock.sendall(b"POST /v1/agent/report HTTP/1.1\r\n")
+        started = time.monotonic()
+        for _ in range(20):  # a byte every 0.1s: each read is quick, the whole is not
+            try:
+                sock.sendall(b"X")
+            except OSError:
+                break
+            time.sleep(0.1)
+        assert sock.recv(100) == b""
+        assert time.monotonic() - started < 3
+    deadline = time.monotonic() + 5
+    while server.unauthenticated() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server.unauthenticated() == 0
+
+
+def test_an_agent_frees_its_connection_slot(server: HubServer, clock: Clock) -> None:
+    agent_for(server, BoardAdapter(), clock).report()
+    assert server.unauthenticated() == 0
+
+
+def test_the_agent_refuses_an_oversized_reply(clock: Clock) -> None:
+    def post_big(*args: Any, **kw: Any) -> Any:
+        raise net.RequestError("too_large", "response over 1048576 bytes")
+
+    settings = AgentSettings(name="laptop", server="https://hub.example.internal:9465")
+    agent = Agent(settings, [BoardAdapter()], TOKEN, clock=clock, post=post_big)
+    with pytest.raises(AgentError, match="over 1048576"):
+        agent.poll(wait=0)
 
 
 def test_bodies_are_limited(server: HubServer) -> None:
@@ -341,16 +480,64 @@ def test_bodies_are_limited(server: HubServer) -> None:
     assert status == 400 and "same Kelpie release" in body["error"]
 
 
-def test_a_second_poll_with_one_token_is_refused(server: HubServer, hub: Hub) -> None:
-    poll = json.dumps({"version": 1, "wait": 2, "results": []}).encode()
-    first = threading.Thread(target=post, args=(server, ACTIONS_PATH, poll), daemon=True)
+def test_a_new_poll_replaces_a_held_one(server: HubServer, hub: Hub) -> None:
+    poll = json.dumps({"version": 1, "wait": 20, "results": []}).encode()
+    replies: list[tuple[int, dict[str, Any]]] = []
+    first = threading.Thread(
+        target=lambda: replies.append(post(server, ACTIONS_PATH, poll)), daemon=True
+    )
     first.start()
     deadline = time.monotonic() + 5
     while not hub._agents["laptop"].polling and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert post(server, ACTIONS_PATH, poll)[0] == 409
-    assert post(server, ACTIONS_PATH, poll, token=OTHER)[0] == 200  # another agent
+    quick = json.dumps({"version": 1, "wait": 0, "results": []}).encode()
+    started = time.monotonic()
+    assert post(server, ACTIONS_PATH, quick) == (200, {"actions": []})
     first.join(5)
+    assert replies == [(200, {"actions": []})] and time.monotonic() - started < 5
+    assert hub._agents["laptop"].polling == 0
+
+
+def test_close_releases_held_polls_and_waits(hub: Hub) -> None:
+    thread, out = send_async(hub, stop_action(), timeout=20)
+    wait_queued(hub)
+    hub.poll("laptop", [], 0)  # delivered, never answered
+    poller = threading.Thread(target=hub.poll, args=("vm-1", [], 20), daemon=True)
+    poller.start()
+    started = time.monotonic()
+    hub.close()
+    thread.join(5)
+    poller.join(5)
+    assert time.monotonic() - started < 2
+    assert "error" in out and not poller.is_alive()
+
+
+def test_a_poll_reply_stays_under_its_cap(hub: Hub) -> None:
+    conditions = [
+        {"id": f"c{i}", "kind": "custom", "params": {f"k{j}": "x" * 1000 for j in range(16)}}
+        for i in range(32)
+    ]
+    for n in range(4):  # about 530 KB each
+        wait = WireAction(
+            "", "fake", ActionKind.WAIT, "r", "x", f"t_{n}", {"conditions": conditions}
+        )
+        send_async(hub, wait, timeout=5)
+    deadline = time.monotonic() + 5
+    while len(hub._agents["laptop"].queue) < 4 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    sizes = []
+    for _ in range(4):
+        batch = hub.poll("laptop", [], 0)
+        sizes.append(len(batch))
+    assert sizes == [1, 1, 1, 1]  # one over-sized action per reply, never two
+    hub.close()
+
+
+def test_withdrawn_actions_leave_the_queue(hub: Hub) -> None:
+    for n in range(3):
+        with pytest.raises(AgentUnavailable, match="not carried out"):
+            hub.send("laptop", replace(stop_action(), params={"session_id": f"s{n}"}), 0.05)
+    assert not hub._agents["laptop"].queue and not hub._agents["laptop"].pending
 
 
 # --- TLS ----------------------------------------------------------------------------------
@@ -386,10 +573,17 @@ def test_report_over_tls(certificate: tuple[Path, Path], clock: Clock) -> None:
         Agent(trusted, [BoardAdapter()], TOKEN, clock=clock, context=tls_context(trusted)).report()
         assert hub.agents()[0].report is not None
         untrusted = AgentSettings(name="laptop", server=url)
-        agent = Agent(untrusted, [BoardAdapter()], TOKEN, clock=clock)
-        clock.now += timedelta(seconds=1)
+        agent = Agent(
+            untrusted, [BoardAdapter()], TOKEN, clock=clock, context=tls_context(untrusted)
+        )
         with pytest.raises(AgentError, match="connection failed"):
             agent.report()  # self-signed, not in the system store: refused
+        by_ip = AgentSettings(
+            name="laptop", server=f"https://127.0.0.1:{srv.server_address[1]}", ca_file=cert
+        )
+        agent = Agent(by_ip, [BoardAdapter()], TOKEN, clock=clock, context=tls_context(by_ip))
+        with pytest.raises(AgentError, match="connection failed"):
+            agent.report()  # trusted CA, but the name on the certificate is not this one
         # A plain-HTTP client on the TLS port gets nowhere.
         status = None
         conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=5)

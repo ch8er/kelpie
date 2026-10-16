@@ -14,7 +14,7 @@ from kelpie.remote.config import (
     read_token,
 )
 
-TOKEN = "x" * 40
+TOKEN = "0123456789abcdef" * 3
 
 
 def agent(**kw: Any) -> AgentSettings:
@@ -143,6 +143,8 @@ def test_hub_tokens_must_be_strong_and_distinct() -> None:
         settings.tokens({"TA": TOKEN, "TB": TOKEN})
     with pytest.raises(ValueError, match="at least 32"):
         settings.tokens({"TA": TOKEN, "TB": "short"})
+    with pytest.raises(ValueError, match="random"):
+        settings.tokens({"TA": TOKEN, "TB": "ab" * 20})
 
 
 def test_read_token_refuses_non_printable() -> None:
@@ -164,6 +166,11 @@ def test_read_token_refuses_non_printable() -> None:
         ("8.8.4.4", False),
         ("8.8.8.8", False),
         ("localhost", False),  # a name, not an address
+        ("2002:c000:204::1", False),  # 6to4: routed over the internet
+        ("2001:0:4136:e378::1", False),  # Teredo
+        ("169.254.1.1", False),
+        ("198.18.0.1", False),
+        ("::ffff:10.0.0.1", True),
     ],
 )
 def test_private_address(host: str, private: bool) -> None:
