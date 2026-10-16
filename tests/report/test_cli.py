@@ -81,12 +81,21 @@ def test_the_report_reads_the_board_s_conditions_and_the_hold_labels(
         '[engine.rules.bottlenecks]\nhold_labels = ["freeze"]\n'
         '[[engine.rules.bottlenecks.holds]]\nlabel = "merge-hold"\n'
     )
+    extra += (
+        '[connectors.github]\nrepos = ["example/app"]\n'
+        '[[block_conditions]]\npattern = "CI of #(?P<pr>\\\\d+)"\nkind = "ci_green"\n'
+        'repo = "example/app"\n'
+    )
     src = sources(load_settings(config(tmp_path, extra)))
     assert src.hold_labels == ("freeze", "merge-hold")
+    [declared] = src.block_kinds
+    assert declared.kind.value == "ci_status" and declared.repo == "example/app"
+    assert declared.pattern.search("waiting for ci of #7")
     waits_on = (Condition("c-1", ConditionKind.CI_STATUS, "T-1"),)
     board = Snapshot(now=datetime(2026, 3, 3, tzinfo=UTC), conditions=waits_on)
     loaded = load_inputs(replace(src, db_path=None), date(2026, 3, 2), board)
     assert loaded.conditions == waits_on and loaded.hold_labels == ("freeze", "merge-hold")
+    assert loaded.block_kinds == src.block_kinds
 
 
 def test_the_report_board_attaches_human_task_conditions_without_network(

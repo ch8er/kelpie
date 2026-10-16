@@ -26,6 +26,7 @@ from kelpie.report.fixes import MANUAL, FixEvent, FixStore
 from kelpie.report.run import ReportSources, Sender, default_day, generate, send, write
 from kelpie.report.schedule import ReportScheduler, RunLog
 from kelpie.report.store import ReportStore
+from kelpie.report.waits import BlockKind
 from kelpie.rules import REGISTRY
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,11 @@ def sources(settings: Settings) -> ReportSources:
         estimated=any(b.mode is BudgetMode.SUBSCRIPTION for b in settings.budgets.budgets),
         modes=modes,
         hold_labels=tuple(hold_labels(engine.rules.get("bottlenecks", {}))),
+        block_kinds=tuple(
+            BlockKind(b.pattern, b.condition_kind, b.repo)
+            for b in settings.block_conditions
+            if "block" in b.applies_to
+        ),
     )
 
 
@@ -70,7 +76,8 @@ def report_board(
     needs, with the connector steps that read nothing but the board (``task_status``, human
     tasks from block reasons), so the report knows what more waiting tasks wait for. Like
     ``kelpie why`` without ``--refresh``, the report calls no network service of its own:
-    GitHub conditions taken from block reasons are not on its board."""
+    a block reason ``[[block_conditions]]`` matches counts as a CI or merge wait without
+    a PR lookup (:class:`kelpie.report.waits.BlockKind`)."""
     enrich, _ = connector_steps(settings, metrics, clock, network=False)
     adapters = build_adapters(report_settings(settings, day, clock()))
     return merged_snapshot(adapters, metrics, clock, enrich=enrich)()

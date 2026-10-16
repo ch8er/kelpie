@@ -7,7 +7,8 @@
 2. the kind of an unmet condition it waits on: ``people`` (``human_task``), ``ci``
    (``ci_status``), ``merge`` (``pr_merged``), ``quota`` (``quota_reset``), ``tasks``
    (``task_status``), ``timer`` (``time``), ``other`` (``custom``). The condition its block
-   names wins, then its unmet conditions, then the latest registered;
+   names wins, then its unmet conditions; else a ``[[block_conditions]]`` pattern its
+   block reason matches (CI or a merge, by the pattern's kind: the report checks no PR);
 3. ``people``: a rule 13 alert of the day listed it as an approval or as parked on a
    person's human task;
 4. the kind of its last condition, met by now;
@@ -19,6 +20,7 @@ known one and all its waiting time of the day counts under it. Pure and determin
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -71,6 +73,15 @@ MIN_HOURS = 1.0  # a smaller wait is no headline
 
 
 @dataclass(frozen=True, slots=True)
+class BlockKind:
+    """A ``[[block_conditions]]`` pattern: a block reason it matches waits for ``kind``."""
+
+    pattern: re.Pattern[str]
+    kind: ConditionKind
+    repo: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class BiggestWait:
     role: str
     cause: str
@@ -106,8 +117,10 @@ class WaitCauses:
         conditions: Iterable[Condition],
         entries: Iterable[LedgerEntry],
         hold_labels: Collection[str] = (),
+        block_kinds: Sequence[BlockKind] = (),
     ) -> None:
         self._labels = frozenset(hold_labels)
+        self._block_kinds = tuple(block_kinds)
         self._by_id: dict[str, Condition] = {}
         self._by_task: dict[str, list[Condition]] = {}
         for c in conditions:
@@ -137,14 +150,26 @@ class WaitCauses:
         """The condition the task waits (or last waited) on."""
         if task.block is not None and task.block.condition_id in self._by_id:
             return self._by_id[task.block.condition_id]
-        mine = self._by_task.get(task.id)
-        if not mine:
-            return None
+        mine = self._by_task.get(task.id, [])
 
         def rank(c: Condition) -> tuple[bool, datetime, str]:
             return (c.satisfied is not True, c.registered_at or task.status_since, c.id)
 
-        return max(mine, key=rank)
+        last = max(mine, key=rank) if mine else None
+        if last is not None and last.satisfied is not True:
+            return last
+        return self._declared(task) or last
+
+    def _declared(self, task: Task) -> Condition | None:
+        """A wait the block reason declares (``[[block_conditions]]``), unchecked."""
+        if task.block is None:
+            return None
+        for b in self._block_kinds:
+            if (m := b.pattern.search(task.block.reason)) is not None:
+                repo = m.groupdict().get("repo") or b.repo
+                params = {"repo": repo} if repo else {}
+                return Condition(f"block:{task.id}:{b.kind}", b.kind, task.id, params)
+        return None
 
 
 def biggest_wait(

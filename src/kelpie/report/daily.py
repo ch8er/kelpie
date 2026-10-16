@@ -114,7 +114,7 @@ from kelpie.report.verify import (
 )
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
 from kelpie.report.waits import UNKNOWN as UNKNOWN_WAIT
-from kelpie.report.waits import BiggestWait, WaitCauses, biggest_wait
+from kelpie.report.waits import BiggestWait, BlockKind, WaitCauses, biggest_wait
 from kelpie.traces.outputs import (
     OutputGroup,
     OutputSettings,
@@ -223,6 +223,7 @@ class ReportInputs:
     section_config: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     conditions: Sequence[Condition] = ()  # the board's conditions, as reported now
     hold_labels: tuple[str, ...] = ()  # rule 6's hold labels: a held task waits for a hold
+    block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]]: waits a block declares
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,7 +392,7 @@ def wait_causes(inputs: ReportInputs, start: datetime, end: datetime) -> WaitCau
     """What each task of the board waited for (:mod:`kelpie.report.waits`), from the day's
     ledger entries (rule 13 re-records an open inbox about hourly)."""
     entries = [e for e in inputs.actions if start <= e.at < end]
-    return WaitCauses(inputs.conditions, entries, inputs.hold_labels)
+    return WaitCauses(inputs.conditions, entries, inputs.hold_labels, inputs.block_kinds)
 
 
 def _biggest_wait(

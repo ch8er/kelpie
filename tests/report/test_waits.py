@@ -261,3 +261,30 @@ def test_waiting_for_a_review_is_no_work() -> None:
     roles = throughput(tasks, REVIEWED, OWNERS, (), START, END, wait_cause=causes())
     wait = biggest_wait(roles, tasks, causes())
     assert wait is not None and wait.work_hours == pytest.approx(2.0)
+
+
+def test_a_wait_a_block_reason_declares_counts_by_its_pattern_kind() -> None:
+    import re
+
+    from kelpie.report.waits import BlockKind
+
+    kinds = (
+        BlockKind(
+            re.compile(r"waiting for CI of #(?P<pr>\d+)", re.I),
+            ConditionKind.CI_STATUS,
+            "example/app",
+        ),
+        BlockKind(re.compile(r"merge of (?P<repo>\S+)#(?P<pr>\d+)", re.I), ConditionKind.PR_MERGED),
+    )
+    of = WaitCauses((), (inbox(waiting=["B1"]),), (), kinds)
+    ci_wait = Task("B1", "B1", Status.BLOCKED, at(8), block=Block("Waiting for CI of #12", at(8)))
+    assert of(ci_wait) == "ci"  # not the person rule 13 lists it under
+    found = of.condition(ci_wait)
+    assert found is not None and found.params == {"repo": "example/app"}
+    merge = Task("B2", "B2", Status.BLOCKED, at(8), block=Block("merge of example/lib#3", at(8)))
+    assert of(merge) == "merge"
+    assert of.condition(merge).params == {"repo": "example/lib"}  # type: ignore[union-attr]
+    other = Task("B3", "B3", Status.BLOCKED, at(8), block=Block("flaky disk", at(8)))
+    assert of(other) == UNKNOWN
+    known = WaitCauses((Condition("q", ConditionKind.QUOTA_RESET, "B1"),), (), (), kinds)
+    assert known(ci_wait) == "quota"  # a registered unmet condition comes first
