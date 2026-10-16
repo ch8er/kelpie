@@ -10,18 +10,20 @@ Describes a Hermes farm to Kelpie from two sources:
   ``hermes-run-<id>``). When Hermes also exports OTLP spans for the same calls, the app
   keeps the OTLP ones, completed from the hooks (:func:`kelpie.traces.hooks.merge_hook_spans`).
 
-Actions. Only ``stop`` (``SupportsStop``) is implemented, by asking Hermes to block the task
-through its own CLI; see :mod:`kelpie.adapters.hermes.stop` for the mechanism. Requeue,
-unblock, comment and WIP commit are not implemented yet: rules that need them run in
-``observe`` or ``suggest`` mode.
+Actions, all through Hermes' own CLI (Kelpie never writes ``kanban.db``): ``stop``
+(``SupportsStop``, see :mod:`kelpie.adapters.hermes.stop`); ``wait`` (``SupportsWait``: park
+a ready or running task in Hermes ``scheduled`` with its conditions), ``requeue`` (wake a task
+Kelpie parked) and ``comment``, see :mod:`kelpie.adapters.hermes.park`. Unblock and WIP commit
+are not implemented yet, and requeue of a task Kelpie did not park is not supported.
 
 Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
 
-    triage, todo, scheduled -> BACKLOG   (``scheduled`` is a timed queue, not a Kelpie wait)
+    triage, todo, scheduled -> BACKLOG   (``scheduled`` is a timed queue; see below)
     ready                   -> READY
     running                 -> IN_PROGRESS
     blocked                 -> BLOCKED
     review                  -> REVIEW
+    scheduled, parked by Kelpie (marker in its reason, see park.py) -> WAITING
     done                    -> DONE
     archived                -> (skipped)
 
@@ -107,6 +109,17 @@ from kelpie.adapters.hermes.git_state import (
     valid_base_ref,
     warn_once,
 )
+from kelpie.adapters.hermes.park import (
+    DEFAULT_WAIT_KEY,
+    comment_args,
+    decode_wait,
+    encode_wait,
+    has_marker,
+    load_key,
+    run_kanban,
+    schedule_args,
+    unblock_args,
+)
 from kelpie.adapters.hermes.stop import (
     CLI_TIMEOUT,
     DEFAULT_CLI,
@@ -117,6 +130,8 @@ from kelpie.adapters.hermes.stop import (
 )
 from kelpie.core.model import (
     Block,
+    Condition,
+    ConditionKind,
     Dependency,
     Owner,
     OwnerKind,
@@ -127,7 +142,7 @@ from kelpie.core.model import (
     Status,
     Task,
 )
-from kelpie.core.ports import PlatformEvent
+from kelpie.core.ports import PlatformEvent, UnsupportedAction
 from kelpie.traces.hooks import SESSION_END, TOOL, HookEvent, spans_from_hook_events
 from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE
 
@@ -197,6 +212,12 @@ NON_STATUS_EVENTS = (
     "suspected_hallucinated_references",
     "completion_blocked_hallucination",
     "completion_blocked_empty_result",
+    # written by the dispatcher or an operator without changing the status
+    "terminal_worker_reaped",
+    "model_override_set",
+    "reasoning_effort_set",
+    "tip_scratch_workspace",
+    "workspace_cleanup_deferred_shared",
 )
 BLOCK_EVENTS = ("blocked", "auto_blocked")
 # Hermes block kinds that wait for an operator (``dependency`` waits in ``todo``).
@@ -216,6 +237,13 @@ def _utc(epoch: Any) -> datetime | None:
 
 def _in_clause(values: Sequence[str]) -> str:
     return ",".join("?" * len(values))
+
+
+def _run_id(raw: Any) -> int | None:
+    try:
+        return None if raw is None else int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _payload(raw: Any) -> dict[str, Any]:
@@ -270,6 +298,24 @@ def _with_files(task: Task, state: GitState | None) -> Task:
     return replace(task, files=state.paths, repo=state.repo)
 
 
+def _park_conditions(
+    task_id: str, scheduled: sqlite3.Row | None, key: bytes | None, window: timedelta
+) -> list[tuple[str, ConditionKind, dict[str, Any]]] | None:
+    """The conditions of Kelpie's park of a task, from its latest ``scheduled`` event, when
+    that carries a marker signed for this task and recorded when Kelpie issued it (within
+    ``window``); else ``None``."""
+    if scheduled is None:
+        return None
+    reason = _payload(scheduled["payload"]).get("reason")
+    if not isinstance(reason, str):
+        return None
+    return decode_wait(reason, task_id, key, _utc(scheduled["created_at"]), window)
+
+
+def _park_reason(scheduled: sqlite3.Row | None) -> object:
+    return None if scheduled is None else _payload(scheduled["payload"]).get("reason")
+
+
 def _block_text(row: sqlite3.Row, status_event: sqlite3.Row | None, block_event: Any) -> str:
     if block_event is not None:  # a block event at/after the block's start: current evidence
         payload = _payload(block_event["payload"])
@@ -297,6 +343,14 @@ def format_age(delta: timedelta) -> str:
     return f"{seconds}s"
 
 
+@dataclass(frozen=True, slots=True)
+class _ParkState:
+    status: str  # Hermes status
+    run: int | None  # current run id
+    ours: bool  # the latest ``scheduled`` event is Kelpie's park (verified)
+    woken: bool  # it has left ``scheduled`` since (unblock, or a human in the dashboard)
+
+
 @dataclass(slots=True)
 class HermesAdapter:
     db_path: Path = DEFAULT_DB
@@ -318,6 +372,11 @@ class HermesAdapter:
     _git_backoff: dict[Path, datetime] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+    wait_key: Path = DEFAULT_WAIT_KEY  # signs park markers (see park.py); created on first park
+    # Hermes status and run of each task in the latest snapshot: a park needs both unchanged
+    _seen: dict[str, tuple[str, int | None]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path).expanduser()
@@ -328,6 +387,7 @@ class HermesAdapter:
         self.roles = {k.strip().casefold(): v.strip().casefold() for k, v in self.roles.items()}
         if self.spool is not None:
             self.spool = Path(self.spool).expanduser()
+        self.wait_key = Path(self.wait_key).expanduser()
 
     def role_of(self, profile: str) -> str:
         """The role of a Hermes profile: ``roles``, else the name without a trailing
@@ -422,7 +482,7 @@ class HermesAdapter:
                 beats[span.session_id] = max(span.end, beats.get(span.session_id, span.end))
         try:
             with self._connect() as conn:  # one read transaction: a consistent view
-                tasks, owner_ids, rows = self._tasks(conn, cutoff)
+                tasks, owner_ids, rows, waits = self._tasks(conn, cutoff)
                 ids = {t.id for t in tasks}
                 dependencies = self._dependencies(conn, ids)
                 sessions, profiles = self._sessions(conn, ids, rows, cutoff, now, beats)
@@ -444,13 +504,28 @@ class HermesAdapter:
             tasks=tasks,
             owners=owners,
             dependencies=dependencies,
+            conditions=waits,
             sessions=sessions,
             spans=spans,
         )
 
+    @property
+    def _park_window(self) -> timedelta:
+        """How long after issuing a park marker Hermes may record it: one CLI call."""
+        return timedelta(seconds=self.cli_timeout)
+
+    def _key(self, create: bool = False) -> bytes | None:
+        try:
+            return load_key(self.wait_key, create=create)
+        except (OSError, ValueError) as exc:
+            warn_once((str(self.wait_key), "key"), "hermes: wait key unusable: %s", exc)
+            if create:
+                raise HermesError(f"wait key {self.wait_key} unusable: {exc}") from exc
+            return None
+
     def _tasks(
         self, conn: _Connection, cutoff: datetime
-    ) -> tuple[tuple[Task, ...], set[str], dict[str, sqlite3.Row]]:
+    ) -> tuple[tuple[Task, ...], set[str], dict[str, sqlite3.Row], tuple[Condition, ...]]:
         rows = conn.execute(
             "SELECT * FROM tasks WHERE status != 'archived'"
             " AND (status != 'done' OR completed_at IS NULL OR completed_at >= ?) ORDER BY id",
@@ -458,9 +533,13 @@ class HermesAdapter:
         ).fetchall()
         latest = self._latest_events(conn, NON_STATUS_EVENTS, exclude=True)
         blocks = self._latest_events(conn, BLOCK_EVENTS)
+        parks = self._latest_events(conn, ("scheduled",))
+        key = self._key() if parks else None
         tasks: list[Task] = []
         owners: set[str] = set()
         known: dict[str, sqlite3.Row] = {}
+        waits: list[Condition] = []
+        self._seen = {}
         for row in rows:
             status = STATUS_MAP.get(row["status"])
             if status is None:
@@ -485,6 +564,34 @@ class HermesAdapter:
                     reason=_block_text(row, event, current),
                     since=at if current is not None and at is not None else since,
                 )
+            self._seen[row["id"]] = (row["status"], _run_id(_col(row, "current_run_id")))
+            park = parks.get(row["id"])
+            wait = _park_conditions(row["id"], park, key, self._park_window)
+            if wait is None and row["status"] == "scheduled" and has_marker(_park_reason(park)):
+                warn_once(
+                    (row["id"], f"park:{park['created_at'] if park is not None else ''}"),
+                    "hermes: task %s is scheduled with a Kelpie park marker that does not "
+                    "verify (written by someone else, copied from an earlier park, or the wait "
+                    "key %s is missing or changed); Kelpie leaves it alone",
+                    row["id"],
+                    self.wait_key,
+                )
+            if wait is not None and park is not None:
+                parked_at = _utc(park["created_at"]) or since
+                # Any way out of scheduled is a wake: the dashboard moves a task without an
+                # ``unblocked`` event.
+                woken = row["status"] != "scheduled"
+                if row["status"] == "scheduled":  # parked by Kelpie: waiting on its conditions
+                    status, since = Status.WAITING, parked_at
+                if row["status"] == "scheduled" or (woken and not status.is_terminal):
+                    # After a wake the conditions stay, registered before the new status, so
+                    # rules ignore them and the GitHub step does not attach them again.
+                    waits.extend(
+                        Condition(
+                            cid, kind, task_id=row["id"], params=params, registered_at=parked_at
+                        )
+                        for cid, kind, params in wait
+                    )
             assignee = (row["assignee"] or "").strip() or None
             if assignee:
                 owners.add(assignee)
@@ -503,7 +610,7 @@ class HermesAdapter:
                     branch=str(_col(row, "branch_name") or "").strip() or None,
                 )
             )
-        return tuple(tasks), owners, known
+        return tuple(tasks), owners, known, tuple(waits)
 
     @staticmethod
     def _latest_events(
@@ -549,6 +656,10 @@ class HermesAdapter:
         for r in rows:
             started = _utc(r["started_at"])
             if r["task_id"] not in ids or started is None:
+                continue
+            if r["outcome"] == "scheduled" and r["ended_at"] == r["started_at"]:
+                # The zero-length run Hermes records when a ready task is scheduled (a park):
+                # nobody worked, and its profile must not look active.
                 continue
             task = tasks[r["task_id"]]
             profile = (r["profile"] or "").strip()
@@ -797,14 +908,129 @@ class HermesAdapter:
         )
         return str(row["task_id"]), active
 
+    # --- park, wake, comment (see kelpie.adapters.hermes.park) ----------------------------
+
+    def _task_state(self, task_id: str) -> _ParkState | None:
+        """Hermes' status and run of a task and whether its latest park is Kelpie's, or
+        ``None`` for an unknown task."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT status, current_run_id FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            park = conn.execute(
+                "SELECT payload, created_at FROM task_events WHERE task_id = ?"
+                " AND kind = 'scheduled' ORDER BY created_at DESC, id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        ours = _park_conditions(task_id, park, self._key(), self._park_window) is not None
+        status = str(row["status"])
+        return _ParkState(status, _run_id(row["current_run_id"]), ours, status != "scheduled")
+
+    def wait(self, task_id: str, conditions: Sequence[Condition], reason: str) -> None:
+        """Park a ready or running task in Hermes ``scheduled`` with the conditions in the
+        reason, if Hermes still shows the status and run the snapshot showed. A running task
+        is pinned to that run. Raises ``UnsupportedAction`` for any other status and
+        :class:`HermesError` when the task moved or Hermes refuses; a park Kelpie cannot
+        read back is undone."""
+        state = self._task_state(task_id)
+        if state is None:
+            raise HermesError(f"unknown Hermes task: {task_id}")
+        seen = self._seen.get(task_id)
+        if seen is None:  # not in the snapshot the rule saw: nothing to check against
+            raise HermesError(f"task {task_id} was not in the last snapshot; not parked")
+        if seen != (state.status, state.run):
+            raise HermesError(
+                f"task {task_id} moved since the snapshot ({seen[0]} run {seen[1]} -> "
+                f"{state.status} run {state.run}); not parked"
+            )
+        if state.status == "running" and state.run is not None:
+            pin: int | None = state.run
+        elif state.status == "ready":
+            pin = None  # no run to pin: Hermes has no "still ready" guard (see park.py)
+        else:
+            raise UnsupportedAction(f"cannot park Hermes task {task_id} in status {state.status!r}")
+        try:
+            text = encode_wait(reason, conditions, task_id, self._wait_key(), datetime.now(UTC))
+            run_kanban(
+                self.cli,
+                self.db_path,
+                schedule_args(task_id, text),
+                timeout=self.cli_timeout,
+                task_id=task_id if pin is not None else None,
+                rid=pin,
+            )
+        except HermesCliError as exc:
+            raise HermesError(str(exc)) from exc
+        after = self._task_state(task_id)
+        if after is not None and after.status == "scheduled" and after.ours:
+            return
+        if after is not None and after.status == "scheduled":
+            self._undo_park(task_id)
+        raise HermesError(f"task {task_id} is not parked after hermes kanban schedule")
+
+    def _undo_park(self, task_id: str) -> None:
+        """Wake a task Kelpie just scheduled but cannot read back as its park: left
+        scheduled, nothing would ever wake it."""
+        log.warning("hermes: park of %s could not be read back; waking it again", task_id)
+        try:
+            run_kanban(
+                self.cli,
+                self.db_path,
+                unblock_args(task_id, "Kelpie could not record its park; woken again"),
+                timeout=self.cli_timeout,
+            )
+        except HermesCliError as exc:
+            raise HermesError(
+                f"task {task_id} is scheduled but Kelpie cannot read back its park, and "
+                f"waking it failed: {exc}; unblock it by hand"
+            ) from exc
+
+    def _wait_key(self) -> bytes:
+        key = self._key(create=True)
+        if key is None:  # pragma: no cover - load_key creates it or raises
+            raise HermesError(f"wait key {self.wait_key} could not be created")
+        return key
+
     def requeue(self, task_id: str, reason: str) -> None:
-        raise NotImplementedError(NOT_IMPLEMENTED)
+        """Wake a task Kelpie parked (``hermes kanban unblock``). Hermes keeps its assignee
+        and lands it in ready, or todo while a parent is open. A Kelpie park already woken
+        is left alone; anything else is not supported on Hermes (``UnsupportedAction``)."""
+        state = self._task_state(task_id)
+        if state is None:
+            raise HermesError(f"unknown Hermes task: {task_id}")
+        if state.status != "scheduled":
+            if state.ours and state.woken:
+                log.info("hermes: task %s is already awake (%s)", task_id, state.status)
+                return
+            raise UnsupportedAction(
+                f"Hermes task {task_id} is {state.status}, not parked by Kelpie; requeue it by hand"
+            )
+        if not state.ours:
+            raise UnsupportedAction(
+                f"Hermes task {task_id} was not parked by Kelpie; requeue it by hand"
+            )
+        try:
+            run_kanban(
+                self.cli, self.db_path, unblock_args(task_id, reason), timeout=self.cli_timeout
+            )
+        except HermesCliError as exc:
+            if (after := self._task_state(task_id)) is not None and after.status != "scheduled":
+                return  # woken in between (by a human): nothing left to do
+            raise HermesError(str(exc)) from exc
 
     def unblock(self, task_id: str, reason: str) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)
 
     def comment(self, task_id: str, body: str) -> None:
-        raise NotImplementedError(NOT_IMPLEMENTED)
+        """``hermes kanban comment --author kelpie``; PR URLs are rewritten (park.py)."""
+        try:
+            run_kanban(
+                self.cli, self.db_path, comment_args(task_id, body), timeout=self.cli_timeout
+            )
+        except HermesCliError as exc:
+            raise HermesError(str(exc)) from exc
 
     def wip_commit(
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False

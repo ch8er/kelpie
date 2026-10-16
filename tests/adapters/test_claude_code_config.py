@@ -113,6 +113,6 @@ def test_hermes_act_guard_holds_next_to_claude_code(tmp_path: Path) -> None:
     act = EngineConfig.from_mapping({"dry_run": False, "rules": {"exit_contract": {"mode": "act"}}})
     cc = ClaudeCodeSettings(tasks_dir=tmp_path / "tasks", spool=None)
     hermes = HermesSettings(db_path=tmp_path / "kanban.db")
-    with pytest.raises(ConfigError, match="Hermes actions other than stop"):
+    with pytest.raises(ConfigError, match="actions the Hermes adapter does not carry out"):
         build_app(Settings(engine=act, db_path=None, hermes=hermes, claude_code=cc))
     build_app(Settings(engine=act, db_path=None, claude_code=cc)).close()

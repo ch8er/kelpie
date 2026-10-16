@@ -334,9 +334,7 @@ def test_list_tasks_and_get_task(board: Board) -> None:
 def test_actions_not_implemented(board: Board) -> None:
     a = adapter(board)
     calls = (
-        lambda: a.requeue("t_1", "r"),
         lambda: a.unblock("t_1", "r"),
-        lambda: a.comment("t_1", "b"),
         lambda: a.wip_commit("t_1", "m"),
     )
     for call in calls:
