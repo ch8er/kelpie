@@ -252,9 +252,14 @@ still hold that much. `kelpie fix --at` without an offset is read in
 `[report] timezone`; it needs the database `kelpie serve` creates. Mode changes are placed
 at the first ledger entry in the new mode, so a quiet rule's switch shows up late.
 
-Schedule it on the host, shortly after midnight in the report's time zone, e.g. with cron:
-`5 0 * * * kelpie --config /etc/kelpie.toml report --send`. For days long past the board
-may no longer hold everything (Hermes keeps runs; the hook spool rotates), so run it daily.
+Schedule it inside `kelpie serve` with `[report] at = "00:15"` (local time in
+`[report] timezone`): it runs yesterday's report once a day, writes it to `[report] dir` and
+sends the summary through the alert channels; a restart does not send a day twice, and a
+`serve` that was down at that time catches up the same day. Cron stays an option:
+`5 0 * * * kelpie --config /etc/kelpie.toml report --send`; use one or the other, or the
+summary is sent twice (runs by hand are not recorded by the schedule). For days long past
+the board may no longer hold everything (Hermes keeps runs; the hook spool rotates), so run
+it daily.
 
 ## Alerts
 

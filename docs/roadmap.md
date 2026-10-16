@@ -630,7 +630,7 @@ recommendations. Delivered to Slack or Telegram and as Markdown/HTML.
 - [x] Cost of chaos and cost per completed task in dollars next to hours, from the budgets and spend sources; marked as an estimate in subscription mode
 - [x] "Needs a human" lists the long-lived alert states still open (state store: since, level, last seen), so states announced once are not forgotten
 - [x] Every number links back to the underlying tasks
-- [ ] Scheduled daily; also available via `kelpie report --date`
+- [x] Scheduled daily; also available via `kelpie report --date`
 
 ### report: before/after verification of fixes
 labels: P0, week-3, area:report

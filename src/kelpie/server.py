@@ -126,6 +126,8 @@ def run(app: App, server: KelpieHTTPServer) -> None:
     """Serve until ``server.shutdown()``; then stop the loop and close the ledger."""
     app.loop.start()
     try:
+        for service in app.services:
+            service.start()
         server.serve_forever()
     finally:
         app.close()

@@ -121,6 +121,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # The app is built from this config: the daily report verifies its effect (never
         # raises).
         record_config_change(settings.db_path, settings.source, datetime.now(UTC))
+    from kelpie.report.cli import report_schedule
+
+    if (schedule := report_schedule(settings, app.alerts)) is not None:
+        app.services.append(schedule)  # [report] at: started with the loop, stopped first
 
     from kelpie.server import serve as run
 
