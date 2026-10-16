@@ -494,6 +494,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #
 # [report]
 # timezone = "UTC"                 # where a day starts and ends (IANA name)
+# at = "00:15"                     # kelpie serve runs yesterday's report at this local time
 # dir = "/var/lib/kelpie/reports"  # writes kelpie-report-<date>.md; unset: stdout only
 # task_url = "https://board.example.org/tasks/{id}"  # links task ids in the Markdown
 # hour_usd = 2.5                   # what a stuck task-hour costs; unset: hours stay hours

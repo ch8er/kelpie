@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.alerts.config import AlertSettings, load_alerts
@@ -607,6 +607,12 @@ class ControlLoop:
         return self._thread is not None and self._thread.is_alive()
 
 
+class Service(Protocol):
+    def start(self) -> None: ...
+
+    def stop(self, timeout: float = 5.0) -> None: ...
+
+
 @dataclass(slots=True)
 class App:
     settings: Settings
@@ -620,8 +626,13 @@ class App:
     retention: SpanRetention | None = None
     forwarder: Forwarder | None = None
     alerts: Delivery | None = None  # [[alerts.channels]]
+    # Background services started by server.run after the loop and stopped first on close,
+    # before the alert delivery they may use (the scheduled daily report).
+    services: list[Service] = field(default_factory=list)
 
     def close(self) -> None:
+        for service in self.services:
+            service.stop()
         self.loop.stop()
         if self.alerts is not None:
             self.alerts.close()

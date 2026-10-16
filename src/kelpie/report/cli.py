@@ -15,7 +15,8 @@ from kelpie.core.config import Mode
 from kelpie.metrics import Metrics
 from kelpie.report.daily import day_bounds
 from kelpie.report.fixes import MANUAL, FixEvent, FixStore
-from kelpie.report.run import ReportSources, default_day, generate, send, write
+from kelpie.report.run import ReportSources, Sender, default_day, generate, send, write
+from kelpie.report.schedule import ReportScheduler, RunLog
 from kelpie.report.store import ReportStore
 from kelpie.rules import REGISTRY
 
@@ -162,3 +163,45 @@ def list_fixes(
         note = " ".join(f.note.split())  # one line per fix
         lines.append(f"{when}  {f.kind:<6}  {note}" + (f"  [{scope}]" if scope else ""))
     return "\n".join(lines) + "\n", 0
+
+
+def scheduled_run(
+    settings: Settings, sender: Sender | None, clock: Callable[[], datetime] = utc_now
+) -> Callable[[date], bool]:
+    """The run of one day for :class:`~kelpie.report.schedule.ReportScheduler`: generate,
+    write to ``[report] dir`` and hand the summary to ``sender`` (``kelpie serve``'s alert
+    delivery; None: not sent). False when the database could not be read (retried)."""
+
+    def run_day(day: date) -> bool:
+        adapters = build_adapters(report_settings(settings, day, clock()))
+        board = merged_snapshot(adapters, Metrics(), clock)()
+        try:
+            report, markdown = generate(sources(settings), day, board)
+        except (OSError, sqlite3.Error, RuntimeError) as exc:
+            log.error("daily report for %s: cannot read the database: %s", day, exc)
+            return False
+        path = write(markdown, settings.report, day)
+        if path is not None:
+            log.info("daily report for %s written to %s", day, path)
+        if sender is not None:
+            send(report, settings.report, sender)
+        elif path is None:
+            log.warning("daily report for %s went nowhere: set [report] dir or alerts", day)
+        return True
+
+    return run_day
+
+
+def report_schedule(settings: Settings, sender: Sender | None) -> ReportScheduler | None:
+    """The daily report for ``kelpie serve`` when ``[report] at`` is set (not started:
+    ``serve`` starts it with the control loop and stops it before the alert delivery)."""
+    report = settings.report
+    if report.at is None:
+        return None
+    if settings.db_path is None:
+        log.warning("[report] at with an in-memory database: the report has no history")
+    if sender is None and report.dir is None:
+        log.warning("[report] at without alert channels or [report] dir: reports go nowhere")
+    run_day = scheduled_run(settings, sender)
+    log.info("daily report scheduled at %s %s", report.at.isoformat("minutes"), report.timezone)
+    return ReportScheduler(report, report.at, run_day, RunLog(settings.db_path))

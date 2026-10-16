@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -24,6 +25,7 @@ KEYS = frozenset(
         "verify_window",
         "review_roles",
         "min_sample",
+        "at",
     }
 )
 SEVERITIES = ("info", "warning", "critical")
@@ -38,7 +40,8 @@ class ReportSettings:
     ``[[alerts.channels]]`` that get the summary (None: all), sent at ``severity``.
     Before/after of fixes: ``verify_window`` on each side, review time from the sessions of
     ``review_roles``, and fewer than ``min_sample`` observations on a side is a small
-    sample."""
+    sample. ``at``: when ``kelpie serve`` runs yesterday's report (local time; None: only
+    ``kelpie report`` or cron)."""
 
     timezone: str = "UTC"
     dir: Path | None = None
@@ -49,6 +52,7 @@ class ReportSettings:
     verify_window: timedelta = DEFAULT_WINDOW
     review_roles: tuple[str, ...] = DEFAULT_REVIEW_ROLES
     min_sample: int = DEFAULT_MIN_SAMPLE
+    at: time | None = None  # local time kelpie serve runs yesterday's report (None: never)
 
     @property
     def tz(self) -> ZoneInfo:
@@ -104,6 +108,16 @@ def load_report(section: Any) -> ReportSettings:
     roles = section.get("review_roles", list(DEFAULT_REVIEW_ROLES))
     if not isinstance(roles, list) or not all(isinstance(r, str) and r.strip() for r in roles):
         raise ValueError("[report] review_roles must be a list of role names")
+    at = section.get("at")
+    run_at = None
+    if at is not None:
+        try:
+            strict = isinstance(at, str) and re.fullmatch(r"\d\d:\d\d", at) is not None
+            run_at = time.fromisoformat(at) if strict else None
+        except ValueError:
+            run_at = None
+        if run_at is None:
+            raise ValueError('[report] at must be a local time "HH:MM", e.g. "00:15"')
     sample = section.get("min_sample", DEFAULT_MIN_SAMPLE)
     if isinstance(sample, bool) or not isinstance(sample, int) or sample <= 0:
         raise ValueError("[report] min_sample must be a positive integer")
@@ -117,4 +131,5 @@ def load_report(section: Any) -> ReportSettings:
         verify_window=window,
         review_roles=tuple(r.strip() for r in roles),
         min_sample=sample,
+        at=run_at,
     )

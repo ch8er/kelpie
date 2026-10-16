@@ -1,10 +1,10 @@
 """``kelpie report``: build one day's report from storage and the board, write it as
 Markdown, and optionally send its summary through the alert channels.
 
-Scheduling is left to the host (cron or a systemd timer running ``kelpie report --send``
-shortly after midnight in ``[report] timezone``). ``kelpie report`` widens the board's
-lookback to what the day needs (:func:`kelpie.report.cli.report_settings`); for days long
-past the hook spool may have rotated, so run it daily.
+``kelpie serve`` runs it daily with ``[report] at`` (:mod:`kelpie.report.schedule`);
+``kelpie report`` (cron, by hand) stays available. Both widen the board's lookback to what
+the day needs (:func:`kelpie.report.cli.report_settings`); for days long past the hook
+spool may have rotated, so run it daily.
 """
 
 from __future__ import annotations
