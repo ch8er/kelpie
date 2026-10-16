@@ -34,7 +34,11 @@ day with a declared status, and per hour (a reviewer's throughput is reviews, no
 done; a review that sends a task back declares no status, so every review session that
 ended counts); *session utilization*, the hours the role's agents had a session running
 over agents x hours; *rework rate*, the share of the role's tasks active within the day
-that were sent back (a return) within it.
+that were sent back (a return) within it. A return counts for the role that does the
+rework, not the one that sent the task back: the role of the first non-review session of
+the task after the return, else of the last one before it, else the task's role. A task
+in review usually carries the reviewer's role by then, and the reviewer did not redo it.
+The task then counts as active for that role too.
 
 **Live** (``/metrics``) gauges measure related but different things from the current
 snapshot (agents with work, the ownerless queue, returns per done task); see
@@ -145,10 +149,12 @@ def throughput(
             a.completed.append(task.id)
         if stages or done:
             a.active.append(task.id)
-            back = sum(1 for r in task.returns if start <= r.at < end)
-            if back:
-                a.reworked.append(task.id)
-                a.returns += back
+            for who, back in _rework_roles(task, mine, start, end, review_roles, role_of_session):
+                r = acc[who or role]
+                r.reworked.append(task.id)
+                r.returns += back
+                if task.id not in r.active:
+                    r.active.append(task.id)
         a.reopened += sum(1 for at in task.reopened_at if start <= at < end)
         if _stage_at(task, mine, windows, end, review_roles, role_of_session, end) == "queue":
             a.queue_now += 1
@@ -193,6 +199,31 @@ def throughput(
             )
         )
     return out
+
+
+def _rework_roles(
+    task: Task,
+    sessions: Sequence[Session],
+    start: datetime,
+    end: datetime,
+    review_roles: Sequence[str],
+    role_of_session: _RoleOf,
+) -> list[tuple[str | None, int]]:
+    """For the task's returns within the day: the role that redid the work and how many
+    returns, per role (None: no non-review session is known, the task's own role)."""
+    doers = [
+        (s.started_at, role)
+        for s in sessions
+        if (role := role_of_session(s)) is not None and role not in review_roles
+    ]
+    counts: Counter[str | None] = Counter()
+    for r in task.returns:
+        if not start <= r.at < end:
+            continue
+        after = [role for at, role in doers if at >= r.at]
+        before = [role for at, role in doers if at < r.at]
+        counts[after[0] if after else before[-1] if before else None] += 1
+    return sorted(counts.items(), key=lambda kv: kv[0] or "")
 
 
 @dataclass(slots=True)

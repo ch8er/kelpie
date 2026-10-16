@@ -260,3 +260,31 @@ def test_reopened_after_done_counts_within_the_day() -> None:
     done = task("T8", Status.DONE, at(10))
     [dev] = throughput([reopened, done], [], [], [], START, END)
     assert dev.reopened == 1 and dev.completed == ("T8",)
+
+
+def test_rework_counts_for_the_role_that_redid_the_work() -> None:
+    """A task in review carries the reviewer's role (Hermes assigns it): the return still
+    counts for the developer who redoes it, never for the reviewer who sent it back."""
+    back = (Return(at(12), "missing test", "review"),)
+    in_review = Task("R1", "R1", Status.REVIEW, at(14), role="reviewer", owner_id="rev-1",
+                     returns=back)  # fmt: skip
+    sessions = (
+        session("A", "R1", "dev-1", 8, 10, Status.REVIEW),
+        session("B", "R1", "rev-1", 11, 12, None),
+        session("C", "R1", "dev-1", 13, 14, Status.REVIEW),
+    )
+    roles = {r.role: r for r in throughput((in_review,), sessions, OWNERS, (), START, END)}
+    dev, rev = roles["developer"], roles["reviewer"]
+    assert dev.reworked == ("R1",) and dev.returns == 1 and dev.rework_rate == 1.0
+    assert rev.reworked == () and rev.returns == 0
+
+
+def test_rework_falls_back_to_the_work_before_the_return_then_the_task_role() -> None:
+    back = (Return(at(12), "wrong API", "review"),)
+    not_yet = Task("R2", "R2", Status.READY, at(12), role="reviewer", returns=back)
+    sessions = (session("A", "R2", "dev-2", 8, 10, Status.REVIEW),)  # nobody redid it yet
+    roles = {r.role: r for r in throughput((not_yet,), sessions, OWNERS, (), START, END)}
+    assert roles["developer"].reworked == ("R2",) and roles["reviewer"].returns == 0
+    nobody = Task("R3", "R3", Status.READY, at(12), role="developer", returns=back)
+    roles = {r.role: r for r in throughput((nobody,), (), OWNERS, (), START, END)}
+    assert roles["developer"].reworked == ("R3",)
