@@ -47,6 +47,9 @@ the same rules: pure, deterministic, no clock and no LLM.
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
+import urllib.parse
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -817,7 +820,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             approx = "~" if g.estimated else ""
             used = f"{g.filtered_calls} ({', '.join(g.filters)})" if g.filtered_calls else "0"
             lines.append(
-                f"| {g.role or '?'} | `{g.key}` | {g.calls} | {approx}{g.tokens:,} | "
+                f"| {_text(g.role or '?')} | {_code(g.key)} | {g.calls} | "
+                f"{approx}{g.tokens:,} | "
                 f"{approx}{round(g.mean):,} | {used} |"
             )
     return "\n".join(lines) + "\n"
@@ -892,8 +896,35 @@ def _verification_lines(report: DailyReport) -> list[str]:
 
 def _inline(text: str) -> str:
     """Free text (a fix note) as one Markdown-safe line."""
-    flat = " ".join(text.split())
-    return flat.replace("|", "\\|") or "(no note)"  # after "**time, kind**:", never a block
+    return _text(text) or "(no note)"  # after "**time, kind**:", never a block
+
+
+_MD_SPECIAL = re.compile(r"([\\`\[\]<>|])")
+MAX_NAME = 80  # characters of an agent-chosen name shown in a code span
+
+
+def _text(text: str) -> str:
+    """Text agents may control (task ids, titles, block reasons in alert summaries) as one
+    Markdown-safe line: no line breaks or control characters, and nothing that opens a
+    link, an image, HTML, a code span or a table cell. Plain words read as they are."""
+    flat = " ".join(_printable(text).split())
+    return _MD_SPECIAL.sub(r"\\\1", flat.replace("&", "&amp;"))
+
+
+def _code(text: str) -> str:
+    """An agent-chosen name (task id, command prefix) as a code span it cannot close; a
+    ``|`` is escaped, since tables split cells on it even inside code spans."""
+    flat = " ".join(_printable(text).split()).replace("|", "\\|")
+    if len(flat) > MAX_NAME:
+        flat = flat[: MAX_NAME - 3] + "..."
+    runs = [len(r) for r in re.findall(r"`+", flat)]
+    fence = "`" * (max(runs, default=0) + 1)
+    pad = " " if flat.startswith("`") or flat.endswith("`") else ""
+    return f"{fence}{pad}{flat}{pad}{fence}"
+
+
+def _printable(text: str) -> str:
+    return "".join(c for c in text if unicodedata.category(c) not in {"Cc", "Cf"} or c in "\t\n")
 
 
 def _value(value: float | None, unit: str) -> str:
@@ -965,7 +996,7 @@ def _inbox(
 def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
     out = []
     for i in report.inbox:
-        who = i.person or "nobody assigned"
+        who = _text(i.person) if i.person else "nobody assigned"
         out.append(
             f"- **Needs you, {who}**: {i.cost_hours:.1f} agent-hours waited, "
             f"{i.blocked_agent_tasks} agent task(s) held; by cost of delay: {tasks(i.tasks)}"
@@ -980,7 +1011,7 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
         out.append(
             f"- **{s.severity}** `{s.rule}`{task}: open {o.open_hours:.1f}h since "
             f"{_local(s.since, report)}{level}, "
-            f"last seen {_local(s.last_seen, report)}: {s.summary}"
+            f"last seen {_local(s.last_seen, report)}: {_text(s.summary)}"
         )
     for f in report.not_done:
         out.append(
@@ -991,7 +1022,7 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
         owner = f"{r.owner}: " if r.owner else ""
         g = r.group
         out.append(
-            f"- {owner}add {r.filter.name} for `{g.key}` to the {g.role or 'agents'}' "
+            f"- {owner}add {r.filter.name} for {_code(g.key)} to the {_text(g.role or 'agents')}' "
             f"instructions: above the threshold on {len(g.hot_days)} days "
             f"{tasks(g.tasks)}".rstrip()
         )
@@ -1011,5 +1042,6 @@ class _TaskLinks:
 
     def _one(self, task_id: str) -> str:
         if self.url is None:
-            return f"`{task_id}`"
-        return f"[{task_id}]({self.url.replace('{id}', task_id)})"
+            return _code(task_id)
+        target = self.url.replace("{id}", urllib.parse.quote(task_id, safe=""))
+        return f"[{_text(task_id)}]({target})"
