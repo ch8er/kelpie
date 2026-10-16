@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from kelpie.adapters.claude_code.hook import PROC, proc_stat
+from kelpie.adapters.claude_code import hook
 
 IDENTITY = ("host", "uid", "pidns", "boot")
 DEAD_STATES = frozenset({"Z", "X", "x"})
@@ -47,9 +47,11 @@ def process_state(
         recorded.get(k) is None or recorded.get(k) != local.get(k) for k in IDENTITY
     ):
         return None
-    fields = proc_stat(pid, proc)
+    fields = hook.proc_stat(pid, proc)
     if fields is None:
-        return False if not ((proc or PROC) / str(pid)).exists() else None
+        return False if not ((proc or hook.PROC) / str(pid)).exists() else None
+    if not fields:
+        return None
     if fields[0] in DEAD_STATES:
         return False
     if len(fields) <= 19:

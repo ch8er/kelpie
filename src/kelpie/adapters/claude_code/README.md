@@ -231,7 +231,10 @@ the spool alone cannot tell them apart. Kelpie asks the process:
   pid reused by another process is never taken for the session.
   - Running with that start time: the session is alive, `last_heartbeat` is "now", and rule 1
     leaves its task alone however long it idles. Kelpie keeps watching such a session after
-    its lines leave `lookback` (in memory: a restart of Kelpie forgets it).
+    its lines leave `lookback` (in memory: a restart of Kelpie forgets it; three checks in a
+    row that cannot tell drop it too). An open session is a session: the daily report counts
+    the time it waits at its prompt in session-hours and concurrency, as it would count an
+    agent waiting on a slow tool.
   - Gone (no such pid, another start time, or a zombie not yet reaped by its parent): the
     session has ended at its last spool line (`exit_reason = "process gone"`), so rule 1
     reports an `in_progress` task after its grace period instead of after 30 minutes. A

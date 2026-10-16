@@ -52,10 +52,11 @@ A ``TaskUpdate`` counts only on a watched list: the hook records the session's l
 
 Liveness: an interactive session waiting at its prompt fires no hooks, so its last line ages
 like a crashed session's. For a session without ``SessionEnd`` the Claude Code process the
-hook recorded is checked (:mod:`kelpie.adapters.claude_code.process`, same host and Linux
-start time only): running means alive (``last_heartbeat`` = now), gone means ended at its
-last line (``exit_reason = "process gone"``); when it cannot be told, the spool alone
-decides, as before. Headless sessions (``claude -p``) end with ``SessionEnd``.
+hook recorded is checked (:mod:`kelpie.adapters.claude_code.process`: Linux only, and only
+when host, user, PID namespace and boot match Kelpie's own): running means alive
+(``last_heartbeat`` = now), gone means ended at its last line (``exit_reason = "process
+gone"``); when it cannot be told, the spool alone decides, as before. Headless sessions
+(``claude -p``) end with ``SessionEnd``.
 """
 
 from __future__ import annotations
@@ -107,6 +108,7 @@ FUTURE_SKEW = timedelta(minutes=5)  # spool lines dated further ahead are droppe
 # A "process gone" verdict is not trusted for a session that wrote a line this recently.
 PROCESS_GRACE = timedelta(minutes=5)
 WATCH_ENDED = timedelta(hours=1)  # a watched session found gone is reported this long
+WATCH_UNKNOWN = 3  # snapshots in a row a watched session's process cannot be told, then dropped
 # A stop not enforced: the session still records tool calls this long after its marker.
 STOP_GRACE = timedelta(minutes=2)
 MAX_MARKER = 4096
@@ -617,8 +619,8 @@ class ClaudeCodeAdapter:
             )
             if alive:
                 self._watched[sid] = _Watched(sessions[-1], _newest(evs))
-            else:
-                self._watched.pop(sid, None)
+            elif alive is False or ended:
+                self._watched.pop(sid, None)  # (None: watched on, see _still_watched)
         return tuple(sessions)
 
     def _checker(self) -> Callable[[int, Mapping[str, Any]], bool | None]:
@@ -635,7 +637,7 @@ class ClaudeCodeAdapter:
     ) -> tuple[Session, ...]:
         """Sessions seen running whose spool lines have left ``lookback``: still running,
         they stay alive; gone, they end (and are reported for ``WATCH_ENDED`` more); when it
-        cannot be told any more, they are dropped as before."""
+        cannot be told ``WATCH_UNKNOWN`` times in a row, they are dropped as before."""
         seen = {s.id for s in current}
         kept: list[Session] = []
         for sid, w in list(self._watched.items()):
@@ -649,7 +651,11 @@ class ClaudeCodeAdapter:
                 continue
             alive = check(w.newest.pid, w.newest.recorded) if w.newest.pid else None
             if alive:
-                kept.append(replace(w.session, last_heartbeat=now))
+                self._watched[sid] = _Watched(replace(w.session, last_heartbeat=now), w.newest)
+                kept.append(self._watched[sid].session)
+            elif alive is None and w.unknown + 1 < WATCH_UNKNOWN:
+                w.unknown += 1  # e.g. /proc briefly unreadable: keep it as last seen
+                kept.append(w.session)
             elif alive is False:
                 gone = replace(
                     w.session,
@@ -749,7 +755,10 @@ class ClaudeCodeAdapter:
             key=lambda e: e.at,
         )
         watched = self._watched.get(session_id)
-        if not own and watched is not None and watched.ended_seen is None:
+        if not own and watched is not None:
+            if watched.ended_seen is not None:
+                log.info("claude-code: session %s has ended; nothing to stop", session_id)
+                return ActionResult.NOTHING_TO_DO
             own = [watched.newest]  # running for longer than lookback, idle
         if not own:
             raise UnsupportedAction(
@@ -883,6 +892,7 @@ class _Watched:
     session: Session  # as last built from the spool
     newest: SpoolEvent  # the line whose process is checked
     ended_seen: datetime | None = None  # when it was found gone
+    unknown: int = 0  # snapshots in a row its process could not be told
 
 
 def _newest(events: Sequence[SpoolEvent]) -> SpoolEvent:

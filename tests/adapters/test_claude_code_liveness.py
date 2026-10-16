@@ -17,9 +17,10 @@ from typing import Any
 import pytest
 
 from kelpie.adapters.claude_code import ClaudeCodeAdapter, hook
-from kelpie.adapters.claude_code.adapter import WATCH_ENDED, parse_line
+from kelpie.adapters.claude_code.adapter import WATCH_ENDED, WATCH_UNKNOWN, parse_line
 from kelpie.adapters.claude_code.process import process_state
 from kelpie.core.actions import ActionKind, ActionResult
+from kelpie.core.ports import UnsupportedAction
 from kelpie.rules.exit_contract import ExitContract
 
 REAL_PROC = Path("/proc")
@@ -64,6 +65,22 @@ def test_claude_pid_counts_only_as_an_ancestor(
     assert (found["pid"], found["pid_start"]) == (200, "4242")  # the claude ancestor instead
     monkeypatch.delenv("CLAUDE_PID")
     assert hook.claude_process(tmp_path)["pid"] == 200
+
+
+def test_an_inner_claude_wins_over_an_inherited_claude_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """claude (100) > bash (200) > claude (300) > sh (400) > hook, with CLAUDE_PID=100 left
+    over from the outer session: the inner session's process is 300."""
+    _fake_proc(tmp_path, 400, b"sh", 300)
+    _fake_proc(tmp_path, 300, b"claude", 200, start=33)
+    _fake_proc(tmp_path, 200, b"bash", 100)
+    _fake_proc(tmp_path, 100, b"claude", 1, start=11)
+    monkeypatch.setattr(os, "getppid", lambda: 400)
+    monkeypatch.setenv("CLAUDE_PID", "100")
+    assert hook.claude_process(tmp_path)["pid"] == 300
+    monkeypatch.setenv("CLAUDE_PID", "300")
+    assert hook.claude_process(tmp_path)["pid"] == 300
 
 
 def test_no_claude_ancestor_records_nothing(
@@ -258,12 +275,37 @@ def test_running_sessions_stay_watched_beyond_lookback(tmp_path: Path) -> None:
     assert adapter.snapshot(later + WATCH_ENDED + timedelta(minutes=2)).sessions == ()
 
 
-def test_unknown_drops_a_watched_session(tmp_path: Path) -> None:
+def test_gone_watched_session_is_reported_until_watch_ended(tmp_path: Path) -> None:
     answer: list[bool | None] = [True]
     adapter = _farm(tmp_path, *_lines(), process_check=lambda pid, rec: answer[0])
     adapter.snapshot(NOW)
+    later = NOW + timedelta(hours=30)
+    answer[0] = False
+    first = adapter.snapshot(later).sessions
+    answer[0] = True  # not asked again: it is gone
+    again = adapter.snapshot(later + WATCH_ENDED - timedelta(minutes=1)).sessions
+    assert first == again and again[0].exit_reason == "process gone"
+
+
+def test_unknown_drops_a_watched_session_only_when_it_lasts(tmp_path: Path) -> None:
+    """A check that briefly cannot tell (``/proc`` unreadable for a moment) keeps the session
+    as last seen; WATCH_UNKNOWN in a row drop it."""
+    answer: list[bool | None] = [True]
+    adapter = _farm(tmp_path, *_lines(), process_check=lambda pid, rec: answer[0])
+    adapter.snapshot(NOW)
+    later = NOW + timedelta(hours=30)
+    assert adapter.snapshot(later).sessions[0].last_heartbeat == later
     answer[0] = None
-    assert adapter.snapshot(NOW + timedelta(hours=30)).sessions == ()
+    for tick in range(1, WATCH_UNKNOWN):
+        (session,) = adapter.snapshot(later + timedelta(minutes=tick)).sessions
+        assert (session.ended_at, session.last_heartbeat) == (None, later)
+    answer[0] = True  # a good answer resets the count
+    adapter.snapshot(later + timedelta(minutes=10))
+    answer[0] = None
+    assert len(adapter.snapshot(later + timedelta(minutes=11)).sessions) == 1
+    for tick in range(12, 12 + WATCH_UNKNOWN):
+        sessions = adapter.snapshot(later + timedelta(minutes=tick)).sessions
+    assert sessions == ()
 
 
 def test_stop_leaves_a_dead_session_alone(tmp_path: Path) -> None:
@@ -274,6 +316,25 @@ def test_stop_leaves_a_dead_session_alone(tmp_path: Path) -> None:
     adapter.process_check = fixed(True)
     adapter.stop(S1, "loop")
     assert (tmp_path / "stop" / f"{S1}.json").exists()
+
+
+def test_stop_reaches_a_watched_session_beyond_lookback(tmp_path: Path) -> None:
+    """Its lines are older than lookback (stop reads the spool at the real now): the watched
+    entry stands in for them."""
+    answer: list[bool | None] = [True]
+    adapter = _farm(
+        tmp_path, *_lines(), stop_dir=tmp_path / "stop", process_check=lambda pid, rec: answer[0]
+    )
+    with pytest.raises(UnsupportedAction):  # never seen running: not known
+        adapter.stop(S1, "loop")
+    adapter.snapshot(NOW)
+    adapter.stop(S1, "loop")
+    assert (tmp_path / "stop" / f"{S1}.json").exists()
+    (tmp_path / "stop" / f"{S1}.json").unlink()
+    answer[0] = False
+    adapter.snapshot(NOW + timedelta(hours=30))  # found gone
+    assert adapter.stop(S1, "loop") is ActionResult.NOTHING_TO_DO
+    assert not (tmp_path / "stop" / f"{S1}.json").exists()
 
 
 @linux

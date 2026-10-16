@@ -426,12 +426,11 @@ def identity(proc: Path | None = None) -> dict[str, Any]:
 def claude_process(proc: Path | None = None) -> dict[str, Any]:
     """The Claude Code process this hook runs under, for Kelpie's liveness check: its pid,
     its start time and :func:`identity`. ``CLAUDE_PID`` (which Claude Code sets for its child
-    processes) counts only when it is one of the hook's ancestors, since it may be inherited
-    from another session; else the nearest ancestor named ``claude``. Empty when unknown."""
-    ancestors = _ancestors(proc)
+    processes) counts only when it is one of the hook's ancestors and no process named
+    ``claude`` is nearer, since it may be inherited from an outer session; else the nearest
+    ancestor named ``claude``. Empty when unknown."""
     env = _pid(os.environ.get("CLAUDE_PID"))
-    pid = env if env is not None and any(p == env for p, _ in ancestors) else None
-    pid = pid or next((p for p, claude in ancestors if claude), None)
+    pid = next((p for p, claude in _ancestors(proc) if claude or p == env), None)
     if pid is None:
         return {}
     return {"pid": pid, "pid_start": proc_start(pid, proc), **identity(proc)}
