@@ -1,0 +1,110 @@
+id: "tokens-cache-context"
+incident: null
+title: "Prompt cache breaks, runaway context and a restart from zero"
+description: >
+  Synthetic farm day. A developer agent's prompt cache breaks twice, each time right after
+  it loads a skill, and its session grows to 120k tokens without compacting. Another
+  developer session restarts a task from 5k tokens where the previous session (the day
+  before) stopped at 60k, and spends eight steps getting back. A reviewer polls every ten
+  minutes, past the cache lifetime, and a triage agent never reads from the cache.
+  Distractors: a session that compacts (its context drops: neither a break nor a runaway),
+  a session that resumes a task with its context (not a restart) and a healthy reviewer.
+# Fixture-only `calls`: each entry expands into one LLM span per `input` value, `every`
+# apart (each lasting 30s), and a tool span before each call after the first (`bash`, or
+# the name in `tools` for that 1-based step). `cached: previous` reads the previous call's
+# input from the cache; `cached_at` overrides single steps.
+config:
+  prices:
+    model-large: {input: 3.0, output: 15.0, cached_input: 0.3}
+    model-small: {input: 0.25, output: 1.25, cached_input: 0.025}
+day: "2026-03-02"
+snapshot:
+  now: "2026-03-02T23:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: reviewer-1, role: reviewer}
+    - {id: triage-1, role: triage}
+  tasks:
+    - {id: T-T01, title: "Add export endpoint", status: in_progress,
+       status_since: "2026-03-02T09:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-T02, title: "Fix pagination", status: in_progress,
+       status_since: "2026-03-01T14:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-T04, title: "Rename settings keys", status: in_progress,
+       status_since: "2026-03-02T07:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-T05, title: "Refactor importer", status: in_progress,
+       status_since: "2026-03-02T13:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-R01, title: "Review export endpoint", status: in_progress,
+       status_since: "2026-03-02T11:00:00+00:00", role: reviewer, owner_id: reviewer-1}
+    - {id: T-R02, title: "Review pagination", status: in_progress,
+       status_since: "2026-03-02T15:00:00+00:00", role: reviewer, owner_id: reviewer-1}
+    - {id: T-G01, title: "Triage new issues", status: in_progress,
+       status_since: "2026-03-02T16:00:00+00:00", role: triage, owner_id: triage-1}
+  sessions:
+    - {id: S-T01, task_id: T-T01, owner_id: agent-dev-1, started_at: "2026-03-02T09:00:00+00:00"}
+    - {id: S-T02, task_id: T-T02, owner_id: agent-dev-1, started_at: "2026-03-01T14:00:00+00:00",
+       ended_at: "2026-03-01T14:15:00+00:00"}
+    - {id: S-T03, task_id: T-T02, owner_id: agent-dev-1, started_at: "2026-03-02T10:00:00+00:00"}
+    - {id: S-T04, task_id: T-T04, owner_id: agent-dev-1, started_at: "2026-03-02T07:00:00+00:00",
+       ended_at: "2026-03-02T07:10:00+00:00"}
+    - {id: S-T06, task_id: T-T04, owner_id: agent-dev-1, started_at: "2026-03-02T08:00:00+00:00"}
+    - {id: S-T05, task_id: T-T05, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00"}
+    - {id: S-R01, task_id: T-R01, owner_id: reviewer-1, started_at: "2026-03-02T11:00:00+00:00"}
+    - {id: S-R02, task_id: T-R02, owner_id: reviewer-1, started_at: "2026-03-02T15:00:00+00:00"}
+    - {id: S-G01, task_id: T-G01, owner_id: triage-1, started_at: "2026-03-02T16:00:00+00:00"}
+calls:
+  # Breaks after load_skill (steps 6 and 9) and runaway growth to 120k.
+  - {session: S-T01, task: T-T01, model: model-large, start: "2026-03-02T09:00:00+00:00",
+     every: 2m, output: 500, cached: previous, cached_at: {6: 2000, 9: 2000},
+     tools: {6: load_skill, 9: load_skill},
+     input: [10000, 20000, 30000, 40000, 50000, 60000, 70000, 80000, 90000, 100000, 110000,
+             120000]}
+  # The day before: stopped at 60k and ended without a final status.
+  - {session: S-T02, task: T-T02, model: model-large, start: "2026-03-01T14:00:00+00:00",
+     every: 2m, output: 500, cached: previous,
+     input: [4000, 12000, 20000, 28000, 36000, 44000, 52000, 60000]}
+  # Restart from zero: 5k, eight steps below 60k.
+  - {session: S-T03, task: T-T02, model: model-large, start: "2026-03-02T10:00:00+00:00",
+     every: 2m, output: 500, cached: previous,
+     input: [5000, 12000, 19000, 26000, 33000, 40000, 47000, 54000, 61000, 68000]}
+  # Distractor: S-T06 resumes T-T04 with its context (40k of 50k).
+  - {session: S-T04, task: T-T04, model: model-large, start: "2026-03-02T07:00:00+00:00",
+     every: 2m, output: 500, cached: previous, input: [10000, 20000, 30000, 40000, 50000]}
+  - {session: S-T06, task: T-T04, model: model-large, start: "2026-03-02T08:00:00+00:00",
+     every: 2m, output: 500, cached: previous, input: [40000, 45000, 50000]}
+  # Distractor: compaction at step 6 (90k -> 15k), the cache read drops with it.
+  - {session: S-T05, task: T-T05, model: model-large, start: "2026-03-02T13:00:00+00:00",
+     every: 2m, output: 500, cached: previous, cached_at: {6: 2000},
+     input: [20000, 40000, 60000, 80000, 90000, 15000, 25000, 35000]}
+  # Polling every 10 minutes: past the 5-minute cache lifetime.
+  - {session: S-R01, task: T-R01, model: model-small, start: "2026-03-02T11:00:00+00:00",
+     every: 10m, output: 200, cached: [0, 0, 0, 0, 0, 0, 0, 0],
+     input: [20000, 20000, 20000, 20000, 20000, 20000, 20000, 20000]}
+  # Distractor: a healthy reviewer.
+  - {session: S-R02, task: T-R02, model: model-small, start: "2026-03-02T15:00:00+00:00",
+     every: 1m, output: 200, cached: previous, input: [8000, 9000, 10000, 11000]}
+  # No cache reads at all.
+  - {session: S-G01, task: T-G01, model: model-small, start: "2026-03-02T16:00:00+00:00",
+     every: 1m, output: 200, cached: [0, 0, 0, 0, 0, 0],
+     input: [10000, 15000, 20000, 25000, 30000, 35000]}
+expected:
+  cache:
+    - {role: developer, model: model-large, break: 2, expired: 0, partial: 0, missed: 126000}
+    - {role: reviewer, model: model-small, break: 0, expired: 7, partial: 0, missed: 140000}
+    - {role: triage, model: model-small, break: 0, expired: 0, partial: 5, missed: 100000}
+  break_hint_contains: "`load_skill` (2 of 2)"
+  runaway: [S-T01]
+  restarts:
+    - {session: S-T03, previous: S-T02, steps: 8, tokens: 54000}
+  advice:
+    - "Fix prompt-cache breaks for developer on `model-large`"
+    - "Keep the prompt cache warm for reviewer on `model-small`"
+    - "Turn on prompt caching for triage on `model-small`"
+    - "Bound the context of developer sessions"
+    - "Resume developer tasks instead of restarting from zero"
+not_expected:
+  break_sessions: [S-T05, S-R02]
+  runaway: [S-T05, S-T03]
+  restarts: [S-T06]
+  advice:
+    - "Bound the context of reviewer sessions"
+    - "Resume reviewer tasks instead of restarting from zero"
