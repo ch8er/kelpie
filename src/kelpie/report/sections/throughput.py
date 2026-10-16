@@ -10,6 +10,7 @@ from kelpie.core.stages import STAGES, UNKNOWN_ROLE, task_roles
 from kelpie.report import md
 from kelpie.report.sections import Section, SectionContext, Spend, register_section
 from kelpie.report.throughput import throughput
+from kelpie.report.waits import WAIT_CAUSES, WaitCauses
 
 TITLE = "Farm throughput"
 STAGE_NAMES = {
@@ -44,6 +45,9 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         ctx.end,
         inputs.review_roles,
         ctx.roles,
+        WaitCauses(
+            inputs.conditions, [e for e in inputs.actions if e.at < ctx.end], inputs.hold_labels
+        ),
     )
     if not roles:
         return None
@@ -118,6 +122,15 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         for r in staged:
             cells = " | ".join(f"{r.stages.get(s, 0.0):.1f}" for s in STAGES)
             lines.append(f"| {md.text(r.role)} | {cells} |")
+    waiting = [r for r in roles if r.waits]
+    if waiting:
+        lines += ["", "**Waiting for conditions, by cause** (task-hours, tasks):", ""]
+        for r in waiting:
+            causes = sorted(r.waits.items(), key=lambda x: (-x[1], x[0]))
+            causes_text = "; ".join(
+                f"{WAIT_CAUSES[c]} {h:.1f} ({len(r.waited.get(c, ()))})" for c, h in causes
+            )
+            lines.append(f"- {md.text(r.role)}: {causes_text}")
     lines += [
         "",
         "Stages are rebuilt from the board's current statuses, the sessions and their "
@@ -125,6 +138,8 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         "history, so a status change between sessions is placed at the next known change. "
         "A task counts from its first known moment of the day, so queue time before its "
         "first pickup is left out (a lower bound); the board only looks back so far "
-        "(Hermes `lookback`), and a session with no end or heartbeat counts until midnight.",
+        "(Hermes `lookback`), and a session with no end or heartbeat counts until midnight. "
+        "A task's waiting time counts under what it waits (or last waited) for now: a hold "
+        "label, a person (rule 13), else the kind of its condition.",
     ]
     return Section(TITLE, tuple(lines))

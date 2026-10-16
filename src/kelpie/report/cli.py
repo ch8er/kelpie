@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 
-from kelpie.app import Settings, build_adapters, merged_snapshot, utc_now
+from kelpie.app import Settings, _hold_labels, build_adapters, merged_snapshot, utc_now
 from kelpie.core.budgets import BudgetMode
 from kelpie.core.config import Mode
 from kelpie.metrics import Metrics
@@ -36,6 +36,7 @@ def sources(settings: Settings) -> ReportSources:
         outputs=settings.traces.outputs,
         estimated=any(b.mode is BudgetMode.SUBSCRIPTION for b in settings.budgets.budgets),
         modes=modes,
+        hold_labels=tuple(_hold_labels(engine.rules.get("bottlenecks", {}))),
     )
 
 

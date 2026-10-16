@@ -49,6 +49,7 @@ class ReportSources:
     outputs: OutputSettings
     estimated: bool  # a subscription-mode budget: dollars are estimates
     modes: Mapping[str, Mode]
+    hold_labels: tuple[str, ...] = ()  # rule 6's hold labels (bottlenecks)
 
 
 def default_day(now: datetime, settings: ReportSettings) -> date:
@@ -101,6 +102,8 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         review_roles=sources.report.review_roles,
         min_sample=sources.report.min_sample,
         section_config=sources.report.sections,
+        conditions=board.conditions,
+        hold_labels=sources.hold_labels,
     )
 
 
