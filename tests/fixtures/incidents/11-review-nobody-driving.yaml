@@ -1,0 +1,66 @@
+id: "11-review-nobody-driving"
+incident: 11
+title: "Task in review with nothing driving it"
+description: >
+  A developer finished a change and moved its task to review, but the task stayed assigned
+  to the developer: no reviewer was assigned, it was not in a reviewer queue, no session
+  worked on it and it waited for no condition. Nothing on the farm would ever pick it up,
+  and the task depending on it was frozen for four hours. Review tasks that a reviewer has,
+  that sit in the reviewer queue, that a live session works on, that wait for CI, that a
+  human owns, or that only just entered review are left alone.
+rule: orphan_status
+config:
+  review_idle_after: "2h"
+  reviewer_roles: [reviewer]
+  critical_dependents: 3
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: reviewer-1, role: reviewer}
+    - {id: human-lead, role: developer, kind: human}
+  tasks:
+    # Handed to review four hours ago and left with its developer.
+    - {id: T-1131, title: "Add CSV export", status: review, status_since: "2026-03-02T12:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-1137, title: "Document CSV export", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    # A reviewer has it.
+    - {id: T-1132, title: "Rate limiter", status: review, status_since: "2026-03-02T12:00:00+00:00", role: developer, owner_id: reviewer-1}
+    # In the reviewer queue (its role is a reviewer role).
+    - {id: T-1133, title: "Retry policy", status: review, status_since: "2026-03-02T12:00:00+00:00", role: reviewer, owner_id: agent-dev-2}
+    # A live session works on it.
+    - {id: T-1134, title: "Pagination", status: review, status_since: "2026-03-02T12:00:00+00:00", role: developer, owner_id: agent-dev-2}
+    # Waits for CI, which is still running.
+    - {id: T-1135, title: "Search index", status: review, status_since: "2026-03-02T12:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # Only an hour in review.
+    - {id: T-1136, title: "Audit log", status: review, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # A human owns it.
+    - {id: T-1138, title: "Pricing page copy", status: review, status_since: "2026-03-02T10:00:00+00:00", role: developer, owner_id: human-lead}
+  dependencies:
+    - {task_id: T-1137, depends_on: T-1131}
+  conditions:
+    - id: "ci:T-1135"
+      kind: ci_status
+      task_id: T-1135
+      params: {repo: example/repo, sha: abc1234}
+      satisfied: false
+      checked_at: "2026-03-02T15:58:00+00:00"
+      registered_at: "2026-03-02T12:00:00+00:00"
+  sessions:
+    - {id: S-1131, task_id: T-1131, owner_id: agent-dev-1, started_at: "2026-03-02T10:00:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: review}
+    - {id: S-1134, task_id: T-1134, owner_id: agent-dev-2, started_at: "2026-03-02T15:00:00+00:00", last_heartbeat: "2026-03-02T15:58:00+00:00"}
+expected_actions:
+  - kind: alert
+    task_id: T-1131
+    severity: warning
+    reason_contains: "nothing is driving it"
+    params: {pattern: review-undriven, dependents: 1, owner_id: agent-dev-1}
+not_expected_actions:
+  - {kind: alert, task_id: T-1132}
+  - {kind: alert, task_id: T-1133}
+  - {kind: alert, task_id: T-1134}
+  - {kind: alert, task_id: T-1135}
+  - {kind: alert, task_id: T-1136}
+  - {kind: alert, task_id: T-1137}
+  - {kind: alert, task_id: T-1138}
+  - {kind: reassign, task_id: T-1131}

@@ -177,7 +177,7 @@ P0 is the MVP; P1 and P2 rules are backlog.
 |---|------|--------------|-----------|
 | 1 | Exit contract | Session ended without a final status, or with a block lacking an allowed reason → requeue | 2 |
 | 2 | Wait for condition | Agent registers a condition and exits; Kelpie wakes the task when it holds and keeps a "waiting" heartbeat meanwhile. Detects in-session polling | 10 |
-| 3 | Orphan statuses | Task sits in a status with no owner for more than N min → alert and reassign to an owner of its role | 11 |
+| 3 | Orphan statuses | Task sits in a status with no owner for more than N min → alert and reassign to an owner of its role. Stop patterns (P1): in review with nothing driving it, a successful run with no next action, a blocker chain ending in a cancelled or inaccessible task, recovery tasks recovering themselves → alert | 11 |
 | 4 | Stale blocks | The block's cause is resolved in the outside world → unblock | 1, 8 |
 | 5 | Ping-pong | After K review rounds → escalate to the architect or a human | 12 |
 | 6 | Bottlenecks | Role utilization and critical path → alert with a rebalancing suggestion; idle with ready work, holds with an owner and an expiry, human tasks on the critical path | 9, 10, 14, 16 |

@@ -791,12 +791,12 @@ Field evidence: tasks stop silently in ways that are not "no owner". Extend rule
 stop patterns, so a task that nothing will move again is flagged.
 
 **Acceptance criteria**
-- [ ] In review with nothing driving it (no reviewer session, no open condition) for more than N minutes → `alert`
-- [ ] A successful run with no next action (session ended with success, task not moved on, no follow-up task) → `alert`
-- [ ] A blocker chain that ends in a cancelled or inaccessible task → `alert` naming the dead end
-- [ ] Recovery tasks recovering themselves (a recovery task whose target is itself a recovery task) → `alert`
-- [ ] Tasks with an active session or an open condition are not flagged
-- [ ] Fixtures: new `11-review-nobody-driving.yaml`, `11-blocker-chain-dead-end.yaml`, `11-recovery-loop.yaml`
+- [x] In review with nothing driving it (no reviewer session, no open condition) for more than N minutes → `alert`
+- [x] A successful run with no next action (session ended with success, task not moved on, no follow-up task) → `alert`
+- [x] A blocker chain that ends in a cancelled or inaccessible task → `alert` naming the dead end
+- [x] Recovery tasks recovering themselves (a recovery task whose target is itself a recovery task) → `alert`
+- [x] Tasks with an active session or an open condition are not flagged
+- [x] Fixtures: new `11-review-nobody-driving.yaml`, `11-successful-run-no-next-action.yaml`, `11-blocker-chain-dead-end.yaml`, `11-recovery-loop.yaml`
 
 ### core: `kelpie why <task>` CLI
 labels: P1, area:core
