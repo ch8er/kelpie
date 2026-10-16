@@ -131,7 +131,9 @@ boards and run the `hermes` CLI.
 machine at `http://127.0.0.1:4318/v1/traces` without a token (Hermes' Langfuse plugin,
 Claude Code's `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`). The relay forwards
 the spans to the hub under the agent's token. With a hub, the main port's `/v1/traces` is
-off: spans whose ids no agent token vouches for could be filed under any machine.
+off: spans whose ids no agent token vouches for could be filed under any machine. If something
+else already listens on 4318 (an OpenTelemetry collector), set `[agent] relay` to another
+loopback port, or `relay = false` when the server has traces off.
 
 **7. Resources.** node_exporter runs on both machines and Prometheus scrapes both, as in
 single-host mode (Prometheus reaching the laptop needs a private network such as Tailscale;
