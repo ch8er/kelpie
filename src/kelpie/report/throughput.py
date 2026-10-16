@@ -1,0 +1,309 @@
+"""Farm throughput: tasks per hour per role, task time by stage, queue length and
+utilization per role, rework rate (cost per completed task is priced by the report
+section). Pure and deterministic; no LLM.
+
+**Where the time comes from.** Kelpie does not store a task's status history: the board
+reports each task's current status and since when, its returns, and the sessions that
+worked on it (start, end, the status each declared at its end). The day of every task is
+rebuilt from those and from Kelpie's own long-lived alert states, cut into segments at
+every known change; each segment gets one stage, the first that applies:
+
+1. ``working`` / ``review``: a session of the task runs (``review`` when its owner has one
+   of ``review_roles``);
+2. ``ownerless``: an ``orphan_status`` state of the task is open;
+3. ``waiting``: a ``wait_condition`` or ``stale_blocks`` state is open (waiting for
+   conditions);
+4. else the status at that time: the current one from ``status_since`` on (``in_progress``
+   without an owner is ``ownerless``), before that the status the last session declared at
+   its end (none: ready). ``ready`` and ``in_progress``
+   outside a session are ``queue`` (waiting for an agent), ``review`` and ``accepted`` are
+   ``review`` (waiting for a reviewer or a merge), ``blocked`` and ``waiting`` are
+   ``waiting``; ``backlog`` and finished statuses are not counted.
+
+A task is counted from its first known moment within the day (its first session, alert
+state or current status, whichever is earliest): when it was created is not known, so queue
+time before its first pickup is a lower bound. Hours are task-hours: two tasks in the queue
+for an hour are two queue hours, and the *mean queue length* of a role is its queue hours
+over the day's hours.
+
+**Per role** (the task's role, else its owner's): tasks completed (reached ``done`` within
+the day) and per hour; *hand-offs*, sessions of the role's agents that ended within the
+day with a declared status, and per hour (a reviewer's throughput is reviews, not tasks
+done); *utilization*, the hours the role's agents had a session running over agents x
+hours; *rework rate*, the share of the role's tasks active within the day that were sent
+back (a return) within it.
+
+**Live** (``/metrics``): :func:`live_stage` puts each open task of a snapshot in a stage.
+"""
+
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from itertools import pairwise
+
+from kelpie.core.model import Owner, OwnerKind, Session, Status, Task
+from kelpie.core.states import OpenState
+
+STAGES = ("working", "queue", "review", "waiting", "ownerless")
+UNKNOWN_ROLE = "unknown"
+OWNERLESS_RULES = frozenset({"orphan_status"})
+WAITING_RULES = frozenset({"wait_condition", "stale_blocks"})
+_STATUS_STAGES: Mapping[Status, str] = {
+    Status.READY: "queue",
+    Status.IN_PROGRESS: "queue",
+    Status.REVIEW: "review",
+    Status.ACCEPTED: "review",
+    Status.BLOCKED: "waiting",
+    Status.WAITING: "waiting",
+}
+_UNDECLARED = frozenset({Status.IN_PROGRESS, Status.READY, Status.BACKLOG})
+type _RoleOf = Callable[[Session], str | None]
+
+
+@dataclass(frozen=True, slots=True)
+class RoleThroughput:
+    role: str
+    hours: float  # the day's length
+    agents: int = 0
+    busy_hours: float = 0.0  # agent-hours with a session running
+    completed: tuple[str, ...] = ()
+    handoffs: int = 0
+    stages: Mapping[str, float] = field(default_factory=dict)  # task-hours per stage
+    active: tuple[str, ...] = ()  # tasks with stage time or completed within the day
+    reworked: tuple[str, ...] = ()  # active tasks sent back within the day
+    returns: int = 0
+    queue_now: int = 0  # tasks of the role in the queue stage at the end of the day
+
+    @property
+    def tasks_per_hour(self) -> float:
+        return len(self.completed) / self.hours if self.hours else 0.0
+
+    @property
+    def handoffs_per_hour(self) -> float:
+        return self.handoffs / self.hours if self.hours else 0.0
+
+    @property
+    def utilization(self) -> float | None:
+        capacity = self.agents * self.hours
+        return min(self.busy_hours / capacity, 1.0) if capacity else None
+
+    @property
+    def mean_queue(self) -> float:
+        return self.stages.get("queue", 0.0) / self.hours if self.hours else 0.0
+
+    @property
+    def rework_rate(self) -> float | None:
+        return len(self.reworked) / len(self.active) if self.active else None
+
+
+def task_roles(tasks: Iterable[Task], owners: Iterable[Owner]) -> dict[str, str]:
+    """Each task's role: its own, else its owner's."""
+    by_owner = {o.id: o.role for o in owners}
+    out = {}
+    for t in tasks:
+        role = t.role or (by_owner.get(t.owner_id) if t.owner_id else None)
+        if role:
+            out[t.id] = role
+    return out
+
+
+def session_end(session: Session, end: datetime) -> datetime:
+    """When a session stopped: its end, else its last heartbeat, else (still running or
+    unknown) ``end``."""
+    found = session.ended_at or session.last_heartbeat or end
+    return max(found, session.started_at)
+
+
+def throughput(
+    tasks: Sequence[Task],
+    sessions: Sequence[Session],
+    owners: Sequence[Owner],
+    states: Iterable[OpenState],
+    start: datetime,
+    end: datetime,
+    review_roles: Sequence[str] = ("reviewer",),
+    session_roles: Mapping[str, str] | None = None,
+) -> list[RoleThroughput]:
+    """Throughput per role for the day ``[start, end)``, roles in name order.
+    ``session_roles`` names the role of sessions whose owner is not in ``owners``."""
+    hours = (end - start).total_seconds() / 3600
+    roles_of_task = task_roles(tasks, owners)
+    owner_roles = {o.id: o.role for o in owners}
+    extra = session_roles or {}
+
+    def role_of_session(s: Session) -> str | None:
+        return owner_roles.get(s.owner_id) or extra.get(s.id) or roles_of_task.get(s.task_id)
+
+    by_task: dict[str, list[Session]] = defaultdict(list)
+    for s in sessions:
+        by_task[s.task_id].append(s)
+    windows: dict[tuple[str, str], list[tuple[datetime, datetime]]] = defaultdict(list)
+    for state in states:
+        if state.task_id and (state.rule in OWNERLESS_RULES or state.rule in WAITING_RULES):
+            kind = "ownerless" if state.rule in OWNERLESS_RULES else "waiting"
+            windows[(state.task_id, kind)].append((state.since, state.last_seen))
+
+    acc: dict[str, _Acc] = defaultdict(_Acc)
+    for task in tasks:
+        role = roles_of_task.get(task.id, UNKNOWN_ROLE)
+        a = acc[role]
+        mine = sorted(by_task.get(task.id, ()), key=lambda s: (s.started_at, s.id))
+        stages = _task_stages(task, mine, windows, start, end, review_roles, role_of_session)
+        done = task.status is Status.DONE and start <= task.status_since < end
+        for stage, h in stages.items():
+            a.stages[stage] += h
+        if done:
+            a.completed.append(task.id)
+        if stages or done:
+            a.active.append(task.id)
+            back = sum(1 for r in task.returns if start <= r.at < end)
+            if back:
+                a.reworked.append(task.id)
+                a.returns += back
+        if _stage_at(task, mine, windows, end, review_roles, role_of_session, end) == "queue":
+            a.queue_now += 1
+
+    agents: dict[str, list[str]] = defaultdict(list)
+    for o in owners:
+        if o.kind is OwnerKind.AGENT:
+            agents[o.role].append(o.id)
+    busy: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
+    for s in sessions:
+        a_, b_ = max(s.started_at, start), min(session_end(s, end), end)
+        if b_ > a_:
+            busy[s.owner_id].append((a_, b_))
+        role = role_of_session(s)
+        if (
+            role
+            and s.ended_at is not None
+            and start <= s.ended_at < end
+            and s.final_status is not None
+            and s.final_status not in _UNDECLARED
+        ):
+            acc[role].handoffs += 1
+    for role, ids in agents.items():
+        acc[role].agents = len(ids)
+        acc[role].busy = sum(_union(busy.get(i, [])) for i in ids)
+
+    out = []
+    for role in sorted(acc):
+        a = acc[role]
+        if not (a.agents or a.active or a.handoffs):
+            continue
+        out.append(
+            RoleThroughput(
+                role=role,
+                hours=hours,
+                agents=a.agents,
+                busy_hours=a.busy,
+                completed=tuple(sorted(a.completed)),
+                handoffs=a.handoffs,
+                stages={s: a.stages[s] for s in STAGES if a.stages[s] > 0},
+                active=tuple(sorted(a.active)),
+                reworked=tuple(sorted(a.reworked)),
+                returns=a.returns,
+                queue_now=a.queue_now,
+            )
+        )
+    return out
+
+
+@dataclass(slots=True)
+class _Acc:
+    agents: int = 0
+    busy: float = 0.0
+    completed: list[str] = field(default_factory=list)
+    handoffs: int = 0
+    stages: Counter[str] = field(default_factory=Counter)
+    active: list[str] = field(default_factory=list)
+    reworked: list[str] = field(default_factory=list)
+    returns: int = 0
+    queue_now: int = 0
+
+
+def _union(intervals: list[tuple[datetime, datetime]]) -> float:
+    """Hours covered by the intervals."""
+    total = 0.0
+    cur: tuple[datetime, datetime] | None = None
+    for a, b in sorted(intervals):
+        if cur is None or a > cur[1]:
+            if cur is not None:
+                total += (cur[1] - cur[0]).total_seconds()
+            cur = (a, b)
+        else:
+            cur = (cur[0], max(cur[1], b))
+    if cur is not None:
+        total += (cur[1] - cur[0]).total_seconds()
+    return total / 3600
+
+
+def _task_stages(
+    task: Task,
+    sessions: Sequence[Session],
+    windows: Mapping[tuple[str, str], Sequence[tuple[datetime, datetime]]],
+    start: datetime,
+    end: datetime,
+    review_roles: Sequence[str],
+    role_of_session: _RoleOf,
+) -> dict[str, float]:
+    """Hours of the task per stage within ``[start, end)`` (see the module docs)."""
+    if task.status.is_terminal and task.status_since < start:
+        return {}
+    points = {end, task.status_since}
+    for s in sessions:
+        points.update((s.started_at, session_end(s, end)))
+    for kind in ("ownerless", "waiting"):
+        for a, b in windows.get((task.id, kind), ()):
+            points.update((a, b))
+    # from the task's first known moment: when it was created is not known
+    first = max(start, min(points))
+    cuts = sorted(p for p in points | {first} if first <= p <= end)
+    out: Counter[str] = Counter()
+    for a, b in pairwise(cuts):
+        stage = _stage_at(task, sessions, windows, a, review_roles, role_of_session, end)
+        if stage is not None:
+            out[stage] += (b - a).total_seconds() / 3600
+    return dict(out)
+
+
+def _stage_at(
+    task: Task,
+    sessions: Sequence[Session],
+    windows: Mapping[tuple[str, str], Sequence[tuple[datetime, datetime]]],
+    at: datetime,
+    review_roles: Sequence[str],
+    role_of_session: _RoleOf,
+    end: datetime,
+) -> str | None:
+    """The task's stage from ``at`` until the next known change."""
+    if task.status.is_terminal and at >= task.status_since:
+        return None
+    for s in sessions:
+        if s.started_at <= at < session_end(s, end):
+            return "review" if role_of_session(s) in review_roles else "working"
+    for kind in ("ownerless", "waiting"):
+        if any(a <= at < b for a, b in windows.get((task.id, kind), ())):
+            return kind
+    if at >= task.status_since:
+        status = task.status
+        if status is Status.IN_PROGRESS and task.owner_id is None:
+            return "ownerless"
+    else:
+        before = [s for s in sessions if session_end(s, end) <= at]
+        last = max(before, key=lambda s: (session_end(s, end), s.id)) if before else None
+        status = last.final_status if last and last.final_status else Status.READY
+    return _STATUS_STAGES.get(status)
+
+
+def live_stage(task: Task, live: bool) -> str | None:
+    """The stage of an open task now: ``live`` when a session is running on it."""
+    if task.status.is_terminal or task.status is Status.BACKLOG:
+        return None
+    if live:
+        return "working"
+    if task.status is Status.IN_PROGRESS and task.owner_id is None:
+        return "ownerless"
+    return _STATUS_STAGES.get(task.status)

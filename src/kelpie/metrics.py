@@ -7,12 +7,14 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from kelpie import __version__
 from kelpie.core.model import Snapshot, Status
-from kelpie.rules.bottlenecks import role_loads
+from kelpie.report.throughput import STAGES, live_stage, task_roles
+from kelpie.rules._tasks import is_live
+from kelpie.rules.bottlenecks import RoleLoad, role_loads
 
 if TYPE_CHECKING:
     from kelpie.app import RuleStatus
@@ -73,6 +75,10 @@ class Metrics:
         self.open_states: Counter[str] = Counter()
         self.tasks: Counter[str] = Counter()
         self.idle_agents: Counter[str] = Counter()  # role -> idle agents (0 if all busy)
+        # throughput per role (kelpie.report.throughput): agents, busy agents, queue,
+        # tasks done and returns over the last 24h; open tasks per stage and role
+        self.roles: dict[str, tuple[int, int, int, int, int]] = {}
+        self.stages: Counter[tuple[str, str]] = Counter()
         self.fleet_seen = False
         self.dry_run = True
         self.rules: list[tuple[str, str, bool]] = []  # (name, mode, implemented)
@@ -308,7 +314,39 @@ class Metrics:
         self.fleet_seen = True
         self.tasks = Counter(dict.fromkeys(Status, 0))
         self.tasks.update(t.status for t in snapshot.tasks)
-        self.idle_agents = Counter({r: len(load.idle) for r, load in role_loads(snapshot).items()})
+        loads = role_loads(snapshot)
+        self.idle_agents = Counter({r: len(load.idle) for r, load in loads.items()})
+        self._throughput(snapshot, loads)
+
+    def _throughput(self, snapshot: Snapshot, loads: Mapping[str, RoleLoad]) -> None:
+        """Agents, busy agents and queue per role (as the bottlenecks rule counts them),
+        tasks done and returns over the last 24h, and open tasks per stage."""
+        now, day = snapshot.now, timedelta(days=1)
+        of_task = task_roles(snapshot.tasks, snapshot.owners)
+        done: Counter[str] = Counter()
+        returns: Counter[str] = Counter()
+        self.stages = Counter()
+        live = {s.task_id for s in snapshot.sessions if is_live(s, now)}
+        for t in snapshot.tasks:
+            role = of_task.get(t.id, "unknown")
+            if t.status is Status.DONE and now - day <= t.status_since <= now:
+                done[role] += 1
+            returns[role] += sum(1 for r in t.returns if now - day <= r.at <= now)
+            if (stage := live_stage(t, t.id in live)) is not None:
+                self.stages[(stage, role)] += 1
+        for role in {role for _, role in self.stages} | set(loads):
+            for stage in STAGES:
+                self.stages[(stage, role)] += 0  # every stage of every known role
+        self.roles = {
+            role: (
+                len(loads[role].agents) if role in loads else 0,
+                len(loads[role].busy) if role in loads else 0,
+                len(loads[role].queue) if role in loads else 0,
+                done[role],
+                returns[role],
+            )
+            for role in sorted(set(loads) | set(done) | {r for r, n in returns.items() if n})
+        }
 
     def tick_failed(self, engine: Engine) -> None:
         with self._lock:
@@ -439,6 +477,7 @@ class Metrics:
                         for r, n in sorted(self.idle_agents.items())
                     ],
                 )
+                self._render_throughput(metric)
             metric(
                 "kelpie_ledger_up",
                 "gauge",
@@ -460,6 +499,27 @@ class Metrics:
             if self.alert_channels:
                 self._render_alerts(metric)
             return "\n".join(out) + "\n"
+
+    def _render_throughput(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        names = (
+            ("kelpie_role_agents", "Agent owners per role."),
+            ("kelpie_role_busy_agents", "Agents with a live session or an open task, by role."),
+            ("kelpie_role_queue_tasks", "Ownerless tasks waiting for the role (ready, review)."),
+            ("kelpie_role_tasks_done_24h", "Tasks of the role that reached done in the last 24h."),
+            ("kelpie_role_returns_24h", "Returns of the role's tasks in the last 24h (rework)."),
+        )
+        for i, (name, help_) in enumerate(names):
+            samples = [f"{name}{_labels(role=r)} {v[i]}" for r, v in self.roles.items()]
+            metric(name, "gauge", help_, samples)
+        metric(
+            "kelpie_tasks_by_stage",
+            "gauge",
+            "Open tasks per stage (working, queue, review, waiting, ownerless) and role.",
+            [
+                f"kelpie_tasks_by_stage{_labels(role=r, stage=s)} {n}"
+                for (s, r), n in sorted(self.stages.items(), key=lambda kv: kv[0][::-1])
+            ],
+        )
 
     def _render_resources(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
         metric(
