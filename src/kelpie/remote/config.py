@@ -332,8 +332,8 @@ def load_hub(section: Any) -> HubSettings | None:
     if len({a.token_env for a in agents}) != len(agents):
         raise ValueError("[[hub.agents]] each agent needs its own token_env")
     silent = _duration(section, "silent_after", timedelta(seconds=90), "[hub]")
-    if not timedelta(seconds=30) <= silent <= timedelta(hours=1):
-        raise ValueError("[hub] silent_after must be between 30s and 1h")
+    if not timedelta(seconds=10) <= silent <= timedelta(hours=1):
+        raise ValueError("[hub] silent_after must be between 10s and 1h")
     timeout = _duration(section, "action_timeout", timedelta(seconds=30), "[hub]")
     if not timedelta(seconds=1) <= timeout <= timedelta(minutes=2):
         raise ValueError("[hub] action_timeout must be between 1s and 2m")
