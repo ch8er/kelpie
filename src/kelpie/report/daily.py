@@ -12,7 +12,9 @@ chaos, and are left out). Each counts from when Kelpie first reported it (``open
 a grace period or an allowed wait before the threshold is not lost) to its ``last_seen``
 (the last tick that still saw it), clipped to the day; a lower bound, since a rule going
 live re-opens its states. Two conditions on one task both count: the unit is
-*condition-hours*, not wall-clock hours. ``[report] hour_usd`` turns them into dollars.
+*condition-hours*, not wall-clock hours. A forgotten hold (rule 6, ``bottlenecks:hold:*``)
+is its own cause and counts idle agent-hours instead (:func:`hold_agent_hours`). Both are
+"hours lost"; ``[report] hour_usd`` turns them into dollars.
 
 **Cost of chaos, dollars.** Tokens burned by sessions that were going nowhere: a session in
 a ``loop_breaker`` (identical calls, error streak) or ``no_progress`` state while it lasted,
@@ -102,6 +104,10 @@ from kelpie.traces.outputs import (
 
 log = logging.getLogger(__name__)
 
+# Rule 6's forgotten holds: a cause of their own, counted in idle agent-hours.
+HOLDS = "bottlenecks:hold"
+HOLD_STATE = HOLDS + ":"
+
 # Rules whose long-lived states are work the farm lost, and what to call that loss.
 CHAOS_CAUSES: Mapping[str, str] = {
     "orphan_status": "ownerless tasks",
@@ -109,7 +115,8 @@ CHAOS_CAUSES: Mapping[str, str] = {
     "wait_condition": "waits past their limit",
     "exit_contract": "exits without a final status",
     "ping_pong": "review ping-pong",
-    "bottlenecks": "idle capacity (bottlenecks, holds, human gates)",
+    "bottlenecks": "idle capacity (bottlenecks, human gates)",
+    HOLDS: "idle agents behind forgotten holds",
     "loop_breaker": "runaway loops",
     "no_progress": "activity without progress",
 }
@@ -123,8 +130,9 @@ REMEDIES: Mapping[str, str] = {
     "checking or a limit that is too short",
     "exit_contract": "make agents set a final status before they exit (role instructions)",
     "ping_pong": "escalate review ping-pong earlier or tighten the acceptance criteria",
-    "bottlenecks": "rebalance roles, give holds an owner and an expiry, and move human tasks "
-    "off the critical path",
+    HOLDS: "give every hold an owner and an expiry ([engine.rules.bottlenecks] holds), and "
+    "lift a hold when its reason is gone",
+    "bottlenecks": "rebalance roles and move human tasks off the critical path",
     "loop_breaker": "let loop_breaker stop runaway sessions (act mode)",
     "no_progress": "longer heartbeat interval, a cheaper model for maintenance calls, "
     "bounded sessions with a handoff file",
@@ -356,6 +364,8 @@ def _verifications(
     evidence = Evidence(
         end=end,
         states=[r for r in inputs.states if is_chaos(r.state)],  # counted like the chaos
+        cause=cause_of,
+        hours=lambda st, lo, hi: state_hours(inputs.actions, st, lo, hi),
         chaos_rules=frozenset(CHAOS_CAUSES),
         spans=known,
         counted=counted_llm(index, known),
@@ -448,13 +458,18 @@ def _chaos(
     rank_ = {rule: i for i, rule in enumerate(CHAOS_CAUSES)}
     chaos = sorted(
         (r.state for r in inputs.states if is_chaos(r.state)),
-        key=lambda s: (rank_[s.rule], s.opened_at, s.id),
+        key=lambda s: (rank_[cause_of(s)], s.opened_at, s.id),
     )
     for state in chaos:
         # From when Kelpie first reported it: a grace period or an allowed wait before the
         # threshold is not lost time. A lower bound (a rule going live re-opens a state).
         a, b = max(state.since, state.opened_at, start), min(state.last_seen, end)
         if b <= a:
+            continue
+        if state.id.startswith(HOLD_STATE):
+            agent_hours, held = hold_agent_hours(inputs.actions, state, a, b)
+            hours[HOLDS] += agent_hours
+            tasks[HOLDS].update(held)
             continue
         hours[state.rule] += (b - a).total_seconds() / 3600
         if state.task_id:
@@ -492,6 +507,61 @@ def _chaos(
     ]
     lines.sort(key=lambda c: (-c.spend.usd, -c.hours, c.rule))
     return tuple(lines)
+
+
+def cause_of(state: OpenState) -> str:
+    """The :data:`CHAOS_CAUSES` key a chaos state counts under."""
+    return HOLDS if state.id.startswith(HOLD_STATE) else state.rule
+
+
+def hold_agent_hours(
+    entries: Sequence[LedgerEntry], state: OpenState, a: datetime, b: datetime
+) -> tuple[float, tuple[str, ...]]:
+    """Idle agent-hours a forgotten hold caused in ``[a, b)``, and the tasks it held.
+
+    Rule 6 reports the agents a hold keeps idle (``idle_agents``) whenever its alert is
+    handled: on transitions, and as suppressed repeats about once an hour while it stays
+    open. Each such sample of this episode of the hold (at or after its ``since``, the
+    expiry) holds until the next one: a step function, integrated over the window. Before
+    the first sample in the window, the latest earlier sample applies, else the first one.
+    No sample at all: no idle agents known (0)."""
+    label = state.id[len(HOLD_STATE) :]
+    samples = sorted(
+        (
+            (e.at, len(e.params["idle_agents"]), e.params.get("held_tasks"))
+            for e in entries
+            if e.rule == "bottlenecks"
+            and e.params.get("hold") == label
+            and state.since <= e.at < b
+            and isinstance(e.params.get("idle_agents"), list)
+        ),
+        key=lambda x: (x[0], x[1]),
+    )
+    if not samples:
+        return 0.0, ()
+    before = [x for x in samples if x[0] <= a]
+    level = (before[-1] if before else samples[0])[1]
+    total, at = 0.0, a
+    for when, idle, _ in samples:
+        if when <= a:
+            continue
+        total += level * (when - at).total_seconds() / 3600
+        at, level = when, idle
+    total += level * (b - at).total_seconds() / 3600
+    held = sorted(
+        {t for _, _, h in samples if isinstance(h, list) for t in h if isinstance(t, str)}
+    )
+    return total, tuple(held)
+
+
+def state_hours(
+    entries: Sequence[LedgerEntry], state: OpenState, a: datetime, b: datetime
+) -> float:
+    """What a chaos state costs in ``[a, b)``: its condition-hours, or for a forgotten hold
+    the idle agent-hours behind it (:func:`hold_agent_hours`)."""
+    if state.id.startswith(HOLD_STATE):
+        return hold_agent_hours(entries, state, a, b)[0]
+    return max((b - a).total_seconds() / 3600, 0.0)
 
 
 def is_chaos(state: OpenState) -> bool:
@@ -650,7 +720,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     lines += ["## Cost of chaos", ""]
     if report.chaos:
         lines += [
-            f"| Cause | Condition-hours | Tokens burned | USD{est} | Tasks |",
+            f"| Cause | Hours lost | Tokens burned | USD{est} | Tasks |",
             "|---|---:|---:|---:|---|",
         ]
         for c in report.chaos:
@@ -666,8 +736,10 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             ]
         lines += [
             "",
-            "Condition-hours: how long each condition lasted after Kelpie first reported it, "
-            "summed over conditions (two on one task both count); a lower bound.",
+            "Hours lost: condition-hours, how long each condition lasted after Kelpie first "
+            "reported it, summed over conditions (two on one task both count; a lower bound); "
+            "for forgotten holds, idle agent-hours: the agents rule 6 saw idle behind the hold "
+            "after its expiry, over time.",
         ]
     else:
         lines.append("Nothing stuck and no tokens burned on loops, idle sessions or restarts.")
@@ -698,7 +770,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             if a.usd > 0:
                 value.append(f"about ${a.usd:,.2f}/day{est}")
             if a.hours > 0:
-                value.append(f"{a.hours:.1f} condition-hours")
+                value.append(f"{a.hours:.1f} hours lost")
             tail = f" ({', '.join(value)})" if value else ""
             linked = f" Tasks: {tasks(a.tasks)}." if a.tasks else ""
             lines.append(f"{i}. **{a.title}**{tail}: {a.detail}.{linked}")
@@ -738,7 +810,7 @@ def render_summary(report: DailyReport) -> str:
 def _headline(report: DailyReport) -> str:
     est = " (estimate)" if report.estimated else ""
     burned = report.chaos_spend
-    chaos = f"Cost of chaos: {report.chaos_hours:.1f} condition-hours"
+    chaos = f"Cost of chaos: {report.chaos_hours:.1f} hours lost"
     parts = []
     if report.priced:
         parts.append(f"${burned.usd:,.2f}{est} in {burned.tokens:,} tokens burned")
