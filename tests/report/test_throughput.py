@@ -176,8 +176,11 @@ def test_no_board_no_section() -> None:
 def test_unknown_role_and_running_sessions() -> None:
     lone = Task("T9", "x", Status.IN_PROGRESS, at(10), owner_id="ghost")
     running = Session("S9", "T9", "ghost", at(10))
-    [r] = throughput([lone], [running], [], [], START, END, session_roles={"S9": "writer"})
-    assert r.role == "unknown" and r.stages == {"working": pytest.approx(14)}
+    roles = throughput([lone], [running], [], [], START, END, session_roles={"S9": "writer"})
+    by_role = {x.role: x for x in roles}
+    r = by_role["unknown"]
+    assert r.stages == {"working": pytest.approx(14)}
+    assert by_role["writer"].worked == ("T9",)  # the writer worked on it, rework-wise
     assert r.utilization is None and r.agents == 0
     assert session_end(running, END) == END
     late = Session("S8", "T9", "ghost", at(10), last_heartbeat=at(9))
@@ -276,7 +279,23 @@ def test_rework_counts_for_the_role_that_redid_the_work() -> None:
     roles = {r.role: r for r in throughput((in_review,), sessions, OWNERS, (), START, END)}
     dev, rev = roles["developer"], roles["reviewer"]
     assert dev.reworked == ("R1",) and dev.returns == 1 and dev.rework_rate == 1.0
-    assert rev.reworked == () and rev.returns == 0
+    assert rev.reworked == () and rev.returns == 0 and rev.rework_rate is None  # reviews only
+
+
+def test_the_live_returns_gauge_counts_the_role_that_redid_the_work() -> None:
+    back = (Return(at(12), "missing test", "review"),)
+    in_review = Task("R1", "R1", Status.REVIEW, at(14), role="reviewer", owner_id="rev-1",
+                     returns=back)  # fmt: skip
+    sessions = (
+        session("A", "R1", "dev-1", 8, 10, Status.REVIEW),
+        session("B", "R1", "rev-1", 11, 12, None),
+        session("C", "R1", "dev-1", 13, 14, Status.REVIEW),
+    )
+    metrics = Metrics()
+    metrics._fleet(Snapshot(now=at(15), owners=OWNERS, tasks=(in_review,), sessions=sessions))
+    text = metrics.render()
+    assert 'kelpie_role_returns_24h{role="developer"} 1' in text
+    assert 'kelpie_role_returns_24h{role="reviewer"} 1' not in text
 
 
 def test_rework_falls_back_to_the_work_before_the_return_then_the_task_role() -> None:
@@ -288,3 +307,39 @@ def test_rework_falls_back_to_the_work_before_the_return_then_the_task_role() ->
     nobody = Task("R3", "R3", Status.READY, at(12), role="developer", returns=back)
     roles = {r.role: r for r in throughput((nobody,), (), OWNERS, (), START, END)}
     assert roles["developer"].reworked == ("R3",)
+
+
+def test_the_rework_rate_is_over_the_tasks_the_role_worked_on() -> None:
+    """Four tasks a developer finished, all now in review (Hermes assigns the reviewer), one
+    sent back and redone: one in four, not one in one."""
+    back = (Return(at(12), "missing test", "review"),)
+    tasks = [
+        Task(f"W{i}", "w", Status.REVIEW, at(15), role="reviewer", owner_id="rev-1",
+             returns=back if i == 0 else ())
+        for i in range(4)
+    ]  # fmt: skip
+    sessions = [session(f"D{i}", f"W{i}", "dev-1", 8 + i, 9 + i, Status.REVIEW) for i in range(4)]
+    sessions.append(session("D9", "W0", "dev-1", 13, 14, Status.REVIEW))
+    roles = {r.role: r for r in throughput(tasks, sessions, OWNERS, (), START, END)}
+    assert roles["developer"].rework_rate == 0.25 and roles["developer"].returns == 1
+
+
+def test_an_unknown_session_role_never_hands_rework_to_the_reviewer() -> None:
+    back = (Return(at(12), "wrong API", "review"),)
+    task_ = Task("U", "u", Status.REVIEW, at(15), role="reviewer", returns=back)
+    ghost = session("G", "U", "ghost", 13, 14, Status.REVIEW)  # owner unknown
+    roles = {r.role: r for r in throughput((task_,), (ghost,), OWNERS, (), START, END)}
+    assert roles["unknown"].reworked == ("U",)
+    assert "reviewer" not in roles or roles["reviewer"].returns == 0
+
+
+def test_a_session_running_at_the_return_redoes_it() -> None:
+    back = (Return(at(12), "CI red", "ci"),)
+    task_ = Task("C", "c", Status.IN_PROGRESS, at(11), role="developer", returns=back)
+    sessions = (
+        session("A", "C", "dev-1", 11, 13, None),  # running when CI sent it back
+        Session("B", "C", "qa-1", at(14), ended_at=at(15)),
+    )
+    owners = (*OWNERS, Owner("qa-1", "qa"))
+    roles = {r.role: r for r in throughput((task_,), sessions, owners, (), START, END)}
+    assert roles["developer"].reworked == ("C",) and roles["qa"].reworked == ()

@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
 from kelpie import __version__
-from kelpie.core.model import Snapshot, Status
-from kelpie.core.stages import STAGES, UNKNOWN_ROLE, live_stage, task_roles
+from kelpie.core.model import Session, Snapshot, Status
+from kelpie.core.stages import STAGES, UNKNOWN_ROLE, live_stage, rework_role, task_roles
 from kelpie.rules._tasks import is_live
 from kelpie.rules.bottlenecks import RoleLoad, role_loads
 
@@ -88,6 +88,8 @@ class Metrics:
         self.idle_agents: Counter[str] = Counter()  # role -> idle agents (0 if all busy)
         # throughput per role now; open tasks per stage and role
         self.roles: dict[str, RoleGauges] = {}
+        # roles that review: returns count for the role that redoes the work ([report])
+        self.review_roles: tuple[str, ...] = ("reviewer",)
         self.stages: Counter[tuple[str, str]] = Counter()
         self.fleet_seen = False
         self.dry_run = True
@@ -340,11 +342,25 @@ class Metrics:
         reopened: Counter[str] = Counter()
         self.stages = Counter()
         live = {s.task_id for s in snapshot.sessions if is_live(s, now)}
+        owner_roles = {o.id: o.role for o in snapshot.owners}
+        by_task: dict[str, list[Session]] = {}
+        for s in snapshot.sessions:
+            by_task.setdefault(s.task_id, []).append(s)
+
+        def own_role(s: Session) -> str | None:
+            return owner_roles.get(s.owner_id)
+
         for t in snapshot.tasks:
             role = of_task.get(t.id, UNKNOWN_ROLE)
             if t.status is Status.DONE and now - day <= t.status_since <= now:
                 done[role] += 1
-            returns[role] += sum(1 for r in t.returns if now - day <= r.at <= now)
+            for back in t.returns:
+                if now - day <= back.at <= now:  # for the role that redoes it, not review
+                    returns[
+                        rework_role(
+                            t, back.at, by_task.get(t.id, ()), own_role, self.review_roles, now
+                        )
+                    ] += 1
             reopened[role] += sum(1 for at in t.reopened_at if now - day <= at <= now)
             if (stage := live_stage(t, t.id in live)) is not None:
                 self.stages[(stage, role)] += 1
