@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/ch8er/kelpie/tree/main/docs
+    about: Installation, configuration, extending Kelpie and the privacy notes.
+  - name: Security issue
+    url: https://github.com/ch8er/kelpie/security/policy
+    about: Report a vulnerability privately, not in a public issue.
