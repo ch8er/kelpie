@@ -576,8 +576,7 @@ class HubHandler(BaseHTTPRequestHandler):
         except Busy:
             self.server.warn_once(
                 agent,
-                "hub: agent %s has too many %s requests in flight (two processes with one "
-                "token?)",
+                "hub: agent %s has too many %s requests in flight (two processes with one token?)",
                 agent,
                 kind,
             )
