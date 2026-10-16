@@ -79,6 +79,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "hooks fire": "PASS",
         "OTLP spans arrive": "PASS",
         "worktrees readable": "SKIP",
+        "PR blocks have conditions": "PASS",
         "Prometheus reachable": "SKIP",
     }
     assert "1 tasks" in checks["kanban.db"].detail
@@ -97,6 +98,7 @@ def test_bad_config_is_one_failure(tmp_path: Path) -> None:
 def test_no_hermes_section_skips_the_board_checks() -> None:
     checks = {c.name: c.status for c in run_checks(None, environ={})}
     assert checks["kanban.db"] == checks["hooks fire"] == checks["worktrees readable"] == "SKIP"
+    assert checks["PR blocks have conditions"] == "SKIP"
     assert checks["observe only"] == "PASS"
 
 
@@ -259,3 +261,113 @@ def test_cli_exits_0_when_nothing_fails(
     farm.make_healthy()
     assert main(["--config", str(farm.config()), "doctor", "--prometheus", prometheus]) == 0
     assert "FAIL" not in capsys.readouterr().out
+
+
+# --- block reasons that name PRs (live 24 h review) --------------------------------------
+
+GITHUB = '[connectors.github]\nrepos = ["example/app"]\n'
+PATTERN = (
+    "[[block_conditions]]\npattern = 'PR\\s*#(?P<pr>\\d+)'\nkind = \"pr_merged\"\n"
+    'repo = "example/app"\n'
+)
+
+
+def blocked(farm: Farm, tid: str, reason: str, kind: str = "needs_input") -> None:
+    farm.board.task(tid, "blocked", NOW - timedelta(hours=3))
+    payload = {"kind": kind, "reason": reason}
+    farm.board.event(tid, "blocked", NOW - timedelta(hours=2), payload)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "automerge PR #412",
+        "waiting for example/app#12 to merge",
+        "see https://github.com/example/app/pull/7",
+        "pull/7 is red",
+        "PR-412 first",
+        "PR: 412 needs a rebase",
+        "after pull request 12 lands",
+        "waiting for the merge of #12",
+    ],
+)
+def test_reasons_that_name_a_pr(reason: str) -> None:
+    from kelpie.doctor import _names_a_pr
+
+    assert _names_a_pr(reason)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "blocked on issue #45",
+        "see ticket #123",
+        "attempt #3 failed",
+        "build #1234 red",
+        "colour #000000",
+        "which certificate should I use?",
+    ],
+)
+def test_reasons_that_name_no_pr(reason: str) -> None:
+    from kelpie.doctor import _names_a_pr
+
+    assert not _names_a_pr(reason)
+
+
+def test_pr_blocks_without_a_github_connector_warn(farm: Farm) -> None:
+    farm.make_healthy()
+    blocked(farm, "t_2", "automerge PR #412")
+    blocked(farm, "t_3", "which certificate?")
+    check = farm.checks()["PR blocks have conditions"]
+    assert check.status == "WARN" and "1 block reason(s) name a PR (t_2)" in check.detail
+    assert "[connectors.github] is not configured" in check.detail
+    assert "fix: add [connectors.github]" in check.render()
+    farm.extra = GITHUB.replace("[connectors.github]\n", "[connectors.github]\nenabled = false\n")
+    assert "is disabled" in farm.checks()["PR blocks have conditions"].detail
+
+
+def test_pr_blocks_without_patterns_with_unmatched_wording_and_unresolved_refs(
+    farm: Farm,
+) -> None:
+    farm.make_healthy()
+    blocked(farm, "t_2", "automerge PR #412")
+    blocked(farm, "t_3", "waiting for https://github.com/example/app/pull/7")
+    blocked(farm, "t_4", "merge of other/repo PR #9 first")
+    farm.extra = GITHUB
+    check = farm.checks()["PR blocks have conditions"]
+    assert check.status == "WARN" and "no [[block_conditions]] pattern" in check.detail
+    ready_only = PATTERN + 'applies_to = ["ready_task"]\n'
+    farm.extra = GITHUB + ready_only
+    assert "no [[block_conditions]] pattern" in farm.checks()["PR blocks have conditions"].detail
+    farm.extra = GITHUB + PATTERN
+    check = farm.checks()["PR blocks have conditions"]
+    assert check.status == "WARN"
+    assert "1 match no [[block_conditions]] pattern (t_3)" in check.detail
+    # A bare "#9" with no repo = on the pattern, or another repository, is not checkable.
+    bare = PATTERN.replace('repo = "example/app"\n', "")
+    farm.extra = GITHUB + bare
+    check = farm.checks()["PR blocks have conditions"]
+    assert "match but name no PR of [connectors.github] repos" in check.detail
+
+
+def test_pr_blocks_all_resolved_pass_and_warnings_do_not_fail(
+    farm: Farm, capsys: pytest.CaptureFixture[str]
+) -> None:
+    farm.make_healthy()
+    blocked(farm, "t_2", "automerge PR #412")
+    blocked(farm, "t_3", "circuit breaker: PR #1 build failed", kind="guard")  # not counted
+    farm.extra = GITHUB + PATTERN
+    check = farm.checks()["PR blocks have conditions"]
+    assert check.status == "PASS" and "1 block reason(s)" in check.detail
+    farm.extra = ""
+    assert main(["--config", str(farm.config()), "doctor"]) == 0  # a WARN is not a failure
+    out = capsys.readouterr().out
+    assert "WARN  PR blocks have conditions" in out and "FAIL" not in out.replace("FAIL ", "")
+
+
+def test_many_pr_blocks_are_cut_short(farm: Farm) -> None:
+    farm.make_healthy()
+    for n in range(2, 12):
+        blocked(farm, f"t_{n}", f"automerge PR #{n}")
+    detail = farm.checks()["PR blocks have conditions"].detail
+    assert "(t_2, t_3, t_4, t_5, t_6 and 5 more)" in detail

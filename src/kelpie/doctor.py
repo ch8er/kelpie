@@ -1,19 +1,21 @@
 """``kelpie doctor``: is a first live run on a Hermes or Claude Code farm set up correctly?
 
-One line per check, ``PASS|FAIL|SKIP  <check>: <detail>``, and a ``  fix: ...`` line under a
-FAIL. Nothing is written anywhere: the kanban database and the span store are opened
-read-only. This module may know about adapters and the app wiring; ``kelpie.core`` does not.
+One line per check, ``PASS|WARN|FAIL|SKIP  <check>: <detail>``, and a ``  fix: ...`` line
+under a FAIL or a WARN (a WARN does not fail the run). Nothing is written anywhere: the
+kanban database and the span store are opened read-only. This module may know about
+adapters and the app wiring; ``kelpie.core`` does not.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 import urllib.request
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -22,25 +24,42 @@ from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
 from kelpie.adapters.hermes.git_state import read_git_state
 from kelpie.app import ConfigError, LoadedRules, Settings, load_rules, load_settings, utc_now
+from kelpie.connectors.github.blocks import MAX_REASON
+from kelpie.connectors.github.connector import parse_pr_ref, web_host
 from kelpie.core.config import Mode
+from kelpie.core.model import Status
 
 FRESH = timedelta(hours=1)  # newest spool line or span must be younger than this
 MAX_WORKTREES = 20  # git is asked about at most this many workspaces
 GIT_DEADLINE = 15.0  # seconds for all git calls together
 DEFAULT_PROMETHEUS = "http://localhost:9090"
 PROMETHEUS_ENV = "KELPIE_PROMETHEUS_URL"
+# How agents name a pull request in a block reason. A bare "#12" only next to PR or merge
+# wording: "issue #45", "attempt #3" or "build #1234" name no PR.
+PR_REFS = (
+    re.compile(r"\bPR\b[\s#:-]*\d+", re.IGNORECASE),
+    re.compile(r"\bpull[\s_-]*request\s*#?\s*\d+", re.IGNORECASE),
+    re.compile(r"\bpulls?/\d+", re.IGNORECASE),
+    re.compile(r"\b[\w.-]+/[\w.-]+#\d+"),
+    re.compile(
+        r"\b(?:merge[sd]?|merging|automerge|review|CI)\b[^#\n]{0,40}(?<![\w&])#\d+",
+        re.IGNORECASE,
+    ),
+)
+SHOWN = 5  # task ids named in a detail
 
 
 @dataclass(frozen=True, slots=True)
 class Check:
-    status: str  # PASS | FAIL | SKIP
+    status: str  # PASS | WARN | FAIL | SKIP
     name: str
     detail: str
     fix: str = ""
 
     def render(self) -> str:
         line = f"{self.status}  {self.name}: {self.detail}"
-        return f"{line}\n  fix: {self.fix}" if self.status == "FAIL" and self.fix else line
+        shown = self.status in ("FAIL", "WARN") and self.fix
+        return f"{line}\n  fix: {self.fix}" if shown else line
 
 
 def _pass(name: str, detail: str) -> Check:
@@ -53,6 +72,10 @@ def _skip(name: str, detail: str) -> Check:
 
 def _fail(name: str, detail: str, fix: str) -> Check:
     return Check("FAIL", name, detail, fix)
+
+
+def _warn(name: str, detail: str, fix: str) -> Check:
+    return Check("WARN", name, detail, fix)
 
 
 def _quiet_or_fail(name: str, detail: str, fix: str, running: int | None) -> Check:
@@ -157,6 +180,104 @@ def check_spans(
     return _pass(name, f"newest span {format_age(age)} old ({path})")
 
 
+def _named(ids: list[str]) -> str:
+    shown = ", ".join(ids[:SHOWN])
+    return shown + (f" and {len(ids) - SHOWN} more" if len(ids) > SHOWN else "")
+
+
+def check_pr_blocks(settings: Settings, adapter: HermesAdapter, now: datetime) -> Check:
+    """Blocks whose reason names a PR wait on that PR, but only ``[[block_conditions]]`` and
+    the GitHub connector turn them into conditions; without them every such block looks like
+    a stuck task or a question for a person (on a live farm, most of the noise of a 24 h
+    review). A reason counts when it names a PR the way agents write it (``PR #12``,
+    ``owner/repo#12``, a ``/pull/12`` link, ``#12`` next to PR or merge wording); ``guard:``
+    blocks (the platform's own, with error text) do not. Each is then resolved as ``kelpie
+    serve`` does: a block pattern must match, its ``pr`` group must name a PR of a repository
+    in ``[connectors.github] repos``. Links other connectors add (human tasks) are not
+    considered."""
+    name = "PR blocks have conditions"
+    try:
+        # The board only: no spool, no git (worktrees readable already asked git).
+        tasks = replace(adapter, git_state=False, spool=None).snapshot(now).tasks
+    except (HermesError, sqlite3.Error) as exc:
+        return _skip(name, f"board not readable: {exc}")
+    blocks = {
+        t.id: t.block.reason
+        for t in tasks
+        if t.status is Status.BLOCKED
+        and t.block is not None
+        and not t.block.reason.lower().startswith("guard:")
+        and _names_a_pr(t.block.reason)
+    }
+    named = sorted(blocks, key=_natural)
+    if not named:
+        return _pass(name, "no block reason on the board names a PR")
+    found = f"{len(named)} block reason(s) name a PR ({_named(named)})"
+    github = settings.github
+    if github is None:
+        return _warn(
+            name,
+            f"{found}, but [connectors.github] is not configured",
+            "add [connectors.github] with the repos agents push to, and [[block_conditions]] "
+            "patterns for these reasons, so rules 2 and 4 see the PR they wait on",
+        )
+    if not github.enabled:
+        return _warn(
+            name,
+            f"{found}, but [connectors.github] is disabled",
+            "set enabled = true in [connectors.github]",
+        )
+    patterns = [p for p in settings.block_conditions if "block" in p.applies_to]
+    if not patterns:
+        return _warn(
+            name,
+            f"{found}, but no [[block_conditions]] pattern reads block reasons",
+            "add [[block_conditions]] patterns (with a named group pr) for these reasons",
+        )
+    host = web_host(github.api_url)
+    repos = {r.lower() for r in github.repos}
+    unmatched, unresolved = [], []
+    for tid in named:
+        reason = blocks[tid][:MAX_REASON]
+        refs = [
+            parse_pr_ref(m["pr"], p.repo, host)
+            for p in patterns
+            if (m := p.pattern.search(reason)) and m["pr"]
+        ]
+        if not refs:
+            unmatched.append(tid)
+            continue
+        if not any(ref is not None and ref.repo in repos for ref in refs):
+            unresolved.append(tid)
+    problems = []
+    if unmatched:
+        problems.append(
+            f"{len(unmatched)} match no [[block_conditions]] pattern ({_named(unmatched)})"
+        )
+    if unresolved:
+        problems.append(
+            f"{len(unresolved)} match but name no PR of [connectors.github] repos (a bare #N "
+            f"with no repo = on the pattern, another repository or host) ({_named(unresolved)})"
+        )
+    if problems:
+        return _warn(
+            name,
+            f"{found}; " + "; ".join(problems),
+            "widen the [[block_conditions]] patterns to the wording these blocks use (only "
+            "waiting wording: a question that names a PR is still a question), set repo = "
+            "for bare #N, and list every repository agents push to",
+        )
+    return _pass(name, f"{found}; every one names a PR [[block_conditions]] can check")
+
+
+def _names_a_pr(reason: str) -> bool:
+    return any(p.search(reason) for p in PR_REFS)
+
+
+def _natural(text: str) -> list[object]:
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text)]
+
+
 def check_worktrees(adapter: HermesAdapter) -> Check:
     name = "worktrees readable"
     if not adapter.git_state:
@@ -256,6 +377,10 @@ def run_checks(
     ]
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
     checks.append(_skip("worktrees readable", why) if adapter is None else check_worktrees(adapter))
+    pr_blocks = "PR blocks have conditions"
+    checks.append(
+        _skip(pr_blocks, why) if adapter is None else check_pr_blocks(settings, adapter, at)
+    )
     checks += cc_checks
     checks.append(check_prometheus(prometheus, environ))
     return checks

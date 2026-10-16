@@ -107,14 +107,16 @@ hermes-otel source; check it against the version you installed.
 
 ```bash
 # Kelpie must be running: `uv run kelpie serve` in a second shell (or step 4's shell).
-uv run kelpie doctor               # PASS|FAIL|SKIP per check, "fix:" under each FAIL; exit 1 on FAIL
+uv run kelpie doctor               # PASS|WARN|FAIL|SKIP per check, "fix:" under FAIL/WARN; exit 1 on FAIL
 uv run kelpie status               # rules, their mode, board readable, spool age
 curl -s localhost:9464/metrics | grep -E '^kelpie_(dry_run|engine_ticks_total|actions_total|snapshot_spans)'
 ```
 
 `kelpie doctor` checks: config and rules load; dry-run on and every rule in observe; the board
 is readable; the spool has a line from the last hour; spans arrived in the last hour (SKIP if
-none ever did: OTLP is optional); worktrees of live tasks are readable by git; Prometheus
+none ever did: OTLP is optional); worktrees of live tasks are readable by git; block
+reasons that name a PR can be checked by `[[block_conditions]]` (a WARN, not a failure,
+when not: those blocks would look stuck); Prometheus
 answers (`--prometheus URL` or `KELPIE_PROMETHEUS_URL`, otherwise `localhost:9090` is tried
 and skipped if absent). "hooks fire" and "OTLP spans arrive" are SKIP while no task is
 running; run doctor while one is, to make them count.
