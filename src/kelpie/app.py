@@ -657,13 +657,19 @@ def _unique_owners(owners: tuple[Owner, ...]) -> tuple[Owner, ...]:
     """One owner per id across adapters: the last one reported, but a person stays a
     person. An adapter that does not know who is human (Claude Code task lists name owners
     without a kind) must not turn a human assignee into an agent, or rules would count
-    them as idle capacity."""
+    them as idle capacity. Like ``human_owners``, this ignores case: ``Alice`` from a task
+    list is the person Hermes knows as ``alice``. A person keeps the role the adapter
+    that knows them gave."""
     found: dict[str, Owner] = {}
     for o in owners:
         prev = found.get(o.id)
-        human = o.kind is OwnerKind.HUMAN or (prev is not None and prev.kind is OwnerKind.HUMAN)
-        found[o.id] = replace(o, kind=OwnerKind.HUMAN) if human else o
-    return tuple(found.values())
+        if prev is not None and prev.kind is OwnerKind.HUMAN and o.kind is not OwnerKind.HUMAN:
+            continue  # the copy that knows the person wins, role included
+        found[o.id] = o
+    people = {o.id.casefold() for o in found.values() if o.kind is OwnerKind.HUMAN}
+    return tuple(
+        replace(o, kind=OwnerKind.HUMAN) if o.id.casefold() in people else o for o in found.values()
+    )
 
 
 def build_adapters(settings: Settings) -> list[PlatformAdapter]:

@@ -421,6 +421,17 @@ def test_a_person_stays_a_person_whatever_another_adapter_says(human_first: bool
     b = SnapAdapter(name="claude-code", owners=(unknown,) if human_first else (person,))
     snap = merged_snapshot([a, b], Metrics(), clock=lambda: NOW)()
     by_id = {o.id: o for o in snap.owners}
-    assert by_id["alice"].kind is OwnerKind.HUMAN and by_id["dev-1"].kind is OwnerKind.AGENT
+    assert by_id["alice"] == person and by_id["dev-1"].kind is OwnerKind.AGENT  # role kept
     loads = role_loads(snap)
     assert all("alice" not in load.agents for load in loads.values())
+
+
+def test_a_person_is_a_person_in_any_case() -> None:
+    """``human_owners`` ignores case; so does the merge: ``Alice`` in a task list is the
+    person Hermes calls ``alice``."""
+    hermes = SnapAdapter(name="hermes", owners=(Owner("alice", "owner", OwnerKind.HUMAN),))
+    cc = SnapAdapter(name="claude-code", owners=(Owner("Alice", "Alice"), Owner("bot", "bot")))
+    snap = merged_snapshot([hermes, cc], Metrics(), clock=lambda: NOW)()
+    kinds = {o.id: o.kind for o in snap.owners}
+    assert kinds == {"alice": OwnerKind.HUMAN, "Alice": OwnerKind.HUMAN, "bot": OwnerKind.AGENT}
+    assert all("Alice" not in load.agents for load in role_loads(snap).values())
