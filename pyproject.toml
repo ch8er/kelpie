@@ -80,7 +80,7 @@ source_modules = [
 forbidden_modules = ["kelpie.report.root_cause"]
 
 [[tool.importlinter.contracts]]
-name = "The farm simulator is for the demo and tests only"
+name = "The farm simulator and the demo stay out of Kelpie itself"
 type = "forbidden"
 source_modules = [
     "kelpie.core",
@@ -99,7 +99,7 @@ source_modules = [
     "kelpie.doctor",
     "kelpie.why",
 ]
-forbidden_modules = ["kelpie.sim"]
+forbidden_modules = ["kelpie.sim", "kelpie.demo"]
 
 [[tool.importlinter.contracts]]
 name = "Live metrics do not depend on the report (it may use an LLM)"

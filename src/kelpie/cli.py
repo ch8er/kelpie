@@ -85,6 +85,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="on a machine with agents: report its boards to a central kelpie serve ([agent]) "
         "and carry out the actions it routes here",
     )
+    demo = sub.add_parser(
+        "demo",
+        help="see Kelpie work on a simulated farm, offline (about a minute; no config needed)",
+    )
+    demo.add_argument("--fast", action="store_true", help="no pauses between lines")
+    demo.add_argument(
+        "--keep",
+        action="store_true",
+        help="keep the farm directory: its board, config, Kelpie's log and the full report",
+    )
+
     spool = sub.add_parser("spool", help="maintain the hooks spools on this host")
     spool_sub = spool.add_subparsers(dest="spool_command", required=True)
     scrub = spool_sub.add_parser(
@@ -102,6 +113,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(
         level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
+    if args.command == "demo":
+        from kelpie.demo import run as run_demo
+
+        return run_demo(fast=args.fast, keep=args.keep, log_level=args.log_level.upper())[0]
     if args.command == "doctor":
         from kelpie.doctor import run as run_doctor
 

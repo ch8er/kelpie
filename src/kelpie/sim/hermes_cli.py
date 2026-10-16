@@ -24,7 +24,8 @@ Supported commands (anything else exits 2 and is recorded):
   event is recorded.
 
 A file ``hermes-fail`` next to the board makes every command fail (exit 1), for scenarios
-where Hermes refuses.
+where Hermes refuses. With a clock file (:func:`install`), times written to the board come
+from it (epoch seconds) instead of the wall clock: the demo runs on a virtual clock.
 """
 
 from __future__ import annotations
@@ -51,18 +52,19 @@ class Refused(Exception):
     """Hermes refuses the command (exit 1)."""
 
 
-def install(directory: Path, log: Path) -> Path:
+def install(directory: Path, log: Path, clock: Path | None = None) -> Path:
     """Write an executable ``hermes`` launcher into ``directory`` that records its calls in
     ``log``; return its path. It runs this interpreter and imports this ``kelpie`` package,
-    installed or not."""
+    installed or not. With ``clock``, the board's times are read from that file."""
     path = directory / "hermes"
     # Appended, not prepended: site-packages must not shadow the standard library. A shell
     # wrapper, not a shebang: an interpreter path may hold spaces or be too long for one.
+    clock_arg = repr(str(clock)) if clock is not None else "None"
     code = (
         "import sys; "
         f"sys.path.append({str(PACKAGE_ROOT)!r}); "
         "from kelpie.sim.hermes_cli import main; "
-        f"raise SystemExit(main(sys.argv[1:], {str(log)!r}))"
+        f"raise SystemExit(main(sys.argv[1:], {str(log)!r}, {clock_arg}))"
     )
     path.write_text(
         f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -c {shlex.quote(code)} "$@"\n',
@@ -109,7 +111,7 @@ def _block(args: Sequence[str]) -> None:
     if pinned and not str(env_run).isdigit():
         raise Refused(f"${RUN_ENV} is not a run id")
     expected = int(str(env_run)) if pinned else None
-    now = int(time.time())
+    now = int(_now())
     conn = _db()
     try:
         conn.execute(
@@ -170,7 +172,7 @@ def _unblock(args: Sequence[str]) -> None:
         conn.execute(
             "INSERT INTO task_events (task_id, kind, payload, created_at)"
             " VALUES (?, 'unblocked', NULL, ?)",
-            (task_id, int(time.time())),
+            (task_id, int(_now())),
         )
         conn.execute("COMMIT")
     except BaseException:
@@ -197,7 +199,28 @@ def run(argv: Sequence[str]) -> int:
     return 0
 
 
-def main(argv: Sequence[str], log: str | None = None) -> int:
+_clock: Path | None = None  # set by main()
+
+
+def _now() -> float:
+    """The board's clock: the clock file when there is one, else the wall clock."""
+    if _clock is not None:
+        return float(_clock.read_text(encoding="utf-8").strip())
+    return time.time()
+
+
+def _log_time() -> float:
+    """When the call happened, for the call log: a broken clock file must not lose the call
+    (the command itself already failed on it and is recorded with its exit code)."""
+    try:
+        return _now()
+    except (OSError, ValueError):
+        return time.time()
+
+
+def main(argv: Sequence[str], log: str | None = None, clock: str | None = None) -> int:
+    global _clock
+    _clock = Path(clock) if clock is not None else None
     error = None
     try:
         code = run(argv)
@@ -219,7 +242,7 @@ def main(argv: Sequence[str], log: str | None = None) -> int:
             "board": os.environ.get(BOARD_ENV),
             "code": code,
             "error": error,
-            "at": time.time(),
+            "at": _log_time(),
         }
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")

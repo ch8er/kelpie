@@ -1,15 +1,16 @@
 """A stateful fake of the GitHub REST API (loopback only).
 
-It holds repositories, pull requests, CI results per commit and GitHub Actions runs, answers
-the endpoints Kelpie's GitHub connector reads, and carries out the one write Kelpie makes
-(``POST .../actions/runs/{id}/cancel``): the run is then completed as ``cancelled`` at once
-(real GitHub answers 202 and keeps the run in progress until the runner stops, so a later
-scan may still see it active; the farm never produces that case). Every request is recorded
-with its method, path and the bearer token it carried; one without the farm's token gets
-401, as GitHub answers bad credentials.
+It holds repositories, pull requests (with their labels and when each went on), CI results
+per commit and GitHub Actions runs, answers the endpoints Kelpie's GitHub connector reads,
+and carries out the one write Kelpie makes (``POST .../actions/runs/{id}/cancel``): the run
+is then completed as ``cancelled`` at once (real GitHub answers 202 and keeps the run in
+progress until the runner stops, so a later scan may still see it active; the farm never
+produces that case). Every request is recorded with its method, path and the bearer token
+it carried; one without the farm's token gets 401, as GitHub answers bad credentials.
 
-Query strings are ignored: the run list returns every run of the repository (the farm only
-creates recent ones), on one page.
+Query strings are ignored but for ``state`` of the pull request list: the run list returns
+every run of the repository (the farm only creates recent ones) and the pull request list
+every pull request in that state, on one page.
 """
 
 from __future__ import annotations
@@ -52,19 +53,50 @@ class Pull:
     head_sha: str
     state: str = "open"  # open | closed
     merged_at: datetime | None = None
+    closed_at: datetime | None = None  # when closed without merging (merged: merged_at)
     draft: bool = False
     files: list[str] = field(default_factory=lambda: ["src/app.py"])
+    title: str = ""
+    branch: str = ""  # head branch, in the same repository
+    mergeable_state: str = "unknown"  # clean | blocked | dirty | ... as GitHub reports it
+    created: datetime | None = None
+    updated: datetime | None = None
+    # label -> when it was put on (issue events); the PR carries these labels now
+    labels: dict[str, datetime] = field(default_factory=dict)
 
-    def body(self) -> dict[str, Any]:
+    def body(self, repo: str = "") -> dict[str, Any]:
+        stamp = self.updated or self.created or datetime.now(UTC)
         return {
             "number": self.number,
+            "title": self.title,
             "state": self.state,
             "merged": self.merged_at is not None,
             "merged_at": iso(self.merged_at) if self.merged_at else None,
+            "closed_at": iso(closed) if (closed := self.closed()) else None,
             "draft": self.draft,
-            "head": {"sha": self.head_sha},
+            "head": {
+                "sha": self.head_sha,
+                "ref": self.branch or f"pr-{self.number}",
+                "repo": {"full_name": repo},
+            },
+            "labels": [{"name": name} for name in self.labels],
+            "mergeable_state": self.mergeable_state,
             "changed_files": len(self.files),
+            "created_at": iso(self.created or stamp),
+            "updated_at": iso(stamp),
         }
+
+    def closed(self) -> datetime | None:
+        if self.state != "closed":
+            return None
+        return self.closed_at or self.merged_at or self.updated or self.created
+
+    def events(self) -> list[dict[str, Any]]:
+        """The issue events that put the current labels on, oldest first."""
+        return [
+            {"event": "labeled", "label": {"name": name}, "created_at": iso(at)}
+            for name, at in sorted(self.labels.items(), key=lambda item: item[1])
+        ]
 
 
 @dataclass
@@ -186,7 +218,8 @@ class FakeGitHub:
     # --- answers ---------------------------------------------------------------------
 
     def answer(self, method: str, path: str) -> tuple[int, Any]:
-        path = path.split("?", 1)[0]
+        path, _, query = path.partition("?")
+        params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
         m = re.fullmatch(r"/repos/([^/]+/[^/]+)(/.*)?", path)
         if m is None:
             return 404, {"message": "Not Found"}
@@ -195,9 +228,11 @@ class FakeGitHub:
             return 404, {"message": "Not Found"}
         rest = m[2] or ""
         with self.lock:
-            return self._route(method, repo, rest)
+            return self._route(method, repo, rest, params)
 
-    def _route(self, method: str, repo: Repo, rest: str) -> tuple[int, Any]:
+    def _route(
+        self, method: str, repo: Repo, rest: str, params: dict[str, str] | None = None
+    ) -> tuple[int, Any]:
         if method == "POST":
             if m := re.fullmatch(r"/actions/runs/(\d+)/cancel", rest):
                 run = repo.runs.get(int(m[1]))
@@ -212,9 +247,16 @@ class FakeGitHub:
             return 404, {"message": "Not Found"}
         if rest == "":
             return 200, {"full_name": repo.name, "default_branch": repo.default_branch}
+        if rest == "/pulls":
+            state = (params or {}).get("state", "open")
+            pulls = [p for p in repo.pulls.values() if state in ("all", p.state)]
+            return 200, [p.body(repo.name) for p in sorted(pulls, key=lambda p: -p.number)]
         if m := re.fullmatch(r"/pulls/(\d+)", rest):
             pr = repo.pulls.get(int(m[1]))
-            return (200, pr.body()) if pr else (404, {"message": "Not Found"})
+            return (200, pr.body(repo.name)) if pr else (404, {"message": "Not Found"})
+        if m := re.fullmatch(r"/issues/(\d+)/events", rest):
+            pr = repo.pulls.get(int(m[1]))
+            return (200, pr.events()) if pr else (404, {"message": "Not Found"})
         if m := re.fullmatch(r"/pulls/(\d+)/files", rest):
             pr = repo.pulls.get(int(m[1]))
             if pr is None:
