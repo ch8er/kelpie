@@ -334,7 +334,7 @@ def test_rule_errors_start_at_zero_and_ledger_down_is_reported() -> None:
     assert "kelpie_ledger_up 0" in metrics.render()
 
 
-def test_orphan_status_inheritshold_labels_from_bottlenecks() -> None:
+def test_orphan_status_inherits_hold_labels_from_bottlenecks() -> None:
     bottlenecks = {"hold_labels": ["freeze"], "holds": [{"label": "merge-hold"}]}
 
     def holds(rules: dict) -> frozenset[str]:

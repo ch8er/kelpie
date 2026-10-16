@@ -67,9 +67,11 @@ def report_board(
     settings: Settings, day: date, clock: Callable[[], datetime], metrics: Metrics
 ) -> Snapshot:
     """The board the report of ``day`` reads: the adapters, looking back as far as the day
-    needs, with the connector steps ``kelpie serve`` runs (GitHub and human-task conditions),
-    so the report knows what waiting tasks wait for."""
-    enrich, _ = connector_steps(settings, metrics, clock)
+    needs, with the connector steps that read nothing but the board (``task_status``, human
+    tasks from block reasons), so the report knows what more waiting tasks wait for. Like
+    ``kelpie why`` without ``--refresh``, the report calls no network service of its own:
+    GitHub conditions taken from block reasons are not on its board."""
+    enrich, _ = connector_steps(settings, metrics, clock, network=False)
     adapters = build_adapters(report_settings(settings, day, clock()))
     return merged_snapshot(adapters, metrics, clock, enrich=enrich)()
 

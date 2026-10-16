@@ -83,9 +83,17 @@ def inbox(
         waiting_agent_tasks=len(waiting),
         waiting=list(waiting),
         cost_hours=3.0,
-        items=[{"kind": "human_task", "task": "H-1", "title": "t", "behind": list(behind),
-                "waiting_minutes": 60, "cost_hours": 3.0}],
-    )  # fmt: skip
+        items=[
+            {
+                "kind": "human_task",
+                "task": "H-1",
+                "title": "t",
+                "behind": list(behind),
+                "waiting_minutes": 60,
+                "cost_hours": 3.0,
+            }
+        ],
+    )
 
 
 REVIEWED = tuple(Session(f"S{i}", f"R{i}", "rev-1", at(6), at(8)) for i in range(1, 5))
@@ -238,8 +246,12 @@ def test_role_names_are_escaped_in_the_headline() -> None:
 
 def test_only_the_day_s_ledger_counts() -> None:
     yesterday = replace(inbox(waiting=["D4"]), at=at(-20))
-    report = build_report(inputs(tasks=(waiting("D4", "developer"),), sessions=(),
-                                 conditions=(), actions=(yesterday,)), sections={})  # fmt: skip
+    report = build_report(
+        inputs(
+            tasks=(waiting("D4", "developer"),), sessions=(), conditions=(), actions=(yesterday,)
+        ),
+        sections={},
+    )
     assert report.biggest_wait is not None and report.biggest_wait.cause == UNKNOWN
 
 

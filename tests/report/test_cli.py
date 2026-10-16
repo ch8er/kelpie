@@ -15,6 +15,7 @@ from kelpie.alerts import Delivery, PermanentError
 from kelpie.app import ConfigError, load_settings
 from kelpie.cli import main
 from kelpie.core.actions import Severity
+from kelpie.metrics import Metrics
 from kelpie.report.cli import report_settings, run, sources
 
 
@@ -86,6 +87,40 @@ def test_the_report_reads_the_board_s_conditions_and_the_hold_labels(
     board = Snapshot(now=datetime(2026, 3, 3, tzinfo=UTC), conditions=waits_on)
     loaded = load_inputs(replace(src, db_path=None), date(2026, 3, 2), board)
     assert loaded.conditions == waits_on and loaded.hold_labels == ("freeze", "merge-hold")
+
+
+def test_the_report_board_attaches_human_task_conditions_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.app
+    import kelpie.report.cli as report_cli
+    from kelpie.core.model import Block, Owner, OwnerKind, Snapshot, Status, Task
+
+    now = datetime(2026, 3, 3, 1, tzinfo=UTC)
+
+    class Board:
+        name = "board"
+
+        def snapshot(self, at: datetime) -> Snapshot:
+            gate = Task("H-1", "approve", Status.READY, now, owner_id="person-a")
+            asks = Block("waiting_human: approval in H-1", now)
+            blocked = Task("T-1", "t", Status.BLOCKED, now, owner_id="dev-1", block=asks)
+            owners = (Owner("person-a", "lead", OwnerKind.HUMAN), Owner("dev-1", "developer"))
+            return Snapshot(now=at, tasks=(gate, blocked), owners=owners)
+
+    def no_network(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the report called a network connector")
+
+    monkeypatch.setattr(report_cli, "build_adapters", lambda settings: [Board()])
+    monkeypatch.setattr(kelpie.app, "_github_steps", no_network)
+    extra = (
+        "[connectors.github]\nenabled = true\n[connectors.human_tasks]\n"
+        '[[connectors.human_tasks.block_patterns]]\npattern = "approval in (?P<task>\\\\S+)"\n'
+    )
+    settings = load_settings(config(tmp_path, extra))
+    board = report_cli.report_board(settings, date(2026, 3, 2), lambda: now, Metrics())
+    [c] = board.conditions
+    assert c.kind.value == "human_task" and c.task_id == "T-1"
 
 
 def test_unknown_report_key_is_a_config_error(tmp_path: Path) -> None:
