@@ -56,7 +56,7 @@ from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
-from kelpie.core.model import OwnerKind, Snapshot, Status, Task
+from kelpie.core.model import Condition, OwnerKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules.bottlenecks import HumanGate, human_gates
@@ -130,17 +130,23 @@ class NeedsYou:
         that task's, not approvals of their own."""
         by_id = {t.id: t for t in snapshot.tasks}
         open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
+        unmet = {
+            t.id: [c for c in linked_conditions(t, snapshot)[0] if c.satisfied is not True]
+            for t in snapshot.tasks
+            if t.status in _FROZEN
+        }  # once per task: the loop below runs per human task
+        waiters = _direct_waiters(snapshot, unmet)
         items = []
         claimed: set[str] = set()
         for gate in gates:
-            direct = _direct_waiters(gate.task.id, snapshot)
+            direct = waiters.get(gate.task.id, {})
             movable = gate.actionable or _stuck_on_its_own(gate.task, snapshot, open_ids)
             parked = {
                 tid
                 for tid in gate.behind
                 if tid in direct
                 and by_id[tid].status in _FROZEN
-                and self._parked_on(by_id[tid], gate.task.id, direct[tid], snapshot, movable)
+                and self._parked_on(by_id[tid], gate.task.id, direct[tid], unmet[tid], movable)
             }
             claimed |= parked
             if not movable:
@@ -159,17 +165,18 @@ class NeedsYou:
         return items, claimed
 
     def _parked_on(
-        self, task: Task, human_task: str, how: str, snapshot: Snapshot, movable: bool
+        self, task: Task, human_task: str, how: str, unmet: Sequence[Condition], movable: bool
     ) -> bool:
         """Whether a parked agent task that waits directly on ``human_task`` is parked
         because of it: a condition names it; or, linked by a dependency only, nothing else
-        visibly holds it (no other unmet condition, and no block, or a block reason that
-        names the human task, or one that asks a person while the person can act on the
-        human task). A reason about something else (CI, a provider) or an agent's own
-        question behind a human task nobody can do yet is not the human task's."""
+        visibly holds it (no other ``unmet`` condition linked to it, and no block, or a
+        block reason that names the human task, or one that asks a person while the
+        person can act on the human task). A reason about something else (CI, a
+        provider) or an agent's own question behind a human task nobody can do yet is not
+        the human task's."""
         if how == "condition":
             return True
-        if any(c.satisfied is not True for c in linked_conditions(task, snapshot)[0]):
+        if unmet:
             return False  # it waits on something else first
         if task.block is None:
             return True
@@ -238,18 +245,21 @@ class NeedsYou:
         )
 
 
-def _direct_waiters(human_task: str, snapshot: Snapshot) -> dict[str, str]:
-    """Agent tasks that wait on ``human_task`` itself, by how: ``"condition"`` for a parked
-    task whose current wait is an unmet condition naming it (``human_task``, or the
-    ``task_status`` of a dispatch gate on its parent), ``"dependency"`` for a task that
-    depends on it directly."""
-    found = {d.task_id: "dependency" for d in snapshot.dependencies if d.depends_on == human_task}
-    for t in snapshot.tasks:
-        if t.status in _FROZEN and any(
-            c.satisfied is not True and c.params.get("task") == human_task
-            for c in linked_conditions(t, snapshot)[0]
-        ):
-            found[t.id] = "condition"
+def _direct_waiters(
+    snapshot: Snapshot, unmet: Mapping[str, Sequence[Condition]]
+) -> dict[str, dict[str, str]]:
+    """For each task, the tasks that wait on it directly, by how: ``"condition"`` for a
+    parked task whose current wait (``unmet``, by parked task) is a condition naming it
+    (``human_task``, or the ``task_status`` of a dispatch gate on its parent),
+    ``"dependency"`` for a task that depends on it. One pass over the snapshot."""
+    found: dict[str, dict[str, str]] = {}
+    for d in snapshot.dependencies:
+        found.setdefault(d.depends_on, {})[d.task_id] = "dependency"
+    for tid, conditions in unmet.items():
+        for c in conditions:
+            target = c.params.get("task")
+            if isinstance(target, str):
+                found.setdefault(target, {})[tid] = "condition"
     return found
 
 
