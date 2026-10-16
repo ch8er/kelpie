@@ -7,11 +7,14 @@ import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from kelpie.app import LoadedRules, build_app, find_config, load_rules, load_settings
+from kelpie.app import LoadedRules, Settings, build_app, find_config, load_rules, load_settings
 from kelpie.cli import main
+from kelpie.connectors.github.blocks import load_block_conditions
+from kelpie.connectors.github.settings import GitHubSettings
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import (
@@ -29,10 +32,12 @@ from kelpie.why import (
     Finding,
     _age,
     _chain,
+    _expected,
     _mentions,
     _mode,
     as_json,
     evaluate_rules,
+    expected_conditions,
     explain,
     explain_snapshot,
     read_history,
@@ -439,3 +444,101 @@ def test_a_young_card_waiting_for_its_own_parent_says_so() -> None:
                      prework_after=timedelta(hours=4),
                      loaded_rules=frozenset({"orphan_status"}))  # fmt: skip
     assert _hints(ex)[1] == "orphan_status leaves it: it waits for parents of its own (P)"
+
+
+# -- block conditions (#126) -------------------------------------------------------------------
+
+
+def _bc_settings(*patterns: dict[str, object], enabled: bool = True) -> Settings:
+    github = GitHubSettings(repos=("example/repo",), enabled=enabled)
+    return SimpleNamespace(  # type: ignore[return-value]
+        github=github, block_conditions=load_block_conditions(list(patterns), github.repos)
+    )
+
+
+MERGE = {"pattern": r"merge of (?P<pr>\S+)", "kind": "pr_merged", "repo": "example/repo"}
+
+
+def _blocked(reason: str, status: Status = Status.BLOCKED, title: str = "t") -> Snapshot:
+    block = Block(reason, NOW - timedelta(hours=1)) if status is Status.BLOCKED else None
+    task = Task("T-1", title, status, NOW - timedelta(hours=1), block=block)
+    return Snapshot(now=NOW, tasks=(task,))
+
+
+def test_expected_offline_names_the_pr_without_the_network() -> None:
+    snap, settings = _blocked("waiting for merge of #57"), _bc_settings(MERGE)
+    [e], n = expected_conditions(settings, snap, snap.tasks[0], refreshed=False)
+    assert n == 1
+    assert (e.status, e.repo, e.pr, e.kind) == ("not_checked", "example/repo", 57, "pr_merged")
+    assert _expected(e) == (
+        "would attach pr_merged on example/repo#57 (from the block reason): "
+        "not checked (offline; --refresh checks them)"
+    )
+    [e], _ = expected_conditions(settings, snap, snap.tasks[0], refreshed=True)
+    assert e.status == "not_attached" and _expected(e).startswith("matched pr_merged on")
+
+
+def test_expected_says_why_a_hit_attaches_nothing_and_escapes_agent_text() -> None:
+    settings = _bc_settings(MERGE)
+    snap = _blocked("merge of other/repo#5")
+    [e], _ = expected_conditions(settings, snap, snap.tasks[0], False)
+    assert e.status == "unresolvable" and "outside [connectors.github] repos" in _expected(e)
+    snap = _blocked("merge of \x1b[31m\x07oops")
+    [e], _ = expected_conditions(settings, snap, snap.tasks[0], False)
+    line = _expected(e)
+    assert "\x1b" not in line and "\x07" not in line and "\\x1b[31m\\x07oops" in line
+    assert line.endswith("nothing is attached") and e.captured.startswith("\x1b")
+
+
+def test_expected_none_when_nothing_applies() -> None:
+    snap = _blocked("stuck")
+    assert expected_conditions(_bc_settings(MERGE), snap, snap.tasks[0], False) == ([], 1)
+    off = _bc_settings(MERGE, enabled=False)
+    assert expected_conditions(off, snap, snap.tasks[0], False) == ([], 0)
+    nothing = SimpleNamespace(github=None, block_conditions=())
+    assert expected_conditions(nothing, snap, snap.tasks[0], False) == ([], 0)  # type: ignore[arg-type]
+    # A block that already has its condition is not matched again.
+    cond = Condition("block:T-1:pr_merged:example/repo#57", ConditionKind.PR_MERGED, "T-1")
+    task = Task(
+        "T-1", "t", Status.BLOCKED, NOW, block=Block("merge of #57", NOW, condition_id=cond.id)
+    )
+    held = Snapshot(now=NOW, tasks=(task,), conditions=(cond,))
+    assert expected_conditions(_bc_settings(MERGE), held, task, False) == ([], 0)
+
+
+def test_expected_reads_a_ready_task_title_for_the_gate() -> None:
+    gate = {**MERGE, "applies_to": ["ready_task"]}
+    snap = _blocked("", Status.READY, title="Redo it after merge of #7")
+    [e], n = expected_conditions(_bc_settings(gate), snap, snap.tasks[0], False)
+    assert n == 1 and e.source == "task_text" and e.pr == 7
+    assert "ready task title" in _expected(e)
+
+
+def test_render_conditions_with_target_and_offline_wording() -> None:
+    task = Task("T-1", "t", Status.WAITING, NOW - timedelta(hours=1))
+    unchecked = Condition("a", ConditionKind.PR_MERGED, "T-1", {"repo": "example/repo", "pr": 9})
+    checked = Condition(
+        "b", ConditionKind.CI_STATUS, "T-1",
+        {"repo": "example/repo", "pr": 9, "sha": "0123456789abcdef0123", "ci_state": "pending"},
+        satisfied=False, checked_at=NOW - timedelta(minutes=3),
+    )  # fmt: skip
+    snap = Snapshot(now=NOW, tasks=(task,), conditions=(unchecked, checked))
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    offline = "a [pr_merged] example/repo#9: unknown, not checked (offline; --refresh checks it)"
+    assert offline in render(ex)
+    ex.refreshed = True
+    text = render(ex)
+    assert "a [pr_merged] example/repo#9: unknown, never checked" in text
+    assert "b [ci_status] example/repo#9 @ 0123456789ab: unmet (CI pending), checked 3m ago" in text
+    target = as_json(ex)["conditions"][1]["target"]
+    assert target == {"repo": "example/repo", "pr": 9, "sha": "0123456789abcdef0123"}
+
+
+def test_none_names_the_patterns_it_checked() -> None:
+    snap = _blocked("stuck")
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    ex.block_patterns = 2
+    expected = "none (the block reason matches none of the 2 [[block_conditions]] patterns)"
+    assert expected in render(ex)
