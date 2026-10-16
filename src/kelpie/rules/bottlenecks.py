@@ -39,13 +39,13 @@ spare. An alert lasts as long as spare capacity exists.
 - **Human tasks on the critical path** (incident 16). For each open human-owned task, the
   agent tasks behind it, transitively, through dependencies and the ``human_task``
   conditions of blocked or waiting tasks. A human task the human can do now (ready or in
-  progress, nothing open before it) that has waited ``human_gate_after`` (1h) with
-  ``human_gate_min_tasks`` (3) or more agent tasks behind it is escalated to its owner
-  with the count and the estimated agent hours. Rule 13 (``needs_you``) also lists the
-  same task in its owner's inbox; set ``escalate_human_gates = false`` to leave human work
-  to that inbox, one message per person. When idle agents have no ready work they
-  could take while such gates exist, Kelpie also alerts with the idle capacity and the
-  gates that hold the most work. Kelpie never removes or rewrites a dependency: it shows
+  progress, nothing open before it) that has waited ``human_gate_after`` (1h) gates that
+  work. When idle agents have no ready work they could take while such gates exist,
+  Kelpie alerts with the idle capacity and the gates that hold the most work. Rule 13
+  (``needs_you``) escalates human work, one message per person with everything waiting
+  for them; with ``escalate_human_gates = true`` this rule also escalates each gate with
+  ``human_gate_min_tasks`` (3) or more agent tasks behind it to its owner, with the count
+  and the estimated agent hours. Kelpie never removes or rewrites a dependency: it shows
   its cost and asks whether the link is needed. Human tasks with nothing behind them are
   not flagged, a human task parked by a hold is not escalated, and a chain with agent work
   behind a human task gets no parallelization advice.
@@ -423,7 +423,7 @@ class Bottlenecks:
     idle_alert_after: timedelta = timedelta(minutes=30)
     human_gate_min_tasks: int = 3
     human_gate_after: timedelta = timedelta(hours=1)  # a human task waits this long first
-    escalate_human_gates: bool = True  # false: rule 13's per-person inbox only
+    escalate_human_gates: bool = False  # per-gate escalation; rule 13 owns per person
     slots: int | None = None
     # Assigned ready tasks nobody started are queued work (Hermes assigns before dispatch).
     ready_is_queued: bool = False

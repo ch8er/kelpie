@@ -288,9 +288,9 @@ gate agent work.
 | `hold_labels` | `[]` | list of labels | Labels that park tasks on purpose. Held tasks do not count as ready work. No expiry unless `hold_expiry` is set. |
 | `holds` | `[]` | array of tables | Holds with an owner and an expiry, see below. |
 | `hold_expiry` | unset | duration, > 0 | Expected length of a hold without its own `expires_after`. Unset: 4h for `holds` entries, no expiry for `hold_labels`. |
-| `human_gate_min_tasks` | `3` | count, >= 1 | Escalate a human task with at least this many agent tasks behind it... |
-| `human_gate_after` | `"1h"` | duration, >= 0 | ...once it has been ready or in progress this long. |
-| `escalate_human_gates` | `true` | bool | `false`: no per-task escalation of human tasks; rule 13's per-person inbox lists them instead (one message per person). |
+| `human_gate_after` | `"1h"` | duration, >= 0 | A human task gates the agent work behind it once it has been ready or in progress this long (for the farm-level alert and the escalation). |
+| `human_gate_min_tasks` | `3` | count, >= 1 | With `escalate_human_gates = true`: escalate a gate with at least this many agent tasks behind it. Not used otherwise. |
+| `escalate_human_gates` | `false` | bool | `true`: also escalate each human task with `human_gate_min_tasks` agent tasks behind it to its owner. By default rule 13 escalates human work, one message per person; this rule keeps the farm-level alert (free slots, only human tasks ready). |
 | `ready_is_queued` | `false` | bool | Assigned ready or review tasks nobody started are queued work of their role, not a busy owner. Set it for Hermes, which assigns before it dispatches. |
 | `ready_prs` | `false` | bool | Open PRs GitHub reports as mergeable count as ready work for idle agents (needs `[connectors.github.pulls]`). Set it where agents merge PRs. |
 | `pr_role` | unset | role | The role that merges PRs. Unset: any idle agent. |
@@ -449,9 +449,9 @@ Only agent tasks that wait on the human task itself add to its cost; work deeper
 chain counts in the number held. The alert is a long-lived state per person: announced
 when it opens, again when the list of tasks changes or at the escalation thresholds,
 resolved when empty. `escalate_to` names the person; delivery goes to the alert channels
-like every other alert. The daily report heads "Needs a human" with each open inbox. Rule
-6 escalates single large human gates as well; set its `escalate_human_gates = false` for
-one message per person.
+like every other alert. The daily report heads "Needs a human" with each open inbox. This
+rule owns escalating human work; rule 6 keeps the farm-level alert (free slots, only human
+tasks ready) and escalates single human gates only with `escalate_human_gates = true`.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |

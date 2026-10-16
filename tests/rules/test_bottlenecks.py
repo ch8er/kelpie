@@ -72,6 +72,9 @@ def run(snapshot: Snapshot, rule: Bottlenecks | None = None) -> list[Action]:
     return list((rule or Bottlenecks()).evaluate(snapshot))
 
 
+GATES = Bottlenecks(escalate_human_gates=True)  # per-gate escalation; off by default
+
+
 def of(actions: list[Action], kind: str) -> list[Action]:
     """Actions of one check, by key: chain, overloaded, idle-ready, hold, human-gate(d)."""
     return [a for a in actions if (a.key or "").startswith(f"bottlenecks:{kind}")]
@@ -771,9 +774,8 @@ def test_human_gates_follow_dependencies_and_current_waits_transitively() -> Non
 def test_gate_with_enough_work_behind_is_escalated_to_its_owner() -> None:
     tasks = (human("H"), task("A", estimate=H), task("B", estimate=30 * M), task("C"))
     snapshot = Snapshot(NOW, tasks, HUMANS, chain("H", "A", "B", "C"))
-    off = Bottlenecks(escalate_human_gates=False)  # left to rule 13's inbox
-    assert [a for a in run(snapshot, off) if a.kind is ActionKind.ESCALATE] == []
-    [esc] = [a for a in run(snapshot) if a.kind is ActionKind.ESCALATE]
+    assert [a for a in run(snapshot) if a.kind is ActionKind.ESCALATE] == []  # rule 13's
+    [esc] = [a for a in run(snapshot, GATES) if a.kind is ActionKind.ESCALATE]
     assert esc.task_id == "H" and esc.state == "bottlenecks:human-gate:H"
     assert esc.since == NOW - 2 * H
     assert esc.params == {
@@ -783,7 +785,7 @@ def test_gate_with_enough_work_behind_is_escalated_to_its_owner() -> None:
         "agent_hours": 1.5,
     }
     assert "does not change dependencies" in esc.reason and "1h 30m of agent work" in esc.reason
-    rule = Bottlenecks(human_gate_min_tasks=4)
+    rule = Bottlenecks(human_gate_min_tasks=4, escalate_human_gates=True)
     assert [a for a in run(snapshot, rule) if a.kind is ActionKind.ESCALATE] == []
 
 
@@ -801,7 +803,7 @@ def test_only_human_tasks_the_human_can_do_now_and_has_had_time_for_escalate(
     status: Status, since: timedelta, escalates: bool
 ) -> None:
     tasks = (human("H", status, since), task("A"), task("B"), task("C"))
-    actions = run(Snapshot(NOW, tasks, HUMANS, chain("H", "A", "B", "C")))
+    actions = run(Snapshot(NOW, tasks, HUMANS, chain("H", "A", "B", "C")), GATES)
     assert any(a.kind is ActionKind.ESCALATE for a in actions) is escalates
 
 
@@ -810,7 +812,7 @@ def test_human_task_waiting_on_agent_work_is_not_escalated() -> None:
     snapshot = Snapshot(
         NOW, tasks, HUMANS + agents("developer", "d1"), chain("P", "H", "A", "B", "C")
     )
-    assert [a for a in run(snapshot) if a.kind is ActionKind.ESCALATE] == []
+    assert [a for a in run(snapshot, GATES) if a.kind is ActionKind.ESCALATE] == []
 
 
 def test_idle_agents_and_only_human_tasks_ready_alert() -> None:
@@ -928,10 +930,10 @@ def test_held_human_task_is_not_escalated() -> None:
     tasks = (held, task("A"), task("B"), task("C"))
     owners = HUMANS + agents("developer", "d1")
     snapshot = snap(tasks, owners, chain("H", "A", "B", "C"))
-    rule = Bottlenecks(hold_labels=frozenset({"park"}))
+    rule = Bottlenecks(hold_labels=frozenset({"park"}), escalate_human_gates=True)
     assert [a for a in run(snapshot, rule) if a.kind is ActionKind.ESCALATE] == []
     assert of(run(snapshot, rule), "human-gated") == []
-    assert [a for a in run(snapshot) if a.kind is ActionKind.ESCALATE]  # unheld: escalated
+    assert [a for a in run(snapshot, GATES) if a.kind is ActionKind.ESCALATE]  # unheld
 
 
 def test_chain_ending_in_a_human_task_still_gets_parallelization_advice() -> None:
@@ -1101,8 +1103,8 @@ def test_human_gated_slot_counts_never_exceed_the_total() -> None:
 
 
 def test_build_escalate_human_gates() -> None:
-    assert build({}).escalate_human_gates is True
-    assert build({"escalate_human_gates": False}).escalate_human_gates is False
+    assert build({}).escalate_human_gates is False
+    assert build({"escalate_human_gates": True}).escalate_human_gates is True
 
 
 # --- open pull requests (GitHub pull requests step) ---------------------------------------
