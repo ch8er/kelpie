@@ -575,3 +575,13 @@ def test_older_schema_without_body(tmp_path: Path) -> None:
     conn.close()
     (task,) = HermesAdapter(db_path=db, spool=None, git_state=False).snapshot(NOW).tasks
     assert task.body is None
+
+
+def test_bytes_body_is_decoded_and_finished_tasks_keep_none(board: Board) -> None:
+    board.task("t_1", "ready", ago(days=1), assignee="dev")
+    board.task("t_2", "done", ago(days=1), assignee="dev", completed=ago(hours=1), body="old")
+    board.conn.execute("UPDATE tasks SET body = ? WHERE id = 't_1'", (b"after #7 lands \xff",))
+    board.conn.commit()
+    tasks = {t.id: t for t in adapter(board).snapshot(NOW).tasks}
+    assert tasks["t_1"].body == "after #7 lands \ufffd"
+    assert tasks["t_2"].body is None

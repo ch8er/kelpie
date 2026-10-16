@@ -27,14 +27,16 @@ instead of the same PRs being revalidated every tick. A tick that runs out of bu
 a warning (once, until it suffices again) and counts ``outcome="budget"`` requests.
 
 Ready tasks (the dispatch gate). A pattern with ``applies_to = ["ready_task"]`` reads the
-title and body (description) of a ready task instead ("Redo the migration after #123"),
-the first ``MAX_TASK_TEXT`` characters: every PR it names, up to ``MAX_READY_REFS``, gets a
-condition linked by ``task_id`` alone (id ``ready:<task>:<kind>:<ref>``, registered when the
-task became ready), under the same rules: only for a confirmed PR, bound to its repo,
-number and head. The ``dispatch_gate`` rule parks a ready task whose condition is unmet.
-Outcomes are counted for blocks only: a ready task whose PR cannot be resolved simply has
-no prerequisite. A condition id the snapshot already holds (the adapter registered it when
-the task was parked) is not attached again.
+title and body (description) of a ready task instead ("Redo the migration after #123"), the
+first ``MAX_TASK_TEXT`` characters: every PR it names (up to ``MAX_READY_REFS`` that can be
+looked up, in pattern order) gets a condition linked by ``task_id`` alone (id
+``ready:<task>:<kind>:<ref>``, registered when the task became ready), under the same rules:
+only for a confirmed PR, bound to its repo, number and head. The ``dispatch_gate`` rule
+parks a ready task whose condition is unmet. Patterns run on up to 8000 characters per ready
+task each tick: keep them simple (no nested quantifiers, no leading ``.*``). Outcomes are
+counted for blocks only: a ready task whose PR cannot be resolved simply has no
+prerequisite. A condition id the snapshot already holds (the adapter registered it when the
+task was parked) is not attached again.
 
 The same step evaluates conditions the platform already registered (``pr_merged`` and
 ``ci_status`` with ``repo``/``pr`` params for a configured repository).
@@ -58,14 +60,14 @@ log = logging.getLogger(__name__)
 KINDS = {"pr_merged": ConditionKind.PR_MERGED, "ci_green": ConditionKind.CI_STATUS}
 MAX_REASON = 2000  # characters of a block reason the patterns look at
 MAX_TASK_TEXT = 8000  # characters of a ready task's title and body the patterns look at
-MAX_READY_REFS = 5  # PR references attached per ready task
+MAX_READY_REFS = 5  # PRs looked up per ready task (resolvable refs, in pattern order)
 DEFAULT_MAX_REQUESTS = 50
 DEFAULT_TICK_BUDGET = timedelta(seconds=10)
 # Blocks whose reason matched a pattern: got a condition; the PR could not be resolved
 # (bad ref, repo not allowed, 404); GitHub could not confirm it yet; the step failed on it.
 OUTCOMES = ("attached", "unresolved", "unconfirmed", "error")
 _KEYS = {"pattern", "kind", "repo", "applies_to"}
-# What a pattern reads: a block reason, or the title of a ready task (the dispatch gate).
+# What a pattern reads: a block reason, or the title and body of a ready task (the gate).
 TARGETS = ("block", "ready_task")
 
 
@@ -169,25 +171,31 @@ class ConditionSync:
             if c.kind in kinds:
                 work.append((self._priority([self.connector.ref_from_params(c.params)]), "c", i))
         known = {c.id for c in conditions}
+        # Patterns run once per task per tick: their cost grows with the text they read.
+        matched: dict[int, tuple[str, list[tuple[BlockConditionPattern, PrRef | None]] | None]] = {}
         for j, task in enumerate(tasks):
             target = self._target(task, snapshot)
             if target is not None:
+                found_refs: list[tuple[BlockConditionPattern, PrRef | None]] | None
                 try:
-                    key = self._priority([ref for _, ref in self._matches(task, target)])
-                except Exception:  # reported once, by _resolve below
-                    key = (2, 0.0)
-                work.append((key, "t", j))
+                    found_refs = self._matches(task, target)
+                except Exception as exc:  # one odd text must not sink the step
+                    log.warning("block condition for task %s failed: %s", task.id, exc)
+                    found_refs = None  # counted as an error below
+                matched[j] = (target, found_refs)
+                work.append((self._priority([r for _, r in found_refs or ()]), "t", j))
         for _, what, k in sorted(work, key=lambda w: w[0]):
             if what == "c":
                 conditions[k] = self._check(conditions[k])
                 continue
-            target = self._target(tasks[k], snapshot)
-            assert target is not None
-            try:
-                found, outcome = self._resolve(tasks[k], target)
-            except Exception as exc:  # one odd block reason must not sink the step
-                log.warning("block condition for task %s failed: %s", tasks[k].id, exc)
-                found, outcome = [], "error"
+            target, refs = matched[k]
+            found, outcome = [], "error"  # the patterns failed on its text (logged above)
+            if refs is not None:
+                try:
+                    found, outcome = self._resolve(tasks[k], target, refs)
+                except Exception as exc:  # one odd block reason must not sink the step
+                    log.warning("block condition for task %s failed: %s", tasks[k].id, exc)
+                    found, outcome = [], "error"
             if target == "block" and outcome is not None:
                 outcomes[outcome] += 1
             if fresh := [c for c in found if c.id not in known]:
@@ -240,7 +248,7 @@ class ConditionSync:
 
     def _target(self, task: Task, snapshot: Snapshot) -> str | None:
         """Which text of the task the patterns read: a bare block's reason, or a ready
-        task's title (for the dispatch gate). None: neither applies."""
+        task's title and body (for the dispatch gate). None: neither applies."""
         if not self.patterns:
             return None
         if _bare_block(task, snapshot):
@@ -249,7 +257,12 @@ class ConditionSync:
             return "ready_task"
         return None
 
-    def _resolve(self, task: Task, target: str) -> tuple[list[Condition], str | None]:
+    def _resolve(
+        self,
+        task: Task,
+        target: str,
+        refs: list[tuple[BlockConditionPattern, PrRef | None]],
+    ) -> tuple[list[Condition], str | None]:
         """The conditions for the task's text, and the outcome (None: no match).
 
         A block gets the first PR that resolves; a ready task every one its title and body
@@ -259,7 +272,7 @@ class ConditionSync:
         it is, so it does not flap between "waiting" and "no condition"."""
         outcome: str | None = None
         found: list[Condition] = []
-        for p, ref in self._matches(task, target):
+        for p, ref in refs:
             outcome = outcome or "unresolved"
             if ref is None:
                 continue
@@ -300,7 +313,12 @@ class ConditionSync:
                 seen.add(key)
                 allowed = ref is not None and self.connector.allows(ref.repo)
                 found.append((p, ref if allowed else None))
-                if target != "block" and len(found) >= MAX_READY_REFS:
+                if target != "block" and sum(r is not None for _, r in found) >= MAX_READY_REFS:
+                    log.debug(
+                        "task %s names more PRs than %s; the rest are ignored",
+                        task.id,
+                        MAX_READY_REFS,
+                    )
                     return found
         return found
 

@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from kelpie.connectors.github.blocks import MAX_READY_REFS, ConditionSync, load_block_conditions
+from kelpie.connectors.github.blocks import (
+    MAX_READY_REFS,
+    MAX_TASK_TEXT,
+    ConditionSync,
+    load_block_conditions,
+)
 from kelpie.connectors.github.client import GitHubClient
 from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.core.actions import ActionKind
@@ -478,3 +483,38 @@ def test_block_reason_still_takes_only_the_first_pr() -> None:
         out = sync(gh)(Snapshot(now=NOW, tasks=(task,)))
     (c,) = out.conditions
     assert c.params["pr"] == 31
+
+
+def test_unresolvable_refs_do_not_use_up_the_cap() -> None:
+    names = " ".join(f"after other/repo#{n} lands" for n in range(1, MAX_READY_REFS + 3))
+    task = replace(ready("T-1", "Many"), body=f"{names} and after #21 lands")
+    with serve() as gh:
+        gh.pull(REPO, 21)
+        out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,)))
+    assert [c.id for c in out.conditions] == ["ready:T-1:pr_merged:example/repo#21"]
+
+
+def test_title_ref_and_body_ref_and_already_known_ones() -> None:
+    task = replace(ready("T-1", "Wire it after #41 lands"), body="also after #42 lands")
+    known = Condition(
+        "ready:T-1:pr_merged:example/repo#41",
+        ConditionKind.PR_MERGED,
+        "T-1",
+        {"repo": REPO, "pr": 41},
+    )
+    with serve() as gh:
+        gh.pull(REPO, 41)
+        gh.pull(REPO, 42)
+        out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,), conditions=(known,)))
+    assert [c.id for c in out.conditions] == [
+        "ready:T-1:pr_merged:example/repo#41",
+        "ready:T-1:pr_merged:example/repo#42",
+    ]
+
+
+def test_text_beyond_the_limit_is_not_read() -> None:
+    task = replace(ready("T-1", "Long"), body="x" * MAX_TASK_TEXT + " after #51 lands")
+    with serve() as gh:
+        gh.pull(REPO, 51)
+        out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,)))
+    assert out.conditions == ()
