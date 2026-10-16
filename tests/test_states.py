@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import AlertEvent
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Dispatched, Outcome, Suppression
@@ -230,10 +231,10 @@ class FlakyAlerter(FakeAlerter):
         super().__init__()
         self.down = True
 
-    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
+    def send(self, event: AlertEvent) -> None:
         if self.down:
             raise ConnectionError("slack down")
-        super().send(title, body, severity)
+        super().send(event)
 
 
 def test_failed_delivery_is_retried_next_tick() -> None:

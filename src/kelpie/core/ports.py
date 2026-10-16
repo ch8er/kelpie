@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from kelpie.core.actions import Action, ActionKind, ActionResult
+from kelpie.core.alerts import AlertEvent
 from kelpie.core.model import (
     Condition,
     ConditionKind,
@@ -175,9 +176,11 @@ class ProviderReader(Protocol):
 
 @runtime_checkable
 class Alerter(Protocol):
-    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
-        """Deliver an alert. ``did`` is the engine's line about what Kelpie itself did (see
-        :mod:`kelpie.core.alerts`); None: telling a human is the whole action."""
+    def send(self, event: AlertEvent) -> None:
+        """Deliver an alert. The event carries the rule, subject, reason, severity,
+        transition and what Kelpie itself did as separate fields (see
+        :mod:`kelpie.core.alerts`); an implementation formats from those and must not read
+        them back out of text."""
         ...
 
 

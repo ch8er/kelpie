@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import AlertEvent
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Outcome
@@ -338,7 +339,7 @@ def test_naive_now_rejected() -> None:
 
 
 class RaisingAlerter:
-    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
+    def send(self, event: AlertEvent) -> None:
         raise ConnectionError("slack down")
 
 

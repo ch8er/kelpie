@@ -3,6 +3,7 @@
 import logging
 import time
 from collections.abc import Callable
+from datetime import timedelta
 
 import pytest
 
@@ -11,7 +12,7 @@ from kelpie.alerts.config import load_alerts
 from kelpie.alerts.slack import SlackChannel, SlackSettings, format_message, load_slack
 from kelpie.alerts.telegram import MAX_TEXT, utf16_len
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import AlertMessage, Did, Transition, parse_alert
+from kelpie.core.alerts import AlertEvent, Did, Transition
 from kelpie.metrics import Metrics
 from tests.alerts.fake_slack import FakeSlack, fake_slack
 from tests.alerts.fake_telegram import fake_telegram
@@ -32,16 +33,16 @@ def channel(fake: FakeSlack, **extra: object) -> SlackChannel:
     return settings(**extra).build({ENV: fake.origin + PATH})
 
 
-def message(**kw: object) -> AlertMessage:
+def message(**kw: object) -> AlertEvent:
     base: dict[str, object] = {
         "rule": "orphans",
         "subject": "alert task-1",
-        "body": "task-1 has had no owner for 3h.",
+        "reason": "task-1 has had no owner for 3h.",
         "severity": Severity.WARNING,
         "transition": Transition.NEW,
         "did": Did.NOTIFIED,
     }
-    return AlertMessage(**{**base, **kw})  # type: ignore[arg-type]
+    return AlertEvent(**{**base, **kw})  # type: ignore[arg-type]
 
 
 def wait_for(cond: Callable[[], bool], timeout: float = 3.0) -> None:
@@ -58,28 +59,35 @@ def test_message_has_the_telegram_layout() -> None:
     assert second == "Still open. task-1 has had no owner for 3h."
     assert third.startswith("Kelpie did: nothing, mode suggest")
     assert "failed" in format_message(message(did=Did.FAILED))
-    resolved = parse_alert("[orphans] alert task-1", "Resolved after 1.0h: gone.", "info")
+    resolved = message(
+        reason="gone.",
+        severity=Severity.INFO,
+        transition=Transition.RESOLVED,
+        age=timedelta(hours=1),
+    )
     # The engine's own wording says it: the channel's label is not added a second time.
     assert format_message(resolved).split("\n")[1] == "Resolved after 1.0h: gone."
-    still = parse_alert("[orphans] alert task-1", "Still open after 4.0h: no owner", "warning")
+    still = message(reason="no owner", transition=Transition.ESCALATED, age=timedelta(hours=4))
     assert format_message(still).split("\n")[1] == "Still open after 4.0h: no owner"
-    changed = parse_alert("[orphans] alert task-1", "Changed: now critical", "critical")
+    changed = message(
+        reason="now critical", severity=Severity.CRITICAL, transition=Transition.CHANGED
+    )
     assert format_message(changed).split("\n")[1] == "Changed: now critical"
 
 
 def test_ampersand_and_angle_brackets_are_escaped_once_and_control_chars_removed() -> None:
-    text = format_message(message(body="<!channel> <http://evil|x> a & b &lt; \x00\x1b"))
+    text = format_message(message(reason="<!channel> <http://evil|x> a & b &lt; \x00\x1b"))
     assert "&lt;!channel&gt; &lt;http://evil|x&gt; a &amp; b &amp;lt;" in text
     assert "<" not in text and ">" not in text and "\x00" not in text
     assert format_message(message(text="a<b&c>d")) == "a&lt;b&amp;c&gt;d"
 
 
 def test_caps_match_telegram_and_kelpie_did_survives() -> None:
-    text = format_message(message(body="y" * 20_000, subject="s" * 5000, did=Did.FAILED))
+    text = format_message(message(reason="y" * 20_000, subject="s" * 5000, did=Did.FAILED))
     assert "tried, and it failed" in text.split("\n")[-1]
     assert utf16_len(text) <= MAX_TEXT
     assert len(format_message(message(text="<" * 20_000))) <= 5 * MAX_TEXT  # escaped, still small
-    format_message(message(subject="task \ud800 x", body="r \udfff \ud83d")).encode("utf-8")
+    format_message(message(subject="task \ud800 x", reason="r \udfff \ud83d")).encode("utf-8")
 
 
 def test_posts_plain_text_json_to_the_webhook_path() -> None:
@@ -103,7 +111,7 @@ def test_429_with_retry_after_is_retried_and_a_huge_one_fails_as_rate_limited() 
         fake.replies = [(429, "", {"Retry-After": "0.01"}), (502, "bad gateway", {})]
         metrics = Metrics()
         delivery = Delivery([channel(fake)], metrics, backoff=0.01)
-        delivery.alerter().send("[orphans] alert task-1", "no owner", "warning")
+        delivery.alerter().send(AlertEvent("orphans", "alert task-1", "no owner", Severity.WARNING))
         wait_for(lambda: metrics.alerts_sent["slack"] == 1)
         delivery.close()
         assert len(fake.requests) == 4  # 1 (above) + 429 + 502 + success
@@ -117,7 +125,7 @@ def test_429_with_retry_after_is_retried_and_a_huge_one_fails_as_rate_limited() 
         failing.set_alert_channels(["slack"])
         fake.replies = [(429, "", {"Retry-After": "99999999"})]
         delivery = Delivery([channel(fake)], failing, backoff=0.01)
-        delivery.alerter().send("[orphans] alert task-2", "no owner", "warning")
+        delivery.alerter().send(AlertEvent("orphans", "alert task-2", "no owner", Severity.WARNING))
         wait_for(lambda: failing.alerts_failed[("slack", "rate_limited")] == 1)
         delivery.close()
         assert len(fake.requests) == 6  # not retried
@@ -180,7 +188,7 @@ def test_the_webhook_never_appears_in_logs_errors_reprs_status_or_metrics(
             with pytest.raises(PermanentError) as info:
                 ch.send(message())
             delivery = Delivery([ch], metrics, backoff=0.001)
-            delivery.alerter().send("[r] alert", "x", "warning")
+            delivery.alerter().send(AlertEvent("r", "alert", "x", Severity.WARNING))
             wait_for(lambda: metrics.alerts_failed[("slack", "rejected")] == 1)
             delivery.close()
         fake.default = (200, "ok", {})
@@ -301,7 +309,7 @@ def test_fan_out_to_telegram_and_slack_with_per_channel_filters() -> None:
 def test_slack_mentions_in_agent_text_are_neutralised_by_escaping() -> None:
     hostile = "<!channel> <!here> <!everyone> <@U012ABCDEF> <#C012ABCDEF|general> <!subteam^S1>"
     for text in (
-        format_message(message(body=hostile, subject=hostile, rule="<!here>")),
+        format_message(message(reason=hostile, subject=hostile, rule="<!here>")),
         format_message(message(text=hostile)),
     ):
         assert "<" not in text and ">" not in text  # nothing Slack could parse as markup
@@ -309,18 +317,18 @@ def test_slack_mentions_in_agent_text_are_neutralised_by_escaping() -> None:
             assert token in text
     # the whole payload as sent
     with fake_slack() as fake:
-        channel(fake).send(message(body=hostile))
+        channel(fake).send(message(reason=hostile))
     sent = fake.requests[0][2]["text"]
     assert "<!channel>" not in sent and "<@U012ABCDEF>" not in sent
     assert sent.count("&lt;!here&gt;") == 1
-    assert "​" not in format_message(message(body="a​<!here>"))  # Cf removed first
+    assert "​" not in format_message(message(reason="a​<!here>"))  # Cf removed first
 
 
-def test_slack_neither_repeats_the_engines_transition_wording() -> None:
-    body = "Still open after 4.0h: task-1 has no owner."
-    text = format_message(parse_alert("[orphans] alert task-1", body, "warning"))
-    assert "Still open. Still open" not in text
-    assert text.split("\n")[1] == body
+def test_slack_a_reason_that_looks_like_transition_wording_is_only_text() -> None:
+    reason = "Changed: Still open after 4.0h: task-1 has no owner."
+    assert format_message(message(reason=reason)).split("\n")[1] == reason
+    again = message(reason=reason, transition=Transition.ESCALATED, age=timedelta(hours=4))
+    assert format_message(again).split("\n")[1] == f"Still open after 4.0h: {reason}"
 
 
 def test_a_huge_error_page_from_a_5xx_or_429_is_still_transient() -> None:

@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from kelpie.app import ConfigError, build_app, load_rules, load_settings, render_status
+from kelpie.core.actions import Severity
+from kelpie.core.alerts import AlertEvent, Did
 from tests.alerts.fake_telegram import fake_telegram
 
 ENV = "KELPIE_TEST_TG_TOKEN"
@@ -72,7 +74,11 @@ def test_the_engine_delivers_through_the_channel_and_metrics_count_it(
         app = build_app(settings)
         try:
             assert app.engine.alerter is not None and app.alerts is not None
-            app.engine.alerter.send("[r] suggest requeue task-1", "Requeue it.", "warning")  # type: ignore[union-attr]
+            app.engine.alerter.send(  # type: ignore[union-attr]
+                AlertEvent(
+                    "r", "requeue task-1", "Requeue it.", Severity.WARNING, did=Did.SUGGESTED
+                )
+            )
             end = time.monotonic() + 3
             while not app.metrics.alerts_sent["telegram"] and time.monotonic() < end:
                 time.sleep(0.01)

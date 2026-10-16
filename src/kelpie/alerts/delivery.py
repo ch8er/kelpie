@@ -21,13 +21,14 @@ Two entry points, both never blocking and never raising:
   channel whose ``min_severity`` the severity reaches. Named channels are sent to regardless
   of ``min_severity``; unknown names are logged and skipped.
 - ``Delivery.alerter()`` returns the engine-facing ``Alerter`` port, a thin wrapper that
-  reads the engine's alert wording (transition, what Kelpie did) and routes it the same way.
+  takes the engine's :class:`~kelpie.core.alerts.AlertEvent` (rule, subject, reason,
+  transition, what Kelpie did, all as fields) and routes it the same way.
 
 The engine already de-duplicates through the action ledger and state transitions; the
 window here is a cheap safety net. An alert is a duplicate only when the last alert sent to
 that channel for the same (rule, subject) is identical, so open, resolved, open again within
 the window is delivered in full. An alert whose delivery fails for good gives up its
-entry. The fingerprint covers the wording, severity, transition and what Kelpie did.
+entry. The fingerprint covers the reason, severity, transition, age and what Kelpie did.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ from datetime import timedelta
 from typing import Protocol, runtime_checkable
 
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import AlertMessage, Did, Transition, parse_alert
+from kelpie.core.alerts import AlertEvent, Did, Transition
 from kelpie.core.ports import Alerter
 
 log = logging.getLogger(__name__)
@@ -76,7 +77,7 @@ class Channel(Protocol):
     name: str
     min_severity: Severity
 
-    def send(self, message: AlertMessage) -> None: ...
+    def send(self, message: AlertEvent) -> None: ...
 
 
 class AlertObserver(Protocol):
@@ -105,14 +106,14 @@ class _Worker:
         queue_size: int,
         backoff: float,
         horizon: float,
-        lost: Callable[[AlertMessage], None],
+        lost: Callable[[AlertEvent], None],
     ) -> None:
         self.channel = channel
         self.observer = observer
         self.backoff = backoff
         self.horizon = horizon
         self.lost = lost  # called for an alert that will never be delivered
-        self.queue: queue.Queue[AlertMessage] = queue.Queue(queue_size)
+        self.queue: queue.Queue[AlertEvent] = queue.Queue(queue_size)
         self.stopping = threading.Event()
         self.deadline = float("inf")
         self.blocked_until = 0.0  # flood control: no send before this (monotonic) time
@@ -120,7 +121,7 @@ class _Worker:
         # ``closed`` (nothing may be queued any more) and ``abandoned`` (close gave up on a
         # worker stuck inside ``send``; whatever it does later is not counted again).
         self._lock = threading.Lock()
-        self.current: AlertMessage | None = None
+        self.current: AlertEvent | None = None
         self.closed = False
         self.abandoned = False
         self.thread = threading.Thread(
@@ -128,7 +129,7 @@ class _Worker:
         )
         self.thread.start()
 
-    def offer(self, message: AlertMessage) -> str | None:
+    def offer(self, message: AlertEvent) -> str | None:
         """None when queued, else why not: ``queue_full`` or ``shutdown``."""
         with self._lock:
             if self.closed:
@@ -209,7 +210,7 @@ class _Worker:
             self.current = None
             return True
 
-    def _deliver(self, message: AlertMessage) -> None:
+    def _deliver(self, message: AlertEvent) -> None:
         """Send, retrying transient errors with a capped exponential backoff (or the
         server's ``retry_after``) until ``horizon`` seconds have passed since the alert was
         taken. Gives up earlier when the queue behind it is full (waiting longer would only
@@ -263,16 +264,16 @@ class _Worker:
         self.blocked_until = max(self.blocked_until, until)
         return asked
 
-    def _shutdown_drop(self, message: AlertMessage) -> None:
+    def _shutdown_drop(self, message: AlertEvent) -> None:
         self.lost(message)
         _notify(self.observer, "alert_dropped", self.channel.name, "shutdown")
         log.warning("alert channel %s: an alert was dropped at shutdown", self.channel.name)
 
-    def _shutdown_drop_current(self, message: AlertMessage) -> None:
+    def _shutdown_drop_current(self, message: AlertEvent) -> None:
         if self._settle():
             self._shutdown_drop(message)
 
-    def _failed(self, message: AlertMessage, cause: str, detail: str) -> None:
+    def _failed(self, message: AlertEvent, cause: str, detail: str) -> None:
         log.warning("alert channel %s: delivery failed (%s): %s", self.channel.name, cause, detail)
         self.lost(message)
         if self._settle():
@@ -316,7 +317,7 @@ class Delivery:
         """Send free ``text`` (as it is, up to each channel's length limit)."""
         try:
             level = _severity(severity)
-            message = AlertMessage("", "", text, level, Transition.NEW, Did.NOTIFIED, text)
+            message = AlertEvent("", "", text, level, Transition.NEW, Did.NOTIFIED, text=text)
             self.deliver(message, channels)
         except Exception:
             log.exception("alert routing failed")
@@ -325,7 +326,7 @@ class Delivery:
         """The engine-facing ``Alerter`` port."""
         return _EngineAlerter(self)
 
-    def deliver(self, message: AlertMessage, channels: Sequence[str] | None = None) -> None:
+    def deliver(self, message: AlertEvent, channels: Sequence[str] | None = None) -> None:
         names = None if channels is None else set(channels)
         if names is not None and (unknown := names - {c.name for c in self.channels}):
             log.warning("alerts: unknown channels %s skipped", sorted(unknown))
@@ -336,7 +337,7 @@ class Delivery:
             elif worker.channel.name in names:
                 self._route(worker, message)
 
-    def _route(self, worker: _Worker, message: AlertMessage) -> None:
+    def _route(self, worker: _Worker, message: AlertEvent) -> None:
         name = worker.channel.name
         if self._closed:  # after close nothing is delivered; say so instead of losing it
             self._dropped(name, "shutdown")
@@ -346,7 +347,7 @@ class Delivery:
             self._lost(name, message)
             self._dropped(name, why)
 
-    def _duplicate(self, channel: str, message: AlertMessage) -> bool:
+    def _duplicate(self, channel: str, message: AlertEvent) -> bool:
         now = self.clock()
         key = (channel, message.rule, message.subject)
         with self._lock:
@@ -358,10 +359,10 @@ class Delivery:
             self._last[key] = (message.fingerprint, now)
         return False
 
-    def _lost_for(self, channel: str) -> Callable[[AlertMessage], None]:
+    def _lost_for(self, channel: str) -> Callable[[AlertEvent], None]:
         return lambda message: self._lost(channel, message)
 
-    def _lost(self, channel: str, message: AlertMessage) -> None:
+    def _lost(self, channel: str, message: AlertEvent) -> None:
         """An alert that was not delivered must not suppress its own retry later."""
         key = (channel, message.rule, message.subject)
         with self._lock:
@@ -396,9 +397,9 @@ class _EngineAlerter:
     def __init__(self, delivery: Delivery) -> None:
         self._delivery = delivery
 
-    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
+    def send(self, event: AlertEvent) -> None:
         try:
-            self._delivery.deliver(parse_alert(title, body, severity, did))
+            self._delivery.deliver(event)
         except Exception:
             log.exception("alert routing failed")
 
