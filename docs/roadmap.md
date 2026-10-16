@@ -510,7 +510,7 @@ how long the quota will last. The rule stays CI-agnostic; CI specifics live in a
 - [x] Each wasted build is classified (draft/WIP, superseded, docs-only, already verified) with the minutes it burned
 - [x] Superseded running builds → `cancel_build`, executed by the CI connector (not the platform adapter) through action routing (see "action routing")
 - [ ] Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check)
-- [ ] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks` — partial: the rule does both, but from GitHub only the quota (config) and the burn are known; minutes used need the billing API (admin rights), so "exhausted" fires only when another source reports usage
+- [x] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks` (minutes used from GitHub's billing usage report, #107)
 - [x] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
 
 ### resources: read host metrics via Prometheus HTTP API
