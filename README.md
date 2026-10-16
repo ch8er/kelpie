@@ -10,7 +10,7 @@ pip install kelpie-sre && kelpie demo
 ```
 
 `kelpie demo` runs a simulated farm on your machine and shows Kelpie finding and fixing its
-problems. No farm, accounts or keys needed.
+problems. No farm, accounts or keys needed; Python 3.12 or newer.
 
 > **Alpha (0.1.0a1).** Config and storage formats may still change. Kelpie starts safe:
 > global dry-run on and every rule in `observe` mode, so it changes nothing until you let
@@ -32,7 +32,7 @@ stops.
 | A parent task stayed open after its subtasks merged | 20 tasks gated; one card sat 21 h in a pre-work status | "Close it?" with the work waiting behind it |
 | Agents waited for reviews inside their sessions | reviews took 40–90 min, 4 of 10 failed | The agent registers what it waits for and exits; Kelpie wakes the task |
 | An agent exited without a final status | hours of idle time | The task goes back to the queue |
-| A simulator cache grew about 9 GB a day | 2–3 days to a full disk | Time-to-full forecast and the fastest-growing paths |
+| A simulator cache grew about 9 GB a day | 2–3 days to a full disk | Disk alerts before it fills (a time-to-full forecast is planned) |
 | A heartbeat loop repeated one tool call overnight (another farm) | about 900 calls, each resending ~80k input tokens | Loop and budget breaker on traces, any platform |
 
 Kelpie also measures whether a fix worked. After one manual fix on that farm, review time
@@ -56,7 +56,7 @@ cp "$(python -c 'import kelpie.adapters.hermes.plugin as m; print(m.__file__)')"
 ```
 
 Add its `plugin.yaml` and enable it in Hermes as in
-[step 3 of the Hermes quickstart](docs/quickstart-hermes.md#3-hooks-plugin-tool-calls-from-hermes), then:
+[step 3 of the Hermes quickstart](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md#3-hooks-plugin-tool-calls-from-hermes), then:
 
 ```toml
 # kelpie.toml
@@ -64,8 +64,13 @@ Add its `plugin.yaml` and enable it in Hermes as in
 db_path = "~/.hermes/kanban.db"
 spool = "~/.hermes/kelpie/spool.jsonl"
 
+# Hermes heartbeats can be up to an hour old (Kelpie's default is 30 minutes)
 [engine.rules.exit_contract]
-session_stale_after = "60m"   # Hermes heartbeats can be up to an hour old
+session_stale_after = "60m"
+[engine.rules.orphan_status]
+session_stale_after = "60m"
+[engine.rules.wait_condition]
+session_stale_after = "60m"
 ```
 
 ```bash
@@ -74,7 +79,7 @@ kelpie doctor     # in a second shell
 kelpie report     # yesterday's cost-of-chaos report
 ```
 
-OTLP traces, Prometheus and Grafana: the [Hermes quickstart](docs/quickstart-hermes.md).
+OTLP traces, Prometheus and Grafana: the [Hermes quickstart](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md).
 
 ### Claude Code
 
@@ -89,7 +94,7 @@ cp "$(python -c 'import kelpie.adapters.claude_code.hook as m; print(m.__file__)
 ```
 
 Register the hook in `~/.claude/settings.json` as in
-[step 4 of the Claude Code quickstart](docs/quickstart-claude-code.md#4-the-hook), then:
+[step 4 of the Claude Code quickstart](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md#4-the-hook), then:
 
 ```toml
 # kelpie.toml
@@ -103,20 +108,23 @@ kelpie serve
 kelpie doctor
 ```
 
-Claude Code's own OpenTelemetry traces: the [Claude Code quickstart](docs/quickstart-claude-code.md).
+Claude Code's own OpenTelemetry traces: the [Claude Code quickstart](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md).
 
 ### Any agent that sends OpenTelemetry traces
 
 `kelpie serve` accepts OTLP traces (OpenTelemetry GenAI conventions) on `POST /v1/traces`.
 With traces alone, the loop and budget breaker, budgets and the token sections of the
-daily report work for any platform; rules about the task board need a platform adapter. See [Traces](docs/guide.md#traces-otlp).
+daily report work for any platform; rules about the task board need a platform adapter. See [Traces](https://github.com/ch8er/kelpie/blob/main/docs/guide.md#traces-otlp).
 
 OpenClaw and other platforms: adapters are on the way, and
-[CONTRIBUTING](CONTRIBUTING.md) explains how to add one.
+[CONTRIBUTING](https://github.com/ch8er/kelpie/blob/main/CONTRIBUTING.md) explains how to add one.
 
 ### Docker
 
+From a clone of the repository:
+
 ```bash
+git clone https://github.com/ch8er/kelpie.git && cd kelpie
 cp .env.example .env   # set GRAFANA_ADMIN_PASSWORD
 docker compose up      # Kelpie, Prometheus and Grafana with Kelpie's dashboard
 ```
@@ -131,7 +139,7 @@ docker compose up      # Kelpie, Prometheus and Grafana with Kelpie's dashboard
   ledger with cooldowns and rate limits, so Kelpie never loops on its own output. What a
   platform cannot do becomes an alert.
 - **Observe, suggest, act.** Each rule has a mode, and a global dry-run overrides them all.
-  The [act checklist](docs/act-checklist.md) is the gate before letting a rule act.
+  The [act checklist](https://github.com/ch8er/kelpie/blob/main/docs/act-checklist.md) is the gate before letting a rule act.
 - **Wait for conditions, not in sessions.** An agent registers what it waits for (CI green,
   PR merged, quota reset, a human's task) and exits; Kelpie wakes the task when it holds.
 - **A daily report.** Hours and tokens lost to chaos, the biggest wait by cause with a
@@ -164,26 +172,26 @@ The rules:
 | `output_offenders` | commands whose output floods a role's context day after day |
 
 The incidents behind each rule, the design and the daily report in full:
-[How Kelpie works](docs/guide.md).
+[How Kelpie works](https://github.com/ch8er/kelpie/blob/main/docs/guide.md).
 
 ## Documentation
 
-- [How Kelpie works](docs/guide.md): rules, daily report, alerts, traces, budgets
-- [Install and run](docs/install.md): uv, Docker, `kelpie doctor`, ports, tokens, data
-- [Configuration reference](docs/configuration.md): every section, rule and threshold
-- Quickstarts: [Hermes](docs/quickstart-hermes.md), [Claude Code](docs/quickstart-claude-code.md);
-  the [observe-to-act checklist](docs/act-checklist.md)
-- [Privacy](docs/privacy.md): what Kelpie stores from traces and hooks, and how to keep less
-- [Extending Kelpie](docs/extending.md): rules, adapters, connectors, report sections
-- [Changelog](CHANGELOG.md) · [Roadmap](docs/roadmap.md) · [Plan](docs/plan.md) ·
-  [Releasing](docs/release.md)
+- [How Kelpie works](https://github.com/ch8er/kelpie/blob/main/docs/guide.md): rules, daily report, alerts, traces, budgets
+- [Install and run](https://github.com/ch8er/kelpie/blob/main/docs/install.md): uv, Docker, `kelpie doctor`, ports, tokens, data
+- [Configuration reference](https://github.com/ch8er/kelpie/blob/main/docs/configuration.md): every section, rule and threshold
+- Quickstarts: [Hermes](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md), [Claude Code](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md);
+  the [observe-to-act checklist](https://github.com/ch8er/kelpie/blob/main/docs/act-checklist.md)
+- [Privacy](https://github.com/ch8er/kelpie/blob/main/docs/privacy.md): what Kelpie stores from traces and hooks, and how to keep less
+- [Extending Kelpie](https://github.com/ch8er/kelpie/blob/main/docs/extending.md): rules, adapters, connectors, report sections
+- [Changelog](https://github.com/ch8er/kelpie/blob/main/CHANGELOG.md) · [Roadmap](https://github.com/ch8er/kelpie/blob/main/docs/roadmap.md) · [Plan](https://github.com/ch8er/kelpie/blob/main/docs/plan.md) ·
+  [Releasing](https://github.com/ch8er/kelpie/blob/main/docs/release.md)
 
 ## Contributing
 
 Incidents from your farm are the most useful contribution: each one becomes a synthetic
-fixture and a rule test. [CONTRIBUTING.md](CONTRIBUTING.md) covers incidents, rules and
-adapters. Security issues: [SECURITY.md](SECURITY.md).
+fixture and a rule test. [CONTRIBUTING.md](https://github.com/ch8er/kelpie/blob/main/CONTRIBUTING.md) covers incidents, rules and
+adapters. Security issues: [SECURITY.md](https://github.com/ch8er/kelpie/blob/main/SECURITY.md).
 
 ## License
 
-Apache License 2.0, see [LICENSE](LICENSE). PyPI: `kelpie-sre` · CLI: `kelpie`.
+Apache License 2.0, see [LICENSE](https://github.com/ch8er/kelpie/blob/main/LICENSE). PyPI: `kelpie-sre` · CLI: `kelpie`.

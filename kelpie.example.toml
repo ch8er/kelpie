@@ -203,7 +203,7 @@ once_attempts = 3         # ...and given up after this many failed attempts
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
                           # $KELPIE_DB overrides this.
 
-# OTLP trace ingest on POST /v1/traces (same port as /metrics). See README "Traces".
+# OTLP trace ingest on POST /v1/traces (same port as /metrics). See docs/guide.md, "Traces".
 [traces]
 enabled = true
 # token_env = "KELPIE_TRACES_TOKEN"  # env var with the bearer token exporters must send.
@@ -226,7 +226,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
                           # "xcodebuild"), redacted; the command itself is never stored
 
 # Forward accepted OTLP requests, unchanged, to other backends (off unless configured; one
-# table per destination; secret header values come from env vars). See README "Traces".
+# table per destination; secret header values come from env vars). See docs/guide.md, "Traces".
 #
 # [[traces.forward]]
 # name = "langfuse"                       # metric label; default: the endpoint's host
@@ -259,7 +259,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # platforms = ["hermes", "claude-code"]          # omit: any platform
 # reduction = 0.6                                # expected share of tokens removed
 
-# Budgets: spend priced from traces (needs [traces]). See README "Budgets and spend".
+# Budgets: spend priced from traces (needs [traces]). See docs/guide.md, "Budgets and spend".
 # scope: day (whole farm) | agent | task | project; unit: usd | tokens; soft and/or hard
 # (hard > soft). Windows are rolling and must fit in [traces] retention.
 #
@@ -618,7 +618,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # #                                    # is loopback); for relays and tests
 
 # Daily "cost of chaos" report: `kelpie report [--date YYYY-MM-DD] [--send]`, scheduled on
-# the host (cron or a timer shortly after midnight). See README "Daily report".
+# the host (cron or a timer shortly after midnight). See docs/guide.md, "Daily report".
 #
 # [report]
 # timezone = "UTC"                 # where a day starts and ends (IANA name)
