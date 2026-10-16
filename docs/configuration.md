@@ -425,7 +425,7 @@ The Hermes platform adapter. Absent: no platform, and snapshots hold no tasks. D
 | --- | --- | --- | --- |
 | `db_path` | `"~/.hermes/kanban.db"` | path | The board. Named boards: `~/.hermes/kanban/boards/<slug>/kanban.db`. Opened read-only. |
 | `spool` | `"~/.hermes/kelpie/spool.jsonl"` | path or `false` | Spool written by the hooks plugin. `false`: no hook data. |
-| `lookback` | `"24h"` | duration, > 0 | Runs, spans and finished tasks older than this are left out. |
+| `lookback` | `"24h"` | duration, > 0 | Runs, spans and finished tasks older than this are left out of the rules' view. The daily report looks further back on its own (see [[report]](#report)). |
 | `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
 | `git_state` | `true` | bool | Read git state (commit, branch, changed files) of live task worktrees. Needs `git` and the agents' user. |
 | `git_timeout` | `"5s"` | duration, > 0 | Limit for each git call. |
@@ -689,7 +689,8 @@ Slack channel (`type = "slack"`):
 
 ## [report]
 
-The daily "cost of chaos" report (rule 8), built by `kelpie report`.
+The daily "cost of chaos" report (rule 8), built by `kelpie report`, or by `kelpie serve`
+once a day when `at` is set.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
@@ -702,6 +703,12 @@ The daily "cost of chaos" report (rule 8), built by `kelpie report`.
 | `verify_window` | `"1d"` | duration string, > 0 | Before/after of fixes: this long on each side. |
 | `review_roles` | `["reviewer"]` | list of roles | Whose sessions make "review time". |
 | `min_sample` | `10` | count, >= 1 | Fewer observations on a side: a small sample. |
+| `at` | unset | `"HH:MM"`, local time in `timezone` | `kelpie serve` builds yesterday's report once a day after this time, writes it to `dir` and sends the summary to `channels`. A serve that was down at that time catches up the same day; a failed run is retried every 10 minutes, at most 3 times a day. Unset: only `kelpie report` (by hand or from cron). |
+
+The report reads the board through the adapters. For the day and its before/after window
+it widens `[adapters.hermes] lookback` on its own (for that run only; the rules keep the
+configured value), so a short `lookback` does not cut the report's data, as long as the
+Hermes spool and board still hold it.
 
 ## Checks across sections
 
