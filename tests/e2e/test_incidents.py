@@ -300,18 +300,36 @@ HUMAN_GATE_RULES = {
         "human_gate_min_tasks": 3,
         "human_gate_after": "1h",
         "ready_is_queued": True,
-    }
+    },
+    "needs_you": {**SUGGEST, "human_wait_alert_after": "1h"},
 }
 
 
 def test_incident_16_human_task_gating_a_chain_is_escalated(farm: Farm) -> None:
+    """Rule 13 escalates human work, one message per person; rule 6 escalates single
+    gates only with ``escalate_human_gates = true``."""
     before = human_gate(farm)
     farm.serve(farm.config(HUMAN_GATE_RULES, human_owners=["alice"]))
+
+    text = farm.wait_message("needs_you", "Needs you (alice)", "t_store")
+    assert "holds 5 agent task(s)" in text
+    settle(farm)
+    assert farm.messages("t_calendar") == []
+    assert farm.messages("bottlenecks", "escalate") == []
+    board_unchanged(farm, before)
+
+
+def test_incident_16_per_gate_escalation_is_opt_in(farm: Farm) -> None:
+    before = human_gate(farm)
+    rules = {
+        **HUMAN_GATE_RULES,
+        "bottlenecks": {**HUMAN_GATE_RULES["bottlenecks"], "escalate_human_gates": True},
+    }
+    farm.serve(farm.config(rules, human_owners=["alice"]))
 
     text = farm.wait_message("bottlenecks", "escalate t_store", "gates 5 agent task(s)")
     assert "owner alice" in text and "Kelpie does not change dependencies" in text
     settle(farm)
-    assert farm.messages("t_calendar") == []
     board_unchanged(farm, before)
 
 

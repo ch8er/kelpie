@@ -41,9 +41,9 @@ one done, is announced as "changed" with the new list; an emptied inbox resolves
 ``escalate_to`` names the person in the alert and the report; delivery goes to the
 configured alert channels like every other alert (no per-person routing yet).
 
-Rule 6 also escalates a single human task with ``human_gate_min_tasks`` (3) or more agent
-tasks behind it, as part of the farm's critical path (the P0 part of incident 16). Set its
-``escalate_human_gates = false`` to leave human work to this inbox, one message per person.
+This rule owns escalating human work, per person. Rule 6 keeps the farm-level alert (free
+slots and only human tasks ready) and escalates single human gates only with
+``escalate_human_gates = true``.
 """
 
 from __future__ import annotations

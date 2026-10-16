@@ -101,14 +101,11 @@ expected_actions:
       idle_agents: [agent-dev-4, agent-dev-5]
       human_tasks: [T-1600]
       blocked_agent_tasks: 28
+not_expected_actions:
+  # Escalating human work is rule 13's (16-human-task-gates-chain-inbox.yaml);
+  # rule 6 escalates single gates only with escalate_human_gates = true.
   - kind: escalate
     task_id: T-1600
-    reason_contains: "gates 28 agent task(s)"
-    params:
-      owner: human-owner
-      blocked_agent_tasks: 28
-      agent_hours: 28.0
-not_expected_actions:
   - kind: escalate
     task_id: T-1650
   - kind: alert
