@@ -587,7 +587,6 @@ def test_idle_agents_with_old_ready_work_alert_dispatch() -> None:
         "ready_count": 2,
         "oldest_wait_minutes": 45,
         "likely_cause": "dispatch",
-        "assigned_busy_tasks": [],
     }
     assert "dispatcher" in action.reason
 
@@ -1007,6 +1006,7 @@ def test_assigned_backlog_or_blocked_work_does_not_make_an_owner_busy() -> None:
     assert load.busy == () and load.queue == ("A",)
     [alert] = run(snap(tasks, owners), HERMES)
     assert alert.params["likely_cause"] == "dispatch" and alert.params["assigned_busy_tasks"] == []
+    assert "1 queued task(s)" in alert.reason
 
 
 def test_assigned_review_lane_counts_as_queued() -> None:
@@ -1076,3 +1076,18 @@ def test_expired_hold_counts_idle_agents_for_assigned_held_work() -> None:
     held = labelled("A", Status.READY, "merge-hold", since=2 * H, owner_id="dev-1")
     [alert] = of(run(snap((held,), agents("developer", "dev-1", "dev-2")), rule), "hold")
     assert alert.params["idle_agents"] == ["dev-1", "dev-2"]
+
+
+def test_human_gated_slot_counts_never_exceed_the_total() -> None:
+    tasks = (
+        human("H"),
+        task("X"),
+        *(task(f"W{i}", Status.IN_PROGRESS, owner="d1") for i in range(3)),
+    )
+    owners = HUMANS + agents("developer", "d1", "d2")
+    sessions = (*(live("d1", f"W{i}") for i in range(3)), live("d1", "W0"), live("boss", "H"))
+    snapshot = snap(tasks, owners, chain("H", "X"), sessions)
+    [alert] = of(run(snapshot), "human-gated")
+    assert (alert.params["busy_slots"], alert.params["slots"]) == (1, 2)  # agents, no cap
+    [capped] = of(run(snapshot, Bottlenecks(slots=5)), "human-gated")
+    assert (capped.params["busy_slots"], capped.params["slots"]) == (3, 5)  # tasks; humans none

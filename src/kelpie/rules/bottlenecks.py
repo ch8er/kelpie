@@ -56,8 +56,9 @@ idle has the likely cause ``assigned_busy`` (a per-agent limit or the farm's cap
 reassign it, listed in ``assigned_busy_tasks``); otherwise ``dispatch``. The flag applies to
 every task of the snapshot, whichever adapter reported it.
 
-``slots`` (optional) is the farm's concurrency limit in running tasks (live sessions; Hermes
-``kanban.max_in_progress``): once that many sessions are live, idle agents are not free
+``slots`` (optional) is the farm's concurrency limit in running tasks (tasks agents run in a
+live session; Hermes ``kanban.max_in_progress``; until 2026-10 it counted agents, which is the
+same while each agent runs one task): once that many sessions are live, idle agents are not free
 capacity, and no idle-capacity alert fires (chain,
 idle with ready work, human-gated); an overloaded role is still reported, with the advice
 to give its work the next free slot instead of rebalancing.
@@ -397,10 +398,17 @@ class Bottlenecks:
         return actions
 
     def _running(self, snapshot: Snapshot) -> int:
-        """Slots in use: live sessions (one per running task; an agent may run several, as a
-        Hermes profile can, and a farm's cap such as Hermes ``max_in_progress`` counts
-        tasks)."""
-        return sum(1 for s in snapshot.sessions if is_live(s, snapshot.now))
+        """Slots in use: tasks an agent runs in a live session (an agent may run several, as
+        a Hermes profile can, and a farm's cap such as Hermes ``max_in_progress`` counts
+        tasks). Humans' sessions take no slot."""
+        humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
+        return len(
+            {
+                s.task_id
+                for s in snapshot.sessions
+                if is_live(s, snapshot.now) and s.owner_id not in humans
+            }
+        )
 
     def _free_capacity(self, snapshot: Snapshot) -> bool:
         return self.slots is None or self._running(snapshot) < self.slots
@@ -548,7 +556,7 @@ class Bottlenecks:
             Action(
                 ActionKind.ALERT,
                 NAME,
-                f"{len(idle)} agent(s) idle ({_names(idle)}) while {len(work)} ready task(s) "
+                f"{len(idle)} agent(s) idle ({_names(idle)}) while {len(work)} queued task(s) "
                 f"wait (oldest {_human(now - oldest)}): {_names(ids)}. Likely cause: {why}.",
                 severity=Severity.WARNING,
                 key=f"{NAME}:idle-ready",
@@ -561,7 +569,11 @@ class Bottlenecks:
                     "ready_count": len(ids),
                     "oldest_wait_minutes": int((now - oldest).total_seconds() // 60),
                     "likely_cause": cause,
-                    "assigned_busy_tasks": [t.id for t in stuck][: _SHOWN * 2],
+                    **(
+                        {"assigned_busy_tasks": [t.id for t in stuck][: _SHOWN * 2]}
+                        if self.ready_is_queued
+                        else {}
+                    ),
                 },
             )
         ]
@@ -664,8 +676,11 @@ class Bottlenecks:
         )
         idle = sorted({a for agents in idle_roles.values() for a in agents})
         agents = sorted({a for load in loads.values() for a in load.agents})
-        running = self._running(snapshot)
-        total = self.slots if self.slots is not None else len(agents)
+        if self.slots is not None:  # slots are running tasks
+            running, total = self._running(snapshot), self.slots
+        else:  # no cap known: running agents out of all agents
+            running = len({a for load in loads.values() for a in load.busy})
+            total = len(agents)
         behind = sorted({tid for g in gates for tid in g.behind})
         top = gates[:_SHOWN]
         listed = "; ".join(
