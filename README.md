@@ -10,13 +10,62 @@ pip install kelpie-sre && kelpie demo
 ```
 
 `kelpie demo` runs a simulated farm on your machine and shows Kelpie finding and fixing its
-problems. No farm, accounts or keys needed; Python 3.12 or newer.
-It replays a working day of real farm incidents on a simulated Hermes board, offline, then
-prints that day's report (`--keep` keeps the farm and the full report). An excerpt:
+problems. No farm, accounts or keys needed; Python 3.12 or newer. It replays a working day
+of real farm incidents on a simulated Hermes board, offline, then prints that day's report
+(`--keep` keeps the farm and the full report). An excerpt:
 
 ```console
 $ kelpie demo
-PLACEHOLDER
+Kelpie demo: one working day on a simulated agent farm
+...
+── 2. A runaway loop ─────────────────────────────────────────────────────────
+...
+10:00  ops starts t_heartbeat. Every 30 seconds it calls the model, resending
+       80k tokens of context, and runs `heartbeat_check`.
+10:05  Kelpie notices (loop_breaker): identical consecutive calls, past the
+       limit.
+       ┌ alert, as Telegram shows it
+       │ [CRITICAL] loop_breaker: alert t_heartbeat
+       │ Runaway run: session hermes-run-4 (agent ops, task t_heartbeat) made
+       │ 10 identical consecutive `heartbeat_check` calls (limit 8 within 10
+       │ minutes). Check the task before resuming it.
+       │ Stopped run hermes-run-4; task t_heartbeat is blocked for a human
+       │ (hermes kanban unblock t_heartbeat); Hermes' dispatcher ends the
+       │ worker within about 2 minutes.
+       └
+10:05  Kelpie ran `hermes kanban block --kind needs_input -- t_heartbeat ...`:
+       t_heartbeat is blocked.
+       observe  records "stop run hermes-run-4"; the loop keeps burning tokens
+                until someone looks.
+       suggest  sends the alert, ending "Suggested: stop run hermes-run-4 (not
+                done, rule in suggest mode)."; the loop runs until a person
+                stops it.
+       act      stops the run through the platform (above) and says so: one
+                critical message, to every channel.
+
+       The stop came after 10 model calls: 0.8M tokens, $2.44 ($3 per million
+       input tokens, $15 per million output). Left alone for a night like on
+       that farm (900 calls) it is 72M input tokens, about $216.
+...
+── 5. The daily report: cost of chaos ────────────────────────────────────────
+Tokens burned counts the model calls of a stuck or looping session after
+Kelpie reported it. Kelpie stopped the runaway in that same tick, so nothing
+burned here; its calls before the stop are in the day's spend.
+
+$ kelpie report --date 2026-03-03
+
+Cost of chaos: 4.5 hours lost, $0.00 in 0 tokens burned + $11.25 in stuck
+hours. 5 tasks completed, $0.49 per completed task.
+
+...
+## Fixed by Kelpie
+
+- `loop_breaker`: stop x1 `t_heartbeat`
+
+Would have done in act mode (observe, suggest or dry-run):
+
+- `stale_blocks`: unblock x1 `t_review`
+...
 ```
 
 > **Alpha (0.1.0a1).** Config and storage formats may still change. Kelpie starts safe:

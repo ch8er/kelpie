@@ -4,6 +4,8 @@ actually did."""
 from __future__ import annotations
 
 import io
+import logging
+import os
 import re
 import socket
 import subprocess
@@ -13,9 +15,12 @@ from typing import Any
 
 import pytest
 
+from kelpie.app import ConfigError
 from kelpie.cli import main
-from kelpie.demo import run
-from kelpie.demo.story import summary
+from kelpie.demo import run, story
+from kelpie.demo.farm import DemoFarm
+from kelpie.demo.narrate import Narrator
+from kelpie.demo.story import Story, summary
 
 README = Path(__file__).resolve().parents[2] / "README.md"
 
@@ -98,13 +103,27 @@ def test_the_story_is_the_same_every_time(tmp_path: Path) -> None:
 
 
 def test_the_readme_shows_what_the_demo_prints(tmp_path: Path) -> None:
-    """The README's first screen quotes the demo; every quoted line must still be printed."""
+    """The README's first screen quotes the demo: each quoted run of lines (between the
+    "..." that mark cuts) must still be printed, whole and in order."""
     text, _ = demo(tmp_path)
-    block = README.read_text().split("$ kelpie demo\n", 1)[1].split("```", 1)[0]
-    quoted = [line for line in block.splitlines() if line.strip() and line.strip() != "..."]
-    assert quoted
-    missing = [line for line in quoted if line not in text.splitlines()]
-    assert missing == []
+    printed = text.splitlines()
+    readme = README.read_text(encoding="utf-8")
+    block = readme.split("```console\n$ kelpie demo\n", 1)[1].split("```", 1)[0]
+    chunks: list[list[str]] = [[]]
+    for line in block.splitlines():
+        if line == "...":
+            chunks.append([])
+        else:
+            chunks[-1].append(line)
+    chunks = [c for c in chunks if any(line.strip() for line in c)]
+    assert len(chunks) >= 3
+    at = 0
+    for chunk in chunks:
+        found = next(
+            (i for i in range(at, len(printed)) if printed[i : i + len(chunk)] == chunk), None
+        )
+        assert found is not None, f"not printed in order: {chunk[:3]}"
+        at = found + len(chunk)
 
 
 def test_the_farm_is_removed_unless_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -160,3 +179,145 @@ def test_the_report_summary_keeps_tables_whole_and_folds_the_rest() -> None:
     assert "Hours lost: how." not in text and "not shown" not in text
     assert all(len(line) <= 78 for line in text.splitlines() if not line.startswith("|"))
     assert "\n  word" in text  # a list item hangs
+
+
+# --- a real install is never touched --------------------------------------------------------
+
+
+def test_the_demo_never_writes_a_real_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = tmp_path / "real" / "kelpie.db"
+    monkeypatch.setenv("KELPIE_DB", str(real))
+    monkeypatch.delenv("KELPIE_DEMO_GITHUB_TOKEN", raising=False)
+    demo(tmp_path)
+    assert not real.exists()
+    assert os.environ["KELPIE_DB"] == str(real)  # given back as it was
+    assert "KELPIE_DEMO_GITHUB_TOKEN" not in os.environ
+
+
+def test_logging_is_given_back(tmp_path: Path) -> None:
+    root = logging.getLogger()
+    handler = logging.NullHandler()
+    root.addHandler(handler)
+    level = root.level
+    try:
+        before = list(root.handlers)
+        demo(tmp_path)
+        assert root.handlers == before and root.level == level
+    finally:
+        root.removeHandler(handler)
+
+
+# --- what each mode does, as the narration says it -----------------------------------------
+
+
+def scene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **modes: str) -> Story:
+    rules = {name: dict(section) for name, section in story.RULES.items()}
+    for name, mode in modes.items():
+        rules[name]["mode"] = mode
+    monkeypatch.setattr(story, "RULES", rules)
+    farm = DemoFarm(story.DAY, tmp_path / "farm")
+    tale = Story(farm, Narrator(io.StringIO(), pace=0.0))
+    farm.start(tale.config())
+    return tale
+
+
+def test_act_on_a_stale_block_is_refused_on_hermes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scene 1's act line: Kelpie will not start with stale_blocks in act mode on Hermes."""
+    with pytest.raises(ConfigError, match=r"stale_blocks"):
+        scene(tmp_path, monkeypatch, stale_blocks="act")
+
+
+@pytest.mark.parametrize("mode", ["observe", "suggest"])
+def test_a_runaway_is_only_stopped_in_act_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    tale = scene(tmp_path, monkeypatch, loop_breaker=mode)
+    try:
+        tale.runaway_loop()
+        farm = tale.farm
+        assert farm.hermes_calls() == []
+        loops = [m for m in farm.inbox.messages if m.rule == "loop_breaker"]
+        stops = [r for r in farm.results if r.action.rule == "loop_breaker"]
+        outcomes = {r.outcome.value for r in stops}
+        if mode == "observe":  # recorded (repeats held back by the ledger), nothing sent
+            assert loops == [] and "observed" in outcomes <= {"observed", "suppressed"}
+        else:  # sent, ending "Suggested: stop run ..."
+            assert loops and loops[0].did.startswith("Suggested: stop run hermes-run-")
+    finally:
+        tale.farm.close()
+
+
+def test_a_hold_alert_is_only_recorded_in_observe_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tale = scene(tmp_path, monkeypatch, bottlenecks="observe")
+    try:
+        with pytest.raises(RuntimeError, match="no 'Resolved' message"):
+            tale.forgotten_hold()  # observed, never sent: nothing to resolve
+        farm = tale.farm
+        assert [m for m in farm.inbox.messages if m.rule == "bottlenecks"] == []
+        held = {r.outcome.value for r in farm.results if r.action.rule == "bottlenecks"}
+        assert "observed" in held <= {"observed", "suppressed"}
+    finally:
+        tale.farm.close()
+
+
+# --- failures ------------------------------------------------------------------------------
+
+
+def test_ctrl_c_cleans_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def interrupted(self: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("kelpie.demo.story.Story.runaway_loop", interrupted)
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    err = io.StringIO()
+    code, _ = run(fast=True, out=io.StringIO(), err=err)
+    assert code == 130 and "interrupted" in err.getvalue()
+    assert list(tmp_path.glob("kelpie-demo-*")) == []
+
+
+def test_a_platform_without_a_shell_is_told_plainly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "name", "nt")
+    err = io.StringIO()
+    assert run(fast=True, out=io.StringIO(), err=err) == (2, None)
+    assert "runs on Linux or macOS" in err.getvalue()
+
+
+def test_a_farm_that_cannot_be_set_up_is_told_plainly(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*args: object) -> None:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr("kelpie.demo.DemoFarm", broken)
+    err = io.StringIO()
+    assert run(fast=True, out=io.StringIO(), err=err) == (1, None)
+    assert "cannot set up the simulated farm: no space left" in err.getvalue()
+
+
+# --- the terminal --------------------------------------------------------------------------
+
+
+class Terminal(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_colour_and_pauses_only_on_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("time.sleep", slept.append)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    tty = Terminal()
+    Narrator(tty).title("Kelpie")
+    assert "\033[" in tty.getvalue() and slept
+    monkeypatch.setenv("NO_COLOR", "1")
+    plain = Terminal()
+    Narrator(plain, pace=0.0).title("Kelpie")
+    assert plain.getvalue() == "Kelpie\n"
+    piped = io.StringIO()
+    slept.clear()
+    Narrator(piped).title("Kelpie")
+    assert piped.getvalue() == "Kelpie\n" and slept == []

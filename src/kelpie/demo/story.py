@@ -12,12 +12,15 @@ simulated farm while the real Kelpie watches, then the daily report on that day:
 5. the daily "cost of chaos" report.
 
 For each, the narration says what happened on the farm, what Kelpie noticed, and what it
-does in each mode. Everything Kelpie says is what it actually sent or recorded in this run
-(the alerter's messages, the engine's results); only the farm's side is scripted.
+does in each mode. What Kelpie sent, recorded, ran and reported comes from this run (the
+alerter's events, the engine's results, the hermes CLI calls, the report); the farm's side
+is scripted. The per-mode lines describe how the engine routes each mode on Hermes, as
+``tests/demo`` checks against a run in that mode.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import textwrap
@@ -30,7 +33,7 @@ from kelpie.core.actions import ActionKind
 from kelpie.core.alerts import intent, suggested_line
 from kelpie.core.ledger import Dispatched, Outcome
 from kelpie.demo.farm import REPO, DemoFarm, Message
-from kelpie.demo.narrate import Narrator
+from kelpie.demo.narrate import WIDTH, Narrator
 from kelpie.report.cli import run as run_report
 from kelpie.sim.otlp import ModelCall
 
@@ -45,7 +48,6 @@ REPORT_SECTIONS = (
     "## Needs a human",
     "## Top 3 recommendations",
 )
-WIDTH = 78
 
 RULES = {
     # Hermes lets Kelpie stop a run; the other actions here are suggestions on Hermes.
@@ -98,7 +100,7 @@ class Story:
         self.forgotten_hold()
         self.human_gate()
         report, path = self.daily_report()
-        self.outro(path)
+        self.outro()
         return Outcomes(tuple(self.farm.inbox.messages), tuple(self.farm.results), report, path)
 
     def config(self) -> dict[str, object]:
@@ -148,7 +150,14 @@ class Story:
             'CI/merge" while the PR sat in the merge queue. The PR merged; the card stayed '
             "blocked. It was most of the block alerts of the first live run.",
         )
-        self.github.pull(REPO, 57, title="Checkout refactor", branch="hermes/t_checkout")
+        self.github.pull(
+            REPO,
+            57,
+            title="Checkout refactor",
+            branch="hermes/t_checkout",
+            created=f.ago(hours=1),
+            updated=f.ago(minutes=30),
+        )
         b.task("t_review", "todo", f.ago(minutes=5), title="Review the checkout refactor")
         b.update("t_review", assignee="reviewer")
         f.at(DAY.replace(hour=8, minute=20))
@@ -169,8 +178,9 @@ class Story:
                 ("suggest", "sends the message above; a person clears the block in one command."),
                 (
                     "act",
-                    "clears the block where the platform lets it. Hermes lets Kelpie clear "
-                    "only blocks Kelpie set, so on Hermes act stays a suggestion.",
+                    "not on Hermes yet: its adapter cannot clear a block, so Kelpie refuses "
+                    "to start with stale_blocks in act mode there. Where the adapter can, "
+                    "Kelpie clears the block itself and says so.",
                 ),
             ]
         )
@@ -205,19 +215,15 @@ class Story:
         )
         session = f"hermes-run-{rid}"
         model_calls = 0
-        for _ in range(12):  # Kelpie looks every 5 minutes; the agent keeps calling
+        for _ in range(12):  # Kelpie looks every 5 minutes; the agent calls every 30 seconds
             for _ in range(10):
                 f.advance(seconds=30)
-                if b.get("t_heartbeat").status != "running":
-                    break
                 call = ModelCall("t_heartbeat", session, MODEL, CONTEXT, 300, f.ago(seconds=5))
                 f.export([call])
                 model_calls += 1
                 f.spool.tool_call("t_heartbeat", rid, "heartbeat_check", {"target": "all"})
                 b.update("t_heartbeat", last_heartbeat_at=f.now)
-            if b.get("t_heartbeat").status != "running":
-                break
-            if any(d.action.rule == "loop_breaker" for d in self._tick()):
+            if any(d.action.rule == "loop_breaker" for d in f.tick()):
                 break
         stop = self._first("loop_breaker", ActionKind.STOP)
         o.noticed(
@@ -226,9 +232,11 @@ class Story:
         )
         self._narrate_messages("loop_breaker")
         ran = f.hermes_calls()
-        argv = " ".join(str(a) for a in ran[-1]["argv"][:6]) if ran else "nothing"  # type: ignore[index]
+        argv = ran[-1]["argv"] if ran else []
+        command = " ".join(str(a) for a in argv[:6]) if isinstance(argv, list) else "nothing"
         o.event(
-            f.now, f"Kelpie ran `hermes {argv} ...`: t_heartbeat is {b.get('t_heartbeat').status}."
+            f.now,
+            f"Kelpie ran `hermes {command} ...`: t_heartbeat is {b.get('t_heartbeat').status}.",
         )
         o.modes(
             [
@@ -245,7 +253,7 @@ class Story:
                 (
                     "act",
                     "stops the run through the platform (above) and says so: one "
-                    "critical message, on every channel.",
+                    "critical message, to every channel.",
                 ),
             ]
         )
@@ -254,9 +262,9 @@ class Story:
         overnight = 900 * CONTEXT * price["input"] / 1e6
         o.paragraph_at(
             f"The stop came after {model_calls} model calls: "
-            f"{model_calls * CONTEXT / 1e6:.1f}M tokens, ${spent:.2f} at "
-            f"${price['input']:g} per million input tokens. Left "
-            f"alone for a night like on that farm (900 calls) it is {900 * CONTEXT / 1e6:.0f}M "
+            f"{model_calls * CONTEXT / 1e6:.1f}M tokens, ${spent:.2f} (${price['input']:g} "
+            f"per million input tokens, ${price['output']:g} per million output). Left alone "
+            f"for a night like on that farm (900 calls) it is {900 * CONTEXT / 1e6:.0f}M input "
             f"tokens, about ${overnight:,.0f}."
         )
         f.advance(minutes=20)
@@ -293,7 +301,7 @@ class Story:
             f'dana puts the "{HOLD}" label on PRs #61 and #62: "for 2.5 hours, until the '
             'release is out". dev has nothing else to do.',
         )
-        found = self._tick_until_action("bottlenecks", ActionKind.ALERT, every=15)
+        self._tick_until_action("bottlenecks", ActionKind.ALERT, every=15)
         o.noticed(f.now, "Kelpie notices (bottlenecks): the hold is past its expiry.")
         self._narrate_messages("bottlenecks")
         o.modes(
@@ -301,13 +309,13 @@ class Story:
                 ("observe", "records the forgotten hold and the idle agent; sends nothing."),
                 (
                     "suggest",
-                    "sends the alert above to the hold's owner. The alert is the whole "
-                    "action: lifting a hold is a human decision.",
+                    "sends the alert above, naming the hold's owner, to the configured "
+                    "channels. The alert is the whole action: lifting a hold is a human "
+                    "decision.",
                 ),
                 ("act", "the same: Kelpie never lifts a hold."),
             ]
         )
-        del found
         self._tick_until(DAY.replace(hour=15, minute=0), every=15)
         for number, tid in ((61, "t_settings"), (62, "t_export")):
             pr = self.github.repos[REPO].pulls[number]
@@ -353,7 +361,7 @@ class Story:
             "t_iap5). Every agent is idle.",
         )
         self._tick_until_action("needs_you", ActionKind.ESCALATE, every=15)
-        self._tick()
+        f.tick()
         o.noticed(
             f.now,
             "Kelpie notices (needs_you, bottlenecks): a person's task holds the agents' work.",
@@ -364,8 +372,8 @@ class Story:
                 ("observe", "records who holds what and for how long; sends nothing."),
                 (
                     "suggest",
-                    "tells sam what is waiting on them, ordered by cost of delay, and "
-                    "the farm what it is idle on.",
+                    "sends sam's inbox, ordered by cost of delay, and what the farm is idle "
+                    "on to the configured channels.",
                 ),
                 ("act", "the same: Kelpie never changes dependencies or does a person's task."),
             ]
@@ -385,12 +393,17 @@ class Story:
         if code != 0:
             raise RuntimeError(f"kelpie report failed ({code}): {err.strip()}")
         path = f.root / "reports" / f"kelpie-report-{day}.md"
+        o.paragraph(
+            "Tokens burned counts the model calls of a stuck or looping session after "
+            "Kelpie reported it. Kelpie stopped the runaway in that same tick, so nothing "
+            "burned here; its calls before the stop are in the day's spend."
+        )
         o.line(f"$ kelpie report --date {day}", "dim")
         o.line()
         o.verbatim(summary(markdown))
         return markdown, path if path.exists() else None
 
-    def outro(self, path: Path | None) -> None:
+    def outro(self) -> None:
         o = self.out
         o.line()
         o.paragraph(
@@ -430,20 +443,21 @@ class Story:
 
     def _hermes(self, argv: Sequence[str]) -> None:
         """A person runs the hermes CLI on the board."""
-        env = {"HERMES_KANBAN_DB": str(self.board.path), "PATH": "/usr/bin:/bin"}
-        subprocess.run([str(self.farm.cli), *argv], env=env, check=True, capture_output=True)
+        env = {"HERMES_KANBAN_DB": str(self.board.path), "PATH": os.defpath}
+        done = subprocess.run(
+            [str(self.farm.cli), *argv], env=env, capture_output=True, text=True, check=False
+        )
+        if done.returncode != 0:
+            raise RuntimeError(f"hermes {' '.join(argv)} failed: {done.stderr.strip()}")
 
     # --- Kelpie's side ------------------------------------------------------------------------
-
-    def _tick(self) -> list[Dispatched]:
-        return self.farm.tick()
 
     def _tick_until(self, when: datetime, every: int = 5) -> None:
         """Let time pass until ``when``, Kelpie looking every ``every`` minutes."""
         f = self.farm
         while f.now + timedelta(minutes=every) <= when:
             f.advance(minutes=every)
-            self._tick()
+            f.tick()
         if f.now < when:
             f.at(when)
 
@@ -454,7 +468,7 @@ class Story:
         f = self.farm
         for _ in range(limit // every):
             f.advance(minutes=every)
-            for d in self._tick():
+            for d in f.tick():
                 if (
                     d.action.rule == rule
                     and d.action.kind is kind
@@ -468,7 +482,7 @@ class Story:
         inbox = self.farm.inbox.messages
         for _ in range(limit // 5):
             self.farm.advance(minutes=5)
-            self._tick()
+            self.farm.tick()
             if any(m.rule == rule and m.mentions(needle) for m in inbox[self._seen :]):
                 return
         raise RuntimeError(f"{rule} sent no {needle!r} message within {limit} minutes")

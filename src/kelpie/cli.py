@@ -116,7 +116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "demo":
         from kelpie.demo import run as run_demo
 
-        return run_demo(fast=args.fast, keep=args.keep)[0]
+        return run_demo(fast=args.fast, keep=args.keep, log_level=args.log_level.upper())[0]
     if args.command == "doctor":
         from kelpie.doctor import run as run_doctor
 

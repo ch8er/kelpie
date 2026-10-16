@@ -83,7 +83,10 @@ jobs:
           uv build --wheel --out-dir "$RUNNER_TEMP/dist"
           uv venv "$RUNNER_TEMP/demo-venv"
           VIRTUAL_ENV="$RUNNER_TEMP/demo-venv" uv pip install "$RUNNER_TEMP"/dist/*.whl
-          cd "$RUNNER_TEMP" && timeout 120 "$RUNNER_TEMP/demo-venv/bin/kelpie" demo
+          # A failed run keeps its farm (and log) here, where the step below uploads it.
+          mkdir -p "$RUNNER_TEMP/e2e/demo"
+          cd "$RUNNER_TEMP" && TMPDIR="$RUNNER_TEMP/e2e/demo" \
+            timeout 120 "$RUNNER_TEMP/demo-venv/bin/kelpie" demo
       - name: Keep the scenario logs of a failed run
         if: failure() || cancelled()
         uses: actions/upload-artifact@v4

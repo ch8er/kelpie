@@ -9,7 +9,9 @@ story decides when Kelpie looks.
 
 Nothing leaves the machine. GitHub is a fake on loopback with a fake token; there are no
 alert channels: an alerter here keeps what Kelpie would send to Telegram or Slack, for the
-narration.
+narration. Nothing of a real install is touched either: Kelpie is built with the fakes'
+tokens in its environment and without ``KELPIE_DB`` (which would point it at the real
+database), and the environment is restored right after.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -162,10 +164,8 @@ class DemoFarm:
         """Write ``config`` next to the board and build Kelpie from it."""
         path = self.root / CONFIG
         path.write_text(toml.dumps(config), encoding="utf-8")
-        # The fakes' tokens: Kelpie reads tokens from its environment only.
-        os.environ.setdefault(GITHUB_TOKEN_ENV, github.TOKEN)
-        os.environ.setdefault(TRACES_TOKEN_ENV, TRACES_TOKEN)
-        app = build_app(load_settings(path), clock=lambda: self.now)
+        with _environment({GITHUB_TOKEN_ENV: github.TOKEN, TRACES_TOKEN_ENV: TRACES_TOKEN}):
+            app = build_app(load_settings(path), clock=lambda: self.now)
         app.engine.alerter = self.inbox
         self.app = app
         self._stack.callback(app.close)
@@ -177,12 +177,6 @@ class DemoFarm:
         results = self.app.engine.tick(self.app.loop.snapshot_source)
         self.results.extend(results)
         return results
-
-    def run(self, minutes: int, every: int = 5) -> Iterator[list[Dispatched]]:
-        """Let ``minutes`` pass, Kelpie looking every ``every`` minutes."""
-        for _ in range(minutes // every):
-            self.advance(minutes=every)
-            yield self.tick()
 
     def export(self, calls: Sequence[otlp.ModelCall]) -> None:
         """An agent's OTLP exporter sends these model calls to Kelpie's ``/v1/traces``."""
@@ -213,8 +207,23 @@ class DemoFarm:
         if self._owned:
             shutil.rmtree(self.root, ignore_errors=True)
 
-    def __enter__(self) -> DemoFarm:
-        return self
 
-    def __exit__(self, *exc: object) -> None:
-        self.close()
+# Environment variables that would point the demo's Kelpie at a real install.
+_REAL = ("KELPIE_DB",)
+
+
+@contextmanager
+def _environment(values: Mapping[str, str]) -> Iterator[None]:
+    """``values`` set and :data:`_REAL` unset while Kelpie is built, then all as before."""
+    saved = {name: os.environ.get(name) for name in (*values, *_REAL)}
+    try:
+        for name in _REAL:
+            os.environ.pop(name, None)
+        os.environ.update(values)
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
