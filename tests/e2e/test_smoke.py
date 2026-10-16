@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from kelpie.sim.github import TOKEN
 from tests.sim.farm import HERMES_STALE, REPO, Farm
-from tests.sim.github import TOKEN
 
 
 def healthy_board(farm: Farm) -> None:

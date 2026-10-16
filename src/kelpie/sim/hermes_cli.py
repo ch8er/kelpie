@@ -2,8 +2,8 @@
 may run to the simulated board, the way Hermes' ``kanban_db`` does.
 
 Kelpie runs the CLI with an allow-listed environment (no ``PYTHONPATH``), so the farm writes
-a small launcher script with this repository's path and the call log baked in
-(:func:`install`).
+a small launcher script with the interpreter, the path of the ``kelpie`` package and the call
+log baked in (:func:`install`).
 
 Every call is appended as a JSON line to the call log (``hermes-calls.jsonl`` next to the
 board), whatever its environment and even if the command crashes: the arguments, the names
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sqlite3
 import sys
 import time
@@ -43,22 +44,28 @@ FAIL = "hermes-fail"
 BOARD_ENV = "HERMES_KANBAN_DB"
 TASK_ENV = "HERMES_KANBAN_TASK"
 RUN_ENV = "HERMES_KANBAN_RUN_ID"
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]  # the directory holding kelpie/
 
 
 class Refused(Exception):
     """Hermes refuses the command (exit 1)."""
 
 
-def install(directory: Path, repo_root: Path, log: Path) -> Path:
+def install(directory: Path, log: Path) -> Path:
     """Write an executable ``hermes`` launcher into ``directory`` that records its calls in
-    ``log``; return its path."""
+    ``log``; return its path. It runs this interpreter and imports this ``kelpie`` package,
+    installed or not."""
     path = directory / "hermes"
+    # Appended, not prepended: site-packages must not shadow the standard library. A shell
+    # wrapper, not a shebang: an interpreter path may hold spaces or be too long for one.
+    code = (
+        "import sys; "
+        f"sys.path.append({str(PACKAGE_ROOT)!r}); "
+        "from kelpie.sim.hermes_cli import main; "
+        f"raise SystemExit(main(sys.argv[1:], {str(log)!r}))"
+    )
     path.write_text(
-        f"#!{sys.executable}\n"
-        "import sys\n"
-        f"sys.path.insert(0, {str(repo_root)!r})\n"
-        "from tests.sim.hermes_cli import main\n"
-        f"raise SystemExit(main(sys.argv[1:], {str(log)!r}))\n",
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -c {shlex.quote(code)} "$@"\n',
         encoding="utf-8",
     )
     path.chmod(0o755)

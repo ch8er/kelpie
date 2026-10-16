@@ -16,7 +16,7 @@ import pytest
 from kelpie.adapters.hermes import HermesAdapter
 from kelpie.adapters.hermes.stop import block_task, stop_comment
 from kelpie.core.model import Status
-from tests.sim import hermes_cli, toml
+from kelpie.sim import hermes_cli, toml
 from tests.sim.farm import Farm
 from tests.sim.kelpie import problems_in
 
@@ -175,6 +175,6 @@ def test_toml_writer_round_trips() -> None:
 
 
 def test_install_writes_an_executable(tmp_path: Path) -> None:
-    path = hermes_cli.install(tmp_path, Path("/nowhere"), tmp_path / "calls.jsonl")
+    path = hermes_cli.install(tmp_path, tmp_path / "calls.jsonl")
     assert os.access(path, os.X_OK)
     assert path.read_text().startswith("#!")

@@ -21,7 +21,10 @@ from unittest import mock
 
 from kelpie.adapters.hermes import plugin
 
-_LOCK = threading.Lock()  # the plugin reads os.environ: one writer at a time
+# The plugin reads os.environ, so a hook call changes the process environment while it runs:
+# one writer at a time, and nothing else in the process may read HERMES_* meanwhile (the e2e
+# tests run Kelpie in another process; the demo runs everything in one thread).
+_LOCK = threading.Lock()
 
 
 class Spool:
@@ -37,7 +40,7 @@ class Spool:
         }
         clock = types.SimpleNamespace(time=lambda: at.timestamp()) if at is not None else None
         with _LOCK, mock.patch.dict(os.environ, env):
-            # Only this worker's variables: none of the test machine's own Hermes ones.
+            # Only this worker's variables: none of this machine's own Hermes ones.
             for key in [k for k in os.environ if k.startswith("HERMES_") and k not in env]:
                 del os.environ[key]
             if clock is None:

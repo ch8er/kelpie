@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+MAX_BODY = 4096  # Kelpie's only write (cancel) has an empty body
 TOKEN = "ghp_SimulatedFarmToken0123456789abcdef"
 BILLING_TOKEN = "ghp_SimulatedBillingToken0123456789ab"  # may read billing usage, nothing else
 
@@ -269,7 +270,8 @@ def _handler(fake: FakeGitHub) -> type[BaseHTTPRequestHandler]:
             self._serve("GET")
 
         def do_POST(self) -> None:
-            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            length = self.headers.get("Content-Length") or "0"
+            self.rfile.read(min(int(length), MAX_BODY) if length.isdigit() else 0)
             self._serve("POST")
 
         def _serve(self, method: str) -> None:

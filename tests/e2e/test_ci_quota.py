@@ -5,8 +5,8 @@ of its own, and rule 9 says the cause is billing, naming the tasks that wait.
 
 from __future__ import annotations
 
+from kelpie.sim.github import BILLING_TOKEN, TOKEN
 from tests.sim.farm import BILLING_TOKEN_ENV, REPO, Farm
-from tests.sim.github import BILLING_TOKEN, TOKEN
 
 ACCOUNT = "farm-owner"
 CI_GREEN = {
