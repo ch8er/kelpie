@@ -3,9 +3,14 @@
 Read-only, like ``kelpie status`` and ``kelpie doctor``: one snapshot is built the way the
 control loop builds it (platform adapters, the connector steps that attach conditions, and
 the span store opened read-only), every loaded rule is evaluated against it (rules are pure,
-so this is observe mode whatever their configured mode), and the explanation is printed:
+so this is observe mode whatever their configured mode), and the explanation is printed.
+Offline by default: only the connector steps that read nothing but the board run (task
+status and human task conditions); ``--refresh`` adds the network ones (GitHub PR, CI and
+block conditions), as one tick of ``kelpie serve`` would, and a note says when they were
+skipped.
 
-- the task's status and how long it has been there, owner, block and sessions;
+- the task's status and how long it has been there, owner, labels (held ones flagged),
+  block and sessions;
 - its linked conditions and their state;
 - what it waits for, link by link up to the first dead end (``kelpie.rules._chains``, the
   same graph rule 3 uses) and what waits behind it;
@@ -14,8 +19,11 @@ so this is observe mode whatever their configured mode), and the explanation is 
 - its open alert states and its latest ledger entries, read from the database without
   writing to it.
 
-Nothing is written: no ledger entry, no alert state, no span attribution. Exit codes: 0, 1
-when the task is not on the board, 2 for a config error.
+Nothing is written: no ledger entry, no alert state, no span attribution. Exit codes: 0; 1
+when the task is not on the board; 2 for a config error; 3 when a platform adapter failed to
+read its board (the task may be there: nothing is explained). ``--json`` always prints one
+object: the explanation (``schema_version`` 1; at most ``JSON_SESSIONS`` sessions, newest
+first, with ``sessions_total``), or ``{"error": "not_found" | "adapter_failed", ...}``.
 """
 
 from __future__ import annotations
@@ -32,8 +40,8 @@ from typing import Any
 from kelpie.app import (
     LoadedRules,
     Settings,
-    _connector_steps,
     build_adapters,
+    connector_steps,
     load_rules,
     merged_snapshot,
     utc_now,
@@ -44,7 +52,13 @@ from kelpie.core.ledger import LedgerEntry
 from kelpie.core.model import Condition, Session, Snapshot, Task
 from kelpie.core.spans import SpanStore
 from kelpie.core.states import OpenState
-from kelpie.core.storage import SchemaOutdated, SqliteSpanStore, _entry, _open_readonly, _state
+from kelpie.core.storage import (
+    SchemaOutdated,
+    SqliteSpanStore,
+    ledger_entry,
+    open_readonly,
+    open_state,
+)
 from kelpie.metrics import Metrics
 from kelpie.rules._chains import BlockerGraph, Chain
 from kelpie.rules._tasks import DEFAULT_STALE_AFTER, is_live, last_seen, linked_conditions
@@ -53,6 +67,28 @@ from kelpie.traces.store import SpanWindow
 log = logging.getLogger(__name__)
 
 DEFAULT_ENTRIES = 10
+SCHEMA_VERSION = 1  # of the --json object
+TEXT_SESSIONS = 3  # sessions shown in the text view, newest first
+JSON_SESSIONS = 10  # ...and in --json
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotRead:
+    """One read-only snapshot, and what went wrong or was left out while building it."""
+
+    snapshot: Snapshot
+    adapter_failures: list[str] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class Failure:
+    """Why there is no explanation: ``error`` is ``not_found`` or ``adapter_failed``."""
+
+    error: str
+    message: str
+    problems: list[str]
+    code: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,18 +113,37 @@ class Explanation:
     entries: list[LedgerEntry]
     dry_run: bool
     problems: list[str] = field(default_factory=list)
+    hold_labels: frozenset[str] = frozenset()
+
+
+class _Capture(logging.Handler):
+    """Collects the errors merged_snapshot logs for a source it leaves out."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
 
 
 def read_snapshot(
-    settings: Settings, clock: Callable[[], datetime] | None = None
-) -> tuple[Snapshot, list[str]]:
+    settings: Settings, clock: Callable[[], datetime] | None = None, refresh: bool = False
+) -> SnapshotRead:
     """One snapshot as the control loop assembles it, without writing anywhere, and the
-    sources that failed (they are left out, as on a tick)."""
+    sources that failed (they are left out, as on a tick). Without ``refresh`` no connector
+    that calls out over the network runs."""
     clock = clock or utc_now
     metrics = Metrics()
     adapters = build_adapters(settings)
-    enrich, _ = _connector_steps(settings, metrics, clock)
+    enrich, _ = connector_steps(settings, metrics, clock, network=refresh)
     problems: list[str] = []
+    github = settings.github
+    if not refresh and github is not None and github.enabled:
+        problems.append(
+            "GitHub conditions were not read (offline); conditions and blocks that depend on "
+            "them may differ from what kelpie serve sees: pass --refresh"
+        )
     store: SpanStore | None = None
     db = settings.db_path
     if settings.traces.enabled and db is not None and db.exists():
@@ -98,6 +153,9 @@ def read_snapshot(
             problems.append(f"spans left out: {exc}")
         except (OSError, sqlite3.Error, RuntimeError) as exc:
             problems.append(f"spans left out: cannot open the span store {db}: {exc}")
+    capture = _Capture()
+    app_log = logging.getLogger("kelpie.app")
+    app_log.addHandler(capture)
     try:
         traces = settings.traces
         window = (
@@ -110,14 +168,21 @@ def read_snapshot(
             adapters, metrics, clock, window, budgets, remember=False, enrich=enrich
         )()
     finally:
+        app_log.removeHandler(capture)
         close = getattr(store, "close", None)
         if callable(close):
             close()
-    problems += [f"adapter {n} failed to snapshot" for n, c in metrics.adapter_errors.items() if c]
+    failed = {n for n, c in metrics.adapter_errors.items() if c}
+    failures = [m for m in capture.messages if m.startswith("adapter ")]
+    failures += [
+        f"adapter {n} failed to snapshot"
+        for n in sorted(failed)
+        if not any(m.startswith(f"adapter {n} ") for m in failures)
+    ]
     problems += [f"connector {n} failed" for n, c in metrics.connector_errors.items() if c]
     if metrics.span_store_errors:
         problems.append("the span store could not be read")
-    return snapshot, problems
+    return SnapshotRead(snapshot, failures, problems)
 
 
 def _mentions(value: Any, task_id: str) -> bool:
@@ -159,7 +224,7 @@ def read_history(
     if not db.exists():
         return [], [], [f"no database at {db} yet"]
     try:
-        conn = _open_readonly(db, 5000)
+        conn = open_readonly(db, 5000)
     except (SchemaOutdated, RuntimeError, sqlite3.Error) as exc:
         return [], [], [f"history left out: {exc}"]
     try:
@@ -168,12 +233,12 @@ def read_history(
         sql = "SELECT * FROM states WHERE closed_at IS NULL AND (task_id = ?"
         sql += f" OR id IN ({marks}))" if ids else ")"
         rows = conn.execute(sql + " ORDER BY opened_at, rowid_", (task_id, *ids)).fetchall()
-        states = [_state(r) for r in rows]
+        states = [open_state(r) for r in rows]
         rows = conn.execute(
             "SELECT * FROM actions WHERE task_id = ? ORDER BY at DESC, id DESC LIMIT ?",
             (task_id, limit),
         ).fetchall()
-        entries = [_entry(r) for r in rows]
+        entries = [ledger_entry(r) for r in rows]
     except sqlite3.Error as exc:
         return [], [], [f"history left out: {exc}"]
     finally:
@@ -206,6 +271,7 @@ def explain_snapshot(
         entries=[],
         dry_run=dry_run,
         problems=failed,
+        hold_labels=frozenset(getattr(orphan, "hold_labels", frozenset())),
     )
 
 
@@ -214,16 +280,24 @@ def explain(
     task_id: str,
     entries: int = DEFAULT_ENTRIES,
     clock: Callable[[], datetime] | None = None,
-) -> Explanation | None:
-    """Everything ``kelpie why`` shows; None when the task is not on the board."""
+    refresh: bool = False,
+) -> Explanation | Failure:
+    """Everything ``kelpie why`` shows, or why it cannot be shown."""
     loaded = load_rules(settings.engine)
-    snapshot, problems = read_snapshot(settings, clock)
-    ex = explain_snapshot(loaded, snapshot, task_id, settings.engine.dry_run)
+    read = read_snapshot(settings, clock, refresh)
+    if read.adapter_failures:
+        return Failure(
+            "adapter_failed",
+            "a platform adapter could not read its board, so the task cannot be explained",
+            [*read.adapter_failures, *read.problems],
+            3,
+        )
+    ex = explain_snapshot(loaded, read.snapshot, task_id, settings.engine.dry_run)
     if ex is None:
-        return None
+        return Failure("not_found", f"task {task_id} is not on the board", read.problems, 1)
     state_ids = [f.action.state for f in ex.findings if f.action.state is not None]
     ex.states, ex.entries, unread = read_history(settings.db_path, task_id, state_ids, entries)
-    ex.problems = [*problems, *ex.problems, *unread]
+    ex.problems = [*read.problems, *ex.problems, *unread]
     return ex
 
 
@@ -297,18 +371,24 @@ def render(ex: Explanation) -> str:
         who = f"{t.owner_id} (not in the owner directory)"
     else:
         who = f"{owner.id} ({owner.kind}, role {owner.role})"
+    held = sorted(ex.hold_labels.intersection(t.labels))
     lines = [
         f"Task {t.id}: {t.title}",
         f"  status   {t.status} for {_age(now - t.status_since)} (since {_when(t.status_since)})",
         f"  owner    {who}; role {t.role or 'none'}" + (f"; source {t.source}" if t.source else ""),
     ]
+    if t.labels:
+        mark = f" (held: {', '.join(held)}; stop patterns skip it)" if held else ""
+        lines.append(f"  labels   {', '.join(t.labels)}{mark}")
     if t.block is not None:
         cond = f", condition {t.block.condition_id}" if t.block.condition_id else ""
         lines.append(f"  block    '{t.block.reason}' for {_age(now - t.block.since)}{cond}")
     sessions = sorted(ex.snapshot.sessions_for(t.id), key=lambda s: s.started_at, reverse=True)
     live = [s for s in sessions if is_live(s, now, ex.stale_after)]
     lines.append(f"  session  {'live' if live else 'none live'}")
-    lines += [f"    {_session(s, now, ex.stale_after)}" for s in sessions[:3]]
+    lines += [f"    {_session(s, now, ex.stale_after)}" for s in sessions[:TEXT_SESSIONS]]
+    if len(sessions) > TEXT_SESSIONS:
+        lines.append(f"    ... and {len(sessions) - TEXT_SESSIONS} older")
 
     lines.append("Conditions")
     if ex.missing_condition:
@@ -349,7 +429,9 @@ def render(ex: Explanation) -> str:
 
 def as_json(ex: Explanation) -> dict[str, Any]:
     t, now = ex.task, ex.snapshot.now
+    sessions = sorted(ex.snapshot.sessions_for(t.id), key=lambda s: s.started_at, reverse=True)
     return {
+        "schema_version": SCHEMA_VERSION,
         "task": {
             "id": t.id,
             "title": t.title,
@@ -358,6 +440,8 @@ def as_json(ex: Explanation) -> dict[str, Any]:
             "age_seconds": int((now - t.status_since).total_seconds()),
             "owner_id": t.owner_id,
             "role": t.role,
+            "labels": list(t.labels),
+            "held_by": sorted(ex.hold_labels.intersection(t.labels)),
             "block": None
             if t.block is None
             else {
@@ -375,8 +459,9 @@ def as_json(ex: Explanation) -> dict[str, Any]:
                 "ended_at": s.ended_at.isoformat() if s.ended_at else None,
                 "final_status": s.final_status.value if s.final_status else None,
             }
-            for s in ex.snapshot.sessions_for(t.id)
+            for s in sessions[:JSON_SESSIONS]
         ],
+        "sessions_total": len(sessions),
         "conditions": [
             {
                 "id": c.id,
@@ -447,11 +532,22 @@ def run(
     as_json_output: bool = False,
     entries: int = DEFAULT_ENTRIES,
     clock: Callable[[], datetime] | None = None,
+    refresh: bool = False,
 ) -> tuple[str, str, int]:
     """Stdout, stderr and the exit code."""
-    ex = explain(settings, task_id, entries, clock)
-    if ex is None:
-        return "", f"kelpie: task {task_id} is not on the board\n", 1
+    ex = explain(settings, task_id, entries, clock, refresh)
+    if isinstance(ex, Failure):
+        if as_json_output:
+            body = {
+                "schema_version": SCHEMA_VERSION,
+                "error": ex.error,
+                "task_id": task_id,
+                "message": ex.message,
+                "problems": ex.problems,
+            }
+            return json.dumps(body, indent=2) + "\n", "", ex.code
+        lines = [f"kelpie: {ex.message}", *(f"  {p}" for p in ex.problems)]
+        return "", "\n".join(lines) + "\n", ex.code
     if as_json_output:
         return json.dumps(as_json(ex), indent=2, default=str) + "\n", "", 0
     return render(ex), "", 0

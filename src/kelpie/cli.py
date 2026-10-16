@@ -61,6 +61,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     why.add_argument(
         "--entries", type=int, default=10, help="latest ledger entries to show (default 10)"
     )
+    why.add_argument(
+        "--refresh",
+        action="store_true",
+        help="also read network connectors (GitHub) as a tick would; default: offline",
+    )
     doctor = sub.add_parser(
         "doctor",
         help="check a first live run: config, observe mode, boards and task lists, hooks, spans, "
@@ -114,7 +119,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "why":
             from kelpie.why import run as run_why
 
-            out, err, code = run_why(settings, args.task, args.json, max(0, args.entries))
+            out, err, code = run_why(
+                settings, args.task, args.json, max(0, args.entries), refresh=args.refresh
+            )
             sys.stdout.write(out)
             sys.stderr.write(err)
             return code

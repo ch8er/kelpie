@@ -15,6 +15,7 @@ from kelpie.core.actions import Action, ActionKind
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import Block, Condition, ConditionKind, Session, Snapshot, Status, Task
 from kelpie.why import (
+    Explanation,
     Finding,
     _age,
     _chain,
@@ -47,6 +48,7 @@ lookback = "30d"
 
 [engine.rules.orphan_status]
 session_stale_after = "60m"
+reviewer_roles = ["reviewer"]
 """
 
 
@@ -87,7 +89,7 @@ def why(task: str, *extra: str) -> list[str]:
 def test_review_with_nothing_driving_it(farm: Path, capsys: pytest.CaptureFixture[str]) -> None:
     settings = load_settings(find_config(None))
     ex = explain(settings, "t_review", clock=lambda: NOW)
-    assert ex is not None
+    assert isinstance(ex, Explanation)
     text = render(ex)
     assert "Task t_review: Add CSV export" in text
     assert "status   review for 4h 00m" in text
@@ -102,7 +104,7 @@ def test_review_with_nothing_driving_it(farm: Path, capsys: pytest.CaptureFixtur
 def test_chain_of_a_waiting_task(farm: Path) -> None:
     settings = load_settings(find_config(None))
     ex = explain(settings, "t_child", clock=lambda: NOW)
-    assert ex is not None
+    assert isinstance(ex, Explanation)
     text = render(ex)
     assert "waits     t_child -> t_review: t_review is review" in text
     # The review alert counts the child as a dependent but does not name it.
@@ -112,9 +114,14 @@ def test_chain_of_a_waiting_task(farm: Path) -> None:
 def test_cli_exit_codes_and_json(farm: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(why("t_nope")) == 1
     assert "t_nope is not on the board" in capsys.readouterr().err
+    assert main(why("t_nope", "--json")) == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data["error"] == "not_found" and data["task_id"] == "t_nope"
     assert main(why("t_blocked", "--json")) == 0
     data = json.loads(capsys.readouterr().out)
+    assert data["schema_version"] == 1 and "sessions_total" in data
     assert data["task"]["status"] == "blocked" and data["task"]["block"]["reason"]
+    assert data["task"]["labels"] == [] and data["task"]["held_by"] == []
     assert any(f["rule"] == "stale_blocks" for f in data["findings"])
     assert data["dry_run"] is True and data["chains"] == []
     assert not (farm / "kelpie.db").exists()
@@ -212,9 +219,15 @@ def test_stop_pattern_fixture_chain_to_the_dead_end() -> None:
     assert ex is not None
     text = render(ex)
     assert "DEAD END  T-1164 -> T-1163 -> T-1162 -> T-1161 -> T-1160: ended as cancelled" in text
-    # The rule 3 alert sits on T-1161 and names T-1164 among the stuck tasks.
-    [finding] = [f for f in ex.findings if f.action.rule == "orphan_status"]
+    # Rule 4 alerts on T-1161 (the cancelled human task) and names T-1164 among the stuck.
+    [finding] = [f for f in ex.findings if f.action.rule == "stale_blocks"]
     assert finding.action.task_id == "T-1161" and "T-1164" in finding.action.params["stuck_ids"]
+    assert not [f for f in ex.findings if f.action.rule == "orphan_status"]
+    # The chain to a task off the board is rule 3's.
+    off_board = explain_snapshot(loaded, snapshot, "T-1172")
+    assert off_board is not None
+    [finding] = [f for f in off_board.findings if f.action.rule == "orphan_status"]
+    assert finding.action.params["dead_end"] == "T-9999"
     assert explain_snapshot(loaded, snapshot, "T-0") is None
 
 
@@ -277,3 +290,70 @@ def test_render_sessions_conditions_and_modes(tmp_path: Path) -> None:
     junk = tmp_path / "junk.db"
     junk.write_text("not a database")
     assert read_history(junk, "T-1", ["s"], 5)[2][0].startswith("history left out")
+
+
+def test_adapter_failure_is_not_a_missing_task(
+    farm: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (farm / "kanban.db").write_bytes(b"not a database" * 100)
+    assert main(why("t_review")) == 3
+    err = capsys.readouterr().err
+    assert "could not read its board" in err and "adapter hermes failed" in err
+    assert main(why("t_review", "--json")) == 3
+    data = json.loads(capsys.readouterr().out)
+    assert data["error"] == "adapter_failed" and data["problems"][0].startswith("adapter hermes")
+
+
+GITHUB = """
+[connectors.github]
+repos = ["example/repo"]
+"""
+
+
+def test_offline_by_default_refresh_reads_github(
+    farm: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with (farm / "kelpie.toml").open("a") as f:
+        f.write(GITHUB)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    calls: list[bool] = []
+
+    def github_steps(*args: object) -> tuple[list, list]:
+        calls.append(True)
+        return [], []
+
+    monkeypatch.setattr("kelpie.app._github_steps", github_steps)
+    assert main(why("t_review")) == 0
+    out = capsys.readouterr().out
+    assert calls == [] and "GitHub conditions were not read (offline)" in out
+    assert main(why("t_review", "--refresh")) == 0
+    out = capsys.readouterr().out
+    assert calls == [True] and "offline" not in out
+
+
+def test_labels_holds_and_session_cap() -> None:
+    hour = timedelta(hours=1)
+    task = Task("T-1", "Parked", Status.REVIEW, NOW - 3 * hour, owner_id="dev",
+                labels=("merge-first", "ui"))  # fmt: skip
+    sessions = tuple(
+        Session(
+            f"S-{i}",
+            "T-1",
+            "dev",
+            NOW - (10 - i) * hour,
+            ended_at=NOW - (9 - i) * hour,
+            final_status=Status.REVIEW,
+        )
+        for i in range(5)
+    )
+    snap = Snapshot(now=NOW, tasks=(task,), sessions=sessions)
+    rules = {"orphan_status": {"hold_labels": ["merge-first"], "reviewer_roles": ["reviewer"]}}
+    loaded = load_rules(EngineConfig.from_mapping({"rules": rules}))
+    ex = explain_snapshot(loaded, snap, "T-1")
+    assert isinstance(ex, Explanation)
+    text = render(ex)
+    assert "labels   merge-first, ui (held: merge-first; stop patterns skip it)" in text
+    assert "S-4 by dev" in text and "S-1 by dev" not in text and "... and 2 older" in text
+    data = as_json(ex)
+    assert data["task"]["held_by"] == ["merge-first"] and data["sessions_total"] == 5
+    assert [s["id"] for s in data["sessions"]] == ["S-4", "S-3", "S-2", "S-1", "S-0"]

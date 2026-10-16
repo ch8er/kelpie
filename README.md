@@ -220,9 +220,10 @@ farm throughput metrics from traces.
   [Daily report](#daily-report), including the before/after effect of yesterday's fixes.
 - **Dashboards**: no custom UI. Kelpie exposes Prometheus metrics on `/metrics`, Grafana
   shows them, traces open in Langfuse. CLI: `kelpie status`, `kelpie report` and
-  `kelpie why <task>`: one read-only snapshot, every rule evaluated against it (observe), and
-  the task's status and age, owner and sessions, conditions, what it waits for up to the
-  first dead end, the rule findings, its open alert states and latest ledger entries.
+  `kelpie why <task>`: one read-only, offline snapshot (`--refresh` adds GitHub), every rule
+  evaluated against it (observe), and the task's status and age, owner, labels and sessions,
+  conditions, what it waits for up to the first dead end, the rule findings, its open alert
+  states and latest ledger entries.
 - **Farm throughput** (`kelpie.report.throughput`): per role, tasks completed per hour,
   hand-offs per hour, utilization, mean and current queue length, rework rate and cost per
   completed task, plus task-hours by stage (working, queue, review, waiting for conditions,

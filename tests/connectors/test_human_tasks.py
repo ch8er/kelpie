@@ -14,8 +14,8 @@ from kelpie.app import (
     ConfigError,
     HermesSettings,
     Settings,
-    _connector_steps,
     build_adapters,
+    connector_steps,
     load_rules,
     load_settings,
     render_status,
@@ -404,7 +404,7 @@ def test_bad_config(tmp_path: Path, text: str, match: str) -> None:
 def test_step_is_wired_only_when_configured(tmp_path: Path) -> None:
     def steps(text: str) -> list[str]:
         settings = load_settings(write(tmp_path, text))
-        return [name for name, _ in _connector_steps(settings, Metrics(), lambda: NOW)[0]]
+        return [name for name, _ in connector_steps(settings, Metrics(), lambda: NOW)[0]]
 
     # task_status needs only the board and always runs first.
     assert steps("") == ["task_status"]

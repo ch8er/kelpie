@@ -52,6 +52,7 @@ restart `kelpie serve` after a change. Unknown sections or keys stop Kelpie with
 | `kelpie serve [--host H] [--port P]` | Control loop plus HTTP endpoints. Defaults: `$KELPIE_HOST` or `127.0.0.1`, `$KELPIE_PORT` or `9464`. |
 | `kelpie status` | Rules with their mode, adapters, traces, connectors, alert channels and budgets. Reads the database without changing it. |
 | `kelpie doctor [--prometheus URL]` | Checks a first live run (see below). |
+| `kelpie why <task> [--json] [--entries N] [--refresh]` | Why one task is not moving: status and age, owner, labels, sessions, conditions, what it waits for up to the first dead end, the rule findings, open alert states and latest ledger entries. Read-only and offline: `--refresh` also reads network connectors (GitHub). Exit 1: not on the board; 3: an adapter could not read its board. `--json` always prints one object (`schema_version`, or `error`). |
 | `kelpie report [--date YYYY-MM-DD] [--send]` | The daily report (see the README, "Daily report"). |
 | `kelpie fix "note" [--rule R] [--command PREFIX] [--role ROLE] [--at TIME]` | Records a fix so the daily report measures its effect; `kelpie fix --list [--days N]` lists them. |
 
