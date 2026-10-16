@@ -68,6 +68,7 @@ uv run lint-imports
 uv run pytest --cov=kelpie
 uv run coverage report --include='src/kelpie/rules/*' --fail-under=90
 uv run kelpie status                # rules that would load, with their mode
+uv run kelpie demo --fast           # the simulated farm's day, narrated (offline)
 uv run kelpie serve                 # control loop; /metrics and /healthz on :9464
 scripts/create_issues.sh --dry-run
 ```

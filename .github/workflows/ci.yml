@@ -77,6 +77,13 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
       - run: uv run pytest tests/e2e -v --basetemp=${{ runner.temp }}/e2e
+      # What a visitor runs: the wheel in a fresh venv, outside the repository.
+      - name: kelpie demo from the built wheel
+        run: |
+          uv build --wheel --out-dir "$RUNNER_TEMP/dist"
+          uv venv "$RUNNER_TEMP/demo-venv"
+          VIRTUAL_ENV="$RUNNER_TEMP/demo-venv" uv pip install "$RUNNER_TEMP"/dist/*.whl
+          cd "$RUNNER_TEMP" && timeout 120 "$RUNNER_TEMP/demo-venv/bin/kelpie" demo
       - name: Keep the scenario logs of a failed run
         if: failure() || cancelled()
         uses: actions/upload-artifact@v4

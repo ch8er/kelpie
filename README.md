@@ -11,6 +11,13 @@ pip install kelpie-sre && kelpie demo
 
 `kelpie demo` runs a simulated farm on your machine and shows Kelpie finding and fixing its
 problems. No farm, accounts or keys needed; Python 3.12 or newer.
+It replays a working day of real farm incidents on a simulated Hermes board, offline, then
+prints that day's report (`--keep` keeps the farm and the full report). An excerpt:
+
+```console
+$ kelpie demo
+PLACEHOLDER
+```
 
 > **Alpha (0.1.0a1).** Config and storage formats may still change. Kelpie starts safe:
 > global dry-run on and every rule in `observe` mode, so it changes nothing until you let
