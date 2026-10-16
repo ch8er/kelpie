@@ -8,9 +8,10 @@ from collections import defaultdict
 from kelpie.core.spans import TokenUsage, usage
 from kelpie.core.stages import STAGES, UNKNOWN_ROLE, task_roles
 from kelpie.report import md
+from kelpie.report.daily import wait_causes
 from kelpie.report.sections import Section, SectionContext, Spend, register_section
 from kelpie.report.throughput import throughput
-from kelpie.report.waits import WAIT_CAUSES, WaitCauses
+from kelpie.report.waits import WAIT_CAUSES
 
 TITLE = "Farm throughput"
 STAGE_NAMES = {
@@ -45,9 +46,7 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         ctx.end,
         inputs.review_roles,
         ctx.roles,
-        WaitCauses(
-            inputs.conditions, [e for e in inputs.actions if e.at < ctx.end], inputs.hold_labels
-        ),
+        wait_causes(inputs, ctx.start, ctx.end),  # as the report's biggest wait
     )
     if not roles:
         return None

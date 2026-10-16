@@ -3,15 +3,15 @@
 
 **Cause of a task's wait**, the first that applies:
 
-1. ``hold``: the task carries a hold label (rule 6's ``hold_labels`` and ``holds``), or a
-   rule 6 hold alert of the day listed it as held;
-2. ``people``: a rule 13 alert of the day listed it as waiting on a person (an approval, a
-   human task it depends on), or it waits on a ``human_task`` condition;
-3. the kind of the condition it waits on: ``ci`` (``ci_status``), ``merge``
-   (``pr_merged``), ``quota`` (``quota_reset``), ``tasks`` (``task_status``), ``timer``
-   (``time``), ``other`` (``custom``). The condition its block names wins, then its
-   unsatisfied conditions, then the latest registered;
-4. else ``unknown``: the task waited without telling Kelpie what for.
+1. ``hold``: the task carries a hold label (rule 6's ``hold_labels`` and ``holds``);
+2. the kind of an unmet condition it waits on: ``people`` (``human_task``), ``ci``
+   (``ci_status``), ``merge`` (``pr_merged``), ``quota`` (``quota_reset``), ``tasks``
+   (``task_status``), ``timer`` (``time``), ``other`` (``custom``). The condition its block
+   names wins, then its unmet conditions, then the latest registered;
+3. ``people``: a rule 13 alert of the day listed it as an approval or as parked on a
+   person's human task;
+4. the kind of its last condition, met by now;
+5. else ``unknown``: the task waited without telling Kelpie what for.
 
 The board only says what a task waits for now (or last), so the cause is the task's latest
 known one and all its waiting time of the day counts under it. Pure and deterministic.
@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
 from kelpie.core.ledger import LedgerEntry
 from kelpie.core.model import Condition, ConditionKind, Task
@@ -74,7 +75,7 @@ class BiggestWait:
     role: str
     cause: str
     hours: float  # task-hours of the role's tasks waiting for the cause
-    work_hours: float  # the role's working and review task-hours, for scale
+    work_hours: float  # agent-hours the role's agents had a session running, for scale
     tasks: tuple[str, ...]
     repo: str | None = None  # for CI and merges: the repository most of them waited on
 
@@ -92,12 +93,13 @@ class BiggestWait:
         return (
             f"Biggest wait: {md.text(self.role)} tasks spent {self.hours:.1f} task-hours "
             f"waiting for {self.label} ({len(self.tasks)} task(s){where}), against "
-            f"{self.work_hours:.1f} h of work. Suggestion: {self.suggestion}."
+            f"{self.work_hours:.1f} agent-hours of work. Suggestion: {self.suggestion}."
         )
 
 
 class WaitCauses:
-    """The cause of each task's wait (see the module docs)."""
+    """The cause of each task's wait (see the module docs). ``entries`` are the day's
+    ledger entries: an older inbox may have been answered since."""
 
     def __init__(
         self,
@@ -112,26 +114,23 @@ class WaitCauses:
             self._by_id[c.id] = c
             if c.task_id:
                 self._by_task.setdefault(c.task_id, []).append(c)
-        self._held: set[str] = set()
+        # Rule 13: approvals (the agent task waits for a person's answer) and the agent
+        # tasks parked on a person's human task (``waiting``); not ``items[].behind``,
+        # which reaches tasks further down the chain that may wait on something else.
         self._people: set[str] = set()
         for e in entries:
-            if e.rule == "bottlenecks" and e.params.get("hold"):
-                self._held.update(_ids(e.params.get("held_tasks")))
-            elif e.rule == "needs_you":
+            if e.rule == "needs_you" and "escalate_to" in e.params:
+                self._people.update(_ids(e.params.get("approvals")))
                 self._people.update(_ids(e.params.get("waiting")))
-                for item in _list(e.params.get("items")):
-                    if not isinstance(item, Mapping):
-                        continue
-                    self._people.update(_ids(item.get("behind")))
-                    if item.get("kind") == "approval":
-                        self._people.update(_ids([item.get("task")]))
 
     def __call__(self, task: Task) -> str:
-        if task.id in self._held or self._labels.intersection(task.labels):
+        if self._labels.intersection(task.labels):
             return "hold"
+        found = self.condition(task)
+        if found is not None and found.satisfied is not True:
+            return _KINDS.get(found.kind, "other")  # what it waits on now
         if task.id in self._people:
             return "people"
-        found = self.condition(task)
         return _KINDS.get(found.kind, "other") if found is not None else UNKNOWN
 
     def condition(self, task: Task) -> Condition | None:
@@ -141,11 +140,11 @@ class WaitCauses:
         mine = self._by_task.get(task.id)
         if not mine:
             return None
-        return max(
-            mine,
-            key=lambda c: (c.satisfied is not True, c.registered_at is not None, c.registered_at
-                           or task.status_since, c.id),
-        )  # fmt: skip
+
+        def rank(c: Condition) -> tuple[bool, datetime, str]:
+            return (c.satisfied is not True, c.registered_at or task.status_since, c.id)
+
+        return max(mine, key=rank)
 
 
 def biggest_wait(
@@ -172,8 +171,7 @@ def biggest_wait(
             if isinstance(repo, str) and repo:
                 repos[repo] += 1
     repo = min(repos, key=lambda x: (-repos[x], x)) if repos else None
-    work = r.stages.get("working", 0.0) + r.stages.get("review", 0.0)
-    return BiggestWait(role, cause, hours, work, waited, repo)
+    return BiggestWait(role, cause, hours, r.busy_hours, waited, repo)
 
 
 def _list(value: object) -> list[object]:

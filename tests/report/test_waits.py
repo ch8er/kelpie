@@ -68,6 +68,26 @@ def ledger(rule: str, **params: Any) -> LedgerEntry:
     )
 
 
+def inbox(
+    approvals: tuple[str, ...] | list[str] = (),
+    waiting: tuple[str, ...] | list[str] = (),
+    behind: tuple[str, ...] | list[str] = (),
+) -> LedgerEntry:
+    """A rule 13 escalation, params as the rule writes them."""
+    return ledger(
+        "needs_you",
+        escalate_to="person-a",
+        human_tasks=["H-1"],
+        approvals=list(approvals),
+        blocked_agent_tasks=len(behind),
+        waiting_agent_tasks=len(waiting),
+        waiting=list(waiting),
+        cost_hours=3.0,
+        items=[{"kind": "human_task", "task": "H-1", "title": "t", "behind": list(behind),
+                "waiting_minutes": 60, "cost_hours": 3.0}],
+    )  # fmt: skip
+
+
 REVIEWED = tuple(Session(f"S{i}", f"R{i}", "rev-1", at(6), at(8)) for i in range(1, 5))
 TASKS = (
     *(waiting(f"R{i}", "reviewer") for i in range(1, 5)),
@@ -83,7 +103,7 @@ CONDITIONS = (
     ci("R4", satisfied=True),
     Condition("h-1", ConditionKind.HUMAN_TASK, "D1", {"task": "H-1"}),
 )
-ENTRIES = (ledger("needs_you", escalate_to="person-a", waiting=["D3"], items=[]),)
+ENTRIES = (inbox(waiting=["D3"]),)
 
 
 def causes() -> WaitCauses:
@@ -122,18 +142,24 @@ def test_the_condition_a_block_names_wins_then_unsatisfied_then_latest() -> None
     assert WaitCauses(met, ())(t) == "tasks"  # all met: the latest registered
 
 
-def test_hold_and_rule_13_ledger_entries_name_tasks() -> None:
+def test_rule_13_names_approvals_and_tasks_parked_on_a_person_only() -> None:
     entries = (
-        ledger("bottlenecks", hold="freeze", held_tasks=["H1", 3]),
-        ledger(
-            "needs_you",
-            items=[{"kind": "approval", "task": "A1", "behind": ["B1"]}, "junk"],
-        ),
-        ledger("bottlenecks", held_tasks=["X1"]),  # not a hold alert
+        inbox(approvals=["A1"], waiting=["W1"], behind=["B1"]),
+        ledger("needs_you", state="needs_you:person-b"),  # a resolution notice
+        ledger("bottlenecks", hold="freeze", held_tasks=["H1"]),  # held tasks are queued
     )
     of = WaitCauses((), entries)
-    plain = {tid: of(Task(tid, tid, Status.WAITING, at(8))) for tid in ("H1", "A1", "B1", "X1")}
-    assert plain == {"H1": "hold", "A1": "people", "B1": "people", "X1": UNKNOWN}
+    plain = {t: of(Task(t, t, Status.WAITING, at(8))) for t in ("A1", "W1", "B1", "H1")}
+    assert plain == {"A1": "people", "W1": "people", "B1": UNKNOWN, "H1": UNKNOWN}
+
+
+def test_what_a_task_waits_on_now_beats_rule_13() -> None:
+    """Downstream of a human task but blocked on its own CI: a CI wait, not a person's."""
+    blocked = Task("C1", "C1", Status.BLOCKED, at(8), block=Block("ci", at(8), "c-C1"))
+    entries = (inbox(waiting=["C1", "C2"]),)
+    assert WaitCauses((ci("C1"),), entries)(blocked) == "ci"
+    met = WaitCauses((ci("C2", satisfied=True),), entries)  # CI green: the person it is
+    assert met(waiting("C2", "reviewer")) == "people"
 
 
 def test_waits_by_cause_per_role_and_the_biggest() -> None:
@@ -151,11 +177,11 @@ def test_waits_by_cause_per_role_and_the_biggest() -> None:
     wait = biggest_wait(list(roles.values()), TASKS, causes())
     assert wait is not None
     assert (wait.role, wait.cause, wait.hours) == ("reviewer", "ci", pytest.approx(64.0))
-    assert wait.work_hours == pytest.approx(8.0)  # four two-hour reviews
+    assert wait.work_hours == pytest.approx(2.0)  # one reviewer, sessions 06-08
     assert wait.repo == "example/app"  # two of three named repositories
     assert wait.headline().startswith(
         "Biggest wait: reviewer tasks spent 64.0 task-hours waiting for CI (4 task(s), "
-        "mostly on `example/app`), against 8.0 h of work. Suggestion: add CI capacity"
+        "mostly on `example/app`), against 2.0 agent-hours of work. Suggestion: add CI capacity"
     )
 
 
@@ -208,3 +234,18 @@ def test_role_names_are_escaped_in_the_headline() -> None:
     report = build_report(inputs(tasks=odd, sessions=(), conditions=(), actions=()), sections={})
     assert report.biggest_wait is not None
     assert "dev\\|\\*ops\\* tasks" in render_markdown(report)
+
+
+def test_only_the_day_s_ledger_counts() -> None:
+    yesterday = replace(inbox(waiting=["D4"]), at=at(-20))
+    report = build_report(inputs(tasks=(waiting("D4", "developer"),), sessions=(),
+                                 conditions=(), actions=(yesterday,)), sections={})  # fmt: skip
+    assert report.biggest_wait is not None and report.biggest_wait.cause == UNKNOWN
+
+
+def test_waiting_for_a_review_is_no_work() -> None:
+    in_review = Task("V", "V", Status.REVIEW, at(0), role="reviewer", owner_id="rev-1")
+    tasks = (*TASKS, in_review)
+    roles = throughput(tasks, REVIEWED, OWNERS, (), START, END, wait_cause=causes())
+    wait = biggest_wait(roles, tasks, causes())
+    assert wait is not None and wait.work_hours == pytest.approx(2.0)

@@ -69,6 +69,25 @@ def test_sources_follow_dry_run_and_budget_mode(
     assert src.estimated and src.modes["orphan_status"].value == "observe"
 
 
+def test_the_report_reads_the_board_s_conditions_and_the_hold_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kelpie.core.model import Condition, ConditionKind, Snapshot
+    from kelpie.report.run import load_inputs
+
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    extra = (
+        '[engine.rules.bottlenecks]\nhold_labels = ["freeze"]\n'
+        '[[engine.rules.bottlenecks.holds]]\nlabel = "merge-hold"\n'
+    )
+    src = sources(load_settings(config(tmp_path, extra)))
+    assert src.hold_labels == ("freeze", "merge-hold")
+    waits_on = (Condition("c-1", ConditionKind.CI_STATUS, "T-1"),)
+    board = Snapshot(now=datetime(2026, 3, 3, tzinfo=UTC), conditions=waits_on)
+    loaded = load_inputs(replace(src, db_path=None), date(2026, 3, 2), board)
+    assert loaded.conditions == waits_on and loaded.hold_labels == ("freeze", "merge-hold")
+
+
 def test_unknown_report_key_is_a_config_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match=r"\[report\]"):
         load_settings(config(tmp_path, "colour = 1\n"))

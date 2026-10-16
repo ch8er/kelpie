@@ -387,16 +387,17 @@ def build_report(
     )
 
 
-def wait_causes(inputs: ReportInputs, end: datetime) -> WaitCauses:
-    """What each task of the board waited for (:mod:`kelpie.report.waits`)."""
-    entries = [e for e in inputs.actions if e.at < end]
+def wait_causes(inputs: ReportInputs, start: datetime, end: datetime) -> WaitCauses:
+    """What each task of the board waited for (:mod:`kelpie.report.waits`), from the day's
+    ledger entries (rule 13 re-records an open inbox about hourly)."""
+    entries = [e for e in inputs.actions if start <= e.at < end]
     return WaitCauses(inputs.conditions, entries, inputs.hold_labels)
 
 
 def _biggest_wait(
     inputs: ReportInputs, start: datetime, end: datetime, roles: Mapping[str, str]
 ) -> BiggestWait | None:
-    causes = wait_causes(inputs, end)
+    causes = wait_causes(inputs, start, end)
     per_role = throughput(
         inputs.tasks,
         inputs.sessions,
@@ -820,8 +821,8 @@ def _recommendations(
                 title=f"Cut the {md.text(wait.role)} wait for {wait.label}",
                 detail=(
                     f"{len(wait.tasks)} task(s) of the role waited {wait.hours:.1f} task-hours "
-                    f"for {wait.label}, against {wait.work_hours:.1f} h of work; "
-                    f"{wait.suggestion}"
+                    f"for {wait.label} (time the work stood still, valued like hours lost), "
+                    f"against {wait.work_hours:.1f} agent-hours of work; {wait.suggestion}"
                 ),
                 hours=wait.hours,
                 tasks=wait.tasks,

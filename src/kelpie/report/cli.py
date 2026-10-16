@@ -9,9 +9,17 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 
-from kelpie.app import Settings, _hold_labels, build_adapters, merged_snapshot, utc_now
+from kelpie.app import (
+    Settings,
+    build_adapters,
+    connector_steps,
+    hold_labels,
+    merged_snapshot,
+    utc_now,
+)
 from kelpie.core.budgets import BudgetMode
 from kelpie.core.config import Mode
+from kelpie.core.model import Snapshot
 from kelpie.metrics import Metrics
 from kelpie.report.daily import day_bounds
 from kelpie.report.fixes import MANUAL, FixEvent, FixStore
@@ -36,7 +44,7 @@ def sources(settings: Settings) -> ReportSources:
         outputs=settings.traces.outputs,
         estimated=any(b.mode is BudgetMode.SUBSCRIPTION for b in settings.budgets.budgets),
         modes=modes,
-        hold_labels=tuple(_hold_labels(engine.rules.get("bottlenecks", {}))),
+        hold_labels=tuple(hold_labels(engine.rules.get("bottlenecks", {}))),
     )
 
 
@@ -55,6 +63,17 @@ def report_settings(settings: Settings, day: date, now: datetime) -> Settings:
     return replace(settings, hermes=replace(hermes, lookback=needed))
 
 
+def report_board(
+    settings: Settings, day: date, clock: Callable[[], datetime], metrics: Metrics
+) -> Snapshot:
+    """The board the report of ``day`` reads: the adapters, looking back as far as the day
+    needs, with the connector steps ``kelpie serve`` runs (GitHub and human-task conditions),
+    so the report knows what waiting tasks wait for."""
+    enrich, _ = connector_steps(settings, metrics, clock)
+    adapters = build_adapters(report_settings(settings, day, clock()))
+    return merged_snapshot(adapters, metrics, clock, enrich=enrich)()
+
+
 def run(
     settings: Settings,
     day_text: str | None,
@@ -70,9 +89,7 @@ def run(
     except ValueError:
         return "", f"kelpie: --date must be YYYY-MM-DD, got {day_text!r}\n", 2
     metrics = Metrics()
-    board = merged_snapshot(
-        build_adapters(report_settings(settings, day, clock())), metrics, clock
-    )()
+    board = report_board(settings, day, clock, metrics)
     try:
         report, markdown = generate(sources(settings), day, board)
     except (OSError, sqlite3.Error, RuntimeError) as exc:
@@ -174,8 +191,7 @@ def scheduled_run(
     delivery; None: not sent). False when the database could not be read (retried)."""
 
     def run_day(day: date) -> bool:
-        adapters = build_adapters(report_settings(settings, day, clock()))
-        board = merged_snapshot(adapters, Metrics(), clock)()
+        board = report_board(settings, day, clock, Metrics())
         try:
             report, markdown = generate(sources(settings), day, board)
         except (OSError, sqlite3.Error, RuntimeError) as exc:
