@@ -91,8 +91,9 @@ class AlertEvent:
     @property
     def fingerprint(
         self,
-    ) -> tuple[str, str, str, Severity, str | None, Transition, timedelta | None, Did, str | None]:
-        """What makes two alerts the same one for de-duplication."""
+    ) -> tuple[str, str, str, Severity, str | None, Transition, str | None, Did, str | None]:
+        """What makes two alerts the same one for de-duplication. The age counts as it is
+        worded ("4.0h"), so an alert re-sent a minute later is still the same one."""
         return (
             self.rule,
             self.subject,
@@ -100,7 +101,7 @@ class AlertEvent:
             self.severity,
             self.text,
             self.transition,
-            self.age,
+            format_age(self.age) if self.age is not None else None,
             self.did,
             self.did_text,
         )

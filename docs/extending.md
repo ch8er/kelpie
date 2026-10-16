@@ -386,10 +386,10 @@ An alerter is what the engine sends alerts to: the `Alerter` protocol in
 | `subject` | What it is about, e.g. `requeue T-12`; with `rule` it identifies the alert for de-duplication. |
 | `reason` | The rule's own text, untrusted: send it as plain text or escape it. |
 | `severity` | `info`, `warning` or `critical`. An action that failed or could not be carried out is at least `warning`. |
-| `transition` | `new`, `still open`, `changed` or `resolved`, for alerts about a lasting condition (`Action.state`); `new` otherwise. |
-| `age` | How long the condition has been open, for `still open` and `resolved`; else `None`. |
+| `transition` | `new`, `still open`, `changed` or `resolved`, for alerts about a lasting condition (`Action.state`); `new` otherwise, and when the state store is unavailable. |
+| `age` | How long the condition has been open (since `Action.since`, when it began, not since the first alert), for `still open` and `resolved`; else `None`. |
 | `did` | What Kelpie itself did: `notified`, `suggested`, `done`, `failed` or `not_executed`. |
-| `did_text` | The engine's one-line account of that, worded from the action and its outcome; show it as it is. |
+| `did_text` | The engine's one-line account of that, worded from the action and its outcome; show it as it is. `None` for a plain notification and for free text: word it from `did` then. |
 | `text` | Free text (the daily report goes through `Delivery.send(text, severity, channels)`); sent as it is, without the alert layout. |
 
 Format from the fields only and never read them back out of a rendered line: a reason may

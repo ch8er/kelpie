@@ -256,6 +256,20 @@ def test_the_fingerprint_covers_the_transition_the_age_and_what_kelpie_did() -> 
     other_did = AlertEvent("r", "s", "same words", Severity.WARNING, Transition.NEW, Did.FAILED)
     assert len({base.fingerprint, other_transition.fingerprint, other_did.fingerprint}) == 3
 
+    def still_open(minutes: int) -> AlertEvent:
+        return AlertEvent(
+            "r",
+            "s",
+            "same words",
+            Severity.WARNING,
+            Transition.ESCALATED,
+            age=timedelta(hours=4, minutes=minutes),
+        )
+
+    # The age counts as worded: a minute later is the same alert, a tenth of an hour is not.
+    assert still_open(1).fingerprint == still_open(2).fingerprint
+    assert still_open(1).fingerprint != still_open(7).fingerprint
+
     channel, metrics = FakeChannel("a"), Metrics()
     delivery = Delivery([channel], metrics, window=timedelta(hours=1), backoff=0.001)
     for message in (base, base, other_transition, other_did, other_did):

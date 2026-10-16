@@ -143,3 +143,33 @@ def test_the_transition_is_worded_once_in_lead_in() -> None:
     assert lead_in(Transition.RESOLVED, timedelta(minutes=5)) == "Resolved after 5m: "
     assert lead_in(Transition.ESCALATED) == "Still open. "  # no age known
     assert lead_in(Transition.RESOLVED) == "Resolved. "
+
+
+class FailsOnEscalation(FakeAlerter):
+    """Raises on the first escalation it is given, then records like the fake."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def send(self, event: AlertEvent) -> None:
+        if event.transition is Transition.ESCALATED and not self.failed:
+            self.failed = True
+            raise OSError("channel down")
+        super().send(event)
+
+
+def test_the_failure_notice_of_a_state_alert_keeps_its_transition() -> None:
+    toggle = Toggle("orphans", state_alert("orphans", "T-1 has no owner."))
+    alerter = FailsOnEscalation()
+    engine = Engine([toggle], adapters=[FakeAdapter()], alerter=alerter, config=LIVE)  # type: ignore[list-item]
+    engine.tick(lambda: Snapshot(now=T0))
+    engine.tick(lambda: Snapshot(now=T0 + 5 * H))
+    opened, failed = alerter.events
+    assert opened.transition is Transition.NEW
+    assert (failed.transition, failed.age, failed.did) == (
+        Transition.ESCALATED,
+        5 * H,
+        Did.FAILED,
+    )
+    assert failed.reason == "T-1 has no owner."
