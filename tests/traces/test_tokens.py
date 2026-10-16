@@ -536,3 +536,18 @@ def test_sessions_already_burned_as_chaos_get_no_token_advice() -> None:
     assert "Bound the context of developer sessions" not in titles
     assert "Resume developer tasks instead of restarting from zero" in titles  # S-T03
     assert any("step 6 of S-T01" in line for line in section.lines)  # still reported
+
+
+def test_settings_from_the_report_config() -> None:
+    from kelpie.report.sections import SECTION_KEYS
+
+    data, snapshot = _load()
+    keys = {"tokens": SECTION_KEYS["tokens"]}
+    quiet = replace(
+        _inputs(data, snapshot), section_config={"tokens": {"min_saving_tokens": 10**9}}
+    )
+    [section] = build_report(quiet, ONLY, keys).sections
+    assert section.advice == () and section.lines  # still reported, nothing recommended
+    misspelt = replace(quiet, section_config={"tokens": {"min_savings": 1}})
+    [note] = build_report(misspelt, ONLY, keys).sections
+    assert "unknown keys ['min_savings']" in note.lines[0]

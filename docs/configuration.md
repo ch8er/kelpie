@@ -32,7 +32,7 @@ configure what exists.
 - [[connectors.human_tasks]](#connectorshuman_tasks)
 - [[connectors.llm_quotas]](#connectorsllm_quotas)
 - [[alerts]](#alerts)
-- [[report]](#report)
+- [[report]](#report), [report sections](#report-sections)
 - [Checks across sections](#checks-across-sections)
 
 ## How the config is read
@@ -710,6 +710,29 @@ The report reads the board through the adapters. For the day and its before/afte
 it widens `[adapters.hermes] lookback` on its own (for that run only; the rules keep the
 configured value), so a short `lookback` does not cut the report's data, as long as the
 Hermes spool and board still hold it.
+
+### Report sections
+
+`[report.sections.tokens]` (token optimization, `kelpie.traces.tokens`) and
+`[report.sections.tokens_fit]` (context and model fit, `kelpie.traces.fit`) accept the
+fields of `TokenSettings` and `FitSettings`. Durations are strings (`"5m"`), counts whole
+numbers >= 0, ratios, shares and tolerances numbers between 0 and 1, lists lists of names;
+any other value fails that section (noted in the report).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `tokens.cache_ttl` | `"5m"` | A call after a longer pause re-reads the prompt uncached ("expired"). |
+| `tokens.runaway_tokens` / `runaway_factor` / `min_steps` | `100000` / `4` / `5` | A session that reaches this context, this many times its first, over this many steps, without compacting, runs away. |
+| `tokens.compact_at` | `50000` | The context where compacting or a handoff would cut a runaway session. |
+| `tokens.min_saving_tokens` | `50000` | A recommendation needs at least this many tokens a day. |
+| `tokens_fit.routine_roles` | `[]` | Roles whose switch to a cheaper model is recommended (priced). Empty: model fit is reported, never recommended. |
+| `tokens_fit.allowed_models` | `[]` | Candidate models besides those the farm already runs (seen in traces). |
+| `tokens_fit.routine_min_calls` / `routine_output_tokens` / `routine_max_tool_tokens` | `20` / `400` / `1000` | Routine work: at least this many calls a day, at most this median output and mean tool output per call. |
+| `tokens_fit.min_after` | `"12h"` | After a model switch, how long before its quality is judged. |
+| `tokens_fit.min_saving_tokens` | `50000` | A recommendation needs at least this many tokens a day. |
+
+The other fields (`break_ratio`, `fragment_min_sessions`, `review_reads`, ...) are
+documented in those modules.
 
 ## Checks across sections
 
