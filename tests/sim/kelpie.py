@@ -90,9 +90,14 @@ def wait_for[T](
         time.sleep(every)
 
 
-def problems_in(lines: Sequence[str], allowed: Sequence[re.Pattern[str]] = ()) -> list[str]:
-    """Log lines at ERROR or above, failure WARNINGs and tracebacks that no ``allowed``
-    pattern matches. A traceback right after an allowed line belongs to it."""
+def problems_in(
+    lines: Sequence[str],
+    allowed: Sequence[re.Pattern[str]] = (),
+    patterns: Sequence[re.Pattern[str]] = (),
+) -> list[str]:
+    """Log lines at ERROR or above, failure WARNINGs (:data:`FAILURE_WARNINGS` and
+    ``patterns``) and tracebacks that no ``allowed`` pattern matches. A traceback right
+    after an allowed line belongs to it."""
     found = []
     excused = False  # inside the traceback of an allowed line
     for line in lines:
@@ -102,7 +107,7 @@ def problems_in(lines: Sequence[str], allowed: Sequence[re.Pattern[str]] = ()) -
                 found.append(line)
             continue
         bad = m["level"] in _PROBLEM_LEVELS or (
-            m["level"] == "WARNING" and any(p.search(line) for p in FAILURE_WARNINGS)
+            m["level"] == "WARNING" and any(p.search(line) for p in (*FAILURE_WARNINGS, *patterns))
         )
         excused = bad and any(p.search(line) for p in allowed)
         if bad and not excused:
