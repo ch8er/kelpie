@@ -16,6 +16,7 @@ keep less. It describes the code as it is; the files named below are the referen
 | Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
 | Daily reports | the report as Markdown | | `[report] dir` | not pruned |
+| LLM root-cause section (optional) | the report's aggregates, sent to the configured model | titles, block reasons, alert texts, commands, tool output, fix notes, names | the provider (or `base_url`) | the provider's terms |
 | Forwarded traces | nothing; requests pass through memory | | queue in memory | until sent or dropped |
 
 ## OTLP spans
@@ -198,6 +199,26 @@ quote parts of it (see the next section).
   and token counts. Written to `[report] dir` when set; with `--send` a short summary goes to
   the alert channels.
 - **Recorded fixes** (`kelpie fix`) keep the note you type.
+
+## LLM root-cause section
+
+Off unless `[report.llm]` is configured. When it is, each report run sends one request to
+the configured provider (or `base_url`) with the report's aggregates: the day, the number
+of completed tasks, spend, hours lost per rule and cause (with up to 5 task ids each),
+what Kelpie did or would have done (rule, action, count), open alerts (rule, severity,
+hours open, escalation level, task id), people's queues as `person-1`, `person-2`
+(agent-hours waited and counts, no names), huge-output offenders (filter, role, days,
+count) and the before/after metrics of fixes. At most 10 entries per list.
+
+Never sent: task titles and bodies, block reasons, alert and reason texts, commands and
+command prefixes, tool arguments and output, fix notes, owner ids and people's names, any
+secret. Agents control most of that text, so it could carry instructions to the model.
+Task ids are sent only if they look like ids; rule names and causes only if they are
+Kelpie's own words. The section ends with a line saying what the model saw.
+
+The API key is read from the environment at report time and sent only to the configured
+origin, without redirects. The provider keeps the request under its own terms; point
+`base_url` at a model on the same host to keep the data there.
 
 ## Forwarding
 

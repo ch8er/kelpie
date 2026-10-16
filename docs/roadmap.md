@@ -844,9 +844,9 @@ Optionally ask an LLM to analyze root causes for the day's incidents. Never used
 control loop.
 
 **Acceptance criteria**
-- [ ] Disabled by default; report is complete without it
-- [ ] Prompt contains only aggregated, redacted data
-- [ ] Clearly marked as generated text in the report
+- [x] Disabled by default; report is complete without it
+- [x] Prompt contains only aggregated, redacted data
+- [x] Clearly marked as generated text in the report
 
 ### rules: orphan_status — stop patterns (rule 3, incident 11)
 labels: P1, area:rules

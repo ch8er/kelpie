@@ -12,6 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from kelpie.core.serde import parse_duration
+from kelpie.report.root_cause import LlmSettings, load_llm
 from kelpie.report.verify import DEFAULT_MIN_SAMPLE, DEFAULT_REVIEW_ROLES, DEFAULT_WINDOW
 
 KEYS = frozenset(
@@ -27,6 +28,7 @@ KEYS = frozenset(
         "min_sample",
         "at",
         "sections",
+        "llm",
     }
 )
 SEVERITIES = ("info", "warning", "critical")
@@ -44,7 +46,8 @@ class ReportSettings:
     sample. ``at``: when ``kelpie serve`` runs yesterday's report (local time; None: only
     ``kelpie report`` or cron). ``sections``: ``[report.sections.<name>]`` tables for that
     report section (``SectionContext.config``); keys are checked against what the section
-    declares, values by the section."""
+    declares, values by the section. ``llm``: the optional root-cause section
+    (:mod:`kelpie.report.root_cause`); None: off."""
 
     timezone: str = "UTC"
     dir: Path | None = None
@@ -57,6 +60,7 @@ class ReportSettings:
     min_sample: int = DEFAULT_MIN_SAMPLE
     at: time | None = None  # local time kelpie serve runs yesterday's report (None: never)
     sections: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    llm: LlmSettings | None = None  # [report.llm]: the optional LLM root-cause section
 
     @property
     def tz(self) -> ZoneInfo:
@@ -142,4 +146,5 @@ def load_report(section: Any) -> ReportSettings:
         min_sample=sample,
         at=run_at,
         sections={k: dict(v) for k, v in sections.items()},
+        llm=load_llm(section.get("llm")),
     )
