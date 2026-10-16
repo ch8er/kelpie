@@ -829,11 +829,11 @@ human tasks that block agent work and agents waiting for approval. Replaces the 
 `human_tasks` rule.
 
 **Acceptance criteria**
-- [ ] Human tasks blocking agent tasks beyond a threshold → `escalate` to the human owner with the cost of delay (blocked agent tasks, idle agent hours)
-- [ ] Agents waiting for approval longer than N minutes → included in the inbox and escalated
-- [ ] The inbox is sorted by cost of delay and shown in the daily report's "needs a human" section
-- [ ] Human tasks with nothing blocked behind them are not escalated
-- [ ] Fixtures: existing `13-human-tasks-block-agents.yaml`; new `13-approval-wait.yaml`
+- [x] Human tasks blocking agent tasks beyond a threshold → `escalate` to the human owner with the cost of delay (blocked agent tasks, idle agent hours)
+- [x] Agents waiting for approval longer than N minutes → included in the inbox and escalated
+- [x] The inbox is sorted by cost of delay and shown in the daily report's "needs a human" section
+- [x] Human tasks with nothing blocked behind them are not escalated
+- [x] Fixtures: existing `13-human-tasks-block-agents.yaml`; new `13-approval-wait.yaml`
 
 ### adapters: Claude Code adapter
 labels: P1, adapter, area:adapters

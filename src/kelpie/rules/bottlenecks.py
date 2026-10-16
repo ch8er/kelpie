@@ -40,7 +40,9 @@ spare. An alert lasts as long as spare capacity exists.
   conditions of blocked or waiting tasks. A human task the human can do now (ready or in
   progress, nothing open before it) that has waited ``human_gate_after`` (1h) with
   ``human_gate_min_tasks`` (3) or more agent tasks behind it is escalated to its owner
-  with the count and the estimated agent hours. When idle agents have no ready work they
+  with the count and the estimated agent hours. Rule 13 (``needs_you``) also lists the
+  same task in its owner's inbox; set ``escalate_human_gates = false`` to leave human work
+  to that inbox, one message per person. When idle agents have no ready work they
   could take while such gates exist, Kelpie also alerts with the idle capacity and the
   gates that hold the most work. Kelpie never removes or rewrites a dependency: it shows
   its cost and asks whether the link is needed. Human tasks with nothing behind them are
@@ -364,6 +366,7 @@ class Bottlenecks:
     idle_alert_after: timedelta = timedelta(minutes=30)
     human_gate_min_tasks: int = 3
     human_gate_after: timedelta = timedelta(hours=1)  # a human task waits this long first
+    escalate_human_gates: bool = True  # false: rule 13's per-person inbox only
     slots: int | None = None
     # Assigned ready tasks nobody started are queued work (Hermes assigns before dispatch).
     ready_is_queued: bool = False
@@ -394,7 +397,8 @@ class Bottlenecks:
             actions.extend(self._idle_with_ready_work(snapshot, loads, held))
             actions.extend(self._human_gated(snapshot, loads, held, gates))
         actions.extend(self._expired_holds(snapshot, loads if free else {}))
-        actions.extend(self._escalate_gates(gates, now))
+        if self.escalate_human_gates:
+            actions.extend(self._escalate_gates(gates, now))
         return actions
 
     def _running(self, snapshot: Snapshot) -> int:
@@ -830,6 +834,11 @@ def build(config: dict[str, Any]) -> Bottlenecks:
     for key in ("min_idle_time", "idle_alert_after", "human_gate_after"):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
+    if "escalate_human_gates" in config:
+        flag = config.pop("escalate_human_gates")
+        if not isinstance(flag, bool):
+            raise ValueError("escalate_human_gates must be true or false")
+        kwargs["escalate_human_gates"] = flag
     if "hold_expiry" in config:
         kwargs["hold_expiry"] = _duration(config.pop("hold_expiry"), "hold_expiry")
         if kwargs["hold_expiry"] <= timedelta(0):

@@ -121,6 +121,7 @@ Fixture conventions:
 | 12 | `12-review-ping-pong.yaml` | `ping_pong` | `escalate` T-1201 (9 rounds > 3) |
 | 12 | `12-below-threshold.yaml` | `ping_pong` | `escalate` T-1211 to the configured architect at exactly 3 rounds, listing return reasons; nothing for 2 rounds, merge-conflict returns, or a done task |
 | 13 | `13-human-tasks-block-agents.yaml` | `needs_you` | `escalate` with `human_tasks` and `blocked_agent_tasks: 5`; T-1308 (nothing blocked behind it) not escalated |
+| 13 | `13-approval-wait.yaml` | `needs_you` | `escalate` to human-owner (approver of the ops role) with approval T-1351, to human-lead (default approver) with T-1352; nothing for a 10-minute-old question or a block waiting for CI |
 | 14 | `14-forgotten-merge-hold.yaml` | `bottlenecks` | `alert` idle developers with ready work, likely cause the `merge-hold` hold; `alert` the hold is past its 2h30m expiry, owner named; nothing for a fresh freeze or the busy designer |
 | 14 | `14-hermes-assigned-ready-idle.yaml` | `bottlenecks` | with `ready_is_queued`: `alert` dev-1 and dev-2 idle while their assigned ready tasks t_1, t_2 wait (cause `dispatch`); nothing for t_4 (its run is live) or the human's task |
 | 16 | `16-human-task-gates-chain.yaml` | `bottlenecks` | `alert` 3 of 5 slots busy and only human tasks ready, `human_tasks: [T-1600]`, 28 agent tasks behind; `escalate` T-1600 to its owner with `agent_hours`; nothing for the human task with nothing behind it, no parallelization advice |

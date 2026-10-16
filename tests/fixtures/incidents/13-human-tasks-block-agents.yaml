@@ -57,11 +57,11 @@ snapshot:
       owner_id: agent-dev-2
       block: {reason: "waiting_human", since: "2026-03-02T12:00:00+00:00", condition_id: C-1304}
   conditions:
-    - {id: C-1301, kind: human_task, task_id: T-1303, params: {human_task_id: T-1301}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
-    - {id: C-1302, kind: human_task, task_id: T-1305, params: {human_task_id: T-1302}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
-    - {id: C-1303, kind: human_task, task_id: T-1306, params: {human_task_id: T-1302}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
-    - {id: C-1304, kind: human_task, task_id: T-1307, params: {human_task_id: T-1302}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
-    - {id: C-1305, kind: human_task, task_id: T-1304, params: {human_task_id: T-1301}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+    - {id: C-1301, kind: human_task, task_id: T-1303, params: {task: T-1301}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+    - {id: C-1302, kind: human_task, task_id: T-1305, params: {task: T-1302}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+    - {id: C-1303, kind: human_task, task_id: T-1306, params: {task: T-1302}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+    - {id: C-1304, kind: human_task, task_id: T-1307, params: {task: T-1302}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
+    - {id: C-1305, kind: human_task, task_id: T-1304, params: {task: T-1301}, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00"}
 expected_actions:
   - kind: escalate
     reason_contains: "human"
@@ -70,6 +70,6 @@ expected_actions:
       blocked_agent_tasks: 5
 not_expected_actions:
   - kind: escalate
-    task_id: T-1308
+    reason_contains: "T-1308"  # nothing waits on it: in nobody's inbox
   - kind: escalate
     params: {human_tasks: [T-1301, T-1302, T-1308]}

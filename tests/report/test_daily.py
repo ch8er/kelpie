@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 import tomllib
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ import pytest
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.budgets import Price, PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.ledger import LedgerEntry, Outcome
+from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
 from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.states import OpenState
 from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
@@ -673,3 +674,56 @@ def test_section_tables_reach_the_report_inputs(db: Path) -> None:
     assert load_inputs(src, DAY, BOARD).section_config == {
         "tokens": {"routine_roles": ["reviewer"]}
     }
+
+
+def test_needs_you_inbox_heads_needs_a_human_by_cost() -> None:
+    def inbox(person: str | None, cost: float, items: list[str], when: datetime) -> LedgerEntry:
+        return entry(
+            when, "needs_you", ActionKind.ESCALATE, Outcome.ALERTED, None,
+            escalate_to=person, cost_hours=cost, blocked_agent_tasks=len(items),
+            items=[{"task": t} for t in items],
+        )  # fmt: skip
+
+    states = [
+        opened("needs_you:human-owner", "needs_you", at(9), at(9), at(23)),
+        opened("needs_you:human-lead", "needs_you", at(9), at(9), at(23)),
+    ]
+    actions = [
+        inbox("human-owner", 2.0, ["T-1"], at(9)),
+        inbox("human-owner", 6.5, ["T-2", "T-1"], at(12)),  # the latest wins
+        inbox("human-lead", 3.0, ["T-9"], at(10)),
+        inbox("human-gone", 99.0, ["T-0"], at(10)),  # its state is closed: not listed
+    ]
+    report = build_report(day_inputs(states=states, actions=actions))
+    assert [(i.person, i.cost_hours, i.tasks) for i in report.inbox] == [
+        ("human-owner", 6.5, ("T-2", "T-1")),
+        ("human-lead", 3.0, ("T-9",)),
+    ]
+    markdown = render_markdown(report)
+    first = markdown.index("**Needs you, human-owner**: 6.5 agent-hours waited")
+    assert first < markdown.index("**Needs you, human-lead**")
+    assert "`needs_you`" not in markdown  # no second line for the same open state
+
+
+def test_needs_you_inbox_uses_the_hourly_view_of_a_quiet_state() -> None:
+    """Opened days ago and unchanged since: only suppressed ``state_open`` entries today,
+    whose params carry the grown cost. Cooldown repeats are not the state's view."""
+
+    def quiet(cost: float, when: datetime, why: Suppression) -> LedgerEntry:
+        e = entry(
+            when, "needs_you", ActionKind.ESCALATE, Outcome.SUPPRESSED, None,
+            escalate_to="human-owner", cost_hours=cost, blocked_agent_tasks=1,
+            items=[{"task": "T-1"}],
+        )  # fmt: skip
+        return replace(e, suppression=why)
+
+    states = [
+        opened("needs_you:human-owner", "needs_you", at(9) - timedelta(days=3), at(9), at(23))
+    ]
+    actions = [
+        quiet(70.0, at(10), Suppression.STATE_OPEN),
+        quiet(83.0, at(22), Suppression.STATE_OPEN),
+        quiet(1.0, at(23), Suppression.COOLDOWN),
+    ]
+    [line] = build_report(day_inputs(states=states, actions=actions)).inbox
+    assert (line.person, line.cost_hours, line.tasks) == ("human-owner", 83.0, ("T-1",))

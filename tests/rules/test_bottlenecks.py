@@ -395,6 +395,7 @@ def test_build_accepts_valid_config() -> None:
         {"min_idle_time": "-5m"},
         {"min_idle_time": "soon"},
         {"min_idle_time": None},
+        {"escalate_human_gates": "yes"},
         {"typo": 1},
     ],
 )
@@ -766,6 +767,8 @@ def test_human_gates_follow_dependencies_and_current_waits_transitively() -> Non
 def test_gate_with_enough_work_behind_is_escalated_to_its_owner() -> None:
     tasks = (human("H"), task("A", estimate=H), task("B", estimate=30 * M), task("C"))
     snapshot = Snapshot(NOW, tasks, HUMANS, chain("H", "A", "B", "C"))
+    off = Bottlenecks(escalate_human_gates=False)  # left to rule 13's inbox
+    assert [a for a in run(snapshot, off) if a.kind is ActionKind.ESCALATE] == []
     [esc] = [a for a in run(snapshot) if a.kind is ActionKind.ESCALATE]
     assert esc.task_id == "H" and esc.state == "bottlenecks:human-gate:H"
     assert esc.since == NOW - 2 * H
@@ -1091,3 +1094,8 @@ def test_human_gated_slot_counts_never_exceed_the_total() -> None:
     assert (alert.params["busy_slots"], alert.params["slots"]) == (1, 2)  # agents, no cap
     [capped] = of(run(snapshot, Bottlenecks(slots=5)), "human-gated")
     assert (capped.params["busy_slots"], capped.params["slots"]) == (3, 5)  # tasks; humans none
+
+
+def test_build_escalate_human_gates() -> None:
+    assert build({}).escalate_human_gates is True
+    assert build({"escalate_human_gates": False}).escalate_human_gates is False

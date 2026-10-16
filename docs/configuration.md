@@ -147,7 +147,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | 11 | `no_progress` | P0 | implemented | `alert` | alert channel |
 | 12 | `conflict_warning` | P0 | implemented | `comment`, `wait`, `wake` | adapter `comment`; `SupportsWait` for `serialize` (not in Hermes yet) |
 | – | `dispatch_gate` | P0 | implemented | `wait`, `wake` | adapter with `SupportsWait` (not in Hermes yet) |
-| 13 | `needs_you` | P1 | not implemented | | |
+| 13 | `needs_you` | P1 | implemented | `escalate` | alert channel |
 | 14 | `compaction_gate` | P2 | not implemented | | |
 | – | `return_causes` | P1 | not implemented | | |
 
@@ -270,6 +270,7 @@ gate agent work.
 | `hold_expiry` | unset | duration, > 0 | Expected length of a hold without its own `expires_after`. Unset: 4h for `holds` entries, no expiry for `hold_labels`. |
 | `human_gate_min_tasks` | `3` | count, >= 1 | Escalate a human task with at least this many agent tasks behind it... |
 | `human_gate_after` | `"1h"` | duration, >= 0 | ...once it has been ready or in progress this long. |
+| `escalate_human_gates` | `true` | bool | `false`: no per-task escalation of human tasks; rule 13's per-person inbox lists them instead (one message per person). |
 
 `[[engine.rules.bottlenecks.holds]]` entries:
 
@@ -409,6 +410,34 @@ to the task, including PR references in its title through `[[block_conditions]]`
 
 In `act` mode the gate needs an adapter with `SupportsWait` and `wait_condition` in `act`
 mode (Kelpie warns otherwise).
+
+### 13. needs_you
+
+Everything waiting for a person, one escalation per person, sorted by cost of delay
+(agent-hours waited so far):
+
+- human tasks (owners with `kind = "human"`) with agent work waiting on them, through
+  dependencies or `human_task` conditions, that the person can move now;
+- agent tasks blocked with a reason that asks a person (`approval_reasons`) and no human
+  task linked to the block, routed to `approvers[role]`, else `default_approver`, else
+  listed as unassigned.
+
+Only agent tasks that wait on the human task itself add to its cost; work deeper in the
+chain counts in the number held. The alert is a long-lived state per person: announced
+when it opens, again when the list of tasks changes or at the escalation thresholds,
+resolved when empty. `escalate_to` names the person; delivery goes to the alert channels
+like every other alert. The daily report heads "Needs a human" with each open inbox. Rule
+6 escalates single large human gates as well; set its `escalate_human_gates = false` for
+one message per person.
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `human_wait_alert_after` | `"1h"` | duration, > 0 | A human task enters the inbox once agent work waiting on it has waited this long. |
+| `approval_wait_after` | `"30m"` | duration, > 0 | An agent waiting for a person's input or approval enters it after this long. |
+| `approval_reasons` | `["waiting_human", "needs_input", "approval"]` | list of prefixes | Block reasons that ask a person, matched as whole words at the start, case-insensitive. `waiting_human: transient` blocks are left out. |
+| `approvers` | `{}` | role → human owner id | Who answers an agent role's questions (the task's role, else its owner's role). |
+| `default_approver` | unset | human owner id | Otherwise this person. |
+| `critical_after_hours` | `24` | agent-hours, > 0 | The escalation is critical once a person's total reaches this. |
 
 ## [storage]
 
