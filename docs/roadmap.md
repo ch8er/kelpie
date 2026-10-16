@@ -521,7 +521,7 @@ them into `Resource` readings per host. Works the same for a laptop, a cloud VM 
 **Acceptance criteria**
 - [x] Disk, memory, load and process count per host
 - [x] PromQL queries configurable
-- [x] Prometheus unavailability degrades gracefully (rule sees no data, alert once)
+- [ ] Prometheus unavailability degrades gracefully (rule sees no data, alert once) — partial: a warning is logged once per cause and `kelpie_resource_read_failures_total` counts it; no alert yet
 
 ### connectors: GitHub PR and CI
 labels: P0, week-2, area:connectors
