@@ -182,7 +182,9 @@ Claude Code runs the hook as a command on each agent host. It writes one JSON li
 session start, prompt, tool call, end of turn and session end to the spool
 (`~/.claude/kelpie/spool.jsonl`, or `KELPIE_CLAUDE_SPOOL`). Every line holds the Claude Code
 session id, a subagent id when there is one, the task list id, `KELPIE_TASK_ID` and
-`KELPIE_AGENT` from the session's environment, and the hook's format version `v`. Session
+`KELPIE_AGENT` from the session's environment, the hook's format version `v`, and, for the
+liveness check, the Claude Code process id and start time, the host name, the user id, the
+PID namespace and the kernel's boot id. Session
 start lines add the start `source`, the model and the `--agent` type; prompt lines only the
 prompt's `source` (user, sdk, ...), never its text; end-of-turn lines the error kind of a failed
 turn; session end lines the end reason. When the hook refuses a call because of a stop, it

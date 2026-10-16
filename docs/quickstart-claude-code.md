@@ -194,8 +194,11 @@ mode = "act"
 
 ## Known limits
 
-- An interactive session waiting at its prompt fires no hooks, so after 30 minutes
-  (`session_stale_after`) rules see it as ended. With a task still `in_progress`, rule 1 then
-  reports that task.
+- An interactive session waiting at its prompt fires no hooks. Kelpie checks its process
+  instead, so an idle session stays alive and a closed one ends within minutes. That works on
+  Linux when Kelpie runs on the agent host itself, as the same user, outside a container.
+  Otherwise an idle session counts as ended after 30 minutes (`session_stale_after`), and rule
+  1 reports its `in_progress` task (adapter README, "Liveness"). Sessions idle for longer than
+  `lookback` stay watched only while Kelpie keeps running.
 - Claude Code has no blocked or review status, so stale blocks (rule 4) and ping-pong (rule 5)
   have nothing to work on.

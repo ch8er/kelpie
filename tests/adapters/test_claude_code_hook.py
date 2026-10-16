@@ -27,6 +27,7 @@ def spool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv(hook.SPOOL_ENV, str(path))
     for var in (*ENV, hook.COMMANDS_ENV, hook.MAX_BYTES_ENV):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(hook, "claude_process", dict)  # liveness has its own tests
     return path
 
 

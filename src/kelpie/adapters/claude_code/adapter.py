@@ -34,9 +34,11 @@ Sessions: one per Claude Code ``session_id`` seen in the spool within ``lookback
 (subagent calls count for their parent session)::
 
     started_at      first event (``SessionStart`` when present)
-    ended_at        ``SessionEnd``, unless events of the same session follow it (resumed)
-    last_heartbeat  latest event of any kind
-    exit_reason     ``SessionEnd`` reason, or the error kind of a failed last turn
+    ended_at        ``SessionEnd``, unless events of the same session follow it (resumed);
+                    else the last event once the session's process is gone
+    last_heartbeat  latest event of any kind; now while its process runs
+    exit_reason     ``SessionEnd`` reason or "process gone", or the error kind of a failed
+                    last turn
     task_id         ``KELPIE_TASK_ID`` of the session, else ``<list>/<id>`` of the task it
                     last set ``in_progress``, else ``session:<session_id>`` (no such task)
     final_status    DONE when the session itself set its task ``completed`` and ended;
@@ -48,9 +50,13 @@ Sessions: one per Claude Code ``session_id`` seen in the spool within ``lookback
 A ``TaskUpdate`` counts only on a watched list: the hook records the session's list
 (``CLAUDE_CODE_TASK_LIST_ID``, else its own session id), so private tasks stay private.
 
-Liveness: an interactive session waiting at its prompt fires no hooks, so its heartbeat
-ages like a crashed one (rules treat it as ended after ``session_stale_after``). Headless
-sessions (``claude -p``) end with ``SessionEnd`` when the process exits.
+Liveness: an interactive session waiting at its prompt fires no hooks, so its last line ages
+like a crashed session's. For a session without ``SessionEnd`` the Claude Code process the
+hook recorded is checked (:mod:`kelpie.adapters.claude_code.process`: Linux only, and only
+when host, user, PID namespace and boot match Kelpie's own): running means alive
+(``last_heartbeat`` = now), gone means ended at its last line (``exit_reason = "process
+gone"``); when it cannot be told, the spool alone decides, as before. Headless sessions
+(``claude -p``) end with ``SessionEnd``.
 """
 
 from __future__ import annotations
@@ -62,13 +68,14 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from kelpie.adapters.claude_code import hook
+from kelpie.adapters.claude_code.process import process_state
 from kelpie.core.actions import ActionResult
 from kelpie.core.model import (
     Dependency,
@@ -98,6 +105,10 @@ MAX_BLOCKED_BY = 100  # blockedBy entries kept per task
 MAX_FIELD = 128  # characters kept of an owner name
 MAX_TITLE = 200
 FUTURE_SKEW = timedelta(minutes=5)  # spool lines dated further ahead are dropped
+# A "process gone" verdict is not trusted for a session that wrote a line this recently.
+PROCESS_GRACE = timedelta(minutes=5)
+WATCH_ENDED = timedelta(hours=1)  # a watched session found gone is reported this long
+WATCH_UNKNOWN = 3  # snapshots in a row a watched session's process cannot be told, then dropped
 # A stop not enforced: the session still records tool calls this long after its marker.
 STOP_GRACE = timedelta(minutes=2)
 MAX_MARKER = 4096
@@ -182,6 +193,23 @@ class SpoolEvent:
     task_status: str | None = None
     task_owner: str | None = None
     version: int = 0  # the hook's spool format version (``v``); 0 before stop support
+    pid: int | None = None  # the Claude Code process the hook ran under
+    pid_start: str | None = None  # its start time (Linux clock ticks since boot)
+    host: str | None = None  # the host the hook ran on
+    uid: int | None = None  # the user it ran as
+    pidns: str | None = None  # its PID namespace (/proc/self/ns/pid)
+    boot: str | None = None  # the kernel's boot id
+
+    @property
+    def recorded(self) -> dict[str, Any]:
+        """What the liveness check compares (:func:`process_state`)."""
+        return {
+            "pid_start": self.pid_start,
+            "host": self.host,
+            "uid": self.uid,
+            "pidns": self.pidns,
+            "boot": self.boot,
+        }
 
 
 def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> SpoolEvent | None:
@@ -227,6 +255,16 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         task_status=_text(rec.get("task_status")),
         task_owner=_text(rec.get("task_owner")),
         version=rec["v"] if isinstance(rec.get("v"), int) and not isinstance(rec["v"], bool) else 0,
+        pid=rec["pid"]
+        if isinstance(rec.get("pid"), int) and not isinstance(rec["pid"], bool) and rec["pid"] > 1
+        else None,
+        pid_start=_text(rec.get("pid_start")),
+        host=_text(rec.get("host")),
+        uid=rec["uid"]
+        if isinstance(rec.get("uid"), int) and not isinstance(rec["uid"], bool)
+        else None,
+        pidns=_text(rec.get("pidns")),
+        boot=_text(rec.get("boot")),
     )
 
 
@@ -252,8 +290,17 @@ class ClaudeCodeAdapter:
     spool: Path | None = DEFAULT_SPOOL  # None: no hook data, no sessions
     lookback: timedelta = DEFAULT_LOOKBACK
     stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused (alerts instead)
+    # (pid, what the hook recorded) -> process running, None: cannot tell. None: the real
+    # check against this host's /proc (process_state); replaceable in tests.
+    process_check: Callable[[int, Mapping[str, Any]], bool | None] | None = field(
+        default=None, repr=False, compare=False
+    )
     name: str = NAME
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    # Sessions seen running, kept watched after their lines leave ``lookback``.
+    _watched: dict[str, _Watched] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.tasks_dir = Path(self.tasks_dir).expanduser()
@@ -335,7 +382,9 @@ class ClaudeCodeAdapter:
         files = [f for tl in self.task_lists for f in self._read_list(tl)]
         updates = self._status_updates(events)
         tasks, dependencies = self._tasks(files, updates, cutoff)
-        sessions = self._sessions(events, self._markers(events))
+        check = self._checker()
+        sessions = self._sessions(events, self._markers(events), now, check)
+        sessions += self._still_watched(sessions, now, check)
         owners = {t.owner_id for t in tasks if t.owner_id} | {s.owner_id for s in sessions}
         return Snapshot(
             now=now,
@@ -499,7 +548,11 @@ class ClaudeCodeAdapter:
         return found
 
     def _sessions(
-        self, events: Sequence[SpoolEvent], markers: Mapping[str, datetime] | None = None
+        self,
+        events: Sequence[SpoolEvent],
+        markers: Mapping[str, datetime] | None,
+        now: datetime,
+        check: Callable[[int, Mapping[str, Any]], bool | None],
     ) -> tuple[Session, ...]:
         grouped: dict[str, list[SpoolEvent]] = {}
         for e in events:
@@ -508,6 +561,13 @@ class ClaudeCodeAdapter:
         for sid, evs in grouped.items():
             last = evs[-1]
             ended = last.type == "session_end"
+            ended_at = last.at if ended else None
+            heartbeat = last.at
+            alive = None if ended else _process_alive(evs, now, check)
+            if alive:  # an idle interactive session: its process is there, waiting
+                heartbeat = max(heartbeat, now)
+            elif alive is False:  # the process is gone without a SessionEnd: it ended
+                ended_at = last.at
             claimed: str | None = None
             declared: str | None = None
             owner_set: str | None = None
@@ -527,7 +587,7 @@ class ClaudeCodeAdapter:
                 (e.agent_type for e in reversed(evs) if e.agent_type and e.agent_id is None), None
             )
             failure = next((e.error for e in reversed(evs) if e.type == "turn_end"), None)
-            reason = last.reason if ended else None
+            reason = last.reason if ended else "process gone" if alive is False else None
             stopped = next((e for e in reversed(evs) if e.type in ("stopped", "prompt")), None)
             if stopped is not None and stopped.type == "stopped":
                 failure = " ".join(x for x in ("stopped by kelpie", failure) if x)
@@ -548,16 +608,66 @@ class ClaudeCodeAdapter:
                     task_id=kelpie_task or claimed or f"{NO_TASK_PREFIX}{sid}",
                     owner_id=agent or owner_set or agent_type or DEFAULT_OWNER,
                     started_at=evs[0].at,
-                    ended_at=last.at if ended else None,
+                    ended_at=ended_at,
                     final_status=Status.DONE
-                    if ended and kelpie_task is None and declared == "completed"
+                    if ended_at is not None and kelpie_task is None and declared == "completed"
                     else None,
                     exit_reason=" ".join(x for x in (reason, failure) if x)[:300] or None,
-                    last_heartbeat=last.at,
+                    last_heartbeat=heartbeat,
                     source=self.name,
                 )
             )
+            if alive:
+                self._watched[sid] = _Watched(sessions[-1], _newest(evs))
+            elif alive is False or ended:
+                self._watched.pop(sid, None)  # (None: watched on, see _still_watched)
         return tuple(sessions)
+
+    def _checker(self) -> Callable[[int, Mapping[str, Any]], bool | None]:
+        if self.process_check is not None:
+            return self.process_check
+        local = hook.identity()  # once per snapshot
+        return lambda pid, recorded: process_state(pid, recorded, local)
+
+    def _still_watched(
+        self,
+        current: Sequence[Session],
+        now: datetime,
+        check: Callable[[int, Mapping[str, Any]], bool | None],
+    ) -> tuple[Session, ...]:
+        """Sessions seen running whose spool lines have left ``lookback``: still running,
+        they stay alive; gone, they end (and are reported for ``WATCH_ENDED`` more); when it
+        cannot be told ``WATCH_UNKNOWN`` times in a row, they are dropped as before."""
+        seen = {s.id for s in current}
+        kept: list[Session] = []
+        for sid, w in list(self._watched.items()):
+            if sid in seen:
+                continue
+            if w.ended_seen is not None:
+                if now - w.ended_seen > WATCH_ENDED:
+                    del self._watched[sid]
+                else:
+                    kept.append(w.session)
+                continue
+            alive = check(w.newest.pid, w.newest.recorded) if w.newest.pid else None
+            if alive:
+                self._watched[sid] = _Watched(replace(w.session, last_heartbeat=now), w.newest)
+                kept.append(self._watched[sid].session)
+            elif alive is None and w.unknown + 1 < WATCH_UNKNOWN:
+                w.unknown += 1  # e.g. /proc briefly unreadable: keep it as last seen
+                kept.append(w.session)
+            elif alive is False:
+                gone = replace(
+                    w.session,
+                    ended_at=w.newest.at,
+                    last_heartbeat=w.newest.at,
+                    exit_reason="process gone",
+                )
+                self._watched[sid] = _Watched(gone, w.newest, ended_seen=now)
+                kept.append(gone)
+            else:
+                del self._watched[sid]
+        return tuple(kept)
 
     def _spans(self, events: Sequence[SpoolEvent], sessions: Sequence[Session]) -> tuple[Span, ...]:
         task_of = {s.id: s.task_id for s in sessions if not s.task_id.startswith(NO_TASK_PREFIX)}
@@ -640,15 +750,22 @@ class ClaudeCodeAdapter:
         if self.stop_dir is None:
             raise UnsupportedAction("stop is turned off ([adapters.claude_code] stop_dir = false)")
         now = datetime.now(UTC)
-        last = None
-        for event in self._events(now - self.lookback):
-            if event.session_id == session_id and (last is None or event.at >= last.at):
-                last = event
-        if last is None:
+        own = sorted(
+            (e for e in self._events(now - self.lookback) if e.session_id == session_id),
+            key=lambda e: e.at,
+        )
+        watched = self._watched.get(session_id)
+        if not own and watched is not None:
+            if watched.ended_seen is not None:
+                log.info("claude-code: session %s has ended; nothing to stop", session_id)
+                return ActionResult.NOTHING_TO_DO
+            own = [watched.newest]  # running for longer than lookback, idle
+        if not own:
             raise UnsupportedAction(
                 f"session {session_id} is not in the hooks spool, so no Kelpie hook can stop it"
             )
-        if last.type == "session_end":
+        last = own[-1]
+        if last.type == "session_end" or _process_alive(own, now, self._checker()) is False:
             log.info("claude-code: session %s has ended; nothing to stop", session_id)
             return ActionResult.NOTHING_TO_DO
         if last.version < 1:
@@ -768,3 +885,34 @@ def _ignored_stop(events: Sequence[SpoolEvent], marked: datetime) -> bool:
         and marked + STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) < expires
         for e in after
     )
+
+
+@dataclass(slots=True)
+class _Watched:
+    session: Session  # as last built from the spool
+    newest: SpoolEvent  # the line whose process is checked
+    ended_seen: datetime | None = None  # when it was found gone
+    unknown: int = 0  # snapshots in a row its process could not be told
+
+
+def _newest(events: Sequence[SpoolEvent]) -> SpoolEvent:
+    """The newest line that describes the session's process (``stopped`` lines carry none)."""
+    return next((e for e in reversed(events) if e.type != "stopped"), events[-1])
+
+
+def _process_alive(
+    events: Sequence[SpoolEvent],
+    now: datetime,
+    check: Callable[[int, Mapping[str, Any]], bool | None],
+) -> bool | None:
+    """Whether the session's Claude Code process still runs, from its newest line: True or
+    False only when it can be told for sure, else None. A newest line without a pid (a
+    resumed session under an older hook) cannot be told; a "gone" for a session that wrote
+    a line within ``PROCESS_GRACE`` is not trusted."""
+    newest = _newest(events)
+    if newest.pid is None:
+        return None
+    alive = check(newest.pid, newest.recorded)
+    if alive is False and now - events[-1].at < PROCESS_GRACE:
+        return None
+    return alive
