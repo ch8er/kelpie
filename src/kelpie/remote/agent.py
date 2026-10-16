@@ -45,6 +45,7 @@ from kelpie.remote.protocol import (
     depth_ok,
     encode_poll,
     encode_report,
+    encode_result,
 )
 
 log = logging.getLogger(__name__)
@@ -55,6 +56,9 @@ POLL_WAIT = 20.0  # seconds the hub may hold a poll open
 # long as the hub keeps an unanswered action's id (an hour), up to this many.
 REMEMBER_FOR = 3600.0
 REMEMBERED = 10_000
+# Results per poll, in encoded bytes: well under the hub's 2 MiB poll bodies.
+MAX_BATCH_BYTES = 1024 * 1024
+MIN_BATCH_BYTES = 32 * 1024
 _BACKOFF_MIN, _BACKOFF_MAX = 1.0, 60.0
 
 Post = Callable[..., net.Response]
@@ -95,6 +99,7 @@ class Agent:
         self._done: OrderedDict[str, tuple[float, Result]] = OrderedDict()
         self._unsent: list[Result] = []
         self._stop = threading.Event()
+        self._batch_bytes = MAX_BATCH_BYTES  # halved after a 413
         self._boot = secrets.token_hex(8)  # orders this process's reports at the hub
         self._seq = 0
 
@@ -125,7 +130,8 @@ class Agent:
     def poll(self, wait: float = POLL_WAIT) -> int:
         """Send the results not yet delivered, wait up to ``wait`` seconds for actions,
         carry them out one at a time. Returns how many actions came."""
-        results, self._unsent = self._unsent[:MAX_RESULTS], self._unsent[MAX_RESULTS:]
+        results = self._batch()
+        self._unsent = self._unsent[len(results) :]
         try:
             reply = self._send(
                 ACTIONS_PATH,
@@ -133,12 +139,14 @@ class Agent:
                 self.settings.timeout.total_seconds() + wait,
             )
         except AgentError as exc:
-            if exc.status in (400, 413) and results:
-                # The hub refuses this batch as it is: sending it again would block every
-                # later poll. Its actions are reported failed on the server side anyway.
+            if exc.status == 400 and str(exc).find("result") >= 0 and results:
+                # The hub refuses these results as they are: sending them again would block
+                # every later poll. The hub tells a human about actions left unconfirmed.
                 log.error("the hub refused %d results; dropped: %s", len(results), exc)
             else:
                 self._unsent = results + self._unsent  # delivered with the next poll
+                if exc.status == 413:
+                    self._batch_bytes = max(MIN_BATCH_BYTES, self._batch_bytes // 2)
             raise
         try:
             raw = decode_actions(reply, self.offered)
@@ -152,6 +160,19 @@ class Agent:
             if result is not None:
                 self._unsent.append(result)
         return len(raw)
+
+    def _batch(self) -> list[Result]:
+        """The next results to send: at most MAX_RESULTS, within the batch's byte budget
+        (encoded as the request will be), always at least one."""
+        out: list[Result] = []
+        size = 0
+        for result in self._unsent[:MAX_RESULTS]:
+            cost = len(json.dumps(encode_result(result), separators=(",", ":"))) + 1
+            if out and size + cost > self._batch_bytes:
+                break
+            out.append(result)
+            size += cost
+        return out
 
     def execute(self, raw: object, received: float | None = None) -> Result | None:
         """Carry out one action the hub sent (at monotonic time ``received``), at most once

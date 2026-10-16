@@ -425,7 +425,7 @@ def decode_report(data: object) -> Report:
     version = body.get("agent_version")
     if not isinstance(version, str) or _VERSION.fullmatch(version) is None:
         raise ProtocolError("report: agent_version must be 1 to 64 printable characters")
-    sent_at = _datetime(body.get("sent_at"), "report: sent_at")
+    sent_at = _value(datetime, _datetime(body.get("sent_at"), "report: sent_at"), "sent_at", False)
     interval = body.get("interval")
     if isinstance(interval, bool) or not isinstance(interval, int | float):
         raise ProtocolError("report: interval must be a number of seconds")

@@ -435,8 +435,7 @@ class HubServer(ThreadingHTTPServer):
             self._unauthenticated[id(request)] = (peer, request)
             self._per_peer[peer] += 1
         if evicted is not None:
-            with contextlib.suppress(OSError):
-                evicted.shutdown(socket.SHUT_RDWR)
+            _shut(evicted)
         try:
             super().process_request(request, client_address)
         except BaseException:
@@ -496,6 +495,13 @@ class HubServer(ThreadingHTTPServer):
         super().shutdown()
 
 
+def _shut(sock: Any) -> None:
+    """Shut a connection down under its handler, on the plain socket: an SSL socket's own
+    shutdown would leave the handler mid-handshake with a broken object (not an OSError)."""
+    with contextlib.suppress(OSError):
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+
+
 def _peer_key(address: str) -> str:
     """Who a connection counts against: the address, or its /64 for IPv6 (one host holds a
     whole /64)."""
@@ -541,8 +547,7 @@ class HubHandler(BaseHTTPRequestHandler):
             raise
 
     def _cut(self) -> None:
-        with contextlib.suppress(OSError):
-            self.request.shutdown(socket.SHUT_RDWR)
+        _shut(self.request)
 
     def finish(self) -> None:
         self._guard.cancel()

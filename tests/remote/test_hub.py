@@ -721,3 +721,35 @@ def test_an_ipv6_listen_address(clock: Clock) -> None:
         pytest.skip("no IPv6 loopback")
     srv.server_close()
     assert srv.address_family == socket.AF_INET6
+
+
+def test_results_go_in_batches_the_hub_accepts(clock: Clock) -> None:
+    bodies: list[int] = []
+
+    def accept(*args: Any, **kw: Any) -> net.Response:
+        bodies.append(len(gzip.decompress(args[3])))
+        return net.Response(413 if len(bodies) == 1 else 200, {}, b'{"actions": []}')
+
+    settings = AgentSettings(name="laptop", server="https://hub.example.internal:9465")
+    agent = Agent(settings, [BoardAdapter()], TOKEN, clock=clock, post=accept)
+    detail = 'é"' * 2000  # escapes to far more bytes than characters
+    agent._unsent = [Result(f"a{i}", Outcome.FAILED, detail) for i in range(256)]
+    with pytest.raises(AgentError, match="413"):
+        agent.poll(wait=0)
+    assert len(agent._unsent) == 256  # kept, not dropped
+    while agent._unsent:
+        agent.poll(wait=0)
+    assert all(size <= 1024 * 1024 for size in bodies)
+    assert max(bodies[1:]) <= 512 * 1024 + 64 * 1024  # halved after the 413
+
+
+def test_a_version_mismatch_keeps_the_results(clock: Clock) -> None:
+    def refuse(*args: Any, **kw: Any) -> net.Response:
+        return net.Response(400, {}, b'{"error": "protocol version 2 is not 1"}')
+
+    settings = AgentSettings(name="laptop", server="https://hub.example.internal:9465")
+    agent = Agent(settings, [BoardAdapter()], TOKEN, clock=clock, post=refuse)
+    agent._unsent = [Result("a1", Outcome.DONE)]
+    with pytest.raises(AgentError):
+        agent.poll(wait=0)
+    assert agent._unsent == [Result("a1", Outcome.DONE)]
