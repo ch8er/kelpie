@@ -125,10 +125,14 @@ board and the database read-only and writes nothing.
 | hooks fire | The spool has a line from the last hour. |
 | OTLP spans arrive | A span arrived in the last hour (skipped if none ever did: OTLP is optional). |
 | worktrees readable | git can read the workspaces of live tasks (skipped with `git_state = false`). |
+| claude code task lists | Every list in `[adapters.claude_code] task_lists` is readable (only with that section, like the next three). |
+| claude code hooks fire | The hook's spool has a line from the last hour, from a hook that can enforce stops (unless `stop_dir = false`). |
+| claude code hook registered | `settings.json` next to `tasks_dir` registers the hook for every event, `PreToolUse` included unless `stop_dir = false` (skipped when no Kelpie hook is there: it may be in project settings). |
+| claude code stop markers | `stop_dir` is a writable directory, or can be created. |
 | Prometheus reachable | Prometheus answers on `/-/ready` (`--prometheus URL` or `$KELPIE_PROMETHEUS_URL`, else `localhost:9090` is tried and skipped if absent). |
 
-"hooks fire" and "OTLP spans arrive" are skipped while no task is running; run doctor while
-one is. Run it in the directory and with the `KELPIE_DB` that `kelpie serve` uses, because it
+"hooks fire", "claude code hooks fire" and "OTLP spans arrive" are skipped while no task is
+running (in progress, on Claude Code); run doctor while one is. Run it in the directory and with the `KELPIE_DB` that `kelpie serve` uses, because it
 reads the span store from there. In the compose stack:
 
 ```bash

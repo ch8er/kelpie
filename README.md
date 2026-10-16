@@ -166,8 +166,9 @@ flowchart LR
 ```
 
 The Kelpie server can run anywhere. Adapter plugins and node_exporter run where the
-agents run. Hermes is the first platform adapter; Claude Code (first candidate), Paperclip,
-OpenClaw, Codex and a GitHub Issues / Linear task-queue adapter are P2, built on signal.
+agents run. Hermes is the first platform adapter and Claude Code the second (shared task
+lists plus a command hook; `stop` only). Paperclip, OpenClaw, Codex and a GitHub Issues /
+Linear task-queue adapter are P2, built on signal.
 
 ## Rules
 
@@ -365,8 +366,9 @@ docker compose up
 Ports are bound to `127.0.0.1` (Kelpie 9464, Prometheus 9090, Grafana 3000). Add
 `--profile local-agents` to also run node_exporter when agents share the server host.
 
-Step by step for a first live run on a Hermes farm, with `kelpie doctor`:
-[`docs/quickstart-hermes.md`](docs/quickstart-hermes.md).
+Step by step for a first live run with `kelpie doctor`: on a Hermes farm,
+[`docs/quickstart-hermes.md`](docs/quickstart-hermes.md); on Claude Code sessions,
+[`docs/quickstart-claude-code.md`](docs/quickstart-claude-code.md).
 
 To watch a Hermes farm (observe mode), add the section below to `kelpie.toml`
 and install the hooks plugin on the Hermes host; see

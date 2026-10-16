@@ -1,4 +1,4 @@
-# Checklist: from observe to act on a Hermes farm
+# Checklist: from observe to act on a Hermes or Claude Code farm
 
 Move **one rule at a time**, and only to the next step once the previous one has run
 quietly for a day. This is based on what the code does today. Things marked **unverified**
@@ -6,12 +6,15 @@ have not been tried against a live farm.
 
 ## What can act today
 
-On a Hermes-only setup Kelpie refuses to start with `dry_run = false` if any other rule is in
-`act` mode (`_refuse_unimplemented_actions`, `HERMES_ACT_RULES` in `src/kelpie/app.py`).
+With a Hermes adapter enabled, Kelpie refuses to start with `dry_run = false` if any other
+rule is in `act` mode (`_refuse_unimplemented_actions`, `HERMES_ACT_RULES` in
+`src/kelpie/app.py`). The Claude Code adapter refuses other actions at runtime
+(`UnsupportedAction`), so on Claude Code they become "not executed" alerts.
 
 | Rule | Action | Needs |
 | --- | --- | --- |
 | `loop_breaker` | `stop`: `hermes kanban block --kind needs_input` on the run Kelpie looked at | `[adapters.hermes]`; `cli` and `cli_timeout` if `hermes` is not on `PATH` |
+| `loop_breaker` | `stop` on Claude Code: a stop marker the hook enforces at the session's next tool call | `[adapters.claude_code]` with `stop_dir`; see [Claude Code](#claude-code) below |
 | `ci_economy` | `cancel_build` of a superseded GitHub Actions run, by the CI connector | `[connectors.github.ci]` with `allow_cancel = true`, `cancel_repos`, ideally `cancel_token_env` (a separate token with Actions: write on those repos only) |
 
 Everything else stays `observe` or `suggest`. That includes `stale_blocks`: its unblock, and
@@ -85,12 +88,35 @@ fresh re-check agrees with, never on the default branch.
   `outcome="failed"`, `kelpie_adapter_errors_total`, and the `BLOCKED:` comments on the board.
 - [ ] Add the next rule or the next board only after a quiet day.
 
+## Claude Code
+
+The steps above apply, with these differences
+([quickstart](quickstart-claude-code.md), [adapter README](../src/kelpie/adapters/claude_code/README.md#stopping-a-session)):
+
+- [ ] Preconditions: Kelpie runs on the agent host as the same user as Claude Code; the hook
+  is the current `hook.py` and registered for `PreToolUse` with `"matcher": "*"`;
+  `stop_dir` and the sessions' `KELPIE_CLAUDE_STOP_DIR` name the same directory.
+  `kelpie doctor` checks all of these (the "claude code" lines).
+- [ ] Instead of a test board (step 3), test on a throwaway session: the quickstart's step 7
+  writes a marker by hand. Then lower `loop_breaker`'s thresholds and let it stop a session you
+  make loop on purpose. Expect the tool call refused with "Stopped by Kelpie: ...", the
+  session's `exit_reason` reading `stopped by kelpie`, and the ledger `executed`. A session
+  shown as `stop not enforced` means the hook did not see the marker: check the
+  preconditions.
+- [ ] Undo: type a new prompt in the session, or delete
+  `~/.claude/kelpie/stop/<session id>.json`.
+- [ ] A stop is cooperative (the next tool call) and lasts for the session only: a headless
+  run ends, and a launcher may start the work again.
+- [ ] With Hermes enabled as well, a stop of a Claude Code session that has no task on a
+  watched list becomes an alert (ch8er/kelpie#85).
+
 ## 5. Rollback
 
 - Fastest: `dry_run = true` and restart. Every rule is back to log-only, whatever its mode.
 - Per rule: set its `mode` back to `suggest` or `observe` (or remove the line) and restart.
 - For `ci_economy`: set `allow_cancel = false`, and revoke the cancel token if in doubt.
-- Stopped tasks: `hermes kanban unblock <task>`. A cancelled CI run is re-run from GitHub.
+- Stopped tasks: `hermes kanban unblock <task>`. Stopped Claude Code sessions: delete the
+  marker or type a prompt. A cancelled CI run is re-run from GitHub.
 - Check afterwards: `uv run kelpie status` shows each rule's mode, and `kelpie_dry_run` is 1.
 
 ## Not verified live

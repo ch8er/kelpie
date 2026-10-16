@@ -22,7 +22,7 @@ configure what exists.
   [no_progress](#11-no_progress), [conflict_warning](#12-conflict_warning),
   [dispatch_gate](#dispatch_gate)
 - [[storage]](#storage)
-- [[adapters.hermes]](#adaptershermes)
+- [[adapters.hermes]](#adaptershermes), [[adapters.claude_code]](#adaptersclaude_code)
 - [[traces]](#traces), [[[traces.forward]]](#tracesforward),
   [[traces.outputs]](#tracesoutputs)
 - [[[budgets]] and [prices]](#budgets-and-prices)
@@ -81,6 +81,12 @@ configure what exists.
 | `KELPIE_HERMES_SPOOL` | Hermes plugin | Spool path on the Hermes host. |
 | `KELPIE_HERMES_SPOOL_COMMANDS` | Hermes plugin | `0`, `false`, `no` or `off`: record no command prefix. |
 | `KELPIE_HERMES_SPOOL_MAX_BYTES` | Hermes plugin | Spool size that triggers rotation (default 20 MiB). |
+| `KELPIE_CLAUDE_SPOOL` | Claude Code hook | Spool path on the agent host (default `~/.claude/kelpie/spool.jsonl`). |
+| `KELPIE_CLAUDE_SPOOL_COMMANDS` | Claude Code hook | `0`, `false`, `no` or `off`: record no command prefix. |
+| `KELPIE_CLAUDE_SPOOL_MAX_BYTES` | Claude Code hook | Spool size that triggers rotation (default 20 MiB). |
+| `KELPIE_CLAUDE_STOP_DIR` | Claude Code hook | Where the hook looks for stop markers; must match `[adapters.claude_code] stop_dir`. |
+| `KELPIE_CLAUDE_STOP_TTL` | Claude Code hook | Seconds a stop marker holds (default 86400). |
+| `CLAUDE_CODE_TASK_LIST_ID`, `KELPIE_TASK_ID`, `KELPIE_AGENT` | Claude Code sessions | The shared task list; a task id from a launcher; the agent's name. Read by the hook. |
 
 Variables named by `token_env`, `webhook_env`, `headers_env` and `cancel_token_env` keys are
 read as configured.
@@ -120,10 +126,12 @@ every outcome is recorded there and in `kelpie_actions_total`.
 - **Routing in act mode.** An action goes to `action.executor` when the rule sets it (the
   CI connector for `cancel_build`), else to the platform adapter named in its task's
   `source`, else to the only platform adapter if there is exactly one.
-- **What can act today.** The Hermes adapter carries out `stop` only. With Hermes as the only
-  adapter and `dry_run = false`, Kelpie refuses to start when a rule other than
-  `loop_breaker` is in `act`, except `ci_economy` when `[connectors.github.ci] allow_cancel`
-  is set. See the [act checklist](act-checklist.md).
+- **What can act today.** The Hermes and Claude Code adapters carry out `stop` only. With a
+  Hermes adapter enabled and `dry_run = false`, Kelpie refuses to start when a rule other
+  than `loop_breaker` is in `act`, except `ci_economy` when `[connectors.github.ci]
+  allow_cancel` is set. The Claude Code adapter refuses the other actions with
+  `UnsupportedAction`, so on Claude Code they become "not executed" alerts. See the
+  [act checklist](act-checklist.md).
 
 ## Rules
 
@@ -143,7 +151,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | 7 | `resources` | P0 | implemented | `alert` | alert channel |
 | 8 | daily report | P0 | `kelpie report` | — | configured in [[report]](#report), not here |
 | 9 | `ci_economy` | P0 | implemented | `cancel_build`, `alert` | `[connectors.github.ci] allow_cancel` |
-| 10 | `loop_breaker` | P0 | implemented | `stop`, `alert` | adapter with `SupportsStop` (Hermes has it) |
+| 10 | `loop_breaker` | P0 | implemented | `stop`, `alert` | adapter with `SupportsStop` (Hermes and Claude Code have it) |
 | 11 | `no_progress` | P0 | implemented | `alert` | alert channel |
 | 12 | `conflict_warning` | P0 | implemented | `comment`, `wait`, `wake` | adapter `comment`; `SupportsWait` for `serialize` (not in Hermes yet) |
 | – | `dispatch_gate` | P0 | implemented | `wait`, `wake` | adapter with `SupportsWait` (not in Hermes yet) |
@@ -462,6 +470,22 @@ The Hermes platform adapter. Absent: no platform, and snapshots hold no tasks. D
 | `cli_timeout` | `"10s"` | duration, > 0 and <= 60s | Limit for one `stop` command; it runs inside the tick. |
 | `human_owners` | `[]` | list of names | Assignees that are people, not agents; case-insensitive. Their tasks get a human owner, which `[connectors.human_tasks]` needs. Also changes `ping_pong`'s default escalation target and who `bottlenecks` and `orphan_status` count as agents. |
 
+## [adapters.claude_code]
+
+The Claude Code platform adapter: shared task lists plus the spool of its command hook, and
+stop markers the hook enforces. Absent: no Claude Code sessions. Details: the
+[Claude Code adapter README](../src/kelpie/adapters/claude_code/README.md); first run:
+[quickstart](quickstart-claude-code.md).
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `task_lists` | `[]` | list of names | `CLAUDE_CODE_TASK_LIST_ID` values whose lists are read. `[]`: sessions only, no board tasks. |
+| `tasks_dir` | `"~/.claude/tasks"` | path | Where Claude Code keeps task lists (`<tasks_dir>/<list>/<id>.json`). Read-only. |
+| `spool` | `"~/.claude/kelpie/spool.jsonl"` | path or `false` | Spool written by the hook. `false`: no sessions, no hook spans. |
+| `lookback` | `"24h"` | duration, > 0 | Sessions and completed tasks older than this are left out. |
+| `stop_dir` | `"~/.claude/kelpie/stop"` | path or `false` | Where `stop` writes markers; the hook must read the same directory as the same user. `false`: `stop` becomes an alert. |
+| `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
+
 ## [traces]
 
 OTLP/HTTP trace ingest on `POST /v1/traces`, on the same port as `/metrics`. On by default.
@@ -752,8 +776,8 @@ Kelpie refuses to start when:
 - `[[block_conditions]]` exist without `[connectors.github]`, or name a `repo` not in its
   `repos`.
 - `ci_economy` `window` is longer than `[connectors.github.ci] window`.
-- Hermes is the only adapter, `dry_run = false`, and a rule other than `loop_breaker` (and
-  `ci_economy` with `allow_cancel`) is in `act`.
+- A Hermes adapter is enabled, `dry_run = false`, and a rule other than `loop_breaker`
+  (and `ci_economy` with `allow_cancel`) is in `act`.
 - A variable named by an explicit `token_env`, `webhook_env`, `headers_env` or
   `cancel_token_env` is missing or malformed.
 - The [exposure check](install.md#otlp-token-and-the-exposure-check) fails.

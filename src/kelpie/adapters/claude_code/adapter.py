@@ -293,6 +293,12 @@ class ClaudeCodeAdapter:
         return [*lines, f"spool: last line {format_age(now - last)} ago ({self.spool})"]
 
     def last_spool_at(self) -> datetime | None:
+        event = self.last_spool_event()
+        return None if event is None else event.at
+
+    def last_spool_event(self, until: datetime | None = None) -> SpoolEvent | None:
+        """The newest readable spool line (read from the file's tail only), ignoring lines
+        dated after ``until``."""
         if self.spool is None:
             return None
         try:
@@ -309,8 +315,8 @@ class ClaudeCodeAdapter:
             os.close(fd)
         oldest = datetime.min.replace(tzinfo=UTC)
         for line in reversed(tail):
-            if (event := parse_line(line, oldest)) is not None:
-                return event.at
+            if (event := parse_line(line, oldest, until)) is not None:
+                return event
         return None
 
     # --- reading -------------------------------------------------------------------------

@@ -56,7 +56,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     fix.add_argument("--days", type=int, help="how far back --list looks (default 7)")
     doctor = sub.add_parser(
-        "doctor", help="check a first live run: config, observe mode, board, hooks, spans, git"
+        "doctor",
+        help="check a first live run: config, observe mode, boards and task lists, hooks, spans, "
+        "git, stop markers",
     )
     doctor.add_argument(
         "--prometheus",

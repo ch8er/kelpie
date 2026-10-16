@@ -1,4 +1,4 @@
-"""``kelpie doctor``: is a first live run on a Hermes farm set up correctly?
+"""``kelpie doctor``: is a first live run on a Hermes or Claude Code farm set up correctly?
 
 One line per check, ``PASS|FAIL|SKIP  <check>: <detail>``, and a ``  fix: ...`` line under a
 FAIL. Nothing is written anywhere: the kanban database and the span store are opened
@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
 from kelpie.adapters.hermes.git_state import read_git_state
 from kelpie.app import ConfigError, LoadedRules, Settings, load_rules, load_settings, utc_now
@@ -127,7 +128,12 @@ def _newest_span(path: Path) -> str | None:
         conn.close()
 
 
-def check_spans(settings: Settings, now: datetime, running: int | None) -> Check:
+def check_spans(
+    settings: Settings,
+    now: datetime,
+    running: int | None,
+    exporter: str = "the OTLP backend of hermes-otel",
+) -> Check:
     name = "OTLP spans arrive"
     if not settings.traces.enabled:
         return _skip(name, "[traces] disabled")
@@ -135,8 +141,8 @@ def check_spans(settings: Settings, now: datetime, running: int | None) -> Check
     if path is None:
         return _skip(name, "storage is in memory; nothing to read from outside")
     fix = (
-        "check the OTLP backend of hermes-otel (endpoint http://<kelpie>:9464/v1/traces, "
-        f"Authorization bearer token = ${settings.traces.token_env}); run doctor with the same "
+        f"check the exporter ({exporter}): endpoint http://<kelpie>:9464/v1/traces, "
+        f"Authorization bearer token = ${settings.traces.token_env}; run doctor with the same "
         "KELPIE_DB as kelpie serve"
     )
     try:
@@ -222,14 +228,35 @@ def run_checks(
     hermes = settings.hermes
     adapter = hermes.build() if hermes is not None and hermes.enabled else None
     why = "no [adapters.hermes] section" if hermes is None else "adapter disabled"
-    running: int | None = None
+    # Tasks in progress per enabled platform (None: unknown); spans are only expected then.
+    counts: list[int | None] = []
     if adapter is None:
         checks += [_skip("kanban.db", why), _skip("hooks fire", why)]
     else:
         board, running = check_board(adapter)
+        counts.append(running)
         checks += [board, check_hooks(adapter, at, running)]
-    checks.append(check_spans(settings, at, running))
+    cc = settings.claude_code
+    cc_checks: list[Check] = []
+    if cc is not None:  # only when configured, so Hermes-only output stays as it was
+        if cc.enabled:
+            found, cc_running = claude_code.run(cc.build(), at)
+            counts.append(cc_running)
+        else:
+            found = claude_code.skipped("adapter disabled")
+        cc_checks = [Check(*c) for c in found]
+    total = None if not counts or None in counts else sum(c for c in counts if c is not None)
+    exporters = [
+        name
+        for name, on in (
+            ("the OTLP backend of hermes-otel", adapter is not None),
+            ("Claude Code's OTEL_EXPORTER_OTLP_TRACES_* variables", cc is not None and cc.enabled),
+        )
+        if on
+    ]
+    checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
     checks.append(_skip("worktrees readable", why) if adapter is None else check_worktrees(adapter))
+    checks += cc_checks
     checks.append(check_prometheus(prometheus, environ))
     return checks
 
