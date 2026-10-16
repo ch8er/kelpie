@@ -448,7 +448,7 @@ class OutputOffender:
     saved_tokens: int  # estimate: unfiltered tokens x the filter's expected reduction
     owner: str | None = None  # who owns the role's instructions
     tasks: tuple[str, ...] = ()
-    latest_task: str | None = None  # the task of the latest unfiltered call
+    recent_tasks: tuple[str, ...] = ()  # tasks of its unfiltered calls, the latest first
 
 
 @dataclass(frozen=True, slots=True)

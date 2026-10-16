@@ -117,6 +117,9 @@ def to_json(value: Any) -> str:
 
 
 def fingerprint(action: Action) -> str:
+    if action.once_per_key and action.key is not None:
+        raw = to_json([action.rule, "once_per_key", action.key])
+        return hashlib.sha256(raw.encode()).hexdigest()[:32]
     detail: Any = action.key if action.key is not None else action.params
     raw = to_json([action.rule, action.kind, action.task_id, action.executor, detail])
     return hashlib.sha256(raw.encode()).hexdigest()[:32]

@@ -14,6 +14,9 @@ snapshot:
   owners:
     - {id: human-owner, role: owner, kind: human}
     - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: T-F502, title: "Build the release target", status: in_progress, status_since: "2026-03-03T14:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-F503, title: "Fix the widget build", status: done, status_since: "2026-03-03T15:30:00+00:00", role: developer, owner_id: agent-dev-1}
   output_offenders:
     # As Kelpie computes them from stored tool spans ([traces.outputs]): repeated only.
     - role: developer
@@ -26,7 +29,7 @@ snapshot:
       saved_tokens: 178850
       owner: human-owner
       tasks: [T-F501, T-F502, T-F503]
-      latest_task: T-F503
+      recent_tasks: [T-F503, T-F502, T-F501]  # T-F503 is done, T-F501 gone: T-F502 gets it
     - role: ops
       command: "tool:read_file"
       filter: range
@@ -38,7 +41,7 @@ snapshot:
       tasks: []
 expected_actions:
   - kind: comment
-    task_id: T-F503
+    task_id: T-F502
     severity: warning
     reason_contains: "human-owner: `xcodebuild` floods the developer context"
     params:
@@ -54,3 +57,6 @@ expected_actions:
 not_expected_actions:
   - kind: comment
     params: {command: "tool:read_file"}
+  # never on a finished task: nobody reads its comments
+  - kind: comment
+    task_id: T-F503

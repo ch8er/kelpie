@@ -463,19 +463,24 @@ tasks ready) and escalates single human gates only with `escalate_human_gates = 
 | `default_approver` | unset | human owner id | Otherwise this person. |
 | `critical_after_hours` | `24` | agent-hours, > 0 | The escalation is critical once a person's total reaches this. |
 
-
 ### output_offenders
 
 A command (or tool) whose output floods one role's context above `[traces.outputs]
-threshold_tokens` per call on `repeat_days` days is a repeated offender, ranked from
-stored tool spans the way the daily report ranks them (recomputed hourly, over the last
-`repeat_days` calendar days in `[report] timezone`). The rule addresses the owner of the
-role's instructions (`[traces.outputs] owners`) with a `comment` on the task of the latest
-unfiltered call: the command, its tokens per call, the filter to add to the instructions
-and the estimated saving. Without a task it alerts instead. Each comment is made once per
-role, command and filter within `once_window` (7 days); the daily report checks the fix
-before/after. The rule takes no parameters of its own: thresholds and owners are in
-[[traces.outputs]](#tracesoutputs), and it needs `[traces] enabled`.
+threshold_tokens` per call on `repeat_days` days is a repeated offender, ranked with the
+daily report's ranking from stored tool spans plus the hook spans in the snapshot,
+recomputed hourly over the calendar days of `[report] timezone` (today counts while it
+runs). The rule addresses the owner of the role's instructions (`[traces.outputs] owners`)
+with a `comment` on the most recent offending task that is still open: the command, its
+tokens per call, the filter to add to the instructions and the estimated saving. Without
+an open task it alerts instead. The request is made once per role, command and filter
+within `once_window` (7 days), whichever task it lands on; the daily report checks the
+fix before/after. Only plain command or tool names are posted on the board; others are
+alerted in a cleaned form.
+
+The rule takes no parameters of its own: thresholds and owners are in
+[[traces.outputs]](#tracesoutputs). It needs `[traces] enabled`; on a farm that reports
+tool calls only through hooks, `[adapters.hermes] lookback` must cover `repeat_days`.
+
 ## [storage]
 
 | Key | Default | Meaning |

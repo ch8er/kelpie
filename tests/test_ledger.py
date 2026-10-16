@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -386,3 +387,30 @@ def test_unsaved_entries_expire_from_the_rate_window() -> None:
         ledger.record(done(action(n=1)), T0)
     assert ledger.check(action(n=2), Mode.ACT, T0) == (Suppression.RATE_LIMIT, True)
     assert ledger.check(action(n=2), Mode.ACT, T0 + timedelta(hours=2)) is None
+
+
+# --- once per key -----------------------------------------------------------------------
+
+
+def test_once_per_key_holds_across_tasks_and_kinds() -> None:
+    """A request that moves to whichever task is current (or alerts without one) is still
+    made once: the key alone is the fingerprint."""
+    adapter, store = FakeAdapter(), MemoryLedgerStore()
+
+    def ask(task: str | None) -> Action:
+        kind = ActionKind.COMMENT if task else ActionKind.ALERT
+        return Action(kind, "emit", "add a filter", task_id=task, key="k", once=True,
+                      once_per_key=True)  # fmt: skip
+
+    for hour, task in enumerate(["T-1", "T-2", None, "T-3"]):
+        engine = Engine([Emit([ask(task)])], adapters=[adapter], config=ACT, ledger_store=store)
+        tick(engine, T0 + timedelta(hours=hour))
+    assert adapter.calls == [("comment", "T-1")]
+    assert fingerprint(ask("T-1")) == fingerprint(ask(None))
+
+
+def test_plain_once_fingerprints_are_unchanged() -> None:
+    a = Action(ActionKind.COMMENT, "emit", "r", task_id="T-1", key="k", once=True)
+    assert fingerprint(a) != fingerprint(replace(a, task_id="T-2"))
+    assert fingerprint(a) == fingerprint(replace(a, once_per_key=False))
+    assert fingerprint(replace(a, key=None, once_per_key=True)) == fingerprint(replace(a, key=None))

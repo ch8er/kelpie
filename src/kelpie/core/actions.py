@@ -57,6 +57,10 @@ class Action:
     ``once`` asks the ledger to carry the action out once per fingerprint (within the
     ledger's ``once_window``) instead of once per cooldown: for comments that must not
     pile up on a task, like a resume note.
+
+    ``once_per_key`` makes ``key`` alone (with the rule) the fingerprint, whatever the
+    task, kind or executor: for a request that may land on a different task each time
+    (or as an alert when there is none) but must be made once.
     """
 
     kind: ActionKind
@@ -70,3 +74,4 @@ class Action:
     state: str | None = None
     since: datetime | None = None
     once: bool = False
+    once_per_key: bool = False

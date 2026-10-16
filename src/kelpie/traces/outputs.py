@@ -438,10 +438,12 @@ def repeated_offenders(
     """The repeated offenders among ``found`` (:func:`rank` and :func:`recommend`, as the
     daily report lists them), for the snapshot rules read."""
     settings = settings or OutputSettings()
-    latest: dict[tuple[str | None, str], str] = {}
-    for c in found:  # in time order
+    recent: dict[tuple[str | None, str], list[str]] = {}
+    for c in reversed(found):  # the latest first
         if c.filter is None and c.task_id:
-            latest[(c.role, c.key)] = c.task_id
+            seen = recent.setdefault((c.role, c.key), [])
+            if c.task_id not in seen:
+                seen.append(c.task_id)
     return tuple(
         OutputOffender(
             role=r.group.role,
@@ -454,7 +456,7 @@ def repeated_offenders(
             saved_tokens=r.saved_tokens,
             owner=r.owner,
             tasks=r.group.tasks,
-            latest_task=latest.get((r.group.role, r.group.key)),
+            recent_tasks=tuple(recent.get((r.group.role, r.group.key), ())[:10]),
         )
         for r in recommend(rank(found, settings, tz), settings)
         if r.repeated

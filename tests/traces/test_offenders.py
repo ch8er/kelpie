@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,7 +31,7 @@ def call(day: int, key: str = "xcodebuild", tokens: int = 9000, **kw: object) ->
     return Call(**{**base, **kw})  # type: ignore[arg-type]
 
 
-def test_two_hot_days_make_an_offender_with_its_owner_and_latest_task() -> None:
+def test_two_hot_days_make_an_offender_with_its_owner_and_recent_tasks() -> None:
     found = [call(2), call(2), call(3), call(3, task_id="T-late")]
     [o] = repeated_offenders(found, SETTINGS)
     assert (o.role, o.command, o.filter, o.days, o.calls) == (
@@ -40,7 +41,11 @@ def test_two_hot_days_make_an_offender_with_its_owner_and_latest_task() -> None:
         2,
         4,
     )
-    assert o.owner == "lead" and o.latest_task == "T-late" and o.tasks == ("T-2", "T-3", "T-late")
+    assert (
+        o.owner == "lead"
+        and o.recent_tasks == ("T-late", "T-3", "T-2")
+        and o.tasks == ("T-2", "T-3", "T-late")
+    )
     assert o.mean_tokens == 9000.0 and o.saved_tokens == round(4 * 9000 * 0.7)
 
 
@@ -129,3 +134,36 @@ def test_build_app_wires_the_watch(tmp_path: Path) -> None:
         assert [o.command for o in snap.output_offenders] == ["xcodebuild"]
     finally:
         app.close()
+
+
+def test_hook_spans_of_the_snapshot_count_and_stored_ones_are_not_doubled() -> None:
+    """A farm without OTLP: the tool calls come from the hooks, in the snapshot only."""
+    store = MemorySpanStore()
+    stored = [tool_span(2, 10, n) for n in range(3)]
+    store.append_spans(stored, NOW)
+    hooks = [tool_span(3, 10, n + 10) for n in range(3)]
+    snap = replace(snapshot(), spans=(*stored, *hooks))  # the window repeats stored spans
+    [o] = OffenderWatch(store, SETTINGS, UTC).offenders(snap, None)
+    assert o.calls == 6 and o.days == 2
+
+
+class FlakyTools(MemorySpanStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def tool_spans_since(self, after: datetime) -> list[Span]:
+        self.reads += 1
+        raise OSError("disk I/O error")
+
+
+def test_a_failed_read_is_retried_after_ten_minutes_not_every_tick() -> None:
+    store = FlakyTools()
+    watch = OffenderWatch(store, SETTINGS, UTC)
+    for minute in (0, 1, 9):
+        with contextlib.suppress(OSError):
+            watch.offenders(snapshot(NOW + timedelta(minutes=minute)), None)
+    assert store.reads == 1
+    with pytest.raises(OSError):
+        watch.offenders(snapshot(NOW + timedelta(minutes=10)), None)
+    assert store.reads == 2
