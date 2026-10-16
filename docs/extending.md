@@ -1,6 +1,6 @@
 # Extending Kelpie
 
-How to add a rule, a platform adapter, a connector and a daily report section. Read
+How to add a rule, a platform adapter, a connector, an alerter and a daily report section. Read
 [CLAUDE.md](../CLAUDE.md) for the invariants and [CONTRIBUTING.md](../CONTRIBUTING.md) for
 the PR workflow first. What to build, and in what order, is decided in [plan.md](plan.md).
 
@@ -370,6 +370,32 @@ reads no service, only the board in the snapshot.
 3. Show it in `kelpie status` (see `_github_status`) without secrets.
 4. Document the section in [configuration.md](configuration.md) and
    `kelpie.example.toml`.
+
+## Writing an alerter
+
+An alerter is what the engine sends alerts to: the `Alerter` protocol in
+`src/kelpie/core/ports.py` has one method, `send(event: AlertEvent)`. The delivery layer in
+`kelpie.alerts` (`Delivery.alerter()`) is the implementation Kelpie ships; its channels
+(Telegram, Slack) are separate objects behind it.
+
+`AlertEvent` (`src/kelpie/core/alerts.py`) is a frozen dataclass with the alert as fields:
+
+| Field | Meaning |
+| --- | --- |
+| `rule` | The rule that asked for the action. |
+| `subject` | What it is about, e.g. `requeue T-12`; with `rule` it identifies the alert for de-duplication. |
+| `reason` | The rule's own text, untrusted: send it as plain text or escape it. |
+| `severity` | `info`, `warning` or `critical`. An action that failed or could not be carried out is at least `warning`. |
+| `transition` | `new`, `still open`, `changed` or `resolved`, for alerts about a lasting condition (`Action.state`); `new` otherwise. |
+| `age` | How long the condition has been open, for `still open` and `resolved`; else `None`. |
+| `did` | What Kelpie itself did: `notified`, `suggested`, `done`, `failed` or `not_executed`. |
+| `did_text` | The engine's one-line account of that, worded from the action and its outcome; show it as it is. |
+| `text` | Free text (the daily report goes through `Delivery.send(text, severity, channels)`); sent as it is, without the alert layout. |
+
+Format from the fields only and never read them back out of a rendered line: a reason may
+start with "Changed: " and a rule name may hold a bracket. `kelpie.core.alerts.lead_in`
+words the transition once ("Still open after 4.0h: "), so every channel says the same.
+The engine's ledger records the reason with that wording in front of it; the event does not.
 
 ## Adding a daily report section
 
