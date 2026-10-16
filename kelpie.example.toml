@@ -530,3 +530,4 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # verify_window = "1d"             # before/after of fixes: this long on each side
 # review_roles = ["reviewer"]      # whose sessions make "review time"
 # min_sample = 10                  # fewer observations on a side: a small sample
+# [report.sections.<name>]         # settings of one report section; it checks its own keys

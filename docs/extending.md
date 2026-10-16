@@ -379,7 +379,7 @@ Code: `src/kelpie/report/sections/__init__.py`.
 | Name | What it is |
 | --- | --- |
 | `register_section(name)` | Decorator that registers a builder under a unique name. |
-| `SectionContext` | What a builder may read: `inputs` (the report's `ReportInputs`: ledger entries, alert states, spans, tasks, owners, sessions, prices, fixes, settings), `start` and `end` of the day, the day's `spans`, `counted` (LLM spans whose tokens count, with the model to price them by), `roles` (session id to its owner's role), `price` (token usage to `Spend`) and `spend` (the farm's whole day). |
+| `SectionContext` | What a builder may read: `inputs` (the report's `ReportInputs`: ledger entries, alert states, spans, tasks, owners, sessions, prices, fixes, settings), `start` and `end` of the day, the day's `spans`, `counted` (LLM spans whose tokens count, with the model to price them by), `roles` (session id to its owner's role), `price` (token usage to `Spend`), `spend` (the farm's whole day) and `config` (the section's own `[report.sections.<name>]` table, read-only, empty without one; check its keys yourself and raise on unknown ones: the report notes the failed section). |
 | `Section(title, lines, advice=())` | The result. `lines` are Markdown rendered under `## <title>` after the top 3; empty `lines` means no heading. |
 | `Advice(title, detail, usd=0.0, hours=0.0, tasks=())` | A recommendation worth `usd` and `hours` per day. It competes for the report's top 3 with the built-in ones, ranked the same way. `detail` has no final period. |
 
