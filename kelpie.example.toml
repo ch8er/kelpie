@@ -36,6 +36,8 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # max_recovery_depth = 1    # stop pattern: recovery tasks recovering recovery tasks
 # recovery_labels = ["recovery"]  # labels that mark a recovery task
 # recovery_titles = []      # ...or title patterns, e.g. '^recover (?P<target>T-\d+)'
+# parent_close_after = "1h" # stop pattern: subtasks all finished, parent still open -> close it?
+# prework_after = "4h"      # stop pattern: a card in triage/scheduled holding up dependents
 # hold_labels = []          # held tasks are skipped by the stop patterns; unset: bottlenecks'
 # ignore_tasks = []         # task ids or globs rule 3 never looks at (boards without labels)
 #
@@ -366,6 +368,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # wait_key = "/data/hermes-wait.key"  # signs Kelpie's parks (mode 0600, out of the agents'
 #                                   # reach); default: next to the ledger. Losing it leaves
 #                                   # parked tasks unrecognised
+# prework_statuses = ["triage", "scheduled"]  # before any work starts (rule 3, incident 17)
 # human_owners = ["alice"]         # assignees that are people, not agents (see
 #                                   # [connectors.human_tasks]); case-insensitive. Not a Hermes
 #                                   # profile. Also sets rule 5's default escalation target

@@ -149,6 +149,7 @@ FIX_KINDS = frozenset(
         ActionKind.WAKE,
         ActionKind.WAIT,
         ActionKind.REASSIGN,
+        ActionKind.CLOSE,
         ActionKind.STOP,
         ActionKind.CANCEL_BUILD,
         ActionKind.WIP_COMMIT,

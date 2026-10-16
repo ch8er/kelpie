@@ -119,6 +119,12 @@ class Task:
     # platform that assigns work before it is claimed (Hermes) sets the owner only once a
     # run claims it. None: the owner is all there is.
     assignee: str | None = None
+    # Tasks this one was split into (a parent and its subtasks; Hermes: a decomposed root).
+    # A parent is done when they are: rule 3 asks to close one left open after them.
+    subtasks: tuple[str, ...] = ()
+    # In a status before any work starts that only a person moves it out of (Hermes:
+    # triage, scheduled; adapter config): rule 3 alerts when one holds up dependents.
+    prework: bool = False
 
 
 class ResourceKind(StrEnum):

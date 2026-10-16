@@ -211,6 +211,8 @@ mode `0600`. Hooks never raise and do no network I/O.
 | `ready` / `running` / `blocked` / `review` / `done` | `ready` / `in_progress` / `blocked` / `review` / `done` |
 | `archived`; `done` older than `lookback` | left out |
 | `assignee` | `assignee` and `role` (Hermes routes work by profile); `owner_id` is the profile of the live run that claims the task (`current_run_id` names a run that has not ended), none while nothing runs, or the assignee itself for a `human_owners` name |
+| `decomposed` event (`child_ids`) | `subtasks`: rule 3 asks to close a parent whose subtasks are all finished |
+| `status` in `prework_statuses` (triage, scheduled) | `prework`: rule 3 alerts on a card held there past `prework_after` with dependents |
 | `task_events`, latest status-changing event | `status_since` (non-status events such as `heartbeat`, `commented`, `claim_extended` are ignored) |
 | `task_links` (parent, child) | `Dependency(child, depends_on=parent)` (links to archived parents dropped) |
 | `task_runs` row | `Session` `hermes-run-<id>` |

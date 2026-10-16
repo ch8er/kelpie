@@ -193,3 +193,126 @@ def test_a_task_routed_to_someone_is_not_ownerless() -> None:
     assert act(task(age=300, assignee="dev-1")) == []
     gone = act(task(status=Status.REVIEW, age=300, assignee="dev-9"))
     assert gone and "assignee dev-9 is no longer known" in gone[0].reason
+
+
+# --- e) a parent left open, f) a card stuck before work (incident 17) -------------------
+
+
+def parent(status: Status = Status.READY, age: int = 600, **kw: object) -> Task:
+    return task("P", status, age, subtasks=("S1", "S2"), **kw)
+
+
+def done(tid: str, age: int) -> Task:
+    return task(tid, Status.DONE, age)
+
+
+def test_a_parent_whose_subtasks_are_done_is_asked_to_close() -> None:
+    deps = (Dependency("W1", "P"), Dependency("W2", "W1"))
+    tasks = (
+        parent(),
+        done("S1", 300),
+        done("S2", 120),
+        task("W1", Status.BACKLOG),
+        task("W2", Status.BACKLOG),
+    )
+    alert, close = act(*tasks, deps=deps)
+    assert alert.kind is ActionKind.ALERT and close.kind is ActionKind.CLOSE
+    assert alert.params["pattern"] == "parent-left-open"
+    assert alert.params["waiting_tasks"] == ["W1", "W2"] and alert.params["subtasks"] == [
+        "S1",
+        "S2",
+    ]
+    assert "close it?" in alert.reason and "the last 2h ago" in alert.reason
+    assert alert.since == NOW - 120 * M
+    assert close.task_id == "P" and close.params["pattern"] == "parent-left-open"
+
+
+def test_parent_thresholds_and_exceptions() -> None:
+    assert act(parent(), done("S1", 300), done("S2", 59)) == []  # the last one just finished
+    assert act(parent(), done("S1", 300), task("S2", Status.IN_PROGRESS, owner_id="dev-1")) == []
+    assert act(parent(), done("S1", 300)) != []  # S2 left the board: finished
+    assert act(task("P", Status.BACKLOG, 600, subtasks=("S9",))) == []  # none known
+    # None known, but ready: the platform woke it when they were done (past lookback).
+    assert act(task("P", Status.READY, 600, subtasks=("S9",)))
+    live = (Session("x", "P", "dev-1", NOW - 10 * M, last_heartbeat=NOW - M),)
+    assert act(parent(), done("S1", 300), done("S2", 300), sessions=live) == []
+    off = OrphanStatus(parent_close_after=None)
+    assert act(parent(), done("S1", 300), done("S2", 300), rule=off) == []
+    assert act(parent(Status.DONE), done("S1", 300), done("S2", 300)) == []
+
+
+def test_a_parent_with_an_open_pr_of_its_own_is_not_done() -> None:
+    from kelpie.core.model import PullRequest
+
+    tasks = (parent(), done("S1", 300), done("S2", 300))
+    pr = PullRequest("example/repo", 7, "P: integration", "feature/P", task_ids=("P",))
+    snap = Snapshot(now=NOW, tasks=tasks, owners=(DEV,), pull_requests=(pr,))
+    assert list(OrphanStatus().evaluate(snap)) == []
+
+
+def test_a_finished_parent_gets_no_other_alert() -> None:
+    # In progress and ownerless for hours: the parent check speaks for it, once.
+    found = act(parent(Status.IN_PROGRESS), done("S1", 300), done("S2", 300))
+    assert [a.params.get("pattern") for a in found] == ["parent-left-open", "parent-left-open"]
+
+
+def test_a_card_stuck_before_work_with_dependents_alerts() -> None:
+    card = task("C", Status.BACKLOG, 21 * 60, prework=True)
+    deps = (Dependency("D1", "C"), Dependency("D2", "C"))
+    [alert] = act(card, task("D1", Status.BACKLOG), task("D2", Status.BACKLOG), deps=deps)
+    assert alert.params["pattern"] == "stuck-before-work"
+    assert alert.params["waiting_tasks"] == ["D1", "D2"]
+    assert "21h" in alert.reason and "only a person moves it out of" in alert.reason
+    assert act(card) == []  # nothing waits on it
+    young = task("C", Status.BACKLOG, 3 * 60, prework=True)
+    assert act(young, task("D1", Status.BACKLOG), deps=deps[:1]) == []
+    plain = task("C", Status.BACKLOG, 21 * 60)  # an ordinary backlog card
+    assert act(plain, task("D1", Status.BACKLOG), deps=deps[:1]) == []
+    off = OrphanStatus(prework_after=None)
+    assert act(card, task("D1", Status.BACKLOG), deps=deps[:1], rule=off) == []
+
+
+def test_build_parent_and_prework_thresholds() -> None:
+    rule = build({"parent_close_after": "30m", "prework_after": False})
+    assert rule.parent_close_after == 30 * M and rule.prework_after is None
+
+
+def test_a_parent_held_by_more_than_its_subtasks_is_not_done() -> None:
+    kids = (done("S1", 300), done("S2", 300))
+    # The orchestrator added work under it.
+    extra = (task("C", Status.IN_PROGRESS, owner_id="dev-1"),)
+    assert act(parent(), *kids, *extra, deps=(Dependency("P", "C"),)) == []
+    # A subtask's PR is still open.
+    from kelpie.core.model import PullRequest
+
+    pr = PullRequest("example/repo", 9, "S2: polish", "feature/S2", task_ids=("S2",))
+    snap = Snapshot(now=NOW, tasks=(parent(), *kids), owners=(DEV,), pull_requests=(pr,))
+    assert list(OrphanStatus().evaluate(snap)) == []
+
+
+@pytest.mark.parametrize("status", [Status.BLOCKED, Status.WAITING, Status.REVIEW])
+def test_a_parent_with_a_reason_of_its_own_is_not_asked_to_close(status: Status) -> None:
+    found = act(parent(status), done("S1", 300), done("S2", 300))
+    assert all(a.params.get("pattern") != "parent-left-open" for a in found)
+
+
+def test_the_close_timer_starts_after_the_parents_own_last_run() -> None:
+    kids = (done("S1", 300), done("S2", 300))
+    run = (Session("r", "P", "dev-1", NOW - 90 * M, ended_at=NOW - 20 * M),)
+    assert act(parent(), *kids, sessions=run) == []  # its last run ended 20 minutes ago
+    later = (Session("r", "P", "dev-1", NOW - 3 * 60 * M, ended_at=NOW - 2 * 60 * M),)
+    assert act(parent(), *kids, sessions=later)
+
+
+def test_the_alert_announces_its_close() -> None:
+    from kelpie.core.alerts import ANNOUNCES
+
+    alert, close = act(parent(), done("S1", 300), done("S2", 300))
+    assert alert.params[ANNOUNCES] == close.key
+
+
+def test_a_pre_work_card_waiting_for_its_own_parents_is_queued() -> None:
+    card = task("C", Status.BACKLOG, 21 * 60, prework=True)
+    deps = (Dependency("D1", "C"), Dependency("C", "U"))
+    behind = (task("D1", Status.BACKLOG), task("U", Status.IN_PROGRESS, owner_id="dev-1"))
+    assert act(card, *behind, deps=deps) == []

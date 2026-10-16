@@ -12,6 +12,7 @@ from kelpie.core.model import Condition, ConditionKind
 from kelpie.core.ports import (
     ActionConnector,
     PlatformAdapter,
+    SupportsClose,
     SupportsReassign,
     SupportsStop,
     SupportsWait,
@@ -91,6 +92,8 @@ class PlatformExecutor:
                 adapter, SupportsReassign
             ):
                 adapter.reassign(tid, action.params["owner_id"], action.reason)
+            case ActionKind.CLOSE if isinstance(adapter, SupportsClose):
+                adapter.close(tid, action.reason)
             case ActionKind.WAIT if isinstance(adapter, SupportsWait):
                 conditions = wait_conditions(action)
                 if not conditions:

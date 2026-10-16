@@ -101,6 +101,13 @@ class SupportsWait(Protocol):
 
 
 @runtime_checkable
+class SupportsClose(Protocol):
+    """Optional capability: move a task to done (a parent whose subtasks are finished)."""
+
+    def close(self, task_id: str, reason: str) -> None: ...
+
+
+@runtime_checkable
 class SupportsStop(Protocol):
     """Optional adapter capability: stop (pause) a running session.
 

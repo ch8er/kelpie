@@ -138,6 +138,8 @@ def intent(action: Action) -> str:
             return f"park {task} until its conditions hold"
         case ActionKind.REASSIGN:
             return f"assign {task} to {_target(action, 'owner_id', 'another owner')}"
+        case ActionKind.CLOSE:
+            return f"close {task} (move it to done)"
         case ActionKind.STOP:
             return f"stop run {_target(action, 'session_id', 'of ' + task)}"
         case ActionKind.CANCEL_BUILD:
@@ -165,6 +167,8 @@ def _past(action: Action) -> str:
             return f"Parked {task} until its conditions hold"
         case ActionKind.REASSIGN:
             return f"Assigned {task} to {_target(action, 'owner_id', 'another owner')}"
+        case ActionKind.CLOSE:
+            return f"Closed {task} (moved it to done)"
         case ActionKind.STOP:
             return f"Stopped run {_target(action, 'session_id', 'of ' + task)}"
         case ActionKind.CANCEL_BUILD:
