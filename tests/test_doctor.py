@@ -44,7 +44,7 @@ class Farm:
         return path
 
     def checks(self, prometheus: str | None = None) -> dict[str, Check]:
-        found = run_checks(self.config(), prometheus, environ={})
+        found = run_checks(self.config(), prometheus, now=lambda: NOW, environ={})
         return {c.name: c for c in found}
 
     def spool_line(self, age: timedelta) -> None:
