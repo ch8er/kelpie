@@ -669,6 +669,83 @@ def test_a_fix_scoped_to_the_hold_cause() -> None:
     assert "hours lost)" in render_markdown(report)
 
 
+# --- agents waiting on people (rule 13) and cards stuck before work (rule 3) -------------
+
+
+def inbox_sample(
+    when: datetime, waiting: list[str], person: str | None = "human-owner"
+) -> LedgerEntry:
+    return entry(
+        when, "needs_you", ActionKind.ESCALATE, Outcome.ALERTED, None,
+        escalate_to=person, cost_hours=1.0, blocked_agent_tasks=len(waiting),
+        waiting_agent_tasks=len(waiting), waiting=waiting, items=[{"task": "H-1"}],
+    )  # fmt: skip
+
+
+def test_agents_waiting_on_people_count_agent_hours() -> None:
+    # 3 agent tasks wait on the person from 09:00, 1 from 15:00, the inbox closes at 17:00
+    inbox = opened("needs_you:human-owner", "needs_you", at(9), at(9), at(17))
+    samples = [
+        inbox_sample(at(9), ["A-1", "A-2", "A-3"]),
+        inbox_sample(at(15), ["A-3"]),
+        inbox_sample(at(10), ["Z-1"], person="human-lead"),  # someone else's inbox
+    ]
+    report = build_report(day_inputs(states=[inbox], actions=samples, hour_usd=2.0))
+    [line] = report.chaos
+    assert line.rule == "needs_you" and line.hours == pytest.approx(3 * 6 + 1 * 2)
+    assert line.tasks == ("A-1", "A-2", "A-3")
+    assert line.cause == "agents waiting on people (approvals, human tasks)"
+    markdown = render_markdown(report)
+    assert "agents waiting on people" in markdown
+    assert "Reduce agents waiting on people" in markdown
+
+
+def test_the_unassigned_inbox_and_alerts_without_the_count() -> None:
+    inbox = opened("needs_you:unassigned", "needs_you", at(10), at(10), at(12))
+    [line] = build_report(
+        day_inputs(states=[inbox], actions=[inbox_sample(at(10), ["A-1", "A-2"], person=None)])
+    ).chaos
+    assert line.hours == pytest.approx(4.0)
+    old = entry(
+        at(10), "needs_you", ActionKind.ESCALATE, Outcome.ALERTED, None,
+        escalate_to=None, cost_hours=1.0, waiting_agent_tasks=True,
+    )  # fmt: skip
+    assert build_report(day_inputs(states=[inbox], actions=[old])).chaos == ()
+
+
+def test_cards_stuck_before_work_are_their_own_line() -> None:
+    stuck = opened(
+        "orphan_status:stuck-before-work:T-5:2026-03-02T06:00:00+00:00",
+        "orphan_status",
+        at(6),
+        at(8),
+        at(12),
+    )
+    ownerless = opened("orphan_status:T-3", "orphan_status", at(9), at(9), at(10))
+    chaos = {c.rule: c for c in build_report(day_inputs(states=[stuck, ownerless])).chaos}
+    assert chaos["orphan_status:prework"].hours == pytest.approx(4.0)
+    assert chaos["orphan_status:prework"].cause == "cards stuck before work (triage, scheduled)"
+    assert chaos["orphan_status"].hours == pytest.approx(1.0)
+
+
+def test_stuck_before_work_state_matches_rule_3() -> None:
+    from kelpie.report.daily import PREWORK, cause_of
+
+    incident = load(FIXTURES / "17-card-stuck-scheduled.yaml")
+    actions = list(REGISTRY[incident.rule](incident.config).evaluate(incident.snapshot))
+    [a] = [a for a in actions if a.state and ":stuck-before-work:" in a.state]
+    state = OpenState(a.state, "orphan_status", at(1), at(1), at(2), 0, Severity.WARNING, "s")
+    assert cause_of(state) == PREWORK
+
+
+def test_before_after_counts_people_waits_like_the_report() -> None:
+    from kelpie.report.daily import state_hours
+
+    inbox = opened("needs_you:human-owner", "needs_you", at(9), at(9), at(17)).state
+    samples = [inbox_sample(at(9), ["A-1", "A-2"])]
+    assert state_hours(samples, inbox, at(9), at(17)) == pytest.approx(16.0)
+
+
 def test_section_tables_reach_the_report_inputs(db: Path) -> None:
     raw = tomllib.loads('[report.sections.tokens]\nroutine_roles = ["reviewer"]\n')["report"]
     src = sources(db, sections=load_report(raw).sections)
@@ -703,7 +780,7 @@ def test_needs_you_inbox_heads_needs_a_human_by_cost() -> None:
     markdown = render_markdown(report)
     first = markdown.index("**Needs you, human-owner**: 6.5 agent-hours waited")
     assert first < markdown.index("**Needs you, human-lead**")
-    assert "`needs_you`" not in markdown  # no second line for the same open state
+    assert "* `needs_you`" not in markdown  # no second line for the same open state
 
 
 def test_needs_you_inbox_uses_the_hourly_view_of_a_quiet_state() -> None:

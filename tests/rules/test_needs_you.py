@@ -86,6 +86,12 @@ def test_cost_of_delay_orders_items_and_people() -> None:
     ]
     first, second = run(snap(tasks, conds))
     assert first.params["escalate_to"] == "human-owner" and first.params["cost_hours"] == 9.0
+    # for the report's agent-hours waiting on people: who waits right now
+    assert first.params["waiting_agent_tasks"] == 3 and first.params["waiting"] == [
+        "A-1",
+        "A-2",
+        "A-3",
+    ]
     assert first.params["human_tasks"] == ["H-1", "H-2"]  # 5h before 4h
     assert first.kind is ActionKind.ESCALATE and first.state == "needs_you:human-owner"
     assert second.params["escalate_to"] == "human-lead" and second.params["cost_hours"] == 3.0

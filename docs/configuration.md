@@ -479,7 +479,10 @@ Only agent tasks that wait on the human task itself add to its cost; work deeper
 chain counts in the number held. The alert is a long-lived state per person: announced
 when it opens, again when the list of tasks changes or at the escalation thresholds,
 resolved when empty. `escalate_to` names the person; delivery goes to the alert channels
-like every other alert. The daily report heads "Needs a human" with each open inbox. This
+like every other alert. The daily report heads "Needs a human" with each open inbox, and
+counts the agent-hours of the agent tasks waiting on each person in its cost of chaos
+("agents waiting on people"), from the count every alert reports (`waiting_agent_tasks`,
+re-sampled about hourly while the inbox stays open). This
 rule owns escalating human work; rule 6 keeps the farm-level alert (free slots, only human
 tasks ready) and escalates single human gates only with `escalate_human_gates = true`.
 
