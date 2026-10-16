@@ -98,6 +98,8 @@ class Evidence:
     # How the report counts a chaos state: its cause (a rule, or "bottlenecks:hold") and
     # its hours lost in a window (condition-hours, idle agent-hours for holds).
     cause: Callable[[OpenState], str] = lambda s: s.rule
+    # When a state starts counting (a person's inbox: when it opened, see the report).
+    start: Callable[[OpenState], datetime] = lambda s: max(s.since, s.opened_at)
     hours: Callable[[OpenState, datetime, datetime], float] = lambda s, lo, hi: (
         (hi - lo).total_seconds() / 3600
     )
@@ -181,7 +183,7 @@ def _stuck(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) -> 
             s = row.state
             if not counts(s):
                 continue
-            lo, hi = max(s.since, s.opened_at, w[0]), min(s.last_seen, w[1])
+            lo, hi = max(ev.start(s), w[0]), min(s.last_seen, w[1])
             if hi > lo:
                 total += ev.hours(s, lo, hi)
                 n += 1

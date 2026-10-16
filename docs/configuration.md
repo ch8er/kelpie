@@ -248,7 +248,7 @@ Alerts (critical when many open tasks depend on it) and proposes an idle agent o
 | `recovery_labels` | `["recovery"]` | list of labels | Labels that mark a recovery task. |
 | `recovery_titles` | `[]` | list of regexes | Titles that mark a recovery task, case-insensitive; a named group `target` names the task it recovers. The only way on Hermes, which has no labels. |
 | `parent_close_after` | `"1h"` | duration, or `false` | Stop pattern (incident 17): every subtask of a parent is finished, the last this long ago, and the parent is still open with no live session and no open PR of its own → alert "close it?" with the tasks waiting behind it, and `close` (act mode, on an adapter that supports it). Rules 1 and 5 never resume such a parent. |
-| `prework_after` | `"4h"` | duration, or `false` | Stop pattern (incident 17): a card in a pre-work status (Hermes `[adapters.hermes] prework_statuses`) this long, with open tasks depending on it → alert with those tasks. |
+| `prework_after` | `"4h"` | duration, or `false` | Stop pattern (incident 17): a card in a pre-work status (Hermes `[adapters.hermes] prework_statuses`) this long, with open tasks depending on it → alert with those tasks. The daily report counts these states as their own cost-of-chaos line, "cards stuck before work", in condition-hours. |
 | `hold_labels` | bottlenecks' | list of labels | Tasks with one of these labels are parked on purpose: no stop pattern looks at them. Unset: `bottlenecks` `hold_labels` and `holds` labels. |
 | `ignore_tasks` | `[]` | list of ids or globs | Tasks rule 3 never looks at, e.g. `["t_parked*"]`: the escape hatch on boards without labels (Hermes), where holds cannot be expressed. |
 
@@ -864,7 +864,7 @@ once a day when `at` is set.
 | `timezone` | `"UTC"` | IANA name | Where a day starts and ends. |
 | `dir` | unset | path | Writes `kelpie-report-<date>.md` there. Unset: stdout only. |
 | `task_url` | unset | string with `{id}` | Links task ids in the Markdown. |
-| `hour_usd` | unset | dollars, > 0 | What a stuck task-hour costs. Unset: hours stay hours. |
+| `hour_usd` | unset | dollars, > 0 | What an hour lost costs: a stuck task-hour, or an agent-hour idle behind a hold or waiting on a person. Unset: hours stay hours. |
 | `channels` | all | list of channel names | `[[alerts.channels]]` that get the summary with `--send`. |
 | `severity` | `"warning"` | `info` \| `warning` \| `critical` | Severity of the summary; channels filter by `min_severity`. |
 | `verify_window` | `"1d"` | duration string, > 0 | Before/after of fixes: this long on each side. |

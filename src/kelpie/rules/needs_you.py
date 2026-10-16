@@ -34,7 +34,9 @@ longest wait.
 items in order, as a long-lived state (``needs_you:<person>``): announced when it opens,
 again when the list changes or at the escalation thresholds, resolved when it is empty.
 Severity is ``critical`` once the person's total cost reaches ``critical_after_hours``
-(24), else ``warning``.
+(24), else ``warning``. Every escalation also carries ``waiting_agent_tasks``, how many agent
+tasks wait on the person right now, and ``waiting``, their ids (at most 20): the daily
+report integrates the count over the day as agent-hours waiting on people.
 
 The state's key is the person's list of task ids, so any change to it, an item added or
 one done, is announced as "changed" with the new list; an emptied inbox resolves.

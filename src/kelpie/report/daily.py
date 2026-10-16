@@ -402,6 +402,7 @@ def _verifications(
         end=end,
         states=[r for r in inputs.states if is_chaos(r.state)],  # counted like the chaos
         cause=cause_of,
+        start=counts_from,
         hours=lambda st, lo, hi: state_hours(inputs.actions, st, lo, hi, _humans(inputs)),
         chaos_rules=frozenset(CHAOS_CAUSES),
         spans=known,
@@ -500,7 +501,7 @@ def _chaos(
     for state in chaos:
         # From when Kelpie first reported it: a grace period or an allowed wait before the
         # threshold is not lost time. A lower bound (a rule going live re-opens a state).
-        a, b = max(state.since, state.opened_at, start), min(state.last_seen, end)
+        a, b = max(counts_from(state), start), min(state.last_seen, end)
         if b <= a:
             continue
         cause = cause_of(state)
@@ -552,6 +553,15 @@ def _chaos(
     return tuple(lines)
 
 
+def counts_from(state: OpenState) -> datetime:
+    """When a chaos state starts counting: when Kelpie first reported it, not before its
+    condition began. A person's inbox (rule 13) counts from when it opened: its ``since``
+    is its longest current wait, which moves forward as items are answered."""
+    if state.id.startswith(PEOPLE_STATE):
+        return state.opened_at
+    return max(state.since, state.opened_at)
+
+
 def cause_of(state: OpenState) -> str:
     """The :data:`CHAOS_CAUSES` key a chaos state counts under."""
     if state.id.startswith(HOLD_STATE):
@@ -582,7 +592,7 @@ def hold_agent_hours(
             return None
         return len([x for x in idle if x not in humans]), _held(e.params)
 
-    return _sampled_hours(entries, state, a, b, sample)
+    return _sampled_hours(entries, state.since, a, b, sample)
 
 
 def people_agent_hours(
@@ -597,25 +607,27 @@ def people_agent_hours(
 
     def sample(e: LedgerEntry) -> tuple[int, list[object]] | None:
         who = e.params.get("escalate_to")
-        if e.rule != PEOPLE or (who if isinstance(who, str) else "unassigned") != person:
+        if e.rule != PEOPLE or "escalate_to" not in e.params:
+            return None  # a resolution notice or another rule's entry: no view of the inbox
+        if (who if isinstance(who, str) else "unassigned") != person:
             return None
         count = e.params.get("waiting_agent_tasks")
         waiting = e.params.get("waiting")
         n = count if isinstance(count, int) and not isinstance(count, bool) else 0
         return max(n, 0), waiting if isinstance(waiting, list) else []
 
-    return _sampled_hours(entries, state, a, b, sample)
+    return _sampled_hours(entries, state.opened_at, a, b, sample)
 
 
 def _sampled_hours(
     entries: Sequence[LedgerEntry],
-    state: OpenState,
+    first: datetime,
     a: datetime,
     b: datetime,
     sample: Callable[[LedgerEntry], tuple[int, list[object]] | None],
 ) -> tuple[float, tuple[str, ...]]:
     """Integrate a count a state's alerts report (idle agents, waiting tasks) over
-    ``[a, b)``: each sample of this episode of the state (at or after its ``since``) holds
+    ``[a, b)``: each sample of this episode of the state (at or after ``first``) holds
     until the next one, a step function. Before the first sample in the window, the latest
     earlier sample applies, else the first one. No sample at all: 0. Also the task ids the
     samples name."""
@@ -623,7 +635,7 @@ def _sampled_hours(
         (
             (e.at, found[0], found[1])
             for e in entries
-            if state.since <= e.at < b and (found := sample(e)) is not None
+            if first <= e.at < b and (found := sample(e)) is not None
         ),
         key=lambda x: (x[0], x[1]),
     )
@@ -847,7 +859,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             "reported it, summed over conditions (two on one task both count; a lower bound); "
             "for forgotten holds, idle agent-hours: the agents rule 6 saw idle behind the hold "
             "after its expiry, over time; for agents waiting on people, agent-hours: the agent "
-            "tasks rule 13 saw waiting on a person's approval or human task, over time.",
+            "tasks rule 13 saw waiting on a person's approval or human task, over time (a "
+            "human gate rule 6 also reports counts in both lines).",
         ]
     else:
         lines.append("Nothing stuck and no tokens burned on loops, idle sessions or restarts.")
@@ -1020,6 +1033,8 @@ def _inbox(
             continue
         if e.outcome is Outcome.SUPPRESSED and e.suppression is not Suppression.STATE_OPEN:
             continue  # a cooldown or rate-limit repeat, not the state's latest view
+        if "escalate_to" not in e.params:
+            continue  # a resolution notice: no view of an inbox
         person = e.params.get("escalate_to")
         state = f"needs_you:{person if isinstance(person, str) else 'unassigned'}"
         if state in open_ids and (state not in latest or e.at >= latest[state].at):

@@ -746,6 +746,40 @@ def test_before_after_counts_people_waits_like_the_report() -> None:
     assert state_hours(samples, inbox, at(9), at(17)) == pytest.approx(16.0)
 
 
+def test_an_inbox_counts_from_when_it_opened_though_its_since_moves() -> None:
+    # opened 09:00 with 2 waiting; A-1 answered at 12:00 and B-1 (waiting since 11:00)
+    # took its place, so the stored since moved to 11:00: 09:00-11:00 still counts
+    inbox = opened("needs_you:human-owner", "needs_you", at(11), at(9), at(17))
+    samples = [inbox_sample(at(9), ["A-1", "A-2"]), inbox_sample(at(12), ["A-2", "B-1"])]
+    [line] = build_report(day_inputs(states=[inbox], actions=samples)).chaos
+    assert line.hours == pytest.approx(2 * 8)
+    assert line.tasks == ("A-1", "A-2", "B-1")
+
+
+def test_another_inbox_resolving_is_no_sample_of_the_unassigned_one() -> None:
+    inbox = opened("needs_you:unassigned", "needs_you", at(9), at(9), at(13))
+    gone = entry(at(10), "needs_you", ActionKind.ALERT, Outcome.ALERTED, None,
+                 state="needs_you:human-owner")  # fmt: skip
+    samples = [inbox_sample(at(9), ["A-1", "A-2"], person=None), gone]
+    report = build_report(day_inputs(states=[inbox], actions=samples))
+    [line] = report.chaos
+    assert line.hours == pytest.approx(2 * 4)
+    [i] = report.inbox
+    assert i.person is None and i.blocked_agent_tasks == 2  # not the notice
+
+
+def test_before_after_of_a_needs_you_fix_counts_agent_hours() -> None:
+    from kelpie.report.fixes import MANUAL, FixEvent
+
+    inbox = opened("needs_you:human-owner", "needs_you", at(0, day=1), at(0, day=1), at(23))
+    samples = [inbox_sample(at(0, day=1), ["A-1", "A-2", "A-3"]), inbox_sample(at(12), [])]
+    fix = FixEvent(at(12), MANUAL, "named approvers", rule="needs_you")
+    report = build_report(day_inputs(states=[inbox], actions=samples, fixes=(fix,)))
+    lost = next(m for m in report.verifications[0].metrics if m.name.startswith("hours lost"))
+    assert lost.name == "hours lost per day (needs_you)"
+    assert (lost.before, lost.after) == (pytest.approx(3 * 24), pytest.approx(0))
+
+
 def test_section_tables_reach_the_report_inputs(db: Path) -> None:
     raw = tomllib.loads('[report.sections.tokens]\nroutine_roles = ["reviewer"]\n')["report"]
     src = sources(db, sections=load_report(raw).sections)

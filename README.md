@@ -256,7 +256,8 @@ report; no LLM is involved.
   condition-hours, with two causes in agent-hours instead: forgotten holds (rule 6) count
   the idle agent-hours behind them, from the idle agents rule 6 reports while the hold
   stays open, and a person's inbox (rule 13) counts the agent-hours of the agent tasks
-  waiting on them (approvals, human tasks). Cards stuck in a pre-work status such as
+  waiting on them (approvals, human tasks); a human gate rule 6 also reports counts
+  in both lines. Cards stuck in a pre-work status such as
   triage or scheduled while other tasks wait on them (rule 3) are a line of their own.
   Humans (owners of kind `human`) never count as idle agents. `[report] hour_usd` prices
   them all.
