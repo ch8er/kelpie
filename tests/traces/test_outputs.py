@@ -3,7 +3,6 @@ recommendations and before/after (fixture ``field-05-build-log-flood``)."""
 
 from __future__ import annotations
 
-import inspect
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,7 +14,6 @@ import yaml
 from kelpie.adapters.hermes import plugin
 from kelpie.core.model import Span, SpanKind
 from kelpie.core.serde import snapshot_from_dict
-from kelpie.traces import command as traces_command
 from kelpie.traces.command import command_prefix, detect_filter, redact_command
 from kelpie.traces.config import load_outputs, load_traces
 from kelpie.traces.outputs import (
@@ -102,18 +100,6 @@ def test_fixture_numbers() -> None:
 
 
 # --- commands ----------------------------------------------------------------------------
-
-
-def test_redaction_shares_source_with_the_hermes_plugin() -> None:
-    assert inspect.getsource(plugin.redact_command) == inspect.getsource(redact_command)
-    for name in ("_ASSIGN", "_KEY_VALUE", "_SENSITIVE_KEY", "_URL_USERINFO", "_QUERY_SECRET"):
-        assert getattr(plugin, name).pattern == getattr(traces_command, name).pattern
-    assert plugin._SECRET_FLAGS == traces_command._SECRET_FLAGS
-    assert plugin._LONG_RUN.pattern == traces_command._LONG_RUN.pattern
-    for name in ("_ASSIGN", "_KEY_VALUE", "_SENSITIVE_KEY", "_URL_USERINFO", "_QUERY_SECRET"):
-        assert getattr(plugin, name).flags == getattr(traces_command, name).flags
-    assert plugin.COMMAND_LIMIT == traces_command.COMMAND_LIMIT
-    assert (plugin._MASK, plugin._MAX_TOKENS) == (traces_command._MASK, traces_command._MAX_TOKENS)
 
 
 @pytest.mark.parametrize(

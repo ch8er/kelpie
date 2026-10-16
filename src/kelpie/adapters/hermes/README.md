@@ -191,16 +191,17 @@ Raw tool arguments and results are never written. A tool call is stored as the t
 first 16 hex digits of a SHA-256 of its canonical JSON arguments and, for tools with a
 `command` (or `cmd`) argument, a redacted prefix of it:
 
-- first line only, leading `VAR=value` assignments dropped, at most 4 tokens, 200 characters;
-- values masked after `Bearer`, `Authorization:`, `--token`, `--password`, `-p` (and `-pSECRET`);
-- values of `key=value` pairs whose key looks like a credential (`API_KEY=...`, `--secret=...`)
-  and of `?token=...` query parameters masked;
-- URL userinfo (`https://user:pass@host`) masked;
-- any run of 24 or more token characters masked, and quoted arguments cut to their opening
-  quote.
+an allowlist, not a list of secrets: at most 4 arguments of the first line, and only the
+executable's name, the plain lowercase words and numbers right after it (`gh pr checks 5`),
+flag names and pipe stages; everything else (flag values, paths, URLs, `user:pass`, headers,
+assignments, quoted text) is `***`, and so is any plain word after a flag or a masked
+argument. Details in [docs/privacy.md](../../../../docs/privacy.md#hermes-hooks-plugin);
+the code is shared with OTLP ingest and the Claude Code hook.
 
 So `GH_TOKEN=abc gh pr checks 5` is stored as `gh pr checks 5`. This is best effort; set
-`KELPIE_HERMES_SPOOL_COMMANDS=0` to record no command at all. The spool file is created with
+`KELPIE_HERMES_SPOOL_COMMANDS=0` to record no command at all. A spool written by an older
+plugin (before ch8er/kelpie#82, which kept secrets such as `curl -u user:pass`) is cleaned
+with `kelpie spool scrub`, run as the spool's owner, after the new plugin is installed. The spool file is created with
 mode `0600`. Hooks never raise and do no network I/O.
 
 ## What Kelpie sees

@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from kelpie import __version__
 from kelpie.app import (
     ConfigError,
+    Settings,
     build_adapters,
     build_app,
     check_exposure,
@@ -77,6 +78,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Prometheus base URL (default: $KELPIE_PROMETHEUS_URL; else localhost:9090 if up)",
     )
 
+    spool = sub.add_parser("spool", help="maintain the hooks spools on this host")
+    spool_sub = spool.add_subparsers(dest="spool_command", required=True)
+    scrub = spool_sub.add_parser(
+        "scrub",
+        help="re-redact the commands in existing spools (secrets kept by older redaction)",
+    )
+    scrub.add_argument(
+        "paths",
+        nargs="*",
+        help="spool files (default: the configured Hermes and Claude Code spools and their .1)",
+    )
+    scrub.add_argument("--dry-run", action="store_true", help="count, change nothing")
+
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -125,6 +139,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(out)
             sys.stderr.write(err)
             return code
+        if args.command == "spool":
+            return _scrub(settings, args.paths, args.dry_run)
         if args.command == "status":
             rules = load_rules(settings.engine)
             adapters = build_adapters(settings)
@@ -152,6 +168,29 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     run(app, args.host, args.port)
     return 0
+
+
+def _scrub(settings: Settings, paths: Sequence[str], dry_run: bool) -> int:
+    """``kelpie spool scrub``: 0 when every spool was scrubbed, 1 otherwise."""
+    from pathlib import Path
+
+    from kelpie.traces.scrub import default_spools, scrub_file
+
+    targets = [Path(p) for p in paths] or default_spools(
+        settings.hermes.spool if settings.hermes is not None else None,
+        settings.claude_code.spool if settings.claude_code is not None else None,
+    )
+    if not targets:
+        print("kelpie: no spool found; pass the spool paths", file=sys.stderr)
+        return 1
+    code = 0
+    for path in targets:
+        try:
+            print(scrub_file(path, dry_run=dry_run).render(dry_run))
+        except OSError as exc:
+            print(f"kelpie: {path}: {exc}", file=sys.stderr)
+            code = 1
+    return code
 
 
 if __name__ == "__main__":

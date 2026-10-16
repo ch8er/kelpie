@@ -48,7 +48,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import sys
 import time
 from pathlib import Path
@@ -64,8 +63,6 @@ MAX_BYTES_ENV = "KELPIE_CLAUDE_SPOOL_MAX_BYTES"
 COMMANDS_ENV = "KELPIE_CLAUDE_SPOOL_COMMANDS"
 DEFAULT_SPOOL = "~/.claude/kelpie/spool.jsonl"
 DEFAULT_MAX_BYTES = 20 * 1024 * 1024
-COMMAND_LIMIT = 200
-MAX_COMMAND_INPUT = 2048  # characters of a command line that redaction looks at
 MAX_INPUT = 16 * 1024 * 1024  # a hook input larger than this is not read
 MAX_ID = 128  # ids and short enums are cut to this many characters
 _COMMAND_KEYS = ("command", "cmd")
@@ -116,73 +113,187 @@ def args_hash(args: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# A plain word: a subcommand, a number, a short name. Anything else (paths, URLs, quoted
-# text, `user:pass`, `$VAR`, globs) ends the kept prefix.
-_WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._,+-]{0,23}$")
-_FLAG = re.compile(r"^-{1,2}[A-Za-z][A-Za-z0-9-]{0,40}$")
-# A flag whose name says its value is a credential, user or header: the value is masked.
-_SECRET_FLAG = re.compile(r"pass|token|secret|key|auth|cred|cookie|user|header|login|otp|pin", re.I)
-# Short flags that take a password, key, user or header in common tools (mysql -p, curl -u
-# and -H, redis-cli -a, ldapsearch -w, zip -P, openssl -k/-K).
-_SECRET_SHORT = frozenset({"-p", "-u", "-a", "-H", "-w", "-P", "-k", "-K"})
-_SEPARATORS = frozenset({"|", "||", "&&", ";", "&"})
-_MASK = "***"
+# --- shared redaction: begin ---
+# Byte-for-byte identical in kelpie.traces.command, the Hermes plugin and the Claude Code
+# hook (tests/traces/test_redaction.py compares them): the hooks run on agent hosts without
+# Kelpie installed, and a command reported both by a hook and over OTLP must redact the same.
+COMMAND_LIMIT = 200
 _MAX_TOKENS = 4
+_MAX_LINE = 4096  # characters of the first line that are looked at
+_MASK = "***"
+_QUOTES = ("'", '"', "`")
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_EXE = re.compile(r"^[A-Za-z0-9_][\w.+-]{0,63}$")
+_WORD = re.compile(r"^(?:[a-z][a-z0-9_-]{0,23}|[0-9]{1,10})$")
+_FLAG = re.compile(r"^(?:-[A-Za-z0-9]|--[A-Za-z][A-Za-z0-9-]{0,40})$")
+_SEPARATORS = frozenset({"|", "||", "|&", "&&", ";", "&"})
+_PYTHON_MODULES = frozenset({"pytest", "unittest", "pip", "mypy", "ruff", "black", "build"})
+# Wrappers that only run the real command, with the flags of theirs that take a value.
+# Wrappers that only run the real command: their flags that take a value, and those that
+# do not. Any other flag of a wrapper may take one: the rest of the command is masked.
+_WRAPPERS = {
+    "sudo": (
+        frozenset(
+            {
+                *("-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D", "-T", "-R"),
+                *("--user", "--group", "--host", "--prompt", "--close-from", "--other-user"),
+                *("--role", "--type", "--chdir", "--command-timeout", "--chroot"),
+            }
+        ),
+        frozenset(
+            {
+                *("-A", "-b", "-E", "-H", "-i", "-K", "-k", "-n", "-P", "-S", "-s", "-B"),
+                *("--askpass", "--background", "--preserve-env", "--set-home", "--login"),
+                *("--remove-timestamp", "--reset-timestamp", "--non-interactive"),
+                *("--preserve-groups", "--stdin", "--shell", "--bell"),
+            }
+        ),
+    ),
+    "time": (
+        frozenset({"-o", "-f", "--output", "--format"}),
+        frozenset({"-p", "-v", "-a", "-q", "--portability", "--verbose", "--append", "--quiet"}),
+    ),
+    "env": (
+        frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+        frozenset({"-i", "-0", "-v", "--ignore-environment", "--null", "--debug"}),
+    ),
+    "nice": (frozenset({"-n", "--adjustment"}), frozenset()),
+    "nohup": (frozenset(), frozenset()),
+    "command": (frozenset(), frozenset({"-p", "-v", "-V"})),
+    "exec": (frozenset({"-a"}), frozenset({"-c", "-l"})),
+    "rtk": (frozenset(), frozenset()),
+}
+_MAX_WRAPPED = 8  # wrapper tokens kept on top of _MAX_TOKENS
+_BLANKS = re.compile(r"[ \t]+")  # what bash splits words on
+
+
+def _quoted_span(tokens: list[str], i: int) -> int:
+    """Index after the argument that starts at ``tokens[i]``: past the token that closes
+    the first quote it opens, else the next token. An unclosed quote runs to the end."""
+    tok = tokens[i]
+    if "\\" in tok and any(q in tok for q in _QUOTES):
+        return len(tokens)  # an escaped quote: where the argument ends is not clear
+    quote = next((c for c in tok if c in _QUOTES), None)
+    if quote is None or tok.count(quote) % 2 == 0:
+        return i + 1
+    for j in range(i + 1, len(tokens)):
+        if tokens[j].count(quote) % 2 == 1:
+            return j + 1
+    return len(tokens)
+
+
+def _wrapper_flag(
+    tok: str, valued: frozenset[str], plain: frozenset[str]
+) -> tuple[str, bool, bool]:
+    """A wrapper's flag as kept, whether the next argument is its value, and whether it is
+    unknown (so its value, or what follows, cannot be told apart from the command)."""
+    if tok == "--":
+        return tok, False, False
+    if tok[:2] == "--" or tok[1:2] == "-":
+        known = tok in valued or tok in plain
+        return (tok if _FLAG.match(tok) else _MASK), tok not in plain, not known
+    for k in range(1, len(tok)):  # a cluster: -iu root, -Eu root, -uroot
+        flag = "-" + tok[k]
+        if flag in plain:
+            continue
+        last = k == len(tok) - 1
+        if flag in valued:
+            return (tok, True, False) if last else (tok[: k + 1] + _MASK, False, False)
+        return tok[: k + 1] + ("" if last else _MASK), True, True
+    return tok, False, False
 
 
 def redact_command(command: str) -> str | None:
     """A shell command reduced to a prefix that is safe to keep, e.g. ``gh pr checks 5``.
 
-    Only the first line and the first command of a pipeline or list; leading ``VAR=value``
-    assignments dropped; the executable without its directory; then at most four tokens,
-    kept while they are plain words or flags. The value after a credential-like flag
-    (``-p``, ``-u``, ``-a``, ``-H``, ``--token``, ``--user``, ``--header``, ...) and the value
-    of any ``--flag=value`` is masked; a glued ``-pSECRET`` keeps only ``-p``. The first
-    other token (a path, a URL, quoted text, ``user:pass``, a variable) ends the prefix with
-    ``…``. Best effort: a secret given as a plain positional word (``echo hunter2``) is kept.
+    An allowlist, not a list of secrets: of the first line (its first 4096 characters),
+    without leading ``VAR=value`` assignments, at most four arguments are kept, and only
+    these: the executable without its directory; plain lowercase words and numbers right
+    after it (subcommands: ``gh pr checks 5``, ``npm run build``); flag names (``-q``,
+    ``--watch``; a cluster or glued value keeps its first letter, ``-p***``); a pipe or
+    list separator and the next executable. Everything else is ``***``: flag values,
+    ``--flag=value`` values, paths, URLs, hosts, ``user:pass``, quoted text, variables. Once
+    a flag or a masked argument appears, later plain words are masked too: they may be its
+    value. A secret passed as a lowercase word right after the executable
+    (``redis-cli auth hunter2``) is still kept.
     """
     lines = command.strip().splitlines()
     if not lines:
         return None
-    # shlex is quadratic in token length: cut long lines (only 4 tokens are kept anyway), and
-    # drop the token the cut may have split, so a cut-off secret never passes as a word.
-    line = lines[0][:MAX_COMMAND_INPUT]
-    try:
-        tokens = shlex.split(line, comments=True)
-    except ValueError:  # unbalanced quotes: quoted parts then fail the word test below
-        tokens = line.split()
-    if len(lines[0]) > MAX_COMMAND_INPUT and tokens:
-        tokens.pop()
-    while tokens and _ASSIGN.match(tokens[0]):
-        tokens.pop(0)
+    tokens = [t for t in _BLANKS.split(lines[0][:_MAX_LINE]) if t]
+    if len(lines[0]) > _MAX_LINE and tokens:
+        tokens[-1] = _MASK  # the cut may have split it
+    i = 0
+    while i < len(tokens) and _ASSIGN.match(tokens[i]):
+        i = _quoted_span(tokens, i)
     out: list[str] = []
-    mask_next = False
-    for i, tok in enumerate(tokens):
-        if len(out) >= _MAX_TOKENS or tok in _SEPARATORS:
-            break
-        if mask_next:
-            out.append(_MASK)
-            mask_next = False
-            continue
-        if i == 0 and "/" in tok:
-            tok = tok.rstrip("/").rsplit("/", 1)[-1]
+    exe = True  # the next argument is an executable
+    words = False  # plain words are still kept (right after the executable)
+    wrapper = None  # flags of the wrapper whose options come next (sudo -u x make)
+    extra = 0  # wrapper tokens, not counted against _MAX_TOKENS
+    while i < len(tokens) and len(out) < _MAX_TOKENS + extra:
+        tok = tokens[i]
+        end = _quoted_span(tokens, i)
         name, eq, _ = tok.partition("=")
-        if eq and _FLAG.match(name):
-            out.append(f"{name}={_MASK}")
-        elif _FLAG.match(tok):
-            if tok[:2] in _SECRET_SHORT and len(tok) > 2 and not tok.startswith("--"):
-                out.append(tok[:2] + _MASK)  # -pSECRET
+        if wrapper is not None:
+            before = len(out)
+            if _ASSIGN.match(tok):
+                out.append(f"{name}={_MASK}")  # env FOO=bar
+            elif eq and tok[:1] == "-" and _FLAG.match(name):
+                out.append(f"{name}={_MASK}")
+            elif tok[:1] == "-" and tok[1:].isdigit() and len(tok) < 5:
+                out.append(tok)  # nice -5
+            elif tok[:1] == "-" and len(tok) > 1 and end == i + 1:
+                kept, value, unknown = _wrapper_flag(tok, *wrapper)
+                out.append(kept)
+                if value and end < len(tokens):
+                    out.append(_MASK)  # its value: sudo -u root
+                    end = _quoted_span(tokens, end)
+                if unknown:  # whatever comes next may be its value
+                    wrapper, words = None, False
             else:
-                out.append(tok)
-                mask_next = tok in _SECRET_SHORT or bool(_SECRET_FLAG.search(tok.lstrip("-")))
-        elif _WORD.match(tok):
-            out.append(tok)
-        else:
-            out.append("…")
+                wrapper, exe = None, True  # the wrapped command: read it as an executable
+                continue
+            extra = min(extra + len(out) - before, _MAX_WRAPPED)
+            i = end
+            continue
+        if tok.startswith("#"):
             break
-    text = " ".join(out)
-    return text[:COMMAND_LIMIT] or None
+        if end > i + 1 or any(q in tok for q in _QUOTES):
+            out.append(_MASK)
+            exe = words = False
+        elif tok in _SEPARATORS:
+            out.append(tok)
+            exe, words = True, False
+        elif exe:
+            base = tok.rstrip("/").rsplit("/", 1)[-1]
+            ok = bool(_EXE.match(base)) and not _ASSIGN.match(base)
+            out.append(base if ok else _MASK)
+            exe, words = False, ok
+            if ok and base in _WRAPPERS:
+                wrapper = _WRAPPERS[base]
+                extra = min(extra + 1, _MAX_WRAPPED)
+        elif _FLAG.match(tok):
+            out.append(tok)
+            words = False
+        elif eq and _FLAG.match(name):
+            out.append(f"{name}={_MASK}")
+            words = False
+        elif tok[:1] == "-" and tok[1:2].isalpha() and tok[1:2] != "-":
+            out.append(tok[:2] + _MASK)  # -la, -sSu, -pSECRET: a cluster or a glued value
+            words = False
+        elif words and _WORD.match(tok):
+            out.append(tok)
+        elif out and out[-1] == "-m" and tok in _PYTHON_MODULES:
+            out.append(tok)  # python -m pytest
+        else:
+            out.append(_MASK)
+            words = False
+        i = end
+    return " ".join(out)[:COMMAND_LIMIT] or None
+
+
+# --- shared redaction: end ---
 
 
 def _command(args: Any) -> str | None:

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from kelpie.adapters.hermes import plugin
+from tests.traces.test_redaction import LEAKS
 
 
 class Ctx:
@@ -110,8 +111,8 @@ def test_same_args_same_hash_regardless_of_key_order(spool: Path) -> None:
 def test_command_is_capped_and_can_be_disabled(
     spool: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    plugin.post_tool_call(tool_name="terminal", args={"command": "echo " + "a." * 150})
-    assert len(lines(spool)[0]["command"]) == plugin.COMMAND_LIMIT
+    plugin.post_tool_call(tool_name="terminal", args={"command": "ls " + "a" * 10_000})
+    assert lines(spool)[0]["command"] == "ls ***"
     monkeypatch.setenv(plugin.COMMANDS_ENV, "0")
     plugin.post_tool_call(tool_name="terminal", args={"command": "ls"})
     assert lines(spool)[1]["command"] is None
@@ -136,7 +137,7 @@ SECRET_COMMANDS = [
 ]
 
 
-@pytest.mark.parametrize(("command", "secret"), SECRET_COMMANDS)
+@pytest.mark.parametrize(("command", "secret"), SECRET_COMMANDS + LEAKS)
 def test_secrets_never_reach_the_spool(spool: Path, command: str, secret: str) -> None:
     plugin.post_tool_call(tool_name="terminal", args={"command": command})
     assert secret not in spool.read_text()
@@ -147,13 +148,10 @@ def test_secrets_never_reach_the_spool(spool: Path, command: str, secret: str) -
     [
         ("gh pr checks 5", "gh pr checks 5"),
         ("GH_TOKEN=abc gh pr checks 5", "gh pr checks 5"),
-        ("  pytest -q tests/test_x.py -k foo\nsecond line", "pytest -q tests/test_x.py -k"),
+        ("  pytest -q tests/test_x.py -k foo\nsecond line", "pytest -q *** -k"),
         ("git status", "git status"),
-        ('curl -H "Authorization: Bearer xyz" https://h.test', "curl -H Authorization: ***"),
-        (
-            "git clone https://user:pass@host.example.test/repo",
-            "git clone https://***@host.example.test/repo",
-        ),
+        ('curl -H "Authorization: Bearer xyz" https://h.test', "curl -H *** ***"),
+        ("git clone https://user:pass@host.example.test/repo", "git clone ***"),
     ],
 )
 def test_redaction_keeps_commands_recognizable(command: str, expected: str) -> None:

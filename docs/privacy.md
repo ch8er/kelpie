@@ -113,29 +113,60 @@ id, `args_hash` (the same hash as above), a redacted `command`, the outcome (`ok
 `error`), the duration in milliseconds and `output_chars`, the size of the result. Raw
 arguments, results and error messages are never written.
 
-The redacted `command` is longer than the OTLP prefix: up to four words of the first line,
-so `GH_TOKEN=abc gh pr checks 5` is stored as `gh pr checks 5`. Redaction masks:
+The redacted `command` is a short prefix built from an allowlist (`redact_command`, one block
+kept byte-identical in `kelpie.traces.command`, the Hermes plugin and the Claude Code hook).
+Of the first line (its first 4096 characters), without leading `VAR=value` assignments, at
+most four arguments are kept, and only these:
 
-- the value after `Bearer`, `Authorization:`, `--token`, `--password`, `--passwd`,
-  `--secret`, `--api-key`, `--apikey`, `--access-token`, `--auth-token`, `-p` (and
-  `-pSECRET`);
-- values of `key=value` pairs whose key contains `token`, `secret`, `passw`, `key`, `auth`,
-  `credential` or `cookie`;
-- values of URL query parameters whose name contains `token`, `key`, `secret`, `passw` or
-  `auth` (not `credential` or `cookie`);
-- URL userinfo (`https://user:pass@host`);
-- any run of 24 or more token characters;
-- the content of quoted arguments.
+- the executable, without its directory (`/usr/bin/python3` → `python3`);
+- plain lowercase words and numbers right after it, the subcommands (`gh pr checks 5`,
+  `npm run build`, `xcodebuild test`);
+- flag names (`-q`, `--watch`); a cluster or a glued value keeps only its first letter
+  (`-la` → `-l***`, `-ppw` → `-p***`), and `--flag=value` keeps only the name;
+- a pipe or list separator and the next executable (`pytest -q | tail`), and the module after
+  `python -m` from a short list (`pytest`, `pip`, `mypy`, ...);
+- after a wrapper that only runs another command (`sudo`, `env`, `nice`, `time`, `nohup`,
+  `command`, `exec`, `rtk`), its flag names, `NAME=***` for its assignments, and the wrapped
+  executable, read like the first one: `sudo -u root make test` → `sudo -u *** make test`.
+  These do not count against the four. A wrapper flag Kelpie does not know may take a value,
+  so after one everything is masked (`sudo -X val make` → `sudo -X *** ***`).
 
-This is best effort, and it only masks secrets. Unlike the OTLP prefix, the redacted command
-keeps ordinary words, so host names, database names and paths in the first four words stay
-readable: `ssh db-1.example.org ls` and `psql -h db.example.org` are stored as they are. To
+Arguments are split on spaces and tabs only, as the shell does; an argument with an escaped
+quote (`\"`) masks the rest of the line.
+
+Everything else becomes `***`: flag values, paths, URLs, hosts, `user:pass`, headers,
+environment assignments, quoted text, variables and substitutions. Once a flag or a masked
+argument has appeared, later plain words are masked too, since they may be its value. So
+`curl -k -u admin:pw https://x` → `curl -k -u ***`, `redis-cli -a pw ping` →
+`redis-cli -a *** ***`, `curl -H "Authorization: Bearer x" url` → `curl -H *** ***`,
+`git clone https://user:pass@host/repo` → `git clone ***`, `cat ~/.secrets/prod.env` →
+`cat ***`, and `GH_TOKEN=abc gh pr checks 5` and `PGPASSWORD='a b c' gh pr checks 5` →
+`gh pr checks 5`.
+
+What can still get through: a secret written as a plain lowercase word right after the
+executable, before any flag (`redis-cli auth hunter2`, `echo hunter2`). To
 record no command at all, set this in the environment of every Hermes process that loads the
 plugin:
 
 ```bash
 export KELPIE_HERMES_SPOOL_COMMANDS=0
 ```
+
+**Spools written before the fix.** Until ch8er/kelpie#82 the redaction masked known secret
+patterns and let others through (`curl -u user:pass`, `redis-cli -a pass`, header values,
+the rest of a quoted string). `kelpie spool scrub` rewrites existing spools with the current redaction: by default
+the configured Hermes and Claude Code spools and their `.1` files, or the paths you give it
+(`--dry-run` only counts). It redacts each line's `command` again; an old line that kept a
+secret after a masked part (`curl -H *** tok123`, written by an early Claude Code hook) is
+cleaned too, because nothing after a masked argument is kept. Lines that are not JSON are
+dropped. It runs only as the user who owns the spool (as root: `sudo -u <agent user> kelpie
+spool scrub`), so the file and its lock stay writable by the hooks. It holds `<spool>.lock`
+(the lock the hooks take to rotate), keeps the file's mode, replaces the file atomically, and
+starts over if the spool was rotated meanwhile.
+A line a hook appends in the moment of the replace can be lost, so run it while the agents
+are idle. It runs where Kelpie is installed, on the spool's host. Copy the new plugin or
+hook to the agent hosts first, or new lines keep the old redaction. Copies elsewhere (backups,
+hard links, forwarded logs) are not touched.
 
 The spool file is created with mode `0600`. It is rotated to `<spool>.1` when it reaches
 `KELPIE_HERMES_SPOOL_MAX_BYTES` (20 MiB), so at most about twice that is on disk. The adapter
@@ -163,14 +194,10 @@ id, the status and the owner that were set, never the subject or description. To
 results, error messages, assistant messages, the transcript path and the working directory
 are never written.
 
-The redacted `command` is stricter than the Hermes plugin's: the first command of the first
-line, at most four tokens, kept only while they are plain words or flags. The first path,
-URL, quoted string, `user:pass` or variable ends it with `…`, and the value after a
-credential-like flag (`-p`, `-u`, `-a`, `-H`, `-w`, `-P`, `-k`, `-K`, or a long flag naming a
-password, token, key, user, header, OTP or PIN) or in `--flag=value` is masked. So
-`curl -u admin:pw https://x` is stored as `curl -u *** …`. Plain words are kept, so a secret
-passed as one (`redis-cli AUTH hunter2`) is not masked. `KELPIE_CLAUDE_SPOOL_COMMANDS=0`
-records no command.
+The redacted `command` uses the same shared redaction as the Hermes plugin (see
+[above](#hermes-hooks-plugin)): the executable, the plain words right after it, flag names
+and pipe stages are kept; values, paths, hosts, URLs and quoted text are masked. `KELPIE_CLAUDE_SPOOL_COMMANDS=0` records no command, and
+`kelpie spool scrub` rewrites a spool written by an older hook.
 
 The spool is created with mode `0600` and rotated like the Hermes spool. Stop markers
 (`~/.claude/kelpie/stop/<session>.json`, mode `0600`) hold a time and the stopping rule's
