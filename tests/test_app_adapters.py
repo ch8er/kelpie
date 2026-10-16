@@ -330,3 +330,27 @@ def test_hermes_cli_timeout_setting(tmp_path: Path) -> None:
     for bad in ("0", "'2m'", "'soon'", "false"):
         with pytest.raises(ConfigError, match="cli_timeout"):
             load_settings(write(tmp_path, f"[adapters.hermes]\ncli_timeout = {bad}\n"))
+
+
+def test_hermes_roles_table(tmp_path: Path) -> None:
+    path = write(
+        tmp_path, '[adapters.hermes.roles]\nreviewer-bot = "reviewer"\nmerger = "reviewer"\n'
+    )
+    h = load_settings(path).hermes
+    assert h is not None and h.roles == (("merger", "reviewer"), ("reviewer-bot", "reviewer"))
+    (adapter,) = build_adapters(load_settings(path))
+    assert isinstance(adapter, HermesAdapter) and adapter.role_of("merger") == "reviewer"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '[adapters.hermes]\nroles = ["dev"]\n',
+        '[adapters.hermes.roles]\ndev-1 = ""\n',
+        "[adapters.hermes.roles]\ndev-1 = 3\n",
+        '[adapters.hermes.roles]\nDev = "a"\ndev = "b"\n',
+    ],
+)
+def test_hermes_roles_rejected(tmp_path: Path, text: str) -> None:
+    with pytest.raises(ConfigError, match="roles"):
+        load_settings(write(tmp_path, text))

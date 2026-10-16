@@ -585,3 +585,29 @@ def test_bytes_body_is_decoded_and_finished_tasks_keep_none(board: Board) -> Non
     tasks = {t.id: t for t in adapter(board).snapshot(NOW).tasks}
     assert tasks["t_1"].body == "after #7 lands \ufffd"
     assert tasks["t_2"].body is None
+
+
+def test_roles_from_the_table_or_the_profile_without_instance_number(board: Board) -> None:
+    board.task("t_1", "running", ago(days=1), assignee="dev-1")
+    board.task("t_2", "ready", ago(days=1), assignee="dev-2")
+    board.task("t_3", "ready", ago(days=1), assignee="reviewer-bot")
+    board.task("t_4", "ready", ago(days=1), assignee="ops")
+    board.task("t_5", "ready", ago(days=1), assignee="build-2024-1")
+    board.task("t_6", "ready", ago(days=1), assignee="")
+    a = HermesAdapter(db_path=board.path, spool=None, roles={"Reviewer-Bot": "reviewer"})
+    snap = a.snapshot(NOW)
+    roles = {t.id: (t.owner_id, t.role) for t in snap.tasks}
+    assert roles == {
+        "t_1": ("dev-1", "dev"),
+        "t_2": ("dev-2", "dev"),
+        "t_3": ("reviewer-bot", "reviewer"),
+        "t_4": ("ops", "ops"),
+        "t_5": ("build-2024-1", "build-2024"),
+        "t_6": (None, None),
+    }
+    assert {o.id: o.role for o in snap.owners}["dev-2"] == "dev"
+
+
+def test_role_of_ignores_names_that_are_only_a_number() -> None:
+    a = HermesAdapter(spool=None)
+    assert a.role_of("-1") == "-1" and a.role_of("x-") == "x-" and a.role_of("Dev-3") == "dev"

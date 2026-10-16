@@ -92,6 +92,7 @@ class HermesSettings:
     cli: str = hermes.DEFAULT_CLI  # Hermes executable that carries out ``stop``
     cli_timeout: timedelta = timedelta(seconds=hermes.CLI_TIMEOUT)  # one stop command
     human_owners: frozenset[str] = frozenset()  # assignees that are people, not agents
+    roles: tuple[tuple[str, str], ...] = ()  # profile -> role ([adapters.hermes.roles])
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -104,6 +105,7 @@ class HermesSettings:
             cli=self.cli,
             cli_timeout=self.cli_timeout.total_seconds(),
             human_owners=self.human_owners,
+            roles=dict(self.roles),
         )
 
 
@@ -254,6 +256,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "cli",
         "cli_timeout",
         "human_owners",
+        "roles",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     paths: dict[str, Path | None] = {}
@@ -314,6 +317,14 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError(
             "[adapters.hermes] human_owners must be a list of distinct non-empty strings"
         )
+    roles = section.get("roles", {})
+    if not isinstance(roles, Mapping) or not all(
+        isinstance(k, str) and k.strip() and isinstance(v, str) and v.strip()
+        for k, v in roles.items()
+    ):
+        raise ConfigError("[adapters.hermes.roles] must map profile names to non-empty role names")
+    if len({k.strip().casefold() for k in roles}) != len(roles):
+        raise ConfigError("[adapters.hermes.roles] lists a profile twice (case-insensitive)")
     return HermesSettings(
         db_path,
         paths["spool"],
@@ -325,6 +336,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         cli,
         cli_timeout,
         frozenset(h.strip() for h in humans),
+        tuple(sorted((k.strip(), v.strip()) for k, v in roles.items())),
     )
 
 

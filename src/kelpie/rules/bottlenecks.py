@@ -45,6 +45,12 @@ spare. An alert lasts as long as spare capacity exists.
   not flagged, a human task parked by a hold is not escalated, and a chain with agent work
   behind a human task gets no parallelization advice.
 
+``ready_is_queued`` (default off; on for Hermes, which assigns a task to a profile before it
+is dispatched) counts an assigned ready task that no live session works on as queued work of
+its role, and not as its owner being busy. Such work waiting while its own owner is busy and
+others of the role idle has the likely cause ``assigned_busy`` (reassign it); otherwise
+``dispatch``.
+
 ``slots`` (optional) is the farm's concurrency limit: once that many agents have a live
 session, idle agents are not free capacity, and no idle-capacity alert fires (chain,
 idle with ready work, human-gated); an overloaded role is still reported, with the advice
@@ -109,12 +115,26 @@ class RoleLoad:
         return self.idle[len(self.queue) :]
 
 
+def queued_assigned(snapshot: Snapshot) -> set[str]:
+    """Ready tasks that have an owner but no live session: assigned, not started yet."""
+    live = {s.task_id for s in snapshot.sessions if is_live(s, snapshot.now)}
+    return {
+        t.id
+        for t in snapshot.tasks
+        if t.status is Status.READY and t.owner_id is not None and t.id not in live
+    }
+
+
 def role_loads(
     snapshot: Snapshot,
     min_idle_time: timedelta = timedelta(0),
     hold_labels: frozenset[str] = frozenset(),
+    ready_is_queued: bool = False,
 ) -> dict[str, RoleLoad]:
-    """Idle agents and queue depth per role, in one pass over owners, sessions and tasks."""
+    """Idle agents and queue depth per role, in one pass over owners, sessions and tasks.
+
+    With ``ready_is_queued`` an assigned ready task nobody has started is queued work of its
+    role and does not make its owner busy (platforms that assign before dispatching)."""
     now = snapshot.now
     live_owners: set[str] = set()
     last_session: dict[str, datetime] = {}
@@ -124,14 +144,20 @@ def role_loads(
         seen = last_seen(s)
         if s.owner_id not in last_session or seen > last_session[s.owner_id]:
             last_session[s.owner_id] = seen
+    waiting_assigned = queued_assigned(snapshot) if ready_is_queued else set()
     # An agent that owns any open task is taken, even if it has not started it yet.
-    assigned = {t.owner_id for t in snapshot.tasks if t.owner_id and not t.status.is_terminal}
+    assigned = {
+        t.owner_id
+        for t in snapshot.tasks
+        if t.owner_id and not t.status.is_terminal and t.id not in waiting_assigned
+    }
     open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
     blocked_by = _open_dependencies(snapshot, open_ids)
 
     queues: dict[str, list[Task]] = {}
     for t in snapshot.tasks:
-        if t.role is None or t.owner_id is not None or t.status not in _QUEUED:
+        unowned = t.owner_id is None or t.id in waiting_assigned
+        if t.role is None or not unowned or t.status not in _QUEUED:
             continue
         if hold_labels.intersection(t.labels):
             continue  # parked on purpose
@@ -325,6 +351,8 @@ class Bottlenecks:
     human_gate_min_tasks: int = 3
     human_gate_after: timedelta = timedelta(hours=1)  # a human task waits this long first
     slots: int | None = None
+    # Assigned ready tasks nobody started are queued work (Hermes assigns before dispatch).
+    ready_is_queued: bool = False
     name: str = NAME
 
     @property
@@ -333,7 +361,7 @@ class Bottlenecks:
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         held = self.held_labels
-        loads = role_loads(snapshot, self.min_idle_time, held)
+        loads = role_loads(snapshot, self.min_idle_time, held, self.ready_is_queued)
         now = snapshot.now
         gates = [
             g
@@ -452,16 +480,18 @@ class Bottlenecks:
     def _takeable(
         self, snapshot: Snapshot, idle_roles: Collection[str], held: bool, labels: frozenset[str]
     ) -> list[Task]:
-        """Ownerless queued work an idle agent could take (its role, or no role), held or
-        not held by ``labels``, waiting at least ``idle_alert_after``, oldest first."""
+        """Queued work an idle agent could take (its role, or no role; ownerless, or with
+        ``ready_is_queued`` assigned but not started), held or not held by ``labels``,
+        waiting at least ``idle_alert_after``, oldest first."""
         now = snapshot.now
         open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
         blocked_by = _open_dependencies(snapshot, open_ids)
+        assigned = queued_assigned(snapshot) if self.ready_is_queued else set()
         return sorted(
             (
                 t
                 for t in snapshot.tasks
-                if t.owner_id is None
+                if (t.owner_id is None or t.id in assigned)
                 and t.status in _QUEUED
                 and not (t.status is Status.READY and blocked_by.get(t.id))
                 and (t.role is None or t.role in idle_roles)
@@ -484,13 +514,28 @@ class Bottlenecks:
         roles, idle = _who_could_take(work, idle_roles)
         oldest = work[0].status_since
         ids = [t.id for t in work]
+        # Work assigned to an agent that is not idle waits for that agent, while others of
+        # its role sit idle: a reassignment helps. Otherwise the dispatcher is not handing
+        # the work out.
+        idle_set = set(idle)
+        stuck = [t for t in work if t.owner_id is not None and t.owner_id not in idle_set]
+        if stuck and len(stuck) == len(work):
+            cause = "assigned_busy"
+            why = (
+                f"they are assigned to busy agents "
+                f"({_names(sorted({str(t.owner_id) for t in stuck}))}), which may be capped at "
+                "their running work: reassign them to idle agents of the role, or check the "
+                "dispatcher's per-agent limit"
+            )
+        else:
+            cause = "dispatch"
+            why = "the dispatcher is not handing it out (paused, a guard, or no free slot)"
         return [
             Action(
                 ActionKind.ALERT,
                 NAME,
                 f"{len(idle)} agent(s) idle ({_names(idle)}) while {len(work)} ready task(s) "
-                f"wait (oldest {_human(now - oldest)}): {_names(ids)}. Likely cause: the "
-                "dispatcher is not handing it out (paused, a guard, or no free slot).",
+                f"wait (oldest {_human(now - oldest)}): {_names(ids)}. Likely cause: {why}.",
                 severity=Severity.WARNING,
                 key=f"{NAME}:idle-ready",
                 state=f"{NAME}:idle-ready",
@@ -501,7 +546,7 @@ class Bottlenecks:
                     "ready_tasks": ids[: _SHOWN * 2],
                     "ready_count": len(ids),
                     "oldest_wait_minutes": int((now - oldest).total_seconds() // 60),
-                    "likely_cause": "dispatch",
+                    "likely_cause": cause,
                 },
             )
         ]
@@ -585,10 +630,11 @@ class Bottlenecks:
         humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
         open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
         blocked_by = _open_dependencies(snapshot, open_ids)
+        assigned = queued_assigned(snapshot) if self.ready_is_queued else set()
         takeable = [
             t
             for t in snapshot.tasks
-            if t.owner_id is None
+            if (t.owner_id is None or t.id in assigned)
             and t.status in _QUEUED
             and not (t.status is Status.READY and blocked_by.get(t.id))
             and not held.intersection(t.labels)
@@ -744,6 +790,11 @@ def build(config: dict[str, Any]) -> Bottlenecks:
     for key in ("min_idle_agents", "min_chain_length", "min_queue_depth", "human_gate_min_tasks"):
         if key in config:
             kwargs[key] = _positive_int(config.pop(key), key)
+    if "ready_is_queued" in config:
+        value = config.pop("ready_is_queued")
+        if not isinstance(value, bool):
+            raise ValueError("ready_is_queued must be true or false")
+        kwargs["ready_is_queued"] = value
     if "slots" in config:
         kwargs["slots"] = _positive_int(config.pop("slots"), "slots")
     for key in ("min_idle_time", "idle_alert_after", "human_gate_after"):

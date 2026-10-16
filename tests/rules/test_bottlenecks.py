@@ -932,3 +932,52 @@ def test_chain_ending_in_a_human_task_still_gets_parallelization_advice() -> Non
     tasks = (head("A0"), *(task(i) for i in ids[1:-1]), human("H", Status.BACKLOG))
     owners = HUMANS + agents("developer", "d1", "d2", "d3")
     assert of(run(snap(tasks, owners, chain(*ids))), "chain")
+
+
+# --- ready_is_queued (Hermes assigns before dispatch) -------------------------------------
+
+
+def test_assigned_ready_work_is_queued_with_ready_is_queued() -> None:
+    tasks = (task("A", Status.READY, owner="dev-1", since=H),)
+    owners = agents("developer", "dev-1", "dev-2")
+    assert run(snap(tasks, owners)) == []  # default: dev-1 is busy with A, nothing queued
+    rule = Bottlenecks(ready_is_queued=True)
+    [alert] = run(snap(tasks, owners), rule)
+    assert alert.key == "bottlenecks:idle-ready" and alert.params["ready_tasks"] == ["A"]
+    assert alert.params["likely_cause"] == "dispatch"  # its own owner is idle
+    load = role_loads(snap(tasks, owners), ready_is_queued=True)["developer"]
+    assert load.queue == ("A",) and load.busy == ()
+
+
+def test_assigned_ready_work_of_a_busy_owner_suggests_reassigning() -> None:
+    tasks = (
+        task("A", Status.READY, owner="dev-1", since=H),
+        task("W", Status.IN_PROGRESS, owner="dev-1"),
+    )
+    sessions = (live("dev-1", "W"),)
+    [alert] = run(
+        snap(tasks, agents("developer", "dev-1", "dev-2"), sessions=sessions),
+        Bottlenecks(ready_is_queued=True),
+    )
+    assert alert.params["likely_cause"] == "assigned_busy" and alert.params["idle_agents"] == [
+        "dev-2"
+    ]
+    assert "reassign" in alert.reason
+
+
+def test_ready_task_with_a_live_session_is_not_queued() -> None:
+    tasks = (task("A", Status.READY, owner="dev-1", since=H),)
+    sessions = (live("dev-1", "A"),)  # claimed: the session has started it
+    assert (
+        run(
+            snap(tasks, agents("developer", "dev-1", "dev-2"), sessions=sessions),
+            Bottlenecks(ready_is_queued=True),
+        )
+        == []
+    )
+
+
+def test_build_parses_ready_is_queued() -> None:
+    assert build({"ready_is_queued": True}).ready_is_queued is True
+    with pytest.raises(ValueError):
+        build({"ready_is_queued": "yes"})
