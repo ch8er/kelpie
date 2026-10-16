@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_code
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
@@ -107,6 +108,7 @@ class HermesSettings:
 class Settings:
     engine: EngineConfig = field(default_factory=EngineConfig)
     hermes: HermesSettings | None = None  # None: no [adapters.hermes] section
+    claude_code: ClaudeCodeSettings | None = None  # None: no [adapters.claude_code] section
     db_path: Path | None = DEFAULT_DB  # None keeps the ledger in memory
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
@@ -188,6 +190,7 @@ def load_settings(path: Path | None) -> Settings:
         block_conditions=block_conditions,
         engine=engine,
         hermes=_load_hermes(data.get("adapters", {})),
+        claude_code=_load_claude_code(data.get("adapters", {})),
         db_path=db_path,
         source=path,
         traces=traces,
@@ -230,7 +233,7 @@ def _load_connectors(
 def _load_hermes(adapters: Any) -> HermesSettings | None:
     if not isinstance(adapters, Mapping):
         raise ConfigError("[adapters] must be a table")
-    if extra := set(adapters) - {"hermes"}:
+    if extra := set(adapters) - {"hermes", "claude_code"}:
         raise ConfigError(f"unknown [adapters] entries: {sorted(extra)}")
     if "hermes" not in adapters:
         return None
@@ -308,6 +311,15 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         cli_timeout,
         frozenset(h.strip() for h in humans),
     )
+
+
+def _load_claude_code(adapters: Mapping[str, Any]) -> ClaudeCodeSettings | None:
+    if "claude_code" not in adapters:
+        return None
+    try:
+        return load_claude_code(adapters["claude_code"])
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -544,6 +556,8 @@ def build_adapters(settings: Settings) -> list[PlatformAdapter]:
     adapters: list[PlatformAdapter] = []
     if settings.hermes is not None and settings.hermes.enabled:
         adapters.append(settings.hermes.build())
+    if settings.claude_code is not None and settings.claude_code.enabled:
+        adapters.append(settings.claude_code.build())
     return adapters
 
 
@@ -973,11 +987,12 @@ HERMES_ACT_RULES = frozenset({"loop_breaker"})
 def _refuse_unimplemented_actions(
     settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter]
 ) -> None:
-    """Hermes carries out ``stop`` only; any other act-mode rule would only fail at runtime.
+    """Hermes carries out ``stop`` only; any other act-mode rule would only fail at runtime
+    on Hermes tasks, also next to adapters that refuse actions with ``UnsupportedAction``.
 
     ``ci_economy`` acts through the CI connector (``cancel_build``), not the platform, so
     it may act when ``[connectors.github.ci] allow_cancel`` is set."""
-    only_hermes = bool(adapters) and all(isinstance(a, hermes.HermesAdapter) for a in adapters)
+    has_hermes = any(isinstance(a, hermes.HermesAdapter) for a in adapters)
     ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
     by_connector = {"ci_economy"} if ci is not None and ci.enabled and ci.allow_cancel else set()
     acting = sorted(
@@ -988,7 +1003,7 @@ def _refuse_unimplemented_actions(
         and s.name not in HERMES_ACT_RULES
         and s.name not in by_connector
     )
-    if only_hermes and acting and not settings.engine.dry_run:
+    if has_hermes and acting and not settings.engine.dry_run:
         raise ConfigError(
             f"Hermes actions other than stop are not implemented; use observe or suggest mode "
             f"(rules in act mode: {acting})"
