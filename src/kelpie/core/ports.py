@@ -108,7 +108,10 @@ class SupportsStop(Protocol):
     status; a human or a later action resumes it.
     """
 
-    def stop(self, session_id: str, reason: str) -> None: ...
+    def stop(self, session_id: str, reason: str) -> str | None:
+        """Stop the session. May return what happened, in a few words a human reads after
+        "Stopped run <id>; " (e.g. when the worker actually exits); None says nothing more."""
+        ...
 
 
 @runtime_checkable
@@ -164,7 +167,10 @@ class ProviderReader(Protocol):
 
 @runtime_checkable
 class Alerter(Protocol):
-    def send(self, title: str, body: str, severity: str) -> None: ...
+    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
+        """Deliver an alert. ``did`` is the engine's line about what Kelpie itself did (see
+        :mod:`kelpie.core.alerts`); None: telling a human is the whole action."""
+        ...
 
 
 class PlatformEvent(Protocol):

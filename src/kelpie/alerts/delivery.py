@@ -396,9 +396,9 @@ class _EngineAlerter:
     def __init__(self, delivery: Delivery) -> None:
         self._delivery = delivery
 
-    def send(self, title: str, body: str, severity: str) -> None:
+    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
         try:
-            self._delivery.deliver(parse_alert(title, body, severity))
+            self._delivery.deliver(parse_alert(title, body, severity, did))
         except Exception:
             log.exception("alert routing failed")
 

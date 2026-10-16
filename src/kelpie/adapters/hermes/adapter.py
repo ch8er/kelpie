@@ -123,6 +123,7 @@ from kelpie.adapters.hermes.park import (
 from kelpie.adapters.hermes.stop import (
     CLI_TIMEOUT,
     DEFAULT_CLI,
+    STOP_DONE,
     HermesCliError,
     block_task,
     run_id,
@@ -859,12 +860,13 @@ class HermesAdapter:
     def events(self, since: datetime) -> Iterable[PlatformEvent]:
         return ()
 
-    def stop(self, session_id: str, reason: str) -> None:
+    def stop(self, session_id: str, reason: str) -> str | None:
         """Stop a run: the task is blocked (``needs_input``) until a human unblocks it.
 
         Idempotent: a run that has already ended, or whose task is no longer running it, is
         left alone. Raises :class:`HermesError` for an unknown or foreign session id and when
-        Hermes refuses or the task is still running afterwards.
+        Hermes refuses or the task is still running afterwards. Returns what the stop means on
+        Hermes, for the human told about it (None when there was nothing to stop).
         """
         rid = run_id(session_id)
         if rid is None:
@@ -892,6 +894,7 @@ class HermesAdapter:
             raise HermesError(str(exc)) from exc
         if self._run_state(rid) != (task_id, False):
             raise HermesError(f"task {task_id} is still running after its block")
+        return STOP_DONE.format(task=task_id)
 
     def _run_state(self, rid: int) -> tuple[str, bool] | None:
         """``(task id, run is the task's active run)`` for a run, ``None`` if it is unknown."""

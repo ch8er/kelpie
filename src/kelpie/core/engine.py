@@ -10,12 +10,19 @@ from datetime import datetime, timedelta
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import (
+    ANNOUNCES,
     CHANGED_PREFIX,
+    DONE_TAG,
     ESCALATED_PREFIX,
     FAILED_TAG,
     NOT_EXECUTED_SUFFIX,
     RESOLVED_PREFIX,
     SUGGEST_TAG,
+    done_line,
+    failed_line,
+    failure_reason,
+    not_executed_line,
+    suggested_line,
 )
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
@@ -40,6 +47,8 @@ _ALERT_ACTIONS = {ActionKind.ALERT, ActionKind.ESCALATE}
 # least at this severity, so channels that skip info still hear about it.
 _NEEDS_HUMAN = Severity.WARNING
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
+# Effects whose own result is visible where it lands: no separate "done" message.
+_QUIET_WHEN_DONE = {ActionKind.COMMENT}
 # Outcomes after which an alert counts as announced (delivered, or logged by design).
 _HANDLED = {
     Outcome.ALERTED,
@@ -83,6 +92,12 @@ class Engine:
     _ledger_write_failed: bool = field(init=False, default=False)
     executors: dict[str, Executor] = field(init=False)
     _platforms: list[str] = field(init=False)
+    # Per tick: keys of effects an alert announces, what happened to them, the messages held
+    # back for that alert, and the keys whose alert went out.
+    _announced: set[str] = field(init=False, default_factory=set)
+    _lines: dict[str, list[str]] = field(init=False, default_factory=dict)
+    _held: dict[str, list[tuple[Action, bool, str, str]]] = field(init=False, default_factory=dict)
+    _told: set[str] = field(init=False, default_factory=set)
 
     def __post_init__(self) -> None:
         self.ledger = ActionLedger(
@@ -133,15 +148,32 @@ class Engine:
             raise ValueError("snapshot.now must be timezone-aware")
         results: list[Dispatched] = []
         seen: set[str] = set()
-        for action in actions:
-            if action.state is not None and action.kind in _ALERT_ACTIONS:
-                seen.add(action.state)
-                results.append(self._state_alert(action, snapshot))
-            else:
-                results.append(self._process(action, snapshot))
-        results.extend(self._resolve_gone(seen, snapshot))
-        self._evaluated = None  # resolution is only valid right after evaluate()
+        # Effects first: an alert that announces one of them (params.announces) then says
+        # what actually happened to it, and the effect's own message is not sent twice.
+        ordered = sorted(actions, key=lambda a: a.kind in _ALERT_ACTIONS)
+        self._announced = {k for a in ordered for k in _announces(a)}
+        self._lines, self._held, self._told = {}, {}, set()
+        try:
+            for action in ordered:
+                if action.state is not None and action.kind in _ALERT_ACTIONS:
+                    seen.add(action.state)
+                    results.append(self._state_alert(action, snapshot))
+                else:
+                    results.append(self._process(action, snapshot))
+            results.extend(self._resolve_gone(seen, snapshot))
+        finally:
+            self._release_held()
+            self._evaluated = None  # resolution is only valid right after evaluate()
         return results
+
+    def _release_held(self) -> None:
+        """Send the effect messages whose announcing alert did not go out this tick."""
+        for key, held in self._held.items():
+            if key in self._told:
+                continue
+            for action, executed, prefix, did in held:
+                self._safe_alert(action, executed=executed, prefix=prefix, did=did)
+        self._announced, self._lines, self._held, self._told = set(), {}, {}, set()
 
     def _process(self, action: Action, snapshot: Snapshot) -> Dispatched:
         mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
@@ -170,7 +202,11 @@ class Engine:
                 log.debug("traceback of failed action: %s", action, exc_info=True)
                 outcome = Outcome.FAILED
                 if self._last_attempt(action, mode, snapshot.now):
-                    self._safe_alert(action, executed=False, prefix=FAILED_TAG)
+                    did = failed_line(action, failure_reason(exc))
+                    if action.kind in _ALERT_ACTIONS:
+                        self._safe_alert(action, executed=False, prefix=FAILED_TAG, did=did)
+                    else:
+                        self._effect_message(action, executed=False, prefix=FAILED_TAG, did=did)
             dispatched = Dispatched(action, mode, outcome)
         self._record(dispatched, snapshot.now)
         return dispatched
@@ -280,12 +316,29 @@ class Engine:
         if not self.config.dry_run:
             self._safe_alert(replace(notice, severity=Severity.WARNING))
 
-    def _safe_alert(self, action: Action, executed: bool = True, prefix: str = "") -> None:
+    def _safe_alert(
+        self, action: Action, executed: bool = True, prefix: str = "", did: str | None = None
+    ) -> None:
         """Alert without ever raising out of the loop."""
         try:
-            self._alert(action, executed=executed, prefix=prefix)
+            self._alert(action, executed=executed, prefix=prefix, did=did)
         except Exception:
             log.exception("could not send alert: %s", action)
+
+    def _effect_message(
+        self, action: Action, *, executed: bool = True, prefix: str = "", did: str
+    ) -> bool:
+        """Tell a human what happened to an effect, or hold it for the alert of this tick
+        that announces it. False if there is no alerter."""
+        if self.alerter is None:
+            log.warning("no alerter configured; dropped: %s", action)
+            return False
+        key = action.key
+        if key is not None and key in self._announced:
+            self._lines.setdefault(key, []).append(did)
+            self._held.setdefault(key, []).append((action, executed, prefix, did))
+            return True
+        return self._alert(action, executed=executed, prefix=prefix, did=did)
 
     def tick(self, snapshot_source: Callable[[], Snapshot]) -> list[Dispatched]:
         snapshot = snapshot_source()
@@ -299,9 +352,15 @@ class Engine:
             log.info("observe: %s", action)
             return Outcome.OBSERVED
         if action.kind in _ALERT_ACTIONS:
-            return Outcome.ALERTED if self._alert(action) else Outcome.DROPPED
+            keys = _announces(action)
+            lines = [line for k in keys for line in self._lines.get(k, ())]
+            if not self._alert(action, did=" ".join(lines) or None):
+                return Outcome.DROPPED
+            self._told.update(k for k in keys if k in self._lines)
+            return Outcome.ALERTED
         if mode is Mode.SUGGEST:
-            return Outcome.SUGGESTED if self._alert(action, prefix=SUGGEST_TAG) else Outcome.DROPPED
+            sent = self._effect_message(action, prefix=SUGGEST_TAG, did=suggested_line(action))
+            return Outcome.SUGGESTED if sent else Outcome.DROPPED
         return self._dispatch(action, snapshot)
 
     def route(self, action: Action, snapshot: Snapshot) -> Executor | None:
@@ -327,13 +386,22 @@ class Engine:
             log.info("%s: nothing to do for %s", executor.name, action)
             return result
         elif result is True or (result and not isinstance(result, Outcome)):
+            if action.kind not in _QUIET_WHEN_DONE:
+                detail = result if isinstance(result, str) else None
+                try:  # it is done: a message that cannot be sent must not undo that
+                    self._effect_message(action, prefix=DONE_TAG, did=done_line(action, detail))
+                except Exception:
+                    log.exception("could not announce: %s", action)
             return Outcome.EXECUTED
         else:
             # e.g. missing task_id or session_id, no target owner, or a missing capability.
             log.warning("%s cannot execute; alerting instead: %s", executor.name, action)
-        return Outcome.NOT_EXECUTED if self._alert(action, executed=False) else Outcome.DROPPED
+        sent = self._effect_message(action, executed=False, did=not_executed_line(action))
+        return Outcome.NOT_EXECUTED if sent else Outcome.DROPPED
 
-    def _alert(self, action: Action, executed: bool = True, prefix: str = "") -> bool:
+    def _alert(
+        self, action: Action, executed: bool = True, prefix: str = "", did: str | None = None
+    ) -> bool:
         """Send ``action`` to a human. Return False if there is no alerter to send it to."""
         if self.alerter is None:
             log.warning("no alerter configured; dropped: %s", action)
@@ -345,8 +413,20 @@ class Engine:
             title += NOT_EXECUTED_SUFFIX
             if _RANK[severity] < _RANK[_NEEDS_HUMAN]:
                 severity = _NEEDS_HUMAN
-        self.alerter.send(title, action.reason, severity)
+        if did is None:
+            self.alerter.send(title, action.reason, severity)
+        else:
+            self.alerter.send(title, action.reason, severity, did=did)
         return True
+
+
+def _announces(action: Action) -> list[str]:
+    """Keys of the effects an alert reports on (``params.announces``: a key or a list)."""
+    if action.kind not in _ALERT_ACTIONS:
+        return []
+    raw = action.params.get(ANNOUNCES)
+    keys = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
+    return [k for k in keys if isinstance(k, str) and k]
 
 
 def _age(d: timedelta) -> str:

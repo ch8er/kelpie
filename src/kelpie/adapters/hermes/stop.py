@@ -76,6 +76,12 @@ ENV_DENIED = frozenset(
 )
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+# What a done stop means on Hermes, for the human reading "Stopped run <id>; ..." (the reap
+# grace is TERMINAL_WORKER_REAP_GRACE_SECONDS, see above).
+STOP_DONE = (
+    "task {task} is blocked for a human (hermes kanban unblock {task}); Hermes' dispatcher "
+    "ends the worker within about 2 minutes"
+)
 
 
 class HermesCliError(RuntimeError):
@@ -95,8 +101,9 @@ def stop_comment(task_id: str, reason: str) -> str:
     clean = _CONTROL.sub(" ", reason).strip() or "no reason given"
     if len(clean) > MAX_REASON:
         clean = clean[: MAX_REASON - 3] + "..."
+    end = "" if clean.endswith(".") else "."  # reasons are sentences: no ".."
     return (
-        f"Stopped by Kelpie: {clean}. The task stays blocked until a human resumes it: "
+        f"Stopped by Kelpie: {clean}{end} The task stays blocked until a human resumes it: "
         f"hermes kanban unblock {task_id}"
     )
 

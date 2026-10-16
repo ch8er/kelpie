@@ -218,7 +218,7 @@ class CiEconomy:
                     ActionKind.CANCEL_BUILD,
                     NAME,
                     f"Build {build.id} {what} is superseded by {build.superseded_by}; "
-                    f"cancelling it saves CI minutes ({_minutes(build.minutes)} burned so far).",
+                    f"it still runs and burns CI minutes ({_minutes(build.minutes)} so far).",
                     executor=build.source,
                     key=f"{NAME}:cancel:{build.id}",
                     once=True,

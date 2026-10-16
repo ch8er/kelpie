@@ -13,7 +13,8 @@ from datetime import timedelta
 from tests.sim.farm import HERMES_STALE, REPO, Farm
 
 SUGGEST = {"mode": "suggest"}
-DID_SUGGEST = "Kelpie did: nothing, mode suggest."
+# What a suggestion says Kelpie did (#69): the intent, and that it was not done.
+DID_SUGGEST = "(not done, rule in suggest mode)."
 
 
 def settle(farm: Farm, ticks: int = 3) -> None:
@@ -70,6 +71,8 @@ def test_incident_01_guard_block_with_green_ci_is_suggested_for_unblock(farm: Fa
 
     text = farm.wait_message("stale_blocks", "unblock t_guard")
     assert "is stale: its condition is met" in text and DID_SUGGEST in text
+    assert "Suggested: clear the block on t_guard" in text
+    assert "Clearing it" not in text  # the rule no longer words it as done (#69)
     settle(farm)
     assert farm.messages("t_pending") == []  # CI still running: a declared wait
     board_unchanged(farm, before)

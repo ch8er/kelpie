@@ -333,6 +333,7 @@ def test_comment_is_one_clean_bounded_line() -> None:
     assert text.startswith("Stopped by Kelpie: line one line two")
     assert "..." in text and len(text) < MAX_REASON + 200
     assert "no reason given" in stop_comment("t1", "  \n ")
+    assert stop_comment("t1", "Runaway run.").startswith("Stopped by Kelpie: Runaway run. The")
 
 
 def test_run_id_parsing() -> None:

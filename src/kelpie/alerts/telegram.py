@@ -70,7 +70,16 @@ DID = {
     Did.SUGGESTED: "Kelpie did: nothing, mode suggest. A human decides.",
     Did.FAILED: "Kelpie did: tried, and it failed. Needs a human.",
     Did.NOT_EXECUTED: "Kelpie did: nothing, no executor could carry it out. Needs a human.",
+    Did.DONE: "Kelpie did: carried it out.",
 }
+MAX_DID = 400
+
+
+def did_line(message: AlertMessage) -> str:
+    """What Kelpie did: the engine's own line when it sent one, else the fixed wording."""
+    if message.did_text:
+        return truncate(clean(message.did_text), MAX_DID)
+    return DID[message.did]
 
 
 def redact(text: str, token: str) -> str:
@@ -128,7 +137,7 @@ def format_message(message: AlertMessage) -> str:
     head += f"{truncate(defang(message.rule), MAX_HEAD)}: " if message.rule else ""
     # Each part has its own cap, so the last line (what Kelpie did) always survives.
     body = truncate(defang(lead(message) + message.body.strip()), MAX_BODY)
-    lines = [head + truncate(defang(message.subject), MAX_HEAD), body, DID[message.did]]
+    lines = [head + truncate(defang(message.subject), MAX_HEAD), body, defang(did_line(message))]
     return truncate("\n".join(lines))
 
 

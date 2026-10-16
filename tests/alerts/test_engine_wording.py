@@ -17,8 +17,8 @@ class Recorder:
     def __init__(self) -> None:
         self.messages: list[AlertMessage] = []
 
-    def send(self, title: str, body: str, severity: str) -> None:
-        self.messages.append(parse_alert(title, body, severity))
+    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
+        self.messages.append(parse_alert(title, body, severity, did))
 
 
 class Toggle:

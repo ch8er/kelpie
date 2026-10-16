@@ -96,7 +96,8 @@ def test_severity_transitive_dependents_and_cycles() -> None:
         task("T-5", Status.READY, owner_id="dev-1"),
     ]
     alert = act(task(), *downstream, deps=deps)[0]
-    assert alert.params == {"dependents": 3, "dependent_ids": ["T-2", "T-3", "T-5"]}
+    assert alert.params["dependents"] == 3
+    assert alert.params["dependent_ids"] == ["T-2", "T-3", "T-5"]
     assert alert.severity is Severity.CRITICAL and alert.key.endswith(":critical")
     assert act(task(), *downstream[:1], deps=deps[:1])[0].severity is Severity.WARNING
 
@@ -113,7 +114,7 @@ def test_only_idle_agents_of_the_role_are_proposed() -> None:
     busy_session = Session("S-9", "T-8", "dev-b", NOW - 10 * M, last_heartbeat=NOW - M)
     alert, reassign = act(task(), busy_task, owners=owners, sessions=(busy_session,))
     assert reassign.params == {"owner_id": "dev-c"}
-    assert "Proposed owner: dev-c" in alert.reason
+    assert "Candidate owner: dev-c" in alert.reason
     all_busy = (Owner("dev-a", "developer"),)
     [alert] = act(task(), busy_task, owners=all_busy)
     assert "No idle agent with role 'developer'" in alert.reason

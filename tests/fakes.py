@@ -70,9 +70,11 @@ class StoppingAdapter(FakeAdapter):
 @dataclass
 class FakeAlerter:
     sent: list[tuple[str, str]] = field(default_factory=list)
+    dids: list[str | None] = field(default_factory=list)  # the engine's "Kelpie did" lines
 
-    def send(self, title: str, body: str, severity: str) -> None:
+    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
         self.sent.append((title, severity))
+        self.dids.append(did)
 
 
 @dataclass
