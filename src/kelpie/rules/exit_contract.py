@@ -135,7 +135,7 @@ class ExitContract:
             ActionKind.REQUEUE,
             NAME,
             f"Session {s.id} of {s.owner_id} {how} without a final status, leaving the task "
-            f"'{task.status}' with nobody on it. Returning it to the queue.{note}",
+            f"'{task.status}' with nobody on it; it belongs back in the queue.{note}",
             task_id=task.id,
             severity=Severity.WARNING,
             key=f"exit:{s.id}",
@@ -150,7 +150,7 @@ class ExitContract:
             NAME,
             f"Session {session.id} of {session.owner_id} left the task blocked with {got}, "
             f"which is not an allowed block reason ({', '.join(self.allowed_block_reasons)}) "
-            "and has no registered condition. Nothing would ever unblock it; returning it to "
+            "and has no registered condition. Nothing would ever unblock it; it belongs back in "
             "the queue.",
             task_id=task.id,
             severity=Severity.WARNING,

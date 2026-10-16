@@ -311,7 +311,19 @@ it daily.
 Alerts are off until a channel is configured. Each `[[alerts.channels]]` entry has its own
 `min_severity`; an alert goes to every channel it reaches. An action that failed, or that no
 executor could carry out, needs a human: its alert is sent at `warning` or above, whatever the
-action's own severity. Delivery runs on a background
+action's own severity.
+
+The last line of every alert says what Kelpie itself did, worded by the engine from the
+rule's mode and the actual outcome, never by the rule: "Suggested: clear the block on T-1
+(not done, rule in suggest mode)." in suggest mode; in act mode, once done, the past tense with
+the executor's specifics ("Stopped run hermes-run-7; task T-1 is blocked for a human (hermes
+kanban unblock T-1); Hermes' dispatcher ends the worker within about 2 minutes."), or "Failed:
+could not ...: <reason>, needs a human." (the reason only when the error marks it safe to show;
+otherwise its type, details in Kelpie's log). An alert that a rule raises together with an effect
+(rule 10's runaway alert with its stop, rule 3's orphan alert with its reassignment) carries the
+effect's line instead of a second message. Plain alerts end with "only sent this alert".
+
+Delivery runs on a background
 worker per channel (bounded queue), so a slow chat service never stalls the control loop.
 Transient failures (429, 5xx, network) are retried for `retry_horizon` (default `15m`, under
 `[alerts]`) with a capped backoff; an alert that is still undelivered is lost and counted in

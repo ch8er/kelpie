@@ -14,17 +14,11 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-import pytest
-
 from tests.sim.farm import REPO, Farm
 from tests.sim.github import Run, sha_of
 from tests.sim.kelpie import wait_for
 
 ACT = {"mode": "act"}
-ISSUE_70 = (
-    "https://github.com/ch8er/kelpie/issues/70: an effect carried out in act mode is not "
-    "announced; the rule's alert says it was only proposed"
-)
 
 
 def live_run(farm: Farm, task_id: str, title: str, minutes: float = 40) -> int:
@@ -92,7 +86,7 @@ def test_runaway_loop_is_stopped_through_the_hermes_cli(farm: Farm) -> None:
     for call in calls:
         assert call["code"] == 0
         assert call["argv"][:6] == ["kanban", "block", "--kind", "needs_input", "--", call["task"]]
-        assert call["argv"][6].startswith("Stopped by Kelpie: Stopping session hermes-run-")
+        assert call["argv"][6].startswith("Stopped by Kelpie: Runaway run: session hermes-run-")
         assert call["argv"][6].endswith(f"hermes kanban unblock {call['task']}")
         assert call["board"] == str(farm.board.path)
         assert not any(k.startswith(("KELPIE_", "GITHUB")) for k in call["env"])
@@ -110,8 +104,8 @@ def test_runaway_loop_is_stopped_through_the_hermes_cli(farm: Farm) -> None:
     assert sum("t_errors" in t for t in runaway) == 1
 
 
-@pytest.mark.xfail(strict=True, reason=ISSUE_70)
 def test_a_stop_is_announced_as_done(farm: Farm) -> None:
+    """One critical message, and it says what Kelpie did, with Hermes' specifics (#70)."""
     loop = live_run(farm, "t_loop", "Nightly maintenance heartbeat")
     heartbeat_loop(farm, "t_loop", loop)
     farm.serve(farm.config({"loop_breaker": ACT}))
@@ -123,6 +117,13 @@ def test_a_stop_is_announced_as_done(farm: Farm) -> None:
     assert all("Stop proposed" not in t for t in about_loop)
     assert all("only sent this alert" not in t for t in about_loop)
     assert any(re.search(r"\b(stopped|blocked)\b", t, re.IGNORECASE) for t in about_loop)
+    (message,) = about_loop  # the runaway alert carries the stop: no second message
+    assert message.startswith("[CRITICAL] loop_breaker: alert t_loop")
+    assert message.splitlines()[-1] == (
+        f"Stopped run hermes-run-{loop}; task t_loop is blocked for a human "
+        "(hermes kanban unblock t_loop); Hermes' dispatcher ends the worker within about 2 "
+        "minutes."
+    )
 
 
 def test_a_refused_stop_reaches_a_human(farm: Farm) -> None:
@@ -135,13 +136,18 @@ def test_a_refused_stop_reaches_a_human(farm: Farm) -> None:
 
     kelpie = farm.serve(farm.config({"loop_breaker": ACT}))
 
-    text = farm.wait_message("loop_breaker", "failed", "t_loop")
-    assert "Needs a human" in text and text.startswith("[WARNING]")
+    # The runaway alert carries what happened to its stop: one critical message.
+    text = farm.wait_message("loop_breaker", "t_loop", "Failed: could not stop run")
+    assert text.startswith("[CRITICAL] loop_breaker: alert t_loop")
+    assert text.splitlines()[-1] == (
+        f"Failed: could not stop run hermes-run-{loop}: hermes kanban block failed (exit 1), "
+        "needs a human."
+    )
     kelpie.wait_ticks(3)
     farm.stop()
     assert farm.board.get("t_loop").status == "running"
-    assert len(farm.messages("failed", "t_loop")) == 1  # once per cooldown, not per tick
-    assert sum("failed" in t and "t_loop" in t for t in farm.channels.slack_texts()) == 1
+    assert len(farm.messages("Failed:", "t_loop")) == 1  # once per cooldown, not per tick
+    assert sum("Failed:" in t and "t_loop" in t for t in farm.channels.slack_texts()) == 1
     assert {c["code"] for c in farm.hermes_calls()} == {1}
 
 
@@ -238,8 +244,8 @@ def test_superseded_build_is_cancelled_on_github(farm: Farm) -> None:
     assert farm.hermes_calls() == []
 
 
-@pytest.mark.xfail(strict=True, reason=ISSUE_70)
 def test_a_cancel_is_announced_as_done(farm: Farm) -> None:
+    """The cancel says it was done and which newer build superseded it (#70)."""
     builds = superseded_builds(farm)
     farm.serve(ci_config(farm))
     wait_for("the cancel request", lambda: bool(farm.github.cancelled), timeout=30)
@@ -249,6 +255,11 @@ def test_a_cancel_is_announced_as_done(farm: Farm) -> None:
     announced = [
         t
         for t in farm.channels.telegram_texts()
-        if re.search(r"\bcancell?ed\b", t) and f"{REPO}:{builds.old.id}" in t
+        if re.search(r"\bcancell?ed\b", t, re.IGNORECASE) and f"{REPO}:{builds.old.id}" in t
     ]
     assert announced, "nothing says the build was cancelled"
+    (done,) = announced  # the waste summary of that tick carries it: one message
+    assert done.startswith("[INFO] ci_economy: alert") and "still runs" not in done
+    assert done.splitlines()[-1] == (
+        f"Cancelled build {REPO}:{builds.old.id} (superseded by {REPO}:{builds.new.id})."
+    )

@@ -45,11 +45,12 @@ import fnmatch
 import math
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import ANNOUNCES
 from kelpie.core.conditions import linked_conditions
 from kelpie.core.model import (
     Build,
@@ -95,9 +96,12 @@ class CiEconomy:
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         recent = self._recent(snapshot)
         actions: list[Action] = []
-        if self.cancel_superseded:
-            actions.extend(self._cancels(snapshot))
+        cancels = self._cancels(snapshot) if self.cancel_superseded else []
+        actions.extend(cancels)
         if (waste := self._waste(recent, snapshot)) is not None:
+            if cancels:  # the summary says what happened to this tick's cancels
+                keys = [c.key for c in cancels if c.key]
+                waste = replace(waste, params={**waste.params, ANNOUNCES: keys})
             actions.append(waste)
         actions.extend(self._quota(recent, snapshot))
         return actions
@@ -162,7 +166,8 @@ class CiEconomy:
         reason = (
             f"CI waste in the last {hours:g}h: {count} of {len(recent)} builds burned "
             f"{_minutes(minutes)} of {_minutes(total)} for nothing — {'; '.join(parts)}. "
-            "Skip CI for drafts, WIP and docs-only changes, and cancel superseded builds."
+            "Skip CI for drafts, WIP and docs-only changes, and cancel superseded builds "
+            "early (rule 9 does it in act mode)."
         )
         params: dict[str, Any] = {
             "wasted_minutes": round(minutes, 1),
@@ -217,8 +222,8 @@ class CiEconomy:
                 Action(
                     ActionKind.CANCEL_BUILD,
                     NAME,
-                    f"Build {build.id} {what} is superseded by {build.superseded_by}; "
-                    f"cancelling it saves CI minutes ({_minutes(build.minutes)} burned so far).",
+                    f"Build {build.id} {what} was superseded by {build.superseded_by} after "
+                    f"burning {_minutes(build.minutes)} of CI.",
                     executor=build.source,
                     key=f"{NAME}:cancel:{build.id}",
                     once=True,

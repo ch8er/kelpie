@@ -115,7 +115,7 @@ class DispatchGate:
                     ActionKind.WAKE,
                     NAME,
                     f"Task {task.id} no longer waits on a parent: {_names(targets)} ended, left "
-                    "the board or are no longer its parents. Waking it.",
+                    "the board or are no longer its parents.",
                     task_id=task.id,
                     key=f"{NAME}:release:{task.id}:{task.status_since.isoformat()}",
                     params={"waited_for": targets},
@@ -162,8 +162,8 @@ class DispatchGate:
         return Action(
             ActionKind.WAIT,
             NAME,
-            f"Task {task.id} is ready but its prerequisites are not met: {text}. Parking it in "
-            "waiting so no agent session is spent on it; it is woken when they hold.",
+            f"Task {task.id} is ready but its prerequisites are not met: {text}. While it waits, "
+            "no agent session is spent on it; it is woken when they hold.",
             task_id=task.id,
             key=f"{NAME}:{task.id}:{task.status_since.isoformat()}",
             once=True,

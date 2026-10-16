@@ -209,7 +209,14 @@ def test_task_action_without_task_id_becomes_alert() -> None:
     adapter, alerter = FakeAdapter(), FakeAlerter()
     run([act(ActionKind.REQUEUE, task_id=None), act(ActionKind.UNBLOCK)], adapter, alerter)
     assert adapter.calls == [("unblock", "T-1")]
-    assert alerter.sent == [("[emit] requeue (not executed, needs a human)", Severity.WARNING)]
+    assert alerter.sent == [
+        ("[emit] requeue (not executed, needs a human)", Severity.WARNING),
+        ("[emit] done unblock T-1", Severity.INFO),
+    ]
+    assert alerter.dids == [
+        "Failed: nothing here can return the task to the queue, needs a human.",
+        "Cleared the block on T-1.",
+    ]
 
 
 def test_routes_by_task_source() -> None:
@@ -331,7 +338,7 @@ def test_naive_now_rejected() -> None:
 
 
 class RaisingAlerter:
-    def send(self, title: str, body: str, severity: str) -> None:
+    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
         raise ConnectionError("slack down")
 
 
@@ -364,7 +371,7 @@ def test_once_action_alerts_only_when_last_attempt_fails(
     with caplog.at_level(logging.INFO):
         outcomes = _ticks(engine, adapter, [True, True, False])
     assert outcomes == [Outcome.FAILED, Outcome.FAILED, Outcome.EXECUTED]
-    assert alerter.sent == []
+    assert alerter.sent == [("[emit] done requeue T-1", Severity.INFO)]  # no failure alert
     assert not any(r.exc_info for r in caplog.records)  # no traceback above DEBUG
 
 

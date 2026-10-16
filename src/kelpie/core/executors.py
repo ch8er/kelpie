@@ -25,9 +25,11 @@ class Executor(Protocol):
     @property
     def name(self) -> str: ...
 
-    def execute(self, action: Action) -> bool | Outcome:
+    def execute(self, action: Action) -> bool | Outcome | str:
         """Carry out ``action``. Return False if this executor cannot do it, or an
-        :class:`Outcome` other than executed (``NOTHING_TO_DO``)."""
+        :class:`Outcome` other than executed (``NOTHING_TO_DO``). A non-empty string means
+        done, and says what happened in specifics a human reads after the engine's own
+        past-tense line (e.g. when a stopped worker actually exits)."""
         ...
 
 
@@ -45,22 +47,28 @@ class PlatformExecutor:
     def name(self) -> str:
         return self.adapter.name
 
-    def execute(self, action: Action) -> bool:
+    def execute(self, action: Action) -> bool | str | Outcome:
         try:
             return self._execute(action)
         except UnsupportedAction as exc:
             log.warning("%s does not support %s: %s", self.name, action.kind, exc)
             return False
 
-    def _execute(self, action: Action) -> bool:
+    def _execute(self, action: Action) -> bool | str | Outcome:
         adapter = self.adapter
         if action.kind is ActionKind.STOP:
             # Stops target a session; heartbeat loops may have no task at all.
             session_id = action.params.get("session_id")
             if not session_id or not isinstance(adapter, SupportsStop):
                 return False
-            adapter.stop(session_id, action.reason)
-            return True
+            detail = adapter.stop(session_id, action.reason)
+            if detail is ActionResult.NOTHING_TO_DO:
+                return Outcome.NOTHING_TO_DO  # the session was over: nothing was stopped
+            if detail is ActionResult.REFUSED:
+                return False  # a human is told instead
+            if detail is ActionResult.DONE or detail is None:  # (a StrEnum is a str too)
+                return True
+            return detail if isinstance(detail, str) and detail.strip() else True
         tid = action.task_id
         if tid is None:
             return False

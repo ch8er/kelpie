@@ -423,7 +423,7 @@ def test_a_session_caught_later_changes_the_alert_key() -> None:
     one = with_budgets(hard, sessions=(session("S-1"),))[0]
     both = with_budgets(hard, sessions=(session("S-1"), session("S-2", task_id="T-2")))[0]
     assert one.state == both.state and one.key != both.key
-    assert "Stop proposed for session(s) S-1, S-2" in both.reason
+    assert "Live session(s) to stop: S-1, S-2" in both.reason
 
 
 def test_hard_state_without_live_sessions_only_alerts() -> None:

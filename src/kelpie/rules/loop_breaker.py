@@ -43,6 +43,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import ANNOUNCES
 from kelpie.core.model import (
     BudgetScope,
     BudgetState,
@@ -212,7 +213,7 @@ class LoopBreaker:
                 ActionKind.ALERT,
                 NAME,
                 f"Runaway run: {subject} made {trip.what} {trip.detail}.{spent} "
-                "Stop proposed; check the task before resuming it.",
+                "Check the task before resuming it.",
                 task_id=session.task_id,
                 severity=Severity.CRITICAL,
                 key=f"{trip.kind}:{session.id}",
@@ -223,12 +224,15 @@ class LoopBreaker:
                     "owner_id": session.owner_id,
                     "trigger": trip.kind,
                     "tokens_since": tokens,
+                    ANNOUNCES: f"stop:{session.id}",
                 },
             )
         yield Action(
             ActionKind.STOP,
             NAME,
-            f"Stopping {subject}: " + "; ".join(f"{t.what} {t.detail}" for t in trips) + ".",
+            f"Runaway run: {subject} made "
+            + "; ".join(f"{t.what} {t.detail}" for t in trips)
+            + ".",
             task_id=session.task_id,
             key=f"stop:{session.id}",
             params={"session_id": session.id, "trigger": trips[0].kind},
@@ -284,7 +288,7 @@ class LoopBreaker:
             ]
             names = ", ".join(sorted(s.id for s in live))
             if live:
-                tail = f" Stop proposed for session(s) {names}."
+                tail = f" Live session(s) to stop: {names}."
             elif may_stop:
                 tail = " No live session to stop."
             else:
@@ -303,14 +307,15 @@ class LoopBreaker:
                     **params,
                     "runs_out_at": _iso(b.runs_out_at),
                     "session_ids": sorted(s.id for s in live),
+                    ANNOUNCES: [f"stop:{s.id}:budget:{base}" for s in live],
                 },
             )
             for s in live:
                 yield Action(
                     ActionKind.STOP,
                     NAME,
-                    f"Stopping session {s.id}: budget `{b.budget}` for {who} is over its hard "
-                    f"limit ({_amount(b.spent, b.unit)} of {_amount(b.hard, b.unit)}).",
+                    f"Session {s.id}: budget `{b.budget}` for {who} is over its hard limit "
+                    f"({_amount(b.spent, b.unit)} of {_amount(b.hard, b.unit)}).",
                     task_id=s.task_id,
                     key=f"stop:{s.id}:budget:{base}",
                     params={"session_id": s.id, "trigger": "budget", "budget": b.budget},

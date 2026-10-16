@@ -230,7 +230,7 @@ class FlakyAlerter(FakeAlerter):
         super().__init__()
         self.down = True
 
-    def send(self, title: str, body: str, severity: str) -> None:
+    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
         if self.down:
             raise ConnectionError("slack down")
         super().send(title, body, severity)

@@ -33,16 +33,18 @@ from kelpie import net
 from kelpie.alerts.delivery import PermanentError, TransientError
 from kelpie.alerts.telegram import (
     DEFAULT_TIMEOUT,
-    DID,
     MAX_BODY,
     MAX_HEAD,
     MAX_RESPONSE,
+    MAX_TEXT,
     MAX_TIMEOUT,
     clean,
+    did_line,
     lead,
     loopback,
     redact,
     truncate,
+    utf16_len,
 )
 from kelpie.core.actions import Severity
 from kelpie.core.alerts import AlertMessage
@@ -69,10 +71,12 @@ def format_message(message: AlertMessage) -> str:
         return escape(truncate(clean(message.text)))
     head = f"[{message.severity.value.upper()}] "
     head += f"{truncate(clean(message.rule), MAX_HEAD)}: " if message.rule else ""
-    # Each part has its own cap, so the last line (what Kelpie did) always survives.
-    body = truncate(clean(lead(message) + message.body.strip()), MAX_BODY)
-    lines = [head + truncate(clean(message.subject), MAX_HEAD), body, DID[message.did]]
-    return escape(truncate("\n".join(lines)))
+    # As in Telegram: the body yields room, so the last line (what Kelpie did) survives.
+    first = head + truncate(clean(message.subject), MAX_HEAD)
+    did = did_line(message)
+    room = min(MAX_BODY, MAX_TEXT - utf16_len(first) - utf16_len(did) - 2)
+    body = truncate(clean(lead(message) + message.body.strip()), room)
+    return escape(truncate("\n".join([first, body, did])))
 
 
 @dataclass(frozen=True, slots=True)

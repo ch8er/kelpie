@@ -158,8 +158,8 @@ class ConflictWarning:
             Action(
                 ActionKind.WAIT,
                 NAME,
-                f"Holding {task.id} until {_names(earlier)} (started earlier) are done: they "
-                f"change the same files ({_names(files)}).",
+                f"{task.id} should wait until {_names(earlier)} (started earlier) are done: "
+                f"they change the same files ({_names(files)}).",
                 task_id=task.id,
                 key=f"{NAME}:wait:{task.id}:{','.join(earlier)}:{task.status_since.isoformat()}",
                 once=True,
@@ -192,7 +192,7 @@ class ConflictWarning:
                     ActionKind.WAKE,
                     NAME,
                     f"The tasks {task.id} was held behind are no longer in flight: {gone}. "
-                    "The conflict is gone; waking it.",
+                    "The conflict is gone.",
                     task_id=task.id,
                     key=f"{NAME}:release:{task.id}:{task.status_since.isoformat()}",
                     params={"waited_for": [str(t) for t in targets]},

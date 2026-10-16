@@ -213,16 +213,20 @@ def test_ledger_down_notice_once_per_outage() -> None:
         config=ACT,
         ledger_store=store,
     )
+
+    def notices() -> int:
+        return sum(title.startswith("[kelpie]") for title, _ in alerter.sent)
+
     for minute in range(5):
         tick(engine, T0 + timedelta(minutes=minute))
-    assert len(alerter.sent) == 1
+    assert notices() == 1
     assert not engine.ledger_available
     store.fail_reads = store.fail_writes = False
     assert tick(engine, T0 + timedelta(minutes=10)) == [Outcome.EXECUTED]
     assert engine.ledger_available
     store.fail_reads = True
     tick(engine, T0 + timedelta(minutes=11))
-    assert len(alerter.sent) == 2  # one notice per outage
+    assert notices() == 2  # one notice per outage
 
 
 def test_read_failure_still_lets_observe_through() -> None:

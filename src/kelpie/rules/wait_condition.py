@@ -138,7 +138,7 @@ class WaitCondition:
             yield Action(
                 ActionKind.WAKE,
                 NAME,
-                f"Every condition the task was waiting for now holds: {done}. Waking it up.",
+                f"Every condition the task was waiting for now holds: {done}.",
                 task_id=task.id,
                 key=f"wake:{task.id}:{since}",
                 params={"conditions": [c.id for c in conditions]},

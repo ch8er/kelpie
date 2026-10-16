@@ -28,7 +28,7 @@ from kelpie.adapters.hermes.stop import (
     run_id,
     stop_comment,
 )
-from kelpie.core.actions import Action, ActionKind
+from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Outcome
@@ -333,6 +333,7 @@ def test_comment_is_one_clean_bounded_line() -> None:
     assert text.startswith("Stopped by Kelpie: line one line two")
     assert "..." in text and len(text) < MAX_REASON + 200
     assert "no reason given" in stop_comment("t1", "  \n ")
+    assert stop_comment("t1", "Runaway run.").startswith("Stopped by Kelpie: Runaway run. The")
 
 
 def test_run_id_parsing() -> None:
@@ -387,3 +388,27 @@ def test_kelpie_never_signals_the_worker(board: Board, fake_cli: tuple[str, Path
     finally:
         child.send_signal(signal.SIGKILL)
         child.wait(timeout=10)
+
+
+def test_stop_says_what_it_did_or_that_there_was_nothing_to_do(
+    board: Board, fake_cli: tuple[str, Path]
+) -> None:
+    exe, _ = fake_cli
+    rid = running(board)
+    adapter = make(board, exe)
+    done = adapter.stop(f"hermes-run-{rid}", "loop")
+    assert isinstance(done, str) and "blocked for a human" in done and "2 minutes" in done
+    assert adapter.stop(f"hermes-run-{rid}", "loop") is ActionResult.NOTHING_TO_DO  # over now
+
+
+def test_a_refused_stop_has_a_reason_safe_to_show(board: Board, fake_cli: tuple[str, Path]) -> None:
+    exe, log = fake_cli
+    set_mode(log, "fail")  # the CLI prints a token on stderr
+    rid = running(board)
+    with pytest.raises(HermesError) as info:
+        make(board, exe).stop(f"hermes-run-{rid}", "x")
+    assert "sk-secret-value" in str(info.value)  # the log keeps the detail...
+    assert info.value.public_reason == "hermes kanban block failed (exit 1)"  # ...chat does not
+    with pytest.raises(HermesError) as unknown:
+        make(board, exe).stop("hermes-run-999", "x")
+    assert unknown.value.public_reason == "the run is not on the board"

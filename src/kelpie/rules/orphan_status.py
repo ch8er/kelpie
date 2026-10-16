@@ -71,6 +71,7 @@ from fnmatch import fnmatchcase
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import ANNOUNCES
 from kelpie.core.model import Condition, ConditionKind, Owner, OwnerKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
@@ -186,7 +187,7 @@ class OrphanStatus:
         severity = self._severity(len(waiting))
         key = f"{task.id}:{task.status_since.isoformat()}"
         if candidate is not None:
-            then = f" Proposed owner: {candidate.id}."
+            then = f" Candidate owner: {candidate.id}, an idle {candidate.role}."
         elif may_reassign and task.role:
             then = f" No idle agent with role '{task.role}'; a human needs to pick it up."
         elif may_reassign:
@@ -203,14 +204,18 @@ class OrphanStatus:
             key=f"orphan:{key}:{severity}",
             state=f"{NAME}:{key}",
             since=task.status_since,
-            params={"dependents": len(waiting), "dependent_ids": waiting},
+            params={
+                "dependents": len(waiting),
+                "dependent_ids": waiting,
+                **({ANNOUNCES: f"reassign:{key}"} if candidate is not None else {}),
+            },
         )
         if candidate is not None:
             yield Action(
                 ActionKind.REASSIGN,
                 NAME,
-                f"This '{task.status}' task had no owner for {hours:.1f}h; assigning it to "
-                f"{candidate.id}, an idle {candidate.role}.",
+                f"This '{task.status}' task had no owner for {hours:.1f}h; {candidate.id}, an "
+                f"idle {candidate.role}, can take it.",
                 task_id=task.id,
                 key=f"reassign:{key}",
                 params={"owner_id": candidate.id},

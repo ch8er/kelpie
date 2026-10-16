@@ -55,7 +55,7 @@ expected_actions:
     reason_contains: "a human needs to pick it up"
   - kind: alert
     task_id: T-1121
-    reason_contains: "Proposed owner: agent-dev-2"
+    reason_contains: "Candidate owner: agent-dev-2"
   - kind: reassign
     task_id: T-1121
     params: {owner_id: agent-dev-2}

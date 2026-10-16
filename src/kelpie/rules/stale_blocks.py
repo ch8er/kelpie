@@ -154,7 +154,7 @@ class StaleBlocks:
             ActionKind.UNBLOCK,
             NAME,
             f"The block '{block.reason}' is stale: its condition is met ({met}) and the block "
-            f"outlived its cause by {by}. Clearing it.",
+            f"outlived its cause by {by}.",
             task_id=task.id,
             key=f"unblock:{task.id}:{block.since.isoformat()}",
             params={
