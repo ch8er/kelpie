@@ -309,7 +309,14 @@ def test_build_app_wires_the_pull_requests_step(
     assert settings.github is not None and settings.github.pulls is not None
     assert settings.github.pulls.poll_interval == timedelta(minutes=5)
     build_app(settings).close()
-    assert "open PRs of example/repo; hold labels read: merge-first, park" in caplog.text
+    assert (
+        "open PRs, and those closed within 7d, of example/repo; hold labels read: "
+        "merge-first, park" in caplog.text
+    )
+    assert "cache_ttl" not in caplog.text
+    slow = text.replace('poll_interval = "5m"', 'poll_interval = "1m"')
+    build_app(load_settings(write(tmp_path, slow))).close()
+    assert "is not below [connectors.github.pulls] poll_interval (1m)" in caplog.text
 
 
 def test_pull_requests_step_off_unless_configured(

@@ -4,7 +4,8 @@ title: "A parent stays open after all its subtasks are done"
 description: >
   A rough idea was split into three subtasks. Each closed within an hour of its PR merging,
   but nobody closed the parent: it sat in ready, and the release work behind it waited.
-  Kelpie must ask to close the parent, naming what waits behind it, and propose close. A
+  Kelpie must ask to close the parent, naming what waits behind it and the merged PRs, and
+  propose close. A
   parent with a subtask still open, and a task whose subtasks are done but which still has
   an open PR of its own, are left alone.
 rule: orphan_status
@@ -37,6 +38,12 @@ snapshot:
     - {id: S-1712, task_id: T-1712, owner_id: agent-dev-1, started_at: "2026-03-02T16:00:00+00:00", last_heartbeat: "2026-03-02T17:58:00+00:00"}
   pull_requests:
     - {repo: example/repo, number: 1720, title: "T-1720 payments integration", branch: "feature/T-1720", task_ids: [T-1720]}
+  closed_pull_requests:
+    - {repo: example/repo, number: 1701, title: "T-1701 catalog API", branch: "feature/T-1701", task_ids: [T-1701], closed_at: "2026-03-02T09:30:00+00:00", merged_at: "2026-03-02T09:30:00+00:00", into_default: true}
+    - {repo: example/repo, number: 1702, title: "T-1702 cart page", branch: "feature/T-1702", task_ids: [T-1702], closed_at: "2026-03-02T11:40:00+00:00", merged_at: "2026-03-02T11:40:00+00:00", into_default: true}
+    - {repo: example/repo, number: 1703, title: "T-1703 checkout", branch: "feature/T-1703", task_ids: [T-1703], closed_at: "2026-03-02T12:50:00+00:00", merged_at: "2026-03-02T12:50:00+00:00", into_default: true}
+    - {repo: example/repo, number: 1721, title: "T-1721 card form", branch: "feature/T-1721", task_ids: [T-1721], closed_at: "2026-03-02T10:40:00+00:00", merged_at: "2026-03-02T10:40:00+00:00", into_default: true}
+  pull_requests_complete: true
 expected_actions:
   - kind: alert
     task_id: T-1700
@@ -45,6 +52,7 @@ expected_actions:
       pattern: parent-left-open
       subtasks: [T-1701, T-1702, T-1703]
       waiting_tasks: [T-1704, T-1705]
+      merged_prs: ["example/repo#1701", "example/repo#1702", "example/repo#1703"]
   - kind: close
     task_id: T-1700
 not_expected_actions:

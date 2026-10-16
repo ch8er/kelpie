@@ -3,12 +3,21 @@ which conditions belong to a task right now, and is anyone still working on it."
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from kelpie.core.conditions import linked_conditions
-from kelpie.core.model import Condition, ConditionKind, Session, Snapshot, Status, Task
+from kelpie.core.model import (
+    Condition,
+    ConditionKind,
+    PullRequest,
+    Session,
+    Snapshot,
+    Status,
+    Task,
+)
 
 __all__ = ["linked_conditions"]  # defined in kelpie.core.conditions, re-exported for rules
 
@@ -31,7 +40,10 @@ def finished_parent(task: Task, snapshot: Snapshot) -> datetime | None:
     of its own or of a subtask (``PullRequest.task_ids``). Subtasks missing from the
     snapshot count as finished (adapters leave out finished tasks past their lookback); when
     none is known, a ready parent counts as finished since it became ready (a platform such
-    as Hermes wakes a parent to ready when its subtasks are done)."""
+    as Hermes wakes a parent to ready when its subtasks are done).
+
+    That is enough to leave the parent alone (no resume, no requeue); whether to propose
+    closing it is :func:`family_prs`'s question."""
     if not task.subtasks or task.status not in _PARENT_OPEN:
         return None
     family = {task.id, *task.subtasks}
@@ -54,6 +66,60 @@ def finished_parent(task: Task, snapshot: Snapshot) -> datetime | None:
 
 
 _PARENT_OPEN = frozenset({Status.BACKLOG, Status.READY, Status.IN_PROGRESS})
+_REVERT = re.compile(r"^\s*revert\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True, slots=True)
+class FamilyPRs:
+    """The PRs of a parent and its subtasks (by task code in their title or branch), as far
+    as the snapshot knows them."""
+
+    known: bool  # a code host listed every repository's open and recent closed PRs in full
+    merged: tuple[PullRequest, ...]  # merged into the default branch
+    unmerged: tuple[PullRequest, ...]  # open, closed without merging, or merged reverts
+    uncovered: tuple[str, ...]  # subtasks without a merged PR of their own
+
+    @property
+    def landed(self) -> bool:
+        """Whether the family's work has certainly landed: only then may a parent be
+        proposed for closing."""
+        return self.known and bool(self.merged) and not self.unmerged and not self.uncovered
+
+
+def family_prs(task: Task, snapshot: Snapshot) -> FamilyPRs:
+    """What the PRs of a parent's family say about whether its work landed.
+
+    On a live farm a parent was proposed for closing while two subtasks' PRs had been
+    returned for conflicts. So its work has landed only when the snapshot knows every PR
+    (``Snapshot.pull_requests_complete`` is True), every PR linked to the parent or a
+    subtask is merged (an open PR, one closed without merging, or a merged revert means it
+    has not), and every subtask has a merged PR of its own into the default branch. A
+    subtask missing from the snapshot has none: its PRs cannot be linked. A PR merged into
+    another branch (a stacked PR), or into one the connector could not tell, neither covers
+    nor blocks. A PR closed without merging blocks only while the connector still lists it
+    (``closed_lookback``)."""
+    family = {task.id, *task.subtasks}
+    merged: dict[tuple[str, int], PullRequest] = {}
+    unmerged: dict[tuple[str, int], PullRequest] = {}
+    for pr in (*snapshot.pull_requests, *snapshot.closed_pull_requests):
+        if not family.intersection(pr.task_ids):
+            continue
+        key = (pr.repo, pr.number)
+        if not pr.merged or _REVERT.match(pr.title):
+            unmerged[key] = pr
+        elif pr.into_default is True:
+            merged[key] = pr
+    covered = {t for pr in merged.values() for t in pr.task_ids}
+    return FamilyPRs(
+        known=snapshot.pull_requests_complete is True,
+        merged=_by_ref(merged),
+        unmerged=_by_ref(unmerged),
+        uncovered=tuple(s for s in task.subtasks if s not in covered),
+    )
+
+
+def _by_ref(prs: dict[tuple[str, int], PullRequest]) -> tuple[PullRequest, ...]:
+    return tuple(prs[k] for k in sorted(prs))
 
 
 def responsible(task: Task) -> str | None:

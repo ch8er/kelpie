@@ -62,12 +62,19 @@ d) **Recovery tasks recovering themselves** (``max_recovery_depth``, 1). Needs r
    per loop, keyed by the task the loop started from.
 e) **A parent left open** (``parent_close_after``, 1h; incident 17): every subtask of a task
    (``Task.subtasks``) is finished, the last one at least that long ago, and the parent is still
-   open with no live session and no open PR of its own (when PRs are known). On a live farm
-   tasks with their own branch closed within 0.7 h of their PR merging, while one parent left
-   open held up 20 tasks. Kelpie asks to close it, naming the tasks waiting behind it, and
-   proposes ``close`` (carried out in act mode by an adapter that supports it; otherwise a human
-   is told). Such a parent gets no other per-task alert, and rules 1 and 5 never propose
-   resuming it.
+   open with no live session. On a live farm tasks with their own branch closed within 0.7 h
+   of their PR merging, while one parent left open held up 20 tasks. Kelpie asks to close it,
+   naming the tasks waiting behind it, and proposes ``close`` (carried out in act mode by an
+   adapter that supports it; otherwise a human is told), but only when its work has certainly
+   landed: the code host's open and recently closed PRs are fully known
+   (``Snapshot.pull_requests_complete``), every PR linked to the parent or a subtask is
+   merged, and every subtask has a merged PR of its own (``family_prs``). On a live farm a
+   parent was proposed for closing while two subtasks' PRs had been returned for conflicts.
+   Otherwise there is no ``close``: a PR of the family closed without merging (or a merged
+   revert) alerts ``parent-prs-unmerged`` naming it, and anything else unknown alerts
+   ``parent-unverified`` ("check its PRs"). An open PR of the family means the parent is not
+   finished at all. A finished parent gets no other per-task alert, and rules 1 and 5 never
+   propose resuming it.
 f) **A card stuck before work** (``prework_after``, 4h; incident 17): a task in a pre-work
    status (``Task.prework``: Hermes ``triage`` or ``scheduled``, from the adapter's
    ``prework_statuses``) with open tasks depending on it. One sat 21 h in scheduled on a live
@@ -93,6 +100,7 @@ from kelpie.rules._chains import NOT_FOUND, BlockerGraph
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     HANDOFF,
+    family_prs,
     finished_parent,
     is_live,
     last_exit,
@@ -311,31 +319,68 @@ class OrphanStatus:
         if snapshot.now - since < after:
             return
         waiting = _open_dependents(task.id, snapshot)
-        reason = (
+        behind = f" {len(waiting)} task(s) wait behind it: {_names(waiting)}." if waiting else ""
+        finished = (
             f"All {len(task.subtasks)} subtask(s) of {task.id} ('{task.title}') are finished, "
             f"the last {_human(snapshot.now - done)} ago, but {task.id} is still "
-            f"'{task.status}': close it?"
-            + (f" {len(waiting)} task(s) wait behind it: {_names(waiting)}." if waiting else "")
+            f"'{task.status}'"
         )
+        prs = family_prs(task, snapshot)
+        merged = [pr.ref for pr in prs.merged]
+        common = {"waiting": waiting, "subtasks": list(task.subtasks), "waiting_tasks": waiting}
+        if not prs.landed:
+            # Never propose closing a parent whose work has not certainly landed.
+            if prs.unmerged:
+                pattern = "parent-prs-unmerged"
+                unmerged = [pr.ref for pr in prs.unmerged]
+                why = (
+                    f", and PR(s) {_names(unmerged)} of its family are not merged (closed "
+                    "without merging, or reverted): their work has not landed. Redo or reopen "
+                    "them; if they were replaced, a person decides whether to close it."
+                )
+            else:
+                pattern, unmerged = "parent-unverified", []
+                gap = (
+                    "the code host's PRs are not fully known"
+                    if not prs.known
+                    else f"no merged PR for {_names(list(prs.uncovered))}"
+                )
+                why = f". Kelpie cannot confirm its work landed ({gap}): check its PRs."
+            yield self._stop_alert(
+                pattern,
+                task,
+                finished + why + behind,
+                since,
+                snapshot,
+                unmerged_prs=unmerged,
+                merged_prs=merged,
+                uncovered=list(prs.uncovered),
+                **common,
+            )
+            return
         close_key = f"{NAME}:close:{task.id}:{task.status_since.isoformat()}"
         yield self._stop_alert(
             "parent-left-open",
             task,
-            reason,
+            f"{finished}, and their PRs are merged ({_names(merged)}): close it?{behind}",
             since,
             snapshot,
-            waiting=waiting,
-            subtasks=list(task.subtasks),
-            waiting_tasks=waiting,
+            merged_prs=merged,
+            **common,
             **{ANNOUNCES: close_key},
         )
         yield Action(
             ActionKind.CLOSE,
             NAME,
-            f"Close {task.id}: all {len(task.subtasks)} subtask(s) are finished.",
+            f"Close {task.id}: all {len(task.subtasks)} subtask(s) are finished and their PRs "
+            f"are merged.",
             task_id=task.id,
             key=close_key,
-            params={"pattern": "parent-left-open", "subtasks": list(task.subtasks)},
+            params={
+                "pattern": "parent-left-open",
+                "subtasks": list(task.subtasks),
+                "merged_prs": merged,
+            },
         )
 
     def _stuck_before_work(self, task: Task, snapshot: Snapshot) -> Action | None:

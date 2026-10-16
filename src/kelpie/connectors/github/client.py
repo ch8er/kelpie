@@ -249,7 +249,8 @@ class GitHubClient:
         """GET ``path`` (relative to the API base). Raises :class:`GitHubError`.
 
         ``fresh`` skips the cache TTL and the tick budget, for a re-check right before a
-        write: GitHub is asked again (conditionally, with the cached ETag). If it cannot be
+        write, or a second read that must come from GitHub (the PR lists): GitHub is asked
+        again (conditionally, with the cached ETag). If it cannot be
         asked, the answer is the cached one marked ``stale`` or an error, as for any read."""
         url = self._url(path, query)
         now = self.clock()
