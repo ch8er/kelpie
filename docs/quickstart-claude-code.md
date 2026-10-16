@@ -199,5 +199,3 @@ mode = "act"
   reports that task.
 - Claude Code has no blocked or review status, so stale blocks (rule 4) and ping-pong (rule 5)
   have nothing to work on.
-- Actions on a session that has no task on a watched list reach this adapter only when it is
-  the only platform adapter configured; with Hermes as well, they become alerts.

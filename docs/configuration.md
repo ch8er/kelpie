@@ -124,11 +124,14 @@ every outcome is recorded there and in `kelpie_actions_total`.
 - For rules that only alert or escalate (`ping_pong`, `bottlenecks`, `resources`,
   `no_progress`), `suggest` and `act` behave the same.
 - **Routing in act mode.** An action goes to `action.executor` when the rule sets it (the
-  CI connector for `cancel_build`), else to the platform adapter named in its task's
-  `source`, else to the only platform adapter if there is exactly one.
-- **What can act today.** The Hermes and Claude Code adapters carry out `stop` only. With a
-  Hermes adapter enabled and `dry_run = false`, Kelpie refuses to start when a rule other
-  than `loop_breaker` is in `act`, except `ci_economy` when `[connectors.github.ci]
+  CI connector for `cancel_build`); else a `stop` goes to the adapter that reported the
+  session; else to the platform adapter named in its task's `source`;
+  else to the only platform adapter if there is exactly one.
+- **What can act today.** The Claude Code adapter carries out `stop` only; Hermes carries out
+  `stop`, `wait`, waking a parked task and `comment`. With a Hermes adapter enabled and
+  `dry_run = false`, Kelpie refuses to start when a rule outside `HERMES_ACT_RULES` in
+  `src/kelpie/app.py` (`loop_breaker`, `wait_condition`, `conflict_warning`,
+  `dispatch_gate`) is in `act`, except `ci_economy` when `[connectors.github.ci]
   allow_cancel` is set. The Claude Code adapter refuses the other actions with
   `UnsupportedAction`, so on Claude Code they become "not executed" alerts. See the
   [act checklist](act-checklist.md).

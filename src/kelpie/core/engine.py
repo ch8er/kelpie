@@ -60,14 +60,19 @@ _HANDLED = {
 }
 
 
+# Actions on a session rather than a task: routed to the adapter that reported the session.
+SESSION_ACTIONS = frozenset({ActionKind.STOP})
+
+
 @dataclass(slots=True)
 class Engine:
     """Runs rules over a snapshot and routes their actions to executors.
 
     Executors are platform adapters and action-capable connectors, keyed by name. An
-    action goes to ``action.executor`` if set, else to the ``source`` adapter of its task
-    (or of the task behind ``params.session_id``), else to the only platform adapter if
-    there is exactly one. Actions that no executor
+    action goes to ``action.executor`` if set; else a ``stop`` goes to the adapter that
+    reported its session (``Session.source``); else an action goes to the ``source`` adapter
+    of its task (or of the task behind ``params.session_id``); else to the only platform
+    adapter if there is exactly one. Actions that no executor
     can carry out become alerts for a human. A failing rule or action is logged and
     skipped; it never stops the loop.
 
@@ -380,9 +385,19 @@ class Engine:
         if action.executor:
             return self.executors.get(action.executor)
         task_id = action.task_id
-        if not task_id and (session_id := action.params.get("session_id")):
+        if session_id := action.params.get("session_id"):
             session = next((s for s in snapshot.sessions if s.id == session_id), None)
-            task_id = session.task_id if session else None
+            # A stop acts on the session, so it goes to the adapter that reported it: its task
+            # may be on another platform's board, or on none. Task actions that only mention
+            # a session (comment, requeue, wip_commit) stay with the task's board.
+            if (
+                action.kind in SESSION_ACTIONS
+                and session is not None
+                and session.source in self.executors
+            ):
+                return self.executors[session.source]
+            if not task_id:
+                task_id = session.task_id if session else None
         task = snapshot.task(task_id) if task_id else None
         if task is not None and task.source:
             return self.executors.get(task.source)

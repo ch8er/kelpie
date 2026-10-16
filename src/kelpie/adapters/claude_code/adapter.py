@@ -554,6 +554,7 @@ class ClaudeCodeAdapter:
                     else None,
                     exit_reason=" ".join(x for x in (reason, failure) if x)[:300] or None,
                     last_heartbeat=last.at,
+                    source=self.name,
                 )
             )
         return tuple(sessions)

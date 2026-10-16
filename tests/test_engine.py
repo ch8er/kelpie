@@ -490,3 +490,62 @@ def test_a_suggestion_keeps_its_own_severity() -> None:
     )
     engine.tick(lambda: Snapshot(now=NOW))
     assert alerter.sent == [("[emit] suggest requeue T-1", Severity.INFO)]
+
+
+def _session(sid: str, task_id: str, source: str | None) -> Session:
+    return Session(sid, task_id, "agent-1", NOW - timedelta(hours=1), source=source)
+
+
+@pytest.mark.parametrize(
+    ("session_source", "task_source", "expected"),
+    [
+        ("cc", None, "cc"),  # no board task, two platforms: routed by the session (#85)
+        ("cc", "hermes", "cc"),  # the session's adapter wins over its task's board
+        (None, "hermes", "hermes"),  # no session source: by the task, as before
+        ("gone", "hermes", "hermes"),  # an adapter that is not configured: by the task
+    ],
+)
+def test_session_actions_route_by_the_session_source(
+    session_source: str | None, task_source: str | None, expected: str
+) -> None:
+    hermes, cc = StoppingAdapter(name="hermes"), StoppingAdapter(name="cc")
+    tasks = (task("T-1", task_source),) if task_source else ()
+    snapshot = Snapshot(now=NOW, tasks=tasks, sessions=(_session("s-1", "T-1", session_source),))
+    engine = Engine(
+        [Emit([act(ActionKind.STOP, "T-1", session_id="s-1")])],
+        adapters=[hermes, cc],
+        alerter=FakeAlerter(),
+        config=ACT,
+    )
+    [result] = engine.tick(lambda: snapshot)
+    assert result.outcome is Outcome.EXECUTED
+    by_name = {"hermes": hermes, "cc": cc}
+    assert by_name[expected].calls == [("stop", "s-1")]
+    assert all(a.calls == [] for n, a in by_name.items() if n != expected)
+
+
+@pytest.mark.parametrize("kind", [ActionKind.COMMENT, ActionKind.REQUEUE, ActionKind.WIP_COMMIT])
+def test_task_actions_that_mention_a_session_stay_with_the_task(kind: ActionKind) -> None:
+    """A Claude Code session working on a Hermes task (KELPIE_TASK_ID): its stop goes to
+    Claude Code, but actions on the task go to Hermes."""
+    hermes, cc = StoppingAdapter(name="hermes"), StoppingAdapter(name="cc")
+    snapshot = Snapshot(
+        now=NOW, tasks=(task("T-1", "hermes"),), sessions=(_session("s-1", "T-1", "cc"),)
+    )
+    engine = Engine([Emit([act(kind, "T-1", session_id="s-1")])], adapters=[hermes, cc], config=ACT)
+    [result] = engine.tick(lambda: snapshot)
+    assert result.outcome is Outcome.EXECUTED
+    assert hermes.calls == [(str(kind), "T-1")] and cc.calls == []
+
+
+def test_session_without_source_or_task_is_still_unroutable_with_two_platforms() -> None:
+    a, b, alerter = StoppingAdapter(name="a"), StoppingAdapter(name="b"), FakeAlerter()
+    snapshot = Snapshot(now=NOW, sessions=(_session("s-1", "session:s-1", None),))
+    engine = Engine(
+        [Emit([act(ActionKind.STOP, "session:s-1", session_id="s-1")])],
+        adapters=[a, b],
+        alerter=alerter,
+        config=ACT,
+    )
+    [result] = engine.tick(lambda: snapshot)
+    assert result.outcome is Outcome.NOT_EXECUTED and a.calls == b.calls == []

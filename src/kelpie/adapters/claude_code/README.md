@@ -150,10 +150,9 @@ Limits:
   and add the `PreToolUse` entry. A stop that is written but not enforced (tool calls go on
   more than 2 minutes after the marker, and the hook never refused one) is logged once per
   session and shows as `exit_reason = "stop not enforced"`.
-- **Routing.** A stop reaches this adapter when the session claimed a task on a watched list,
-  or when Claude Code is the only platform adapter. With Hermes configured as well, a stop of a
-  session without a watched task has no route and becomes an alert, and one whose
-  `KELPIE_TASK_ID` names a Hermes task goes to Hermes, which fails it (a human is alerted).
+- **Routing.** Sessions carry their adapter (`Session.source`), so a stop of a session this
+  adapter reports reaches it, also next to Hermes and also for a session whose task is not on
+  a watched list. Task actions (comment, requeue) still go to the task's board.
 - **Cost.** `PreToolUse` starts `python3` before every tool call (tens of milliseconds). If the
   hook times out, Claude Code runs the tool anyway: that call is not stopped, nothing hangs.
 - **Repeats.** A hard budget stays exceeded, so `loop_breaker` stops the session again after
@@ -222,5 +221,5 @@ a killed one fires no hook, so it counts as ended once its heartbeat is older th
 rules' `session_stale_after` (30 minutes). An interactive session waiting at its prompt fires
 no hooks either and looks the same: with a task still `in_progress`, rule 1 reports it.
 
-**Routing.** Actions on a session without a board task (`session:<id>`) reach this adapter only
-when it is the only platform adapter configured; with Hermes as well, they become alerts.
+**Routing.** A `stop` goes to the adapter that reported the session (`Session.source`),
+whatever board its task is on; task actions go to the task's board.
