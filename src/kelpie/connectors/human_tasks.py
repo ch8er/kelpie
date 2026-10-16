@@ -122,8 +122,11 @@ class HumanTaskConnector:
             self.check(c) if c.kind in self.kinds else c for c in snapshot.conditions
         )
         live = {c.id for c in conditions}
-        for gone in set(self._satisfied) - live:
-            del self._satisfied[gone]
+        # While part of the farm is not observed (multi-host: a silent agent), its
+        # conditions are missing, not gone: keep what was seen done.
+        if not snapshot.unobserved:
+            for gone in set(self._satisfied) - live:
+                del self._satisfied[gone]
         return replace(snapshot, conditions=conditions)
 
     def bind(self, snapshot: Snapshot) -> None:
@@ -155,6 +158,10 @@ class HumanTaskConnector:
         for pattern in self.block_patterns:
             m = pattern.search(reason)
             ref = (m["task"] or "").strip(_TRIM) if m else ""
+            # Multi-host: the reason names a task of the same board, by its local id, and
+            # only that board's tasks count (never a namespaced id of another machine).
+            if ref and task.host and task.id.startswith(f"{task.host}:"):
+                ref = f"{task.host}:{ref}"
             if not ref or ref == task.id or not _is_human_task(snapshot, ref):
                 continue
             return Condition(

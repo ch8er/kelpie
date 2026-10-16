@@ -11,7 +11,12 @@ from kelpie.core.model import Snapshot
 
 @runtime_checkable
 class Rule(Protocol):
-    """Rules MUST be pure: no I/O, no clock reads (use ``snapshot.now``), no LLM calls."""
+    """Rules MUST be pure: no I/O, no clock reads (use ``snapshot.now``), no LLM calls.
+
+    A rule may set ``boards = False`` when its farm-wide states do not depend on the
+    platforms' boards (only on resources, providers or CI), or ``boards(state_id) -> bool``
+    to say it per state: those states then resolve as usual while part of a multi-host farm
+    is not observed (see ``Snapshot.unobserved``)."""
 
     name: str
 

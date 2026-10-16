@@ -116,7 +116,8 @@ namespace.
   token checks out. Someone with several addresses who opens connections faster than an
   agent completes its handshake can still crowd agents out; put the hub behind a firewall
   that admits only the agents' networks where that matters.
-- **Per agent:** one report, two polls and two trace exports in flight; more get 409. A
+- **Per agent:** one report, two polls and two trace exports in flight; more get 409 (a
+  trace export gets 503 with `Retry-After`, which OTLP exporters retry). A
   new poll (its body read) replaces a held one, whose connection may be dead; if that
   keeps happening, or reports come from two agent processes at once, the hub warns (two
   processes share a token, or a stolen one is in use). Poll bodies are capped at 2 MiB.
@@ -173,7 +174,7 @@ into the agent's namespace, `<agent>:<id>`, before merging. Agent names are
 | `Task` | `id`, `owner_id`, `assignee`, `subtasks`, `repo` |
 | `Owner` | `id` — humans too: a person on two boards is two owners, so no host can overwrite another host's owner |
 | `Dependency` | `task_id`, `depends_on` |
-| `Condition` | `id`, `task_id`, the `task` param of `task_status` conditions; `Block.condition_id` |
+| `Condition` | `task_id` and the `task` param of `task_status` and `human_task` conditions get the prefix; `id` and `Block.condition_id` get a suffix, `<id>@<agent>`, so the prefixes rules give the conditions they create (`dispatch_gate:<task>:`) survive, and the agent gets its own id back |
 | `Session` | `id`, `task_id`, `owner_id` |
 | `Span` | `trace_id`, `span_id`, `parent_id`, `task_id`, `session_id`, the `tool_call_id` attribute — so links are only inherited, and hook and OTLP spans only merged, within one host |
 
@@ -188,11 +189,14 @@ release, stated in the docs.
 
 **Pull requests** link to tasks by task code in the title or branch. A task's id without
 its `<agent>:` prefix is also a code, but only when exactly one task in the merged
-snapshot has that local id; when several hosts have it, only the branch links.
+snapshot has that local id and no machine is unobserved; otherwise only the branch and
+title codes link.
 
-**Config that names ids** (budget `match`, orphan `ignore_tasks`, ping-pong
-`escalate_to`, provider owners) compares against namespaced ids; patterns take a
-`laptop:` or `*:` prefix.
+**Config that names ids** compares against namespaced ids: patterns (budget `match`,
+orphan `ignore_tasks`) take a `laptop:` or `*:` prefix, and literal ids (ping-pong
+`escalate_to`, provider owners) are written in full (`laptop:alice`). Owners are picked only
+for tasks of their own machine (orphan candidates, ping-pong's default human), and a
+person on two boards is two owners (the "needs you" inbox lists them per machine).
 
 **Clocks.** Agent clocks are used as is, so rules compare an agent's times with the
 server's `now`. The hub measures each report's offset (`sent_at` against its own clock): a
@@ -216,9 +220,10 @@ thread, so the remote executor bounds the wait:
 
 - An action waits up to `[hub] action_timeout` (default 30 s) for its result.
 - Each agent has a per-tick budget of `action_timeout` in total. Once an agent used it (a
-  slow answer, a timeout), its further actions in that tick fail fast as "agent busy" and
-  the ledger retries them later.
-- At most 16 actions per agent per tick; more fail fast the same way.
+  slow answer, a timeout), its further actions in that tick are *deferred*: not recorded,
+  not counted as an attempt, not reported, and asked for again next tick (core's
+  `Deferred`). An alert that announces a deferred effect says it is not done yet.
+- At most 16 actions per agent per tick; more are deferred the same way.
 
 So one slow or hostile agent costs the loop at most `action_timeout` per tick, and N agents
 at most N times that.
@@ -256,21 +261,23 @@ and `requeue` are idempotent there; `comment` may repeat once.
   is left out the same way.
 - **The snapshot says it is partial.** `Snapshot.unobserved` lists the agents (and
   `<agent>/<adapter>` parts) not merged this tick, including agents that have not reported
-  since the server started. While it is not empty the engine resolves no alert states:
-  rules that stop reporting a state may only be blind to it. States still reported are
+  since the server started. While it is not empty the engine does not resolve the alert
+  states of tasks on those machines (their ids carry the agent's prefix), nor farm-wide
+  states of rules that read the boards: a rule that stops reporting them may only be blind
+  to them. States that read no board (`ci_economy`'s, `resources`' host readings and
+  provider quotas: a rule's `boards`) resolve as usual, and so do states on machines that are observed. States still reported are
   escalated as usual; when the host is back its states are reported again and escalate by
   their real age (the condition lasted while the host was away).
 - Farm-wide rules (idle farm, role bottlenecks) see a farm without the silent host's tasks
   and owners. Both drop together, so capacity and demand stay consistent; the silence
   alert says the farm is partial.
-- Actions routed to a silent agent fail fast with "agent a is silent" (the ledger retries
-  them after it is back).
+- Actions routed to a silent agent are deferred until it is back.
 
 ## Failure modes
 
 | Failure | What happens |
 | --- | --- |
-| Agent host down or network split | Agent silent → one alert; its board left out, alert states frozen; actions to it fail fast and are retried by the ledger. |
+| Agent host down or network split | Agent silent → one alert; its board left out, alert states frozen; actions to it are deferred until it is back. |
 | Server down | Agents retry with backoff (1 s → 60 s); nothing acts on agent hosts without the server, which is the point of a central watchdog. Platforms keep working. |
 | Slow agent | Its actions time out within the per-tick budget; at most `action_timeout` of loop time per tick; the late result answers the retry, or a human is told. |
 | Report loop hangs, poll loop alive | No fresh report → its board is left out → silent after `silent_after`. |

@@ -103,6 +103,12 @@ class Finding:
 
 @dataclass(frozen=True, slots=True)
 class Resources:
+    @staticmethod
+    def boards(state: str) -> bool:
+        """Which of its states read the boards (kelpie.core.rule): the heavy-task ones;
+        host readings and provider quotas do not."""
+        return "heavy" in state.split(":")[1:]
+
     thresholds: Mapping[ResourceKind, Thresholds] = field(
         default_factory=lambda: dict(DEFAULT_THRESHOLDS)
     )

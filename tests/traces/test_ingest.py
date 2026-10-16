@@ -209,3 +209,21 @@ def test_spans_are_kelpie_spans() -> None:
     post(target, request([S(sid(1), attrs={**CHAT, "kelpie.session_id": "run-1"})]))
     (s,) = store.spans_since(NOW.replace(year=2000))
     assert isinstance(s, Span) and s.session_id == "run-1" and s.input_tokens == 10
+
+
+def test_an_authenticated_caller_skips_the_token_and_may_rewrite_spans() -> None:
+    from dataclasses import replace
+
+    target, store, _ = ingest(token="secret")
+    h = Headers({"Content-Type": PROTOBUF, "Content-Length": str(len(request(SPANS)))})
+    reply = target.handle(
+        h,
+        io.BytesIO(request(SPANS)).read,
+        authenticated=True,
+        rewrite=lambda s: replace(s, span_id=f"laptop:{s.span_id}"),
+    )
+    assert reply.status == 200
+    assert all(
+        s.span_id.startswith("laptop:")
+        for s in store.spans_since(datetime.min.replace(tzinfo=NOW.tzinfo))
+    )

@@ -186,18 +186,29 @@ def _agent(settings: Settings) -> int:
 
     from kelpie.app import utc_now
     from kelpie.remote.agent import Agent, tls_context
+    from kelpie.remote.relay import Relay
 
     config = settings.agent
     if config is None:
         raise ConfigError("kelpie agent needs an [agent] section (name, server, token_env)")
+    relay = None
     try:
         token = config.token()
         config.check_server()
-        agent = Agent(
-            config, build_adapters(settings), token, clock=utc_now, context=tls_context(config)
-        )
+        context = tls_context(config)
+        agent = Agent(config, build_adapters(settings), token, clock=utc_now, context=context)
+        if config.relay is not None:
+            relay = Relay(
+                config.relay, config.server, token, config.max_body_bytes, context=context
+            )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    except OSError as exc:
+        host, port = config.relay or ("", 0)
+        raise ConfigError(
+            f"[agent] relay cannot listen on {host}:{port}: {exc} (another OTLP receiver "
+            "there? set [agent] relay to another port, or relay = false)"
+        ) from exc
     if config.plain_http:
         log.warning("[agent] reports over plain http: the token crosses the network in clear")
 
@@ -214,7 +225,16 @@ def _agent(settings: Settings) -> int:
         ", ".join(f"{name} ({', '.join(sorted(kinds))})" for name, kinds in agent.offered.items()),
         config.server,
     )
-    agent.run()
+    if relay is not None:
+        threading.Thread(target=relay.serve_forever, name="kelpie-relay", daemon=True).start()
+        host, port = config.relay or ("", 0)
+        log.info("OTLP relay on http://%s:%d/v1/traces", host, port)
+    try:
+        agent.run()
+    finally:
+        if relay is not None:
+            relay.shutdown()
+            relay.server_close()
     log.info("kelpie agent stopped")
     return 0
 

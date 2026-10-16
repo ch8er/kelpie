@@ -33,7 +33,7 @@ from kelpie.core.ledger import (
     subject,
 )
 from kelpie.core.model import Snapshot
-from kelpie.core.ports import ActionConnector, Alerter, PlatformAdapter
+from kelpie.core.ports import ActionConnector, Alerter, Deferred, PlatformAdapter
 from kelpie.core.rule import Rule
 from kelpie.core.states import MemoryStateStore, StateStore, StateTracker, Transition
 
@@ -69,7 +69,9 @@ class Engine:
     action goes to ``action.executor`` if set; else a ``stop`` goes to the adapter that
     reported its session (``Session.source``); else an action goes to the ``source`` adapter
     of its task (or of the task behind ``params.session_id``); else to the only platform
-    adapter if there is exactly one. Actions that no executor
+    adapter if there is exactly one, unless ``fallback`` is off (multi-host: every board is
+    remote, and a guess could act on the wrong host). Executors added with
+    :meth:`add_executor` (remote boards) are routed to by name. Actions that no executor
     can carry out become alerts for a human. A failing rule or action is logged and
     skipped; it never stops the loop.
 
@@ -77,6 +79,9 @@ class Engine:
     ``config.dry_run`` overrides every mode. Every action passes the action ledger first
     (see :mod:`kelpie.core.ledger`). If the ledger itself fails, the engine fails closed:
     only observe and dry-run actions proceed, and a human is told once per tick.
+
+    While a snapshot is partial (``Snapshot.unobserved``), states on the tasks it is missing,
+    and farm-wide states, are not resolved.
     """
 
     rules: Sequence[Rule]
@@ -86,6 +91,8 @@ class Engine:
     config: EngineConfig = field(default_factory=EngineConfig)
     ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
     state_store: StateStore = field(default_factory=MemoryStateStore)
+    fallback: bool = True  # route to the only platform adapter when nothing else says where
+    _by_name: dict[str, Rule] = field(init=False, default_factory=dict)
     ledger: ActionLedger = field(init=False)
     states: StateTracker = field(init=False)
     _evaluated: set[str] | None = field(init=False, default=None)
@@ -126,6 +133,12 @@ class Engine:
             self._platforms.append(adapter.name)
         for connector in self.connectors:
             self._add(ConnectorExecutor(connector))
+        self._by_name = {r.name: r for r in self.rules}
+
+    def add_executor(self, executor: Executor) -> None:
+        """Register an executor after construction (a remote board an agent reported).
+        Call it from the control-loop thread; ValueError on a duplicate name."""
+        self._add(executor)
 
     def _add(self, executor: Executor) -> None:
         if executor.name in self.executors:
@@ -214,6 +227,15 @@ class Engine:
         else:
             try:
                 outcome = self._handle(action, mode, snapshot)
+            except Deferred as exc:
+                log.info("deferred: %s: %s", action, exc)
+                if action.key is not None and action.key in self._announced:
+                    # The alert announcing it must not read as if it was done.
+                    line = (
+                        f"Not done yet: {failure_reason(exc).rstrip('.')}; tried again next tick."
+                    )
+                    self._lines.setdefault(action.key, []).append(line)
+                return Dispatched(action, mode, Outcome.DEFERRED)  # not an attempt
             except Exception as exc:
                 log.warning("action failed: %s: %r", action, exc)
                 log.debug("traceback of failed action: %s", action, exc_info=True)
@@ -289,6 +311,11 @@ class Engine:
         except Exception:
             log.exception("state store unavailable; cannot resolve states")
             return []
+        gone = [
+            s
+            for s in gone
+            if not _blind(s.task_id, snapshot.unobserved, self._reads_boards(s.rule, s.id))
+        ]
         results: list[Dispatched] = []
         for state in gone:
             first_line = f"{state.summary.split('. ')[0].rstrip('.')}."
@@ -316,6 +343,17 @@ class Engine:
             return self._process(action, snapshot)
         finally:
             self._transitions.pop(action.key, None)
+
+    def _reads_boards(self, rule: str, state: str) -> bool:
+        """Whether a rule's state depends on the boards (``Rule`` docs: ``boards``)."""
+        boards = getattr(self._by_name.get(rule), "boards", True)
+        if callable(boards):
+            try:
+                return bool(boards(state))
+            except Exception:
+                log.exception("rule %s: boards(%r) failed", rule, state)
+                return True
+        return boards is not False
 
     @staticmethod
     def _safe_state(write: Callable[[], None]) -> None:
@@ -420,7 +458,7 @@ class Engine:
         task = snapshot.task(task_id) if task_id else None
         if task is not None and task.source:
             return self.executors.get(task.source)
-        if len(self._platforms) == 1:
+        if self.fallback and len(self._platforms) == 1:
             return self.executors[self._platforms[0]]
         return None
 
@@ -495,6 +533,19 @@ _TRANSITIONS = {
     Transition.ESCALATED: AlertTransition.ESCALATED,
     Transition.CHANGED: AlertTransition.CHANGED,
 }
+
+
+def _blind(task_id: str | None, unobserved: Sequence[str], boards: bool = True) -> bool:
+    """Whether a state may have stopped being reported only because part of the farm is not
+    in the snapshot: one on a task of an unobserved agent, or a farm-wide one (no task) of a
+    rule that reads the boards (``boards``) while anything is unobserved."""
+    if not unobserved:
+        return False
+    if task_id is None:
+        return boards
+    if "hub" in unobserved:
+        return True
+    return any(task_id.startswith(f"{part.split('/')[0]}:") for part in unobserved)
 
 
 def _higher(a: Severity, b: Severity) -> Severity:

@@ -190,3 +190,15 @@ def test_sections_load_from_the_config_file(tmp_path: Path) -> None:
     path.write_text('[agent]\nname = "vm-1"\n')
     with pytest.raises(ConfigError, match="server is required"):
         load_settings(path)
+
+
+def test_relay() -> None:
+    assert agent().relay == ("127.0.0.1", 4318)
+    assert agent(relay=False).relay is None
+    assert agent(relay="[::1]:4319").relay == ("::1", 4319)
+    with pytest.raises(ValueError, match="loopback only"):
+        agent(relay="0.0.0.0:4318")
+
+
+def test_relay_true_is_the_default_address() -> None:
+    assert agent(relay=True).relay == ("127.0.0.1", 4318)

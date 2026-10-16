@@ -13,6 +13,10 @@ description or comments never link it: on a live farm 8 of 10 such matches were 
 A fork's PR links nothing (its branch names are its own, and its title is not ours to
 trust).
 
+On a multi-host farm task ids are namespaced (``laptop:t_1a``, ``Task.host`` = ``laptop``):
+the id without the prefix is a code too, but only while no other task has the same local
+id, so a PR is never linked to look-alike tasks on several hosts.
+
 ``task_code`` runs over agent-written titles on every scan, so :func:`compile_task_code`
 refuses patterns that can backtrack badly (a repeated group that itself repeats,
 backreferences, lookarounds) and keeps them to ``MAX_TASK_CODE`` characters; titles are cut
@@ -23,7 +27,8 @@ from __future__ import annotations
 
 import re
 import re._parser as sre_parse  # the parse tree, to refuse patterns that backtrack badly
-from collections.abc import Sequence
+from collections import Counter
+from collections.abc import Collection, Sequence
 from dataclasses import replace
 from functools import lru_cache
 
@@ -108,13 +113,30 @@ def _token(code: str) -> re.Pattern[str]:
 
 
 def link_tasks(
-    pulls: Sequence[PullRequest], tasks: Sequence[Task], pattern: re.Pattern[str] | None
+    pulls: Sequence[PullRequest],
+    tasks: Sequence[Task],
+    pattern: re.Pattern[str] | None,
+    unique_local: Collection[str] | None = None,
 ) -> tuple[PullRequest, ...]:
-    """Each PR with the ids of the tasks it belongs to (``PullRequest.task_ids``)."""
+    """Each PR with the ids of the tasks it belongs to (``PullRequest.task_ids``).
+    ``unique_local`` (part of a multi-host farm is not observed): the local ids (casefolded)
+    the last snapshot that saw every machine had exactly once; no other local id links, as a
+    look-alike may be on the missing machine. None: every machine is observed."""
     by_code: dict[str, set[str]] = {}
     by_branch: dict[str, set[str]] = {}
+    local = {t.id: _local_id(t) for t in tasks}
+    shared = Counter(i.casefold() for i in local.values() if i is not None)
     for t in tasks:
-        for code in task_codes(t, pattern):
+        codes = set(task_codes(t, pattern))
+        own = local[t.id]
+        if (
+            own is not None
+            and shared[own.casefold()] == 1
+            and (unique_local is None or own.casefold() in unique_local)
+            and is_code(own)
+        ):
+            codes.add(own)
+        for code in codes:
             by_code.setdefault(code.casefold(), set()).add(t.id)
         if t.branch:
             by_branch.setdefault(t.branch, set()).add(t.id)
@@ -130,3 +152,16 @@ def link_tasks(
                 ids |= owners
         out.append(replace(pr, task_ids=tuple(sorted(ids))) if ids else pr)
     return tuple(out)
+
+
+def unique_local_ids(tasks: Sequence[Task]) -> frozenset[str]:
+    """Local ids (casefolded) that exactly one host-namespaced task has."""
+    seen = Counter(i.casefold() for t in tasks if (i := _local_id(t)) is not None)
+    return frozenset(i for i, n in seen.items() if n == 1)
+
+
+def _local_id(task: Task) -> str | None:
+    """The id on the task's own board when it is host-namespaced (``<host>:<id>``)."""
+    if task.host and task.id.startswith(f"{task.host}:"):
+        return task.id[len(task.host) + 1 :].strip() or None
+    return None

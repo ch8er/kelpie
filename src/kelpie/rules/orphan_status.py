@@ -221,7 +221,7 @@ class OrphanStatus:
         may_reassign = self.reassign and (not gone or self.reassign_unknown_owner)
         candidate = None
         if may_reassign and task.role is not None:
-            candidate = next((o for o in idle if o.role == task.role), None)
+            candidate = next((o for o in idle if o.role == task.role and o.serves(task)), None)
             if candidate is not None:
                 idle.remove(candidate)  # one task per idle agent per tick
         severity = self._severity(len(waiting))

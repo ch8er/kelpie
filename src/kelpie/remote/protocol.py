@@ -15,15 +15,16 @@ import dataclasses
 import math
 import re
 import types
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum, StrEnum
+from functools import partial
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from kelpie.core import model
 from kelpie.core.actions import Action, ActionKind
-from kelpie.core.model import ConditionKind, Snapshot
+from kelpie.core.model import ConditionKind, Dependency, Snapshot, Span
 from kelpie.core.ports import (
     PlatformAdapter,
     SupportsClose,
@@ -612,7 +613,7 @@ def _conditions(raw: list[Any]) -> list[dict[str, Any]]:
         for key, value in params.items():
             if not isinstance(key, str) or not key or len(key) > 64 or _ID_CONTROL.search(key):
                 raise ProtocolError("wait: condition param names must be short strings")
-            if key == "task" and kind == ConditionKind.TASK_STATUS:
+            if key == "task" and kind in (ConditionKind.TASK_STATUS, ConditionKind.HUMAN_TASK):
                 value = _id(value, "wait: task_status task")
             elif isinstance(value, str):
                 value = _text(value, 1024)
@@ -724,3 +725,125 @@ def _text(value: str, limit: int) -> str:
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+# --- namespaces ---------------------------------------------------------------------------
+
+# Span attributes that carry an id other spans are joined on (hook and OTLP tool calls).
+_SPAN_ID_ATTRIBUTES = ("gen_ai.tool.call.id",)
+
+
+def namespaced(agent: str, value: str) -> str:
+    """``<agent>:<value>``: an id of the agent's board in the merged farm."""
+    return f"{agent}:{value}"
+
+
+def local(agent: str, value: str) -> str | None:
+    """The agent's own id behind ``value``, or None when ``value`` is not in its namespace."""
+    prefix = f"{agent}:"
+    return value[len(prefix) :] if value.startswith(prefix) and len(value) > len(prefix) else None
+
+
+def condition_id(agent: str, value: str) -> str:
+    """A condition id in the merged farm: ``<value>@<agent>``. A suffix, not a prefix, so the
+    prefixes rules give the conditions they create (``dispatch_gate:<task>:``) survive."""
+    return f"{value}@{agent}"
+
+
+def local_condition_id(agent: str, value: str) -> str:
+    """The id to hand the agent: without this agent's suffix (a condition it reported), or
+    as is (one a rule made up)."""
+    suffix = f"@{agent}"
+    return value[: -len(suffix)] if value.endswith(suffix) and len(value) > len(suffix) else value
+
+
+def namespace_snapshot(agent: str, adapter: str, part: Snapshot) -> Snapshot:
+    """Every id of an agent's board in the agent's namespace (docs/multi-host.md):
+    tasks, owners (people too), dependencies, conditions, sessions and spans. ``source``
+    becomes the remote executor ``<agent>/<adapter>`` and ``Task.host`` the agent."""
+    ns = partial(namespaced, agent)
+    source = f"{agent}/{adapter}"
+
+    def opt(value: str | None) -> str | None:
+        return None if value is None else ns(value)
+
+    tasks = tuple(
+        dataclasses.replace(
+            t,
+            id=ns(t.id),
+            owner_id=opt(t.owner_id),
+            assignee=opt(t.assignee),
+            subtasks=tuple(ns(s) for s in t.subtasks),
+            # Files without a repository still belong to this machine's checkout.
+            repo=opt(t.repo) if t.repo is not None or not t.files else f"{agent}:",
+            source=source,
+            host=agent,
+            block=None
+            if t.block is None
+            else dataclasses.replace(
+                t.block,
+                condition_id=None
+                if t.block.condition_id is None
+                else condition_id(agent, t.block.condition_id),
+            ),
+        )
+        for t in part.tasks
+    )
+    conditions = tuple(
+        dataclasses.replace(
+            c,
+            id=condition_id(agent, c.id),
+            task_id=opt(c.task_id),
+            params=_condition_params(c.kind, c.params, ns),
+        )
+        for c in part.conditions
+    )
+    return Snapshot(
+        now=part.now,
+        tasks=tasks,
+        owners=tuple(dataclasses.replace(o, id=ns(o.id), host=agent) for o in part.owners),
+        dependencies=tuple(Dependency(ns(d.task_id), ns(d.depends_on)) for d in part.dependencies),
+        conditions=conditions,
+        sessions=tuple(
+            dataclasses.replace(
+                s,
+                id=ns(s.id),
+                task_id=ns(s.task_id),
+                owner_id=ns(s.owner_id),
+                source=source,
+            )
+            for s in part.sessions
+        ),
+        spans=tuple(namespace_span(agent, s) for s in part.spans),
+    )
+
+
+def namespace_span(agent: str, span: Span) -> Span:
+    """A span in the agent's namespace: its trace and span ids too, so links are only
+    inherited, and hook and OTLP tool calls only merged, within one host."""
+    ns = partial(namespaced, agent)
+    attributes = dict(span.attributes)
+    for key in _SPAN_ID_ATTRIBUTES:
+        if isinstance(attributes.get(key), str) and attributes[key]:
+            attributes[key] = ns(attributes[key])
+    return dataclasses.replace(
+        span,
+        trace_id=ns(span.trace_id),
+        span_id=ns(span.span_id),
+        parent_id=None if span.parent_id is None else ns(span.parent_id),
+        task_id=None if span.task_id is None else ns(span.task_id),
+        session_id=None if span.session_id is None else ns(span.session_id),
+        attributes=attributes,
+    )
+
+
+# Condition kinds whose ``task`` param names a task of the same board.
+TASK_REF_KINDS = frozenset({ConditionKind.TASK_STATUS, ConditionKind.HUMAN_TASK})
+
+
+def _condition_params(
+    kind: ConditionKind, params: dict[str, Any], ns: Callable[[str], str]
+) -> dict[str, Any]:
+    if kind in TASK_REF_KINDS and isinstance(params.get("task"), str):
+        return {**params, "task": ns(params["task"])}
+    return params

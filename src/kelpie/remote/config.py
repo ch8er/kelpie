@@ -37,6 +37,7 @@ AGENT_KEYS = frozenset(
         "allow_plain_http",
         "actions",
         "max_body_bytes",
+        "relay",
     }
 )
 HUB_KEYS = frozenset(
@@ -120,6 +121,9 @@ class AgentSettings:
     allow_plain_http: bool = False
     actions: frozenset[ActionKind] | None = None  # None: every kind the adapters implement
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
+    # Loopback address of the OTLP relay (exporters on this host send spans there, the agent
+    # forwards them to the hub under its token); None: no relay.
+    relay: tuple[str, int] | None = ("127.0.0.1", 4318)
 
     @property
     def plain_http(self) -> bool:
@@ -258,7 +262,29 @@ def load_agent(section: Any) -> AgentSettings | None:
         allow_plain_http=plain,
         actions=actions,
         max_body_bytes=_size(section, "[agent]"),
+        relay=_relay(section.get("relay", "127.0.0.1:4318")),
     )
+
+
+def _relay(value: Any) -> tuple[str, int] | None:
+    if value is False:
+        return None
+    if value is True:
+        value = "127.0.0.1:4318"
+    host, port = _listen(value, "[agent] relay", "127.0.0.1:4318")
+    host = "127.0.0.1" if host == "localhost" else host
+    if not _loopback(host):
+        raise ValueError(
+            f"[agent] relay listens on loopback only (it takes spans without a token), not {host}"
+        )
+    return host, port
+
+
+def _loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def load_hub(section: Any) -> HubSettings | None:
@@ -269,7 +295,9 @@ def load_hub(section: Any) -> HubSettings | None:
         raise ValueError("[hub] must be a table")
     if extra := set(section) - HUB_KEYS:
         raise ValueError(f"unknown [hub] keys: {sorted(extra)}")
-    host, port = _listen(section.get("listen", f"0.0.0.0:{DEFAULT_PORT}"))
+    host, port = _listen(
+        section.get("listen", f"0.0.0.0:{DEFAULT_PORT}"), "[hub] listen", f"0.0.0.0:{DEFAULT_PORT}"
+    )
     cert, key = _path(section, "tls_cert", "[hub]"), _path(section, "tls_key", "[hub]")
     if (cert is None) != (key is None):
         raise ValueError("[hub] tls_cert and tls_key go together")
@@ -307,8 +335,8 @@ def load_hub(section: Any) -> HubSettings | None:
     if len({a.token_env for a in agents}) != len(agents):
         raise ValueError("[[hub.agents]] each agent needs its own token_env")
     silent = _duration(section, "silent_after", timedelta(seconds=90), "[hub]")
-    if not timedelta(seconds=30) <= silent <= timedelta(hours=1):
-        raise ValueError("[hub] silent_after must be between 30s and 1h")
+    if not timedelta(seconds=10) <= silent <= timedelta(hours=1):
+        raise ValueError("[hub] silent_after must be between 10s and 1h")
     timeout = _duration(section, "action_timeout", timedelta(seconds=30), "[hub]")
     if not timedelta(seconds=1) <= timeout <= timedelta(minutes=2):
         raise ValueError("[hub] action_timeout must be between 1s and 2m")
@@ -335,9 +363,9 @@ def load_hub(section: Any) -> HubSettings | None:
     )
 
 
-def _listen(value: Any) -> tuple[str, int]:
+def _listen(value: Any, what: str, example: str) -> tuple[str, int]:
     if not isinstance(value, str) or ":" not in value:
-        raise ValueError('[hub] listen must be "host:port" (e.g. "0.0.0.0:9465")')
+        raise ValueError(f'{what} must be "host:port" (e.g. "{example}")')
     host, _, port = value.strip().rpartition(":")
     host = host.strip("[]")
     try:
@@ -345,7 +373,7 @@ def _listen(value: Any) -> tuple[str, int]:
     except ValueError:
         number = -1
     if not host or not 0 < number < 65536:
-        raise ValueError('[hub] listen must be "host:port" (e.g. "0.0.0.0:9465")')
+        raise ValueError(f'{what} must be "host:port" (e.g. "{example}")')
     return host, number
 
 

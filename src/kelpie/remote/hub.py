@@ -29,10 +29,12 @@ from collections import Counter, deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Protocol
 
 from kelpie.core.actions import ActionKind
+from kelpie.core.model import Span
 from kelpie.remote.config import HubSettings
 from kelpie.remote.protocol import (
     ACTIONS_PATH,
@@ -48,6 +50,7 @@ from kelpie.remote.protocol import (
     decode_report,
     depth_ok,
     encode_action,
+    namespace_span,
 )
 
 log = logging.getLogger(__name__)
@@ -400,12 +403,29 @@ def _key(action: WireAction) -> str:
 # --- HTTP -------------------------------------------------------------------------------
 
 
+TRACES_PATH = "/v1/traces"
+
+
+class TraceSink(Protocol):
+    """Trace ingest (``kelpie.traces.ingest.TraceIngest``) as the hub uses it."""
+
+    def handle(
+        self,
+        headers: Any,
+        read: Callable[[int], bytes],
+        *,
+        authenticated: bool = False,
+        rewrite: Callable[[Span], Span] | None = None,
+    ) -> Any: ...
+
+
 class HubServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, hub: Hub) -> None:
+    def __init__(self, hub: Hub, traces: TraceSink | None = None) -> None:
         settings = hub.settings
         self.hub = hub
+        self.traces = traces  # OTLP exports agents relay; None: refused (404)
         self.tls = _server_context(settings) if settings.tls else None
         if ":" in settings.host:
             self.address_family = socket.AF_INET6
@@ -516,6 +536,35 @@ def _peer_key(address: str) -> str:
     return str(ip)
 
 
+class HubService:
+    """``kelpie serve``'s hub listener as a service: started with the control loop, stopped
+    on exit (held polls are released first)."""
+
+    def __init__(self, server: HubServer) -> None:
+        self.server = server
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self.server.serve_forever, name="kelpie-hub", daemon=True
+        )
+        self._thread.start()
+        settings = self.server.hub.settings
+        log.info(
+            "hub listening on %s://%s:%d for agents %s",
+            "https" if settings.tls else "http",
+            settings.host,
+            self.server.server_address[1],
+            ", ".join(a.name for a in settings.agents),
+        )
+
+    def stop(self, timeout: float = 5.0) -> None:
+        if self._thread is not None:
+            self.server.shutdown()
+            self._thread.join(timeout)
+        self.server.server_close()
+
+
 def _server_context(settings: HubSettings) -> ssl.SSLContext:
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -561,7 +610,7 @@ class HubHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self.close_connection = True  # one request per connection
         path = self.path.split("?")[0]
-        if path not in (REPORT_PATH, ACTIONS_PATH):
+        if path not in (REPORT_PATH, ACTIONS_PATH, TRACES_PATH):
             self._json(404, {"error": "not found"})
             return
         hub = self.server.hub
@@ -575,10 +624,14 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         self._guard.cancel()
         self.server.release(self.request)
-        kind = "report" if path == REPORT_PATH else "poll"
+        kinds = {REPORT_PATH: "report", ACTIONS_PATH: "poll", TRACES_PATH: "traces"}
+        kind = kinds[path]
         try:
             hub.enter(agent, kind)
         except Busy:
+            if kind == "traces":  # exporters retry 503 (OTLP/HTTP), not 409
+                self._json(503, {"error": "busy, retry later"}, {"Retry-After": "1"})
+                return
             self.server.warn_once(
                 agent,
                 "hub: agent %s has too many %s requests in flight (two processes with one token?)",
@@ -588,9 +641,42 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json(409, {"error": f"too many {kind} requests in flight"})
             return
         try:
-            self._handle(hub, agent, path)
+            if path == TRACES_PATH:
+                self._traces(agent)
+            else:
+                self._handle(hub, agent, path)
         finally:
             hub.leave(agent, kind)
+
+    def _traces(self, agent: str) -> None:
+        """An OTLP export the agent relayed: ingest's own limits apply, and every span goes
+        into the agent's namespace before it is stored."""
+        sink = self.server.traces
+        if sink is None:
+            self._json(404, {"error": "traces are not enabled on this server"})
+            return
+        try:
+            reply = sink.handle(
+                self.headers,
+                self._read,
+                authenticated=True,
+                rewrite=partial(namespace_span, agent),
+            )
+        except OSError as exc:
+            log.info("hub: trace export from agent %s aborted: %s", agent, exc)
+            return
+        except Exception:
+            log.exception("hub: trace ingest failed")
+            self._json(500, {"error": "internal error"})
+            return
+        self.send_response(reply.status)
+        self.send_header("Content-Type", reply.content_type)
+        self.send_header("Content-Length", str(len(reply.body)))
+        for name, value in reply.headers.items():
+            self.send_header(name, value)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(reply.body)
 
     def _handle(self, hub: Hub, agent: str, path: str) -> None:
         limit = hub.settings.max_body_bytes if path == REPORT_PATH else MAX_POLL_BYTES
@@ -691,11 +777,15 @@ class HubHandler(BaseHTTPRequestHandler):
             self.connection.settimeout(self.timeout)
         return b"".join(chunks)
 
-    def _json(self, code: int, body: Mapping[str, Any]) -> None:
+    def _json(
+        self, code: int, body: Mapping[str, Any], headers: Mapping[str, str] | None = None
+    ) -> None:
         data = json.dumps(body, separators=(",", ":")).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
