@@ -33,6 +33,7 @@ configure what exists.
 - [[connectors.llm_quotas]](#connectorsllm_quotas)
 - [[alerts]](#alerts)
 - [[report]](#report), [report sections](#report-sections)
+- [[agent]](#agent) and [[hub]](#hub): multi-host
 - [Checks across sections](#checks-across-sections)
 
 ## How the config is read
@@ -942,6 +943,52 @@ any other value fails that section (noted in the report).
 
 The other fields (`break_ratio`, `fragment_min_sessions`, `review_reads`, ...) are
 documented in those modules.
+
+## [agent]
+
+For `kelpie agent` on a machine with agents ([deploy.md](deploy.md),
+[multi-host.md](multi-host.md)). The agent also reads the `[adapters.*]` sections and
+`[storage] path` (where the Hermes park key lives); it ignores rules, connectors, alerts
+and the report.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | required | This machine on the farm: 1–63 of `a-z`, `0-9`, `-`. Its task ids become `<name>:<id>`. Must match an `[[hub.agents]]` entry. |
+| `server` | required | `https://host[:port]` of the hub (port 9465 by default), no path. `http://` only with `allow_plain_http`. |
+| `token_env` | `KELPIE_AGENT_TOKEN` | Variable holding this agent's token: at least 32 printable characters, random (`openssl rand -hex 32`). |
+| `ca_file` | system trust store | Certificate (or CA) the hub's certificate must chain to. The host name is always checked. |
+| `allow_plain_http` | `false` | Allow `http://`; the server name must resolve to loopback or private addresses only (RFC 1918, `100.64.0.0/10`, IPv6 ULA). The token then crosses the network in clear. |
+| `interval` | `15s` | Between reports (1s–5m). The server merges a report for 2 × interval + 10s. |
+| `timeout` | `30s` | One request to the hub (1s–5m). |
+| `actions` | every kind the adapters declare | Narrows the action kinds this agent carries out, e.g. `["comment"]`. |
+| `max_body_bytes` | 16 MiB | Largest report sent; must not exceed the hub's. |
+| `relay` | `"127.0.0.1:4318"` | Loopback address of the OTLP relay (spans from this machine go through it to the hub); `false`: none. |
+
+## [hub]
+
+For `kelpie serve` taking reports from agents. With `[hub]`, in-process `[adapters.*]` are
+refused (run `kelpie agent` on the server's machine too), the engine never guesses which
+board an action belongs to, and `/v1/traces` on the main port is off (spans come through
+the agents' relays).
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `listen` | `"0.0.0.0:9465"` | Address and port of the hub listener. |
+| `tls_cert`, `tls_key` | — | Certificate and key (PEM) for HTTPS. Required unless `allow_plain_http`. |
+| `allow_plain_http` | `false` | Plain HTTP; `listen` must then be a loopback or private address, never `0.0.0.0`. |
+| `silent_after` | `90s` | No fresh report for this long: one alert "agent X silent"; "resolved" when it is back (10s–1h). |
+| `action_timeout` | `30s` | How long an action waits for the agent's result, and each agent's total per tick (1s–2m). |
+| `max_clock_skew` | `2m` | A report whose clock is further off is not merged, and a human is told (5s–1h). |
+| `max_body_bytes` | 16 MiB | Largest request body, also after gzip. |
+| `max_connections` | `64` | Connections not yet authenticated (also at most 16 per address); each has 10s to present its token. |
+
+`[[hub.agents]]`: one entry per machine, `name` (as in its `[agent] name`) and `token_env`
+(the variable holding its token on the server). Names and variables must be distinct, and
+so must the tokens.
+
+`/metrics` gains `kelpie_agent_up{agent}` and
+`kelpie_agent_last_report_timestamp_seconds{agent}`; adapter errors on an agent are counted
+as `kelpie_adapter_errors_total{adapter="<agent>/<adapter>"}`.
 
 ## Checks across sections
 

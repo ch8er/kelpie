@@ -663,3 +663,22 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # runaway_tokens = 100000               # a session past this without compacting runs away
 # compact_at = 50000                    # where compacting or a handoff would cut it
 # min_saving_tokens = 50000             # a recommendation needs at least this a day
+
+# --- Multi-host (docs/deploy.md) -----------------------------------------------------------
+# On a machine with agents, for `kelpie agent` (next to its [adapters.*] sections):
+# [agent]
+# name = "laptop"                       # its task ids become laptop:<id>
+# server = "https://kelpie.example.internal:9465"
+# token_env = "KELPIE_AGENT_TOKEN"      # openssl rand -hex 32
+# ca_file = "/etc/kelpie/tls.crt"       # for a self-signed hub certificate
+# relay = "127.0.0.1:4318"              # OTLP relay for this machine's exporters; false: none
+#
+# On the central `kelpie serve` (no [adapters.*] then):
+# [hub]
+# listen = "0.0.0.0:9465"
+# tls_cert = "/etc/kelpie/tls.crt"
+# tls_key = "/etc/kelpie/tls.key"
+# silent_after = "90s"
+# [[hub.agents]]
+# name = "laptop"
+# token_env = "KELPIE_AGENT_LAPTOP_TOKEN"

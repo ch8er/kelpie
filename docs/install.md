@@ -23,8 +23,9 @@ released (see [release.md](release.md)), `pipx install kelpie-sre` and the image
 | node_exporter | each agent host | Optional. Scraped by Prometheus; Kelpie reads Prometheus. |
 | Prometheus, Grafana | any host | Optional. The compose file runs both next to Kelpie. |
 
-The Hermes adapter reads `kanban.db` from the local filesystem, so with Hermes, Kelpie runs
-on the Hermes host or against a mounted copy of the Hermes directory.
+The adapters read their platforms' files locally, so `kelpie serve` runs on the agents'
+machine. For agents on several machines (a laptop and a cloud VM, two VMs), run
+`kelpie agent` on each and one central `kelpie serve` with a hub: [deploy.md](deploy.md).
 
 ## Option 1: from source with uv
 
@@ -152,7 +153,9 @@ docker compose exec kelpie kelpie doctor --prometheus http://prometheus:9090
 | --- | --- | --- | --- |
 | 9464 | `GET /metrics` | Prometheus metrics of Kelpie | none |
 | 9464 | `GET /healthz` | `ok` while the server runs | none |
-| 9464 | `POST /v1/traces` | OTLP/HTTP trace ingest (protobuf or JSON, optionally gzip; no gRPC) | bearer token, see below |
+| 9464 | `POST /v1/traces` | OTLP/HTTP trace ingest (protobuf or JSON, optionally gzip; no gRPC); off with `[hub]` | bearer token, see below |
+| 9465 | `POST /v1/agent/*`, `/v1/traces` | Hub for `kelpie agent` (only with `[hub]`; HTTPS) | per-agent token |
+| 4318 (agent machine, loopback) | `POST /v1/traces` | `kelpie agent`'s OTLP relay | none (loopback only) |
 | 9090 | | Prometheus (compose) | none |
 | 3000 | | Grafana (compose) | Grafana login |
 
