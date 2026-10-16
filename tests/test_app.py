@@ -347,7 +347,9 @@ def test_orphan_status_inherits_hold_labels_from_bottlenecks() -> None:
     assert holds(own) == {"parked"}  # its own list wins
     assert holds({"orphan_status": {}}) == frozenset()
     # Malformed entries are left to the bottlenecks rule, which refuses them at startup.
-    assert _hold_labels({"hold_labels": "bad", "holds": ["junk", {"label": 1}]}) == []
+    junk = {"hold_labels": "bad", "holds": ["junk", {"label": 1}]}
+    bad = EngineConfig(rules={"bottlenecks": junk})
+    assert _hold_labels(bad) == frozenset()
 
 
 def test_loop_breaker_inherits_poll_patterns_from_wait_condition(

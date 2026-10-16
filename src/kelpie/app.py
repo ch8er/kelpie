@@ -421,9 +421,9 @@ def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
     section = dict(config.rules.get(name, {}))
     if name == "orphan_status" and "hold_labels" not in section:
         # Held tasks are parked on purpose: rule 3's stop patterns skip what rule 6 calls held.
-        held = _hold_labels(config.rules.get("bottlenecks", {}))
+        held = _hold_labels(config)
         if held:
-            section["hold_labels"] = held
+            section["hold_labels"] = sorted(held)
         return section
     if name != "loop_breaker":
         return section
@@ -438,18 +438,6 @@ def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
             "matching only one of them are coached by rule 2 or stopped by rule 10 inconsistently"
         )
     return section
-
-
-def _hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
-    """``bottlenecks``' ``hold_labels`` and ``holds`` labels; malformed entries are left to
-    the bottlenecks rule, which refuses them at startup."""
-    labels = bottlenecks.get("hold_labels", [])
-    found = [x for x in labels if isinstance(x, str)] if isinstance(labels, list) else []
-    holds = bottlenecks.get("holds", [])
-    for hold in holds if isinstance(holds, list) else []:
-        if isinstance(hold, Mapping) and isinstance(hold.get("label"), str):
-            found.append(hold["label"])
-    return sorted(set(found))
 
 
 def _normalized(patterns: Any) -> Any:
@@ -1027,10 +1015,14 @@ def _github_steps(
 
 def _hold_labels(engine: EngineConfig) -> frozenset[str]:
     """Rule 6's hold labels (``holds`` and ``hold_labels``): the PR labels whose time the
-    pull request step reads."""
+    pull request step reads, and the labels rule 3's stop patterns skip unless it sets its
+    own. Malformed entries are left to the bottlenecks rule, which refuses them at
+    startup."""
     section = engine.rules.get("bottlenecks", {})
-    labels = {str(x) for x in section.get("hold_labels", []) if isinstance(x, str)}
-    for hold in section.get("holds", []):
+    raw = section.get("hold_labels", [])
+    labels = {x for x in raw if isinstance(x, str)} if isinstance(raw, list) else set()
+    holds = section.get("holds", [])
+    for hold in holds if isinstance(holds, list) else []:
         if isinstance(hold, Mapping) and isinstance(hold.get("label"), str):
             labels.add(hold["label"])
     return frozenset(labels)
