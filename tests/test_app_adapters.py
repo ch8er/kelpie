@@ -72,6 +72,24 @@ def test_hermes_git_settings(tmp_path: Path) -> None:
     assert adapter.git_state is False and adapter.git_timeout == timedelta(seconds=90)
 
 
+def test_hermes_base_refs(tmp_path: Path) -> None:
+    assert load_settings(write(tmp_path, "[adapters.hermes]\n")).hermes.base_refs == (  # type: ignore[union-attr]
+        "origin/main",
+        "main",
+    )
+    path = write(tmp_path, '[adapters.hermes]\nbase_refs = ["origin/develop"]\n')
+    (adapter,) = build_adapters(load_settings(path))
+    assert isinstance(adapter, HermesAdapter) and adapter.base_refs == ("origin/develop",)
+
+
+@pytest.mark.parametrize(
+    "value", ['"main"', '["-main"]', '["main", "main"]', '["a..b"]', "[1]", '["main^"]']
+)
+def test_hermes_base_refs_rejected(tmp_path: Path, value: str) -> None:
+    with pytest.raises(ConfigError, match="base_refs"):
+        load_settings(write(tmp_path, f"[adapters.hermes]\nbase_refs = {value}\n"))
+
+
 def test_hermes_values(tmp_path: Path) -> None:
     path = write(
         tmp_path,

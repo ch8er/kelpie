@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from kelpie.adapters.hermes import adapter as hermes
+from kelpie.adapters.hermes.git_state import valid_base_ref
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
 from kelpie.connectors.github import (
@@ -86,6 +87,7 @@ class HermesSettings:
     enabled: bool = True
     git_state: bool = True  # read git state of the workspaces of live tasks
     git_timeout: timedelta = hermes.DEFAULT_GIT_TIMEOUT  # per git call
+    base_refs: tuple[str, ...] = hermes.DEFAULT_BASE_REFS  # task files: changes since these
     cli: str = hermes.DEFAULT_CLI  # Hermes executable that carries out ``stop``
     cli_timeout: timedelta = timedelta(seconds=hermes.CLI_TIMEOUT)  # one stop command
     human_owners: frozenset[str] = frozenset()  # assignees that are people, not agents
@@ -97,6 +99,7 @@ class HermesSettings:
             lookback=self.lookback,
             git_state=self.git_state,
             git_timeout=self.git_timeout,
+            base_refs=self.base_refs,
             cli=self.cli,
             cli_timeout=self.cli_timeout.total_seconds(),
             human_owners=self.human_owners,
@@ -244,6 +247,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "enabled",
         "git_state",
         "git_timeout",
+        "base_refs",
         "cli",
         "cli_timeout",
         "human_owners",
@@ -279,6 +283,16 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError(f"[adapters.hermes] git_timeout: {exc}") from exc
     if git_timeout <= timedelta(0):
         raise ConfigError("[adapters.hermes] git_timeout must be positive")
+    base_refs = section.get("base_refs", list(hermes.DEFAULT_BASE_REFS))
+    if (
+        not isinstance(base_refs, list)
+        or not all(isinstance(r, str) and valid_base_ref(r) for r in base_refs)
+        or len(set(base_refs)) != len(base_refs)
+    ):
+        raise ConfigError(
+            "[adapters.hermes] base_refs must be a list of distinct branch names "
+            '(e.g. ["origin/main", "main"])'
+        )
     cli = section.get("cli", hermes.DEFAULT_CLI)
     if not isinstance(cli, str) or not cli.strip():
         raise ConfigError("[adapters.hermes] cli must be a non-empty string")
@@ -304,6 +318,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         enabled,
         git_state,
         git_timeout,
+        tuple(base_refs),
         cli,
         cli_timeout,
         frozenset(h.strip() for h in humans),

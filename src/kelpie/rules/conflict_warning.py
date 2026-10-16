@@ -6,10 +6,14 @@ warns while both tasks are still in flight.
 
 A task is *live* while its change is unmerged: in progress, in review, accepted, blocked or
 waiting. Its files are ``Task.files`` as the adapter reports them (paths are compared after
-dropping a leading ``./``). No adapter reports them yet (Hermes gives only a count of
-changed files), so on a live farm the rule stays silent until one does. When two live tasks
-share files (after dropping files matching ``expected_shared``, glob patterns of files that
-are meant to be edited by many tasks, such as a changelog), each gets one ``comment`` per
+dropping a leading ``./``), relative to ``Task.repo``: only tasks of the same repository are
+compared. The Hermes adapter reports what an unfinished task changed since its merge-base
+with ``base_refs`` plus what is uncommitted in its worktree; a task without a worktree has
+no files and is never compared. A new untracked directory counts as one ``dir/`` entry, and
+untracked scratch files every task writes (handoff notes) belong in ``expected_shared``.
+When two live tasks share files (after dropping files matching ``expected_shared``, glob
+patterns of files that are meant to be edited by many tasks, such as a changelog), each gets
+one ``comment`` per
 other task, naming the files they share then. It is sent once per pair (``once``): files
 added later or a third task leaving send nothing new; a new pair does. An overlap that
 lasts past the ledger's ``once_window`` (7 days) is mentioned again. With ``serialize`` the
@@ -76,15 +80,15 @@ class ConflictWarning:
 
     def overlaps(self, snapshot: Snapshot) -> dict[str, dict[str, tuple[str, ...]]]:
         """For each live task: the other live tasks it shares files with, and those files."""
-        by_file: dict[str, set[str]] = {}
+        by_file: dict[tuple[str | None, str], set[str]] = {}
         for t in snapshot.tasks:
             if t.status not in LIVE:
                 continue
             for f in {_normalized(f) for f in t.files}:
                 if f and not self._shared(f):
-                    by_file.setdefault(f, set()).add(t.id)
+                    by_file.setdefault((t.repo, f), set()).add(t.id)
         pairs: dict[str, dict[str, set[str]]] = {}
-        for f, ids in by_file.items():
+        for (_, f), ids in by_file.items():
             if len(ids) < 2:
                 continue
             for a in ids:
