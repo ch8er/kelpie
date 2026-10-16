@@ -61,12 +61,14 @@ import logging
 import os
 import re
 import stat
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from kelpie.adapters.claude_code import hook
 from kelpie.core.model import (
     Dependency,
     Owner,
@@ -85,6 +87,7 @@ log = logging.getLogger(__name__)
 NAME = "claude-code"
 DEFAULT_TASKS_DIR = Path("~/.claude/tasks")
 DEFAULT_SPOOL = Path("~/.claude/kelpie/spool.jsonl")
+DEFAULT_STOP_DIR = Path(hook.DEFAULT_STOP_DIR)
 DEFAULT_LOOKBACK = timedelta(hours=24)
 DEFAULT_OWNER = "claude-code"
 NO_TASK_PREFIX = "session:"
@@ -94,6 +97,9 @@ MAX_BLOCKED_BY = 100  # blockedBy entries kept per task
 MAX_FIELD = 128  # characters kept of an owner name
 MAX_TITLE = 200
 FUTURE_SKEW = timedelta(minutes=5)  # spool lines dated further ahead are dropped
+# A stop not enforced: the session still records tool calls this long after its marker.
+STOP_GRACE = timedelta(minutes=2)
+MAX_MARKER = 4096
 SPOOL_TAIL = 65536  # bytes read from the end of the spool to find its newest line
 MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
 MAX_LINE = 16 * 1024  # a longer spool line is skipped (the hook writes well under 2 KB)
@@ -111,7 +117,7 @@ STATUS_MAP: Mapping[str, Status] = {
 # Claude Code turns a list id into a directory name this way (``[^a-zA-Z0-9_-]`` -> ``-``).
 _UNSAFE_LIST_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
 _TASK_FILE = re.compile(r"^[A-Za-z0-9_-]{1,128}\.json$")
-_EVENT_TYPES = frozenset({"session_start", "prompt", "tool", "turn_end", "session_end"})
+_EVENT_TYPES = frozenset({"session_start", "prompt", "tool", "turn_end", "session_end", "stopped"})
 
 
 class ClaudeCodeError(RuntimeError):
@@ -169,6 +175,7 @@ class SpoolEvent:
     task: str | None = None
     task_status: str | None = None
     task_owner: str | None = None
+    version: int = 0  # the hook's spool format version (``v``); 0 before stop support
 
 
 def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> SpoolEvent | None:
@@ -213,6 +220,7 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         task=_text(rec.get("task")),
         task_status=_text(rec.get("task_status")),
         task_owner=_text(rec.get("task_owner")),
+        version=rec["v"] if isinstance(rec.get("v"), int) and not isinstance(rec["v"], bool) else 0,
     )
 
 
@@ -237,6 +245,7 @@ class ClaudeCodeAdapter:
     task_lists: Sequence[str] = ()  # list ids to read; empty: no board tasks
     spool: Path | None = DEFAULT_SPOOL  # None: no hook data, no sessions
     lookback: timedelta = DEFAULT_LOOKBACK
+    stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused (alerts instead)
     name: str = NAME
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
 
@@ -245,6 +254,8 @@ class ClaudeCodeAdapter:
         self.task_lists = tuple(self.task_lists)
         if self.spool is not None:
             self.spool = Path(self.spool).expanduser()
+        if self.stop_dir is not None:
+            self.stop_dir = Path(self.stop_dir).expanduser()
 
     # --- status --------------------------------------------------------------------------
 
@@ -312,7 +323,7 @@ class ClaudeCodeAdapter:
         files = [f for tl in self.task_lists for f in self._read_list(tl)]
         updates = self._status_updates(events)
         tasks, dependencies = self._tasks(files, updates, cutoff)
-        sessions = self._sessions(events)
+        sessions = self._sessions(events, self._markers(events))
         owners = {t.owner_id for t in tasks if t.owner_id} | {s.owner_id for s in sessions}
         return Snapshot(
             now=now,
@@ -461,7 +472,23 @@ class ClaudeCodeAdapter:
                 latest[ref] = e.at
         return latest
 
-    def _sessions(self, events: Sequence[SpoolEvent]) -> tuple[Session, ...]:
+    def _markers(self, events: Sequence[SpoolEvent]) -> dict[str, datetime]:
+        """Stop marker times of sessions in the spool (``{}`` without a stop directory)."""
+        if self.stop_dir is None:
+            return {}
+        try:
+            names = set(os.listdir(self.stop_dir))
+        except OSError:
+            return {}
+        found: dict[str, datetime] = {}
+        for sid in {e.session_id for e in events}:
+            if f"{sid}.json" in names and (at := read_marker(self.stop_dir, sid)) is not None:
+                found[sid] = at
+        return found
+
+    def _sessions(
+        self, events: Sequence[SpoolEvent], markers: Mapping[str, datetime] | None = None
+    ) -> tuple[Session, ...]:
         grouped: dict[str, list[SpoolEvent]] = {}
         for e in events:
             grouped.setdefault(e.session_id, []).append(e)
@@ -489,6 +516,20 @@ class ClaudeCodeAdapter:
             )
             failure = next((e.error for e in reversed(evs) if e.type == "turn_end"), None)
             reason = last.reason if ended else None
+            stopped = next((e for e in reversed(evs) if e.type in ("stopped", "prompt")), None)
+            if stopped is not None and stopped.type == "stopped":
+                failure = " ".join(x for x in ("stopped by kelpie", failure) if x)
+            marked = (markers or {}).get(sid)
+            if marked is not None and not ended and _ignored_stop(evs, marked):
+                self._warn(
+                    f"unenforced:{sid}",
+                    "claude-code: session %s still calls tools %s after its stop; is the hook "
+                    "registered for PreToolUse, current, run as the same user, and pointed at "
+                    "the same stop_dir?",
+                    sid,
+                    STOP_GRACE,
+                )
+                failure = " ".join(x for x in ("stop not enforced", failure) if x)
             sessions.append(
                 Session(
                     id=sid,
@@ -569,6 +610,44 @@ class ClaudeCodeAdapter:
     def events(self, since: datetime) -> Iterable[PlatformEvent]:
         return ()
 
+    def stop(self, session_id: str, reason: str) -> None:
+        """Stop a session at its next tool call (or machine-submitted prompt).
+
+        Writes the stop marker the hook reads (see :mod:`kelpie.adapters.claude_code.hook`):
+        cooperative, so a session in the middle of a model call stops once that call asks for
+        a tool, and the stop holds until a human types a prompt in the session, removes the
+        marker, or ``KELPIE_CLAUDE_STOP_TTL`` passes. Idempotent: an ended session is left
+        alone. Raises :class:`UnsupportedAction` when stop is turned off or the session is not
+        in the spool (no Kelpie hook runs there), :class:`ClaudeCodeError` for an id that is
+        not a Claude Code session id or a marker that cannot be written.
+        """
+        if hook.marker_path(session_id) is None:
+            raise ClaudeCodeError(f"not a Claude Code session id: {session_id!r}")
+        if self.stop_dir is None:
+            raise UnsupportedAction("stop is turned off ([adapters.claude_code] stop_dir = false)")
+        now = datetime.now(UTC)
+        last = None
+        for event in self._events(now - self.lookback):
+            if event.session_id == session_id and (last is None or event.at >= last.at):
+                last = event
+        if last is None:
+            raise UnsupportedAction(
+                f"session {session_id} is not in the hooks spool, so no Kelpie hook can stop it"
+            )
+        if last.type == "session_end":
+            log.info("claude-code: session %s has ended; nothing to stop", session_id)
+            return
+        if last.version < 1:
+            raise UnsupportedAction(
+                f"session {session_id} runs a Kelpie hook without stop support; copy the "
+                "current hook.py and register it for PreToolUse"
+            )
+        try:
+            write_marker(self.stop_dir, session_id, reason, now.timestamp())
+        except OSError as exc:
+            raise ClaudeCodeError(f"cannot write the stop marker for {session_id}: {exc}") from exc
+        log.info("claude-code: stop requested for session %s", session_id)
+
     def requeue(self, task_id: str, reason: str) -> None:
         raise UnsupportedAction(UNSUPPORTED)
 
@@ -613,3 +692,58 @@ def _read_lines(path: Path, limit: int) -> Iterator[str]:
                     left -= len(line)
                 continue
             yield line.decode("utf-8", "replace")
+
+
+def write_marker(directory: Path, session_id: str, reason: str, at: float) -> Path:
+    """Write ``<directory>/<session_id>.json`` atomically (mode 0600), replacing an older one."""
+    if not hook._SESSION_ID.fullmatch(session_id):
+        raise ValueError(f"not a Claude Code session id: {session_id!r}")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if directory.is_symlink() or not directory.is_dir():
+        raise OSError(f"{directory} is not a plain directory")
+    body = json.dumps({"at": at, "reason": hook.clean_reason(reason)}).encode()
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".stop-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+        target = directory / f"{session_id}.json"
+        os.replace(tmp, target)  # replaces a symlink itself, never its target
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return target
+
+
+def read_marker(directory: Path, session_id: str) -> datetime | None:
+    """When the session's stop marker was written; None if there is no usable one."""
+    try:
+        fd = _open_regular(directory / f"{session_id}.json")
+    except OSError:
+        return None
+    try:
+        raw = os.read(fd, MAX_MARKER + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        data = json.loads(raw.decode("utf-8", "replace")) if len(raw) <= MAX_MARKER else None
+    except ValueError:
+        return None
+    return _utc(data.get("at")) if isinstance(data, dict) else None
+
+
+def _ignored_stop(events: Sequence[SpoolEvent], marked: datetime) -> bool:
+    """The session went on calling tools well after its stop marker, and the hook never
+    refused anything: the stop is not enforced."""
+    after = [e for e in events if e.at >= marked]
+    if any(e.type == "stopped" for e in after):
+        return False
+    # A call counts by its start (a long call begun before the stop is not a miss), and only
+    # while the marker holds for the hook (it ignores markers older than its TTL).
+    expires = marked + timedelta(seconds=hook.DEFAULT_STOP_TTL)
+    return any(
+        e.type == "tool"
+        and marked + STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) < expires
+        for e in after
+    )

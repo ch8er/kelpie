@@ -72,6 +72,7 @@ def test_tool_call(spool: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         "type": "tool",
         "at": rec["at"],
         "session_id": "0b5c6f7e-0000-4000-8000-000000000001",
+        "v": hook.HOOK_VERSION,
         "agent_id": "sub-1",
         "task_list": "farm",
         "kelpie_task": None,

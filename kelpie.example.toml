@@ -355,12 +355,14 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                          "needs_input", "capability", "transient"]
 
 # Claude Code (src/kelpie/adapters/claude_code/README.md): shared task lists plus the spool
-# of its command hook. Read-only; actions become alerts ("not executed").
+# of its command hook. Read-only, except stop (a marker the hook enforces); other actions
+# become alerts ("not executed").
 # [adapters.claude_code]
 # task_lists = ["farm"]             # CLAUDE_CODE_TASK_LIST_ID values to read; [] = none
 # tasks_dir = "~/.claude/tasks"
 # spool = "~/.claude/kelpie/spool.jsonl"  # written by the hook; false = off
 # lookback = "24h"                  # sessions and completed tasks older than this are left out
+# stop_dir = "~/.claude/kelpie/stop"  # stop markers the hook enforces; false = alert instead
 # enabled = true
 
 # GitHub connector (read-only): evaluates pr_merged and ci_status conditions for these
