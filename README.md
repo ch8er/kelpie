@@ -200,7 +200,7 @@ farm throughput metrics from traces.
 - **Real-time alerts** to Telegram and Slack: only actionable
   items, always stating what Kelpie already did by itself; duplicate alerts are merged.
   See [Alerts](#alerts).
-- **Daily report** (`kelpie report`): cost of chaos in condition-hours and dollars, cost per
+- **Daily report** (`kelpie report`): cost of chaos in hours lost and dollars, cost per
   completed task, what Kelpie fixed by itself (and would have fixed in act mode), what
   needs a human (alert states still open, actions Kelpie could not carry out, repeated
   huge-output offenders), the top 3 recommendations and the largest tool outputs. See
@@ -234,7 +234,7 @@ report; no LLM is involved.
   remedies for the largest causes, ranked by dollars (hours count when `hour_usd` is set).
 
 **Before/after of fixes.** Every fix made on the report's day or the day before is measured
-over `[report] verify_window` (a day) before and after it: stuck condition-hours per day
+over `[report] verify_window` (a day) before and after it: hours lost per day
 (only the fix's rule when it names one), tokens per day, task returns per day, review time
 (sessions of `review_roles`), sessions that failed or ended without a status, and for a
 command fix the output tokens per call. A side with fewer than `min_sample` observations,

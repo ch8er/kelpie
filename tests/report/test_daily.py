@@ -646,3 +646,17 @@ def test_before_after_counts_holds_like_the_report() -> None:
     assert lost.name == "hours lost per day (bottlenecks)"
     assert (lost.before, lost.after) == (pytest.approx(4 * 24), pytest.approx(0))
     assert "Cost of chaos: 48.0 hours lost" in render_summary(report)
+
+
+def test_a_fix_scoped_to_the_hold_cause() -> None:
+    from kelpie.report.fixes import MANUAL, FixEvent
+
+    hold = opened("bottlenecks:hold:merge-hold", "bottlenecks", at(0, day=1), at(0, day=1), at(23))
+    idle = opened("bottlenecks:idle-ready", "bottlenecks", at(0, day=1), at(0, day=1), at(23))
+    samples = [hold_alert(at(0, day=1), 0, ["a", "b"])]
+    fix = FixEvent(at(12), MANUAL, "hold expiries", rule="bottlenecks:hold")
+    report = build_report(day_inputs(states=[hold, idle], actions=samples, fixes=(fix,)))
+    lost = next(m for m in report.verifications[0].metrics if m.name.startswith("hours lost"))
+    assert lost.name == "hours lost per day (bottlenecks:hold)"
+    assert lost.before == pytest.approx(2 * 24)  # the hold only, in agent-hours
+    assert "hours lost)" in render_markdown(report)

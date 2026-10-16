@@ -551,7 +551,7 @@ def hold_agent_hours(
     held = sorted(
         {t for _, _, h in samples if isinstance(h, list) for t in h if isinstance(t, str)}
     )
-    return total, tuple(sorted(held))
+    return total, tuple(held)
 
 
 def state_hours(
@@ -770,7 +770,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             if a.usd > 0:
                 value.append(f"about ${a.usd:,.2f}/day{est}")
             if a.hours > 0:
-                value.append(f"{a.hours:.1f} condition-hours")
+                value.append(f"{a.hours:.1f} hours lost")
             tail = f" ({', '.join(value)})" if value else ""
             linked = f" Tasks: {tasks(a.tasks)}." if a.tasks else ""
             lines.append(f"{i}. **{a.title}**{tail}: {a.detail}.{linked}")

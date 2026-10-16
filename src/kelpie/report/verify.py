@@ -164,14 +164,21 @@ def _days(w: Window) -> float:
 
 
 def _stuck(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) -> Metric:
-    scoped = event.rule in {c.split(":")[0] for c in ev.chaos_rules}
-    rules = {event.rule} if scoped else {c.split(":")[0] for c in ev.chaos_rules}
+    # A rule covers its causes (bottlenecks covers bottlenecks:hold); a cause is exact.
+    exact = event.rule in ev.chaos_rules and ":" in (event.rule or "")
+    scoped = exact or event.rule in {c.split(":")[0] for c in ev.chaos_rules}
+
+    def counts(s: OpenState) -> bool:
+        cause = ev.cause(s)
+        if exact:
+            return cause == event.rule
+        return not scoped or cause.split(":")[0] == event.rule
 
     def hours(w: Window) -> tuple[float, int]:
         total, n = 0.0, 0
         for row in ev.states:
             s = row.state
-            if ev.cause(s).split(":")[0] not in rules:
+            if not counts(s):
                 continue
             lo, hi = max(s.since, s.opened_at, w[0]), min(s.last_seen, w[1])
             if hi > lo:
