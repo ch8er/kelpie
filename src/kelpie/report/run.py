@@ -27,6 +27,7 @@ from kelpie.report.daily import (
     render_markdown,
     render_summary,
 )
+from kelpie.report.root_cause import Llm, with_root_cause
 from kelpie.report.store import ReportStore
 from kelpie.traces.hooks import merge_hook_spans
 from kelpie.traces.outputs import OutputSettings
@@ -117,6 +118,11 @@ def send(report: DailyReport, settings: ReportSettings, sender: Sender) -> None:
     sender.send(render_summary(report), settings.severity, settings.channels)
 
 
-def generate(sources: ReportSources, day: date, board: Snapshot) -> tuple[DailyReport, str]:
+def generate(
+    sources: ReportSources, day: date, board: Snapshot, llm: Llm | None = None
+) -> tuple[DailyReport, str]:
+    """The day's report and its Markdown. With ``[report.llm]``, the Markdown also gets the
+    LLM root-cause section (``llm``: a client for tests; default: the provider's API)."""
     report = build_report(load_inputs(sources, day, board))
+    report = with_root_cause(report, sources.report.llm, llm)
     return report, render_markdown(report, sources.report.task_url)

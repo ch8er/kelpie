@@ -16,6 +16,7 @@ keep less. It describes the code as it is; the files named below are the referen
 | Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
 | Daily reports | the report as Markdown | | `[report] dir` | not pruned |
+| LLM root-cause section (optional) | the report's aggregates, sent to the configured model (tasks and people as pseudonyms) | titles, task ids, block reasons, alert texts, commands, tool output, fix notes, roles, names | the provider (or `base_url`) | the provider's terms |
 | Forwarded traces | nothing; requests pass through memory | | queue in memory | until sent or dropped |
 
 ## OTLP spans
@@ -198,6 +199,30 @@ quote parts of it (see the next section).
   and token counts. Written to `[report] dir` when set; with `--send` a short summary goes to
   the alert channels.
 - **Recorded fixes** (`kelpie fix`) keep the note you type.
+
+## LLM root-cause section
+
+Off unless `[report.llm]` is configured. When it is, each report run sends one request to
+the configured provider (or `base_url`) with the report's aggregates: the day, the number
+of completed tasks, spend, hours lost per rule and cause, what Kelpie did or would have
+done (rule, action, outcome, count), open alerts (rule, severity, hours open, escalation
+level), people's queues (agent-hours waited and counts), huge-output offenders (filter,
+days, count) and the before/after metrics of fixes (name, unit, values). At most 10 entries
+per list. Tasks are named `task-1`, `task-2`... and people `person-1`, `person-2`...; the
+real ids stay on the host and are put back into the answer there.
+
+Never sent: task titles, bodies and ids, block reasons, alert and reason texts, commands
+and command prefixes, tool arguments and output, fix notes, roles, owner ids and people's
+names, any secret. Agents control most of that text, so it could carry instructions to the
+model. Rule names, causes, kinds and units are sent only if they are Kelpie's own words
+(otherwise `other`). The section ends with what the model saw; a failed call says so too,
+since the data may have left the host before the failure.
+
+The API key is read from the environment at report time and sent only to the configured
+origin, without redirects. With a `base_url` other than the provider's API, the key
+variable must be named explicitly; on localhost no key is needed. The provider keeps the
+request under its own terms; point `base_url` at a model on the same host to keep the data
+there.
 
 ## Forwarding
 

@@ -575,6 +575,18 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # [report.sections.<name>]         # settings of one report section (keys it declares; any
 #                                  # other key: noted, and the section is skipped)
 #
+# Optional LLM root-cause section (off without this table). The model sees aggregates only:
+# rule names, causes, hours, dollars, counts; tasks and people as pseudonyms; never titles,
+# ids, reasons, commands or tool output. See docs/privacy.md.
+# [report.llm]
+# provider = "anthropic"           # anthropic | openai (also OpenAI-compatible servers)
+# model = "claude-sonnet-5-5"      # the provider's model id
+# api_key_env = "ANTHROPIC_API_KEY"  # the key's variable (default for the provider's API;
+#                                  # required for another https base_url; none on localhost)
+# base_url = "https://api.anthropic.com"  # or http://127.0.0.1:8000 (no /v1) for a local model
+# timeout = "60s"
+# max_tokens = 1000
+#
 # Context and model fit (kelpie.traces.fit). A switch to a cheaper model is recommended
 # only for roles named here: short outputs alone do not make work routine.
 # [report.sections.tokens_fit]
