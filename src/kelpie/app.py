@@ -21,6 +21,7 @@ from typing import Any, Protocol
 from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_code
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes.git_state import valid_base_ref
+from kelpie.adapters.hermes.park import DEFAULT_WAIT_KEY, WAIT_KEY_NAME
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
 from kelpie.connectors.github import (
@@ -95,6 +96,8 @@ class HermesSettings:
     human_owners: frozenset[str] = frozenset()  # assignees that are people, not agents
     roles: tuple[tuple[str, str], ...] = ()  # profile -> role ([adapters.hermes.roles])
     role_from_name: bool = True  # role of other profiles: the name without a trailing -N
+    # Signs Kelpie's parks of Hermes tasks; None: next to the ledger (see wait_key_path).
+    wait_key: Path | None = None
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -109,6 +112,7 @@ class HermesSettings:
             human_owners=self.human_owners,
             roles=dict(self.roles),
             role_from_name=self.role_from_name,
+            wait_key=self.wait_key or DEFAULT_WAIT_KEY,
         )
 
 
@@ -197,7 +201,7 @@ def load_settings(path: Path | None) -> Settings:
         human_tasks=human_tasks,
         block_conditions=block_conditions,
         engine=engine,
-        hermes=_load_hermes(data.get("adapters", {})),
+        hermes=_with_wait_key(_load_hermes(data.get("adapters", {})), db_path),
         claude_code=_load_claude_code(data.get("adapters", {})),
         db_path=db_path,
         source=path,
@@ -261,6 +265,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "human_owners",
         "roles",
         "role_from_name",
+        "wait_key",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     paths: dict[str, Path | None] = {}
@@ -332,6 +337,9 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError("[adapters.hermes.roles] must map profile names to non-empty role names")
     if len({k.strip().casefold() for k in roles}) != len(roles):
         raise ConfigError("[adapters.hermes.roles] lists a profile twice (case-insensitive)")
+    wait_key = section.get("wait_key")
+    if wait_key is not None and (not isinstance(wait_key, str) or not wait_key.strip()):
+        raise ConfigError("[adapters.hermes] wait_key must be a non-empty path")
     return HermesSettings(
         db_path,
         paths["spool"],
@@ -345,7 +353,17 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         frozenset(h.strip() for h in humans),
         tuple(sorted((k.strip().casefold(), v.strip().casefold()) for k, v in roles.items())),
         role_from_name,
+        None if wait_key is None else Path(wait_key),
     )
+
+
+def _with_wait_key(hermes: HermesSettings | None, db: Path | None) -> HermesSettings | None:
+    """The park-signing key defaults next to the ledger, which a deployment keeps (a
+    container's data volume): losing the key leaves Kelpie's parks unrecognised. With an
+    in-memory ledger it is ``~/.kelpie/hermes-wait.key``."""
+    if hermes is None or hermes.wait_key is not None:
+        return hermes
+    return replace(hermes, wait_key=DEFAULT_WAIT_KEY if db is None else db.parent / WAIT_KEY_NAME)
 
 
 def _load_claude_code(adapters: Mapping[str, Any]) -> ClaudeCodeSettings | None:
@@ -1049,16 +1067,19 @@ def _open_span_store(db_path: Path | None) -> SpanStore:
         raise ConfigError(f"cannot open span store {db_path}: {exc}") from exc
 
 
-# Rules whose only effect on a platform is ``stop`` (plus alerts), the one action the Hermes
-# adapter carries out. Update with the adapter when it gains more actions.
-HERMES_ACT_RULES = frozenset({"loop_breaker"})
+# Rules whose effects on a platform are actions the Hermes adapter carries out: stop, wait
+# (park), wake of a parked task, comment (plus alerts). Update with the adapter.
+HERMES_ACT_RULES = frozenset(
+    {"loop_breaker", "wait_condition", "conflict_warning", "dispatch_gate"}
+)
 
 
 def _refuse_unimplemented_actions(
     settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter]
 ) -> None:
-    """Hermes carries out ``stop`` only; any other act-mode rule would only fail at runtime
-    on Hermes tasks, also next to adapters that refuse actions with ``UnsupportedAction``.
+    """Hermes carries out stop, wait, wake of a parked task and comment; any other act-mode
+    rule would only fail at runtime on Hermes tasks, also next to adapters that refuse
+    actions with ``UnsupportedAction``.
 
     ``ci_economy`` acts through the CI connector (``cancel_build``), not the platform, so
     it may act when ``[connectors.github.ci] allow_cancel`` is set."""
@@ -1075,7 +1096,8 @@ def _refuse_unimplemented_actions(
     )
     if has_hermes and acting and not settings.engine.dry_run:
         raise ConfigError(
-            f"Hermes actions other than stop are not implemented; use observe or suggest mode "
+            "these rules emit actions the Hermes adapter does not carry out (it does stop, "
+            "wait, wake of a parked task and comment); use observe or suggest mode "
             f"(rules in act mode: {acting})"
         )
 

@@ -2,10 +2,12 @@
 
 Lets Kelpie watch a [Hermes](https://github.com/NousResearch/hermes-agent) farm. Kelpie
 reads the Kanban board and a spool of tool calls; rules 1–4 run in `observe` (or `suggest`)
-mode. The one action implemented is `stop` (see [Stopping a run](#stopping-a-run)). The other
-Hermes actions (requeue, unblock, comment, WIP commit) raise `NotImplementedError` until a
-later step, so a rule other than `loop_breaker` in `act` mode with `dry_run = false` and
-Hermes as the only adapter stops Kelpie at startup.
+mode. The actions implemented are `stop` (see [Stopping a run](#stopping-a-run)), `wait`
+(park a task on conditions), the wake of a task Kelpie parked, and `comment` (see
+[Parking, waking, commenting](#parking-waking-commenting)). Unblock, reassign and WIP commit
+are not, so a rule other than `loop_breaker`, `wait_condition`, `conflict_warning` and
+`dispatch_gate` in `act` mode with `dry_run = false` stops Kelpie at startup when Hermes is
+configured.
 
 ## Config
 
@@ -18,8 +20,9 @@ lookback = "24h"                         # runs, spans and finished tasks older 
 enabled = true                           # default when the section exists
 git_state = true                         # read git state of live task workspaces (see below)
 git_timeout = "5s"                       # limit for each git call; 2x per snapshot in total
-cli = "hermes"                           # Hermes executable used by `stop` (name on PATH or a path)
-cli_timeout = "10s"                      # limit for that command (at most 60s)
+cli = "hermes"                           # Hermes executable used by stop, park, wake, comment
+cli_timeout = "10s"                      # limit for each command (at most 60s)
+# wait_key = "/data/hermes-wait.key"     # signs Kelpie's parks; default: next to the ledger
 human_owners = ["alice"]                 # assignees that are people, not agents (optional)
 
 # Hermes tolerates heartbeats up to an hour old; Kelpie's default is 30 minutes.
@@ -111,6 +114,25 @@ repeatedly makes Hermes route it to `triage` (its unblock-loop breaker); it stil
 re-queued. The CLI contract was read from the Hermes sources (`hermes_cli/kanban.py`,
 `kanban_db.py`, `kanban_db_dispatch.py`) and is exercised here against a fake executable only:
 try one stop on a test board before enabling `act`.
+
+## Parking, waking, commenting
+
+Kelpie parks a task (rule 12's conflict wait, the dispatch gate) with
+`hermes kanban schedule <task> <reason>`: Hermes' `scheduled` status, which is not dispatched,
+pages nobody and is left only through `hermes kanban unblock`. The reason carries the
+conditions in a signed marker, `[kelpie-wait:v2:...]`, which the adapter reads back from the
+`scheduled` event; a task parked this way shows as `waiting` on those conditions, and rule 2
+(`wait_condition`) wakes it with `hermes kanban unblock` once they hold. Only a ready task, or
+a running task pinned to the run the rule saw, is parked; only a task Kelpie parked is woken.
+
+The marker is signed with a key Kelpie creates on first use (`wait_key`, by default next to
+the ledger database, mode 0600). Keep it with the ledger (a container's data volume) and out
+of the agents' reach: losing it leaves Kelpie's parks unrecognised (logged; wake those tasks
+by hand), and an agent that can read it can forge parks. A marker copied from an earlier park
+(it is visible in the `SCHEDULED:` comment) does not verify. Comments are written with
+`hermes kanban comment --author kelpie`. Every text Kelpie writes has GitHub PR URLs
+rewritten to `owner/repo#N`: a PR URL in a comment holds a ready task back for 24 hours in
+Hermes.
 
 ## Hooks plugin
 

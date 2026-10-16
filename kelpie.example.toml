@@ -357,8 +357,11 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # 3 + base_refs + 1 + merge-bases calls per worktree)
 # base_refs = ["origin/main", "main"]  # a task's files (rule 12) are what it changed since its
 #                                   # merge-base with these, plus uncommitted files
-# cli = "hermes"                    # Hermes executable used to stop a run (name on PATH or a path)
-# cli_timeout = "10s"               # limit for that command (at most 60s); it runs inside the tick
+# cli = "hermes"                    # Hermes executable used to stop, park, wake and comment
+# cli_timeout = "10s"               # limit for each command (at most 60s); it runs inside the tick
+# wait_key = "/data/hermes-wait.key"  # signs Kelpie's parks (mode 0600, out of the agents'
+#                                   # reach); default: next to the ledger. Losing it leaves
+#                                   # parked tasks unrecognised
 # human_owners = ["alice"]         # assignees that are people, not agents (see
 #                                   # [connectors.human_tasks]); case-insensitive. Not a Hermes
 #                                   # profile. Also sets rule 5's default escalation target

@@ -16,9 +16,18 @@ rule is in `act` mode (`_refuse_unimplemented_actions`, `HERMES_ACT_RULES` in
 | `loop_breaker` | `stop`: `hermes kanban block --kind needs_input` on the run Kelpie looked at | `[adapters.hermes]`; `cli` and `cli_timeout` if `hermes` is not on `PATH` |
 | `loop_breaker` | `stop` on Claude Code: a stop marker the hook enforces at the session's next tool call | `[adapters.claude_code]` with `stop_dir`; see [Claude Code](#claude-code) below |
 | `ci_economy` | `cancel_build` of a superseded GitHub Actions run, by the CI connector | `[connectors.github.ci]` with `allow_cancel = true`, `cancel_repos`, ideally `cancel_token_env` (a separate token with Actions: write on those repos only) |
+| `dispatch_gate` | `wait`: `hermes kanban schedule` of a ready task, with its conditions in the reason (**unverified**) | `wait_condition` in `act` too, or parked tasks are never woken (Kelpie warns at startup) |
+| `wait_condition` | `wake` of a task Kelpie parked: `hermes kanban unblock` (**unverified**); `comment` (`hermes kanban comment --author kelpie`) | |
+| `conflict_warning` | `comment` on both tasks; with `serialize`, `wait` of the later running task pinned to its run (**unverified**) | `wait_condition` in `act` too |
 
 Everything else stays `observe` or `suggest`. That includes `stale_blocks`: its unblock, and
-the requeue, comment and WIP-commit actions, are not implemented for Hermes.
+requeue of tasks Kelpie did not park and WIP commit, are not implemented for Hermes. Kelpie
+never writes a GitHub PR URL into a Hermes comment or reason: Hermes holds a ready task back
+for 24 h after one appears (a URL its worker wrote still does, also after a wake). A wake
+(`unblocked`) pages chats subscribed to the task. Parks are signed with a key Kelpie creates
+next to its ledger database (`[adapters.hermes] wait_key`): run Kelpie as a user the agents
+cannot read it as, or a worker could forge a park that Kelpie then wakes, and keep it on the
+persistent volume, or Kelpie no longer recognises its parks (logged; wake them by hand).
 
 ## 1. Preconditions
 

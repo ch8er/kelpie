@@ -172,3 +172,6 @@ def _kill_group(proc: subprocess.Popen[str]) -> None:
             proc.kill()
     except (ProcessLookupError, PermissionError):
         pass
+
+
+kill_group = _kill_group  # shared with kelpie.adapters.hermes.park

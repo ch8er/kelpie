@@ -263,7 +263,7 @@ def test_ci_economy_may_act_with_only_hermes_when_cancel_is_allowed(
     app = build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=github))
     app.close()
     read_only = replace(github, ci=replace(github.ci, allow_cancel=False, cancel_repos=()))
-    with pytest.raises(ConfigError, match="Hermes actions other than stop"):
+    with pytest.raises(ConfigError, match="actions the Hermes adapter does not carry out"):
         build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=read_only))
 
 

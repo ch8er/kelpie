@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from kelpie.adapters.hermes import HermesAdapter
+from kelpie.adapters.hermes.park import DEFAULT_WAIT_KEY
 from kelpie.app import (
     ConfigError,
     HermesSettings,
@@ -56,6 +57,7 @@ def test_hermes_defaults(tmp_path: Path) -> None:
         enabled=True,
         git_state=True,
         git_timeout=timedelta(seconds=5),
+        wait_key=(settings.db_path or Path()).parent / "hermes-wait.key",  # next to the ledger
     )
     (adapter,) = build_adapters(settings)
     assert isinstance(adapter, HermesAdapter)
@@ -96,8 +98,14 @@ def test_hermes_values(tmp_path: Path) -> None:
         '[adapters.hermes]\ndb_path = "/data/k.db"\nspool = "/data/s.jsonl"\n'
         'lookback = "6h"\nenabled = true\n',
     )
-    h = load_settings(path).hermes
-    assert h == HermesSettings(Path("/data/k.db"), Path("/data/s.jsonl"), timedelta(hours=6), True)
+    settings = load_settings(path)
+    assert settings.hermes == HermesSettings(
+        Path("/data/k.db"),
+        Path("/data/s.jsonl"),
+        timedelta(hours=6),
+        True,
+        wait_key=(settings.db_path or Path()).parent / "hermes-wait.key",
+    )
 
 
 def test_hermes_disabled_builds_no_adapter(tmp_path: Path) -> None:
@@ -269,7 +277,7 @@ def test_act_mode_with_only_hermes_is_refused(tmp_path: Path) -> None:
         {"dry_run": False, "rules": {"exit_contract": {"mode": "act"}}}
     )
     hermes = HermesSettings(db_path=tmp_path / "kanban.db")
-    with pytest.raises(ConfigError, match="Hermes actions other than stop are not implemented"):
+    with pytest.raises(ConfigError, match="actions the Hermes adapter does not carry out"):
         build_app(Settings(engine=config, db_path=None, hermes=hermes))
     # Allowed: dry-run on, observe/suggest modes, or no Hermes at all.
     for ok in (
@@ -310,15 +318,24 @@ def test_status_shows_spool_age(tmp_path: Path) -> None:
     assert "spool: last line 2m ago" in text
 
 
-def test_act_allow_list_matches_what_loop_breaker_emits() -> None:
-    """Hermes carries out stop only; loop_breaker may therefore emit nothing but stop and alerts."""
-    from kelpie.app import HERMES_ACT_RULES
-    from kelpie.rules import loop_breaker
+def test_act_allow_list_matches_what_hermes_carries_out() -> None:
+    """Rules allowed to act on Hermes emit only what the adapter carries out (stop, wait,
+    wake of a parked task, comment) and alerts."""
+    import importlib
 
-    source = Path(loop_breaker.__file__).read_text()
-    kinds = set(re.findall(r"ActionKind\.(\w+)", source))
-    assert kinds == {"ALERT", "STOP"}
-    assert {"loop_breaker"} == HERMES_ACT_RULES
+    from kelpie.app import HERMES_ACT_RULES
+
+    carried_out = {"ALERT", "ESCALATE", "STOP", "WAIT", "WAKE", "COMMENT"}
+    assert {
+        "loop_breaker",
+        "wait_condition",
+        "conflict_warning",
+        "dispatch_gate",
+    } == HERMES_ACT_RULES
+    for name in HERMES_ACT_RULES:
+        source = Path(importlib.import_module(f"kelpie.rules.{name}").__file__ or "").read_text()
+        kinds = set(re.findall(r"ActionKind\.(\w+)", source))
+        assert kinds <= carried_out, (name, kinds - carried_out)
 
 
 def test_hermes_cli_timeout_setting(tmp_path: Path) -> None:
@@ -362,3 +379,19 @@ def test_hermes_role_from_name_setting(tmp_path: Path) -> None:
     assert isinstance(adapter, HermesAdapter) and adapter.role_of("dev-1") == "dev-1"
     with pytest.raises(ConfigError, match="role_from_name"):
         load_settings(write(tmp_path, '[adapters.hermes]\nrole_from_name = "no"\n'))
+
+
+def test_wait_key_defaults_next_to_the_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    text = f'[storage]\npath = "{tmp_path / "data" / "kelpie.db"}"\n[adapters.hermes]\n'
+    settings = load_settings(write(tmp_path, text))
+    assert settings.hermes is not None
+    assert settings.hermes.wait_key == tmp_path / "data" / "hermes-wait.key"
+    memory = load_settings(write(tmp_path, '[storage]\npath = ":memory:"\n[adapters.hermes]\n'))
+    assert memory.hermes is not None and memory.hermes.wait_key == DEFAULT_WAIT_KEY
+    explicit = load_settings(write(tmp_path, '[adapters.hermes]\nwait_key = "/k/key"\n'))
+    assert explicit.hermes is not None and explicit.hermes.wait_key == Path("/k/key")
+    with pytest.raises(ConfigError, match="wait_key"):
+        load_settings(write(tmp_path, '[adapters.hermes]\nwait_key = ""\n'))
