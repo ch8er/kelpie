@@ -71,6 +71,7 @@ class RoleThroughput:
     active: tuple[str, ...] = ()  # tasks with stage time or completed within the day
     reworked: tuple[str, ...] = ()  # active tasks sent back within the day
     returns: int = 0
+    reopened: int = 0  # done tasks moved back out of done within the day
     queue_now: int = 0  # tasks of the role in the queue stage at the end of the day
 
     @property
@@ -148,6 +149,7 @@ def throughput(
             if back:
                 a.reworked.append(task.id)
                 a.returns += back
+        a.reopened += sum(1 for at in task.reopened_at if start <= at < end)
         if _stage_at(task, mine, windows, end, review_roles, role_of_session, end) == "queue":
             a.queue_now += 1
 
@@ -186,6 +188,7 @@ def throughput(
                 active=tuple(sorted(a.active)),
                 reworked=tuple(sorted(a.reworked)),
                 returns=a.returns,
+                reopened=a.reopened,
                 queue_now=a.queue_now,
             )
         )
@@ -202,6 +205,7 @@ class _Acc:
     active: list[str] = field(default_factory=list)
     reworked: list[str] = field(default_factory=list)
     returns: int = 0
+    reopened: int = 0
     queue_now: int = 0
 
 

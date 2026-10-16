@@ -746,3 +746,113 @@ def test_a_hermes_review_loop_reaches_ping_pong(board: Board) -> None:
     snap = adapter(board).snapshot(NOW)
     [escalation] = PingPong().evaluate(snap)
     assert escalation.task_id == "t_1" and "3" in escalation.reason
+
+
+# --- evidence for "done" and reopens (rule 1) --------------------------------------------
+
+
+def test_a_done_task_moved_back_is_a_reopen(board: Board) -> None:
+    board.task("t_1", "ready", ago(days=2), assignee="dev")
+    board.event("t_1", "completed", ago(hours=10))
+    board.event("t_1", "worker_result", ago(hours=10))  # bookkeeping after completion
+    board.event("t_1", "pr_acceptance", ago(hours=9))
+    board.event("t_1", "status", ago(hours=9), {"status": "archived"})  # still done
+    board.event("t_1", "status", ago(hours=8), {"status": "ready"})  # reopened
+    board.event("t_1", "status", ago(hours=6), {"status": "done"})
+    board.event("t_1", "descendant_invalidated", ago(hours=5), {"previous_status": "done"})
+    board.event("t_1", "status", ago(hours=5), {"status": "todo"})  # reopened again, once
+    board.event("t_1", "status", ago(hours=4), {"status": "ready"})  # not done before
+    board.task("t_2", "done", ago(days=1), assignee="dev")
+    board.event("t_2", "completed", ago(hours=3))
+    board.event("t_2", "worker_result", ago(hours=3))
+    tasks = {t.id: t for t in adapter(board).snapshot(NOW).tasks}
+    assert tasks["t_1"].reopened_at == (ago(hours=8), ago(hours=5))
+    assert tasks["t_2"].reopened_at == ()
+    assert tasks["t_1"].returns == ()  # a reopen is not a send-back before done
+    assert tasks["t_2"].status_since == ago(hours=3)  # bookkeeping does not move it
+
+
+def attachments_table(board: Board) -> None:
+    board.conn.execute(
+        "CREATE TABLE task_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT,"
+        " filename TEXT, stored_path TEXT, content_type TEXT, size INTEGER, uploaded_by TEXT,"
+        " created_at INTEGER)"
+    )
+
+
+def attach(board: Board, name: str, at: datetime, by: str | None) -> None:
+    board.conn.execute(
+        "INSERT INTO task_attachments (task_id, filename, stored_path, uploaded_by, created_at)"
+        " VALUES ('t_1', ?, '/x', ?, ?)",
+        (name, by, int(at.timestamp())),
+    )
+
+
+def test_evidence_is_what_a_run_left(board: Board) -> None:
+    board.task("t_1", "done", ago(days=1), assignee="dev")
+    first = board.run("t_1", "dev", ago(hours=5), status="done", ended=ago(hours=4))
+    second = board.run("t_1", "dev", ago(hours=3), status="done", ended=ago(hours=2))
+    board.event(
+        "t_1",
+        "completed",
+        ago(hours=2),
+        {"artifacts": ["reports/junit.xml", "", 7]},
+        run_id=second,
+    )
+    attachments_table(board)
+    attach(board, "test-plan.md", ago(days=1), "alice")  # a person's spec, before any run
+    attach(board, "spec-test.md", ago(hours=4, minutes=30), "alice")  # a person, mid-run
+    attach(board, "pytest.txt", ago(hours=4, minutes=30), "dev")  # the agent, during run 1
+    attach(board, "early-test.txt", ago(days=2), "dev")  # the agent, before its first run
+    attach(board, "live-check.txt", ago(hours=1), "dev")  # after run 2 ended: run 2
+    board.conn.commit()
+    sessions = {s.id: s for s in adapter(board).snapshot(NOW).sessions}
+    assert [a.path for a in sessions[f"hermes-run-{first}"].artifacts] == ["pytest.txt"]
+    assert [a.path for a in sessions[f"hermes-run-{second}"].artifacts] == [
+        "reports/junit.xml",
+        "live-check.txt",
+    ]
+
+
+def test_no_attachments_table_is_fine(board: Board) -> None:
+    board.task("t_1", "done", ago(days=1), assignee="dev")
+    board.run("t_1", "dev", ago(hours=5), status="done", ended=ago(hours=4))
+    (session,) = adapter(board).snapshot(NOW).sessions
+    assert session.artifacts == ()
+
+
+def test_a_cascade_from_a_reopened_ancestor_is_not_the_childs_reopen(board: Board) -> None:
+    board.task("t_1", "todo", ago(days=1), assignee="dev")
+    board.event("t_1", "completed", ago(hours=6))
+    board.event("t_1", "status", ago(hours=2), {"status": "todo", "reason": "ancestor_reopened"})
+    (task,) = adapter(board).snapshot(NOW).tasks
+    assert task.reopened_at == ()
+
+
+def test_attachments_of_hermes_attach_tool_count_for_the_running_run(board: Board) -> None:
+    board.task("t_1", "done", ago(days=1), assignee="dev")
+    run = board.run("t_1", "dev", ago(hours=3), status="done", ended=ago(hours=1))
+    attachments_table(board)
+    attach(board, "pytest.txt", ago(hours=2), "agent")  # kanban_attach records "agent"
+    attach(board, "notes.txt", ago(hours=2), "dashboard")  # a person, through the dashboard
+    board.conn.commit()
+    (session,) = adapter(board).snapshot(NOW).sessions
+    assert session.id == f"hermes-run-{run}" and [a.path for a in session.artifacts] == [
+        "pytest.txt"
+    ]
+
+
+def test_a_persons_approval_is_not_an_agents_completion(board: Board) -> None:
+    from kelpie.rules.exit_contract import build
+
+    board.task("t_1", "done", ago(days=1), assignee="dev")
+    board.run(
+        "t_1", "dev", ago(hours=4), status="review", ended=ago(hours=3), outcome="review_requested"
+    )
+    # The approval: Hermes synthesizes a zero-length completed run.
+    board.run("t_1", "dev", ago(hours=1), status="done", ended=ago(hours=1), outcome="completed")
+    board.event("t_1", "completed", ago(hours=1))
+    snap = adapter(board).snapshot(NOW)
+    assert [s.final_status for s in snap.sessions] == [Status.REVIEW]
+    rule = build({"done_evidence": [{"name": "tests", "artifacts": ["*pytest*"]}]})
+    assert rule.evaluate(snap) == []

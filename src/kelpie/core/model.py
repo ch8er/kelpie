@@ -119,6 +119,9 @@ class Task:
     # platform that assigns work before it is claimed (Hermes) sets the owner only once a
     # run claims it. None: the owner is all there is.
     assignee: str | None = None
+    # When the task, once done, was moved back out of done (rule 1's reopened-after-done
+    # rate). Kept apart from ``returns``, which are sends-back before done.
+    reopened_at: tuple[datetime, ...] = ()
     # Tasks this one was split into (a parent and its subtasks; Hermes: a decomposed root).
     # A parent is done when they are: rule 3 asks to close one left open after them.
     subtasks: tuple[str, ...] = ()

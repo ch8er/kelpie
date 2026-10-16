@@ -1,0 +1,54 @@
+id: "02-done-without-evidence"
+incident: 2
+title: "Tasks marked done without test output, green CI or a live check"
+description: >
+  Agents marked tasks done without running the tests, without green CI and without a live
+  check, and the tasks came back later. With evidence for "done" configured, Kelpie sends a
+  task an agent moved to done without any of it back to the queue, naming what is missing.
+  Tasks with test output, with a green CI condition, a person's task, and a task done long
+  ago are left alone.
+rule: exit_contract
+config:
+  done_evidence:
+    - {name: tests, artifacts: ["*test*", "*.junit.xml"]}
+    - {name: ci, condition: ci_status}
+    - {name: live-check, artifacts: ["*live-check*"]}
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: human-owner, role: owner, kind: human}
+  tasks:
+    # Done 1 h ago with only a summary note: no evidence.
+    - {id: T-201, title: "Fix login redirect", status: done, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # Done with test output attached.
+    - {id: T-202, title: "Export CSV", status: done, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # Done with green CI.
+    - {id: T-203, title: "Rate limiter", status: done, status_since: "2026-03-02T15:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # A person's task.
+    - {id: T-204, title: "Sign the store agreement", status: done, status_since: "2026-03-02T15:00:00+00:00", role: owner, owner_id: human-owner}
+    # Done two days ago: not judged now.
+    - {id: T-205, title: "Old cleanup", status: done, status_since: "2026-02-28T15:00:00+00:00", role: developer, owner_id: agent-dev-1}
+  sessions:
+    - {id: S-201, task_id: T-201, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", final_status: done, artifacts: [{path: "notes/summary.md", at: "2026-03-02T14:59:00+00:00"}]}
+    - {id: S-202, task_id: T-202, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", final_status: done, artifacts: [{path: "reports/pytest-output.txt", at: "2026-03-02T14:58:00+00:00"}]}
+    - {id: S-203, task_id: T-203, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", final_status: done}
+    - {id: S-204, task_id: T-204, owner_id: human-owner, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", final_status: done}
+    - {id: S-205, task_id: T-205, owner_id: agent-dev-1, started_at: "2026-02-28T13:00:00+00:00", ended_at: "2026-02-28T15:00:00+00:00", final_status: done}
+  conditions:
+    - {id: "ci:T-203", kind: ci_status, task_id: T-203, satisfied: true}
+expected_actions:
+  - kind: requeue
+    task_id: T-201
+    reason_contains: "without evidence"
+    params:
+      missing: [tests, ci, live-check]
+not_expected_actions:
+  - kind: requeue
+    task_id: T-202
+  - kind: requeue
+    task_id: T-203
+  - kind: requeue
+    task_id: T-204
+  - kind: requeue
+    task_id: T-205

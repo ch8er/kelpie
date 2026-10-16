@@ -193,13 +193,19 @@ work, and a resume note for the next session. Needs git state from the adapter (
 
 A session ended without a final status, or left a block without an allowed reason or a
 condition: the task goes back to the queue. Also alerts when a declared final status was
-never applied by the platform.
+never applied by the platform. With `done_evidence`, a task an agent moved to done without
+the configured evidence goes back to the queue too; the reopened-after-done rate per role is
+on `/metrics` (`kelpie_role_reopened_after_done_ratio`) and in the daily report.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `allowed_block_reasons` | `["guard", "waiting_ci", "waiting_pr_merge", "waiting_human", "quota"]` | list of strings | A block is allowed when its reason equals one of these, or starts with one followed by `:` or a space; case-insensitive. Replaces the default list. A block tied to a condition is always allowed. |
 | `session_exit_grace` | `"10m"` | duration | Time the platform gets to record a status after an exit before Kelpie judges it. |
 | `session_stale_after` | `"30m"` | duration | See [live session](#rules). |
+| `done_evidence` | `[]` (off) | array of tables | Evidence that a task is done. Each entry: `name`, and either `artifacts` (globs on the path or file name of an artifact a session left since the task was last reopened, case-insensitive: test output, a live-check report; Hermes: the artifacts a completion lists, and files the run's profile attached) or `condition` (a condition kind, e.g. `ci_status`, satisfied and linked to the task; no connector keeps one on done tasks yet). |
+| `done_evidence_require` | `"any"` | `any` or `all` | One kind of evidence is enough, or all are needed. |
+| `done_evidence_action` | `"requeue"` | `requeue` or `alert` | What happens to a task done without it. |
+| `done_evidence_within` | `"24h"` | duration, > 0 and <= 7d | Only tasks that reached done this recently, and at least `session_exit_grace` ago, are judged. Only an agent's completion is (a session ended declaring done when the task became done): not a person's task, one a person closed, or a parent. Hermes cannot requeue a done task: a human is told instead. A person approving a review is not judged (Hermes records no run for it), but a person forcing a running task to done on the dashboard looks like the agent's completion. Keep it within `[engine] once_window` (7d by default), or a judgement repeats. |
 
 ### 2. wait_condition
 

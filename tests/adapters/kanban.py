@@ -118,11 +118,24 @@ class Board:
         self.conn.commit()
 
     def event(
-        self, task_id: str, kind: str, at: datetime, payload: dict[str, Any] | None = None
+        self,
+        task_id: str,
+        kind: str,
+        at: datetime,
+        payload: dict[str, Any] | None = None,
+        *,
+        run_id: int | None = None,
     ) -> None:
         self.conn.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
-            (task_id, kind, json.dumps(payload) if payload is not None else None, epoch(at)),
+            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                task_id,
+                run_id,
+                kind,
+                json.dumps(payload) if payload is not None else None,
+                epoch(at),
+            ),
         )
         self.conn.commit()
 

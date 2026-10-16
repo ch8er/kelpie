@@ -162,10 +162,9 @@ def test_the_section_in_the_daily_report() -> None:
     assert section.title == "Farm throughput" and section.advice == ()
     markdown = render_markdown(report)
     # 100k input and 2k output at $3 and $15 per million, one completed task
-    assert (
-        "| developer | 2 | 9% | 1 | 0.04 | 0.12 | 0.2 | 1 | 25% (1 return(s)) | $0.33 |" in markdown
-    )
-    assert "| reviewer | 1 | 6% | 0 | 0.00 | 0.08 | 0.0 | 0 | - | *none done* |" in markdown
+    developer = "| developer | 2 | 9% | 1 | 0.04 | 0.12 | 0.2 | 1 | 25% (1 return(s)) | 0 of 1 |"
+    assert f"{developer} $0.33 |" in markdown
+    assert "| reviewer | 1 | 6% | 0 | 0.00 | 0.08 | 0.0 | 0 | - | - | *none done* |" in markdown
     assert "| developer | 4.5 | 5.0 | 4.0 | 14.0 | 15.0 |" in markdown
     assert SECTIONS["throughput"] is throughput_section
 
@@ -249,3 +248,15 @@ def test_cost_markers_and_unlisted_spend() -> None:
     assert "| *unpriced* |" in render_markdown(build_report(unpriced, ONLY))
     quiet = ReportInputs(day=DAY, tz=UTC, tasks=TASKS, owners=OWNERS, sessions=SESSIONS)
     assert "| *no spend* |" in render_markdown(build_report(quiet, ONLY))
+
+
+def test_reopened_after_done_counts_within_the_day() -> None:
+    from dataclasses import replace
+
+    reopened = replace(
+        task("T9", Status.READY, at(15)),
+        reopened_at=(at(14), at(1, day=1)),  # one the day before
+    )
+    done = task("T8", Status.DONE, at(10))
+    [dev] = throughput([reopened, done], [], [], [], START, END)
+    assert dev.reopened == 1 and dev.completed == ("T8",)

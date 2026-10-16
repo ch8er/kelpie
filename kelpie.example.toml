@@ -15,6 +15,18 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # the plan (kelpie.rules.PLANNED); unknown names stop Kelpie at startup, and planned rules
 # that are not implemented yet are skipped with a warning. `kelpie status` shows the result.
 #
+# [engine.rules.exit_contract]  # rule 1; "done" needs evidence (off until listed)
+# done_evidence_require = "any"  # or "all"
+# done_evidence_action = "requeue"  # or "alert"
+# [[engine.rules.exit_contract.done_evidence]]
+# name = "tests"
+# artifacts = ["*pytest*", "*.junit.xml", "test-output*"]  # a run's artifacts (Hermes: those
+#                           # its completion lists, and files its profile attached)
+# [[engine.rules.exit_contract.done_evidence]]
+# name = "ci"
+# condition = "ci_status"   # a satisfied condition linked to the task; needs a connector that
+#                           # keeps one on done tasks (none does yet), so not with "all"
+#
 # [engine.rules.stale_blocks]
 # mode = "suggest"
 # unblock_grace = "5m"
