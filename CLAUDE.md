@@ -18,6 +18,7 @@ src/kelpie/
   connectors/   external-condition connectors (GitHub/CI, LLM quotas, human tasks)
   traces/       OTLP ingest (OpenTelemetry GenAI semconv), storage, export
   report/       daily report — the only place an LLM may be used, optionally
+  remote/       multi-host: kelpie agent, the hub of kelpie serve, the wire protocol
   cli.py, server.py
 tests/fixtures/incidents/   synthetic incident fixtures (format: README.md there)
 ```

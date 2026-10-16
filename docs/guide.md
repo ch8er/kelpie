@@ -137,7 +137,9 @@ flowchart LR
 ```
 
 The Kelpie server can run anywhere. Adapter plugins and node_exporter run where the
-agents run. Hermes is the first platform adapter and Claude Code the second (shared task
+agents run. On one machine the adapters run inside `kelpie serve`; with agents on several
+machines, a `kelpie agent` on each runs them and reports to a central `kelpie serve`, which
+routes actions back ([deploy.md](deploy.md)). Hermes is the first platform adapter and Claude Code the second (shared task
 lists plus a command hook; `stop` only). Paperclip, OpenClaw, Codex and a GitHub Issues /
 Linear task-queue adapter are P2, built on signal.
 

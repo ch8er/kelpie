@@ -178,6 +178,7 @@ The incidents behind each rule, the design and the daily report in full:
 
 - [How Kelpie works](https://github.com/ch8er/kelpie/blob/main/docs/guide.md): rules, daily report, alerts, traces, budgets
 - [Install and run](https://github.com/ch8er/kelpie/blob/main/docs/install.md): uv, Docker, `kelpie doctor`, ports, tokens, data
+- [Several machines](https://github.com/ch8er/kelpie/blob/main/docs/deploy.md): `kelpie agent` on each, a central `kelpie serve` (laptop + cloud VM, two VMs)
 - [Configuration reference](https://github.com/ch8er/kelpie/blob/main/docs/configuration.md): every section, rule and threshold
 - Quickstarts: [Hermes](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md), [Claude Code](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md);
   the [observe-to-act checklist](https://github.com/ch8er/kelpie/blob/main/docs/act-checklist.md)

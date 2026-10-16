@@ -751,11 +751,11 @@ cloud VM, several VMs). Blocks the release.
 
 **Acceptance criteria**
 - [x] `kelpie agent`: runs on each machine with agents, hosts the platform adapters' local parts (board, spool, worktree git state) and executes local actions (Hermes CLI, Claude Code marker); no rules, no ledger
-- [ ] Central `kelpie serve` merges snapshots from all agents (task and session ids namespaced by host), runs rules, ledger, report and alerts; routes each action to the agent that owns the task
-- [ ] Transport: HTTPS or a configured plain-HTTP bind on a private network, per-agent token, request size limits, agent heartbeats; a silent agent → alert, and its tasks are not treated as abandoned while it is silent
-- [ ] Single-host mode (adapters in-process) stays the default and unchanged
-- [ ] Prometheus/node_exporter and OTLP already work over the network; document one setup per case: laptop only, laptop + cloud VM, two VMs
-- [ ] e2e: two simulated hosts, one farm; an agent going silent; an action routed to the right host
+- [x] Central `kelpie serve` merges snapshots from all agents (task and session ids namespaced by host), runs rules, ledger, report and alerts; routes each action to the agent that owns the task
+- [x] Transport: HTTPS or a configured plain-HTTP bind on a private network, per-agent token, request size limits, agent heartbeats; a silent agent → alert, and its tasks are not treated as abandoned while it is silent
+- [x] Single-host mode (adapters in-process) stays the default and unchanged
+- [x] Prometheus/node_exporter and OTLP already work over the network; document one setup per case: laptop only, laptop + cloud VM, two VMs
+- [x] e2e: two simulated hosts, one farm; an agent going silent; an action routed to the right host
 - [x] Security: the agent never accepts arbitrary commands, only the action kinds its adapters implement
 
 ### project: code health — performance, duplication, refactoring

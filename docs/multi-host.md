@@ -1,8 +1,8 @@
 # Multi-host: `kelpie agent` on agent machines, central `kelpie serve`
 
 Design for the P0 release blocker in [plan.md](plan.md) ("P0 before the first release —
-multi-host") and its [roadmap](roadmap.md) entry. Setup guides per case follow in
-[install.md](install.md) once the code lands.
+multi-host") and its [roadmap](roadmap.md) entry. Setup per case (laptop only, laptop +
+cloud VM, two VMs): [deploy.md](deploy.md); keys: [configuration.md](configuration.md#agent).
 
 ## Problem
 

@@ -224,7 +224,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Daily "cost of chaos" report with dollars, cost per completed task, and before/after verification of fixes
 - [ ] Token savings that act: rule 12 (conflict warning), dispatch gate, huge tool outputs
 - [ ] Token optimization recommendations (cache breaks, model fit per role, diff-only review) and throughput metrics
-- [ ] Multi-host: `kelpie agent` on each agent machine, central `kelpie serve` anywhere (blocks the release)
+- [x] Multi-host: `kelpie agent` on each agent machine, central `kelpie serve` anywhere (blocks the release)
 - [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring
 - [ ] Whole-codebase security audit after the code-health pass (blocks the release)
 - [ ] `kelpie demo`: the farm simulator replays real incidents so anyone can see Kelpie work in two minutes without a farm
