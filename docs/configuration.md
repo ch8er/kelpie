@@ -980,7 +980,7 @@ the agents' relays).
 | `action_timeout` | `30s` | How long an action waits for the agent's result, and each agent's total per tick (1s–2m). |
 | `max_clock_skew` | `2m` | A report whose clock is further off is not merged, and a human is told (5s–1h). |
 | `max_body_bytes` | 16 MiB | Largest request body, also after gzip. |
-| `max_connections` | `64` | Connections not yet authenticated (also at most 16 per address); each has 10s to present its token. |
+| `max_connections` | `64` | Connections not yet authenticated (8–10000; also at most 16 per address, per /64 for IPv6); each has 3s to present its token, and when all are taken the oldest is cut. |
 
 `[[hub.agents]]`: one entry per machine, `name` (as in its `[agent] name`) and `token_env`
 (the variable holding its token on the server). Names and variables must be distinct, and
