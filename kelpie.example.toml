@@ -543,3 +543,21 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # min_sample = 10                  # fewer observations on a side: a small sample
 # [report.sections.<name>]         # settings of one report section (keys it declares; any
 #                                  # other key: noted, and the section is skipped)
+#
+# Context and model fit (kelpie.traces.fit). A switch to a cheaper model is recommended
+# only for roles named here: short outputs alone do not make work routine.
+# [report.sections.tokens_fit]
+# routine_roles = ["triage", "status"]  # roles whose routine work may move to a cheaper model
+# allowed_models = ["model-small"]      # candidates besides the models the farm already runs
+# routine_min_calls = 20                # calls a day before a role counts as routine
+# routine_output_tokens = 400           # median output per call at most
+# routine_max_tool_tokens = 1000        # mean tool output per call at most
+# min_after = "12h"                     # after a switch, wait this long before judging it
+# min_saving_tokens = 50000             # a recommendation needs at least this a day
+#
+# Token optimization (kelpie.traces.tokens): prompt cache, context growth, restarts.
+# [report.sections.tokens]
+# cache_ttl = "5m"                      # the provider's cache lifetime (some offer 1h)
+# runaway_tokens = 100000               # a session past this without compacting runs away
+# compact_at = 50000                    # where compacting or a handoff would cut it
+# min_saving_tokens = 50000             # a recommendation needs at least this a day

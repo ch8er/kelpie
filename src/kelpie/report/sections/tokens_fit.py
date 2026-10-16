@@ -3,8 +3,8 @@ per role and diff-only review (:mod:`kelpie.traces.fit`), priced by ``[prices]``
 
 Roles are the report's (the session owner's), else the task's; sessions of an unknown role
 get no advice. A switch to a cheaper model is priced only for ``routine_roles`` the
-operator named (``[report.sections.tokens_fit]`` once the report passes section settings
-through; until then lines only). Unused tools need the platform to list the offered tools
+operator named in ``[report.sections.tokens_fit] routine_roles`` (none by default: lines
+only). Unused tools need the platform to list the offered tools
 in ``kelpie.tools.offered`` (see :mod:`kelpie.traces.fit`); without it the section is
 silent about them. The estimates overlap with other sections and are not additive: a
 fragment's tokens also count in context growth and cache misses (``tokens``), and model fit
@@ -14,10 +14,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import replace
 
 from kelpie.core.spans import TokenUsage, counted_llm, last_at, span_key
 from kelpie.report.sections import Advice, Section, SectionContext, register_section
+from kelpie.report.sections._config import keys_of, settings_from
 from kelpie.traces.fit import (
     UNKNOWN_ROLE,
     FitSettings,
@@ -47,7 +47,7 @@ OVERLAP_NOTE = (
 )
 
 
-@register_section("tokens_fit")
+@register_section("tokens_fit", keys=keys_of(FitSettings()))
 def tokens_fit(ctx: SectionContext, settings: FitSettings | None = None) -> Section | None:
     cfg = _settings(ctx, settings)
     inputs = ctx.inputs
@@ -94,19 +94,8 @@ def tokens_fit(ctx: SectionContext, settings: FitSettings | None = None) -> Sect
 
 
 def _settings(ctx: SectionContext, settings: FitSettings | None) -> FitSettings:
-    """``settings``, else the defaults with ``routine_roles`` and ``allowed_models`` from
-    the section's config when the report passes one (``ctx.config``)."""
-    if settings is not None:
-        return settings
-    config = getattr(ctx, "config", None)
-    if not isinstance(config, Mapping):
-        return FitSettings()
-    names = {}
-    for key in ("routine_roles", "allowed_models"):
-        value = config.get(key)
-        if isinstance(value, list | tuple) and all(isinstance(v, str) for v in value):
-            names[key] = tuple(value)
-    return replace(FitSettings(), **names)
+    """``settings``, else ``[report.sections.tokens_fit]`` over the defaults."""
+    return settings or settings_from(FitSettings(), ctx.config)
 
 
 class _Prices:

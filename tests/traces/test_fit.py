@@ -16,8 +16,9 @@ from kelpie.core.model import Return, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.serde import snapshot_from_dict
 from kelpie.core.spans import TokenUsage, counted_llm, span_key
 from kelpie.report.daily import ReportInputs, build_report, render_markdown
-from kelpie.report.sections import SECTIONS
-from kelpie.report.sections.tokens_fit import _settings, tokens_fit
+from kelpie.report.sections import SECTION_KEYS, SECTIONS
+from kelpie.report.sections._config import settings_from
+from kelpie.report.sections.tokens_fit import tokens_fit
 from kelpie.traces.fit import (
     FitSettings,
     Read,
@@ -323,21 +324,21 @@ def test_default_settings_price_no_model_switch() -> None:
 
 def test_section_settings_from_the_report_config() -> None:
     data, snapshot = _load()
-    seen: list[FitSettings] = []
-
-    class Ctx:  # a context that carries section settings, as ctx.config will
-        def __init__(self, ctx: Any) -> None:
-            self.__dict__.update({k: getattr(ctx, k) for k in ctx.__slots__})
-            self.config = {"routine_roles": ["triage"], "allowed_models": ["model-tiny"]}
-
-    def builder(ctx: Any) -> Any:
-        seen.append(_settings(Ctx(ctx), None))
-        return tokens_fit(Ctx(ctx))  # type: ignore[arg-type]
-
-    [section] = build_report(_inputs(data, snapshot), {"tokens_fit": builder}).sections
-    assert seen[0].routine_roles == ("triage",) and seen[0].allowed_models == ("model-tiny",)
+    keys = {"tokens_fit": SECTION_KEYS["tokens_fit"]}
+    config = {"tokens_fit": {"routine_roles": ["triage"], "allowed_models": ["model-tiny"]}}
+    inputs = replace(_inputs(data, snapshot), section_config=config)
+    [section] = build_report(inputs, ONLY, keys).sections
     assert "Try `model-tiny` for triage" in {a.title for a in section.advice}
-    assert _settings(Ctx.__new__(Ctx), None) == FitSettings()
+    assert {"routine_roles", "allowed_models", "min_saving_tokens"} <= keys["tokens_fit"]
+    # a value of the wrong type fails this section only, and the report says so
+    bad = replace(inputs, section_config={"tokens_fit": {"routine_roles": "triage"}})
+    [section] = build_report(bad, ONLY, keys).sections
+    assert section.lines == ("This section failed (tokens_fit); see the log.",)
+    assert _settings_for({}) == FitSettings()
+
+
+def _settings_for(config: dict[str, Any]) -> FitSettings:
+    return settings_from(FitSettings(), config)
 
 
 def test_review_ignores_files_shared_across_tasks() -> None:

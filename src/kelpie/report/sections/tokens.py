@@ -20,6 +20,7 @@ from kelpie.core.model import Snapshot, Status
 from kelpie.core.spans import TokenUsage, counted_llm, last_at, span_key
 from kelpie.report.daily import session_of
 from kelpie.report.sections import Advice, Section, SectionContext, register_section
+from kelpie.report.sections._config import keys_of, settings_from
 from kelpie.traces.tokens import (
     MISS_KINDS,
     UNKNOWN_ROLE,
@@ -61,9 +62,9 @@ OVERLAP_NOTE = (
 )
 
 
-@register_section("tokens")
+@register_section("tokens", keys=keys_of(TokenSettings()))
 def tokens(ctx: SectionContext, settings: TokenSettings | None = None) -> Section | None:
-    cfg = settings or TokenSettings()
+    cfg = settings or settings_from(TokenSettings(), ctx.config)
     inputs = ctx.inputs
     board = Snapshot(
         now=ctx.end,
