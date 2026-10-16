@@ -5,9 +5,11 @@ includes, ``.gitattributes``, ``.git/info/attributes``, the objects) is untruste
 programs named in that config (filter drivers, fsmonitor, gpg for signed commits), so this
 module asks git only things that do not need them, and switches off what it can:
 
-- three git commands per workspace: ``config --get-regexp '^filter\\.'`` (lists filter
-  drivers, runs nothing), ``status --porcelain=v2`` with every listed driver emptied, and
-  ``cat-file commit <oid>`` (no gpg, no filters, unlike ``log``);
+- up to five git commands per workspace: ``config --get-regexp '^filter\\.'`` (lists filter
+  drivers, runs nothing), ``status --porcelain=v2 -z`` with every listed driver emptied,
+  ``cat-file commit <oid>`` (no gpg, no filters, unlike ``log``), and, with base refs,
+  ``merge-base`` and ``diff-tree -r --name-only`` (plumbing that compares trees by object id:
+  no textconv, no external diff, no filters);
 - ``-c`` overrides on every call: no fsmonitor, no global attributes file, no hooks, no
   submodule recursion; ``--attr-source=<empty tree>`` where git supports it (2.40+), so the
   worktree's ``.gitattributes`` is not read;
@@ -21,6 +23,15 @@ module asks git only things that do not need them, and switches off what it can:
 
 Any failure leaves the fields ``None`` and says why in ``GitState.problem``. Nothing here
 raises. ``last_commit`` is the first ``ABBREV`` hex digits of the ``HEAD`` object id.
+
+``paths`` are the files the task touches: the uncommitted entries of ``status`` (untracked
+included, a new untracked directory as one ``dir/`` entry; both sides of a rename) plus,
+when ``base_refs`` are given, the files changed between ``HEAD`` and its newest merge-base
+with any of them (``git merge-base HEAD <ref>...``, so a stale ``origin/main`` next to a
+fresh ``main`` does not pull in commits the branch merely rebased onto). Base refs that do
+not resolve are skipped; when none resolves (or the history is too shallow) only the
+uncommitted paths count. At most ``MAX_PATHS`` paths are kept, the first in sorted order,
+and ``paths_truncated`` says so.
 """
 
 from __future__ import annotations
@@ -71,6 +82,16 @@ FILTER_KEYS = ("clean", "smudge", "process")
 _OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _VERSION = re.compile(r"(\d+)\.(\d+)")
 _ENTRY_PREFIXES = ("1 ", "2 ", "u ", "? ")  # changed, renamed, unmerged, untracked
+# Fields before the path in each ``status --porcelain=v2`` entry type.
+_PATH_FIELD = {"1": 8, "2": 9, "u": 10, "?": 1}
+MAX_PATHS = 1000  # paths kept per workspace
+# A base ref from configuration: a plain ref name, never an option.
+_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
+
+
+def valid_base_ref(ref: str) -> bool:
+    """Whether ``ref`` can be given to git as a base ref (no option, no revision syntax)."""
+    return bool(_REF.fullmatch(ref)) and ".." not in ref and not ref.endswith((".", "/", ".lock"))
 
 
 class Problem(StrEnum):
@@ -91,6 +112,8 @@ class GitState:
     last_commit_at: datetime | None = None  # committer date of HEAD, UTC
     branch: str | None = None
     changed_files: int | None = None  # entries of ``status`` (untracked included)
+    paths: tuple[str, ...] | None = None  # files the task touches, sorted (see module doc)
+    paths_truncated: bool = False  # more than MAX_PATHS; the first ones by sort order are kept
     problem: Problem | None = None
 
     @property
@@ -216,10 +239,12 @@ def read_git_state(
     *,
     branch: str | None = None,
     deadline: float | None = None,
+    base_refs: tuple[str, ...] = (),
 ) -> GitState:
     """Git state of the worktree at ``path``.
 
     ``branch`` is a branch name known from elsewhere (the Kanban task); it wins over git's.
+    ``base_refs`` (validated with :func:`valid_base_ref`) are the branches work starts from.
     ``timeout`` limits each git call; ``deadline`` (``time.monotonic()``) limits all of them.
     Only a directory with its own ``.git`` is read: git is never left to search parent
     directories for a repository.
@@ -230,12 +255,18 @@ def read_git_state(
     if problem is not None:
         return GitState(branch=branch, problem=problem)
     try:
-        return _read(path, timeout, deadline, branch)
+        return _read(path, timeout, deadline, branch, base_refs)
     except _Stop as stop:
         return GitState(branch=branch, problem=stop.problem)
 
 
-def _read(path: Path, timeout: float, deadline: float | None, branch: str | None) -> GitState:
+def _read(
+    path: Path,
+    timeout: float,
+    deadline: float | None,
+    branch: str | None,
+    base_refs: tuple[str, ...] = (),
+) -> GitState:
     trees = [EMPTY_TREE, EMPTY_TREE_SHA256]  # the empty tree of a SHA-1, then SHA-256 repo
 
     def git(command: str, *args: str, extra: tuple[str, ...] = ()) -> tuple[int, str]:
@@ -262,6 +293,7 @@ def _read(path: Path, timeout: float, deadline: float | None, branch: str | None
     code, out = git(
         "status",
         "--porcelain=v2",
+        "-z",
         "--branch",
         "--untracked-files=normal",
         "--ignore-submodules=all",
@@ -269,16 +301,36 @@ def _read(path: Path, timeout: float, deadline: float | None, branch: str | None
     )
     if code != 0:
         return GitState(branch=branch, problem=Problem.FAILED)
-    oid, head, changed = _parse_status(out)
+    oid, head, changed, paths = _parse_status(out)
     committed_at = None
     if oid is not None:
         code, raw = git("cat-file", "commit", oid)
         committed_at = _committed_at(raw) if code == 0 else None
+        refs = [r for r in base_refs if valid_base_ref(r)]
+        if refs:
+            # Only refs that resolve: merge-base fails as a whole on one unknown name.
+            known = []
+            for ref in refs:
+                code, _ = git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+                if code == 0:
+                    known.append(ref)
+            if known:
+                code, out = git("merge-base", oid, *known)
+                base = out.strip()
+                if code == 0 and _OID.fullmatch(base):
+                    code, out = git(
+                        "diff-tree", "-r", "--name-only", "--no-renames", "-z", base, oid
+                    )
+                    if code == 0:
+                        paths.update(p for p in out.split("\0") if p)
+    ordered = sorted(paths)
     return GitState(
         last_commit=oid[:ABBREV] if oid else None,
         last_commit_at=committed_at,
         branch=branch or head,
         changed_files=changed,
+        paths=tuple(ordered[:MAX_PATHS]),
+        paths_truncated=len(ordered) > MAX_PATHS,
     )
 
 
@@ -298,20 +350,31 @@ def _filter_drivers(listing: str) -> set[str] | None:
     return names
 
 
-def _parse_status(out: str) -> tuple[str | None, str | None, int]:
-    """``(oid of HEAD, branch, number of entries)`` from ``status --porcelain=v2 --branch``."""
+def _parse_status(out: str) -> tuple[str | None, str | None, int, set[str]]:
+    """``(oid of HEAD, branch, number of entries, paths)`` from
+    ``status --porcelain=v2 -z --branch``: NUL-terminated records; a rename (``2``) is followed
+    by one more record, its original path. Paths are taken verbatim (``-z`` does not quote)."""
     oid = head = None
     changed = 0
-    for line in out.splitlines():
-        if line.startswith("# branch.oid "):
-            value = line.removeprefix("# branch.oid ").strip()
+    paths: set[str] = set()
+    records = iter(out.split("\0"))
+    for record in records:
+        if record.startswith("# branch.oid "):
+            value = record.removeprefix("# branch.oid ").strip()
             oid = value if _OID.fullmatch(value) else None  # "(initial)": no commit yet
-        elif line.startswith("# branch.head "):
-            value = line.removeprefix("# branch.head ").strip()
+        elif record.startswith("# branch.head "):
+            value = record.removeprefix("# branch.head ").strip()
             head = value if value and value != "(detached)" else None
-        elif line.startswith(_ENTRY_PREFIXES):
+        elif record.startswith(_ENTRY_PREFIXES):
             changed += 1
-    return oid, head, changed
+            fields = record.split(" ", _PATH_FIELD[record[0]])
+            if len(fields) > _PATH_FIELD[record[0]] and fields[-1]:
+                paths.add(fields[-1])
+            if record[0] == "2":
+                original = next(records, "")
+                if original:
+                    paths.add(original)
+    return oid, head, changed, paths
 
 
 def _committed_at(raw: str) -> datetime | None:

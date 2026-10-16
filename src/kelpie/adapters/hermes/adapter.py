@@ -58,8 +58,10 @@ within ``lookback``::
 ``exit_reason`` is the outcome, followed by the run's error text when there is one.
 
 Progress note and git state. ``Session.summary`` is ``task_runs.summary``. The git fields
-(``last_commit``, ``last_commit_at``, ``branch``, ``changed_files``, ``dirty_worktree``) come
-from the workspace as it is now, so they go only on the latest run of a task that is not
+(``last_commit``, ``last_commit_at``, ``branch``, ``changed_files``, ``dirty_worktree``) and
+the task's ``files`` (what it changed since its newest merge-base with ``base_refs``, plus
+what is uncommitted; rule 12 compares them across live tasks) come from the workspace as it
+is now, so they go only on the latest run of a task that is not
 finished and whose ``workspace_kind`` is ``worktree`` with an existing absolute
 ``workspace_path``. A resolved path used by more than one such run is read for none of them.
 Workspaces are agent-controlled: see :mod:`kelpie.adapters.hermes.git_state` for how git is run
@@ -97,6 +99,7 @@ from kelpie.adapters.hermes.git_state import (
     Problem,
     probe_git,
     read_git_state,
+    valid_base_ref,
     warn_once,
 )
 from kelpie.adapters.hermes.stop import (
@@ -129,6 +132,9 @@ DEFAULT_DB = Path("~/.hermes/kanban.db")
 DEFAULT_SPOOL = Path("~/.hermes/kelpie/spool.jsonl")
 DEFAULT_LOOKBACK = timedelta(hours=24)
 DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
+# Branches task work starts from: a task's files are what it changed since its newest
+# merge-base with any of them, plus what is uncommitted.
+DEFAULT_BASE_REFS = ("origin/main", "main")
 BUSY_TIMEOUT_MS = 5000
 MAX_BODY = 8000  # characters of a task's description kept in the snapshot
 # The ``tasks.workspace_kind`` whose directory is the task's own: ``dir`` may point to a shared
@@ -279,6 +285,7 @@ class HermesAdapter:
     lookback: timedelta = DEFAULT_LOOKBACK
     git_state: bool = True  # read the git state of the workspaces of live tasks
     git_timeout: timedelta = DEFAULT_GIT_TIMEOUT  # per git call
+    base_refs: tuple[str, ...] = DEFAULT_BASE_REFS  # see DEFAULT_BASE_REFS
     cli: str = DEFAULT_CLI  # the Hermes executable that carries out ``stop``
     cli_timeout: float = CLI_TIMEOUT  # seconds; a stop runs inside the control loop tick
     # Assignees that are people, not agents (Hermes lowercases profile names).
@@ -292,6 +299,9 @@ class HermesAdapter:
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path).expanduser()
         self.human_owners = frozenset(h.strip().casefold() for h in self.human_owners)
+        self.base_refs = tuple(self.base_refs)
+        if bad := [r for r in self.base_refs if not valid_base_ref(r)]:
+            raise ValueError(f"invalid base refs: {bad}")
         if self.spool is not None:
             self.spool = Path(self.spool).expanduser()
 
@@ -386,7 +396,8 @@ class HermesAdapter:
         except sqlite3.Error as exc:
             raise HermesError(f"cannot read Hermes kanban database {self.db_path}: {exc}") from exc
         if self.git_state:  # outside the read transaction: git may be slow
-            sessions = self._with_git_state(sessions, tasks, rows, now)
+            sessions, files = self._with_git_state(sessions, tasks, rows, now)
+            tasks = tuple(replace(t, files=files[t.id]) if t.id in files else t for t in tasks)
         owners = tuple(
             Owner(
                 id=p,
@@ -539,8 +550,9 @@ class HermesAdapter:
         tasks: Sequence[Task],
         rows: Mapping[str, sqlite3.Row],
         now: datetime,
-    ) -> tuple[Session, ...]:
-        """Attach the workspace's git state to the latest run of each live task.
+    ) -> tuple[tuple[Session, ...], dict[str, tuple[str, ...]]]:
+        """Attach the workspace's git state to the latest run of each live task, and return
+        the files each such task touches (for ``Task.files``).
 
         Git describes the worktree as it is now, so older runs of a task get nothing, and
         neither do finished tasks: their worktree says nothing about a session any more.
@@ -578,8 +590,11 @@ class HermesAdapter:
         if jobs:
             states.update(self._read_git(jobs, now))
         attached: dict[str, Session] = {}
+        files: dict[str, tuple[str, ...]] = {}
         for s in sessions:
             if (state := states.get(s.id)) is not None:
+                if state.paths is not None:
+                    files[s.task_id] = state.paths
                 attached[s.id] = replace(
                     s,
                     last_commit=state.last_commit,
@@ -588,7 +603,7 @@ class HermesAdapter:
                     changed_files=state.changed_files,
                     dirty_worktree=state.dirty,
                 )
-        return tuple(attached.get(s.id, s) for s in sessions)
+        return tuple(attached.get(s.id, s) for s in sessions), files
 
     def _read_git(
         self, jobs: Mapping[Path, tuple[Session, str | None]], now: datetime
@@ -602,7 +617,14 @@ class HermesAdapter:
             return {s.id: GitState(branch=b, problem=problem) for s, b in jobs.values()}
         with ThreadPoolExecutor(GIT_WORKERS, thread_name_prefix="kelpie-git") as pool:
             futures = {
-                path: pool.submit(read_git_state, path, timeout, branch=b, deadline=deadline)
+                path: pool.submit(
+                    read_git_state,
+                    path,
+                    timeout,
+                    branch=b,
+                    deadline=deadline,
+                    base_refs=self.base_refs,
+                )
                 for path, (_, b) in jobs.items()
             }
         states: dict[str, GitState] = {}
@@ -615,6 +637,13 @@ class HermesAdapter:
                 state = GitState(branch=branch, problem=Problem.FAILED)
             if state.problem is Problem.TIMEOUT:
                 self._git_backoff[path] = now + GIT_BACKOFF
+            if state.paths_truncated:
+                warn_once(
+                    (str(path), "truncated"),
+                    "hermes: %s changes more than %s files; only the first are compared",
+                    path,
+                    len(state.paths or ()),
+                )
             self._report(path, state.problem)
             states[session.id] = state
         return states

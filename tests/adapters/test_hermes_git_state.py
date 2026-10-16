@@ -349,7 +349,7 @@ def test_unborn_branch_comes_from_status(tmp_path: Path) -> None:
     git(fresh, "init", "-q", "-b", "start")
     (fresh / "x.txt").write_text("x\n")
     state = read_git_state(fresh, 5.0)
-    assert state == GitState(branch="start", changed_files=1)
+    assert state == GitState(branch="start", changed_files=1, paths=("x.txt",))
 
 
 def test_parent_repository_is_not_searched(repo: Path) -> None:
@@ -784,3 +784,110 @@ def test_committer_date_parsing(raw: str, expected: datetime | None) -> None:
 )
 def test_filter_driver_names(listing: str, expected: set[str] | None) -> None:
     assert gs._filter_drivers(listing) == expected
+
+
+# --- changed paths (Task.files) -----------------------------------------------------------
+
+
+def branch_off(repo: Path, name: str = "task") -> None:
+    git(repo, "checkout", "-q", "-b", name)
+
+
+def commit(repo: Path, *files: str, message: str = "change") -> None:
+    for f in files:
+        target = repo / f
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{f} {message}\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", message)
+
+
+def test_paths_are_uncommitted_entries_with_renames_spaces_and_untracked(repo: Path) -> None:
+    commit(repo, "old name.txt", "keep.txt")
+    git(repo, "mv", "old name.txt", "new name.txt")
+    (repo / "keep.txt").write_text("edited\n")
+    (repo / "dir").mkdir()
+    (repo / "dir" / "untracked file.py").write_text("x\n")
+    state = read_git_state(repo, 5.0)
+    # A new untracked directory is one entry, as status lists it (untracked-files=normal).
+    assert state.paths == ("dir/", "keep.txt", "new name.txt", "old name.txt")
+    assert state.changed_files == 3 and not state.paths_truncated
+
+
+def test_clean_worktree_without_base_refs_has_no_paths(repo: Path) -> None:
+    assert read_git_state(repo, 5.0).paths == ()
+
+
+def test_committed_branch_changes_count_against_the_base(repo: Path) -> None:
+    branch_off(repo)
+    commit(repo, "src/routes.py", message="one")
+    commit(repo, "src/types.py", message="two")
+    (repo / "notes.md").write_text("wip\n")
+    state = read_git_state(repo, 5.0, base_refs=("main",))
+    assert state.paths == ("notes.md", "src/routes.py", "src/types.py")
+    assert read_git_state(repo, 5.0).paths == ("notes.md",)  # without base refs
+
+
+def test_newest_merge_base_wins_over_a_stale_base(repo: Path) -> None:
+    git(repo, "branch", "stale")  # an old copy of main, never updated
+    commit(repo, "landed.py", message="merged elsewhere")  # main moves on
+    branch_off(repo)  # the task starts from the new main
+    commit(repo, "mine.py")
+    state = read_git_state(repo, 5.0, base_refs=("stale", "main"))
+    assert state.paths == ("mine.py",)  # landed.py is main's, not the task's
+
+
+def test_unknown_and_invalid_base_refs_are_skipped(repo: Path) -> None:
+    branch_off(repo)
+    commit(repo, "mine.py")
+    for refs in [("nope", "main"), ("-x", "main"), ("a..b", "main")]:
+        assert read_git_state(repo, 5.0, base_refs=refs).paths == ("mine.py",)
+    assert read_git_state(repo, 5.0, base_refs=("nope",)).paths == ()
+
+
+@pytest.mark.parametrize(
+    ("ref", "ok"),
+    [
+        ("main", True),
+        ("origin/main", True),
+        ("release/2.x", True),
+        ("-main", False),
+        ("a..b", False),
+        ("main.lock", False),
+        ("main/", False),
+        ("ma in", False),
+        ("main^", False),
+        ("", False),
+    ],
+)
+def test_valid_base_ref(ref: str, ok: bool) -> None:
+    assert gs.valid_base_ref(ref) is ok
+
+
+def test_paths_are_capped(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gs, "MAX_PATHS", 2)
+    for name in ("c.txt", "b.txt", "d.txt"):
+        (repo / name).write_text("x\n")
+    state = read_git_state(repo, 5.0)
+    assert state.paths == ("b.txt", "c.txt") and state.paths_truncated
+    assert state.changed_files == 3
+
+
+def test_adapter_puts_paths_on_the_task(board: Board, repo: Path) -> None:
+    branch_off(repo)
+    commit(repo, "src/routes.py")
+    (repo / "wip.py").write_text("x\n")
+    live_task(board, repo, branch="task")
+    board.run("t_1", "dev", ago(hours=1))
+    board.task("t_2", "ready", ago(days=1), assignee="dev")  # no workspace: no files
+    adapter = HermesAdapter(db_path=board.path, spool=None, base_refs=("main",))
+    tasks = {t.id: t for t in adapter.snapshot(NOW).tasks}
+    assert tasks["t_1"].files == ("src/routes.py", "wip.py")
+    assert tasks["t_2"].files == ()
+    no_git = HermesAdapter(db_path=board.path, spool=None, git_state=False)
+    assert {t.id: t.files for t in no_git.snapshot(NOW).tasks}["t_1"] == ()
+
+
+def test_adapter_rejects_invalid_base_refs(board: Board) -> None:
+    with pytest.raises(ValueError, match="base refs"):
+        HermesAdapter(db_path=board.path, spool=None, base_refs=("--upload-pack=x",))

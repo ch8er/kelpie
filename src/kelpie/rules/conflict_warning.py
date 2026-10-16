@@ -6,8 +6,9 @@ warns while both tasks are still in flight.
 
 A task is *live* while its change is unmerged: in progress, in review, accepted, blocked or
 waiting. Its files are ``Task.files`` as the adapter reports them (paths are compared after
-dropping a leading ``./``). No adapter reports them yet (Hermes gives only a count of
-changed files), so on a live farm the rule stays silent until one does. When two live tasks
+dropping a leading ``./``). The Hermes adapter reports what a task changed since its
+newest merge-base with ``base_refs`` plus what is uncommitted in its worktree, for tasks
+with a live worktree; a task without one has no files and is never compared. When two live tasks
 share files (after dropping files matching ``expected_shared``, glob patterns of files that
 are meant to be edited by many tasks, such as a changelog), each gets one ``comment`` per
 other task, naming the files they share then. It is sent once per pair (``once``): files

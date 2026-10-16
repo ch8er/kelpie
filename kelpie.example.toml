@@ -323,6 +323,8 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # enabled = true
 # git_state = true                  # git state (commit, branch, dirty files) of live task workspaces
 # git_timeout = "5s"                # limit for each git call; 2x per snapshot in total
+# base_refs = ["origin/main", "main"]  # a task's files (rule 12) are what it changed since its
+#                                   # newest merge-base with these, plus uncommitted files
 # cli = "hermes"                    # Hermes executable used to stop a run (name on PATH or a path)
 # cli_timeout = "10s"               # limit for that command (at most 60s); it runs inside the tick
 # human_owners = ["alice"]         # assignees that are people, not agents (see
