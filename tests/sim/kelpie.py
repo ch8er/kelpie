@@ -3,8 +3,10 @@
 ``kelpie serve`` gets a generated config, a free loopback port, a clean environment (only
 what the scenario passes: no tokens of the machine running the tests leak in) and its own
 ``HOME``. Its output goes to a log file; :meth:`KelpieServe.problems` returns every
-``ERROR``/``CRITICAL`` line and traceback so a scenario can fail on them. Ticks are counted
-on ``/metrics`` (``kelpie_engine_ticks_total``).
+``ERROR``/``CRITICAL`` line, every traceback and every WARNING that reports a failure (an
+action or an alert delivery that failed, a connector read that failed: Kelpie logs those as
+warnings because it keeps going) so a scenario can fail on them. Ticks are counted on
+``/metrics`` (``kelpie_engine_ticks_total``).
 """
 
 from __future__ import annotations
@@ -25,6 +27,23 @@ from pathlib import Path
 # "%(asctime)s %(levelname)s %(name)s %(message)s", asctime like "2026-10-16 01:02:03,123"
 _LEVEL = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ (?P<level>[A-Z]+) ")
 _PROBLEM_LEVELS = {"ERROR", "CRITICAL"}
+# WARNING lines that mean something failed (kelpie.core.engine, kelpie.alerts.delivery,
+# kelpie.connectors.github, kelpie.app).
+FAILURE_WARNINGS = tuple(
+    re.compile(p)
+    for p in (
+        r"action failed: ",
+        r"cannot execute; alerting instead",
+        r"no executor for action",
+        r"no alerter configured; dropped",
+        r"alert channel .*: (delivery failed|dropped an alert|an alert was dropped)",
+        r"alerts: unknown channels",
+        r"block condition for task .* failed",
+        r"condition .* could not be checked",
+        r"runs not read",
+        r"control loop still busy",
+    )
+)
 _METRIC = re.compile(r"^(?P<name>[a-zA-Z_:][\w:]*)(?P<labels>\{[^}]*\})? (?P<value>\S+)$")
 
 
@@ -72,14 +91,21 @@ def wait_for[T](
 
 
 def problems_in(lines: Sequence[str], allowed: Sequence[re.Pattern[str]] = ()) -> list[str]:
-    """Log lines at ERROR or above, and tracebacks, that no ``allowed`` pattern matches."""
+    """Log lines at ERROR or above, failure WARNINGs and tracebacks that no ``allowed``
+    pattern matches. A traceback right after an allowed line belongs to it."""
     found = []
+    excused = False  # inside the traceback of an allowed line
     for line in lines:
         m = _LEVEL.match(line)
-        bad = (m is not None and m["level"] in _PROBLEM_LEVELS) or line.startswith(
-            "Traceback (most recent call last)"
+        if m is None:
+            if line.startswith("Traceback (most recent call last)") and not excused:
+                found.append(line)
+            continue
+        bad = m["level"] in _PROBLEM_LEVELS or (
+            m["level"] == "WARNING" and any(p.search(line) for p in FAILURE_WARNINGS)
         )
-        if bad and not any(p.search(line) for p in allowed):
+        excused = bad and any(p.search(line) for p in allowed)
+        if bad and not excused:
             found.append(line)
     return found
 
@@ -123,7 +149,20 @@ class KelpieServe:
         )
         return CliResult(proc.returncode, proc.stdout, proc.stderr)
 
-    def start(self) -> None:
+    def start(self, attempts: int = 3) -> None:
+        """Start ``kelpie serve`` and wait for ``/healthz``. The port is picked free just
+        before, so another process can take it in between: then try another one."""
+        for attempt in range(attempts):
+            try:
+                self._spawn()
+                return
+            except AssertionError:
+                taken = "Address already in use" in self.log_text()
+                if not taken or attempt == attempts - 1:
+                    raise
+                self.port = free_port()
+
+    def _spawn(self) -> None:
         log = self.log_path.open("wb")
         try:
             self.proc = subprocess.Popen(
@@ -177,11 +216,24 @@ class KelpieServe:
     def ticks(self) -> int:
         return int(self.metrics().get("kelpie_engine_ticks_total", 0))
 
+    def _ticks_or_none(self) -> int | None:
+        try:
+            return self.ticks()
+        except OSError:  # one slow or refused read: the next poll tries again
+            return None
+
     def wait_ticks(self, n: int, timeout: float = 60) -> int:
         """Wait until ``n`` more ticks have completed than when called."""
-        target = self.ticks() + n
+        (now,) = wait_for(
+            "a /metrics answer",
+            lambda: (t := self._ticks_or_none()) is not None and (t,),
+            timeout,
+        )
+        target = now + n
         return wait_for(
-            f"{n} control-loop ticks", lambda: (t := self.ticks()) >= target and t, timeout
+            f"{n} control-loop ticks",
+            lambda: (t := self._ticks_or_none()) is not None and t >= target and t,
+            timeout,
         )
 
     def stop(self, timeout: float = 15) -> int:
@@ -195,7 +247,9 @@ class KelpieServe:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
-                raise AssertionError(f"kelpie serve did not stop within {timeout}s") from None
+                raise AssertionError(
+                    f"kelpie serve did not stop within {timeout}s:\n{self.log_text()[-6000:]}"
+                ) from None
         self.returncode = self.proc.returncode
         return self.returncode
 

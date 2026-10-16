@@ -77,11 +77,14 @@ jobs:
       - run: uv sync --frozen
       - run: uv run pytest tests/e2e -v --basetemp=${{ runner.temp }}/e2e
       - name: Keep the scenario logs of a failed run
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs
-          path: ${{ runner.temp }}/e2e/**/*.log
+          path: |
+            ${{ runner.temp }}/e2e/**/*.log
+            ${{ runner.temp }}/e2e/**/*.jsonl
+            ${{ runner.temp }}/e2e/**/*.toml
           if-no-files-found: ignore
 
   ci-ok:

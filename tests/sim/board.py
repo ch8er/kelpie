@@ -13,7 +13,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -214,6 +214,44 @@ class Board:
         )
         return rid
 
+    def end_run(self, run_id: int, at: datetime, outcome: str | None = None) -> None:
+        """A run ends (``outcome`` None: the worker went away without declaring one)."""
+        with connect(self.path) as conn:
+            conn.execute(
+                "UPDATE task_runs SET status = ?, ended_at = ?, outcome = ? WHERE id = ?",
+                (outcome or "ended", epoch(at), outcome, run_id),
+            )
+
+    def block(
+        self,
+        task_id: str,
+        reason: str,
+        at: datetime,
+        *,
+        kind: str | None = None,
+    ) -> None:
+        """The worker running ``task_id`` blocks it, as Hermes records it: the run ends
+        ``blocked``, the task is ``blocked`` without a claim, a ``blocked`` event carries
+        the kind (if typed) and the reason."""
+        rid = self.get(task_id).current_run_id
+        assert rid is not None, f"{task_id} has no current run"
+        self.end_run(rid, at, "blocked")
+        self.update(
+            task_id, status="blocked", current_run_id=None, claim_expires=None, block_kind=kind
+        )
+        payload: dict[str, Any] = {"reason": reason}
+        if kind:
+            payload["kind"] = kind
+        self.event(task_id, "blocked", at, payload, run_id=rid)
+
+    def hand_off(self, task_id: str, at: datetime, outcome: str = "review_requested") -> None:
+        """The worker hands the task over to review: its run ends with ``outcome``."""
+        rid = self.get(task_id).current_run_id
+        assert rid is not None, f"{task_id} has no current run"
+        self.end_run(rid, at, outcome)
+        self.update(task_id, status="review", current_run_id=None, claim_expires=None)
+        self.event(task_id, outcome, at, run_id=rid)
+
     # --- reading ---------------------------------------------------------------------
 
     def _read(self, sql: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
@@ -254,7 +292,3 @@ class Board:
             "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id", (task_id,)
         )
         return [r["body"] for r in rows]
-
-
-def now_utc() -> datetime:
-    return datetime.now(UTC)

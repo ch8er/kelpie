@@ -23,7 +23,7 @@ from tests.sim.board import Board
 from tests.sim.channels import Channels
 from tests.sim.github import TOKEN as GITHUB_TOKEN
 from tests.sim.github import FakeGitHub
-from tests.sim.kelpie import KelpieServe
+from tests.sim.kelpie import KelpieServe, wait_for
 from tests.sim.spool import Spool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -54,11 +54,13 @@ class Farm:
         self.spool = Spool(hermes_home / "kelpie" / "spool.jsonl")
         bin_dir = root / "bin"
         bin_dir.mkdir()
-        self.hermes_path = hermes_cli.install(bin_dir, REPO_ROOT)
+        self.hermes_log = hermes_home / hermes_cli.CALLS
+        self.hermes_path = hermes_cli.install(bin_dir, REPO_ROOT, self.hermes_log)
         self.channels = channels
         self.github = github
         self.kelpie: KelpieServe | None = None
-        # Log lines a scenario expects at ERROR level (each is a regex).
+        # Problem lines (ERROR, or a WARNING that reports a failure) a scenario expects in
+        # Kelpie's log, as regexes.
         self.allowed_errors: list[re.Pattern[str]] = []
 
     def ago(self, **kw: float) -> datetime:
@@ -119,15 +121,34 @@ class Farm:
         self.kelpie.start()
         return self.kelpie
 
+    def wait_message(self, *needles: str, timeout: float = 30) -> str:
+        """The first Telegram message (every alert goes there) containing all ``needles``."""
+
+        def probe() -> str | None:
+            return next(
+                (t for t in self.channels.telegram_texts() if all(n in t for n in needles)), None
+            )
+
+        return wait_for(f"a Telegram message with {needles}", probe, timeout)
+
+    def messages(self, *needles: str) -> list[str]:
+        """Telegram messages containing all ``needles``."""
+        return [t for t in self.channels.telegram_texts() if all(n in t for n in needles)]
+
     def hermes_calls(self) -> list[dict[str, Any]]:
-        return hermes_cli.calls(self.board.path.parent)
+        return hermes_cli.calls(self.hermes_log)
+
+    def stop(self) -> int:
+        """Stop ``kelpie serve`` (SIGTERM); queued alerts are delivered before it exits, so
+        checks that something was *not* sent belong after this."""
+        return self.kelpie.stop() if self.kelpie is not None else 0
 
     def close(self) -> None:
-        """Stop ``kelpie serve``; fail on a bad exit or any unexpected ERROR in its log."""
+        """Stop ``kelpie serve``; fail on a bad exit or any unexpected problem in its log."""
         kelpie = self.kelpie
         if kelpie is None:
             return
-        code = kelpie.stop()
+        code = self.stop()
         problems = kelpie.problems(self.allowed_errors)
         if code != 0 or problems:
             raise AssertionError(

@@ -15,12 +15,14 @@ mode (act only where Kelpie can act on Hermes: `loop_breaker` stops a run, `ci_e
 cancels a build), waits a few 1-second ticks on `/metrics`, and asserts on the board, the
 Hermes calls and the messages in the channels.
 
-The `farm` fixture fails a scenario when `kelpie serve` logs anything at ERROR or above (or a
-traceback) that the scenario did not list in `farm.allowed_errors`, or does not exit cleanly
-on SIGTERM.
+The `farm` fixture fails a scenario when `kelpie serve` logs anything at ERROR or above, a
+traceback, or a WARNING that reports a failure (a failed action or alert delivery, a failed
+GitHub read: `FAILURE_WARNINGS` in `tests/sim/kelpie.py`) that the scenario did not list in
+`farm.allowed_errors`, or does not exit cleanly on SIGTERM. Check that something was *not*
+sent after `farm.stop()`: Kelpie delivers queued alerts before it exits.
 
 ```bash
-uv run pytest tests/e2e -v                      # all scenarios, about a minute
+uv run pytest tests/e2e -v                      # all scenarios (seconds each)
 uv run pytest tests/e2e --basetemp=/tmp/e2e     # keep each farm and kelpie-serve.log
 ```
 

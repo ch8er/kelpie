@@ -2,20 +2,24 @@
 may run to the simulated board, the way Hermes' ``kanban_db`` does.
 
 Kelpie runs the CLI with an allow-listed environment (no ``PYTHONPATH``), so the farm writes
-a small launcher script with this repository's path baked in (:func:`install`).
+a small launcher script with this repository's path and the call log baked in
+(:func:`install`).
 
-Calls are appended as JSON lines to ``hermes-calls.jsonl`` next to the board named by
-``$HERMES_KANBAN_DB``: the arguments, the names of the environment variables the command got
-(never their values) and the exit code.
+Every call is appended as a JSON line to the call log (``hermes-calls.jsonl`` next to the
+board), whatever its environment and even if the command crashes: the arguments, the names
+of the environment variables the command got (never their values), the board it was pointed
+at and the exit code.
 
 Supported commands (anything else exits 2 and is recorded):
 
-- ``kanban block [--kind K] [--] <task> <reason>``: records ``BLOCKED: <reason>`` as a
-  comment first (as Hermes does, so a lost race leaves a stray comment), then in one
-  transaction: the task must be ``running`` and, with ``$HERMES_KANBAN_RUN_ID``, that run
-  must be its current run (``expected_run_id``); the task becomes ``blocked`` with
-  ``block_kind`` K, its claim is released, the run ends with outcome ``blocked`` and a
-  ``blocked`` event carries the kind and the reason.
+- ``kanban block <task> <reason> [--kind K]`` (options anywhere, ``--`` ends them): records
+  ``BLOCKED: <reason>`` as a comment first (as Hermes does, so a lost race leaves a stray
+  comment), then in one transaction: the task must be ``running`` or ``ready``; when
+  ``$HERMES_KANBAN_TASK`` names this task, ``$HERMES_KANBAN_RUN_ID`` pins the run (Hermes'
+  ``_worker_run_id_for`` passes it as ``expected_run_id``), so the block fails if that run is
+  no longer the task's current run; the task becomes ``blocked`` with ``block_kind`` K, its
+  claim is released, the run ends with outcome ``blocked`` and a ``blocked`` event carries
+  the kind and the reason.
 - ``kanban unblock <task>``: a ``blocked`` task goes back to ``ready``; an ``unblocked``
   event is recorded.
 
@@ -34,6 +38,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 CALLS = "hermes-calls.jsonl"
+BLOCK_KINDS = ("needs_input", "capability", "transient", "dependency")
 FAIL = "hermes-fail"
 BOARD_ENV = "HERMES_KANBAN_DB"
 TASK_ENV = "HERMES_KANBAN_TASK"
@@ -44,15 +49,16 @@ class Refused(Exception):
     """Hermes refuses the command (exit 1)."""
 
 
-def install(directory: Path, repo_root: Path) -> Path:
-    """Write an executable ``hermes`` launcher into ``directory``; return its path."""
+def install(directory: Path, repo_root: Path, log: Path) -> Path:
+    """Write an executable ``hermes`` launcher into ``directory`` that records its calls in
+    ``log``; return its path."""
     path = directory / "hermes"
     path.write_text(
         f"#!{sys.executable}\n"
         "import sys\n"
         f"sys.path.insert(0, {str(repo_root)!r})\n"
         "from tests.sim.hermes_cli import main\n"
-        "raise SystemExit(main(sys.argv[1:]))\n",
+        f"raise SystemExit(main(sys.argv[1:], {str(log)!r}))\n",
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -70,16 +76,32 @@ def _db() -> sqlite3.Connection:
 
 def _block(args: Sequence[str]) -> None:
     kind = "needs_input"
+    positional: list[str] = []
     rest = list(args)
-    if rest[:1] == ["--kind"]:
-        kind, rest = rest[1], rest[2:]
-    if rest[:1] == ["--"]:
-        rest = rest[1:]
-    if len(rest) != 2:
-        raise Refused("usage: hermes kanban block [--kind K] [--] <task> <reason>")
-    task_id, reason = rest
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--":
+            positional += rest
+            break
+        if arg == "--kind":
+            if not rest:
+                raise Refused("--kind needs a value")
+            kind = rest.pop(0)
+        elif arg.startswith("--kind="):
+            kind = arg.split("=", 1)[1]
+        else:
+            positional.append(arg)
+    if kind not in BLOCK_KINDS:
+        raise Refused(f"unknown block kind {kind!r}")
+    if len(positional) != 2:
+        raise Refused("usage: hermes kanban block <task> <reason> [--kind K]")
+    task_id, reason = positional
+    # As Hermes' _worker_run_id_for: the run is pinned only for the worker's own task.
     env_run = os.environ.get(RUN_ENV)
-    expected = int(env_run) if env_run else None
+    pinned = os.environ.get(TASK_ENV) == task_id and bool(env_run)
+    if pinned and not str(env_run).isdigit():
+        raise Refused(f"${RUN_ENV} is not a run id")
+    expected = int(str(env_run)) if pinned else None
     now = int(time.time())
     conn = _db()
     try:
@@ -93,8 +115,8 @@ def _block(args: Sequence[str]) -> None:
         ).fetchone()
         if row is None:
             raise Refused(f"no such task: {task_id}")
-        if row["status"] != "running":
-            raise Refused(f"task {task_id} is {row['status']}, not running")
+        if row["status"] not in ("running", "ready"):
+            raise Refused(f"task {task_id} is {row['status']}, not running or ready")
         if expected is not None and row["current_run_id"] != expected:
             raise Refused(f"task {task_id} is not on run {expected}")
         rid = row["current_run_id"]
@@ -168,7 +190,8 @@ def run(argv: Sequence[str]) -> int:
     return 0
 
 
-def main(argv: Sequence[str]) -> int:
+def main(argv: Sequence[str], log: str | None = None) -> int:
+    error = None
     try:
         code = run(argv)
     except Refused as exc:
@@ -177,25 +200,27 @@ def main(argv: Sequence[str]) -> int:
     except sqlite3.Error as exc:
         print(f"hermes: database error: {exc}", file=sys.stderr)
         code = 1
-    board = os.environ.get(BOARD_ENV)
-    if board:
+    except Exception as exc:  # a crash is recorded too: the call happened
+        print(f"hermes: crashed: {exc!r}", file=sys.stderr)
+        code, error = 3, repr(exc)
+    if log is not None:
         record = {
             "argv": list(argv),
             "env": sorted(os.environ),
             "task": os.environ.get(TASK_ENV),
             "run": os.environ.get(RUN_ENV),
-            "board": board,
+            "board": os.environ.get(BOARD_ENV),
             "code": code,
+            "error": error,
             "at": time.time(),
         }
-        with (Path(board).parent / CALLS).open("a", encoding="utf-8") as f:
+        with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
     return code
 
 
-def calls(directory: Path) -> list[dict[str, object]]:
-    """The recorded calls of the board in ``directory``, oldest first."""
-    path = directory / CALLS
+def calls(path: Path) -> list[dict[str, object]]:
+    """The calls recorded in the log at ``path``, oldest first."""
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]

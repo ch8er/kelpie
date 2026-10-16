@@ -23,7 +23,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 TOKEN = "ghp_SimulatedFarmToken0123456789abcdef"
-CANCEL_TOKEN = "ghp_SimulatedCancelToken0123456789abc"
 
 
 def iso(dt: datetime) -> str:
@@ -115,6 +114,7 @@ class FakeGitHub:
         self.requests: list[Request] = []
         self.cancelled: list[tuple[str, int]] = []
         self.lock = threading.Lock()
+        self.tokens = {TOKEN}  # bearer tokens GitHub accepts
         self.url = ""
         self._next_run = 1000
 
@@ -234,7 +234,10 @@ def _handler(fake: FakeGitHub) -> type[BaseHTTPRequestHandler]:
             auth = self.headers.get("Authorization") or ""
             token = auth.removeprefix("Bearer ") if auth.startswith("Bearer ") else None
             fake.requests.append(Request(method, self.path, token))
-            status, body = fake.answer(method, self.path)
+            if token not in fake.tokens:
+                status, body = 401, {"message": "Bad credentials"}
+            else:
+                status, body = fake.answer(method, self.path)
             data = json.dumps(body).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
