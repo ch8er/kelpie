@@ -356,3 +356,47 @@ def test_a_question_deeper_behind_a_human_task_still_reaches_a_person(
     )
     [action] = run(snap(tasks, deps=deps), default_approver="human-lead")
     assert action.params["approvals"] == ["C-1"] and action.params["human_tasks"] == []
+
+
+def test_agents_parked_on_their_human_parent_count() -> None:
+    """A dispatch gate parks dependents in ``waiting`` on the parent's status; a platform
+    may block them with a reason naming the parent. Both wait on the human task."""
+    gated = [
+        Task(f"A-{i}", f"step {i}", Status.WAITING, ago(hours=5), role="developer",
+             block=Block("dispatch gate", ago(hours=5), f"G-{i}"))
+        for i in (1, 2, 3)
+    ]  # fmt: skip
+    conds = [
+        Condition(f"G-{i}", ConditionKind.TASK_STATUS, f"A-{i}", {"task": "H-1"}, satisfied=False)
+        for i in (1, 2, 3)
+    ]
+    deps = [Dependency(f"A-{i}", "H-1") for i in (1, 2, 3)]
+    [action] = run(snap([human("H-1", ago(hours=6)), *gated], conds, deps))
+    assert action.params["cost_hours"] == 15.0 and action.params["human_tasks"] == ["H-1"]
+    named = blocked("A-9", ago(hours=5), "dependency: H-1 not done")
+    [action] = run(snap([human("H-1", ago(hours=6)), named], deps=[Dependency("A-9", "H-1")]))
+    assert action.params["cost_hours"] == 5.0
+
+
+def test_a_question_behind_a_human_task_nobody_can_do_yet() -> None:
+    """Behind a human task that waits on agent work: a block naming it is the human
+    task's (nothing to do yet); the agent's own question is still an approval."""
+    tasks = [
+        Task("P-1", "agent work", Status.IN_PROGRESS, ago(hours=1), role="developer",
+             owner_id="agent-dev-1"),
+        Task("H-1", "h", Status.BACKLOG, ago(hours=6), role="owner", owner_id="human-owner"),
+        blocked("C-1", ago(hours=3), "waiting_human: H-1"),
+        blocked("C-2", ago(hours=3), "needs_input: which region?"),
+    ]  # fmt: skip
+    deps = [Dependency("H-1", "P-1"), Dependency("C-1", "H-1"), Dependency("C-2", "H-1")]
+    [action] = run(snap(tasks, deps=deps), default_approver="human-lead")
+    assert action.params["approvals"] == ["C-2"]
+
+
+def test_a_plain_waiting_dependent_counts_and_one_on_ci_does_not() -> None:
+    plain = Task("A-1", "next", Status.WAITING, ago(hours=2), role="developer")
+    on_ci = blocked("A-2", ago(hours=40), "dependency: H-1, then CI", "CI-1")
+    ci = Condition("CI-1", ConditionKind.CI_STATUS, "A-2", {"pr": 7}, satisfied=False)
+    deps = [Dependency("A-1", "H-1"), Dependency("A-2", "H-1")]
+    [action] = run(snap([human("H-1", ago(hours=6)), plain, on_ci], [ci], deps))
+    assert action.params["cost_hours"] == 2.0  # A-2 waits on CI first

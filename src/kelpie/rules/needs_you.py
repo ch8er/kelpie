@@ -13,17 +13,17 @@ delay, so the human sees one list instead of scattered blocks:
   behind them never do.
 - **Agents waiting for a person's input or approval.** An agent task blocked with a reason
   that starts with one of ``approval_reasons`` (``waiting_human``, Hermes' typed blocks
-  ``needs_input``, ``approval``, ...), unless its block is a human task's (a ``human_task``
-  condition, or a direct dependency on a human task the person can move), once it has
-  waited ``approval_wait_after`` (30m). Its human is ``approvers[role]``, else
-  ``default_approver``; without either it is listed under ``unassigned``.
+  ``needs_input``, ``approval``, ...), unless it is parked on a human task (see below;
+  then it is listed under that task), once it has waited ``approval_wait_after`` (30m).
+  Its human is ``approvers[role]``, else ``default_approver``; without either it is listed under ``unassigned``.
 
 **Cost of delay** of an item: the agent-hours spent waiting on it so far, the sum over the
-agent tasks that wait on it directly of how long each has waited: a parked task whose wait
-is a ``human_task`` condition naming it, or that depends on it with a block that asks a
-person (``approval_reasons``), since it was parked; a
-ready or backlog task that depends on it since its last status change (platforms keep
-dependents in the backlog until their parents finish). Everything else behind it (deeper
+agent tasks that wait on it directly of how long each has waited: a task parked on it since
+it was parked, and a ready or backlog task that depends on it since its last status change
+(platforms keep dependents in the backlog until their parents finish). Parked on it: a
+condition names it (``human_task``, a dispatch gate's ``task_status``), or the task depends
+on it and nothing else visibly holds it (no other unmet condition; no block reason, one
+that names the human task, or one that asks a person). Everything else behind it (deeper
 in the chain, in progress, or parked for another reason such as CI) is held but waits on
 something else first: it counts in the number of agent tasks behind the item, not in its
 cost. Items are sorted by cost; so are the people, each waiting task counted once with its
@@ -55,7 +55,7 @@ from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
-from kelpie.core.model import ConditionKind, OwnerKind, Snapshot, Status, Task
+from kelpie.core.model import OwnerKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules.bottlenecks import HumanGate, human_gates
@@ -125,24 +125,30 @@ class NeedsYou:
         """Human tasks that are the person's to move now, whose agent work has waited long
         enough: ready or in progress with nothing open before them (like rule 6), or
         blocked or waiting themselves (the person chases what blocks them). Also the agent
-        tasks whose wait is a human task's: linked to any human task by a condition, or
-        waiting directly on one the person can move, listed or not yet. They are not
-        approvals of their own."""
+        tasks parked on a human task (:meth:`_parked_on`), listed or not yet: they are
+        that task's, not approvals of their own."""
         by_id = {t.id: t for t in snapshot.tasks}
         open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
         items = []
         claimed: set[str] = set()
         for gate in gates:
             direct = _direct_waiters(gate.task.id, snapshot)
-            claimed.update(tid for tid, how in direct.items() if how == "condition")
-            if not gate.actionable and not _stuck_on_its_own(gate.task, snapshot, open_ids):
+            movable = gate.actionable or _stuck_on_its_own(gate.task, snapshot, open_ids)
+            parked = {
+                tid
+                for tid in gate.behind
+                if tid in direct
+                and by_id[tid].status in _FROZEN
+                and self._parked_on(by_id[tid], gate.task.id, direct[tid], snapshot, movable)
+            }
+            claimed |= parked
+            if not movable:
                 continue  # agent work comes first: not the person's bottleneck today
             waits = {
                 tid: w
                 for tid in gate.behind
-                if (w := self._waiting(by_id[tid], snapshot.now, direct)) is not None
+                if (w := _waiting(by_id[tid], snapshot.now, direct, parked)) is not None
             }
-            claimed.update(waits)
             if not waits or max(waits.values()) < self.human_wait_alert_after:
                 continue  # only follow-up work behind it, or not long enough
             cost = sum(w.total_seconds() for w in waits.values()) / 3600
@@ -151,29 +157,25 @@ class NeedsYou:
             )
         return items, claimed
 
-    def _waiting(self, task: Task, now: datetime, direct: Mapping[str, str]) -> timedelta | None:
-        """How long an agent task has waited on the human task: a parked task linked to it
-        by a condition, or depending on it with a block that asks a person, since it was
-        parked; a ready or backlog task that depends on it directly since its last status
-        change (platforms keep dependents in the backlog until their parents finish). None
-        for everything else behind it, deeper in the chain, in progress, or parked for
-        another reason (CI, a provider): it is held, but its wait is not this human task's
-        cost."""
-        how = direct.get(task.id)
-        if task.status in _FROZEN and (
-            how == "condition"
-            or (
-                how == "dependency"
-                and task.block is not None
-                and _asks_a_person(task.block.reason, self.approval_reasons)
-            )
-        ):
-            since = task.block.since if task.block is not None else task.status_since
-        elif how == "dependency" and task.status in {Status.READY, Status.BACKLOG}:
-            since = task.status_since
-        else:
-            return None
-        return max(now - since, timedelta(0))
+    def _parked_on(
+        self, task: Task, human_task: str, how: str, snapshot: Snapshot, movable: bool
+    ) -> bool:
+        """Whether a parked agent task that waits directly on ``human_task`` is parked
+        because of it: a condition names it; or, linked by a dependency only, nothing else
+        visibly holds it (no other unmet condition, and no block, or a block reason that
+        names the human task, or one that asks a person while the person can act on the
+        human task). A reason about something else (CI, a provider) or an agent's own
+        question behind a human task nobody can do yet is not the human task's."""
+        if how == "condition":
+            return True
+        if any(c.satisfied is not True for c in linked_conditions(task, snapshot)[0]):
+            return False  # it waits on something else first
+        if task.block is None:
+            return True
+        reason = task.block.reason
+        if re.search(rf"(?<![\w-]){re.escape(human_task)}(?![\w-])", reason):
+            return True
+        return movable and _asks_a_person(reason, self.approval_reasons)
 
     def _approvals(self, snapshot: Snapshot, claimed: set[str]) -> list[Item]:
         humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
@@ -237,18 +239,35 @@ class NeedsYou:
 
 def _direct_waiters(human_task: str, snapshot: Snapshot) -> dict[str, str]:
     """Agent tasks that wait on ``human_task`` itself, by how: ``"condition"`` for a parked
-    task whose current wait is an unmet ``human_task`` condition naming it, ``"dependency"``
-    for a task that depends on it directly."""
+    task whose current wait is an unmet condition naming it (``human_task``, or the
+    ``task_status`` of a dispatch gate on its parent), ``"dependency"`` for a task that
+    depends on it directly."""
     found = {d.task_id: "dependency" for d in snapshot.dependencies if d.depends_on == human_task}
     for t in snapshot.tasks:
         if t.status in _FROZEN and any(
-            c.kind is ConditionKind.HUMAN_TASK
-            and c.satisfied is not True
-            and c.params.get("task") == human_task
+            c.satisfied is not True and c.params.get("task") == human_task
             for c in linked_conditions(t, snapshot)[0]
         ):
             found[t.id] = "condition"
     return found
+
+
+def _waiting(
+    task: Task, now: datetime, direct: Mapping[str, str], parked: set[str]
+) -> timedelta | None:
+    """How long an agent task has waited on the human task: a task ``parked`` on it since
+    it was parked; a ready or backlog task that depends on it directly since its last
+    status change (platforms keep dependents in the backlog until their parents finish).
+    None for everything else behind it, deeper in the chain, in progress, or parked for
+    another reason (CI, a provider): it is held, but its wait is not this human task's
+    cost."""
+    if task.id in parked:
+        since = task.block.since if task.block is not None else task.status_since
+    elif direct.get(task.id) == "dependency" and task.status in {Status.READY, Status.BACKLOG}:
+        since = task.status_since
+    else:
+        return None
+    return max(now - since, timedelta(0))
 
 
 def _stuck_on_its_own(task: Task, snapshot: Snapshot, open_ids: set[str]) -> bool:
