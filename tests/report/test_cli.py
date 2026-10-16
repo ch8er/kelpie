@@ -114,7 +114,8 @@ def test_the_report_board_attaches_human_task_conditions_without_network(
     monkeypatch.setattr(report_cli, "build_adapters", lambda settings: [Board()])
     monkeypatch.setattr(kelpie.app, "_github_steps", no_network)
     extra = (
-        "[connectors.github]\nenabled = true\n[connectors.human_tasks]\n"
+        '[connectors.github]\nenabled = true\nrepos = ["example/app"]\n'
+        "[connectors.human_tasks]\n"
         '[[connectors.human_tasks.block_patterns]]\npattern = "approval in (?P<task>\\\\S+)"\n'
     )
     settings = load_settings(config(tmp_path, extra))
