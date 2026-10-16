@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [0.1.0a1] - Unreleased
 
-First public pre-release. Kelpie is pre-alpha: interfaces and configuration keys may still
+First public pre-release, an alpha: interfaces and configuration keys may still
 change. It starts in global dry-run (`dry_run = true`) with every rule in `observe` mode,
 so a fresh install changes nothing on your farm until you turn it on, rule by rule.
 
@@ -114,7 +114,7 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 - `[[budgets]]` per day, task, agent or project, in USD or tokens, for API or subscription
   use, with soft and hard limits and a forecast of when a limit will be reached; `[prices]`
-  per model. Nested LLM spans are counted once ([#19](https://github.com/ch8er/kelpie/pull/19), [#29](https://github.com/ch8er/kelpie/pull/29)).
+  per model. Nested LLM spans are counted once ([#29](https://github.com/ch8er/kelpie/pull/29)).
 
 #### Token optimization
 
@@ -152,8 +152,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - `kelpie serve` runs the control loop with `/metrics` and `/healthz`, and `kelpie status`
   lists the rules that would load with their mode ([#7](https://github.com/ch8er/kelpie/pull/7)).
 - `kelpie doctor` checks a first live run (config, observe mode, boards, hooks, spans, git,
-  Prometheus), with a Hermes quickstart; a Claude Code quickstart and checks followed
-  ([#22](https://github.com/ch8er/kelpie/pull/22), [#89](https://github.com/ch8er/kelpie/pull/89)).
+  Prometheus), with a Hermes quickstart; a Claude Code quickstart and checks followed, and
+  a warning when block reasons name PRs but nothing reads them
+  ([#22](https://github.com/ch8er/kelpie/pull/22), [#89](https://github.com/ch8er/kelpie/pull/89), [#137](https://github.com/ch8er/kelpie/pull/137)).
 - `kelpie why <task>` explains why a task is not moving, read-only and offline by default
   ([#87](https://github.com/ch8er/kelpie/pull/87)).
 - `kelpie report` prints the daily report as Markdown, and `--send` posts the summary to the
@@ -162,7 +163,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   provisioned Grafana dashboard ([#7](https://github.com/ch8er/kelpie/pull/7), [#42](https://github.com/ch8er/kelpie/pull/42)).
 - A tag-triggered release pipeline to TestPyPI, PyPI and GHCR ([#105](https://github.com/ch8er/kelpie/pull/105)).
 - Documentation: install, configuration, privacy and extension guides ([#77](https://github.com/ch8er/kelpie/pull/77)), and an act
-  checklist for Hermes ([#46](https://github.com/ch8er/kelpie/pull/46)).
+  checklist, the gate before act mode ([#46](https://github.com/ch8er/kelpie/pull/46), [#138](https://github.com/ch8er/kelpie/pull/138)).
+- The farm simulator is packaged as `kelpie.sim`, the first step towards `kelpie demo`
+  ([#134](https://github.com/ch8er/kelpie/pull/134)).
 - Multi-host, work in progress: the design (`docs/multi-host.md`) and the first two steps,
   `kelpie agent` and the authenticated, bounded transport. `kelpie serve` does not yet
   accept agent reports, so multi-host is not usable end to end in this pre-release
