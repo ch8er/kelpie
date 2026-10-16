@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 
+from kelpie.sim.github import sha_of
 from tests.sim.farm import REPO, Farm
-from tests.sim.github import sha_of
 from tests.sim.kelpie import KelpieServe, wait_for
 
 PATTERN = {
