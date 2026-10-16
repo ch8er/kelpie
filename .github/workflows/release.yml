@@ -1,0 +1,187 @@
+name: Release
+
+# A tag v<version> (PEP 440: v0.1.0, v0.1.0a1, v0.1.0rc1) publishes that version:
+#   verify -> build -> TestPyPI -> install check from TestPyPI -> PyPI -> GitHub release,
+#   and the container image to GHCR once PyPI has the same version.
+# PyPI and TestPyPI use trusted publishing (OIDC): no API token is stored anywhere.
+# One-time setup on PyPI, TestPyPI and GitHub: docs/release.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - id: version
+        name: The tag, pyproject.toml and kelpie.__version__ agree
+        run: |
+          version="$(python3 scripts/release_version.py "${GITHUB_REF_NAME}")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if python3 scripts/release_version.py --is-prerelease "${version}"; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: The tagged commit is on main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run lint-imports
+      - run: uv run pytest -q --ignore=tests/e2e
+
+  build:
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - name: The wheel installs and runs in a clean environment
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/kelpie --version | grep -Fx "kelpie ${{ needs.verify.outputs.version }}"
+          cd /tmp && /tmp/smoke/bin/kelpie status
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  testpypi:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/kelpie-sre/
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  testpypi-install:
+    needs: [verify, testpypi]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: astral-sh/setup-uv@v6
+      - name: pip install from TestPyPI gives a working kelpie CLI
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          uv venv /tmp/check
+          # TestPyPI may take a minute to serve a new upload; dependencies come from PyPI.
+          for attempt in 1 2 3 4 5 6; do
+            if uv pip install --python /tmp/check/bin/python \
+                --index-url https://test.pypi.org/simple/ \
+                --extra-index-url https://pypi.org/simple/ \
+                --index-strategy unsafe-best-match \
+                "kelpie-sre==${VERSION}"; then
+              break
+            fi
+            [ "$attempt" = 6 ] && exit 1
+            sleep $((attempt * 15))
+          done
+          /tmp/check/bin/kelpie --version | grep -Fx "kelpie ${VERSION}"
+          cd /tmp && /tmp/check/bin/kelpie status
+
+  pypi:
+    needs: testpypi-install
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi  # protect it with required reviewers (docs/release.md)
+      url: https://pypi.org/project/kelpie-sre/
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  image:
+    needs: [verify, pypi]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write  # push to ghcr.io
+      id-token: write  # build provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # <version> always; latest only for a final release, never for a pre-release.
+          tags: |
+            type=raw,value=${{ needs.verify.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.verify.outputs.prerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.title=kelpie-sre
+            org.opencontainers.image.description=SRE and throughput optimization for AI agent farms
+            org.opencontainers.image.licenses=Apache-2.0
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  github-release:
+    needs: [verify, pypi]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write  # create the release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Release with the wheel, the sdist and generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+        run: |
+          flags=(--verify-tag --generate-notes --title "kelpie-sre ${GITHUB_REF_NAME#v}")
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          gh release create "${GITHUB_REF_NAME}" dist/* "${flags[@]}"

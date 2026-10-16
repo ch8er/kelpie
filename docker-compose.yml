@@ -6,7 +6,9 @@
 services:
   kelpie:
     build: .
-    image: kelpie-sre:dev
+    # A published image instead of a local build:
+    # KELPIE_IMAGE=ghcr.io/ch8er/kelpie:<version> docker compose up -d --no-build
+    image: ${KELPIE_IMAGE:-kelpie-sre:dev}
     restart: unless-stopped
     init: true  # forward signals and reap children; Kelpie also handles SIGTERM itself
     environment:

@@ -27,10 +27,11 @@ of truth; the issue backlog is [docs/roadmap.md](docs/roadmap.md).
   [observe-to-act checklist](docs/act-checklist.md)
 - [Privacy](docs/privacy.md): what Kelpie stores from traces and hooks, and how to keep less
 - [Extending Kelpie](docs/extending.md): rules, adapters, connectors, report sections
+- [Releasing](docs/release.md): the tag-triggered release to PyPI and GHCR
 
 **Package**
 
-- PyPI: `kelpie-sre` (not published yet) · CLI: `kelpie`
+- PyPI: `kelpie-sre` (not published yet; see [releasing](docs/release.md)) · CLI: `kelpie`
 - License: Apache-2.0 · Repo: [github.com/ch8er/kelpie](https://github.com/ch8er/kelpie)
 
 ## Why

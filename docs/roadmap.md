@@ -772,9 +772,9 @@ labels: P0, week-3, area:deploy
 Publish the open core: first public pre-release on PyPI and a container image.
 
 **Acceptance criteria**
-- [ ] Release workflow builds and publishes with trusted publishing
+- [x] Release workflow builds and publishes with trusted publishing (`docs/release.md`; the first tag is still to come)
 - [ ] `pip install kelpie-sre` provides a working `kelpie` CLI
-- [ ] Container image published and referenced by docker-compose.yml
+- [ ] Container image published and referenced by docker-compose.yml (the workflow pushes it to GHCR; compose takes it through `KELPIE_IMAGE`)
 - [ ] Changelog and release notes
 
 ### project: 10 conversations with farm owners
