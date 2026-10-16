@@ -1544,6 +1544,118 @@
         "overrides": []
       },
       "description": "Trailing-hour increase; a series appears with its first event."
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Alerts",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 101
+      },
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Alerts delivered per hour by channel",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 102
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (channel) (increase(kelpie_alerts_sent_total[1h]))",
+          "legendFormat": "{{channel}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Trailing-hour increase of alerts handed to the chat service successfully."
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Lost alerts per hour by channel and cause",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 102
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (channel, cause) (increase(kelpie_alerts_failed_total[1h]))",
+          "legendFormat": "{{channel}} {{cause}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Alerts Kelpie gave up on after retrying for retry_horizon (or at once for a rejection). Anything above zero means a human may have missed an alert; the KelpieAlertDeliveryFailed Prometheus rule fires on it. A series appears with its first event."
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "Dropped alerts per hour by channel and reason",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 102
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (channel, reason) (increase(kelpie_alerts_dropped_total[1h]))",
+          "legendFormat": "{{channel}} {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Alerts dropped before delivery: duplicate (merged), queue_full or shutdown. A series appears with its first event."
     }
   ],
   "templating": {

@@ -15,7 +15,8 @@ The rules it enforces:
   headers or the body, however slowly the other side drips bytes. Opening the TCP
   connection is bounded by the time left, per address tried; DNS resolution is not bounded
   (the stdlib cannot do it cheaply).
-- The body is read in small chunks up to a size cap.
+- The body is read in small chunks up to a size cap. A 2xx answer over the cap is an error;
+  the body of any other status is cut at the cap (the status is what matters there).
 - Header names and values are checked before sending (values must be printable ASCII):
   ``http.client`` would put an invalid value (a secret with a line break) into its
   exception message.
@@ -202,8 +203,9 @@ def request(
     body_on_error: bool = False,
 ) -> Response:
     """Send ``method`` ``path`` (with its query, if any) on the origin of ``url``; raises
-    :class:`RequestError` on redirects, timeouts, connection errors, bodies over
-    ``max_bytes`` and header values that are not valid. Other statuses are returned.
+    :class:`RequestError` on redirects, timeouts, connection errors, 2xx bodies over
+    ``max_bytes`` and header values that are not valid. Other statuses are returned, with
+    their body cut at ``max_bytes``.
     With ``read_body`` false the body is never read (only the status and headers count);
     otherwise it is read for 2xx answers, and for others only with ``body_on_error``.
     ``proxy`` allows an environment https proxy as a CONNECT tunnel (https only)."""
@@ -239,7 +241,7 @@ def request(
         for name, value in response.getheaders():
             names.setdefault(name.lower(), value)
         wanted = read_body and (status < 300 or body_on_error)
-        data = _read_limited(response, deadline, max_bytes) if wanted else b""
+        data = _read_limited(response, deadline, max_bytes, status < 300) if wanted else b""
         if guard.expired:
             raise TimeoutError
     except RequestError:
@@ -270,17 +272,24 @@ def _tracked(guard: _Guard, deadline: float) -> Callable[..., socket.socket]:
     return create
 
 
-def _read_limited(response: http.client.HTTPResponse, deadline: float, max_bytes: int) -> bytes:
+def _read_limited(
+    response: http.client.HTTPResponse, deadline: float, max_bytes: int, strict: bool
+) -> bytes:
+    """Read at most ``max_bytes``. Over the cap it is an error when ``strict`` (a 2xx
+    answer), else the rest is left unread: the status already says what happened."""
     chunks: list[bytes] = []
     size = 0
     while not response.isclosed():  # the socket is gone once the last byte is read
         if time.monotonic() >= deadline:
             raise TimeoutError
-        chunk = response.read(READ_CHUNK)
+        chunk = response.read(min(READ_CHUNK, max_bytes - size + 1))
         if not chunk:
             break
         size += len(chunk)
         if size > max_bytes:
-            raise RequestError("too_large", f"response over {max_bytes} bytes")
+            if strict:
+                raise RequestError("too_large", f"response over {max_bytes} bytes")
+            chunks.append(chunk[: len(chunk) - (size - max_bytes)])
+            break
         chunks.append(chunk)
     return b"".join(chunks)

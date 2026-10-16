@@ -17,6 +17,7 @@ import ipaddress
 import json
 import os
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
@@ -26,7 +27,14 @@ from urllib.parse import urlsplit
 from kelpie import net
 from kelpie.alerts.delivery import PermanentError, TransientError
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import AlertMessage, Did, Transition
+from kelpie.core.alerts import (
+    CHANGED_PREFIX,
+    ESCALATED_PREFIX,
+    RESOLVED_PREFIX,
+    AlertMessage,
+    Did,
+    Transition,
+)
 from kelpie.core.serde import parse_duration
 
 TYPE = "telegram"
@@ -49,6 +57,14 @@ TRANSITION = {
     Transition.CHANGED: "Changed. ",
     Transition.RESOLVED: "Resolved. ",
 }
+# What the engine already puts in front of the body for a transition (core.alerts). The
+# label above is shown only when the body does not say so itself.
+_ENGINE_PREFIX = {
+    Transition.ESCALATED: ESCALATED_PREFIX,
+    Transition.CHANGED: CHANGED_PREFIX,
+    Transition.RESOLVED: RESOLVED_PREFIX,
+}
+AT_SIGN = "\uff20"  # fullwidth commercial at: shown like "@", never a mention
 DID = {
     Did.NOTIFIED: "Kelpie did: only sent this alert (no other change).",
     Did.SUGGESTED: "Kelpie did: nothing, mode suggest. A human decides.",
@@ -62,8 +78,26 @@ def redact(text: str, token: str) -> str:
 
 
 def clean(text: str) -> str:
-    """No lone surrogates (they cannot be encoded) and no control characters."""
-    return _CONTROL.sub(" ", text.encode("utf-8", "replace").decode("utf-8"))
+    """No lone surrogates (they cannot be encoded), no control characters and no invisible
+    format characters (category Cf: bidi overrides, zero-width characters), which could
+    hide or reorder what a human reads."""
+    text = _CONTROL.sub(" ", text.encode("utf-8", "replace").decode("utf-8"))
+    return "".join(c for c in text if unicodedata.category(c) != "Cf")
+
+
+def defang(text: str) -> str:
+    """``clean`` and break @mentions: in a chat, agent-controlled text must not ping people
+    (``@everyone``, ``@someone``); a fullwidth @ looks the same and notifies nobody."""
+    return clean(text).replace("@", AT_SIGN)
+
+
+def lead(message: AlertMessage) -> str:
+    """The label of the transition, unless the body already starts with the engine's own
+    wording for it ("Still open after 4.0h: ..."), so it is not said twice."""
+    prefix = _ENGINE_PREFIX.get(message.transition)
+    if prefix is not None and message.body.strip().startswith(prefix):
+        return ""
+    return TRANSITION[message.transition]
 
 
 def utf16_len(text: str) -> int:
@@ -89,12 +123,12 @@ def format_message(message: AlertMessage) -> str:
     """Plain text: severity and subject, the transition, the reason, what Kelpie did.
     Free text (``message.text``) is sent as it is."""
     if message.text is not None:
-        return truncate(clean(message.text))
+        return truncate(defang(message.text))
     head = f"[{message.severity.value.upper()}] "
-    head += f"{truncate(clean(message.rule), MAX_HEAD)}: " if message.rule else ""
+    head += f"{truncate(defang(message.rule), MAX_HEAD)}: " if message.rule else ""
     # Each part has its own cap, so the last line (what Kelpie did) always survives.
-    body = truncate(clean(TRANSITION[message.transition] + message.body.strip()), MAX_BODY)
-    lines = [head + truncate(clean(message.subject), MAX_HEAD), body, DID[message.did]]
+    body = truncate(defang(lead(message) + message.body.strip()), MAX_BODY)
+    lines = [head + truncate(defang(message.subject), MAX_HEAD), body, DID[message.did]]
     return truncate("\n".join(lines))
 
 

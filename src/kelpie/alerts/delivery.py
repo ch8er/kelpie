@@ -3,10 +3,12 @@
 :class:`Delivery` routes an alert to each channel whose ``min_severity`` it reaches. Per
 channel there is a small bounded queue and one worker thread, so a slow or failing chat
 service never blocks or crashes the control loop: ``send`` only enqueues. The worker retries
-transient failures with backoff (honouring a server's ``retry_after``); alerts that do not
-fit the queue, or repeat within the dedup window, are dropped and counted per channel. On
-``close`` the queue is delivered within the timeout and the rest counted as dropped
-("shutdown").
+transient failures over a time horizon (default 15 minutes: capped exponential backoff,
+honouring a server's ``retry_after``), as long as the queue behind the alert has room; a
+429 also holds back the alerts queued after it until its ``retry_after`` has passed.
+Alerts that do not fit the queue, or repeat within the dedup window, are dropped and
+counted per channel. On ``close`` the queue is delivered until one shared deadline and the
+rest counted as dropped ("shutdown"); after ``close``, ``send`` drops and counts too.
 
 A channel is a small object (``name``, ``min_severity``, ``send(message)``). It raises
 :class:`TransientError` (network, 429, 5xx: retried) or :class:`PermanentError` (bad token,
@@ -24,7 +26,8 @@ Two entry points, both never blocking and never raising:
 The engine already de-duplicates through the action ledger and state transitions; the
 window here is a cheap safety net. An alert is a duplicate only when the last alert sent to
 that channel for the same (rule, subject) is identical, so open, resolved, open again within
-the window is delivered in full. An alert whose delivery fails for good gives up its entry.
+the window is delivered in full. An alert whose delivery fails for good gives up its
+entry. The fingerprint covers the wording, severity, transition and what Kelpie did.
 """
 
 from __future__ import annotations
@@ -45,8 +48,8 @@ log = logging.getLogger(__name__)
 
 DEFAULT_WINDOW = timedelta(minutes=10)
 DEFAULT_QUEUE_SIZE = 50
-MAX_ATTEMPTS = 5
-MAX_WAIT = 60.0  # longest single wait before a retry, whatever the server asks
+DEFAULT_RETRY_HORIZON = timedelta(minutes=15)
+MAX_WAIT = 60.0  # longest backoff between two attempts (a server's retry_after may be longer)
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 
 
@@ -101,56 +104,94 @@ class _Worker:
         observer: AlertObserver | None,
         queue_size: int,
         backoff: float,
+        horizon: float,
         lost: Callable[[AlertMessage], None],
     ) -> None:
         self.channel = channel
         self.observer = observer
         self.backoff = backoff
+        self.horizon = horizon
         self.lost = lost  # called for an alert that will never be delivered
         self.queue: queue.Queue[AlertMessage] = queue.Queue(queue_size)
         self.stopping = threading.Event()
         self.deadline = float("inf")
+        self.blocked_until = 0.0  # flood control: no send before this (monotonic) time
+        # Guards the hand-over of alerts: ``current`` (taken from the queue, not settled),
+        # ``closed`` (nothing may be queued any more) and ``abandoned`` (close gave up on a
+        # worker stuck inside ``send``; whatever it does later is not counted again).
+        self._lock = threading.Lock()
+        self.current: AlertMessage | None = None
+        self.closed = False
+        self.abandoned = False
         self.thread = threading.Thread(
             target=self._run, name=f"kelpie-alerts-{channel.name}", daemon=True
         )
         self.thread.start()
 
-    def offer(self, message: AlertMessage) -> bool:
-        try:
-            self.queue.put_nowait(message)
-        except queue.Full:
-            return False
-        return True
+    def offer(self, message: AlertMessage) -> str | None:
+        """None when queued, else why not: ``queue_full`` or ``shutdown``."""
+        with self._lock:
+            if self.closed:
+                return "shutdown"
+            try:
+                self.queue.put_nowait(message)
+            except queue.Full:
+                return "queue_full"
+        return None
 
-    def stop(self, timeout: float) -> None:
-        """Deliver what is queued until ``timeout`` runs out; the worker drops the rest."""
-        self.deadline = time.monotonic() + timeout
+    def stop(self, deadline: float) -> None:
+        """Deliver what is queued until ``deadline`` (monotonic); the rest is dropped."""
+        self.deadline = deadline
         self.stopping.set()
+
+    def abandon(self) -> None:
+        """Give up on a worker that is still inside ``send`` after the deadline: count the
+        alert it holds and everything queued as dropped, and ignore its late outcome."""
+        with self._lock:
+            self.abandoned = True
+            held, self.current = self.current, None
+        if held is not None:
+            self._shutdown_drop(held)
+        self._drain()
 
     def _expired(self) -> bool:
         return self.stopping.is_set() and time.monotonic() >= self.deadline
 
     def _run(self) -> None:
-        while True:
+        while not self.abandoned:
             try:
                 message = self.queue.get(timeout=0.1)
             except queue.Empty:
                 if self.stopping.is_set():
+                    self._drain()
                     return
                 continue
+            with self._lock:
+                if self.abandoned:  # close gave up between get() and here
+                    held = message
+                else:
+                    held = None
+                    self.current = message
+            if held is not None:
+                self._shutdown_drop(held)
+                return
             self._deliver(message)
             if self._expired():
-                self._drop_rest()
+                self._drain()
                 return
 
-    def _drop_rest(self) -> None:
+    def _drain(self) -> None:
+        """Nothing more is queued from now on; count what is queued as dropped."""
+        with self._lock:
+            self.closed = True
         dropped = 0
         while True:
             try:
-                self.lost(self.queue.get_nowait())
+                message = self.queue.get_nowait()
             except queue.Empty:
                 break
             dropped += 1
+            self.lost(message)
             _notify(self.observer, "alert_dropped", self.channel.name, "shutdown")
         if dropped:
             log.warning(
@@ -159,28 +200,45 @@ class _Worker:
                 dropped,
             )
 
+    def _settle(self) -> bool:
+        """The alert in hand is done (sent, failed or dropped). False when ``close`` already
+        counted it as dropped."""
+        with self._lock:
+            if self.abandoned:
+                return False
+            self.current = None
+            return True
+
     def _deliver(self, message: AlertMessage) -> None:
-        for attempt in range(MAX_ATTEMPTS):
-            if self._expired():
-                self._shutdown_drop(message)
+        """Send, retrying transient errors with a capped exponential backoff (or the
+        server's ``retry_after``) until ``horizon`` seconds have passed since the alert was
+        taken. Gives up earlier when the queue behind it is full (waiting longer would only
+        drop newer alerts), and drops it when shutdown runs out of time."""
+        started = time.monotonic()
+        attempt = 0
+        while True:
+            now = time.monotonic()
+            wait = max(self.blocked_until - now, 0.0)  # flood control, also from earlier alerts
+            if self.stopping.is_set() and now + wait >= self.deadline:
+                self._shutdown_drop_current(message)
                 return
+            if wait > 0:
+                if self.stopping.is_set():
+                    time.sleep(wait)  # the deadline check above bounds it
+                else:
+                    self.stopping.wait(wait)  # wakes on stop; the checks above run again
+                continue
             try:
                 self.channel.send(message)
             except TransientError as exc:
-                last = attempt == MAX_ATTEMPTS - 1
-                # A server that asks for a longer wait than we ever make is not retried.
-                if last or (exc.retry_after is not None and exc.retry_after > MAX_WAIT):
+                asked = self._block(exc, attempt)
+                attempt += 1
+                if time.monotonic() + asked - started > self.horizon:
                     self._failed(message, exc.cause, str(exc))
                     return
-                wait = exc.retry_after if exc.retry_after is not None else self.backoff * 2**attempt
-                wait = min(max(wait, 0.0), MAX_WAIT)
-                if not self.stopping.is_set():
-                    self.stopping.wait(wait)  # wakes early on stop; then the deadline decides
-                elif self.deadline - time.monotonic() < wait:
-                    self._shutdown_drop(message)
+                if self.queue.full():
+                    self._failed(message, exc.cause, f"{exc} (queue full, not retried)")
                     return
-                else:
-                    time.sleep(wait)
             except PermanentError as exc:
                 self._failed(message, exc.cause, str(exc))
                 return
@@ -188,18 +246,37 @@ class _Worker:
                 self._failed(message, "error", type(exc).__name__)  # the type only: no message
                 return
             else:
-                _notify(self.observer, "alert_sent", self.channel.name)
+                if self._settle():
+                    _notify(self.observer, "alert_sent", self.channel.name)
                 return
+
+    def _block(self, exc: TransientError, attempt: int) -> float:
+        """No send before the server's ``retry_after`` (or our backoff) has passed: for the
+        next attempt and for every alert behind this one (up to the horizon). Returns the
+        wait that was asked for."""
+        # The backoff is also the floor: a server answering "retry_after: 0" every time must
+        # not turn the retries into a busy loop (the default backoff is one second).
+        asked = min(self.backoff * 2 ** min(attempt, 20), MAX_WAIT)
+        if exc.retry_after is not None:
+            asked = max(asked, exc.retry_after)
+        until = time.monotonic() + min(asked, self.horizon)
+        self.blocked_until = max(self.blocked_until, until)
+        return asked
 
     def _shutdown_drop(self, message: AlertMessage) -> None:
         self.lost(message)
         _notify(self.observer, "alert_dropped", self.channel.name, "shutdown")
         log.warning("alert channel %s: an alert was dropped at shutdown", self.channel.name)
 
+    def _shutdown_drop_current(self, message: AlertMessage) -> None:
+        if self._settle():
+            self._shutdown_drop(message)
+
     def _failed(self, message: AlertMessage, cause: str, detail: str) -> None:
         log.warning("alert channel %s: delivery failed (%s): %s", self.channel.name, cause, detail)
         self.lost(message)
-        _notify(self.observer, "alert_failed", self.channel.name, cause)
+        if self._settle():
+            _notify(self.observer, "alert_failed", self.channel.name, cause)
 
 
 class Delivery:
@@ -213,16 +290,26 @@ class Delivery:
         queue_size: int = DEFAULT_QUEUE_SIZE,
         backoff: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
+        retry_horizon: timedelta = DEFAULT_RETRY_HORIZON,
     ) -> None:
         self.channels = tuple(channels)
         self.observer = observer
         self.window = window.total_seconds()
         self.clock = clock
         self._lock = threading.Lock()
+        self._closed = False
         # (channel, rule, subject) -> (fingerprint, time) of the last alert queued for it
         self._last: dict[tuple[str, str, str], tuple[tuple[object, ...], float]] = {}
         self._workers = [
-            _Worker(c, observer, queue_size, backoff, self._lost_for(c.name)) for c in self.channels
+            _Worker(
+                c,
+                observer,
+                queue_size,
+                backoff,
+                retry_horizon.total_seconds(),
+                self._lost_for(c.name),
+            )
+            for c in self.channels
         ]
 
     def send(self, text: str, severity: str, channels: Sequence[str] | None = None) -> None:
@@ -251,11 +338,13 @@ class Delivery:
 
     def _route(self, worker: _Worker, message: AlertMessage) -> None:
         name = worker.channel.name
-        if self._duplicate(name, message):
+        if self._closed:  # after close nothing is delivered; say so instead of losing it
+            self._dropped(name, "shutdown")
+        elif self._duplicate(name, message):
             self._dropped(name, "duplicate")
-        elif not worker.offer(message):
+        elif (why := worker.offer(message)) is not None:
             self._lost(name, message)
-            self._dropped(name, "queue_full")
+            self._dropped(name, why)
 
     def _duplicate(self, channel: str, message: AlertMessage) -> bool:
         now = self.clock()
@@ -285,11 +374,20 @@ class Delivery:
         _notify(self.observer, "alert_dropped", channel, reason)
 
     def close(self, timeout: float = 2.0) -> None:
-        """Deliver what is queued within ``timeout``; count and log the rest as dropped."""
+        """Deliver what is queued within ``timeout`` (one deadline for all channels), then
+        count and log the rest as dropped ("shutdown"). A worker still stuck inside a
+        channel's ``send`` at the deadline is abandoned: the alert it holds is counted as
+        dropped too, and whatever it does later is ignored. ``send`` after ``close`` drops
+        and counts."""
+        deadline = time.monotonic() + max(timeout, 0.0)
+        self._closed = True
         for worker in self._workers:
-            worker.stop(timeout)
+            worker.stop(deadline)
         for worker in self._workers:
-            worker.thread.join(timeout + 0.5)
+            worker.thread.join(max(deadline - time.monotonic(), 0.0))
+        for worker in self._workers:
+            if worker.thread.is_alive():
+                worker.abandon()
 
 
 class _EngineAlerter:

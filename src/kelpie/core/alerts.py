@@ -56,8 +56,17 @@ class AlertMessage:
     text: str | None = None  # free text (e.g. a report): sent as is, without the alert layout
 
     @property
-    def fingerprint(self) -> tuple[str, str, str, Severity, str | None]:
-        return (self.rule, self.subject, self.body, self.severity, self.text)
+    def fingerprint(self) -> tuple[str, str, str, Severity, str | None, Transition, Did]:
+        """What makes two alerts the same one for de-duplication."""
+        return (
+            self.rule,
+            self.subject,
+            self.body,
+            self.severity,
+            self.text,
+            self.transition,
+            self.did,
+        )
 
 
 def parse_alert(title: str, body: str, severity: str) -> AlertMessage:

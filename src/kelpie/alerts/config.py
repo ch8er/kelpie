@@ -5,6 +5,7 @@
     [alerts]
     dedup_window = "10m"        # identical alerts within this window are sent once per channel
     queue_size = 50             # per channel; an alert that does not fit is dropped and counted
+    retry_horizon = "15m"       # transient failures (429, 5xx, network) are retried this long
 
     [[alerts.channels]]
     type = "telegram"
@@ -33,6 +34,7 @@ from typing import Any
 from kelpie.alerts import slack, telegram
 from kelpie.alerts.delivery import (
     DEFAULT_QUEUE_SIZE,
+    DEFAULT_RETRY_HORIZON,
     DEFAULT_WINDOW,
     AlertObserver,
     Delivery,
@@ -43,6 +45,7 @@ from kelpie.core.serde import parse_duration
 
 SECTION = "[alerts]"
 MAX_QUEUE = 1000
+MAX_RETRY_HORIZON = timedelta(hours=24)
 
 ChannelSettings = TelegramSettings | SlackSettings
 
@@ -52,6 +55,7 @@ class AlertSettings:
     channels: tuple[ChannelSettings, ...] = ()
     dedup_window: timedelta = DEFAULT_WINDOW
     queue_size: int = DEFAULT_QUEUE_SIZE
+    retry_horizon: timedelta = DEFAULT_RETRY_HORIZON
 
     def build(
         self, observer: AlertObserver | None = None, environ: Mapping[str, str] = os.environ
@@ -61,7 +65,9 @@ class AlertSettings:
         if not self.channels:
             return None
         built = [c.build(environ) for c in self.channels]
-        return Delivery(built, observer, self.dedup_window, self.queue_size)
+        return Delivery(
+            built, observer, self.dedup_window, self.queue_size, retry_horizon=self.retry_horizon
+        )
 
     def problems(self, environ: Mapping[str, str] = os.environ) -> list[str]:
         out = []
@@ -78,7 +84,7 @@ def load_alerts(section: Any) -> AlertSettings:
         return AlertSettings()
     if not isinstance(section, Mapping):
         raise ValueError(f"{SECTION} must be a table")
-    if extra := set(section) - {"dedup_window", "queue_size", "channels"}:
+    if extra := set(section) - {"dedup_window", "queue_size", "retry_horizon", "channels"}:
         raise ValueError(f"{SECTION}: unknown keys {sorted(extra)}")
     try:
         window = parse_duration(section.get("dedup_window", DEFAULT_WINDOW))
@@ -89,7 +95,13 @@ def load_alerts(section: Any) -> AlertSettings:
     size = section.get("queue_size", DEFAULT_QUEUE_SIZE)
     if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= MAX_QUEUE:
         raise ValueError(f"{SECTION} queue_size must be between 1 and {MAX_QUEUE}")
-    return AlertSettings(_channels(section.get("channels", [])), window, size)
+    try:
+        horizon = parse_duration(section.get("retry_horizon", DEFAULT_RETRY_HORIZON))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{SECTION} retry_horizon: {exc}") from exc
+    if not timedelta(0) <= horizon <= MAX_RETRY_HORIZON:
+        raise ValueError(f"{SECTION} retry_horizon must be between 0 and {MAX_RETRY_HORIZON}")
+    return AlertSettings(_channels(section.get("channels", [])), window, size, horizon)
 
 
 def _channels(entries: Any) -> tuple[ChannelSettings, ...]:
