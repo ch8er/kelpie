@@ -157,7 +157,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | – | `dispatch_gate` | P0 | implemented | `wait`, `wake` | adapter with `SupportsWait` (not in Hermes yet) |
 | 13 | `needs_you` | P1 | implemented | `escalate` | alert channel |
 | 14 | `compaction_gate` | P2 | not implemented | | |
-| – | `return_causes` | P1 | not implemented | | |
+| – | `return_causes` | P1 | implemented | `alert`, `comment` | adapter `comment` |
 | – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
 
 Several rules share these terms:
@@ -421,6 +421,24 @@ files. Needs an adapter that reports `Task.files` (Hermes does not yet).
 | --- | --- | --- | --- |
 | `expected_shared` | `[]` | list of globs | Files many tasks are meant to edit, such as a changelog. Ignored when comparing. |
 | `serialize` | `false` | bool | Also park the later task in `waiting` until the earlier ones are done. Needs an adapter with `SupportsWait` and `wait_condition` in `act` mode to wake it (Kelpie warns otherwise). |
+
+### return_causes
+
+Why tasks come back (incident 7). Returns (`Task.returns`; Hermes: a reviewer's changes
+requested and reopened reviews) are grouped by cause over a window. When merge conflicts
+dominate and some files keep coming up in them, Kelpie raises one alert with the hot files
+and a recommendation, and comments on in-progress tasks that touch them. Otherwise a
+dominant cause gets an informational alert with the shares.
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `window` | `"24h"` | duration, > 0 | Returns counted (Hermes reports every return of the tasks on the board, whatever their age; finished tasks older than its `lookback` are not on it). |
+| `min_returns` | `5` | count, >= 1 | No finding with fewer returns in the window. |
+| `conflict_ratio_threshold` | `0.5` | share, (0, 1] | Merge conflicts must make up this share of the returns for a hot-file alert. |
+| `hot_file_min_conflicts` | `3` | count, >= 1 | Conflicts naming a file that make it hot. |
+| `dominant_ratio` | `0.5` | share, (0, 1] | Share of a cause (other than `other`) reported as dominant when there is no hot file. |
+| `expected_shared` | `conflict_warning`'s | list of globs | Files many tasks are meant to edit: never hot. |
+| `cause_patterns` | `merge_conflict` patterns | table of category -> regexes | Classify a return by its reason (case-insensitive), before the platform's category. |
 
 ### dispatch_gate
 

@@ -403,3 +403,23 @@ def test_dispatch_gate_act_mode_needs_rule_2_in_act_mode() -> None:
     assert dispatch_gate_warnings(EngineConfig(dry_run=False, modes=both)) == []
     assert dispatch_gate_warnings(EngineConfig(dry_run=True, modes={"dispatch_gate": act})) == []
     assert dispatch_gate_warnings(EngineConfig(dry_run=False)) == []
+
+
+def test_return_causes_inherits_expected_shared_from_conflict_warning() -> None:
+    from kelpie.app import _rule_config
+    from kelpie.core.config import EngineConfig
+
+    shared = EngineConfig.from_mapping(
+        {"rules": {"conflict_warning": {"expected_shared": ["CHANGELOG.md"]}}}
+    )
+    assert _rule_config("return_causes", shared) == {"expected_shared": ["CHANGELOG.md"]}
+    own = EngineConfig.from_mapping(
+        {
+            "rules": {
+                "conflict_warning": {"expected_shared": ["CHANGELOG.md"]},
+                "return_causes": {"expected_shared": []},
+            }
+        }
+    )
+    assert _rule_config("return_causes", own) == {"expected_shared": []}
+    assert _rule_config("return_causes", EngineConfig.from_mapping({})) == {}

@@ -1,0 +1,67 @@
+id: "07-disjoint-files"
+incident: 7
+title: "Merge conflicts that share no file get no hot-file recommendation"
+description: >
+  Most returns in the window were merge conflicts, but each one hit a different file: no file
+  is a hot spot that an owner, a split or serialized work would fix. Kelpie reports the
+  dominant cause and the shares only: no hot-file alert, no warning to in-progress tasks. A changelog that every task edits is on the
+  expected_shared list, so its conflicts never make it hot.
+rule: return_causes
+config:
+  window: "24h"
+  conflict_ratio_threshold: 0.5
+  hot_file_min_conflicts: 3
+  expected_shared: ["CHANGELOG.md"]
+snapshot:
+  now: "2026-03-02T17:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - id: T-711
+      title: "Billing"
+      status: done
+      status_since: "2026-03-02T15:00:00+00:00"
+      role: developer
+      files: [src/billing.py, CHANGELOG.md]
+      returns:
+        - {at: "2026-03-02T09:00:00+00:00", reason: "merge conflict in src/billing.py", category: merge_conflict}
+        - {at: "2026-03-02T10:00:00+00:00", reason: "merge conflict in CHANGELOG.md", category: merge_conflict}
+    - id: T-712
+      title: "Invoices"
+      status: done
+      status_since: "2026-03-02T15:00:00+00:00"
+      role: developer
+      files: [src/invoices.py, CHANGELOG.md]
+      returns:
+        - {at: "2026-03-02T11:00:00+00:00", reason: "merge conflict in src/invoices.py", category: merge_conflict}
+        - {at: "2026-03-02T12:00:00+00:00", reason: "merge conflict in CHANGELOG.md", category: merge_conflict}
+    - id: T-713
+      title: "Exports"
+      status: done
+      status_since: "2026-03-02T15:00:00+00:00"
+      role: developer
+      files: [src/export.py, CHANGELOG.md]
+      returns:
+        - {at: "2026-03-02T13:00:00+00:00", reason: "merge conflict in src/export.py", category: merge_conflict}
+        - {at: "2026-03-02T14:00:00+00:00", reason: "merge conflict in CHANGELOG.md", category: merge_conflict}
+        - {at: "2026-03-02T14:30:00+00:00", reason: "missing tests", category: review}
+    - id: T-714
+      title: "Release notes"
+      status: in_progress
+      status_since: "2026-03-02T16:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      files: [CHANGELOG.md, src/billing.py]
+expected_actions:
+  - kind: alert
+    severity: info
+    reason_contains: "spread over many files"
+    params:
+      finding: dominant_cause
+      dominant_cause: merge_conflict
+      returns: 7
+not_expected_actions:
+  - kind: alert
+    params: {finding: hot_files}
+  - kind: comment
+    task_id: T-714
