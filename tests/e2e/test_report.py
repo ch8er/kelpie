@@ -77,9 +77,12 @@ def test_daily_report_is_written_and_sent(farm: Farm) -> None:
     for heading in ("## Cost of chaos", "## Fixed by Kelpie", "## Needs a human"):
         assert heading in markdown
     fixed = markdown.split("## Fixed by Kelpie", 1)[1].split("\n## ", 1)[0]
-    assert "t_loop" in fixed
+    assert "- `loop_breaker`: stop x1 `t_loop`" in fixed  # done, not "would have done"
     needs_human = markdown.split("## Needs a human", 1)[1].split("\n## ", 1)[0]
-    assert "t_auth" in needs_human
+    assert "**critical** `orphan_status` `t_auth`" in needs_human
+    chaos = markdown.split("## Cost of chaos", 1)[1].split("\n## ", 1)[0]
+    assert re.search(r"\| ownerless tasks \(`orphan_status`\) \|.*`t_auth`", chaos)
+    assert "Stuck hours at $2.50/hour" in chaos
     assert (reports / f"kelpie-report-{day}.md").read_text(encoding="utf-8") == markdown
 
     sent = farm.channels.telegram_texts()[alerts:]
@@ -87,26 +90,28 @@ def test_daily_report_is_written_and_sent(farm: Farm) -> None:
     summary = sent[0]
     assert summary.startswith(f"Kelpie daily report {day}")
     assert re.search(r"\b1 tasks? completed", summary)
-    # The ownerless review, the stopped run (a human resumes it) and rule 6's observation.
-    assert re.search(r"Needs a human: [1-9]\d* open condition\(s\)\.", summary)
-    assert "Reduce ownerless tasks" in summary
+    # The ownerless review and the stopped run (a human resumes it), at least; rule 6, in
+    # observe mode, adds its own observation today.
+    found = re.search(r"Needs a human: (\d+) open condition\(s\)\.", summary)
+    assert found and int(found[1]) >= 2
     assert summary in farm.channels.slack_texts()  # [report] severity warning: Slack too
 
 
 def test_report_send_fails_loudly_when_a_channel_rejects_it(farm: Farm) -> None:
     """Slack answers ``no_service`` (the webhook was removed): cron must see exit 1."""
     farm.board.task("t_1", "ready", farm.ago(hours=1), title="Anything", assignee="dev")
-    farm.channels.slack.default = (404, "no_service", {})
     kelpie = farm.serve(farm.config(extra={"report": {"timezone": midday_zone(farm)}}))
     kelpie.wait_ticks(1)
     farm.stop()
+    farm.channels.slack.default = (404, "no_service", {})  # removed after the day ran
+    alerts = len(farm.channels.telegram_texts())
 
     day = farm.now.astimezone(ZoneInfo(midday_zone(farm))).date().isoformat()
     result = kelpie.cli("report", "--date", day, "--send")
 
     assert result.code == 1
     assert "did not reach every channel" in result.stderr
-    assert [t.splitlines()[0] for t in farm.channels.telegram_texts()] == [
+    assert [t.splitlines()[0] for t in farm.channels.telegram_texts()[alerts:]] == [
         f"Kelpie daily report {day}"
     ]
     problems = problems_in(result.stderr.splitlines())
