@@ -607,3 +607,42 @@ def test_hold_state_and_params_match_rule_6() -> None:
         assert isinstance(a.params["idle_agent_minutes"], int)
         assert isinstance(a.params["idle_agents"], list)
         assert isinstance(a.params["held_tasks"], list)
+
+
+def test_hold_samples_are_a_step_function() -> None:
+    # 3 idle from 00:00 (sample the evening before), 0 at 12:00, 2 at 18:00, till 24:00
+    hold = opened(
+        "bottlenecks:hold:merge-hold",
+        "bottlenecks",
+        at(20, day=1),
+        at(20, day=1),
+        at(23, 59, day=2),
+    )
+    samples = [
+        hold_alert(at(20, day=1), 0, ["a", "b", "c"]),
+        hold_alert(at(12), 0, []),
+        hold_alert(at(18), 0, ["a", "b"]),
+        hold_alert(at(0, day=3), 0, ["a", "b", "c", "d"]),  # after the day: ignored
+    ]
+    [line] = build_report(day_inputs(states=[hold], actions=samples)).chaos
+    assert line.hours == pytest.approx(3 * 12 + 0 * 6 + 2 * (5 + 59 / 60))
+
+
+def test_hold_samples_of_an_earlier_episode_are_ignored() -> None:
+    hold = opened("bottlenecks:hold:merge-hold", "bottlenecks", at(12), at(12), at(14))
+    old = hold_alert(at(8), 0, ["a", "b", "c", "d", "e"])  # before this episode's expiry
+    assert build_report(day_inputs(states=[hold], actions=[old])).chaos == ()
+
+
+def test_before_after_counts_holds_like_the_report() -> None:
+    from kelpie.report.fixes import MANUAL, FixEvent
+
+    hold = opened("bottlenecks:hold:merge-hold", "bottlenecks", at(0, day=1), at(0, day=1), at(23))
+    samples = [hold_alert(at(0, day=1), 0, ["a", "b", "c", "d"]), hold_alert(at(12), 0, [])]
+    fix = FixEvent(at(12), MANUAL, "lifted the merge hold", rule="bottlenecks")
+    report = build_report(day_inputs(states=[hold], actions=samples, fixes=(fix,)))
+    [v] = report.verifications
+    lost = next(m for m in v.metrics if m.name.startswith("hours lost"))
+    assert lost.name == "hours lost per day (bottlenecks)"
+    assert (lost.before, lost.after) == (pytest.approx(4 * 24), pytest.approx(0))
+    assert "Cost of chaos: 48.0 hours lost" in render_summary(report)

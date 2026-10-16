@@ -8,8 +8,9 @@ observe to act, or dry-run turned off), or an output filter that appeared in tra
 (:func:`kelpie.traces.outputs.filter_introductions`).
 
 Each fix is measured over ``window`` before it and the same length after it (shorter when
-the report ends sooner): stuck condition-hours per day (chaos states counted like the
-report's cost of chaos, only the fix's rule when it names one), tokens per day (the fix's
+the report ends sooner): hours lost per day (chaos states counted exactly like the report's
+cost of chaos, condition-hours and for forgotten holds idle agent-hours; only the fix's
+rule when it names one), tokens per day (the fix's
 role when it names one), returns per day, review time
 (mean session length of ``review_roles``), sessions that failed or ended without a final
 status, and for a command fix the output tokens per call of that command. A side with fewer
@@ -24,13 +25,14 @@ board must reach back ``1d + 2 x verify_window`` (72h) when the report runs.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from kelpie.core.ledger import LedgerEntry, Outcome
 from kelpie.core.model import Session, Span, Status, Task
 from kelpie.core.spans import SpanKey, last_at, span_key
+from kelpie.core.states import OpenState
 from kelpie.report.fixes import FILTER, MODE, FixEvent
 from kelpie.report.store import StateRow
 from kelpie.traces.outputs import Call, OutputSettings, before_after, filter_introductions
@@ -92,6 +94,12 @@ class Evidence:
     window: timedelta = DEFAULT_WINDOW
     min_sample: int = DEFAULT_MIN_SAMPLE
     review_roles: tuple[str, ...] = DEFAULT_REVIEW_ROLES
+    # How the report counts a chaos state: its cause (a rule, or "bottlenecks:hold") and
+    # its hours lost in a window (condition-hours, idle agent-hours for holds).
+    cause: Callable[[OpenState], str] = lambda s: s.rule
+    hours: Callable[[OpenState, datetime, datetime], float] = lambda s, lo, hi: (
+        (hi - lo).total_seconds() / 3600
+    )
 
 
 def mode_events(entries: Iterable[LedgerEntry]) -> list[FixEvent]:
@@ -156,27 +164,28 @@ def _days(w: Window) -> float:
 
 
 def _stuck(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) -> Metric:
-    rules = {event.rule} if event.rule in ev.chaos_rules else ev.chaos_rules
+    scoped = event.rule in {c.split(":")[0] for c in ev.chaos_rules}
+    rules = {event.rule} if scoped else {c.split(":")[0] for c in ev.chaos_rules}
 
     def hours(w: Window) -> tuple[float, int]:
         total, n = 0.0, 0
         for row in ev.states:
             s = row.state
-            if s.rule not in rules:
+            if ev.cause(s).split(":")[0] not in rules:
                 continue
             lo, hi = max(s.since, s.opened_at, w[0]), min(s.last_seen, w[1])
             if hi > lo:
-                total += (hi - lo).total_seconds() / 3600
+                total += ev.hours(s, lo, hi)
                 n += 1
         return total / _days(w), n
 
     (hb, nb), (ha, na) = hours(b), hours(a)
-    if len(rules) == 1:
-        name = f"stuck condition-hours per day ({event.rule})"
+    if scoped:
+        name = f"hours lost per day ({event.rule})"
     elif event.rule:  # a rule without chaos states: all causes, and the name says so
-        name = f"stuck condition-hours per day (all causes; {event.rule} has none)"
+        name = f"hours lost per day (all causes; {event.rule} has none)"
     else:
-        name = "stuck condition-hours per day"
+        name = "hours lost per day"
     return Metric(name, "h/day", hb, ha, nb, na, short or min(nb, na) < ev.min_sample)
 
 

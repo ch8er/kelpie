@@ -147,11 +147,11 @@ def test_stuck_hours_of_the_fixed_rule() -> None:
     )
     event = FixEvent(FIX, MANUAL, "conditions for CI blocks", rule="stale_blocks")
     report = build_report(inputs(fixes=(event,), states=states))
-    stuck = metric(report, "stuck condition-hours")
-    assert stuck.name == "stuck condition-hours per day (stale_blocks)"
+    stuck = metric(report, "hours lost")
+    assert stuck.name == "hours lost per day (stale_blocks)"
     assert (stuck.before, stuck.after) == (pytest.approx(12), pytest.approx(1))
     everything = build_report(inputs(states=states))
-    assert metric(everything, "stuck condition-hours").after == pytest.approx(9)
+    assert metric(everything, "hours lost").after == pytest.approx(9)
 
 
 def test_tokens_returns_and_command_output() -> None:
