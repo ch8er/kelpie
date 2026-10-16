@@ -559,8 +559,8 @@ stop markers the hook enforces. Absent: no Claude Code sessions. Details: the
 
 ## [adapters.openclaw]
 
-The OpenClaw platform adapter: the spool written by the Kelpie OpenClaw plugin, and the
-cards of OpenClaw's Workboard plugin as tasks. Absent: no OpenClaw sessions. Details: the
+The OpenClaw platform adapter: the spool written by the Kelpie OpenClaw plugin, the cards of
+OpenClaw's Workboard plugin as tasks, and stop markers the plugin enforces. Absent: no OpenClaw sessions. Details: the
 [OpenClaw adapter README](../src/kelpie/adapters/openclaw/README.md).
 
 | Key | Default | Unit | Meaning |
@@ -569,6 +569,9 @@ cards of OpenClaw's Workboard plugin as tasks. Absent: no OpenClaw sessions. Det
 | `workboard` | `"<state_dir>/plugins/workboard/workboard.sqlite"` | path or `false` | The Workboard database, opened read-only. Missing: sessions only (a warning once). `false`: not read. |
 | `spool` | `"~/.openclaw/kelpie/spool.jsonl"` | path or `false` | Spool written by the plugin. `false`: no sessions, no hook spans. |
 | `lookback` | `"24h"` | duration, > 0 | Sessions and finished cards older than this are left out. |
+| `stop_dir` | `"~/.openclaw/kelpie/stop"` | path or `false` | Where `stop` writes markers; the plugin's `stopDir` must name the same directory. `false`: `stop` becomes an alert. |
+| `cli` | `"openclaw"` | name or path or `false` | OpenClaw CLI that aborts a stopped session's run in flight (`openclaw gateway call sessions.abort`). `false`: markers only. |
+| `cli_timeout` | `"20s"` | duration, > 0 and <= 60s | Limit for one abort command; it runs inside the tick. |
 | `token_spans` | `true` | bool | LLM spans with each run's tokens from the plugin (it needs conversation access). Set `false` if OpenClaw's `diagnostics-otel` also sends its token spans to Kelpie: the daily report would count a run twice. |
 | `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
 

@@ -1,7 +1,7 @@
 {
   "id": "kelpie",
   "name": "Kelpie",
-  "description": "Reports sessions, tool calls and token usage to Kelpie's spool.",
+  "description": "Reports sessions, tool calls and token usage to Kelpie's spool, and enforces Kelpie's stops.",
   "activation": { "onStartup": true },
   "configSchema": {
     "type": "object",
@@ -10,7 +10,9 @@
       "python": { "type": "string", "description": "Python 3.8+ that runs kelpie_hook.py (default python3)" },
       "spool": { "type": "string", "description": "Kelpie's spool file (default ~/.openclaw/kelpie/spool.jsonl)" },
       "commands": { "type": "boolean", "description": "Record a redacted command prefix for exec calls (default true)" },
-      "maxBytes": { "type": "integer", "minimum": 1, "description": "Spool size that moves it to <spool>.1 (default 20 MiB)" }
+      "maxBytes": { "type": "integer", "minimum": 1, "description": "Spool size that moves it to <spool>.1 (default 20 MiB)" },
+      "stopDir": { "type": "string", "description": "Where Kelpie writes stop markers; must match [adapters.openclaw] stop_dir (default ~/.openclaw/kelpie/stop)" },
+      "stopTtl": { "type": "number", "exclusiveMinimum": 0, "description": "Seconds a stop marker holds (default 86400)" }
     }
   }
 }

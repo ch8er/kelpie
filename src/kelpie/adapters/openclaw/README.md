@@ -2,9 +2,10 @@
 
 Lets Kelpie watch the agents of an [OpenClaw](https://docs.openclaw.ai) Gateway. Kelpie reads
 a spool written by the Kelpie OpenClaw plugin (sessions, tool calls, token usage) and, when
-the bundled Workboard plugin is enabled, its cards as tasks. Task actions (`requeue`,
-`unblock`, `comment`, `wip_commit`) raise `UnsupportedAction`, so in `act` mode the engine
-alerts a human instead ("not executed, needs a human").
+the bundled Workboard plugin is enabled, its cards as tasks. The one action carried out is
+`stop` (see [Stopping a session](#stopping-a-session)). Task actions (`requeue`, `unblock`,
+`comment`, `wip_commit`) raise `UnsupportedAction`, so in `act` mode the engine alerts a human
+instead ("not executed, needs a human").
 
 OpenClaw has no loop guard by default (`tools.loopDetection.enabled` is `false`, and when on
 it counts per run, so a loop spread over heartbeat runs is never caught). Rule 10
@@ -13,8 +14,9 @@ it counts per run, so a loop spread over heartbeat runs is never caught). Rule 1
 What was checked against a real OpenClaw (2026.10.4, npm, a local Gateway on loopback with a
 mock OpenAI-compatible model that loops on one tool call): the plugin installs with
 `openclaw plugins install --link`, loads at Gateway start, and its hooks receive the fields
-read below; a looping run wrote one spool line per tool call with the same `args_hash`, and
-the adapter turned the spool and a real Workboard database into sessions, spans and tasks.
+read below; a looping run wrote one spool line per tool call with the same `args_hash`, the
+adapter turned the spool and a real Workboard database into sessions, spans and tasks, and a
+stop ended looping runs (see [Stopping a session](#stopping-a-session)).
 Nothing here has run on a production farm or with a hosted model.
 
 ## Config
@@ -26,6 +28,9 @@ workboard = "~/.openclaw/plugins/workboard/workboard.sqlite"  # default: under s
 spool = "~/.openclaw/kelpie/spool.jsonl"   # written by the plugin below; false = do not read one
 lookback = "24h"                           # sessions and finished cards older than this are left out
 token_spans = true                         # LLM spans from the plugin; false if diagnostics-otel sends tokens too
+stop_dir = "~/.openclaw/kelpie/stop"       # where stop markers go; false = refuse stop (alerts instead)
+cli = "openclaw"                           # aborts a stopped session's run; false = markers only
+cli_timeout = "20s"
 enabled = true                             # default when the section exists
 ```
 
@@ -78,6 +83,8 @@ Plugin settings (`plugins.entries.kelpie.config`, all optional):
 | `spool` | `~/.openclaw/kelpie/spool.jsonl` | spool file; must match `[adapters.openclaw] spool` |
 | `commands` | `true` | `false` records no command prefix |
 | `maxBytes` | `20971520` | spool size that moves it to `<spool>.1` |
+| `stopDir` | `~/.openclaw/kelpie/stop` | where Kelpie's stop markers are; must match `[adapters.openclaw] stop_dir` |
+| `stopTtl` | `86400` | seconds a stop marker holds |
 
 Each forwarded hook starts one short Python process (tens of milliseconds), asynchronously: no
 hook is awaited, so the agent never waits for Kelpie, and a missing Python only logs a warning
@@ -117,6 +124,75 @@ process gets only `PATH`, `HOME`,
 `LANG`, `LC_ALL`, `TMPDIR`, `SYSTEMROOT` of the Gateway's environment, never provider keys. The spool is
 created with mode `0600` (not through a symlink); keep its directory `0700` as above.
 `kelpie spool scrub` cleans it like the other spools.
+
+## Stopping a session
+
+`loop_breaker` in `act` mode (runaway loops, error streaks, hard budgets) stops a session with
+the `stop` action. OpenClaw has no command that stops a session for good: `/stop` and the
+Gateway's `sessions.abort` end the run in flight, and the next heartbeat, cron wake or queued
+message starts another. So a stop has two parts:
+
+1. **A stop marker.** The adapter writes `<stop_dir>/<sessionId>.json` (`{"at", "reason"}`,
+   mode `0600`, atomically). The plugin reads it in the Gateway, without starting Python:
+   while it holds, every tool call of the session is refused (`before_tool_call` answers
+   `block` with "Stopped by Kelpie: <reason>", which the model reads as the tool result), and,
+   with conversation access, every new run that is not a message from the session's owner is
+   refused before the model is called (`before_agent_run`: heartbeats, cron wakes,
+   inter-session deliveries). A refused run is replaced in the transcript by "Stopped by
+   Kelpie: <reason>. The session resumes when its owner sends it a message."
+2. **An abort of the run in flight.** The adapter runs
+   `openclaw gateway call sessions.abort --params '{"key": <sessionKey>, "clearQueued": true}'`.
+   That ends the current run and its queued follow-ups at once. Background runs OpenClaw starts
+   outside the session's lane answer `no-active-run` to the key; then the adapter aborts the
+   session's latest run id instead (`{"runId": ...}`). A key the hook reduced (a chat peer
+   replaced by a hash) is never sent; only the run id is.
+
+The stop is lifted when the session's owner sends it a message (`before_agent_run` with
+trigger `user` and `senderIsOwner`; that message goes through), when the session is reset,
+started anew (`/new`) or deleted, when someone deletes the marker file, or after `stopTtl`
+(24 hours). A Gateway restart, an idle or daily rollover or a compaction does not lift it.
+
+What the human told about the stop reads: "Stopped run <session>; its current run was aborted;
+every tool call and every run but its owner's message is refused until the owner messages it
+or the stop expires". When the abort fails (no `openclaw` on Kelpie's `PATH`, the Gateway is
+down or refuses), the marker still holds and the message says the run could not be aborted:
+the run then goes on until the model gives up on the refused tools, spending a model call per
+refused tool call.
+
+Verified on OpenClaw 2026.10.4 (local Gateway, a mock model that loops on one tool call):
+
+- a looping `openclaw agent` run: the marker refused the next tool calls, `sessions.abort`
+  answered `{"ok": true, "status": "aborted"}` in about a second, and the model saw no request
+  after it;
+- a heartbeat run (`openclaw system event --mode now`) on the stopped session was refused by
+  `before_agent_run` before any model call;
+- an internal `skill-workshop-review` run that OpenClaw started on its own looped on the same
+  call under its own session: the key answered `no-active-run`, the run id aborted it.
+
+Limits:
+
+- **Without conversation access** there is no `before_agent_run`: heartbeats and cron wakes
+  still start runs on a stopped session; their tool calls are refused. Grant access (see
+  [Plugin](#plugin)) so a stop also stops scheduled runs.
+- **Same host, same user.** The marker directory is `0700` and markers `0600`, written by the
+  user Kelpie runs as, and the `openclaw` CLI authenticates with that user's OpenClaw config
+  (`gateway.auth`) or `OPENCLAW_GATEWAY_TOKEN`. Run Kelpie as the Gateway's user on its host,
+  or set `stop_dir` and the plugin's `stopDir` to a directory both can use.
+- **Plugin required, and current.** Spool lines carry the plugin's format version (`"v": 2`
+  supports stops); a session whose newest line comes from an older plugin is refused with
+  `UnsupportedAction` (a human is alerted). A stop that is written but not enforced (tool calls
+  go on more than 2 minutes after the marker, and the plugin never refused one) is logged once
+  per session and shows as `exit_reason = "stop not enforced"`.
+- **Owner.** OpenClaw decides `senderIsOwner`; a message from anyone else to a stopped
+  session is refused (and lost, as OpenClaw keeps only the replacement text of a refused run).
+- **Known sessions only.** A session not in the spool within `lookback` is refused with
+  `UnsupportedAction`; so is every stop with `stop_dir = false`. An ended session is left alone
+  (`NOTHING_TO_DO`).
+- **Repeats.** A hard budget stays exceeded, so `loop_breaker` stops the session again after
+  each action cooldown (30 minutes by default); the owner's message lifts the stop until then.
+
+The session's `exit_reason` reads `stopped by kelpie` once the plugin has refused something,
+until the stop is lifted.
 
 ## What Kelpie sees
 

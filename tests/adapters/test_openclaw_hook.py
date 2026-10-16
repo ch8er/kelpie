@@ -293,6 +293,14 @@ def test_a_digest_from_the_plugin_replaces_the_hash(spool: Path) -> None:
     assert rec["args_hash"] == "0123456789abcdef"
 
 
+def test_stopped_and_resumed_lines(spool: Path) -> None:
+    run(forwarded("kelpie_stopped", {"event": "before_tool_call"}))
+    run(forwarded("kelpie_resumed", {"event": "before_agent_run"}))
+    stopped, resumed = lines(spool)
+    assert (stopped["type"], stopped["event"], stopped["v"]) == ("stopped", "before_tool_call", 2)
+    assert (resumed["type"], resumed["event"]) == ("resumed", "before_agent_run")
+
+
 def test_args_hash_matches_otlp_ingest() -> None:
     for args in ({"b": 1, "a": [1, 2]}, None, "text", {"x": object()}):
         assert hook.args_hash(args) == args_hash(args)
