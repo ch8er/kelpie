@@ -26,14 +26,16 @@ report: one analysis must not cost the whole report.
 
 from __future__ import annotations
 
+import copy
 import importlib
 import logging
 import math
 import pkgutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 from kelpie.core.model import Span
 from kelpie.core.spans import SpanKey, TokenUsage
@@ -84,7 +86,11 @@ class SectionContext:
     """What a builder may read: the report's ``inputs``; the day (``start``, ``end``, its
     ``spans`` and ``spend``); ``counted``, the LLM spans whose tokens count (nested
     instrumentations left out) with the model to price them by; ``roles``, the role of each
-    session's owner; and ``price``, which turns token usage into :class:`Spend`."""
+    session's owner; ``price``, which turns token usage into :class:`Spend`; and
+    ``config``, the section's own ``[report.sections.<name>]`` table (empty without one),
+    holding only the keys it registered (``register_section(name, keys=...)``); the
+    section checks the values and raises on bad ones. Read-only at the top level; nested
+    values are the builder's own copy."""
 
     inputs: ReportInputs
     start: datetime
@@ -94,17 +100,29 @@ class SectionContext:
     price: Callable[[Iterable[TokenUsage]], Spend]
     spend: Spend
     roles: Mapping[str, str]
+    config: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
 SectionBuilder = Callable[[SectionContext], "Section | None"]
 SECTIONS: dict[str, SectionBuilder] = {}
+SECTION_KEYS: dict[str, frozenset[str]] = {}  # the config keys each section accepts
 
 
-def register_section(name: str) -> Callable[[SectionBuilder], SectionBuilder]:
+def register_section(
+    name: str, keys: Iterable[str] = ()
+) -> Callable[[SectionBuilder], SectionBuilder]:
+    """Register a builder under ``name``. ``keys``: the ``[report.sections.<name>]`` keys it
+    reads (none by default); a table with any other key is noted in the report instead of
+    reaching the builder, which still checks the values."""
+
+    if isinstance(keys, str):
+        raise TypeError("keys must be a collection of key names, not a string")
+
     def decorator(builder: SectionBuilder) -> SectionBuilder:
         if name in SECTIONS:
             raise ValueError(f"report section already registered: {name}")
         SECTIONS[name] = builder
+        SECTION_KEYS[name] = frozenset(keys)
         return builder
 
     return decorator
@@ -124,15 +142,32 @@ def load_sections() -> list[str]:
 
 
 def run_sections(
-    builders: Mapping[str, SectionBuilder], ctx: SectionContext, failed: Sequence[str] = ()
+    builders: Mapping[str, SectionBuilder],
+    ctx: SectionContext,
+    failed: Sequence[str] = (),
+    config: Mapping[str, Mapping[str, Any]] | None = None,
+    keys: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[Section, ...]:
-    """Every builder's section in name order, with a note for each that failed."""
+    """Every builder's section in name order, each given its own ``config`` table, with a
+    note for each that failed, each table with keys its section does not accept (``keys``,
+    default: as registered), and each table no section reads (a typo)."""
+    config = config or {}
+    keys = SECTION_KEYS if keys is None else keys
     out = [
         Section(name, (f"This section failed to load ({name}); see the log.",)) for name in failed
     ]
+    out.extend(
+        Section(name, (f"[report.sections.{name}] is configured, but no such section exists.",))
+        for name in sorted(set(config) - set(builders) - set(failed))
+    )
     for name in sorted(builders):
         try:
-            found = builders[name](ctx)
+            table = config.get(name, {})
+            if extra := sorted(set(table) - keys.get(name, frozenset())):
+                out.append(Section(name, (f"[report.sections.{name}]: unknown keys {extra}.",)))
+                continue
+            own = MappingProxyType(copy.deepcopy(dict(table)))
+            found = builders[name](replace(ctx, config=own))
             if found is not None and not _valid(found):
                 raise TypeError(f"returned {type(found).__name__}, not a valid Section")
         except Exception:

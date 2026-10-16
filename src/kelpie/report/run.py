@@ -99,6 +99,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         verify_window=sources.report.verify_window,
         review_roles=sources.report.review_roles,
         min_sample=sources.report.min_sample,
+        section_config=sources.report.sections,
     )
 
 

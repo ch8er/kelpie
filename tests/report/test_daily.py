@@ -4,6 +4,7 @@ stores, read back read-only, and checked number by number."""
 from __future__ import annotations
 
 import sqlite3
+import tomllib
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ from kelpie.report.daily import (
     render_summary,
     session_of,
 )
-from kelpie.report.run import ReportSources, default_day, generate, send, write
+from kelpie.report.run import ReportSources, default_day, generate, load_inputs, send, write
 from kelpie.report.store import ReportStore, StateRow
 from kelpie.rules import REGISTRY
 from kelpie.traces.outputs import OutputSettings
@@ -424,6 +425,8 @@ def test_report_config() -> None:
     assert settings.hour_usd == 4.0 and settings.channels == ("ops",)
     assert settings.dir is not None and "~" not in str(settings.dir)
     assert load_report(None) == ReportSettings()
+    tables = load_report({"sections": {"model-fit": {"routine_roles": ["reviewer"]}}})
+    assert tables.sections == {"model-fit": {"routine_roles": ["reviewer"]}}
 
 
 @pytest.mark.parametrize(
@@ -441,6 +444,8 @@ def test_report_config() -> None:
         {"channels": []},
         {"channels": [""]},
         {"severity": "loud"},
+        {"sections": []},
+        {"sections": {"model-fit": 1}},
     ],
 )
 def test_report_config_errors(section: Any) -> None:
@@ -660,3 +665,11 @@ def test_a_fix_scoped_to_the_hold_cause() -> None:
     assert lost.name == "hours lost per day (bottlenecks:hold)"
     assert lost.before == pytest.approx(2 * 24)  # the hold only, in agent-hours
     assert "hours lost)" in render_markdown(report)
+
+
+def test_section_tables_reach_the_report_inputs(db: Path) -> None:
+    raw = tomllib.loads('[report.sections.tokens]\nroutine_roles = ["reviewer"]\n')["report"]
+    src = sources(db, sections=load_report(raw).sections)
+    assert load_inputs(src, DAY, BOARD).section_config == {
+        "tokens": {"routine_roles": ["reviewer"]}
+    }
