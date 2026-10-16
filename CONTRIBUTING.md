@@ -68,6 +68,10 @@ These are non-negotiable; reviews will block on them.
 
 1. Create `src/kelpie/adapters/<platform>/` implementing `kelpie.core.ports.PlatformAdapter`:
    `list_tasks`, `get_task`, `requeue`, `unblock`, `comment`, `wip_commit`, `events`.
+   An action the platform does not allow raises `kelpie.core.ports.UnsupportedAction`
+   before any side effect; the engine then alerts a human instead. An action that is only
+   not implemented yet is a plain `NotImplementedError` (a failure); refuse act mode for it
+   at startup, as `app.py` does for Hermes.
 2. Map platform statuses onto `kelpie.core.model.Status` in one place, and document the
    mapping.
 3. Anything that must run on the agent host (hooks, plugins) lives inside the adapter

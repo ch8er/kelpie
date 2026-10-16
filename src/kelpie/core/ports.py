@@ -20,6 +20,12 @@ from kelpie.core.model import (
 )
 
 
+class UnsupportedAction(NotImplementedError):
+    """Raised by an adapter for an action its platform does not allow, before any side
+    effect. The engine records the action as not executed and alerts a human instead (repeats
+    are limited by the ledger's cooldown); any other exception is a failure and is retried."""
+
+
 @runtime_checkable
 class PlatformAdapter(Protocol):
     """Bridge to an agent platform (Hermes, OpenClaw, Paperclip, Claude Code, ...).
@@ -27,6 +33,8 @@ class PlatformAdapter(Protocol):
     Contract for ``waiting`` tasks (rule 2): the agent registered a condition and exited on
     purpose. The adapter reports such tasks to the platform's dispatcher as waiting and
     alive, never as dead or abandoned, until Kelpie wakes them.
+
+    An action the platform does not allow raises :class:`UnsupportedAction`.
     """
 
     name: str
