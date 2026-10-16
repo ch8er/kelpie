@@ -700,9 +700,9 @@ labels: P0, week-3, area:docs
 User and contributor documentation for the first public release.
 
 **Acceptance criteria**
-- [ ] Install guide (docker compose and uv) and Hermes plugin setup
-- [ ] Configuration reference for every rule and threshold
-- [ ] Guides for writing a rule, an adapter and a connector, with the fixture format
+- [x] Install guide (docker compose and uv) and Hermes plugin setup
+- [x] Configuration reference for every rule and threshold
+- [x] Guides for writing a rule, an adapter and a connector, with the fixture format
 
 ### deploy: publish kelpie-sre 0.1.0a1
 labels: P0, week-3, area:deploy

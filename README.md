@@ -18,6 +18,18 @@ daily report.
 Scope, priorities and order of work live in [docs/plan.md](docs/plan.md), the single source
 of truth; the issue backlog is [docs/roadmap.md](docs/roadmap.md).
 
+**Documentation**
+
+- [Install and run](docs/install.md): uv, docker compose, `kelpie doctor`, ports, the OTLP
+  token, where data lives
+- [Configuration reference](docs/configuration.md): every section, rule and threshold
+- [Quickstart on a Hermes farm](docs/quickstart-hermes.md) and the
+  [observe-to-act checklist](docs/act-checklist.md)
+- [Privacy](docs/privacy.md): what Kelpie stores from traces and hooks, and how to keep less
+- [Extending Kelpie](docs/extending.md): rules, adapters, connectors, report sections
+
+**Package**
+
 - PyPI: `kelpie-sre` (not published yet) · CLI: `kelpie`
 - License: Apache-2.0 · Repo: [github.com/ch8er/kelpie](https://github.com/ch8er/kelpie)
 
