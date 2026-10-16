@@ -18,6 +18,7 @@ from kelpie.core.actions import ActionKind
 from kelpie.core.ledger import Outcome
 from kelpie.core.model import Snapshot, Status
 from kelpie.core.spans import TokenUsage, counted_llm, last_at, span_key
+from kelpie.report import md
 from kelpie.report.daily import session_of
 from kelpie.report.sections import Advice, Section, SectionContext, register_section
 from kelpie.report.sections._config import keys_of, settings_from
@@ -155,18 +156,17 @@ def _usd(value: float) -> str:
     return f"${value:,.2f}" if value > 0 else "-"
 
 
-def _cell(text: str) -> str:
-    """Free text (a role, an id) safe inside a Markdown table cell."""
-    return " ".join(text.split()).replace("|", "\\|")
-
-
 def _listed(items: Sequence[str]) -> str:
     more = f" (+{len(items) - MAX_ITEMS} more)" if len(items) > MAX_ITEMS else ""
     return ", ".join(items[:MAX_ITEMS]) + more
 
 
-def _model(model: str | None) -> str:
-    return f"`{_cell(model)}`" if model else "unknown model"
+def _model(model: str | None, *, cell: bool = False) -> str:
+    return md.code(model, cell=cell) if model else "unknown model"
+
+
+def _hint(group: CacheGroup) -> str:
+    return break_hint(group, md.code)
 
 
 # --- prompt cache ------------------------------------------------------------------------
@@ -186,7 +186,7 @@ def _cache_lines(groups: Sequence[CacheGroup], price: _Prices, reporting: set[st
     rows = sorted(groups, key=lambda g: (-price.missed(g), -g.missed(), g.role, g.model or ""))
     for g in rows[:MAX_ROWS]:
         lines.append(
-            f"| {_cell(g.role)} | {_model(g.model)} | {g.calls} | {g.hit_rate:.0%} | "
+            f"| {md.text(g.role)} | {_model(g.model, cell=True)} | {g.calls} | {g.hit_rate:.0%} | "
             f"{len(g.of('break'))} | {len(g.of('expired'))} | {len(g.of('partial'))} | "
             f"{g.missed():,} | {_usd(price.missed(g))} |"
         )
@@ -195,14 +195,14 @@ def _cache_lines(groups: Sequence[CacheGroup], price: _Prices, reporting: set[st
         lines += ["", "Where the cache breaks:", ""]
         for g in broken[:MAX_ROWS]:
             steps = [
-                f"step {m.step.index} of {m.step.session_id}"
-                + (f" (after `{m.step.after_tool}`)" if m.step.after_tool else "")
+                f"step {m.step.index} of {md.text(m.step.session_id)}"
+                + (f" (after {md.code(m.step.after_tool)})" if m.step.after_tool else "")
                 for m in g.of("break")
             ]
-            lines.append(f"- {g.role} on {_model(g.model)}: {_listed(steps)}; {break_hint(g)}.")
+            lines.append(f"- {md.text(g.role)} on {_model(g.model)}: {_listed(steps)}; {_hint(g)}.")
     silent = sorted({g.model for g in groups if g.model and g.model not in reporting})
     if silent:
-        names = ", ".join(f"`{_cell(m)}`" for m in silent)
+        names = ", ".join(md.code(m) for m in silent)
         lines += [
             "",
             f"No call of {names} reported a cache read: the provider or its instrumentation "
@@ -225,12 +225,12 @@ def _cache_advice(
             if missed < cfg.min_saving_tokens:
                 continue
             tasks = tuple(sorted({m.task_id for m in misses if m.task_id}))
-            where = f"{g.role} on {_model(g.model)}"
+            where = f"{md.text(g.role)} on {_model(g.model)}"
             if kind == "break":
                 title = f"Fix prompt-cache breaks for {where}"
                 detail = (
                     f"hit rate {g.hit_rate:.0%}; {len(misses)} of {g.checked} checked calls read "
-                    f"far less from the cache than the call before; {break_hint(g)}"
+                    f"far less from the cache than the call before; {_hint(g)}"
                 )
             elif kind == "expired":
                 title = f"Keep the prompt cache warm for {where}"
@@ -279,7 +279,7 @@ def _growth_lines(growth: Sequence[Growth], price: _Prices) -> list[str]:
     rows = sorted(by_role.items(), key=lambda kv: (-max(g.peak for g in kv[1]), kv[0]))
     for role, found in rows[:MAX_ROWS]:
         lines.append(
-            f"| {_cell(role)} | {len(found)} | {statistics.median(g.steps for g in found):g} | "
+            f"| {md.text(role)} | {len(found)} | {statistics.median(g.steps for g in found):g} | "
             f"{round(statistics.median(g.per_step for g in found)):,} | "
             f"{max(g.peak for g in found):,} | {sum(g.runaway for g in found)} |"
         )
@@ -287,9 +287,10 @@ def _growth_lines(growth: Sequence[Growth], price: _Prices) -> list[str]:
     if runaway:
         lines += ["", "Runaway sessions (grew without compacting):", ""]
         for g in runaway[:MAX_ROWS]:
-            task = f", {g.session.task_id}" if g.session.task_id else ""
+            task = f", {md.text(g.session.task_id)}" if g.session.task_id else ""
             lines.append(
-                f"- {g.session.session_id} ({g.session.role}{task}): {g.steps} steps, context "
+                f"- {md.text(g.session.session_id)} ({md.text(g.session.role)}{task}): "
+                f"{g.steps} steps, context "
                 f"{g.first:,} → {g.last:,} tokens, +{round(g.per_step):,} per step; up to "
                 f"{excess_tokens(g):,} tokens re-read above the compaction point "
                 f"({_usd(price.usd(g.excess))})."
@@ -309,7 +310,7 @@ def _growth_advice(growth: Sequence[Growth], price: _Prices, cfg: TokenSettings)
             continue
         out.append(
             Advice(
-                f"Bound the context of {role} sessions",
+                f"Bound the context of {md.text(role)} sessions",
                 (
                     f"{len(found)} session(s) grew past {cfg.runaway_tokens:,} tokens without "
                     f"compacting (largest {max(g.peak for g in found):,}); compacting or "
@@ -346,17 +347,18 @@ def _restart_lines(found: Sequence[Restart], price: _Prices) -> list[str]:
     ]
     rows = sorted(by_role.items(), key=lambda kv: (-sum(r.tokens for r in kv[1]), kv[0]))
     for role, rs in rows[:MAX_ROWS]:
-        tasks = sorted({_cell(r.session.task_id) for r in rs if r.session.task_id})
+        tasks = sorted({md.text(r.session.task_id) for r in rs if r.session.task_id})
         lines.append(
-            f"| {_cell(role)} | {len(rs)} | {sum(r.tokens for r in rs):,} | "
+            f"| {md.text(role)} | {len(rs)} | {sum(r.tokens for r in rs):,} | "
             f"{_usd(price.usd(u for r in rs for u in r.usage()))} | {_listed(tasks)} |"
         )
     lines.append("")
     for r in found[:MAX_ROWS]:
         lines.append(
-            f"- {r.session.session_id} restarted {r.session.task_id} after "
-            f"{r.previous.session_id}: started at {r.session.steps[0].input_tokens:,} tokens "
-            f"where the earlier session stopped at {r.previous.steps[-1].input_tokens:,}; "
+            f"- {md.text(r.session.session_id)} restarted {md.text(r.session.task_id)} after "
+            f"{md.text(r.previous.session_id)}: started at "
+            f"{r.session.steps[0].input_tokens:,} tokens where the earlier session stopped "
+            f"at {r.previous.steps[-1].input_tokens:,}; "
             f"{len(r.ramp)} steps to get back, {r.tokens:,} tokens of context re-acquired."
         )
     return lines
@@ -373,7 +375,7 @@ def _restart_advice(found: Sequence[Restart], price: _Prices, cfg: TokenSettings
             continue
         out.append(
             Advice(
-                f"Resume {role} tasks instead of restarting from zero",
+                f"Resume {md.text(role)} tasks instead of restarting from zero",
                 (
                     f"{len(rs)} session(s) rebuilt the context of an earlier session that left "
                     f"the task unfinished, {tokens:,} tokens; end sessions with a handoff note "

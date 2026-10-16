@@ -16,6 +16,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 
 from kelpie.core.spans import TokenUsage, counted_llm, last_at, span_key
+from kelpie.report import md
 from kelpie.report.sections import Advice, Section, SectionContext, register_section
 from kelpie.report.sections._config import keys_of, settings_from
 from kelpie.traces.fit import (
@@ -122,11 +123,6 @@ def _usd(value: float) -> str:
     return f"${value:,.2f}" if value > 0 else "-"
 
 
-def _cell(text: str) -> str:
-    """Free text (a role, an id) safe inside a Markdown table cell."""
-    return " ".join(text.split()).replace("|", "\\|")
-
-
 def _listed(items: Sequence[str]) -> str:
     more = f" (+{len(items) - MAX_ITEMS} more)" if len(items) > MAX_ITEMS else ""
     return ", ".join(items[:MAX_ITEMS]) + more
@@ -159,8 +155,8 @@ def _fragment_lines(found: Sequence[Fragment], price: _Prices) -> list[str]:
     ]
     for f in found[:MAX_ROWS]:
         lines.append(
-            f"| {_cell(f.role)} | `{_cell(f.key)}` | `{f.args_hash}` | {len(f.sessions)} | "
-            f"{f.size:,} | "
+            f"| {md.text(f.role)} | {md.code(f.key, cell=True)} | "
+            f"{md.code(f.args_hash, cell=True)} | {len(f.sessions)} | {f.size:,} | "
             f"{f.tokens:,} | {_usd(price.cacheable(_fragment_tokens(f)))} |"
         )
     return lines
@@ -176,12 +172,12 @@ def _fragment_advice(found: Sequence[Fragment], price: _Prices, cfg: FitSettings
         tokens = sum(f.tokens for f in fs)
         if tokens < cfg.min_saving_tokens:
             continue
-        keys = [f"`{f.key}`" for f in fs]
+        keys = [md.code(f.key) for f in fs]
         sessions = {s for f in fs for s in f.sessions}
         per = _per_session((r.session_id, r.tokens) for f in fs for r in f.reads)
         out.append(
             Advice(
-                f"Put what every {role} session loads into its cached instructions",
+                f"Put what every {md.text(role)} session loads into its cached instructions",
                 (
                     f"{len(fs)} fragment(s) ({_listed(keys)}) were loaded unchanged into "
                     f"{len(sessions)} sessions, {tokens:,} tokens; a summary in the role's "
@@ -203,9 +199,9 @@ def _tool_lines(uses: Sequence[ToolUse]) -> list[str]:
         return []
     lines = ["**Unused tools** per role (offered but never called this day):", ""]
     for u in known[:MAX_ROWS]:
-        unused = [f"`{t}`" for t in u.unused]
+        unused = [md.code(t) for t in u.unused]
         lines.append(
-            f"- {u.role}: {len(u.offered or ())} offered, {len(u.used)} called"
+            f"- {md.text(u.role)}: {len(u.offered or ())} offered, {len(u.used)} called"
             + (f"; never called: {_listed(unused)}" if unused else "; all called")
             + "."
         )
@@ -267,10 +263,10 @@ def _fit_lines(fit: _Fit, price: _Prices) -> list[str]:
             note = ""
             if r.role in fit.hold:
                 note = " (hold: " + ("worse" if fit.hold[r.role].worse else "too early") + ")"
+            other = md.code(cheaper, cell=True) if cheaper else "none in the farm"
             lines.append(
-                f"| {_cell(r.role)} | `{_cell(r.model or '')}` | {r.calls} | "
-                f"{r.median_output:,.0f} | "
-                f"{f'`{_cell(cheaper)}`' if cheaper else 'none in the farm'}{note} | {saved} |"
+                f"| {md.text(r.role)} | {md.code(r.model or '', cell=True)} | {r.calls} | "
+                f"{r.median_output:,.0f} | {other}{note} | {saved} |"
             )
         if fit.switches:
             lines.append("")
@@ -281,7 +277,7 @@ def _fit_lines(fit: _Fit, price: _Prices) -> list[str]:
         )
         when = s.at.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
         lines.append(
-            f"- {s.role} switched `{s.old}` → `{s.new}` at {when}: returns "
+            f"- {md.text(s.role)} switched {md.code(s.old)} → {md.code(s.new)} at {when}: returns "
             f"{before.returns} → {after.returns}, review returns {before.review_returns} → "
             f"{after.review_returns} over {before.tasks} → {after.tasks} tasks ({verdict})."
         )
@@ -299,11 +295,12 @@ def _fit_advice(fit: _Fit, price: _Prices) -> list[Advice]:
             continue
         out.append(
             Advice(
-                f"Try `{cheaper}` for {r.role}",
+                f"Try {md.code(cheaper)} for {md.text(r.role)}",
                 (
-                    f"routine work on `{r.model}`: {r.calls} calls with a median output of "
-                    f"{r.median_output:,.0f} tokens; Kelpie checks returns and ping-pong "
-                    "rounds after the switch (not additive with cache advice for the role)"
+                    f"routine work on {md.code(r.model or '')}: {r.calls} calls with a "
+                    f"median output of {r.median_output:,.0f} tokens; Kelpie checks returns "
+                    "and ping-pong rounds after the switch (not additive with cache advice "
+                    "for the role)"
                 ),
                 usd=saved,
                 tasks=r.tasks,
@@ -331,7 +328,7 @@ def _review_lines(rounds: Sequence[ReviewRound], price: _Prices) -> list[str]:
     ]
     for r in rounds[:MAX_ROWS]:
         lines.append(
-            f"| {_cell(r.task_id)} | {r.round} | {_cell(r.session_id)} | {r.tokens:,} | "
+            f"| {md.text(r.task_id)} | {r.round} | {md.text(r.session_id)} | {r.tokens:,} | "
             f"{r.reread:,} "
             f"({r.share:.0%}) | {'yes' if r.whole else 'no'} | "
             f"{_usd(price.input(_review_tokens([r])))} |"
@@ -358,7 +355,7 @@ def _review_advice(rounds: Sequence[ReviewRound], price: _Prices, cfg: FitSettin
             continue
         out.append(
             Advice(
-                f"Review only the changes since the last round ({role})",
+                f"Review only the changes since the last round ({md.text(role)})",
                 (
                     f"{len(rs)} review round(s) 2+ re-read {tokens:,} tokens already read in "
                     "an earlier round; give the reviewer the diff since the last reviewed "

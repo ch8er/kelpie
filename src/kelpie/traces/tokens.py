@@ -62,7 +62,7 @@ from __future__ import annotations
 import statistics
 from bisect import bisect_left
 from collections import Counter, defaultdict
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import pairwise
@@ -361,8 +361,9 @@ def cache_groups(
     return groups
 
 
-def break_hint(group: CacheGroup) -> str:
-    """What the breaks of a group point at, from when they happen."""
+def break_hint(group: CacheGroup, quote: Callable[[str], str] = "`{}`".format) -> str:
+    """What the breaks of a group point at, from when they happen. ``quote`` renders a tool
+    name (a Markdown report passes one that escapes it)."""
     breaks = group.of("break")
     if not breaks:
         return ""
@@ -376,7 +377,7 @@ def break_hint(group: CacheGroup) -> str:
         tool, count = max(sorted(after.items()), key=lambda kv: kv[1])
         if count * 2 > len(breaks):
             return (
-                f"most breaks follow `{tool}` ({count} of {len(breaks)}): check whether it "
+                f"most breaks follow {quote(tool)} ({count} of {len(breaks)}): check whether it "
                 "changes the instructions or the tool list, or edits earlier messages"
             )
     return (
