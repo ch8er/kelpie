@@ -59,7 +59,7 @@ within ``lookback``::
 
 Progress note and git state. ``Session.summary`` is ``task_runs.summary``. The git fields
 (``last_commit``, ``last_commit_at``, ``branch``, ``changed_files``, ``dirty_worktree``) and
-the task's ``files`` (what it changed since its newest merge-base with ``base_refs``, plus
+the task's ``files`` (what it changed since its merge-bases with ``base_refs``, plus
 what is uncommitted; rule 12 compares them across live tasks) come from the workspace as it
 is now, so they go only on the latest run of a task that is not
 finished and whose ``workspace_kind`` is ``worktree`` with an existing absolute
@@ -672,6 +672,13 @@ class HermesAdapter:
             warn_once(
                 (str(path), problem),
                 "hermes: %s has a git filter driver whose name cannot be overridden; not read",
+                path,
+            )
+        elif problem is Problem.LAYOUT:
+            warn_once(
+                (str(path), problem),
+                "hermes: %s has a .git layout Kelpie does not read (not an ordinary checkout or"
+                " a linked worktree pointing back at it); no git state",
                 path,
             )
         elif problem is Problem.BUDGET:

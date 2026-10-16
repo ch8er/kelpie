@@ -249,9 +249,19 @@ is logged once).
 | `last_commit` | `# branch.oid` of that `status`, first 7 hex digits (none before the first commit) |
 | `last_commit_at` | committer time of that commit, from `git cat-file commit <oid>`, in UTC |
 
+`Task.files` (rule 12, conflict warning) are what the task touches: the uncommitted entries
+of that `status` (both sides of a rename; a new untracked directory as one `dir/` entry)
+plus the files changed between `HEAD` and its merge-bases with `base_refs` (default
+`["origin/main", "main"]`; refs that do not resolve are skipped, with a warning once when
+none does). They are read for every unfinished task with a worktree, also one with no run
+inside `lookback` (a task waiting in review is what new work conflicts with). `Task.repo` is
+the repository's common git directory: tasks are compared only within one repository, and
+all linked worktrees of a repository share it (separate clones do not).
+
 Failures (not a repository, git missing, timeout, unreadable config) leave the git fields
-unset and never fail the snapshot; `branch` from the task is kept. Set `git_state = false`
-to turn all of it off.
+unset and never fail the snapshot; `branch` from the task is kept. If only the committed
+files cannot be read (no base ref, shallow history, timeout), the other fields and the
+uncommitted files are kept. Set `git_state = false` to turn all of it off.
 
 #### Trust model
 
@@ -260,9 +270,22 @@ Workspaces are **controlled by the agents**, and so is everything git reads ther
 objects. Git runs programs named in that config (filter drivers, `core.fsmonitor`,
 `gpg.program` for signed commits), so Kelpie asks git only what it can answer without them:
 
-- Three commands per workspace, nothing else: `git config -z --name-only --get-regexp
-  '^filter\.'` (lists filter drivers, runs nothing), the `status` above, and `git cat-file
-  commit <oid>` (no `git log`: with `log.showSignature` it runs gpg).
+- Only these commands per workspace: `git config -z --name-only --get-regexp '^filter\.'`
+  (lists filter drivers, runs nothing), the `status` above (with `-z`), `git cat-file commit
+  <oid>` (no `git log`: with `log.showSignature` it runs gpg), and for `Task.files`
+  `git rev-parse --verify` per base ref, `git merge-base --all` on the oids it printed, and
+  `git diff-tree -r --name-only --no-renames -z` per merge-base (plumbing that compares trees
+  by object id: no textconv, no external diff, no filters). Ref names are validated (no
+  option, no revision syntax) and passed after `--end-of-options`.
+- Only two `.git` layouts are read: an ordinary `.git` directory without a `commondir` file,
+  and a linked worktree whose `.git` file names `<common>/worktrees/<id>`, whose `commondir`
+  and `gitdir` files lead back to `<common>` and to this `.git`, with `<common>` outside the
+  workspace. Anything else (a `.git` symlink, separate git dirs, submodule checkouts) is
+  refused with one warning ("untrusted .git layout"), so an agent cannot point Kelpie at
+  another repository and have its file names reported. `GIT_WORK_TREE` is always the
+  workspace, so `core.worktree` in its config cannot make git list another directory.
+- Output is read up to a cap (8 Mi characters of `status`, 2 Mi per `diff-tree`) and git
+  is killed beyond it; at most 1000 paths are kept per task.
 - Every filter driver found is emptied for the `status` call (`-c filter.<name>.clean=`,
   `smudge=`, `process=`, `required=false`); a driver name that cannot be written as `-c`
   (it contains `=`) means `status` is not run for that workspace.
@@ -279,7 +302,7 @@ objects. Git runs programs named in that config (filter drivers, `core.fsmonitor
   (`remote.<name>.uploadpack`, `core.sshCommand`, `ext::`). `GIT_CEILING_DIRECTORIES` is the
   workspace's parent, so an empty or broken `.git` never makes git use a repository further
   up (such as a human's checkout).
-  Kelpie's tokens and any inherited `GIT_*` (`GIT_DIR`, `GIT_WORK_TREE`, ...) never reach git.
+  Kelpie's tokens and any inherited `GIT_*` (`GIT_DIR`, `GIT_INDEX_FILE`, ...) never reach git.
   Git still reads the global config of the user Kelpie runs as (`$HOME/.gitconfig`).
 - Each call runs in its own process group with `git_timeout`; on timeout the whole group is
   killed.

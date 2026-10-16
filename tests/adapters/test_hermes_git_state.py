@@ -922,19 +922,19 @@ def test_gitfile_must_point_back_at_the_workspace(repo: Path, tmp_path: Path) ->
     stranger = tmp_path / "stranger"
     stranger.mkdir()
     (stranger / ".git").write_text(f"gitdir: {repo / '.git'}\n")
-    assert read_git_state(stranger, 5.0).problem is Problem.UNSAFE
+    assert read_git_state(stranger, 5.0).problem is Problem.LAYOUT
     linked_gitdir = (linked / ".git").read_text().split(":", 1)[1].strip()
     hijack = tmp_path / "hijack"
     hijack.mkdir()
     (hijack / ".git").write_text(f"gitdir: {linked_gitdir}\n")  # points at linked's, not back
-    assert read_git_state(hijack, 5.0).problem is Problem.UNSAFE
+    assert read_git_state(hijack, 5.0).problem is Problem.LAYOUT
 
 
 def test_symlinked_dot_git_is_not_followed(repo: Path, tmp_path: Path) -> None:
     other = tmp_path / "other"
     other.mkdir()
     (other / ".git").symlink_to(repo / ".git")
-    assert read_git_state(other, 5.0).problem is Problem.UNSAFE
+    assert read_git_state(other, 5.0).problem is Problem.LAYOUT
 
 
 def test_unmerged_detached_and_newline_paths(repo: Path) -> None:
@@ -985,7 +985,7 @@ def test_no_merge_base_or_unknown_refs_is_partial(repo: Path, tmp_path: Path) ->
 
 
 def test_huge_output_is_cut_not_read_whole(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(gs, "MAX_STATUS_BYTES", 200)
+    monkeypatch.setattr(gs, "MAX_STATUS_CHARS", 200)
     for i in range(50):
         (repo / f"untracked-file-number-{i:03d}.txt").write_text("x\n")
     state = read_git_state(repo, 5.0)
@@ -997,7 +997,7 @@ def test_huge_output_is_cut_not_read_whole(repo: Path, monkeypatch: pytest.Monke
 def test_capped_diff_marks_truncation(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     branch_off(repo)
     commit(repo, *(f"src/module_{i:03d}.py" for i in range(40)))
-    monkeypatch.setattr(gs, "MAX_DIFF_BYTES", 120)
+    monkeypatch.setattr(gs, "MAX_DIFF_CHARS", 120)
     state = read_git_state(repo, 5.0, base_refs=("main",))
     assert state.paths_truncated and state.paths is not None
     assert 0 < len(state.paths) < 40 and all(p.endswith(".py") for p in state.paths)
@@ -1013,3 +1013,60 @@ def test_open_task_without_a_recent_run_still_gets_files(board: Board, repo: Pat
     (task,) = snap.tasks
     assert task.files == ("src/routes.py",) and task.repo == str((repo / ".git").resolve())
     assert snap.sessions == ()
+
+
+def test_fake_gitdir_inside_the_workspace_cannot_borrow_a_repository(
+    repo: Path, tmp_path: Path
+) -> None:
+    ws = tmp_path / "ws"
+    fake = ws / "fake" / "worktrees" / "x"
+    fake.mkdir(parents=True)
+    (ws / ".git").write_text(f"gitdir: {fake}\n")
+    (fake / "gitdir").write_text(f"{ws / '.git'}\n")
+    (fake / "commondir").write_text(f"{repo / '.git'}\n")
+    (fake / "HEAD").write_text("ref: refs/heads/main\n")
+    state = read_git_state(ws, 5.0)
+    assert state.problem is Problem.LAYOUT and state.paths is None and state.repo is None
+    # The same files under worktrees/ of the workspace itself are refused too.
+    (fake / "commondir").write_text("../..\n")
+    assert read_git_state(ws, 5.0).problem is Problem.LAYOUT
+
+
+def test_commondir_in_a_plain_dot_git_is_refused(repo: Path, tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    git(ws, "init", "-q", "-b", "main")
+    (ws / ".git" / "commondir").write_text(f"{repo / '.git'}\n")
+    state = read_git_state(ws, 5.0)
+    assert state.problem is Problem.LAYOUT and state.paths is None
+
+
+def test_relative_back_pointers_of_a_linked_worktree_are_accepted(
+    repo: Path, tmp_path: Path
+) -> None:
+    linked = tmp_path / "rel"
+    git(repo, "worktree", "add", "-q", "-b", "rel", str(linked))
+    gitdir = Path((linked / ".git").read_text().split(":", 1)[1].strip())
+    # Rewrite both pointers as relative paths, as worktree.useRelativePaths does.
+    (linked / ".git").write_text(f"gitdir: {os.path.relpath(gitdir, linked)}\n")
+    (gitdir / "gitdir").write_text(f"{os.path.relpath(linked / '.git', gitdir)}\n")
+    assert gs.common_dir(linked) == str((repo / ".git").resolve())
+
+
+def test_separate_git_dir_is_refused(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    store = tmp_path / "store.git"
+    ws.mkdir()
+    git(ws, "init", "-q", "-b", "main", f"--separate-git-dir={store}")
+    assert read_git_state(ws, 5.0).problem is Problem.LAYOUT
+
+
+def test_capped_run_timeout_leaves_no_reader_errors(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    errors: list[object] = []
+    monkeypatch.setattr("threading.excepthook", errors.append)
+    with pytest.raises(gs._Stop):
+        gs._run_capped(["sh", "-c", "sleep 5"], 0.2, None, repo, 100)
+    time.sleep(0.2)
+    assert errors == []

@@ -30,14 +30,17 @@ when ``base_refs`` are given, the files changed between ``HEAD`` and its merge-b
 refs that resolve (``git merge-base --all HEAD <oids>``; with several merge-bases, only files
 changed against each of them). When no ref resolves or there is no merge-base (shallow
 history), or that step fails, only uncommitted paths count and ``paths_partial`` is set; the
-rest of the state is kept. Output is read up to ``MAX_STATUS_BYTES``/``MAX_DIFF_BYTES`` and
+rest of the state is kept. Output is read up to ``MAX_STATUS_CHARS``/``MAX_DIFF_CHARS`` and
 git is killed beyond; at most ``MAX_PATHS`` paths are kept (first in sorted order) and
 ``paths_truncated`` says so. Control characters in names become ``?``.
 
 ``repo`` is the repository's common git directory, read from ``.git`` without running git:
-all worktrees of one repository share it. ``GIT_WORK_TREE`` is always the workspace, so a
-``core.worktree`` in its config cannot make git list another directory; a ``.git`` file must
-name a git directory whose ``gitdir`` points back at it, and a ``.git`` symlink is refused.
+all linked worktrees of one repository share it (separate clones do not). ``GIT_WORK_TREE`` is
+always the workspace, so a ``core.worktree`` in its config cannot make git list another
+directory. Only two ``.git`` layouts are read (see :func:`common_dir`): an ordinary ``.git``
+directory and a linked worktree whose ``.git`` file and git directory point at each other;
+anything else (a symlink, a ``commondir`` in a plain ``.git``, separate git dirs, submodule
+checkouts) gets ``Problem.LAYOUT`` and no git state.
 """
 
 from __future__ import annotations
@@ -87,8 +90,9 @@ SAFE_CONFIG = (
 FILTER_KEYS = ("clean", "smudge", "process")
 _CHUNK = 65536
 MAX_ERR_CHARS = 4096  # stderr kept per call
-MAX_STATUS_BYTES = 8 << 20  # status output read per workspace (beyond: counts are lower bounds)
-MAX_DIFF_BYTES = 2 << 20  # diff-tree output read per merge-base
+# Output is decoded as it is read, so these count characters (up to 4 bytes each).
+MAX_STATUS_CHARS = 8 << 20  # status output read per workspace (beyond: counts are lower bounds)
+MAX_DIFF_CHARS = 2 << 20  # diff-tree output read per merge-base
 MAX_BASES = 3  # merge-bases compared when the history has several
 
 _OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -114,6 +118,7 @@ class Problem(StrEnum):
     BUDGET = "git time budget of the snapshot used up"
     FAILED = "git failed"  # not a repository, dubious ownership, broken config, ...
     UNSAFE = "filter driver name that cannot be switched off"
+    LAYOUT = "untrusted .git layout"  # see common_dir
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +216,8 @@ def _run(
 def _run_capped(
     cmd: list[str], timeout: float, deadline: float | None, path: Path, max_bytes: int
 ) -> tuple[int, str, str, bool]:
-    """Like :func:`_run`, but stop reading after ``max_bytes`` of stdout and kill git:
+    """Like :func:`_run`, but stop reading after ``max_bytes`` characters of stdout and kill
+    git:
     ``(returncode, stdout, stderr, truncated)``. A truncated stdout may end mid-record."""
     limit, cut = timeout, False
     if deadline is not None:
@@ -242,21 +248,27 @@ def _run_capped(
 
     def read_out() -> None:
         assert proc.stdout is not None
-        while chunk := proc.stdout.read(_CHUNK):
-            out.append(chunk)
-            state["size"] += len(chunk)
-            if state["size"] >= max_bytes:
-                state["truncated"] = True
-                _signal_group(proc)
-                break
+        try:
+            while chunk := proc.stdout.read(_CHUNK):
+                out.append(chunk)
+                state["size"] += len(chunk)
+                if state["size"] >= max_bytes:
+                    state["truncated"] = True
+                    _signal_group(proc)
+                    break
+        except (OSError, ValueError):  # the pipe was closed after a timeout
+            pass
 
     def read_err() -> None:
         assert proc.stderr is not None
         kept = 0
-        while chunk := proc.stderr.read(_CHUNK):
-            if kept < MAX_ERR_CHARS:
-                err.append(chunk[: MAX_ERR_CHARS - kept])
-                kept += len(err[-1])
+        try:
+            while chunk := proc.stderr.read(_CHUNK):
+                if kept < MAX_ERR_CHARS:
+                    err.append(chunk[: MAX_ERR_CHARS - kept])
+                    kept += len(err[-1])
+        except (OSError, ValueError):
+            pass
 
     readers = [threading.Thread(target=f, daemon=True) for f in (read_out, read_err)]
     for r in readers:
@@ -265,6 +277,9 @@ def _run_capped(
     for r in readers:
         r.join(max(0.0, end - time.monotonic()))
     if any(r.is_alive() for r in readers):
+        _signal_group(proc)
+        for r in readers:  # the killed group closes its ends: readers see EOF
+            r.join(1.0)
         _kill_group(proc)
         raise _Stop(Problem.BUDGET if cut else Problem.TIMEOUT)
     proc.wait()
@@ -349,7 +364,7 @@ def read_git_state(
         return GitState(branch=branch)
     repo = common_dir(path)
     if repo is None:
-        return GitState(branch=branch, problem=Problem.UNSAFE)
+        return GitState(branch=branch, problem=Problem.LAYOUT)
     problem = probe_git(timeout)
     if problem is not None:
         return GitState(branch=branch, repo=repo, problem=problem)
@@ -361,13 +376,19 @@ def read_git_state(
 
 def common_dir(path: Path) -> str | None:
     """The repository's common git directory for the workspace at ``path`` (shared by all
-    worktrees of one repository), or ``None`` when ``.git`` is not one Kelpie trusts: a
-    symlink, or a gitfile whose ``gitdir`` does not point back at ``path/.git``."""
+    worktrees of one repository), or ``None`` when ``.git`` has a layout Kelpie does not
+    trust. Accepted: a ``.git`` directory without a ``commondir`` file (an ordinary checkout),
+    and a linked worktree's ``.git`` file whose ``gitdir`` is ``<common>/worktrees/<id>``,
+    where ``<id>/commondir`` leads back to ``<common>``, ``<id>/gitdir`` leads back to this
+    ``.git``, and ``<common>`` lies outside the workspace. Refused: a ``.git`` symlink, a
+    ``commondir`` inside a plain ``.git``, separate git dirs and submodule checkouts."""
     dotgit = path / ".git"
     try:
         if dotgit.is_symlink():
             return None
         if dotgit.is_dir():
+            if os.path.lexists(dotgit / "commondir"):
+                return None  # would make git read objects and refs from elsewhere
             return str(dotgit.resolve())
         with dotgit.open("rb") as f:
             raw = f.read(4096).decode("utf-8", "replace").strip()
@@ -375,14 +396,19 @@ def common_dir(path: Path) -> str | None:
             return None
         gitdir = Path(raw.removeprefix("gitdir:").strip())
         gitdir = (gitdir if gitdir.is_absolute() else path / gitdir).resolve()
-        back = (gitdir / "gitdir").read_text("utf-8", "replace").strip()
-        if Path(back).resolve() != dotgit.resolve():
+        if gitdir.parent.name != "worktrees":
+            return None  # a separate git dir or a submodule: not a linked worktree
+        common = gitdir.parent.parent
+        workspace = path.resolve()
+        if common == workspace or workspace in common.parents:
+            return None  # a fake repository inside the workspace itself
+        rel = Path((gitdir / "commondir").read_text("utf-8", "replace").strip())
+        if (rel if rel.is_absolute() else gitdir / rel).resolve() != common:
             return None
-        commondir = gitdir / "commondir"
-        if commondir.is_file():
-            rel = Path(commondir.read_text("utf-8", "replace").strip())
-            return str((rel if rel.is_absolute() else gitdir / rel).resolve())
-        return str(gitdir)
+        back = Path((gitdir / "gitdir").read_text("utf-8", "replace").strip())
+        if (back if back.is_absolute() else gitdir / back).resolve() != dotgit.resolve():
+            return None
+        return str(common)
     except (OSError, ValueError):
         return None
 
@@ -431,7 +457,7 @@ def _read(
         "--untracked-files=normal",
         "--ignore-submodules=all",
         extra=off,
-        cap=MAX_STATUS_BYTES,
+        cap=MAX_STATUS_CHARS,
     )
     if code != 0:
         return GitState(branch=branch, problem=Problem.FAILED)
@@ -492,7 +518,7 @@ def _branch_paths(git: Any, oid: str, refs: list[str], path: Path) -> tuple[set[
     cut = False
     for base in bases:
         code, out, truncated = git(
-            "diff-tree", "-r", "--name-only", "--no-renames", "-z", base, oid, cap=MAX_DIFF_BYTES
+            "diff-tree", "-r", "--name-only", "--no-renames", "-z", base, oid, cap=MAX_DIFF_CHARS
         )
         if code != 0:
             return None, False
