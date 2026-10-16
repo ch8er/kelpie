@@ -229,7 +229,7 @@ uv run coverage report --include='src/kelpie/rules/*' --fail-under=90
 ### 6. Document it
 
 Add the rule's parameters to [configuration.md](configuration.md), a commented table to
-`kelpie.example.toml`, and the row in the README rules table.
+`kelpie.example.toml`, and the rows in the rules tables of the README and [guide.md](guide.md#rules).
 
 ## Writing a platform adapter
 

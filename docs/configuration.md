@@ -591,7 +591,7 @@ destination. Needs `[traces]` enabled. The global dry-run does not stop forwardi
 | `queue_bytes` | `67108864` | bytes, >= 1 | Bytes waiting per destination (64 MiB). |
 | `retries` | `3` | count, 0 to 10 | Retries on network errors, 429 and 5xx. |
 
-Examples for Langfuse, Phoenix and Datadog are in the README, "Forwarding".
+Examples for Langfuse, Phoenix and Datadog are in [How Kelpie works, "Forwarding"](guide.md#forwarding-to-langfuse-phoenix-or-datadog).
 
 ### [traces.outputs]
 
