@@ -1,0 +1,57 @@
+id: "13-condition-block-not-a-question"
+incident: 13
+title: "A block that waits for a merge is not a question for a person"
+description: >
+  From a live 24 h review: reviewers blocked their tasks with needs_input ("automerge PR #N")
+  to get past Hermes' block loop guard while they waited for a PR to merge, and the needs-you
+  inbox listed them as questions for a person. A block whose reason matches a
+  [[block_conditions]] pattern (inherited as condition_reasons), or that already has a linked
+  condition other than a human task, waits on that condition, whatever its block kind; rule 4
+  owns it. A real question in the same farm is still escalated.
+rule: needs_you
+config:
+  approval_wait_after: "30m"
+  default_approver: human-lead
+  condition_reasons: ['\bPR\s*#(?P<pr>\d+)']
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: human-lead, role: lead, kind: human}
+    - {id: agent-rev-1, role: reviewer}
+    - {id: agent-rev-2, role: reviewer}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - id: T-1361
+      title: "Review sign-in flow"
+      status: blocked
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: reviewer
+      owner_id: agent-rev-1
+      block: {reason: "needs_input: automerge PR #412", since: "2026-03-02T11:00:00+00:00"}
+    - id: T-1362
+      title: "Review settings sync"
+      status: blocked
+      status_since: "2026-03-02T11:30:00+00:00"
+      role: reviewer
+      owner_id: agent-rev-2
+      block: {reason: "needs_input: merge first", since: "2026-03-02T11:30:00+00:00", condition_id: "pr:example/app#418"}
+    - id: T-1363
+      title: "Push notifications"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "needs_input: which certificate should I use?", since: "2026-03-02T12:00:00+00:00"}
+  conditions:
+    - {id: "pr:example/app#418", kind: pr_merged, task_id: T-1362, params: {repo: example/app, pr: 418}, satisfied: false}
+expected_actions:
+  - kind: escalate
+    reason_contains: "Needs you (human-lead)"
+    params: {escalate_to: human-lead, approvals: [T-1363]}
+not_expected_actions:
+  - kind: escalate
+    params: {approvals: [T-1361, T-1363]}
+  - kind: escalate
+    params: {approvals: [T-1362, T-1363]}
+  - kind: escalate
+    params: {approvals: [T-1361, T-1362, T-1363]}

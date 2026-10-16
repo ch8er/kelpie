@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -406,3 +407,54 @@ def test_a_plain_waiting_dependent_counts_and_one_on_ci_does_not() -> None:
     deps = [Dependency("A-1", "H-1"), Dependency("A-2", "H-1")]
     [action] = run(snap([human("H-1", ago(hours=6)), plain, on_ci], [ci], deps))
     assert action.params["cost_hours"] == 2.0  # A-2 waits on CI first
+
+
+# --- a block that waits on a condition is not a question (live 24 h review) -------------
+
+
+def test_a_block_naming_a_condition_is_not_an_approval() -> None:
+    asks = blocked("T-1", ago(hours=2), reason="needs_input: automerge PR #12")
+    patterns = (re.compile(r"\bPR\s*#\d+", re.IGNORECASE),)
+    assert run(snap([asks]), condition_reasons=patterns) == []
+    assert run(snap([asks]))  # without the pattern it reads as a question
+    # A linked condition other than a human task: the condition is what it waits on.
+    linked = blocked("T-2", ago(hours=2), reason="needs_input: merge first", cond="c-pr")
+    pr = Condition("c-pr", ConditionKind.PR_MERGED, "T-2", satisfied=False)
+    assert run(snap([linked], [pr])) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("PR", "list of regular expressions"),
+        ([" "], "list of regular expressions"),
+        (["(unclosed"], "invalid pattern"),
+        (["x?"], "matches an empty reason"),
+    ],
+)
+def test_condition_reasons_are_validated(value: object, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        REGISTRY["needs_you"]({"condition_reasons": value})
+
+
+def test_a_condition_that_holds_no_longer_hides_a_question() -> None:
+    asks = blocked("T-2", ago(hours=2), reason="needs_input: which certificate?", cond="c-pr")
+    met = Condition("c-pr", ConditionKind.PR_MERGED, "T-2", satisfied=True)
+    [item] = run(snap([asks], [met]))
+    assert item.params["approvals"] == ["T-2"]
+
+
+def test_a_dependent_waiting_on_a_merge_is_not_parked_on_the_human_task() -> None:
+    """Behind a ready human task, an agent task blocked on a merge waits on the merge first:
+    held, but not the human task's cost."""
+    gate = human("H-1", ago(hours=3))
+    merge = blocked("A-1", ago(hours=2), reason="needs_input: automerge PR #12")
+    deps = [Dependency("A-1", "H-1")]
+    patterns = (re.compile(r"\bPR\s*#\d+", re.IGNORECASE),)
+    [item] = run(snap([gate, merge], deps=deps))
+    assert item.params["human_tasks"] == ["H-1"]
+    assert run(snap([gate, merge], deps=deps), condition_reasons=patterns) == []
+    # A reason that names the human task is parked on it, pattern or not.
+    named = blocked("A-1", ago(hours=2), reason="needs_input: waiting for H-1 (see PR #12)")
+    [item] = run(snap([gate, named], deps=deps), condition_reasons=patterns)
+    assert item.params["human_tasks"] == ["H-1"]

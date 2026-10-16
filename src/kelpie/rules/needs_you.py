@@ -16,7 +16,11 @@ delay, so the human sees one list instead of scattered blocks:
   ``needs_input``, ``approval``, ...), unless it is parked on a human task (see below;
   then it is listed under that task), once it has waited ``approval_wait_after`` (30m).
   Its human is ``approvers[role]``, else ``default_approver``; without either it is listed
-  under ``unassigned``.
+  under ``unassigned``. A block that waits on a condition is not one, whatever its kind: it
+  has a linked condition other than a human task (rule 4 owns it), or its reason matches
+  ``condition_reasons`` (by default the ``[[block_conditions]]`` block patterns, such as
+  ``needs_input: automerge PR #12``). On a live farm reviewers blocked with ``needs_input``
+  to get past Hermes' block loop guard while they waited for a merge.
 
 **Cost of delay** of an item: the agent-hours spent waiting on it so far, the sum over the
 agent tasks that wait on it directly of how long each has waited: a task parked on it since
@@ -58,7 +62,7 @@ from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
-from kelpie.core.model import Condition, OwnerKind, Snapshot, Status, Task
+from kelpie.core.model import Condition, ConditionKind, OwnerKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules.bottlenecks import HumanGate, human_gates
@@ -70,6 +74,7 @@ TRANSIENT = re.compile(r"waiting_human:\s*transient\b")
 STOPPED = "stopped by kelpie"  # Hermes stop (adapters/hermes/stop.py): a human unblocks it
 _SHOWN = 5
 _FROZEN = frozenset({Status.BLOCKED, Status.WAITING})
+MAX_REASON = 2000  # characters of a block reason searched, as [[block_conditions]] does
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +114,9 @@ class NeedsYou:
     approvers: Mapping[str, str] = field(default_factory=dict)  # agent role -> human
     default_approver: str | None = None
     critical_after_hours: float = 24.0
+    # Block reasons that name something a condition checks (inherited from
+    # [[block_conditions]]): such a block waits on the condition, not on a person.
+    condition_reasons: tuple[re.Pattern[str], ...] = ()
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> list[Action]:
@@ -148,7 +156,9 @@ class NeedsYou:
                 for tid in gate.behind
                 if tid in direct
                 and by_id[tid].status in _FROZEN
-                and self._parked_on(by_id[tid], gate.task.id, direct[tid], unmet[tid], movable)
+                and self._parked_on(
+                    by_id[tid], gate.task.id, direct[tid], unmet[tid], movable, snapshot
+                )
             }
             claimed |= parked
             if not movable:
@@ -167,7 +177,13 @@ class NeedsYou:
         return items, claimed
 
     def _parked_on(
-        self, task: Task, human_task: str, how: str, unmet: Sequence[Condition], movable: bool
+        self,
+        task: Task,
+        human_task: str,
+        how: str,
+        unmet: Sequence[Condition],
+        movable: bool,
+        snapshot: Snapshot,
     ) -> bool:
         """Whether a parked agent task that waits directly on ``human_task`` is parked
         because of it: a condition names it; or, linked by a dependency only, nothing else
@@ -185,7 +201,21 @@ class NeedsYou:
         reason = task.block.reason
         if re.search(rf"(?<![\w-]){re.escape(human_task)}(?![\w-])", reason):
             return True
-        return movable and _asks_a_person(reason, self.approval_reasons)
+        return movable and self._question_for_a_person(task, snapshot)
+
+    def _question_for_a_person(self, task: Task, snapshot: Snapshot) -> bool:
+        """Whether the task's block asks a person for input or approval: its reason starts
+        with an approval reason, and it does not wait on a condition instead (a reason that
+        matches ``condition_reasons``, or an unmet linked condition other than a human
+        task; one that already holds is waited on no longer)."""
+        if task.block is None or not _asks_a_person(task.block.reason, self.approval_reasons):
+            return False
+        if any(p.search(task.block.reason[:MAX_REASON]) for p in self.condition_reasons):
+            return False
+        return not any(
+            c.kind is not ConditionKind.HUMAN_TASK and c.satisfied is not True
+            for c in linked_conditions(task, snapshot)[0]
+        )
 
     def _approvals(self, snapshot: Snapshot, claimed: set[str]) -> list[Item]:
         humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
@@ -195,7 +225,7 @@ class NeedsYou:
                 continue
             if t.id in claimed:
                 continue  # it waits on a human task directly: listed under that task
-            if not _asks_a_person(t.block.reason, self.approval_reasons):
+            if not self._question_for_a_person(t, snapshot):
                 continue
             waited = snapshot.now - t.block.since
             if waited < self.approval_wait_after:
@@ -358,6 +388,19 @@ def build(config: dict[str, Any]) -> NeedsYou:
         if not isinstance(default, str) or not default.strip():
             raise ValueError("default_approver must be a human owner id")
         kwargs["default_approver"] = default.strip()
+    if "condition_reasons" in config:
+        patterns = config.pop("condition_reasons")
+        if not isinstance(patterns, list) or not all(
+            isinstance(p, str) and p.strip() for p in patterns
+        ):
+            raise ValueError("condition_reasons must be a list of regular expressions")
+        try:
+            compiled = tuple(re.compile(p, re.IGNORECASE) for p in patterns)
+        except re.error as exc:
+            raise ValueError(f"condition_reasons: invalid pattern: {exc}") from exc
+        if any(p.search("") for p in compiled):
+            raise ValueError("condition_reasons: a pattern matches an empty reason (every block)")
+        kwargs["condition_reasons"] = compiled
     if "critical_after_hours" in config:
         hours = config.pop("critical_after_hours")
         if isinstance(hours, bool) or not isinstance(hours, int | float) or hours <= 0:

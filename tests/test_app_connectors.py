@@ -55,6 +55,13 @@ def test_load_github_and_block_conditions(tmp_path: Path) -> None:
     assert settings.github == GitHubSettings(repos=("example/repo",))
     (pattern,) = settings.block_conditions
     assert pattern.kind == "pr_merged" and pattern.repo == "example/repo"
+    # needs_you inherits the block patterns: such a block waits on a condition.
+    reasons = settings.engine.rules["needs_you"]["condition_reasons"]
+    assert reasons == [pattern.pattern.pattern]
+    own = load_settings(
+        write(tmp_path, CONFIG + '\n[engine.rules.needs_you]\ncondition_reasons = ["x#1"]\n')
+    )
+    assert own.engine.rules["needs_you"]["condition_reasons"] == ["x#1"]
 
 
 def test_github_options(tmp_path: Path) -> None:

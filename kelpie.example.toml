@@ -81,6 +81,9 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #                                # it has waited this long
 # approval_wait_after = "30m"    # an agent blocked for a person's input or approval, after this
 # approval_reasons = ["waiting_human", "needs_input", "approval"]  # block reason prefixes
+# condition_reasons = ['\b(?:automerge|merge of|waiting for)\b[^\n]{0,80}?PR\s*#(?P<pr>\d+)']
+#                           # waits on a condition, not a person; tie it to waiting wording
+#                           # (default: the [[block_conditions]] block patterns)
 # approvers = { ops = "human-lead" }  # agent role -> the human who answers its questions
 # default_approver = "human-owner"    # otherwise this human; without either: "unassigned"
 # critical_after_hours = 24      # critical once a person's agent-hours waited reach this
