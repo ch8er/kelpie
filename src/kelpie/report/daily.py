@@ -42,6 +42,10 @@ part of the chaos in act mode, and a fixed remedy for the largest remaining caus
 by dollars, with hours converted by ``hour_usd`` when it is set, else alternating the best
 by dollars and the best by hours.
 
+**Biggest wait.** Under the headline: the role and cause whose tasks spent the most
+task-hours waiting for conditions, with a suggestion (:mod:`kelpie.report.waits`); a known
+cause also competes for the top 3.
+
 **Sections.** Analyses registered in :mod:`kelpie.report.sections` (token optimization,
 ...) add their own section after the top 3, and their advice competes for it; they follow
 the same rules: pure, deterministic, no clock and no LLM.
@@ -63,7 +67,17 @@ from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
-from kelpie.core.model import Owner, OwnerKind, Session, Snapshot, Span, SpanKind, Status, Task
+from kelpie.core.model import (
+    Condition,
+    Owner,
+    OwnerKind,
+    Session,
+    Snapshot,
+    Span,
+    SpanKind,
+    Status,
+    Task,
+)
 from kelpie.core.spans import (
     Attribution,
     SpanKey,
@@ -87,6 +101,7 @@ from kelpie.report.sections import (
     run_sections,
 )
 from kelpie.report.store import StateRow
+from kelpie.report.throughput import throughput
 from kelpie.report.verify import (
     DEFAULT_MIN_SAMPLE,
     DEFAULT_REVIEW_ROLES,
@@ -98,6 +113,8 @@ from kelpie.report.verify import (
     verify,
 )
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
+from kelpie.report.waits import UNKNOWN as UNKNOWN_WAIT
+from kelpie.report.waits import BiggestWait, BlockKind, WaitCauses, biggest_wait
 from kelpie.traces.outputs import (
     OutputGroup,
     OutputSettings,
@@ -204,6 +221,9 @@ class ReportInputs:
     review_roles: tuple[str, ...] = DEFAULT_REVIEW_ROLES
     min_sample: int = DEFAULT_MIN_SAMPLE
     section_config: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    conditions: Sequence[Condition] = ()  # the board's conditions, as reported now
+    hold_labels: tuple[str, ...] = ()  # rule 6's hold labels: a held task waits for a hold
+    block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]]: waits a block declares
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +282,7 @@ class DailyReport:
     verifications: tuple[Verification, ...] = ()  # fixes of the day and the day before
     sections: tuple[Section, ...] = ()  # from kelpie.report.sections builders
     inbox: tuple[InboxLine, ...] = ()  # rule 13, per person, by cost of delay
+    biggest_wait: BiggestWait | None = None  # the role and cause tasks waited longest for
 
     @property
     def chaos_hours(self) -> float:
@@ -331,6 +352,7 @@ def build_report(
         roles=MappingProxyType(_roles(inputs, end)),
     )
     extra = run_sections(sections, context, failed, inputs.section_config, section_keys)
+    wait = _biggest_wait(inputs, start, end, context.roles)
     advice = _recommendations(
         inputs,
         chaos,
@@ -339,6 +361,7 @@ def build_report(
         pricer,
         _session_models(spans, counted),
         [a for s in extra for a in s.advice],
+        wait,
     )
     return DailyReport(
         day=inputs.day,
@@ -361,7 +384,33 @@ def build_report(
         tz=inputs.tz,
         verifications=_verifications(inputs, index, start, end),
         sections=extra,
+        biggest_wait=wait,
     )
+
+
+def wait_causes(inputs: ReportInputs, start: datetime, end: datetime) -> WaitCauses:
+    """What each task of the board waited for (:mod:`kelpie.report.waits`), from the day's
+    ledger entries (rule 13 re-records an open inbox about hourly)."""
+    entries = [e for e in inputs.actions if start <= e.at < end]
+    return WaitCauses(inputs.conditions, entries, inputs.hold_labels, inputs.block_kinds)
+
+
+def _biggest_wait(
+    inputs: ReportInputs, start: datetime, end: datetime, roles: Mapping[str, str]
+) -> BiggestWait | None:
+    causes = wait_causes(inputs, start, end)
+    per_role = throughput(
+        inputs.tasks,
+        inputs.sessions,
+        inputs.owners,
+        [row.state for row in inputs.states],
+        start,
+        end,
+        inputs.review_roles,
+        roles,
+        causes,
+    )
+    return biggest_wait(per_role, inputs.tasks, causes)
 
 
 def _roles(inputs: ReportInputs, end: datetime) -> dict[str, str]:
@@ -764,8 +813,22 @@ def _recommendations(
     pricer: _Pricer,
     models: Mapping[str, str | None],
     extra: Sequence[Advice] = (),
+    wait: BiggestWait | None = None,
 ) -> tuple[Advice, ...]:
     candidates: list[Advice] = list(extra)
+    if wait is not None and wait.cause != UNKNOWN_WAIT:  # the headline covers that one
+        candidates.append(
+            Advice(
+                title=f"Cut the {md.text(wait.role)} wait for {wait.label}",
+                detail=(
+                    f"{len(wait.tasks)} task(s) of the role waited {wait.hours:.1f} task-hours "
+                    f"for {wait.label} (time the work stood still, valued like hours lost), "
+                    f"against {wait.work_hours:.1f} agent-hours of work; {wait.suggestion}"
+                ),
+                hours=wait.hours,
+                tasks=wait.tasks,
+            )
+        )
     for rec in filters:
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
@@ -836,6 +899,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     est = " (estimate)" if report.estimated else ""
     lines = [f"# Kelpie daily report: {report.day.isoformat()}", ""]
     lines += [_headline(report), ""]
+    if report.biggest_wait is not None:
+        lines += [report.biggest_wait.headline(), ""]
     lines += ["## Cost of chaos", ""]
     if report.chaos:
         lines += [
@@ -923,6 +988,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
 def render_summary(report: DailyReport) -> str:
     """A short plain-text summary for a chat channel (the full report is the Markdown)."""
     lines = [f"Kelpie daily report {report.day.isoformat()}", _headline(report)]
+    if report.biggest_wait is not None:
+        lines.append(report.biggest_wait.headline())
     if report.open_states:
         lines.append(f"Needs a human: {len(report.open_states)} open condition(s).")
     for i, a in enumerate(report.recommendations, 1):

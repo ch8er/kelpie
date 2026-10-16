@@ -15,6 +15,7 @@ from kelpie.alerts import Delivery, PermanentError
 from kelpie.app import ConfigError, load_settings
 from kelpie.cli import main
 from kelpie.core.actions import Severity
+from kelpie.metrics import Metrics
 from kelpie.report.cli import report_settings, run, sources
 
 
@@ -67,6 +68,69 @@ def test_sources_follow_dry_run_and_budget_mode(
     )
     src = sources(load_settings(config(tmp_path, extra)))
     assert src.estimated and src.modes["orphan_status"].value == "observe"
+
+
+def test_the_report_reads_the_board_s_conditions_and_the_hold_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kelpie.core.model import Condition, ConditionKind, Snapshot
+    from kelpie.report.run import load_inputs
+
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    extra = (
+        '[engine.rules.bottlenecks]\nhold_labels = ["freeze"]\n'
+        '[[engine.rules.bottlenecks.holds]]\nlabel = "merge-hold"\n'
+    )
+    extra += (
+        '[connectors.github]\nrepos = ["example/app"]\n'
+        '[[block_conditions]]\npattern = "CI of #(?P<pr>\\\\d+)"\nkind = "ci_green"\n'
+        'repo = "example/app"\n'
+    )
+    src = sources(load_settings(config(tmp_path, extra)))
+    assert src.hold_labels == ("freeze", "merge-hold")
+    [declared] = src.block_kinds
+    assert declared.kind.value == "ci_status" and declared.repo == "example/app"
+    assert declared.pattern.search("waiting for ci of #7")
+    waits_on = (Condition("c-1", ConditionKind.CI_STATUS, "T-1"),)
+    board = Snapshot(now=datetime(2026, 3, 3, tzinfo=UTC), conditions=waits_on)
+    loaded = load_inputs(replace(src, db_path=None), date(2026, 3, 2), board)
+    assert loaded.conditions == waits_on and loaded.hold_labels == ("freeze", "merge-hold")
+    assert loaded.block_kinds == src.block_kinds
+
+
+def test_the_report_board_attaches_human_task_conditions_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.app
+    import kelpie.report.cli as report_cli
+    from kelpie.core.model import Block, Owner, OwnerKind, Snapshot, Status, Task
+
+    now = datetime(2026, 3, 3, 1, tzinfo=UTC)
+
+    class Board:
+        name = "board"
+
+        def snapshot(self, at: datetime) -> Snapshot:
+            gate = Task("H-1", "approve", Status.READY, now, owner_id="person-a")
+            asks = Block("waiting_human: approval in H-1", now)
+            blocked = Task("T-1", "t", Status.BLOCKED, now, owner_id="dev-1", block=asks)
+            owners = (Owner("person-a", "lead", OwnerKind.HUMAN), Owner("dev-1", "developer"))
+            return Snapshot(now=at, tasks=(gate, blocked), owners=owners)
+
+    def no_network(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the report called a network connector")
+
+    monkeypatch.setattr(report_cli, "build_adapters", lambda settings: [Board()])
+    monkeypatch.setattr(kelpie.app, "_github_steps", no_network)
+    extra = (
+        '[connectors.github]\nenabled = true\nrepos = ["example/app"]\n'
+        "[connectors.human_tasks]\n"
+        '[[connectors.human_tasks.block_patterns]]\npattern = "approval in (?P<task>\\\\S+)"\n'
+    )
+    settings = load_settings(config(tmp_path, extra))
+    board = report_cli.report_board(settings, date(2026, 3, 2), lambda: now, Metrics())
+    [c] = board.conditions
+    assert c.kind.value == "human_task" and c.task_id == "T-1"
 
 
 def test_unknown_report_key_is_a_config_error(tmp_path: Path) -> None:

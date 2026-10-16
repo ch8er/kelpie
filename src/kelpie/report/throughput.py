@@ -77,6 +77,9 @@ class RoleThroughput:
     returns: int = 0
     reopened: int = 0  # done tasks moved back out of done within the day
     queue_now: int = 0  # tasks of the role in the queue stage at the end of the day
+    # waiting task-hours by cause (kelpie.report.waits), and the tasks that waited for each
+    waits: Mapping[str, float] = field(default_factory=dict)
+    waited: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def tasks_per_hour(self) -> float:
@@ -118,9 +121,11 @@ def throughput(
     end: datetime,
     review_roles: Sequence[str] = ("reviewer",),
     session_roles: Mapping[str, str] | None = None,
+    wait_cause: Callable[[Task], str] | None = None,
 ) -> list[RoleThroughput]:
     """Throughput per role for the day ``[start, end)``, roles in name order.
-    ``session_roles`` names the role of sessions whose owner is not in ``owners``."""
+    ``session_roles`` names the role of sessions whose owner is not in ``owners``;
+    ``wait_cause`` names what a task waited for (its ``waiting`` hours count under it)."""
     hours = (end - start).total_seconds() / 3600
     roles_of_task = task_roles(tasks, owners)
     owner_roles = {o.id: o.role for o in owners}
@@ -151,6 +156,10 @@ def throughput(
         done = task.status is Status.DONE and start <= task.status_since < end
         for stage, h in stages.items():
             a.stages[stage] += h
+        if wait_cause is not None and stages.get("waiting"):
+            cause = wait_cause(task)
+            a.waits[cause] += stages["waiting"]
+            a.waited[cause].add(task.id)
         if done:
             a.completed.append(task.id)
         if stages or done:
@@ -214,6 +223,8 @@ def throughput(
                 returns=a.returns,
                 reopened=a.reopened,
                 queue_now=a.queue_now,
+                waits=dict(a.waits),
+                waited={c: tuple(sorted(ids)) for c, ids in a.waited.items()},
             )
         )
     return out
@@ -236,6 +247,8 @@ class _Acc:
     returns: int = 0
     reopened: int = 0
     queue_now: int = 0
+    waits: Counter[str] = field(default_factory=Counter)
+    waited: defaultdict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
 
 
 def _union(intervals: list[tuple[datetime, datetime]]) -> float:

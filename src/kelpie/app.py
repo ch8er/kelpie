@@ -460,7 +460,7 @@ def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
         return section
     if name == "orphan_status" and "hold_labels" not in section:
         # Held tasks are parked on purpose: rule 3's stop patterns skip what rule 6 calls held.
-        held = _hold_labels(config.rules.get("bottlenecks", {}))
+        held = hold_labels(config.rules.get("bottlenecks", {}))
         if held:
             section["hold_labels"] = held
         return section
@@ -479,7 +479,7 @@ def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
     return section
 
 
-def _hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
+def hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
     """``bottlenecks``' ``hold_labels`` and ``holds`` labels; malformed entries are left to
     the bottlenecks rule, which refuses them at startup."""
     labels = bottlenecks.get("hold_labels", [])
@@ -1100,7 +1100,7 @@ def _github_steps(
     steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = [("github", step)]
     if github.pulls is not None and github.pulls.enabled:
         # Rule 6's hold labels: the PR labels whose time the pull request step reads.
-        watch = frozenset(_hold_labels(settings.engine.rules.get("bottlenecks", {})))
+        watch = frozenset(hold_labels(settings.engine.rules.get("bottlenecks", {})))
         steps.append(("github_pulls", PullRequestSync(connector, github.pulls, watch)))
         # A cache entry dates from its request, a few seconds into a tick: keep a margin.
         if github.cache_ttl + github.tick_budget >= github.pulls.poll_interval:

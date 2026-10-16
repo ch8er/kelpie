@@ -265,6 +265,17 @@ report; no LLM is involved.
   flagged, and by every session `exit_contract` requeued (a restart), priced with
   `[prices]`. In subscription mode the dollars are marked as an estimate.
 - **Cost per completed task**: the day's priced spend over the tasks that reached `done`.
+- **Biggest wait** (`kelpie.report.waits`), under the headline: the role and cause whose
+  tasks spent the most task-hours waiting for conditions, against the agent-hours the
+  role's agents had a session running, with a concrete suggestion. A task's wait counts
+  under a hold (rule 6's hold labels), else the kind of the unmet condition it waits on (a
+  person's `human_task`, CI, merges, LLM quotas, other tasks, timers), else a person when
+  rule 13 listed it that day (an approval, parked on a human task), else unknown. The
+  report makes no network calls: it runs the connector steps that read only the board
+  (`task_status`, human tasks from block reasons), and a block reason a
+  `[[block_conditions]]` pattern matches counts as a CI or merge wait by the pattern's kind,
+  without a PR lookup. The "Farm throughput" section breaks each role's waiting time down
+  by cause.
 - **Context and model fit** (from traces, `kelpie.traces.fit`): content a read-like tool
   loaded unchanged into many sessions of a role (same tool, arguments hash and size); tools
   offered but never called, when the platform lists them in the span attribute

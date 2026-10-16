@@ -29,6 +29,7 @@ from kelpie.report.daily import (
 )
 from kelpie.report.root_cause import Llm, with_root_cause
 from kelpie.report.store import ReportStore
+from kelpie.report.waits import BlockKind
 from kelpie.traces.hooks import merge_hook_spans
 from kelpie.traces.outputs import OutputSettings
 
@@ -49,6 +50,8 @@ class ReportSources:
     outputs: OutputSettings
     estimated: bool  # a subscription-mode budget: dollars are estimates
     modes: Mapping[str, Mode]
+    hold_labels: tuple[str, ...] = ()  # rule 6's hold labels (bottlenecks)
+    block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]], matched offline
 
 
 def default_day(now: datetime, settings: ReportSettings) -> date:
@@ -101,6 +104,9 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         review_roles=sources.report.review_roles,
         min_sample=sources.report.min_sample,
         section_config=sources.report.sections,
+        conditions=board.conditions,
+        hold_labels=sources.hold_labels,
+        block_kinds=sources.block_kinds,
     )
 
 
