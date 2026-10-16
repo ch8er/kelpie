@@ -1094,11 +1094,13 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     if hub is not None:
         # A span whose ids no agent token vouches for could be forged into any host's
         # namespace: with a hub, spans come only through the agents.
-        log.warning(
+        log.info(
             "[hub] is set: OTLP ingest on /v1/traces of this port is off; spans reach Kelpie "
-            "through the agents"
+            "through the agents' relays, on the hub listener"
         )
-        ingest = None
+        relayed, ingest = ingest, None
+    else:
+        relayed = None
     app = App(
         settings,
         loaded,
@@ -1112,7 +1114,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         forwarder,
         alerts,
     )
-    return _with_hub(app, hub)
+    return _with_hub(app, hub, relayed)
 
 
 def _build_hub(
@@ -1137,12 +1139,13 @@ def _build_hub(
     return Hub(settings.hub, tokens, clock)
 
 
-def _with_hub(app: App, hub: Hub | None) -> App:
-    """Bind the hub's listener (a startup error is a config error) and run it as a service."""
+def _with_hub(app: App, hub: Hub | None, traces: TraceIngest | None = None) -> App:
+    """Bind the hub's listener (a startup error is a config error) and run it as a service.
+    ``traces``: ingest for the OTLP exports agents relay."""
     if hub is None:
         return app
     try:
-        server = HubServer(hub)
+        server = HubServer(hub, traces)
     except (OSError, ValueError) as exc:
         app.close()
         raise ConfigError(
@@ -1258,7 +1261,10 @@ def _github_steps(
 
 
 def check_exposure(settings: Settings, host: str) -> None:
-    """Refuse to serve an unauthenticated ingest endpoint on a non-loopback address."""
+    """Refuse to serve an unauthenticated ingest endpoint on a non-loopback address. With
+    ``[hub]`` this port takes no spans (agents relay them to the hub listener)."""
+    if settings.hub is not None:
+        return
     try:
         settings.traces.check_exposure(host)
     except ValueError as exc:

@@ -27,7 +27,7 @@ import threading
 import zlib
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Protocol
 
@@ -90,13 +90,29 @@ class TraceIngest:
     # e.g. :meth:`kelpie.traces.forward.Forwarder.submit`. Must not block.
     on_accepted: Callable[[bytes, str, str | None], None] | None = None
 
-    def handle(self, headers: Headers, read: Callable[[int], bytes]) -> Reply:
-        reply = self._handle(headers, read)
+    def handle(
+        self,
+        headers: Headers,
+        read: Callable[[int], bytes],
+        *,
+        authenticated: bool = False,
+        rewrite: Callable[[Span], Span] | None = None,
+    ) -> Reply:
+        """Ingest one export. ``authenticated``: the caller already checked who sent it (the
+        multi-host hub, by agent token), so ``token`` is not asked for. ``rewrite`` maps
+        every span before it is stored (the hub puts it in the agent's namespace)."""
+        reply = self._handle(headers, read, authenticated, rewrite)
         if self.observer is not None:
             self.observer.traces_request(reply.status)
         return reply
 
-    def _handle(self, headers: Headers, read: Callable[[int], bytes]) -> Reply:
+    def _handle(
+        self,
+        headers: Headers,
+        read: Callable[[int], bytes],
+        authenticated: bool,
+        rewrite: Callable[[Span], Span] | None,
+    ) -> Reply:
         media = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
         # Errors before the media type is known are answered in JSON.
         encoding = media if media in (otlp.JSON, otlp.PROTOBUF) else otlp.JSON
@@ -112,7 +128,11 @@ class TraceIngest:
         if length > self.max_body_bytes:
             message = f"body over {self.max_body_bytes} bytes"
             return _error(413, encoding, otlp.RESOURCE_EXHAUSTED, message)
-        if self.token is not None and not _authorized(headers.get("Authorization"), self.token):
+        if (
+            not authenticated
+            and self.token is not None
+            and not _authorized(headers.get("Authorization"), self.token)
+        ):
             return _error(401, encoding, otlp.UNAUTHENTICATED, "missing or invalid bearer token")
         if media not in (otlp.JSON, otlp.PROTOBUF):
             message = f"unsupported content type {media!r}; use {otlp.PROTOBUF} or {otlp.JSON}"
@@ -127,12 +147,18 @@ class TraceIngest:
         try:
             original_type = headers.get("Content-Type") or media
             body = read(length)
-            return self._ingest(body, media, original_type, content_encoding, encoding)
+            return self._ingest(body, media, original_type, content_encoding, encoding, rewrite)
         finally:
             self._slots.release()
 
     def _ingest(
-        self, body: bytes, media: str, original_type: str, content_encoding: str, encoding: str
+        self,
+        body: bytes,
+        media: str,
+        original_type: str,
+        content_encoding: str,
+        encoding: str,
+        rewrite: Callable[[Span], Span] | None = None,
     ) -> Reply:
         received = body  # forwarded as received, still compressed
         if content_encoding == "gzip":
@@ -155,6 +181,8 @@ class TraceIngest:
             rejected[INVALID_TIME] += len(decoded.spans) - len(raw)
         mapped = map_spans(raw, self.options)
         rejected.update(mapped.rejected)
+        if rewrite is not None:
+            mapped = replace(mapped, spans=[rewrite(s) for s in mapped.spans])
         try:
             self.store.append_spans(mapped.spans, now)
             if mapped.spans:

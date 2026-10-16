@@ -173,7 +173,7 @@ into the agent's namespace, `<agent>:<id>`, before merging. Agent names are
 | `Task` | `id`, `owner_id`, `assignee`, `subtasks`, `repo` |
 | `Owner` | `id` — humans too: a person on two boards is two owners, so no host can overwrite another host's owner |
 | `Dependency` | `task_id`, `depends_on` |
-| `Condition` | `id`, `task_id`, the `task` param of `task_status` conditions; `Block.condition_id` |
+| `Condition` | `task_id` and the `task` param of `task_status` and `human_task` conditions get the prefix; `id` and `Block.condition_id` get a suffix, `<id>@<agent>`, so the prefixes rules give the conditions they create (`dispatch_gate:<task>:`) survive, and the agent gets its own id back |
 | `Session` | `id`, `task_id`, `owner_id` |
 | `Span` | `trace_id`, `span_id`, `parent_id`, `task_id`, `session_id`, the `tool_call_id` attribute — so links are only inherited, and hook and OTLP spans only merged, within one host |
 
