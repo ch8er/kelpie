@@ -40,6 +40,7 @@ by dollars and the best by hours.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -62,6 +63,13 @@ from kelpie.core.spans import (
 )
 from kelpie.core.states import OpenState
 from kelpie.report.fixes import FixEvent
+from kelpie.report.sections import (
+    SECTIONS,
+    Advice,
+    Section,
+    SectionContext,
+    load_sections,
+)
 from kelpie.report.store import StateRow
 from kelpie.report.verify import (
     DEFAULT_MIN_SAMPLE,
@@ -83,6 +91,8 @@ from kelpie.traces.outputs import (
     recommend,
     session_context,
 )
+
+log = logging.getLogger(__name__)
 
 # Rules whose long-lived states are work the farm lost, and what to call that loss.
 CHAOS_CAUSES: Mapping[str, str] = {
@@ -198,15 +208,6 @@ class OpenLine:
 
 
 @dataclass(frozen=True, slots=True)
-class Advice:
-    title: str
-    detail: str
-    usd: float = 0.0
-    hours: float = 0.0
-    tasks: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
 class DailyReport:
     day: date
     start: datetime
@@ -226,6 +227,7 @@ class DailyReport:
     hour_usd: float | None = None
     tz: tzinfo = UTC  # times are shown in the report's time zone
     verifications: tuple[Verification, ...] = ()  # fixes of the day and the day before
+    sections: tuple[Section, ...] = ()  # from kelpie.report.sections builders
 
     @property
     def chaos_hours(self) -> float:
@@ -272,8 +274,15 @@ def build_report(inputs: ReportInputs) -> DailyReport:
             t.id for t in inputs.tasks if t.status is Status.DONE and start <= t.status_since < end
         )
     )
+    sections = _sections(SectionContext(inputs, start, end, spans, counted, pricer.price))
     advice = _recommendations(
-        inputs, chaos, would_fix, filters, pricer, _session_models(spans, counted)
+        inputs,
+        chaos,
+        would_fix,
+        filters,
+        pricer,
+        _session_models(spans, counted),
+        [a for s in sections for a in s.advice],
     )
     return DailyReport(
         day=inputs.day,
@@ -294,7 +303,24 @@ def build_report(inputs: ReportInputs) -> DailyReport:
         hour_usd=inputs.hour_usd,
         tz=inputs.tz,
         verifications=_verifications(inputs, index, start, end),
+        sections=sections,
     )
+
+
+def _sections(ctx: SectionContext) -> tuple[Section, ...]:
+    """Sections from :mod:`kelpie.report.sections` builders, in name order; one that
+    raises is logged and noted instead of failing the report."""
+    load_sections()
+    out: list[Section] = []
+    for name in sorted(SECTIONS):
+        try:
+            found = SECTIONS[name](ctx)
+        except Exception:
+            log.exception("report section %s failed", name)
+            found = Section(name, (f"This section failed ({name}); see the log.",))
+        if found is not None:
+            out.append(found)
+    return tuple(out)
 
 
 def _verifications(
@@ -542,8 +568,9 @@ def _recommendations(
     filters: Sequence[Recommendation],
     pricer: _Pricer,
     models: Mapping[str, str | None],
+    extra: Sequence[Advice] = (),
 ) -> tuple[Advice, ...]:
-    candidates: list[Advice] = []
+    candidates: list[Advice] = list(extra)
     for rec in filters:
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
@@ -663,6 +690,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             lines.append(f"{i}. **{a.title}**{tail}: {a.detail}.{linked}")
     else:
         lines.append("None: nothing above the thresholds.")
+    for section in report.sections:
+        lines += ["", f"## {section.title}", "", *section.lines]
     lines += ["", "## Before/after of recent fixes", ""]
     lines += _verification_lines(report) or [
         "No fixes on this day or the day before (note one with `kelpie fix`)."
