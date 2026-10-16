@@ -9,13 +9,15 @@ status and human task conditions); ``--refresh`` adds the network ones (GitHub P
 block conditions), as one tick of ``kelpie serve`` would, and a note says when they were
 skipped.
 
-- the task's status and how long it has been there, owner, labels (held ones flagged),
-  block and sessions;
+- the task's status and how long it has been there (with the platform's own status when it
+  differs, such as Hermes ``triage`` or ``scheduled`` behind ``backlog``), owner, labels
+  (held ones flagged), block and sessions;
 - its linked conditions and their state;
 - what it waits for, link by link up to the first dead end (``kelpie.rules._chains``, the
   same graph rule 3 uses) and what waits behind it;
 - the rule findings about it: actions on the task, or naming it in their params (a chain,
-  a list of dependents), with each rule's configured mode;
+  a list of dependents), with each rule's configured mode; with none, what would make a rule
+  act on a task parked before work or on its conditions;
 - its open alert states and its latest ledger entries, read from the database without
   writing to it.
 
@@ -49,7 +51,7 @@ from kelpie.app import (
 from kelpie.core.actions import Action
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry
-from kelpie.core.model import Condition, Session, Snapshot, Task
+from kelpie.core.model import Condition, Session, Snapshot, Status, Task
 from kelpie.core.spans import SpanStore
 from kelpie.core.states import OpenState
 from kelpie.core.storage import (
@@ -114,6 +116,9 @@ class Explanation:
     dry_run: bool
     problems: list[str] = field(default_factory=list)
     hold_labels: frozenset[str] = frozenset()
+    # rule 3's threshold for a card stuck before work; None when off or not loaded
+    prework_after: timedelta | None = None
+    loaded_rules: frozenset[str] = frozenset()
 
 
 class _Capture(logging.Handler):
@@ -272,6 +277,8 @@ def explain_snapshot(
         dry_run=dry_run,
         problems=failed,
         hold_labels=frozenset(getattr(orphan, "hold_labels", frozenset())),
+        prework_after=getattr(orphan, "prework_after", None),
+        loaded_rules=frozenset(r.name for r in loaded.rules),
     )
 
 
@@ -377,7 +384,8 @@ def render(ex: Explanation) -> str:
     held = sorted(ex.hold_labels.intersection(t.labels))
     lines = [
         f"Task {t.id}: {t.title}",
-        f"  status   {t.status} for {_age(now - t.status_since)} (since {_when(t.status_since)})",
+        f"  status   {t.status}{_raw(t)} for {_age(now - t.status_since)} "
+        f"(since {_when(t.status_since)})",
         f"  owner    {who}; role {t.role or 'none'}" + (f"; source {t.source}" if t.source else ""),
     ]
     if t.labels:
@@ -412,6 +420,7 @@ def render(ex: Explanation) -> str:
         lines.append(f"  {a.rule} [{_mode(f, ex.dry_run)}] {a.kind} {a.severity}: {a.reason}")
     if not ex.findings:
         lines.append("  no rule acts on this task")
+        lines += [f"  {hint}" for hint in _hints(ex)]
 
     lines.append("Open alert states")
     for s in ex.states:
@@ -430,6 +439,61 @@ def render(ex: Explanation) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _raw(t: Task) -> str:
+    """The platform's own status, where it says more than the normalized one."""
+    parts = []
+    if t.platform_status and t.platform_status != t.status.value:
+        parts.append(f"{t.source or 'platform'}: {t.platform_status}")
+    if t.prework:
+        parts.append("before work")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _hints(ex: Explanation) -> list[str]:
+    """With no finding: what would make a rule act on a card parked before work, or on a
+    task waiting on its conditions."""
+    t, snap = ex.task, ex.snapshot
+    out: list[str] = []
+    if t.prework:
+        where = f"'{t.platform_status}'" if t.platform_status else "a pre-work status"
+        out.append(f"{where} is before work: only a person moves the card out of it")
+        if "orphan_status" not in ex.loaded_rules or ex.prework_after is None:
+            out.append("orphan_status's prework_after is off or the rule is not loaded")
+        else:
+            waiting = [d for d in snap.dependents(t.id) if not d.status.is_terminal]
+            parents = [
+                p.id
+                for d in snap.dependencies
+                if d.task_id == t.id
+                and (p := snap.task(d.depends_on)) is not None
+                and not p.status.is_terminal
+            ]
+            when = _age(ex.prework_after)
+            if parents:
+                out.append(
+                    "orphan_status leaves it: it waits for parents of its own "
+                    f"({', '.join(sorted(parents))})"
+                )
+            elif not waiting:
+                out.append(
+                    f"orphan_status alerts after {when} there only while open tasks depend on "
+                    "it; none does"
+                )
+            elif snap.now - t.status_since < ex.prework_after:
+                out.append(f"orphan_status alerts once it has sat there {when}")
+            else:
+                out.append("orphan_status skips it: it is held or ignored")
+    elif t.status is Status.WAITING and ex.conditions:
+        unmet = [c.id for c in ex.conditions if not c.satisfied]
+        if unmet:
+            out.append(
+                f"waits on {len(unmet)} unmet condition(s); wait_condition wakes it when they "
+                "are met"
+                + ("" if "wait_condition" in ex.loaded_rules else " (the rule is not loaded)")
+            )
+    return out
+
+
 def as_json(ex: Explanation) -> dict[str, Any]:
     t, now = ex.task, ex.snapshot.now
     sessions = sorted(ex.snapshot.sessions_for(t.id), key=lambda s: s.started_at, reverse=True)
@@ -439,6 +503,8 @@ def as_json(ex: Explanation) -> dict[str, Any]:
             "id": t.id,
             "title": t.title,
             "status": t.status.value,
+            "platform_status": t.platform_status,
+            "prework": t.prework,
             "status_since": t.status_since.isoformat(),
             "age_seconds": int((now - t.status_since).total_seconds()),
             "owner_id": t.owner_id,

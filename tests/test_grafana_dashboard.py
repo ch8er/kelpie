@@ -18,6 +18,8 @@ from kelpie.core.model import (
     Owner,
     ProviderStatus,
     Snapshot,
+    Status,
+    Task,
 )
 from kelpie.metrics import Metrics
 
@@ -60,7 +62,8 @@ def _metrics() -> Metrics:
         BudgetStatus("b", BudgetScope.DAY, "farm", BudgetUnit.USD, 1.0, runs_out_at=NOW),
     )
     metrics.budgets_at = NOW
-    snapshot = Snapshot(now=NOW, owners=(Owner("agent-a", "role-a"),))
+    card = Task("C", "c", Status.BACKLOG, NOW, prework=True, platform_status="triage")
+    snapshot = Snapshot(now=NOW, owners=(Owner("agent-a", "role-a"),), tasks=(card,))
     ControlLoop(Engine([]), lambda: snapshot, metrics).tick_once()  # fleet gauges
     return metrics
 

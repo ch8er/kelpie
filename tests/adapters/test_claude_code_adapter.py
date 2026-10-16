@@ -127,6 +127,7 @@ def test_status_mapping(farm: Farm) -> None:
         "farm/4": Status.BACKLOG,
         "farm/5": Status.READY,
     }
+    assert snap.task("farm/3").platform_status == "pending"  # type: ignore[union-attr]
     t2 = snap.task("farm/2")
     assert t2 is not None
     assert (t2.title, t2.owner_id, t2.role, t2.source) == (

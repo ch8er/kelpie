@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,7 +14,16 @@ from kelpie.app import LoadedRules, build_app, find_config, load_rules, load_set
 from kelpie.cli import main
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.config import EngineConfig, Mode
-from kelpie.core.model import Block, Condition, ConditionKind, Session, Snapshot, Status, Task
+from kelpie.core.model import (
+    Block,
+    Condition,
+    ConditionKind,
+    Dependency,
+    Session,
+    Snapshot,
+    Status,
+    Task,
+)
 from kelpie.why import (
     Explanation,
     Finding,
@@ -359,3 +369,73 @@ def test_labels_holds_and_session_cap() -> None:
     data = as_json(ex)
     assert data["task"]["held_by"] == ["merge-first"] and data["sessions_total"] == 5
     assert [s["id"] for s in data["sessions"]] == ["S-4", "S-3", "S-2", "S-1", "S-0"]
+
+
+def test_a_card_parked_before_work_says_what_would_act() -> None:
+    """Live review: on a Hermes card in scheduled, kelpie why said only "no rule acts"."""
+    loaded, snapshot = fixture_rules("17-prework-not-backlog")
+    lone = explain_snapshot(loaded, snapshot, "t_c210")
+    assert lone is not None and not lone.findings
+    text = render(lone)
+    assert "status   backlog (hermes: scheduled, before work) for 1d 1h" in text
+    assert "'scheduled' is before work: only a person moves the card out of it" in text
+    assert "only while open tasks depend on it; none does" in text
+    data = as_json(lone)["task"]
+    assert data["platform_status"] == "scheduled" and data["prework"] is True
+    stuck = explain_snapshot(loaded, snapshot, "t_c200")
+    assert stuck is not None
+    assert "stuck-before-work" in {f.action.params.get("pattern") for f in stuck.findings}
+    assert "before work: only" not in render(stuck)  # a rule acts: no hint
+
+
+def test_hints_for_young_cards_rules_off_and_waits() -> None:
+    from kelpie.why import _hints
+
+    card = Task("C", "c", Status.BACKLOG, NOW - timedelta(hours=1), prework=True)
+    behind = Task("D", "d", Status.BACKLOG, NOW)
+    snap = Snapshot(now=NOW, tasks=(card, behind), dependencies=(Dependency("D", "C"),))
+    on = frozenset({"orphan_status"})
+
+    def ex(task: Task, after: timedelta | None, rules: frozenset[str], conds=()) -> Explanation:
+        return Explanation(task, snap, timedelta(minutes=30), list(conds), None, [], {}, [], [],
+                           [], True, prework_after=after, loaded_rules=rules)  # fmt: skip
+
+    hints = _hints(ex(card, timedelta(hours=4), on))
+    assert hints[0].startswith("a pre-work status is before work")
+    assert hints[1] == "orphan_status alerts once it has sat there 4h 00m"
+    assert "skips it" in _hints(ex(replace(card, status_since=NOW - timedelta(hours=5)),
+                                   timedelta(hours=4), on))[1]  # fmt: skip
+    assert "is off or the rule is not loaded" in _hints(ex(card, None, on))[1]
+    waiting = Task("W", "w", Status.WAITING, NOW)
+    unmet = Condition("c1", ConditionKind.PR_MERGED, "W")
+    [hint] = _hints(ex(waiting, None, frozenset(), [unmet]))
+    assert hint.startswith("waits on 1 unmet condition(s)") and "not loaded" in hint
+    assert _hints(ex(waiting, None, frozenset({"wait_condition"}), [unmet]))[0].endswith("met")
+    assert _hints(ex(Task("R", "r", Status.READY, NOW), None, on)) == []
+
+
+def test_a_card_parked_by_kelpie_is_not_shown_as_before_work() -> None:
+    parked = Task("W", "w", Status.WAITING, NOW - timedelta(hours=2), source="hermes",
+                  platform_status="scheduled")  # fmt: skip
+    unmet = Condition("c1", ConditionKind.PR_MERGED, "W")
+    snap = Snapshot(now=NOW, tasks=(parked,), conditions=(unmet,))
+    loaded = LoadedRules([], [], [])
+    ex = explain_snapshot(loaded, snap, "W")
+    assert ex is not None
+    text = render(ex)
+    assert "status   waiting (hermes: scheduled) for 2h 00m" in text
+    assert "before work" not in text and "waits on 1 unmet condition(s)" in text
+
+
+def test_a_young_card_waiting_for_its_own_parent_says_so() -> None:
+    from kelpie.why import _hints
+
+    card = Task("C", "c", Status.BACKLOG, NOW - timedelta(hours=1), prework=True)
+    parent = Task("P", "p", Status.IN_PROGRESS, NOW)
+    behind = Task("D", "d", Status.BACKLOG, NOW)
+    deps = (Dependency("D", "C"), Dependency("C", "P"))
+    snap = Snapshot(now=NOW, tasks=(card, parent, behind), dependencies=deps)
+    ex = Explanation(card, snap, timedelta(minutes=30), [], None, [], {}, [], [], [], True,
+                     prework_after=timedelta(hours=4),
+                     loaded_rules=frozenset({"orphan_status"}))  # fmt: skip
+    assert _hints(ex)[1] == "orphan_status leaves it: it waits for parents of its own (P)"

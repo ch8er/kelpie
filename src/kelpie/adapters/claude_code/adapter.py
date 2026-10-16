@@ -506,6 +506,7 @@ class ClaudeCodeAdapter:
                     role=f.owner,
                     owner_id=f.owner,
                     source=self.name,
+                    platform_status=f.status,
                 )
             )
         kept = {t.id for t in tasks}
