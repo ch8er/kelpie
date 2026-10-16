@@ -853,7 +853,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
-    enrich, connectors = _connector_steps(settings, metrics, clock)
+    enrich, connectors = connector_steps(settings, metrics, clock)
     engine = Engine(
         loaded.rules,
         adapters=adapters,
@@ -959,16 +959,22 @@ def _start_alerts(settings: Settings, engine: Engine, metrics: Metrics) -> Deliv
     return alerts
 
 
-def _connector_steps(
-    settings: Settings, metrics: Metrics, clock: Callable[[], datetime]
+def connector_steps(
+    settings: Settings,
+    metrics: Metrics,
+    clock: Callable[[], datetime],
+    network: bool = True,
 ) -> tuple[list[tuple[str, Callable[[Snapshot], Snapshot]]], list[ActionConnector]]:
     """Connector steps (human tasks; GitHub PR/CI conditions and block conditions; with
     ``[connectors.github.ci]`` recent builds and the CI quota) and the connectors that can
-    carry out actions."""
+    carry out actions. Without ``network`` only the steps that read nothing but the board
+    (task_status, human tasks) are returned."""
     # task_status conditions need nothing but the board (dispatch gate, rule 12).
     steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = [("task_status", check_task_status)]
     if settings.human_tasks is not None and settings.human_tasks.enabled:
         steps.append(("human_tasks", HumanTaskConnector(settings.human_tasks.block_patterns)))
+    if not network:
+        return steps, []
     github_steps, connectors = _github_steps(settings, metrics, clock)
     return steps + github_steps, connectors
 

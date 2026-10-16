@@ -156,7 +156,7 @@ def _ts(at: datetime) -> str:
     return at.astimezone(UTC).isoformat(timespec="microseconds")
 
 
-def _entry(row: sqlite3.Row) -> LedgerEntry:
+def ledger_entry(row: sqlite3.Row) -> LedgerEntry:
     return LedgerEntry(
         at=datetime.fromisoformat(row["at"]),
         fingerprint=row["fingerprint"],
@@ -211,7 +211,7 @@ class SqliteLedgerStore:
 
     def _query(self, sql: str, args: tuple[object, ...]) -> list[LedgerEntry]:
         with self._lock:
-            return [_entry(r) for r in self._db.execute(sql, args).fetchall()]
+            return [ledger_entry(r) for r in self._db.execute(sql, args).fetchall()]
 
     def _write(self, fn: Callable[[sqlite3.Connection], sqlite3.Cursor]) -> sqlite3.Cursor:
         with self._lock, self._db:
@@ -267,13 +267,13 @@ class SqliteLedgerStore:
         sql = f"SELECT {self._STATE_COLUMNS} FROM states WHERE closed_at IS NULL"
         with self._lock:
             rows = self._db.execute(sql + " ORDER BY opened_at, rowid_").fetchall()
-        return [_state(r) for r in rows]
+        return [open_state(r) for r in rows]
 
     def get_state(self, state_id: str) -> OpenState | None:
         sql = f"SELECT {self._STATE_COLUMNS} FROM states WHERE id = ? AND closed_at IS NULL"
         with self._lock:
             row = self._db.execute(sql, (state_id,)).fetchone()
-        return None if row is None else _state(row)
+        return None if row is None else open_state(row)
 
     def save(self, state: OpenState) -> None:
         values = (
@@ -315,7 +315,7 @@ class SqliteLedgerStore:
         )
 
 
-def _state(r: sqlite3.Row) -> OpenState:
+def open_state(r: sqlite3.Row) -> OpenState:
     return OpenState(
         id=r["id"],
         rule=r["rule"],
@@ -430,7 +430,7 @@ def _span(r: sqlite3.Row) -> Span:
     )
 
 
-def _open_readonly(path: Path | str, busy_timeout_ms: int) -> sqlite3.Connection:
+def open_readonly(path: Path | str, busy_timeout_ms: int) -> sqlite3.Connection:
     """A connection that never writes, not even a migration (``kelpie status``)."""
     db = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True, check_same_thread=False)
     db.row_factory = sqlite3.Row
@@ -474,7 +474,7 @@ class SqliteSpanStore:
         self._read_lock = threading.Lock()
         self._closing = threading.Event()
         if readonly:
-            self._db = self._reader = _open_readonly(path, busy_timeout_ms)
+            self._db = self._reader = open_readonly(path, busy_timeout_ms)
         else:
             self._db = _open(path, busy_timeout_ms)
             self._reader = _open(path, busy_timeout_ms)
@@ -767,3 +767,7 @@ def _labels(raw: str) -> list[str]:
     except ValueError:
         return []
     return [str(v) for v in value] if isinstance(value, list) else []
+
+
+# Earlier private names, still imported by readers of the database (the report).
+_entry, _state, _open_readonly = ledger_entry, open_state, open_readonly

@@ -55,6 +55,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--list", action="store_true", help="list the fixes recorded in the last --days instead"
     )
     fix.add_argument("--days", type=int, help="how far back --list looks (default 7)")
+    why = sub.add_parser("why", help="explain why a task is not moving (read-only)")
+    why.add_argument("task", help="the task id, as the board shows it")
+    why.add_argument("--json", action="store_true", help="machine-readable output")
+    why.add_argument(
+        "--entries", type=int, default=10, help="latest ledger entries to show (default 10)"
+    )
+    why.add_argument(
+        "--refresh",
+        action="store_true",
+        help="also read network connectors (GitHub) as a tick would; default: offline",
+    )
     doctor = sub.add_parser(
         "doctor",
         help="check a first live run: config, observe mode, boards and task lists, hooks, spans, "
@@ -102,6 +113,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             from kelpie.report.cli import run as run_report
 
             out, err, code = run_report(settings, args.date, args.send)
+            sys.stdout.write(out)
+            sys.stderr.write(err)
+            return code
+        if args.command == "why":
+            from kelpie.why import run as run_why
+
+            out, err, code = run_why(
+                settings, args.task, args.json, max(0, args.entries), refresh=args.refresh
+            )
             sys.stdout.write(out)
             sys.stderr.write(err)
             return code
