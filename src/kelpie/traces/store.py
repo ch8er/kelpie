@@ -12,17 +12,22 @@ import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
+from datetime import time as clock_time
 from typing import Protocol
 
-from kelpie.core.model import Session, Span, SpanTotals, Task
+from kelpie.core.model import OutputOffender, Session, Snapshot, Span, SpanKind, SpanTotals, Task
 from kelpie.core.spans import Attribution, SpanKey, SpanStore, TokenUsage, last_at, span_key
+from kelpie.traces.hooks import merge_hook_spans
+from kelpie.traces.outputs import OutputSettings, calls, repeated_offenders, session_context
 
 log = logging.getLogger(__name__)
 
 PRUNE_EVERY = timedelta(hours=1)
 DEFAULT_MAX_SNAPSHOT_SPANS = 50_000
 TOTALS_EVERY = timedelta(minutes=1)
+OFFENDERS_EVERY = timedelta(hours=1)
+OFFENDERS_RETRY = timedelta(minutes=10)
 
 
 class StoreObserver(Protocol):
@@ -134,6 +139,52 @@ class SpanWindow:
             with self._lock:
                 self._attribution_at = None  # read again next time
         return written
+
+
+@dataclass(slots=True)
+class OffenderWatch:
+    """Repeated huge-output offenders for the snapshot (rule ``output_offenders``).
+
+    Tool calls since the start of the calendar day ``repeat_days - 1`` days ago in ``tz``
+    (the report's days), up to now: the stored spans (OTLP ingest) merged with the hook
+    spans the snapshot carries (``merge_hook_spans``, as the report does), ranked with the
+    report's :func:`~kelpie.traces.outputs.rank` and
+    :func:`~kelpie.traces.outputs.recommend`. Unlike the report, today counts while it is
+    still running, and ``min_calls`` applies to the whole window. Hook-only farms see as far
+    back as the adapter's lookback. Recomputed at most every ``every`` of snapshot time; a
+    failed read is retried after ``retry_after``, not every tick.
+    """
+
+    store: SpanStore
+    settings: OutputSettings
+    tz: tzinfo
+    every: timedelta = OFFENDERS_EVERY
+    retry_after: timedelta = OFFENDERS_RETRY
+    _found: tuple[OutputOffender, ...] = ()
+    _next: datetime | None = None
+
+    def offenders(
+        self, snapshot: Snapshot, remembered: Attribution | None
+    ) -> tuple[OutputOffender, ...]:
+        now = snapshot.now
+        if self._next is not None and now < self._next and now >= self._next - self.every:
+            return self._found
+        today = now.astimezone(self.tz).date()
+        first = today - timedelta(days=max(self.settings.repeat_days - 1, 0))
+        start = datetime.combine(first, clock_time(0), self.tz)
+        try:
+            stored = self.store.tool_spans_since(start)
+        except Exception:
+            self._next = now + self.retry_after
+            raise
+        hooks = [s for s in snapshot.spans if s.kind is SpanKind.TOOL and last_at(s) >= start]
+        # The snapshot carries the stored spans of its window too, already folded with
+        # their hook spans (command, task, session): its copy goes first and wins.
+        spans = merge_hook_spans(merge_spans(hooks, stored)).spans
+        roles, platforms = session_context(snapshot, remembered)
+        self._found = repeated_offenders(calls(spans, roles, platforms), self.settings, self.tz)
+        self._next = now + self.every
+        return self._found
 
 
 def merge_spans(*groups: Iterable[Span]) -> tuple[Span, ...]:

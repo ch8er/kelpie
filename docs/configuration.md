@@ -158,6 +158,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | 13 | `needs_you` | P1 | implemented | `escalate` | alert channel |
 | 14 | `compaction_gate` | P2 | not implemented | | |
 | – | `return_causes` | P1 | not implemented | | |
+| – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
 
 Several rules share these terms:
 
@@ -462,6 +463,24 @@ tasks ready) and escalates single human gates only with `escalate_human_gates = 
 | `default_approver` | unset | human owner id | Otherwise this person. |
 | `critical_after_hours` | `24` | agent-hours, > 0 | The escalation is critical once a person's total reaches this. |
 
+### output_offenders
+
+A command (or tool) whose output floods one role's context above `[traces.outputs]
+threshold_tokens` per call on `repeat_days` days is a repeated offender, ranked with the
+daily report's ranking from stored tool spans plus the hook spans in the snapshot,
+recomputed hourly over the calendar days of `[report] timezone` (today counts while it
+runs). The rule addresses the owner of the role's instructions (`[traces.outputs] owners`)
+with a `comment` on the most recent offending task that is still open: the command, its
+tokens per call, the filter to add to the instructions and the estimated saving. Without
+an open task it alerts instead. The request is made once per role, command and filter
+within `once_window` (7 days), whichever task it lands on; the daily report checks the
+fix before/after. Only plain command or tool names are posted on the board; others are
+alerted in a cleaned form.
+
+The rule takes no parameters of its own: thresholds and owners are in
+[[traces.outputs]](#tracesoutputs). It needs `[traces] enabled`; on a farm that reports
+tool calls only through hooks, `[adapters.hermes] lookback` must cover `repeat_days`.
+
 ## [storage]
 
 | Key | Default | Meaning |
@@ -552,7 +571,7 @@ filter recommendation, read by the daily report. Only the size of an output is r
 | `repeat_days` | `2` | days, >= 1 | Above the threshold on this many days: a repeated offender. |
 | `window` | `"1d"` | duration string, > 0 | Each side of a before/after comparison. |
 | `min_sample` | `5` | count, >= 1 | Fewer calls on a side: labelled a small sample. |
-| `owners` | `{}` | table: role -> owner | Who owns each role's instructions; named for repeated offenders. |
+| `owners` | `{}` | table: role -> owner | Who owns each role's instructions: rule `output_offenders` addresses its comment to them, and the daily report names them. |
 | `filters` | built-in table | array of tables | Replaces the built-in filter table as a whole; first match wins. |
 
 With `[traces.outputs]` present, `[traces] retention` must cover `repeat_days` and twice

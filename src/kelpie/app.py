@@ -68,7 +68,7 @@ from kelpie.traces.config import TraceSettings, load_traces
 from kelpie.traces.forward import Forwarder
 from kelpie.traces.hooks import merge_hook_spans
 from kelpie.traces.ingest import IGNORED, TraceIngest
-from kelpie.traces.store import SpanRetention, SpanWindow, merge_spans
+from kelpie.traces.store import OffenderWatch, SpanRetention, SpanWindow, merge_spans
 
 log = logging.getLogger(__name__)
 
@@ -495,6 +495,7 @@ def merged_snapshot(
     resources: ResourceReader | None = None,
     enrich: Sequence[tuple[str, Callable[[Snapshot], Snapshot]]] = (),
     providers: ProviderReader | None = None,
+    offenders: OffenderWatch | None = None,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
 
@@ -513,7 +514,9 @@ def merged_snapshot(
     carries the last good budget state with ``budgets_ok`` false. With ``resources``, host
     readings (Prometheus) are added; a reader that raises is logged and counted, and the
     tick goes on without them. With ``providers``, LLM provider statuses and limit hits are
-    added (before budgets, which forecast from the hits), under the same rule.
+    added (before budgets, which forecast from the hits), under the same rule. With
+    ``offenders``, repeated huge-output offenders (rule ``output_offenders``) are added,
+    recomputed hourly from the span store; a failed read is logged and counted.
     """
     last = _LastBudgets()
 
@@ -579,6 +582,15 @@ def merged_snapshot(
         folded = merge_hook_spans(merged.spans)
         metrics.hook_spans_merged(folded.merged)
         merged = replace(merged, spans=folded.spans)
+        if offenders is not None:
+            try:
+                remembered = spans.attribution(merged.now) if spans is not None else None
+                found = offenders.offenders(merged, remembered)
+            except Exception as exc:
+                log.error("span store failed to read tool outputs: %s", exc)
+                metrics.span_store_failed()
+            else:
+                merged = replace(merged, output_offenders=found)
         if spans is not None and budgets is not None and budgets.budgets:
             merged = _with_budgets(merged, spans, budgets, metrics, last, remember)
         return merged
@@ -947,6 +959,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         resources=reader,
         enrich=enrich,
         providers=quotas,
+        offenders=OffenderWatch(span_store, traces.outputs, settings.report.tz),
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     alerts = _start_alerts(settings, engine, metrics)

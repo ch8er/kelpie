@@ -432,6 +432,26 @@ class ProviderStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class OutputOffender:
+    """A command (or tool) whose output keeps flooding one role's context: above
+    ``[traces.outputs] threshold_tokens`` per call on ``days`` days. Computed from stored
+    tool spans when the snapshot is assembled (``kelpie.traces.outputs``), with the filter
+    to add to the role's instructions and who owns them (``[traces.outputs] owners``)."""
+
+    role: str | None
+    command: str  # a command prefix, or tool:<name>
+    filter: str  # name of the recommended filter
+    how: str  # what to add to the instructions
+    days: int  # days above the threshold
+    calls: int  # unfiltered calls in the window
+    mean_tokens: float  # per unfiltered call
+    saved_tokens: int  # estimate: unfiltered tokens x the filter's expected reduction
+    owner: str | None = None  # who owns the role's instructions
+    tasks: tuple[str, ...] = ()
+    recent_tasks: tuple[str, ...] = ()  # tasks of its unfiltered calls, the latest first
+
+
+@dataclass(frozen=True, slots=True)
 class Snapshot:
     """Everything a rule may look at, captured at ``now``."""
 
@@ -455,6 +475,8 @@ class Snapshot:
     providers: tuple[ProviderStatus, ...] = ()  # LLM provider quota and auth probes
     builds: tuple[Build, ...] = ()  # recent CI builds (CI connectors)
     pull_requests: tuple[PullRequest, ...] = ()  # open PRs (code-host connectors)
+    # Repeated huge-output offenders over [traces.outputs] repeat_days (span store).
+    output_offenders: tuple[OutputOffender, ...] = ()
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )

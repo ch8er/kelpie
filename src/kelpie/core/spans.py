@@ -109,6 +109,10 @@ class SpanStore(Protocol):
         """Spans whose last time is at or after ``after``, in start order."""
         ...
 
+    def tool_spans_since(self, after: datetime) -> Sequence[Span]:
+        """Tool spans only (``kind = tool``), as :meth:`spans_since`."""
+        ...
+
     def changes(self, after: datetime, since: int) -> SpanChanges:
         """Spans inserted or updated after version ``since`` whose last time is at or
         after ``after``; ``since=0`` returns them all."""
@@ -334,6 +338,9 @@ class MemorySpanStore:
         with self._lock:
             found = [s for s, _ in self._spans.values() if last_at(s) >= after]
         return sorted(found, key=lambda s: s.start)
+
+    def tool_spans_since(self, after: datetime) -> Sequence[Span]:
+        return [s for s in self.spans_since(after) if s.kind is SpanKind.TOOL]
 
     def changes(self, after: datetime, since: int) -> SpanChanges:
         with self._lock:

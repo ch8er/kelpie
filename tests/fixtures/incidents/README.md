@@ -33,6 +33,7 @@ snapshot:                    # passed verbatim to kelpie.core.serde.snapshot_fro
   providers: [...]           # ProviderStatus: LLM provider probes ([connectors.llm_quotas])
   builds: [...]              # Build: recent CI builds, as a CI connector reports them
   pull_requests: [...]       # PullRequest: open PRs, as a code-host connector reports them
+  output_offenders: [...]    # OutputOffender: repeated huge tool outputs ([traces.outputs])
 expected_actions:            # must be emitted; subset match, order-insensitive
   - kind: unblock            # ActionKind value
     task_id: T-101           # optional (omit for host/global alerts)
@@ -139,6 +140,7 @@ Fixture conventions:
 | – | `field-02-idle-context-resend.yaml` | `no_progress` | `alert` with `recommendations: [longer_heartbeat_interval, cheaper_maintenance_model, bounded_session_handoff]` for the idle agent resending a 12k-token context every 5 min; nothing for the productive session |
 | – | `field-03-budget-overrun.yaml` | `loop_breaker` | `alert` warning for the agent past the soft threshold; `alert` critical (spend, hard limit) and `stop` for the live session of the agent past the hard threshold; nothing for its ended session, or for the agent under budget |
 | – | `field-04-dispatch-red-pr.yaml` | `dispatch_gate` | `wait` T-F401 (its PR's head is red) and T-F402 (parent still in progress); nothing for a merged PR, an unknown or stale PR state, a finished parent, or a task in progress |
+| – | `field-05-repeated-huge-outputs.yaml` | `output_offenders` | `comment` T-F502 (the latest offending task still open; T-F503 is done) addressed to human-owner (xcbeautify for `xcodebuild`, 2 days, ~179k tokens); `alert` to whoever owns the ops instructions for `tool:read_file` (no task to comment on) |
 
 ## Adding a fixture
 

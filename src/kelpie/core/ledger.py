@@ -2,7 +2,9 @@
 
 Every action has a fingerprint: rule, kind, task, executor and either ``Action.key``
 (when the rule sets one) or all params. Put volatile measurements in params *and* set
-``key`` so that the same alert with a new reading is still recognised as a repeat.
+``key`` so that the same alert with a new reading is still recognised as a repeat. With
+``Action.once_per_key`` the fingerprint is the rule and the key alone, whatever the task
+or kind.
 
 Before an action is handled the ledger may suppress it:
 
@@ -117,6 +119,9 @@ def to_json(value: Any) -> str:
 
 
 def fingerprint(action: Action) -> str:
+    if action.once_per_key and action.key is not None:
+        raw = to_json([action.rule, "once_per_key", action.key])
+        return hashlib.sha256(raw.encode()).hexdigest()[:32]
     detail: Any = action.key if action.key is not None else action.params
     raw = to_json([action.rule, action.kind, action.task_id, action.executor, detail])
     return hashlib.sha256(raw.encode()).hexdigest()[:32]

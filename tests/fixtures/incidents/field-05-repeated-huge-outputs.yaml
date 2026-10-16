@@ -1,0 +1,62 @@
+id: "field-05-repeated-huge-outputs"
+incident: null
+title: "A build log floods the developers' context two days running"
+description: >
+  Developer agents ran the full build with its whole log as tool output, about 18,000
+  tokens per call, on two days in a row, and each later model call of the session re-read
+  it. Each agent starts from the role's instructions, so only their owner can stop it.
+  Commands big on one day only, or already run through a filter, never reach the snapshot
+  as offenders (kelpie.traces.outputs); an offender without a task gets an alert.
+rule: output_offenders
+config: {}
+snapshot:
+  now: "2026-03-03T16:00:00+00:00"
+  owners:
+    - {id: human-owner, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: T-F502, title: "Build the release target", status: in_progress, status_since: "2026-03-03T14:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-F503, title: "Fix the widget build", status: done, status_since: "2026-03-03T15:30:00+00:00", role: developer, owner_id: agent-dev-1}
+  output_offenders:
+    # As Kelpie computes them from stored tool spans ([traces.outputs]): repeated only.
+    - role: developer
+      command: "xcodebuild"
+      filter: xcbeautify
+      how: "pipe the build through xcbeautify: `xcodebuild ... 2>&1 | xcbeautify --quiet`"
+      days: 2
+      calls: 14
+      mean_tokens: 18250.0
+      saved_tokens: 178850
+      owner: human-owner
+      tasks: [T-F501, T-F502, T-F503]
+      recent_tasks: [T-F503, T-F502, T-F501]  # T-F503 is done, T-F501 gone: T-F502 gets it
+    - role: ops
+      command: "tool:read_file"
+      filter: range
+      how: "read a line range or search the file instead of returning it whole"
+      days: 3
+      calls: 9
+      mean_tokens: 6100.0
+      saved_tokens: 27450
+      tasks: []
+expected_actions:
+  - kind: comment
+    task_id: T-F502
+    severity: warning
+    reason_contains: "human-owner: `xcodebuild` floods the developer context"
+    params:
+      owner: human-owner
+      filter: xcbeautify
+      days: 2
+      saved_tokens: 178850
+  - kind: alert
+    reason_contains: "Whoever owns the ops instructions"
+    params:
+      command: "tool:read_file"
+      owner: null
+not_expected_actions:
+  - kind: comment
+    params: {command: "tool:read_file"}
+  # never on a finished task: nobody reads its comments
+  - kind: comment
+    task_id: T-F503

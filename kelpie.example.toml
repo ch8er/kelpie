@@ -70,6 +70,9 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # default_approver = "human-owner"    # otherwise this human; without either: "unassigned"
 # critical_after_hours = 24      # critical once a person's agent-hours waited reach this
 #
+# [engine.rules.output_offenders]  # no parameters: thresholds and owners are in
+#                                  # [traces.outputs]; needs [traces] enabled
+#
 # [engine.rules.conflict_warning]
 # expected_shared = ["CHANGELOG.md"]  # glob patterns of files many tasks are meant to edit
 # serialize = false         # true: hold the later of two conflicting tasks (act mode, needs an
