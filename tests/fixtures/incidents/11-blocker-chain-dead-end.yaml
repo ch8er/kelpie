@@ -1,0 +1,115 @@
+id: "11-blocker-chain-dead-end"
+incident: 11
+title: "Blocker chains that end in a cancelled or inaccessible task"
+description: >
+  A task waited on a task that had been archived off the board, and another task waited
+  behind it: the chain could never move, and no other rule saw the missing task until its
+  wait ran past max_wait. In a second chain a coder blocked its task on a human's approval
+  task, which the human cancelled, with three tasks behind it; rule 4 alerts on that block at
+  once and lists the stuck tasks, so rule 3 stays quiet there instead of alerting twice. A
+  lone task in front of a dead end (rule 4's), a chain whose end is still open, and a task
+  whose parent was cancelled (a finished parent satisfies a dependency) are left alone.
+rule: orphan_status
+config:
+  dead_end_chains: true
+  critical_dependents: 3
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: coder-1, role: coder}
+    - {id: coder-2, role: coder}
+    - {id: owner-1, role: owner, kind: human}
+  tasks:
+    # Chain 1: T-1164 -> T-1163 -> T-1162 -> T-1161 -> T-1160 (cancelled).
+    - {id: T-1160, title: "Approve vendor contract", status: cancelled, status_since: "2026-03-02T13:30:00+00:00", owner_id: owner-1}
+    - id: T-1161
+      title: "Integrate vendor API"
+      status: blocked
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: coder
+      owner_id: coder-1
+      block: {reason: "waiting_human: approval in T-1160", since: "2026-03-02T13:00:00+00:00", condition_id: "block:T-1161:human_task:T-1160"}
+    - {id: T-1162, title: "Vendor webhooks", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: coder}
+    - {id: T-1163, title: "Vendor billing sync", status: waiting, status_since: "2026-03-02T13:00:00+00:00", role: coder, owner_id: coder-2}
+    - {id: T-1164, title: "Vendor reports", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: coder}
+    # Chain 2: T-1172 -> T-1171 -> T-9999 (not on the board).
+    - {id: T-1171, title: "Reuse the auth client", status: waiting, status_since: "2026-03-02T14:00:00+00:00", role: coder, owner_id: coder-1}
+    - {id: T-1172, title: "Auth client docs", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: coder}
+    # A lone task in front of a dead end: rule 4 alerts on it.
+    - {id: T-1180, title: "Approve port change", status: cancelled, status_since: "2026-03-02T13:30:00+00:00", owner_id: owner-1}
+    - id: T-1181
+      title: "Open the service port"
+      status: blocked
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: coder
+      owner_id: coder-2
+      block: {reason: "waiting_human: approval in T-1180", since: "2026-03-02T13:00:00+00:00", condition_id: "block:T-1181:human_task:T-1180"}
+    # A chain whose end is still open (the human is reviewing).
+    - {id: T-1190, title: "Approve budget", status: review, status_since: "2026-03-02T13:10:00+00:00", owner_id: owner-1}
+    - id: T-1191
+      title: "Buy more runners"
+      status: blocked
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: coder
+      owner_id: coder-2
+      block: {reason: "waiting_human: approval in T-1190", since: "2026-03-02T13:00:00+00:00", condition_id: "block:T-1191:human_task:T-1190"}
+    - {id: T-1192, title: "Runner autoscaling", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: coder}
+    # A cancelled parent satisfies the dependency.
+    - {id: T-1194, title: "Old prototype", status: cancelled, status_since: "2026-03-02T12:00:00+00:00", role: coder}
+    - {id: T-1195, title: "Prototype cleanup", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: coder}
+  dependencies:
+    - {task_id: T-1162, depends_on: T-1161}
+    - {task_id: T-1164, depends_on: T-1163}
+    - {task_id: T-1172, depends_on: T-1171}
+    - {task_id: T-1192, depends_on: T-1191}
+    - {task_id: T-1195, depends_on: T-1194}
+  conditions:
+    - id: "block:T-1161:human_task:T-1160"
+      kind: human_task
+      task_id: T-1161
+      params: {task: T-1160, status: cancelled, owner: owner-1, terminal: true}
+      satisfied: false
+      checked_at: "2026-03-02T15:59:00+00:00"
+      registered_at: "2026-03-02T13:00:00+00:00"
+    - id: "wait:T-1163:T-1162"
+      kind: task_status
+      task_id: T-1163
+      params: {task: T-1162, status: done, observed_status: backlog}
+      satisfied: false
+      checked_at: "2026-03-02T15:59:00+00:00"
+      registered_at: "2026-03-02T13:00:00+00:00"
+    - id: "wait:T-1171:T-9999"
+      kind: task_status
+      task_id: T-1171
+      params: {task: T-9999, status: done, error: not_found}
+      checked_at: "2026-03-02T15:59:00+00:00"
+      registered_at: "2026-03-02T14:00:00+00:00"
+    - id: "block:T-1181:human_task:T-1180"
+      kind: human_task
+      task_id: T-1181
+      params: {task: T-1180, status: cancelled, owner: owner-1, terminal: true}
+      satisfied: false
+      checked_at: "2026-03-02T15:59:00+00:00"
+      registered_at: "2026-03-02T13:00:00+00:00"
+    - id: "block:T-1191:human_task:T-1190"
+      kind: human_task
+      task_id: T-1191
+      params: {task: T-1190, status: review, owner: owner-1}
+      satisfied: false
+      checked_at: "2026-03-02T15:59:00+00:00"
+      registered_at: "2026-03-02T13:00:00+00:00"
+expected_actions:
+  - kind: alert
+    task_id: T-1171
+    severity: warning
+    reason_contains: "is not on the board"
+    params: {pattern: dead-end-chain, dead_end: T-9999, chain: [T-1172, T-1171, T-9999], stuck_ids: [T-1172]}
+not_expected_actions:
+  - {kind: alert, task_id: T-1161}
+  - {kind: alert, task_id: T-1181}
+  - {kind: alert, task_id: T-1191}
+  - {kind: alert, task_id: T-1192}
+  - {kind: alert, task_id: T-1195}
+  - {kind: alert, task_id: T-1162}
+  - {kind: alert, task_id: T-1163}
+  - {kind: alert, task_id: T-1164}

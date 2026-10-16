@@ -39,9 +39,18 @@ spool = "~/.hermes/kelpie/spool.jsonl"   # written by the plugin (step 3)
 session_stale_after = "60m"
 [engine.rules.orphan_status]
 session_stale_after = "60m"
+# reviewer_roles = ["reviewer"]   # the roles (profiles, see [adapters.hermes.roles]) that
+#                                 # review; set it to get "in review with nothing driving it"
+# ignore_tasks = ["t_parked*"]    # Hermes has no labels, so holds cannot skip a parked task
 [engine.rules.wait_condition]
 session_stale_after = "60m"
 ```
+
+Rule 3's review stop pattern needs to know which roles review: Hermes roles are profile
+names unless `[adapters.hermes.roles]` maps them, so set `reviewer_roles` to the role your
+reviewer profiles have, or leave it out to keep the pattern off. Hermes tasks carry no
+labels, so hold labels (and recovery labels) never match there: list parked tasks in
+`ignore_tasks` and recognise recovery tasks by `recovery_titles`.
 
 `[traces]` is on by default (OTLP ingest, step 4). Git state of task worktrees is read by
 default (`git_state = true`); it needs `git` on `PATH` and the same user as the agents, see

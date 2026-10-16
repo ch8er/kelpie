@@ -15,6 +15,9 @@ Polling detection only looks at calls matching ``poll_patterns`` (condition kind
 substrings), which is configuration, never code: Kelpie knows no particular CI. Without
 patterns it stays silent. Generic loops are rule 10's (``loop_breaker``).
 
+The can-never-be-met and waits-on-nothing alerts list the tasks stuck behind the waiting one
+(``params.stuck_ids``, as rule 3 reads chains), so rule 3 does not alert on the same dead end.
+
 Keeping the dispatcher from declaring a waiting task dead is the adapter's job (see
 :class:`kelpie.core.ports.PlatformAdapter`); this rule never requeues waiting tasks.
 """
@@ -22,7 +25,7 @@ Keeping the dispatcher from declaring a waiting task dead is the adapter's job (
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -39,6 +42,7 @@ from kelpie.rules._calls import (
     poll_kind,
     tool_calls,
 )
+from kelpie.rules._chains import behind_lookup, behind_text
 from kelpie.rules._tasks import (
     DEFAULT_MAX_CONDITION_AGE,
     DEFAULT_STALE_AFTER,
@@ -68,9 +72,10 @@ class WaitCondition:
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         actions: list[Action] = []
+        behind = behind_lookup(snapshot, self.session_stale_after)
         for task in snapshot.tasks:
             if task.status is Status.WAITING:
-                actions.extend(self._check_waiting(task, snapshot))
+                actions.extend(self._check_waiting(task, snapshot, behind))
         if self.poll_patterns:
             waiting = {t.id for t in snapshot.tasks if t.status is Status.WAITING}
             for session in snapshot.sessions:
@@ -82,7 +87,9 @@ class WaitCondition:
 
     # --- waiting tasks ------------------------------------------------------------------
 
-    def _check_waiting(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
+    def _check_waiting(
+        self, task: Task, snapshot: Snapshot, behind: Callable[[str], list[str]]
+    ) -> Iterable[Action]:
         waited = snapshot.now - task.status_since
         since = task.status_since.isoformat()
         conditions, missing = linked_conditions(task, snapshot)
@@ -94,30 +101,33 @@ class WaitCondition:
                 if missing
                 else "is waiting without any registered condition"
             )
+            stuck = behind(task.id)
             yield Action(
                 ActionKind.ALERT,
                 NAME,
-                f"Task {task.id} {what}, so nothing will ever wake it.",
+                f"Task {task.id} {what}, so nothing will ever wake it." + behind_text(stuck),
                 task_id=task.id,
                 severity=Severity.WARNING,
                 key=f"no-condition:{task.id}:{since}",
                 state=f"{NAME}:{task.id}:{since}",
                 since=task.status_since,
+                params={"stuck_ids": stuck},
             )
             return
         ended = dead_ends(conditions, task.status_since)
         if ended:
+            stuck = behind(task.id)
             yield Action(
                 ActionKind.ALERT,
                 NAME,
                 f"Task {task.id} is waiting, but {dead_end_text(ended)}: "
-                "nothing will ever wake it.",
+                "nothing will ever wake it." + behind_text(stuck),
                 task_id=task.id,
                 severity=Severity.WARNING,
                 key=f"dead-end:{task.id}:{since}",
                 state=f"{NAME}:{task.id}:{since}",
                 since=task.status_since,
-                params={"ended_conditions": [c.id for c in ended]},
+                params={"ended_conditions": [c.id for c in ended], "stuck_ids": stuck},
             )
             return
         if all(

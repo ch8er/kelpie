@@ -26,11 +26,15 @@ before the rule runs: ``[[block_conditions]]`` patterns attach one during snapsh
 (``kelpie.connectors.github.blocks``), linked through ``Block.condition_id``, so such a
 block is handled like any other block with a condition. It is then a declared wait for
 rule 1 too, which does not requeue blocks tied to a condition.
+
+The dead-end and no-condition alerts list the tasks stuck behind the blocked one
+(``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
+does not raise a second alert for the same dead end.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -39,6 +43,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._chains import behind_lookup, behind_text
 from kelpie.rules._tasks import (
     DEFAULT_MAX_CONDITION_AGE,
     dead_end_text,
@@ -62,12 +67,15 @@ class StaleBlocks:
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         actions: list[Action] = []
+        behind = behind_lookup(snapshot)
         for task in snapshot.tasks:
             if task.status is Status.BLOCKED and task.block is not None:
-                actions.extend(self._check(task, snapshot))
+                actions.extend(self._check(task, snapshot, behind))
         return actions
 
-    def _check(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
+    def _check(
+        self, task: Task, snapshot: Snapshot, behind: Callable[[str], list[str]]
+    ) -> Iterable[Action]:
         block = task.block
         assert block is not None
         age = snapshot.now - block.since
@@ -79,11 +87,14 @@ class StaleBlocks:
                     if missing
                     else "has no condition Kelpie can check"
                 )
+                stuck = behind(task.id)
                 yield self._alert(
                     task,
                     "unlinked",
                     f"Task {task.id} has been blocked for {_human(age)} on "
-                    f"'{block.reason}' and {what}, so nothing will clear it automatically.",
+                    f"'{block.reason}' and {what}, so nothing will clear it automatically."
+                    + behind_text(stuck),
+                    {"stuck_ids": stuck},
                 )
             return
         stale = [
@@ -111,11 +122,13 @@ class StaleBlocks:
             return
         ended = dead_ends(conditions, block.since)
         if ended:
+            stuck = behind(task.id)
             yield self._alert(
                 task,
                 "dead-end",
                 f"Task {task.id} is blocked on '{block.reason}', but {dead_end_text(ended)}: "
-                "the block will never clear on its own.",
+                "the block will never clear on its own." + behind_text(stuck),
+                {"stuck_ids": stuck},
             )
             return
         if not all(c.satisfied for c in conditions):
@@ -150,7 +163,9 @@ class StaleBlocks:
             },
         )
 
-    def _alert(self, task: Task, kind: str, reason: str) -> Action:
+    def _alert(
+        self, task: Task, kind: str, reason: str, params: dict[str, Any] | None = None
+    ) -> Action:
         block = task.block
         assert block is not None
         return Action(
@@ -163,6 +178,7 @@ class StaleBlocks:
             # One state per block: overdue / stale evidence / unlinked are its descriptions.
             state=f"{NAME}:{task.id}:{block.since.isoformat()}",
             since=block.since,
+            params=params or {},
         )
 
 
