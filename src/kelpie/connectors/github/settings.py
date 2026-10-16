@@ -1,7 +1,8 @@
 """``[connectors.github]``: which repositories Kelpie may read, and with which token.
 
 ``[connectors.github.ci]`` (optional) adds GitHub Actions runs for rule 9 and, opt-in, the
-``cancel_build`` action (see :mod:`kelpie.connectors.github.builds`)."""
+``cancel_build`` action (see :mod:`kelpie.connectors.github.builds`). ``[connectors.github.pulls]``
+(optional) adds the open pull requests for rule 6 (see :mod:`kelpie.connectors.github.pulls`)."""
 
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from kelpie.connectors.github.client import (
     valid_token,
 )
 from kelpie.connectors.github.connector import GitHubConnector, valid_repo
+from kelpie.connectors.github.pulls import PullSettings, load_pulls
 from kelpie.core.serde import parse_duration
 
 DEFAULT_TOKEN_ENV = "GITHUB_TOKEN"
@@ -41,6 +43,7 @@ _KEYS = {
     "tick_budget",
     "enabled",
     "ci",
+    "pulls",
 }
 
 
@@ -56,6 +59,7 @@ class GitHubSettings:
     tick_budget: timedelta = DEFAULT_TICK_BUDGET
     enabled: bool = True
     ci: CiSettings | None = None  # None: no [connectors.github.ci] table
+    pulls: PullSettings | None = None  # None: no [connectors.github.pulls] table
 
     def token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The token from ``$token_env``; None when unset (anonymous, 60 requests an hour).
@@ -165,6 +169,7 @@ def load_github(section: Any) -> GitHubSettings:
         raise ValueError("[connectors.github] enabled must be true or false")
     repos = list(dict.fromkeys(r.lower() for r in repos))
     ci = load_ci(section["ci"], repos) if "ci" in section else None
+    pulls = load_pulls(section["pulls"]) if "pulls" in section else None
     return GitHubSettings(
         repos=tuple(repos),
         api_url=api_url,
@@ -176,6 +181,7 @@ def load_github(section: Any) -> GitHubSettings:
         tick_budget=tick_budget,
         enabled=enabled,
         ci=ci,
+        pulls=pulls,
     )
 
 

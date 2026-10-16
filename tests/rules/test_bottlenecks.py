@@ -9,8 +9,10 @@ from kelpie.core.model import (
     Condition,
     ConditionKind,
     Dependency,
+    LabelEvent,
     Owner,
     OwnerKind,
+    PullRequest,
     Session,
     Snapshot,
     Status,
@@ -23,7 +25,9 @@ from kelpie.rules.bottlenecks import (
     build,
     critical_path,
     human_gates,
+    link_pull_requests,
     role_loads,
+    with_pr_labels,
 )
 
 NOW = datetime(2026, 3, 2, 15, tzinfo=UTC)
@@ -1099,3 +1103,218 @@ def test_human_gated_slot_counts_never_exceed_the_total() -> None:
 def test_build_escalate_human_gates() -> None:
     assert build({}).escalate_human_gates is True
     assert build({"escalate_human_gates": False}).escalate_human_gates is False
+
+
+# --- open pull requests (GitHub pull requests step) ---------------------------------------
+
+
+def pr(
+    number: int,
+    branch: str | None = None,
+    *labels: str,
+    since: timedelta = H,
+    mergeable: bool | None = True,
+    **kw: Any,
+) -> PullRequest:
+    return PullRequest(
+        kw.pop("repo", "example/repo"),
+        number,
+        f"PR {number}",
+        branch,
+        labels,
+        mergeable=mergeable,
+        **{"updated_at": NOW - since, **kw},
+    )
+
+
+def on_branch(tid: str, status: Status, branch: str, since: timedelta = H, **kw: Any) -> Task:
+    return Task(tid, tid, status, NOW - since, kw.pop("role", "developer"), branch=branch, **kw)
+
+
+def with_prs(snapshot: Snapshot, *prs: PullRequest) -> Snapshot:
+    return Snapshot(
+        now=snapshot.now,
+        tasks=snapshot.tasks,
+        owners=snapshot.owners,
+        dependencies=snapshot.dependencies,
+        sessions=snapshot.sessions,
+        pull_requests=prs,
+    )
+
+
+MERGERS = Bottlenecks(ready_prs=True)  # agents merge PRs on this farm
+
+
+def test_tasks_link_to_the_open_prs_of_their_branch() -> None:
+    tasks = (
+        on_branch("A", Status.REVIEW, "feat/a"),
+        on_branch("B", Status.READY, "shared"),  # two PRs head "shared": both are B's
+        on_branch("C", Status.DONE, "feat/c"),  # finished: its PR stands on its own
+        task("D", Status.READY),  # no branch
+    )
+    prs = (
+        pr(1, "feat/a", "merge-hold"),
+        pr(2, "shared", "x"),
+        pr(3, "shared", "y", repo="example/other"),
+        pr(4, "feat/c"),
+        pr(5, None),
+    )
+    linked, loose = link_pull_requests(with_prs(snap(tasks), *prs))
+    assert {t: [p.number for p in ps] for t, ps in linked.items()} == {"A": [1], "B": [2, 3]}
+    assert [p.number for p in loose] == [4, 5]
+    labelled_snapshot = with_pr_labels(with_prs(snap(tasks), *prs), linked)
+    assert labelled_snapshot.tasks[0].labels == ("merge-hold",)
+    assert labelled_snapshot.tasks[1].labels == ("x", "y")
+    assert labelled_snapshot.tasks[2:] == tasks[2:]
+    unchanged = with_prs(snap(tasks), *prs)
+    assert with_pr_labels(unchanged, {}) is unchanged
+
+
+def test_a_hold_label_on_a_pr_holds_its_task() -> None:
+    rule = Bottlenecks(holds=(Hold("merge-first", "lead", 2 * H),))
+    tasks = (on_branch("A", Status.REVIEW, "feat/a", since=3 * H),)
+    owners = agents("developer", "d1")
+    base = snap(tasks, owners)
+    # Without the PR the review task is plain queued work.
+    assert of(run(base, rule), "idle-ready")
+    actions = run(with_prs(base, pr(7, "feat/a", "merge-first", mergeable=False)), rule)
+    assert of(actions, "idle-ready") == []
+    [hold] = of(actions, "hold")
+    assert hold.params["held_tasks"] == ["A"] and hold.params["held_count"] == 1
+    assert "held_prs" not in hold.params  # the PR is its task's, not more held work
+
+
+def test_a_hold_on_any_pr_of_a_shared_branch_holds_the_task() -> None:
+    rule = Bottlenecks(holds=(Hold("merge-hold", "lead", 2 * H),), ready_prs=True)
+    tasks = (on_branch("T1", Status.REVIEW, "fix/ci", since=3 * H),)
+    prs = (pr(1, "fix/ci", "merge-hold"), pr(2, "fix/ci", repo="example/other"))
+    actions = run(with_prs(snap(tasks, agents("developer", "d1")), *prs), rule)
+    assert of(actions, "idle-ready") == []  # neither the task nor the other PR is ready work
+    [hold] = of(actions, "hold")
+    assert hold.params["held_tasks"] == ["T1"]
+
+
+def test_pr_label_time_ages_the_hold() -> None:
+    rule = Bottlenecks(holds=(Hold("merge-first", "lead", 2 * H),))
+    tasks = (on_branch("A", Status.REVIEW, "feat/a", since=5 * H),)
+    owners = agents("developer", "d1")
+    fresh = pr(7, "feat/a", "merge-first", labeled=(LabelEvent("merge-first", NOW - 90 * M),))
+    # The task has waited 5h, but the hold went on 90 minutes ago: not expired yet.
+    assert of(run(with_prs(snap(tasks, owners), fresh), rule), "hold") == []
+    old = pr(7, "feat/a", "merge-first", labeled=(LabelEvent("merge-first", NOW - 3 * H),))
+    [hold] = of(run(with_prs(snap(tasks, owners), old), rule), "hold")
+    assert hold.params["held_minutes"] == 180
+    # The task moved after the label went on: the hold is as old as the move.
+    moved = (on_branch("A", Status.REVIEW, "feat/a", since=150 * M),)
+    [hold] = of(run(with_prs(snap(moved, owners), old), rule), "hold")
+    assert hold.params["held_minutes"] == 150
+
+
+def test_held_prs_without_a_task_are_held_work() -> None:
+    rule = Bottlenecks(holds=(Hold("merge-first", "lead", 2 * H),))
+    prs = (
+        pr(
+            1,
+            "x",
+            "merge-first",
+            mergeable=False,
+            labeled=(LabelEvent("merge-first", NOW - 4 * H),),
+        ),
+        pr(2, "y", "merge-first", since=3 * H),  # label time unknown: its last change
+        pr(3, "z", "merge-first", since=9 * H, draft=True),  # drafts are not held work
+        pr(4, "w", "merge-first", mergeable=None, updated_at=None, created_at=None),  # no age
+        pr(5, None, "merge-first", since=9 * H, fork=True),  # a fork's PR is not ours
+    )
+    [hold] = run(with_prs(snap((), agents("developer", "d1")), *prs), rule)
+    assert hold.params["held_tasks"] == []
+    assert hold.params["held_prs"] == ["example/repo#1", "example/repo#2"]
+    assert hold.params["held_count"] == 2 and hold.params["held_minutes"] == 240
+    assert hold.params["idle_agents"] == []  # people merge (no ready_prs): no idle cost
+    mergers = Bottlenecks(holds=rule.holds, ready_prs=True)
+    [hold] = run(with_prs(snap((), agents("developer", "d1")), *prs), mergers)
+    assert hold.params["idle_agents"] == ["d1"]
+    assert "its 2 PR(s) (example/repo#1, example/repo#2)" in hold.reason
+
+
+def test_mergeable_prs_are_ready_work_only_where_agents_merge() -> None:
+    owners = agents("developer", "d1") + agents("reviewer", "r1")
+    assert run(with_prs(snap((), owners), pr(1, "a", since=2 * H))) == []  # off by default
+    prs = (
+        pr(1, "a", since=2 * H),
+        pr(2, "b", mergeable=False),  # not mergeable
+        pr(3, "c", mergeable=None),  # unknown
+        pr(4, "d", draft=True),
+        pr(5, "e", since=10 * M),  # changed recently
+        pr(6, "f", "park"),  # held
+        pr(7, None, fork=True),  # a fork's PR
+    )
+    rule = Bottlenecks(hold_labels=frozenset({"park"}), ready_prs=True)
+    [action] = run(with_prs(snap((), owners), *prs), rule)
+    assert action.key == "bottlenecks:idle-ready"
+    assert action.params["ready_prs"] == ["example/repo#1"]
+    assert action.params["ready_tasks"] == ["example/repo#1"]
+    assert action.params["ready_count"] == 1 and action.params["oldest_wait_minutes"] == 120
+    assert action.params["likely_cause"] == "merge"
+    assert action.params["idle_agents"] == ["d1", "r1"]  # no pr_role: any idle agent
+    assert "1 mergeable PR(s) wait" in action.reason and "any agent" in action.reason
+
+
+def test_pr_role_limits_who_could_merge() -> None:
+    owners = agents("developer", "d1") + agents("reviewer", "r1")
+    rule = Bottlenecks(ready_prs=True, pr_role="reviewer")
+    [action] = run(with_prs(snap((), owners), pr(1, "a")), rule)
+    assert action.params["idle_agents"] == ["r1"] and "the reviewer role" in action.reason
+    busy = (task("W", Status.IN_PROGRESS, role="reviewer", owner="r1"),)
+    assert run(with_prs(snap(busy, owners), pr(1, "a")), rule) == []
+
+
+def test_prs_add_to_the_tasks_cause() -> None:
+    tasks = (task("A", Status.READY, since=3 * H),)
+    [action] = run(with_prs(snap(tasks, agents("developer", "d1")), pr(1, "a")), MERGERS)
+    assert action.params["ready_tasks"] == ["A", "example/repo#1"]
+    assert action.params["ready_count"] == 2 and action.params["likely_cause"] == "dispatch"
+    assert "1 queued task(s) and 1 mergeable PR(s) wait" in action.reason
+    assert "dispatcher" in action.reason and "nobody merges the PRs" in action.reason
+
+
+def test_a_mergeable_pr_keeps_the_assigned_busy_cause() -> None:
+    owners = agents("developer", "a1", "a2")
+    tasks = (
+        task("W", Status.IN_PROGRESS, owner="a1"),
+        task("T2", Status.READY, owner="a1", since=2 * H),
+    )
+    rule = Bottlenecks(ready_prs=True, ready_is_queued=True)
+    sessions = (live("a1", "W"),)
+    [action] = run(with_prs(snap(tasks, owners, sessions=sessions), pr(1, "a")), rule)
+    assert action.params["likely_cause"] == "assigned_busy"
+    assert action.params["assigned_busy_tasks"] == ["T2"]
+
+
+def test_a_pr_whose_task_is_open_is_not_counted_twice() -> None:
+    tasks = (on_branch("A", Status.REVIEW, "feat/a", since=3 * H),)
+    [action] = run(with_prs(snap(tasks, agents("developer", "d1")), pr(1, "feat/a")), MERGERS)
+    assert action.params["ready_tasks"] == ["A"] and "ready_prs" not in action.params
+
+
+def test_mergeable_prs_mean_idle_agents_are_not_gated_by_humans() -> None:
+    owners = (*agents("developer", "d1"), Owner("alice", "owner", OwnerKind.HUMAN))
+    tasks = (
+        Task("H", "Sign", Status.READY, NOW - 3 * H, "owner", owner_id="alice"),
+        *(task(f"T{i}", Status.BACKLOG) for i in range(3)),
+    )
+    deps = tuple(Dependency(f"T{i}", "H") for i in range(3))
+    base = snap(tasks, owners, deps)
+    assert of(run(base), "human-gated")
+    assert of(run(with_prs(base, pr(1, "a"))), "human-gated")  # PRs are not ready work by default
+    actions = run(with_prs(base, pr(1, "a")), MERGERS)
+    assert of(actions, "human-gated") == [] and of(actions, "idle-ready")
+
+
+def test_build_pull_request_params() -> None:
+    rule = build({"ready_prs": True, "pr_role": "reviewer"})
+    assert rule.ready_prs is True and rule.pr_role == "reviewer"
+    assert build({}).ready_prs is False
+    with pytest.raises(ValueError, match="ready_prs"):
+        build({"ready_prs": "no"})
+    with pytest.raises(ValueError, match="pr_role"):
+        build({"pr_role": ""})

@@ -28,7 +28,7 @@ configure what exists.
 - [[[budgets]] and [prices]](#budgets-and-prices)
 - [[resources.prometheus]](#resourcesprometheus)
 - [[connectors.github]](#connectorsgithub), [[connectors.github.ci]](#connectorsgithubci),
-  [[[block_conditions]]](#block_conditions)
+  [[connectors.github.pulls]](#connectorsgithubpulls), [[[block_conditions]]](#block_conditions)
 - [[connectors.human_tasks]](#connectorshuman_tasks)
 - [[connectors.llm_quotas]](#connectorsllm_quotas)
 - [[alerts]](#alerts)
@@ -279,6 +279,9 @@ gate agent work.
 | `human_gate_min_tasks` | `3` | count, >= 1 | Escalate a human task with at least this many agent tasks behind it... |
 | `human_gate_after` | `"1h"` | duration, >= 0 | ...once it has been ready or in progress this long. |
 | `escalate_human_gates` | `true` | bool | `false`: no per-task escalation of human tasks; rule 13's per-person inbox lists them instead (one message per person). |
+| `ready_is_queued` | `false` | bool | Assigned ready or review tasks nobody started are queued work of their role, not a busy owner. Set it for Hermes, which assigns before it dispatches. |
+| `ready_prs` | `false` | bool | Open PRs GitHub reports as mergeable count as ready work for idle agents (needs `[connectors.github.pulls]`). Set it where agents merge PRs. |
+| `pr_role` | unset | role | The role that merges PRs. Unset: any idle agent. |
 
 `[[engine.rules.bottlenecks.holds]]` entries:
 
@@ -286,7 +289,7 @@ gate agent work.
 | --- | --- | --- |
 | `label` | *required* | The label that marks held tasks. Unique. |
 | `owner` | unset | Who owns the hold; named in the alert. |
-| `expires_after` | `hold_expiry`, else `"4h"` | Expected length. A hold's age is how long its oldest queued task has not moved. |
+| `expires_after` | `hold_expiry`, else `"4h"` | Expected length. A hold's age is how long its oldest queued task has not moved, or since the label went on a PR (`[connectors.github.pulls]`). |
 
 ### 7. resources
 
@@ -642,6 +645,25 @@ can make to GitHub).
 | `cancel_workflows` | `[]` | list of workflow paths | Only runs of these workflows, e.g. `.github/workflows/ci.yml`. Empty: any. |
 | `cancel_branches` | `[]` | list of globs | Only runs on these branches. Empty: any branch but the default branch, which is never cancelled. |
 | `cancel_token_env` | unset | variable name | A separate token with Actions: write on `cancel_repos`, used only for the cancel request. |
+
+### [connectors.github.pulls]
+
+Open pull requests for rule 6 (`bottlenecks`). A task is linked to the open PRs whose head
+branch is the task's branch (Hermes: `tasks.branch_name`, else the worktree's branch; a
+fork's PR links nothing). Hold labels (`holds`, `hold_labels`) on a PR hold its task, aged
+from when the label went on (read from the PR's issue events); a held PR with no open task
+is held work too. With rule 6's `ready_prs` (default off), PRs GitHub reports as mergeable
+(`mergeable_state` `clean`), not drafts, not forks', not held and unchanged for
+`idle_alert_after` count as ready work for idle agents of `pr_role` (default: any). Up to
+300 open PRs of each repository (most recently updated first) are read. A repository
+GitHub stops answering keeps its last list for three scans, then its PRs are left out with
+a warning. The token needs Pull requests: read and Issues: read (label events).
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `true` | bool | |
+| `poll_interval` | `"2m"` | duration, >= 30s | List open PRs this often; the last list is served in between. |
+| `max_details` | `20` | count, 0 to 100 | PRs whose mergeable state is read per scan, one request each, within `[connectors.github] max_requests_per_tick`. |
 
 ### [[block_conditions]]
 
