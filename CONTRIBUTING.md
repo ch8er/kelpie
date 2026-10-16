@@ -83,7 +83,7 @@ relative to the repository root, and `hermes/` and `claude_code/` stand for
 | Actions carried out | stop, wait, wake (`requeue`), comment | stop only (a marker the hook enforces) |
 | README | `hermes/README.md` | `claude_code/README.md` |
 
-Read `claude_code/` first: it is the smaller, read-only example. `hermes/` adds the write
+Read `claude_code/` first: it is the smaller example and almost read-only (`stop` only). `hermes/` adds the write
 side (parking tasks through the platform's CLI).
 
 ### 1. Before you write code
@@ -191,10 +191,12 @@ format" and "Privacy" sections of their READMEs.
 
 - Record no prompts, messages or raw tool arguments and results. A tool call is its name,
   an `args_hash`, the size of its result and, at most, a redacted command prefix. The hash
-  and the redaction are shared code, kept byte-identical in `src/kelpie/traces/args.py`,
-  `src/kelpie/traces/command.py`, `hermes/plugin.py` and `claude_code/hook.py` by
-  `tests/traces/test_redaction.py`: copy the shared blocks, never write your own, and add
-  your file to that test. Describe what is recorded in [docs/privacy.md](docs/privacy.md).
+  and the redaction are shared code: copy the shared blocks, never write your own. The
+  redaction block (`src/kelpie/traces/command.py`, `hermes/plugin.py`,
+  `claude_code/hook.py`) is kept byte-identical by `tests/traces/test_redaction.py`; the
+  `args_hash` copies of `src/kelpie/traces/args.py` are checked by
+  `tests/traces/test_semconv.py` (Hermes by source, Claude Code by results). Add your hook
+  to both tests. Describe what is recorded in [docs/privacy.md](docs/privacy.md).
 - Create the spool with mode `0600`, never follow a symlink or block on a FIFO there, and
   read it defensively (size limits, malformed lines skipped): agents can write next to it.
   Task files are read the same way (`_open_regular` and `_read_task` in
@@ -239,8 +241,8 @@ An adapter carries out what the platform allows and refuses the rest.
 - Config is data: paths, list names, roles and human owners come from
   `[adapters.<platform>]`, never from code. Follow `claude_code/config.py`: a frozen
   `...Settings` dataclass with `build()` and a `load_...` function that rejects unknown
-  keys, validates types, raises `ValueError` naming the key and reads secrets from
-  environment variables. Wire it in `src/kelpie/app.py`: a field on `Settings`, a loader
+  keys, validates types and raises `ValueError` naming the key; if the platform needs
+  secrets, read them from environment variables, never from the config file. Wire it in `src/kelpie/app.py`: a field on `Settings`, a loader
   called from `load_settings` (`_load_claude_code`), the new name in the allowed
   `[adapters]` entries (the check at the top of `_load_hermes`) and a branch in
   `build_adapters`. Document the section in [docs/configuration.md](docs/configuration.md)
@@ -270,7 +272,7 @@ An adapter carries out what the platform allows and refuses the rest.
 
 - `kelpie.core` and `kelpie.rules` never import `kelpie.adapters`. Adapters implement the
   protocols in `kelpie.core.ports`, and only `src/kelpie/app.py` and `src/kelpie/doctor.py`
-  name concrete adapters. `uv run lint-imports` and `tests/test_architecture.py` enforce it.
+  (and the `kelpie.sim` farm simulator) name concrete adapters. `uv run lint-imports` and `tests/test_architecture.py` enforce it.
 - No platform specifics in core or in rules: no status name, tool name or path of one
   platform outside its adapter package. If a rule needs a new fact, add a neutral field to
   `kelpie.core.model` (as `Task.platform_status` and `Session.source` were) and fill it
