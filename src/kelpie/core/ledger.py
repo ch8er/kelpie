@@ -2,7 +2,9 @@
 
 Every action has a fingerprint: rule, kind, task, executor and either ``Action.key``
 (when the rule sets one) or all params. Put volatile measurements in params *and* set
-``key`` so that the same alert with a new reading is still recognised as a repeat.
+``key`` so that the same alert with a new reading is still recognised as a repeat. With
+``Action.once_per_key`` the fingerprint is the rule and the key alone, whatever the task
+or kind.
 
 Before an action is handled the ledger may suppress it:
 

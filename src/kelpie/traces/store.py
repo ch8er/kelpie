@@ -178,8 +178,9 @@ class OffenderWatch:
             self._next = now + self.retry_after
             raise
         hooks = [s for s in snapshot.spans if s.kind is SpanKind.TOOL and last_at(s) >= start]
-        # the snapshot also carries the stored spans of its window: keep each span once
-        spans = merge_hook_spans(merge_spans(stored, hooks)).spans
+        # The snapshot carries the stored spans of its window too, already folded with
+        # their hook spans (command, task, session): its copy goes first and wins.
+        spans = merge_hook_spans(merge_spans(hooks, stored)).spans
         roles, platforms = session_context(snapshot, remembered)
         self._found = repeated_offenders(calls(spans, roles, platforms), self.settings, self.tz)
         self._next = now + self.every

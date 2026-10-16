@@ -33,7 +33,7 @@ from kelpie.core.model import OutputOffender, Snapshot
 from kelpie.rules import register
 
 NAME = "output_offenders"
-SAFE_NAME = re.compile(r"[\w.:/+-]{1,64}")
+SAFE_NAME = re.compile(r"[\w.:/+-]{1,64}", re.ASCII)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +81,7 @@ class OutputOffenders:
 
 def _clean(text: str) -> str:
     """A name an exporter or the board controls, reduced to safe characters."""
-    kept = re.sub(r"[^\w.:/+-]", "_", text)[:64]
+    kept = re.sub(r"[^\w.:/+-]", "_", text, flags=re.ASCII)[:64]
     return kept or "?"
 
 

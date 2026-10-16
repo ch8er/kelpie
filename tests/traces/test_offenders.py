@@ -15,6 +15,7 @@ from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind
 from kelpie.core.spans import MemorySpanStore
 from kelpie.core.storage import SqliteSpanStore
 from kelpie.metrics import Metrics
+from kelpie.traces.hooks import merge_hook_spans
 from kelpie.traces.outputs import Call, OutputSettings, repeated_offenders
 from kelpie.traces.store import OffenderWatch, SpanWindow
 
@@ -167,3 +168,34 @@ def test_a_failed_read_is_retried_after_ten_minutes_not_every_tick() -> None:
     with pytest.raises(OSError):
         watch.offenders(snapshot(NOW + timedelta(minutes=10)), None)
     assert store.reads == 2
+
+
+def otlp_and_hook(day: int, n: int) -> tuple[Span, Span]:
+    """One xcodebuild call reported twice: OTLP without arguments (the exporter's own
+    session) and the Hermes hook with the command and the platform's session."""
+    at = datetime(2026, 3, day, 10, n, tzinfo=UTC)
+    call = {"gen_ai.tool.call.id": f"call-{day}-{n}"}
+    otlp = Span(
+        f"tr-{day}-{n}", f"otlp-{n}", "execute_tool terminal", SpanKind.TOOL, at, at,
+        session_id="chat-x", tool="terminal",
+        attributes={**call, "kelpie.tool.output_chars": 40_000},
+    )  # fmt: skip
+    hook = Span(
+        f"hook-{day}-{n}", f"hook-{n}", "terminal", SpanKind.TOOL, at, at,
+        task_id=f"T-{day}", session_id="S-1", tool="terminal",
+        attributes={**call, "kelpie.source": "hooks", "command": "xcodebuild -scheme App build"},
+    )  # fmt: skip
+    return otlp, hook
+
+
+def test_calls_folded_with_their_hooks_keep_the_command() -> None:
+    """The app folds hook spans into the OTLP spans of its window before the watch runs:
+    that folded copy (command, task, session) must win over the raw stored one."""
+    store = MemorySpanStore()
+    pairs = [otlp_and_hook(d, n) for d in (2, 3) for n in range(3)]
+    store.append_spans([otlp for otlp, _ in pairs], NOW)  # OTLP only reaches the store
+    window = [s for p in pairs if p[0].start.day == 3 for s in p]
+    older_hooks = [hook for otlp, hook in pairs if otlp.start.day == 2]
+    folded = merge_hook_spans([*window, *older_hooks]).spans  # as merged_snapshot does
+    [o] = OffenderWatch(store, SETTINGS, UTC).offenders(replace(snapshot(), spans=folded), None)
+    assert (o.role, o.command, o.days, o.calls) == ("dev", "xcodebuild", 2, 6)
