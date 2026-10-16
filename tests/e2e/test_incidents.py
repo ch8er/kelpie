@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-import pytest
-
 from tests.sim.farm import HERMES_STALE, REPO, Farm
 
 SUGGEST = {"mode": "suggest"}
@@ -242,14 +240,10 @@ def idle_dev(farm: Farm, task_id: str, ended_hours: float) -> None:
     b.event(task_id, "completed", farm.ago(hours=ended_hours), run_id=rid)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="https://github.com/ch8er/kelpie/issues/68: the Hermes adapter makes the profile "
-    "the owner of unclaimed tasks, so rule 6 counts it busy and its ready work as taken",
-)
 def test_incident_14_idle_farm_with_ready_work_is_alerted(farm: Farm) -> None:
-    """The idle half of incident 14. The hold itself cannot be modelled on Hermes: holds are
-    task labels, and the Hermes adapter reports none."""
+    """The idle half of incident 14, with ``ready_is_queued`` (the Hermes setting: the
+    assignee of a ready task routes it, nobody has claimed it). The hold itself cannot be
+    modelled on Hermes: holds are task labels, and the Hermes adapter reports none."""
     b = farm.board
     idle_dev(farm, "t_prev", ended_hours=3)
     for i in range(3):  # ready for five hours, nobody dispatches them
@@ -257,7 +251,14 @@ def test_incident_14_idle_farm_with_ready_work_is_alerted(farm: Farm) -> None:
         b.event(f"t_ready{i}", "promoted", farm.ago(hours=5))
     before = farm.board.statuses()
 
-    rules = {"bottlenecks": {**SUGGEST, "min_idle_time": "30m", "idle_alert_after": "30m"}}
+    rules = {
+        "bottlenecks": {
+            **SUGGEST,
+            "min_idle_time": "30m",
+            "idle_alert_after": "30m",
+            "ready_is_queued": True,
+        }
+    }
     farm.serve(farm.config(rules))
 
     text = farm.wait_message("bottlenecks", "t_ready0", timeout=5)
@@ -298,6 +299,7 @@ HUMAN_GATE_RULES = {
         "min_idle_time": "30m",
         "human_gate_min_tasks": 3,
         "human_gate_after": "1h",
+        "ready_is_queued": True,
     }
 }
 
@@ -313,11 +315,6 @@ def test_incident_16_human_task_gating_a_chain_is_escalated(farm: Farm) -> None:
     board_unchanged(farm, before)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="https://github.com/ch8er/kelpie/issues/68: the idle dev profile owns the chain's "
-    "unclaimed tasks, so rule 6 counts it busy and sees no idle capacity",
-)
 def test_incident_16_idle_capacity_behind_a_human_gate_is_alerted(farm: Farm) -> None:
     human_gate(farm)
     farm.serve(farm.config(HUMAN_GATE_RULES, human_owners=["alice"]))
