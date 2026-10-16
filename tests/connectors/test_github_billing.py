@@ -19,6 +19,7 @@ from kelpie.app import billing_interval_warnings, load_rules, load_settings, ren
 from kelpie.connectors.github.billing import (
     CiBilling,
     ReportError,
+    Tally,
     last_reset,
     minutes_since,
 )
@@ -88,8 +89,54 @@ def test_only_standard_runner_minutes_since_the_reset_count() -> None:
         {"product": "Actions", "sku": "actions_linux", "unitType": "minutes", "quantity": 3},
         "junk",
     )
-    assert minutes_since(body, date(2026, 3, 1)) == (357.5, 1)  # one item without a date
-    assert minutes_since(body, date(2026, 3, 1), ["actions_linux_16_core"]) == (500.0, 0)
+    tally = minutes_since(body, date(2026, 3, 1))
+    assert (tally.minutes, tally.undated, tally.counted) == (357.5, 1, 3)  # one without a date
+    assert tally.other_skus == {"actions_linux_16_core"}
+    larger = minutes_since(body, date(2026, 3, 1), ["actions_linux_16_core"])
+    assert (larger.minutes, larger.undated, larger.counted) == (500.0, 0, 1)
+
+
+def test_sku_display_names_count_as_their_ids() -> None:
+    """The endpoint's documented example says ``Actions Linux``; it must not read as 0."""
+    body = report(
+        item("2026-03-02", 10, sku="Actions Linux"),
+        item("2026-03-02", 5, sku="actions-macos"),
+        item("2026-03-02", 1, sku=" ACTIONS_WINDOWS "),
+    )
+    assert minutes_since(body, date(2026, 3, 1)).minutes == 16.0
+
+
+def test_only_the_asked_month_up_to_today_counts() -> None:
+    body = report(
+        item("2026-02-26", 100),
+        item("2026-03-02", 200),
+        item("2026-03-25", 999),  # after today: not this reading's
+    )
+    start, today = date(2026, 2, 25), date(2026, 3, 20)
+    feb = minutes_since(body, start, month=(2026, 2), until=today)
+    march = minutes_since(body, start, month=(2026, 3), until=today)
+    assert (feb.minutes, march.minutes) == (100.0, 200.0)
+
+
+@pytest.mark.parametrize(
+    ("raw", "counted"),
+    [
+        ("2026-03-01T01:00:00+09:00", False),  # 2026-02-28T16:00Z: before the reset
+        ("2026-02-28T20:00:00-05:00", True),  # 2026-03-01T01:00Z
+        ("2026-03-01T00:00:00.000Z", True),
+        ("2026-03-01", True),
+        ("2026-03-01T00:00:00", True),  # no offset: taken as UTC
+    ],
+)
+def test_item_dates_are_read_in_utc(raw: str, counted: bool) -> None:
+    tally = minutes_since(report(item("2026-03-02", 1, date=raw)), date(2026, 3, 1))
+    assert tally.minutes == (1.0 if counted else 0.0)
+
+
+@pytest.mark.parametrize("raw", ["2026-13-01T00:00:00Z", "March 1", "", 20260301])
+def test_an_unreadable_date_is_left_out(raw: Any) -> None:
+    tally = minutes_since(report(item("2026-03-02", 1, date=raw)), date(2026, 3, 1))
+    assert tally == Tally(0.0, 1, 0, frozenset())
 
 
 @pytest.mark.parametrize("body", [{}, [], {"usageItems": "x"}, None])
@@ -158,6 +205,86 @@ def test_a_period_that_began_last_month_reads_both_months() -> None:
         assert billing.used(now) == (310.0, now)
 
 
+def test_an_answer_that_ignores_the_month_is_not_counted_twice() -> None:
+    now = datetime(2026, 3, 20, tzinfo=UTC)
+    both = report(item("2026-02-26", 1000), item("2026-03-02", 2000))
+    with serve() as gh:
+        gh.reply(usage_path(2026, 2), both)
+        gh.reply(usage_path(2026, 3), both)
+        billing = reader(gh.url, Clock(now), reset_day=25)
+        assert billing.used(now) == (3000.0, now)
+
+
+def test_a_report_with_none_of_the_counted_skus_reads_0_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = Clock(NOW)
+    with serve() as gh, caplog.at_level(logging.WARNING):
+        gh.reply(usage_path(2026, 3), report(item("2026-03-02", 9, sku="actions_linux_arm")))
+        billing = reader(gh.url, clock)
+        assert billing.used(NOW) == (0.0, NOW)
+        clock.now = NOW + timedelta(minutes=16)
+        billing.used(clock.now)
+        gh.reply(usage_path(2026, 3), report(item("2026-03-02", 9)))
+        clock.now = NOW + timedelta(minutes=32)
+        assert billing.used(clock.now) == (9.0, clock.now)
+        gh.reply(usage_path(2026, 3), report(item("2026-03-02", 9, sku="actions_linux_arm")))
+        clock.now = NOW + timedelta(minutes=48)
+        billing.used(clock.now)
+    warned = [r.getMessage() for r in caplog.records if "none of billing_skus" in r.getMessage()]
+    assert len(warned) == 2  # once, and again after a read that counted something
+    assert "Actions minutes of actions_linux_arm but none of billing_skus" in warned[0]
+
+
+def test_a_stale_cached_answer_gives_no_reading(caplog: pytest.LogCaptureFixture) -> None:
+    clock = Clock(NOW)
+    with serve() as gh, caplog.at_level(logging.WARNING):
+        gh.reply(usage_path(2026, 3), report(item("2026-03-02", 100)))
+        billing = reader(gh.url, clock)
+        assert billing.used(NOW) == (100.0, NOW)
+        gh.reply(usage_path(2026, 3), {"message": "Server Error"}, status=502)
+        for minutes in (31, 47):  # past the cache and two intervals: only the stale answer
+            clock.now = NOW + timedelta(minutes=minutes)
+            assert billing.used(clock.now) is None
+    warned = [r.getMessage() for r in caplog.records if "not read" in r.getMessage()]
+    assert len(warned) == 1 and "(stale)" in warned[0]
+
+
+def test_one_month_failing_fails_the_whole_read(caplog: pytest.LogCaptureFixture) -> None:
+    now = datetime(2026, 3, 20, tzinfo=UTC)
+    clock = Clock(now)
+    with serve() as gh, caplog.at_level(logging.WARNING):
+        gh.reply(usage_path(2026, 2), report(item("2026-02-26", 1000)))
+        gh.reply(usage_path(2026, 3), {"message": "Forbidden"}, status=403)
+        billing = reader(gh.url, clock, reset_day=25)
+        for minutes in (0, 16):
+            clock.now = now + timedelta(minutes=minutes)
+            assert billing.used(clock.now) is None
+    warned = [r.getMessage() for r in caplog.records if "not read" in r.getMessage()]
+    assert len(warned) == 1 and "(forbidden)" in warned[0]
+
+
+def test_a_spent_time_budget_fails_the_whole_read(caplog: pytest.LogCaptureFixture) -> None:
+    now = datetime(2026, 3, 20, tzinfo=UTC)
+    with serve() as gh, caplog.at_level(logging.WARNING):
+        gh.reply(usage_path(2026, 2), report(item("2026-02-26", 1000)))
+        gh.reply(usage_path(2026, 3), report(item("2026-03-02", 2000)))
+        billing = reader(gh.url, Clock(now), reset_day=25, budget=timedelta(seconds=10))
+        ticks = [0.0]
+        billing.client.monotonic = lambda: ticks[0]
+        get = billing.client.get
+
+        def slow_get(path: str, params: Any = None) -> Any:
+            answer = get(path, params)
+            ticks[0] += 60  # the first month took the whole budget
+            return answer
+
+        billing.client.get = slow_get  # type: ignore[method-assign]
+        assert billing.used(now) is None
+    assert len(gh.requests) == 1
+    assert "(budget)" in caplog.text
+
+
 def test_an_organization_is_read_at_its_own_path() -> None:
     with serve() as gh:
         gh.reply(usage_path(2026, 3, "farm-org", org=True), report(item("2026-03-02", 5)))
@@ -173,10 +300,11 @@ def test_an_organization_is_read_at_its_own_path() -> None:
         (401, "unauthorized", "was refused"),
         (404, "not_found", "no such account"),
         (400, "http_error", "enhanced billing platform"),
+        (422, "http_error", None),
     ],
 )
 def test_a_refused_read_is_logged_once_with_what_to_fix(
-    status: int, kind: str, hint: str, caplog: pytest.LogCaptureFixture
+    status: int, kind: str, hint: str | None, caplog: pytest.LogCaptureFixture
 ) -> None:
     clock = Clock(NOW)
     with serve() as gh, caplog.at_level(logging.DEBUG):
@@ -188,7 +316,11 @@ def test_a_refused_read_is_logged_once_with_what_to_fix(
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     billing_warnings = [w for w in warnings if "billing usage" in w]
     assert len(billing_warnings) == 1
-    assert f"({kind})" in billing_warnings[0] and hint in billing_warnings[0]
+    assert f"({kind})" in billing_warnings[0]
+    if hint is None:  # only a 400 hints at the billing platform
+        assert f"({kind}); CI minutes fall back" in billing_warnings[0]
+    else:
+        assert hint in billing_warnings[0]
     assert SECRET not in caplog.text and BILLING not in caplog.text
 
 
@@ -324,8 +456,10 @@ def test_billing_never_shares_the_main_token_variable() -> None:
 
 
 def test_billing_skus_are_config_data() -> None:
-    ci = load_ci({**BASE, "billing_skus": ["Actions_Linux_4_Core"]}, [REPO])
+    ci = load_ci({**BASE, "billing_skus": ["Actions Linux 4 Core"]}, [REPO])
     assert ci.billing_skus == ("actions_linux_4_core",)
+    with pytest.raises(ValueError, match="billing_skus must not be empty"):
+        load_ci({**BASE, "billing_skus": []}, [REPO])
     default = load_ci(BASE, [REPO]).billing_skus
     assert default == ("actions_linux", "actions_windows", "actions_macos")
 
@@ -370,10 +504,28 @@ def test_the_billing_token_goes_to_the_billing_report_only(
         source(Snapshot(now=NOW))
         with caplog.at_level(logging.WARNING):  # the same value under two names: warned
             github.build_ci(connector, clock, {"MAIN": TOKEN, "BILL": TOKEN})
+            cancel = load_github(
+                {
+                    "repos": [REPO],
+                    "api_url": gh.url,
+                    "token_env": "MAIN",
+                    "ci": {
+                        **BASE,
+                        "billing_user": "farm-owner",
+                        "billing_token_env": "BILL",
+                        "allow_cancel": True,
+                        "cancel_repos": [REPO],
+                        "cancel_token_env": "CANCEL",
+                    },
+                }
+            )
+            cancel.build_ci(connector, clock, {"MAIN": TOKEN, "CANCEL": BILLING, "BILL": BILLING})
     by_path = {r.path.split("?")[0]: r.headers["Authorization"] for r in gh.requests}
     assert by_path["/users/farm-owner/settings/billing/usage"] == f"Bearer {BILLING}"
     assert all(v == f"Bearer {TOKEN}" for k, v in by_path.items() if "/billing/" not in k)
-    assert "holds the same token as $MAIN" in caplog.text and TOKEN not in caplog.text
+    assert "holds the same token as $MAIN" in caplog.text
+    assert "$BILL holds the same token as $CANCEL" in caplog.text
+    assert TOKEN not in caplog.text and BILLING not in caplog.text
 
 
 def test_status_names_the_account_and_the_variable_never_the_token(
@@ -396,4 +548,19 @@ def test_status_names_the_account_and_the_variable_never_the_token(
     assert "billing usage of user farm-owner, every 0:30:00 (token from $BILL)" in status
     assert BILLING not in status
     (warning,) = billing_interval_warnings(loaded.rules, settings)
-    assert "billing_interval (0:30:00) is longer than rule 'ci_economy' max_reading_age" in warning
+    assert "billing_interval (0:30:00) keeps a reading for up to 1:00:00, longer than" in warning
+
+
+@pytest.mark.parametrize(("interval", "warned"), [("5m", False), ("6m", True)])
+def test_a_reading_kept_past_max_reading_age_is_warned_about(
+    tmp_path: Path, interval: str, warned: bool
+) -> None:
+    config = tmp_path / "kelpie.toml"
+    config.write_text(
+        '[engine.rules.ci_economy]\nmax_reading_age = "10m"\n'
+        '[connectors.github]\nrepos = ["example/repo"]\n'
+        '[connectors.github.ci]\nincluded_minutes = 3000\nbilling_user = "farm-owner"\n'
+        f'billing_token_env = "BILL"\nbilling_interval = "{interval}"\n'
+    )
+    settings = load_settings(config)
+    assert bool(billing_interval_warnings(load_rules(settings.engine).rules, settings)) is warned

@@ -127,14 +127,17 @@ class GitHubSettings:
         billing = None
         billing_token = self.ci.billing_token(environ)
         if billing_token is not None and self.ci.billing_account is not None:
-            main = environ.get(self.token_env, "").strip()
-            if main and main == billing_token:
-                log.warning(
-                    "[connectors.github.ci] $%s holds the same token as $%s: the token that "
-                    "reads PRs and runs can then read billing too; use a token of its own",
-                    self.ci.billing_token_env,
-                    self.token_env,
-                )
+            others = {self.token_env: environ.get(self.token_env, "").strip()}
+            if self.ci.cancel_token_env is not None:
+                others[self.ci.cancel_token_env] = token or ""
+            for name, value in others.items():
+                if value and value == billing_token:
+                    log.warning(
+                        "[connectors.github.ci] $%s holds the same token as $%s: one token "
+                        "then does both jobs; give billing a token of its own",
+                        self.ci.billing_token_env,
+                        name,
+                    )
             # Its own client, without the main client's metrics: its rate limit and its
             # refusals are not the main token's.
             billing_client = GitHubClient(

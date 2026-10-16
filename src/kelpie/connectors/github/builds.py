@@ -266,7 +266,9 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
     account, organization, billing_env, billing_interval = _billing(section, included, where)
     if billing_env is not None and billing_env == token_env:
         raise ValueError(f"{where} billing_token_env must not be cancel_token_env: one token each")
-    skus = _strings(section, "billing_skus", where) or usage.DEFAULT_SKUS
+    skus = _strings(section, "billing_skus", where) if "billing_skus" in section else None
+    if skus == ():
+        raise ValueError(f"{where} billing_skus must not be empty (leave it out for the default)")
     reserve = section.get("rate_reserve", DEFAULT_RATE_RESERVE)
     if isinstance(reserve, bool) or not isinstance(reserve, int) or not 0 <= reserve <= 4000:
         raise ValueError(f"{where} rate_reserve must be an integer from 0 to 4000")
@@ -292,7 +294,7 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
         billing_organization=organization,
         billing_token_env=billing_env,
         billing_interval=billing_interval,
-        billing_skus=tuple(s.lower() for s in skus),
+        billing_skus=usage.DEFAULT_SKUS if skus is None else tuple(usage.sku_name(s) for s in skus),
     )
 
 

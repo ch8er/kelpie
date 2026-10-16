@@ -84,3 +84,6 @@ def test_a_quota_with_room_left_stays_quiet(farm: Farm) -> None:
     farm.stop()
     assert farm.messages("ci_economy") == []
     assert any("/settings/billing/usage" in r.path for r in farm.github.requests)
+    log = kelpie.log_text()  # what is read is announced by name; the token never
+    assert f"minutes used read from the billing usage of {ACCOUNT}" in log
+    assert f"token from ${BILLING_TOKEN_ENV}" in log and BILLING_TOKEN not in log
