@@ -60,6 +60,8 @@ Kelpie is a **service, not an LLM agent**. Control is done by deterministic rule
 
 Deployment: one `kelpie serve` process (or docker compose with Kelpie, Prometheus and Grafana). The server can run anywhere; adapters and node_exporter run where the agents run. The watchdog should not die together with what it watches, so the server should eventually live on a separate machine.
 
+**P0 before the first release — multi-host:** today the Hermes and Claude Code adapters read local files (`kanban.db`, the spool, worktrees) and act through local commands (the `hermes` CLI, a marker file), so `kelpie serve` must sit on the agents' machine and cannot watch two machines. A small `kelpie agent` runs on every machine with agents: it reads the local board, spool and git state, executes local actions, and talks to a central `kelpie serve` over authenticated HTTP. The central server holds rules, ledger, report and alerts and can run on a separate machine. Single-host mode (adapters in-process) stays the default for a laptop farm.
+
 ### P0. Engine safety — first PRs of week 1, before any rule acts on a real farm
 
 - **A. Action ledger:** every action gets a fingerprint; the same action is not re-emitted within a cooldown; at most N actions per task per hour; the ledger is persisted in storage. It powers alert de-duplication and the before/after report, and keeps Kelpie itself from looping.
@@ -220,6 +222,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Daily "cost of chaos" report with dollars, cost per completed task, and before/after verification of fixes
 - [ ] Token savings that act: rule 12 (conflict warning), dispatch gate, huge tool outputs
 - [ ] Token optimization recommendations (cache breaks, model fit per role, diff-only review) and throughput metrics
+- [ ] Multi-host: `kelpie agent` on each agent machine, central `kelpie serve` anywhere (blocks the release)
 - [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring
 - [ ] Whole-codebase security audit after the code-health pass (blocks the release)
 - [ ] Documentation and publication of the open core
