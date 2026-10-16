@@ -36,15 +36,21 @@ repeated huge-output offenders. **Top 3 recommendations.** Filters for huge tool
 part of the chaos in act mode, and a fixed remedy for the largest remaining causes; ranked
 by dollars, with hours converted by ``hour_usd`` when it is set, else alternating the best
 by dollars and the best by hours.
+
+**Sections.** Analyses registered in :mod:`kelpie.report.sections` (token optimization,
+...) add their own section after the top 3, and their advice competes for it; they follow
+the same rules: pure, deterministic, no clock and no LLM.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import zip_longest
+from types import MappingProxyType
 
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
@@ -62,6 +68,16 @@ from kelpie.core.spans import (
 )
 from kelpie.core.states import OpenState
 from kelpie.report.fixes import FixEvent
+from kelpie.report.sections import (
+    SECTIONS,
+    Advice,
+    Section,
+    SectionBuilder,
+    SectionContext,
+    Spend,
+    load_sections,
+    run_sections,
+)
 from kelpie.report.store import StateRow
 from kelpie.report.verify import (
     DEFAULT_MIN_SAMPLE,
@@ -83,6 +99,8 @@ from kelpie.traces.outputs import (
     recommend,
     session_context,
 )
+
+log = logging.getLogger(__name__)
 
 # Rules whose long-lived states are work the farm lost, and what to call that loss.
 CHAOS_CAUSES: Mapping[str, str] = {
@@ -160,20 +178,6 @@ class ReportInputs:
 
 
 @dataclass(frozen=True, slots=True)
-class Spend:
-    tokens: int = 0
-    usd: float = 0.0
-    unpriced_tokens: int = 0  # tokens of models with no price
-
-    def __add__(self, other: Spend) -> Spend:
-        return Spend(
-            self.tokens + other.tokens,
-            self.usd + other.usd,
-            self.unpriced_tokens + other.unpriced_tokens,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class ChaosLine:
     rule: str
     cause: str
@@ -198,15 +202,6 @@ class OpenLine:
 
 
 @dataclass(frozen=True, slots=True)
-class Advice:
-    title: str
-    detail: str
-    usd: float = 0.0
-    hours: float = 0.0
-    tasks: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
 class DailyReport:
     day: date
     start: datetime
@@ -226,6 +221,7 @@ class DailyReport:
     hour_usd: float | None = None
     tz: tzinfo = UTC  # times are shown in the report's time zone
     verifications: tuple[Verification, ...] = ()  # fixes of the day and the day before
+    sections: tuple[Section, ...] = ()  # from kelpie.report.sections builders
 
     @property
     def chaos_hours(self) -> float:
@@ -255,7 +251,11 @@ def day_bounds(day: date, tz: tzinfo) -> tuple[datetime, datetime]:
     return start.astimezone(UTC), end.astimezone(UTC)
 
 
-def build_report(inputs: ReportInputs) -> DailyReport:
+def build_report(
+    inputs: ReportInputs, sections: Mapping[str, SectionBuilder] | None = None
+) -> DailyReport:
+    """The day's report. ``sections`` are the extra section builders (default: every one
+    registered in :mod:`kelpie.report.sections`)."""
     start, end = day_bounds(inputs.day, inputs.tz)
     spans = [s for s in inputs.spans if start <= last_at(s) < end]
     index = {span_key(s): s for s in inputs.spans}
@@ -272,8 +272,29 @@ def build_report(inputs: ReportInputs) -> DailyReport:
             t.id for t in inputs.tasks if t.status is Status.DONE and start <= t.status_since < end
         )
     )
+    failed: list[str] = []
+    if sections is None:
+        failed = load_sections()
+        sections = SECTIONS
+    context = SectionContext(
+        inputs=inputs,
+        start=start,
+        end=end,
+        spans=tuple(spans),
+        counted=MappingProxyType(dict(counted)),
+        price=pricer.price,
+        spend=spend,
+        roles=MappingProxyType(_roles(inputs, end)),
+    )
+    extra = run_sections(sections, context, failed)
     advice = _recommendations(
-        inputs, chaos, would_fix, filters, pricer, _session_models(spans, counted)
+        inputs,
+        chaos,
+        would_fix,
+        filters,
+        pricer,
+        _session_models(spans, counted),
+        [a for s in extra for a in s.advice],
     )
     return DailyReport(
         day=inputs.day,
@@ -294,7 +315,18 @@ def build_report(inputs: ReportInputs) -> DailyReport:
         hour_usd=inputs.hour_usd,
         tz=inputs.tz,
         verifications=_verifications(inputs, index, start, end),
+        sections=extra,
     )
+
+
+def _roles(inputs: ReportInputs, end: datetime) -> dict[str, str]:
+    board = Snapshot(
+        now=end,
+        tasks=tuple(inputs.tasks),
+        owners=tuple(inputs.owners),
+        sessions=tuple(inputs.sessions),
+    )
+    return session_context(board, inputs.attribution)[0]
 
 
 def _verifications(
@@ -542,8 +574,9 @@ def _recommendations(
     filters: Sequence[Recommendation],
     pricer: _Pricer,
     models: Mapping[str, str | None],
+    extra: Sequence[Advice] = (),
 ) -> tuple[Advice, ...]:
-    candidates: list[Advice] = []
+    candidates: list[Advice] = list(extra)
     for rec in filters:
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
@@ -582,6 +615,14 @@ def _recommendations(
 
 
 def _top(candidates: Sequence[Advice], hour_usd: float | None) -> list[Advice]:
+    def worth(a: Advice) -> tuple[float, float, str]:
+        return (a.usd + a.hours * (hour_usd or 0.0), a.hours, a.detail)
+
+    best: dict[str, Advice] = {}
+    for a in candidates:  # one advice per title: the one worth most
+        if a.title not in best or worth(a) > worth(best[a.title]):
+            best[a.title] = a
+    candidates = list(best.values())
     if hour_usd is not None:
         return sorted(candidates, key=lambda a: (-(a.usd + a.hours * hour_usd), a.title))[:TOP]
     by_usd = sorted((a for a in candidates if a.usd > 0), key=lambda a: (-a.usd, a.title))
@@ -663,6 +704,9 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             lines.append(f"{i}. **{a.title}**{tail}: {a.detail}.{linked}")
     else:
         lines.append("None: nothing above the thresholds.")
+    for section in report.sections:
+        if section.lines:
+            lines += ["", f"## {section.title}", "", *section.lines]
     lines += ["", "## Before/after of recent fixes", ""]
     lines += _verification_lines(report) or [
         "No fixes on this day or the day before (note one with `kelpie fix`)."
