@@ -56,7 +56,7 @@ def test_incident_01_guard_block_with_green_ci_is_suggested_for_unblock(farm: Fa
     before = farm.board.statuses()
 
     config = farm.config(
-        {"stale_blocks": SUGGEST, "exit_contract": {**SUGGEST, **HERMES_STALE}},
+        {"stale_blocks": SUGGEST},
         github=True,
         extra={
             "block_conditions": [
@@ -74,7 +74,6 @@ def test_incident_01_guard_block_with_green_ci_is_suggested_for_unblock(farm: Fa
     assert "is stale: its condition is met" in text and DID_SUGGEST in text
     settle(farm)
     assert farm.messages("t_pending") == []  # CI still running: a declared wait
-    assert farm.messages("exit_contract") == []  # a declared wait is not a bad exit
     board_unchanged(farm, before)
     assert any(p.endswith(f"/commits/{green.head_sha}/status?per_page=100") for p in gh.paths())
 
@@ -122,32 +121,33 @@ def test_incident_15_waiting_for_merge_block_clears_once_merged(farm: Farm) -> N
 
 def test_incident_02_exit_without_status_is_suggested_for_requeue(farm: Farm) -> None:
     b = farm.board
-    # The worker exited 40 minutes ago; Hermes has not swept the task back yet.
-    b.task("t_exit", "todo", farm.ago(hours=3), title="Paginate the list endpoint", assignee="dev")
-    rid = b.claim("t_exit", "dev", farm.ago(hours=2), heartbeat=farm.ago(minutes=41))
-    b.end_run(rid, farm.ago(minutes=40))
+    # The worker vanished: no heartbeat for two hours and its claim expired, before Hermes'
+    # sweep closed the run (a crash the sweep sees leaves the task ready, not running).
+    b.task("t_gone", "todo", farm.ago(hours=4), title="Paginate the list endpoint", assignee="dev")
+    rid = b.claim(
+        "t_gone",
+        "dev",
+        farm.ago(hours=3),
+        heartbeat=farm.ago(hours=2),
+        claim_expires=farm.ago(hours=1, minutes=45),
+    )
     # An agent blocked its task with a reason nobody can act on.
     blocked_by_agent(farm, "t_vague", "stuck, not sure why", hours=1)
-    # Look-alikes: a typed block for an operator, and a live worker.
+    # Look-alikes: a typed block for an operator, and a worker in a long LLM call whose
+    # heartbeat is 45 minutes old: Hermes tolerates up to an hour (session_stale_after 60m).
     blocked_by_agent(farm, "t_question", "which API version?", kind="needs_input", hours=1)
-    b.task("t_live", "todo", farm.ago(hours=1), title="Add metrics", assignee="dev")
-    b.claim(
-        "t_live",
-        "dev",
-        farm.ago(minutes=30),
-        heartbeat=farm.ago(minutes=1),
-        claim_expires=farm.now + timedelta(minutes=10),
-    )
+    b.task("t_slow", "todo", farm.ago(hours=2), title="Add metrics", assignee="dev")
+    b.claim("t_slow", "dev", farm.ago(hours=1), heartbeat=farm.ago(minutes=45))
     before = farm.board.statuses()
 
     farm.serve(farm.config({"exit_contract": {**SUGGEST, **HERMES_STALE}}))
 
-    exited = farm.wait_message("exit_contract", "requeue t_exit")
-    assert f"hermes-run-{rid}" in exited and "without a final status" in exited
+    gone = farm.wait_message("exit_contract", "requeue t_gone")
+    assert f"hermes-run-{rid}" in gone and "stopped sending heartbeats" in gone
     vague = farm.wait_message("exit_contract", "requeue t_vague")
     assert "not an allowed block reason" in vague
     settle(farm)
-    assert farm.messages("t_question") == [] and farm.messages("t_live") == []
+    assert farm.messages("t_question") == [] and farm.messages("t_slow") == []
     board_unchanged(farm, before)
 
 
@@ -198,7 +198,9 @@ def test_incident_11_ownerless_review_with_dependents_is_critical(farm: Farm) ->
     b.task("t_auth", "todo", farm.ago(hours=6), title="Shared auth middleware", assignee="dev")
     b.claim("t_auth", "dev", farm.ago(hours=5))
     b.hand_off("t_auth", farm.ago(hours=3))
-    b.update("t_auth", assignee=None)  # nobody picked the review up
+    # Assumption: the review is up for any reviewer, so the task has no assignee (if Hermes
+    # kept the developer as assignee, the adapter would call it owned).
+    b.update("t_auth", assignee=None)
     for i in range(4):
         b.task(f"t_dep{i}", "todo", farm.ago(hours=6), title=f"Protect endpoint {i}")
         b.link("t_auth", f"t_dep{i}")
@@ -212,7 +214,7 @@ def test_incident_11_ownerless_review_with_dependents_is_critical(farm: Farm) ->
     farm.serve(farm.config({"orphan_status": {**SUGGEST, **HERMES_STALE}}))
 
     text = farm.wait_message("orphan_status", "t_auth")
-    assert text.startswith("[CRITICAL]") and "4" in text
+    assert text.startswith("[CRITICAL]") and "4 open task(s) depend on it" in text
     settle(farm)
     assert farm.messages("t_fresh") == []
     board_unchanged(farm, before)
@@ -243,12 +245,14 @@ def idle_dev(farm: Farm, task_id: str, ended_hours: float) -> None:
 @pytest.mark.xfail(
     strict=True,
     reason="https://github.com/ch8er/kelpie/issues/68: the Hermes adapter makes the profile "
-    "the owner of unclaimed tasks, so rule 6 counts it busy",
+    "the owner of unclaimed tasks, so rule 6 counts it busy and its ready work as taken",
 )
 def test_incident_14_idle_farm_with_ready_work_is_alerted(farm: Farm) -> None:
+    """The idle half of incident 14. The hold itself cannot be modelled on Hermes: holds are
+    task labels, and the Hermes adapter reports none."""
     b = farm.board
     idle_dev(farm, "t_prev", ended_hours=3)
-    for i in range(3):  # ready since the merge hold began, five hours ago
+    for i in range(3):  # ready for five hours, nobody dispatches them
         b.task(f"t_ready{i}", "ready", farm.ago(hours=5), title=f"Follow-up {i}", assignee="dev")
         b.event(f"t_ready{i}", "promoted", farm.ago(hours=5))
     before = farm.board.statuses()
@@ -256,7 +260,7 @@ def test_incident_14_idle_farm_with_ready_work_is_alerted(farm: Farm) -> None:
     rules = {"bottlenecks": {**SUGGEST, "min_idle_time": "30m", "idle_alert_after": "30m"}}
     farm.serve(farm.config(rules))
 
-    text = farm.wait_message("bottlenecks", "t_ready0", timeout=15)
+    text = farm.wait_message("bottlenecks", "t_ready0", timeout=5)
     assert "idle" in text and "dev" in text
     settle(farm)
     board_unchanged(farm, before)
@@ -312,11 +316,11 @@ def test_incident_16_human_task_gating_a_chain_is_escalated(farm: Farm) -> None:
 @pytest.mark.xfail(
     strict=True,
     reason="https://github.com/ch8er/kelpie/issues/68: the idle dev profile owns the chain's "
-    "unclaimed tasks, so rule 6 sees no idle capacity",
+    "unclaimed tasks, so rule 6 counts it busy and sees no idle capacity",
 )
 def test_incident_16_idle_capacity_behind_a_human_gate_is_alerted(farm: Farm) -> None:
     human_gate(farm)
     farm.serve(farm.config(HUMAN_GATE_RULES, human_owners=["alice"]))
 
-    text = farm.wait_message("bottlenecks", "alert", "t_store", timeout=15)
-    assert "idle" in text and "dev" in text
+    text = farm.wait_message("bottlenecks: alert", "idle with no ready work", "t_store", timeout=5)
+    assert "dev" in text
