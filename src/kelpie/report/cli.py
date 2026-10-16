@@ -14,6 +14,7 @@ from kelpie.core.config import Mode
 from kelpie.metrics import Metrics
 from kelpie.report.fixes import MANUAL, FixEvent, FixStore
 from kelpie.report.run import ReportSources, default_day, generate, send, write
+from kelpie.report.store import ReportStore
 from kelpie.rules import REGISTRY
 
 log = logging.getLogger(__name__)
@@ -107,3 +108,32 @@ def note_fix(
     except (OSError, sqlite3.Error) as exc:
         return f"kelpie: cannot write to {settings.db_path}: {exc}\n", 1
     return f"fix noted at {at.isoformat(timespec='minutes')}: {event.note.strip()}\n", 0
+
+
+def list_fixes(
+    settings: Settings, days: int = 7, clock: Callable[[], datetime] = utc_now
+) -> tuple[str, int]:
+    """``kelpie fix --list``: the fixes recorded in the last ``days`` (manual and config;
+    mode changes and filters are found when the report runs), in [report] timezone."""
+    if days <= 0:
+        return "kelpie: --days must be positive\n", 2
+    if settings.db_path is None or not settings.db_path.exists():
+        return "no fixes recorded (no database yet)\n", 0
+    now = clock()
+    try:
+        with ReportStore(settings.db_path) as store:
+            found = store.fixes(now - timedelta(days=days), now + FUTURE_SKEW)
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        return f"kelpie: cannot read the database {settings.db_path}: {exc}\n", 1
+    if not found:
+        return f"no fixes recorded in the last {days} day(s)\n", 0
+    tz = settings.report.tz
+    lines = []
+    for f in found:
+        scope = " ".join(
+            x for x in (f.rule and f"rule={f.rule}", f.command and f"command={f.command!r}",
+                        f.role and f"role={f.role}") if x
+        )  # fmt: skip
+        when = f.at.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+        lines.append(f"{when}  {f.kind:<6}  {f.note}" + (f"  [{scope}]" if scope else ""))
+    return "\n".join(lines) + "\n", 0

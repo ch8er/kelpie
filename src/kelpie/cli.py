@@ -42,7 +42,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--send", action="store_true", help="send the summary to [[alerts.channels]] too"
     )
     fix = sub.add_parser("fix", help="note a fix so the daily report verifies its effect")
-    fix.add_argument("note", help="what changed, e.g. 'lifted the merge hold'")
+    fix.add_argument("note", nargs="?", help="what changed, e.g. 'lifted the merge hold'")
     fix.add_argument("--rule", help="the rule whose problem it should reduce")
     fix.add_argument(
         "--command", dest="command_prefix", help="a command prefix whose output it filters"
@@ -51,6 +51,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     fix.add_argument(
         "--at", help="when (ISO time; without an offset in [report] timezone; default: now)"
     )
+    fix.add_argument(
+        "--list", action="store_true", help="list the fixes recorded in the last --days instead"
+    )
+    fix.add_argument("--days", type=int, default=7, help="how far back --list looks (7)")
     doctor = sub.add_parser(
         "doctor", help="check a first live run: config, observe mode, board, hooks, spans, git"
     )
@@ -73,11 +77,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = load_settings(find_config(args.config))
         if args.command == "fix":
-            from kelpie.report.cli import note_fix
+            from kelpie.report.cli import list_fixes, note_fix
 
-            text, code = note_fix(
-                settings, args.note, args.rule, args.command_prefix, args.role, args.at
-            )
+            if args.list:
+                text, code = list_fixes(settings, args.days)
+            elif args.note is None:
+                text, code = "kelpie: fix needs a note (or --list)\n", 2
+            else:
+                text, code = note_fix(
+                    settings, args.note, args.rule, args.command_prefix, args.role, args.at
+                )
             sys.stdout.write(text)
             return code
         if args.command == "report":
