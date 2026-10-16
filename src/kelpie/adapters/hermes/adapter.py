@@ -26,8 +26,12 @@ Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
     archived                -> (skipped)
 
 ``body`` is ``tasks.body`` (the description; none for finished tasks), at most ``MAX_BODY``
-characters; the dispatch gate's patterns read it with the title. ``role`` is the assignee
-profile: Hermes routes work by profile, so a profile is both the owner and its role.
+characters; the dispatch gate's patterns read it with the title. ``owner_id`` is the assignee
+profile and ``role`` the profile's role. Hermes has no roles, so ``roles``
+(``[adapters.hermes.roles]``) maps profiles to roles, and any other profile's role is its name
+without a trailing ``-<number>`` (``dev-1``, ``dev-2`` -> ``dev``; ``role_from_name = false``
+turns that off), else the profile itself. Hermes assigns a task to a profile before
+dispatching it: set rule 6's ``ready_is_queued`` to count assigned ready work as queued.
 ``status_since`` is the time of the latest status-changing event of the task (any
 ``task_events`` kind except the non-status ones in ``NON_STATUS_EVENTS``), else
 ``started_at``/``completed_at``/``created_at``. Done tasks older than ``lookback`` are left
@@ -84,6 +88,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
@@ -137,6 +142,8 @@ DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
 DEFAULT_BASE_REFS = ("origin/main", "main")
 BUSY_TIMEOUT_MS = 5000
 MAX_BODY = 8000  # characters of a task's description kept in the snapshot
+# A trailing instance number of a profile name: dev-1, dev-2 -> role "dev".
+_INSTANCE = re.compile(r"^(.+?)-\d+$")
 # The ``tasks.workspace_kind`` whose directory is the task's own: ``dir`` may point to a shared
 # or human checkout, ``scratch`` is not a repository.
 WORKSPACE_KINDS = ("worktree",)
@@ -297,6 +304,10 @@ class HermesAdapter:
     cli_timeout: float = CLI_TIMEOUT  # seconds; a stop runs inside the control loop tick
     # Assignees that are people, not agents (Hermes lowercases profile names).
     human_owners: Collection[str] = ()
+    # Profile -> role (Hermes lowercases profiles). Others: the profile without a trailing
+    # "-<number>" (dev-1 -> dev), else the profile itself.
+    roles: Mapping[str, str] = field(default_factory=dict)
+    role_from_name: bool = True  # dev-1, dev-2 -> dev; false: a profile is its own role
     name: str = "hermes"
     # workspace -> snapshot time until which it is not read (its git timed out)
     _git_backoff: dict[Path, datetime] = field(
@@ -309,8 +320,18 @@ class HermesAdapter:
         self.base_refs = tuple(self.base_refs)
         if bad := [r for r in self.base_refs if not valid_base_ref(r)]:
             raise ValueError(f"invalid base refs: {bad}")
+        self.roles = {k.strip().casefold(): v.strip().casefold() for k, v in self.roles.items()}
         if self.spool is not None:
             self.spool = Path(self.spool).expanduser()
+
+    def role_of(self, profile: str) -> str:
+        """The role of a Hermes profile: ``roles``, else the name without a trailing
+        ``-<number>``, else the profile itself."""
+        key = profile.strip().casefold()
+        if key in self.roles:
+            return self.roles[key]
+        m = _INSTANCE.match(key) if self.role_from_name else None
+        return m[1] if m else key
 
     # --- reading -------------------------------------------------------------------------
 
@@ -408,7 +429,7 @@ class HermesAdapter:
         owners = tuple(
             Owner(
                 id=p,
-                role=p,
+                role=self.role_of(p),
                 kind=OwnerKind.HUMAN if p.casefold() in self.human_owners else OwnerKind.AGENT,
             )
             for p in sorted(owner_ids | profiles)
@@ -469,7 +490,7 @@ class HermesAdapter:
                     title=row["title"],
                     status=status,
                     status_since=since,
-                    role=assignee,
+                    role=self.role_of(assignee) if assignee else None,
                     owner_id=assignee,
                     source=self.name,
                     block=block,

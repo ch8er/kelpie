@@ -1,0 +1,47 @@
+id: "14-hermes-assigned-ready-idle"
+incident: 14
+title: "Hermes: assigned ready tasks wait while their profiles sit idle"
+description: >
+  On Hermes every task is assigned to a profile before the dispatcher spawns it, so ready
+  work never looks ownerless. During the merge-hold incident the developer profiles owned
+  ready tasks and backlog children but ran nothing for hours. With ready_is_queued the
+  assigned, unstarted work counts as queued and its idle owners as idle, so Kelpie names the
+  stall; a ready task whose run already started, and a human's ready task, are left alone.
+rule: bottlenecks
+config:
+  ready_is_queued: true
+  min_idle_time: "30m"
+  idle_alert_after: "30m"
+snapshot:
+  now: "2026-03-02T17:00:00+00:00"
+  owners:
+    - {id: alice, role: alice, kind: human}
+    - {id: dev-1, role: dev}
+    - {id: dev-2, role: dev}
+    - {id: dev-3, role: dev}
+  tasks:
+    - {id: t_1, title: "Settings page", status: ready, status_since: "2026-03-02T14:00:00+00:00", role: dev, owner_id: dev-1}
+    - {id: t_2, title: "Export job", status: ready, status_since: "2026-03-02T14:10:00+00:00", role: dev, owner_id: dev-2}
+    - {id: t_3, title: "Settings page: tests", status: backlog, status_since: "2026-03-02T13:00:00+00:00", role: dev, owner_id: dev-1}
+    # Distractor: claimed a minute ago, its run is live.
+    - {id: t_4, title: "Lint cleanup", status: ready, status_since: "2026-03-02T14:00:00+00:00", role: dev, owner_id: dev-3}
+    # Distractor: a human's ready task is not agent work.
+    - {id: t_5, title: "Approve release notes", status: ready, status_since: "2026-03-02T12:00:00+00:00", role: alice, owner_id: alice}
+  sessions:
+    - {id: hermes-run-1, task_id: t_0, owner_id: dev-1, started_at: "2026-03-02T11:00:00+00:00", ended_at: "2026-03-02T13:30:00+00:00", final_status: done}
+    - {id: hermes-run-4, task_id: t_4, owner_id: dev-3, started_at: "2026-03-02T16:59:00+00:00", last_heartbeat: "2026-03-02T16:59:30+00:00"}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "dispatcher"
+    params:
+      idle_agents: [dev-1, dev-2]
+      ready_tasks: [t_1, t_2]
+      likely_cause: dispatch
+not_expected_actions:
+  - kind: alert
+    params: {ready_tasks: [t_1, t_2, t_4]}
+  - kind: alert
+    params: {overloaded_role: alice}
+  - kind: alert
+    params: {likely_cause: assigned_busy}

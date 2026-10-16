@@ -303,7 +303,8 @@ class Metrics:
     def _fleet(self, snapshot: Snapshot) -> None:
         """Tasks per status and idle agents per role, from the tick's snapshot.
 
-        Idle agents are counted as the bottlenecks rule counts them."""
+        Idle agents are counted as the bottlenecks rule counts them by default (no
+        ``min_idle_time``, no ``ready_is_queued``), so they may differ from the rule's view."""
         self.fleet_seen = True
         self.tasks = Counter(dict.fromkeys(Status, 0))
         self.tasks.update(t.status for t in snapshot.tasks)

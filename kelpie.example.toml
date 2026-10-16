@@ -31,6 +31,8 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # slots = 5                 # optional farm concurrency limit: full slots are not idle capacity
 # human_gate_min_tasks = 3  # escalate a human task with this many agent tasks behind it
 # human_gate_after = "1h"   # ...once it has been ready (or in progress) this long
+# ready_is_queued = false   # true on Hermes: assigned ready tasks nobody started are queued
+#                           # work of their role, not a busy owner
 # hold_labels = []          # labels that park tasks on purpose; no expiry unless hold_expiry
 # hold_expiry = "4h"        # optional: expected length of a hold without its own expires_after
 # [[engine.rules.bottlenecks.holds]]   # a label that parks tasks on purpose
@@ -333,6 +335,15 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # profile. Also sets rule 5's default escalation target
 #                                   # (first human by id): set escalate_to explicitly.
 #
+# Roles (rule 6 compares capacity per role). Hermes has none: a profile's role is its name
+# without a trailing "-<number>" (dev-1, dev-2 -> dev), unless listed here; set
+# role_from_name = false under [adapters.hermes] to keep every profile its own role. Config
+# keyed by role (loop_breaker roles, heavy_roles, provider_roles, review_roles) uses these
+# role names, so per-profile keys such as "dev-1" stop matching once it maps to "dev".
+# [adapters.hermes.roles]
+# reviewer-bot = "reviewer"
+# merger = "reviewer"
+#
 # Recommended on Hermes. A valid Hermes claim counts as a heartbeat, but Hermes tolerates
 # heartbeats up to an hour old, while Kelpie's default is 30 minutes:
 #
@@ -344,6 +355,8 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # session_stale_after = "60m"
 # [engine.rules.checkpoints]
 # session_stale_after = "60m"
+# [engine.rules.bottlenecks]
+# ready_is_queued = true    # Hermes assigns a task to a profile before it dispatches it
 #
 # Blocks. The adapter reports Hermes typed blocks (needs_input, capability, transient) as
 # "waiting_human: <kind>: <reason>" and circuit-breaker parks as "guard: hermes circuit
