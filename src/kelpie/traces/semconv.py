@@ -24,8 +24,9 @@ linkage within the request and then dropped (counted as ``ignored``).
 
 **Fields.** ``model``: ``gen_ai.response.model``, else ``gen_ai.request.model``. Tokens:
 ``gen_ai.usage.input_tokens`` / ``output_tokens`` (deprecated ``prompt_tokens`` /
-``completion_tokens`` accepted), cached = ``gen_ai.usage.cache_read.input_tokens``; cache
-writes stay in ``attributes`` as ``gen_ai.usage.cache_write.input_tokens``. Input tokens
+``completion_tokens`` accepted), cached = ``gen_ai.usage.cache_read.input_tokens`` (or
+OpenLLMetry's ``gen_ai.usage.cache_read_input_tokens``); cache writes stay in
+``attributes`` as ``gen_ai.usage.cache_write.input_tokens``. Input tokens
 follow the conventions and include cached tokens. Claude Code reports Anthropic usage,
 where ``input_tokens`` excludes cache reads and writes, so for ``claude_code.*`` spans
 Kelpie stores ``input_tokens + cache_read_tokens + cache_creation_tokens``.
@@ -108,7 +109,7 @@ CLAUDE_CODE_SPANS: Mapping[str, SpanKind] = {
 MODEL = ("gen_ai.response.model", "gen_ai.request.model")
 INPUT_TOKENS = ("gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens")
 OUTPUT_TOKENS = ("gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens")
-CACHED_TOKENS = ("gen_ai.usage.cache_read.input_tokens",)
+CACHED_TOKENS = ("gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.cache_read_input_tokens")
 TOOL_NAME = ("gen_ai.tool.name",)
 ARGUMENTS = "gen_ai.tool.call.arguments"
 CC_MODEL = ("model",)

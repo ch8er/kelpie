@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -10,13 +11,16 @@ from typing import Any
 import pytest
 import yaml
 
+from kelpie.core.actions import Severity
 from kelpie.core.budgets import Price, PriceTable
-from kelpie.core.model import Snapshot, Span, SpanKind
+from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind
 from kelpie.core.serde import parse_datetime, parse_duration, snapshot_from_dict
 from kelpie.core.spans import Attribution, counted_llm, span_key
+from kelpie.core.states import OpenState
 from kelpie.report.daily import ReportInputs, build_report, render_markdown
 from kelpie.report.sections import SECTIONS, Section
 from kelpie.report.sections.tokens import tokens as tokens_section
+from kelpie.report.store import StateRow
 from kelpie.traces.tokens import (
     SessionSteps,
     Step,
@@ -143,7 +147,8 @@ def test_fixture_cache_growth_and_restarts() -> None:
         *session_roles(snapshot),
     )
     start = datetime(day.year, day.month, day.day, tzinfo=UTC)
-    found = restarts(every, start, start + timedelta(days=1))
+    abnormal = {x.id for x in snapshot.sessions if x.ended_at and x.final_status is None}
+    found = restarts(every, start, start + timedelta(days=1), abnormal)
     flat = [
         {
             "session": r.session.session_id,
@@ -172,8 +177,8 @@ def test_fixture_in_the_daily_report() -> None:
     assert breaks.usd == pytest.approx(126_000 * 2.7 / 1e6)
     assert breaks.tasks == ("T-T01",)
     restart = by_title["Resume developer tasks instead of restarting from zero"]
-    # eight steps: 236k input (182k of it cached), 4k output
-    assert restart.usd == pytest.approx((54_000 * 3 + 182_000 * 0.3 + 4_000 * 15) / 1e6)
+    # the 54k of context it got back to (below the earlier 60k), read once uncached
+    assert restart.usd == pytest.approx(54_000 * 3 / 1e6)
     assert restart.tasks == ("T-T02",)
     # the section's advice competes for the top 3: the three largest by dollars
     top = [a.title for a in report.recommendations]
@@ -332,18 +337,23 @@ def test_restart_needs_same_role_an_ended_predecessor_and_a_small_start() -> Non
 
     a = sess("A", "dev", T0, [10_000, 50_000])
     b = sess("B", "dev", T0 + timedelta(hours=1), [5_000, 20_000, 60_000])
-    found = restarts({"A": a, "B": b}, day, day + timedelta(days=1))
-    assert [(r.session.session_id, len(r.ramp)) for r in found] == [("B", 2)]
+    bad = {"A"}  # A left the task unfinished
+    found = restarts({"A": a, "B": b}, day, day + timedelta(days=1), bad)
+    assert [(r.session.session_id, len(r.ramp), r.tokens) for r in found] == [("B", 2, 20_000)]
+    # after a declared hand-off the next session is a normal one
+    assert restarts({"A": a, "B": b}, day, day + timedelta(days=1), set()) == []
     other_role = sess("B", "reviewer", T0 + timedelta(hours=1), [5_000])
-    assert restarts({"A": a, "B": other_role}, day, day + timedelta(days=1)) == []
+    assert restarts({"A": a, "B": other_role}, day, day + timedelta(days=1), bad) == []
     overlapping = sess("B", "dev", T0 + timedelta(minutes=1), [5_000])
-    assert restarts({"A": a, "B": overlapping}, day, day + timedelta(days=1)) == []
+    assert restarts({"A": a, "B": overlapping}, day, day + timedelta(days=1), bad) == []
     tomorrow = day + timedelta(days=1)
-    assert restarts({"A": a, "B": b}, tomorrow, tomorrow + timedelta(days=1)) == []
+    assert restarts({"A": a, "B": b}, tomorrow, tomorrow + timedelta(days=1), bad) == []
+    unknown = {k: replace(v, role="unknown") for k, v in {"A": a, "B": b}.items()}
+    assert restarts(unknown, day, day + timedelta(days=1), bad) == []
     # the ramp is at most as long as the earlier session
     long = sess("B", "dev", T0 + timedelta(hours=1), [1_000, 2_000, 3_000, 4_000])
-    [r] = restarts({"A": a, "B": long}, day, day + timedelta(days=1))
-    assert len(r.ramp) == 2
+    [r] = restarts({"A": a, "B": long}, day, day + timedelta(days=1), bad)
+    assert len(r.ramp) == 2 and r.tokens == 2_000
 
 
 def test_session_roles_fall_back_to_the_task_role() -> None:
@@ -428,12 +438,101 @@ def test_a_fixed_cached_prefix_is_a_partial_miss_with_its_own_advice() -> None:
         for i, n in enumerate(sizes)
     ]
     prices = PriceTable((("m", Price(input=3.0, output=15.0, cached_input=0.3)),))
-    inputs = ReportInputs(day=date(2026, 3, 2), tz=UTC, spans=spans, prices=prices)
+    inputs = ReportInputs(
+        day=date(2026, 3, 2),
+        tz=UTC,
+        spans=spans,
+        prices=prices,
+        owners=(Owner("dev-1", "dev"),),
+        sessions=(Session("S1", "T", "dev-1", T0),),
+    )
     report = build_report(inputs, ONLY)
     [section] = [s for s in report.sections if s.title == "Token optimization"]
     [advice] = section.advice
-    assert advice.title == "Cache the growing conversation for unknown on `m`"
+    assert advice.title == "Cache the growing conversation for dev on `m`"
     # four calls each re-read the previous prompt, 2k of it from the cache
     assert "Up to 152,000 tokens a day" in advice.detail
     assert advice.usd == pytest.approx(152_000 * 2.7 / 1e6)
     assert "**Restarts from zero**: none" in "\n".join(section.lines)
+
+
+def test_no_priced_caching_advice_for_a_model_that_never_reports_cache_reads() -> None:
+    sizes = [10_000, 30_000, 50_000, 70_000, 90_000]
+    spans = [
+        Span(
+            "t",
+            f"c{i}",
+            "chat",
+            SpanKind.LLM,
+            T0 + timedelta(minutes=i),
+            T0 + timedelta(minutes=i) + CALL,
+            session_id="S1",
+            model="m",
+            input_tokens=n,
+            output_tokens=10,
+        )
+        for i, n in enumerate(sizes)
+    ]
+    owners = (Owner("dev-1", "dev"),)
+    sessions = (Session("S1", "T", "dev-1", T0),)
+    prices = PriceTable((("m", Price(input=3.0, output=15.0, cached_input=0.3)),))
+    inputs = ReportInputs(
+        day=date(2026, 3, 2), tz=UTC, spans=spans, owners=owners, sessions=sessions, prices=prices
+    )
+    [section] = build_report(inputs, ONLY).sections
+    assert section.advice == ()
+    assert any("No call of `m` reported a cache read" in line for line in section.lines)
+    # one call of the same model elsewhere that reads from the cache: the misses are real
+    other = replace(spans[0], span_id="x", session_id="S2", cached_tokens=5_000)
+    inputs = replace(inputs, spans=[*spans, other])
+    [section] = build_report(inputs, ONLY).sections
+    assert [a.title for a in section.advice] == ["Turn on prompt caching for dev on `m`"]
+
+
+def test_unknown_roles_get_no_advice_and_cells_are_escaped() -> None:
+    data, snapshot = _load()
+    inputs = replace(_inputs(data, snapshot), owners=(), sessions=(), tasks=())
+    [section] = build_report(inputs, ONLY).sections
+    assert section.advice == ()
+    assert any(line.startswith("| unknown |") for line in section.lines)
+    roles = {"S-T01": "dev|ops"}
+    owners = (Owner("o", "dev|ops"),)
+    sessions = (Session("S-T01", "T-T01", "o", T0),)
+    inputs = replace(_inputs(data, snapshot), owners=owners, sessions=sessions, tasks=())
+    [section] = build_report(inputs, ONLY).sections
+    assert any(line.startswith("| dev\\|ops |") for line in section.lines), roles
+
+
+def test_openllmetry_cache_reads_are_mapped() -> None:
+    from tests.traces.test_semconv import one
+
+    s = one(
+        {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.usage.input_tokens": 9_000,
+            "gen_ai.usage.cache_read_input_tokens": 8_000,
+        }
+    )
+    assert (s.input_tokens, s.cached_tokens) == (9_000, 8_000)
+    assert "gen_ai.usage.cache_read_input_tokens" not in s.attributes
+
+
+def test_sessions_already_burned_as_chaos_get_no_token_advice() -> None:
+    data, snapshot = _load()
+    stuck = OpenState(
+        "no_progress:S-T01",
+        "no_progress",
+        T0,
+        T0,
+        T0 + timedelta(hours=2),
+        0,
+        Severity.WARNING,
+        "no progress",
+    )
+    inputs = replace(_inputs(data, snapshot), states=(StateRow(stuck),))
+    [section] = build_report(inputs, ONLY).sections
+    titles = {a.title for a in section.advice}
+    assert "Fix prompt-cache breaks for developer on `model-large`" not in titles
+    assert "Bound the context of developer sessions" not in titles
+    assert "Resume developer tasks instead of restarting from zero" in titles  # S-T03
+    assert any("step 6 of S-T01" in line for line in section.lines)  # still reported

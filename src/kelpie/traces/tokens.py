@@ -8,8 +8,13 @@ broke on step 7 of a session after a ``bash`` call, not which line of the system
 changed.
 
 **Steps.** The counted LLM spans of a session (nested instrumentations of the same call are
-left out, :func:`kelpie.core.spans.counted_llm`), in start order, are its steps. A step's
-input tokens are its context size (they include cached tokens).
+left out, :func:`kelpie.core.spans.counted_llm`), in start order, are its steps; step
+numbers count the session's calls within the analysed spans (the report's day). A step's
+input tokens are its context size: they include cached tokens, as in the GenAI conventions.
+Ingest normalizes Claude Code, which reports Anthropic usage (input without cache reads and
+writes); another instrumentation that passes Anthropic-native usage through unchanged
+reports cached tokens above input tokens, which are cut to the input here, so its hit rate
+reads too high.
 
 **Prompt cache.** Agent loops resend the previous prompt plus the newest messages, so a
 step can read from the cache about what the previous step sent:
@@ -19,7 +24,8 @@ the steps did not overlap (parallel calls) and the context did not shrink below
 ``compaction_ratio`` of the previous step (a compaction or a new conversation). A checked
 step misses when it read less than ``break_ratio`` of ``expected`` from the cache:
 
-- ``expired``: more than ``cache_ttl`` passed since the previous step;
+- ``expired``: more than ``cache_ttl`` passed since the previous step (5 minutes, the
+  common default cache lifetime; providers and paid options differ);
 - ``break``: the cache read dropped below ``break_ratio`` of the previous step's read, so
   the prefix changed (data that changes in the system prompt, tools in another order, an
   edited earlier message);
@@ -29,18 +35,26 @@ step misses when it read less than ``break_ratio`` of ``expected`` from the cach
 The hit rate per role and model is cached over input tokens of all its steps. The missed
 tokens of a step are ``expected - cached``; they are priced as the difference between
 uncached and cached input (cache-write premiums are not counted, so it is an upper bound).
+A model that never reports a cache read anywhere in the traces may be one whose provider or
+instrumentation does not report them: :func:`reports_cache` tells the report so, and it
+does not price "turn caching on" for it.
 
 **Context growth.** Per session: the context at the first, peak and last step and the mean
 change per step (compactions left out). A session *runs away* when it has at least
 ``min_steps`` steps and its last context is at least ``runaway_tokens`` and
 ``runaway_factor`` times its first: it never compacted. The saving of compacting or handing
-off at ``compact_at`` is the context above it, re-read on every later step.
+off at ``compact_at`` is at most the context above it, re-read on every later step; the
+compaction's own call (a summary) is not counted, and the same steps' cache misses are
+counted again under the prompt cache: the two are not additive.
 
 **Restarts from zero.** A session of a task, started after an earlier session of the same
-task and role ended, whose first context is below ``from_zero_ratio`` of where the earlier
-one stopped: the work was not resumed but rebuilt. Burned are its steps until its context
-reaches the earlier session's last context, at most as many steps as the earlier session
-took: an estimate of re-reading what was already known.
+task and role ended *abnormally* (``abnormal``: it declared no real end, or Kelpie requeued
+it), whose first context is below ``from_zero_ratio`` of where the earlier one stopped: the
+work was not resumed but rebuilt. A session that follows a declared hand-off is a normal
+next session, and sessions of an unknown role are left out. The *ramp* is its steps until
+its context reaches the earlier session's last context, at most as many steps as the
+earlier session took. Burned is the context re-acquired, once: ``min(earlier last context,
+largest ramp context)`` input tokens, a lower bound on re-reading what was already known.
 """
 
 from __future__ import annotations
@@ -48,7 +62,7 @@ from __future__ import annotations
 import statistics
 from bisect import bisect_left
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from itertools import pairwise
@@ -190,10 +204,14 @@ class Restart:
 
     @property
     def tokens(self) -> int:
-        return sum(s.input_tokens + s.output_tokens for s in self.ramp)
+        """The context re-acquired, counted once."""
+        reached = self.previous.steps[-1].input_tokens
+        return min(reached, max(s.input_tokens for s in self.ramp))
 
     def usage(self) -> tuple[TokenUsage, ...]:
-        return tuple(s.usage(self.session.task_id) for s in self.ramp)
+        """The re-acquired context as uncached input of the session's first model."""
+        s = self.session
+        return (TokenUsage(s.session_id, s.task_id, s.steps[0].model, 0, self.tokens, 0, 0),)
 
 
 # --- steps -------------------------------------------------------------------------------
@@ -418,6 +436,14 @@ def context_growth(
     return out
 
 
+def reports_cache(spans: Iterable[Span], counted: Mapping[SpanKey, str | None]) -> set[str]:
+    """Models with at least one counted call that reported a cache read: their provider and
+    instrumentation report cache tokens, so zero reads elsewhere are real misses."""
+    return {
+        model for span in spans if span.cached_tokens > 0 and (model := counted.get(span_key(span)))
+    }
+
+
 def excess_tokens(growth: Growth) -> int:
     return sum(u.input_tokens for u in growth.excess)
 
@@ -429,15 +455,17 @@ def restarts(
     sessions: Mapping[str, SessionSteps],
     start: datetime,
     end: datetime,
+    abnormal: Collection[str],
     settings: TokenSettings | None = None,
 ) -> list[Restart]:
     """Sessions that started within ``[start, end)`` and rebuilt from zero what an earlier
-    session of the same task and role had (see the module docs). ``sessions`` should reach
-    back far enough to hold the earlier ones."""
+    session of the same task and role had, after it ended abnormally (session ids in
+    ``abnormal``; see the module docs). ``sessions`` should reach back far enough to hold
+    the earlier ones."""
     cfg = settings or TokenSettings()
     by_task: dict[tuple[str, str], list[SessionSteps]] = defaultdict(list)
     for s in sessions.values():
-        if s.task_id and s.steps:
+        if s.task_id and s.steps and s.role != UNKNOWN_ROLE:
             by_task[(s.task_id, s.role)].append(s)
     out: list[Restart] = []
     for group in by_task.values():
@@ -449,6 +477,8 @@ def restarts(
             if not earlier:
                 continue
             previous = max(earlier, key=lambda p: (p.end, p.session_id))
+            if previous.session_id not in abnormal:
+                continue  # a declared hand-off: a normal next session
             reached = previous.steps[-1].input_tokens
             if current.steps[0].input_tokens >= cfg.from_zero_ratio * reached:
                 continue  # resumed with its context

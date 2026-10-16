@@ -58,7 +58,7 @@ calls:
      tools: {6: load_skill, 9: load_skill},
      input: [10000, 20000, 30000, 40000, 50000, 60000, 70000, 80000, 90000, 100000, 110000,
              120000]}
-  # The day before: stopped at 60k.
+  # The day before: stopped at 60k and ended without a final status.
   - {session: S-T02, task: T-T02, model: model-large, start: "2026-03-01T14:00:00+00:00",
      every: 2m, output: 500, cached: previous,
      input: [4000, 12000, 20000, 28000, 36000, 44000, 52000, 60000]}
@@ -94,7 +94,7 @@ expected:
   break_hint_contains: "`load_skill` (2 of 2)"
   runaway: [S-T01]
   restarts:
-    - {session: S-T03, previous: S-T02, steps: 8, tokens: 240000}
+    - {session: S-T03, previous: S-T02, steps: 8, tokens: 54000}
   advice:
     - "Fix prompt-cache breaks for developer on `model-large`"
     - "Keep the prompt cache warm for reviewer on `model-small`"

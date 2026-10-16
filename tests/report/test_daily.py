@@ -256,9 +256,7 @@ def sources(db: Path, **kw: Any) -> ReportSources:
     )
 
 
-def test_cost_of_chaos_day(db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # built-in parts only: section builders (kelpie.report.sections) have their own tests
-    monkeypatch.setattr("kelpie.report.daily.SECTIONS", {})
+def test_cost_of_chaos_day(db: Path) -> None:
     report, markdown = generate(sources(db), DAY, BOARD)
     chaos = {c.rule: c for c in report.chaos}
     assert set(chaos) == {"orphan_status", "stale_blocks", "no_progress", "exit_contract"}
