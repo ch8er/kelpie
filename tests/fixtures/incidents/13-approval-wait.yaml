@@ -1,0 +1,67 @@
+id: "13-approval-wait"
+incident: 13
+title: "Agents wait for a person's input, and nobody is told"
+description: >
+  Two agents blocked their tasks to ask a person: one needed a decision on the staging
+  region, the other a production database grant. The blocks sat in the board for an hour
+  and two, and the agents idled. Kelpie gathers such waits per person, routing them by the
+  agent's role or to a default approver, and escalates each person's inbox sorted by cost of
+  delay. A fresh question (10 minutes old) and a block that waits for CI, not for a person,
+  are the distractors.
+rule: needs_you
+config:
+  approval_wait_after: "30m"
+  approvers: {ops: human-owner}
+  default_approver: human-lead
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: human-owner, role: owner, kind: human}
+    - {id: human-lead, role: lead, kind: human}
+    - {id: agent-ops-1, role: ops}
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+  tasks:
+    - id: T-1351
+      title: "Provision staging cluster"
+      status: blocked
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block: {reason: "waiting_human: needs_input: which region for staging?", since: "2026-03-02T13:00:00+00:00"}
+    - id: T-1352
+      title: "Backfill invoices table"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: capability: needs a production database grant", since: "2026-03-02T12:00:00+00:00"}
+    # Distractors: asked 10 minutes ago; and a block that waits for CI, not for a person.
+    - id: T-1353
+      title: "Rename feature flag"
+      status: blocked
+      status_since: "2026-03-02T13:50:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "waiting_human: needs_input: keep the old flag?", since: "2026-03-02T13:50:00+00:00"}
+    - id: T-1354
+      title: "Fix flaky login test"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "guard: CI red on the base branch", since: "2026-03-02T10:00:00+00:00"}
+expected_actions:
+  - kind: escalate
+    reason_contains: "Needs you (human-owner)"
+    params: {escalate_to: human-owner, approvals: [T-1351], human_tasks: []}
+  - kind: escalate
+    reason_contains: "Needs you (human-lead)"
+    params: {escalate_to: human-lead, approvals: [T-1352]}
+not_expected_actions:
+  - kind: escalate
+    params: {approvals: [T-1353]}
+  - kind: escalate
+    params: {approvals: [T-1354]}
+  - kind: escalate
+    params: {approvals: [T-1351, T-1352]}

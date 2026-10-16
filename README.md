@@ -189,7 +189,7 @@ P0 is the MVP; P1 and P2 rules are backlog.
 | – | Return causes (P1) | Root-cause analysis of task returns from traces → recommendation | 7 |
 | 12 | Conflict warning | Two live tasks editing the same files → comment on both; optionally hold the later one until the earlier is done (files from the task's worktree on Hermes) | 7 |
 | – | Dispatch gate | A ready task whose prerequisite is not met (a referenced PR red or not merged, a parent task not done) → parked in waiting on it; rule 2 wakes it | field |
-| 13 | "Needs you" inbox (P1) | Everything waiting for a human, sorted by cost of delay; agents waiting for approval too long | 13 |
+| 13 | "Needs you" inbox (P1) | Per person: human tasks with agent work behind them and agents waiting for their input or approval, sorted by cost of delay (agent-hours waited) → one escalation per person | 13 |
 | 14 | Compaction gate (P2) | Agent acts against the task's gate right after a context compaction | field |
 
 P1 also extends rule 1 ("done" requires evidence; reopened-after-done rate) and rule 3 (stop

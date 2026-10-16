@@ -1,0 +1,331 @@
+"""Rule 13 — the "needs you" inbox (incident 13).
+
+Everything on the farm that waits for a person, gathered per person and sorted by cost of
+delay, so the human sees one list instead of scattered blocks:
+
+- **Human tasks with agent work behind them.** An open task owned by a human
+  (:attr:`~kelpie.core.model.OwnerKind.HUMAN`) that agent tasks wait on, through
+  dependencies or the ``human_task`` conditions of blocked and waiting tasks, transitively
+  (the same graph as rule 6's :func:`~kelpie.rules.bottlenecks.human_gates`), and that is
+  the person's to move now: ready or in progress with nothing open before it, or blocked
+  or waiting itself (the person chases what blocks it). It enters the inbox once agent
+  work waiting on it has waited ``human_wait_alert_after`` (1h). Human tasks with nothing
+  behind them never do.
+- **Agents waiting for a person's input or approval.** An agent task blocked with a reason
+  that starts with one of ``approval_reasons`` (``waiting_human``, Hermes' typed blocks
+  ``needs_input``, ``approval``, ...), unless its block is a human task's (a ``human_task``
+  condition, or a direct dependency on a human task the person can move), once it has
+  waited ``approval_wait_after`` (30m). Its human is ``approvers[role]``, else
+  ``default_approver``; without either it is listed under ``unassigned``.
+
+**Cost of delay** of an item: the agent-hours spent waiting on it so far, the sum over the
+agent tasks that wait on it directly of how long each has waited: a parked task whose wait
+is a ``human_task`` condition naming it, or that depends on it with a block that asks a
+person (``approval_reasons``), since it was parked; a
+ready or backlog task that depends on it since its last status change (platforms keep
+dependents in the backlog until their parents finish). Everything else behind it (deeper
+in the chain, in progress, or parked for another reason such as CI) is held but waits on
+something else first: it counts in the number of agent tasks behind the item, not in its
+cost. Items are sorted by cost; so are the people, each waiting task counted once with its
+longest wait.
+
+**Actions.** One ``escalate`` per person, addressed to them (``escalate_to``), listing their
+items in order, as a long-lived state (``needs_you:<person>``): announced when it opens,
+again when the list changes or at the escalation thresholds, resolved when it is empty.
+Severity is ``critical`` once the person's total cost reaches ``critical_after_hours``
+(24), else ``warning``.
+
+The state's key is the person's list of task ids, so any change to it, an item added or
+one done, is announced as "changed" with the new list; an emptied inbox resolves.
+``escalate_to`` names the person in the alert and the report; delivery goes to the
+configured alert channels like every other alert (no per-person routing yet).
+
+Rule 6 also escalates a single human task with ``human_gate_min_tasks`` (3) or more agent
+tasks behind it, as part of the farm's critical path (the P0 part of incident 16). Set its
+``escalate_human_gates = false`` to leave human work to this inbox, one message per person.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any
+
+from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.conditions import linked_conditions
+from kelpie.core.model import ConditionKind, OwnerKind, Snapshot, Status, Task
+from kelpie.core.serde import parse_duration
+from kelpie.rules import register
+from kelpie.rules.bottlenecks import HumanGate, human_gates
+
+NAME = "needs_you"
+UNASSIGNED = "unassigned"
+DEFAULT_APPROVAL_REASONS = ("waiting_human", "needs_input", "approval")
+TRANSIENT = re.compile(r"waiting_human:\s*transient\b")
+STOPPED = "stopped by kelpie"  # Hermes stop (adapters/hermes/stop.py): a human unblocks it
+_SHOWN = 5
+_FROZEN = frozenset({Status.BLOCKED, Status.WAITING})
+
+
+@dataclass(frozen=True, slots=True)
+class Item:
+    kind: str  # "human_task" | "approval"
+    task: Task
+    behind: tuple[str, ...]  # agent tasks waiting on it (the task itself for an approval)
+    waiting: timedelta  # how long the longest of them has waited
+    cost_hours: float  # agent-hours waited, summed over its waiting agent tasks
+    waits: Mapping[str, timedelta] = field(default_factory=dict)  # waiting task -> how long
+
+    def describe(self) -> str:
+        hours = f"{self.cost_hours:.1f} agent-hours"
+        if self.kind == "approval":
+            what = (
+                "was stopped by Kelpie and needs unblocking"
+                if _stopped(self.task)
+                else ("waits for your input")
+            )
+            return f"{self.task.id} ('{self.task.title}') {what}: {hours}"
+        state = ""
+        if self.task.status in _FROZEN:
+            why = f": {self.task.block.reason}" if self.task.block is not None else ""
+            state = f"is {self.task.status}{why}, and "
+        return (
+            f"{self.task.id} ('{self.task.title}') {state}holds {len(self.behind)} agent task(s) "
+            f"({', '.join(self.behind[:_SHOWN])}{'...' if len(self.behind) > _SHOWN else ''})"
+            f": {hours}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NeedsYou:
+    human_wait_alert_after: timedelta = timedelta(hours=1)
+    approval_wait_after: timedelta = timedelta(minutes=30)
+    approval_reasons: tuple[str, ...] = DEFAULT_APPROVAL_REASONS
+    approvers: Mapping[str, str] = field(default_factory=dict)  # agent role -> human
+    default_approver: str | None = None
+    critical_after_hours: float = 24.0
+    name: str = NAME
+
+    def evaluate(self, snapshot: Snapshot) -> list[Action]:
+        roles = {o.id: o.role for o in snapshot.owners}
+        inbox: dict[str, list[Item]] = {}
+        found, claimed = self._human_tasks(snapshot, human_gates(snapshot))
+        for item in found:
+            inbox.setdefault(item.task.owner_id or UNASSIGNED, []).append(item)
+        for item in self._approvals(snapshot, claimed):
+            inbox.setdefault(self._approver(item.task, roles) or UNASSIGNED, []).append(item)
+        ranked = sorted(inbox.items(), key=lambda kv: (-_total(kv[1]), kv[0]))
+        return [self._escalate(person, items, snapshot.now) for person, items in ranked]
+
+    def _human_tasks(
+        self, snapshot: Snapshot, gates: list[HumanGate]
+    ) -> tuple[list[Item], set[str]]:
+        """Human tasks that are the person's to move now, whose agent work has waited long
+        enough: ready or in progress with nothing open before them (like rule 6), or
+        blocked or waiting themselves (the person chases what blocks them). Also the agent
+        tasks whose wait is a human task's: linked to any human task by a condition, or
+        waiting directly on one the person can move, listed or not yet. They are not
+        approvals of their own."""
+        by_id = {t.id: t for t in snapshot.tasks}
+        open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
+        items = []
+        claimed: set[str] = set()
+        for gate in gates:
+            direct = _direct_waiters(gate.task.id, snapshot)
+            claimed.update(tid for tid, how in direct.items() if how == "condition")
+            if not gate.actionable and not _stuck_on_its_own(gate.task, snapshot, open_ids):
+                continue  # agent work comes first: not the person's bottleneck today
+            waits = {
+                tid: w
+                for tid in gate.behind
+                if (w := self._waiting(by_id[tid], snapshot.now, direct)) is not None
+            }
+            claimed.update(waits)
+            if not waits or max(waits.values()) < self.human_wait_alert_after:
+                continue  # only follow-up work behind it, or not long enough
+            cost = sum(w.total_seconds() for w in waits.values()) / 3600
+            items.append(
+                Item("human_task", gate.task, gate.behind, max(waits.values()), cost, waits)
+            )
+        return items, claimed
+
+    def _waiting(self, task: Task, now: datetime, direct: Mapping[str, str]) -> timedelta | None:
+        """How long an agent task has waited on the human task: a parked task linked to it
+        by a condition, or depending on it with a block that asks a person, since it was
+        parked; a ready or backlog task that depends on it directly since its last status
+        change (platforms keep dependents in the backlog until their parents finish). None
+        for everything else behind it, deeper in the chain, in progress, or parked for
+        another reason (CI, a provider): it is held, but its wait is not this human task's
+        cost."""
+        how = direct.get(task.id)
+        if task.status in _FROZEN and (
+            how == "condition"
+            or (
+                how == "dependency"
+                and task.block is not None
+                and _asks_a_person(task.block.reason, self.approval_reasons)
+            )
+        ):
+            since = task.block.since if task.block is not None else task.status_since
+        elif how == "dependency" and task.status in {Status.READY, Status.BACKLOG}:
+            since = task.status_since
+        else:
+            return None
+        return max(now - since, timedelta(0))
+
+    def _approvals(self, snapshot: Snapshot, claimed: set[str]) -> list[Item]:
+        humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
+        items = []
+        for t in snapshot.tasks:
+            if t.status is not Status.BLOCKED or t.block is None or t.owner_id in humans:
+                continue
+            if t.id in claimed:
+                continue  # it waits on a human task directly: listed under that task
+            if not _asks_a_person(t.block.reason, self.approval_reasons):
+                continue
+            waited = snapshot.now - t.block.since
+            if waited < self.approval_wait_after:
+                continue
+            hours = waited.total_seconds() / 3600
+            items.append(Item("approval", t, (t.id,), waited, hours, {t.id: waited}))
+        return items
+
+    def _approver(self, task: Task, roles: Mapping[str, str]) -> str | None:
+        role = task.role or (roles.get(task.owner_id) if task.owner_id else None)
+        return (self.approvers.get(role) if role else None) or self.default_approver
+
+    def _escalate(self, person: str, items: list[Item], now: datetime) -> Action:
+        items = sorted(items, key=lambda i: (-i.cost_hours, i.task.id))
+        total = _total(items)
+        blocked = sorted({tid for i in items for tid in i.behind})
+        since = now - max(i.waiting for i in items)
+        severity = Severity.CRITICAL if total >= self.critical_after_hours else Severity.WARNING
+        listed = "; ".join(i.describe() for i in items[:_SHOWN])
+        more = f"; and {len(items) - _SHOWN} more" if len(items) > _SHOWN else ""
+        who = "Nobody is assigned to approve these" if person == UNASSIGNED else person
+        return Action(
+            ActionKind.ESCALATE,
+            NAME,
+            f"Needs you ({who}): {len(items)} item(s) hold {len(blocked)} agent task(s), "
+            f"{total:.1f} agent-hours waited so far. By cost of delay: {listed}{more}.",
+            severity=severity,
+            key=f"{NAME}:{person}:{','.join(sorted(i.task.id for i in items))}",
+            state=f"{NAME}:{person}",
+            since=since,
+            params={
+                "escalate_to": None if person == UNASSIGNED else person,
+                "human_tasks": [i.task.id for i in items if i.kind == "human_task"],
+                "approvals": [i.task.id for i in items if i.kind == "approval"],
+                "blocked_agent_tasks": len(blocked),
+                "cost_hours": round(total, 1),
+                "items": [
+                    {
+                        "kind": i.kind,
+                        "task": i.task.id,
+                        "title": i.task.title,
+                        "behind": list(i.behind[: _SHOWN * 2]),
+                        "waiting_minutes": int(i.waiting.total_seconds() // 60),
+                        "cost_hours": round(i.cost_hours, 1),
+                    }
+                    for i in items[: _SHOWN * 2]
+                ],
+            },
+        )
+
+
+def _direct_waiters(human_task: str, snapshot: Snapshot) -> dict[str, str]:
+    """Agent tasks that wait on ``human_task`` itself, by how: ``"condition"`` for a parked
+    task whose current wait is an unmet ``human_task`` condition naming it, ``"dependency"``
+    for a task that depends on it directly."""
+    found = {d.task_id: "dependency" for d in snapshot.dependencies if d.depends_on == human_task}
+    for t in snapshot.tasks:
+        if t.status in _FROZEN and any(
+            c.kind is ConditionKind.HUMAN_TASK
+            and c.satisfied is not True
+            and c.params.get("task") == human_task
+            for c in linked_conditions(t, snapshot)[0]
+        ):
+            found[t.id] = "condition"
+    return found
+
+
+def _stuck_on_its_own(task: Task, snapshot: Snapshot, open_ids: set[str]) -> bool:
+    """A blocked or waiting human task with nothing open before it."""
+    return task.status in _FROZEN and not any(
+        d.task_id == task.id and d.depends_on in open_ids for d in snapshot.dependencies
+    )
+
+
+def _total(items: Sequence[Item]) -> float:
+    """A person's cost of delay: each waiting agent task once, with its longest wait (a
+    task behind two of their human tasks is not counted twice)."""
+    longest: dict[str, timedelta] = {}
+    for item in items:
+        for tid, w in item.waits.items():
+            longest[tid] = max(w, longest.get(tid, w))
+    return sum(w.total_seconds() for w in longest.values()) / 3600
+
+
+def _asks_a_person(reason: str, prefixes: Sequence[str]) -> bool:
+    """The block reason starts with one of ``prefixes`` as a whole word (``waiting_human:``,
+    ``needs_input ...``), not as part of a longer one (``approved``, ``needs_input_x``).
+    Hermes' ``transient`` blocks wait for the outside world, not for a person."""
+    text = reason.strip().lower()
+    if TRANSIENT.match(text):
+        return False
+    return any(re.match(rf"{re.escape(p)}(?![\w-])", text) for p in prefixes)
+
+
+def _stopped(task: Task) -> bool:
+    return task.block is not None and STOPPED in task.block.reason.lower()
+
+
+def _duration(value: Any, what: str) -> timedelta:
+    try:
+        found = parse_duration(value)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{what}: {exc}") from exc
+    if found <= timedelta(0):
+        raise ValueError(f"{what} must be positive")
+    return found
+
+
+@register(NAME)
+def build(config: dict[str, Any]) -> NeedsYou:
+    config = dict(config)
+    kwargs: dict[str, Any] = {}
+    for key in ("human_wait_alert_after", "approval_wait_after"):
+        if key in config:
+            kwargs[key] = _duration(config.pop(key), key)
+    if "approval_reasons" in config:
+        reasons = config.pop("approval_reasons")
+        if (
+            not isinstance(reasons, list)
+            or not reasons
+            or not all(isinstance(r, str) and r.strip() for r in reasons)
+        ):
+            raise ValueError("approval_reasons must be a non-empty list of strings")
+        kwargs["approval_reasons"] = tuple(r.strip().lower() for r in reasons)
+    if "approvers" in config:
+        approvers = config.pop("approvers")
+        if not isinstance(approvers, Mapping) or not all(
+            isinstance(k, str) and k and isinstance(v, str) and v.strip()
+            for k, v in approvers.items()
+        ):
+            raise ValueError("approvers must map agent roles to human owner ids")
+        kwargs["approvers"] = {k: v.strip() for k, v in approvers.items()}
+    if "default_approver" in config:
+        default = config.pop("default_approver")
+        if not isinstance(default, str) or not default.strip():
+            raise ValueError("default_approver must be a human owner id")
+        kwargs["default_approver"] = default.strip()
+    if "critical_after_hours" in config:
+        hours = config.pop("critical_after_hours")
+        if isinstance(hours, bool) or not isinstance(hours, int | float) or hours <= 0:
+            raise ValueError("critical_after_hours must be a positive number")
+        kwargs["critical_after_hours"] = float(hours)
+    if config:
+        raise ValueError(f"unknown parameters: {sorted(config)}")
+    return NeedsYou(**kwargs)

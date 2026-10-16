@@ -58,7 +58,7 @@ from typing import Any
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.ledger import LedgerEntry, Outcome
+from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
 from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.spans import (
     Attribution,
@@ -206,6 +206,16 @@ class FixLine:
 
 
 @dataclass(frozen=True, slots=True)
+class InboxLine:
+    """One person's "needs you" inbox (rule 13), as its latest escalation describes it."""
+
+    person: str | None  # None: nobody assigned
+    cost_hours: float
+    tasks: tuple[str, ...]  # human tasks and approvals, by cost of delay
+    blocked_agent_tasks: int
+
+
+@dataclass(frozen=True, slots=True)
 class OpenLine:
     state: OpenState
     open_hours: float  # from ``since`` to the end of the day (or last seen, if earlier)
@@ -232,6 +242,7 @@ class DailyReport:
     tz: tzinfo = UTC  # times are shown in the report's time zone
     verifications: tuple[Verification, ...] = ()  # fixes of the day and the day before
     sections: tuple[Section, ...] = ()  # from kelpie.report.sections builders
+    inbox: tuple[InboxLine, ...] = ()  # rule 13, per person, by cost of delay
 
     @property
     def chaos_hours(self) -> float:
@@ -279,6 +290,7 @@ def build_report(
     chaos = _chaos(inputs, actions, spans, counted, pricer, start, end)
     fixed, would_fix, not_done = _actions(actions)
     open_states = _open_states(inputs.states, end)
+    inbox = _inbox(inputs.actions, open_states, end)
     filters, groups = _outputs(inputs, end, spans)
     completed = tuple(
         sorted(
@@ -320,6 +332,7 @@ def build_report(
         would_fix=would_fix,
         not_done=not_done,
         open_states=open_states,
+        inbox=inbox,
         offenders=tuple(r for r in filters if r.repeated),
         outputs=tuple(groups[:5]),
         recommendations=advice,
@@ -900,10 +913,60 @@ def _fix_lines(lines: Sequence[FixLine], tasks: _TaskLinks) -> list[str]:
     return [f"- `{f.rule}`: {f.kind} x{f.count} {tasks(f.tasks)}".rstrip() for f in lines]
 
 
+def _inbox(
+    entries: Sequence[LedgerEntry], open_states: Sequence[OpenLine], end: datetime
+) -> tuple[InboxLine, ...]:
+    """Rule 13's open inboxes at the end of the day, the most costly person first, from
+    the latest escalation of each (its params carry the sorted items). An inbox that stays
+    unchanged is not announced again, but the engine still records it about hourly as a
+    suppressed ``state_open`` entry with fresh params: those count too."""
+    open_ids = {o.state.id for o in open_states if o.state.rule == "needs_you"}
+    latest: dict[str, LedgerEntry] = {}
+    for e in entries:
+        if e.rule != "needs_you" or e.at >= end:
+            continue
+        if e.outcome is Outcome.SUPPRESSED and e.suppression is not Suppression.STATE_OPEN:
+            continue  # a cooldown or rate-limit repeat, not the state's latest view
+        person = e.params.get("escalate_to")
+        state = f"needs_you:{person if isinstance(person, str) else 'unassigned'}"
+        if state in open_ids and (state not in latest or e.at >= latest[state].at):
+            latest[state] = e
+    out = []
+    for e in latest.values():
+        items = e.params.get("items")
+        ids = (
+            tuple(str(i["task"]) for i in items if isinstance(i, dict) and "task" in i)
+            if isinstance(items, list)
+            else ()
+        )
+        cost = e.params.get("cost_hours")
+        blocked = e.params.get("blocked_agent_tasks")
+        person = e.params.get("escalate_to")
+        out.append(
+            InboxLine(
+                person if isinstance(person, str) else None,
+                float(cost) if isinstance(cost, int | float) else 0.0,
+                ids,
+                int(blocked) if isinstance(blocked, int) else 0,
+            )
+        )
+    out.sort(key=lambda i: (-i.cost_hours, i.person or ""))
+    return tuple(out)
+
+
 def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
     out = []
+    for i in report.inbox:
+        who = i.person or "nobody assigned"
+        out.append(
+            f"- **Needs you, {who}**: {i.cost_hours:.1f} agent-hours waited, "
+            f"{i.blocked_agent_tasks} agent task(s) held; by cost of delay: {tasks(i.tasks)}"
+        )
+    listed = {f"needs_you:{i.person or 'unassigned'}" for i in report.inbox}
     for o in report.open_states:
         s = o.state
+        if s.id in listed:
+            continue  # shown above as the person's inbox
         task = f" {tasks((s.task_id,))}" if s.task_id else ""
         level = f", escalation {s.level}" if s.level else ""
         out.append(

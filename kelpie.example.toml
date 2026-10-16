@@ -29,16 +29,27 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # min_idle_time = "30m"     # an agent counts as idle this long after its last session
 # idle_alert_after = "30m"  # ...and alerts once ready work it could take waited this long
 # slots = 5                 # optional farm concurrency limit: full slots are not idle capacity
-# human_gate_min_tasks = 3  # escalate a human task with this many agent tasks behind it
+# human_gate_min_tasks = 3  # a human task with this many agent tasks behind it is a gate
 # human_gate_after = "1h"   # ...once it has been ready (or in progress) this long
 # ready_is_queued = false   # true on Hermes: assigned ready tasks nobody started are queued
 #                           # work of their role, not a busy owner
+# escalate_human_gates = true  # false: leave human tasks to the needs_you inbox (one
+#                              # message per person instead of one per gate)
 # hold_labels = []          # labels that park tasks on purpose; no expiry unless hold_expiry
 # hold_expiry = "4h"        # optional: expected length of a hold without its own expires_after
 # [[engine.rules.bottlenecks.holds]]   # a label that parks tasks on purpose
 # label = "merge-hold"
 # owner = "human-owner"     # named in the alert when the hold looks forgotten
 # expires_after = "2h30m"
+#
+# [engine.rules.needs_you]
+# human_wait_alert_after = "1h"  # a human task enters its owner's inbox once agent work behind
+#                                # it has waited this long
+# approval_wait_after = "30m"    # an agent blocked for a person's input or approval, after this
+# approval_reasons = ["waiting_human", "needs_input", "approval"]  # block reason prefixes
+# approvers = { ops = "human-lead" }  # agent role -> the human who answers its questions
+# default_approver = "human-owner"    # otherwise this human; without either: "unassigned"
+# critical_after_hours = 24      # critical once a person's agent-hours waited reach this
 #
 # [engine.rules.conflict_warning]
 # expected_shared = ["CHANGELOG.md"]  # glob patterns of files many tasks are meant to edit
