@@ -70,6 +70,9 @@ PLANNED: tuple[PlannedRule, ...] = (
     PlannedRule("needs_you", 13, _P1, "Everything waiting for a human, by cost of delay", (13,)),
     PlannedRule("compaction_gate", 14, _P2, "Gate violated right after context compaction"),
     PlannedRule("return_causes", None, _P1, "Root causes of task returns -> recommendation", (7,)),
+    PlannedRule(
+        "output_offenders", None, _P1, "Repeated huge tool outputs -> comment to instructions owner"
+    ),
 )
 
 

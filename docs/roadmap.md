@@ -628,7 +628,7 @@ context on every run. Find them in traces and recommend a filter.
 - [x] Tool calls ranked by output tokens per role and command prefix (redacted, no raw output stored)
 - [x] Commands above a threshold get a filter recommendation from a config table: RTK (github.com/rtk-ai/rtk) where it supports the platform, otherwise e.g. `xcbeautify`, errors only, tail; Kelpie does not build its own filter
 - [x] Before/after: tokens per command prefix compared across the day a filter was introduced
-- [ ] Repeated offenders → `comment` addressed to the owner of the role's instructions (listed under "needs a human" in the daily report; the `comment` action needs a rule)
+- [x] Repeated offenders → `comment` addressed to the owner of the role's instructions (listed under "needs a human" in the daily report; rule `output_offenders`)
 - [x] Estimated savings in the daily report
 - [x] Fixtures: new `field-05-build-log-flood.yaml`
 

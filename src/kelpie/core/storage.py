@@ -565,6 +565,13 @@ class SqliteSpanStore:
         sql = f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? ORDER BY start, rowid_"
         return [_span(r) for r in self._read(sql, (_ts(after),))]
 
+    def tool_spans_since(self, after: datetime) -> Sequence[Span]:
+        sql = (
+            f"SELECT {_SPAN_COLUMNS} FROM spans INDEXED BY spans_last"
+            " WHERE last_at >= ? AND kind = 'tool' ORDER BY start, rowid_"
+        )
+        return [_span(r) for r in self._read(sql, (_ts(after),))]
+
     def changes(self, after: datetime, since: int) -> SpanChanges:
         sql = (
             f"SELECT {_SPAN_COLUMNS} FROM spans WHERE version > ? AND last_at >= ?"

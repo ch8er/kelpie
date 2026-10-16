@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from fnmatch import fnmatchcase
 
-from kelpie.core.model import Snapshot, Span, SpanKind
+from kelpie.core.model import OutputOffender, Snapshot, Span, SpanKind
 from kelpie.core.spans import Attribution
 from kelpie.traces.command import command_prefix, detect_filter
 from kelpie.traces.semconv import (
@@ -430,6 +430,35 @@ def recommend(
         )
     out.sort(key=lambda r: (-r.saved_tokens, r.group.key, r.group.role or ""))
     return out
+
+
+def repeated_offenders(
+    found: Sequence[Call], settings: OutputSettings | None = None, tz: tzinfo = UTC
+) -> tuple[OutputOffender, ...]:
+    """The repeated offenders among ``found`` (:func:`rank` and :func:`recommend`, as the
+    daily report lists them), for the snapshot rules read."""
+    settings = settings or OutputSettings()
+    latest: dict[tuple[str | None, str], str] = {}
+    for c in found:  # in time order
+        if c.filter is None and c.task_id:
+            latest[(c.role, c.key)] = c.task_id
+    return tuple(
+        OutputOffender(
+            role=r.group.role,
+            command=r.group.key,
+            filter=r.filter.name,
+            how=r.filter.how,
+            days=len(r.group.hot_days),
+            calls=r.group.calls,
+            mean_tokens=round(r.group.mean, 1),
+            saved_tokens=r.saved_tokens,
+            owner=r.owner,
+            tasks=r.group.tasks,
+            latest_task=latest.get((r.group.role, r.group.key)),
+        )
+        for r in recommend(rank(found, settings, tz), settings)
+        if r.repeated
+    )
 
 
 def _choose(group: OutputGroup, filters: Sequence[Filter]) -> tuple[Filter, bool] | None:

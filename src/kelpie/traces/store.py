@@ -12,17 +12,20 @@ import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
+from datetime import time as clock_time
 from typing import Protocol
 
-from kelpie.core.model import Session, Span, SpanTotals, Task
+from kelpie.core.model import OutputOffender, Session, Snapshot, Span, SpanTotals, Task
 from kelpie.core.spans import Attribution, SpanKey, SpanStore, TokenUsage, last_at, span_key
+from kelpie.traces.outputs import OutputSettings, calls, repeated_offenders, session_context
 
 log = logging.getLogger(__name__)
 
 PRUNE_EVERY = timedelta(hours=1)
 DEFAULT_MAX_SNAPSHOT_SPANS = 50_000
 TOTALS_EVERY = timedelta(minutes=1)
+OFFENDERS_EVERY = timedelta(hours=1)
 
 
 class StoreObserver(Protocol):
@@ -134,6 +137,36 @@ class SpanWindow:
             with self._lock:
                 self._attribution_at = None  # read again next time
         return written
+
+
+@dataclass(slots=True)
+class OffenderWatch:
+    """Repeated huge-output offenders for the snapshot (rule ``output_offenders``): tool
+    calls of the last ``repeat_days`` calendar days in ``tz`` (the report's days), ranked
+    the way the daily report ranks them. Recomputed at most every ``every`` of snapshot
+    time: offenders change by the day, and the read covers days of spans."""
+
+    store: SpanStore
+    settings: OutputSettings
+    tz: tzinfo
+    every: timedelta = OFFENDERS_EVERY
+    _found: tuple[OutputOffender, ...] = ()
+    _at: datetime | None = None
+
+    def offenders(
+        self, snapshot: Snapshot, remembered: Attribution | None
+    ) -> tuple[OutputOffender, ...]:
+        now = snapshot.now
+        if self._at is not None and timedelta(0) <= now - self._at < self.every:
+            return self._found
+        today = now.astimezone(self.tz).date()
+        first = today - timedelta(days=max(self.settings.repeat_days - 1, 0))
+        start = datetime.combine(first, clock_time(0), self.tz)
+        roles, platforms = session_context(snapshot, remembered)
+        found = calls(self.store.tool_spans_since(start), roles, platforms)
+        self._found = repeated_offenders(found, self.settings, self.tz)
+        self._at = now
+        return self._found
 
 
 def merge_spans(*groups: Iterable[Span]) -> tuple[Span, ...]:
