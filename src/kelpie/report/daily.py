@@ -36,6 +36,10 @@ repeated huge-output offenders. **Top 3 recommendations.** Filters for huge tool
 part of the chaos in act mode, and a fixed remedy for the largest remaining causes; ranked
 by dollars, with hours converted by ``hour_usd`` when it is set, else alternating the best
 by dollars and the best by hours.
+
+**Sections.** Analyses registered in :mod:`kelpie.report.sections` (token optimization,
+...) add their own section after the top 3, and their advice competes for it; they follow
+the same rules: pure, deterministic, no clock and no LLM.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import zip_longest
+from types import MappingProxyType
 
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
@@ -67,8 +72,11 @@ from kelpie.report.sections import (
     SECTIONS,
     Advice,
     Section,
+    SectionBuilder,
     SectionContext,
+    Spend,
     load_sections,
+    run_sections,
 )
 from kelpie.report.store import StateRow
 from kelpie.report.verify import (
@@ -170,20 +178,6 @@ class ReportInputs:
 
 
 @dataclass(frozen=True, slots=True)
-class Spend:
-    tokens: int = 0
-    usd: float = 0.0
-    unpriced_tokens: int = 0  # tokens of models with no price
-
-    def __add__(self, other: Spend) -> Spend:
-        return Spend(
-            self.tokens + other.tokens,
-            self.usd + other.usd,
-            self.unpriced_tokens + other.unpriced_tokens,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class ChaosLine:
     rule: str
     cause: str
@@ -257,7 +251,11 @@ def day_bounds(day: date, tz: tzinfo) -> tuple[datetime, datetime]:
     return start.astimezone(UTC), end.astimezone(UTC)
 
 
-def build_report(inputs: ReportInputs) -> DailyReport:
+def build_report(
+    inputs: ReportInputs, sections: Mapping[str, SectionBuilder] | None = None
+) -> DailyReport:
+    """The day's report. ``sections`` are the extra section builders (default: every one
+    registered in :mod:`kelpie.report.sections`)."""
     start, end = day_bounds(inputs.day, inputs.tz)
     spans = [s for s in inputs.spans if start <= last_at(s) < end]
     index = {span_key(s): s for s in inputs.spans}
@@ -274,7 +272,21 @@ def build_report(inputs: ReportInputs) -> DailyReport:
             t.id for t in inputs.tasks if t.status is Status.DONE and start <= t.status_since < end
         )
     )
-    sections = _sections(SectionContext(inputs, start, end, spans, counted, pricer.price))
+    failed: list[str] = []
+    if sections is None:
+        failed = load_sections()
+        sections = SECTIONS
+    context = SectionContext(
+        inputs=inputs,
+        start=start,
+        end=end,
+        spans=tuple(spans),
+        counted=MappingProxyType(dict(counted)),
+        price=pricer.price,
+        spend=spend,
+        roles=MappingProxyType(_roles(inputs, end)),
+    )
+    extra = run_sections(sections, context, failed)
     advice = _recommendations(
         inputs,
         chaos,
@@ -282,7 +294,7 @@ def build_report(inputs: ReportInputs) -> DailyReport:
         filters,
         pricer,
         _session_models(spans, counted),
-        [a for s in sections for a in s.advice],
+        [a for s in extra for a in s.advice],
     )
     return DailyReport(
         day=inputs.day,
@@ -303,24 +315,18 @@ def build_report(inputs: ReportInputs) -> DailyReport:
         hour_usd=inputs.hour_usd,
         tz=inputs.tz,
         verifications=_verifications(inputs, index, start, end),
-        sections=sections,
+        sections=extra,
     )
 
 
-def _sections(ctx: SectionContext) -> tuple[Section, ...]:
-    """Sections from :mod:`kelpie.report.sections` builders, in name order; one that
-    raises is logged and noted instead of failing the report."""
-    load_sections()
-    out: list[Section] = []
-    for name in sorted(SECTIONS):
-        try:
-            found = SECTIONS[name](ctx)
-        except Exception:
-            log.exception("report section %s failed", name)
-            found = Section(name, (f"This section failed ({name}); see the log.",))
-        if found is not None:
-            out.append(found)
-    return tuple(out)
+def _roles(inputs: ReportInputs, end: datetime) -> dict[str, str]:
+    board = Snapshot(
+        now=end,
+        tasks=tuple(inputs.tasks),
+        owners=tuple(inputs.owners),
+        sessions=tuple(inputs.sessions),
+    )
+    return session_context(board, inputs.attribution)[0]
 
 
 def _verifications(
@@ -609,6 +615,13 @@ def _recommendations(
 
 
 def _top(candidates: Sequence[Advice], hour_usd: float | None) -> list[Advice]:
+    seen: set[str] = set()
+    unique = []
+    for a in candidates:  # built-in advice comes after section advice: first title wins
+        if a.title not in seen:
+            seen.add(a.title)
+            unique.append(a)
+    candidates = unique
     if hour_usd is not None:
         return sorted(candidates, key=lambda a: (-(a.usd + a.hours * hour_usd), a.title))[:TOP]
     by_usd = sorted((a for a in candidates if a.usd > 0), key=lambda a: (-a.usd, a.title))
