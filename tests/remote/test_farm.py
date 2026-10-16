@@ -695,3 +695,32 @@ def test_deferred_effects_are_not_announced_as_done() -> None:
     rig.farm._budgets["laptop"] = _Budget(actions=MAX_ACTIONS_PER_TICK)
     engine.execute([stop_it, alert], snap)
     assert sent and sent[0] is not None and "Not done yet" in sent[0]
+
+
+def test_an_unblock_reaches_a_remote_board() -> None:
+    rig = ready()
+    rig.farm._kinds["laptop/hermes"] = KINDS | {ActionKind.UNBLOCK}
+    agent = answer(rig.hub, "laptop", Outcome.DONE)
+    unblock = Action(
+        ActionKind.UNBLOCK,
+        "stale_blocks",
+        "cause fixed",
+        task_id="laptop:t_1a",
+        params={"conditions": ["c1@laptop"]},
+    )
+    assert rig.executors["laptop/hermes"].execute(unblock) is True
+    agent.join(5)
+    (sent,) = agent.seen  # type: ignore[attr-defined]
+    assert (sent.kind, sent.task_id, sent.params) == (ActionKind.UNBLOCK, "t_1a", {})
+
+
+def test_a_reported_condition_named_like_another_machine_is_fine() -> None:
+    from kelpie.remote.farm import _condition
+
+    raw = {"id": "review@vm-1@laptop", "kind": "custom", "params": {}}
+    assert _condition("laptop", raw, ["vm-1"]) == {
+        "id": "review@vm-1",
+        "kind": "custom",
+        "params": {},
+    }
+    assert _condition("laptop", {"id": "c1@vm-1", "kind": "custom"}, ["vm-1"]) is None

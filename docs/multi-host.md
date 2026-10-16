@@ -264,8 +264,8 @@ and `requeue` are idempotent there; `comment` may repeat once.
   since the server started. While it is not empty the engine does not resolve the alert
   states of tasks on those machines (their ids carry the agent's prefix), nor farm-wide
   states of rules that read the boards: a rule that stops reporting them may only be blind
-  to them. Rules that read no board (`resources`, `ci_economy`: `boards = False`) resolve
-  as usual, and so do states on machines that are observed. States still reported are
+  to them. States that read no board (`ci_economy`'s, `resources`' host readings and
+  provider quotas: a rule's `boards`) resolve as usual, and so do states on machines that are observed. States still reported are
   escalated as usual; when the host is back its states are reported again and escalate by
   their real age (the condition lasted while the host was away).
 - Farm-wide rules (idle farm, role bottlenecks) see a farm without the silent host's tasks

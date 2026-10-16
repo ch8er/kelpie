@@ -161,5 +161,8 @@ def test_trace_exports_over_the_cap_are_told_to_retry(hub_server: HubServer) -> 
     hub = hub_server.hub
     for _ in range(2):
         hub.enter("laptop", "traces")
-    status, _ = send(hub_server.server_address[1], b"spans", token=TOKEN)
-    assert status == 503
+    conn = http.client.HTTPConnection("127.0.0.1", hub_server.server_address[1], timeout=5)
+    conn.request("POST", "/v1/traces", body=b"spans", headers={"Authorization": f"Bearer {TOKEN}"})
+    response = conn.getresponse()
+    assert (response.status, response.getheader("Retry-After")) == (503, "1")
+    conn.close()

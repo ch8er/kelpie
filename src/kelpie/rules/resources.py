@@ -44,7 +44,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Any, ClassVar
+from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import OwnerKind, Resource, ResourceKind, Snapshot, Status, Task
@@ -103,9 +103,12 @@ class Finding:
 
 @dataclass(frozen=True, slots=True)
 class Resources:
-    # Host readings and provider quotas (kelpie.core.rule). The heavy-task count is per
-    # host: a silent host's own count is not re-evaluated anyway.
-    boards: ClassVar[bool] = False
+    @staticmethod
+    def boards(state: str) -> bool:
+        """Which of its states read the boards (kelpie.core.rule): the heavy-task ones;
+        host readings and provider quotas do not."""
+        return "heavy" in state.split(":")[1:]
+
     thresholds: Mapping[ResourceKind, Thresholds] = field(
         default_factory=lambda: dict(DEFAULT_THRESHOLDS)
     )

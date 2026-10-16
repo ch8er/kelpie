@@ -92,7 +92,7 @@ class Engine:
     ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
     state_store: StateStore = field(default_factory=MemoryStateStore)
     fallback: bool = True  # route to the only platform adapter when nothing else says where
-    _board_free: frozenset[str] = field(init=False, default=frozenset())
+    _by_name: dict[str, Rule] = field(init=False, default_factory=dict)
     ledger: ActionLedger = field(init=False)
     states: StateTracker = field(init=False)
     _evaluated: set[str] | None = field(init=False, default=None)
@@ -133,9 +133,7 @@ class Engine:
             self._platforms.append(adapter.name)
         for connector in self.connectors:
             self._add(ConnectorExecutor(connector))
-        self._board_free = frozenset(
-            r.name for r in self.rules if getattr(r, "boards", True) is False
-        )
+        self._by_name = {r.name: r for r in self.rules}
 
     def add_executor(self, executor: Executor) -> None:
         """Register an executor after construction (a remote board an agent reported).
@@ -316,7 +314,7 @@ class Engine:
         gone = [
             s
             for s in gone
-            if not _blind(s.task_id, snapshot.unobserved, s.rule not in self._board_free)
+            if not _blind(s.task_id, snapshot.unobserved, self._reads_boards(s.rule, s.id))
         ]
         results: list[Dispatched] = []
         for state in gone:
@@ -345,6 +343,17 @@ class Engine:
             return self._process(action, snapshot)
         finally:
             self._transitions.pop(action.key, None)
+
+    def _reads_boards(self, rule: str, state: str) -> bool:
+        """Whether a rule's state depends on the boards (``Rule`` docs: ``boards``)."""
+        boards = getattr(self._by_name.get(rule), "boards", True)
+        if callable(boards):
+            try:
+                return bool(boards(state))
+            except Exception:
+                log.exception("rule %s: boards(%r) failed", rule, state)
+                return True
+        return boards is not False
 
     @staticmethod
     def _safe_state(write: Callable[[], None]) -> None:

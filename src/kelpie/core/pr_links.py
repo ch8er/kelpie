@@ -116,11 +116,12 @@ def link_tasks(
     pulls: Sequence[PullRequest],
     tasks: Sequence[Task],
     pattern: re.Pattern[str] | None,
-    shared_local: Collection[str] = (),
+    unique_local: Collection[str] | None = None,
 ) -> tuple[PullRequest, ...]:
     """Each PR with the ids of the tasks it belongs to (``PullRequest.task_ids``).
-    ``shared_local``: local ids (casefolded) known to be on several machines, from the last
-    snapshot that saw them all; they link nothing even when only one is visible now."""
+    ``unique_local`` (part of a multi-host farm is not observed): the local ids (casefolded)
+    the last snapshot that saw every machine had exactly once; no other local id links, as a
+    look-alike may be on the missing machine. None: every machine is observed."""
     by_code: dict[str, set[str]] = {}
     by_branch: dict[str, set[str]] = {}
     local = {t.id: _local_id(t) for t in tasks}
@@ -131,7 +132,7 @@ def link_tasks(
         if (
             own is not None
             and shared[own.casefold()] == 1
-            and own.casefold() not in shared_local
+            and (unique_local is None or own.casefold() in unique_local)
             and is_code(own)
         ):
             codes.add(own)
@@ -153,10 +154,10 @@ def link_tasks(
     return tuple(out)
 
 
-def shared_local_ids(tasks: Sequence[Task]) -> frozenset[str]:
-    """Local ids (casefolded) that more than one host-namespaced task has."""
+def unique_local_ids(tasks: Sequence[Task]) -> frozenset[str]:
+    """Local ids (casefolded) that exactly one host-namespaced task has."""
     seen = Counter(i.casefold() for t in tasks if (i := _local_id(t)) is not None)
-    return frozenset(i for i, n in seen.items() if n > 1)
+    return frozenset(i for i, n in seen.items() if n == 1)
 
 
 def _local_id(task: Task) -> str | None:

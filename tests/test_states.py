@@ -384,3 +384,25 @@ def test_rules_that_read_no_board_resolve_on_a_partial_farm() -> None:
     resolved = e.tick(lambda: Snapshot(now=T0 + H, unobserved=("laptop",)))
     assert [d.outcome for d in resolved] == [Outcome.ALERTED]
     assert e.states.store.open_states() == []
+
+
+def test_board_dependence_can_be_per_state() -> None:
+    class Resources(Toggle):
+        @staticmethod
+        def boards(state: str) -> bool:
+            return "heavy" in state.split(":")[1:]
+
+    heavy = replace(alert(state="resources:laptop:heavy"), task_id=None, key="h")
+    disk = replace(alert(state="resources:disk:laptop"), task_id=None, key="d")
+
+    class Both(Resources):
+        def evaluate(self, snapshot: Snapshot) -> list[Action]:
+            return [heavy, disk] if self.on else []
+
+    alerter, rule = FakeAlerter(), Both(heavy)
+    e = engine(rule, alerter)
+    e.tick(lambda: Snapshot(now=T0))
+    rule.on = False
+    for unobserved in (("laptop",), ("hub",)):
+        e.tick(lambda u=unobserved: Snapshot(now=T0 + H, unobserved=u))
+    assert {s.id for s in e.states.store.open_states()} == {"resources:laptop:heavy"}

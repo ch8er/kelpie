@@ -58,7 +58,7 @@ from typing import Any
 from kelpie.connectors.github.client import GitHubError
 from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.core.model import LabelEvent, PullRequest, Snapshot
-from kelpie.core.pr_links import compile_task_code, link_tasks, shared_local_ids
+from kelpie.core.pr_links import compile_task_code, link_tasks, unique_local_ids
 from kelpie.core.serde import parse_duration
 
 log = logging.getLogger(__name__)
@@ -163,8 +163,9 @@ class PullRequestSync:
     _exhausted: bool = field(default=False, init=False)
     _version: int = field(default=0, init=False)  # bumped on every scan
     _link_key: object = field(default=None, init=False)
-    # Multi-host: local task ids on several machines when all were last observed.
-    _shared_local: frozenset[str] = field(default=frozenset(), init=False)
+    # Multi-host: local task ids on exactly one machine when all were last observed; None:
+    # never all observed yet (no local id links while part of the farm is missing).
+    _unique_local: frozenset[str] | None = field(default=None, init=False)
     _links: tuple[PullRequest, ...] = field(default=(), init=False)
     _closed_links: tuple[PullRequest, ...] = field(default=(), init=False)
     # (repo, number, label) -> (when it was put on, when that was read);
@@ -200,18 +201,20 @@ class PullRequestSync:
         self, snapshot: Snapshot
     ) -> tuple[tuple[PullRequest, ...], tuple[PullRequest, ...]]:
         """The open and closed PRs with the tasks they belong to, worked out again only when
-        the PRs or the tasks' ids, titles or branches changed. On a multi-host farm, local
-        ids seen on several machines while all were observed stay ambiguous while one is
-        not (a look-alike may be on the missing machine)."""
-        if not snapshot.unobserved:
-            self._shared_local = shared_local_ids(snapshot.tasks)
+        the PRs or the tasks' ids, titles or branches changed. On a multi-host farm with a
+        machine not observed, a local id links only if it was unique when every machine was
+        last observed (a look-alike may be on the missing machine)."""
+        partial = bool(snapshot.unobserved)
+        if not partial:
+            self._unique_local = unique_local_ids(snapshot.tasks)
+        unique = (self._unique_local or frozenset()) if partial else None
         key = (
             self._version,
             tuple((t.id, t.title, t.branch) for t in snapshot.tasks),
-            self._shared_local,
+            unique,
         )
         if key != self._link_key:
-            code, shared = self.settings.task_code, self._shared_local
+            code, shared = self.settings.task_code, unique
             closed = tuple(p for repo in sorted(self._closed) for p in self._closed[repo])
             # A PR closed between the two lists of one scan counts as closed; an older closed
             # list says nothing about a PR open now (it may have been reopened).

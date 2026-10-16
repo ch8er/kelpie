@@ -330,9 +330,9 @@ def _condition(agent: str, raw: object, others: Iterable[str] = ()) -> dict[str,
         params["task"] = task
     cid = raw.get("id")
     if isinstance(cid, str):
-        cid = local_condition_id(agent, cid)
-        if any(cid.endswith(f"@{other}") for other in others):
+        if not cid.endswith(f"@{agent}") and any(cid.endswith(f"@{o}") for o in others):
             return None  # a condition another machine reported
+        cid = local_condition_id(agent, cid)
     return {
         "id": cid,
         "kind": raw.get("kind"),
