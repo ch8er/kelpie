@@ -171,6 +171,7 @@ channels and whether the token is set.
 ## Where to look
 
 - `kelpie doctor` and `kelpie status`: setup and what is loaded.
+- `kelpie why <task>`: why one task is not moving, from the board and `kelpie.db`, read-only.
 - `http://127.0.0.1:9464/metrics`: `kelpie_dry_run` (must be 1), `kelpie_actions_total`
   (what rules would do, by rule and outcome), `kelpie_adapter_errors_total`,
   `kelpie_spans_received_total`, `kelpie_snapshot_spans`.

@@ -867,9 +867,9 @@ owner, blocks, open conditions, the dependency chain up to the first dead end, t
 session and the rule findings for the task (stop patterns included).
 
 **Acceptance criteria**
-- [ ] `kelpie why T-101` prints the explanation from storage or a running server; `--json` for scripts
-- [ ] Uses the same rule results as the engine (no separate logic)
-- [ ] Tests on the stop-pattern fixtures
+- [x] `kelpie why T-101` prints the explanation from the board and storage (read-only); `--json` for scripts. A running server is not queried yet
+- [x] Uses the same rule results as the engine (no separate logic)
+- [x] Tests on the stop-pattern fixtures
 
 ### rules: exit_contract — "done" requires evidence, reopened-after-done rate (rule 1, incident 2)
 labels: P1, area:rules

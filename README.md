@@ -219,7 +219,10 @@ farm throughput metrics from traces.
   huge-output offenders), the top 3 recommendations and the largest tool outputs. See
   [Daily report](#daily-report), including the before/after effect of yesterday's fixes.
 - **Dashboards**: no custom UI. Kelpie exposes Prometheus metrics on `/metrics`, Grafana
-  shows them, traces open in Langfuse. CLI: `kelpie status` and `kelpie report`.
+  shows them, traces open in Langfuse. CLI: `kelpie status`, `kelpie report` and
+  `kelpie why <task>`: one read-only snapshot, every rule evaluated against it (observe), and
+  the task's status and age, owner and sessions, conditions, what it waits for up to the
+  first dead end, the rule findings, its open alert states and latest ledger entries.
 - **Farm throughput** (`kelpie.report.throughput`): per role, tasks completed per hour,
   hand-offs per hour, utilization, mean and current queue length, rework rate and cost per
   completed task, plus task-hours by stage (working, queue, review, waiting for conditions,
@@ -353,6 +356,7 @@ cd kelpie
 uv sync
 cp kelpie.example.toml kelpie.toml   # optional; every key has a safe default
 uv run kelpie status                 # rules that would load, with their mode
+uv run kelpie why T-101               # why a task is not moving (read-only; --json)
 uv run kelpie serve                  # listens on 127.0.0.1:9464; --host 0.0.0.0 to expose
 ```
 
