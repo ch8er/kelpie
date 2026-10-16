@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import ssl
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -66,7 +67,11 @@ class Relay(ThreadingHTTPServer):
             self.connections.release()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
-        log.info("relay: connection failed", exc_info=True)
+        exc = sys.exc_info()[1]
+        if isinstance(exc, OSError):  # the exporter went away
+            log.debug("relay: connection ended: %s", exc)
+        else:
+            log.exception("relay: request failed")
 
 
 class RelayHandler(BaseHTTPRequestHandler):

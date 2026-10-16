@@ -13,7 +13,7 @@ from kelpie.remote.config import AgentSettings
 from kelpie.remote.hub import HubService
 from tests.remote.test_hub import BoardAdapter
 
-TOKEN = "k" * 40
+TOKEN = "0123456789abcdef" * 3
 
 
 def free_port() -> int:

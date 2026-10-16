@@ -189,6 +189,7 @@ class Rig:
         self.alerter = Alerter()
         self.observer = Observer()
         self.executors: dict[str, Any] = {}
+        self.seq = 0
         self.farm = RemoteFarm(
             self.hub,
             lambda e: self.executors.__setitem__(e.name, e),
@@ -204,7 +205,10 @@ class Rig:
         sent_at: datetime | None = None,
     ) -> None:
         parts = parts or (AdapterReport("hermes", KINDS, board(self.clock.now)),)
-        report = Report("0.0.1", sent_at or self.clock.now, timedelta(seconds=15), parts)
+        self.seq += 1
+        report = Report(
+            "0.0.1", sent_at or self.clock.now, timedelta(seconds=15), parts, "c0ffee00", self.seq
+        )
         self.hub.receive_report(agent, report)
 
     def tick(self) -> Snapshot:
