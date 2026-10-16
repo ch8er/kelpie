@@ -124,7 +124,14 @@ most four arguments are kept, and only these:
 - flag names (`-q`, `--watch`); a cluster or a glued value keeps only its first letter
   (`-la` → `-l***`, `-ppw` → `-p***`), and `--flag=value` keeps only the name;
 - a pipe or list separator and the next executable (`pytest -q | tail`), and the module after
-  `python -m` from a short list (`pytest`, `pip`, `mypy`, ...).
+  `python -m` from a short list (`pytest`, `pip`, `mypy`, ...);
+- after a wrapper that only runs another command (`sudo`, `env`, `nice`, `time`, `nohup`,
+  `command`, `exec`, `rtk`), its flag names, `NAME=***` for its assignments, and the wrapped
+  executable, read like the first one: `sudo -u root make test` → `sudo -u *** make test`.
+  These do not count against the four.
+
+Arguments are split on spaces and tabs only, as the shell does; an argument with an escaped
+quote (`\"`) masks the rest of the line.
 
 Everything else becomes `***`: flag values, paths, URLs, hosts, `user:pass`, headers,
 environment assignments, quoted text, variables and substitutions. Once a flag or a masked
@@ -132,7 +139,8 @@ argument has appeared, later plain words are masked too, since they may be its v
 `curl -k -u admin:pw https://x` → `curl -k -u ***`, `redis-cli -a pw ping` →
 `redis-cli -a *** ***`, `curl -H "Authorization: Bearer x" url` → `curl -H *** ***`,
 `git clone https://user:pass@host/repo` → `git clone ***`, `cat ~/.secrets/prod.env` →
-`cat ***`, and `GH_TOKEN=abc gh pr checks 5` → `gh pr checks 5`.
+`cat ***`, and `GH_TOKEN=abc gh pr checks 5` and `PGPASSWORD='a b c' gh pr checks 5` →
+`gh pr checks 5`.
 
 What can still get through: a secret written as a plain lowercase word right after the
 executable, before any flag (`redis-cli auth hunter2`, `echo hunter2`). To
@@ -150,8 +158,10 @@ the configured Hermes and Claude Code spools and their `.1` files, or the paths 
 (`--dry-run` only counts). It redacts each line's `command` again; an old line that kept a
 secret after a masked part (`curl -H *** tok123`, written by an early Claude Code hook) is
 cleaned too, because nothing after a masked argument is kept. Lines that are not JSON are
-dropped. It holds `<spool>.lock` (the lock the hooks take to rotate), keeps the file's mode
-and owner, replaces the file atomically, and starts over if the spool was rotated meanwhile.
+dropped. It runs only as the user who owns the spool (as root: `sudo -u <agent user> kelpie
+spool scrub`), so the file and its lock stay writable by the hooks. It holds `<spool>.lock`
+(the lock the hooks take to rotate), keeps the file's mode, replaces the file atomically, and
+starts over if the spool was rotated meanwhile.
 A line a hook appends in the moment of the replace can be lost, so run it while the agents
 are idle. It runs where Kelpie is installed, on the spool's host. Copy the new plugin or
 hook to the agent hosts first, or new lines keep the old redaction. Copies elsewhere (backups,
@@ -184,8 +194,8 @@ results, error messages, assistant messages, the transcript path and the working
 are never written.
 
 The redacted `command` uses the same shared redaction as the Hermes plugin (see
-[above](#hermes-hooks-plugin)): ordinary words, paths and hosts in the first four arguments are
-kept, secrets masked. `KELPIE_CLAUDE_SPOOL_COMMANDS=0` records no command, and
+[above](#hermes-hooks-plugin)): the executable, the plain words right after it, flag names
+and pipe stages are kept; values, paths, hosts, URLs and quoted text are masked. `KELPIE_CLAUDE_SPOOL_COMMANDS=0` records no command, and
 `kelpie spool scrub` rewrites a spool written by an older hook.
 
 The spool is created with mode `0600` and rotated like the Hermes spool. Stop markers

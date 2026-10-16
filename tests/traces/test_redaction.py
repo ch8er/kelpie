@@ -127,6 +127,25 @@ LEAKS = [
     ("echo `cat secret` $'hunter2'", "hunter2"),
     ("cat /home/alice/.secrets/prod.env", ".secrets"),
     ("mysql -p -u root db", "root"),
+    # a quoted leading assignment, values with spaces
+    ("PGPASSWORD='correct horse battery staple' psql -h db", "horse"),
+    ("PGPASSWORD='correct horse battery staple' psql -h db", "battery"),
+    ('DB_PASS="my secret pass" ./migrate', "secret"),
+    ("A='x' B='tok hunter2 y' make", "hunter2"),
+    # wrappers: their values and assignments
+    ("env TOKEN=hunter2 make test", "hunter2"),
+    ("env TOKEN='a hunter2' make test", "hunter2"),
+    ("sudo -u hunter2 make", "hunter2"),
+    ("sudo -p 'pw hunter2' make", "hunter2"),
+    ("sudo --user=hunter2 make", "hunter2"),
+    ("env -S 'make hunter2' x", "hunter2"),
+    ("sudo env A=1 nice -n 5 curl -u admin:hunter2 h", "hunter2"),
+    # only spaces and tabs split words; an escaped quote masks the rest
+    ("cmd\u00a0hunter2", "hunter2"),
+    ("tool x\u2003hunter2", "hunter2"),
+    ("tool x\x1fhunter2", "hunter2"),
+    ('"a\\" | cat hunter2 x"', "hunter2"),
+    ('echo \\"hi hunter2\\"', "hunter2"),
 ]
 
 
@@ -161,6 +180,10 @@ def test_no_secret_leaks(copy: str, cmd: str, secret: str) -> None:
         ("ls -la /tmp", "ls -l*** ***"),
         ("tool --level=3 run", "tool --level=*** ***"),
         ("sleep 30 # wait for CI", "sleep 30"),
+        ("sudo -u root make test", "sudo -u *** make test"),
+        ("env FOO='a b' make test", "env FOO=*** make test"),
+        ("sudo env A=1 B=2 nice -n 5 git status", "sudo env A=*** B=*** nice -n *** git status"),
+        ("pytest\t-q", "pytest -q"),
     ],
 )
 def test_commands_stay_recognizable(cmd: str, expected: str) -> None:
@@ -174,6 +197,13 @@ def test_commands_stay_recognizable(cmd: str, expected: str) -> None:
         ("npm run build -- --token=x", "npm run build"),
         ("python -m pytest -q", "python -m pytest"),
         ("uv run pytest -q", "pytest"),
+        ("sudo -u root make test", "make test"),
+        ("sudo -uroot npm test", "npm test"),
+        ("nice -n 5 make", "make"),
+        ("env FOO=1 make", "make"),
+        ("env -u X make", "make"),
+        ("sudo env A=1 nice -n 5 git status", "git status"),
+        ("rtk git status --short", "git status"),
     ],
 )
 def test_prefixes_still_work(cmd: str, prefix: str) -> None:
@@ -291,6 +321,36 @@ def test_scrub_refuses_symlinks_and_fifos(tmp_path: Path) -> None:
     os.mkfifo(fifo)
     with pytest.raises(OSError):
         scrub_file(fifo)
+
+
+def test_scrub_runs_only_as_the_spool_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As root it would leave a root-owned file and lock the hooks cannot write, and it would
+    write in a directory the agent controls: refused (sudo -u <agent> is the way)."""
+    path = _spool(tmp_path, OLD_LINES)
+    before = path.read_text()
+    monkeypatch.setattr(scrub_module.os, "geteuid", lambda: os.stat(path).st_uid + 1)
+    with pytest.raises(OSError, match="sudo -u"):
+        scrub_file(path)
+    assert path.read_text() == before
+    assert not (tmp_path / "spool.jsonl.lock").exists()
+    assert scrub_file(path, dry_run=True).changed == 4  # reading is fine
+
+
+def test_scrub_takes_the_rotation_lock_of_the_spool(tmp_path: Path) -> None:
+    _spool(tmp_path, OLD_LINES)
+    rotated = tmp_path / "spool.jsonl.1"
+    rotated.write_text(json.dumps(OLD_LINES[1]) + "\n")
+    scrub_file(rotated)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "spool.jsonl", "spool.jsonl.1", "spool.jsonl.lock"
+    ]  # fmt: skip
+    (tmp_path / "spool.jsonl.lock").unlink()
+    (tmp_path / "spool.jsonl.lock").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(OSError):
+        scrub_file(rotated)
+    assert not (tmp_path / "elsewhere").exists()
 
 
 def test_default_spools(tmp_path: Path) -> None:

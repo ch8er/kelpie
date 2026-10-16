@@ -201,7 +201,7 @@ the code is shared with OTLP ingest and the Claude Code hook.
 So `GH_TOKEN=abc gh pr checks 5` is stored as `gh pr checks 5`. This is best effort; set
 `KELPIE_HERMES_SPOOL_COMMANDS=0` to record no command at all. A spool written by an older
 plugin (before ch8er/kelpie#82, which kept secrets such as `curl -u user:pass`) is cleaned
-with `kelpie spool scrub` after the new plugin is installed. The spool file is created with
+with `kelpie spool scrub`, run as the spool's owner, after the new plugin is installed. The spool file is created with
 mode `0600`. Hooks never raise and do no network I/O.
 
 ## What Kelpie sees

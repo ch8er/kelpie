@@ -7,11 +7,14 @@ command; the old, partly redacted command is the only input, and redacting it ag
 what the fixed version masks. Lines that are not JSON objects cannot be read by the adapters
 and are dropped, since they could be the cut-off half of a line with a secret.
 
-The rewrite is atomic (a temporary file in the same directory, then ``os.replace``) and
-keeps the file's mode and, when run as root, its owner (so the hooks can still append). It
-holds ``<spool>.lock``, the lock the Claude Code hook and the Hermes plugin take to rotate the
-spool, and checks just before the replace that the path is still the file it read; if the
-spool was rotated anyway, it starts over. Lines appended while it runs are scrubbed and
+It runs only as the user who owns the spool (as root: ``sudo -u <agent user> kelpie spool
+scrub``), so the new file, its lock and its owner stay the agent's and the hooks can keep
+appending; a root run in a directory the agent can write to would also give the agent a way
+to swap the temporary file for a link. The rewrite is atomic (a temporary file in the same
+directory, then ``os.replace``) and keeps the file's mode. It holds ``<spool>.lock`` (for
+``<spool>.1`` as well), the lock the Claude Code hook and the Hermes plugin take to rotate
+the spool, and checks just before the replace that the path is still the file it read; if
+the spool was rotated anyway, it starts over. Lines appended while it runs are scrubbed and
 carried over; a line appended in the moment between the last read and the replace is lost,
 so run it while the agents are idle if you can.
 """
@@ -87,12 +90,39 @@ def _scrub_text(text: str) -> tuple[list[str], int, int, int]:
     return out, total, changed, dropped
 
 
-def _open_spool(path: Path) -> int:
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+
+
+def _lock_path(path: Path) -> Path:
+    """The rotation lock: ``<spool>.lock``, also for the rotated ``<spool>.1``."""
+    base = path.name[:-2] if path.name.endswith(".1") else path.name
+    return path.with_name(base + ".lock")
+
+
+def _open_lock(path: Path) -> int:
+    fd = os.open(_lock_path(path), os.O_WRONLY | os.O_CREAT | _NOFOLLOW, 0o600)
     if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError(f"{_lock_path(path)} is not a regular file")
+    return fd
+
+
+def _open_spool(path: Path) -> int:
+    fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
         os.close(fd)
         raise OSError(f"{path} is not a regular file")
     return fd
+
+
+def _check_owner(path: Path) -> None:
+    owner = os.stat(path, follow_symlinks=False).st_uid
+    if hasattr(os, "geteuid") and os.geteuid() != owner:
+        raise OSError(
+            f"{path} belongs to uid {owner}: run the scrub as that user "
+            f"(sudo -u <user> kelpie spool scrub), so the hooks can still write the spool"
+        )
 
 
 def _read_more(fd: int) -> bytes:
@@ -110,8 +140,10 @@ def _lines(data: bytes) -> tuple[str, bytes]:
 
 def scrub_file(path: Path, dry_run: bool = False) -> ScrubResult:
     """Re-redact every command in ``path``. Raises OSError when it cannot be read or written,
-    or when the spool keeps being rotated while it runs."""
+    belongs to another user (unless ``dry_run``), or keeps being rotated while it runs."""
     path = Path(path)
+    if not dry_run:
+        _check_owner(path)
     for _ in range(MAX_ROUNDS):
         result = _scrub_once(path, dry_run)
         if result is not None:
@@ -123,7 +155,7 @@ def _scrub_once(path: Path, dry_run: bool) -> ScrubResult | None:
     """One attempt; None when the spool was rotated meanwhile (the caller retries)."""
     lock = None
     if not dry_run:  # the lock the hooks take to rotate the spool
-        lock = os.open(path.with_name(path.name + ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+        lock = _open_lock(path)
         if fcntl is not None:
             fcntl.flock(lock, fcntl.LOCK_EX)
     try:
@@ -152,10 +184,8 @@ def _scrub_once(path: Path, dry_run: bool) -> ScrubResult | None:
                     f.writelines(tail)
                     total, changed, dropped = total + n, changed + c, dropped + d
                     f.flush()
+                    os.fchmod(f.fileno(), stat.S_IMODE(info.st_mode))
                     os.fsync(f.fileno())
-                os.chmod(tmp, stat.S_IMODE(info.st_mode))
-                if os.geteuid() == 0 and (info.st_uid, info.st_gid) != (0, 0):
-                    os.chown(tmp, info.st_uid, info.st_gid)  # keep the hooks able to append
                 current = os.stat(path, follow_symlinks=False)
                 if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
                     Path(tmp).unlink(missing_ok=True)

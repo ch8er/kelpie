@@ -105,11 +105,11 @@ its result in characters and, for tools with a `command` input (`Bash`), a redac
 the command, redacted by the code shared with OTLP ingest and the Hermes plugin (one block,
 kept byte-identical by a test). It is an allowlist: at most 4 arguments, only the
 executable's name, the plain lowercase words and numbers right after it, flag names and pipe
-stages; everything else is `***`. So `curl -u admin:pw https://x` is `curl -u ***`, `cat
+stages; everything else is `***`. So `curl -u admin:pw https://x` is `curl -u *** ***`, `cat
 ~/.secrets/prod.env` is `cat ***` and `gh pr checks 5` stays as is (details in
 [docs/privacy.md](../../../../docs/privacy.md#hermes-hooks-plugin)). A secret written as a
 plain lowercase word right after the executable is still kept (`redis-cli auth hunter2`);
-`KELPIE_CLAUDE_SPOOL_COMMANDS=0` records no command. A spool written by an older hook is cleaned with `kelpie spool scrub`. For `TaskUpdate` calls only the task id, status and owner are kept, never
+`KELPIE_CLAUDE_SPOOL_COMMANDS=0` records no command. A spool written by an older hook is cleaned with `kelpie spool scrub`, run as the spool's owner. For `TaskUpdate` calls only the task id, status and owner are kept, never
 subjects or descriptions. The spool is created with mode `0600` (not through a symlink); keep
 its directory `0700` as above.
 

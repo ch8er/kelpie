@@ -40,12 +40,33 @@ _WORD = re.compile(r"^(?:[a-z][a-z0-9_-]{0,23}|[0-9]{1,10})$")
 _FLAG = re.compile(r"^(?:-[A-Za-z0-9]|--[A-Za-z][A-Za-z0-9-]{0,40})$")
 _SEPARATORS = frozenset({"|", "||", "|&", "&&", ";", "&"})
 _PYTHON_MODULES = frozenset({"pytest", "unittest", "pip", "mypy", "ruff", "black", "build"})
+# Wrappers that only run the real command, with the flags of theirs that take a value.
+_WRAPPERS = {
+    "sudo": frozenset(
+        {
+            *("-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D"),
+            *("--user", "--group", "--host", "--prompt", "--close-from", "--other-user"),
+            *("--role", "--type", "--chdir"),
+        }
+    ),
+    "time": frozenset({"-o", "-f", "--output", "--format"}),
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "nohup": frozenset(),
+    "command": frozenset(),
+    "exec": frozenset({"-a"}),
+    "rtk": frozenset(),
+}
+_MAX_WRAPPED = 8  # wrapper tokens kept on top of _MAX_TOKENS
+_BLANKS = re.compile(r"[ \t]+")  # what bash splits words on
 
 
 def _quoted_span(tokens: list[str], i: int) -> int:
     """Index after the argument that starts at ``tokens[i]``: past the token that closes
     the first quote it opens, else the next token. An unclosed quote runs to the end."""
     tok = tokens[i]
+    if "\\" in tok and any(q in tok for q in _QUOTES):
+        return len(tokens)  # an escaped quote: where the argument ends is not clear
     quote = next((c for c in tok if c in _QUOTES), None)
     if quote is None or tok.count(quote) % 2 == 0:
         return i + 1
@@ -72,21 +93,42 @@ def redact_command(command: str) -> str | None:
     lines = command.strip().splitlines()
     if not lines:
         return None
-    tokens = lines[0][:_MAX_LINE].split()
+    tokens = [t for t in _BLANKS.split(lines[0][:_MAX_LINE]) if t]
     if len(lines[0]) > _MAX_LINE and tokens:
         tokens[-1] = _MASK  # the cut may have split it
     i = 0
     while i < len(tokens) and _ASSIGN.match(tokens[i]):
-        i += 1
+        i = _quoted_span(tokens, i)
     out: list[str] = []
     exe = True  # the next argument is an executable
     words = False  # plain words are still kept (right after the executable)
-    while i < len(tokens) and len(out) < _MAX_TOKENS:
+    wrapper = None  # flags of the wrapper whose options come next (sudo -u x make)
+    extra = 0  # wrapper tokens, not counted against _MAX_TOKENS
+    while i < len(tokens) and len(out) < _MAX_TOKENS + extra:
         tok = tokens[i]
-        if tok.startswith("#"):
-            break
         end = _quoted_span(tokens, i)
         name, eq, _ = tok.partition("=")
+        if wrapper is not None:
+            before = len(out)
+            if _ASSIGN.match(tok):
+                out.append(f"{name}={_MASK}")  # env FOO=bar
+            elif _FLAG.match(tok):
+                out.append(tok)
+                if tok in wrapper and end < len(tokens):
+                    out.append(_MASK)  # its value: sudo -u root
+                    end = _quoted_span(tokens, end)
+            elif eq and _FLAG.match(name):
+                out.append(f"{name}={_MASK}")
+            elif tok[:1] == "-" and tok[1:2].isalpha() and tok[1:2] != "-":
+                out.append(tok[:2] + _MASK)
+            else:
+                wrapper, exe = None, True  # the wrapped command: read it as an executable
+                continue
+            extra = min(extra + len(out) - before, _MAX_WRAPPED)
+            i = end
+            continue
+        if tok.startswith("#"):
+            break
         if end > i + 1 or any(q in tok for q in _QUOTES):
             out.append(_MASK)
             exe = words = False
@@ -98,6 +140,9 @@ def redact_command(command: str) -> str | None:
             ok = bool(_EXE.match(base)) and not _ASSIGN.match(base)
             out.append(base if ok else _MASK)
             exe, words = False, ok
+            if ok and base in _WRAPPERS:
+                wrapper = _WRAPPERS[base]
+                extra = min(extra + 1, _MAX_WRAPPED)
         elif _FLAG.match(tok):
             out.append(tok)
             words = False
@@ -122,23 +167,6 @@ def redact_command(command: str) -> str | None:
 
 
 RTK = "rtk"
-# Wrappers that only run the real command, with the flags of theirs that take a value.
-_WRAPPERS: dict[str, frozenset[str]] = {
-    "sudo": frozenset(
-        {
-            *("-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D"),
-            *("--user", "--group", "--host", "--prompt", "--close-from", "--other-user"),
-            *("--role", "--type", "--chdir"),
-        }
-    ),
-    "time": frozenset({"-o", "-f", "--output", "--format"}),
-    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
-    "nice": frozenset({"-n", "--adjustment"}),
-    "nohup": frozenset(),
-    "command": frozenset(),
-    "exec": frozenset({"-a"}),
-    RTK: frozenset(),
-}
 _RUNNERS = {"uv": "run", "poetry": "run", "pipenv": "run", "bundle": "exec", "pnpm": "exec"}
 # Executables whose first argument is a subcommand of the tool, not user data. Any other
 # executable is kept alone: its next word may be a host, a database or a secret.
@@ -160,7 +188,6 @@ _TARGET_RUNNERS = frozenset({"make", "just"})
 _TARGETS = frozenset(
     {"build", "test", "lint", "check", "install", "clean", "all", "format", "ci", "dev"}
 )
-_PYTHON_MODULES = frozenset({"pytest", "unittest", "pip", "mypy", "ruff", "black", "build"})
 _SUBCOMMAND = re.compile(r"^[a-z][a-z0-9:_-]*$")
 _EXECUTABLE = re.compile(r"^[A-Za-z0-9_][\w.+-]*$")
 _PIPE_FILTERS = ("xcbeautify", "xcpretty", "tail", "head", "grep")
