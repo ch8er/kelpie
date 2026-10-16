@@ -450,3 +450,13 @@ def test_a_block_that_ends_before_the_deadline_is_waited_out_during_stop() -> No
     delivery.close(3.0)
     assert [m.body for m in channel.sent] == ["one", "two"]
     assert metrics.alerts_dropped[("a", "shutdown")] == 0
+
+
+def test_retry_after_zero_does_not_make_an_unthrottled_loop() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.errors = [TransientError("rate_limited", "HTTP 429", 0.0)] * 100_000
+    delivery = Delivery([channel], metrics, retry_horizon=timedelta(seconds=2))  # backoff 1 s
+    delivery.alerter().send("[r] alert", "one", "warning")
+    wait_for(lambda: metrics.alerts_failed[("a", "rate_limited")] == 1, timeout=5.0)
+    assert 1 <= channel.calls <= 4  # the backoff is the floor between attempts
+    delivery.close()

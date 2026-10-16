@@ -254,10 +254,11 @@ class _Worker:
         """No send before the server's ``retry_after`` (or our backoff) has passed: for the
         next attempt and for every alert behind this one (up to the horizon). Returns the
         wait that was asked for."""
+        # The backoff is also the floor: a server answering "retry_after: 0" every time must
+        # not turn the retries into a busy loop (the default backoff is one second).
+        asked = min(self.backoff * 2 ** min(attempt, 20), MAX_WAIT)
         if exc.retry_after is not None:
-            asked = max(exc.retry_after, 0.0)
-        else:
-            asked = min(self.backoff * 2 ** min(attempt, 20), MAX_WAIT)
+            asked = max(asked, exc.retry_after)
         until = time.monotonic() + min(asked, self.horizon)
         self.blocked_until = max(self.blocked_until, until)
         return asked

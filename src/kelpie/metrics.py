@@ -505,7 +505,7 @@ class Metrics:
         metric(
             "kelpie_alerts_dropped_total",
             "counter",
-            "Alerts dropped before delivery (queue_full, duplicate), by channel and reason.",
+            "Alerts not delivered (queue_full, duplicate, shutdown), by channel and reason.",
             [
                 f"kelpie_alerts_dropped_total{_labels(channel=n, reason=r)} {v}"
                 for (n, r), v in sorted(self.alerts_dropped.items())

@@ -260,6 +260,9 @@ Transient failures (429, 5xx, network) are retried for `retry_horizon` (default 
 `kelpie_alerts_failed_total`. The bundled Prometheus rule `KelpieAlertDeliveryFailed`
 (`deploy/prometheus/rules/kelpie.yml`) fires on it, and the Grafana dashboard has an Alerts
 row. Drops (full queue, duplicates, shutdown) are counted in `kelpie_alerts_dropped_total`.
+Alerts still waiting when Kelpie shuts down during a chat outage are counted as
+`kelpie_alerts_dropped_total{reason="shutdown"}`, not as failed, so `KelpieAlertDeliveryFailed`
+does not fire for them.
 
 ```toml
 [[alerts.channels]]
