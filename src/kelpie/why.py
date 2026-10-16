@@ -346,7 +346,7 @@ def expected_conditions(
         same_pr = target == "block" and m.ref in seen
         fallback = target == "block" and not same_pr and bool(seen) and status == "not_checked"
         if same_pr:
-            why = "not used: same PR as above"
+            why = "same PR as above"
         elif fallback:
             above = "the PR above is" if len(seen) == 1 else "the PRs above are"
             why = f"used only if {above} not confirmed"
@@ -642,7 +642,7 @@ def render(ex: Explanation) -> str:
     # can pass for a section or an entry; every line is escaped.
     out: list[str] = []
     for line in lines:
-        first, *more = line.split("\n")
+        first, *more = line.replace("\r\n", "\n").split("\n")
         out.append(_text(first))
         out += [f"    | {_text(part)}" for part in more if part.strip()]
     return "\n".join(out) + "\n"

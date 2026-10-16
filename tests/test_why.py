@@ -720,7 +720,7 @@ def test_the_same_pr_as_another_kind_is_never_a_fallback() -> None:
         ("ci_green", False, True),
     ]
     assert _expected(found[1]) == (
-        "unused ci_green on example/repo#5 (from the block reason): not used: same PR as above"
+        "unused ci_green on example/repo#5 (from the block reason): same PR as above"
     )
     ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
     assert ex is not None
@@ -747,6 +747,16 @@ def test_rule_reasons_keep_their_paragraphs() -> None:
         "Open alert states",
     ]
     assert "\\n" not in "\n".join(lines)
+
+
+def test_rule_reasons_with_crlf_line_ends_keep_no_carriage_return() -> None:
+    snap = _blocked("stuck")
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    action = Action(ActionKind.ALERT, "checkpoints", "One.\r\n\r\nTwo.", task_id="T-1")
+    ex.findings = [Finding(action, Mode.OBSERVE)]
+    out = render(ex)
+    assert "\\r" not in out and "    | Two." in out
 
 
 def test_text_escapes_controls_but_keeps_emoji_joiners_and_spaces() -> None:
