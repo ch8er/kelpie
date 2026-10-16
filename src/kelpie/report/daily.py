@@ -60,7 +60,7 @@ from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
-from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
+from kelpie.core.model import Owner, OwnerKind, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.spans import (
     Attribution,
     SpanKey,
@@ -386,7 +386,7 @@ def _verifications(
         end=end,
         states=[r for r in inputs.states if is_chaos(r.state)],  # counted like the chaos
         cause=cause_of,
-        hours=lambda st, lo, hi: state_hours(inputs.actions, st, lo, hi),
+        hours=lambda st, lo, hi: state_hours(inputs.actions, st, lo, hi, _humans(inputs)),
         chaos_rules=frozenset(CHAOS_CAUSES),
         spans=known,
         counted=counted_llm(index, known),
@@ -488,7 +488,7 @@ def _chaos(
         if b <= a:
             continue
         if state.id.startswith(HOLD_STATE):
-            agent_hours, held = hold_agent_hours(inputs.actions, state, a, b)
+            agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
             hours[HOLDS] += agent_hours
             tasks[HOLDS].update(held)
             continue
@@ -536,7 +536,11 @@ def cause_of(state: OpenState) -> str:
 
 
 def hold_agent_hours(
-    entries: Sequence[LedgerEntry], state: OpenState, a: datetime, b: datetime
+    entries: Sequence[LedgerEntry],
+    state: OpenState,
+    a: datetime,
+    b: datetime,
+    humans: frozenset[str] = frozenset(),
 ) -> tuple[float, tuple[str, ...]]:
     """Idle agent-hours a forgotten hold caused in ``[a, b)``, and the tasks it held.
 
@@ -545,11 +549,12 @@ def hold_agent_hours(
     open. Each such sample of this episode of the hold (at or after its ``since``, the
     expiry) holds until the next one: a step function, integrated over the window. Before
     the first sample in the window, the latest earlier sample applies, else the first one.
-    No sample at all: no idle agents known (0)."""
+    No sample at all: no idle agents known (0). ``humans`` (owners of kind human) never
+    count as idle agents, even if an older alert listed them."""
     label = state.id[len(HOLD_STATE) :]
     samples = sorted(
         (
-            (e.at, len(e.params["idle_agents"]), _held(e.params))
+            (e.at, len([x for x in e.params["idle_agents"] if x not in humans]), _held(e.params))
             for e in entries
             if e.rule == "bottlenecks"
             and e.params.get("hold") == label
@@ -584,13 +589,21 @@ def _held(params: Mapping[str, object]) -> list[object]:
 
 
 def state_hours(
-    entries: Sequence[LedgerEntry], state: OpenState, a: datetime, b: datetime
+    entries: Sequence[LedgerEntry],
+    state: OpenState,
+    a: datetime,
+    b: datetime,
+    humans: frozenset[str] = frozenset(),
 ) -> float:
     """What a chaos state costs in ``[a, b)``: its condition-hours, or for a forgotten hold
     the idle agent-hours behind it (:func:`hold_agent_hours`)."""
     if state.id.startswith(HOLD_STATE):
-        return hold_agent_hours(entries, state, a, b)[0]
+        return hold_agent_hours(entries, state, a, b, humans)[0]
     return max((b - a).total_seconds() / 3600, 0.0)
+
+
+def _humans(inputs: ReportInputs) -> frozenset[str]:
+    return frozenset(o.id for o in inputs.owners if o.kind is OwnerKind.HUMAN)
 
 
 def is_chaos(state: OpenState) -> bool:
