@@ -23,7 +23,7 @@ from kelpie.alerts.telegram import (
     utf16_len,
 )
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import AlertMessage, Did, Transition, parse_alert
+from kelpie.core.alerts import AlertEvent, Did, Transition
 from kelpie.metrics import Metrics
 from tests.alerts.fake_telegram import FakeTelegram, fake_telegram
 
@@ -40,16 +40,16 @@ def channel(fake: FakeTelegram, **extra: object) -> TelegramChannel:
     return settings(fake.url, **extra).build({ENV: TOKEN})
 
 
-def message(**kw: object) -> AlertMessage:
+def message(**kw: object) -> AlertEvent:
     base: dict[str, object] = {
         "rule": "orphans",
         "subject": "alert task-1",
-        "body": "task-1 has had no owner for 3h.",
+        "reason": "task-1 has had no owner for 3h.",
         "severity": Severity.WARNING,
         "transition": Transition.NEW,
         "did": Did.NOTIFIED,
     }
-    return AlertMessage(**{**base, **kw})  # type: ignore[arg-type]
+    return AlertEvent(**{**base, **kw})  # type: ignore[arg-type]
 
 
 def wait_for(cond: Callable[[], bool], timeout: float = 3.0) -> None:
@@ -68,17 +68,24 @@ def test_message_shows_severity_transition_and_what_kelpie_did() -> None:
     assert "only sent this alert" in format_message(message())
     assert "failed" in format_message(message(did=Did.FAILED))
     assert "no executor" in format_message(message(did=Did.NOT_EXECUTED))
-    resolved = parse_alert("[orphans] alert task-1", "Resolved after 1.0h: gone.", "info")
-    # The engine's own wording says it: the channel's label is not added a second time.
+    resolved = message(
+        reason="gone.",
+        severity=Severity.INFO,
+        transition=Transition.RESOLVED,
+        age=timedelta(hours=1),
+    )
+    # The transition is worded from the fields (core.alerts.lead_in), once.
     assert format_message(resolved).split("\n")[1] == "Resolved after 1.0h: gone."
-    still = parse_alert("[orphans] alert task-1", "Still open after 4.0h: no owner", "warning")
+    still = message(reason="no owner", transition=Transition.ESCALATED, age=timedelta(hours=4))
     assert format_message(still).split("\n")[1] == "Still open after 4.0h: no owner"
-    changed = parse_alert("[orphans] alert task-1", "Changed: now critical", "critical")
+    changed = message(
+        reason="now critical", severity=Severity.CRITICAL, transition=Transition.CHANGED
+    )
     assert format_message(changed).split("\n")[1] == "Changed: now critical"
 
 
 def test_untrusted_text_is_plain_and_control_characters_are_removed() -> None:
-    text = format_message(message(body="*bold* _it_ [x](http://evil) \x00\x1b[31m"))
+    text = format_message(message(reason="*bold* _it_ [x](http://evil) \x00\x1b[31m"))
     assert "*bold* _it_ [x](http://evil)" in text  # no parse_mode: shown literally
     assert "\x00" not in text and "\x1b" not in text
 
@@ -89,7 +96,7 @@ def test_text_is_cut_to_the_telegram_limit_in_utf16_units() -> None:
     assert len(cut) <= MAX_TEXT and cut.endswith("(cut)")
     astral = truncate("\U0001f600" * 5000)  # two UTF-16 units each
     assert utf16_len(astral) <= MAX_TEXT and astral.endswith("(cut)")
-    assert utf16_len(format_message(message(body="y" * 20_000))) <= MAX_TEXT
+    assert utf16_len(format_message(message(reason="y" * 20_000))) <= MAX_TEXT
 
 
 def test_sends_plain_text_to_the_configured_chat() -> None:
@@ -117,7 +124,7 @@ def test_429_carries_retry_after_and_is_retried_by_delivery() -> None:
         fake.replies = [(429, limited), (502, {"ok": False})]
         metrics = Metrics()
         delivery = Delivery([channel(fake)], metrics, backoff=0.01)
-        delivery.alerter().send("[orphans] alert task-1", "no owner", "warning")
+        delivery.alerter().send(AlertEvent("orphans", "alert task-1", "no owner", Severity.WARNING))
         wait_for(lambda: metrics.alerts_sent["telegram"] == 1)
         delivery.close()
     assert len(fake.requests) == 4  # 1 (above) + 429 + 502 + success
@@ -165,7 +172,7 @@ def test_the_token_never_appears_in_logs_errors_reprs_or_metrics(
             with pytest.raises(PermanentError) as info:
                 ch.send(message())
             delivery = Delivery([ch], metrics, backoff=0.001)
-            delivery.alerter().send("[r] alert", "x", "warning")
+            delivery.alerter().send(AlertEvent("r", "alert", "x", Severity.WARNING))
             wait_for(lambda: metrics.alerts_failed[("telegram", "rejected")] == 1)
             delivery.close()
         assert "<redacted>" in str(info.value)
@@ -245,7 +252,7 @@ def test_free_text_is_sent_as_it_is_and_cut_to_the_limit() -> None:
 
 
 def test_lone_surrogates_do_not_crash_formatting_or_sending() -> None:
-    bad = message(subject="task \ud800 x", body="reason \udfff \ud83d end")
+    bad = message(subject="task \ud800 x", reason="reason \udfff \ud83d end")
     text = format_message(bad)
     text.encode("utf-8")  # must be encodable
     assert "reason" in text and "end" in text
@@ -257,14 +264,14 @@ def test_lone_surrogates_do_not_crash_formatting_or_sending() -> None:
 
 
 def test_a_huge_body_never_cuts_off_what_kelpie_did() -> None:
-    text = format_message(message(body="y" * 20_000, subject="s" * 5000, did=Did.FAILED))
+    text = format_message(message(reason="y" * 20_000, subject="s" * 5000, did=Did.FAILED))
     assert "tried, and it failed" in text.split("\n")[-1]
     assert utf16_len(text) <= MAX_TEXT
 
 
 def test_invisible_format_characters_are_removed() -> None:
     sneaky = "pay‮evil‬ ok​‍go﻿ ⁦x⁩"  # bidi, zero-width, BOM
-    text = format_message(message(body=sneaky, subject="task​-1"))
+    text = format_message(message(reason=sneaky, subject="task​-1"))
     assert all(unicodedata.category(c) != "Cf" for c in text)
     assert "payevil okgo x" in text and "task-1" in text
     assert clean("a­b") == "ab"  # soft hyphen too
@@ -272,7 +279,7 @@ def test_invisible_format_characters_are_removed() -> None:
 
 def test_mentions_in_agent_controlled_text_are_broken() -> None:
     body = "ping @everyone and @some_user, mail a@b.example"
-    text = format_message(message(body=body, subject="@admin task", rule="@rule"))
+    text = format_message(message(reason=body, subject="@admin task", rule="@rule"))
     assert "@" not in text  # none left in the agent's fields
     assert all(f"{AT_SIGN}{n}" in text for n in ("everyone", "some_user", "admin"))
     assert "@" not in format_message(message(text="Daily report for @team"))
@@ -281,7 +288,7 @@ def test_mentions_in_agent_controlled_text_are_broken() -> None:
 
 def test_the_chat_id_is_not_affected_by_mention_breaking() -> None:
     with fake_telegram() as fake:
-        channel(fake, chat_id="@kelpie_alerts").send(message(body="@everyone"))
+        channel(fake, chat_id="@kelpie_alerts").send(message(reason="@everyone"))
     body = fake.requests[0][2]
     assert body["chat_id"] == "@kelpie_alerts"
     assert "@everyone" not in body["text"]

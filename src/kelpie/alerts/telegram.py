@@ -27,14 +27,7 @@ from urllib.parse import urlsplit
 from kelpie import net
 from kelpie.alerts.delivery import PermanentError, TransientError
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import (
-    CHANGED_PREFIX,
-    ESCALATED_PREFIX,
-    RESOLVED_PREFIX,
-    AlertMessage,
-    Did,
-    Transition,
-)
+from kelpie.core.alerts import AlertEvent, Did, lead_in
 from kelpie.core.serde import parse_duration
 
 TYPE = "telegram"
@@ -51,19 +44,6 @@ _CHAT = re.compile(r"-?\d{1,20}|@[A-Za-z0-9_]{4,64}")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _KEYS = {"type", "name", "token_env", "chat_id", "timeout", "min_severity", "api_url"}
 
-TRANSITION = {
-    Transition.NEW: "",
-    Transition.ESCALATED: "Still open. ",
-    Transition.CHANGED: "Changed. ",
-    Transition.RESOLVED: "Resolved. ",
-}
-# What the engine already puts in front of the body for a transition (core.alerts). The
-# label above is shown only when the body does not say so itself.
-_ENGINE_PREFIX = {
-    Transition.ESCALATED: ESCALATED_PREFIX,
-    Transition.CHANGED: CHANGED_PREFIX,
-    Transition.RESOLVED: RESOLVED_PREFIX,
-}
 AT_SIGN = "\uff20"  # fullwidth commercial at: shown like "@", never a mention
 DID = {
     Did.NOTIFIED: "Kelpie did: only sent this alert (no other change).",
@@ -75,7 +55,7 @@ DID = {
 MAX_DID = 1500  # several effects' lines (a budget alert's stops); the body yields room
 
 
-def did_line(message: AlertMessage) -> str:
+def did_line(message: AlertEvent) -> str:
     """What Kelpie did: the engine's own line when it sent one, else the fixed wording."""
     if message.did_text:
         return truncate(clean(message.did_text), MAX_DID)
@@ -100,13 +80,10 @@ def defang(text: str) -> str:
     return clean(text).replace("@", AT_SIGN)
 
 
-def lead(message: AlertMessage) -> str:
-    """The label of the transition, unless the body already starts with the engine's own
-    wording for it ("Still open after 4.0h: ..."), so it is not said twice."""
-    prefix = _ENGINE_PREFIX.get(message.transition)
-    if prefix is not None and message.body.strip().startswith(prefix):
-        return ""
-    return TRANSITION[message.transition]
+def lead(message: AlertEvent) -> str:
+    """The words that put the reason in the context of its transition ("Still open after
+    4.0h: "), from the event's fields; empty for a new alert."""
+    return lead_in(message.transition, message.age)
 
 
 def utf16_len(text: str) -> int:
@@ -128,7 +105,7 @@ def truncate(text: str, limit: int = MAX_TEXT) -> str:
     return "".join(kept) + tail
 
 
-def format_message(message: AlertMessage) -> str:
+def format_message(message: AlertEvent) -> str:
     """Plain text: severity and subject, the transition, the reason, what Kelpie did.
     Free text (``message.text``) is sent as it is."""
     if message.text is not None:
@@ -140,7 +117,7 @@ def format_message(message: AlertMessage) -> str:
     first = head + truncate(defang(message.subject), MAX_HEAD)
     did = defang(did_line(message))
     room = min(MAX_BODY, MAX_TEXT - utf16_len(first) - utf16_len(did) - 2)
-    body = truncate(defang(lead(message) + message.body.strip()), room)
+    body = truncate(defang(lead(message) + message.reason.strip()), room)
     return truncate("\n".join([first, body, did]))
 
 
@@ -261,7 +238,7 @@ class TelegramChannel:
     def __repr__(self) -> str:
         return f"TelegramChannel(name={self.name!r}, chat_id={self._settings.chat_id!r})"
 
-    def send(self, message: AlertMessage) -> None:
+    def send(self, message: AlertEvent) -> None:
         payload = {
             "chat_id": self._settings.chat_id,
             "text": format_message(message),

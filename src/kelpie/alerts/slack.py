@@ -47,7 +47,7 @@ from kelpie.alerts.telegram import (
     utf16_len,
 )
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import AlertMessage
+from kelpie.core.alerts import AlertEvent
 from kelpie.core.serde import parse_duration
 
 TYPE = "slack"
@@ -65,7 +65,7 @@ def escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def format_message(message: AlertMessage) -> str:
+def format_message(message: AlertEvent) -> str:
     """The text of a message, laid out as in Telegram, then escaped for Slack."""
     if message.text is not None:
         return escape(truncate(clean(message.text)))
@@ -75,7 +75,7 @@ def format_message(message: AlertMessage) -> str:
     first = head + truncate(clean(message.subject), MAX_HEAD)
     did = did_line(message)
     room = min(MAX_BODY, MAX_TEXT - utf16_len(first) - utf16_len(did) - 2)
-    body = truncate(clean(lead(message) + message.body.strip()), room)
+    body = truncate(clean(lead(message) + message.reason.strip()), room)
     return escape(truncate("\n".join([first, body, did])))
 
 
@@ -174,7 +174,7 @@ class SlackChannel:
     def __repr__(self) -> str:
         return f"SlackChannel(name={self.name!r})"
 
-    def send(self, message: AlertMessage) -> None:
+    def send(self, message: AlertEvent) -> None:
         payload = {
             "text": format_message(message),
             "mrkdwn": False,

@@ -1,17 +1,21 @@
-"""What an alert says, as the engine words it, and how to read it back (pure, no I/O).
+"""What an alert says, as the engine hands it to an alerter (pure, no I/O).
 
-The engine calls ``Alerter.send(title, body, severity, did=...)``. The title and the body
-carry the transition of a long-lived state in fixed wording, defined here once so that alert
-channels can show it without guessing. ``did`` is the line that says what Kelpie itself did,
-rendered by the engine from the action's kind and params, the rule's mode and the actual
-outcome (:func:`suggested_line`, :func:`done_line`, :func:`failed_line`): rules only describe
-the situation and what they want done, never whether it was done.
+The engine calls ``Alerter.send(event)`` with an :class:`AlertEvent`: the rule, the subject,
+the rule's reason, the severity, the transition of a long-lived state, and what Kelpie
+itself did, all as separate fields. A channel lays the fields out and never reads them back
+out of text. ``did_text`` is the line that says what Kelpie did, rendered by the engine from
+the action's kind and params, the rule's mode and the actual outcome
+(:func:`suggested_line`, :func:`done_line`, :func:`failed_line`): rules only describe the
+situation and what they want done, never whether it was done. The wording of a transition
+("Still open after 4.0h: ") is defined here once (:func:`lead_in`), for the engine's ledger
+and for every channel.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 
 from kelpie.core.actions import Action, ActionKind, Severity
@@ -34,86 +38,73 @@ class Did(StrEnum):
     DONE = "done"  # mode act: the action was carried out
 
 
-# Wording the engine puts in front of the reason of a state alert (see Engine._state_alert),
-# and in the title of an alert that is not a plain notification.
-ESCALATED_PREFIX = "Still open after "
-CHANGED_PREFIX = "Changed: "
-RESOLVED_PREFIX = "Resolved after "
-SUGGEST_TAG = "suggest"
-FAILED_TAG = "failed"
-DONE_TAG = "done"
-NOT_EXECUTED_SUFFIX = " (not executed, needs a human)"
 # An alert that reports on effects of the same tick names their keys in this param
 # (a string or a list): its ``did`` line is then theirs (see Engine.execute).
 ANNOUNCES = "announces"
 MAX_FAILURE = 200  # characters of a failure reason shown to a human
 
-_TITLE = re.compile(
-    r"\[(?P<rule>[^\]]*)\] (?P<tag>(?:suggest|failed|done) )?(?P<what>.*)", re.DOTALL
-)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 
 
+def format_age(age: timedelta) -> str:
+    """A duration as an alert shows it: ``4.0h``, or whole minutes below an hour."""
+    hours = age.total_seconds() / 3600
+    return f"{hours:.1f}h" if hours >= 1 else f"{max(0, int(age.total_seconds() // 60))}m"
+
+
+def lead_in(transition: Transition, age: timedelta | None = None) -> str:
+    """The words that put a reason in the context of its transition: ``Still open after
+    4.0h: ``, ``Changed: ``, ``Resolved after 1.0h: ``; nothing for a new alert. Without an
+    ``age`` the short labels ``Still open. `` and ``Resolved. `` stand in."""
+    match transition:
+        case Transition.ESCALATED:
+            return f"Still open after {format_age(age)}: " if age is not None else "Still open. "
+        case Transition.CHANGED:
+            return "Changed: "
+        case Transition.RESOLVED:
+            return f"Resolved after {format_age(age)}: " if age is not None else "Resolved. "
+        case _:
+            return ""
+
+
 @dataclass(frozen=True, slots=True)
-class AlertMessage:
-    """An alert as a channel sees it. ``body`` is the reason, possibly with untrusted task
-    text: channels send it as plain text or escape it."""
+class AlertEvent:
+    """An alert as the engine hands it over and as a channel sees it.
+
+    ``reason`` is the rule's own text, as it is (no wording of a transition in front of it),
+    possibly with untrusted task text: channels send it as plain text or escape it.
+    ``subject`` is what the alert is about, e.g. ``requeue task-12``; with ``rule`` it
+    identifies the alert for de-duplication. ``age`` is how long a lasting condition has been
+    open, for the transitions ``ESCALATED`` and ``RESOLVED``.
+    """
 
     rule: str
-    subject: str  # e.g. "requeue task-12"
-    body: str
+    subject: str
+    reason: str
     severity: Severity
-    transition: Transition
-    did: Did
-    text: str | None = None  # free text (e.g. a report): sent as is, without the alert layout
+    transition: Transition = Transition.NEW
+    did: Did = Did.NOTIFIED
     did_text: str | None = None  # what Kelpie did, as the engine rendered it (else from did)
+    age: timedelta | None = None
+    text: str | None = None  # free text (e.g. a report): sent as is, without the alert layout
 
     @property
     def fingerprint(
         self,
-    ) -> tuple[str, str, str, Severity, str | None, Transition, Did, str | None]:
-        """What makes two alerts the same one for de-duplication."""
+    ) -> tuple[str, str, str, Severity, str | None, Transition, str | None, Did, str | None]:
+        """What makes two alerts the same one for de-duplication. The age counts as it is
+        worded ("4.0h"), so an alert re-sent a minute later is still the same one."""
         return (
             self.rule,
             self.subject,
-            self.body,
+            self.reason,
             self.severity,
             self.text,
             self.transition,
+            format_age(self.age) if self.age is not None else None,
             self.did,
             self.did_text,
         )
-
-
-def parse_alert(title: str, body: str, severity: str, did: str | None = None) -> AlertMessage:
-    """Read an engine alert back. Unknown wording degrades to a plain notification.
-    ``did`` is the engine's line about what Kelpie did, kept as it is."""
-    try:
-        level = Severity(severity)
-    except ValueError:
-        level = Severity.WARNING
-    did_text = did
-    kind = Did.NOTIFIED
-    if title.endswith(NOT_EXECUTED_SUFFIX):
-        title, kind = title[: -len(NOT_EXECUTED_SUFFIX)], Did.NOT_EXECUTED
-    m = _TITLE.fullmatch(title)
-    rule, subject = (m["rule"], m["what"]) if m else ("", title)
-    if m and m["tag"]:
-        tag = m["tag"].strip()
-        if tag == SUGGEST_TAG:
-            kind = Did.SUGGESTED
-        elif tag == FAILED_TAG:
-            kind = Did.FAILED
-        elif tag == DONE_TAG:
-            kind = Did.DONE
-    transition = Transition.NEW
-    if body.startswith(RESOLVED_PREFIX):
-        transition = Transition.RESOLVED
-    elif body.startswith(ESCALATED_PREFIX):
-        transition = Transition.ESCALATED
-    elif body.startswith(CHANGED_PREFIX):
-        transition = Transition.CHANGED
-    return AlertMessage(rule, subject, body, level, transition, kind, did_text=did_text or None)
 
 
 # --- what Kelpie did, from the action and its outcome --------------------------------------

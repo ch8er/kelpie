@@ -12,12 +12,11 @@ from kelpie.alerts import slack, telegram
 from kelpie.core.actions import Action, ActionKind, ActionResult, Severity
 from kelpie.core.alerts import (
     ANNOUNCES,
-    AlertMessage,
+    AlertEvent,
     Did,
     done_line,
     failure_reason,
     intent,
-    parse_alert,
 )
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
@@ -33,10 +32,10 @@ SESSION = Session("S-1", "T-1", "agent-1", NOW)
 
 class Recorder:
     def __init__(self) -> None:
-        self.messages: list[AlertMessage] = []
+        self.messages: list[AlertEvent] = []
 
-    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
-        self.messages.append(parse_alert(title, body, severity, did))
+    def send(self, event: AlertEvent) -> None:
+        self.messages.append(event)
 
 
 class Detailed(StoppingAdapter):
@@ -142,7 +141,7 @@ def test_failure_reason_never_shows_raw_exception_text() -> None:
 def test_suggest_says_suggested_and_not_done() -> None:
     unblock = Action(ActionKind.UNBLOCK, "stale", "The block is stale.", task_id="T-1")
     (m,) = tick([unblock], FakeAdapter(), SUGGEST).messages
-    assert (m.did, m.body) == (Did.SUGGESTED, "The block is stale.")
+    assert (m.did, m.reason) == (Did.SUGGESTED, "The block is stale.")
     assert m.did_text == "Suggested: clear the block on T-1 (not done, rule in suggest mode)."
 
 
@@ -194,7 +193,7 @@ def test_the_alert_announcing_an_effect_says_what_happened_to_it(
     (m,) = tick([runaway(), stop()], adapter, config).messages
     assert (m.severity, m.subject) == (Severity.CRITICAL, "alert T-1")
     assert m.did_text == line
-    assert "Stop proposed" not in m.body
+    assert "Stop proposed" not in m.reason
 
 
 def test_an_effect_whose_alert_stays_quiet_is_announced_on_its_own() -> None:
@@ -239,19 +238,23 @@ def test_observe_and_dry_run_send_nothing() -> None:
 
 @pytest.mark.parametrize("fmt", [telegram.format_message, slack.format_message])
 def test_channels_print_the_engines_line_last(fmt: object) -> None:
-    message = parse_alert(
-        "[loop] alert T-1", "Runaway run.", "critical", did="Stopped run S-1; exits soon."
+    message = AlertEvent(
+        "loop",
+        "alert T-1",
+        "Runaway run.",
+        Severity.CRITICAL,
+        did_text="Stopped run S-1; exits soon.",
     )
     text = fmt(message)  # type: ignore[operator]
     assert text.splitlines()[-1] == "Stopped run S-1; exits soon."
     assert "Kelpie did:" not in text
-    plain = fmt(parse_alert("[loop] alert T-1", "Runaway run.", "critical"))  # type: ignore[operator]
+    plain = fmt(AlertEvent("loop", "alert T-1", "Runaway run.", Severity.CRITICAL))  # type: ignore[operator]
     assert plain.splitlines()[-1] == telegram.DID[Did.NOTIFIED]
 
 
 def test_the_did_line_is_part_of_what_makes_two_alerts_the_same() -> None:
-    a = parse_alert("[r] alert T-1", "b", "info", did="Stopped run S-1.")
-    b = parse_alert("[r] alert T-1", "b", "info", did="Suggested: stop run S-1.")
+    a = AlertEvent("r", "alert T-1", "b", Severity.INFO, did_text="Stopped run S-1.")
+    b = AlertEvent("r", "alert T-1", "b", Severity.INFO, did_text="Suggested: stop run S-1.")
     assert a.fingerprint != b.fingerprint
 
 
@@ -273,10 +276,10 @@ def test_an_announcing_alert_held_back_by_the_ledger_releases_the_effects_line()
 class FailingAlerts(Recorder):
     """Delivers everything but plain alerts."""
 
-    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
-        if title.startswith("[loop] alert"):
+    def send(self, event: AlertEvent) -> None:
+        if event.did is Did.NOTIFIED and event.subject.startswith("alert"):
             raise ConnectionError("chat down")
-        super().send(title, body, severity, did)
+        super().send(event)
 
 
 def test_an_announcing_alert_that_cannot_be_sent_still_lets_the_effect_be_told() -> None:
@@ -334,7 +337,7 @@ def test_the_did_line_survives_a_long_body_whole() -> None:
     body = "x" * 5000
     did = "Stopped run S-1; " + "y" * 1200 + "."
     for fmt in (telegram.format_message, slack.format_message):
-        text = fmt(parse_alert("[loop] alert T-1", body, "critical", did=did))
+        text = fmt(AlertEvent("loop", "alert T-1", body, Severity.CRITICAL, did_text=did))
         assert text.splitlines()[-1] == did and len(text) <= telegram.MAX_TEXT
 
 

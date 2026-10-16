@@ -4,7 +4,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from kelpie.core.actions import Action, ActionKind
+from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import AlertEvent, Did
 from kelpie.core.model import Condition, Snapshot, Task
 from kelpie.core.ports import PlatformEvent
 
@@ -67,14 +68,31 @@ class StoppingAdapter(FakeAdapter):
         self._record("stop", session_id)
 
 
+_TAGS = {Did.SUGGESTED: "suggest ", Did.FAILED: "failed ", Did.DONE: "done "}
+
+
+def describe(event: AlertEvent) -> str:
+    """A short line for assertions ("[rule] suggest requeue T-1"); not a wire format."""
+    held = " (not executed, needs a human)" if event.did in (Did.NOT_EXECUTED, Did.FAILED) else ""
+    return f"[{event.rule}] {_TAGS.get(event.did, '')}{event.subject}{held}"
+
+
 @dataclass
 class FakeAlerter:
-    sent: list[tuple[str, str]] = field(default_factory=list)
-    dids: list[str | None] = field(default_factory=list)  # the engine's "Kelpie did" lines
+    events: list[AlertEvent] = field(default_factory=list)
 
-    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
-        self.sent.append((title, severity))
-        self.dids.append(did)
+    def send(self, event: AlertEvent) -> None:
+        self.events.append(event)
+
+    @property
+    def sent(self) -> list[tuple[str, Severity]]:
+        """(description, severity) of each alert, for short assertions."""
+        return [(describe(e), e.severity) for e in self.events]
+
+    @property
+    def dids(self) -> list[str | None]:
+        """The engine's "Kelpie did" lines."""
+        return [e.did_text for e in self.events]
 
 
 @dataclass

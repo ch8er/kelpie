@@ -11,19 +11,16 @@ from datetime import datetime, timedelta
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import (
     ANNOUNCES,
-    CHANGED_PREFIX,
-    DONE_TAG,
-    ESCALATED_PREFIX,
-    FAILED_TAG,
-    NOT_EXECUTED_SUFFIX,
-    RESOLVED_PREFIX,
-    SUGGEST_TAG,
+    AlertEvent,
+    Did,
     done_line,
     failed_line,
     failure_reason,
+    lead_in,
     not_executed_line,
     suggested_line,
 )
+from kelpie.core.alerts import Transition as AlertTransition
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
 from kelpie.core.ledger import (
@@ -101,9 +98,14 @@ class Engine:
     # back for that alert, and the keys whose alert went out.
     _announced: set[str] = field(init=False, default_factory=set)
     _lines: dict[str, list[str]] = field(init=False, default_factory=dict)
-    _held: dict[str, list[tuple[Action, bool, str, str]]] = field(init=False, default_factory=dict)
+    _held: dict[str, list[tuple[Action, bool, Did | None, str]]] = field(
+        init=False, default_factory=dict
+    )
     _told: set[str] = field(init=False, default_factory=set)
     _announcer_severity: dict[str, Severity] = field(init=False, default_factory=dict)
+    # While an alert about a state is processed: what it says besides the rule's reason,
+    # keyed by the alert's key.
+    _transitions: dict[str, _StateNote] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         self.ledger = ActionLedger(
@@ -184,9 +186,9 @@ class Engine:
                 continue
             # As urgent as the alert that would have carried it (a critical runaway's stop).
             floor = self._announcer_severity.get(key, Severity.INFO)
-            for action, executed, prefix, did in held:
+            for action, executed, kind, did in held:
                 urgent = replace(action, severity=_higher(action.severity, floor))
-                self._safe_alert(urgent, executed=executed, prefix=prefix, did=did)
+                self._safe_alert(urgent, executed=executed, kind=kind, did=did)
         self._announced, self._lines, self._held, self._told = set(), {}, {}, set()
         self._announcer_severity = {}
 
@@ -219,9 +221,9 @@ class Engine:
                 if self._last_attempt(action, mode, snapshot.now):
                     did = failed_line(action, failure_reason(exc))
                     if action.kind in _ALERT_ACTIONS:
-                        self._safe_alert(action, executed=False, prefix=FAILED_TAG, did=did)
+                        self._safe_alert(action, executed=False, kind=Did.FAILED, did=did)
                     else:
-                        self._effect_message(action, executed=False, prefix=FAILED_TAG, did=did)
+                        self._effect_message(action, executed=False, kind=Did.FAILED, did=did)
             dispatched = Dispatched(action, mode, outcome)
         self._record(dispatched, snapshot.now)
         return dispatched
@@ -260,15 +262,17 @@ class Engine:
             dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, Suppression.STATE_OPEN)
             self._record(dispatched, now)
             return dispatched
-        prefix = {
-            Transition.ESCALATED: f"{ESCALATED_PREFIX}{_age(now - new.since)}: ",
-            Transition.CHANGED: CHANGED_PREFIX,
-        }.get(transition, "")
+        shown = _TRANSITIONS.get(transition, AlertTransition.NEW)
+        age = now - new.since if shown is AlertTransition.ESCALATED else None
+        note = _StateNote(shown, age, action.reason)
+        # The ledger records the reason with the transition worded in front of it; the alert
+        # event carries the transition and the rule's own reason as separate fields.
+        lead = lead_in(shown, age)
         # Each transition has its own fingerprint, so the cooldown only stops true repeats.
         key = f"{action.key or action.state}|{new.opened_at.isoformat()}|L{new.level}"
         key += f"|{new.severity}|{new.mode}"
-        dispatched = self._process(
-            replace(action, reason=prefix + action.reason, key=key), snapshot
+        dispatched = self._process_noted(
+            replace(action, reason=lead + action.reason, key=key), snapshot, note
         )
         if dispatched.outcome in _HANDLED:
             self._safe_state(lambda: self.states.commit(new))
@@ -287,20 +291,31 @@ class Engine:
             return []
         results: list[Dispatched] = []
         for state in gone:
-            first_line = state.summary.split(". ")[0].rstrip(".")
+            first_line = f"{state.summary.split('. ')[0].rstrip('.')}."
+            age = snapshot.now - state.since
+            note = _StateNote(AlertTransition.RESOLVED, age, first_line)
             notice = Action(
                 ActionKind.ALERT,
                 state.rule,
-                f"{RESOLVED_PREFIX}{_age(snapshot.now - state.since)}: {first_line}.",
+                lead_in(AlertTransition.RESOLVED, age) + first_line,
                 task_id=state.task_id,
                 key=f"resolved:{state.id}|{state.opened_at.isoformat()}",
                 params={"state": state.id},
             )
-            dispatched = self._process(notice, snapshot)
+            dispatched = self._process_noted(notice, snapshot, note)
             results.append(dispatched)
             if dispatched.outcome in _HANDLED:  # otherwise retry the notice next tick
                 self._safe_state(lambda s=state: self.states.resolve(s, snapshot.now))
         return results
+
+    def _process_noted(self, action: Action, snapshot: Snapshot, note: _StateNote) -> Dispatched:
+        """:meth:`_process` an alert about a state; its event carries ``note``."""
+        assert action.key is not None
+        self._transitions[action.key] = note
+        try:
+            return self._process(action, snapshot)
+        finally:
+            self._transitions.pop(action.key, None)
 
     @staticmethod
     def _safe_state(write: Callable[[], None]) -> None:
@@ -332,16 +347,20 @@ class Engine:
             self._safe_alert(replace(notice, severity=Severity.WARNING))
 
     def _safe_alert(
-        self, action: Action, executed: bool = True, prefix: str = "", did: str | None = None
+        self,
+        action: Action,
+        executed: bool = True,
+        kind: Did | None = None,
+        did: str | None = None,
     ) -> None:
         """Alert without ever raising out of the loop."""
         try:
-            self._alert(action, executed=executed, prefix=prefix, did=did)
+            self._alert(action, executed=executed, kind=kind, did=did)
         except Exception:
             log.exception("could not send alert: %s", action)
 
     def _effect_message(
-        self, action: Action, *, executed: bool = True, prefix: str = "", did: str
+        self, action: Action, *, executed: bool = True, kind: Did | None = None, did: str
     ) -> bool:
         """Tell a human what happened to an effect, or hold it for the alert of this tick
         that announces it. False if there is no alerter."""
@@ -351,9 +370,9 @@ class Engine:
         key = action.key
         if key is not None and key in self._announced:
             self._lines.setdefault(key, []).append(did)
-            self._held.setdefault(key, []).append((action, executed, prefix, did))
+            self._held.setdefault(key, []).append((action, executed, kind, did))
             return True
-        return self._alert(action, executed=executed, prefix=prefix, did=did)
+        return self._alert(action, executed=executed, kind=kind, did=did)
 
     def tick(self, snapshot_source: Callable[[], Snapshot]) -> list[Dispatched]:
         snapshot = snapshot_source()
@@ -377,7 +396,7 @@ class Engine:
             self._told.update(k for k in keys if k in self._lines)
             return Outcome.ALERTED
         if mode is Mode.SUGGEST:
-            sent = self._effect_message(action, prefix=SUGGEST_TAG, did=suggested_line(action))
+            sent = self._effect_message(action, kind=Did.SUGGESTED, did=suggested_line(action))
             return Outcome.SUGGESTED if sent else Outcome.DROPPED
         return self._dispatch(action, snapshot)
 
@@ -417,7 +436,7 @@ class Engine:
             if action.kind not in _QUIET_WHEN_DONE:
                 detail = result if isinstance(result, str) else None
                 try:  # it is done: a message that cannot be sent must not undo that
-                    self._effect_message(action, prefix=DONE_TAG, did=done_line(action, detail))
+                    self._effect_message(action, kind=Did.DONE, did=done_line(action, detail))
                 except Exception:
                     log.exception("could not announce: %s", action)
             return Outcome.EXECUTED
@@ -428,24 +447,54 @@ class Engine:
         return Outcome.NOT_EXECUTED if sent else Outcome.DROPPED
 
     def _alert(
-        self, action: Action, executed: bool = True, prefix: str = "", did: str | None = None
+        self,
+        action: Action,
+        executed: bool = True,
+        kind: Did | None = None,
+        did: str | None = None,
     ) -> bool:
-        """Send ``action`` to a human. Return False if there is no alerter to send it to."""
+        """Send ``action`` to a human. Return False if there is no alerter to send it to.
+        ``kind`` is what Kelpie did when that is more than telling a human (suggested, done,
+        failed); an action that was not executed counts as ``Did.NOT_EXECUTED`` unless it
+        failed."""
         if self.alerter is None:
             log.warning("no alerter configured; dropped: %s", action)
             return False
-        title = f"[{action.rule}] {prefix + ' ' if prefix else ''}{action.kind}"  # see alerts.py
-        title += f" {action.task_id}" if action.task_id else ""
+        subject = f"{action.kind} {action.task_id}" if action.task_id else str(action.kind)
         severity = action.severity
-        if not executed:
-            title += NOT_EXECUTED_SUFFIX
-            if _RANK[severity] < _RANK[_NEEDS_HUMAN]:
-                severity = _NEEDS_HUMAN
-        if did is None:
-            self.alerter.send(title, action.reason, severity)
-        else:
-            self.alerter.send(title, action.reason, severity, did=did)
+        if not executed and _RANK[severity] < _RANK[_NEEDS_HUMAN]:
+            severity = _NEEDS_HUMAN
+        if kind is None:
+            kind = Did.NOTIFIED if executed else Did.NOT_EXECUTED
+        note = self._transitions.get(action.key) if action.key is not None else None
+        self.alerter.send(
+            AlertEvent(
+                rule=action.rule,
+                subject=subject,
+                reason=action.reason if note is None else note.reason,
+                severity=severity,
+                transition=AlertTransition.NEW if note is None else note.transition,
+                did=kind,
+                did_text=did,
+                age=None if note is None else note.age,
+            )
+        )
         return True
+
+
+@dataclass(frozen=True, slots=True)
+class _StateNote:
+    """What the alert about a long-lived state says besides the rule's reason."""
+
+    transition: AlertTransition
+    age: timedelta | None  # how long the condition has been open (escalated, resolved)
+    reason: str  # the rule's own reason, without the wording of the transition
+
+
+_TRANSITIONS = {
+    Transition.ESCALATED: AlertTransition.ESCALATED,
+    Transition.CHANGED: AlertTransition.CHANGED,
+}
 
 
 def _higher(a: Severity, b: Severity) -> Severity:
@@ -459,8 +508,3 @@ def _announces(action: Action) -> list[str]:
     raw = action.params.get(ANNOUNCES)
     keys = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
     return [k for k in keys if isinstance(k, str) and k]
-
-
-def _age(d: timedelta) -> str:
-    hours = d.total_seconds() / 3600
-    return f"{hours:.1f}h" if hours >= 1 else f"{max(0, int(d.total_seconds() // 60))}m"
