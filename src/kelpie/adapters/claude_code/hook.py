@@ -48,6 +48,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import time
 from pathlib import Path
@@ -349,6 +350,100 @@ def _task_update(args: Any) -> dict[str, str | None]:
     }
 
 
+PROC = Path("/proc")
+CLAUDE_NAMES = ("claude",)  # process names of Claude Code (Linux /proc/<pid>/comm)
+MAX_ANCESTORS = 4
+
+
+def _pid(value: Any) -> int | None:
+    try:
+        pid = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 1 else None
+
+
+def proc_stat(pid: int, proc: Path | None = None) -> list[str] | None:
+    """The fields of ``/proc/<pid>/stat`` after the process name (field 3, the state, comes
+    first); None when unreadable. Read as bytes: any process may name itself with bytes
+    that are not UTF-8, and the name, in parentheses, may hold spaces and parentheses."""
+    try:
+        raw = ((proc or PROC) / str(pid) / "stat").read_bytes()
+    except OSError:
+        return None
+    cut = raw.rfind(b")")
+    if cut < 0:
+        return None
+    return raw[cut + 2 :].decode("ascii", "replace").split()
+
+
+def proc_start(pid: int, proc: Path | None = None) -> str | None:
+    """The process's start time in clock ticks since boot (``/proc/<pid>/stat`` field 22),
+    which tells a live process from a later one that reused its pid; None off Linux."""
+    fields = proc_stat(pid, proc)
+    if fields is None or len(fields) <= 19 or not fields[19].isdigit():
+        return None
+    return fields[19]
+
+
+def _ancestors(proc: Path | None = None) -> list[tuple[int, bool]]:
+    """The hook's nearest ancestor processes (pid, named ``claude``), Linux only."""
+    found: list[tuple[int, bool]] = []
+    pid = os.getppid()
+    for _ in range(MAX_ANCESTORS):
+        if pid <= 1:
+            break
+        try:
+            comm = ((proc or PROC) / str(pid) / "comm").read_bytes()
+        except OSError:
+            break
+        found.append((pid, comm.decode("utf-8", "replace").strip() in CLAUDE_NAMES))
+        fields = proc_stat(pid, proc)
+        if fields is None or len(fields) < 2 or not fields[1].isdigit():
+            break
+        pid = int(fields[1])  # field 4: the parent
+    return found
+
+
+def identity(proc: Path | None = None) -> dict[str, Any]:
+    """What makes a pid meaningful: the host, the user, the PID namespace and the boot.
+    Kelpie compares them with its own and only checks a pid when all of them match."""
+    root = proc or PROC
+    found: dict[str, Any] = {"host": socket.gethostname()[:MAX_ID]}
+    found["uid"] = os.getuid() if hasattr(os, "getuid") else None
+    try:
+        found["pidns"] = os.readlink(root / "self" / "ns" / "pid")[:MAX_ID]
+    except OSError:
+        found["pidns"] = None
+    try:
+        boot = (root / "sys" / "kernel" / "random" / "boot_id").read_bytes()
+        found["boot"] = boot.decode("ascii", "replace").strip()[:MAX_ID] or None
+    except OSError:
+        found["boot"] = None
+    return found
+
+
+def claude_process(proc: Path | None = None) -> dict[str, Any]:
+    """The Claude Code process this hook runs under, for Kelpie's liveness check: its pid,
+    its start time and :func:`identity`. ``CLAUDE_PID`` (which Claude Code sets for its child
+    processes) counts only when it is one of the hook's ancestors, since it may be inherited
+    from another session; else the nearest ancestor named ``claude``. Empty when unknown."""
+    ancestors = _ancestors(proc)
+    env = _pid(os.environ.get("CLAUDE_PID"))
+    pid = env if env is not None and any(p == env for p, _ in ancestors) else None
+    pid = pid or next((p for p, claude in ancestors if claude), None)
+    if pid is None:
+        return {}
+    return {"pid": pid, "pid_start": proc_start(pid, proc), **identity(proc)}
+
+
+def _process_fields() -> dict[str, Any]:
+    try:
+        return claude_process()
+    except Exception:  # liveness is optional: never lose the line for it
+        return {}
+
+
 def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | None:
     """The spool line for one hook input; ``None`` for events Kelpie does not record."""
     kind = EVENTS.get(str(data.get("hook_event_name")))
@@ -365,6 +460,7 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
         "task_list": _env("CLAUDE_CODE_TASK_LIST_ID") or session,
         "kelpie_task": _env("KELPIE_TASK_ID"),
         "agent": _env("KELPIE_AGENT"),
+        **_process_fields(),
     }
     event = data.get("hook_event_name")
     if kind == "session_start":

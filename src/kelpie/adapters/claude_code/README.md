@@ -207,19 +207,44 @@ Sessions:
 
 | `Session` field | Source |
 | --- | --- |
-| `started_at`, `last_heartbeat` | first and latest spool line of the session (lines dated more than 5 minutes ahead are dropped) |
-| `ended_at` | `SessionEnd`, unless the session has later lines (it was resumed) |
-| `exit_reason` | `SessionEnd` reason (`clear`, `resume`, `logout`, `prompt_input_exit`, `other`), plus the error kind of a failed last turn |
+| `started_at`, `last_heartbeat` | first and latest spool line of the session (lines dated more than 5 minutes ahead are dropped); "now" while its process runs (see Liveness) |
+| `ended_at` | `SessionEnd`, unless the session has later lines (it was resumed); else its last line once its process is gone (see Liveness) |
+| `exit_reason` | `SessionEnd` reason (`clear`, `resume`, `logout`, `prompt_input_exit`, `other`) or `process gone`, plus the error kind of a failed last turn |
 | `task_id` | `KELPIE_TASK_ID`; else `<list>/<id>` of the watched-list task the session last set `in_progress`; else `session:<session_id>` (not a board task) |
 | `final_status` | `done` when the session set its own task `completed` and then ended; else none |
 | `owner_id` | `KELPIE_AGENT`; else the owner set on the task the session claimed (owners it gives other tasks do not count); else the `--agent` type; else `claude-code` |
 
 Subagent tool calls count for their parent session (the spool keeps their `agent_id`).
 
-**Liveness.** A headless session (`claude -p`) ends with `SessionEnd` when the process exits;
-a killed one fires no hook, so it counts as ended once its heartbeat is older than the
-rules' `session_stale_after` (30 minutes). An interactive session waiting at its prompt fires
-no hooks either and looks the same: with a task still `in_progress`, rule 1 reports it.
+**Liveness.** A headless session (`claude -p`) ends with `SessionEnd` when the process exits.
+An interactive session waiting at its prompt fires no hooks, and neither does a killed one, so
+the spool alone cannot tell them apart. Kelpie asks the process:
+
+- Every spool line carries the Claude Code process the hook ran under: `pid` (`CLAUDE_PID`,
+  which Claude Code sets for its child processes, when it is one of the hook's ancestors; else
+  the nearest ancestor named `claude`), `pid_start` (its start time, `/proc/<pid>/stat`) and
+  where that pid means something: `host`, `uid`, `pidns` (the PID namespace) and `boot` (the
+  kernel's boot id).
+- For a session without `SessionEnd`, Kelpie checks the process of its newest line, but only
+  when host, user, PID namespace and boot all equal its own (so not from a container, another
+  machine, another user under `hidepid`, or after a reboot) and the start time is known, so a
+  pid reused by another process is never taken for the session.
+  - Running with that start time: the session is alive, `last_heartbeat` is "now", and rule 1
+    leaves its task alone however long it idles. Kelpie keeps watching such a session after
+    its lines leave `lookback` (in memory: a restart of Kelpie forgets it).
+  - Gone (no such pid, another start time, or a zombie not yet reaped by its parent): the
+    session has ended at its last spool line (`exit_reason = "process gone"`), so rule 1
+    reports an `in_progress` task after its grace period instead of after 30 minutes. A
+    session that wrote a line in the last 5 minutes is never ended this way.
+  - Otherwise (anything above does not match, no `/proc` as on macOS, an older hook without
+    `pid`, a newest line without one) liveness is as before: the session counts as ended once
+    its last line is older than `session_stale_after` (30 minutes).
+
+Why the process and not the transcript: an idle session writes nothing to its transcript, so
+the transcript's modification time ages exactly like a crashed session's and cannot tell
+them apart. Kelpie does not read transcripts at all. Claude Code also keeps an internal
+registry of running sessions (`~/.claude/sessions/<pid>.json`); it is undocumented, so Kelpie
+does not depend on it.
 
 **Routing.** A `stop` goes to the adapter that reported the session (`Session.source`),
 whatever board its task is on; task actions go to the task's board.
