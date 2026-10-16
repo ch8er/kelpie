@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -114,3 +115,34 @@ def test_old_database_says_how_to_upgrade(tmp_path: Path, monkeypatch: pytest.Mo
     db.close()
     out, err, code = run(load_settings(config(tmp_path)), "2026-03-02", False)
     assert code == 1 and out == "" and "run kelpie serve" in err
+
+
+def test_the_report_looks_back_as_far_as_its_day_needs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import timedelta
+
+    from kelpie.report.cli import report_settings
+
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    hermes = f'[adapters.hermes]\ndb_path = "{tmp_path / "kanban.db"}"\nspool = false\n'
+    settings = load_settings(config(tmp_path, hermes))  # [report] timezone = Europe/Berlin
+    assert settings.hermes is not None and settings.hermes.lookback == timedelta(hours=24)
+    # report of Mar 2 at 00:05 on Mar 3 (Berlin): back to Mar 1 00:00 minus a 1d window
+    now = datetime(2026, 3, 2, 23, 5, tzinfo=UTC)
+    wide = report_settings(settings, date(2026, 3, 2), now)
+    assert wide.hermes is not None
+    assert wide.hermes.lookback == now - datetime(
+        2026, 2, 28, 0, tzinfo=ZoneInfo("Europe/Berlin")
+    ) + timedelta(hours=1)
+    assert timedelta(hours=73) < wide.hermes.lookback < timedelta(hours=74)
+    # an older --date reaches further; a longer configured lookback is kept
+    older = report_settings(settings, date(2026, 2, 20), now)
+    assert older.hermes is not None and older.hermes.lookback > timedelta(days=11)
+    long = config(tmp_path, hermes + 'lookback = "30d"\n')
+    kept = report_settings(load_settings(long), date(2026, 3, 2), now)
+    assert kept.hermes is not None and kept.hermes.lookback == timedelta(days=30)
+    # serve's own settings are untouched
+    assert settings.hermes.lookback == timedelta(hours=24)
+    no_hermes = load_settings(config(tmp_path))
+    assert report_settings(no_hermes, date(2026, 3, 2), now) is no_hermes
