@@ -1,10 +1,11 @@
 """Shell commands in traces: the redacted prefix Kelpie keeps, how calls are grouped, and
 which output filter a command already runs through.
 
-:func:`redact_command` is kept byte-for-byte identical to the one in
-:mod:`kelpie.adapters.hermes.plugin`, which must stay standard-library only and import
-nothing from Kelpie; a test compares the source. A command reported by OTLP and by a hook
-is therefore redacted the same way.
+:func:`redact_command` and its constants form one block (between the ``shared redaction``
+markers) kept byte-for-byte identical in :mod:`kelpie.adapters.hermes.plugin` and
+:mod:`kelpie.adapters.claude_code.hook`, which run on agent hosts, must stay standard-library
+only and import nothing from Kelpie; ``tests/traces/test_redaction.py`` compares the three. A
+command reported by OTLP and by a hook is therefore redacted the same way.
 
 :func:`command_prefix` groups calls: the executable (without its directory) and, for tools
 known to take subcommands, the subcommand (``npm test``, ``git status``, ``xcodebuild``,
@@ -22,77 +23,102 @@ from __future__ import annotations
 
 import re
 
-COMMAND_LIMIT = 200
 _COMMAND_KEYS = ("command", "cmd")
 
-_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_KEY_VALUE = re.compile(r"^(-{0,2}[A-Za-z_][\w.-]*)=(.*)$")
-_SENSITIVE_KEY = re.compile(r"token|secret|passw|key|auth|credential|cookie", re.IGNORECASE)
-_SECRET_FLAGS = frozenset(
-    {
-        "-p",
-        "--token",
-        "--password",
-        "--passwd",
-        "--secret",
-        "--api-key",
-        "--apikey",
-        "--access-token",
-        "--auth-token",
-    }
-)
-_URL_USERINFO = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]+@")
-_QUERY_SECRET = re.compile(
-    r"([?&][\w-]*(?:token|key|secret|passw|auth)[\w-]*=)[^&\s]+", re.IGNORECASE
-)
-_LONG_RUN = re.compile(r"[A-Za-z0-9_\-+/=]{24,}")
-_MASK = "***"
+# --- shared redaction: begin ---
+# Byte-for-byte identical in kelpie.traces.command, the Hermes plugin and the Claude Code
+# hook (tests/traces/test_redaction.py compares them): the hooks run on agent hosts without
+# Kelpie installed, and a command reported both by a hook and over OTLP must redact the same.
+COMMAND_LIMIT = 200
 _MAX_TOKENS = 4
+_MAX_LINE = 4096  # characters of the first line that are looked at
+_MASK = "***"
+_QUOTES = ("'", '"', "`")
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_EXE = re.compile(r"^[A-Za-z0-9_][\w.+-]{0,63}$")
+_WORD = re.compile(r"^(?:[a-z][a-z0-9_-]{0,23}|[0-9]{1,10})$")
+_FLAG = re.compile(r"^(?:-[A-Za-z0-9]|--[A-Za-z][A-Za-z0-9-]{0,40})$")
+_SEPARATORS = frozenset({"|", "||", "|&", "&&", ";", "&"})
+_PYTHON_MODULES = frozenset({"pytest", "unittest", "pip", "mypy", "ruff", "black", "build"})
+
+
+def _quoted_span(tokens: list[str], i: int) -> int:
+    """Index after the argument that starts at ``tokens[i]``: past the token that closes
+    the first quote it opens, else the next token. An unclosed quote runs to the end."""
+    tok = tokens[i]
+    quote = next((c for c in tok if c in _QUOTES), None)
+    if quote is None or tok.count(quote) % 2 == 0:
+        return i + 1
+    for j in range(i + 1, len(tokens)):
+        if tokens[j].count(quote) % 2 == 1:
+            return j + 1
+    return len(tokens)
 
 
 def redact_command(command: str) -> str | None:
-    """A shell command reduced to what is safe to keep: its first line, without leading
-    ``VAR=value`` assignments, at most four tokens, secrets masked.
+    """A shell command reduced to a prefix that is safe to keep, e.g. ``gh pr checks 5``.
 
-    Masked: values after ``Bearer``, ``Authorization:``, ``--token``, ``--password`` and
-    ``-p``; values of ``key=value`` pairs whose key looks like a credential; URL userinfo;
-    any run of 24 or more token characters; and the content of quoted arguments. Best
-    effort: the aim is that tokens never reach the spool, while ``gh pr checks 5`` or
-    ``pytest -q`` stay recognizable.
+    An allowlist, not a list of secrets: of the first line (its first 4096 characters),
+    without leading ``VAR=value`` assignments, at most four arguments are kept, and only
+    these: the executable without its directory; plain lowercase words and numbers right
+    after it (subcommands: ``gh pr checks 5``, ``npm run build``); flag names (``-q``,
+    ``--watch``; a cluster or glued value keeps its first letter, ``-p***``); a pipe or
+    list separator and the next executable. Everything else is ``***``: flag values,
+    ``--flag=value`` values, paths, URLs, hosts, ``user:pass``, quoted text, variables. Once
+    a flag or a masked argument appears, later plain words are masked too: they may be its
+    value. A secret passed as a lowercase word right after the executable
+    (``redis-cli auth hunter2``) is still kept.
     """
     lines = command.strip().splitlines()
-    tokens = lines[0].split() if lines else []
-    while tokens and _ASSIGN.match(tokens[0]):
-        tokens.pop(0)
+    if not lines:
+        return None
+    tokens = lines[0][:_MAX_LINE].split()
+    if len(lines[0]) > _MAX_LINE and tokens:
+        tokens[-1] = _MASK  # the cut may have split it
+    i = 0
+    while i < len(tokens) and _ASSIGN.match(tokens[i]):
+        i += 1
     out: list[str] = []
-    mask_next = 0
-    for tok in tokens:
-        if mask_next:
+    exe = True  # the next argument is an executable
+    words = False  # plain words are still kept (right after the executable)
+    while i < len(tokens) and len(out) < _MAX_TOKENS:
+        tok = tokens[i]
+        if tok.startswith("#"):
+            break
+        end = _quoted_span(tokens, i)
+        name, eq, _ = tok.partition("=")
+        if end > i + 1 or any(q in tok for q in _QUOTES):
             out.append(_MASK)
-            mask_next -= 1
-            continue
-        bare = tok.strip("'\"")
-        low = bare.lower()
-        if low.startswith("authorization:"):
-            glued = len(bare) > len("authorization:")
-            out.append("Authorization:" + (_MASK if glued else ""))
-            mask_next = 1 if glued else 2  # (scheme and) credential
-        elif low == "bearer" or low in _SECRET_FLAGS:
-            out.append(bare)
-            mask_next = 1
-        elif (kv := _KEY_VALUE.match(bare)) and _SENSITIVE_KEY.search(kv.group(1)):
-            out.append(f"{kv.group(1)}={_MASK}")
-        elif bare.startswith("-p") and len(bare) > 2 and not bare.startswith("--"):
-            out.append("-p" + _MASK)  # -psecret
-        elif tok[:1] in {"'", '"'}:
-            out.append(tok[0] + "…")  # quoted text is free-form: drop it
-        else:
+            exe = words = False
+        elif tok in _SEPARATORS:
             out.append(tok)
-    text = " ".join(out[:_MAX_TOKENS])
-    text = _URL_USERINFO.sub(rf"\1{_MASK}@", text)
-    text = _QUERY_SECRET.sub(rf"\1{_MASK}", text)
-    text = _LONG_RUN.sub(_MASK, text)
-    return text[:COMMAND_LIMIT] or None
+            exe, words = True, False
+        elif exe:
+            base = tok.rstrip("/").rsplit("/", 1)[-1]
+            ok = bool(_EXE.match(base)) and not _ASSIGN.match(base)
+            out.append(base if ok else _MASK)
+            exe, words = False, ok
+        elif _FLAG.match(tok):
+            out.append(tok)
+            words = False
+        elif eq and _FLAG.match(name):
+            out.append(f"{name}={_MASK}")
+            words = False
+        elif tok[:1] == "-" and tok[1:2].isalpha() and tok[1:2] != "-":
+            out.append(tok[:2] + _MASK)  # -la, -sSu, -pSECRET: a cluster or a glued value
+            words = False
+        elif words and _WORD.match(tok):
+            out.append(tok)
+        elif out and out[-1] == "-m" and tok in _PYTHON_MODULES:
+            out.append(tok)  # python -m pytest
+        else:
+            out.append(_MASK)
+            words = False
+        i = end
+    return " ".join(out)[:COMMAND_LIMIT] or None
+
+
+# --- shared redaction: end ---
 
 
 RTK = "rtk"

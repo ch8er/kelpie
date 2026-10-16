@@ -16,6 +16,7 @@ import pytest
 
 from kelpie.adapters.claude_code import hook
 from kelpie.traces.args import args_hash
+from tests.traces.test_redaction import LEAKS
 
 ENV = ("CLAUDE_CODE_TASK_LIST_ID", "KELPIE_TASK_ID", "KELPIE_AGENT")
 
@@ -303,53 +304,17 @@ def test_hook_avoids_newer_syntax() -> None:
             assert not isinstance(node.args[1], ast.BinOp)
 
 
-@pytest.mark.parametrize(
-    ("command", "expected"),
-    [
-        ("gh pr checks 5", "gh pr checks 5"),
-        ("GH_TOKEN=abc gh pr checks 5", "gh pr checks 5"),
-        ("gh run view 123456 --log", "gh run view 123456"),
-        ("/usr/bin/python3 -m pytest -q", "python3 -m pytest -q"),
-        ("sleep 30 # wait for CI", "sleep 30"),
-        ("npm run build && npm test", "npm run build"),
-        ("pytest -q tests/x.py | tail -5", "pytest -q …"),
-        ("curl -u admin:hunter2 https://x", "curl -u *** …"),
-        ("redis-cli -a hunter2 ping", "redis-cli -a *** ping"),
-        ("curl -H 'X-Api-Key: shortkey1' https://x", "curl -H *** …"),
-        ('echo "my password is hunter2 ok"', "echo …"),
-        ("cat /home/alice/.secrets/prod.env", "cat …"),
-        ("mysql -phunter2 db", "mysql -p*** db"),
-        ("git push --token=abc origin", "git push --token=*** origin"),
-        ("psql --username admin db", "psql --username *** db"),
-        ("docker login -p s3cret registry", "docker login -p ***"),
-        ("curl https://user:pw@host/x", "curl …"),
-        ("export TOKEN=abc", "export …"),
-        ('echo "unbalanced', "echo …"),
-        ("tool " + "a" * 30, "tool …"),
-        ("ldapsearch -x -w hunter2 -b dc", "ldapsearch -x -w ***"),
-        ("zip -P hunter2 out.zip f", "zip -P *** out.zip"),
-        ("unzip -Phunter2 a.zip", "unzip -P*** a.zip"),
-        ("openssl enc -k hunter2 -in f", "openssl enc -k ***"),
-        ("npm login --otp 123456", "npm login --otp ***"),
-    ],
-)
-def test_redaction(command: str, expected: str) -> None:
-    assert hook.redact_command(command) == expected
+@pytest.mark.parametrize(("command", "secret"), LEAKS)
+def test_secrets_never_reach_the_spool(spool: Path, command: str, secret: str) -> None:
+    """The hook redacts with the shared redaction (tests/traces/test_redaction.py)."""
+    run(base("PostToolUse", tool_name="Bash", tool_input={"command": command}, tool_use_id="t"))
+    assert secret not in spool.read_text()
 
 
-@pytest.mark.parametrize("command", ["", "   ", "FOO=bar", "\n\n"])
-def test_redact_nothing_left(command: str) -> None:
-    assert hook.redact_command(command) is None
-
-
-def test_long_lines_are_cheap_and_never_leak_a_cut_token() -> None:
-    """shlex is quadratic in token length; a huge one-line command must stay fast."""
+def test_long_lines_stay_cheap() -> None:
     start = time.monotonic()
-    assert hook.redact_command("echo " + "A" * 2_000_000) == "echo"
+    assert hook.redact_command("echo " + "A" * 2_000_000) == "echo ***"
     assert time.monotonic() - start < 2
-    # A word cut at the limit is dropped, not kept as a shorter "word".
-    line = "deploy " + "x " * ((hook.MAX_COMMAND_INPUT - 8) // 2) + "s3cretvalue"
-    assert "s3cret" not in (hook.redact_command(line) or "")
 
 
 def test_poll_patterns_still_match() -> None:
