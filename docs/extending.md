@@ -438,8 +438,15 @@ from kelpie.report.sections.spend_by_role import spend_by_role
 
 def test_spend_by_role() -> None:
     span = Span(
-        "TR-1", "SP-1", "chat", SpanKind.LLM, datetime(2026, 3, 2, 9, tzinfo=UTC),
-        session_id="S-1", model="model-a", input_tokens=1200, output_tokens=300,
+        "TR-1",
+        "SP-1",
+        "chat",
+        SpanKind.LLM,
+        datetime(2026, 3, 2, 9, tzinfo=UTC),
+        session_id="S-1",
+        model="model-a",
+        input_tokens=1200,
+        output_tokens=300,
     )
     inputs = ReportInputs(
         day=date(2026, 3, 2),
