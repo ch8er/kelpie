@@ -330,6 +330,7 @@ def test_incident_16_per_gate_escalation_is_opt_in(farm: Farm) -> None:
     text = farm.wait_message("bottlenecks", "escalate t_store", "gates 5 agent task(s)")
     assert "owner alice" in text and "Kelpie does not change dependencies" in text
     settle(farm)
+    assert farm.messages("t_calendar") == []
     board_unchanged(farm, before)
 
 
