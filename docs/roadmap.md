@@ -407,6 +407,17 @@ and from cards sitting in triage or scheduled (one for 21 h after its PR merged)
 - [ ] checkpoints and exit_contract never propose resuming such a parent
 - [ ] Fixtures: new `17-parent-left-open.yaml`, `17-card-stuck-scheduled.yaml`, `17-foreign-pr-mention.yaml` (synthetic names)
 
+### rules: exit_contract — human acceptance criteria need their own evidence (rule 1, incident 18)
+labels: P0, week-3, area:rules
+Live case: a human asked for "20 runs in a row, 20 of 20" before automerge; the reviewer
+confirmed green CI and a clean merge only, and the PR merged without that evidence.
+
+**Acceptance criteria**
+- [ ] Acceptance criteria stated by a human (owner kind = "human") in the task body or its comments are extracted by config patterns (e.g. "N runs", "N of N", "before merge", "must"), kept per task
+- [ ] Before a task moves to done or its PR is approved/automerged, each criterion needs matching evidence in the review or handoff (comment, CI job, artifact); missing → `alert` to the reviewer role and the human who asked, naming the criterion
+- [ ] return_causes: a test failing other tasks' PRs is classified as "flaky test" with the test name
+- [ ] Fixtures: new `18-acceptance-criterion-dropped.yaml`, `18-criterion-met.yaml` (synthetic names)
+
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules
 Field evidence: a heartbeat/maintenance loop repeated the same tool call about 900 times
