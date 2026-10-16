@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import kelpie.report.daily as daily
 import kelpie.report.sections as sections_pkg
 from kelpie.core.model import Span, SpanKind
 from kelpie.report.daily import ReportInputs, build_report, render_markdown
@@ -71,8 +73,36 @@ def test_a_failing_section_does_not_fail_the_report(bad: Any) -> None:
     assert "This section failed (test-bad)" in render_markdown(report)
 
 
-def test_empty_sections_are_left_out() -> None:
+def test_empty_sections_are_left_out_but_their_advice_counts() -> None:
     assert build_report(inputs(), {"test-empty": lambda ctx: Section("E", ())}).sections == ()
+    only = Section("Only", (), advice=(Advice("Only advice", "d", usd=5.0),))
+    report = build_report(inputs(), {"test-only": lambda ctx: only})
+    assert [a.title for a in report.recommendations] == ["Only advice"]
+    assert "## Only" not in render_markdown(report)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        Section("T", (1,)),  # type: ignore[arg-type]
+        Section("T", ("x",), advice=(Advice("A", "d", usd="5"),)),  # type: ignore[arg-type]
+        Section("T", ("x",), advice=(Advice("A", "d", usd=float("nan")),)),
+        Section("T", ("x",), advice=[Advice("A", "d")]),  # type: ignore[arg-type]
+    ],
+)
+def test_malformed_sections_are_noted(bad: Section) -> None:
+    report = build_report(inputs(), {"test-bad": lambda ctx: bad})
+    assert "This section failed (test-bad)" in render_markdown(report)
+
+
+def test_the_best_advice_of_a_title_wins() -> None:
+    low = Section("S", ("x",), advice=(Advice("Reduce blocks that outlived their cause", "d"),))
+    stuck = StateRow(
+        _state("stale_blocks:T-1", "stale_blocks", datetime(2026, 3, 2, 8, tzinfo=UTC))
+    )
+    report = build_report(inputs(states=[stuck]), {"test-low": lambda ctx: low})
+    [top] = report.recommendations
+    assert top.hours == pytest.approx(2.0)  # the built-in one, with its hours
 
 
 def test_section_advice_ranks_with_built_in_advice_and_titles_are_unique() -> None:
@@ -123,12 +153,12 @@ def test_modules_in_the_package_register_and_failures_are_noted(
     (extra / "zz_broken.py").write_text("raise ImportError('missing optional dependency')\n")
     monkeypatch.setattr(sections_pkg, "__path__", [*sections_pkg.__path__, str(extra)])
     monkeypatch.setattr(sections_pkg, "SECTIONS", dict(SECTIONS))
-    monkeypatch.delitem(__import__("sys").modules, "kelpie.report.sections.zz_probe", raising=False)
-    failed = load_sections()
-    assert failed == ["zz_broken"]
+    monkeypatch.setattr(daily, "SECTIONS", sections_pkg.SECTIONS)
+    monkeypatch.setattr(sys, "modules", dict(sys.modules))  # the probe modules go away after
+    assert load_sections() == ["zz_broken"]
     assert "zz-probe" in sections_pkg.SECTIONS
-    report = build_report(inputs(), dict(sections_pkg.SECTIONS))
-    assert "probe ran" in render_markdown(report)
+    markdown = render_markdown(build_report(inputs()))  # default: load and run the registered
+    assert "probe ran" in markdown and "This section failed to load (zz_broken)" in markdown
 
 
 def test_names_are_unique() -> None:

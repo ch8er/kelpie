@@ -615,13 +615,14 @@ def _recommendations(
 
 
 def _top(candidates: Sequence[Advice], hour_usd: float | None) -> list[Advice]:
-    seen: set[str] = set()
-    unique = []
-    for a in candidates:  # built-in advice comes after section advice: first title wins
-        if a.title not in seen:
-            seen.add(a.title)
-            unique.append(a)
-    candidates = unique
+    def worth(a: Advice) -> tuple[float, float, str]:
+        return (a.usd + a.hours * (hour_usd or 0.0), a.hours, a.detail)
+
+    best: dict[str, Advice] = {}
+    for a in candidates:  # one advice per title: the one worth most
+        if a.title not in best or worth(a) > worth(best[a.title]):
+            best[a.title] = a
+    candidates = list(best.values())
     if hour_usd is not None:
         return sorted(candidates, key=lambda a: (-(a.usd + a.hours * hour_usd), a.title))[:TOP]
     by_usd = sorted((a for a in candidates if a.usd > 0), key=lambda a: (-a.usd, a.title))
@@ -704,7 +705,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     else:
         lines.append("None: nothing above the thresholds.")
     for section in report.sections:
-        lines += ["", f"## {section.title}", "", *section.lines]
+        if section.lines:
+            lines += ["", f"## {section.title}", "", *section.lines]
     lines += ["", "## Before/after of recent fixes", ""]
     lines += _verification_lines(report) or [
         "No fixes on this day or the day before (note one with `kelpie fix`)."

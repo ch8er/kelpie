@@ -18,7 +18,7 @@ read-only; ``inputs`` holds the report's own sequences, so do not mutate them.
 Every module here is imported when the report is built (:func:`load_sections`); builders
 run in name order. A section's ``advice`` competes for the report's top 3 recommendations
 with the built-in ones, ranked the same way (dollars, and hours with ``[report]
-hour_usd``); an advice whose title is already taken is dropped. Its Markdown ``lines`` are
+hour_usd``); of advice sharing a title, the one worth most is kept. Its Markdown ``lines`` are
 rendered under ``## <title>`` after the top 3. A module that fails to import, a builder that
 raises or one that returns something else than a ``Section`` is logged and noted in the
 report: one analysis must not cost the whole report.
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import math
 import pkgutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -74,7 +75,7 @@ class Advice:
 @dataclass(frozen=True, slots=True)
 class Section:
     title: str
-    lines: tuple[str, ...]  # Markdown body under "## <title>"; empty: the section is left out
+    lines: tuple[str, ...]  # Markdown body under "## <title>"; empty: no heading, advice only
     advice: tuple[Advice, ...] = ()  # candidates for the top 3
 
 
@@ -132,15 +133,31 @@ def run_sections(
     for name in sorted(builders):
         try:
             found = builders[name](ctx)
-            if found is not None and not (
-                isinstance(found, Section)
-                and isinstance(found.lines, tuple)
-                and all(isinstance(a, Advice) for a in found.advice)
-            ):
-                raise TypeError(f"returned {type(found).__name__}, not a Section")
+            if found is not None and not _valid(found):
+                raise TypeError(f"returned {type(found).__name__}, not a valid Section")
         except Exception:
             log.exception("report section %s failed", name)
             found = Section(name, (f"This section failed ({name}); see the log.",))
-        if found is not None and found.lines:
-            out.append(found)
+        if found is not None and (found.lines or found.advice):
+            out.append(found)  # advice only: no heading, but it competes for the top 3
     return tuple(out)
+
+
+def _valid(found: object) -> bool:
+    """A Section whose lines are strings and whose advice has finite, non-negative values."""
+    if not isinstance(found, Section) or not isinstance(found.title, str):
+        return False
+    if not isinstance(found.lines, tuple) or not all(isinstance(x, str) for x in found.lines):
+        return False
+    if not isinstance(found.advice, tuple):
+        return False
+    return all(
+        isinstance(a, Advice)
+        and isinstance(a.title, str)
+        and isinstance(a.detail, str)
+        and all(
+            isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
+            for v in (a.usd, a.hours)
+        )
+        for a in found.advice
+    )
