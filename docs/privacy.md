@@ -117,7 +117,9 @@ so `GH_TOKEN=abc gh pr checks 5` is stored as `gh pr checks 5`. Redaction masks:
   `--secret`, `--api-key`, `--apikey`, `--access-token`, `--auth-token`, `-p` (and
   `-pSECRET`);
 - values of `key=value` pairs whose key contains `token`, `secret`, `passw`, `key`, `auth`,
-  `credential` or `cookie`, and such parameters in URL query strings;
+  `credential` or `cookie`;
+- values of URL query parameters whose name contains `token`, `key`, `secret`, `passw` or
+  `auth` (not `credential` or `cookie`);
 - URL userinfo (`https://user:pass@host`);
 - any run of 24 or more token characters;
 - the content of quoted arguments.
@@ -193,6 +195,6 @@ that runs Kelpie. To remove everything Kelpie stored, stop it and delete `kelpie
 | Record no commands in the Hermes spool | `KELPIE_HERMES_SPOOL_COMMANDS=0` on the Hermes hosts |
 | Read no hook data at all | `[adapters.hermes] spool = false` and do not install the plugin |
 | Keep spans for a shorter time | `[traces] retention = "2d"` (budgets and reports that look further back then count less) |
-| Store no spans | `[traces] enabled = false` (no budgets, no loop breaker on traces) |
+| Store no spans | `[traces] enabled = false` (no budgets; loop detection then relies on Hermes hook spans only) |
 | Read no git state | `[adapters.hermes] git_state = false` |
 | Send nothing to chat services | no `[[alerts.channels]]` |

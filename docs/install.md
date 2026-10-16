@@ -55,8 +55,9 @@ restart `kelpie serve` after a change. Unknown sections or keys stop Kelpie with
 | `kelpie report [--date YYYY-MM-DD] [--send]` | The daily report (see the README, "Daily report"). |
 | `kelpie fix "note" [--rule R] [--command PREFIX] [--role ROLE] [--at TIME]` | Records a fix so the daily report measures its effect; `kelpie fix --list [--days N]` lists them. |
 
-Global options: `--config PATH`, `--log-level LEVEL` (default `$KELPIE_LOG_LEVEL` or `INFO`),
-`--version`.
+Global options go before the command, `kelpie [--config PATH] [--log-level LEVEL] <command>`
+(log level default `$KELPIE_LOG_LEVEL` or `INFO`); `kelpie --version` prints the version.
+`kelpie status --config x.toml` fails with "unrecognized arguments".
 
 `kelpie serve` handles SIGTERM and SIGINT: it stops the loop, gives queued alerts about two
 seconds to go out, stops trace forwarding (requests still queued are dropped and counted) and
@@ -177,7 +178,7 @@ Kelpie keeps its state in one SQLite database.
 
 | Path | Set by | Default |
 | --- | --- | --- |
-| Database | `$KELPIE_DB`, else `[storage] path` | `kelpie.db` in the working directory; `/data/kelpie.db` in the container |
+| Database | `$KELPIE_DB`, else `[storage] path` | `kelpie.db` in the working directory; `/data/kelpie.db` in the compose stack (with a plain `docker run`, set `KELPIE_DB=/data/kelpie.db` and mount a volume at `/data`: the image's `/app` is not writable by uid 10001) |
 | Report files | `[report] dir` | none: `kelpie report` prints to stdout only |
 | Hermes spool | `KELPIE_HERMES_SPOOL` on the Hermes host | `~/.hermes/kelpie/spool.jsonl`, rotated to `.1` at 20 MiB |
 

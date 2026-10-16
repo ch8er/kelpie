@@ -38,7 +38,8 @@ configure what exists.
 ## How the config is read
 
 - **File.** `--config PATH`, else `$KELPIE_CONFIG`, else `./kelpie.toml` if it exists,
-  else defaults only. Read once at startup.
+  else defaults only. Read once at startup. `--config` goes before the command:
+  `kelpie --config kelpie.toml status`.
 - **Top-level sections:** `engine`, `storage`, `adapters`, `traces`, `budgets`, `prices`,
   `resources`, `connectors`, `block_conditions`, `alerts`, `report`. Anything else stops
   Kelpie at startup.
@@ -134,8 +135,8 @@ is accepted and ignored with a warning. Rules run in the order below.
 | --- | --- | --- | --- | --- | --- |
 | – | `checkpoints` | P0 | implemented | `comment`, `wip_commit` | adapter `comment`, `wip_commit` (not in Hermes yet) |
 | 1 | `exit_contract` | P0 | implemented | `requeue`, `alert` | adapter `requeue` (not in Hermes yet) |
-| 2 | `wait_condition` | P0 | implemented | `wake`, `comment`, `alert` | adapter `requeue` (a wake puts the task back in the ready queue), `comment` |
-| 3 | `orphan_status` | P0 | implemented | `alert`, `reassign` | adapter with `SupportsReassign` |
+| 2 | `wait_condition` | P0 | implemented | `wake`, `comment`, `alert` | adapter `requeue` (a wake puts the task back in the ready queue), `comment` (not in Hermes yet) |
+| 3 | `orphan_status` | P0 | implemented | `alert`, `reassign` | adapter with `SupportsReassign` (not in Hermes yet) |
 | 4 | `stale_blocks` | P0 | implemented | `unblock`, `alert` | adapter `unblock` (not in Hermes yet) |
 | 5 | `ping_pong` | P0 | implemented | `escalate` | alert channel |
 | 6 | `bottlenecks` | P0 | implemented | `alert`, `escalate` | alert channel |
@@ -144,8 +145,8 @@ is accepted and ignored with a warning. Rules run in the order below.
 | 9 | `ci_economy` | P0 | implemented | `cancel_build`, `alert` | `[connectors.github.ci] allow_cancel` |
 | 10 | `loop_breaker` | P0 | implemented | `stop`, `alert` | adapter with `SupportsStop` (Hermes has it) |
 | 11 | `no_progress` | P0 | implemented | `alert` | alert channel |
-| 12 | `conflict_warning` | P0 | implemented | `comment`, `wait`, `wake` | adapter `comment`; `SupportsWait` for `serialize` |
-| – | `dispatch_gate` | P0 | implemented | `wait`, `wake` | adapter with `SupportsWait` |
+| 12 | `conflict_warning` | P0 | implemented | `comment`, `wait`, `wake` | adapter `comment`; `SupportsWait` for `serialize` (not in Hermes yet) |
+| – | `dispatch_gate` | P0 | implemented | `wait`, `wake` | adapter with `SupportsWait` (not in Hermes yet) |
 | 13 | `needs_you` | P1 | not implemented | | |
 | 14 | `compaction_gate` | P2 | not implemented | | |
 | – | `return_causes` | P1 | not implemented | | |
@@ -512,8 +513,8 @@ Spend is priced from traces, so budgets need `[traces]` enabled.
 | `scope` | *required* | `day` \| `agent` \| `task` \| `project` | `day`: the whole farm. `agent`: the session's owner. `task`: the span's task. `project`: tasks matched by `match`. |
 | `unit` | *required* | `usd` \| `tokens` | `usd` needs a `[prices]` table. |
 | `soft` | unset | number, > 0 | Alert at this spend. |
-| `hard` | unset | number, > `soft` | Stop the run at this spend (act mode, through `loop_breaker`). At least one of `soft` and `hard` is required. |
-| `match` | unset | string | `project`: `label:<name>` or a task id glob (*required*). `agent`/`task`: an owner or task id, or a glob; without it each agent or task has its own budget. Not allowed for `day`. |
+| `hard` | unset | number, > `soft` | Stop the run at this spend (act mode, through `loop_breaker`): `agent` and `task` budgets; `day` and `project` budgets only alert unless `loop_breaker` has `stop_on_shared_budgets = true`. At least one of `soft` and `hard` is required. |
+| `match` | unset | string | `project`: `label:<name>` or a task id glob (*required*); all matching tasks share one budget. `agent`/`task`: limits the budget to the owners or tasks it names (an id or a glob); each matching agent or task still has its own budget, so `match = "agent-*"`, `hard = 50` is $50 per agent, not in total. Without it every agent or task has one. Not allowed for `day`. |
 | `window` | `"24h"`; `task`: `[traces] retention` | duration, > 0 | Rolling window. Must not exceed `[traces] retention`. |
 | `burn_window` | `"1h"`, or `window` if shorter | duration, <= `window` | Burn rate and "runs out at" forecast. |
 | `mode` | `"api"` | `api` \| `subscription` | `subscription`: spend is an estimate, and the forecast is the time to the next provider limit. |

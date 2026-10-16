@@ -30,7 +30,7 @@ The import boundaries are checked by import-linter (`[tool.importlinter]` in
 | `kelpie.resources` | the above plus `traces` |
 | `kelpie.connectors` | `adapters`, `rules`, `traces`, `resources`, `app`, `server`, `cli`, `metrics` |
 | `kelpie.alerts` | `adapters`, `connectors`, `rules`, `traces`, `resources`, `app`, `server`, `cli`, `metrics` |
-| `kelpie.net` | anything in `kelpie` |
+| `kelpie.net` | `core`, `rules`, `adapters`, `connectors`, `traces`, `resources`, `app`, `server`, `cli`, `metrics` (keep it free of any `kelpie` import) |
 
 `tests/test_architecture.py` also checks that `core`, `rules`, `traces`, `resources`,
 `alerts`, `server.py` and `app.py` import no LLM client. Only `report/` may use one, and
