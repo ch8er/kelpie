@@ -195,6 +195,7 @@ class Session:
     changed_files: int | None = None  # uncommitted changed files, if the adapter knows
     summary: str | None = None  # the agent's own progress note, if it left one
     artifacts: tuple[Artifact, ...] = ()
+    source: str | None = None  # name of the platform adapter that reported the session
 
 
 class SpanKind(StrEnum):

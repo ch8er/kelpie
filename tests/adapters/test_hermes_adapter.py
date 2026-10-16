@@ -250,6 +250,7 @@ def test_open_run_is_a_live_session(board: Board) -> None:
     board.run("t_1", "dev", ago(days=3), heartbeat=ago(minutes=2))
     (s,) = adapter(board).snapshot(NOW).sessions
     assert s.ended_at is None and s.final_status is None and s.last_heartbeat == ago(minutes=2)
+    assert s.source == "hermes"  # session-scoped actions (stop) are routed back here
 
 
 def test_lookback_filters_old_runs_but_keeps_open_ones(board: Board) -> None:

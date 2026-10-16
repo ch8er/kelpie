@@ -532,7 +532,7 @@ class HermesAdapter:
             owners=owners,
             dependencies=dependencies,
             conditions=waits,
-            sessions=sessions,
+            sessions=tuple(replace(s, source=self.name) for s in sessions),
             spans=spans,
         )
 

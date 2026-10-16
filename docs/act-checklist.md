@@ -116,8 +116,6 @@ The steps above apply, with these differences
   `~/.claude/kelpie/stop/<session id>.json`.
 - [ ] A stop is cooperative (the next tool call) and lasts for the session only: a headless
   run ends, and a launcher may start the work again.
-- [ ] With Hermes enabled as well, a stop of a Claude Code session that has no task on a
-  watched list becomes an alert (ch8er/kelpie#85).
 
 ## 5. Rollback
 

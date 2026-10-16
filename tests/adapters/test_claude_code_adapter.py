@@ -103,6 +103,12 @@ def test_capabilities(farm: Farm) -> None:
     assert adapter.name == "claude-code"
 
 
+def test_sessions_name_their_adapter(farm: Farm) -> None:
+    farm.event("prompt", ago(minutes=5))
+    (session,) = farm.adapter().snapshot(NOW).sessions
+    assert session.source == "claude-code"  # stop is routed here even next to Hermes
+
+
 # --- tasks --------------------------------------------------------------------------------
 
 
