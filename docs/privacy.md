@@ -12,6 +12,8 @@ keep less. It describes the code as it is; the files named below are the referen
 | Hermes hook records | tool name, ids, hash of arguments, a redacted command, outcome, duration, output size | raw arguments and results | spool file on the Hermes host | until rotated: one backup file at 20 MiB |
 | Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
 | Claude Code task lists | task id, subject (200 characters), status, owner, `blockedBy` | descriptions | read in place, not copied | |
+| OpenClaw hook records | session id and key, agent id, run id, session start and end reasons; tool name, call id, hash of arguments, a redacted command, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
+| OpenClaw Workboard cards | card id, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, block reason (500 characters) | claim tokens, attachments, proof, worker logs | read in place, not copied | |
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
 | Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
@@ -207,6 +209,27 @@ reason. The hook deletes a marker when a human prompt resumes the session or the
 an expired marker is ignored but stays on disk until then. Kelpie reads the shared task lists in place
 (id, subject cut to 200 characters, status, owner, `blockedBy`) and never reads session
 transcripts.
+
+## OpenClaw plugin
+
+Code: [`src/kelpie/adapters/openclaw/plugin/`](../src/kelpie/adapters/openclaw/plugin/).
+
+The plugin runs inside the OpenClaw Gateway. For each forwarded hook it builds a reduced copy
+of the event in `index.js` and hands only that to `kelpie_hook.py` (a separate `python3`
+process that gets `PATH`, `HOME`, `LANG`, `LC_ALL` and `TMPDIR` of the Gateway's environment,
+never its provider keys). Prompts, messages, tool results, error messages and assistant text
+are dropped in `index.js` and never leave the Gateway process; tool arguments go to the hook
+process only to be hashed and, for `exec`-like tools, reduced to a redacted command with the
+shared redaction (see [above](#hermes-hooks-plugin)). The hook writes one JSON line per
+session start, tool call, run usage, run end and session end to the spool
+(`~/.openclaw/kelpie/spool.jsonl`): the OpenClaw session id and key, the agent id, the run id
+and the fields listed in the summary. `commands = false` in the plugin's config records no
+command. The spool is created with mode `0600` (not through a symlink) in a `0700` directory
+and rotated like the Hermes spool.
+
+Kelpie opens the Workboard database read-only and keeps what it reads in memory for one tick.
+It never reads the claim token stored with a claimed card, card attachments, proof or worker
+logs, OpenClaw's session database or transcripts.
 
 ## Task boards and git
 

@@ -1,0 +1,8 @@
+{
+  "name": "kelpie-openclaw",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Kelpie plugin for OpenClaw: reports sessions and tool calls to Kelpie's spool",
+  "type": "module",
+  "openclaw": { "extensions": ["./index.js"] }
+}

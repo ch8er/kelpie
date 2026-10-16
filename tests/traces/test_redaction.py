@@ -1,4 +1,4 @@
-"""The shared command redaction (#82): one implementation in three files, no leaks."""
+"""The shared command redaction (#82): one implementation in four files, no leaks."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import pytest
 
 from kelpie.adapters.claude_code import hook
 from kelpie.adapters.hermes import plugin
+from kelpie.adapters.openclaw.plugin import kelpie_hook as openclaw_hook
 from kelpie.cli import main
 from kelpie.traces import command
 from kelpie.traces import scrub as scrub_module
@@ -24,6 +25,7 @@ COPIES: dict[str, Callable[[str], str | None]] = {
     "traces": command.redact_command,
     "hermes": plugin.redact_command,
     "claude_code": hook.redact_command,
+    "openclaw": openclaw_hook.redact_command,
 }
 BEGIN, END = "# --- shared redaction: begin ---", "# --- shared redaction: end ---"
 
@@ -33,14 +35,19 @@ def _block(path: str) -> str:
     return text[text.index(BEGIN) : text.index(END)]
 
 
-def test_the_three_copies_are_identical() -> None:
+def test_the_copies_are_identical() -> None:
     """The hooks run on agent hosts without Kelpie, so they carry the code; this keeps it
     the same code."""
     blocks = {
         name: _block(m.__file__ or "")
-        for name, m in (("traces", command), ("hermes", plugin), ("claude_code", hook))
+        for name, m in (
+            ("traces", command),
+            ("hermes", plugin),
+            ("claude_code", hook),
+            ("openclaw", openclaw_hook),
+        )
     }
-    assert blocks["traces"] == blocks["hermes"] == blocks["claude_code"]
+    assert blocks["traces"] == blocks["hermes"] == blocks["claude_code"] == blocks["openclaw"]
     assert "def redact_command" in blocks["traces"]
 
 

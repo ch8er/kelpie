@@ -214,10 +214,11 @@ def _tail(rest: bytes, out: list[str]) -> tuple[int, int, int]:
     return 1, int(changed), 0
 
 
-def default_spools(hermes: Path | None, claude_code: Path | None) -> list[Path]:
-    """The configured spools and their rotated ``.1`` files that exist."""
+def default_spools(*spools: Path | None) -> list[Path]:
+    """The configured spools (one per adapter, None when not configured) and their rotated
+    ``.1`` files that exist."""
     found: list[Path] = []
-    for spool in (hermes, claude_code):
+    for spool in spools:
         if spool is None:
             continue
         spool = spool.expanduser()

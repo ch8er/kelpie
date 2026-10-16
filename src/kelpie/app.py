@@ -22,6 +22,7 @@ from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_c
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes.git_state import valid_base_ref
 from kelpie.adapters.hermes.park import DEFAULT_WAIT_KEY, WAIT_KEY_NAME
+from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
 from kelpie.connectors.github import (
@@ -128,6 +129,7 @@ class Settings:
     engine: EngineConfig = field(default_factory=EngineConfig)
     hermes: HermesSettings | None = None  # None: no [adapters.hermes] section
     claude_code: ClaudeCodeSettings | None = None  # None: no [adapters.claude_code] section
+    openclaw: OpenClawSettings | None = None  # None: no [adapters.openclaw] section
     db_path: Path | None = DEFAULT_DB  # None keeps the ledger in memory
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
@@ -216,6 +218,7 @@ def load_settings(path: Path | None) -> Settings:
         engine=_with_condition_reasons(engine, block_conditions),
         hermes=_with_wait_key(_load_hermes(data.get("adapters", {})), db_path),
         claude_code=_load_claude_code(data.get("adapters", {})),
+        openclaw=_load_openclaw(data.get("adapters", {})),
         db_path=db_path,
         source=path,
         traces=traces,
@@ -260,7 +263,7 @@ def _load_connectors(
 def _load_hermes(adapters: Any) -> HermesSettings | None:
     if not isinstance(adapters, Mapping):
         raise ConfigError("[adapters] must be a table")
-    if extra := set(adapters) - {"hermes", "claude_code"}:
+    if extra := set(adapters) - {"hermes", "claude_code", "openclaw"}:
         raise ConfigError(f"unknown [adapters] entries: {sorted(extra)}")
     if "hermes" not in adapters:
         return None
@@ -396,6 +399,15 @@ def _load_claude_code(adapters: Mapping[str, Any]) -> ClaudeCodeSettings | None:
         return None
     try:
         return load_claude_code(adapters["claude_code"])
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def _load_openclaw(adapters: Mapping[str, Any]) -> OpenClawSettings | None:
+    if "openclaw" not in adapters:
+        return None
+    try:
+        return load_openclaw(adapters["openclaw"])
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -728,6 +740,8 @@ def build_adapters(settings: Settings) -> list[PlatformAdapter]:
         adapters.append(settings.hermes.build())
     if settings.claude_code is not None and settings.claude_code.enabled:
         adapters.append(settings.claude_code.build())
+    if settings.openclaw is not None and settings.openclaw.enabled:
+        adapters.append(settings.openclaw.build())
     return adapters
 
 

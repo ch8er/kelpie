@@ -263,6 +263,7 @@ def _scrub(settings: Settings, paths: Sequence[str], dry_run: bool) -> int:
     targets = [Path(p) for p in paths] or default_spools(
         settings.hermes.spool if settings.hermes is not None else None,
         settings.claude_code.spool if settings.claude_code is not None else None,
+        settings.openclaw.spool if settings.openclaw is not None else None,
     )
     if not targets:
         print("kelpie: no spool found; pass the spool paths", file=sys.stderr)

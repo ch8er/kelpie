@@ -1,0 +1,15 @@
+{
+  "id": "kelpie",
+  "name": "Kelpie",
+  "description": "Reports sessions, tool calls and token usage to Kelpie's spool.",
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "python": { "type": "string", "description": "Python 3.8+ that runs kelpie_hook.py (default python3)" },
+      "spool": { "type": "string", "description": "Kelpie's spool file (default ~/.openclaw/kelpie/spool.jsonl)" },
+      "commands": { "type": "boolean", "description": "Record a redacted command prefix for exec calls (default true)" }
+    }
+  }
+}

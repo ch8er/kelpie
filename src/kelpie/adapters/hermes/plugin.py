@@ -72,9 +72,10 @@ def args_hash(args: Any) -> str:
 
 
 # --- shared redaction: begin ---
-# Byte-for-byte identical in kelpie.traces.command, the Hermes plugin and the Claude Code
-# hook (tests/traces/test_redaction.py compares them): the hooks run on agent hosts without
-# Kelpie installed, and a command reported both by a hook and over OTLP must redact the same.
+# Byte-for-byte identical in kelpie.traces.command, the Hermes plugin, the Claude Code hook
+# and the OpenClaw hook (tests/traces/test_redaction.py compares them): the hooks run on agent
+# hosts without Kelpie installed, and a command reported both by a hook and over OTLP must
+# redact the same.
 COMMAND_LIMIT = 200
 _MAX_TOKENS = 4
 _MAX_LINE = 4096  # characters of the first line that are looked at
