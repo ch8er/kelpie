@@ -703,7 +703,7 @@ once a day when `at` is set.
 | `verify_window` | `"1d"` | duration string, > 0 | Before/after of fixes: this long on each side. |
 | `review_roles` | `["reviewer"]` | list of roles | Whose sessions make "review time". |
 | `min_sample` | `10` | count, >= 1 | Fewer observations on a side: a small sample. |
-| `sections` | none | `[report.sections.<name>]` tables | Settings of a report section, passed as they are; the section checks them (a bad table fails that section only, noted in the report). A table for a section that does not exist is noted in the report. |
+| `sections` | unset | `[report.sections.<name>]` tables | Settings of a report section. A key the section does not accept, or a table for a section that does not exist, is noted in the report; a bad value fails that section only (also noted). |
 | `at` | unset | `"HH:MM"`, local time in `timezone` | `kelpie serve` builds yesterday's report once a day after this time, writes it to `dir` and sends the summary to `channels`. A serve that was down at that time catches up the same day; a failed run is retried every 10 minutes, at most 3 times a day. Unset: only `kelpie report` (by hand or from cron). |
 
 The report reads the board through the adapters. For the day and its before/after window

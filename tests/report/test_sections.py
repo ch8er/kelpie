@@ -30,6 +30,12 @@ def inputs(**kw: Any) -> ReportInputs:
     return ReportInputs(**{"day": DAY, "tz": UTC, **kw})
 
 
+def build_context() -> SectionContext:
+    seen: list[SectionContext] = []
+    build_report(inputs(), {"test-seen": lambda ctx: seen.append(ctx)})
+    return seen[0]
+
+
 def test_a_section_renders_and_competes_for_the_top_3() -> None:
     seen: list[SectionContext] = []
 
@@ -183,20 +189,52 @@ def test_each_section_gets_its_own_config_table() -> None:
         seen["other"] = ctx.config
 
     config = {"test-fit": {"routine_roles": ["reviewer"], "min_calls": 20}}
-    report = build_report(inputs(section_config=config), {"test-fit": fit, "test-other": other})
+    keys = {"test-fit": frozenset({"routine_roles", "min_calls"})}
+    report = build_report(
+        inputs(section_config=config), {"test-fit": fit, "test-other": other}, keys
+    )
     assert report.sections == ()
     assert seen["fit"]["min_calls"] == 20 and dict(seen["other"]) == {}
     assert config["test-fit"]["routine_roles"] == ["reviewer"]
 
 
-def test_a_section_rejecting_its_config_is_noted_and_a_typo_too() -> None:
+def test_bad_tables_are_noted_and_never_reach_the_section() -> None:
+    calls: list[str] = []
+
     def strict(ctx: SectionContext) -> Section:
-        if extra := set(ctx.config) - {"threshold"}:
-            raise ValueError(f"unknown keys {sorted(extra)}")
+        calls.append("strict")
+        if not isinstance(ctx.config.get("threshold", 1), int):
+            raise ValueError("threshold must be an integer")
         return Section("Strict", ("ok",))
 
-    config = {"test-strict": {"treshold": 1}, "test-strcit": {}}
-    report = build_report(inputs(section_config=config), {"test-strict": strict})
-    markdown = render_markdown(report)
-    assert "This section failed (test-strict)" in markdown
+    keys = {"test-strict": frozenset({"threshold"})}
+    sections = {"test-strict": strict, "test-plain": lambda ctx: Section("Plain", ("x",))}
+    config = {"test-strict": {"treshold": 1}, "test-plain": {"a": 1}, "test-strcit": {}}
+    markdown = render_markdown(build_report(inputs(section_config=config), sections, keys))
+    assert calls == []
+    assert "[report.sections.test-strict]: unknown keys ['treshold']." in markdown
+    assert "[report.sections.test-plain]: unknown keys ['a']." in markdown  # takes none
     assert "[report.sections.test-strcit] is configured, but no such section exists." in markdown
+    bad = {"test-strict": {"threshold": "high"}}
+    markdown = render_markdown(build_report(inputs(section_config=bad), sections, keys))
+    assert "This section failed (test-strict)" in markdown and "## Plain" in markdown
+
+
+def test_a_table_for_a_module_that_failed_to_load_gets_one_note() -> None:
+    ctx = build_context()
+    found = sections_pkg.run_sections({}, ctx, ["test-broken"], {"test-broken": {"a": 1}})
+    assert [s.lines for s in found] == [
+        ("This section failed to load (test-broken); see the log.",)
+    ]
+
+
+def test_a_table_that_cannot_be_copied_fails_only_its_section() -> None:
+    ctx = build_context()
+    found = sections_pkg.run_sections(
+        {"test-x": lambda c: None},
+        ctx,
+        (),
+        {"test-x": 1},
+        {},  # type: ignore[dict-item]
+    )
+    assert [s.title for s in found] == ["test-x"] and "failed" in found[0].lines[0]

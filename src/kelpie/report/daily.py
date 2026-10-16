@@ -262,10 +262,13 @@ def day_bounds(day: date, tz: tzinfo) -> tuple[datetime, datetime]:
 
 
 def build_report(
-    inputs: ReportInputs, sections: Mapping[str, SectionBuilder] | None = None
+    inputs: ReportInputs,
+    sections: Mapping[str, SectionBuilder] | None = None,
+    section_keys: Mapping[str, frozenset[str]] | None = None,
 ) -> DailyReport:
     """The day's report. ``sections`` are the extra section builders (default: every one
-    registered in :mod:`kelpie.report.sections`)."""
+    registered in :mod:`kelpie.report.sections`), ``section_keys`` the config keys each
+    accepts (default: as registered)."""
     start, end = day_bounds(inputs.day, inputs.tz)
     spans = [s for s in inputs.spans if start <= last_at(s) < end]
     index = {span_key(s): s for s in inputs.spans}
@@ -296,7 +299,7 @@ def build_report(
         spend=spend,
         roles=MappingProxyType(_roles(inputs, end)),
     )
-    extra = run_sections(sections, context, failed, inputs.section_config)
+    extra = run_sections(sections, context, failed, inputs.section_config, section_keys)
     advice = _recommendations(
         inputs,
         chaos,
