@@ -5,8 +5,9 @@ Kelpie is one process, `kelpie serve`. It runs the control loop and serves `/met
 or as a container next to Prometheus and Grafana with docker compose. Both start safe:
 global dry-run on and every rule in `observe` mode, so nothing leaves Kelpie.
 
-Kelpie is pre-alpha. There is no PyPI release and no published image yet; both ways below
-build from the repository.
+Kelpie is pre-alpha. Both ways below build from the repository; once a version is
+released (see [release.md](release.md)), `pipx install kelpie-sre` and the image
+`ghcr.io/ch8er/kelpie:<version>` work too.
 
 - Configuration reference: [configuration.md](configuration.md)
 - First live run on a Hermes farm: [quickstart-hermes.md](quickstart-hermes.md)
@@ -67,7 +68,10 @@ closes the database. Run it under any process supervisor you already use.
 ## Option 2: docker compose
 
 The compose file starts Kelpie, Prometheus and Grafana. The image is built locally from the
-`Dockerfile` (`kelpie-sre:dev`).
+`Dockerfile` (`kelpie-sre:dev`); with `KELPIE_IMAGE=ghcr.io/ch8er/kelpie:<version>` and
+`docker compose up -d --no-build` it runs a published one instead. Do not combine
+`KELPIE_IMAGE` with `docker compose build` or `up --build`: that tags a local build with
+the published name.
 
 ```bash
 cp .env.example .env     # set GRAFANA_ADMIN_PASSWORD
