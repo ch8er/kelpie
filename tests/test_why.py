@@ -38,6 +38,7 @@ from kelpie.why import (
     _mentions,
     _mode,
     _offline_note,
+    _text,
     as_json,
     evaluate_rules,
     expected_conditions,
@@ -649,7 +650,9 @@ def test_agent_text_cannot_forge_a_section_or_a_control_sequence() -> None:
     assert not any(line.startswith("  fake") for line in lines)
     assert not any("\x1b" in line or "\x07" in line for line in lines)
     assert sum(line.startswith("note:") for line in lines) == 1
-    assert "\\n  Conditions\\n  fake [pr_merged]: met\\x1b[2K" in render(ex)
+    # The block reason's later lines sit behind a bar, escaped.
+    assert "    |   Conditions" in lines
+    assert any(line.startswith("    |   fake [pr_merged]: met\\x1b[2K") for line in lines)
 
 
 def test_condition_params_are_escaped_and_ids_are_not_cut() -> None:
@@ -677,3 +680,100 @@ def test_expected_skips_what_is_attached_and_follows_the_patterns() -> None:
     found, _ = expected_conditions(_bc_settings(gate), many, many.tasks[0], False)
     assert [e.pr for e in found] == [1, 2, 3, 4, 5]  # MAX_READY_REFS; the rest are ignored
     assert not any(e.fallback for e in found)
+
+
+# -- second review pass ------------------------------------------------------------------------
+
+
+def _ci(pattern: str = r"merge of (?P<pr>\S+)") -> dict[str, object]:
+    return {"pattern": pattern, "kind": "ci_green", "repo": "example/repo"}
+
+
+def test_fallback_only_while_the_first_pr_is_unknown() -> None:
+    other = {"pattern": r"PR (?P<pr>#\d+)", "kind": "ci_green", "repo": "example/repo"}
+    third = {"pattern": r"also (?P<pr>#\d+)", "kind": "pr_merged", "repo": "example/repo"}
+    snap = _blocked("merge of #5, PR #6, also #7")
+    task = snap.tasks[0]
+    # Offline the first PR is not confirmed: later ones are fallbacks ("the PRs above").
+    found, _ = expected_conditions(_bc_settings(MERGE, other), snap, task, refreshed=False)
+    assert [e.detail for e in found][1] == "used only if the PR above is not confirmed"
+    found, _ = expected_conditions(_bc_settings(MERGE, other, third), snap, task, False)
+    assert [e.fallback for e in found] == [False, True, True]
+    assert found[2].detail == "used only if the PRs above are not confirmed"
+    # After --refresh no PR was confirmed, so none is a fallback: each is simply unconfirmed.
+    found, _ = expected_conditions(_bc_settings(MERGE, other), snap, task, refreshed=True)
+    assert [(e.status, e.fallback) for e in found] == [("not_attached", False)] * 2
+    assert all(_expected(e).startswith("matched ") for e in found)
+    assert all("GitHub did not confirm the PR" in _expected(e) for e in found)
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    ex.expected, ex.refreshed = found, True
+    assert all(f["fallback"] is False for f in as_json(ex)["expected_conditions"])
+
+
+def test_the_same_pr_as_another_kind_is_never_a_fallback() -> None:
+    snap = _blocked("waiting for merge of #5")
+    found, n = expected_conditions(_bc_settings(MERGE, _ci()), snap, snap.tasks[0], False)
+    assert n == 2
+    assert [(e.kind, e.fallback, e.same_pr) for e in found] == [
+        ("pr_merged", False, False),
+        ("ci_green", False, True),
+    ]
+    assert _expected(found[1]) == (
+        "unused ci_green on example/repo#5 (from the block reason): not used: same PR as above"
+    )
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    ex.expected = found
+    assert [e["same_pr"] for e in as_json(ex)["expected_conditions"]] == [False, True]
+    assert _offline_note(found) is not None
+    refreshed, _ = expected_conditions(_bc_settings(MERGE, _ci()), snap, snap.tasks[0], True)
+    assert [e.same_pr for e in refreshed] == [False, True]
+
+
+def test_rule_reasons_keep_their_paragraphs() -> None:
+    snap = _blocked("stuck")
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    reason = "First paragraph.\n\nSecond \x1b[2Kparagraph.\n   \nThird."
+    action = Action(ActionKind.ALERT, "checkpoints", reason, task_id="T-1")
+    ex.findings = [Finding(action, Mode.OBSERVE)]
+    lines = render(ex).splitlines()
+    i = next(i for i, line in enumerate(lines) if line.startswith("  checkpoints"))
+    assert lines[i].endswith("First paragraph.")
+    assert lines[i + 1 : i + 4] == [
+        "    | Second \\x1b[2Kparagraph.",
+        "    | Third.",
+        "Open alert states",
+    ]
+    assert "\\n" not in "\n".join(lines)
+
+
+def test_text_escapes_controls_but_keeps_emoji_joiners_and_spaces() -> None:
+    zwj = "\N{ZERO WIDTH JOINER}"
+    family = f"\N{MAN}{zwj}\N{WOMAN}{zwj}\N{GIRL}"
+    spaces = "a\N{NO-BREAK SPACE}b\N{NARROW NO-BREAK SPACE}c\N{IDEOGRAPHIC SPACE}d"
+    assert _text(family) == family and _text(spaces) == spaces
+    assert _text("\N{ZERO WIDTH NON-JOINER}") == "\N{ZERO WIDTH NON-JOINER}"
+    # Escaped: C0/C1 controls, bidi controls, line and paragraph separators.
+    bad_chars = [
+        "\x00",
+        "\x1b",
+        "\x7f",
+        "\x85",
+        "\t",
+        "\N{RIGHT-TO-LEFT OVERRIDE}",
+        "\N{LEFT-TO-RIGHT EMBEDDING}",
+        "\N{LEFT-TO-RIGHT ISOLATE}",
+        "\N{POP DIRECTIONAL ISOLATE}",
+        "\N{LEFT-TO-RIGHT MARK}",
+        "\N{RIGHT-TO-LEFT MARK}",
+        "\N{ARABIC LETTER MARK}",
+        "\N{LINE SEPARATOR}",
+        "\N{PARAGRAPH SEPARATOR}",
+        "\N{ZERO WIDTH NO-BREAK SPACE}",
+    ]
+    for bad in bad_chars:
+        out = _text(f"a{bad}b")
+        assert bad not in out and out.startswith("a\\") and out.endswith("b"), repr(bad)
+    assert _text("x\N{RIGHT-TO-LEFT OVERRIDE}y") == "x\\u202ey"

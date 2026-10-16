@@ -71,6 +71,7 @@ def test_a_block_condition_serve_attached_shows_in_why(farm: Farm) -> None:
     # --refresh: resolved and checked as one tick of serve does.
     refreshed = kelpie.cli("why", "t_wait", "--refresh")
     assert refreshed.code == 0, refreshed.stderr
+    assert "note: offline:" not in refreshed.stdout  # the condition is attached: no caveat
     [line] = conditions_section(refreshed.stdout)
     assert line.startswith(
         f"  block:t_wait:pr_merged:{REPO}#57 [pr_merged] {REPO}#57 @ {head[:12]}"

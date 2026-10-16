@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -55,7 +56,7 @@ from kelpie.app import (
     utc_now,
 )
 from kelpie.connectors.github.blocks import target_of, text_matches
-from kelpie.connectors.github.connector import web_host
+from kelpie.connectors.github.connector import PrRef, web_host
 from kelpie.core.actions import Action
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry
@@ -81,6 +82,8 @@ GITHUB_KINDS = frozenset({ConditionKind.PR_MERGED, ConditionKind.CI_STATUS})
 SCHEMA_VERSION = 1  # of the --json object (fields are only ever added within a version)
 TEXT_SESSIONS = 3  # sessions shown in the text view, newest first
 JSON_SESSIONS = 10  # ...and in --json
+_JOINERS = frozenset("\u200c\u200d")  # ZWNJ, ZWJ
+_BIDI = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 NOT_CHECKED = "not checked (offline; --refresh checks {})"  # {}: "it" or "them"
 # Rules whose verdict on a block rests on it having no condition: offline they judge the
 # bare block, while serve attaches the condition the reason would give.
@@ -131,6 +134,7 @@ class Expected:
     captured: str = ""  # what the pattern captured: agent text
     condition_kind: str = ""  # the ConditionKind value the condition has (ci_green: ci_status)
     fallback: bool = False  # a block gets the first PR GitHub confirms; this one only if not
+    same_pr: bool = False  # names the PR of an earlier hit (another kind): never used
 
 
 @dataclass(slots=True)
@@ -305,7 +309,7 @@ def expected_conditions(
     known = {c.id for c in snapshot.conditions}
     source = "block_reason" if target == "block" else "task_text"
     out: list[Expected] = []
-    primary = False  # a block takes the first resolvable PR GitHub confirms: later ones back it up
+    seen: list[PrRef] = []  # a block takes the first PR GitHub confirms; later ones back it up
     for m in text_matches(task, target, patterns, host, lambda repo: repo.lower() in repos):
         kind = m.pattern.kind
         if m.ref is None:
@@ -337,8 +341,17 @@ def expected_conditions(
             )
         else:
             status, why = "not_checked", NOT_CHECKED.format("them")
-        fallback = target == "block" and primary
-        primary = True
+        # Confirmation is per PR: another kind on a PR seen above is never used. A later PR
+        # is a fallback only while the first is unknown; after --refresh none was confirmed.
+        same_pr = target == "block" and m.ref in seen
+        fallback = target == "block" and not same_pr and bool(seen) and status == "not_checked"
+        if same_pr:
+            why = "not used: same PR as above"
+        elif fallback:
+            above = "the PR above is" if len(seen) == 1 else "the PRs above are"
+            why = f"used only if {above} not confirmed"
+        if m.ref not in seen:
+            seen.append(m.ref)
         out.append(
             Expected(
                 kind,
@@ -350,6 +363,7 @@ def expected_conditions(
                 m.text,
                 m.pattern.condition_kind.value,
                 fallback,
+                same_pr,
             )
         )
     return out, applying
@@ -358,7 +372,9 @@ def expected_conditions(
 def _offline_note(expected: Sequence[Expected]) -> str | None:
     """The caveat for rule verdicts on a block that serve would give a condition: offline the
     rules judge the bare block. Not a prediction: the PR is only confirmed by GitHub."""
-    first = next((e for e in expected if e.status == "not_checked" and not e.fallback), None)
+    first = next(
+        (e for e in expected if e.status == "not_checked" and not (e.fallback or e.same_pr)), None
+    )
     if first is None or first.source != "block_reason":
         return None
     return (
@@ -462,11 +478,18 @@ def _session(s: Session, now: datetime, stale_after: timedelta) -> str:
     return f"{s.id} by {s.owner_id}: ended {_age(now - s.ended_at)} ago, {final}{reason}"
 
 
+def _shown(ch: str) -> bool:
+    """Whether a character is printed as it is. Control characters, bidi controls and line
+    or paragraph separators are escaped; the joiners of emoji sequences and the space
+    separators (no-break space, narrow no-break space) are text, not control."""
+    if ch in _JOINERS or unicodedata.category(ch) == "Zs":
+        return True
+    return ch.isprintable() and ch not in _BIDI
+
+
 def _text(value: object, limit: int | None = None) -> str:
     """Agent-provided text on one line: control characters shown escaped, long text cut."""
-    flat = "".join(
-        ch if ch.isprintable() else ch.encode("unicode_escape").decode() for ch in str(value)
-    )
+    flat = "".join(ch if _shown(ch) else ch.encode("unicode_escape").decode() for ch in str(value))
     return flat if limit is None or len(flat) <= limit else flat[: limit - 3] + "..."
 
 
@@ -512,11 +535,11 @@ def _expected(e: Expected) -> str:
     if e.status == "unresolvable":
         return f"{e.kind} from the {source} {e.detail}: nothing is attached"
     if e.fallback:
-        return (
-            f"fallback {e.kind} on {_pr(e.repo, e.pr)} (from the {source}): used only if the "
-            "PR above is not confirmed"
-        )
-    verb = "would attach" if e.status == "not_checked" else "matched"
+        verb = "fallback"
+    elif e.same_pr:
+        verb = "unused"
+    else:
+        verb = "would attach" if e.status == "not_checked" else "matched"
     return f"{verb} {e.kind} on {_pr(e.repo, e.pr)} (from the {source}): {e.detail}"
 
 
@@ -614,9 +637,15 @@ def render(ex: Explanation) -> str:
     if not ex.entries:
         lines.append("  none")
     lines += [f"note: {p}" for p in ex.problems]
-    # Block reasons, titles, rule reasons and the like are agents' text: one line each, so
-    # that none can forge a section or a terminal control sequence.
-    return "\n".join(_text(line) for line in lines) + "\n"
+    # Block reasons, titles, rule reasons and the like carry agents' text. Newlines in a
+    # line (rule reasons are paragraphs) start continuation lines behind a bar, so that none
+    # can pass for a section or an entry; every line is escaped.
+    out: list[str] = []
+    for line in lines:
+        first, *more = line.split("\n")
+        out.append(_text(first))
+        out += [f"    | {_text(part)}" for part in more if part.strip()]
+    return "\n".join(out) + "\n"
 
 
 def _raw(t: Task) -> str:
@@ -737,6 +766,7 @@ def as_json(ex: Explanation) -> dict[str, Any]:
                 "kind": e.kind,
                 "condition_kind": e.condition_kind,
                 "fallback": e.fallback,
+                "same_pr": e.same_pr,
                 "source": e.source,
                 "status": e.status,
                 "repo": e.repo,
