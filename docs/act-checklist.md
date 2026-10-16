@@ -1,8 +1,66 @@
 # Checklist: from observe to act on a Hermes or Claude Code farm
 
 Move **one rule at a time**, and only to the next step once the previous one has run
-quietly for a day. This is based on what the code does today. Things marked **unverified**
-have not been tried against a live farm.
+quietly for a day. No rule goes to `act` before it has passed [the gate](#the-gate-observe-before-act).
+This is based on what the code does today. Things marked **unverified** have not been tried
+against a live farm.
+
+## The gate: observe before act
+
+A rule goes to `act` only when it has been **in `observe` on the farm for at least 24 h, and
+longer until it has at least 10 triggers**, and **at least 90 % of all its triggers in that
+window are true positives**, as **reviewed by a person**. The gate is per rule and per farm,
+and it needs step 1's preconditions (a real `[storage] path`: the triggers are read from the
+ledger). A live 24 h review found a rule that would have proposed closing parent tasks whose
+PRs had not merged; only reading every trigger catches that.
+
+- [ ] **In observe.** Both `dry_run = true` (ledger outcome `dry_run`) and the rule in
+  `observe` with `dry_run = false` (outcome `observed`) count; the ledger stores both with
+  `mode = 'observe'`. The window starts again after any change to the rule's config, its
+  mode, or its code (a Kelpie upgrade that changes the rule).
+- [ ] **At least 10 triggers.** A trigger is one finding, not one tick: one opened state for
+  a rule's lasting alerts (its escalations, changes and resolution are the same trigger), one
+  ledger fingerprint for its other actions. With fewer than 10 the window grows; it never
+  shrinks.
+- [ ] **Every trigger reviewed by a person**, who marks it a true positive (an action they
+  would have taken themselves at the time of the trigger) or a false positive (wrong task,
+  wrong cause, wrong time, or harmless noise). "Probably fine" is not a true positive.
+- [ ] **At least 90 % true positives** (at least 9 of 10, 18 of 20, ...). Below that, tune
+  or fix the rule and start the window again.
+- [ ] **No false positive that would have been destructive** (closing, stopping, committing
+  or parking the wrong task), whatever the rate: fix the rule and observe it again.
+- [ ] **Write the review down**: rule, window, Kelpie version, number of triggers, true and
+  false positives with one line each, the reviewer, the date. A rule without a written
+  review stays in `observe`.
+
+The triggers of one rule in a window, from the ledger database (`[storage] path`; times are
+UTC, written as `...+00:00`). With Python, for example
+`python3 -c 'import sqlite3,sys; [print(*r, sep=" | ") for r in sqlite3.connect(sys.argv[1]).execute(sys.argv[2])]' kelpie.db "<query>"`:
+
+```sql
+-- Lasting alerts: one row per opened state.
+SELECT id, task_id, opened_at, closed_at, severity, summary
+FROM states
+WHERE rule = 'loop_breaker' AND mode = 'observe' AND opened_at >= '2026-03-02T09:00:00+00:00'
+ORDER BY opened_at;
+
+-- Other actions (and one-off alerts): one row per finding, with how many ticks saw it. An
+-- alert on a task while one of the rule's states about it was open belongs to that state.
+SELECT fingerprint, MIN(at) AS first, SUM(1 + suppressed) AS sightings, task_id, kind, reason
+FROM actions AS a
+WHERE rule = 'loop_breaker' AND mode = 'observe' AND outcome IN ('observed', 'dry_run')
+  AND at >= '2026-03-02T09:00:00+00:00'
+  AND NOT (kind = 'alert' AND (
+    reason LIKE 'Still open after %' OR reason LIKE 'Changed: %' OR reason LIKE 'Resolved after %'
+    OR EXISTS (SELECT 1 FROM states AS s WHERE s.rule = a.rule AND s.task_id IS a.task_id
+               AND a.at >= s.opened_at AND a.at <= COALESCE(s.closed_at, a.at))))
+GROUP BY fingerprint ORDER BY first;
+```
+
+The evidence for a trigger is its ledger `reason` and `params`. `kelpie why <task>` shows the
+task as it is now and its recent ledger entries, not the board as the rule saw it; a
+`once` finding already handled before the window does not come back within `once_window`
+(7 days).
 
 ## What can act today
 
@@ -92,6 +150,8 @@ fresh re-check agrees with, never on the default branch.
 
 ## 4. Go live, small
 
+- [ ] The rule passed [the gate](#the-gate-observe-before-act), and its written review is at
+  hand.
 - [ ] Set `dry_run = false` with exactly one rule in `act` and every other rule in `observe`
   or `suggest`. Do not change `default_mode` to `act`.
 - [ ] Stay on it for the first hours. Look at `kelpie_actions_total{outcome="executed"}`,
