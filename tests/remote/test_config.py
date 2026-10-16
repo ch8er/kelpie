@@ -119,7 +119,7 @@ def test_hub_plain_http_on_a_private_address() -> None:
         ),
         ({"silent_after": "5s"}, (), "silent_after"),
         ({"action_timeout": "10m"}, (), "action_timeout"),
-        ({"max_connections": 3}, (), "at least 2 per agent"),
+        ({"max_connections": 3}, (), "between 8 and 10000"),
         ({"max_clock_skew": "1s"}, (), "max_clock_skew"),
         ({"surprise": 1}, (), "unknown"),
     ],

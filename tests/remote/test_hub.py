@@ -1,3 +1,4 @@
+import contextlib
 import gzip
 import http.client
 import json
@@ -409,25 +410,141 @@ def test_deep_bodies_are_refused(server: HubServer) -> None:
     assert status == 400 and "deep" in body["error"]
 
 
-def test_strangers_cannot_hold_the_connections(
+def wait_unauthenticated(server: HubServer, n: int) -> None:
+    deadline = time.monotonic() + 5
+    while server.unauthenticated() != n and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server.unauthenticated() == n
+
+
+def test_strangers_cannot_lock_agents_out(server: HubServer, clock: Clock) -> None:
+    server.max_connections = 3
+    port = server.server_address[1]
+    # Idle strangers from several addresses fill every unauthenticated slot...
+    idle = [
+        socket.create_connection(("127.0.0.1", port), source_address=(f"127.0.0.{i + 2}", 0))
+        for i in range(3)
+    ]
+    wait_unauthenticated(server, 3)
+    # ...an agent still gets in: the oldest stranger is cut to make room.
+    agent_for(server, BoardAdapter(), clock).report()
+    assert idle[0].recv(10) == b""
+    for sock in idle:
+        sock.close()
+    wait_unauthenticated(server, 0)
+
+
+def test_one_address_gets_at_most_its_share(
     server: HubServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import kelpie.remote.hub as hub_module
 
-    server.max_connections = 3
-    idle = [socket.create_connection(("127.0.0.1", server.server_address[1])) for _ in range(3)]
-    deadline = time.monotonic() + 5
-    while server.unauthenticated() < 3 and time.monotonic() < deadline:
-        time.sleep(0.01)
-    with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5) as extra:
+    monkeypatch.setattr(hub_module, "MAX_PER_PEER", 2)
+    port = server.server_address[1]
+    idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(2)]
+    wait_unauthenticated(server, 2)
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as extra:
         assert extra.recv(10) == b""  # closed at accept
     for sock in idle:
         sock.close()
+    wait_unauthenticated(server, 0)
+
+
+def test_peers_count_by_address_or_ipv6_64() -> None:
+    from kelpie.remote.hub import _peer_key
+
+    assert _peer_key("192.0.2.7") == "192.0.2.7"
+    assert _peer_key("2001:db8:1:2:aaaa::1") == _peer_key("2001:db8:1:2:bbbb::9")
+    assert _peer_key("2001:db8:1:3::1") != _peer_key("2001:db8:1:2::1")
+    assert _peer_key("::ffff:192.0.2.7") == "192.0.2.7"
+
+
+def test_one_token_holds_few_requests(server: HubServer, hub: Hub) -> None:
+    port = server.server_address[1]
+    head = (
+        f"POST {ACTIONS_PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n"
+        "Content-Type: application/json\r\nContent-Length: 50\r\n\r\n{"
+    )
+    stalled = []
+    for _ in range(2):  # bodies that never finish
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        sock.sendall(head.encode())
+        stalled.append(sock)
     deadline = time.monotonic() + 5
-    while server.unauthenticated() and time.monotonic() < deadline:
+    while hub._agents["laptop"].in_flight["poll"] < 2 and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert server.unauthenticated() == 0
-    assert hub_module.MAX_PER_PEER == 16
+    poll = json.dumps({"version": 1, "wait": 0, "results": []}).encode()
+    assert post(server, ACTIONS_PATH, poll)[0] == 409
+    assert hub._agents["laptop"].polling == 0  # a stalled body replaced nothing
+    assert post(server, ACTIONS_PATH, poll, token=OTHER)[0] == 200
+    for sock in stalled:
+        sock.close()
+    deadline = time.monotonic() + 5
+    while hub._agents["laptop"].in_flight["poll"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert post(server, ACTIONS_PATH, poll)[0] == 200
+
+
+def test_a_failed_tls_handshake_leaves_nothing_behind(
+    certificate: tuple[Path, Path], clock: Clock
+) -> None:
+    cert, key = certificate
+    settings = hub_settings(tls_cert=cert, tls_key=key, allow_plain_http=False)
+    srv = HubServer(Hub(settings, {"laptop": TOKEN, "vm-1": OTHER}, clock))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        before = threading.active_count()
+        for _ in range(30):
+            with socket.create_connection(("127.0.0.1", srv.server_address[1]), timeout=5) as s:
+                s.sendall(b"GET / HTTP/1.1\r\n\r\n")  # not TLS
+                with contextlib.suppress(OSError):
+                    s.recv(10)
+        deadline = time.monotonic() + 5
+        while threading.active_count() > before + 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert threading.active_count() <= before + 2  # no guard timers left running
+        wait_unauthenticated(srv, 0)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_undelivered_actions_go_back_to_the_front(hub: Hub) -> None:
+    thread, out = send_async(hub, stop_action(), timeout=5)
+    wait_queued(hub)
+    actions = hub.poll("laptop", [], 0)
+    hub.undeliver("laptop", actions)  # the reply could not be written
+    assert [a.id for a in hub.poll("laptop", [], 0)] == [a.id for a in actions]
+    hub.poll("laptop", [Result(actions[0].id, Outcome.DONE)], 0)
+    thread.join(5)
+    assert out["result"].outcome is Outcome.DONE
+
+
+def test_an_answered_action_is_not_handed_out_again(hub: Hub) -> None:
+    thread, _ = send_async(hub, stop_action(), timeout=0.3)
+    wait_queued(hub)
+    (first,) = hub.poll("laptop", [], 0)
+    thread.join(5)  # timed out after delivery
+    thread, out = send_async(hub, stop_action(), timeout=2)  # re-queues the same id
+    wait_queued(hub)
+    assert hub.poll("laptop", [Result(first.id, Outcome.DONE)], 0) == []
+    thread.join(5)
+    assert out["result"].outcome is Outcome.DONE
+
+
+def test_the_agent_drops_results_the_hub_refuses(clock: Clock) -> None:
+    calls: list[bytes] = []
+
+    def refuse(*args: Any, **kw: Any) -> net.Response:
+        calls.append(args[3])
+        return net.Response(400, {}, b'{"error": "result: id must be a string"}')
+
+    settings = AgentSettings(name="laptop", server="https://hub.example.internal:9465")
+    agent = Agent(settings, [BoardAdapter()], TOKEN, clock=clock, post=refuse)
+    agent._unsent = [Result("a1", Outcome.DONE)]
+    with pytest.raises(AgentError, match="400"):
+        agent.poll(wait=0)
+    assert agent._unsent == []
 
 
 def test_a_slow_stranger_is_cut_at_the_deadline(
@@ -594,3 +711,13 @@ def test_report_over_tls(certificate: tuple[Path, Path], clock: Clock) -> None:
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_an_ipv6_listen_address(clock: Clock) -> None:
+    hub = Hub(hub_settings(host="::1"), {"laptop": TOKEN, "vm-1": OTHER}, clock)
+    try:
+        srv = HubServer(hub)
+    except OSError:
+        pytest.skip("no IPv6 loopback")
+    srv.server_close()
+    assert srv.address_family == socket.AF_INET6

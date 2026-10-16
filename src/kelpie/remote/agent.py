@@ -61,7 +61,12 @@ Post = Callable[..., net.Response]
 
 
 class AgentError(Exception):
-    """A request to the hub that failed; the text is safe to log."""
+    """A request to the hub that failed; the text is safe to log. ``status``: the hub's
+    HTTP status, if it answered."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class Agent:
@@ -127,8 +132,13 @@ class Agent:
                 encode_poll(results, min(wait, MAX_WAIT)),
                 self.settings.timeout.total_seconds() + wait,
             )
-        except AgentError:
-            self._unsent = results + self._unsent  # delivered with the next poll
+        except AgentError as exc:
+            if exc.status in (400, 413) and results:
+                # The hub refuses this batch as it is: sending it again would block every
+                # later poll. Its actions are reported failed on the server side anyway.
+                log.error("the hub refused %d results; dropped: %s", len(results), exc)
+            else:
+                self._unsent = results + self._unsent  # delivered with the next poll
             raise
         try:
             raw = decode_actions(reply, self.offered)
@@ -263,7 +273,9 @@ class Agent:
         except net.RequestError as exc:
             raise AgentError(f"{path}: {exc.detail}") from None
         if response.status != 200:
-            raise AgentError(f"{path}: HTTP {response.status} {_error_text(response.body)}")
+            raise AgentError(
+                f"{path}: HTTP {response.status} {_error_text(response.body)}", response.status
+            )
         try:
             reply = json.loads(response.body)
         except (ValueError, RecursionError):

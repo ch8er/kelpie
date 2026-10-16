@@ -17,7 +17,7 @@ import re
 import types
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import Enum, StrEnum
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
@@ -61,8 +61,15 @@ MAX_COUNTS = {
 # Agent names end up in task ids ("<agent>:<id>") and executor names ("<agent>/<adapter>").
 _AGENT_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _ADAPTER_NAME = re.compile(r"[a-z0-9_-]{1,64}")
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")  # in text: line breaks and tabs stay
-_ID_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# Control characters and lone UTF-16 surrogates (JSON can carry "\ud800"; nothing can
+# encode it as UTF-8 later, so SQLite and every log line would fail on it).
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\ud800-\udfff]")  # line breaks, tabs stay
+_ID_CONTROL = re.compile(r"[\x00-\x1f\x7f\ud800-\udfff]")
+_VERSION = re.compile(r"[\x21-\x7e]{1,64}")
+# Times an agent may send, and durations: a board from year 9999 would overflow rules.
+_EARLIEST = datetime(2000, 1, 1, tzinfo=UTC)
+_LATEST = datetime(2200, 1, 1, tzinfo=UTC)
+_LONGEST = timedelta(days=3650)
 _BRANCH_PART = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,99}")
 _BOOT = re.compile(r"[0-9a-f]{8,64}")
 
@@ -204,12 +211,40 @@ def decode_snapshot(data: object) -> Snapshot:
     if not depth_ok(data):
         raise ProtocolError(f"snapshot: nested deeper than {MAX_DEPTH} levels")
     try:
-        snapshot = from_dict(Snapshot, data)
-        return _checked(snapshot, "snapshot")
+        _raw_lists(Snapshot, data, "snapshot")
+        snapshot = _checked(from_dict(Snapshot, data), "snapshot")
+        for name in ("tasks", "owners", "sessions", "conditions"):
+            ids = [item.id for item in getattr(snapshot, name)]
+            if len(set(ids)) != len(ids):
+                raise ProtocolError(f"snapshot: {name} has an id twice")
+        return snapshot
     except ProtocolError:
         raise
     except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
         raise ProtocolError(f"snapshot: {_clip(str(exc), 300)}") from None
+
+
+def _raw_lists(cls: type, data: Any, where: str) -> None:
+    """Fields that hold lists must arrive as JSON lists: serde would split a string into
+    its characters."""
+    if not isinstance(data, dict):
+        raise ProtocolError(f"{where} must be an object")
+    hints = _model_hints(cls)
+    for key, value in data.items():
+        tp = hints.get(key)
+        if tp is None or value is None:
+            continue
+        if get_origin(tp) in (Union, types.UnionType):
+            tp = next(a for a in get_args(tp) if a is not type(None))
+        if get_origin(tp) is tuple:
+            if not isinstance(value, list):
+                raise ProtocolError(f"{where}.{key} must be a list")
+            item = get_args(tp)[0]
+            if dataclasses.is_dataclass(item):
+                for v in value:
+                    _raw_lists(item, v, f"{where}.{key}")  # type: ignore[arg-type]
+        elif dataclasses.is_dataclass(tp):
+            _raw_lists(tp, value, f"{where}.{key}")  # type: ignore[arg-type]
 
 
 def _is_id(name: str) -> bool:
@@ -269,7 +304,21 @@ def _value(tp: Any, value: Any, where: str, is_id: bool) -> Any:
         if not math.isfinite(value) or abs(value) > 1e15:
             raise ProtocolError(f"{where} must be a finite number")
         return float(value)
-    if tp in (datetime, timedelta) or (isinstance(tp, type) and issubclass(tp, Enum)):
+    if tp is datetime:
+        if not isinstance(value, datetime):
+            raise ProtocolError(f"{where} has the wrong type")
+        try:
+            utc = value.astimezone(UTC)
+        except OverflowError:
+            raise ProtocolError(f"{where} is out of range") from None
+        if not _EARLIEST <= utc < _LATEST:
+            raise ProtocolError(f"{where} must be between 2000 and 2200")
+        return utc
+    if tp is timedelta:
+        if not isinstance(value, timedelta) or not timedelta(0) <= value <= _LONGEST:
+            raise ProtocolError(f"{where} must be a duration of 0 to 3650 days")
+        return value
+    if isinstance(tp, type) and issubclass(tp, Enum):
         if not isinstance(value, tp):
             raise ProtocolError(f"{where} has the wrong type")
         return value
@@ -374,8 +423,8 @@ def decode_report(data: object) -> Report:
     )
     _check_version(body)
     version = body.get("agent_version")
-    if not isinstance(version, str) or len(version) > 64:
-        raise ProtocolError("report: agent_version must be a short string")
+    if not isinstance(version, str) or _VERSION.fullmatch(version) is None:
+        raise ProtocolError("report: agent_version must be 1 to 64 printable characters")
     sent_at = _datetime(body.get("sent_at"), "report: sent_at")
     interval = body.get("interval")
     if isinstance(interval, bool) or not isinstance(interval, int | float):

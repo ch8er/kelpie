@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import hmac
+import ipaddress
 import json
 import logging
 import socket
@@ -54,8 +55,11 @@ log = logging.getLogger(__name__)
 # How long an unanswered action keeps its id (and a late result waits to be claimed).
 PENDING_TTL = timedelta(hours=1)
 MAX_REPLY_BYTES = 512 * 1024  # of a poll reply (the agent reads at most 1 MiB)
-PREAUTH_DEADLINE = 10.0  # seconds from accept to a checked token; then the socket is shut
-MAX_PER_PEER = 16  # connections from one address not yet authenticated
+PREAUTH_DEADLINE = 3.0  # seconds from accept to a checked token; then the socket is shut
+MAX_PER_PEER = 16  # connections from one address (an IPv6 /64) not yet authenticated
+# Authenticated requests in flight per agent, by kind.
+IN_FLIGHT = {"report": 1, "poll": 2, "traces": 2}
+MAX_POLL_BYTES = 2 * 1024 * 1024  # a poll carries results only
 _LOG_EVERY = 60.0  # seconds between refusal warnings per peer
 
 
@@ -83,7 +87,7 @@ class _Pending:
     deadline: float = 0.0  # monotonic: the waiting send gives up then
     queued: bool = False  # waiting in the queue, not yet delivered
     delivered: bool = False
-    waiting: bool = False  # a send() is waiting for the result
+    waiting: int = 0  # send() calls waiting for the result
     result: Result | None = None
     result_at: datetime | None = None
 
@@ -96,7 +100,8 @@ class _Agent:
     report_at: datetime | None = None
     polling: int = 0  # generation of the poll being held; 0: none
     poll_gen: int = 0
-    reporting: bool = False
+    warned: float = -_LOG_EVERY  # monotonic time of the last "polls again" warning
+    in_flight: Counter[str] = field(default_factory=Counter)  # requests by kind
     queue: deque[str] = field(default_factory=deque)  # action ids to deliver
     pending: dict[str, _Pending] = field(default_factory=dict)  # by action id
     by_key: dict[str, str] = field(default_factory=dict)  # action key -> id
@@ -154,19 +159,28 @@ class Hub:
 
     # --- agent side -----------------------------------------------------------------------
 
-    def begin(self, agent: str, path: str) -> int:
-        """Take the agent's slot for ``path``: one report at a time (Busy otherwise), and
-        one poll: a new poll replaces a held one (its connection may be dead), which then
-        returns at once with nothing. Returns the slot's generation for :meth:`end` and
-        :meth:`poll`."""
+    def enter(self, agent: str, kind: str) -> None:
+        """Count a request of ``kind`` (report, poll, traces) in flight for the agent; Busy
+        over :data:`IN_FLIGHT`. Authenticated requests are limited here, per agent, so one
+        token cannot hold more than a few threads. Pair with :meth:`leave`."""
         with self._cond:
             state = self._agents[agent]
-            if path == REPORT_PATH:
-                if state.reporting:
-                    raise Busy("reporting")
-                state.reporting = True
-                return 0
-            if state.polling:
+            if state.in_flight[kind] >= IN_FLIGHT[kind]:
+                raise Busy(kind)
+            state.in_flight[kind] += 1
+
+    def leave(self, agent: str, kind: str) -> None:
+        with self._cond:
+            self._agents[agent].in_flight[kind] -= 1
+
+    def begin_poll(self, agent: str) -> int:
+        """Hold the agent's poll slot: a new poll (its body already read) replaces a held
+        one, whose connection may be dead; the held one then returns at once with nothing.
+        Returns the generation for :meth:`poll` and :meth:`end_poll`."""
+        with self._cond:
+            state = self._agents[agent]
+            if state.polling and time.monotonic() - state.warned > _LOG_EVERY:
+                state.warned = time.monotonic()
                 log.warning(
                     "hub: agent %s polls again while a poll is held; the new one replaces it "
                     "(if this repeats, two processes use the agent's token)",
@@ -177,13 +191,22 @@ class Hub:
             self._cond.notify_all()
             return state.poll_gen
 
-    def end(self, agent: str, path: str, generation: int = 0) -> None:
+    def end_poll(self, agent: str, generation: int) -> None:
         with self._cond:
             state = self._agents[agent]
-            if path == REPORT_PATH:
-                state.reporting = False
-            elif state.polling == generation:
+            if state.polling == generation:
                 state.polling = 0
+
+    def undeliver(self, agent: str, actions: list[WireAction]) -> None:
+        """Put actions whose reply could not be written back at the front of the queue."""
+        with self._cond:
+            state = self._agents[agent]
+            for action in reversed(actions):
+                pending = state.pending.get(action.id)
+                if pending is not None and pending.result is None and not pending.queued:
+                    pending.queued, pending.delivered = True, False
+                    state.queue.appendleft(action.id)
+            self._cond.notify_all()
 
     def receive_report(self, agent: str, report: Report) -> None:
         """Keep ``report`` as the agent's latest; OutOfOrder when the same agent process
@@ -195,6 +218,20 @@ class Hub:
             last = state.report
             if last is not None and report.boot == last.boot and report.seq <= last.seq:
                 raise OutOfOrder(f"{report.boot}/{report.seq}")
+            if (
+                last is not None
+                and report.boot != last.boot
+                and state.report_at is not None
+                and now - state.report_at < 2 * last.interval
+                and time.monotonic() - state.warned > _LOG_EVERY
+            ):
+                state.warned = time.monotonic()
+                log.warning(
+                    "hub: agent %s reports from a new process while the old one reported %ss "
+                    "ago (if this repeats, two processes use the agent's token)",
+                    agent,
+                    int((now - state.report_at).total_seconds()),
+                )
             state.report, state.report_at = report, now
 
     def poll(
@@ -218,11 +255,13 @@ class Hub:
             while not self._closed and (not generation or state.polling == generation):
                 while state.queue and len(out) < MAX_ACTIONS:
                     pending = state.pending.get(state.queue[0])
-                    if pending is None or not pending.queued:
+                    if pending is None or not pending.queued or pending.result is not None:
                         state.queue.popleft()
+                        if pending is not None:
+                            pending.queued = False
                         continue
                     ttl = pending.deadline - time.monotonic()
-                    if ttl <= 0:
+                    if ttl < 0.01:
                         state.queue.popleft()  # its wait gave up: withdrawn, not delivered
                         pending.queued = False
                         continue
@@ -291,7 +330,7 @@ class Hub:
                 pending.queued = True
                 state.queue.append(action_id)
                 self._cond.notify_all()
-            pending.waiting = True
+            pending.waiting += 1
             try:
                 while pending.result is None and not self._closed:
                     left = pending.deadline - time.monotonic()
@@ -299,7 +338,7 @@ class Hub:
                         break
                     self._cond.wait(left)
             finally:
-                pending.waiting = False
+                pending.waiting -= 1
             if pending.result is None:
                 if not pending.delivered:
                     pending.queued = False  # withdrawn
@@ -370,26 +409,34 @@ class HubServer(ThreadingHTTPServer):
         self.tls = _server_context(settings) if settings.tls else None
         if ":" in settings.host:
             self.address_family = socket.AF_INET6
-        # Connections not yet authenticated: at most max_connections, MAX_PER_PEER from one
-        # address. A connection gives its slot back once its token checks out (agents' own
-        # requests are then limited per agent), so strangers cannot hold agents' capacity.
+        # Connections not yet authenticated: at most max_connections (when full, the oldest
+        # is cut to make room: an agent sends its token at once, a stranger holding slots
+        # does not), MAX_PER_PEER from one address. A connection gives its slot back once
+        # its token checks out; agents' own requests are then limited per agent.
         self.max_connections = settings.max_connections
         self._slots_lock = threading.Lock()
-        self._unauthenticated: dict[int, str] = {}  # id(socket) -> peer
+        self._unauthenticated: dict[int, tuple[str, Any]] = {}  # id(socket) -> peer, socket
         self._per_peer: Counter[str] = Counter()
         self._warned: dict[str, float] = {}
         super().__init__((settings.host, settings.port), HubHandler)
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        # Over a cap a connection is closed before a thread is started for it.
-        peer = str(client_address[0])
+        # Over the per-peer cap a connection is closed before a thread is started for it.
+        peer = _peer_key(str(client_address[0]))
+        evicted = None
         with self._slots_lock:
-            full = len(self._unauthenticated) >= self.max_connections
-            if full or self._per_peer[peer] >= MAX_PER_PEER:
+            if self._per_peer[peer] >= MAX_PER_PEER:
                 self.shutdown_request(request)
                 return
-            self._unauthenticated[id(request)] = peer
+            if len(self._unauthenticated) >= self.max_connections:
+                oldest = next(iter(self._unauthenticated))
+                old_peer, evicted = self._unauthenticated.pop(oldest)
+                self._drop_peer(old_peer)
+            self._unauthenticated[id(request)] = (peer, request)
             self._per_peer[peer] += 1
+        if evicted is not None:
+            with contextlib.suppress(OSError):
+                evicted.shutdown(socket.SHUT_RDWR)
         try:
             super().process_request(request, client_address)
         except BaseException:
@@ -405,11 +452,14 @@ class HubServer(ThreadingHTTPServer):
     def release(self, request: Any) -> None:
         """Give back the connection's unauthenticated slot (once)."""
         with self._slots_lock:
-            peer = self._unauthenticated.pop(id(request), None)
-            if peer is not None:
-                self._per_peer[peer] -= 1
-                if not self._per_peer[peer]:
-                    del self._per_peer[peer]
+            entry = self._unauthenticated.pop(id(request), None)
+            if entry is not None:
+                self._drop_peer(entry[0])
+
+    def _drop_peer(self, peer: str) -> None:
+        self._per_peer[peer] -= 1
+        if not self._per_peer[peer]:
+            del self._per_peer[peer]
 
     def unauthenticated(self) -> int:
         with self._slots_lock:
@@ -446,6 +496,20 @@ class HubServer(ThreadingHTTPServer):
         super().shutdown()
 
 
+def _peer_key(address: str) -> str:
+    """Who a connection counts against: the address, or its /64 for IPv6 (one host holds a
+    whole /64)."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return address
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
+
+
 def _server_context(settings: HubSettings) -> ssl.SSLContext:
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -467,10 +531,14 @@ class HubHandler(BaseHTTPRequestHandler):
         self._guard = threading.Timer(PREAUTH_DEADLINE, self._cut)
         self._guard.daemon = True
         self._guard.start()
-        self.request.settimeout(self.timeout)
-        if isinstance(self.request, ssl.SSLSocket):
-            self.request.do_handshake()
-        super().setup()
+        try:
+            self.request.settimeout(self.timeout)
+            if isinstance(self.request, ssl.SSLSocket):
+                self.request.do_handshake()
+            super().setup()
+        except BaseException:
+            self._guard.cancel()  # finish() does not run when setup() fails
+            raise
 
     def _cut(self) -> None:
         with contextlib.suppress(OSError):
@@ -502,23 +570,27 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         self._guard.cancel()
         self.server.release(self.request)
+        kind = "report" if path == REPORT_PATH else "poll"
         try:
-            generation = hub.begin(agent, path)
+            hub.enter(agent, kind)
         except Busy:
-            log.warning(
-                "hub: agent %s sent a second report while one is in flight (two processes "
-                "with one token?)",
+            self.server.warn_once(
                 agent,
+                "hub: agent %s has too many %s requests in flight (two processes with one "
+                "token?)",
+                agent,
+                kind,
             )
-            self._json(409, {"error": "a request of this kind is already in flight"})
+            self._json(409, {"error": f"too many {kind} requests in flight"})
             return
         try:
-            self._handle(hub, agent, path, generation)
+            self._handle(hub, agent, path)
         finally:
-            hub.end(agent, path, generation)
+            hub.leave(agent, kind)
 
-    def _handle(self, hub: Hub, agent: str, path: str, generation: int = 0) -> None:
-        body = self._body(hub.settings.max_body_bytes)
+    def _handle(self, hub: Hub, agent: str, path: str) -> None:
+        limit = hub.settings.max_body_bytes if path == REPORT_PATH else MAX_POLL_BYTES
+        body = self._body(min(limit, hub.settings.max_body_bytes))
         if body is None:
             return
         try:
@@ -527,8 +599,16 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._json(200, {})
             else:
                 results, wait = decode_poll(body)
-                actions = hub.poll(agent, results, wait, generation)
-                self._json(200, {"actions": [encode_action(a) for a in actions]})
+                generation = hub.begin_poll(agent)  # only now: a stalled body replaces nothing
+                try:
+                    actions = hub.poll(agent, results, wait, generation)
+                finally:
+                    hub.end_poll(agent, generation)
+                try:
+                    self._json(200, {"actions": [encode_action(a) for a in actions]})
+                except OSError:
+                    hub.undeliver(agent, actions)  # the agent never got them
+                    raise
         except ProtocolError as exc:
             log.warning("hub: agent %s sent an invalid %s: %s", agent, path, exc)
             self._json(400, {"error": str(exc)})

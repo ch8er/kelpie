@@ -302,6 +302,13 @@ def task(**kw: object) -> dict[str, object]:
         {"tasks": [task(id="t\n\x1b[2J")]},
         {"tasks": [task(estimate=1e999)]},
         {"tasks": [task(files=[1, 2])]},
+        {"tasks": [task(files="abc")]},
+        {"tasks": [task(status_since="9999-12-31T23:59:59+00:00")]},
+        {"tasks": [task(status_since="0001-01-01T00:00:00+14:00")]},
+        {"tasks": [task(estimate=8.6e13)]},
+        {"tasks": [task(estimate=-5)]},
+        {"tasks": [task(id="t\ud800")]},
+        {"tasks": [task(), task()]},
         {"conditions": [{"id": "c", "kind": "custom", "params": {"a": float("nan")}}]},
         {
             "conditions": [
@@ -332,8 +339,12 @@ def test_snapshot_fields_are_checked(data: dict[str, object]) -> None:
 
 
 def test_free_text_is_cleaned_not_refused() -> None:
-    snap = decode_snapshot({"now": NOW.isoformat(), "tasks": [task(title="a\x1b[2Jb\nc")]})
-    assert snap.tasks[0].title == "a [2Jb\nc"
+    snap = decode_snapshot({"now": NOW.isoformat(), "tasks": [task(title="a\x1b[2Jb\nc\udfff")]})
+    assert snap.tasks[0].title == "a [2Jb\nc "
+    snap = decode_snapshot(
+        {"now": "2026-10-16T14:00:00+02:00", "tasks": [task(status_since=NOW.isoformat())]}
+    )
+    assert snap.now == NOW and snap.now.tzinfo is UTC
 
 
 @pytest.mark.parametrize(
@@ -356,6 +367,13 @@ def test_branch_names(branch: str, ok: bool) -> None:
     else:
         with pytest.raises(ProtocolError):
             decode_action(raw, OFFERED)
+
+
+def test_agent_version_is_printable() -> None:
+    body = encode_report("1.0\x1b[31m\nFAKE", NOW, timedelta(seconds=15), [], "c0ffee00", 1)
+    body["adapters"] = [{"name": "h", "actions": [], "error": "x"}]
+    with pytest.raises(ProtocolError, match="agent_version"):
+        decode_report(body)
 
 
 def test_unhashable_kinds_are_a_protocol_error() -> None:

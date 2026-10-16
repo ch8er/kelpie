@@ -318,11 +318,8 @@ def load_hub(section: Any) -> HubSettings | None:
     connections = section.get("max_connections", DEFAULT_MAX_CONNECTIONS)
     if isinstance(connections, bool) or not isinstance(connections, int):
         raise ValueError("[hub] max_connections must be an integer")
-    if not 2 * len(agents) + 2 <= connections <= 10_000:
-        raise ValueError(
-            "[hub] max_connections must be at least 2 per agent plus 2 (each agent holds a "
-            "poll open and sends reports) and at most 10000"
-        )
+    if not 8 <= connections <= 10_000:
+        raise ValueError("[hub] max_connections must be between 8 and 10000")
     return HubSettings(
         agents=tuple(agents),
         host=host,
