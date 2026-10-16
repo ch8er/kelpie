@@ -6,6 +6,7 @@ import contextlib
 import json
 import threading
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from kelpie import net
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
@@ -212,10 +214,8 @@ def test_the_section_is_marked_quoted_and_says_what_it_saw() -> None:
     assert section.title == TITLE
     markdown = render_markdown(report)
     assert "Written by `anthropic/model-x`" in markdown and "not checked by Kelpie" in markdown
-    # the real ids come back as code spans, here only: a URL-shaped one cannot link
-    assert (
-        "> Retries pile up on `T-4` and `https://evil.example/SYSTEM:ignore-previous-" in markdown
-    )
+    # the real ids come back here only, escaped and defanged: a URL-shaped one cannot link
+    assert "> Retries pile up on T-4 and https[:]//evil.example/SYSTEM:ignore-previous-" in markdown
     assert "task-9 is unknown" in markdown and "\n>\n> See below." in markdown
     assert SAW in markdown and NOT_SENT in markdown
 
@@ -228,6 +228,8 @@ def test_the_section_is_marked_quoted_and_says_what_it_saw() -> None:
         ("see www.evil.example now", "see www[.]evil.example now"),
         ("\\[a](b)", "\\\\\\[a\\](b)"),
         ("safe\u202etxt.exe\u200b", "safetxt.exe"),
+        ("mail ops@evil.example", "mail ops[@]evil.example"),
+        ("a `b` c", "a \\`b\\` c"),
     ],
 )
 def test_generated_text_cannot_link_render_html_or_hide_text(answer: str, shown: str) -> None:
@@ -386,3 +388,36 @@ def test_generate_adds_the_section_only_when_configured(tmp_path: Path) -> None:
     assert TITLE not in plain and fake.calls == []
     _, markdown = generate(sources(SETTINGS), DAY, board, fake)
     assert f"## {TITLE}" in markdown and "> Cause one." in markdown
+
+
+def test_a_stray_backtick_cannot_turn_a_restored_id_into_markup() -> None:
+    report = poisoned_report()
+    aliases = {real: a for a, real in digest(report).aliases.items()}
+    hostile = replace(
+        report, chaos=(replace(report.chaos[0], tasks=("[x](https://evil.example/a)<img src=x>",)),)
+    )
+    alias = next(iter(digest(hostile).aliases))
+    [section] = with_root_cause(hostile, SETTINGS, Fake(f"Look at `{alias} now")).sections
+    line = next(x for x in section.lines if x.startswith("> Look"))
+    assert line == "> Look at \\`\\[x\\](https[:]//evil.example/a)&lt;img src=x&gt; now"
+    assert aliases  # the poisoned report has aliases too
+
+
+def test_openai_own_api_gets_max_completion_tokens_through_the_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def post(
+        url: str, path: str, headers: Any, body: bytes, timeout: float, cap: int, proxy: bool
+    ) -> Any:
+        seen.update(url=url, path=path, body=json.loads(body), proxy=proxy)
+        return net.Response(
+            200, {}, json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+        )
+
+    monkeypatch.setattr(net, "post", post)
+    settings = LlmSettings("openai", "m", "OPENAI_API_KEY", "https://api.openai.com")
+    assert HttpLlm(settings, "k").complete("s", "p") == "ok"
+    assert seen["path"] == "/v1/chat/completions" and seen["proxy"] is True
+    assert seen["body"]["max_completion_tokens"] == 1000 and "max_tokens" not in seen["body"]

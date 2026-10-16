@@ -17,7 +17,8 @@ control most of that text (it could carry instructions to the model) and some of
 private. The section lists what the model saw, also when the call failed.
 
 **What comes back** is shown as generated text, marked as such, as a quote; HTML,
-images, links and Markdown escapes are neutralised and URLs defanged. A failure (no key,
+images, links, code spans and Markdown escapes are neutralised and URLs and email
+addresses defanged, the restored task ids with the rest. A failure (no key,
 a timeout, an HTTP error) is a note in the section, never a failed report.
 """
 
@@ -314,18 +315,20 @@ def _strip_controls(text: str) -> str:
 
 
 def _plain(text: str) -> str:
-    """Generated text, safe in Markdown: no HTML, images, links or escapes that could turn
-    into one; URLs defanged (``https[:]//``, ``www[.]``) so renderers do not link them."""
-    text = _strip_controls(text).replace("\\", "\\\\")
+    """Untrusted text, safe in Markdown: no HTML, images, links, code spans or escapes that
+    could turn into one; URLs and email addresses defanged (``https[:]//``, ``www[.]``,
+    ``a[@]b``) so renderers do not link them."""
+    text = _strip_controls(text).replace("\\", "\\\\").replace("`", "\\`")
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = text.replace("[", "\\[").replace("]", "\\]")
     text = re.sub(r"(?i)\b([a-z][a-z0-9+.-]*)://", r"\1[:]//", text)
-    return re.sub(r"(?i)\bwww\.", "www[.]", text)
+    text = re.sub(r"(?i)\bwww\.", "www[.]", text)
+    return re.sub(r"(?<=[\w.+-])@(?=[\w-])", "[@]", text)
 
 
 def _quote(text: str, aliases: Mapping[str, str]) -> list[str]:
     raw = text.strip()[:MAX_TEXT].splitlines()
-    lines = [_unalias(_plain(line.rstrip()), aliases) for line in raw]
+    lines = [_plain(_unalias(line.rstrip(), aliases)) for line in raw]
     shown = lines[:MAX_LINES]
     if len(lines) > MAX_LINES:
         shown.append("...")
@@ -333,13 +336,9 @@ def _quote(text: str, aliases: Mapping[str, str]) -> list[str]:
 
 
 def _unalias(line: str, aliases: Mapping[str, str]) -> str:
-    """Put the real task ids back, as code spans (they are agents' text)."""
-
-    def real(m: re.Match[str]) -> str:
-        found = aliases.get(m.group(0))
-        return _code(found) if found is not None else m.group(0)
-
-    return _ALIAS.sub(real, line)
+    """Put the real task ids back, before :func:`_plain` (they are agents' text: escaped
+    and defanged with the rest of the line)."""
+    return _ALIAS.sub(lambda m: aliases.get(m.group(0), m.group(0)), line)
 
 
 def with_root_cause(
