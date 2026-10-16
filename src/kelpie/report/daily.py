@@ -546,7 +546,7 @@ def hold_agent_hours(
     label = state.id[len(HOLD_STATE) :]
     samples = sorted(
         (
-            (e.at, len(e.params["idle_agents"]), e.params.get("held_tasks"))
+            (e.at, len(e.params["idle_agents"]), _held(e.params))
             for e in entries
             if e.rule == "bottlenecks"
             and e.params.get("hold") == label
@@ -570,6 +570,14 @@ def hold_agent_hours(
         {t for _, _, h in samples if isinstance(h, list) for t in h if isinstance(t, str)}
     )
     return total, tuple(held)
+
+
+def _held(params: Mapping[str, object]) -> list[object]:
+    """The held work a hold alert lists: its tasks, then its PRs (PR labels as holds)."""
+    return [
+        *(params.get("held_tasks") if isinstance(params.get("held_tasks"), list) else []),
+        *(params.get("held_prs") if isinstance(params.get("held_prs"), list) else []),
+    ]
 
 
 def state_hours(

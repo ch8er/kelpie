@@ -291,3 +291,46 @@ def test_rule_window_must_fit_the_connector_window(tmp_path: Path) -> None:
     text = CI_CONFIG + '\n[engine.rules.ci_economy]\nwindow = "48h"\n'
     with pytest.raises(ConfigError, match="window"):
         build_app(load_settings(write(tmp_path, text)))
+
+
+def test_build_app_wires_the_pull_requests_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    caplog.set_level("INFO")
+    text = CONFIG.replace(
+        'repos = ["example/repo"]\n',
+        'repos = ["example/repo"]\n[connectors.github.pulls]\npoll_interval = "5m"\n',
+    ) + (
+        '\n[engine.rules.bottlenecks]\nhold_labels = ["park"]\n'
+        '[[engine.rules.bottlenecks.holds]]\nlabel = "merge-first"\n'
+    )
+    settings = load_settings(write(tmp_path, text))
+    assert settings.github is not None and settings.github.pulls is not None
+    assert settings.github.pulls.poll_interval == timedelta(minutes=5)
+    build_app(settings).close()
+    assert "open PRs of example/repo; hold labels read: merge-first, park" in caplog.text
+
+
+def test_pull_requests_step_off_unless_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    caplog.set_level("INFO")
+    build_app(load_settings(write(tmp_path, CONFIG))).close()
+    off = CONFIG.replace(
+        'repos = ["example/repo"]\n',
+        'repos = ["example/repo"]\n[connectors.github.pulls]\nenabled = false\n',
+    )
+    build_app(load_settings(write(tmp_path, off))).close()
+    assert "open PRs of" not in caplog.text
+    with pytest.raises(ConfigError, match="max_details"):
+        load_settings(
+            write(
+                tmp_path,
+                CONFIG.replace(
+                    'repos = ["example/repo"]\n',
+                    'repos = ["example/repo"]\n[connectors.github.pulls]\nmax_details = -1\n',
+                ),
+            )
+        )

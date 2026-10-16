@@ -41,6 +41,10 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # label = "merge-hold"
 # owner = "human-owner"     # named in the alert when the hold looks forgotten
 # expires_after = "2h30m"
+# ready_prs = false         # true where agents merge: open PRs GitHub says can be merged
+#                           # are ready work (needs [connectors.github.pulls]); hold labels
+#                           # on PRs hold them either way
+# pr_role = "developer"     # optional: the role that merges PRs (default: any idle agent)
 #
 # [engine.rules.needs_you]
 # human_wait_alert_after = "1h"  # a human task enters its owner's inbox once agent work behind
@@ -430,6 +434,16 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # push/pull_request run of the same workflow, branch and PR, still active, not on the
 # default branch, not a re-run, within the cancel policy) and a fresh re-check right before
 # the request agrees.
+#
+# Open PRs for rule 6 (bottlenecks): hold labels on PRs (holds/hold_labels) hold the task on
+# the PR's head branch and age from when the label went on; mergeable PRs count as ready
+# work. A task is linked to its PR by branch (Hermes: tasks.branch_name, else the worktree's).
+#
+# [connectors.github.pulls]
+# poll_interval = "2m"              # list open PRs this often (at least 30s)
+# max_details = 20                  # PRs whose mergeable state is read per scan (0 to 100):
+#                                   # one request each, within max_requests_per_tick
+# enabled = true
 #
 # Rate limit: a scan runs every poll_interval and spends at most max_requests_per_tick
 # requests: 100 every 2 minutes is at most 3,000 of a token's 5,000 an hour (304s are

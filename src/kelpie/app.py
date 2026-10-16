@@ -30,6 +30,7 @@ from kelpie.connectors.github import (
     load_block_conditions,
     load_github,
 )
+from kelpie.connectors.github.pulls import PullRequestSync
 from kelpie.connectors.human_tasks import (
     HumanTaskConnector,
     HumanTaskSettings,
@@ -984,8 +985,17 @@ def _github_steps(
         ci = github.build_ci(connector, clock)
     except ValueError as exc:
         raise ConfigError(str(exc)) from None
+    steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = [("github", step)]
+    if github.pulls is not None and github.pulls.enabled:
+        watch = _hold_labels(settings.engine)
+        steps.append(("github_pulls", PullRequestSync(connector, github.pulls, watch)))
+        log.info(
+            "[connectors.github.pulls] open PRs of %s; hold labels read: %s",
+            ", ".join(sorted(connector.repos)),
+            ", ".join(sorted(watch)) or "none",
+        )
     if ci is None:
-        return [("github", step)], []
+        return steps, []
     log.info(
         "[connectors.github.ci] builds of %s; cancel_build %s",
         ", ".join(ci.settings.repos),
@@ -993,7 +1003,18 @@ def _github_steps(
         if ci.settings.allow_cancel
         else "off (allow_cancel = false)",
     )
-    return [("github", step), ("github_ci", ci)], [ci]
+    return [*steps, ("github_ci", ci)], [ci]
+
+
+def _hold_labels(engine: EngineConfig) -> frozenset[str]:
+    """Rule 6's hold labels (``holds`` and ``hold_labels``): the PR labels whose time the
+    pull request step reads."""
+    section = engine.rules.get("bottlenecks", {})
+    labels = {str(x) for x in section.get("hold_labels", []) if isinstance(x, str)}
+    for hold in section.get("holds", []):
+        if isinstance(hold, Mapping) and isinstance(hold.get("label"), str):
+            labels.add(hold["label"])
+    return frozenset(labels)
 
 
 def check_exposure(settings: Settings, host: str) -> None:

@@ -114,6 +114,7 @@ class Task:
     returns: tuple[Return, ...] = ()
     host: str | None = None  # where the task runs, if the adapter knows (a config name)
     body: str | None = None  # the task's description, if the adapter knows it
+    branch: str | None = None  # the task's working branch, if the adapter knows it
 
 
 class ResourceKind(StrEnum):
@@ -361,6 +362,44 @@ class Build:
 
 
 @dataclass(frozen=True, slots=True)
+class LabelEvent:
+    """When ``label`` was (last) put on a pull request."""
+
+    label: str
+    at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequest:
+    """An open pull (merge) request, as a code-host connector reports it.
+
+    ``branch`` is its head branch, which links it to the task working on that branch.
+    ``mergeable`` is True when the host says it can be merged now (no conflicts, required
+    checks and reviews satisfied), False when it says it cannot, None when unknown.
+    ``labeled`` holds when watched labels (holds) were put on it, where the connector read
+    that. ``updated_at`` is the host's last change to the PR.
+    """
+
+    repo: str
+    number: int
+    title: str = ""
+    branch: str | None = None
+    labels: tuple[str, ...] = ()
+    draft: bool = False
+    fork: bool = False  # from another repository (its branch names are not ours)
+    mergeable: bool | None = None
+    head_sha: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    labeled: tuple[LabelEvent, ...] = ()
+    source: str | None = None
+
+    @property
+    def ref(self) -> str:
+        return f"{self.repo}#{self.number}"
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderStatus:
     """The last probe of an LLM provider (``[connectors.llm_quotas]``), as of ``checked_at``.
 
@@ -408,6 +447,7 @@ class Snapshot:
     limit_hits: tuple[LimitHit, ...] = ()  # observed provider limits (budgets forecast them)
     providers: tuple[ProviderStatus, ...] = ()  # LLM provider quota and auth probes
     builds: tuple[Build, ...] = ()  # recent CI builds (CI connectors)
+    pull_requests: tuple[PullRequest, ...] = ()  # open PRs (code-host connectors)
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )

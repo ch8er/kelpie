@@ -30,8 +30,9 @@ spare. An alert lasts as long as spare capacity exists.
 - **Holds with an owner and an expiry** (incident 14). A hold is a label that parks tasks on
   purpose, listed in ``holds`` with an owner and an expected length (``expires_after``,
   else ``hold_expiry``, else 4h). Bare ``hold_labels`` only park tasks, with no expiry
-  unless ``hold_expiry`` is set. Kelpie cannot see when a label was set, so a hold's age is
-  how long its oldest queued task (ready, review, accepted) has not moved. Past the expiry
+  unless ``hold_expiry`` is set. A hold's age is how long its oldest queued task (ready,
+  review, accepted) has not moved, or, for a label on a PR, since the label went on when
+  the code host says (see below). Past the expiry
   Kelpie alerts once, naming the owner, the idle agents that could take the held work and
   the idle agent minutes since the expiry (for the cost-of-chaos report). Lifting a hold in
   act mode needs an executor that owns the label; none exists yet, so it is only an alert.
@@ -58,6 +59,19 @@ idle has the likely cause ``assigned_busy`` (a per-agent limit or the farm's cap
 reassign it, listed in ``assigned_busy_tasks``); otherwise ``dispatch``. The flag applies to
 every task of the snapshot, whichever adapter reported it.
 
+**Open pull requests** (``snapshot.pull_requests``, from the GitHub pull requests step). An
+open task is linked to the open PRs whose head branch is the task's ``branch`` (usually one;
+a branch name heading several PRs links them all, since Kelpie cannot tell which is the
+task's) and carries their labels as its own: a hold label on a PR holds its task, aged from
+when the label went on (when the code host says) or the task's last move, whichever is
+later. A held PR that no open task stands for (a fork's excepted) is held work of its hold
+too. With ``ready_prs`` (default off: turn it on where agents merge PRs), a PR no open task
+stands for that the code host says can be merged now, not a draft, not a fork's, not held,
+and unchanged for ``idle_alert_after`` is ready work for idle agents of ``pr_role`` (any
+idle agent without one), and idle agents who could merge held PRs count in the hold
+alert. When only such PRs wait, the likely cause is ``merge`` (nobody merges them); with
+tasks too, the tasks decide the cause and the text adds the PRs.
+
 ``slots`` (optional) is the farm's concurrency limit in running tasks (tasks agents run in a
 live session; Hermes ``kanban.max_in_progress``; until 2026-10 it counted agents, which is the
 same while each agent runs one task): once that many sessions are live, idle agents are not free
@@ -83,12 +97,12 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import ConditionKind, OwnerKind, Snapshot, Status, Task
+from kelpie.core.model import ConditionKind, OwnerKind, PullRequest, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._tasks import is_live, last_seen, linked_conditions
@@ -215,6 +229,49 @@ def _open_dependencies(snapshot: Snapshot, open_ids: set[str]) -> dict[str, set[
         if d.task_id in open_ids and d.depends_on in open_ids:
             deps.setdefault(d.task_id, set()).add(d.depends_on)
     return deps
+
+
+def link_pull_requests(
+    snapshot: Snapshot,
+) -> tuple[dict[str, tuple[PullRequest, ...]], tuple[PullRequest, ...]]:
+    """Open tasks linked to the open PRs of their branch, and the PRs no open task stands
+    for.
+
+    A task is linked to every open PR whose head branch is its ``branch`` (usually one; the
+    same branch name may head PRs in several repositories, or several PRs of one, and Kelpie
+    cannot tell which is the task's, so a hold on any of them holds it). A PR whose task is
+    finished, or that no task names (a fork's, for one), stands on its own."""
+    by_branch: dict[str, list[PullRequest]] = {}
+    for pr in snapshot.pull_requests:
+        if pr.branch:
+            by_branch.setdefault(pr.branch, []).append(pr)
+    linked: dict[str, tuple[PullRequest, ...]] = {}
+    for t in snapshot.tasks:
+        if not t.status.is_terminal and (prs := by_branch.get(t.branch or "")):
+            linked[t.id] = tuple(prs)
+    taken = {(pr.repo, pr.number) for prs in linked.values() for pr in prs}
+    loose = tuple(pr for pr in snapshot.pull_requests if (pr.repo, pr.number) not in taken)
+    return linked, loose
+
+
+def with_pr_labels(snapshot: Snapshot, linked: dict[str, tuple[PullRequest, ...]]) -> Snapshot:
+    """The snapshot with each linked task also carrying its PRs' labels."""
+    if not linked:
+        return snapshot
+    tasks = []
+    for t in snapshot.tasks:
+        extra = [x for pr in linked.get(t.id, ()) for x in pr.labels if x not in t.labels]
+        tasks.append(replace(t, labels=t.labels + tuple(dict.fromkeys(extra))) if extra else t)
+    return replace(snapshot, tasks=tuple(tasks))
+
+
+def _labeled_at(pr: PullRequest, label: str) -> datetime | None:
+    return max((e.at for e in pr.labeled if e.label == label), default=None)
+
+
+def _pr_since(pr: PullRequest) -> datetime | None:
+    """When an open PR last changed, as far as Kelpie can tell."""
+    return pr.updated_at or pr.created_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +427,11 @@ class Bottlenecks:
     slots: int | None = None
     # Assigned ready tasks nobody started are queued work (Hermes assigns before dispatch).
     ready_is_queued: bool = False
+    # Open PRs the code host says can be merged now count as ready work (needs the GitHub
+    # pull requests step); ``pr_role`` is the role that merges them (None: any idle agent).
+    # Off by default: on a farm where people merge, an idle agent cannot take them.
+    ready_prs: bool = False
+    pr_role: str | None = None
     name: str = NAME
 
     @property
@@ -378,6 +440,8 @@ class Bottlenecks:
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         held = self.held_labels
+        linked, loose = link_pull_requests(snapshot)
+        snapshot = with_pr_labels(snapshot, linked)  # a hold on a PR holds its task
         loads = role_loads(snapshot, self.min_idle_time, held, self.ready_is_queued)
         now = snapshot.now
         gates = [
@@ -394,9 +458,9 @@ class Bottlenecks:
         actions.extend(self._overloaded(loads, full=not free))
         if free:
             actions.extend(self._chain(snapshot, loads, held))
-            actions.extend(self._idle_with_ready_work(snapshot, loads, held))
-            actions.extend(self._human_gated(snapshot, loads, held, gates))
-        actions.extend(self._expired_holds(snapshot, loads if free else {}))
+            actions.extend(self._idle_with_ready_work(snapshot, loads, held, loose))
+            actions.extend(self._human_gated(snapshot, loads, held, gates, loose))
+        actions.extend(self._expired_holds(snapshot, loads if free else {}, linked, loose))
         if self.escalate_human_gates:
             actions.extend(self._escalate_gates(gates, now))
         return actions
@@ -528,25 +592,75 @@ class Bottlenecks:
             key=lambda t: (t.status_since, t.id),
         )
 
+    def _takeable_prs(
+        self,
+        now: datetime,
+        loose: Sequence[PullRequest],
+        idle_roles: Collection[str],
+        held: bool,
+        labels: frozenset[str],
+    ) -> list[PullRequest]:
+        """PRs no open task stands for that an idle agent of ``pr_role`` (or any, without
+        one) could merge, held or not held by ``labels``, unchanged for ``idle_alert_after``,
+        oldest first. Unheld ones must be mergeable; held ones count whatever their state
+        (the hold may be what keeps them from merging). Drafts never count."""
+        if not self.ready_prs or not idle_roles:
+            return []
+        if self.pr_role is not None and self.pr_role not in idle_roles:
+            return []
+        return sorted(
+            (
+                pr
+                for pr in loose
+                if not pr.draft
+                and not pr.fork
+                and bool(labels.intersection(pr.labels)) is held
+                and (held or pr.mergeable is True)
+                and (since := _pr_since(pr)) is not None
+                and now - since >= self.idle_alert_after
+            ),
+            key=lambda pr: (_pr_since(pr), pr.repo, pr.number),
+        )
+
+    def _pr_roles(self, prs: Sequence[PullRequest]) -> list[str | None]:
+        """The roles that could merge ``prs``: ``pr_role``, or any (None) without one."""
+        return [self.pr_role] if prs else []
+
     def _idle_with_ready_work(
-        self, snapshot: Snapshot, loads: dict[str, RoleLoad], held: frozenset[str]
+        self,
+        snapshot: Snapshot,
+        loads: dict[str, RoleLoad],
+        held: frozenset[str],
+        loose: Sequence[PullRequest] = (),
     ) -> list[Action]:
-        """Idle agents while unheld ready work they could take has waited
-        ``idle_alert_after``. Held work is the hold alert's, once the hold expires."""
+        """Idle agents while unheld ready work they could take (queued tasks, mergeable PRs)
+        has waited ``idle_alert_after``. Held work is the hold alert's, once the hold
+        expires."""
         now = snapshot.now
         idle_roles = {r: load.idle for r, load in loads.items() if load.idle}
         work = self._takeable(snapshot, idle_roles, False, held) if idle_roles else []
-        if not work:
+        prs = self._takeable_prs(now, loose, idle_roles, False, held)
+        if not work and not prs:
             return []
-        roles, idle = _who_could_take(work, idle_roles)
-        oldest = work[0].status_since
-        ids = [t.id for t in work]
+        roles, idle = _who_could_take(work, idle_roles, self._pr_roles(prs))
+        oldest = min(
+            [t.status_since for t in work] + [s for pr in prs if (s := _pr_since(pr)) is not None]
+        )
+        ids = [t.id for t in work] + [pr.ref for pr in prs]
         # Work assigned to an agent that is not idle waits for that agent, while others of
         # its role sit idle: a reassignment helps. Otherwise the dispatcher is not handing
         # the work out.
         busy = {a for load in loads.values() for a in load.busy}
         stuck = [t for t in work if t.owner_id is not None and t.owner_id in busy]
-        if stuck and len(stuck) == len(work):
+        # The cause comes from the tasks; mergeable PRs add their own.
+        role = f"the {self.pr_role} role" if self.pr_role else "any agent"
+        merge = (
+            f"nobody merges the PRs: give merging to {role}, or check what keeps the merge "
+            "back (a merge queue, a policy, a person)"
+        )
+        if not work:
+            cause, why = "merge", merge
+        elif stuck and len(stuck) == len(work):
             cause = "assigned_busy"
             owners = _names(sorted({str(t.owner_id) for t in stuck}))
             why = (
@@ -556,11 +670,13 @@ class Bottlenecks:
         else:
             cause = "dispatch"
             why = "the dispatcher is not handing the work out (paused, a guard, or no free slot)"
+        if work and prs:
+            why = f"{why}; and {merge}"
         return [
             Action(
                 ActionKind.ALERT,
                 NAME,
-                f"{len(idle)} agent(s) idle ({_names(idle)}) while {len(work)} queued task(s) "
+                f"{len(idle)} agent(s) idle ({_names(idle)}) while {_work(len(work), len(prs))} "
                 f"wait (oldest {_human(now - oldest)}): {_names(ids)}. Likely cause: {why}.",
                 severity=Severity.WARNING,
                 key=f"{NAME}:idle-ready",
@@ -573,6 +689,7 @@ class Bottlenecks:
                     "ready_count": len(ids),
                     "oldest_wait_minutes": int((now - oldest).total_seconds() // 60),
                     "likely_cause": cause,
+                    **({"ready_prs": [pr.ref for pr in prs][: _SHOWN * 2]} if prs else {}),
                     **(
                         {"assigned_busy_tasks": [t.id for t in stuck][: _SHOWN * 2]}
                         if self.ready_is_queued
@@ -582,9 +699,19 @@ class Bottlenecks:
             )
         ]
 
-    def _expired_holds(self, snapshot: Snapshot, loads: dict[str, RoleLoad]) -> list[Action]:
+    def _expired_holds(
+        self,
+        snapshot: Snapshot,
+        loads: dict[str, RoleLoad],
+        linked: dict[str, tuple[PullRequest, ...]] | None = None,
+        loose: Sequence[PullRequest] = (),
+    ) -> list[Action]:
         """Holds past their expiry. A hold's age is how long its oldest queued task (ready,
-        review, accepted) has not moved; backlog tasks carrying the label do not count."""
+        review, accepted) has not moved, or since the label was put on its PR when the code
+        host says so; backlog tasks carrying the label do not count. Open PRs carrying the
+        label that no open task stands for are held work too (aged by the label, else their
+        last change)."""
+        linked = linked or {}
         holds = {h.label: h for h in self.holds}
         if self.hold_expiry is not None:
             for label in self.hold_labels - holds.keys():
@@ -594,20 +721,38 @@ class Bottlenecks:
         actions: list[Action] = []
         for label in sorted(holds):
             hold = holds[label]
-            tasks = sorted(
-                (t for t in snapshot.tasks if t.status in _QUEUED and label in t.labels),
-                key=lambda t: (t.status_since, t.id),
-            )
-            if not tasks:
+            starts: dict[str, datetime] = {}
+            for t in snapshot.tasks:
+                if t.status in _QUEUED and label in t.labels:
+                    times = [x for pr in linked.get(t.id, ()) if (x := _labeled_at(pr, label))]
+                    on = min(times, default=None)
+                    starts[t.id] = t.status_since if on is None else max(t.status_since, on)
+            prs = {
+                pr.ref: start
+                for pr in loose
+                if not pr.draft
+                and not pr.fork
+                and label in pr.labels
+                and (start := _labeled_at(pr, label) or _pr_since(pr)) is not None
+            }
+            if not starts and not prs:
                 continue
-            since = tasks[0].status_since
+            since = min([*starts.values(), *prs.values()])
             expiry = hold.expires_after or self.hold_expiry or DEFAULT_HOLD_EXPIRY
             age = snapshot.now - since
             if age < expiry:
                 continue
-            ids = [t.id for t in tasks]
-            waiting = self._takeable(snapshot, idle_roles, True, frozenset({label}))
-            _, idle = _who_could_take(waiting, idle_roles) if waiting else ([], [])
+            ids = sorted(starts, key=lambda tid: (starts[tid], tid))
+            pr_refs = sorted(prs, key=lambda ref: (prs[ref], ref))
+            only = frozenset({label})
+            waiting = self._takeable(snapshot, idle_roles, True, only)
+            waiting_prs = self._takeable_prs(snapshot.now, loose, idle_roles, True, only)
+            pr_roles = self._pr_roles(waiting_prs)
+            _, idle = (
+                _who_could_take(waiting, idle_roles, pr_roles)
+                if waiting or waiting_prs
+                else ([], [])
+            )
             expired_at = since + expiry
             # Idle time the hold caused: each idle agent since the hold expired or its own
             # last session, whichever is later.
@@ -623,7 +768,8 @@ class Bottlenecks:
                 Action(
                     ActionKind.ALERT,
                     NAME,
-                    f"Hold '{label}' looks forgotten: its {len(ids)} task(s) ({_names(ids)}) "
+                    f"Hold '{label}' looks forgotten: its {_work(len(ids), len(pr_refs), '')} "
+                    f"({_names(ids + pr_refs)}) "
                     f"have not moved for {_human(age)}, past its expected {_human(expiry)}."
                     f"{meanwhile} {owner} Lift the hold, or set a new expiry.",
                     severity=Severity.WARNING,
@@ -634,7 +780,8 @@ class Bottlenecks:
                         "hold": label,
                         "owner": hold.owner,
                         "held_tasks": ids[: _SHOWN * 2],
-                        "held_count": len(ids),
+                        "held_count": len(ids) + len(pr_refs),
+                        **({"held_prs": pr_refs[: _SHOWN * 2]} if pr_refs else {}),
                         "held_minutes": int(age.total_seconds() // 60),
                         "expires_after_minutes": int(expiry.total_seconds() // 60),
                         "idle_agents": idle,
@@ -650,6 +797,7 @@ class Bottlenecks:
         loads: dict[str, RoleLoad],
         held: frozenset[str],
         gates: list[HumanGate],
+        loose: Sequence[PullRequest] = (),
     ) -> list[Action]:
         """Idle agents with no ready work they could take, while ready human tasks gate
         agent work."""
@@ -671,7 +819,7 @@ class Bottlenecks:
             and not held.intersection(t.labels)
             and (t.role is None or t.role in idle_roles)
         ]
-        if takeable:
+        if takeable or self._takeable_prs(snapshot.now, loose, idle_roles, False, held):
             return []  # idle agents have work they could take: the idle-ready alert's case
         ready_human = sorted(
             t.id
@@ -748,15 +896,26 @@ class Bottlenecks:
 
 
 def _who_could_take(
-    work: Sequence[Task], idle_roles: dict[str, tuple[str, ...]]
+    work: Sequence[Task],
+    idle_roles: dict[str, tuple[str, ...]],
+    extra: Collection[str | None] = (),
 ) -> tuple[list[str], list[str]]:
-    """Roles and idle agents that could take ``work``: any idle agent for work without a
-    role, otherwise the idle agents of the work's roles."""
-    if any(t.role is None for t in work):
+    """Roles and idle agents that could take ``work`` and work of the ``extra`` roles: any
+    idle agent for work without a role (None), otherwise the idle agents of those roles."""
+    wanted = [t.role for t in work] + list(extra)
+    if any(r is None for r in wanted):
         roles = sorted(idle_roles)
     else:
-        roles = sorted({t.role for t in work if t.role in idle_roles})
+        roles = sorted({r for r in wanted if r in idle_roles})
     return roles, sorted({a for r in roles for a in idle_roles[r]})
+
+
+def _work(tasks: int, prs: int, verb: str = "queued ") -> str:
+    """``N queued task(s)``, ``M mergeable PR(s)``, or both."""
+    parts = [f"{tasks} {verb}task(s)"] if tasks or not prs else []
+    if prs:
+        parts.append(f"{prs} {'mergeable ' if verb else ''}PR(s)")
+    return " and ".join(parts)
 
 
 def _last_session(snapshot: Snapshot) -> dict[str, datetime]:
@@ -831,6 +990,16 @@ def build(config: dict[str, Any]) -> Bottlenecks:
         kwargs["ready_is_queued"] = value
     if "slots" in config:
         kwargs["slots"] = _positive_int(config.pop("slots"), "slots")
+    if "ready_prs" in config:
+        value = config.pop("ready_prs")
+        if not isinstance(value, bool):
+            raise ValueError("ready_prs must be true or false")
+        kwargs["ready_prs"] = value
+    if "pr_role" in config:
+        value = config.pop("pr_role")
+        if not isinstance(value, str) or not value:
+            raise ValueError("pr_role must be a non-empty string")
+        kwargs["pr_role"] = value
     for key in ("min_idle_time", "idle_alert_after", "human_gate_after"):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)

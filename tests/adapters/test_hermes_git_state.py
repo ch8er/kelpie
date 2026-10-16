@@ -199,6 +199,35 @@ def test_detached_head_has_no_branch(board: Board, repo: Path) -> None:
     assert s.branch is None and s.last_commit is not None
 
 
+def task_branch(board: Board, **kw: object) -> str | None:
+    adapter = HermesAdapter(db_path=board.path, spool=None, **kw)  # type: ignore[arg-type]
+    (task,) = adapter.snapshot(NOW).tasks
+    return task.branch
+
+
+def test_task_branch_links_the_task_to_its_pr(board: Board, repo: Path) -> None:
+    git(repo, "checkout", "-q", "-b", "other")
+    live_task(board, repo, branch="hermes/t_1")
+    board.run("t_1", "dev", ago(hours=1))
+    assert task_branch(board) == "hermes/t_1"  # tasks.branch_name wins
+    assert task_branch(board, git_state=False) == "hermes/t_1"
+
+
+def test_task_branch_from_git_when_the_task_has_none(board: Board, repo: Path) -> None:
+    git(repo, "checkout", "-q", "-b", "feature/x")
+    live_task(board, repo, branch="  ")
+    board.run("t_1", "dev", ago(hours=1))
+    assert task_branch(board) == "feature/x"
+    assert task_branch(board, git_state=False) is None
+
+
+def test_task_on_a_detached_head_has_no_branch(board: Board, repo: Path) -> None:
+    git(repo, "checkout", "-q", "--detach")
+    live_task(board, repo)
+    board.run("t_1", "dev", ago(hours=1))
+    assert task_branch(board) is None
+
+
 def test_dir_workspace_is_ignored(board: Board, repo: Path) -> None:
     live_task(board, repo, kind="dir", branch="hermes/t_1")  # may be a shared or human checkout
     board.run("t_1", "dev", ago(hours=1))

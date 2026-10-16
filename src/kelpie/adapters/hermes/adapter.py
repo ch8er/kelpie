@@ -259,8 +259,13 @@ def _body(row: sqlite3.Row) -> str | None:
 
 
 def _with_files(task: Task, state: GitState | None) -> Task:
-    """The task with its worktree's files and repository, when git could say."""
-    if state is None or state.paths is None:
+    """The task with its worktree's files and repository, when git could say, and its
+    branch from git when ``tasks.branch_name`` is empty."""
+    if state is None:
+        return task
+    if task.branch is None and state.branch:
+        task = replace(task, branch=state.branch)
+    if state.paths is None:
         return task
     return replace(task, files=state.paths, repo=state.repo)
 
@@ -495,6 +500,7 @@ class HermesAdapter:
                     source=self.name,
                     block=block,
                     body=None if status.is_terminal else _body(row),
+                    branch=str(_col(row, "branch_name") or "").strip() or None,
                 )
             )
         return tuple(tasks), owners, known
