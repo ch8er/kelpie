@@ -34,7 +34,9 @@ longest wait.
 items in order, as a long-lived state (``needs_you:<person>``): announced when it opens,
 again when the list changes or at the escalation thresholds, resolved when it is empty.
 Severity is ``critical`` once the person's total cost reaches ``critical_after_hours``
-(24), else ``warning``.
+(24), else ``warning``. Every escalation also carries ``waiting_agent_tasks``, how many agent
+tasks wait on the person right now, and ``waiting``, their ids (at most 20): the daily
+report integrates the count over the day as agent-hours waiting on people.
 
 The state's key is the person's list of task ids, so any change to it, an item added or
 one done, is announced as "changed" with the new list; an emptied inbox resolves.
@@ -210,6 +212,7 @@ class NeedsYou:
         items = sorted(items, key=lambda i: (-i.cost_hours, i.task.id))
         total = _total(items)
         blocked = sorted({tid for i in items for tid in i.behind})
+        waiting = sorted({tid for i in items for tid in i.waits})
         since = now - max(i.waiting for i in items)
         severity = Severity.CRITICAL if total >= self.critical_after_hours else Severity.WARNING
         listed = "; ".join(i.describe() for i in items[:_SHOWN])
@@ -229,6 +232,10 @@ class NeedsYou:
                 "human_tasks": [i.task.id for i in items if i.kind == "human_task"],
                 "approvals": [i.task.id for i in items if i.kind == "approval"],
                 "blocked_agent_tasks": len(blocked),
+                # agent tasks waiting on the person right now: the report integrates their
+                # count over the day as agent-hours lost waiting on people
+                "waiting_agent_tasks": len(waiting),
+                "waiting": waiting[: _SHOWN * 4],
                 "cost_hours": round(total, 1),
                 "items": [
                     {
