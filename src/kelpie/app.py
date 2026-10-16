@@ -58,6 +58,7 @@ from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
+from kelpie.remote.config import AgentSettings, HubSettings, load_agent, load_hub
 from kelpie.report.config import ReportSettings, load_report
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
@@ -136,6 +137,8 @@ class Settings:
     llm_quotas: LlmQuotaSettings | None = None  # [connectors.llm_quotas]
     alerts: AlertSettings = field(default_factory=AlertSettings)  # [alerts]
     report: ReportSettings = field(default_factory=ReportSettings)  # [report]
+    agent: AgentSettings | None = None  # [agent]: this host runs ``kelpie agent``
+    hub: HubSettings | None = None  # [hub]: ``kelpie serve`` takes reports from agents
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -167,6 +170,8 @@ def load_settings(path: Path | None) -> Settings:
         "block_conditions",
         "alerts",
         "report",
+        "agent",
+        "hub",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -198,6 +203,8 @@ def load_settings(path: Path | None) -> Settings:
     try:
         alerts = load_alerts(data.get("alerts"))
         report = load_report(data.get("report"))
+        agent = load_agent(data.get("agent"))
+        hub = load_hub(data.get("hub"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     return Settings(
@@ -215,6 +222,8 @@ def load_settings(path: Path | None) -> Settings:
         llm_quotas=llm_quotas,
         alerts=alerts,
         report=report,
+        agent=agent,
+        hub=hub,
     )
 
 

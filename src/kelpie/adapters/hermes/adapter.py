@@ -101,7 +101,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from kelpie.adapters.hermes.git_state import (
     DEFAULT_TIMEOUT,
@@ -132,7 +132,7 @@ from kelpie.adapters.hermes.stop import (
     run_id,
     stop_comment,
 )
-from kelpie.core.actions import ActionResult
+from kelpie.core.actions import ActionKind, ActionResult
 from kelpie.core.model import (
     Artifact,
     Block,
@@ -510,6 +510,11 @@ class HermesAdapter:
     roles: Mapping[str, str] = field(default_factory=dict)
     role_from_name: bool = True  # dev-1, dev-2 -> dev; false: a profile is its own role
     name: str = "hermes"
+    # The action kinds it carries out (``kelpie agent`` offers only these): stop, park, wake
+    # of a task Kelpie parked (requeue), comment. unblock and wip_commit are not implemented.
+    actions: ClassVar[frozenset[ActionKind]] = frozenset(
+        {ActionKind.STOP, ActionKind.WAIT, ActionKind.REQUEUE, ActionKind.WAKE, ActionKind.COMMENT}
+    )
     # workspace -> snapshot time until which it is not read (its git timed out)
     _git_backoff: dict[Path, datetime] = field(
         default_factory=dict, init=False, repr=False, compare=False

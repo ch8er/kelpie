@@ -147,6 +147,24 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "Agent transport builds on core and the HTTP helper only"
+type = "forbidden"
+source_modules = ["kelpie.remote"]
+forbidden_modules = [
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.rules",
+    "kelpie.traces",
+    "kelpie.resources",
+    "kelpie.alerts",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+    "kelpie.report",
+]
+
+[[tool.importlinter.contracts]]
 name = "The HTTP helper stands alone"
 type = "forbidden"
 source_modules = ["kelpie.net"]

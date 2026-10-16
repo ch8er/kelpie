@@ -23,6 +23,8 @@ from kelpie.app import (
     render_status,
 )
 
+log = logging.getLogger("kelpie.cli")
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kelpie", description=__doc__)
@@ -78,6 +80,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Prometheus base URL (default: $KELPIE_PROMETHEUS_URL; else localhost:9090 if up)",
     )
 
+    sub.add_parser(
+        "agent",
+        help="on a machine with agents: report its boards to a central kelpie serve ([agent]) "
+        "and carry out the actions it routes here",
+    )
     spool = sub.add_parser("spool", help="maintain the hooks spools on this host")
     spool_sub = spool.add_subparsers(dest="spool_command", required=True)
     scrub = spool_sub.add_parser(
@@ -141,6 +148,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return code
         if args.command == "spool":
             return _scrub(settings, args.paths, args.dry_run)
+        if args.command == "agent":
+            return _agent(settings)
         if args.command == "status":
             rules = load_rules(settings.engine)
             adapters = build_adapters(settings)
@@ -167,6 +176,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     from kelpie.server import serve as run
 
     run(app, args.host, args.port)
+    return 0
+
+
+def _agent(settings: Settings) -> int:
+    """``kelpie agent``: runs until SIGTERM or SIGINT. ConfigError when it cannot start."""
+    import signal
+    import threading
+
+    from kelpie.app import utc_now
+    from kelpie.remote.agent import Agent, tls_context
+
+    config = settings.agent
+    if config is None:
+        raise ConfigError("kelpie agent needs an [agent] section (name, server, token_env)")
+    try:
+        token = config.token()
+        config.check_server()
+        agent = Agent(
+            config, build_adapters(settings), token, clock=utc_now, context=tls_context(config)
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if config.plain_http:
+        log.warning("[agent] reports over plain http: the token crosses the network in clear")
+
+    def on_signal(signum: int, frame: object) -> None:
+        log.info("received %s, stopping", signal.Signals(signum).name)
+        agent.stop()
+
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, on_signal)
+        signal.signal(signal.SIGINT, on_signal)
+    log.info(
+        "kelpie agent %s reporting %s to %s",
+        config.name,
+        ", ".join(f"{name} ({', '.join(sorted(kinds))})" for name, kinds in agent.offered.items()),
+        config.server,
+    )
+    agent.run()
+    log.info("kelpie agent stopped")
     return 0
 
 
