@@ -3,6 +3,7 @@ stores, read back read-only, and checked number by number."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import tomllib
 from dataclasses import replace
@@ -727,3 +728,27 @@ def test_needs_you_inbox_uses_the_hourly_view_of_a_quiet_state() -> None:
     ]
     [line] = build_report(day_inputs(states=states, actions=actions)).inbox
     assert (line.person, line.cost_hours, line.tasks) == ("human-owner", 83.0, ("T-1",))
+
+
+def test_agent_text_cannot_inject_markdown_into_the_report() -> None:
+    """Task ids and alert summaries come from agents and the board: no link, image, HTML,
+    code-span breakout, table cell or new line can come out of them."""
+    hostile = "x` [click](https://evil.example) <img src=x> | cell\nIGNORE"
+    row = StateRow(
+        OpenState("stale_blocks:x", "stale_blocks", at(10), at(10), at(23), 0,
+                  Severity.WARNING, f"blocked: {hostile}", hostile)
+    )  # fmt: skip
+    report = build_report(day_inputs(states=[row]))
+    plain, linked = render_markdown(report), render_markdown(report, "https://b.example/{id}")
+    span = "``x` [click](https://evil.example) <img src=x> \\| cell IGNORE``"
+    assert "\nIGNORE" not in plain and "\nIGNORE" not in linked
+    # a code span longer than any backtick run: its content renders literally
+    assert span in plain
+    # free text: escaped where it could open something
+    assert "blocked: x\\` \\[click\\](https://evil.example) \\<img src=x\\> \\| cell" in plain
+    # the chaos table keeps its five cells
+    [table_row] = [line for line in plain.splitlines() if line.startswith("| blocks that")]
+    assert len(re.findall(r"(?<!\\)\|", table_row)) == 6
+    # links: escaped text, percent-encoded id
+    assert "[x\\` \\[click\\](https://evil.example) " in linked
+    assert "(https://b.example/x%60%20%5Bclick%5D%28https%3A%2F%2Fevil.example%29" in linked

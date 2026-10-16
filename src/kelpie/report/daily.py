@@ -47,6 +47,7 @@ the same rules: pure, deterministic, no clock and no LLM.
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -70,6 +71,7 @@ from kelpie.core.spans import (
     usage,
 )
 from kelpie.core.states import OpenState
+from kelpie.report import md
 from kelpie.report.fixes import FixEvent
 from kelpie.report.sections import (
     SECTIONS,
@@ -676,11 +678,11 @@ def _recommendations(
     for rec in filters:
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
-        role = f" ({group.role})" if group.role else ""
+        role = f" ({md.text(group.role)})" if group.role else ""
         maybe = "" if rec.platform_known else " if RTK supports your agent platform"
         candidates.append(
             Advice(
-                title=f"Filter `{group.key}` output{role} with {rec.filter.name}{maybe}",
+                title=f"Filter {md.code(group.key)} output{role} with {rec.filter.name}{maybe}",
                 detail=(
                     f"{group.calls} calls put {group.tokens:,} tokens into the context, "
                     f"{round(group.mean):,} per call; {rec.filter.how}. Expected saving: about "
@@ -815,9 +817,11 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
         lines += ["|---|---|---:|---:|---:|---:|"]
         for g in report.outputs:
             approx = "~" if g.estimated else ""
-            used = f"{g.filtered_calls} ({', '.join(g.filters)})" if g.filtered_calls else "0"
+            filters = md.text(", ".join(g.filters))
+            used = f"{g.filtered_calls} ({filters})" if g.filtered_calls else "0"
             lines.append(
-                f"| {g.role or '?'} | `{g.key}` | {g.calls} | {approx}{g.tokens:,} | "
+                f"| {md.text(g.role or '?')} | {md.code(g.key, cell=True)} | {g.calls} | "
+                f"{approx}{g.tokens:,} | "
                 f"{approx}{round(g.mean):,} | {used} |"
             )
     return "\n".join(lines) + "\n"
@@ -864,7 +868,9 @@ def _verification_lines(report: DailyReport) -> list[str]:
     for v in report.verifications:
         e = v.event
         scope = ", ".join(
-            x for x in (e.rule and f"rule {e.rule}", e.role and f"role {e.role}") if x
+            x
+            for x in (e.rule and f"rule {md.text(e.rule)}", e.role and f"role {md.text(e.role)}")
+            if x
         )
         hours = v.after.total_seconds() / 3600
         title = f"**{_local(e.at, report)}, {e.kind}**: {_inline(e.note)}" + (
@@ -892,8 +898,7 @@ def _verification_lines(report: DailyReport) -> list[str]:
 
 def _inline(text: str) -> str:
     """Free text (a fix note) as one Markdown-safe line."""
-    flat = " ".join(text.split())
-    return flat.replace("|", "\\|") or "(no note)"  # after "**time, kind**:", never a block
+    return md.text(text) or "(no note)"  # after "**time, kind**:", never a block
 
 
 def _value(value: float | None, unit: str) -> str:
@@ -965,7 +970,7 @@ def _inbox(
 def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
     out = []
     for i in report.inbox:
-        who = i.person or "nobody assigned"
+        who = md.text(i.person) if i.person else "nobody assigned"
         out.append(
             f"- **Needs you, {who}**: {i.cost_hours:.1f} agent-hours waited, "
             f"{i.blocked_agent_tasks} agent task(s) held; by cost of delay: {tasks(i.tasks)}"
@@ -980,7 +985,7 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
         out.append(
             f"- **{s.severity}** `{s.rule}`{task}: open {o.open_hours:.1f}h since "
             f"{_local(s.since, report)}{level}, "
-            f"last seen {_local(s.last_seen, report)}: {s.summary}"
+            f"last seen {_local(s.last_seen, report)}: {md.text(s.summary)}"
         )
     for f in report.not_done:
         out.append(
@@ -988,10 +993,11 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
             f"x{f.count} {tasks(f.tasks)}".rstrip()
         )
     for r in report.offenders:
-        owner = f"{r.owner}: " if r.owner else ""
+        owner = f"{md.text(r.owner)}: " if r.owner else ""
         g = r.group
+        role = md.text(g.role or "agents")
         out.append(
-            f"- {owner}add {r.filter.name} for `{g.key}` to the {g.role or 'agents'}' "
+            f"- {owner}add {r.filter.name} for {md.code(g.key)} to the {role}' "
             f"instructions: above the threshold on {len(g.hot_days)} days "
             f"{tasks(g.tasks)}".rstrip()
         )
@@ -1011,5 +1017,6 @@ class _TaskLinks:
 
     def _one(self, task_id: str) -> str:
         if self.url is None:
-            return f"`{task_id}`"
-        return f"[{task_id}]({self.url.replace('{id}', task_id)})"
+            return md.code(task_id, cell=True)  # task lists also fill table cells
+        target = self.url.replace("{id}", urllib.parse.quote(task_id, safe=""))
+        return f"[{md.link_text(task_id)}]({target})"
