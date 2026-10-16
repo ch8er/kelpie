@@ -66,6 +66,7 @@ def test_a_block_condition_serve_attached_shows_in_why(farm: Farm) -> None:
         "not checked (offline; --refresh checks them)"
     ]
     assert "GitHub conditions were not read (offline)" in offline.stdout
+    assert "note: offline: serve treats this block as a wait on example/repo#57" in offline.stdout
 
     # --refresh: resolved and checked as one tick of serve does.
     refreshed = kelpie.cli("why", "t_wait", "--refresh")

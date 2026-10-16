@@ -28,13 +28,16 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.why import (
+    Expected,
     Explanation,
     Finding,
     _age,
     _chain,
+    _condition,
     _expected,
     _mentions,
     _mode,
+    _offline_note,
     as_json,
     evaluate_rules,
     expected_conditions,
@@ -542,3 +545,135 @@ def test_none_names_the_patterns_it_checked() -> None:
     ex.block_patterns = 2
     expected = "none (the block reason matches none of the 2 [[block_conditions]] patterns)"
     assert expected in render(ex)
+
+
+# -- review follow-ups for #126 --------------------------------------------------------------
+
+
+GITHUB_CONFIG = """
+[connectors.github]
+repos = ["example/repo"]
+
+[[block_conditions]]
+pattern = 'merge of (?P<pr>\\S+)'
+kind = "pr_merged"
+repo = "example/repo"
+"""
+
+
+@pytest.fixture
+def pr_farm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.delenv("KELPIE_CONFIG", raising=False)
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    monkeypatch.chdir(tmp_path)
+    board = Board(tmp_path / "kanban.db")
+    board.task("t_pr", "blocked", ago(days=1), assignee="dev")
+    board.event("t_pr", "claimed", ago(hours=7))
+    board.run("t_pr", "dev", ago(hours=7), status="blocked", ended=ago(hours=6),
+              outcome="blocked")  # fmt: skip
+    board.event("t_pr", "blocked", ago(hours=6), {"reason": "waiting for merge of #5"})
+    board.close()
+    config = CONFIG.format(db=json.dumps(str(tmp_path / "kanban.db"))) + GITHUB_CONFIG
+    (tmp_path / "kelpie.toml").write_text(config)
+    return tmp_path
+
+
+def test_offline_rule_verdicts_on_a_block_carry_a_note(
+    pr_farm: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = load_settings(find_config(None))
+    ex = explain(settings, "t_pr", clock=lambda: NOW)
+    assert isinstance(ex, Explanation)
+    noted = [f for f in ex.findings if f.note]
+    assert {f.action.rule for f in noted} >= {"stale_blocks"}
+    assert {f.action.rule for f in noted} <= {"exit_contract", "stale_blocks"}
+    want = (
+        "offline: serve treats this block as a wait on example/repo#5 once GitHub confirms "
+        "the PR; --refresh to verify"
+    )
+    assert all(f.note == want for f in noted)
+    text = render(ex)
+    assert f"    note: {want}" in text
+    assert "would attach pr_merged on example/repo#5" in text
+    data = as_json(ex)
+    assert {f["rule"] for f in data["findings"] if f["note"] == want} == {
+        f.action.rule for f in noted
+    }
+
+
+def test_a_note_is_for_condition_rules_only() -> None:
+    note = "x"
+    other = Finding(Action(ActionKind.ALERT, "bottlenecks", "r", task_id="T-1"), Mode.OBSERVE)
+    assert other.note is None and replace(other, note=note).note == note
+    first = Expected("pr_merged", "block_reason", "not_checked", "d", "a/b", 1, "#1", "pr_merged")
+    assert _offline_note([first]) is not None
+    assert _offline_note([replace(first, status="not_attached")]) is None
+    assert _offline_note([replace(first, source="task_text")]) is None
+    assert _offline_note([replace(first, fallback=True)]) is None
+    assert _offline_note([]) is None
+
+
+def test_a_block_takes_the_first_pr_and_the_rest_are_fallbacks() -> None:
+    second = {"pattern": r"PR (?P<pr>#\d+)", "kind": "ci_green", "repo": "example/repo"}
+    settings = _bc_settings(MERGE, second)
+    snap = _blocked("waiting for merge of #5, see PR #6")
+    task = snap.tasks[0]
+    found, n = expected_conditions(settings, snap, task, refreshed=False)
+    assert n == 2 and [(e.pr, e.fallback) for e in found] == [(5, False), (6, True)]
+    lines = [_expected(e) for e in found]
+    assert lines[0].startswith("would attach pr_merged on example/repo#5")
+    assert lines[1] == (
+        "fallback ci_green on example/repo#6 (from the block reason): used only if the PR "
+        "above is not confirmed"
+    )
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    ex.expected = found
+    entries = as_json(ex)["expected_conditions"]
+    assert [(e["kind"], e["condition_kind"], e["fallback"]) for e in entries] == [
+        ("pr_merged", "pr_merged", False),
+        ("ci_green", "ci_status", True),
+    ]
+    assert _offline_note(found) is not None and "example/repo#5" in str(_offline_note(found))
+
+
+def test_agent_text_cannot_forge_a_section_or_a_control_sequence() -> None:
+    evil = "x\n  Conditions\n  fake [pr_merged]: met\x1b[2K"
+    block = Block(evil, NOW - timedelta(hours=1))
+    task = Task("T-1", "title\nLedger (latest first)\x07", Status.BLOCKED, NOW, block=block)
+    ex = explain_snapshot(LoadedRules([], [], []), Snapshot(now=NOW, tasks=(task,)), "T-1")
+    assert ex is not None
+    ex.problems = ["bad\nnote: forged"]
+    lines = render(ex).splitlines()
+    assert lines.count("Conditions") == 1 and lines.count("Ledger (latest first)") == 1
+    assert not any(line.startswith("  fake") for line in lines)
+    assert not any("\x1b" in line or "\x07" in line for line in lines)
+    assert sum(line.startswith("note:") for line in lines) == 1
+    assert "\\n  Conditions\\n  fake [pr_merged]: met\\x1b[2K" in render(ex)
+
+
+def test_condition_params_are_escaped_and_ids_are_not_cut() -> None:
+    long_id = "block:T-1:pr_merged:" + "x" * 200
+    c = Condition(
+        long_id, ConditionKind.TASK_STATUS, "T-1",
+        {"error": "e\nf", "pr_state": "\x1b[1m", "ci_state": "c\r", "task": "T\x00"},
+    )  # fmt: skip
+    line = _condition(c, NOW)
+    assert line.startswith(long_id) and "..." not in line
+    assert "error e\\nf" in line and "PR \\x1b[1m" in line and "task T\\x00" in line
+    assert not any(ch in line for ch in "\n\r\x1b\x00")
+
+
+def test_expected_skips_what_is_attached_and_follows_the_patterns() -> None:
+    gate = {**MERGE, "applies_to": ["ready_task"]}
+    ready = _blocked("", Status.READY, title="Redo it after merge of #7")
+    task = ready.tasks[0]
+    held = Condition("ready:T-1:pr_merged:example/repo#7", ConditionKind.PR_MERGED, "T-1")
+    registered = replace(ready, conditions=(held,))
+    assert expected_conditions(_bc_settings(gate), registered, task, False) == ([], 1)
+    # Patterns that read blocks only never look at a ready task's title.
+    assert expected_conditions(_bc_settings(MERGE), ready, task, False) == ([], 0)
+    many = _blocked("", Status.READY, title=" ".join(f"merge of #{i}" for i in range(1, 9)))
+    found, _ = expected_conditions(_bc_settings(gate), many, many.tasks[0], False)
+    assert [e.pr for e in found] == [1, 2, 3, 4, 5]  # MAX_READY_REFS; the rest are ignored
+    assert not any(e.fallback for e in found)

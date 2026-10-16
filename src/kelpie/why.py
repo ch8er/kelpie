@@ -39,8 +39,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -81,7 +81,10 @@ GITHUB_KINDS = frozenset({ConditionKind.PR_MERGED, ConditionKind.CI_STATUS})
 SCHEMA_VERSION = 1  # of the --json object (fields are only ever added within a version)
 TEXT_SESSIONS = 3  # sessions shown in the text view, newest first
 JSON_SESSIONS = 10  # ...and in --json
-OFFLINE = "not checked (offline; --refresh checks them)"
+NOT_CHECKED = "not checked (offline; --refresh checks {})"  # {}: "it" or "them"
+# Rules whose verdict on a block rests on it having no condition: offline they judge the
+# bare block, while serve attaches the condition the reason would give.
+CONDITION_RULES = frozenset({"exit_contract", "stale_blocks"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +112,7 @@ class Finding:
 
     action: Action
     mode: Mode
+    note: str | None = None  # a caveat about the verdict (offline: a condition is not attached)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +129,8 @@ class Expected:
     repo: str | None = None
     pr: int | None = None
     captured: str = ""  # what the pattern captured: agent text
+    condition_kind: str = ""  # the ConditionKind value the condition has (ci_green: ci_status)
+    fallback: bool = False  # a block gets the first PR GitHub confirms; this one only if not
 
 
 @dataclass(slots=True)
@@ -299,14 +305,26 @@ def expected_conditions(
     known = {c.id for c in snapshot.conditions}
     source = "block_reason" if target == "block" else "task_text"
     out: list[Expected] = []
+    primary = False  # a block takes the first resolvable PR GitHub confirms: later ones back it up
     for m in text_matches(task, target, patterns, host, lambda repo: repo.lower() in repos):
         kind = m.pattern.kind
         if m.ref is None:
             if m.problem == "not_allowed":
-                why = f"names {_text(m.text)}, a repository outside [connectors.github] repos"
+                why = f"names {_text(m.text, 80)}, a repository outside [connectors.github] repos"
             else:
-                why = f"names {_text(m.text)}, which is not a PR reference Kelpie can read"
-            out.append(Expected(kind, source, "unresolvable", why, captured=m.text))
+                why = f"names {_text(m.text, 80)}, which is not a PR reference Kelpie can read"
+            out.append(
+                Expected(
+                    kind,
+                    source,
+                    "unresolvable",
+                    why,
+                    None,
+                    None,
+                    m.text,
+                    m.pattern.condition_kind.value,
+                )
+            )
             continue
         cid = f"{'block' if target == 'block' else 'ready'}:{task.id}:{kind}:{m.ref}"
         if cid in known:
@@ -318,9 +336,35 @@ def expected_conditions(
                 "kelpie serve retries every tick and attaches it once it does"
             )
         else:
-            status, why = "not_checked", OFFLINE
-        out.append(Expected(kind, source, status, why, m.ref.repo, m.ref.number, m.text))
+            status, why = "not_checked", NOT_CHECKED.format("them")
+        fallback = target == "block" and primary
+        primary = True
+        out.append(
+            Expected(
+                kind,
+                source,
+                status,
+                why,
+                m.ref.repo,
+                m.ref.number,
+                m.text,
+                m.pattern.condition_kind.value,
+                fallback,
+            )
+        )
     return out, applying
+
+
+def _offline_note(expected: Sequence[Expected]) -> str | None:
+    """The caveat for rule verdicts on a block that serve would give a condition: offline the
+    rules judge the bare block. Not a prediction: the PR is only confirmed by GitHub."""
+    first = next((e for e in expected if e.status == "not_checked" and not e.fallback), None)
+    if first is None or first.source != "block_reason":
+        return None
+    return (
+        f"offline: serve treats this block as a wait on {_pr(first.repo, first.pr)} once "
+        "GitHub confirms the PR; --refresh to verify"
+    )
 
 
 def explain_snapshot(
@@ -376,6 +420,13 @@ def explain(
         return Failure("not_found", f"task {task_id} is not on the board", read.problems, 1)
     ex.refreshed = refresh
     ex.expected, ex.block_patterns = expected_conditions(settings, read.snapshot, ex.task, refresh)
+    if note := _offline_note(ex.expected):
+        ex.findings = [
+            replace(f, note=note)
+            if f.action.rule in CONDITION_RULES and f.action.task_id == ex.task.id
+            else f
+            for f in ex.findings
+        ]
     state_ids = [f.action.state for f in ex.findings if f.action.state is not None]
     ex.states, ex.entries, unread = read_history(settings.db_path, task_id, state_ids, entries)
     ex.problems = [*read.problems, *ex.problems, *unread]
@@ -411,12 +462,12 @@ def _session(s: Session, now: datetime, stale_after: timedelta) -> str:
     return f"{s.id} by {s.owner_id}: ended {_age(now - s.ended_at)} ago, {final}{reason}"
 
 
-def _text(value: object, limit: int = 80) -> str:
+def _text(value: object, limit: int | None = None) -> str:
     """Agent-provided text on one line: control characters shown escaped, long text cut."""
     flat = "".join(
         ch if ch.isprintable() else ch.encode("unicode_escape").decode() for ch in str(value)
     )
-    return flat if len(flat) <= limit else flat[: limit - 3] + "..."
+    return flat if limit is None or len(flat) <= limit else flat[: limit - 3] + "..."
 
 
 def _pr(repo: object, pr: object, sha: object = None) -> str | None:
@@ -448,18 +499,23 @@ def _condition(c: Condition, now: datetime, offline: bool = False) -> str:
     if c.checked_at:
         checked = f"checked {_age(now - c.checked_at)} ago"
     elif offline and c.satisfied is None and c.kind in GITHUB_KINDS:
-        checked = "not checked (offline; --refresh checks it)"
+        checked = NOT_CHECKED.format("it")
     else:
         checked = "never checked"
     detail = f" ({', '.join(extra)})" if extra else ""
     where = f" {target}" if (target := _target(c)) else ""
-    return f"{_text(c.id, 120)} [{c.kind}]{where}: {state}{detail}, {checked}"
+    return f"{_text(c.id)} [{c.kind}]{where}: {state}{detail}, {checked}"
 
 
 def _expected(e: Expected) -> str:
     source = "block reason" if e.source == "block_reason" else "ready task title"
     if e.status == "unresolvable":
         return f"{e.kind} from the {source} {e.detail}: nothing is attached"
+    if e.fallback:
+        return (
+            f"fallback {e.kind} on {_pr(e.repo, e.pr)} (from the {source}): used only if the "
+            "PR above is not confirmed"
+        )
     verb = "would attach" if e.status == "not_checked" else "matched"
     return f"{verb} {e.kind} on {_pr(e.repo, e.pr)} (from the {source}): {e.detail}"
 
@@ -538,6 +594,8 @@ def render(ex: Explanation) -> str:
     for f in ex.findings:
         a = f.action
         lines.append(f"  {a.rule} [{_mode(f, ex.dry_run)}] {a.kind} {a.severity}: {a.reason}")
+        if f.note:
+            lines.append(f"    note: {f.note}")
     if not ex.findings:
         lines.append("  no rule acts on this task")
         lines += [f"  {hint}" for hint in _hints(ex)]
@@ -556,7 +614,9 @@ def render(ex: Explanation) -> str:
     if not ex.entries:
         lines.append("  none")
     lines += [f"note: {p}" for p in ex.problems]
-    return "\n".join(lines) + "\n"
+    # Block reasons, titles, rule reasons and the like are agents' text: one line each, so
+    # that none can forge a section or a terminal control sequence.
+    return "\n".join(_text(line) for line in lines) + "\n"
 
 
 def _raw(t: Task) -> str:
@@ -675,6 +735,8 @@ def as_json(ex: Explanation) -> dict[str, Any]:
         "expected_conditions": [
             {
                 "kind": e.kind,
+                "condition_kind": e.condition_kind,
+                "fallback": e.fallback,
                 "source": e.source,
                 "status": e.status,
                 "repo": e.repo,
@@ -707,6 +769,7 @@ def as_json(ex: Explanation) -> dict[str, Any]:
                 "reason": f.action.reason,
                 "state": f.action.state,
                 "params": f.action.params,
+                "note": f.note,
             }
             for f in ex.findings
         ],
