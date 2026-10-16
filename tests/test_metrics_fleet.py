@@ -112,3 +112,42 @@ def test_reopened_after_done_rate_per_role() -> None:
     assert 'kelpie_role_reopened_after_done_ratio{role="coder"} 0.3333' in text
     assert 'kelpie_role_returns_24h{role="coder"} 1' in text  # reopens are not returns
     assert 'kelpie_role_reopened_after_done_ratio{role="tester"}' not in text  # none done
+
+
+def test_pre_work_cards_by_platform_status() -> None:
+    tasks = (
+        Task("C-1", "t", Status.BACKLOG, NOW - timedelta(hours=25), prework=True,
+             platform_status="scheduled"),
+        Task("C-2", "t", Status.BACKLOG, NOW - timedelta(hours=14), prework=True,
+             platform_status="scheduled"),
+        Task("C-3", "t", Status.BACKLOG, NOW - timedelta(hours=2), prework=True,
+             platform_status="triage"),
+        Task("C-4", "t", Status.BACKLOG, NOW - timedelta(hours=30), platform_status="todo"),
+    )  # fmt: skip
+    metrics = Metrics()
+    loop = ControlLoop(Engine([]), lambda: Snapshot(now=NOW, tasks=tasks), metrics)
+    loop.tick_once()
+    text = metrics.render()
+    assert 'kelpie_prework_tasks{platform_status="scheduled"} 2' in text
+    assert 'kelpie_prework_tasks{platform_status="triage"} 1' in text
+    assert f'kelpie_prework_oldest_seconds{{platform_status="scheduled"}} {25 * 3600}' in text
+    assert 'platform_status="todo"' not in text  # waiting for parents is not pre-work
+
+
+def test_pre_work_series_are_capped_and_unknown_statuses_named() -> None:
+    from kelpie.metrics import MAX_PREWORK_SERIES
+
+    def render(*tasks: Task) -> str:
+        metrics = Metrics()
+        ControlLoop(Engine([]), lambda: Snapshot(now=NOW, tasks=tasks), metrics).tick_once()
+        return metrics.render()
+
+    cards = [
+        Task(f"C-{i}", "t", Status.BACKLOG, NOW, prework=True, platform_status=f"s{i:02d}")
+        for i in range(MAX_PREWORK_SERIES + 2)
+    ]
+    text = render(*cards)
+    assert text.count("kelpie_prework_tasks{") == MAX_PREWORK_SERIES
+    assert 'kelpie_prework_tasks{platform_status="s00"} 1' in text
+    unnamed = Task("C-x", "t", Status.BACKLOG, NOW, prework=True)  # the adapter said nothing
+    assert 'kelpie_prework_tasks{platform_status="unknown"} 1' in render(unnamed)

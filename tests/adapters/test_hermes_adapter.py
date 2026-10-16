@@ -693,8 +693,15 @@ def test_pre_work_statuses_mark_cards(board: Board) -> None:
     board.task("t_triage", "triage", ago(days=1))
     board.task("t_sched", "scheduled", ago(days=1))
     board.task("t_todo", "todo", ago(days=1))
-    tasks = {t.id: t.prework for t in adapter(board).snapshot(NOW).tasks}
+    snap = adapter(board).snapshot(NOW)
+    tasks = {t.id: t.prework for t in snap.tasks}
     assert tasks == {"t_triage": True, "t_sched": True, "t_todo": False}
+    # All three are backlog, but the platform's own status is kept (incident 17).
+    assert {t.id: (t.status, t.platform_status) for t in snap.tasks} == {
+        "t_triage": (Status.BACKLOG, "triage"),
+        "t_sched": (Status.BACKLOG, "scheduled"),
+        "t_todo": (Status.BACKLOG, "todo"),
+    }
     a = HermesAdapter(db_path=board.path, spool=None, prework_statuses=("triage",))
     assert {t.id: t.prework for t in a.snapshot(NOW).tasks}["t_sched"] is False
 
@@ -717,6 +724,7 @@ def test_kelpies_own_park_is_waiting_not_pre_work(board: Board) -> None:
     )
     (task,) = a.snapshot(NOW).tasks
     assert task.status is Status.WAITING and task.prework is False
+    assert task.platform_status == "scheduled"
 
 
 def test_review_returns_are_reported(board: Board) -> None:

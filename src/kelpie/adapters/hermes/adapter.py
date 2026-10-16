@@ -763,6 +763,7 @@ class HermesAdapter:
                     branch=str(_col(row, "branch_name") or "").strip() or None,
                     subtasks=_subtasks(splits.get(row["id"])),
                     prework=status is Status.BACKLOG and row["status"] in self.prework_statuses,
+                    platform_status=row["status"],
                     returns=returns.get(row["id"], ()),
                     reopened_at=reopens.get(row["id"], ()),
                 )

@@ -208,12 +208,12 @@ mode `0600`. Hooks never raise and do no network I/O.
 
 | Hermes | Kelpie |
 | --- | --- |
-| task `triage`, `todo`, `scheduled` | `backlog` (`scheduled` is a timed queue, not a Kelpie wait) |
+| task `triage`, `todo`, `scheduled` | `backlog` (`scheduled` is not dispatched and is left only through `unblock`; unless Kelpie parked it there, see below, it is a person's to move); the Hermes status itself is kept as `platform_status` (`kelpie why`, `kelpie_prework_tasks`) |
 | `ready` / `running` / `blocked` / `review` / `done` | `ready` / `in_progress` / `blocked` / `review` / `done` |
 | `archived`; `done` older than `lookback` | left out |
 | `assignee` | `assignee` and `role` (Hermes routes work by profile); `owner_id` is the profile of the live run that claims the task (`current_run_id` names a run that has not ended), none while nothing runs, or the assignee itself for a `human_owners` name |
 | `decomposed` event (`child_ids`) | `subtasks`: rule 3 asks to close a parent whose subtasks are all finished |
-| `status` in `prework_statuses` (triage, scheduled) | `prework`: rule 3 alerts on a card held there past `prework_after` with dependents |
+| `status` in `prework_statuses` (triage, scheduled) | `prework`: rule 3 alerts on a card held there past `prework_after` with dependents and never counts it as a dependent the platform failed to promote; `kelpie why` says what would act on it, `kelpie_prework_*` counts such cards |
 | `changes_requested` (reason), `review_reopened` events | `returns` (category `review`), over the task's whole history: rule 4 (`ping_pong`) counts review rounds from them, `return_causes` their causes |
 | a `status` move out of done (not to archived) after `completed` or a move to done | `reopened_at`: rule 1's reopened-after-done rate |
 | `completed` / `review_requested` events' `artifacts` (with their run); `task_attachments` uploaded by a run's profile | artifacts of that run (an attachment: the uploader's latest run on the task that started before the upload; a person's upload or one before any run is no run's): rule 1's evidence for "done" |

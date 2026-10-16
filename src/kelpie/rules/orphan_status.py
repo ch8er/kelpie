@@ -40,7 +40,9 @@ b) **A successful run with no next action** (``next_action_after``, 30m): the ta
    blocked or waiting) and nothing changed it since, so nobody acts on the result. With
    ``dependents_not_woken`` (off: a platform's backlog also holds work parked on purpose), a
    task finished ``done`` whose dependents still sit in ``backlog`` with every parent on the
-   board finished: one alert per finished parent, naming them.
+   board finished: one alert per finished parent, naming them. A dependent in a pre-work
+   status (``Task.prework``) is not one: a person moves it, not the platform (pattern f
+   alerts when tasks wait on it; alone it shows in ``kelpie why`` and ``kelpie_prework_*``).
 c) **A blocker chain that ends in a dead end** (``dead_end_chains``, on): tasks that wait,
    through other waiting tasks (dependencies, ``task_status`` and ``human_task``
    conditions), on a task the board does not show (archived, deleted or out of reach; see
@@ -353,7 +355,7 @@ class OrphanStatus:
             "stuck-before-work",
             task,
             f"{task.id} ('{task.title}') has sat {_human(snapshot.now - task.status_since)} "
-            f"in a status only a person moves it out of (such as triage or a timed queue) "
+            f"in a status only a person moves it out of (such as triage or scheduled) "
             f"while {len(waiting)} task(s) wait behind it: {_names(waiting)}. Triage it, "
             "start it, or drop the dependency.",
             task.status_since,
@@ -435,6 +437,10 @@ class OrphanStatus:
         for tid, ids in sorted(parents.items()):
             task = by_id.get(tid)
             if task is None or task.status is not Status.BACKLOG or self._skipped(task):
+                continue
+            if task.prework:
+                # A person's to move, not the platform's to promote: pattern f alerts when
+                # tasks wait on it; alone it shows in kelpie why and kelpie_prework_*.
                 continue
             ps = [by_id[p] for p in ids]
             if not all(p.status.is_terminal for p in ps):

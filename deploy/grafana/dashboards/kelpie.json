@@ -713,6 +713,72 @@
       "description": "Agent owners with no live session and no open task."
     },
     {
+      "id": 60,
+      "type": "timeseries",
+      "title": "Cards before work",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_prework_tasks",
+          "legendFormat": "{{platform_status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Cards in a status before any work starts (Hermes triage, scheduled), by the platform's own status (incident 17)."
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "Oldest card before work",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_prework_oldest_seconds",
+          "legendFormat": "{{platform_status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "How long the oldest card in each pre-work status has sat there; rule 3 alerts past prework_after only when tasks depend on it."
+    },
+    {
       "id": 24,
       "type": "row",
       "title": "Budgets & spend",
@@ -721,7 +787,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 50
       },
       "panels": []
     },
@@ -737,7 +803,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 44
+        "y": 51
       },
       "targets": [
         {
@@ -769,7 +835,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 44
+        "y": 51
       },
       "targets": [
         {
@@ -801,7 +867,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 44
+        "y": 51
       },
       "targets": [
         {
@@ -833,7 +899,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 51
+        "y": 58
       },
       "targets": [
         {
@@ -865,7 +931,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 51
+        "y": 58
       },
       "targets": [
         {
@@ -897,7 +963,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 51
+        "y": 58
       },
       "targets": [
         {
@@ -931,7 +997,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 58
+        "y": 65
       },
       "targets": [
         {
@@ -969,7 +1035,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 72
       },
       "panels": []
     },
@@ -985,7 +1051,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 66
+        "y": 73
       },
       "targets": [
         {
@@ -1017,7 +1083,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 66
+        "y": 73
       },
       "targets": [
         {
@@ -1058,7 +1124,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 66
+        "y": 73
       },
       "targets": [
         {
@@ -1090,7 +1156,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 73
+        "y": 80
       },
       "targets": [
         {
@@ -1141,7 +1207,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 73
+        "y": 80
       },
       "targets": [
         {
@@ -1188,7 +1254,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 87
       },
       "panels": []
     },
@@ -1204,7 +1270,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 81
+        "y": 88
       },
       "targets": [
         {
@@ -1236,7 +1302,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 81
+        "y": 88
       },
       "targets": [
         {
@@ -1277,7 +1343,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 81
+        "y": 88
       },
       "targets": [
         {
@@ -1306,7 +1372,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 88
+        "y": 95
       },
       "panels": []
     },
@@ -1322,7 +1388,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 89
+        "y": 96
       },
       "targets": [
         {
@@ -1363,7 +1429,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 89
+        "y": 96
       },
       "targets": [
         {
@@ -1405,7 +1471,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 89
+        "y": 96
       },
       "targets": [
         {
@@ -1444,7 +1510,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 96
+        "y": 103
       },
       "panels": []
     },
@@ -1460,7 +1526,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 97
+        "y": 104
       },
       "targets": [
         {
@@ -1492,7 +1558,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 97
+        "y": 104
       },
       "targets": [
         {
@@ -1524,7 +1590,7 @@
         "h": 4,
         "w": 16,
         "x": 8,
-        "y": 97
+        "y": 104
       },
       "targets": [
         {
@@ -1554,7 +1620,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 101
+        "y": 108
       },
       "panels": []
     },
@@ -1570,7 +1636,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 102
+        "y": 109
       },
       "targets": [
         {
@@ -1603,7 +1669,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 102
+        "y": 109
       },
       "targets": [
         {
@@ -1636,7 +1702,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 102
+        "y": 109
       },
       "targets": [
         {
@@ -1666,7 +1732,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 108
+        "y": 115
       },
       "panels": []
     },
@@ -1682,7 +1748,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 109
+        "y": 116
       },
       "targets": [
         {
@@ -1715,7 +1781,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 109
+        "y": 116
       },
       "targets": [
         {
@@ -1748,7 +1814,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 109
+        "y": 116
       },
       "targets": [
         {
@@ -1781,7 +1847,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 116
+        "y": 123
       },
       "targets": [
         {
@@ -1814,7 +1880,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 116
+        "y": 123
       },
       "targets": [
         {

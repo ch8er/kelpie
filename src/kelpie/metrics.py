@@ -48,6 +48,7 @@ def _labels(**labels: str) -> str:
 # Task budgets can have a subject per task: only these many per budget are exported (the
 # highest spend), plus every task past a threshold.
 MAX_TASK_SERIES = 20
+MAX_PREWORK_SERIES = 10  # pre-work statuses exported (platform statuses are config data)
 
 
 def _bounded(statuses: Iterable[BudgetStatus]) -> tuple[BudgetStatus, ...]:
@@ -86,6 +87,8 @@ class Metrics:
         self.open_states: Counter[str] = Counter()
         self.tasks: Counter[str] = Counter()
         self.idle_agents: Counter[str] = Counter()  # role -> idle agents (0 if all busy)
+        # platform status -> (cards in it before work, seconds the oldest has sat there)
+        self.prework: dict[str, tuple[int, float]] = {}
         # throughput per role now; open tasks per stage and role
         self.roles: dict[str, RoleGauges] = {}
         # roles that review: returns count for the role that redoes the work ([report])
@@ -326,6 +329,14 @@ class Metrics:
         self.fleet_seen = True
         self.tasks = Counter(dict.fromkeys(Status, 0))
         self.tasks.update(t.status for t in snapshot.tasks)
+        prework: dict[str, list[float]] = {}
+        for t in snapshot.tasks:
+            if t.prework:
+                age = (snapshot.now - t.status_since).total_seconds()
+                prework.setdefault(t.platform_status or "unknown", []).append(age)
+        self.prework = {
+            k: (len(v), max(v)) for k, v in sorted(prework.items())[:MAX_PREWORK_SERIES]
+        }
         loads = role_loads(snapshot)
         self.idle_agents = Counter({r: len(load.idle) for r, load in loads.items()})
         self._throughput(snapshot, loads)
@@ -503,6 +514,26 @@ class Metrics:
                     "gauge",
                     "Tasks in the last snapshot, by normalized status.",
                     [f"kelpie_tasks{_labels(status=str(k))} {n}" for k, n in self.tasks.items()],
+                )
+                metric(
+                    "kelpie_prework_tasks",
+                    "gauge",
+                    "Cards in a status before any work starts (Hermes triage, scheduled), by "
+                    "the platform's own status (incident 17); also those still waiting for "
+                    "parents of their own. A status shows only while a card is in it.",
+                    [
+                        f"kelpie_prework_tasks{_labels(platform_status=k)} {n}"
+                        for k, (n, _) in self.prework.items()
+                    ],
+                )
+                metric(
+                    "kelpie_prework_oldest_seconds",
+                    "gauge",
+                    "How long the oldest card in each pre-work status has sat there.",
+                    [
+                        f"kelpie_prework_oldest_seconds{_labels(platform_status=k)} {age:.0f}"
+                        for k, (_, age) in self.prework.items()
+                    ],
                 )
                 metric(
                     "kelpie_idle_agents",

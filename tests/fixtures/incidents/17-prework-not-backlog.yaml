@@ -1,0 +1,54 @@
+id: "17-prework-not-backlog"
+incident: 17
+title: "Cards in triage or scheduled are not ordinary backlog"
+description: >
+  From a live 24 h review: Hermes cards sat 14 to 25 h in triage or scheduled, and the
+  adapter showed them only as backlog, so Kelpie explained nothing ("no rule acts on this
+  task"). The task keeps the platform's own status (platform_status) and the pre-work mark
+  the adapter config names (prework_statuses). A scheduled card with work behind it alerts
+  as stuck before work. A finished task whose dependents still sit in backlog alerts that
+  nothing promoted them, but a dependent in triage is a person's to move, not the
+  platform's to promote, so it is not named. A lone scheduled card alerts nothing; kelpie
+  why says what would act on it.
+rule: orphan_status
+config:
+  dependents_not_woken: true
+  prework_after: "4h"
+  next_action_after: "30m"
+snapshot:
+  now: "2026-03-03T09:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # Scheduled 25 h with a task behind it.
+    - {id: t_c200, title: "Settings migration", status: backlog, status_since: "2026-03-02T08:00:00+00:00", role: developer, source: hermes, prework: true, platform_status: scheduled}
+    - {id: t_c201, title: "Settings screen", status: backlog, status_since: "2026-03-02T08:00:00+00:00", role: developer, source: hermes, platform_status: todo}
+    # Scheduled 25 h, nothing behind it.
+    - {id: t_c210, title: "Lone spike", status: backlog, status_since: "2026-03-02T08:00:00+00:00", role: developer, source: hermes, prework: true, platform_status: scheduled}
+    # Finished 3 h ago; one dependent in triage, one plain backlog card nobody promoted.
+    - {id: t_c220, title: "Sync engine", status: done, status_since: "2026-03-03T06:00:00+00:00", role: developer, source: hermes, platform_status: done}
+    - {id: t_c221, title: "Sync conflicts", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, source: hermes, prework: true, platform_status: triage}
+    - {id: t_c222, title: "Sync settings", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, source: hermes, platform_status: todo}
+  dependencies:
+    - {task_id: t_c201, depends_on: t_c200}
+    - {task_id: t_c221, depends_on: t_c220}
+    - {task_id: t_c222, depends_on: t_c220}
+  sessions:
+    - {id: S-c220, task_id: t_c220, owner_id: agent-dev-1, started_at: "2026-03-03T04:00:00+00:00", ended_at: "2026-03-03T06:00:00+00:00", final_status: done}
+expected_actions:
+  - kind: alert
+    task_id: t_c200
+    reason_contains: "25h"
+    params:
+      pattern: stuck-before-work
+      waiting_tasks: [t_c201]
+  - kind: alert
+    task_id: t_c220
+    params:
+      pattern: dependents-not-woken
+      dependent_ids: [t_c222]
+not_expected_actions:
+  - kind: alert
+    task_id: t_c210
+  - kind: alert
+    params: {dependent_ids: [t_c221, t_c222]}

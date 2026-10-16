@@ -128,6 +128,9 @@ class Task:
     # In a status before any work starts that only a person moves it out of (Hermes:
     # triage, scheduled; adapter config): rule 3 alerts when one holds up dependents.
     prework: bool = False
+    # The platform's own status, before it was normalized into ``status`` (Hermes: triage,
+    # todo and scheduled are all ``backlog``), for explanations, metrics and reports.
+    platform_status: str | None = None
 
 
 class ResourceKind(StrEnum):
