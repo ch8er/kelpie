@@ -792,6 +792,18 @@ GitHub, Telegram, Slack and LLM provider tokens.
 - [ ] Clear fixes as small PRs; design questions as issues
 - [ ] `docs/security.md`: threat model, what Kelpie trusts, what it never stores
 
+### deploy: `kelpie demo` — see Kelpie work without a farm
+labels: P0, week-3, area:deploy
+Kelpie is published free; the first question of every visitor is "what does it do for me".
+`kelpie demo` answers it in two minutes on any laptop, before any adapter is configured.
+
+**Acceptance criteria**
+- [ ] `pip install kelpie-sre && kelpie demo` runs the tests/sim farm (packaged, no network, no Hermes) and replays a short story: a stale block cleared, a runaway loop stopped, a forgotten hold, a human task gating agents, then the daily report with cost of chaos
+- [ ] Narrated terminal output: what happened on the farm, what Kelpie noticed, what it would do in observe vs act
+- [ ] Finishes in under two minutes; optional `--web` opens the report as HTML
+- [ ] The README's first screen shows the demo command and its output
+- [ ] e2e test runs the demo in CI
+
 ### deploy: publish kelpie-sre 0.1.0a1
 labels: P0, week-3, area:deploy
 Publish the open core: first public pre-release on PyPI and a container image.
@@ -948,15 +960,6 @@ farm or in validation conversations.
 - [ ] Gates are data: task status → tools or actions not allowed in it (e.g. no edits in plan review)
 - [ ] A disallowed tool call within N minutes after a compaction → `stop` + `alert` (or `comment`, per config)
 - [ ] Fixtures: new `field-03-edit-during-plan-review.yaml` (`incident: null`)
-
-### project: one-off farm audit offer
-labels: P2, area:project
-Early revenue: a one-off audit of a team's agent farm using Kelpie's report (cost of chaos,
-bottlenecks, top recommendations). Start only after the validation conversations show demand.
-
-**Acceptance criteria**
-- [ ] Audit scope and deliverable described
-- [ ] Report template based on the daily report
 
 ### adapters: Paperclip adapter
 labels: P2, adapter, area:adapters

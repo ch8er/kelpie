@@ -152,9 +152,9 @@ Metrics: tasks per hour per role, task time by stage (queue, review, waiting for
 
 ### Market and money
 
+- **Decision (Oct 16): Kelpie is published free and open source; no monetization for now.** Success is measured by adoption: farms running Kelpie, incidents and fixes they report, contributed adapters. The paid tier and the farm audit are out of scope until this decision is revisited.
 - Segments: engineering teams running fleets of coding agents; self-hosted farms on Hermes, OpenClaw, Paperclip
-- Model: open core with adapters → paid fleet dashboard and reports; a one-off farm audit as early revenue (P2)
-- **P1** validation: open-source the core and talk to 10 people who run agent farms
+- **P1** feedback: talk to 10 people who run agent farms — as a source of incidents and requirements, not as demand validation
 - **P1** naming: check domains and USPTO for Kelpie; the PyPI package is `kelpie-sre` because `kelpie` is taken
 
 ### Risks
@@ -171,7 +171,7 @@ The credit goes to building Kelpie in Claude Code cloud sessions: it is spent fi
 | Week 2 | Rules 5–7, 9–11, budgets and spend, resource reading via Prometheus, condition connectors, live run on our farm | credit |
 | Week 3 | "Cost of chaos" report with dollars, basic token optimization, throughput metrics, documentation | credit, then subscription |
 | After the credit | The rest of the open core, in this order: stop patterns and `kelpie why`, rule 13, evidence for "done", full token optimization, Claude Code adapter, return causes, LLM root-cause section | subscription |
-| Paid tier | Fleet dashboard, hosting, billing | only after the 10 conversations confirm demand |
+| Paid tier | Not planned: Kelpie stays free and open source for now | — |
 
 On the subscription, development sessions share limits with any farm that runs on the same subscription: run them when the farm is idle, or use a separate account.
 
@@ -193,7 +193,7 @@ To keep the scope focused, Kelpie does not build what already exists or is not n
 | Our own orchestrator and queues | Kelpie runs on top of platforms, not instead of them |
 | Coupling to CI, iOS or one machine | Everything specific lives in adapters and connectors |
 | Kelpie as an LLM agent | Control is rules and code; LLM only for root-cause analysis |
-| Hosting, SOC 2, enterprise sales | Only after demand is validated |
+| Hosting, SOC 2, enterprise sales, paid tier, paid audits | Kelpie is free and open source for now |
 
 ## Three-week plan
 
@@ -227,6 +227,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Multi-host: `kelpie agent` on each agent machine, central `kelpie serve` anywhere (blocks the release)
 - [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring
 - [ ] Whole-codebase security audit after the code-health pass (blocks the release)
+- [ ] `kelpie demo`: the farm simulator replays real incidents so anyone can see Kelpie work in two minutes without a farm
 - [ ] Documentation and publication of the open core
 - [ ] 10 conversations with farm owners
 
