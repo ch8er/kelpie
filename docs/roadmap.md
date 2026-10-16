@@ -393,6 +393,19 @@ rule 13 ("needs you") moves into rule 6 as P0; the full inbox stays P1.
 - [ ] Human tasks with nothing behind them are not flagged
 - [ ] Fixtures: new `16-human-task-gates-chain.yaml` (one human task, a chain of 28 agent tasks, 3 of 5 slots busy, only human tasks ready)
 
+### rules: orphan_status — parents left open and cards stuck before work (rule 3, incident 17)
+labels: P0, week-3, area:rules
+Live run: tasks with their own branch closed within 0.7 h of their PR merging (148 of 148);
+the lag came from parent tasks left open after their subtasks were done (one gated 20 tasks)
+and from cards sitting in triage or scheduled (one for 21 h after its PR merged).
+
+**Acceptance criteria**
+- [ ] A parent whose children are all terminal (and, when known, whose PR merged) → `alert` "close it?" with the tasks waiting behind it; act mode moves it to done through the adapter if supported
+- [ ] A card in a pre-work status (triage, scheduled; mapping in adapter config) past a threshold with dependents → `alert` with the dependents
+- [ ] PR ↔ task linking uses the task code in the PR title or branch only; mentions in comments or bodies never link a PR (field check: 8 of 10 comment-based matches were wrong). Applies to the dispatch gate's PR references too
+- [ ] checkpoints and exit_contract never propose resuming such a parent
+- [ ] Fixtures: new `17-parent-left-open.yaml`, `17-card-stuck-scheduled.yaml`, `17-foreign-pr-mention.yaml` (synthetic names)
+
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules
 Field evidence: a heartbeat/maintenance loop repeated the same tool call about 900 times
