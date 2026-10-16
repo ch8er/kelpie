@@ -197,8 +197,8 @@ def redact_command(command: str) -> str | None:
             before = len(out)
             if _ASSIGN.match(tok):
                 out.append(f"{name}={_MASK}")  # env FOO=bar
-            elif eq and tok[:1] == "-":
-                out.append(f"{name}={_MASK}" if _FLAG.match(name) else _MASK)
+            elif eq and tok[:1] == "-" and _FLAG.match(name):
+                out.append(f"{name}={_MASK}")
             elif tok[:1] == "-" and tok[1:].isdigit() and len(tok) < 5:
                 out.append(tok)  # nice -5
             elif tok[:1] == "-" and len(tok) > 1 and end == i + 1:

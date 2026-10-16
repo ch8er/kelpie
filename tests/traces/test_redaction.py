@@ -246,8 +246,10 @@ def test_redaction_is_stable_on_random_commands() -> None:
     rng = random.Random(82)
     pool = ["curl", "-u", "-k", "-H", "'", '"', "a:b", "x=y", "TOKEN=z", "|", "&&", "#",
             "gh", "pr", "checks", "5", "--token", "--a=b", "-pq", "Authorization:", "Bearer",
-            "https://u:p@h", "`x`", "$'q'", "-", "--", "***", "…", "a'b", "/p/q"]  # fmt: skip
-    for _ in range(5000):
+            "https://u:p@h", "`x`", "$'q'", "-", "--", "***", "…", "a'b", "/p/q",
+            "sudo", "env", "nice", "rtk", "-iu", "-iA=1", "-E", "-n", "-1234", "-X", "A=1",
+            "--user=r", "--chroot", "make"]  # fmt: skip
+    for _ in range(20000):
         cmd = " ".join(rng.choice(pool) for _ in range(rng.randint(1, 9)))
         once = command.redact_command(cmd)
         assert once is None or command.redact_command(once) == once, cmd
