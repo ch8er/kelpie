@@ -541,3 +541,69 @@ def test_store_opens_without_writing_anything(db: Path) -> None:
     # a reader may create an empty -wal/-shm pair, but writes no frames and no pages
     after = (db.stat().st_mtime_ns, db.read_bytes(), wal.stat().st_size if wal.exists() else 0)
     assert after == before
+
+
+# --- forgotten holds (rule 6) --------------------------------------------------------------
+
+
+def hold_alert(
+    when: datetime, idle_minutes: int, agents: list[str], label: str = "merge-hold"
+) -> LedgerEntry:
+    return entry(
+        when,
+        "bottlenecks",
+        ActionKind.ALERT,
+        Outcome.OBSERVED,
+        None,
+        Mode.OBSERVE,
+        hold=label,
+        held_tasks=["T-21", "T-22"],
+        idle_agents=agents,
+        idle_agent_minutes=idle_minutes,
+    )
+
+
+def test_forgotten_hold_counts_idle_agent_hours() -> None:
+    # expired 10:00, reported 10:00, last seen 14:00; at 12:00 two agents had been idle
+    # since the expiry: 240 agent-minutes over 120 minutes = 2 agents, for 4 hours
+    hold = opened("bottlenecks:hold:merge-hold", "bottlenecks", at(10), at(10), at(14))
+    alert = hold_alert(at(12), 240, ["agent-dev-1", "agent-dev-2"])
+    report = build_report(day_inputs(states=[hold], actions=[alert], hour_usd=3.0))
+    [line] = report.chaos
+    assert line.rule == "bottlenecks:hold" and line.hours == pytest.approx(8.0)
+    assert line.tasks == ("T-21", "T-22")
+    assert report.chaos_usd == pytest.approx(24.0)
+    markdown = render_markdown(report)
+    assert "idle agents behind forgotten holds" in markdown and "agent-hours" in markdown
+
+
+def test_hold_alert_from_an_earlier_day_and_without_data() -> None:
+    hold = opened("bottlenecks:hold:merge-hold", "bottlenecks", at(20, day=1), at(20, day=1), at(6))
+    # the latest alert (opened, at the expiry): idle agents counted directly
+    alert = hold_alert(at(20, day=1), 0, ["agent-dev-1"])
+    [line] = build_report(day_inputs(states=[hold], actions=[alert])).chaos
+    assert line.hours == pytest.approx(6.0)  # 1 agent, 00:00-06:00 of the day
+    assert build_report(day_inputs(states=[hold])).chaos == ()  # no alert: nothing known
+
+
+def test_holds_are_not_also_counted_as_bottlenecks() -> None:
+    hold = opened("bottlenecks:hold:h", "bottlenecks", at(10), at(10), at(12))
+    idle = opened("bottlenecks:idle-ready", "bottlenecks", at(10), at(10), at(12))
+    alert = hold_alert(at(10), 0, ["a", "b", "c"], label="h")
+    chaos = {
+        c.rule: c.hours
+        for c in build_report(day_inputs(states=[hold, idle], actions=[alert])).chaos
+    }
+    assert chaos == {"bottlenecks": pytest.approx(2.0), "bottlenecks:hold": pytest.approx(6.0)}
+
+
+def test_hold_state_and_params_match_rule_6() -> None:
+    incident = load(FIXTURES / "14-forgotten-merge-hold.yaml")
+    actions = list(REGISTRY["bottlenecks"](incident.config).evaluate(incident.snapshot))
+    holds = [a for a in actions if a.state and a.state.startswith("bottlenecks:hold:")]
+    assert holds
+    for a in holds:
+        assert a.state == f"bottlenecks:hold:{a.params['hold']}"
+        assert isinstance(a.params["idle_agent_minutes"], int)
+        assert isinstance(a.params["idle_agents"], list)
+        assert isinstance(a.params["held_tasks"], list)
