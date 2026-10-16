@@ -118,8 +118,9 @@ Adapter details (status mapping, blocks, git state, `stop`): the
 
 ## kelpie doctor
 
-`kelpie doctor` checks a first live run and prints one line per check, `PASS`, `FAIL` or
-`SKIP`, with a `fix:` line under each failure. It exits 1 if any check failed. It opens the
+`kelpie doctor` checks a first live run and prints one line per check, `PASS`, `WARN`,
+`FAIL` or `SKIP`, with a `fix:` line under each failure or warning. It exits 1 if any check
+failed; a warning does not fail it. It opens the
 board and the database read-only and writes nothing.
 
 | Check | Passes when |
@@ -130,6 +131,7 @@ board and the database read-only and writes nothing.
 | hooks fire | The spool has a line from the last hour. |
 | OTLP spans arrive | A span arrived in the last hour (skipped if none ever did: OTLP is optional). |
 | worktrees readable | git can read the workspaces of live tasks (skipped with `git_state = false`). |
+| PR blocks have conditions | No block reason on the board names a PR (`PR #12`, `owner/repo#12`, a `/pull/12` link, `#12` next to PR or merge wording; `guard:` blocks are left out), or every one that does matches a `[[block_conditions]]` pattern whose `pr` names a PR of `[connectors.github] repos`, as `kelpie serve` resolves it. Otherwise a WARN: those blocks would look like stuck tasks or questions for a person (on a live farm, most of the noise of a 24 h review). |
 | claude code task lists | Every list in `[adapters.claude_code] task_lists` is readable (only with that section, like the next three). |
 | claude code hooks fire | The hook's spool has a line from the last hour, from a hook that can enforce stops (unless `stop_dir = false`). |
 | claude code hook registered | `settings.json` next to `tasks_dir` registers the hook for every event, `PreToolUse` included unless `stop_dir = false` (skipped when no Kelpie hook is there: it may be in project settings). |

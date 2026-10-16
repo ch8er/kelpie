@@ -123,7 +123,7 @@ matches the pair by session, tool and time, within 2 seconds.
 
 ```bash
 uv run kelpie serve                # second shell, unless step 5 started it
-uv run kelpie doctor               # PASS|FAIL|SKIP per check, "fix:" under each FAIL; exit 1 on FAIL
+uv run kelpie doctor               # PASS|WARN|FAIL|SKIP per check, "fix:" under FAIL/WARN; exit 1 on FAIL
 uv run kelpie status               # rules, their mode, task lists, spool age
 curl -s localhost:9464/metrics | grep -E '^kelpie_(dry_run|engine_ticks_total|actions_total|snapshot_spans)'
 ```
