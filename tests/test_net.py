@@ -327,3 +327,34 @@ def test_an_unsupported_proxy_is_logged_once_without_its_url(
     assert len(warnings) == 2
     assert "(socks5)" in warnings[0] and "(https)" in warnings[1]
     assert "secret" not in caplog.text
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 400, 401])
+def test_an_error_status_with_a_huge_body_keeps_its_status(status: int) -> None:
+    """A 5xx/429 page over the cap must stay transient for the caller: the status is
+    classified first, the body is only cut at ``max_bytes``."""
+    head = b"HTTP/1.1 %d Oops\r\n" % status
+    with raw_server(answer(b"x" * 200_000, head)) as (port, _):
+        response = net.post(f"http://127.0.0.1:{port}", "/", {}, b"{}", 2.0, max_bytes=65_536)
+    assert response.status == status
+    assert response.body == b"x" * 65_536  # at most max_bytes were read
+
+
+def test_an_error_body_under_the_cap_is_returned_whole_and_2xx_over_it_still_fails() -> None:
+    head = b"HTTP/1.1 429 Slow\r\n"
+    with raw_server(answer(b'{"retry_after": 3}', head)) as (port, _):
+        response = net.post(f"http://127.0.0.1:{port}", "/", {}, b"{}", 2.0, max_bytes=100)
+    assert (response.status, response.body) == (429, b'{"retry_after": 3}')
+    with (
+        raw_server(answer(b"x" * 10_000)) as (port, _),
+        pytest.raises(net.RequestError) as caught,
+    ):
+        net.post(f"http://127.0.0.1:{port}", "/", {}, b"{}", 2.0, max_bytes=5000)
+    assert caught.value.cause == "too_large"
+
+
+def test_an_error_body_of_exactly_the_cap_is_whole() -> None:
+    head = b"HTTP/1.1 503 Down\r\n"
+    with raw_server(answer(b"y" * 5000, head)) as (port, _):
+        response = net.post(f"http://127.0.0.1:{port}", "/", {}, b"{}", 2.0, max_bytes=5000)
+    assert (response.status, len(response.body)) == (503, 5000)

@@ -254,8 +254,12 @@ Schedule it on the host, shortly after midnight in the report's time zone, e.g. 
 
 Alerts are off until a channel is configured. Each `[[alerts.channels]]` entry has its own
 `min_severity`; an alert goes to every channel it reaches. Delivery runs on a background
-worker per channel (bounded queue, retries on 429 and 5xx), so a slow chat service never
-stalls the control loop; drops are counted in `kelpie_alerts_dropped_total`.
+worker per channel (bounded queue), so a slow chat service never stalls the control loop.
+Transient failures (429, 5xx, network) are retried for `retry_horizon` (default `15m`, under
+`[alerts]`) with a capped backoff; an alert that is still undelivered is lost and counted in
+`kelpie_alerts_failed_total`. The bundled Prometheus rule `KelpieAlertDeliveryFailed`
+(`deploy/prometheus/rules/kelpie.yml`) fires on it, and the Grafana dashboard has an Alerts
+row. Drops (full queue, duplicates, shutdown) are counted in `kelpie_alerts_dropped_total`.
 
 ```toml
 [[alerts.channels]]
@@ -272,7 +276,9 @@ min_severity = "critical"
 
 The token and the webhook URL are never logged or shown, and a missing or malformed one stops
 Kelpie at startup (a Slack webhook must be https on `hooks.slack.com`). Slack messages are
-plain text with `&`, `<` and `>` escaped, so task text cannot become a mention. Every message
+plain text with `&`, `<` and `>` escaped, so task text cannot become a mention (in Telegram,
+`@` in task text is shown as a fullwidth `＠`, and invisible format characters are removed).
+Every message
 states the transition (new, still open, changed, resolved) and what Kelpie already did.
 See `kelpie.example.toml`.
 

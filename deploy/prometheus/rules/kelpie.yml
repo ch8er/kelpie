@@ -1,0 +1,28 @@
+# Prometheus alerting rules for Kelpie itself. Loaded by deploy/prometheus/prometheus.yml
+# (rule_files); the compose file mounts this directory at /etc/prometheus/rules.
+#
+# Kelpie retries a transient chat-service failure (429, 5xx, network) for `[alerts]
+# retry_horizon` (15 minutes by default) before it gives an alert up. That is the only place
+# an alert is lost, and it is counted in kelpie_alerts_failed_total{channel,cause}: this
+# rule is the "alert about the alerter", so route it to a channel that does not depend on
+# the one that failed (an Alertmanager receiver, email, a pager).
+groups:
+  - name: kelpie-alerts
+    rules:
+      - alert: KelpieAlertDeliveryFailed
+        # A series appears with its first failure (no earlier sample), where increase()
+        # sees nothing: the second branch catches a series that is new within the window.
+        expr: |
+          sum by (channel, cause) (increase(kelpie_alerts_failed_total[15m])) > 0
+          or
+          sum by (channel, cause) (
+            kelpie_alerts_failed_total unless kelpie_alerts_failed_total offset 15m
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kelpie lost an alert on channel {{ $labels.channel }} ({{ $labels.cause }})"
+          description: >-
+            Kelpie could not deliver an alert to {{ $labels.channel }} after retrying
+            (cause: {{ $labels.cause }}). A human may have missed it: check the channel's
+            token or webhook and the chat service, and kelpie's log ("delivery failed").

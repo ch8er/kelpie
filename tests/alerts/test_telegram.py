@@ -2,6 +2,7 @@
 
 import logging
 import time
+import unicodedata
 from collections.abc import Callable
 from datetime import timedelta
 
@@ -10,9 +11,12 @@ import pytest
 from kelpie.alerts import Delivery, PermanentError, TransientError
 from kelpie.alerts.config import load_alerts
 from kelpie.alerts.telegram import (
+    AT_SIGN,
     MAX_TEXT,
     TelegramChannel,
     TelegramSettings,
+    clean,
+    defang,
     format_message,
     load_telegram,
     truncate,
@@ -65,7 +69,12 @@ def test_message_shows_severity_transition_and_what_kelpie_did() -> None:
     assert "failed" in format_message(message(did=Did.FAILED))
     assert "no executor" in format_message(message(did=Did.NOT_EXECUTED))
     resolved = parse_alert("[orphans] alert task-1", "Resolved after 1.0h: gone.", "info")
-    assert "Resolved. Resolved after" in format_message(resolved)
+    # The engine's own wording says it: the channel's label is not added a second time.
+    assert format_message(resolved).split("\n")[1] == "Resolved after 1.0h: gone."
+    still = parse_alert("[orphans] alert task-1", "Still open after 4.0h: no owner", "warning")
+    assert format_message(still).split("\n")[1] == "Still open after 4.0h: no owner"
+    changed = parse_alert("[orphans] alert task-1", "Changed: now critical", "critical")
+    assert format_message(changed).split("\n")[1] == "Changed: now critical"
 
 
 def test_untrusted_text_is_plain_and_control_characters_are_removed() -> None:
@@ -251,3 +260,47 @@ def test_a_huge_body_never_cuts_off_what_kelpie_did() -> None:
     text = format_message(message(body="y" * 20_000, subject="s" * 5000, did=Did.FAILED))
     assert "tried, and it failed" in text.split("\n")[-1]
     assert utf16_len(text) <= MAX_TEXT
+
+
+def test_invisible_format_characters_are_removed() -> None:
+    sneaky = "pay‮evil‬ ok​‍go﻿ ⁦x⁩"  # bidi, zero-width, BOM
+    text = format_message(message(body=sneaky, subject="task​-1"))
+    assert all(unicodedata.category(c) != "Cf" for c in text)
+    assert "payevil okgo x" in text and "task-1" in text
+    assert clean("a­b") == "ab"  # soft hyphen too
+
+
+def test_mentions_in_agent_controlled_text_are_broken() -> None:
+    body = "ping @everyone and @some_user, mail a@b.example"
+    text = format_message(message(body=body, subject="@admin task", rule="@rule"))
+    assert "@" not in text  # none left in the agent's fields
+    assert all(f"{AT_SIGN}{n}" in text for n in ("everyone", "some_user", "admin"))
+    assert "@" not in format_message(message(text="Daily report for @team"))
+    assert defang("x@y") == f"x{AT_SIGN}y"
+
+
+def test_the_chat_id_is_not_affected_by_mention_breaking() -> None:
+    with fake_telegram() as fake:
+        channel(fake, chat_id="@kelpie_alerts").send(message(body="@everyone"))
+    body = fake.requests[0][2]
+    assert body["chat_id"] == "@kelpie_alerts"
+    assert "@everyone" not in body["text"]
+
+
+def test_retry_horizon_config() -> None:
+    assert load_alerts(None).retry_horizon == timedelta(minutes=15)
+    assert load_alerts({"retry_horizon": "30m"}).retry_horizon == timedelta(minutes=30)
+    assert load_alerts({"retry_horizon": "0s"}).retry_horizon == timedelta(0)
+    for bad in ("soon", "-5m", "2d", True):
+        with pytest.raises(ValueError, match="retry_horizon"):
+            load_alerts({"retry_horizon": bad})
+
+
+def test_a_huge_error_page_from_a_5xx_or_429_is_still_transient() -> None:
+    huge = {"ok": False, "description": "x" * 200_000}
+    with fake_telegram() as fake:
+        fake.replies = [(502, huge), (429, huge)]
+        for cause in ("server_error", "rate_limited"):
+            with pytest.raises(TransientError) as info:
+                channel(fake).send(message())
+            assert info.value.cause == cause

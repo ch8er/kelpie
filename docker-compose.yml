@@ -29,6 +29,7 @@ services:
       - --storage.tsdb.retention.time=30d
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     ports:
       - "127.0.0.1:9090:9090"

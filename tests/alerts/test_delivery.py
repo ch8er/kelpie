@@ -9,6 +9,7 @@ from datetime import timedelta
 import pytest
 
 from kelpie.alerts import Delivery, PermanentError, TransientError
+from kelpie.alerts.delivery import DEFAULT_RETRY_HORIZON, MAX_WAIT
 from kelpie.core.actions import Severity
 from kelpie.core.alerts import AlertMessage, Did, Transition, parse_alert
 from kelpie.metrics import Metrics
@@ -115,15 +116,16 @@ def test_a_full_queue_drops_and_counts_without_blocking() -> None:
 def test_transient_errors_are_retried_with_retry_after_then_counted_as_failed() -> None:
     channel, metrics = FakeChannel("a"), Metrics()
     channel.errors = [TransientError("rate_limited", "HTTP 429", 0.01), TransientError("x")]
-    delivery = Delivery([channel], metrics, backoff=0.001)
+    delivery = Delivery([channel], metrics, backoff=0.001, retry_horizon=timedelta(seconds=0.2))
     delivery.alerter().send("[r] alert", "one", "warning")
     wait_for(lambda: len(channel.sent) == 1)
     assert channel.calls == 3
     assert metrics.alerts_sent["a"] == 1
 
-    channel.errors = [TransientError("server_error")] * 10
+    channel.errors = [TransientError("server_error")] * 10_000
     delivery.alerter().send("[r] alert", "two", "warning")
     wait_for(lambda: metrics.alerts_failed[("a", "server_error")] == 1)
+    assert channel.calls > 5  # retried over the horizon, not a fixed handful of times
     delivery.close()
 
 
@@ -203,13 +205,19 @@ def test_a_flap_within_the_window_is_delivered_but_a_true_repeat_is_not() -> Non
 def test_an_alert_that_failed_for_good_does_not_block_its_own_repeat() -> None:
     channel, metrics = FakeChannel("a"), Metrics()
     channel.errors = [PermanentError("rejected", "HTTP 400"), TransientError("x", "", 3600.0)]
-    delivery = Delivery([channel], metrics, window=timedelta(hours=1), backoff=0.001)
+    delivery = Delivery(
+        [channel],
+        metrics,
+        window=timedelta(hours=1),
+        backoff=0.001,
+        retry_horizon=timedelta(seconds=0.1),
+    )
     alerter = delivery.alerter()
     alerter.send("[r] alert", "one", "warning")
     wait_for(lambda: metrics.alerts_failed[("a", "rejected")] == 1)
     alerter.send("[r] alert", "one", "warning")  # retried by the caller later: not a duplicate
     wait_for(lambda: metrics.alerts_failed[("a", "x")] == 1)
-    assert channel.calls == 2  # a retry_after beyond the cap fails at once, no capped retries
+    assert channel.calls == 2  # a retry_after beyond the horizon fails at once, no retries
     alerter.send("[r] alert", "one", "warning")
     wait_for(lambda: len(channel.sent) == 1)
     delivery.close()
@@ -239,4 +247,206 @@ def test_close_counts_what_it_could_not_deliver_as_dropped(
     dropped = metrics.alerts_dropped[("a", "shutdown")]
     assert dropped >= 3
     assert len(channel.sent) + dropped == 6
-    assert len([r for r in caplog.records if "at shutdown" in r.getMessage()]) == 1
+    assert (
+        len([r for r in caplog.records if "queued alert(s) dropped at shutdown" in r.getMessage()])
+        == 1
+    )
+
+
+# --- the dedup fingerprint ----------------------------------------------------------------
+
+
+def test_the_fingerprint_covers_the_transition_and_what_kelpie_did() -> None:
+    base = AlertMessage("r", "s", "same words", Severity.WARNING, Transition.NEW, Did.NOTIFIED)
+    other_transition = AlertMessage(
+        "r", "s", "same words", Severity.WARNING, Transition.CHANGED, Did.NOTIFIED
+    )
+    other_did = AlertMessage("r", "s", "same words", Severity.WARNING, Transition.NEW, Did.FAILED)
+    assert len({base.fingerprint, other_transition.fingerprint, other_did.fingerprint}) == 3
+
+    channel, metrics = FakeChannel("a"), Metrics()
+    delivery = Delivery([channel], metrics, window=timedelta(hours=1), backoff=0.001)
+    for message in (base, base, other_transition, other_did, other_did):
+        delivery.deliver(message)
+    wait_for(lambda: len(channel.sent) == 3)
+    assert metrics.alerts_dropped[("a", "duplicate")] == 2
+    delivery.close()
+
+
+# --- retry horizon and flood control ------------------------------------------------------
+
+
+def test_transient_errors_are_retried_for_the_whole_horizon_not_a_few_attempts() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.errors = [TransientError("server_error")] * 9  # more than the old five attempts
+    delivery = Delivery([channel], metrics, backoff=0.001, retry_horizon=timedelta(seconds=30))
+    delivery.alerter().send("[r] alert", "one", "warning")
+    wait_for(lambda: len(channel.sent) == 1)
+    assert channel.calls == 10
+    assert metrics.alerts_sent["a"] == 1 and not metrics.alerts_failed
+    delivery.close()
+
+
+def test_the_default_horizon_is_fifteen_minutes_of_capped_backoff() -> None:
+    assert timedelta(minutes=15) == DEFAULT_RETRY_HORIZON
+    assert MAX_WAIT <= 60.0  # so 15 minutes are a few dozen attempts, not a handful
+
+
+def test_a_retry_after_within_the_horizon_is_waited_out_beyond_it_fails_at_once() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.errors = [TransientError("rate_limited", "HTTP 429", 0.15)]
+    delivery = Delivery([channel], metrics, backoff=0.001, retry_horizon=timedelta(seconds=5))
+    started = time.monotonic()
+    delivery.alerter().send("[r] alert", "one", "warning")
+    wait_for(lambda: len(channel.sent) == 1)
+    assert time.monotonic() - started >= 0.14  # not retried before the server's wait is over
+    channel.errors = [TransientError("rate_limited", "HTTP 429", 600.0)]
+    delivery.alerter().send("[r] alert", "two", "warning")
+    wait_for(lambda: metrics.alerts_failed[("a", "rate_limited")] == 1)
+    delivery.close()
+
+
+def test_retrying_gives_up_while_the_queue_is_full() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.gate = threading.Event()
+    channel.errors = [TransientError("server_error")]
+    delivery = Delivery([channel], metrics, queue_size=1, backoff=0.001)
+    delivery.alerter().send("[r] alert", "head", "warning")
+    wait_for(lambda: channel.calls == 1)  # the worker holds the head, blocked in send
+    delivery.alerter().send("[r] alert", "behind", "warning")  # the queue is now full
+    channel.gate.set()
+    wait_for(lambda: len(channel.sent) == 1)  # the alert behind it
+    assert metrics.alerts_failed[("a", "server_error")] == 1  # the head was not retried
+    assert channel.calls == 2
+    delivery.close()
+
+
+def test_a_429_holds_back_the_next_queued_alert_too() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    stamps: list[float] = []
+    original = channel.send
+
+    def timed(message: AlertMessage) -> None:
+        stamps.append(time.monotonic())
+        original(message)
+
+    channel.send = timed  # type: ignore[method-assign]
+    # The first alert fails for good after a 429 whose wait exceeds the horizon: the one
+    # queued behind it must still not be sent at once.
+    channel.errors = [TransientError("rate_limited", "HTTP 429", 5.0)]
+    delivery = Delivery([channel], metrics, backoff=0.001, retry_horizon=timedelta(seconds=0.4))
+    delivery.alerter().send("[r] alert", "first", "warning")
+    delivery.alerter().send("[r] alert", "second", "warning")
+    wait_for(lambda: len(channel.sent) == 1)
+    assert metrics.alerts_failed[("a", "rate_limited")] == 1
+    assert len(stamps) == 2 and stamps[1] - stamps[0] >= 0.35
+    delivery.close()
+
+
+# --- shutdown -----------------------------------------------------------------------------
+
+
+def hung_channels(count: int) -> list[FakeChannel]:
+    channels = [FakeChannel(f"c{i}") for i in range(count)]
+    for c in channels:
+        c.gate = threading.Event()  # send blocks until the test opens it
+    return channels
+
+
+def test_close_has_one_shared_deadline_and_counts_every_alert() -> None:
+    channels, metrics = hung_channels(3), Metrics()
+    delivery = Delivery(channels, metrics, backoff=0.001)
+    for i in range(4):  # per channel: one held inside send, three queued
+        delivery.alerter().send("[r] alert", f"m{i}", "warning")
+    wait_for(lambda: all(c.calls == 1 for c in channels))
+    started = time.monotonic()
+    delivery.close(2.0)
+    took = time.monotonic() - started
+    assert 1.9 <= took < 2.6  # not 3 x (2.0 + 0.5)
+    delivered = sum(metrics.alerts_sent.values())
+    dropped = sum(v for (_, reason), v in metrics.alerts_dropped.items() if reason == "shutdown")
+    assert delivered + dropped == 12  # none neither delivered nor counted
+    assert dropped == 12
+    for c in channels:
+        assert c.gate is not None
+        c.gate.set()
+    for worker in delivery._workers:
+        worker.thread.join(2.0)
+        assert not worker.thread.is_alive()
+    # What the hung sends do after close is not counted a second time.
+    assert sum(metrics.alerts_sent.values()) == 0
+    assert sum(metrics.alerts_dropped.values()) == 12
+    assert not metrics.alerts_failed
+
+
+def test_send_after_close_is_dropped_and_counted() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    delivery = Delivery([channel], metrics, backoff=0.001)
+    delivery.close(0.5)
+    delivery.alerter().send("[r] alert", "late", "warning")
+    delivery.send("late report", "warning")
+    assert metrics.alerts_dropped[("a", "shutdown")] == 2
+    assert not channel.sent
+    delivery.close(0.5)  # closing twice is harmless
+
+
+def test_an_alert_offered_to_a_worker_that_already_drained_is_counted() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    delivery = Delivery([channel], metrics, backoff=0.001)
+    worker = delivery._workers[0]
+    worker.stop(time.monotonic())
+    worker.thread.join(2.0)  # drained and gone, while Delivery itself is not yet closed
+    delivery.alerter().send("[r] alert", "raced", "warning")
+    assert metrics.alerts_dropped[("a", "shutdown")] == 1
+    assert delivery._last == {}  # the entry was released: a later repeat is not a duplicate
+
+
+def test_close_drains_the_queue_and_counts_what_it_did_not_deliver() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.delay = 0.3
+    delivery = Delivery([channel], metrics, backoff=0.001)
+    for i in range(5):
+        delivery.alerter().send("[r] alert", f"m{i}", "warning")
+    delivery.close(0.2)
+    dropped = metrics.alerts_dropped[("a", "shutdown")]
+    assert len(channel.sent) + dropped == 5
+    assert dropped >= 3
+
+
+def test_close_does_not_wait_for_a_retry_that_would_end_after_the_deadline() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.errors = [TransientError("rate_limited", "HTTP 429", 30.0)]
+    delivery = Delivery([channel], metrics, backoff=0.001)
+    delivery.alerter().send("[r] alert", "held", "warning")
+    wait_for(lambda: channel.calls == 1)
+    started = time.monotonic()
+    delivery.close(0.5)
+    assert time.monotonic() - started < 1.5
+    assert metrics.alerts_dropped[("a", "shutdown")] == 1
+    assert channel.calls == 1  # no busy-sending into a flood-control block while stopping
+
+
+def test_blocked_until_is_respected_during_stop_for_the_queued_alerts() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.errors = [TransientError("rate_limited", "HTTP 429", 30.0)]
+    delivery = Delivery([channel], metrics, backoff=0.001, retry_horizon=timedelta(seconds=60))
+    for i in range(3):
+        delivery.alerter().send("[r] alert", f"m{i}", "warning")
+    wait_for(lambda: channel.calls == 1)
+    started = time.monotonic()
+    delivery.close(0.5)
+    assert time.monotonic() - started < 1.5
+    assert channel.calls == 1 and not channel.sent
+    assert metrics.alerts_dropped[("a", "shutdown")] == 3
+
+
+def test_a_block_that_ends_before_the_deadline_is_waited_out_during_stop() -> None:
+    channel, metrics = FakeChannel("a"), Metrics()
+    channel.errors = [TransientError("rate_limited", "HTTP 429", 0.3)]
+    delivery = Delivery([channel], metrics, backoff=0.001, retry_horizon=timedelta(seconds=60))
+    delivery.alerter().send("[r] alert", "one", "warning")
+    delivery.alerter().send("[r] alert", "two", "warning")
+    wait_for(lambda: channel.calls == 1)
+    delivery.close(3.0)
+    assert [m.body for m in channel.sent] == ["one", "two"]
+    assert metrics.alerts_dropped[("a", "shutdown")] == 0

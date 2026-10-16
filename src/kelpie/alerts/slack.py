@@ -38,8 +38,8 @@ from kelpie.alerts.telegram import (
     MAX_HEAD,
     MAX_RESPONSE,
     MAX_TIMEOUT,
-    TRANSITION,
     clean,
+    lead,
     loopback,
     redact,
     truncate,
@@ -70,7 +70,7 @@ def format_message(message: AlertMessage) -> str:
     head = f"[{message.severity.value.upper()}] "
     head += f"{truncate(clean(message.rule), MAX_HEAD)}: " if message.rule else ""
     # Each part has its own cap, so the last line (what Kelpie did) always survives.
-    body = truncate(clean(TRANSITION[message.transition] + message.body.strip()), MAX_BODY)
+    body = truncate(clean(lead(message) + message.body.strip()), MAX_BODY)
     lines = [head + truncate(clean(message.subject), MAX_HEAD), body, DID[message.did]]
     return escape(truncate("\n".join(lines)))
 

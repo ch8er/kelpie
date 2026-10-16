@@ -453,13 +453,18 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # Real-time alerts. None are sent without a channel. An alert goes to every channel whose
 # min_severity it reaches; each message shows the transition (new, still open, changed,
 # resolved) and what Kelpie already did. Nothing leaves Kelpie while engine.dry_run is true.
-# Delivery runs on a background worker per channel (bounded queue; retries on 429, honouring
-# retry_after, and on 5xx); alerts that do not fit the queue are dropped and counted
-# (kelpie_alerts_dropped_total). `kelpie status` lists the channels, never their secrets.
+# Delivery runs on a background worker per channel (bounded queue). A transient failure
+# (429, 5xx, network) is retried with a capped exponential backoff, honouring retry_after,
+# for retry_horizon; a 429 also holds back the alerts queued behind it. An alert that is
+# still undelivered then is lost and counted (kelpie_alerts_failed_total; the Prometheus rule
+# in deploy/prometheus/rules fires on it). Alerts that do not fit the queue, or are still
+# queued when Kelpie shuts down, are dropped and counted (kelpie_alerts_dropped_total).
+# `kelpie status` lists the channels, never their secrets.
 #
 # [alerts]
 # dedup_window = "10m"      # identical alerts within this window are sent once per channel
 # queue_size = 50           # per channel
+# retry_horizon = "15m"     # how long a transient failure is retried before the alert is lost
 #
 # [[alerts.channels]]
 # type = "telegram"

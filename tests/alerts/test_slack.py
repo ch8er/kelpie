@@ -59,7 +59,12 @@ def test_message_has_the_telegram_layout() -> None:
     assert third.startswith("Kelpie did: nothing, mode suggest")
     assert "failed" in format_message(message(did=Did.FAILED))
     resolved = parse_alert("[orphans] alert task-1", "Resolved after 1.0h: gone.", "info")
-    assert "Resolved. Resolved after" in format_message(resolved)
+    # The engine's own wording says it: the channel's label is not added a second time.
+    assert format_message(resolved).split("\n")[1] == "Resolved after 1.0h: gone."
+    still = parse_alert("[orphans] alert task-1", "Still open after 4.0h: no owner", "warning")
+    assert format_message(still).split("\n")[1] == "Still open after 4.0h: no owner"
+    changed = parse_alert("[orphans] alert task-1", "Changed: now critical", "critical")
+    assert format_message(changed).split("\n")[1] == "Changed: now critical"
 
 
 def test_ampersand_and_angle_brackets_are_escaped_once_and_control_chars_removed() -> None:
@@ -291,3 +296,37 @@ def test_fan_out_to_telegram_and_slack_with_per_channel_filters() -> None:
         "named slack report",
     ]
     assert metrics.alerts_sent["telegram"] == 2 and metrics.alerts_sent["slack"] == 2
+
+
+def test_slack_mentions_in_agent_text_are_neutralised_by_escaping() -> None:
+    hostile = "<!channel> <!here> <!everyone> <@U012ABCDEF> <#C012ABCDEF|general> <!subteam^S1>"
+    for text in (
+        format_message(message(body=hostile, subject=hostile, rule="<!here>")),
+        format_message(message(text=hostile)),
+    ):
+        assert "<" not in text and ">" not in text  # nothing Slack could parse as markup
+        for token in ("&lt;!channel&gt;", "&lt;!here&gt;", "&lt;@U012ABCDEF&gt;"):
+            assert token in text
+    # the whole payload as sent
+    with fake_slack() as fake:
+        channel(fake).send(message(body=hostile))
+    sent = fake.requests[0][2]["text"]
+    assert "<!channel>" not in sent and "<@U012ABCDEF>" not in sent
+    assert sent.count("&lt;!here&gt;") == 1
+    assert "​" not in format_message(message(body="a​<!here>"))  # Cf removed first
+
+
+def test_slack_neither_repeats_the_engines_transition_wording() -> None:
+    body = "Still open after 4.0h: task-1 has no owner."
+    text = format_message(parse_alert("[orphans] alert task-1", body, "warning"))
+    assert "Still open. Still open" not in text
+    assert text.split("\n")[1] == body
+
+
+def test_a_huge_error_page_from_a_5xx_or_429_is_still_transient() -> None:
+    with fake_slack() as fake:
+        fake.replies = [(503, "x" * 200_000, {}), (429, "y" * 200_000, {"Retry-After": "2"})]
+        for cause in ("server_error", "rate_limited"):
+            with pytest.raises(TransientError) as info:
+                channel(fake).send(message())
+            assert info.value.cause == cause
