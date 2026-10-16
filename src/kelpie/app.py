@@ -204,7 +204,7 @@ def load_settings(path: Path | None) -> Settings:
         github=github,
         human_tasks=human_tasks,
         block_conditions=block_conditions,
-        engine=engine,
+        engine=_with_condition_reasons(engine, block_conditions),
         hermes=_with_wait_key(_load_hermes(data.get("adapters", {})), db_path),
         claude_code=_load_claude_code(data.get("adapters", {})),
         db_path=db_path,
@@ -395,7 +395,9 @@ class RuleStatus:
     planned: PlannedRule
     implemented: bool
     mode: Mode
-    configured: bool  # has a [engine.rules.<name>] section
+    # has a [engine.rules.<name>] section, or settings inherited into one (needs_you's
+    # condition_reasons from [[block_conditions]])
+    configured: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +446,21 @@ def load_rules(
         for p in planned
     ]
     return LoadedRules(rules, statuses, warnings)
+
+
+def _with_condition_reasons(
+    engine: EngineConfig, patterns: Sequence[BlockConditionPattern]
+) -> EngineConfig:
+    """``needs_you`` inherits the ``[[block_conditions]]`` block patterns as its
+    ``condition_reasons`` unless it sets its own: a block whose reason names something a
+    condition can check (a PR to merge) waits on that, not on a person's answer, whatever
+    its kind (agents use ``needs_input`` to get past Hermes' block loop guard)."""
+    reasons = [p.pattern.pattern for p in patterns if "block" in p.applies_to]
+    section = engine.rules.get("needs_you", {})
+    if not reasons or "condition_reasons" in section:
+        return engine
+    rules = {**engine.rules, "needs_you": {**section, "condition_reasons": reasons}}
+    return replace(engine, rules=rules)
 
 
 def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
