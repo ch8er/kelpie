@@ -10,6 +10,8 @@ keep less. It describes the code as it is; the files named below are the referen
 | --- | --- | --- | --- | --- |
 | OTLP spans | ids, timing, model, token counts, tool name, outcome, allowlisted attributes, a hash of tool arguments, output size, a command prefix | message content, prompts, completions, reasoning, tool arguments and results, error messages, user identity | `kelpie.db`, table `spans` | `[traces] retention` (7 days), at most `max_rows` (1,000,000) |
 | Hermes hook records | tool name, ids, hash of arguments, a redacted command, outcome, duration, output size | raw arguments and results | spool file on the Hermes host | until rotated: one backup file at 20 MiB |
+| Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
+| Claude Code task lists | task id, subject (200 characters), status, owner, `blockedBy` | descriptions | read in place, not copied | |
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
 | Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
@@ -139,6 +141,42 @@ The spool file is created with mode `0600`. It is rotated to `<spool>.1` when it
 reads it into snapshots; hook spans are not written to the span store, but when a hook call
 and an OTLP span describe the same call, the snapshot's merged span carries the hook's
 `command`.
+
+## Claude Code hook
+
+Code: [`src/kelpie/adapters/claude_code/hook.py`](../src/kelpie/adapters/claude_code/hook.py).
+
+Claude Code runs the hook as a command on each agent host. It writes one JSON line per
+session start, prompt, tool call, end of turn and session end to the spool
+(`~/.claude/kelpie/spool.jsonl`, or `KELPIE_CLAUDE_SPOOL`). Every line holds the Claude Code
+session id, a subagent id when there is one, the task list id, `KELPIE_TASK_ID` and
+`KELPIE_AGENT` from the session's environment, and the hook's format version `v`. Session
+start lines add the start `source`, the model and the `--agent` type; prompt lines only the
+prompt's `source` (user, sdk, ...), never its text; end-of-turn lines the error kind of a failed
+turn; session end lines the end reason. When the hook refuses a call because of a stop, it
+writes a `stopped` line with only the session and subagent ids, the event and `v`.
+
+A tool-call line holds: the tool name, the tool use id, `args_hash`, a redacted `command`,
+the outcome, the duration and `output_chars`. For a `TaskUpdate` call it also holds the task
+id, the status and the owner that were set, never the subject or description. Tool inputs and
+results, error messages, assistant messages, the transcript path and the working directory
+are never written.
+
+The redacted `command` is stricter than the Hermes plugin's: the first command of the first
+line, at most four tokens, kept only while they are plain words or flags. The first path,
+URL, quoted string, `user:pass` or variable ends it with `…`, and the value after a
+credential-like flag (`-p`, `-u`, `-a`, `-H`, `-w`, `-P`, `-k`, `-K`, or a long flag naming a
+password, token, key, user, header, OTP or PIN) or in `--flag=value` is masked. So
+`curl -u admin:pw https://x` is stored as `curl -u *** …`. Plain words are kept, so a secret
+passed as one (`redis-cli AUTH hunter2`) is not masked. `KELPIE_CLAUDE_SPOOL_COMMANDS=0`
+records no command.
+
+The spool is created with mode `0600` and rotated like the Hermes spool. Stop markers
+(`~/.claude/kelpie/stop/<session>.json`, mode `0600`) hold a time and the stopping rule's
+reason. The hook deletes a marker when a human prompt resumes the session or the session ends;
+an expired marker is ignored but stays on disk until then. Kelpie reads the shared task lists in place
+(id, subject cut to 200 characters, status, owner, `blockedBy`) and never reads session
+transcripts.
 
 ## Task boards and git
 

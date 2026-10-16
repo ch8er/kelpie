@@ -13,6 +13,10 @@ fields of every event below (read from its hook schema), the task file format an
 (a task list written by Claude Code itself), and how a list id becomes a directory name. The
 hook has not yet run inside a live Claude Code session, and nothing here has run on a farm.
 
+First live run, step by step: [docs/quickstart-claude-code.md](../../../../docs/quickstart-claude-code.md).
+`kelpie doctor` checks the task lists, the spool, the hook registration in
+`~/.claude/settings.json` and the stop directory.
+
 ## Config
 
 ```toml

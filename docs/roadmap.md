@@ -842,9 +842,10 @@ so traces come through OTLP ingest; the adapter maps sessions and tasks onto the
 and implements the actions the platform allows.
 
 **Acceptance criteria**
-- [ ] Sessions and tasks mapped onto `kelpie.core.model`; status mapping documented
-- [ ] Supported actions implemented, unsupported ones fall back to alerts through action routing
-- [ ] Tests against synthetic data, no network access
+- [x] Sessions and tasks mapped onto `kelpie.core.model`; status mapping documented
+- [x] Supported actions implemented, unsupported ones fall back to alerts through action routing
+- [x] Tests against synthetic data, no network access
+- [x] `docs/quickstart-claude-code.md` and `kelpie doctor` checks
 
 ## Later (P2, on signal)
 
