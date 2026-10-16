@@ -717,6 +717,21 @@ User and contributor documentation for the first public release.
 - [x] Configuration reference for every rule and threshold
 - [x] Guides for writing a rule, an adapter and a connector, with the fixture format
 
+### deploy: multi-host — `kelpie agent` on agent machines, central `kelpie serve`
+labels: P0, week-3, area:deploy
+Today the platform adapters read local files and run local commands, so Kelpie must live on
+the agents' machine and cannot watch a farm spread over several machines (a laptop plus a
+cloud VM, several VMs). Blocks the release.
+
+**Acceptance criteria**
+- [ ] `kelpie agent`: runs on each machine with agents, hosts the platform adapters' local parts (board, spool, worktree git state) and executes local actions (Hermes CLI, Claude Code marker); no rules, no ledger
+- [ ] Central `kelpie serve` merges snapshots from all agents (task and session ids namespaced by host), runs rules, ledger, report and alerts; routes each action to the agent that owns the task
+- [ ] Transport: HTTPS or a configured plain-HTTP bind on a private network, per-agent token, request size limits, agent heartbeats; a silent agent → alert, and its tasks are not treated as abandoned while it is silent
+- [ ] Single-host mode (adapters in-process) stays the default and unchanged
+- [ ] Prometheus/node_exporter and OTLP already work over the network; document one setup per case: laptop only, laptop + cloud VM, two VMs
+- [ ] e2e: two simulated hosts, one farm; an agent going silent; an action routed to the right host
+- [ ] Security: the agent never accepts arbitrary commands, only the action kinds its adapters implement
+
 ### project: code health — performance, duplication, refactoring
 labels: P0, week-3, area:project
 Five tracks wrote code in parallel, so helpers are likely duplicated (git calls, time
