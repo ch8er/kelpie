@@ -453,12 +453,15 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #
 # Open PRs for rule 6 (bottlenecks): hold labels on PRs (holds/hold_labels) hold the task on
 # the PR's head branch and age from when the label went on; mergeable PRs count as ready
-# work. A task is linked to its PR by branch (Hermes: tasks.branch_name, else the worktree's).
+# work. A PR belongs to a task whose code is in the PR's title or branch: the task id, and
+# task_code matches in the task's title; never a mention in its description or comments.
 #
 # [connectors.github.pulls]
 # poll_interval = "2m"              # list open PRs this often (at least 30s)
 # max_details = 20                  # PRs whose mergeable state is read per scan (0 to 100):
 #                                   # one request each, within max_requests_per_tick
+# task_code = '^[A-Z][A-Z0-9]+-[0-9]+'  # task codes at the start of task titles (besides
+#                                   # the id); no nested repeats
 # enabled = true
 #
 # Rate limit: a scan runs every poll_interval and spends at most max_requests_per_tick

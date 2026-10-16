@@ -1,0 +1,43 @@
+id: "17-foreign-pr-mention"
+incident: 17
+title: "A PR that only mentions a task is not that task's PR"
+description: >
+  On a live farm, linking PRs to tasks by mentions in comments and descriptions was wrong
+  8 times out of 10. Here a held PR mentions task T-1702 in its description, but its title
+  and branch name T-1701, so it belongs to T-1701 only (task_ids, set by the connector from
+  the task code in the PR title or branch). The hold therefore holds T-1701 and leaves
+  T-1702 alone: T-1702 is ordinary ready work for the idle developer.
+rule: bottlenecks
+config:
+  min_idle_time: "30m"
+  idle_alert_after: "30m"
+  holds:
+    - {label: merge-first, owner: human-owner, expires_after: "2h"}
+snapshot:
+  now: "2026-03-02T17:00:00+00:00"
+  owners:
+    - {id: human-owner, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: T-1701, title: "T-1701 Settings page", status: review, status_since: "2026-03-02T12:00:00+00:00", role: developer, branch: "feature/T-1701"}
+    - {id: T-1702, title: "T-1702 Export job", status: ready, status_since: "2026-03-02T13:00:00+00:00", role: developer}
+  sessions:
+    - {id: S-1701, task_id: T-1701, owner_id: agent-dev-1, started_at: "2026-03-02T10:00:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: review}
+  pull_requests:
+    # Its description says "unblocks T-1702"; that mention links nothing.
+    - {repo: example/repo, number: 71, title: "T-1701: settings page", branch: "feature/T-1701", task_ids: [T-1701], labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
+expected_actions:
+  - kind: alert
+    params:
+      hold: merge-first
+      held_tasks: [T-1701]
+      held_count: 1
+  - kind: alert
+    params:
+      likely_cause: dispatch
+      ready_tasks: [T-1702]
+not_expected_actions:
+  - kind: alert
+    params: {held_tasks: [T-1701, T-1702]}
+  - kind: alert
+    params: {held_tasks: [T-1702]}

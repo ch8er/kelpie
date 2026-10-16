@@ -28,7 +28,7 @@ Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
     archived                -> (skipped)
 
 ``body`` is ``tasks.body`` (the description; none for finished tasks), at most ``MAX_BODY``
-characters; the dispatch gate's patterns read it with the title. ``assignee`` is the assignee
+characters; PR references in it link nothing (incident 17). ``assignee`` is the assignee
 profile and ``role`` its role: on Hermes an assignee only routes a task until it is
 dispatched. ``owner_id`` is the profile of the live run that claims the task (its
 ``current_run_id`` names a run that has not ended), none while nothing runs, and the

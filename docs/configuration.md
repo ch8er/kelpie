@@ -660,9 +660,12 @@ can make to GitHub).
 
 ### [connectors.github.pulls]
 
-Open pull requests for rule 6 (`bottlenecks`). A task is linked to the open PRs whose head
-branch is the task's branch (Hermes: `tasks.branch_name`, else the worktree's branch; a
-fork's PR links nothing). Hold labels (`holds`, `hold_labels`) on a PR hold its task, aged
+Open pull requests for rule 6 (`bottlenecks`). A PR belongs to a task when its head branch is
+the task's own branch, or when one of the task's codes is a whole token of the PR's title or
+head branch: the task id (Hermes `t_…` in `hermes/t_…`) and, with `task_code`, every match
+of that pattern in the task's title (e.g. `IOS-036`). A code needs at least 4 characters with
+a letter and a digit. Mentions in a PR's description or comments never link it (incident 17:
+8 of 10 such matches were wrong on a live farm), and a fork's PR links nothing. Hold labels (`holds`, `hold_labels`) on a PR hold its task, aged
 from when the label went on (read from the PR's issue events); a held PR with no open task
 is held work too. With rule 6's `ready_prs` (default off), PRs GitHub reports as mergeable
 (`mergeable_state` `clean`), not drafts, not forks', not held and unchanged for
@@ -676,6 +679,7 @@ a warning. The token needs Pull requests: read and Issues: read (label events).
 | `enabled` | `true` | bool | |
 | `poll_interval` | `"2m"` | duration, >= 30s | List open PRs this often; the last list is served in between. |
 | `max_details` | `20` | count, 0 to 100 | PRs whose mergeable state is read per scan, one request each, within `[connectors.github] max_requests_per_tick`. |
+| `task_code` | unset | regular expression, at most 200 characters | Task codes in task titles (besides the id) that link a PR whose title or branch carries them, e.g. `'^[A-Z][A-Z0-9]+-[0-9]+'` (anchored, so `UTF-8` later in a title is not a code). No capturing groups, no repeated group that itself repeats, no backreferences or lookarounds: it runs over agent-written titles every scan. |
 
 ### [[block_conditions]]
 

@@ -450,11 +450,8 @@ def test_dispatch_gate_park_then_wake_follows_the_prs_current_head() -> None:
     assert DispatchGate().evaluate(green) == []
 
 
-def test_ready_task_body_names_several_prerequisites() -> None:
-    task = replace(
-        ready("T-1", "Wire the orders API"),
-        body="Depends on: after #21 lands, and after #22 lands. Also after #21 lands again.",
-    )
+def test_ready_task_title_names_several_prerequisites() -> None:
+    task = ready("T-1", "Wire the orders API after #21 lands, and after #22 lands (#21 lands)")
     with serve() as gh:
         gh.pull(REPO, 21)
         gh.pull(REPO, 22)
@@ -466,8 +463,8 @@ def test_ready_task_body_names_several_prerequisites() -> None:
 
 
 def test_ready_task_refs_are_capped() -> None:
-    body = " ".join(f"after #{n} lands" for n in range(1, MAX_READY_REFS + 3))
-    task = replace(ready("T-1", "Many"), body=body)
+    title = " ".join(f"after #{n} lands" for n in range(1, MAX_READY_REFS + 3))
+    task = ready("T-1", title)
     with serve() as gh:
         for n in range(1, MAX_READY_REFS + 3):
             gh.pull(REPO, n)
@@ -487,15 +484,15 @@ def test_block_reason_still_takes_only_the_first_pr() -> None:
 
 def test_unresolvable_refs_do_not_use_up_the_cap() -> None:
     names = " ".join(f"after other/repo#{n} lands" for n in range(1, MAX_READY_REFS + 3))
-    task = replace(ready("T-1", "Many"), body=f"{names} and after #21 lands")
+    task = ready("T-1", f"{names} and after #21 lands")
     with serve() as gh:
         gh.pull(REPO, 21)
         out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,)))
     assert [c.id for c in out.conditions] == ["ready:T-1:pr_merged:example/repo#21"]
 
 
-def test_title_ref_and_body_ref_and_already_known_ones() -> None:
-    task = replace(ready("T-1", "Wire it after #41 lands"), body="also after #42 lands")
+def test_title_refs_and_already_known_ones() -> None:
+    task = ready("T-1", "Wire it after #41 lands, also after #42 lands")
     known = Condition(
         "ready:T-1:pr_merged:example/repo#41",
         ConditionKind.PR_MERGED,
@@ -512,8 +509,18 @@ def test_title_ref_and_body_ref_and_already_known_ones() -> None:
     ]
 
 
+def test_a_description_never_links_a_pr() -> None:
+    """Incident 17: on a live farm 8 of 10 PRs matched from mentions in descriptions and
+    comments were not the task's."""
+    task = replace(ready("T-1", "Wire the orders API"), body="Context: after #21 lands")
+    with serve() as gh:
+        gh.pull(REPO, 21)
+        out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,)))
+    assert out.conditions == ()
+
+
 def test_text_beyond_the_limit_is_not_read() -> None:
-    task = replace(ready("T-1", "Long"), body="x" * MAX_TASK_TEXT + " after #51 lands")
+    task = ready("T-1", "x" * MAX_TASK_TEXT + " after #51 lands")
     with serve() as gh:
         gh.pull(REPO, 51)
         out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,)))

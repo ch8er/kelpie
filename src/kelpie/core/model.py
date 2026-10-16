@@ -377,7 +377,7 @@ class LabelEvent:
 class PullRequest:
     """An open pull (merge) request, as a code-host connector reports it.
 
-    ``branch`` is its head branch, which links it to the task working on that branch.
+    ``branch`` is its head branch. ``task_ids`` are the tasks it belongs to.
     ``mergeable`` is True when the host says it can be merged now (no conflicts, required
     checks and reviews satisfied), False when it says it cannot, None when unknown.
     ``labeled`` holds when watched labels (holds) were put on it, where the connector read
@@ -397,6 +397,9 @@ class PullRequest:
     updated_at: datetime | None = None
     labeled: tuple[LabelEvent, ...] = ()
     source: str | None = None
+    # The tasks it belongs to: their code is in its title or head branch (never a mention in
+    # its description or comments, incident 17).
+    task_ids: tuple[str, ...] = ()
 
     @property
     def ref(self) -> str:

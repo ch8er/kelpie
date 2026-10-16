@@ -20,7 +20,8 @@ Prerequisites of a ready task nobody is working on yet (no live session):
   can never be met, and a human moves it back to ready.
 - **Conditions linked to the task** by ``task_id`` for its current status (as
   ``linked_conditions`` reads them): those the platform registered, and those the GitHub
-  step attaches from PR references in the task's title and body (``[[block_conditions]]`` with
+  step attaches from PR references in the task's title, never its description or comments
+  (incident 17) (``[[block_conditions]]`` with
   ``applies_to = ["ready_task"]``), bound to the PR's repo, number and head like block
   conditions (``pr_merged`` when the task needs the PR landed, ``ci_green`` when it needs
   its head green). Only an unmet condition checked within ``max_condition_age`` counts.
