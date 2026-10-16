@@ -114,7 +114,13 @@ def test_alerts_build_on_core_only(path: Path) -> None:
     ids=_ids,
 )
 def test_control_loop_has_no_llm(path: Path) -> None:
-    bad = {m for m in _imports(path) if m.split(".")[0] in LLM_ROOTS or m.startswith(LLM_PREFIXES)}
+    bad = {
+        m
+        for m in _imports(path)
+        if m.split(".")[0] in LLM_ROOTS
+        or m.startswith(LLM_PREFIXES)
+        or m.startswith("kelpie.report.root_cause")  # Kelpie's own LLM client (raw HTTP)
+    }
     assert not bad, f"{path.name} imports LLM client {bad}"
 
 

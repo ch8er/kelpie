@@ -63,6 +63,23 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "Only the report run reaches the LLM client"
+type = "forbidden"
+source_modules = [
+    "kelpie.core",
+    "kelpie.rules",
+    "kelpie.traces",
+    "kelpie.resources",
+    "kelpie.alerts",
+    "kelpie.connectors",
+    "kelpie.adapters",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.metrics",
+]
+forbidden_modules = ["kelpie.report.root_cause"]
+
+[[tool.importlinter.contracts]]
 name = "Live metrics do not depend on the report (it may use an LLM)"
 type = "forbidden"
 source_modules = ["kelpie.metrics"]

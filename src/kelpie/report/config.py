@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import time, timedelta
@@ -12,7 +13,6 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from kelpie.core.serde import parse_duration
-from kelpie.report.root_cause import LlmSettings, load_llm
 from kelpie.report.verify import DEFAULT_MIN_SAMPLE, DEFAULT_REVIEW_ROLES, DEFAULT_WINDOW
 
 KEYS = frozenset(
@@ -148,3 +148,93 @@ def load_report(section: Any) -> ReportSettings:
         sections={k: dict(v) for k, v in sections.items()},
         llm=load_llm(section.get("llm")),
     )
+
+
+# --- [report.llm]: the optional LLM root-cause section (kelpie.report.root_cause) --------
+
+LLM_PROVIDERS: Mapping[str, tuple[str, str]] = {  # name -> (default base_url, default key env)
+    "anthropic": ("https://api.anthropic.com", "ANTHROPIC_API_KEY"),
+    "openai": ("https://api.openai.com", "OPENAI_API_KEY"),
+}
+LLM_KEYS = frozenset({"provider", "model", "api_key_env", "base_url", "timeout", "max_tokens"})
+_LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+@dataclass(frozen=True, slots=True)
+class LlmSettings:
+    """``api_key_env``: where the key is read at report time; None sends no key (a server
+    on this host). Kept apart from the client so the control loop never loads it."""
+
+    provider: str
+    model: str
+    api_key_env: str | None
+    base_url: str
+    timeout: timedelta = timedelta(seconds=60)
+    max_tokens: int = 1000
+
+    @property
+    def default_endpoint(self) -> bool:
+        return self.base_url == LLM_PROVIDERS[self.provider][0]
+
+
+def load_llm(section: Any) -> LlmSettings | None:
+    """Parse ``[report.llm]`` (None when absent); raises ValueError naming the bad key.
+
+    The provider's key goes only to the provider's own API: with another ``base_url``,
+    ``api_key_env`` must be named explicitly, except on this host (localhost), where no
+    key is sent unless one is named."""
+    if section is None:
+        return None
+    if not isinstance(section, Mapping):
+        raise ValueError("[report.llm] must be a table")
+    if extra := set(section) - LLM_KEYS:
+        raise ValueError(f"unknown [report.llm] keys: {sorted(extra)}")
+    provider = section.get("provider")
+    if not isinstance(provider, str) or provider not in LLM_PROVIDERS:
+        raise ValueError(f"[report.llm] provider must be one of {sorted(LLM_PROVIDERS)}")
+    model = section.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("[report.llm] model is required, e.g. a model id of the provider")
+    default_url, default_env = LLM_PROVIDERS[provider]
+    url = section.get("base_url", default_url)
+    if not isinstance(url, str) or not _valid_base(url):
+        raise ValueError(
+            "[report.llm] base_url must be an https URL (http only on localhost), "
+            "without credentials, query or fragment"
+        )
+    url = url.rstrip("/")
+    env = section.get("api_key_env")
+    if env is not None and (
+        not isinstance(env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env)
+    ):
+        raise ValueError("[report.llm] api_key_env must be an environment variable name")
+    if env is None and url != default_url:
+        if urllib.parse.urlsplit(url).hostname not in _LOOPBACK:
+            raise ValueError(
+                f"[report.llm] api_key_env must be named for base_url {url!r}: the "
+                f"provider's ${default_env} is only sent to {default_url}"
+            )
+    elif env is None:
+        env = default_env
+    raw = section.get("timeout", "60s")
+    try:
+        timeout = parse_duration(raw) if isinstance(raw, str) else None
+    except ValueError:
+        timeout = None
+    if timeout is None or not timedelta(0) < timeout <= timedelta(minutes=10):
+        raise ValueError('[report.llm] timeout must be a duration up to 10m, e.g. "60s"')
+    tokens = section.get("max_tokens", 1000)
+    if isinstance(tokens, bool) or not isinstance(tokens, int) or not 1 <= tokens <= 32000:
+        raise ValueError("[report.llm] max_tokens must be an integer from 1 to 32000")
+    return LlmSettings(provider, model.strip(), env, url, timeout, tokens)
+
+
+def _valid_base(url: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    if parts.username or parts.password or parts.query or parts.fragment or not host:
+        return False
+    return parts.scheme == "https" or (parts.scheme == "http" and host in _LOOPBACK)
