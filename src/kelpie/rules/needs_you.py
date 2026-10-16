@@ -15,7 +15,8 @@ delay, so the human sees one list instead of scattered blocks:
   that starts with one of ``approval_reasons`` (``waiting_human``, Hermes' typed blocks
   ``needs_input``, ``approval``, ...), unless it is parked on a human task (see below;
   then it is listed under that task), once it has waited ``approval_wait_after`` (30m).
-  Its human is ``approvers[role]``, else ``default_approver``; without either it is listed under ``unassigned``.
+  Its human is ``approvers[role]``, else ``default_approver``; without either it is listed
+  under ``unassigned``.
 
 **Cost of delay** of an item: the agent-hours spent waiting on it so far, the sum over the
 agent tasks that wait on it directly of how long each has waited: a task parked on it since
