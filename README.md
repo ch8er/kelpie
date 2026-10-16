@@ -259,7 +259,9 @@ may no longer hold everything (Hermes keeps runs; the hook spool rotates), so ru
 ## Alerts
 
 Alerts are off until a channel is configured. Each `[[alerts.channels]]` entry has its own
-`min_severity`; an alert goes to every channel it reaches. Delivery runs on a background
+`min_severity`; an alert goes to every channel it reaches. An action that failed, or that no
+executor could carry out, needs a human: its alert is sent at `warning` or above, whatever the
+action's own severity. Delivery runs on a background
 worker per channel (bounded queue), so a slow chat service never stalls the control loop.
 Transient failures (429, 5xx, network) are retried for `retry_horizon` (default `15m`, under
 `[alerts]`) with a capped backoff; an alert that is still undelivered is lost and counted in
