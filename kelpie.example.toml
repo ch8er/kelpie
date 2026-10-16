@@ -75,6 +75,16 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # [engine.rules.output_offenders]  # no parameters: thresholds and owners are in
 #                                  # [traces.outputs]; needs [traces] enabled
 #
+# [engine.rules.return_causes]
+# window = "24h"            # returns counted
+# min_returns = 5           # ...at least this many for a finding
+# conflict_ratio_threshold = 0.5  # merge conflicts this share of returns -> hot files alert
+# hot_file_min_conflicts = 3      # conflicts naming a file that make it hot
+# dominant_ratio = 0.5      # otherwise: report a cause behind this share of returns
+# expected_shared = []      # default: conflict_warning's
+# [engine.rules.return_causes.cause_patterns]
+# flaky_tests = ['flaky', 'intermittent']  # classify returns by their reason
+#
 # [engine.rules.conflict_warning]
 # expected_shared = ["CHANGELOG.md"]  # glob patterns of files many tasks are meant to edit
 # serialize = false         # true: hold the later of two conflicting tasks (act mode, needs an

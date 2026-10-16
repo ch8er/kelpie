@@ -716,3 +716,32 @@ def test_kelpies_own_park_is_waiting_not_pre_work(board: Board) -> None:
     )
     (task,) = a.snapshot(NOW).tasks
     assert task.status is Status.WAITING and task.prework is False
+
+
+def test_review_returns_are_reported(board: Board) -> None:
+    board.task("t_1", "ready", ago(days=1), assignee="dev")
+    board.event("t_1", "changes_requested", ago(hours=3), {"reason": "merge conflict in a.py"})
+    board.event("t_1", "review_reopened", ago(hours=2))
+    board.event("t_1", "changes_requested", ago(days=3), {"reason": "older than lookback"})
+    board.event("t_1", "changes_requested", ago(hours=1), {"reason": 7})  # not a string
+    board.event("t_1", "changes_requested", ago(minutes=30), {"reason": "x" * 3000})
+    (task,) = adapter(board).snapshot(NOW).tasks
+    assert [(r.reason[:30], r.category) for r in task.returns] == [
+        ("older than lookback", "review"),  # a review loop is the task's whole history
+        ("merge conflict in a.py", "review"),
+        ("review reopened", "review"),
+        ("changes requested", "review"),
+        ("x" * 30, "review"),
+    ]
+    assert len(task.returns[-1].reason) == 2000
+
+
+def test_a_hermes_review_loop_reaches_ping_pong(board: Board) -> None:
+    from kelpie.rules.ping_pong import PingPong
+
+    board.task("t_1", "ready", ago(days=5), assignee="dev")
+    for days in (4, 3, 2):  # some of it older than lookback
+        board.event("t_1", "changes_requested", ago(days=days), {"reason": f"round {days}"})
+    snap = adapter(board).snapshot(NOW)
+    [escalation] = PingPong().evaluate(snap)
+    assert escalation.task_id == "t_1" and "3" in escalation.reason

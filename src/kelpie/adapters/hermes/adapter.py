@@ -140,6 +140,7 @@ from kelpie.core.model import (
     Dependency,
     Owner,
     OwnerKind,
+    Return,
     Session,
     Snapshot,
     Span,
@@ -229,6 +230,7 @@ BLOCK_EVENTS = ("blocked", "auto_blocked")
 # a card there holding up others is rule 3's "stuck before work" (incident 17).
 DEFAULT_PREWORK = ("triage", "scheduled")
 PREWORK_ALLOWED = frozenset({"triage", "scheduled"})  # todo: waiting for parents is queued
+MAX_RETURN_REASON = 2000  # characters of a review's reason kept on a return
 # Hermes block kinds that wait for an operator (``dependency`` waits in ``todo``).
 TYPED_BLOCKS = ("needs_input", "capability", "transient")
 
@@ -562,6 +564,7 @@ class HermesAdapter:
         splits = self._latest_events(conn, ("decomposed",))
         key = self._key() if parks else None
         claimed = self._claimed(conn, rows)
+        returns = self._returns(conn, {r["id"] for r in rows})
         tasks: list[Task] = []
         owners: set[str] = set()
         known: dict[str, sqlite3.Row] = {}
@@ -643,9 +646,36 @@ class HermesAdapter:
                     branch=str(_col(row, "branch_name") or "").strip() or None,
                     subtasks=_subtasks(splits.get(row["id"])),
                     prework=status is Status.BACKLOG and row["status"] in self.prework_statuses,
+                    returns=returns.get(row["id"], ()),
                 )
             )
         return tuple(tasks), owners, known, tuple(waits)
+
+    @staticmethod
+    def _returns(conn: _Connection, ids: set[str]) -> dict[str, tuple[Return, ...]]:
+        """Every time a task on the board was sent back, whatever its age (a review loop is
+        the task's history, not the last ``lookback``): a reviewer's ``changes_requested``
+        (with its reason) and a reopened review (``review_reopened``), both category
+        ``review``."""
+        rows = conn.execute(
+            "SELECT task_id, kind, payload, created_at FROM task_events"
+            " WHERE kind IN ('changes_requested', 'review_reopened')"
+            " ORDER BY task_id, created_at, id"
+        ).fetchall()
+        found: dict[str, list[Return]] = {}
+        for r in rows:
+            if r["task_id"] not in ids:
+                continue
+            at = _utc(r["created_at"])
+            if at is None:
+                continue
+            reason = _payload(r["payload"]).get("reason")
+            text = reason.strip() if isinstance(reason, str) and reason.strip() else None
+            fallback = r["kind"].replace("_", " ")  # "changes requested", "review reopened"
+            found.setdefault(r["task_id"], []).append(
+                Return(at, (text or fallback)[:MAX_RETURN_REASON], "review")
+            )
+        return {k: tuple(v) for k, v in found.items()}
 
     @staticmethod
     def _claimed(conn: _Connection, rows: Sequence[sqlite3.Row]) -> dict[str, str]:

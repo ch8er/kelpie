@@ -107,6 +107,7 @@ Fixture conventions:
 | 6 | `06-llm-quota-and-expired-auth.yaml` | `resources` | `alert` warning (rate limits), `alert` critical (expired auth); none for valid or non-expiring credentials |
 | 6 | `06-subscription-limit-forecast.yaml` | `loop_breaker` | `info` alerts saying "estimate": the next provider limit (`next_limit_at`) and the budget running out within the horizon, for the subscription agent on course to hit its limit; nothing for the slow-burning agent, no `stop` |
 | 7 | `07-shared-file-conflicts.yaml` | `return_causes` | `alert` recommendation with `hot_files` (conflicts dominate returns); `comment` on in-progress tasks T-705, T-706 touching them; none for T-707 |
+| 7 | `07-disjoint-files.yaml` | `return_causes` | conflicts dominate but share no file (the shared changelog is in `expected_shared`): only the informational `dominant_cause` alert; no hot-file alert, no comment |
 | 7 | `07-live-tasks-same-files.yaml` | `conflict_warning` | `comment` T-711 and T-712 naming each other and the shared files; `wait` T-712 (started later) until T-711 is done; nothing for T-713 (only the expected-shared changelog in common) or the finished T-714 |
 | 8 | `08-block-outlived-cause.yaml` | `stale_blocks` | `unblock` T-801, reason mentions the 3h delay; T-802 (PR not merged) stays blocked |
 | 9 | `09-sequential-chain-idle.yaml` | `bottlenecks` | `alert` suggesting parallelization, idle agents and `critical_path_length`; nothing for reviewer work T-906, no `escalate` |

@@ -449,8 +449,15 @@ def load_rules(
 def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
     """A rule's config section. ``loop_breaker`` polls the same checks rule 2 coaches, so it
     inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own; ``orphan_status``
-    inherits ``bottlenecks``' hold labels the same way."""
+    inherits ``bottlenecks``' hold labels and ``return_causes`` ``conflict_warning``'s
+    ``expected_shared`` the same way."""
     section = dict(config.rules.get(name, {}))
+    if name == "return_causes" and "expected_shared" not in section:
+        # Files many tasks are meant to edit are not conflict hot spots either.
+        shared = config.rules.get("conflict_warning", {}).get("expected_shared")
+        if shared is not None:
+            section["expected_shared"] = shared
+        return section
     if name == "orphan_status" and "hold_labels" not in section:
         # Held tasks are parked on purpose: rule 3's stop patterns skip what rule 6 calls held.
         held = _hold_labels(config.rules.get("bottlenecks", {}))
