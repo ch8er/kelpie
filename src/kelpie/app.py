@@ -1298,10 +1298,14 @@ def _github_status(settings: Settings) -> list[str]:
         lines.append(f"github ci: builds of {', '.join(ci.repos)}, {cancel}")
         if ci.billing_account is not None:
             kind = "organization" if ci.billing_organization else "user"
+            try:
+                ci.billing_token()
+                auth = f"token from ${ci.billing_token_env}"
+            except ValueError as exc:  # names the variable, never the value
+                auth = f"NOT ready: {exc}"
             lines.append(
                 f"github ci: minutes used from the billing usage of {kind} "
-                f"{ci.billing_account}, every {ci.billing_interval} (token from "
-                f"${ci.billing_token_env})"
+                f"{ci.billing_account}, every {ci.billing_interval} ({auth})"
             )
     return lines
 

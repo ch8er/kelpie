@@ -498,14 +498,20 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # on cancel_repos only, used for the cancel request only
 #
 # Minutes used, for rule 9's "quota exhausted" (critical, with the tasks waiting on CI):
-# read from GitHub's billing usage report (enhanced billing platform), Actions items in
-# minutes since quota_reset_day, as reported (no Windows/macOS multipliers). Off unless
-# set; needs included_minutes. The token may read the account's billing and is used for
-# nothing else: keep it out of the token above.
+# read from GitHub's billing usage report (enhanced billing platform): Actions minutes of
+# the standard runners since quota_reset_day, as reported (no Windows/macOS multipliers, so
+# the reading errs low). Minutes of public repositories are free but may be in the report:
+# do not use this if the account also runs Actions on public repositories. Off unless set;
+# needs included_minutes. The token must be able to read the account's billing usage (for
+# a user, a fine-grained token with the "Plan" permission, read; for an organization, one
+# of an owner or billing manager) and is used for nothing else: it must not be the token
+# above or the cancel token. A report over 4 MiB (very large organizations) is not read.
 # billing_user = "your-login"       # or billing_org = "your-org" (one of them)
 # billing_token_env = "KELPIE_GITHUB_BILLING_TOKEN"  # required with billing_user/org
 # billing_interval = "15m"          # one read this often (5m to 1h); at most rule 9's
 #                                   # max_reading_age, or readings go stale in between
+# billing_skus = ["actions_linux", "actions_windows", "actions_macos"]  # what counts against
+#                                   # included_minutes (larger runners never do)
 #
 # Blocks that are really waits. When a blocked task's reason matches a pattern and names a
 # PR GitHub has confirmed to exist, Kelpie attaches a condition of that kind to the block,

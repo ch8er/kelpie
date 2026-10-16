@@ -149,6 +149,7 @@ _KEYS = {
     "billing_org",
     "billing_token_env",
     "billing_interval",
+    "billing_skus",
 }
 
 
@@ -177,6 +178,7 @@ class CiSettings:
     billing_organization: bool = False
     billing_token_env: str | None = None
     billing_interval: timedelta = usage.DEFAULT_INTERVAL
+    billing_skus: tuple[str, ...] = usage.DEFAULT_SKUS
 
     def cancel_token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The cancel-only token from ``$cancel_token_env``; None when not configured.
@@ -262,6 +264,9 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
     ):
         raise ValueError(f"{where} cancel_token_env must be an environment variable name")
     account, organization, billing_env, billing_interval = _billing(section, included, where)
+    if billing_env is not None and billing_env == token_env:
+        raise ValueError(f"{where} billing_token_env must not be cancel_token_env: one token each")
+    skus = _strings(section, "billing_skus", where) or usage.DEFAULT_SKUS
     reserve = section.get("rate_reserve", DEFAULT_RATE_RESERVE)
     if isinstance(reserve, bool) or not isinstance(reserve, int) or not 0 <= reserve <= 4000:
         raise ValueError(f"{where} rate_reserve must be an integer from 0 to 4000")
@@ -287,6 +292,7 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
         billing_organization=organization,
         billing_token_env=billing_env,
         billing_interval=billing_interval,
+        billing_skus=tuple(s.lower() for s in skus),
     )
 
 

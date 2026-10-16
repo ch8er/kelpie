@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -29,6 +30,8 @@ from kelpie.connectors.github.client import (
 from kelpie.connectors.github.connector import GitHubConnector, valid_repo
 from kelpie.connectors.github.pulls import PullSettings, load_pulls
 from kelpie.core.serde import parse_duration
+
+log = logging.getLogger(__name__)
 
 DEFAULT_TOKEN_ENV = "GITHUB_TOKEN"
 MAX_TIMEOUT = timedelta(seconds=60)
@@ -124,13 +127,22 @@ class GitHubSettings:
         billing = None
         billing_token = self.ci.billing_token(environ)
         if billing_token is not None and self.ci.billing_account is not None:
+            main = environ.get(self.token_env, "").strip()
+            if main and main == billing_token:
+                log.warning(
+                    "[connectors.github.ci] $%s holds the same token as $%s: the token that "
+                    "reads PRs and runs can then read billing too; use a token of its own",
+                    self.ci.billing_token_env,
+                    self.token_env,
+                )
+            # Its own client, without the main client's metrics: its rate limit and its
+            # refusals are not the main token's.
             billing_client = GitHubClient(
                 self.api_url,
                 billing_token,
                 timeout=self.timeout,
                 cache_ttl=self.cache_ttl,
                 clock=clock,
-                observer=observer or connector.client.observer,
             )
             billing = CiBilling(
                 billing_client,
@@ -138,6 +150,8 @@ class GitHubSettings:
                 organization=self.ci.billing_organization,
                 interval=self.ci.billing_interval,
                 reset_day=self.ci.quota_reset_day,
+                skus=self.ci.billing_skus,
+                budget=self.ci.tick_budget,
             )
         return GitHubCI(connector.client, self.ci, cancel_client, billing)
 
@@ -190,6 +204,11 @@ def load_github(section: Any) -> GitHubSettings:
         raise ValueError("[connectors.github] enabled must be true or false")
     repos = list(dict.fromkeys(r.lower() for r in repos))
     ci = load_ci(section["ci"], repos) if "ci" in section else None
+    if ci is not None and ci.billing_token_env is not None and ci.billing_token_env == token_env:
+        raise ValueError(
+            "[connectors.github.ci] billing_token_env must not be [connectors.github] "
+            "token_env: billing gets a token of its own"
+        )
     pulls = load_pulls(section["pulls"]) if "pulls" in section else None
     return GitHubSettings(
         repos=tuple(repos),

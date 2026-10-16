@@ -5,8 +5,6 @@ of its own, and rule 9 says the cause is billing, naming the tasks that wait.
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from tests.sim.farm import BILLING_TOKEN_ENV, REPO, Farm
 from tests.sim.github import BILLING_TOKEN, TOKEN
 
@@ -27,6 +25,12 @@ def blocked_on_ci(farm: Farm, task_id: str, pr: int) -> None:
     farm.github.checks(REPO, pull.head_sha, "pending")
 
 
+def reset_day(farm: Farm) -> int:
+    """The quota resets today (at 00:00 UTC; at most on the 28th), so the period cannot end
+    while the scenario runs, whatever the date."""
+    return min(farm.now.day, 28)
+
+
 def ci_config(farm: Farm) -> dict:
     return farm.config(
         {"ci_economy": {"mode": "suggest"}},
@@ -37,7 +41,7 @@ def ci_config(farm: Farm) -> dict:
                 "github": {
                     "ci": {
                         "included_minutes": 3000,
-                        "quota_reset_day": 1,
+                        "quota_reset_day": reset_day(farm),
                         "billing_user": ACCOUNT,
                         "billing_token_env": BILLING_TOKEN_ENV,
                         "billing_interval": "5m",
@@ -52,13 +56,11 @@ def test_incident_05_exhausted_ci_minutes_name_billing_and_the_waiting_tasks(far
     farm.github.repo(REPO)
     for i, pr in enumerate((51, 52, 53)):
         blocked_on_ci(farm, f"t_ci{i}", pr)
-    # The whole quota went this period, a little every day since the reset.
-    start = farm.now.replace(day=1, hour=0, minute=0, second=0)
-    days = max((farm.now - start).days + 1, 1)
-    for d in range(days):  # whole minutes, the remainder on the last day: exactly 3000
-        share = 3000 // days + (3000 % days if d == days - 1 else 0)
-        farm.github.minutes(ACCOUNT, start + timedelta(days=d), share)
-    farm.github.minutes(ACCOUNT, start - timedelta(days=2), 900)  # last period: not counted
+    # The whole quota went this period (since the reset, 00:00 UTC on the reset day).
+    start = farm.now.replace(day=reset_day(farm), hour=0, minute=0, second=0)
+    farm.github.minutes(ACCOUNT, start, 2000)
+    farm.github.minutes(ACCOUNT, farm.now, 1000)
+    farm.github.minutes(ACCOUNT, farm.now, 4000, sku="actions_linux_16_core")  # not included
     farm.serve(ci_config(farm))
 
     text = farm.wait_message("ci_economy", "exhausted")
