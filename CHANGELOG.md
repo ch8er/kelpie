@@ -166,8 +166,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   checklist, the gate before act mode ([#46](https://github.com/ch8er/kelpie/pull/46), [#138](https://github.com/ch8er/kelpie/pull/138)).
 - `kelpie demo`: a working day of real farm incidents (a stale block, a runaway loop, a
   forgotten hold, a human task gating agents) on a simulated Hermes farm (`kelpie.sim`),
-  with the real Kelpie watching and the day's report at the end; offline, no config
-  ([#134](https://github.com/ch8er/kelpie/pull/134), [#151](https://github.com/ch8er/kelpie/pull/151)).
+  with the real Kelpie watching and the day's report at the end; offline, no config.
+  `--web` opens the report as a self-contained web page ([#134](https://github.com/ch8er/kelpie/pull/134), [#151](https://github.com/ch8er/kelpie/pull/151),
+  [#152](https://github.com/ch8er/kelpie/pull/152)).
 - Multi-host, work in progress: the design (`docs/multi-host.md`) and the first two steps,
   `kelpie agent` and the authenticated, bounded transport. `kelpie serve` does not yet
   accept agent reports, so multi-host is not usable end to end in this pre-release

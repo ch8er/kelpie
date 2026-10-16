@@ -321,3 +321,62 @@ def test_colour_and_pauses_only_on_a_terminal(monkeypatch: pytest.MonkeyPatch) -
     slept.clear()
     Narrator(piped).title("Kelpie")
     assert piped.getvalue() == "Kelpie\n" and slept == []
+
+
+def test_web_writes_the_report_as_a_page_and_opens_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    monkeypatch.setenv("DISPLAY", ":0")
+    out = io.StringIO()
+    code, outcomes = run(fast=True, web=True, out=out, err=io.StringIO())
+    assert code == 0 and outcomes is not None
+    (page,) = tmp_path.glob("kelpie-demo-web-*/kelpie-demo-report.html")
+    assert opened == [page.resolve().as_uri()]
+    html = page.read_text(encoding="utf-8")
+    assert "<h2>Cost of chaos</h2>" in html and "<code>t_heartbeat</code>" in html
+    assert f"The report as a web page:\n  {page}\n(sent to your browser)\n" in out.getvalue()
+    assert not list(tmp_path.glob("kelpie-demo-[!w]*"))  # the farm itself is gone
+
+
+def test_web_without_a_display_only_prints_the_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a server or over SSH, Python would fall back to a text browser in the terminal."""
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr("webbrowser.open", lambda url: pytest.fail("no browser to open"))
+    out = io.StringIO()
+    code, _ = run(fast=True, web=True, keep=True, root=tmp_path / "farm", out=out)
+    assert code == 0
+    page = tmp_path / "farm" / "kelpie-demo-report.html"
+    assert page.exists()  # kept with the farm
+    assert f"The report as a web page:\n  {page}\n" in out.getvalue()
+    assert "sent to your browser" not in out.getvalue()
+
+
+def test_web_survives_a_browser_error_and_a_page_it_cannot_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import webbrowser
+
+    def broken(url: str) -> bool:
+        raise webbrowser.Error("no runnable browser")
+
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr("webbrowser.open", broken)
+    out = io.StringIO()
+    code, _ = run(fast=True, web=True, root=tmp_path / "a", out=out)
+    assert code == 0 and "sent to your browser" not in out.getvalue()
+
+    def unwritable(*args: object, **kwargs: object) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr("kelpie.demo.html.render", unwritable)
+    err = io.StringIO()
+    code, _ = run(fast=True, web=True, root=tmp_path / "b", out=io.StringIO(), err=err)
+    assert code == 0
+    assert "the report page could not be written: read-only file system" in err.getvalue()

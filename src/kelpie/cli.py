@@ -95,6 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="keep the farm directory: its board, config, Kelpie's log and the full report",
     )
+    demo.add_argument("--web", action="store_true", help="also open the day's report as a web page")
 
     spool = sub.add_parser("spool", help="maintain the hooks spools on this host")
     spool_sub = spool.add_subparsers(dest="spool_command", required=True)
@@ -116,7 +117,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "demo":
         from kelpie.demo import run as run_demo
 
-        return run_demo(fast=args.fast, keep=args.keep, log_level=args.log_level.upper())[0]
+        return run_demo(
+            fast=args.fast, keep=args.keep, web=args.web, log_level=args.log_level.upper()
+        )[0]
     if args.command == "doctor":
         from kelpie.doctor import run as run_doctor
 

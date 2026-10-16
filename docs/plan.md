@@ -227,7 +227,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [x] Multi-host: `kelpie agent` on each agent machine, central `kelpie serve` anywhere (blocks the release)
 - [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring
 - [ ] Whole-codebase security audit after the code-health pass (blocks the release)
-- [ ] `kelpie demo`: the farm simulator replays real incidents so anyone can see Kelpie work in two minutes without a farm
+- [x] `kelpie demo`: the farm simulator replays real incidents so anyone can see Kelpie work in two minutes without a farm
 - [ ] Documentation and publication of the open core
 - [ ] 10 conversations with farm owners
 
