@@ -14,9 +14,9 @@ Each comment is made once per role, command and filter within the ledger's
 before/after. An offender that adopted a filter (its latest call ran through one) is no
 longer an offender.
 
-In act mode the comment goes through the task's platform adapter (Hermes cannot comment
-yet: the action fails and Kelpie alerts instead); in observe and suggest mode it is an
-alert. The daily report lists the same offenders under "needs a human".
+In act mode the comment goes through the task's platform adapter (Hermes: ``hermes kanban
+comment``); in observe and suggest mode it is an alert. The daily report lists the same
+offenders under "needs a human".
 """
 
 from __future__ import annotations

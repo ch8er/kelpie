@@ -158,7 +158,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | 13 | `needs_you` | P1 | implemented | `escalate` | alert channel |
 | 14 | `compaction_gate` | P2 | not implemented | | |
 | – | `return_causes` | P1 | not implemented | | |
-| – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (not in Hermes yet) |
+| – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
 
 Several rules share these terms:
 
