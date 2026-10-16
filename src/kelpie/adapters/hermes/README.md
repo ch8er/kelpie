@@ -215,6 +215,8 @@ mode `0600`. Hooks never raise and do no network I/O.
 | `decomposed` event (`child_ids`) | `subtasks`: rule 3 asks to close a parent whose subtasks are all finished |
 | `status` in `prework_statuses` (triage, scheduled) | `prework`: rule 3 alerts on a card held there past `prework_after` with dependents |
 | `changes_requested` (reason), `review_reopened` events | `returns` (category `review`), over the task's whole history: rule 4 (`ping_pong`) counts review rounds from them, `return_causes` their causes |
+| a `status` move out of done (not to archived) after `completed` or a move to done | `reopened_at`: rule 1's reopened-after-done rate |
+| `completed` / `review_requested` events' `artifacts` (with their run); `task_attachments` uploaded by a run's profile | artifacts of that run (an attachment: the uploader's latest run on the task that started before the upload; a person's upload or one before any run is no run's): rule 1's evidence for "done" |
 | `task_events`, latest status-changing event | `status_since` (non-status events such as `heartbeat`, `commented`, `claim_extended` are ignored) |
 | `task_links` (parent, child) | `Dependency(child, depends_on=parent)` (links to archived parents dropped) |
 | `task_runs` row | `Session` `hermes-run-<id>` |

@@ -32,6 +32,7 @@ class RoleGauges(NamedTuple):
     ownerless_queue: int
     done_24h: int
     returns_24h: int
+    reopened_24h: int = 0  # done tasks moved back out of done
 
 
 def _escape(value: str) -> str:
@@ -329,13 +330,14 @@ class Metrics:
 
     def _throughput(self, snapshot: Snapshot, loads: Mapping[str, RoleLoad]) -> None:
         """Agents, agents with work and the ownerless queue per role (as the bottlenecks
-        rule counts them), tasks done and returns over the last 24h, and open tasks per
+        rule counts them), tasks done, returns and reopens over the last 24h, and open tasks per
         stage. Not the daily report's utilization, queue or rework rate: those are measured
         over a day (:mod:`kelpie.report.throughput`)."""
         now, day = snapshot.now, timedelta(days=1)
         of_task = task_roles(snapshot.tasks, snapshot.owners)
         done: Counter[str] = Counter()
         returns: Counter[str] = Counter()
+        reopened: Counter[str] = Counter()
         self.stages = Counter()
         live = {s.task_id for s in snapshot.sessions if is_live(s, now)}
         for t in snapshot.tasks:
@@ -343,6 +345,7 @@ class Metrics:
             if t.status is Status.DONE and now - day <= t.status_since <= now:
                 done[role] += 1
             returns[role] += sum(1 for r in t.returns if now - day <= r.at <= now)
+            reopened[role] += sum(1 for at in t.reopened_at if now - day <= at <= now)
             if (stage := live_stage(t, t.id in live)) is not None:
                 self.stages[(stage, role)] += 1
         for role in {role for _, role in self.stages} | set(loads):
@@ -355,8 +358,14 @@ class Metrics:
                 ownerless_queue=len(loads[role].queue) if role in loads else 0,
                 done_24h=done[role],
                 returns_24h=returns[role],
+                reopened_24h=reopened[role],
             )
-            for role in sorted(set(loads) | set(done) | {r for r, n in returns.items() if n})
+            for role in sorted(
+                set(loads)
+                | set(done)
+                | {r for r, n in returns.items() if n}
+                | {r for r, n in reopened.items() if n}
+            )
         }
 
     def tick_failed(self, engine: Engine) -> None:
@@ -534,12 +543,29 @@ class Metrics:
                 "returns_24h",
                 "Returns (sent back) of the role's tasks in the last 24h.",
             ),
+            (
+                "kelpie_role_reopened_after_done_24h",
+                "reopened_24h",
+                "Done tasks of the role moved back out of done in the last 24h.",
+            ),
         )
         for name, field, help_ in names:
             samples = [
                 f"{name}{_labels(role=r)} {getattr(v, field)}" for r, v in self.roles.items()
             ]
             metric(name, "gauge", help_, samples)
+        metric(
+            "kelpie_role_reopened_after_done_ratio",
+            "gauge",
+            "Of the role's completions in the last 24h (tasks still done, plus those reopened "
+            "since), the share reopened; roles with a completion only.",
+            [
+                f"kelpie_role_reopened_after_done_ratio{_labels(role=r)} "
+                f"{v.reopened_24h / (v.done_24h + v.reopened_24h):.4g}"
+                for r, v in self.roles.items()
+                if v.done_24h + v.reopened_24h
+            ],
+        )
         metric(
             "kelpie_tasks_by_stage",
             "gauge",

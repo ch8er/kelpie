@@ -1825,6 +1825,15 @@
           "refId": "A",
           "expr": "kelpie_role_returns_24h / (kelpie_role_tasks_done_24h > 0)",
           "legendFormat": "{{role}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "kelpie_role_reopened_after_done_ratio",
+          "legendFormat": "{{role}} reopened after done"
         }
       ],
       "fieldConfig": {
@@ -1833,7 +1842,7 @@
         },
         "overrides": []
       },
-      "description": "Returns of the role's tasks in the last 24h over its tasks done in that time. Not the daily report's rework rate (share of active tasks sent back)."
+      "description": "Returns of the role's tasks in the last 24h over its tasks done in that time, and the share of its completions reopened after done. Not the daily report's rework rate (share of active tasks sent back)."
     }
   ],
   "templating": {

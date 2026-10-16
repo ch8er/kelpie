@@ -63,23 +63,27 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         "progress with no session running), averaged over the day; queue at end: those still "
         "waiting at midnight (the live gauge counts ownerless tasks only). Rework: share of "
         "the role's active tasks sent back within the day (the live gauges give returns per "
-        "done task).",
+        "done task). Reopened: done tasks moved back out of done within the day, over the "
+        "day's completions (those still done plus those reopened; rule 1's \"done\" needs "
+        "evidence).",
         "",
         "| Role | Agents | Utilization | Completed | Tasks/hour | Hand-offs/hour | "
-        f"Mean queue | Queue at end | Rework | Cost per completed task{est} |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        f"Mean queue | Queue at end | Rework | Reopened | Cost per completed task{est} |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     listed = {r.role for r in roles}
     unpriced = 0
     for r in roles:
         util = "-" if r.utilization is None else f"{r.utilization:.0%}"
         rework = "-" if r.rework_rate is None else f"{r.rework_rate:.0%} ({r.returns} return(s))"
+        completions = len(r.completed) + r.reopened  # a reopened task completed first
+        reopened = f"{r.reopened} of {completions}" if completions else "-"
         spend = ctx.price(spent.get(r.role, ()))
         unpriced += spend.unpriced_tokens
         lines.append(
             f"| {md.text(r.role)} | {r.agents} | {util} | {len(r.completed)} | "
             f"{r.tasks_per_hour:.2f} | {r.handoffs_per_hour:.2f} | {r.mean_queue:.1f} | "
-            f"{r.queue_now} | {rework} | {_per_task(spend, len(r.completed))} |"
+            f"{r.queue_now} | {rework} | {reopened} | {_per_task(spend, len(r.completed))} |"
         )
     lines += [
         "",

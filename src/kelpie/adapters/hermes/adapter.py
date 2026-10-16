@@ -134,6 +134,7 @@ from kelpie.adapters.hermes.stop import (
 )
 from kelpie.core.actions import ActionResult
 from kelpie.core.model import (
+    Artifact,
     Block,
     Condition,
     ConditionKind,
@@ -220,6 +221,11 @@ NON_STATUS_EVENTS = (
     "completion_blocked_empty_result",
     # written by the dispatcher or an operator without changing the status
     "terminal_worker_reaped",
+    # bookkeeping of a worker's turns and PR receipts, also after a task completed
+    "worker_bound",
+    "worker_result",
+    "owner_admitted",
+    "pr_acceptance",
     "model_override_set",
     "reasoning_effort_set",
     "tip_scratch_workspace",
@@ -231,6 +237,8 @@ BLOCK_EVENTS = ("blocked", "auto_blocked")
 DEFAULT_PREWORK = ("triage", "scheduled")
 PREWORK_ALLOWED = frozenset({"triage", "scheduled"})  # todo: waiting for parents is queued
 MAX_RETURN_REASON = 2000  # characters of a review's reason kept on a return
+MAX_ARTIFACT_PATH = 500  # characters of an artifact path kept
+AGENT_UPLOADER = "agent"  # task_attachments.uploaded_by of Hermes' kanban_attach tool
 # Hermes block kinds that wait for an operator (``dependency`` waits in ``todo``).
 TYPED_BLOCKS = ("needs_input", "capability", "transient")
 
@@ -263,6 +271,113 @@ def _subtasks(event: sqlite3.Row | None) -> tuple[str, ...]:
     if not isinstance(ids, list):
         return ()
     return tuple(dict.fromkeys(str(i) for i in ids if isinstance(i, str) and i.strip()))
+
+
+def _reopens(conn: _Connection, ids: set[str]) -> dict[str, tuple[datetime, ...]]:
+    """When a done task was moved back out of done: a ``status`` move to anything but done
+    or archived after it was done (a ``completed`` event, or a later ``status`` move to
+    done). Only tasks that ever completed are read. A done task Hermes moves back because an
+    ancestor was reopened (``reason: ancestor_reopened``) is not counted: the ancestor's own
+    reopen is, once."""
+    rows = conn.execute(
+        "SELECT task_id, kind, payload, created_at FROM task_events"
+        " WHERE kind IN ('completed', 'status') AND task_id IN"
+        " (SELECT DISTINCT task_id FROM task_events WHERE kind = 'completed')"
+        " ORDER BY task_id, created_at, id"
+    ).fetchall()
+    found: dict[str, list[datetime]] = {}
+    done: dict[str, bool] = {}
+    for r in rows:
+        tid = r["task_id"]
+        if tid not in ids:
+            continue
+        payload = _payload(r["payload"])
+        to = payload.get("status") if r["kind"] == "status" else "done"
+        if payload.get("reason") == "ancestor_reopened":
+            done[tid] = False
+            continue
+        if to in ("done", "archived"):
+            done[tid] = True
+        elif done.get(tid) and isinstance(to, str):
+            done[tid] = False
+            if (at := _utc(r["created_at"])) is not None:
+                found.setdefault(tid, []).append(at)
+    return {k: tuple(v) for k, v in found.items()}
+
+
+def _evidence(
+    conn: _Connection, ids: set[str], cutoff: datetime
+) -> list[tuple[str, int | str, str, datetime]]:
+    """What a run left as evidence: ``(task, run id or uploader, path, when)`` for the
+    artifacts a ``completed`` or ``review_requested`` event lists (with its run) and for files
+    attached to the task (``task_attachments``, by who uploaded them; none on older
+    schemas)."""
+    found: list[tuple[str, int | str, str, datetime]] = []
+    rows = conn.execute(
+        "SELECT task_id, run_id, payload, created_at FROM task_events"
+        " WHERE kind IN ('completed', 'review_requested') AND run_id IS NOT NULL"
+        " AND created_at >= ?",
+        (int(cutoff.timestamp()),),
+    ).fetchall()
+    for r in rows:
+        at = _utc(r["created_at"])
+        paths = _payload(r["payload"]).get("artifacts")
+        if r["task_id"] not in ids or at is None or not isinstance(paths, list):
+            continue
+        found.extend(
+            (r["task_id"], int(r["run_id"]), str(p)[:MAX_ARTIFACT_PATH], at)
+            for p in paths
+            if isinstance(p, str) and p.strip()
+        )
+    try:
+        rows = conn.execute(
+            "SELECT task_id, filename, uploaded_by, created_at FROM task_attachments"
+            " WHERE created_at >= ?",
+            (int(cutoff.timestamp()),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return found
+    for r in rows:
+        at = _utc(r["created_at"])
+        who = (r["uploaded_by"] or "").strip() if isinstance(r["uploaded_by"], str) else ""
+        if r["task_id"] in ids and at is not None and who and isinstance(r["filename"], str):
+            found.append((r["task_id"], who, r["filename"][:MAX_ARTIFACT_PATH], at))
+    return found
+
+
+def _with_evidence(
+    sessions: tuple[Session, ...], evidence: Sequence[tuple[str, int | str, str, datetime]]
+) -> tuple[Session, ...]:
+    """Evidence as artifacts of the run that left it: the run a completion event names, or
+    for an attachment, the latest run on the task that started before the upload, of the
+    uploading profile (``hermes kanban attach`` records it) or of any profile when the
+    uploader is ``agent`` (Hermes' attach tool). Files a person or the dashboard uploaded,
+    or uploaded before any run, are no run's evidence."""
+    if not evidence:
+        return sessions
+    by_id = {s.id: s for s in sessions}
+    runs: dict[tuple[str, str], list[Session]] = {}
+    for s in sessions:
+        runs.setdefault((s.task_id, s.owner_id), []).append(s)
+    extra: dict[str, list[Artifact]] = {}
+    for task_id, source, path, at in evidence:
+        if isinstance(source, int):
+            run_id = f"hermes-run-{source}"
+            if run_id in by_id and by_id[run_id].task_id == task_id:
+                extra.setdefault(run_id, []).append(Artifact(path, at))
+            continue
+        if source == AGENT_UPLOADER:
+            candidates = [s for (t, _), ss in runs.items() if t == task_id for s in ss]
+        else:
+            candidates = list(runs.get((task_id, source), ()))
+        mine = [s for s in candidates if s.started_at <= at]
+        if mine:
+            run = max(mine, key=lambda s: (s.started_at, s.id))
+            extra.setdefault(run.id, []).append(Artifact(path, at))
+    return tuple(
+        replace(s, artifacts=s.artifacts + tuple(extra[s.id])) if s.id in extra else s
+        for s in sessions
+    )
 
 
 def _run_id(raw: Any) -> int | None:
@@ -513,6 +628,7 @@ class HermesAdapter:
                 ids = {t.id for t in tasks}
                 dependencies = self._dependencies(conn, ids)
                 sessions, profiles = self._sessions(conn, ids, rows, cutoff, now, beats)
+                sessions = _with_evidence(sessions, _evidence(conn, ids, cutoff))
         except sqlite3.Error as exc:
             raise HermesError(f"cannot read Hermes kanban database {self.db_path}: {exc}") from exc
         if self.git_state:  # outside the read transaction: git may be slow
@@ -565,6 +681,7 @@ class HermesAdapter:
         key = self._key() if parks else None
         claimed = self._claimed(conn, rows)
         returns = self._returns(conn, {r["id"] for r in rows})
+        reopens = _reopens(conn, {r["id"] for r in rows})
         tasks: list[Task] = []
         owners: set[str] = set()
         known: dict[str, sqlite3.Row] = {}
@@ -647,6 +764,7 @@ class HermesAdapter:
                     subtasks=_subtasks(splits.get(row["id"])),
                     prework=status is Status.BACKLOG and row["status"] in self.prework_statuses,
                     returns=returns.get(row["id"], ()),
+                    reopened_at=reopens.get(row["id"], ()),
                 )
             )
         return tuple(tasks), owners, known, tuple(waits)
@@ -747,9 +865,10 @@ class HermesAdapter:
             started = _utc(r["started_at"])
             if r["task_id"] not in ids or started is None:
                 continue
-            if r["outcome"] == "scheduled" and r["ended_at"] == r["started_at"]:
-                # The zero-length run Hermes records when a ready task is scheduled (a park):
-                # nobody worked, and its profile must not look active.
+            if r["outcome"] in ("scheduled", "completed") and r["ended_at"] == r["started_at"]:
+                # A zero-length run Hermes synthesizes when a task with no active run is
+                # scheduled (a park) or completed (a person approving a review): nobody
+                # worked, its profile must not look active, nor the closure an agent's.
                 continue
             task = tasks[r["task_id"]]
             profile = (r["profile"] or "").strip()

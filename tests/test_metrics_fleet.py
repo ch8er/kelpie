@@ -84,3 +84,31 @@ def test_failing_snapshot_source_keeps_the_gauges_and_counts_a_failure() -> None
     assert 'kelpie_idle_agents{role="coder"} 1' in text
     assert "kelpie_engine_tick_failures_total 1" in text
     assert "kelpie_engine_ticks_total 1" in text
+
+
+def test_reopened_after_done_rate_per_role() -> None:
+    from kelpie.core.model import Return
+
+    tasks = (
+        Task("A", "A", Status.DONE, NOW - timedelta(hours=2), "coder"),
+        Task("B", "B", Status.DONE, NOW - timedelta(hours=3), "coder"),
+        Task(
+            "C",
+            "C",
+            Status.READY,
+            NOW - timedelta(hours=1),
+            "coder",
+            reopened_at=(NOW - timedelta(hours=1), NOW - timedelta(days=3)),  # one too old
+            returns=(Return(NOW - timedelta(hours=1), "needs tests", "review"),),
+        ),
+        Task("D", "D", Status.READY, NOW, "tester"),
+    )
+    metrics = Metrics()
+    loop = ControlLoop(Engine([]), lambda: Snapshot(now=NOW, tasks=tasks), metrics)
+    loop.tick_once()
+    text = metrics.render()
+    assert 'kelpie_role_reopened_after_done_24h{role="coder"} 1' in text
+    # 2 tasks still done + 1 reopened = 3 completions in the day
+    assert 'kelpie_role_reopened_after_done_ratio{role="coder"} 0.3333' in text
+    assert 'kelpie_role_returns_24h{role="coder"} 1' in text  # reopens are not returns
+    assert 'kelpie_role_reopened_after_done_ratio{role="tester"}' not in text  # none done
