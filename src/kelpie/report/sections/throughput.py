@@ -7,6 +7,7 @@ from collections import defaultdict
 
 from kelpie.core.spans import TokenUsage, usage
 from kelpie.core.stages import STAGES, UNKNOWN_ROLE, task_roles
+from kelpie.report import md
 from kelpie.report.sections import Section, SectionContext, Spend, register_section
 from kelpie.report.throughput import throughput
 
@@ -18,10 +19,6 @@ STAGE_NAMES = {
     "waiting": "Waiting for conditions",
     "ownerless": "Ownerless",
 }
-
-
-def _cell(text: str) -> str:
-    return " ".join(text.split()).replace("|", "\\|")
 
 
 def _per_task(spend: Spend, completed: int) -> str:
@@ -80,7 +77,7 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         spend = ctx.price(spent.get(r.role, ()))
         unpriced += spend.unpriced_tokens
         lines.append(
-            f"| {_cell(r.role)} | {r.agents} | {util} | {len(r.completed)} | "
+            f"| {md.text(r.role)} | {r.agents} | {util} | {len(r.completed)} | "
             f"{r.tasks_per_hour:.2f} | {r.handoffs_per_hour:.2f} | {r.mean_queue:.1f} | "
             f"{r.queue_now} | {rework} | {_per_task(spend, len(r.completed))} |"
         )
@@ -97,7 +94,7 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         extra = ctx.price(u for r in others for u in spent[r])
         unpriced += extra.unpriced_tokens
         lines.append(
-            f"Spend of roles not listed ({', '.join(_cell(r) for r in others)}): "
+            f"Spend of roles not listed ({', '.join(md.text(r) for r in others)}): "
             f"{extra.tokens:,} tokens, ${extra.usd:,.2f}{est}."
         )
     if unpriced:
@@ -113,7 +110,7 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         ]
         for r in staged:
             cells = " | ".join(f"{r.stages.get(s, 0.0):.1f}" for s in STAGES)
-            lines.append(f"| {_cell(r.role)} | {cells} |")
+            lines.append(f"| {md.text(r.role)} | {cells} |")
     lines += [
         "",
         "Stages are rebuilt from the board's current statuses, the sessions and their "
