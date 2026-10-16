@@ -395,3 +395,15 @@ def test_wait_key_defaults_next_to_the_ledger(
     assert explicit.hermes is not None and explicit.hermes.wait_key == Path("/k/key")
     with pytest.raises(ConfigError, match="wait_key"):
         load_settings(write(tmp_path, '[adapters.hermes]\nwait_key = ""\n'))
+
+
+def test_prework_statuses_setting(tmp_path: Path) -> None:
+    settings = load_settings(write(tmp_path, "[adapters.hermes]\n"))
+    assert settings.hermes is not None and settings.hermes.prework_statuses == (
+        "triage",
+        "scheduled",
+    )
+    custom = load_settings(write(tmp_path, '[adapters.hermes]\nprework_statuses = ["triage"]\n'))
+    assert custom.hermes is not None and custom.hermes.prework_statuses == ("triage",)
+    with pytest.raises(ConfigError, match="prework_statuses"):
+        load_settings(write(tmp_path, '[adapters.hermes]\nprework_statuses = ["running"]\n'))

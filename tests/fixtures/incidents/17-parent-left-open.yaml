@@ -1,0 +1,58 @@
+id: "17-parent-left-open"
+incident: 17
+title: "A parent stays open after all its subtasks are done"
+description: >
+  A rough idea was split into three subtasks. Each closed within an hour of its PR merging,
+  but nobody closed the parent: it sat in ready, and the release work behind it waited.
+  Kelpie must ask to close the parent, naming what waits behind it, and propose close. A
+  parent with a subtask still open, and a task whose subtasks are done but which still has
+  an open PR of its own, are left alone.
+rule: orphan_status
+config: {}
+snapshot:
+  now: "2026-03-02T18:00:00+00:00"
+  owners:
+    - {id: agent-orch-1, role: orchestrator}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # The parent left open: its three subtasks finished, the last 5 h ago.
+    - {id: T-1700, title: "Store front", status: ready, status_since: "2026-03-02T13:00:00+00:00", role: orchestrator, assignee: agent-orch-1, subtasks: [T-1701, T-1702, T-1703]}
+    - {id: T-1701, title: "Catalog API", status: done, status_since: "2026-03-02T10:00:00+00:00", role: developer}
+    - {id: T-1702, title: "Cart page", status: done, status_since: "2026-03-02T12:00:00+00:00", role: developer}
+    - {id: T-1703, title: "Checkout", status: done, status_since: "2026-03-02T13:00:00+00:00", role: developer}
+    # Work behind the parent.
+    - {id: T-1704, title: "Release notes", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    - {id: T-1705, title: "Launch checklist", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    # Distractor: a parent with a subtask still in progress.
+    - {id: T-1710, title: "Search", status: ready, status_since: "2026-03-02T12:00:00+00:00", role: orchestrator, assignee: agent-orch-1, subtasks: [T-1711, T-1712]}
+    - {id: T-1711, title: "Index", status: done, status_since: "2026-03-02T11:00:00+00:00", role: developer}
+    - {id: T-1712, title: "Query page", status: in_progress, status_since: "2026-03-02T16:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # Distractor: subtasks done, but its own integration PR is still open.
+    - {id: T-1720, title: "Payments", status: ready, status_since: "2026-03-02T12:00:00+00:00", role: orchestrator, assignee: agent-orch-1, subtasks: [T-1721]}
+    - {id: T-1721, title: "Card form", status: done, status_since: "2026-03-02T11:00:00+00:00", role: developer}
+  dependencies:
+    - {task_id: T-1704, depends_on: T-1700}
+    - {task_id: T-1705, depends_on: T-1704}
+  sessions:
+    - {id: S-1712, task_id: T-1712, owner_id: agent-dev-1, started_at: "2026-03-02T16:00:00+00:00", last_heartbeat: "2026-03-02T17:58:00+00:00"}
+  pull_requests:
+    - {repo: example/repo, number: 1720, title: "T-1720 payments integration", branch: "feature/T-1720", task_ids: [T-1720]}
+expected_actions:
+  - kind: alert
+    task_id: T-1700
+    reason_contains: "close it?"
+    params:
+      pattern: parent-left-open
+      subtasks: [T-1701, T-1702, T-1703]
+      waiting_tasks: [T-1704, T-1705]
+  - kind: close
+    task_id: T-1700
+not_expected_actions:
+  - kind: alert
+    task_id: T-1710
+  - kind: close
+    task_id: T-1710
+  - kind: alert
+    task_id: T-1720
+  - kind: close
+    task_id: T-1720

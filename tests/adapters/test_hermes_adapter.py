@@ -673,3 +673,46 @@ def test_assignee_is_reported_whether_claimed_or_not(board: Board) -> None:
     tasks = {t.id: t for t in adapter(board).snapshot(NOW).tasks}
     assert tasks["t_1"].assignee == "dev-1" and tasks["t_1"].owner_id is None
     assert tasks["t_2"].assignee is None
+
+
+# --- parents and pre-work cards (incident 17) --------------------------------------------
+
+
+def test_a_decomposed_root_lists_its_subtasks(board: Board) -> None:
+    board.task("t_root", "todo", ago(days=1), assignee="orchestrator")
+    board.event("t_root", "decomposed", ago(hours=5), {"child_ids": ["t_a", "t_b", "t_a", 3]})
+    board.task("t_a", "done", ago(days=1), assignee="dev")
+    board.task("t_plain", "todo", ago(days=1), assignee="dev")
+    tasks = {t.id: t for t in adapter(board).snapshot(NOW).tasks}
+    assert tasks["t_root"].subtasks == ("t_a", "t_b")
+    assert tasks["t_plain"].subtasks == ()
+
+
+def test_pre_work_statuses_mark_cards(board: Board) -> None:
+    board.task("t_triage", "triage", ago(days=1))
+    board.task("t_sched", "scheduled", ago(days=1))
+    board.task("t_todo", "todo", ago(days=1))
+    tasks = {t.id: t.prework for t in adapter(board).snapshot(NOW).tasks}
+    assert tasks == {"t_triage": True, "t_sched": True, "t_todo": False}
+    a = HermesAdapter(db_path=board.path, spool=None, prework_statuses=("triage",))
+    assert {t.id: t.prework for t in a.snapshot(NOW).tasks}["t_sched"] is False
+
+
+def test_kelpies_own_park_is_waiting_not_pre_work(board: Board) -> None:
+    from kelpie.adapters.hermes.park import encode_wait, load_key
+    from kelpie.core.model import Condition, ConditionKind
+
+    board.task("t_1", "scheduled", ago(days=1), assignee="dev")
+    a = adapter(board)
+    key = load_key(board.path.parent / "wait.key", create=True)
+    assert key is not None
+    a.wait_key = board.path.parent / "wait.key"
+    cond = Condition("ready:t_1:x", ConditionKind.CUSTOM, "t_1")
+    board.event(
+        "t_1",
+        "scheduled",
+        NOW - timedelta(minutes=5),
+        {"reason": encode_wait("r", (cond,), "t_1", key, NOW - timedelta(minutes=5))},
+    )
+    (task,) = a.snapshot(NOW).tasks
+    assert task.status is Status.WAITING and task.prework is False

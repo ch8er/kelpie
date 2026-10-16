@@ -1,0 +1,43 @@
+id: "17-card-stuck-scheduled"
+incident: 17
+title: "A card sits 21 h in scheduled with work behind it"
+description: >
+  A card was put in a pre-work status (a timed queue) and forgotten for 21 hours while two
+  tasks waited on it. Only a person moves a card out of there. Kelpie must alert with the
+  dependents. A pre-work card with nothing behind it, one that has only waited 2 hours, and
+  an ordinary backlog card are left alone.
+rule: orphan_status
+config: {}
+snapshot:
+  now: "2026-03-03T09:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: T-1750, title: "Migrate settings", status: backlog, status_since: "2026-03-02T12:00:00+00:00", role: developer, prework: true}
+    - {id: T-1751, title: "Settings UI", status: backlog, status_since: "2026-03-02T12:00:00+00:00", role: developer}
+    - {id: T-1752, title: "Settings docs", status: backlog, status_since: "2026-03-02T12:00:00+00:00", role: developer}
+    # Distractors.
+    - {id: T-1760, title: "Spike", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer, prework: true}
+    - {id: T-1761, title: "Fresh idea", status: backlog, status_since: "2026-03-03T07:00:00+00:00", role: developer, prework: true}
+    - {id: T-1762, title: "Behind the fresh idea", status: backlog, status_since: "2026-03-03T07:00:00+00:00", role: developer}
+    - {id: T-1770, title: "Plain backlog", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+    - {id: T-1771, title: "Behind plain backlog", status: backlog, status_since: "2026-03-02T09:00:00+00:00", role: developer}
+  dependencies:
+    - {task_id: T-1751, depends_on: T-1750}
+    - {task_id: T-1752, depends_on: T-1751}
+    - {task_id: T-1762, depends_on: T-1761}
+    - {task_id: T-1771, depends_on: T-1770}
+expected_actions:
+  - kind: alert
+    task_id: T-1750
+    reason_contains: "21h"
+    params:
+      pattern: stuck-before-work
+      waiting_tasks: [T-1751, T-1752]
+not_expected_actions:
+  - kind: alert
+    task_id: T-1760
+  - kind: alert
+    task_id: T-1761
+  - kind: alert
+    task_id: T-1770

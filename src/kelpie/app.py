@@ -99,6 +99,8 @@ class HermesSettings:
     role_from_name: bool = True  # role of other profiles: the name without a trailing -N
     # Signs Kelpie's parks of Hermes tasks; None: next to the ledger (see wait_key_path).
     wait_key: Path | None = None
+    # Hermes statuses before any work starts (rule 3's cards stuck before work)
+    prework_statuses: tuple[str, ...] = hermes.DEFAULT_PREWORK
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -114,6 +116,7 @@ class HermesSettings:
             roles=dict(self.roles),
             role_from_name=self.role_from_name,
             wait_key=self.wait_key or DEFAULT_WAIT_KEY,
+            prework_statuses=self.prework_statuses,
         )
 
 
@@ -266,6 +269,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "human_owners",
         "roles",
         "role_from_name",
+        "prework_statuses",
         "wait_key",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
@@ -341,6 +345,14 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
     wait_key = section.get("wait_key")
     if wait_key is not None and (not isinstance(wait_key, str) or not wait_key.strip()):
         raise ConfigError("[adapters.hermes] wait_key must be a non-empty path")
+    prework = section.get("prework_statuses", list(hermes.DEFAULT_PREWORK))
+    if not isinstance(prework, list) or not all(
+        isinstance(x, str) and x.strip() in hermes.PREWORK_ALLOWED for x in prework
+    ):
+        raise ConfigError(
+            "[adapters.hermes] prework_statuses must be a list of Hermes statuses among "
+            f"{sorted(hermes.PREWORK_ALLOWED)}"
+        )
     return HermesSettings(
         db_path,
         paths["spool"],
@@ -355,6 +367,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         tuple(sorted((k.strip().casefold(), v.strip().casefold()) for k, v in roles.items())),
         role_from_name,
         None if wait_key is None else Path(wait_key),
+        tuple(dict.fromkeys(x.strip() for x in prework)),
     )
 
 

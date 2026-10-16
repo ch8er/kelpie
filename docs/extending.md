@@ -136,6 +136,7 @@ out.
 | `comment` | comment on the task | platform adapter `comment` |
 | `wip_commit` | commit and push the worktree | platform adapter `wip_commit` |
 | `reassign` | new owner (`params.owner_id`) | adapter with `SupportsReassign` |
+| `close` | move the task to done | adapter with `SupportsClose` |
 | `wait` | park in `waiting` on `params.conditions` | adapter with `SupportsWait` |
 | `stop` | stop the session `params.session_id` | adapter with `SupportsStop` |
 | `cancel_build` | cancel a CI build | the connector named in `executor` |
@@ -245,6 +246,7 @@ All in `src/kelpie/core/ports.py`.
 | `PlatformAdapter` | yes | `name`, `list_tasks()`, `get_task(id)`, `requeue(id, reason)`, `unblock(id, reason)`, `comment(id, body)`, `wip_commit(id, message, *, branch, draft_pr)`, `events(since)` |
 | `SnapshotSource` | in practice | `snapshot(now) -> Snapshot`: tasks, owners, dependencies, sessions, spans and conditions as of `now`. Only adapters with it contribute to snapshots. |
 | `SupportsReassign` | optional | `reassign(task_id, owner_id, reason)` |
+| `SupportsClose` | optional | `close(task_id, reason)`: move a task to done (a parent whose subtasks are all finished). |
 | `SupportsWait` | optional | `wait(task_id, conditions, reason)`: register the conditions and report the task as waiting. |
 | `SupportsStop` | optional | `stop(session_id, reason)`: stop or pause a running session; the task keeps its status. May return what the stop means on the platform (a few words a human reads after "Stopped run <id>; "), and returns `ActionResult.NOTHING_TO_DO` when the session was already over. An exception's `public_reason` is the only part of it a chat message shows. |
 

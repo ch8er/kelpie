@@ -33,7 +33,14 @@ from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import Session, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import DEFAULT_STALE_AFTER, Exit, is_live, last_exit, undeclared_exit
+from kelpie.rules._tasks import (
+    DEFAULT_STALE_AFTER,
+    Exit,
+    finished_parent,
+    is_live,
+    last_exit,
+    undeclared_exit,
+)
 
 NAME = "checkpoints"
 
@@ -65,7 +72,8 @@ class Checkpoints:
                 continue  # someone is working on it, nobody ever did, or the exit is old
             if end.session.dirty_worktree:
                 actions.append(self._wip_commit(task, end.session))
-            actions.extend(self._resume(task, end, snapshot))
+            if finished_parent(task, snapshot) is None:  # a finished parent is closed, not resumed
+                actions.extend(self._resume(task, end, snapshot))
         return actions
 
     def _remind(self, task: Task, session: Session, snapshot: Snapshot) -> Iterable[Action]:

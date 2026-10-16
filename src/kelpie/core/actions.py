@@ -18,6 +18,8 @@ class ActionKind(StrEnum):
     # serialization); rule 2 wakes it when they hold.
     WAIT = "wait"
     REASSIGN = "reassign"
+    # Move a task to done: a parent whose subtasks are all finished (``SupportsClose``).
+    CLOSE = "close"
     STOP = "stop"
     CANCEL_BUILD = "cancel_build"
     ESCALATE = "escalate"

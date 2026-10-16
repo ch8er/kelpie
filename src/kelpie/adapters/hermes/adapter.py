@@ -225,6 +225,10 @@ NON_STATUS_EVENTS = (
     "workspace_cleanup_deferred_shared",
 )
 BLOCK_EVENTS = ("blocked", "auto_blocked")
+# Statuses before any work starts that only a person (or the decomposer) moves a card out of:
+# a card there holding up others is rule 3's "stuck before work" (incident 17).
+DEFAULT_PREWORK = ("triage", "scheduled")
+PREWORK_ALLOWED = frozenset({"triage", "scheduled"})  # todo: waiting for parents is queued
 # Hermes block kinds that wait for an operator (``dependency`` waits in ``todo``).
 TYPED_BLOCKS = ("needs_input", "capability", "transient")
 
@@ -247,6 +251,16 @@ def _utc(epoch: Any) -> datetime | None:
 
 def _in_clause(values: Sequence[str]) -> str:
     return ",".join("?" * len(values))
+
+
+def _subtasks(event: sqlite3.Row | None) -> tuple[str, ...]:
+    """The children a ``decomposed`` event split the task into."""
+    if event is None:
+        return ()
+    ids = _payload(event["payload"]).get("child_ids")
+    if not isinstance(ids, list):
+        return ()
+    return tuple(dict.fromkeys(str(i) for i in ids if isinstance(i, str) and i.strip()))
 
 
 def _run_id(raw: Any) -> int | None:
@@ -373,6 +387,7 @@ class HermesAdapter:
     cli_timeout: float = CLI_TIMEOUT  # seconds; a stop runs inside the control loop tick
     # Assignees that are people, not agents (Hermes lowercases profile names).
     human_owners: Collection[str] = ()
+    prework_statuses: Collection[str] = DEFAULT_PREWORK
     # Profile -> role (Hermes lowercases profiles). Others: the profile without a trailing
     # "-<number>" (dev-1 -> dev), else the profile itself.
     roles: Mapping[str, str] = field(default_factory=dict)
@@ -544,6 +559,7 @@ class HermesAdapter:
         latest = self._latest_events(conn, NON_STATUS_EVENTS, exclude=True)
         blocks = self._latest_events(conn, BLOCK_EVENTS)
         parks = self._latest_events(conn, ("scheduled",))
+        splits = self._latest_events(conn, ("decomposed",))
         key = self._key() if parks else None
         claimed = self._claimed(conn, rows)
         tasks: list[Task] = []
@@ -625,6 +641,8 @@ class HermesAdapter:
                     block=block,
                     body=None if status.is_terminal else _body(row),
                     branch=str(_col(row, "branch_name") or "").strip() or None,
+                    subtasks=_subtasks(splits.get(row["id"])),
+                    prework=status is Status.BACKLOG and row["status"] in self.prework_statuses,
                 )
             )
         return tuple(tasks), owners, known, tuple(waits)

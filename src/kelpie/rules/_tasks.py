@@ -20,6 +20,42 @@ DEFAULT_MAX_CONDITION_AGE = timedelta(minutes=15)
 DEFAULT_STALE_AFTER = timedelta(minutes=30)
 
 
+def finished_parent(task: Task, snapshot: Snapshot) -> datetime | None:
+    """When the last subtask of a parent finished, if every subtask has and nothing else
+    holds the parent: it is done in substance and only waits to be closed. None for any
+    other task.
+
+    Only a parent waiting to be picked up or worked (backlog, ready, in progress) counts: a
+    blocked, waiting or reviewed parent has a reason of its own. It must have no open
+    dependency besides its subtasks (an orchestrator may add work under it), and no open PR
+    of its own or of a subtask (``PullRequest.task_ids``). Subtasks missing from the
+    snapshot count as finished (adapters leave out finished tasks past their lookback); when
+    none is known, a ready parent counts as finished since it became ready (a platform such
+    as Hermes wakes a parent to ready when its subtasks are done)."""
+    if not task.subtasks or task.status not in _PARENT_OPEN:
+        return None
+    family = {task.id, *task.subtasks}
+    if any(family.intersection(pr.task_ids) for pr in snapshot.pull_requests):
+        return None
+    by_id = {t.id: t for t in snapshot.tasks}
+    if any(
+        d.task_id == task.id
+        and (dep := by_id.get(d.depends_on)) is not None
+        and not dep.status.is_terminal
+        for d in snapshot.dependencies
+    ):
+        return None
+    known = [by_id[s] for s in task.subtasks if s in by_id]
+    if not known:
+        return task.status_since if task.status is Status.READY else None
+    if not all(t.status.is_terminal for t in known):
+        return None
+    return max(t.status_since for t in known)
+
+
+_PARENT_OPEN = frozenset({Status.BACKLOG, Status.READY, Status.IN_PROGRESS})
+
+
 def responsible(task: Task) -> str | None:
     """Who answers for a task: its owner, else whom the platform routed it to."""
     return task.owner_id or task.assignee

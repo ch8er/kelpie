@@ -34,6 +34,7 @@ from kelpie.rules import register
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     Exit,
+    finished_parent,
     last_exit,
     linked_conditions,
     undeclared_exit,
@@ -66,6 +67,8 @@ class ExitContract:
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         actions: list[Action] = []
         for task in snapshot.tasks:
+            if finished_parent(task, snapshot) is not None:
+                continue  # its subtasks did the work: rule 3 asks to close it, not resume it
             if task.status is Status.BLOCKED:
                 actions.extend(self._check_block(task, snapshot))
                 continue

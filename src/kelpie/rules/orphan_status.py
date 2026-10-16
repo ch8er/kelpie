@@ -58,6 +58,18 @@ d) **Recovery tasks recovering themselves** (``max_recovery_depth``, 1). Needs r
    it through a condition, are its targets too, but only count for a cycle: recovery tasks
    that merely follow each other (a staged plan) are not a loop unless they cycle. One alert
    per loop, keyed by the task the loop started from.
+e) **A parent left open** (``parent_close_after``, 1h; incident 17): every subtask of a task
+   (``Task.subtasks``) is finished, the last one at least that long ago, and the parent is still
+   open with no live session and no open PR of its own (when PRs are known). On a live farm
+   tasks with their own branch closed within 0.7 h of their PR merging, while one parent left
+   open held up 20 tasks. Kelpie asks to close it, naming the tasks waiting behind it, and
+   proposes ``close`` (carried out in act mode by an adapter that supports it; otherwise a human
+   is told). Such a parent gets no other per-task alert, and rules 1 and 5 never propose
+   resuming it.
+f) **A card stuck before work** (``prework_after``, 4h; incident 17): a task in a pre-work
+   status (``Task.prework``: Hermes ``triage`` or ``scheduled``, from the adapter's
+   ``prework_statuses``) with open tasks depending on it. One sat 21 h in scheduled on a live
+   farm. Kelpie alerts with the dependents; only a person moves such a card.
 """
 
 from __future__ import annotations
@@ -79,6 +91,7 @@ from kelpie.rules._chains import NOT_FOUND, BlockerGraph
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     HANDOFF,
+    finished_parent,
     is_live,
     last_exit,
     linked_conditions,
@@ -120,25 +133,39 @@ class OrphanStatus:
     recovery_titles: tuple[re.Pattern[str], ...] = ()
     hold_labels: frozenset[str] = frozenset()
     ignore_tasks: tuple[str, ...] = ()  # task ids or glob patterns
+    parent_close_after: timedelta | None = timedelta(hours=1)
+    prework_after: timedelta | None = timedelta(hours=4)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
+        actions: list[Action] = []
+        parents: set[str] = set()  # finished parents: closing them is the only question
+        for task in snapshot.tasks:
+            if self._skipped(task) or (done := finished_parent(task, snapshot)) is None:
+                continue
+            parents.add(task.id)
+            actions.extend(self._parent_left_open(task, done, snapshot))
         orphans = [
             (task, gone, _open_dependents(task.id, snapshot))
             for task in snapshot.tasks
-            if not self._ignored(task) and (gone := self._orphaned(task, snapshot)) is not None
+            if task.id not in parents
+            and not self._ignored(task)
+            and (gone := self._orphaned(task, snapshot)) is not None
         ]
         # Most urgent first, so the scarce idle agents go where they unblock the most.
         orphans.sort(key=lambda o: (-len(o[2]), o[0].status_since, o[0].id))
         idle = _idle_agents(snapshot, self.session_stale_after)
-        actions: list[Action] = []
         for task, gone, waiting in orphans:
             actions.extend(self._act(task, snapshot, gone, waiting, idle))
-        orphaned = {task.id for task, _, _ in orphans}
+        orphaned = {task.id for task, _, _ in orphans} | parents
         for task in snapshot.tasks:
             if task.id in orphaned or task.status.is_terminal or self._skipped(task):
                 continue
-            found = self._unfollowed_run(task, snapshot) or self._undriven_review(task, snapshot)
+            found = (
+                self._unfollowed_run(task, snapshot)
+                or self._undriven_review(task, snapshot)
+                or self._stuck_before_work(task, snapshot)
+            )
             if found is not None:
                 actions.append(found)
         if self.next_action_after is not None and self.dependents_not_woken:
@@ -268,6 +295,71 @@ class OrphanStatus:
             state=f"{NAME}:{key}",
             since=since,
             params={"pattern": pattern, "dependents": len(waiting), **params},
+        )
+
+    def _parent_left_open(self, task: Task, done: datetime, snapshot: Snapshot) -> Iterable[Action]:
+        """e) Every subtask finished, the parent still open and nobody on it."""
+        after = self.parent_close_after
+        if after is None:
+            return
+        if live_session(task.id, snapshot, self.session_stale_after) is not None:
+            return  # someone is judging it right now
+        end = last_exit(task, snapshot, self.session_stale_after)
+        since = max(done, task.status_since, *([end.at] if end is not None else []))
+        if snapshot.now - since < after:
+            return
+        waiting = _open_dependents(task.id, snapshot)
+        reason = (
+            f"All {len(task.subtasks)} subtask(s) of {task.id} ('{task.title}') are finished, "
+            f"the last {_human(snapshot.now - done)} ago, but {task.id} is still "
+            f"'{task.status}': close it?"
+            + (f" {len(waiting)} task(s) wait behind it: {_names(waiting)}." if waiting else "")
+        )
+        close_key = f"{NAME}:close:{task.id}:{task.status_since.isoformat()}"
+        yield self._stop_alert(
+            "parent-left-open",
+            task,
+            reason,
+            since,
+            snapshot,
+            waiting=waiting,
+            subtasks=list(task.subtasks),
+            waiting_tasks=waiting,
+            **{ANNOUNCES: close_key},
+        )
+        yield Action(
+            ActionKind.CLOSE,
+            NAME,
+            f"Close {task.id}: all {len(task.subtasks)} subtask(s) are finished.",
+            task_id=task.id,
+            key=close_key,
+            params={"pattern": "parent-left-open", "subtasks": list(task.subtasks)},
+        )
+
+    def _stuck_before_work(self, task: Task, snapshot: Snapshot) -> Action | None:
+        """f) In a pre-work status for too long while other tasks wait on it."""
+        after = self.prework_after
+        if after is None or not task.prework or snapshot.now - task.status_since < after:
+            return None
+        if any(
+            d.task_id == task.id and not _finished(d.depends_on, snapshot)
+            for d in snapshot.dependencies
+        ):
+            return None  # it waits for its own parents: not stuck, queued
+        waiting = _open_dependents(task.id, snapshot)
+        if not waiting:
+            return None
+        return self._stop_alert(
+            "stuck-before-work",
+            task,
+            f"{task.id} ('{task.title}') has sat {_human(snapshot.now - task.status_since)} "
+            f"in a status only a person moves it out of (such as triage or a timed queue) "
+            f"while {len(waiting)} task(s) wait behind it: {_names(waiting)}. Triage it, "
+            "start it, or drop the dependency.",
+            task.status_since,
+            snapshot,
+            waiting=waiting,
+            waiting_tasks=waiting,
         )
 
     def _unfollowed_run(self, task: Task, snapshot: Snapshot) -> Action | None:
@@ -551,6 +643,12 @@ def _human(d: timedelta) -> str:
     return f"{hours}h" if hours else f"{minutes}m"
 
 
+def _finished(task_id: str, snapshot: Snapshot) -> bool:
+    """A dependency on a task off the board, or finished, is met."""
+    task = next((t for t in snapshot.tasks if t.id == task_id), None)
+    return task is None or task.status.is_terminal
+
+
 def _open_dependents(task_id: str, snapshot: Snapshot) -> list[str]:
     """Non-terminal tasks that depend on ``task_id``, directly or transitively."""
     found: set[str] = set()
@@ -609,7 +707,7 @@ def build(config: dict[str, Any]) -> OrphanStatus:
     for key in ("orphan_after", "queue_after", "session_stale_after"):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
-    for key in ("review_idle_after", "next_action_after"):
+    for key in ("review_idle_after", "next_action_after", "parent_close_after", "prework_after"):
         if key in config:
             value = config.pop(key)
             kwargs[key] = None if value is False else _duration(value, key)  # false: off
