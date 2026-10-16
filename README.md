@@ -232,6 +232,13 @@ report; no LLM is involved.
 - **Top 3 recommendations**: output filters for huge tool outputs (RTK first; see
   `[traces.outputs]`), rules that would have fixed part of the chaos in act mode, and fixed
   remedies for the largest causes, ranked by dollars (hours count when `hour_usd` is set).
+- **Token optimization** (from traces, `kelpie.traces.tokens`): prompt-cache hit rate per
+  role and model with the steps where the cache breaks, expires or covers only a fixed
+  prefix; context growth per step with runaway sessions (grew past 100k tokens without
+  compacting); tokens burned by sessions that restarted a task from zero instead of
+  resuming it. Each comes with a recommendation and its estimated saving, which competes
+  for the top 3. Traces keep no prompt text, so a break is located by step and preceding
+  tool, not by the line of the prompt that changed.
 
 **Before/after of fixes.** Every fix made on the report's day or the day before is measured
 over `[report] verify_window` (a day) before and after it: hours lost per day
