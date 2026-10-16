@@ -509,7 +509,7 @@ superseded run.
 - [x] Build/run records mapped to the CI-agnostic model fields
 - [x] Exposes the `cancel_build` action as an executor (see "action routing"); only with a token that allows it, read-only otherwise
 - [x] Respects rate limits with caching / conditional requests; tests with mocked HTTP
-- [ ] Remaining Actions minutes as a resource — partial: the monthly quota and its reset come from config (`included_minutes`); minutes used are not read (the billing API needs admin rights)
+- [x] Remaining Actions minutes as a resource: the monthly quota and its reset come from config (`included_minutes`, `quota_reset_day`); minutes used from GitHub's billing usage report with a token of its own (`billing_user` or `billing_org`, #43)
 
 ### rules: stale_blocks — block reasons that mean "waiting" become conditions (rule 4, incident 15)
 labels: P0, week-2, area:rules

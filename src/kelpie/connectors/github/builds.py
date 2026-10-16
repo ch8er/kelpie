@@ -34,10 +34,12 @@ Mapping:
   current draft state; its files only while the PR head is the run's commit and it touches
   at most 100 files, otherwise unknown);
 - with ``included_minutes``, a ``ci_minutes`` resource carries the monthly quota and its
-  reset (``quota_reset_day``, UTC). Minutes used are not read: GitHub's billing API needs
-  an administrative permission. Exhaustion is not guessed from runs either: a run blocked
-  by billing looks like any other run that failed at once, and a false "quota exhausted"
-  would send humans to the wrong place. The rule projects the burn against the quota.
+  reset (``quota_reset_day``, UTC). Minutes used come only from GitHub's billing usage
+  report, when ``billing_user`` or ``billing_org`` is set with a token of its own
+  (:mod:`kelpie.connectors.github.billing`); without it the rule projects the burn against
+  the quota. Exhaustion is never guessed from runs: a run blocked by billing looks like any
+  other run that failed at once, and a false "quota exhausted" would send humans to the
+  wrong place.
 
 The one write is ``cancel_build`` (``POST /repos/{repo}/actions/runs/{id}/cancel``):
 
@@ -78,6 +80,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from kelpie.connectors.github import billing as usage
 from kelpie.connectors.github.client import GitHubClient, GitHubError, valid_token
 from kelpie.connectors.github.connector import valid_repo
 from kelpie.core.actions import Action, ActionKind, ActionResult
@@ -107,6 +110,7 @@ MAX_DISPLAY = 255  # characters of a branch or workflow name kept on a Build
 MAX_PR_FILES = 100
 SUPERSEDABLE_EVENTS = frozenset({"push", "pull_request"})
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
+_ACCOUNT = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", re.ASCII)
 _ACTIVE = {
     "queued": BuildStatus.QUEUED,
     "waiting": BuildStatus.QUEUED,
@@ -141,6 +145,11 @@ _KEYS = {
     "cancel_workflows",
     "cancel_branches",
     "cancel_token_env",
+    "billing_user",
+    "billing_org",
+    "billing_token_env",
+    "billing_interval",
+    "billing_skus",
 }
 
 
@@ -163,6 +172,13 @@ class CiSettings:
     cancel_workflows: tuple[str, ...] = ()
     cancel_branches: tuple[str, ...] = ()  # globs; empty: any branch but the default one
     cancel_token_env: str | None = None  # a separate token for cancelling only
+    # Minutes used from GitHub's billing usage report (kelpie.connectors.github.billing):
+    # the user or organization billed, with a token of its own.
+    billing_account: str | None = None
+    billing_organization: bool = False
+    billing_token_env: str | None = None
+    billing_interval: timedelta = usage.DEFAULT_INTERVAL
+    billing_skus: tuple[str, ...] = usage.DEFAULT_SKUS
 
     def cancel_token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The cancel-only token from ``$cancel_token_env``; None when not configured.
@@ -179,6 +195,25 @@ class CiSettings:
         if not valid_token(token):
             raise ValueError(
                 f"[connectors.github.ci] ${self.cancel_token_env} contains characters not "
+                "allowed in an HTTP header"
+            )
+        return token
+
+    def billing_token(self, environ: Mapping[str, str] = os.environ) -> str | None:
+        """The billing token from ``$billing_token_env``; None when billing is not read.
+
+        Raises ValueError when billing is configured but the variable is unset or not usable
+        in a header. The message never contains the value."""
+        if self.billing_account is None or self.billing_token_env is None:
+            return None
+        token = environ.get(self.billing_token_env, "").strip()
+        if not token:
+            raise ValueError(
+                f"[connectors.github.ci] billing_token_env: ${self.billing_token_env} is not set"
+            )
+        if not valid_token(token):
+            raise ValueError(
+                f"[connectors.github.ci] ${self.billing_token_env} contains characters not "
                 "allowed in an HTTP header"
             )
         return token
@@ -228,6 +263,12 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
         not isinstance(token_env, str) or not _ENV_NAME.fullmatch(token_env)
     ):
         raise ValueError(f"{where} cancel_token_env must be an environment variable name")
+    account, organization, billing_env, billing_interval = _billing(section, included, where)
+    if billing_env is not None and billing_env == token_env:
+        raise ValueError(f"{where} billing_token_env must not be cancel_token_env: one token each")
+    skus = _strings(section, "billing_skus", where) if "billing_skus" in section else None
+    if skus == ():
+        raise ValueError(f"{where} billing_skus must not be empty (leave it out for the default)")
     reserve = section.get("rate_reserve", DEFAULT_RATE_RESERVE)
     if isinstance(reserve, bool) or not isinstance(reserve, int) or not 0 <= reserve <= 4000:
         raise ValueError(f"{where} rate_reserve must be an integer from 0 to 4000")
@@ -249,7 +290,41 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
         cancel_workflows=_strings(section, "cancel_workflows", where),
         cancel_branches=_strings(section, "cancel_branches", where),
         cancel_token_env=token_env,
+        billing_account=account,
+        billing_organization=organization,
+        billing_token_env=billing_env,
+        billing_interval=billing_interval,
+        billing_skus=usage.DEFAULT_SKUS if skus is None else tuple(usage.sku_name(s) for s in skus),
     )
+
+
+def _billing(
+    section: Mapping[str, Any], included: Any, where: str
+) -> tuple[str | None, bool, str | None, timedelta]:
+    """``billing_user`` or ``billing_org``, ``billing_token_env``, ``billing_interval``."""
+    user, org = section.get("billing_user"), section.get("billing_org")
+    interval = _duration(section, "billing_interval", usage.DEFAULT_INTERVAL, where)
+    if not usage.MIN_INTERVAL <= interval <= usage.MAX_INTERVAL:
+        raise ValueError(f"{where} billing_interval must be from 5m to 1h")
+    env = section.get("billing_token_env")
+    if user is None and org is None:
+        if env is not None:
+            raise ValueError(f"{where} billing_token_env needs billing_user or billing_org")
+        return None, False, None, interval
+    if user is not None and org is not None:
+        raise ValueError(f"{where}: set billing_user or billing_org, not both")
+    account = user if user is not None else org
+    key = "billing_user" if user is not None else "billing_org"
+    if not isinstance(account, str) or not _ACCOUNT.fullmatch(account):
+        raise ValueError(f"{where} {key} must be a GitHub user or organization name")
+    if not isinstance(env, str) or not _ENV_NAME.fullmatch(env):
+        raise ValueError(
+            f"{where} {key} needs billing_token_env (the variable holding a token that may "
+            "read its billing usage)"
+        )
+    if included is None:
+        raise ValueError(f"{where} {key} needs included_minutes (the quota it counts against)")
+    return account, org is not None, env, interval
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,10 +365,12 @@ class GitHubCI:
         client: GitHubClient,
         settings: CiSettings,
         cancel_client: GitHubClient | None = None,
+        billing: usage.CiBilling | None = None,
     ) -> None:
         self.client = client
         self.settings = settings
         self.cancel_client = cancel_client or client
+        self.billing = billing
         self.actions = (
             frozenset({ActionKind.CANCEL_BUILD}) if settings.allow_cancel else frozenset()
         )
@@ -598,13 +675,16 @@ class GitHubCI:
     def _quota(self, now: datetime) -> tuple[Resource, ...]:
         if self.settings.included_minutes is None:
             return ()
+        reading = self.billing.used(now) if self.billing is not None else None
         return (
             Resource(
                 name=f"ci:{SOURCE}",
                 kind=ResourceKind.CI_MINUTES,
+                used=reading[0] if reading else None,
                 limit=self.settings.included_minutes,
                 unit="minutes",
                 resets_at=next_reset(now, self.settings.quota_reset_day),
+                at=reading[1] if reading else None,
             ),
         )
 

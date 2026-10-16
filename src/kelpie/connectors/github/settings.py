@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Callable, Mapping
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from kelpie.connectors.github.billing import CiBilling
 from kelpie.connectors.github.blocks import DEFAULT_MAX_REQUESTS, DEFAULT_TICK_BUDGET
 from kelpie.connectors.github.builds import CiSettings, GitHubCI, load_ci
 from kelpie.connectors.github.client import (
@@ -28,6 +30,8 @@ from kelpie.connectors.github.client import (
 from kelpie.connectors.github.connector import GitHubConnector, valid_repo
 from kelpie.connectors.github.pulls import PullSettings, load_pulls
 from kelpie.core.serde import parse_duration
+
+log = logging.getLogger(__name__)
 
 DEFAULT_TOKEN_ENV = "GITHUB_TOKEN"
 MAX_TIMEOUT = timedelta(seconds=60)
@@ -104,7 +108,9 @@ class GitHubSettings:
     ) -> GitHubCI | None:
         """The CI source sharing ``connector``'s client; None when not configured. With
         ``cancel_token_env`` the cancel request alone goes through a second client that
-        holds that token. Raises ValueError when that token is missing or unusable."""
+        holds that token; with ``billing_user``/``billing_org`` the billing usage report is
+        read through a third one holding ``billing_token_env``'s token. Raises ValueError
+        when one of those tokens is missing or unusable."""
         if self.ci is None or not self.ci.enabled:
             return None
         token = self.ci.cancel_token(environ)
@@ -118,7 +124,39 @@ class GitHubSettings:
                 clock=clock,
                 observer=observer or connector.client.observer,
             )
-        return GitHubCI(connector.client, self.ci, cancel_client)
+        billing = None
+        billing_token = self.ci.billing_token(environ)
+        if billing_token is not None and self.ci.billing_account is not None:
+            others = {self.token_env: environ.get(self.token_env, "").strip()}
+            if self.ci.cancel_token_env is not None:  # also while allow_cancel is off
+                others[self.ci.cancel_token_env] = environ.get(self.ci.cancel_token_env, "").strip()
+            for name, value in others.items():
+                if value and value == billing_token:
+                    log.warning(
+                        "[connectors.github.ci] $%s holds the same token as $%s: one token "
+                        "then does both jobs; give billing a token of its own",
+                        self.ci.billing_token_env,
+                        name,
+                    )
+            # Its own client, without the main client's metrics: its rate limit and its
+            # refusals are not the main token's.
+            billing_client = GitHubClient(
+                self.api_url,
+                billing_token,
+                timeout=self.timeout,
+                cache_ttl=self.cache_ttl,
+                clock=clock,
+            )
+            billing = CiBilling(
+                billing_client,
+                self.ci.billing_account,
+                organization=self.ci.billing_organization,
+                interval=self.ci.billing_interval,
+                reset_day=self.ci.quota_reset_day,
+                skus=self.ci.billing_skus,
+                budget=self.ci.tick_budget,
+            )
+        return GitHubCI(connector.client, self.ci, cancel_client, billing)
 
 
 def load_github(section: Any) -> GitHubSettings:
@@ -169,6 +207,11 @@ def load_github(section: Any) -> GitHubSettings:
         raise ValueError("[connectors.github] enabled must be true or false")
     repos = list(dict.fromkeys(r.lower() for r in repos))
     ci = load_ci(section["ci"], repos) if "ci" in section else None
+    if ci is not None and ci.billing_token_env is not None and ci.billing_token_env == token_env:
+        raise ValueError(
+            "[connectors.github.ci] billing_token_env must not be [connectors.github] "
+            "token_env: billing gets a token of its own"
+        )
     pulls = load_pulls(section["pulls"]) if "pulls" in section else None
     return GitHubSettings(
         repos=tuple(repos),

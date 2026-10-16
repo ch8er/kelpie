@@ -31,6 +31,7 @@ from kelpie.connectors.github import (
     load_block_conditions,
     load_github,
 )
+from kelpie.connectors.github.billing import KEEP_FOR
 from kelpie.connectors.github.pulls import PullRequestSync
 from kelpie.connectors.human_tasks import (
     HumanTaskConnector,
@@ -796,6 +797,24 @@ def ci_window_errors(rules: Sequence[Rule], settings: Settings) -> list[str]:
     ]
 
 
+def billing_interval_warnings(rules: Sequence[Rule], settings: Settings) -> list[str]:
+    """A billing reading is kept for ``KEEP_FOR`` intervals; rule 9 skips the quota (burn
+    projection included) while it holds one older than ``max_reading_age``."""
+    github = settings.github
+    ci = github.ci if github is not None and github.enabled else None
+    if ci is None or not ci.enabled or ci.billing_account is None:
+        return []
+    kept = ci.billing_interval * KEEP_FOR
+    return [
+        f"[connectors.github.ci] billing_interval ({ci.billing_interval}) keeps a reading for "
+        f"up to {kept}, longer than rule 'ci_economy' max_reading_age "
+        f"({rule.max_reading_age}): when reads fail, the CI minutes quota would go unwatched "
+        "until the reading expires"
+        for rule in rules
+        if isinstance(rule, CiEconomy) and kept > rule.max_reading_age
+    ]
+
+
 def resource_interval_warnings(rules: Sequence[Rule], resources: ResourceSettings) -> list[str]:
     """Readings older than the rule's ``max_reading_age`` are ignored: a slower fetch would
     leave the rule blind between fetches."""
@@ -849,6 +868,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         *serialize_warnings(settings.engine, loaded.rules),
         *dispatch_gate_warnings(settings.engine),
         *resource_interval_warnings(loaded.rules, settings.resources),
+        *billing_interval_warnings(loaded.rules, settings),
         *provider_interval_warnings(loaded.rules, settings.llm_quotas),
         *budget_provider_warnings(settings.budgets, settings.llm_quotas),
     ]:
@@ -1060,6 +1080,14 @@ def _github_steps(
         if ci.settings.allow_cancel
         else "off (allow_cancel = false)",
     )
+    if ci.billing is not None:  # names only, never the token
+        log.info(
+            "[connectors.github.ci] minutes used read from the billing usage of %s every %s, "
+            "token from $%s",
+            ci.settings.billing_account,
+            ci.settings.billing_interval,
+            ci.settings.billing_token_env,
+        )
     return [*steps, ("github_ci", ci)], [ci]
 
 
@@ -1280,6 +1308,17 @@ def _github_status(settings: Settings) -> list[str]:
             else "read-only (allow_cancel = false)"
         )
         lines.append(f"github ci: builds of {', '.join(ci.repos)}, {cancel}")
+        if ci.billing_account is not None:
+            kind = "organization" if ci.billing_organization else "user"
+            try:
+                ci.billing_token()
+                auth = f"token from ${ci.billing_token_env}"
+            except ValueError as exc:  # names the variable, never the value
+                auth = f"NOT ready: {exc}"
+            lines.append(
+                f"github ci: minutes used from the billing usage of {kind} "
+                f"{ci.billing_account}, every {ci.billing_interval} ({auth})"
+            )
     return lines
 
 

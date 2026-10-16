@@ -21,13 +21,14 @@ from typing import Any
 from tests.sim import hermes_cli, toml
 from tests.sim.board import Board
 from tests.sim.channels import Channels
+from tests.sim.github import BILLING_TOKEN, FakeGitHub
 from tests.sim.github import TOKEN as GITHUB_TOKEN
-from tests.sim.github import FakeGitHub
 from tests.sim.kelpie import KelpieServe, wait_for
 from tests.sim.spool import Spool
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GITHUB_TOKEN_ENV = "KELPIE_SIM_GITHUB_TOKEN"
+BILLING_TOKEN_ENV = "KELPIE_SIM_GITHUB_BILLING_TOKEN"
 REPO = "example/repo"
 # Recommended on Hermes (README): Hermes tolerates heartbeats up to an hour old.
 HERMES_STALE = {"session_stale_after": "60m"}
@@ -110,7 +111,11 @@ class Farm:
         return merge(config, extra or {})
 
     def env(self) -> dict[str, str]:
-        return {**self.channels.env(), GITHUB_TOKEN_ENV: GITHUB_TOKEN}
+        return {
+            **self.channels.env(),
+            GITHUB_TOKEN_ENV: GITHUB_TOKEN,
+            BILLING_TOKEN_ENV: BILLING_TOKEN,
+        }
 
     # --- kelpie --------------------------------------------------------------------------
 

@@ -485,8 +485,8 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # pages, PRs, PR files and job lists
 # tick_budget = "10s"
 # included_minutes = 3000           # monthly quota -> a ci_minutes resource (optional);
-#                                   # minutes used are not read (the billing API needs
-#                                   # admin rights): the rule projects the burn instead
+#                                   # without billing_* below, minutes used are not read
+#                                   # and the rule projects the burn against the quota
 # quota_reset_day = 1               # day of the month the quota resets (UTC)
 # allow_cancel = false
 # cancel_repos = []                 # required with allow_cancel; among repos above
@@ -496,6 +496,29 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # but the repository's default branch (never cancelled)
 # cancel_token_env = "KELPIE_GITHUB_CANCEL_TOKEN"   # optional: a token with Actions: write
 #                                   # on cancel_repos only, used for the cancel request only
+#
+# Minutes used, for rule 9's "quota exhausted" (critical, with the tasks waiting on CI):
+# read from GitHub's billing usage report (enhanced billing platform): Actions minutes of
+# the standard runners since quota_reset_day, as reported (no Windows/macOS multipliers, so
+# the reading errs low). Minutes of public repositories are free but may be in the report:
+# do not use this if the account also runs Actions on public repositories. Off unless set;
+# needs included_minutes. "Exhausted" means builds stop, which holds only when usage stops
+# at the included minutes (a $0 Actions budget, the default for a personal account): if the
+# account pays for minutes beyond them, set included_minutes to all its budget allows, or
+# leave billing_* out. The token must be able to read the account's billing usage and is
+# used for nothing else: it must not be the token above or the cancel token. For a user, a
+# fine-grained token with the user permission "Plan" (read); for an organization, a
+# fine-grained token of an owner or billing manager with the organization permission
+# "Administration" (read), never a classic token (its admin:org scope is full org admin);
+# check GitHub's REST docs for the endpoint if it is refused. A report over 4 MiB (very
+# large organizations) is not read.
+# billing_user = "your-login"       # or billing_org = "your-org" (one of them)
+# billing_token_env = "KELPIE_GITHUB_BILLING_TOKEN"  # required with billing_user/org
+# billing_interval = "15m"          # one read this often (5m to 1h); a reading is kept for
+#                                   # two intervals, which should not exceed rule 9's
+#                                   # max_reading_age (Kelpie warns)
+# billing_skus = ["actions_linux", "actions_windows", "actions_macos"]  # what counts against
+#                                   # included_minutes (larger runners never do)
 #
 # Blocks that are really waits. When a blocked task's reason matches a pattern and names a
 # PR GitHub has confirmed to exist, Kelpie attaches a condition of that kind to the block,

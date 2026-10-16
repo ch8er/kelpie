@@ -88,8 +88,8 @@ configure what exists.
 | `KELPIE_CLAUDE_STOP_TTL` | Claude Code hook | Seconds a stop marker holds (default 86400). |
 | `CLAUDE_CODE_TASK_LIST_ID`, `KELPIE_TASK_ID`, `KELPIE_AGENT` | Claude Code sessions | The shared task list; a task id from a launcher; the agent's name. Read by the hook. |
 
-Variables named by `token_env`, `webhook_env`, `headers_env` and `cancel_token_env` keys are
-read as configured.
+Variables named by `token_env`, `webhook_env`, `headers_env`, `cancel_token_env` and
+`billing_token_env` keys are read as configured.
 
 ## [engine]
 
@@ -669,13 +669,37 @@ can make to GitHub).
 | `max_pages` | `3` | count, 1 to 10 | Pages of 100 runs per repo per scan. |
 | `max_requests_per_tick` | `30` | count, 1 to 100 | This step's own request budget per scan. |
 | `tick_budget` | `"10s"` | duration, > 0 and <= 60s | |
-| `included_minutes` | unset | minutes, > 0 | Monthly quota; becomes a `ci_minutes` resource for the forecast. Minutes used are not read; rule 9 projects the burn. |
+| `included_minutes` | unset | minutes, > 0 | Monthly quota; becomes a `ci_minutes` resource for the forecast. Minutes used are read only with `billing_user` or `billing_org`; otherwise rule 9 projects the burn. |
 | `quota_reset_day` | `1` | day of month, 1 to 28 | When the quota resets (UTC). |
 | `allow_cancel` | `false` | bool | Allow `cancel_build`. |
 | `cancel_repos` | `[]` | list | Required with `allow_cancel`; among `repos`. |
 | `cancel_workflows` | `[]` | list of workflow paths | Only runs of these workflows, e.g. `.github/workflows/ci.yml`. Empty: any. |
 | `cancel_branches` | `[]` | list of globs | Only runs on these branches. Empty: any branch but the default branch, which is never cancelled. |
 | `cancel_token_env` | unset | variable name | A separate token with Actions: write on `cancel_repos`, used only for the cancel request. |
+| `billing_user`, `billing_org` | unset | login | Read minutes used from this user's or organization's billing usage report (one of them; needs `included_minutes` and `billing_token_env`). |
+| `billing_token_env` | unset | variable name | A token of its own that may read the account's billing usage; not `token_env` or `cancel_token_env`. |
+| `billing_interval` | `"15m"` | duration, 5m to 1h | One read this often. A reading is kept for two intervals and only within its quota period. |
+| `billing_skus` | `["actions_linux", "actions_windows", "actions_macos"]` | non-empty list | SKUs that draw on `included_minutes`; any case, spaces or hyphens read as `_`. |
+
+**Minutes used.** With `billing_user` or `billing_org`, Kelpie reads GitHub's billing usage
+report (`/users/{user}/settings/billing/usage` or `/organizations/{org}/...`, the enhanced
+billing platform) and counts Actions minutes of `billing_skus` dated from the last reset to
+today (UTC). These minutes are counted as reported, without Windows or macOS multipliers, so the
+reading errs low. Rule 9 then calls the quota exhausted only from that reading (a critical
+alert naming the tasks that wait on CI). That alert means builds stop, which holds only
+when usage stops at the included minutes: a $0 Actions budget, the default for a personal
+account. If the account pays for minutes beyond them, set `included_minutes` to everything
+its budget allows, or leave billing out. Do not use this when the account also runs
+Actions on public repositories, whose free minutes may appear in the report.
+
+The billing token is used for this report only, through a client of its own. For a user it
+is a fine-grained token with the user permission "Plan" (read). For an organization it is a
+fine-grained token of an owner or billing manager with the organization permission
+"Administration" (read); do not use a classic token, whose `admin:org` scope is full
+organization admin. A failed read (refused, not on the enhanced billing platform, stale, or
+an implausible report) gives no reading and is logged once, and rule 9 falls back to the
+burn projection. Each read has the request and time budget of `tick_budget` on its own,
+after the scan.
 
 ### [connectors.github.pulls]
 
@@ -900,6 +924,9 @@ Kelpie refuses to start when:
   (and `ci_economy` with `allow_cancel`) is in `act`.
 - A variable named by an explicit `token_env`, `webhook_env`, `headers_env` or
   `cancel_token_env` is missing or malformed.
+- `billing_user` or `billing_org` is set without `billing_token_env` or `included_minutes`,
+  or both are set; `billing_token_env` names `token_env`'s or `cancel_token_env`'s variable,
+  or its variable is missing or malformed; `billing_skus` is empty.
 - The [exposure check](install.md#otlp-token-and-the-exposure-check) fails.
 
 Kelpie logs a warning when:
@@ -910,6 +937,9 @@ Kelpie logs a warning when:
   `wait_condition` in `act`;
 - `[resources.prometheus] interval` or a provider's `interval` is longer than rule 7's
   `max_reading_age`;
+- twice `[connectors.github.ci] billing_interval` (how long a reading is kept) is longer
+  than rule 9's `max_reading_age`;
+- the billing token holds the same value as the main or the cancel token;
 - a budget's `providers` names a provider that is not in `[connectors.llm_quotas]`;
 - `loop_breaker` and `wait_condition` set different `poll_patterns`;
 - no OTLP token is set, or credentials would go over plain http to a non-loopback host.
