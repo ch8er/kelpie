@@ -613,7 +613,7 @@ def _conditions(raw: list[Any]) -> list[dict[str, Any]]:
         for key, value in params.items():
             if not isinstance(key, str) or not key or len(key) > 64 or _ID_CONTROL.search(key):
                 raise ProtocolError("wait: condition param names must be short strings")
-            if key == "task" and kind == ConditionKind.TASK_STATUS:
+            if key == "task" and kind in (ConditionKind.TASK_STATUS, ConditionKind.HUMAN_TASK):
                 value = _id(value, "wait: task_status task")
             elif isinstance(value, str):
                 value = _text(value, 1024)
@@ -774,7 +774,8 @@ def namespace_snapshot(agent: str, adapter: str, part: Snapshot) -> Snapshot:
             owner_id=opt(t.owner_id),
             assignee=opt(t.assignee),
             subtasks=tuple(ns(s) for s in t.subtasks),
-            repo=opt(t.repo),
+            # Files without a repository still belong to this machine's checkout.
+            repo=opt(t.repo) if t.repo is not None or not t.files else f"{agent}:",
             source=source,
             host=agent,
             block=None
@@ -800,7 +801,7 @@ def namespace_snapshot(agent: str, adapter: str, part: Snapshot) -> Snapshot:
     return Snapshot(
         now=part.now,
         tasks=tasks,
-        owners=tuple(dataclasses.replace(o, id=ns(o.id)) for o in part.owners),
+        owners=tuple(dataclasses.replace(o, id=ns(o.id), host=agent) for o in part.owners),
         dependencies=tuple(Dependency(ns(d.task_id), ns(d.depends_on)) for d in part.dependencies),
         conditions=conditions,
         sessions=tuple(
@@ -836,9 +837,13 @@ def namespace_span(agent: str, span: Span) -> Span:
     )
 
 
+# Condition kinds whose ``task`` param names a task of the same board.
+TASK_REF_KINDS = frozenset({ConditionKind.TASK_STATUS, ConditionKind.HUMAN_TASK})
+
+
 def _condition_params(
     kind: ConditionKind, params: dict[str, Any], ns: Callable[[str], str]
 ) -> dict[str, Any]:
-    if kind is ConditionKind.TASK_STATUS and isinstance(params.get("task"), str):
+    if kind in TASK_REF_KINDS and isinstance(params.get("task"), str):
         return {**params, "task": ns(params["task"])}
     return params

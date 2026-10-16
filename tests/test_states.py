@@ -138,15 +138,43 @@ def test_a_failing_rule_does_not_resolve_its_states() -> None:
     assert tick(e, T0 + 2 * H) == [("Resolved after 2.0h", Outcome.ALERTED)]  # last seen T0
 
 
-def test_a_partial_snapshot_resolves_nothing() -> None:
+class Many:
+    """Reports each of its actions while it is in ``on``."""
+
+    name = "emit"
+
+    def __init__(self, *actions: Action) -> None:
+        self.actions, self.on = actions, {a.state for a in actions}
+
+    def evaluate(self, snapshot: Snapshot) -> list[Action]:
+        return [a for a in self.actions if a.state in self.on]
+
+
+def test_a_partial_snapshot_freezes_only_what_it_cannot_see() -> None:
+    laptop = replace(alert(state="s-laptop"), task_id="laptop:T-1", key="k1")
+    vm = replace(alert(state="s-vm"), task_id="vm-1:T-1", key="k2")
+    farm = replace(alert(state="s-farm"), task_id=None, key="k3")
+    alerter, rule = FakeAlerter(), Many(laptop, vm, farm)
+    e = engine(rule, alerter)
+    e.tick(lambda: Snapshot(now=T0))
+    rule.on = set()  # the laptop went silent; vm-1's and the farm's conditions also ended
+    partial = Snapshot(now=T0 + H, unobserved=("laptop",))
+    resolved = [d.action.task_id for d in e.tick(lambda: partial)]
+    assert resolved == ["vm-1:T-1"]  # only what the snapshot can see
+    assert {s.id for s in e.states.store.open_states()} == {"s-laptop", "s-farm"}
+    assert [d.action.task_id for d in e.tick(lambda: Snapshot(now=T0 + 2 * H))] == [
+        "laptop:T-1",
+        None,
+    ]
+
+
+def test_an_unreadable_hub_freezes_everything() -> None:
     alerter, rule = FakeAlerter(), Toggle(alert())
     e = engine(rule, alerter)
     tick(e, T0)
-    rule.on = False  # the task's host went silent: its board is not in the snapshot
-    partial = Snapshot(now=T0 + H, unobserved=("laptop",))
-    assert [d.outcome for d in e.tick(lambda: partial)] == []
+    rule.on = False
+    assert e.tick(lambda: Snapshot(now=T0 + H, unobserved=("hub",))) == []
     assert len(e.states.store.open_states()) == 1
-    assert tick(e, T0 + 2 * H) == [("Resolved after 2.0h", Outcome.ALERTED)]
 
 
 def test_execute_without_evaluate_resolves_nothing() -> None:

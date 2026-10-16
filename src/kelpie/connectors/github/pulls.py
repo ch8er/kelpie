@@ -58,7 +58,7 @@ from typing import Any
 from kelpie.connectors.github.client import GitHubError
 from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.core.model import LabelEvent, PullRequest, Snapshot
-from kelpie.core.pr_links import compile_task_code, link_tasks
+from kelpie.core.pr_links import compile_task_code, link_tasks, shared_local_ids
 from kelpie.core.serde import parse_duration
 
 log = logging.getLogger(__name__)
@@ -163,6 +163,8 @@ class PullRequestSync:
     _exhausted: bool = field(default=False, init=False)
     _version: int = field(default=0, init=False)  # bumped on every scan
     _link_key: object = field(default=None, init=False)
+    # Multi-host: local task ids on several machines when all were last observed.
+    _shared_local: frozenset[str] = field(default=frozenset(), init=False)
     _links: tuple[PullRequest, ...] = field(default=(), init=False)
     _closed_links: tuple[PullRequest, ...] = field(default=(), init=False)
     # (repo, number, label) -> (when it was put on, when that was read);
@@ -198,10 +200,18 @@ class PullRequestSync:
         self, snapshot: Snapshot
     ) -> tuple[tuple[PullRequest, ...], tuple[PullRequest, ...]]:
         """The open and closed PRs with the tasks they belong to, worked out again only when
-        the PRs or the tasks' ids, titles or branches changed."""
-        key = (self._version, tuple((t.id, t.title, t.branch) for t in snapshot.tasks))
+        the PRs or the tasks' ids, titles or branches changed. On a multi-host farm, local
+        ids seen on several machines while all were observed stay ambiguous while one is
+        not (a look-alike may be on the missing machine)."""
+        if not snapshot.unobserved:
+            self._shared_local = shared_local_ids(snapshot.tasks)
+        key = (
+            self._version,
+            tuple((t.id, t.title, t.branch) for t in snapshot.tasks),
+            self._shared_local,
+        )
         if key != self._link_key:
-            code = self.settings.task_code
+            code, shared = self.settings.task_code, self._shared_local
             closed = tuple(p for repo in sorted(self._closed) for p in self._closed[repo])
             # A PR closed between the two lists of one scan counts as closed; an older closed
             # list says nothing about a PR open now (it may have been reopened).
@@ -216,8 +226,8 @@ class PullRequestSync:
                 for p in self._pulls[repo]
                 if (p.repo, p.number) not in gone
             )
-            self._links = link_tasks(pulls, snapshot.tasks, code)
-            self._closed_links = link_tasks(closed, snapshot.tasks, code)
+            self._links = link_tasks(pulls, snapshot.tasks, code, shared)
+            self._closed_links = link_tasks(closed, snapshot.tasks, code, shared)
             self._link_key = key
         return self._links, self._closed_links
 

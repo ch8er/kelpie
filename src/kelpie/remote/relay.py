@@ -1,5 +1,6 @@
 """The agent's OTLP relay: exporters on an agent host send trace exports to
-``127.0.0.1:4318/v1/traces`` (as they would to a single-host Kelpie); the relay forwards
+``127.0.0.1:4318/v1/traces`` (the usual OTLP/HTTP port; in single-host mode they go to
+Kelpie's own 9464 instead); the relay forwards
 each export unchanged to the hub's ``/v1/traces`` under the agent's token, and hands the
 hub's answer back. The hub puts the spans in the agent's namespace.
 
@@ -11,6 +12,7 @@ the host's own users can do anyway.
 from __future__ import annotations
 
 import logging
+import socket
 import ssl
 import sys
 import threading
@@ -48,6 +50,8 @@ class Relay(ThreadingHTTPServer):
         self.context = context
         self.post = post
         self.connections = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        if ":" in address[0]:
+            self.address_family = socket.AF_INET6
         super().__init__(address, RelayHandler)
 
     def process_request(self, request: Any, client_address: Any) -> None:

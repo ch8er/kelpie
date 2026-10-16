@@ -22,9 +22,10 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.executors import Executor
 from kelpie.core.ledger import Outcome as LedgerOutcome
 from kelpie.core.model import Snapshot
-from kelpie.core.ports import Alerter
-from kelpie.remote.hub import AgentUnavailable, AgentView, Hub
+from kelpie.core.ports import Alerter, Deferred
+from kelpie.remote.hub import AgentView, Hub
 from kelpie.remote.protocol import (
+    TASK_REF_KINDS,
     Outcome,
     ProtocolError,
     WireAction,
@@ -44,6 +45,15 @@ class FarmObserver(Protocol):
     def agent_state(self, agent: str, up: bool, last_report: datetime | None) -> None: ...
 
     def adapter_failed(self, name: str) -> None: ...
+
+
+class Busy(Deferred):
+    """The agent cannot take the action this tick (its budget is used up, or it is not
+    reporting); the engine asks again next tick, without counting an attempt."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.public_reason = reason
 
 
 class RemoteActionFailed(Exception):
@@ -83,6 +93,7 @@ class RemoteFarm:
     _fresh: set[str] = field(init=False, default_factory=set)
     _budgets: dict[str, _Budget] = field(init=False, default_factory=dict)
     _health: dict[str, _Health] = field(init=False, default_factory=dict)
+    _failing: set[str] = field(init=False, default_factory=set)  # boards told unreadable
 
     def __post_init__(self) -> None:
         self.started = self.clock()
@@ -95,6 +106,7 @@ class RemoteFarm:
         parts: list[Snapshot] = []
         unobserved: list[str] = []
         fresh: set[str] = set()
+        failing: set[str] = set()
         for view in self.hub.agents():
             report = view.report
             if not self._usable(view, now):
@@ -110,8 +122,21 @@ class RemoteFarm:
                     if self.observer is not None:
                         self.observer.adapter_failed(source)
                     unobserved.append(source)
+                    failing.add(source)
+                    if source not in self._failing:
+                        self._failing.add(source)
+                        self._alert(
+                            Severity.WARNING,
+                            f"board {source} unreadable",
+                            f"Agent {view.name} cannot read its {part.name} board "
+                            f"({part.error}); its tasks are not evaluated until it can.",
+                        )
                     continue
                 parts.append(namespace_snapshot(view.name, part.name, part.snapshot))
+        for source in sorted(self._failing - failing):
+            if source.split("/")[0] in fresh:  # read again, or no longer reported
+                self._failing.discard(source)
+                self._alert(Severity.INFO, f"board {source} unreadable", "Resolved.")
         self._fresh = fresh
         self._tell_late()
         return Snapshot(
@@ -198,11 +223,11 @@ class RemoteFarm:
         if wire is None:
             return False
         if agent not in self._fresh:
-            raise AgentUnavailable(f"agent {agent} is not reporting")
+            raise Busy(f"agent {agent} is not reporting")
         budget = self._budgets.setdefault(agent, _Budget())
         left = self.hub.settings.action_timeout.total_seconds() - budget.seconds
         if left < 0.5 or budget.actions >= MAX_ACTIONS_PER_TICK:
-            raise AgentUnavailable(f"agent {agent} is busy this tick; retried later")
+            raise Busy(f"agent {agent} is busy this tick")
         budget.actions += 1
         started = time.monotonic()
         try:
@@ -295,7 +320,7 @@ def _condition(agent: str, raw: object) -> dict[str, Any] | None:
     if not isinstance(raw, Mapping):
         return None
     params = dict(raw.get("params") or {})
-    if isinstance(params.get("task"), str):
+    if raw.get("kind") in TASK_REF_KINDS and isinstance(params.get("task"), str):
         task = local(agent, params["task"])
         if task is None:
             return None

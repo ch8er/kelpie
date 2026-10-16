@@ -33,7 +33,7 @@ from kelpie.core.ledger import (
     subject,
 )
 from kelpie.core.model import Snapshot
-from kelpie.core.ports import ActionConnector, Alerter, PlatformAdapter
+from kelpie.core.ports import ActionConnector, Alerter, Deferred, PlatformAdapter
 from kelpie.core.rule import Rule
 from kelpie.core.states import MemoryStateStore, StateStore, StateTracker, Transition
 
@@ -80,7 +80,8 @@ class Engine:
     (see :mod:`kelpie.core.ledger`). If the ledger itself fails, the engine fails closed:
     only observe and dry-run actions proceed, and a human is told once per tick.
 
-    While a snapshot is partial (``Snapshot.unobserved``), no alert state is resolved.
+    While a snapshot is partial (``Snapshot.unobserved``), states on the tasks it is missing,
+    and farm-wide states, are not resolved.
     """
 
     rules: Sequence[Rule]
@@ -224,6 +225,9 @@ class Engine:
         else:
             try:
                 outcome = self._handle(action, mode, snapshot)
+            except Deferred as exc:
+                log.info("deferred: %s: %s", action, exc)
+                return Dispatched(action, mode, Outcome.DEFERRED)  # not an attempt
             except Exception as exc:
                 log.warning("action failed: %s: %r", action, exc)
                 log.debug("traceback of failed action: %s", action, exc_info=True)
@@ -292,13 +296,14 @@ class Engine:
 
     def _resolve_gone(self, seen: set[str], snapshot: Snapshot) -> list[Dispatched]:
         """Close states that rules which ran fine this tick stopped reporting."""
-        if self._evaluated is None or snapshot.unobserved:
+        if self._evaluated is None:
             return []
         try:
             gone = self.states.gone(self._evaluated, seen, snapshot.now)
         except Exception:
             log.exception("state store unavailable; cannot resolve states")
             return []
+        gone = [s for s in gone if not _blind(s.task_id, snapshot.unobserved)]
         results: list[Dispatched] = []
         for state in gone:
             first_line = f"{state.summary.split('. ')[0].rstrip('.')}."
@@ -505,6 +510,17 @@ _TRANSITIONS = {
     Transition.ESCALATED: AlertTransition.ESCALATED,
     Transition.CHANGED: AlertTransition.CHANGED,
 }
+
+
+def _blind(task_id: str | None, unobserved: Sequence[str]) -> bool:
+    """Whether a state may have stopped being reported only because part of the farm is not
+    in the snapshot: one on a task of an unobserved agent, or a farm-wide one (no task)
+    while anything is unobserved."""
+    if not unobserved:
+        return False
+    if task_id is None or "hub" in unobserved:
+        return True
+    return any(task_id.startswith(f"{part.split('/')[0]}:") for part in unobserved)
 
 
 def _higher(a: Severity, b: Severity) -> Severity:

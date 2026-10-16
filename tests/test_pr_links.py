@@ -129,3 +129,14 @@ def test_namespaced_ids_link_by_their_local_id_when_it_is_unique() -> None:
         2: ("vm-1:t_2b",),
         3: (),
     }
+
+
+def test_local_ids_known_to_be_shared_stay_unlinked() -> None:
+    from kelpie.core.pr_links import shared_local_ids
+
+    both = [replace(t("laptop:t_1a"), host="laptop"), replace(t("vm-1:t_1a"), host="vm-1")]
+    assert shared_local_ids(both) == {"t_1a"}
+    visible = both[:1]  # vm-1 is silent now
+    pulls = (pr(1, "t_1a: fix login", "feature/x"), pr(2, "nothing", "feature/y"))
+    assert ids(link_tasks(pulls, visible, None, shared_local_ids(both))) == {1: (), 2: ()}
+    assert ids(link_tasks(pulls, visible, None)) == {1: ("laptop:t_1a",), 2: ()}

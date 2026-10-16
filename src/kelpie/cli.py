@@ -204,7 +204,11 @@ def _agent(settings: Settings) -> int:
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     except OSError as exc:
-        raise ConfigError(f"[agent] relay cannot listen on {config.relay}: {exc}") from exc
+        host, port = config.relay or ("", 0)
+        raise ConfigError(
+            f"[agent] relay cannot listen on {host}:{port}: {exc} (another OTLP receiver "
+            "there? set [agent] relay to another port, or relay = false)"
+        ) from exc
     if config.plain_http:
         log.warning("[agent] reports over plain http: the token crosses the network in clear")
 

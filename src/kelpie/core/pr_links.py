@@ -28,7 +28,7 @@ from __future__ import annotations
 import re
 import re._parser as sre_parse  # the parse tree, to refuse patterns that backtrack badly
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import replace
 from functools import lru_cache
 
@@ -113,9 +113,14 @@ def _token(code: str) -> re.Pattern[str]:
 
 
 def link_tasks(
-    pulls: Sequence[PullRequest], tasks: Sequence[Task], pattern: re.Pattern[str] | None
+    pulls: Sequence[PullRequest],
+    tasks: Sequence[Task],
+    pattern: re.Pattern[str] | None,
+    shared_local: Collection[str] = (),
 ) -> tuple[PullRequest, ...]:
-    """Each PR with the ids of the tasks it belongs to (``PullRequest.task_ids``)."""
+    """Each PR with the ids of the tasks it belongs to (``PullRequest.task_ids``).
+    ``shared_local``: local ids (casefolded) known to be on several machines, from the last
+    snapshot that saw them all; they link nothing even when only one is visible now."""
     by_code: dict[str, set[str]] = {}
     by_branch: dict[str, set[str]] = {}
     local = {t.id: _local_id(t) for t in tasks}
@@ -123,7 +128,12 @@ def link_tasks(
     for t in tasks:
         codes = set(task_codes(t, pattern))
         own = local[t.id]
-        if own is not None and shared[own.casefold()] == 1 and is_code(own):
+        if (
+            own is not None
+            and shared[own.casefold()] == 1
+            and own.casefold() not in shared_local
+            and is_code(own)
+        ):
             codes.add(own)
         for code in codes:
             by_code.setdefault(code.casefold(), set()).add(t.id)
@@ -141,6 +151,12 @@ def link_tasks(
                 ids |= owners
         out.append(replace(pr, task_ids=tuple(sorted(ids))) if ids else pr)
     return tuple(out)
+
+
+def shared_local_ids(tasks: Sequence[Task]) -> frozenset[str]:
+    """Local ids (casefolded) that more than one host-namespaced task has."""
+    seen = Counter(i.casefold() for t in tasks if (i := _local_id(t)) is not None)
+    return frozenset(i for i, n in seen.items() if n > 1)
 
 
 def _local_id(task: Task) -> str | None:

@@ -26,6 +26,7 @@ from kelpie.core.model import (
 from kelpie.remote.config import HubAgent, HubSettings
 from kelpie.remote.farm import (
     MAX_ACTIONS_PER_TICK,
+    Busy,
     RemoteActionFailed,
     RemoteExecutor,
     RemoteFarm,
@@ -431,7 +432,7 @@ def test_an_agent_that_is_not_reporting_fails_fast() -> None:
     rig.report("vm-1")
     rig.tick()
     started = time.monotonic()
-    with pytest.raises(AgentUnavailable, match="not reporting"):
+    with pytest.raises(Busy, match="not reporting"):
         rig.executors["laptop/hermes"].execute(stop())
     assert time.monotonic() - started < 0.5
 
@@ -440,8 +441,10 @@ def test_a_slow_agent_costs_one_budget_per_tick() -> None:
     rig = ready()  # action_timeout 2s, nobody answers
     executor: RemoteExecutor = rig.executors["laptop/hermes"]
     started = time.monotonic()
-    for session in ("laptop:s1", "laptop:s2", "laptop:s3"):
-        with pytest.raises(AgentUnavailable):
+    with pytest.raises(AgentUnavailable, match="not carried out"):
+        executor.execute(stop("laptop:s1"))
+    for session in ("laptop:s2", "laptop:s3"):
+        with pytest.raises(Busy):  # deferred, not failed: no attempt is counted
             executor.execute(stop(session))
     assert time.monotonic() - started < 3  # not 3 x 2s
     rig.tick()  # a new tick: a new budget
@@ -452,7 +455,7 @@ def test_a_slow_agent_costs_one_budget_per_tick() -> None:
 def test_at_most_16_actions_per_agent_per_tick() -> None:
     rig = ready()
     rig.farm._budgets["laptop"] = _Budget(actions=MAX_ACTIONS_PER_TICK)
-    with pytest.raises(AgentUnavailable, match="busy"):
+    with pytest.raises(Busy, match="busy"):
         rig.executors["laptop/hermes"].execute(stop())
 
 
@@ -488,3 +491,115 @@ def test_the_engine_routes_to_remote_boards_by_source() -> None:
     assert engine.route(Action(ActionKind.COMMENT, "r", "x", task_id="nope"), snap) is None
     with pytest.raises(ValueError, match="duplicate"):
         engine.add_executor(rig.executors["vm-1/hermes"])
+
+
+# --- review follow-ups --------------------------------------------------------------------
+
+
+def test_human_task_refs_round_trip() -> None:
+    part = Snapshot(
+        now=NOW,
+        conditions=(
+            Condition("h1", ConditionKind.HUMAN_TASK, "t_1a", {"task": "T-42"}),
+            Condition("x1", ConditionKind.CUSTOM, "t_1a", {"task": "free text"}),
+        ),
+    )
+    human, custom = namespace_snapshot("laptop", "hermes", part).conditions
+    assert human.params == {"task": "laptop:T-42"}
+    assert custom.params == {"task": "free text"}  # not a task reference
+    rig = ready()
+    agent = answer(rig.hub, "laptop", Outcome.DONE)
+    wait = Action(
+        ActionKind.WAIT,
+        "wait_condition",
+        "waiting for a person",
+        task_id="laptop:t_1a",
+        params={
+            "conditions": [
+                {"id": "h1@laptop", "kind": "human_task", "params": {"task": "laptop:T-42"}},
+                {"id": "x1@laptop", "kind": "custom", "params": {"task": "free text"}},
+            ]
+        },
+    )
+    assert rig.executors["laptop/hermes"].execute(wait) is True
+    agent.join(5)
+    (sent,) = agent.seen  # type: ignore[attr-defined]
+    assert sent.params["conditions"] == [
+        {"id": "h1", "kind": "human_task", "params": {"task": "T-42"}},
+        {"id": "x1", "kind": "custom", "params": {"task": "free text"}},
+    ]
+
+
+def test_a_block_reason_names_a_human_task_of_the_same_board() -> None:
+    import re
+
+    from kelpie.connectors.human_tasks import HumanTaskConnector
+
+    board_part = Snapshot(
+        now=NOW,
+        tasks=(
+            Task("t_1a", "Ship", Status.BLOCKED, NOW, block=Block("approval in T-42", NOW)),
+            Task("T-42", "Approve", Status.IN_PROGRESS, NOW, owner_id="alice"),
+        ),
+        owners=(Owner("alice", "pm", OwnerKind.HUMAN),),
+    )
+    merged = namespace_snapshot("laptop", "hermes", board_part)
+    connector = HumanTaskConnector([re.compile(r"approval in (?P<task>\S+)")])
+    out = connector(merged)
+    (cond,) = out.conditions
+    assert cond.params["task"] == "laptop:T-42"
+    assert cond.satisfied is False and cond.params["owner"] == "laptop:alice"
+
+
+def test_an_adapter_that_keeps_failing_is_told_once() -> None:
+    rig = Rig()
+    failing = AdapterReport("claude-code", frozenset({ActionKind.STOP}), error="OSError")
+    for _ in range(3):
+        rig.report("laptop", AdapterReport("hermes", KINDS, board()), failing)
+        rig.report("vm-1")
+        rig.tick()
+    assert rig.titles() == ["[kelpie] board laptop/claude-code unreadable"]
+    rig.report("laptop", AdapterReport("hermes", KINDS, board()))
+    rig.report("vm-1")
+    rig.tick()
+    assert "Resolved" in rig.alerter.sent[-1][1]
+
+
+def test_deferred_actions_are_not_attempts() -> None:
+    from kelpie.core.config import EngineConfig, Mode
+    from kelpie.core.ledger import Outcome as Done
+
+    rig = ready()
+    rig.farm._budgets["laptop"] = _Budget(actions=MAX_ACTIONS_PER_TICK)  # busy this tick
+    action = Action(ActionKind.COMMENT, "rule", "note", task_id="laptop:t_1a", once=True)
+
+    class Rule:
+        name = "rule"
+
+        def evaluate(self, snapshot: Snapshot) -> list[Action]:
+            return [action]
+
+    engine = Engine(
+        [Rule()],  # type: ignore[list-item]
+        config=EngineConfig(dry_run=False, default_mode=Mode.ACT),
+        fallback=False,
+    )
+    engine.add_executor(rig.executors["laptop/hermes"])
+    snap = rig.tick()
+    rig.farm._budgets["laptop"] = _Budget(actions=MAX_ACTIONS_PER_TICK)
+    (d,) = engine.execute(engine.evaluate(snap), snap)
+    assert d.outcome is Done.DEFERRED
+    assert engine.ledger.failed_attempts(action, Mode.ACT, snap.now) == 0
+    assert engine.ledger.check(action, Mode.ACT, snap.now) is None  # free to try next tick
+
+
+def test_owners_serve_tasks_of_their_own_machine() -> None:
+    from kelpie.rules.ping_pong import PingPong
+
+    task = replace(namespace_snapshot("laptop", "hermes", board()).tasks[0])
+    mine = Owner("laptop:alice", "pm", OwnerKind.HUMAN, host="laptop")
+    theirs = Owner("a:aaa", "pm", OwnerKind.HUMAN, host="vm-1")
+    assert mine.serves(task) and not theirs.serves(task)
+    assert Owner("alice", "pm").serves(task)  # single host: no machine to compare
+    snap = Snapshot(now=NOW, tasks=(task,), owners=(theirs, mine))
+    assert PingPong()._target(snap, task) == "laptop:alice"

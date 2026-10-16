@@ -270,6 +270,7 @@ def _relay(value: Any) -> tuple[str, int] | None:
     if value is False:
         return None
     host, port = _listen(value, "[agent] relay", "127.0.0.1:4318")
+    host = "127.0.0.1" if host == "localhost" else host
     if not _loopback(host):
         raise ValueError(
             f"[agent] relay listens on loopback only (it takes spans without a token), not {host}"

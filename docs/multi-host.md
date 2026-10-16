@@ -188,11 +188,14 @@ release, stated in the docs.
 
 **Pull requests** link to tasks by task code in the title or branch. A task's id without
 its `<agent>:` prefix is also a code, but only when exactly one task in the merged
-snapshot has that local id; when several hosts have it, only the branch links.
+snapshot has that local id and no machine is unobserved; otherwise only the branch and
+title codes link.
 
-**Config that names ids** (budget `match`, orphan `ignore_tasks`, ping-pong
-`escalate_to`, provider owners) compares against namespaced ids; patterns take a
-`laptop:` or `*:` prefix.
+**Config that names ids** compares against namespaced ids: patterns (budget `match`,
+orphan `ignore_tasks`) take a `laptop:` or `*:` prefix, and literal ids (ping-pong
+`escalate_to`, provider owners) are written in full (`laptop:alice`). Owners are picked only
+for tasks of their own machine (orphan candidates, ping-pong's default human), and a
+person on two boards is two owners (the "needs you" inbox lists them per machine).
 
 **Clocks.** Agent clocks are used as is, so rules compare an agent's times with the
 server's `now`. The hub measures each report's offset (`sent_at` against its own clock): a

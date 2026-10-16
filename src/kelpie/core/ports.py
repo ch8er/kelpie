@@ -27,6 +27,12 @@ class UnsupportedAction(NotImplementedError):
     are limited by the ledger's cooldown); any other exception is a failure and is retried."""
 
 
+class Deferred(Exception):
+    """Raised by an executor that cannot take an action now for a reason of its own, not
+    the action's (a remote agent busy this tick, or not reporting). The engine neither
+    records nor reports it: it is not an attempt, and the rule asks again next tick."""
+
+
 @runtime_checkable
 class PlatformAdapter(Protocol):
     """Bridge to an agent platform (Hermes, OpenClaw, Paperclip, Claude Code, ...).

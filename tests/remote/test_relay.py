@@ -104,3 +104,38 @@ def test_the_relay_answers_503_when_the_hub_is_away() -> None:
     finally:
         relay.shutdown()
         relay.server_close()
+
+
+def test_relayed_spans_are_stored_in_the_agents_namespace(tmp_path: Any) -> None:
+    from datetime import UTC, datetime
+
+    from kelpie.core.spans import MemorySpanStore
+    from kelpie.traces.ingest import TraceIngest
+    from tests.traces.otlp_builders import S, request, sid
+
+    now = datetime.now(UTC)
+    store = MemorySpanStore()
+    ingest = TraceIngest(store=store, clock=lambda: now)
+    hub = Hub(hub_settings(), {"laptop": TOKEN, "vm-1": OTHER}, Clock())
+    server = HubServer(hub, ingest)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    relay = Relay(("127.0.0.1", 0), f"http://127.0.0.1:{server.server_address[1]}", TOKEN, 1 << 20)
+    threading.Thread(target=relay.serve_forever, daemon=True).start()
+    try:
+        attrs = {
+            "gen_ai.operation.name": "execute_tool",
+            "gen_ai.tool.name": "shell",
+            "kelpie.task.id": "t_1a",
+            "session.id": "s1",
+        }
+        body = request([S(sid(1), attrs=attrs, start=now)])
+        status, _ = send(relay.server_address[1], body)
+        assert status == 200
+        (span,) = store.spans_since(datetime.min.replace(tzinfo=UTC))
+        assert span.trace_id.startswith("laptop:") and span.span_id.startswith("laptop:")
+        assert span.session_id in (None, "laptop:s1")
+    finally:
+        relay.shutdown()
+        relay.server_close()
+        server.shutdown()
+        server.server_close()

@@ -56,7 +56,7 @@ class PingPong:
     def _escalate(
         self, task: Task, rounds: int, reviews: list[Return], snapshot: Snapshot
     ) -> Action:
-        target = self._target(snapshot)
+        target = self._target(snapshot, task)
         history = reviews[-_SHOWN_REASONS:]
         lines = "; ".join(f"{i}. {r.reason} [{r.category}]" for i, r in enumerate(history, 1))
         earlier = len(reviews) - len(history)
@@ -102,10 +102,12 @@ class PingPong:
             },
         )
 
-    def _target(self, snapshot: Snapshot) -> str | None:
+    def _target(self, snapshot: Snapshot, task: Task) -> str | None:
         if self.escalate_to is not None:
             return self.escalate_to
-        humans = sorted(o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN)
+        humans = sorted(
+            o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN and o.serves(task)
+        )
         return humans[0] if humans else None
 
 

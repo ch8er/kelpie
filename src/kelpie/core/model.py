@@ -41,6 +41,13 @@ class Owner:
     id: str
     role: str
     kind: OwnerKind = OwnerKind.AGENT
+    # The machine whose board names this owner (multi-host); None: single host. Owners are
+    # only picked for tasks of the same machine.
+    host: str | None = None
+
+    def serves(self, task: Task) -> bool:
+        """Whether this owner can be picked for ``task`` (same machine, when known)."""
+        return self.host is None or task.host is None or self.host == task.host
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,8 +516,9 @@ class Snapshot:
     # Repeated huge-output offenders over [traces.outputs] repeat_days (span store).
     output_offenders: tuple[OutputOffender, ...] = ()
     # Parts of the farm that are not in this snapshot (multi-host: agents and
-    # ``<agent>/<adapter>`` boards that are silent, stale or failed). Not empty means the
-    # snapshot is partial: a rule that stops reporting a state may only be blind to it.
+    # ``<agent>/<adapter>`` boards that are silent, stale or failed, whose task ids start
+    # with ``<agent>:``; ``hub`` when no agent board could be read). A rule that stops
+    # reporting a state on such a task, or a farm-wide state, may only be blind to it.
     unobserved: tuple[str, ...] = ()
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False

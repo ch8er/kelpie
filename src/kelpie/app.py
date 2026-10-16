@@ -1045,7 +1045,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     span_store = _open_span_store(settings.db_path)
     metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
     metrics.set_span_rows_source(span_store.count)
-    if token is None:
+    if token is None and hub is None:
         log.warning(
             "OTLP ingest on /v1/traces accepts spans without a token; set $%s",
             traces.token_env,
