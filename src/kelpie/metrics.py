@@ -83,6 +83,8 @@ class Metrics:
         self.actions: Counter[tuple[str, str, str, str]] = Counter()
         self.rule_errors: Counter[str] = Counter()
         self.adapter_errors: Counter[str] = Counter()
+        # multi-host: agent -> (up, unix time of its last report or 0)
+        self.agents: dict[str, tuple[bool, float]] = {}
         self.ledger_up = True
         self.open_states: Counter[str] = Counter()
         self.tasks: Counter[str] = Counter()
@@ -303,6 +305,12 @@ class Metrics:
         with self._lock:
             self.adapter_errors[name] += 1
 
+    # --- multi-host (kelpie.remote.farm.FarmObserver) ---------------------------------------
+
+    def agent_state(self, agent: str, up: bool, last_report: datetime | None) -> None:
+        with self._lock:
+            self.agents[agent] = (up, last_report.timestamp() if last_report else 0.0)
+
     def observe_tick(
         self,
         seconds: float,
@@ -489,6 +497,25 @@ class Metrics:
                     for a, n in sorted(self.adapter_errors.items())
                 ],
             )
+            if self.agents:
+                metric(
+                    "kelpie_agent_up",
+                    "gauge",
+                    "1 while the agent's board is merged (fresh reports, clock in range).",
+                    [
+                        f"kelpie_agent_up{_labels(agent=a)} {int(up)}"
+                        for a, (up, _) in sorted(self.agents.items())
+                    ],
+                )
+                metric(
+                    "kelpie_agent_last_report_timestamp_seconds",
+                    "gauge",
+                    "Unix time the hub accepted the agent's last report (0: none yet).",
+                    [
+                        f"kelpie_agent_last_report_timestamp_seconds{_labels(agent=a)} {ts:.3f}"
+                        for a, (_, ts) in sorted(self.agents.items())
+                    ],
+                )
             metric(
                 "kelpie_actions_total",
                 "counter",

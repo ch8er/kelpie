@@ -1,0 +1,486 @@
+import threading
+import time
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+
+from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.engine import Engine
+from kelpie.core.ledger import Outcome as LedgerOutcome
+from kelpie.core.model import (
+    Block,
+    Condition,
+    ConditionKind,
+    Dependency,
+    Owner,
+    OwnerKind,
+    Session,
+    Snapshot,
+    Span,
+    SpanKind,
+    Status,
+    Task,
+)
+from kelpie.remote.config import HubAgent, HubSettings
+from kelpie.remote.farm import (
+    MAX_ACTIONS_PER_TICK,
+    RemoteActionFailed,
+    RemoteExecutor,
+    RemoteFarm,
+    _Budget,
+)
+from kelpie.remote.hub import AgentUnavailable, Hub
+from kelpie.remote.protocol import (
+    AdapterReport,
+    Outcome,
+    Report,
+    Result,
+    local,
+    local_condition_id,
+    namespace_snapshot,
+)
+
+NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+KINDS = frozenset({ActionKind.STOP, ActionKind.WAIT, ActionKind.COMMENT, ActionKind.REASSIGN})
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = NOW
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+class Alerter:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str]] = []
+
+    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
+        self.sent.append((title, body, severity))
+
+
+class Observer:
+    def __init__(self) -> None:
+        self.states: dict[str, tuple[bool, datetime | None]] = {}
+        self.failed: list[str] = []
+
+    def agent_state(self, agent: str, up: bool, last_report: datetime | None) -> None:
+        self.states[agent] = (up, last_report)
+
+    def adapter_failed(self, name: str) -> None:
+        self.failed.append(name)
+
+
+def board(now: datetime = NOW) -> Snapshot:
+    return Snapshot(
+        now=now,
+        tasks=(
+            Task(
+                "t_1a",
+                "Fix login",
+                Status.BLOCKED,
+                now,
+                owner_id="dev-1",
+                assignee="dev-1",
+                subtasks=("t_2b",),
+                repo="/srv/repo",
+                block=Block("waiting", now, "c1"),
+            ),
+            Task("t_2b", "Child", Status.READY, now),
+        ),
+        owners=(Owner("dev-1", "dev"), Owner("alice", "pm", OwnerKind.HUMAN)),
+        dependencies=(Dependency("t_2b", "t_1a"),),
+        conditions=(Condition("c1", ConditionKind.TASK_STATUS, "t_1a", {"task": "t_2b"}),),
+        sessions=(Session("s1", "t_1a", "dev-1", now),),
+        spans=(
+            Span(
+                "tr",
+                "sp",
+                "bash",
+                SpanKind.TOOL,
+                now,
+                parent_id="root",
+                task_id="t_1a",
+                session_id="s1",
+                attributes={"gen_ai.tool.call.id": "call-1", "x": "y"},
+            ),
+        ),
+    )
+
+
+def test_every_id_is_namespaced() -> None:
+    part = namespace_snapshot("laptop", "hermes", board())
+    task = part.tasks[0]
+    assert task.id == "laptop:t_1a"
+    assert (task.owner_id, task.assignee) == ("laptop:dev-1", "laptop:dev-1")
+    assert task.subtasks == ("laptop:t_2b",)
+    assert task.repo == "laptop:/srv/repo"
+    assert (task.source, task.host) == ("laptop/hermes", "laptop")
+    assert task.block is not None and task.block.condition_id == "c1@laptop"
+    assert [o.id for o in part.owners] == ["laptop:dev-1", "laptop:alice"]
+    assert part.dependencies == (Dependency("laptop:t_2b", "laptop:t_1a"),)
+    cond = part.conditions[0]
+    assert (cond.id, cond.task_id, cond.params) == (
+        "c1@laptop",
+        "laptop:t_1a",
+        {"task": "laptop:t_2b"},
+    )
+    session = part.sessions[0]
+    assert (session.id, session.task_id, session.owner_id, session.source) == (
+        "laptop:s1",
+        "laptop:t_1a",
+        "laptop:dev-1",
+        "laptop/hermes",
+    )
+    span = part.spans[0]
+    assert (span.trace_id, span.span_id, span.parent_id) == (
+        "laptop:tr",
+        "laptop:sp",
+        "laptop:root",
+    )
+    assert (span.task_id, span.session_id) == ("laptop:t_1a", "laptop:s1")
+    assert span.attributes == {"gen_ai.tool.call.id": "laptop:call-1", "x": "y"}
+
+
+def test_local_ids() -> None:
+    assert local("laptop", "laptop:t_1a") == "t_1a"
+    assert local("laptop", "vm-1:t_1a") is None
+    assert local("laptop", "laptop:") is None
+    assert local("lap", "laptop:t_1a") is None
+    assert local_condition_id("laptop", "c1@laptop") == "c1"
+    assert local_condition_id("laptop", "dispatch_gate:laptop:t_1a:p") == (
+        "dispatch_gate:laptop:t_1a:p"
+    )
+
+
+def test_rule_condition_prefixes_survive_the_round_trip() -> None:
+    made = "dispatch_gate:laptop:t_1a:laptop:t_2b"
+    back = namespace_snapshot(
+        "laptop",
+        "hermes",
+        Snapshot(now=NOW, conditions=(Condition(made, ConditionKind.TASK_STATUS, "t_1a"),)),
+    ).conditions[0]
+    assert back.id.startswith("dispatch_gate:laptop:t_1a:")
+    assert local_condition_id("laptop", back.id) == made  # registered again under its id
+
+
+# --- the farm ---------------------------------------------------------------------------
+
+
+def settings(**kw: Any) -> HubSettings:
+    base = HubSettings(
+        agents=(HubAgent("laptop", "T1"), HubAgent("vm-1", "T2")),
+        host="127.0.0.1",
+        port=0,
+        allow_plain_http=True,
+        silent_after=timedelta(seconds=90),
+        action_timeout=timedelta(seconds=2),
+    )
+    return replace(base, **kw)
+
+
+class Rig:
+    def __init__(self, **kw: Any) -> None:
+        self.clock = Clock()
+        self.hub = Hub(settings(**kw), {"laptop": "a" * 40, "vm-1": "b" * 40}, self.clock)
+        self.alerter = Alerter()
+        self.observer = Observer()
+        self.executors: dict[str, Any] = {}
+        self.farm = RemoteFarm(
+            self.hub,
+            lambda e: self.executors.__setitem__(e.name, e),
+            self.clock,
+            alerter=lambda: self.alerter,
+            observer=self.observer,
+        )
+
+    def report(
+        self,
+        agent: str = "laptop",
+        *parts: AdapterReport,
+        sent_at: datetime | None = None,
+    ) -> None:
+        parts = parts or (AdapterReport("hermes", KINDS, board(self.clock.now)),)
+        report = Report("0.0.1", sent_at or self.clock.now, timedelta(seconds=15), parts)
+        self.hub.receive_report(agent, report)
+
+    def tick(self) -> Snapshot:
+        return self.farm.snapshot(self.clock.now)
+
+    def titles(self) -> list[str]:
+        return [title for title, *_ in self.alerter.sent]
+
+
+def test_fresh_boards_are_merged_and_executors_registered() -> None:
+    rig = Rig()
+    rig.report("laptop")
+    rig.report("vm-1")
+    snap = rig.tick()
+    assert {t.id for t in snap.tasks} == {"laptop:t_1a", "laptop:t_2b", "vm-1:t_1a", "vm-1:t_2b"}
+    assert snap.unobserved == ()
+    assert set(rig.executors) == {"laptop/hermes", "vm-1/hermes"}
+    assert rig.observer.states["laptop"] == (True, NOW)
+
+
+def test_a_stale_board_is_left_out_and_the_snapshot_says_so() -> None:
+    rig = Rig()
+    rig.report("laptop")
+    rig.report("vm-1")
+    rig.clock.now += timedelta(seconds=41)  # over 2 x 15s + 10s
+    rig.report("vm-1")
+    snap = rig.tick()
+    assert {t.id for t in snap.tasks} == {"vm-1:t_1a", "vm-1:t_2b"}
+    assert snap.unobserved == ("laptop",)
+    assert rig.observer.states["laptop"] == (False, NOW)
+    assert rig.alerter.sent == []  # not yet silent
+
+
+def test_silence_is_told_once_and_resolved() -> None:
+    rig = Rig()
+    rig.report("laptop")
+    rig.report("vm-1")
+    rig.tick()
+    for _ in range(3):
+        rig.clock.now += timedelta(seconds=60)
+        rig.report("vm-1")
+        rig.tick()
+    assert rig.titles() == ["[kelpie] agent laptop silent"]
+    _, body, severity = rig.alerter.sent[0]
+    assert severity == Severity.WARNING
+    assert "not evaluated" in body and NOW.isoformat(timespec="seconds") in body
+    rig.report("laptop")
+    rig.tick()
+    assert rig.titles()[-1] == "[kelpie] agent laptop silent"
+    assert "Resolved" in rig.alerter.sent[-1][1]
+    assert len(rig.alerter.sent) == 2
+
+
+def test_an_agent_that_never_reported_is_silent_after_the_grace() -> None:
+    rig = Rig()
+    rig.report("vm-1")
+    assert rig.tick().unobserved == ("laptop",)
+    assert rig.alerter.sent == []
+    rig.clock.now += timedelta(seconds=91)
+    rig.report("vm-1")
+    rig.tick()
+    assert "since Kelpie started" in rig.alerter.sent[0][1]
+
+
+def test_a_skewed_clock_keeps_the_board_out() -> None:
+    rig = Rig()
+    rig.report("laptop", sent_at=NOW - timedelta(minutes=5))
+    rig.report("vm-1")
+    snap = rig.tick()
+    assert "laptop" in snap.unobserved
+    assert rig.titles() == ["[kelpie] agent laptop clock off"]
+    assert "5 min behind" in rig.alerter.sent[0][1]
+    rig.clock.now += timedelta(seconds=1)
+    rig.report("laptop")
+    assert rig.tick().unobserved == ()
+    assert "Resolved" in rig.alerter.sent[-1][1]
+
+
+def test_a_failed_adapter_is_unobserved() -> None:
+    rig = Rig()
+    rig.report(
+        "laptop",
+        AdapterReport("hermes", KINDS, board()),
+        AdapterReport("claude-code", frozenset({ActionKind.STOP}), error="OSError"),
+    )
+    rig.report("vm-1")
+    snap = rig.tick()
+    assert snap.unobserved == ("laptop/claude-code",)
+    assert rig.observer.failed == ["laptop/claude-code"]
+    assert "laptop/claude-code" in rig.executors  # its stops still have somewhere to go
+
+
+def test_dry_run_only_logs_alerts() -> None:
+    rig = Rig()
+    rig.farm.dry_run = True
+    rig.clock.now += timedelta(seconds=91)
+    rig.tick()
+    assert rig.alerter.sent == []
+
+
+# --- actions ------------------------------------------------------------------------------
+
+
+def answer(hub: Hub, agent: str, outcome: Outcome, detail: str | None = None) -> threading.Thread:
+    """A fake agent: takes one action and answers it."""
+
+    def run() -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            actions = hub.poll(agent, [], 1)
+            if actions:
+                hub.poll(agent, [Result(actions[0].id, outcome, detail)], 0)
+                seen.append(actions[0])
+                return
+
+    seen: list[Any] = []
+    thread = threading.Thread(target=run, daemon=True)
+    thread.seen = seen  # type: ignore[attr-defined]
+    thread.start()
+    return thread
+
+
+def ready() -> Rig:
+    rig = Rig()
+    rig.report("laptop")
+    rig.report("vm-1")
+    rig.tick()
+    return rig
+
+
+def stop(session: str = "laptop:s1", **kw: Any) -> Action:
+    return Action(ActionKind.STOP, "loop_breaker", "looping", params={"session_id": session}, **kw)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "detail", "expected"),
+    [
+        (Outcome.DONE, "exits within 2 minutes", "exits within 2 minutes"),
+        (Outcome.DONE, None, True),
+        (Outcome.NOTHING_TO_DO, None, LedgerOutcome.NOTHING_TO_DO),
+        (Outcome.NOT_EXECUTED, "refused", False),
+    ],
+)
+def test_results_map_onto_the_engine(outcome: Outcome, detail: str | None, expected: Any) -> None:
+    rig = ready()
+    agent = answer(rig.hub, "laptop", outcome, detail)
+    assert rig.executors["laptop/hermes"].execute(stop()) == expected
+    agent.join(5)
+    (sent,) = agent.seen  # type: ignore[attr-defined]
+    assert sent.params == {"session_id": "s1"} and sent.task_id is None
+
+
+def test_a_failure_carries_only_the_public_reason() -> None:
+    rig = ready()
+    agent = answer(rig.hub, "laptop", Outcome.FAILED, "CalledProcessError (details in the log)")
+    with pytest.raises(RemoteActionFailed) as exc:
+        rig.executors["laptop/hermes"].execute(stop())
+    assert exc.value.public_reason == "CalledProcessError (details in the log)"
+    agent.join(5)
+
+
+def test_ids_are_translated_back() -> None:
+    rig = ready()
+    agent = answer(rig.hub, "laptop", Outcome.DONE)
+    wait = Action(
+        ActionKind.WAIT,
+        "dispatch_gate",
+        "parent not done",
+        task_id="laptop:t_1a",
+        params={
+            "conditions": [
+                {"id": "c1@laptop", "kind": "task_status", "params": {"task": "laptop:t_2b"}},
+                {"id": "dispatch_gate:laptop:t_1a:x", "kind": "task_status", "params": {}},
+            ],
+            "extra": "dropped",
+        },
+    )
+    assert rig.executors["laptop/hermes"].execute(wait) is True
+    agent.join(5)
+    (sent,) = agent.seen  # type: ignore[attr-defined]
+    assert sent.task_id == "t_1a"
+    assert sent.params == {
+        "conditions": [
+            {"id": "c1", "kind": "task_status", "params": {"task": "t_2b"}},
+            {"id": "dispatch_gate:laptop:t_1a:x", "kind": "task_status", "params": {}},
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        Action(ActionKind.COMMENT, "r", "x", task_id="vm-1:t_1a"),  # another host's task
+        Action(ActionKind.COMMENT, "r", "x", task_id="t_1a"),  # not namespaced at all
+        stop("vm-1:s1"),
+        Action(
+            ActionKind.REASSIGN, "r", "x", task_id="laptop:t_1a", params={"owner_id": "vm-1:dev-2"}
+        ),
+        Action(
+            ActionKind.WAIT,
+            "r",
+            "x",
+            task_id="laptop:t_1a",
+            params={
+                "conditions": [{"id": "c", "kind": "task_status", "params": {"task": "vm-1:t_9"}}]
+            },
+        ),
+        Action(ActionKind.REQUEUE, "r", "x", task_id="laptop:t_1a"),  # not offered
+    ],
+)
+def test_actions_that_cross_hosts_or_kinds_are_not_executed(action: Action) -> None:
+    rig = ready()
+    assert rig.executors["laptop/hermes"].execute(action) is False
+    assert not rig.hub._agents["laptop"].queue
+
+
+def test_an_agent_that_is_not_reporting_fails_fast() -> None:
+    rig = ready()
+    rig.clock.now += timedelta(seconds=60)
+    rig.report("vm-1")
+    rig.tick()
+    started = time.monotonic()
+    with pytest.raises(AgentUnavailable, match="not reporting"):
+        rig.executors["laptop/hermes"].execute(stop())
+    assert time.monotonic() - started < 0.5
+
+
+def test_a_slow_agent_costs_one_budget_per_tick() -> None:
+    rig = ready()  # action_timeout 2s, nobody answers
+    executor: RemoteExecutor = rig.executors["laptop/hermes"]
+    started = time.monotonic()
+    for session in ("laptop:s1", "laptop:s2", "laptop:s3"):
+        with pytest.raises(AgentUnavailable):
+            executor.execute(stop(session))
+    assert time.monotonic() - started < 3  # not 3 x 2s
+    rig.tick()  # a new tick: a new budget
+    with pytest.raises(AgentUnavailable, match="not carried out"):
+        executor.execute(stop("laptop:s4"))
+
+
+def test_at_most_16_actions_per_agent_per_tick() -> None:
+    rig = ready()
+    rig.farm._budgets["laptop"] = _Budget(actions=MAX_ACTIONS_PER_TICK)
+    with pytest.raises(AgentUnavailable, match="busy"):
+        rig.executors["laptop/hermes"].execute(stop())
+
+
+def test_a_late_done_is_told() -> None:
+    rig = ready()
+    taker = threading.Thread(target=rig.hub.poll, args=("laptop", [], 3), daemon=True)
+    taker.start()  # the agent takes the action but never answers in time
+    with pytest.raises(AgentUnavailable, match="may still"):
+        rig.executors["laptop/hermes"].execute(stop())
+    taker.join(5)
+    (pending,) = rig.hub._agents["laptop"].pending.values()
+    rig.hub.poll("laptop", [Result(pending.action.id, Outcome.DONE, "exits soon")], 0)
+    rig.clock.now += timedelta(minutes=6)
+    rig.report("laptop")
+    rig.report("vm-1")
+    rig.tick()
+    assert rig.titles() == ["[loop_breaker] stop laptop:s1 done after all"]
+    assert "Carried out after all" in rig.alerter.sent[0][1]
+
+
+# --- the engine ---------------------------------------------------------------------------
+
+
+def test_the_engine_routes_to_remote_boards_by_source() -> None:
+    rig = ready()
+    engine = Engine([], fallback=False)
+    for executor in rig.executors.values():
+        engine.add_executor(executor)
+    snap = rig.tick()
+    comment = Action(ActionKind.COMMENT, "r", "x", task_id="vm-1:t_1a")
+    assert engine.route(comment, snap) is rig.executors["vm-1/hermes"]
+    assert engine.route(stop(), snap) is rig.executors["laptop/hermes"]
+    assert engine.route(Action(ActionKind.COMMENT, "r", "x", task_id="nope"), snap) is None
+    with pytest.raises(ValueError, match="duplicate"):
+        engine.add_executor(rig.executors["vm-1/hermes"])

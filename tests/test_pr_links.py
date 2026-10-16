@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -111,3 +112,20 @@ def test_accepted_patterns_stay_fast_on_hostile_titles() -> None:
     task_codes(t("t_1a", title), CODE)
     task_codes(t("t_1b", title), compile_task_code(r"[A-Z]+-[A-Z]+-[0-9]+"))
     assert time.monotonic() - started < 0.5
+
+
+def test_namespaced_ids_link_by_their_local_id_when_it_is_unique() -> None:
+    def on(host: str, tid: str) -> Task:
+        return replace(t(f"{host}:{tid}"), host=host)
+
+    tasks = [on("laptop", "t_1a"), on("vm-1", "t_2b"), on("laptop", "t_3c"), on("vm-1", "t_3c")]
+    pulls = (
+        pr(1, "t_1a: fix login", "hermes/t_1a"),
+        pr(2, "Child", "hermes/t_2b"),
+        pr(3, "same id on two hosts", "hermes/t_3c"),
+    )
+    assert ids(link_tasks(pulls, tasks, None)) == {
+        1: ("laptop:t_1a",),
+        2: ("vm-1:t_2b",),
+        3: (),
+    }

@@ -138,6 +138,17 @@ def test_a_failing_rule_does_not_resolve_its_states() -> None:
     assert tick(e, T0 + 2 * H) == [("Resolved after 2.0h", Outcome.ALERTED)]  # last seen T0
 
 
+def test_a_partial_snapshot_resolves_nothing() -> None:
+    alerter, rule = FakeAlerter(), Toggle(alert())
+    e = engine(rule, alerter)
+    tick(e, T0)
+    rule.on = False  # the task's host went silent: its board is not in the snapshot
+    partial = Snapshot(now=T0 + H, unobserved=("laptop",))
+    assert [d.outcome for d in e.tick(lambda: partial)] == []
+    assert len(e.states.store.open_states()) == 1
+    assert tick(e, T0 + 2 * H) == [("Resolved after 2.0h", Outcome.ALERTED)]
+
+
 def test_execute_without_evaluate_resolves_nothing() -> None:
     e = engine(Emit([]), FakeAlerter())
     e.states.store.save(OpenState("x", "emit", T0, T0, T0, 0, Severity.WARNING, "s", None))

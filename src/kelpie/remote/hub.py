@@ -516,6 +516,35 @@ def _peer_key(address: str) -> str:
     return str(ip)
 
 
+class HubService:
+    """``kelpie serve``'s hub listener as a service: started with the control loop, stopped
+    on exit (held polls are released first)."""
+
+    def __init__(self, server: HubServer) -> None:
+        self.server = server
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self.server.serve_forever, name="kelpie-hub", daemon=True
+        )
+        self._thread.start()
+        settings = self.server.hub.settings
+        log.info(
+            "hub listening on %s://%s:%d for agents %s",
+            "https" if settings.tls else "http",
+            settings.host,
+            self.server.server_address[1],
+            ", ".join(a.name for a in settings.agents),
+        )
+
+    def stop(self, timeout: float = 5.0) -> None:
+        if self._thread is not None:
+            self.server.shutdown()
+            self._thread.join(timeout)
+        self.server.server_close()
+
+
 def _server_context(settings: HubSettings) -> ssl.SSLContext:
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     context.minimum_version = ssl.TLSVersion.TLSv1_2

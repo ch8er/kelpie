@@ -59,6 +59,8 @@ from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
 from kelpie.remote.config import AgentSettings, HubSettings, load_agent, load_hub
+from kelpie.remote.farm import RemoteFarm
+from kelpie.remote.hub import Hub, HubServer, HubService
 from kelpie.report.config import ReportSettings, load_report
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
@@ -543,8 +545,13 @@ def merged_snapshot(
     enrich: Sequence[tuple[str, Callable[[Snapshot], Snapshot]]] = (),
     providers: ProviderReader | None = None,
     offenders: OffenderWatch | None = None,
+    remote: Callable[[datetime], Snapshot] | None = None,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
+
+    ``remote`` gives the boards of ``kelpie agent`` processes (multi-host), merged like an
+    adapter's, with what it could not see in ``Snapshot.unobserved``; if it raises, the
+    whole remote farm counts as unobserved for that tick.
 
     ``enrich`` are named connector steps run on the merged board (e.g. GitHub conditions);
     one that raises is logged, counted in ``kelpie_connector_errors_total`` and skipped.
@@ -592,6 +599,23 @@ def merged_snapshot(
                 providers=merged.providers + part.providers,
                 builds=merged.builds + part.builds,
             )
+        if remote is not None:
+            try:
+                part = remote(now)
+            except Exception:
+                log.exception("merging the agents' boards failed")
+                merged = replace(merged, unobserved=("hub",))
+            else:
+                merged = replace(
+                    merged,
+                    tasks=merged.tasks + part.tasks,
+                    owners=_unique_owners(merged.owners + part.owners),
+                    dependencies=merged.dependencies + part.dependencies,
+                    conditions=merged.conditions + part.conditions,
+                    sessions=merged.sessions + part.sessions,
+                    spans=merged.spans + part.spans,
+                    unobserved=part.unobserved,
+                )
         for name, step in enrich:
             try:
                 merged = step(merged)
@@ -962,6 +986,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     # into an alert that is only logged. The defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
     _refuse_unimplemented_actions(settings, loaded, adapters)
+    hub = _build_hub(settings, adapters, clock)
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
@@ -973,7 +998,20 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         config=settings.engine,
         ledger_store=store,
         state_store=states,
+        fallback=hub is None,
     )
+    farm = None
+    if hub is not None:
+        farm = RemoteFarm(
+            hub,
+            engine.add_executor,
+            clock,
+            alerter=lambda: engine.alerter,
+            observer=metrics,
+            dry_run=settings.engine.dry_run,
+            late_after=settings.engine.retry_after,
+        )
+    remote = farm.snapshot if farm is not None else None
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     metrics.set_adapters(a.name for a in adapters)
     metrics.set_budgets_enabled(bool(settings.budgets.budgets))
@@ -985,10 +1023,16 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         metrics.set_providers(p.name for p in quotas.providers)
     if not traces.enabled:
         source = merged_snapshot(
-            adapters, metrics, clock, resources=reader, enrich=enrich, providers=quotas
+            adapters,
+            metrics,
+            clock,
+            resources=reader,
+            enrich=enrich,
+            providers=quotas,
+            remote=remote,
         )
         loop = ControlLoop(engine, source, metrics)
-        return App(
+        app = App(
             settings,
             loaded,
             engine,
@@ -997,6 +1041,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             store,
             alerts=_start_alerts(settings, engine, metrics),
         )
+        return _with_hub(app, hub)
     span_store = _open_span_store(settings.db_path)
     metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
     metrics.set_span_rows_source(span_store.count)
@@ -1042,10 +1087,19 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         enrich=enrich,
         providers=quotas,
         offenders=OffenderWatch(span_store, traces.outputs, settings.report.tz),
+        remote=remote,
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     alerts = _start_alerts(settings, engine, metrics)
-    return App(
+    if hub is not None:
+        # A span whose ids no agent token vouches for could be forged into any host's
+        # namespace: with a hub, spans come only through the agents.
+        log.warning(
+            "[hub] is set: OTLP ingest on /v1/traces of this port is off; spans reach Kelpie "
+            "through the agents"
+        )
+        ingest = None
+    app = App(
         settings,
         loaded,
         engine,
@@ -1058,6 +1112,44 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         forwarder,
         alerts,
     )
+    return _with_hub(app, hub)
+
+
+def _build_hub(
+    settings: Settings, adapters: Sequence[PlatformAdapter], clock: Callable[[], datetime]
+) -> Hub | None:
+    """The hub for ``[hub]``, or None. With a hub every board is an agent's: in-process
+    adapters are refused, so no raw platform id can pass for a namespaced one."""
+    if settings.hub is None:
+        return None
+    if adapters:
+        raise ConfigError(
+            "[hub] and in-process adapters exclude each other: run `kelpie agent` with the "
+            f"[adapters.*] sections on this machine too (enabled here: "
+            f"{', '.join(a.name for a in adapters)})"
+        )
+    try:
+        tokens = settings.hub.tokens()
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if not settings.hub.tls:
+        log.warning("[hub] takes agents over plain http: their tokens cross the network in clear")
+    return Hub(settings.hub, tokens, clock)
+
+
+def _with_hub(app: App, hub: Hub | None) -> App:
+    """Bind the hub's listener (a startup error is a config error) and run it as a service."""
+    if hub is None:
+        return app
+    try:
+        server = HubServer(hub)
+    except (OSError, ValueError) as exc:
+        app.close()
+        raise ConfigError(
+            f"[hub] cannot listen on {hub.settings.host}:{hub.settings.port}: {exc}"
+        ) from exc
+    app.services.append(HubService(server))
+    return app
 
 
 def _start_alerts(settings: Settings, engine: Engine, metrics: Metrics) -> Delivery | None:

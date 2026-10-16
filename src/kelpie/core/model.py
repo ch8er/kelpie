@@ -508,6 +508,10 @@ class Snapshot:
     pull_requests_complete: bool | None = None
     # Repeated huge-output offenders over [traces.outputs] repeat_days (span store).
     output_offenders: tuple[OutputOffender, ...] = ()
+    # Parts of the farm that are not in this snapshot (multi-host: agents and
+    # ``<agent>/<adapter>`` boards that are silent, stale or failed). Not empty means the
+    # snapshot is partial: a rule that stops reporting a state may only be blind to it.
+    unobserved: tuple[str, ...] = ()
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
