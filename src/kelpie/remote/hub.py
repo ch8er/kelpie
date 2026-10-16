@@ -629,6 +629,9 @@ class HubHandler(BaseHTTPRequestHandler):
         try:
             hub.enter(agent, kind)
         except Busy:
+            if kind == "traces":  # exporters retry 503 (OTLP/HTTP), not 409
+                self._json(503, {"error": "busy, retry later"}, {"Retry-After": "1"})
+                return
             self.server.warn_once(
                 agent,
                 "hub: agent %s has too many %s requests in flight (two processes with one token?)",
@@ -774,11 +777,15 @@ class HubHandler(BaseHTTPRequestHandler):
             self.connection.settimeout(self.timeout)
         return b"".join(chunks)
 
-    def _json(self, code: int, body: Mapping[str, Any]) -> None:
+    def _json(
+        self, code: int, body: Mapping[str, Any], headers: Mapping[str, str] | None = None
+    ) -> None:
         data = json.dumps(body, separators=(",", ":")).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)

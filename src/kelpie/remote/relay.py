@@ -103,6 +103,9 @@ class RelayHandler(BaseHTTPRequestHandler):
             body = self._read(length)
         except OSError:
             return
+        if len(body) != length:
+            self._reply(400, b"body shorter than Content-Length\n", "text/plain")
+            return
         headers = {"Authorization": f"Bearer {self.server.token}"}
         for name in ("Content-Type", "Content-Encoding"):
             value = self.headers.get(name)

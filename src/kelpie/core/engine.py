@@ -92,6 +92,7 @@ class Engine:
     ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
     state_store: StateStore = field(default_factory=MemoryStateStore)
     fallback: bool = True  # route to the only platform adapter when nothing else says where
+    _board_free: frozenset[str] = field(init=False, default=frozenset())
     ledger: ActionLedger = field(init=False)
     states: StateTracker = field(init=False)
     _evaluated: set[str] | None = field(init=False, default=None)
@@ -132,6 +133,9 @@ class Engine:
             self._platforms.append(adapter.name)
         for connector in self.connectors:
             self._add(ConnectorExecutor(connector))
+        self._board_free = frozenset(
+            r.name for r in self.rules if getattr(r, "boards", True) is False
+        )
 
     def add_executor(self, executor: Executor) -> None:
         """Register an executor after construction (a remote board an agent reported).
@@ -227,6 +231,12 @@ class Engine:
                 outcome = self._handle(action, mode, snapshot)
             except Deferred as exc:
                 log.info("deferred: %s: %s", action, exc)
+                if action.key is not None and action.key in self._announced:
+                    # The alert announcing it must not read as if it was done.
+                    line = (
+                        f"Not done yet: {failure_reason(exc).rstrip('.')}; tried again next tick."
+                    )
+                    self._lines.setdefault(action.key, []).append(line)
                 return Dispatched(action, mode, Outcome.DEFERRED)  # not an attempt
             except Exception as exc:
                 log.warning("action failed: %s: %r", action, exc)
@@ -303,7 +313,11 @@ class Engine:
         except Exception:
             log.exception("state store unavailable; cannot resolve states")
             return []
-        gone = [s for s in gone if not _blind(s.task_id, snapshot.unobserved)]
+        gone = [
+            s
+            for s in gone
+            if not _blind(s.task_id, snapshot.unobserved, s.rule not in self._board_free)
+        ]
         results: list[Dispatched] = []
         for state in gone:
             first_line = f"{state.summary.split('. ')[0].rstrip('.')}."
@@ -512,13 +526,15 @@ _TRANSITIONS = {
 }
 
 
-def _blind(task_id: str | None, unobserved: Sequence[str]) -> bool:
+def _blind(task_id: str | None, unobserved: Sequence[str], boards: bool = True) -> bool:
     """Whether a state may have stopped being reported only because part of the farm is not
-    in the snapshot: one on a task of an unobserved agent, or a farm-wide one (no task)
-    while anything is unobserved."""
+    in the snapshot: one on a task of an unobserved agent, or a farm-wide one (no task) of a
+    rule that reads the boards (``boards``) while anything is unobserved."""
     if not unobserved:
         return False
-    if task_id is None or "hub" in unobserved:
+    if task_id is None:
+        return boards
+    if "hub" in unobserved:
         return True
     return any(task_id.startswith(f"{part.split('/')[0]}:") for part in unobserved)
 

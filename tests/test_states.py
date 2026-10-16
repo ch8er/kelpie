@@ -371,3 +371,16 @@ def test_rules_mark_long_lived_alerts_as_states(fixture: str) -> None:
     actions = REGISTRY[incident.rule](incident.config).evaluate(incident.snapshot)
     alerts = [a for a in actions if a.kind is ActionKind.ALERT]
     assert alerts and all(a.state and a.since for a in alerts)
+
+
+def test_rules_that_read_no_board_resolve_on_a_partial_farm() -> None:
+    class Quotas(Toggle):
+        boards = False
+
+    alerter, rule = FakeAlerter(), Quotas(replace(alert(), task_id=None))
+    e = engine(rule, alerter)
+    tick(e, T0)
+    rule.on = False
+    resolved = e.tick(lambda: Snapshot(now=T0 + H, unobserved=("laptop",)))
+    assert [d.outcome for d in resolved] == [Outcome.ALERTED]
+    assert e.states.store.open_states() == []

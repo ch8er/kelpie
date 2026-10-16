@@ -47,7 +47,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import ANNOUNCES
@@ -80,6 +80,7 @@ DEFAULT_WIP_PATTERNS = (r"^\s*\[?wip\b", r"^\s*(fixup|squash)!")
 
 @dataclass(frozen=True, slots=True)
 class CiEconomy:
+    boards: ClassVar[bool] = False  # builds and quotas only (kelpie.core.rule)
     window: timedelta = timedelta(hours=24)
     docs_globs: tuple[str, ...] = DEFAULT_DOCS_GLOBS
     wip_patterns: tuple[re.Pattern[str], ...] = tuple(

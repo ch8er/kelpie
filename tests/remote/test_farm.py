@@ -44,7 +44,9 @@ from kelpie.remote.protocol import (
 )
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
-KINDS = frozenset({ActionKind.STOP, ActionKind.WAIT, ActionKind.COMMENT, ActionKind.REASSIGN})
+KINDS = frozenset(
+    {ActionKind.STOP, ActionKind.WAIT, ActionKind.WAKE, ActionKind.COMMENT, ActionKind.REASSIGN}
+)
 
 
 class Clock:
@@ -603,3 +605,93 @@ def test_owners_serve_tasks_of_their_own_machine() -> None:
     assert Owner("alice", "pm").serves(task)  # single host: no machine to compare
     snap = Snapshot(now=NOW, tasks=(task,), owners=(theirs, mine))
     assert PingPong()._target(snap, task) == "laptop:alice"
+
+
+def test_a_wake_reaches_a_remote_board() -> None:
+    rig = ready()
+    agent = answer(rig.hub, "laptop", Outcome.DONE)
+    wake = Action(
+        ActionKind.WAKE,
+        "wait_condition",
+        "conditions met",
+        task_id="laptop:t_1a",
+        params={"conditions": ["c1@laptop"]},  # condition ids, for the record
+    )
+    assert rig.executors["laptop/hermes"].execute(wake) is True
+    agent.join(5)
+    (sent,) = agent.seen  # type: ignore[attr-defined]
+    assert (sent.kind, sent.task_id, sent.params) == (ActionKind.WAKE, "t_1a", {})
+
+
+def test_a_wait_cannot_carry_another_machines_condition() -> None:
+    rig = ready()
+    wait = Action(
+        ActionKind.WAIT,
+        "r",
+        "x",
+        task_id="laptop:t_1a",
+        params={"conditions": [{"id": "c1@vm-1", "kind": "custom", "params": {}}]},
+    )
+    assert rig.executors["laptop/hermes"].execute(wait) is False
+
+
+def test_a_block_reason_never_binds_another_machines_task() -> None:
+    import re
+
+    from kelpie.connectors.human_tasks import HumanTaskConnector
+
+    laptop = namespace_snapshot(
+        "laptop",
+        "hermes",
+        Snapshot(
+            now=NOW,
+            tasks=(
+                Task(
+                    "t_1a", "Ship", Status.BLOCKED, NOW, block=Block("approval in vm-1:T-42", NOW)
+                ),
+            ),
+        ),
+    )
+    vm = namespace_snapshot(
+        "vm-1",
+        "hermes",
+        Snapshot(
+            now=NOW,
+            tasks=(Task("T-42", "Approve", Status.DONE, NOW, owner_id="bob"),),
+            owners=(Owner("bob", "pm", OwnerKind.HUMAN),),
+        ),
+    )
+    merged = replace(laptop, tasks=laptop.tasks + vm.tasks, owners=vm.owners)
+    out = HumanTaskConnector([re.compile(r"approval in (?P<task>\S+)")])(merged)
+    assert out.conditions == ()
+
+
+def test_deferred_effects_are_not_announced_as_done() -> None:
+    from kelpie.core.alerts import ANNOUNCES
+    from kelpie.core.config import EngineConfig, Mode
+
+    rig = ready()
+    stop_it = stop(key="runaway:laptop:s1")
+    alert = Action(
+        ActionKind.ALERT,
+        "loop_breaker",
+        "Runaway run",
+        params={ANNOUNCES: "runaway:laptop:s1"},
+    )
+    sent: list[str | None] = []
+
+    class Alerts:
+        def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
+            sent.append(did)
+
+    engine = Engine(
+        [],
+        alerter=Alerts(),
+        config=EngineConfig(dry_run=False, default_mode=Mode.ACT),
+        fallback=False,
+    )
+    engine.add_executor(rig.executors["laptop/hermes"])
+    snap = rig.tick()
+    rig.farm._budgets["laptop"] = _Budget(actions=MAX_ACTIONS_PER_TICK)
+    engine.execute([stop_it, alert], snap)
+    assert sent and sent[0] is not None and "Not done yet" in sent[0]

@@ -139,3 +139,27 @@ def test_relayed_spans_are_stored_in_the_agents_namespace(tmp_path: Any) -> None
         relay.server_close()
         server.shutdown()
         server.server_close()
+
+
+def test_a_short_body_is_not_forwarded(hub_server: HubServer, sink: Sink) -> None:
+    import socket
+
+    relay = Relay(("127.0.0.1", 0), f"http://127.0.0.1:{hub_server.server_address[1]}", TOKEN, 1024)
+    threading.Thread(target=relay.serve_forever, daemon=True).start()
+    try:
+        with socket.create_connection(("127.0.0.1", relay.server_address[1]), timeout=5) as s:
+            s.sendall(b"POST /v1/traces HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nshort")
+            s.shutdown(socket.SHUT_WR)
+            assert s.recv(100).startswith(b"HTTP/1.0 400")
+        assert sink.calls == []
+    finally:
+        relay.shutdown()
+        relay.server_close()
+
+
+def test_trace_exports_over_the_cap_are_told_to_retry(hub_server: HubServer) -> None:
+    hub = hub_server.hub
+    for _ in range(2):
+        hub.enter("laptop", "traces")
+    status, _ = send(hub_server.server_address[1], b"spans", token=TOKEN)
+    assert status == 503

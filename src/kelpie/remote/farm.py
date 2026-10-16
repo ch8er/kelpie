@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -260,8 +260,11 @@ class RemoteFarm:
                     log.warning("%s %s is not on agent %s", key, params[key], agent)
                     return None
                 params[key] = mine
-        if isinstance(params.get("conditions"), list):
-            conditions = [_condition(agent, c) for c in params["conditions"]]
+        # Only a wait carries conditions to register; elsewhere (wake, unblock) they are
+        # condition ids for the record, which wire_params drops.
+        if action.kind is ActionKind.WAIT and isinstance(params.get("conditions"), list):
+            others = [a.name for a in self.hub.settings.agents if a.name != agent]
+            conditions = [_condition(agent, c, others) for c in params["conditions"]]
             if any(c is None for c in conditions):
                 log.warning("a condition of %s names another host's task", action)
                 return None
@@ -316,7 +319,7 @@ class RemoteExecutor:
         return self.farm.execute(self.agent, self.adapter, action)
 
 
-def _condition(agent: str, raw: object) -> dict[str, Any] | None:
+def _condition(agent: str, raw: object, others: Iterable[str] = ()) -> dict[str, Any] | None:
     if not isinstance(raw, Mapping):
         return None
     params = dict(raw.get("params") or {})
@@ -326,8 +329,12 @@ def _condition(agent: str, raw: object) -> dict[str, Any] | None:
             return None
         params["task"] = task
     cid = raw.get("id")
+    if isinstance(cid, str):
+        cid = local_condition_id(agent, cid)
+        if any(cid.endswith(f"@{other}") for other in others):
+            return None  # a condition another machine reported
     return {
-        "id": local_condition_id(agent, cid) if isinstance(cid, str) else cid,
+        "id": cid,
         "kind": raw.get("kind"),
         "params": params,
     }

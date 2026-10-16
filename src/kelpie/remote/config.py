@@ -269,6 +269,8 @@ def load_agent(section: Any) -> AgentSettings | None:
 def _relay(value: Any) -> tuple[str, int] | None:
     if value is False:
         return None
+    if value is True:
+        value = "127.0.0.1:4318"
     host, port = _listen(value, "[agent] relay", "127.0.0.1:4318")
     host = "127.0.0.1" if host == "localhost" else host
     if not _loopback(host):

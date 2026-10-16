@@ -158,8 +158,9 @@ class HumanTaskConnector:
         for pattern in self.block_patterns:
             m = pattern.search(reason)
             ref = (m["task"] or "").strip(_TRIM) if m else ""
-            # Multi-host: the reason names a task of the same board, by its local id.
-            if ref and task.host and _is_human_task(snapshot, f"{task.host}:{ref}"):
+            # Multi-host: the reason names a task of the same board, by its local id, and
+            # only that board's tasks count (never a namespaced id of another machine).
+            if ref and task.host and task.id.startswith(f"{task.host}:"):
                 ref = f"{task.host}:{ref}"
             if not ref or ref == task.id or not _is_human_task(snapshot, ref):
                 continue

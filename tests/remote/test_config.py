@@ -198,3 +198,7 @@ def test_relay() -> None:
     assert agent(relay="[::1]:4319").relay == ("::1", 4319)
     with pytest.raises(ValueError, match="loopback only"):
         agent(relay="0.0.0.0:4318")
+
+
+def test_relay_true_is_the_default_address() -> None:
+    assert agent(relay=True).relay == ("127.0.0.1", 4318)
