@@ -237,7 +237,7 @@ over `[report] verify_window` (a day) before and after it: stuck condition-hours
 command fix the output tokens per call. A side with fewer than `min_sample` observations,
 or an after-window under a quarter of the window, is labelled a small sample. Fixes come
 from `kelpie fix "lifted the merge hold" [--rule R] [--command PREFIX] [--role ROLE]
-[--at TIME]`, from config changes (`kelpie serve` notes when its config file changed), from
+[--at TIME]` (check with `kelpie fix --list [--days N]`), from config changes (`kelpie serve` notes when its config file changed), from
 rule mode changes in the action ledger (observe to act, dry-run off) and from output
 filters that appear in traces (`rtk`, `| xcbeautify`). Board-based metrics (review time,
 failures, returns) need the adapters to look back `1d + 2 x verify_window` when the report

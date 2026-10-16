@@ -425,3 +425,40 @@ def test_serve_records_a_config_change_after_startup(
     with ReportStore(db) as store:
         found = store.fixes(datetime(2020, 1, 1, tzinfo=UTC), datetime(2100, 1, 1, tzinfo=UTC))
     assert [f.kind for f in found] == [CONFIG]
+
+
+def test_kelpie_fix_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from kelpie.report.cli import list_fixes
+
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n[report]\ntimezone = "Europe/Berlin"\n'
+    )
+    settings = load_settings(path)
+    assert list_fixes(settings) == ("no fixes recorded (no database yet)\n", 0)
+    SqliteLedgerStore(tmp_path / "kelpie.db").close()
+    now = lambda: datetime(2026, 3, 2, 12, tzinfo=UTC)  # noqa: E731
+    assert list_fixes(settings, clock=now)[0].startswith("no fixes recorded in the last 7")
+    for when, note in (("2026-03-01T09:00", "lifted the merge hold"), ("2026-02-01T09:00", "old")):
+        assert note_fix(settings, note, rule="bottlenecks", when=when, clock=now)[1] == 0
+    text, code = list_fixes(settings, clock=now)
+    assert code == 0 and text.splitlines() == [
+        "2026-03-01 09:00 CET  manual  lifted the merge hold  [rule=bottlenecks]"
+    ]
+    assert list_fixes(settings, days=0)[1] == 2
+    assert list_fixes(settings, days=10**9)[1] == 2
+    args = ["--config", str(path), "fix"]
+    for bad, why in (
+        ([], "note is required"),
+        (["n", "--list"], "cannot be combined"),
+        (["--list", "--rule", "bottlenecks"], "cannot be combined"),
+        (["n", "--days", "3"], "only applies to --list"),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            main([*args, *bad])
+        assert exc.value.code == 2 and why in capsys.readouterr().err
+    assert main([*args, "--list", "--days", "3650"]) == 0
+    assert "old" in capsys.readouterr().out

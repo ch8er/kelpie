@@ -42,7 +42,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--send", action="store_true", help="send the summary to [[alerts.channels]] too"
     )
     fix = sub.add_parser("fix", help="note a fix so the daily report verifies its effect")
-    fix.add_argument("note", help="what changed, e.g. 'lifted the merge hold'")
+    fix.add_argument("note", nargs="?", help="what changed, e.g. 'lifted the merge hold'")
     fix.add_argument("--rule", help="the rule whose problem it should reduce")
     fix.add_argument(
         "--command", dest="command_prefix", help="a command prefix whose output it filters"
@@ -51,6 +51,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     fix.add_argument(
         "--at", help="when (ISO time; without an offset in [report] timezone; default: now)"
     )
+    fix.add_argument(
+        "--list", action="store_true", help="list the fixes recorded in the last --days instead"
+    )
+    fix.add_argument("--days", type=int, help="how far back --list looks (default 7)")
     doctor = sub.add_parser(
         "doctor", help="check a first live run: config, observe mode, board, hooks, spans, git"
     )
@@ -73,11 +77,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = load_settings(find_config(args.config))
         if args.command == "fix":
-            from kelpie.report.cli import note_fix
+            from kelpie.report.cli import list_fixes, note_fix
 
-            text, code = note_fix(
-                settings, args.note, args.rule, args.command_prefix, args.role, args.at
-            )
+            recording = [args.note, args.rule, args.command_prefix, args.role, args.at]
+            if args.list and any(v is not None for v in recording):
+                fix.error(
+                    "--list cannot be combined with a note, --rule, --command, --role or --at"
+                )
+            if not args.list and args.days is not None:
+                fix.error("--days only applies to --list")
+            if not args.list and args.note is None:
+                fix.error("a note is required unless --list is given")
+            if args.list:
+                text, code = list_fixes(settings, 7 if args.days is None else args.days)
+            else:
+                text, code = note_fix(
+                    settings, args.note, args.rule, args.command_prefix, args.role, args.at
+                )
             sys.stdout.write(text)
             return code
         if args.command == "report":
