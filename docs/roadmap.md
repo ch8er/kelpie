@@ -60,11 +60,11 @@ number of actions per task per hour is capped, so Kelpie cannot loop on its own 
 same records power alert deduplication and the before/after report.
 
 **Acceptance criteria**
-- [ ] Fingerprint = rule, kind, target and the params that matter; identical actions within the cooldown (config) are suppressed and counted
-- [ ] Max actions per task per hour (config); excess actions are dropped and reported once as an alert
-- [ ] Ledger persisted through the storage protocol (an in-memory implementation until the SQLite storage issue lands); survives a restart
+- [x] Fingerprint = rule, kind, target and the params that matter; identical actions within the cooldown (config) are suppressed and counted
+- [x] Max actions per task per hour (config); excess actions are dropped and reported once as an alert
+- [x] Ledger persisted through the storage protocol (an in-memory implementation until the SQLite storage issue lands); survives a restart
 - [ ] The alert pipeline and the before/after report read the ledger instead of keeping their own history
-- [ ] Unit tests with a fake clock
+- [x] Unit tests with a fake clock
 
 ### core: action routing — task source, executor targets, executor registry
 labels: P0, week-1, area:core
@@ -72,12 +72,12 @@ The engine dispatches to one adapter today. Kelpie needs several platforms and c
 that can act (a CI connector cancelling a build), so actions are routed to executors.
 
 **Acceptance criteria**
-- [ ] `Task.source` names the adapter the task came from
-- [ ] `Action` carries an executor target: the task's platform adapter by default, or a named connector
-- [ ] The engine holds a registry of executors (platform adapters and connectors) instead of a single adapter; unknown target or unsupported action → alert, never a crash
-- [ ] Connectors can expose actions, e.g. `cancel_build` executed by a CI connector (used by `ci_economy`)
-- [ ] Optional capabilities (`SupportsReassign`, `SupportsStop`) keep their alert fallback per executor
-- [ ] `kelpie.core` still imports no adapter or connector (import-linter passes)
+- [x] `Task.source` names the adapter the task came from
+- [x] `Action` carries an executor target: the task's platform adapter by default, or a named connector
+- [x] The engine holds a registry of executors (platform adapters and connectors) instead of a single adapter; unknown target or unsupported action → alert, never a crash
+- [x] Connectors can expose actions, e.g. `cancel_build` executed by a CI connector (used by `ci_economy`)
+- [x] Optional capabilities (`SupportsReassign`, `SupportsStop`) keep their alert fallback per executor
+- [x] `kelpie.core` still imports no adapter or connector (import-linter passes)
 
 ### core: per-rule mode — observe, suggest, act
 labels: P0, week-1, area:core
@@ -87,10 +87,10 @@ action as an alert or comment for a human to apply) or `act` (execute it). The d
 `observe`; the global dry-run flag overrides every rule.
 
 **Acceptance criteria**
-- [ ] Per-rule `mode: observe | suggest | act` in config, default `observe`
-- [ ] Global dry-run forces every rule to `observe` regardless of its mode
-- [ ] The mode is recorded with every action in the action ledger
-- [ ] Unit tests cover each mode and the global override
+- [x] Per-rule `mode: observe | suggest | act` in config, default `observe`
+- [x] Global dry-run forces every rule to `observe` regardless of its mode
+- [x] The mode is recorded with every action in the action ledger
+- [x] Unit tests cover each mode and the global override
 
 ### deploy: cloud session setup script
 labels: P0, week-1, area:deploy
@@ -109,10 +109,10 @@ from adapters, connectors, resources and traces. Dry-run is the default global o
 per-rule behaviour comes from the per-rule mode issue, dispatch from the action routing issue.
 
 **Acceptance criteria**
-- [ ] Loop interval and the global dry-run override come from config (per-rule `mode` as in "per-rule mode")
-- [ ] A failing rule is logged and skipped; it never stops the loop
-- [ ] Each tick records duration and number of actions per rule
-- [ ] Unit tests use a fake clock and a fake adapter; no sleeps in tests
+- [x] Loop interval and the global dry-run override come from config (per-rule `mode` as in "per-rule mode")
+- [x] A failing rule is logged and skipped; it never stops the loop
+- [x] Each tick records duration and number of actions per rule
+- [x] Unit tests use a fake clock and a fake adapter; no sleeps in tests
 
 ### core: SQLite storage for snapshots, sessions and actions
 labels: P0, week-1, area:core
@@ -126,8 +126,8 @@ SQLite by default; keep the schema DuckDB-compatible for analytics.
 - [ ] Daily aggregates kept indefinitely (per rule, action kind and mode; executed / suppressed / failed counts), because rule 8's before/after verification needs history; aggregates are written before raw rows are pruned
 - [ ] Pruning runs inside `kelpie serve` on a schedule and never blocks action dispatch (separate thread or short batched transactions; WAL)
 - [ ] The trace store will follow the same policy shape (raw rows with age + size limits, aggregates kept); note only, not built here
-- [ ] Storage lives behind a protocol in `kelpie.core`; no adapter imports
-- [ ] Tests run against a temporary database file
+- [x] Storage lives behind a protocol in `kelpie.core`; no adapter imports
+- [x] Tests run against a temporary database file
 
 ### core: config file and `kelpie serve` CLI
 labels: P0, week-1, area:core
@@ -135,10 +135,10 @@ A single YAML config (adapters, connectors, rules and thresholds, alerting, Prom
 and a `kelpie` CLI with `serve`, `check-config` and `run-once --dry-run`.
 
 **Acceptance criteria**
-- [ ] `uv run kelpie serve` starts the loop with the configured adapter
+- [x] `uv run kelpie serve` starts the loop with the configured adapter
 - [ ] `kelpie run-once --dry-run` prints the actions for a single snapshot and exits
-- [ ] Secrets can be supplied via environment variables, never only in the file
-- [ ] Invalid config fails fast with a readable error
+- [x] Secrets can be supplied via environment variables, never only in the file
+- [x] Invalid config fails fast with a readable error
 
 ### core: close model gaps found while writing incident fixtures
 labels: P0, week-1, area:core
@@ -152,7 +152,7 @@ the ones rules actually need to typed fields before implementing those rules.
 - [ ] `Block` has a category so allowed-reason checks do not parse free text
 - [ ] `Resource` has `sampled_at` and a window for event counts (e.g. hits per day)
 - [ ] Task status history is available to rules (time-to-accept, bounce count)
-- [ ] CI build/run records in the snapshot, supplied by the CI connector (fixture 05 today only
+- [x] CI build/run records in the snapshot, supplied by the CI connector (fixture 05 today only
       has the `ci_minutes` quota resource): commit sha, branch, trigger event, draft flag,
       changed paths, duration/minutes, status, `superseded_by`. Field names stay CI-agnostic
 - [ ] Fixtures in `tests/fixtures/incidents/` migrated to the new fields
@@ -199,11 +199,11 @@ outcome. Hermes sends traces through its Langfuse plugin; Claude Code exports te
 OpenTelemetry.
 
 **Acceptance criteria**
-- [ ] OTLP/HTTP protobuf and JSON accepted
-- [ ] `gen_ai.*` attributes mapped to `Span` fields; unknown attributes kept in `attributes`
-- [ ] Tool spans carry `args_hash`, a stable hash of the normalized tool arguments (never the raw arguments), for loop detection (rule 10)
-- [ ] Spans linked to task and session ids
-- [ ] Ingest endpoint can require a bearer token
+- [x] OTLP/HTTP protobuf and JSON accepted
+- [x] `gen_ai.*` attributes mapped to `Span` fields; unknown attributes kept in `attributes`
+- [x] Tool spans carry `args_hash`, a stable hash of the normalized tool arguments (never the raw arguments), for loop detection (rule 10)
+- [x] Spans linked to task and session ids
+- [x] Ingest endpoint can require a bearer token
 
 ### traces: span storage and query helpers
 labels: P0, week-1, area:traces
@@ -211,9 +211,9 @@ Store spans locally (SQLite or DuckDB) and expose per-session and per-task aggre
 (tokens, duration, tool calls) for rules and the report.
 
 **Acceptance criteria**
-- [ ] Spans persisted with a retention setting
-- [ ] Aggregates available in the snapshot without loading every raw span
-- [ ] Tests with synthetic traces
+- [x] Spans persisted with a retention setting
+- [x] Aggregates available in the snapshot without loading every raw span
+- [x] Tests with synthetic traces
 
 ### traces: optional forwarding to Langfuse, Phoenix or Datadog
 labels: P0, week-1, area:traces
@@ -221,9 +221,9 @@ Forward ingested spans over OTLP to the tracing backend a team already uses. Tra
 Langfuse from the daily report and dashboards.
 
 **Acceptance criteria**
-- [ ] Disabled unless configured; one or more OTLP destinations with headers from env vars
-- [ ] Langfuse covered by a documented example; Phoenix and Datadog by config examples
-- [ ] Forwarding failures never block or slow down ingest (bounded queue, drop with a counter)
+- [x] Disabled unless configured; one or more OTLP destinations with headers from env vars
+- [x] Langfuse covered by a documented example; Phoenix and Datadog by config examples
+- [x] Forwarding failures never block or slow down ingest (bounded queue, drop with a counter)
 
 ### traces: spans from adapter hooks when a platform emits none
 labels: P0, week-1, area:traces
@@ -231,9 +231,9 @@ Some platforms do not emit OpenTelemetry. Give adapters a small helper that turn
 events (session start/end, tool call) into GenAI-convention spans fed into the same storage.
 
 **Acceptance criteria**
-- [ ] Helper in `kelpie.traces` builds task → session → tool spans from hook events, with the same `args_hash` as OTLP ingest
-- [ ] Spans from hooks and from OTLP are not double-counted when both exist
-- [ ] Tests with synthetic hook events
+- [x] Helper in `kelpie.traces` builds task → session → tool spans from hook events, with the same `args_hash` as OTLP ingest
+- [x] Spans from hooks and from OTLP are not double-counted when both exist
+- [x] Tests with synthetic hook events
 
 ### rules: checkpoints — commit reminder and WIP commit on exit
 labels: P0, week-1, area:rules
@@ -243,10 +243,10 @@ committing, make a WIP commit to the task branch and write a progress note. WIP 
 not trigger CI.
 
 **Acceptance criteria**
-- [ ] `comment` reminder when `last_commit_at` is older than N minutes or changed files exceed M (both in config)
-- [ ] `wip_commit` with a progress note when a session ends with a dirty worktree
-- [ ] WIP commits go to a draft PR or carry `[skip ci]` (configurable)
-- [ ] New fixtures with `rule: checkpoints` and `incident: null`: `14-checkpoint-commit-reminder.yaml`,
+- [x] `comment` reminder when `last_commit_at` is older than N minutes or changed files exceed M (both in config)
+- [x] `wip_commit` with a progress note when a session ends with a dirty worktree
+- [x] WIP commits go to a draft PR or carry `[skip ci]` (configurable)
+- [x] New fixtures with `rule: checkpoints` and `incident: null`: `14-checkpoint-commit-reminder.yaml`,
       `15-checkpoint-wip-commit-on-exit.yaml`
 
 ### rules: checkpoints — resume from the last commit
@@ -256,8 +256,8 @@ A restarted task continues from the last commit instead of starting from zero.
 **Acceptance criteria**
 - [ ] Requeued tasks carry the last commit reference, the progress note and a short git log
 - [ ] The adapter passes them into the next session's prompt
-- [ ] Restarts from zero are counted (input for the daily report and token optimization)
-- [ ] New fixture `16-checkpoint-resume-from-commit.yaml` (`rule: checkpoints`, `incident: null`)
+- [x] Restarts from zero are counted (input for the daily report and token optimization)
+- [x] New fixture `16-checkpoint-resume-from-commit.yaml` (`rule: checkpoints`, `incident: null`)
 
 ### adapters: Hermes adapter (read side)
 labels: P0, week-1, area:adapters
@@ -265,10 +265,10 @@ Read tasks, owners, dependencies and blocks from Hermes Kanban (`~/.hermes/kanba
 map statuses onto `kelpie.core.model.Status`.
 
 **Acceptance criteria**
-- [ ] `list_tasks` and `get_task` implemented
-- [ ] Status mapping documented in the adapter module
-- [ ] Database opened read-only for reads
-- [ ] Tests against a synthetic `kanban.db` built in the test
+- [x] `list_tasks` and `get_task` implemented
+- [x] Status mapping documented in the adapter module
+- [x] Database opened read-only for reads
+- [x] Tests against a synthetic `kanban.db` built in the test
 
 ### adapters: Hermes adapter (actions)
 labels: P0, week-1, area:adapters
@@ -286,9 +286,9 @@ A Hermes plugin that runs on the agent host and sends session events and spans t
 
 **Acceptance criteria**
 - [ ] `on_session_end` sends final status, exit reason and worktree state
-- [ ] `post_tool_call` sends heartbeat and tool span (via the hooks-to-spans helper)
-- [ ] Plugin never blocks the agent if Kelpie is unreachable (buffer and drop)
-- [ ] Install instructions in docs
+- [x] `post_tool_call` sends heartbeat and tool span (via the hooks-to-spans helper)
+- [x] Plugin never blocks the agent if Kelpie is unreachable (buffer and drop)
+- [x] Install instructions in docs
 
 ### rules: exit_contract (rule 1, incident 2)
 labels: P0, week-1, area:rules
@@ -296,10 +296,10 @@ A session ended without a final status, or set a block whose reason is not in th
 list. The task goes back to the queue with an explanatory comment.
 
 **Acceptance criteria**
-- [ ] Session ended with `final_status` empty → `requeue`
-- [ ] Block reason not in the configured allowed list → `requeue`
-- [ ] Healthy exits (final status, allowed block) produce no action
-- [ ] Fixtures: existing `02-exit-without-status.yaml` (covers both requeue cases); new `02-healthy-exit.yaml`
+- [x] Session ended with `final_status` empty → `requeue`
+- [x] Block reason not in the configured allowed list → `requeue`
+- [x] Healthy exits (final status, allowed block) produce no action
+- [x] Fixtures: existing `02-exit-without-status.yaml` (covers both requeue cases); new `02-healthy-exit.yaml`
 
 ### rules: wait_condition — wake on condition and "waiting" heartbeat (rule 2, incident 10)
 labels: P0, week-1, area:rules
@@ -309,10 +309,10 @@ the condition holds. While the task waits, Kelpie keeps a "waiting" heartbeat so
 dispatcher does not declare the agent dead.
 
 **Acceptance criteria**
-- [ ] Satisfied condition on a waiting task → `wake`
-- [ ] Waiting tasks are never requeued or flagged as dead by Kelpie's rules; the "waiting" heartbeat towards the platform's dispatcher is part of the adapter contract (`PlatformAdapter` docstring) and is delivered with the Hermes adapter
-- [ ] A condition that stays unsatisfied past a configurable deadline → `alert`
-- [ ] Fixtures: `10-condition-satisfied-wake.yaml` (the waiting-heartbeat fixture moves to the Hermes adapter tests)
+- [x] Satisfied condition on a waiting task → `wake`
+- [x] Waiting tasks are never requeued or flagged as dead by Kelpie's rules; the "waiting" heartbeat towards the platform's dispatcher is part of the adapter contract (`PlatformAdapter` docstring) and is delivered with the Hermes adapter
+- [x] A condition that stays unsatisfied past a configurable deadline → `alert`
+- [x] Fixtures: `10-condition-satisfied-wake.yaml` (the waiting-heartbeat fixture moves to the Hermes adapter tests)
 
 ### rules: wait_condition — detect in-session polling (rule 2, incident 10)
 labels: P0, week-1, area:rules
@@ -321,11 +321,11 @@ and tell them to register a condition and exit. Defaults reuse the AgentWatchdog
 thresholds: 8 repeats in 10 minutes, 5 errors in a row.
 
 **Acceptance criteria**
-- [ ] Repeated identical checks (default 8 in 10 minutes) or consecutive errors (default 5) → `comment` suggesting to register a condition and exit
-- [ ] A long but productive session is not flagged
-- [ ] Polled commands map to condition kinds via config (`poll_patterns`), never hard-coded CI commands
-- [ ] Repeated-call detection lives in one helper in `kelpie.rules`, reused later by `loop_breaker` (rule 10)
-- [ ] Fixtures: existing `10-reviewer-polls-ci.yaml`; new `10-productive-long-session.yaml`
+- [x] Repeated identical checks (default 8 in 10 minutes) or consecutive errors (default 5) → `comment` suggesting to register a condition and exit
+- [x] A long but productive session is not flagged
+- [x] Polled commands map to condition kinds via config (`poll_patterns`), never hard-coded CI commands
+- [x] Repeated-call detection lives in one helper in `kelpie.rules`, reused later by `loop_breaker` (rule 10)
+- [x] Fixtures: existing `10-reviewer-polls-ci.yaml`; new `10-productive-long-session.yaml`
 
 ### rules: orphan_status (rule 3, incident 11)
 labels: P0, week-1, area:rules
@@ -335,11 +335,11 @@ it. Alert, and propose it to an idle agent of the task's role (the default; reas
 can be switched off). Severity rises with the number of open dependents.
 
 **Acceptance criteria**
-- [ ] Ownerless beyond `orphan_after` (owned statuses) or `queue_after` (queue statuses) → `alert` and `reassign` to an idle agent of the role
-- [ ] Severity is `critical` when open dependents (transitive) reach a threshold
-- [ ] Blocked, waiting, backlog/ready and terminal tasks, tasks with a live session, and tasks left by a session without a final status (rule 1) are ignored
-- [ ] An owner missing from the directory only alerts unless `reassign_unknown_owner`
-- [ ] Fixtures: existing `11-orphan-accepted-task.yaml`; `11-below-threshold.yaml`
+- [x] Ownerless beyond `orphan_after` (owned statuses) or `queue_after` (queue statuses) → `alert` and `reassign` to an idle agent of the role
+- [x] Severity is `critical` when open dependents (transitive) reach a threshold
+- [x] Blocked, waiting, backlog/ready and terminal tasks, tasks with a live session, and tasks left by a session without a final status (rule 1) are ignored
+- [x] An owner missing from the directory only alerts unless `reassign_unknown_owner`
+- [x] Fixtures: existing `11-orphan-accepted-task.yaml`; `11-below-threshold.yaml`
 
 ### rules: stale_blocks (rule 4, incidents 1, 8)
 labels: P0, week-1, area:rules
@@ -347,10 +347,10 @@ A task is blocked on a cause that is already fixed in the outside world (guard c
 met, PR merged). Check the block reason against external state and clear it.
 
 **Acceptance criteria**
-- [ ] Block linked to a satisfied condition → `unblock` with the condition in the reason
-- [ ] Block with an unsatisfied or unknown condition → no action
-- [ ] Grace period configurable to avoid racing the agent
-- [ ] Fixtures: existing `01-stale-guard-block.yaml`, `08-block-outlived-cause.yaml`
+- [x] Block linked to a satisfied condition → `unblock` with the condition in the reason
+- [x] Block with an unsatisfied or unknown condition → no action
+- [x] Grace period configurable to avoid racing the agent
+- [x] Fixtures: existing `01-stale-guard-block.yaml`, `08-block-outlived-cause.yaml`
 
 ## Week 2
 
@@ -360,10 +360,10 @@ After K review rounds on one task, stop the loop and escalate to the architect o
 with the history of return reasons.
 
 **Acceptance criteria**
-- [ ] `review_rounds >= K` → `escalate` once (not every tick)
-- [ ] Escalation target (architect role or human) comes from config
-- [ ] Escalation message lists return reasons and categories
-- [ ] Fixtures: existing `12-review-ping-pong.yaml`; new `12-below-threshold.yaml`
+- [x] `review_rounds >= K` → `escalate` once (not every tick)
+- [x] Escalation target (architect role or human) comes from config
+- [x] Escalation message lists return reasons and categories
+- [x] Fixtures: existing `12-review-ping-pong.yaml`; new `12-below-threshold.yaml`
 
 ### rules: bottlenecks — role utilization, critical path, idle with ready work (rule 6, incidents 9, 10, 14)
 labels: P0, week-2, area:rules
@@ -372,13 +372,13 @@ sequential graph keeps agents idle, or one role (e.g. reviewers) becomes the bot
 alert with a rebalancing suggestion.
 
 **Acceptance criteria**
-- [ ] Idle time and queue depth per role computed from sessions and task statuses
-- [ ] Long sequential chains with idle agents → `alert` suggesting parallelization, with `critical_path_length`
-- [ ] Overloaded role with idle roles elsewhere → `alert` with a rebalancing suggestion
-- [ ] Farm or role idle longer than N minutes (config) while ready work waits (queued tasks, mergeable PRs from the GitHub connector) → `alert` with the idle time, the waiting work and the likely cause (an active hold, an empty queue upstream)
+- [x] Idle time and queue depth per role computed from sessions and task statuses
+- [x] Long sequential chains with idle agents → `alert` suggesting parallelization, with `critical_path_length`
+- [x] Overloaded role with idle roles elsewhere → `alert` with a rebalancing suggestion
+- [x] Farm or role idle longer than N minutes (config) while ready work waits (queued tasks, mergeable PRs from the GitHub connector) → `alert` with the idle time, the waiting work and the likely cause (an active hold, an empty queue upstream)
 - [ ] Holds are first-class: a hold (a label, flag or pause, matched by config) has an owner and an expiry (default from config); expired hold → `alert`; in act mode the executor that owns it lifts it
-- [ ] Idle hours caused by holds go to the cost-of-chaos report
-- [ ] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`, `14-forgotten-merge-hold.yaml` (hold set, promised lift missed, ready PRs waiting about 5 h)
+- [x] Idle hours caused by holds go to the cost-of-chaos report
+- [x] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`, `14-forgotten-merge-hold.yaml` (hold set, promised lift missed, ready PRs waiting about 5 h)
 
 ### rules: bottlenecks — human tasks on the critical path (rule 6, incident 16)
 labels: P0, week-2, area:rules
@@ -388,11 +388,11 @@ shows the farm-level cost; escalating human work to the person is rule 13's ("ne
 one message per person. Rule 6's per-gate escalation is opt-in (`escalate_human_gates`).
 
 **Acceptance criteria**
-- [ ] Free agent slots while every ready task is human-owned → `alert` with the idle capacity and the human tasks that gate the most agent work
-- [ ] For each open human task: the number of agent tasks blocked behind it (transitively) and the agent hours they hold; with `escalate_human_gates`, tasks above a threshold → `escalate` to the human owner (by default rule 13 escalates per person)
-- [ ] Kelpie never removes or rewrites a dependency; the alert asks whether the link is needed
-- [ ] Human tasks with nothing behind them are not flagged
-- [ ] Fixtures: new `16-human-task-gates-chain.yaml` (one human task, a chain of 28 agent tasks, 3 of 5 slots busy, only human tasks ready)
+- [x] Free agent slots while every ready task is human-owned → `alert` with the idle capacity and the human tasks that gate the most agent work
+- [x] For each open human task: the number of agent tasks blocked behind it (transitively) and the agent hours they hold; with `escalate_human_gates`, tasks above a threshold → `escalate` to the human owner (by default rule 13 escalates per person)
+- [x] Kelpie never removes or rewrites a dependency; the alert asks whether the link is needed
+- [x] Human tasks with nothing behind them are not flagged
+- [x] Fixtures: new `16-human-task-gates-chain.yaml` (one human task, a chain of 28 agent tasks, 3 of 5 slots busy, only human tasks ready)
 
 ### rules: orphan_status — parents left open and cards stuck before work (rule 3, incident 17)
 labels: P0, week-3, area:rules
@@ -401,11 +401,11 @@ the lag came from parent tasks left open after their subtasks were done (one gat
 and from cards sitting in triage or scheduled (one for 21 h after its PR merged).
 
 **Acceptance criteria**
-- [ ] A parent whose children are all terminal (and, when known, whose PR merged) → `alert` "close it?" with the tasks waiting behind it; act mode moves it to done through the adapter if supported
-- [ ] A card in a pre-work status (triage, scheduled; mapping in adapter config) past a threshold with dependents → `alert` with the dependents
-- [ ] PR ↔ task linking uses the task code in the PR title or branch only; mentions in comments or bodies never link a PR (field check: 8 of 10 comment-based matches were wrong). Applies to the dispatch gate's PR references too
-- [ ] checkpoints and exit_contract never propose resuming such a parent
-- [ ] Fixtures: new `17-parent-left-open.yaml`, `17-card-stuck-scheduled.yaml`, `17-foreign-pr-mention.yaml` (synthetic names)
+- [x] A parent whose children are all terminal (and, when known, whose PR merged) → `alert` "close it?" with the tasks waiting behind it; act mode moves it to done through the adapter if supported
+- [x] A card in a pre-work status (triage, scheduled; mapping in adapter config) past a threshold with dependents → `alert` with the dependents
+- [x] PR ↔ task linking uses the task code in the PR title or branch only; mentions in comments or bodies never link a PR (field check: 8 of 10 comment-based matches were wrong). Applies to the dispatch gate's PR references too
+- [x] checkpoints and exit_contract never propose resuming such a parent
+- [x] Fixtures: new `17-parent-left-open.yaml`, `17-card-stuck-scheduled.yaml`, `17-foreign-pr-mention.yaml` (synthetic names)
 
 ### rules: exit_contract — human acceptance criteria need their own evidence (rule 1, incident 18)
 labels: P0, week-3, area:rules
@@ -441,14 +441,14 @@ planned"). Kelpie's breaker is built on traces, so it works for any platform tha
 them (OTLP or spans written by an adapter from hooks). It stops the run and tells a human.
 
 **Acceptance criteria**
-- [ ] N identical consecutive tool calls in a session (same `tool` and same `Span.args_hash`; default 8 within 10 minutes) → `stop` (with `session_id`) + critical `alert`
-- [ ] Precedence with rule 2: calls matching `wait_condition`'s `poll_patterns` are left to rule 2 (a coaching `comment`); the run is stopped only if polling continues after that comment for a grace period or passes a higher hard limit
-- [ ] 5 consecutive tool errors in a session → `stop` + critical `alert`
-- [ ] A budget's hard threshold exceeded (see "core: budgets and spend") → `stop` + critical `alert` with the spend; the budget objects and windows come from that issue
-- [ ] Defaults are the AgentWatchdog thresholds (8 repeats in 10 minutes, 5 errors in a row); every threshold can be overridden per agent or role
-- [ ] Reuses the repeated-call helper from the `wait_condition` polling check; reads only spans and sessions, no platform-specific code
-- [ ] The same tool with different arguments, a varied long session and an agent under budget are not flagged
-- [ ] Fixtures: existing `field-01-heartbeat-runaway.yaml` (about 900 identical heartbeat calls with about 80k input tokens each, plus 5 consecutive tool errors; a healthy agent and a CI-polling reviewer left to rule 2 as distractors)
+- [x] N identical consecutive tool calls in a session (same `tool` and same `Span.args_hash`; default 8 within 10 minutes) → `stop` (with `session_id`) + critical `alert`
+- [x] Precedence with rule 2: calls matching `wait_condition`'s `poll_patterns` are left to rule 2 (a coaching `comment`); the run is stopped only if polling continues after that comment for a grace period or passes a higher hard limit
+- [x] 5 consecutive tool errors in a session → `stop` + critical `alert`
+- [x] A budget's hard threshold exceeded (see "core: budgets and spend") → `stop` + critical `alert` with the spend; the budget objects and windows come from that issue
+- [x] Defaults are the AgentWatchdog thresholds (8 repeats in 10 minutes, 5 errors in a row); every threshold can be overridden per agent or role
+- [x] Reuses the repeated-call helper from the `wait_condition` polling check; reads only spans and sessions, no platform-specific code
+- [x] The same tool with different arguments, a varied long session and an agent under budget are not flagged
+- [x] Fixtures: existing `field-01-heartbeat-runaway.yaml` (about 900 identical heartbeat calls with about 80k input tokens each, plus 5 consecutive tool errors; a healthy agent and a CI-polling reviewer left to rule 2 as distractors)
 
 ### rules: no_progress — tokens spent without progress (rule 11, field evidence)
 labels: P0, week-2, area:rules
@@ -457,11 +457,11 @@ Field evidence: idle agents keep spending tokens without moving any task, e.g. r
 Alert with concrete recommendations; stopping runaway loops is rule 10's job.
 
 **Acceptance criteria**
-- [ ] Per session over a configurable window: tokens spent vs. progress signals (task status change, `last_commit_at`, `Session.artifacts`); tokens above a threshold with no progress → `alert`
-- [ ] Alert carries the tokens burned and `params.recommendations`: `longer_heartbeat_interval`, `cheaper_maintenance_model`, `bounded_session_handoff` (bounded sessions with a handoff file)
-- [ ] One alert per session per window, not one per tick
-- [ ] A productive session (status change, commit or artifact in the window) is not flagged
-- [ ] Fixtures: existing `field-02-idle-context-resend.yaml` (a productive session as the distractor)
+- [x] Per session over a configurable window: tokens spent vs. progress signals (task status change, `last_commit_at`, `Session.artifacts`); tokens above a threshold with no progress → `alert`
+- [x] Alert carries the tokens burned and `params.recommendations`: `longer_heartbeat_interval`, `cheaper_maintenance_model`, `bounded_session_handoff` (bounded sessions with a handoff file)
+- [x] One alert per session per window, not one per tick
+- [x] A productive session (status change, commit or artifact in the window) is not flagged
+- [x] Fixtures: existing `field-02-idle-context-resend.yaml` (a productive session as the distractor)
 
 ### adapters: Hermes adapter — stop a run (`SupportsStop`)
 labels: P0, week-2, area:adapters
@@ -471,10 +471,10 @@ engine dispatch with an alert fallback for adapters without it were delivered in
 issue implements it for Hermes.
 
 **Acceptance criteria**
-- [ ] Hermes adapter implements `SupportsStop`: the running session stops and the task is not picked up again until a human resumes it; the mechanism is documented in the adapter module
-- [ ] Stopping leaves a comment on the task with the reason and how to resume
-- [ ] Idempotent: stopping an already stopped run is a no-op
-- [ ] Engine dispatch for `stop` reaches the Hermes adapter (test with a synthetic `kanban.db`)
+- [x] Hermes adapter implements `SupportsStop`: the running session stops and the task is not picked up again until a human resumes it; the mechanism is documented in the adapter module
+- [x] Stopping leaves a comment on the task with the reason and how to resume
+- [x] Idempotent: stopping an already stopped run is a no-op
+- [x] Engine dispatch for `stop` reaches the Hermes adapter (test with a synthetic `kanban.db`)
 
 ### rules: resources — disk, memory, processes and heavy-task concurrency (rule 7, incidents 3, 4)
 labels: P0, week-2, area:rules
@@ -482,10 +482,10 @@ Warn before host resources run out and the agents stop, and limit concurrency of
 tasks on an overloaded host.
 
 **Acceptance criteria**
-- [ ] Utilization thresholds per resource kind (warning / critical) for disk, memory, load, processes
-- [ ] Overloaded host with a heavy-task queue → `alert` with a suggested heavy-task concurrency limit (`max_heavy`)
-- [ ] Healthy hosts and light tasks produce no action
-- [ ] Fixtures: existing `03-disk-full.yaml`, `04-host-overload-heavy-queue.yaml`; new `03-disk-below-threshold.yaml`
+- [x] Utilization thresholds per resource kind (warning / critical) for disk, memory, load, processes
+- [x] Overloaded host with a heavy-task queue → `alert` with a suggested heavy-task concurrency limit (`max_heavy`)
+- [x] Healthy hosts and light tasks produce no action
+- [x] Fixtures: existing `03-disk-full.yaml`, `04-host-overload-heavy-queue.yaml`; new `03-disk-below-threshold.yaml`
 
 ### rules: resources — LLM provider quotas and auth health (rule 7, incident 6)
 labels: P0, week-2, area:rules
@@ -493,10 +493,10 @@ Provider limits and expired logins stopped agents up to 200 times a day. Alert b
 quotas run out or logins expire, and suggest a concurrency level tuned to the provider limit.
 
 **Acceptance criteria**
-- [ ] Repeated limit hits aggregated into one alert with counts per provider
+- [x] Repeated limit hits aggregated into one alert with counts per provider
 - [ ] Suggested concurrency per provider derived from the observed limit
-- [ ] Credentials expired or expiring within a window → `alert` (critical when expired)
-- [ ] Fixtures: existing `06-llm-quota-and-expired-auth.yaml`
+- [x] Credentials expired or expiring within a window → `alert` (critical when expired)
+- [x] Fixtures: existing `06-llm-quota-and-expired-auth.yaml`
 
 ### rules: ci_economy — wasted builds, cancel superseded, quota forecast (rule 9, incident 5)
 labels: P0, week-2, area:rules
@@ -510,7 +510,7 @@ how long the quota will last. The rule stays CI-agnostic; CI specifics live in a
 - [x] Each wasted build is classified (draft/WIP, superseded, docs-only, already verified) with the minutes it burned
 - [x] Superseded running builds → `cancel_build`, executed by the CI connector (not the platform adapter) through action routing (see "action routing")
 - [ ] Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check)
-- [ ] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks` — partial: the rule does both, but from GitHub only the quota (config) and the burn are known; minutes used need the billing API (admin rights), so "exhausted" fires only when another source reports usage
+- [x] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks` (minutes used from GitHub's billing usage report, #107)
 - [x] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
 
 ### resources: read host metrics via Prometheus HTTP API
@@ -519,9 +519,9 @@ No custom collector: query node_exporter metrics through the Prometheus HTTP API
 them into `Resource` readings per host. Works the same for a laptop, a cloud VM or a container.
 
 **Acceptance criteria**
-- [ ] Disk, memory, load and process count per host
-- [ ] PromQL queries configurable
-- [ ] Prometheus unavailability degrades gracefully (rule sees no data, alert once)
+- [x] Disk, memory, load and process count per host
+- [x] PromQL queries configurable
+- [ ] Prometheus unavailability degrades gracefully (rule sees no data, alert once) — partial: a warning is logged once per cause and `kelpie_resource_read_failures_total` counts it; no alert yet
 
 ### connectors: GitHub PR and CI
 labels: P0, week-2, area:connectors
@@ -543,11 +543,11 @@ First live run: most block alerts came from a reviewer blocking its own card wit
 block (incident 10 in another form). Turn such blocks into conditions instead of alerting.
 
 **Acceptance criteria**
-- [ ] Config: block-reason patterns as data (like `wait_condition`'s `poll_patterns`), each mapped to a condition kind (`pr_merged`, `ci_green`) and a way to extract the PR reference
-- [ ] A matching block gets the condition attached through the GitHub connector when it can resolve the PR; rule 4 then clears the block when the condition is met
-- [ ] Matched blocks count as waiting: no "block without condition" alert
-- [ ] A condition is bound to the exact target the task waits for: repo, PR number and the PR's head SHA. `ci_green` means the required checks on that head are green; green CI on `main` or on another PR never satisfies it; a new push to the PR resets it. When a task waits for a PR to land, the condition is `pr_merged`, not `ci_green` (field case: a duty agent unblocked a task because CI on `main` was green while the PR it waited for was still red)
-- [ ] Unmatched blocks, and matched ones whose PR cannot be resolved, keep the current behaviour
+- [x] Config: block-reason patterns as data (like `wait_condition`'s `poll_patterns`), each mapped to a condition kind (`pr_merged`, `ci_green`) and a way to extract the PR reference
+- [x] A matching block gets the condition attached through the GitHub connector when it can resolve the PR; rule 4 then clears the block when the condition is met
+- [x] Matched blocks count as waiting: no "block without condition" alert
+- [x] A condition is bound to the exact target the task waits for: repo, PR number and the PR's head SHA. `ci_green` means the required checks on that head are green; green CI on `main` or on another PR never satisfies it; a new push to the PR resets it. When a task waits for a PR to land, the condition is `pr_merged`, not `ci_green` (field case: a duty agent unblocked a task because CI on `main` was green while the PR it waited for was still red)
+- [x] Unmatched blocks, and matched ones whose PR cannot be resolved, keep the current behaviour
 - [ ] Fixtures: new `15-review-block-waiting-merge.yaml` (synthetic names), with a 13 h unmatched block as the true positive; new `15-green-main-red-pr.yaml` (main green, the awaited PR head red → the block stays)
 
 ### connectors: LLM provider quotas and auth health
@@ -560,7 +560,7 @@ provider APIs where available and from trace errors otherwise.
 - [ ] Limit hits from spans counted per provider
 - [ ] Credential expiry exposed as a resource
 - [ ] Provider usage and cost APIs read where they exist (API keys) and fed to budgets as a spend source
-- [ ] No provider SDK is required by core
+- [x] No provider SDK is required by core
 
 ### connectors: human tasks
 labels: P0, week-2, area:connectors
@@ -568,8 +568,8 @@ Evaluate `human_task` conditions (task assigned to a human owner reached a termi
 so agent tasks can wait on humans without polling.
 
 **Acceptance criteria**
-- [ ] Works with human-owned tasks on the same board via the adapter
-- [ ] Satisfied condition wakes the dependent agent task through the `wait_condition` rule
+- [x] Works with human-owned tasks on the same board via the adapter
+- [x] Satisfied condition wakes the dependent agent task through the `wait_condition` rule
 
 ### report: Kelpie metrics on /metrics and a Grafana dashboard
 labels: P0, week-2, area:report
@@ -588,14 +588,14 @@ Works with pay-per-token API keys and with subscriptions, where there is no bill
 are limits.
 
 **Acceptance criteria**
-- [ ] Budget config objects: scope (day, task, agent, project), window, soft and hard thresholds; strict validation like the rest of the config
-- [ ] Soft threshold → `alert`; hard threshold → `stop` through `SupportsStop` (act mode only, alert fallback otherwise); transition-based alerts like other lasting states
-- [ ] Burn-rate forecast: "budget runs out at <time>"; in subscription mode, time to the next limit from observed limit hits
+- [x] Budget config objects: scope (day, task, agent, project), window, soft and hard thresholds; strict validation like the rest of the config
+- [x] Soft threshold → `alert`; hard threshold → `stop` through `SupportsStop` (act mode only, alert fallback otherwise); transition-based alerts like other lasting states
+- [x] Burn-rate forecast: "budget runs out at <time>"; in subscription mode, time to the next limit from observed limit hits
 - [ ] Spend sources: traces (tokens × price table in config, cached tokens priced separately); Claude Code's OpenTelemetry cost and token metrics via OTLP ingest; provider cost APIs via the provider quota connector
-- [ ] Spend and remaining budget exported on `/metrics`; shown in `kelpie status`
-- [ ] `loop_breaker` (rule 10) reads budgets from here instead of its own config
-- [ ] No double counting of nested LLM spans in spend sums (see the double-count issue)
-- [ ] Fixtures: new `field-03-budget-overrun.yaml` (API-key agent crossing soft then hard threshold), `06-subscription-limit-forecast.yaml`
+- [x] Spend and remaining budget exported on `/metrics`; shown in `kelpie status`
+- [x] `loop_breaker` (rule 10) reads budgets from here instead of its own config
+- [x] No double counting of nested LLM spans in spend sums (see the double-count issue)
+- [x] Fixtures: new `field-03-budget-overrun.yaml` (API-key agent crossing soft then hard threshold), `06-subscription-limit-forecast.yaml`
 
 ### deploy: Hermes quickstart and `kelpie doctor`
 labels: P0, week-2, area:deploy
@@ -603,9 +603,9 @@ The live run on our farm must take minutes, not an evening, and must be done by 
 who cannot see inside the cloud session.
 
 **Acceptance criteria**
-- [ ] `docs/quickstart-hermes.md`: install, config, hooks, OTLP endpoint, docker compose with Prometheus and Grafana, in the fewest steps
-- [ ] `kelpie doctor`: kanban.db readable, hooks fire, OTLP spans arrive, worktrees readable, Prometheus reachable, dry-run on; one line per check with pass/fail and how to fix
-- [ ] Exit code non-zero when any check fails
+- [x] `docs/quickstart-hermes.md`: install, config, hooks, OTLP endpoint, docker compose with Prometheus and Grafana, in the fewest steps
+- [x] `kelpie doctor`: kanban.db readable, hooks fire, OTLP spans arrive, worktrees readable, Prometheus reachable, dry-run on; one line per check with pass/fail and how to fix
+- [x] Exit code non-zero when any check fails
 
 ### deploy: run on our own farm and record every rule trigger
 labels: P0, week-2, area:deploy
@@ -626,10 +626,10 @@ merge. `return_causes` explains conflicts after the fact; this rule warns while 
 are still in progress.
 
 **Acceptance criteria**
-- [ ] Two live tasks whose changed files overlap → `comment` on both naming the files and the other task
-- [ ] Optional serialization (config): the later task is held until the earlier one merges
-- [ ] Files on the expected-shared allowlist (same config as `return_causes`) are ignored
-- [ ] Fixtures: new `07-live-tasks-same-files.yaml` (a live task with disjoint files as the distractor)
+- [x] Two live tasks whose changed files overlap → `comment` on both naming the files and the other task
+- [x] Optional serialization (config): the later task is held until the earlier one merges
+- [x] Files on the expected-shared allowlist (same config as `return_causes`) are ignored
+- [x] Fixtures: new `07-live-tasks-same-files.yaml` (a live task with disjoint files as the distractor)
 
 ### rules: dispatch gate — do not start work whose prerequisite is not met
 labels: P0, week-3, area:rules
@@ -696,10 +696,10 @@ Basic token optimization from traces, no LLM: cache hit rate and where caching b
 context growth per step, restarts from zero.
 
 **Acceptance criteria**
-- [ ] Cache hit rate per role and model, with the steps where the cache breaks
-- [ ] Context growth per step; sessions with runaway context flagged
-- [ ] Tokens burned on restarts from zero (feeds the cost of chaos)
-- [ ] Recommendations with estimated savings in the daily report
+- [x] Cache hit rate per role and model, with the steps where the cache breaks
+- [x] Context growth per step; sessions with runaway context flagged
+- [x] Tokens burned on restarts from zero (feeds the cost of chaos)
+- [x] Recommendations with estimated savings in the daily report
 
 ### traces: token optimization — repeated fragments, unused tools, model fit, diff-only review
 labels: P1, week-3, area:traces
@@ -708,11 +708,11 @@ on a cheaper model, and reviewers re-reading whole PRs. Huge tool outputs have t
 item.
 
 **Acceptance criteria**
-- [ ] Repeated prompt fragments detected across sessions of a role
-- [ ] Unused tools per role listed
-- [ ] Model fit per role: roles doing routine work (triage, polling, status updates) flagged as candidates for a cheaper model; after a switch, quality is checked by returns and ping-pong rounds
-- [ ] Diff-only review: review rounds 2+ that re-read the whole PR instead of the changes since the last round
-- [ ] Recommendations with estimated savings in the daily report
+- [x] Repeated prompt fragments detected across sessions of a role
+- [x] Unused tools per role listed
+- [x] Model fit per role: roles doing routine work (triage, polling, status updates) flagged as candidates for a cheaper model; after a switch, quality is checked by returns and ping-pong rounds
+- [x] Diff-only review: review rounds 2+ that re-read the whole PR instead of the changes since the last round
+- [x] Recommendations with estimated savings in the daily report
 
 ### report: farm throughput metrics
 labels: P1, week-3, area:report
@@ -721,8 +721,8 @@ waiting for conditions, ownerless statuses), queue length and utilization per ro
 rate, cost per completed task.
 
 **Acceptance criteria**
-- [ ] Metrics computed from task status history and traces
-- [ ] Exported on `/metrics` with Grafana panels, and summarized in the daily report
+- [x] Metrics computed from task status history and traces
+- [x] Exported on `/metrics` with Grafana panels, and summarized in the daily report
 
 ### report: theory-of-constraints recommendations
 labels: P1, week-3, area:report
@@ -847,10 +847,10 @@ back, from returns and traces, and turn the dominant causes into a recommendatio
 shared-file conflicts: the hot files, and a warning to in-progress tasks touching them).
 
 **Acceptance criteria**
-- [ ] Returns grouped by cause category; share of each cause computed over a window
-- [ ] Dominant shared-file conflicts → `alert` with `hot_files` and a recommendation; in-progress tasks touching them → `comment`
-- [ ] Configurable allowlist of files that are expected to be shared
-- [ ] Fixtures: existing `07-shared-file-conflicts.yaml`; new `07-disjoint-files.yaml`
+- [x] Returns grouped by cause category; share of each cause computed over a window
+- [x] Dominant shared-file conflicts → `alert` with `hot_files` and a recommendation; in-progress tasks touching them → `comment`
+- [x] Configurable allowlist of files that are expected to be shared
+- [x] Fixtures: existing `07-shared-file-conflicts.yaml`; new `07-disjoint-files.yaml`
 
 ### core: Telegram alerter and the shared delivery layer
 labels: P0, week-2, area:core
@@ -916,11 +916,11 @@ then reopened. Extend rule 1 so "done" needs evidence, and track how often done 
 back.
 
 **Acceptance criteria**
-- [ ] Task moved to done without configured evidence (test-output artifact, satisfied `ci_status` condition, live-check artifact) → `requeue` with the missing evidence in the reason (`alert` only, if configured)
-- [ ] Evidence kinds come from config and the snapshot; no CI-specific code
-- [ ] Reopened-after-done rate per role exported on `/metrics` and in the daily report
-- [ ] Done tasks with evidence produce no action
-- [ ] Fixtures: new `02-done-without-evidence.yaml`
+- [x] Task moved to done without configured evidence (test-output artifact, satisfied `ci_status` condition, live-check artifact) → `requeue` with the missing evidence in the reason (`alert` only, if configured)
+- [x] Evidence kinds come from config and the snapshot; no CI-specific code
+- [x] Reopened-after-done rate per role exported on `/metrics` and in the daily report
+- [x] Done tasks with evidence produce no action
+- [x] Fixtures: new `02-done-without-evidence.yaml`
 
 ### rules: needs_you — "needs you" inbox with cost of delay (rule 13, incident 13)
 labels: P1, area:rules
