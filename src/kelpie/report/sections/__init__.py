@@ -26,14 +26,16 @@ report: one analysis must not cost the whole report.
 
 from __future__ import annotations
 
+import copy
 import importlib
 import logging
 import math
 import pkgutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import TYPE_CHECKING
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 
 from kelpie.core.model import Span
 from kelpie.core.spans import SpanKey, TokenUsage
@@ -84,7 +86,9 @@ class SectionContext:
     """What a builder may read: the report's ``inputs``; the day (``start``, ``end``, its
     ``spans`` and ``spend``); ``counted``, the LLM spans whose tokens count (nested
     instrumentations left out) with the model to price them by; ``roles``, the role of each
-    session's owner; and ``price``, which turns token usage into :class:`Spend`."""
+    session's owner; ``price``, which turns token usage into :class:`Spend`; and
+    ``config``, the section's own ``[report.sections.<name>]`` table (empty without one),
+    whose keys the section checks itself, raising on unknown ones."""
 
     inputs: ReportInputs
     start: datetime
@@ -94,6 +98,7 @@ class SectionContext:
     price: Callable[[Iterable[TokenUsage]], Spend]
     spend: Spend
     roles: Mapping[str, str]
+    config: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
 SectionBuilder = Callable[[SectionContext], "Section | None"]
@@ -124,15 +129,25 @@ def load_sections() -> list[str]:
 
 
 def run_sections(
-    builders: Mapping[str, SectionBuilder], ctx: SectionContext, failed: Sequence[str] = ()
+    builders: Mapping[str, SectionBuilder],
+    ctx: SectionContext,
+    failed: Sequence[str] = (),
+    config: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[Section, ...]:
-    """Every builder's section in name order, with a note for each that failed."""
+    """Every builder's section in name order, each given its own ``config`` table, with a
+    note for each that failed and for each table no section reads (a typo)."""
+    config = config or {}
     out = [
         Section(name, (f"This section failed to load ({name}); see the log.",)) for name in failed
     ]
+    out.extend(
+        Section(name, (f"[report.sections.{name}] is configured, but no such section exists.",))
+        for name in sorted(set(config) - set(builders))
+    )
     for name in sorted(builders):
+        own = MappingProxyType(copy.deepcopy(dict(config.get(name, {}))))
         try:
-            found = builders[name](ctx)
+            found = builders[name](replace(ctx, config=own))
             if found is not None and not _valid(found):
                 raise TypeError(f"returned {type(found).__name__}, not a valid Section")
         except Exception:

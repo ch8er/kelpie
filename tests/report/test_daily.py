@@ -424,6 +424,8 @@ def test_report_config() -> None:
     assert settings.hour_usd == 4.0 and settings.channels == ("ops",)
     assert settings.dir is not None and "~" not in str(settings.dir)
     assert load_report(None) == ReportSettings()
+    tables = load_report({"sections": {"model-fit": {"routine_roles": ["reviewer"]}}})
+    assert tables.sections == {"model-fit": {"routine_roles": ["reviewer"]}}
 
 
 @pytest.mark.parametrize(
@@ -441,6 +443,8 @@ def test_report_config() -> None:
         {"channels": []},
         {"channels": [""]},
         {"severity": "loud"},
+        {"sections": []},
+        {"sections": {"model-fit": 1}},
     ],
 )
 def test_report_config_errors(section: Any) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import time, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,7 @@ KEYS = frozenset(
         "review_roles",
         "min_sample",
         "at",
+        "sections",
     }
 )
 SEVERITIES = ("info", "warning", "critical")
@@ -41,7 +42,9 @@ class ReportSettings:
     Before/after of fixes: ``verify_window`` on each side, review time from the sessions of
     ``review_roles``, and fewer than ``min_sample`` observations on a side is a small
     sample. ``at``: when ``kelpie serve`` runs yesterday's report (local time; None: only
-    ``kelpie report`` or cron)."""
+    ``kelpie report`` or cron). ``sections``: ``[report.sections.<name>]`` tables, passed
+    as they are to that report section (``SectionContext.config``), which checks its own
+    keys."""
 
     timezone: str = "UTC"
     dir: Path | None = None
@@ -53,6 +56,7 @@ class ReportSettings:
     review_roles: tuple[str, ...] = DEFAULT_REVIEW_ROLES
     min_sample: int = DEFAULT_MIN_SAMPLE
     at: time | None = None  # local time kelpie serve runs yesterday's report (None: never)
+    sections: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     @property
     def tz(self) -> ZoneInfo:
@@ -121,6 +125,11 @@ def load_report(section: Any) -> ReportSettings:
     sample = section.get("min_sample", DEFAULT_MIN_SAMPLE)
     if isinstance(sample, bool) or not isinstance(sample, int) or sample <= 0:
         raise ValueError("[report] min_sample must be a positive integer")
+    sections = section.get("sections", {})
+    if not isinstance(sections, Mapping) or not all(
+        isinstance(k, str) and k and isinstance(v, Mapping) for k, v in sections.items()
+    ):
+        raise ValueError("[report] sections must be [report.sections.<name>] tables")
     return ReportSettings(
         timezone=tz.strip(),
         dir=None if out_dir is None else Path(out_dir.strip()).expanduser(),
@@ -132,4 +141,5 @@ def load_report(section: Any) -> ReportSettings:
         review_roles=tuple(r.strip() for r in roles),
         min_sample=sample,
         at=run_at,
+        sections={k: dict(v) for k, v in sections.items()},
     )

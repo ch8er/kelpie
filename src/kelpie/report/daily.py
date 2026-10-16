@@ -53,6 +53,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import zip_longest
 from types import MappingProxyType
+from typing import Any
 
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
@@ -183,6 +184,7 @@ class ReportInputs:
     verify_window: timedelta = DEFAULT_VERIFY_WINDOW
     review_roles: tuple[str, ...] = DEFAULT_REVIEW_ROLES
     min_sample: int = DEFAULT_MIN_SAMPLE
+    section_config: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,7 +296,7 @@ def build_report(
         spend=spend,
         roles=MappingProxyType(_roles(inputs, end)),
     )
-    extra = run_sections(sections, context, failed)
+    extra = run_sections(sections, context, failed, inputs.section_config)
     advice = _recommendations(
         inputs,
         chaos,

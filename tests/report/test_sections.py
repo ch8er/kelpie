@@ -168,3 +168,35 @@ def test_names_are_unique() -> None:
             register_section("unique-test")(lambda ctx: None)
     finally:
         del SECTIONS["unique-test"]
+
+
+def test_each_section_gets_its_own_config_table() -> None:
+    seen: dict[str, Any] = {}
+
+    def fit(ctx: SectionContext) -> None:
+        seen["fit"] = ctx.config
+        with pytest.raises(TypeError):
+            ctx.config["routine_roles"] = []  # type: ignore[index]
+        ctx.config["routine_roles"].append("mutated")  # a copy: the settings stay as they are
+
+    def other(ctx: SectionContext) -> None:
+        seen["other"] = ctx.config
+
+    config = {"test-fit": {"routine_roles": ["reviewer"], "min_calls": 20}}
+    report = build_report(inputs(section_config=config), {"test-fit": fit, "test-other": other})
+    assert report.sections == ()
+    assert seen["fit"]["min_calls"] == 20 and dict(seen["other"]) == {}
+    assert config["test-fit"]["routine_roles"] == ["reviewer"]
+
+
+def test_a_section_rejecting_its_config_is_noted_and_a_typo_too() -> None:
+    def strict(ctx: SectionContext) -> Section:
+        if extra := set(ctx.config) - {"threshold"}:
+            raise ValueError(f"unknown keys {sorted(extra)}")
+        return Section("Strict", ("ok",))
+
+    config = {"test-strict": {"treshold": 1}, "test-strcit": {}}
+    report = build_report(inputs(section_config=config), {"test-strict": strict})
+    markdown = render_markdown(report)
+    assert "This section failed (test-strict)" in markdown
+    assert "[report.sections.test-strcit] is configured, but no such section exists." in markdown
