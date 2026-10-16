@@ -17,8 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.sim import channels, github
-from tests.sim.board import connect, epoch
+from kelpie.sim import github
+from kelpie.sim.board import connect, epoch
+from tests.sim import channels
 from tests.sim.farm import HERMES_STALE, Farm
 from tests.sim.hosts import MultiHostFarm
 from tests.sim.kelpie import KelpieServe, wait_for

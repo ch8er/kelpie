@@ -14,10 +14,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from tests.sim import toml
+from kelpie.sim import toml
+from kelpie.sim.github import FakeGitHub
 from tests.sim.channels import Channels
 from tests.sim.farm import Farm, merge
-from tests.sim.github import FakeGitHub
 from tests.sim.kelpie import KelpieServe, base_env, free_port, kelpie_command, problems_in, wait_for
 
 HOSTS = ("laptop", "vm-1")
