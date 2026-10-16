@@ -72,6 +72,11 @@ These are non-negotiable; reviews will block on them.
    before any side effect; the engine then alerts a human instead. An action that is only
    not implemented yet is a plain `NotImplementedError` (a failure); refuse act mode for it
    at startup, as `app.py` does for Hermes.
+   Kelpie tells a human what it did in its own words (`kelpie.core.alerts`), so `stop` may
+   return what the stop means on the platform ("the worker exits within about 2 minutes")
+   and must return `ActionResult.NOTHING_TO_DO` when the session was already over. An
+   exception may carry a `public_reason`: the only text of it a chat message shows (the rest
+   can hold CLI output with secrets and stays in the log).
 2. Map platform statuses onto `kelpie.core.model.Status` in one place, and document the
    mapping.
 3. Anything that must run on the agent host (hooks, plugins) lives inside the adapter

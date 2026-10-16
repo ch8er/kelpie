@@ -108,9 +108,10 @@ class SupportsStop(Protocol):
     status; a human or a later action resumes it.
     """
 
-    def stop(self, session_id: str, reason: str) -> str | None:
+    def stop(self, session_id: str, reason: str) -> str | ActionResult | None:
         """Stop the session. May return what happened, in a few words a human reads after
-        "Stopped run <id>; " (e.g. when the worker actually exits); None says nothing more."""
+        "Stopped run <id>; " (e.g. when the worker actually exits); None says nothing more.
+        ``ActionResult.NOTHING_TO_DO``: the session had already ended, nothing was stopped."""
         ...
 
 

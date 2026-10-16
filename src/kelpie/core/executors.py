@@ -47,14 +47,14 @@ class PlatformExecutor:
     def name(self) -> str:
         return self.adapter.name
 
-    def execute(self, action: Action) -> bool | str:
+    def execute(self, action: Action) -> bool | str | Outcome:
         try:
             return self._execute(action)
         except UnsupportedAction as exc:
             log.warning("%s does not support %s: %s", self.name, action.kind, exc)
             return False
 
-    def _execute(self, action: Action) -> bool | str:
+    def _execute(self, action: Action) -> bool | str | Outcome:
         adapter = self.adapter
         if action.kind is ActionKind.STOP:
             # Stops target a session; heartbeat loops may have no task at all.
@@ -62,6 +62,8 @@ class PlatformExecutor:
             if not session_id or not isinstance(adapter, SupportsStop):
                 return False
             detail = adapter.stop(session_id, action.reason)
+            if detail is ActionResult.NOTHING_TO_DO:
+                return Outcome.NOTHING_TO_DO  # the session was over: nothing was stopped
             return detail if isinstance(detail, str) and detail.strip() else True
         tid = action.task_id
         if tid is None:

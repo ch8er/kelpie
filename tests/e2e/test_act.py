@@ -140,8 +140,8 @@ def test_a_refused_stop_reaches_a_human(farm: Farm) -> None:
     text = farm.wait_message("loop_breaker", "t_loop", "Failed: could not stop run")
     assert text.startswith("[CRITICAL] loop_breaker: alert t_loop")
     assert text.splitlines()[-1] == (
-        f"Failed: could not stop run hermes-run-{loop}: HermesError (details in the Kelpie "
-        "log), needs a human."
+        f"Failed: could not stop run hermes-run-{loop}: hermes kanban block failed (exit 1), "
+        "needs a human."
     )
     kelpie.wait_ticks(3)
     farm.stop()
@@ -258,7 +258,8 @@ def test_a_cancel_is_announced_as_done(farm: Farm) -> None:
         if re.search(r"\bcancell?ed\b", t, re.IGNORECASE) and f"{REPO}:{builds.old.id}" in t
     ]
     assert announced, "nothing says the build was cancelled"
-    (done,) = announced
+    (done,) = announced  # the waste summary of that tick carries it: one message
+    assert done.startswith("[INFO] ci_economy: alert") and "still runs" not in done
     assert done.splitlines()[-1] == (
         f"Cancelled build {REPO}:{builds.old.id} (superseded by {REPO}:{builds.new.id})."
     )

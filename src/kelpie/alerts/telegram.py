@@ -72,7 +72,7 @@ DID = {
     Did.NOT_EXECUTED: "Kelpie did: nothing, no executor could carry it out. Needs a human.",
     Did.DONE: "Kelpie did: carried it out.",
 }
-MAX_DID = 400
+MAX_DID = 1500  # several effects' lines (a budget alert's stops); the body yields room
 
 
 def did_line(message: AlertMessage) -> str:
@@ -135,10 +135,13 @@ def format_message(message: AlertMessage) -> str:
         return truncate(defang(message.text))
     head = f"[{message.severity.value.upper()}] "
     head += f"{truncate(defang(message.rule), MAX_HEAD)}: " if message.rule else ""
-    # Each part has its own cap, so the last line (what Kelpie did) always survives.
-    body = truncate(defang(lead(message) + message.body.strip()), MAX_BODY)
-    lines = [head + truncate(defang(message.subject), MAX_HEAD), body, defang(did_line(message))]
-    return truncate("\n".join(lines))
+    # Each part has its own cap and the body yields what the others take, so the last line
+    # (what Kelpie did) always survives whole.
+    first = head + truncate(defang(message.subject), MAX_HEAD)
+    did = defang(did_line(message))
+    room = min(MAX_BODY, MAX_TEXT - utf16_len(first) - utf16_len(did) - 2)
+    body = truncate(defang(lead(message) + message.body.strip()), room)
+    return truncate("\n".join([first, body, did]))
 
 
 @dataclass(frozen=True, slots=True)

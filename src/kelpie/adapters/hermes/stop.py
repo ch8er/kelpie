@@ -85,7 +85,12 @@ STOP_DONE = (
 
 
 class HermesCliError(RuntimeError):
-    """The Hermes CLI is missing, timed out or refused the command."""
+    """The Hermes CLI is missing, timed out or refused the command. ``public_reason`` says
+    so without anything the CLI printed (which may hold secrets), for the human told."""
+
+    def __init__(self, message: str, public_reason: str | None = None) -> None:
+        super().__init__(message)
+        self.public_reason = public_reason
 
 
 def run_id(session_id: str) -> int | None:
@@ -142,7 +147,10 @@ def block_task(
     """
     exe = shutil.which(cli)
     if exe is None:
-        raise HermesCliError(f"Hermes CLI not found: {cli!r} (set [adapters.hermes] cli)")
+        raise HermesCliError(
+            f"Hermes CLI not found: {cli!r} (set [adapters.hermes] cli)",
+            "the Hermes CLI was not found (set [adapters.hermes] cli)",
+        )
     env = cli_env(os.environ if environ is None else environ, db_path, task_id, rid)
     try:
         proc = subprocess.Popen(
@@ -156,17 +164,23 @@ def block_task(
             start_new_session=True,
         )
     except OSError as exc:
-        raise HermesCliError(f"cannot run the Hermes CLI {cli!r}: {exc}") from exc
+        raise HermesCliError(
+            f"cannot run the Hermes CLI {cli!r}: {exc}", "the Hermes CLI could not be started"
+        ) from exc
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         _kill_group(proc)
         proc.communicate()
-        raise HermesCliError(f"hermes kanban block {task_id} timed out after {timeout:g}s") from exc
+        raise HermesCliError(
+            f"hermes kanban block {task_id} timed out after {timeout:g}s",
+            f"hermes kanban block timed out after {timeout:g}s",
+        ) from exc
     if proc.returncode != 0:
         tail = (err or out or "").strip()[-ERROR_TAIL:]
         raise HermesCliError(
-            f"hermes kanban block {task_id} failed (exit {proc.returncode}): {tail}"
+            f"hermes kanban block {task_id} failed (exit {proc.returncode}): {tail}",
+            f"hermes kanban block failed (exit {proc.returncode})",
         )
 
 

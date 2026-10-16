@@ -3,12 +3,13 @@ rule's own text (issues #69, #70)."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
 from kelpie.alerts import slack, telegram
-from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.actions import Action, ActionKind, ActionResult, Severity
 from kelpie.core.alerts import (
     ANNOUNCES,
     AlertMessage,
@@ -20,6 +21,7 @@ from kelpie.core.alerts import (
 )
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
+from kelpie.core.ledger import Outcome
 from kelpie.core.model import Session, Snapshot
 from tests.fakes import Emit, FakeAdapter, StoppingAdapter
 
@@ -59,14 +61,14 @@ class Refusing2(StoppingAdapter):
         raise PublicError("raw stderr with sk-secret-value")
 
 
-def stop(key: str = "stop:S-1") -> Action:
+def stop(key: str = "stop:S-1", session: str = "S-1") -> Action:
     return Action(
         ActionKind.STOP,
         "loop",
-        "Runaway run: session S-1 made 20 identical calls.",
+        f"Runaway run: session {session} made 20 identical calls.",
         task_id="T-1",
         key=key,
-        params={"session_id": "S-1"},
+        params={"session_id": session},
     )
 
 
@@ -200,12 +202,13 @@ def test_an_effect_whose_alert_stays_quiet_is_announced_on_its_own() -> None:
     first = Emit([runaway(), stop()])
     engine = Engine([first], adapters=[adapter], alerter=recorder, config=ACT)
     engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION,)))
-    # A new run of the same loop: the state alert is ongoing (no message), the stop is new.
-    first.actions = [runaway("stop:S-2"), stop("stop:S-2")]
-    engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION,)))
-    assert [(m.subject, m.did_text) for m in recorder.messages] == [
-        ("alert T-1", "Stopped run S-1; the worker exits within ~2 min."),
-        ("stop T-1", "Stopped run S-1; the worker exits within ~2 min."),
+    # A new run of the same loop: the state alert is ongoing (no message), the stop is new
+    # and goes out on its own, as urgent as the alert that would have carried it.
+    first.actions = [runaway("stop:S-2"), stop("stop:S-2", "S-2")]
+    engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION, Session("S-2", "T-1", "a", NOW))))
+    assert [(m.subject, m.did_text, m.severity) for m in recorder.messages] == [
+        ("alert T-1", "Stopped run S-1; the worker exits within ~2 min.", Severity.CRITICAL),
+        ("stop T-1", "Stopped run S-2; the worker exits within ~2 min.", Severity.CRITICAL),
     ]
 
 
@@ -250,3 +253,86 @@ def test_the_did_line_is_part_of_what_makes_two_alerts_the_same() -> None:
     a = parse_alert("[r] alert T-1", "b", "info", did="Stopped run S-1.")
     b = parse_alert("[r] alert T-1", "b", "info", did="Suggested: stop run S-1.")
     assert a.fingerprint != b.fingerprint
+
+
+def test_an_announcing_alert_held_back_by_the_ledger_releases_the_effects_line() -> None:
+    """Not a lasting state: the ledger's cooldown silences the alert on the second tick."""
+    plain = replace(runaway(), state=None, since=None)
+    adapter, recorder = Detailed(), Recorder()
+    rule = Emit([plain, stop()])
+    engine = Engine([rule], adapters=[adapter], alerter=recorder, config=ACT)
+    engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION,)))
+    rule.actions = [replace(plain, params={ANNOUNCES: "stop:S-1:again"}), stop("stop:S-1:again")]
+    engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION,)))
+    assert [(m.subject, m.severity) for m in recorder.messages] == [
+        ("alert T-1", Severity.CRITICAL),
+        ("stop T-1", Severity.CRITICAL),  # released, at the alert's severity
+    ]
+
+
+class FailingAlerts(Recorder):
+    """Delivers everything but plain alerts."""
+
+    def send(self, title: str, body: str, severity: str, did: str | None = None) -> None:
+        if title.startswith("[loop] alert"):
+            raise ConnectionError("chat down")
+        super().send(title, body, severity, did)
+
+
+def test_an_announcing_alert_that_cannot_be_sent_still_lets_the_effect_be_told() -> None:
+    recorder = FailingAlerts()
+    engine = Engine(
+        [Emit([runaway(), stop()])], adapters=[Detailed()], alerter=recorder, config=ACT
+    )
+    engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION,)))
+    failed, done = recorder.messages
+    assert (failed.subject, failed.did) == ("alert T-1", Did.FAILED)  # once, needs a human
+    assert failed.did_text == (
+        "Failed: could not send this alert: ConnectionError (details in the Kelpie log), "
+        "needs a human."
+    )
+    assert (done.subject, done.did) == ("stop T-1", Did.DONE)  # the stop is still told
+    assert done.did_text == "Stopped run S-1; the worker exits within ~2 min."
+
+
+class Ended(StoppingAdapter):
+    def stop(self, session_id: str, reason: str) -> ActionResult:  # type: ignore[override]
+        super().stop(session_id, reason)
+        return ActionResult.NOTHING_TO_DO
+
+
+def test_a_session_that_was_already_over_is_not_announced_as_stopped() -> None:
+    recorder = Recorder()
+    engine = Engine([Emit([runaway(), stop()])], adapters=[Ended()], alerter=recorder, config=ACT)
+    (result, _) = engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION,)))
+    assert result.outcome is Outcome.NOTHING_TO_DO
+    (m,) = recorder.messages
+    assert m.did_text is None  # the alert only: nothing was stopped
+    assert "Stopped" not in telegram.format_message(m)
+
+
+def test_a_carried_failure_raises_an_info_alert_to_warning() -> None:
+    quiet = replace(runaway(), severity=Severity.INFO)
+    (m,) = tick([quiet, stop()], Refusing(), ACT).messages
+    assert m.severity is Severity.WARNING and m.did_text.startswith("Failed:")
+
+
+def test_a_public_reason_ending_in_a_period_reads_cleanly() -> None:
+    class Dotted(StoppingAdapter):
+        def stop(self, session_id: str, reason: str) -> None:
+            exc = RuntimeError("raw")
+            exc.public_reason = "the run is no longer current."  # type: ignore[attr-defined]
+            raise exc
+
+    (m,) = tick([stop()], Dotted(), ACT).messages
+    assert m.did_text == (
+        "Failed: could not stop run S-1: the run is no longer current, needs a human."
+    )
+
+
+def test_the_did_line_survives_a_long_body_whole() -> None:
+    body = "x" * 5000
+    did = "Stopped run S-1; " + "y" * 1200 + "."
+    for fmt in (telegram.format_message, slack.format_message):
+        text = fmt(parse_alert("[loop] alert T-1", body, "critical", did=did))
+        assert text.splitlines()[-1] == did and len(text) <= telegram.MAX_TEXT

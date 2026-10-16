@@ -129,6 +129,7 @@ from kelpie.adapters.hermes.stop import (
     run_id,
     stop_comment,
 )
+from kelpie.core.actions import ActionResult
 from kelpie.core.model import (
     Block,
     Condition,
@@ -226,7 +227,12 @@ TYPED_BLOCKS = ("needs_input", "capability", "transient")
 
 
 class HermesError(RuntimeError):
-    """The Hermes board cannot be read."""
+    """The Hermes board cannot be read, or a stop failed. ``public_reason`` (when set) says
+    why without anything a CLI printed, for the human told about it."""
+
+    def __init__(self, message: str, public_reason: str | None = None) -> None:
+        super().__init__(message)
+        self.public_reason = public_reason
 
 
 def _utc(epoch: Any) -> datetime | None:
@@ -860,24 +866,24 @@ class HermesAdapter:
     def events(self, since: datetime) -> Iterable[PlatformEvent]:
         return ()
 
-    def stop(self, session_id: str, reason: str) -> str | None:
+    def stop(self, session_id: str, reason: str) -> str | ActionResult:
         """Stop a run: the task is blocked (``needs_input``) until a human unblocks it.
 
         Idempotent: a run that has already ended, or whose task is no longer running it, is
         left alone. Raises :class:`HermesError` for an unknown or foreign session id and when
         Hermes refuses or the task is still running afterwards. Returns what the stop means on
-        Hermes, for the human told about it (None when there was nothing to stop).
+        Hermes, for the human told about it, or ``NOTHING_TO_DO`` when the run was over.
         """
         rid = run_id(session_id)
         if rid is None:
-            raise HermesError(f"not a Hermes run session: {session_id!r}")
+            raise HermesError(f"not a Hermes run session: {session_id!r}", "not a Hermes run")
         state = self._run_state(rid)
         if state is None:
-            raise HermesError(f"unknown Hermes run: {session_id}")
+            raise HermesError(f"unknown Hermes run: {session_id}", "the run is not on the board")
         task_id, active = state
         if not active:
             log.info("run %s of task %s is not active; nothing to stop", rid, task_id)
-            return
+            return ActionResult.NOTHING_TO_DO
         try:
             block_task(
                 self.cli,
@@ -890,10 +896,11 @@ class HermesAdapter:
         except HermesCliError as exc:
             # The run may have ended on its own between our read and the command.
             if self._run_state(rid) == (task_id, False):
-                return
-            raise HermesError(str(exc)) from exc
+                return ActionResult.NOTHING_TO_DO
+            raise HermesError(str(exc), exc.public_reason) from exc
         if self._run_state(rid) != (task_id, False):
-            raise HermesError(f"task {task_id} is still running after its block")
+            message = f"task {task_id} is still running after its block"
+            raise HermesError(message, message)
         return STOP_DONE.format(task=task_id)
 
     def _run_state(self, rid: int) -> tuple[str, bool] | None:

@@ -69,6 +69,7 @@ from pathlib import Path
 from typing import Any
 
 from kelpie.adapters.claude_code import hook
+from kelpie.core.actions import ActionResult
 from kelpie.core.model import (
     Dependency,
     Owner,
@@ -616,16 +617,17 @@ class ClaudeCodeAdapter:
     def events(self, since: datetime) -> Iterable[PlatformEvent]:
         return ()
 
-    def stop(self, session_id: str, reason: str) -> None:
+    def stop(self, session_id: str, reason: str) -> str | ActionResult:
         """Stop a session at its next tool call (or machine-submitted prompt).
 
         Writes the stop marker the hook reads (see :mod:`kelpie.adapters.claude_code.hook`):
         cooperative, so a session in the middle of a model call stops once that call asks for
         a tool, and the stop holds until a human types a prompt in the session, removes the
         marker, or ``KELPIE_CLAUDE_STOP_TTL`` passes. Idempotent: an ended session is left
-        alone. Raises :class:`UnsupportedAction` when stop is turned off or the session is not
-        in the spool (no Kelpie hook runs there), :class:`ClaudeCodeError` for an id that is
-        not a Claude Code session id or a marker that cannot be written.
+        alone (``NOTHING_TO_DO``); otherwise returns what the stop means here, for the human
+        told about it. Raises :class:`UnsupportedAction` when stop is turned off or the
+        session is not in the spool (no Kelpie hook runs there), :class:`ClaudeCodeError` for
+        an id that is not a Claude Code session id or a marker that cannot be written.
         """
         if hook.marker_path(session_id) is None:
             raise ClaudeCodeError(f"not a Claude Code session id: {session_id!r}")
@@ -642,7 +644,7 @@ class ClaudeCodeAdapter:
             )
         if last.type == "session_end":
             log.info("claude-code: session %s has ended; nothing to stop", session_id)
-            return
+            return ActionResult.NOTHING_TO_DO
         if last.version < 1:
             raise UnsupportedAction(
                 f"session {session_id} runs a Kelpie hook without stop support; copy the "
@@ -653,6 +655,7 @@ class ClaudeCodeAdapter:
         except OSError as exc:
             raise ClaudeCodeError(f"cannot write the stop marker for {session_id}: {exc}") from exc
         log.info("claude-code: stop requested for session %s", session_id)
+        return "the session stops at its next tool call, until a human types a prompt in it"
 
     def requeue(self, task_id: str, reason: str) -> None:
         raise UnsupportedAction(UNSUPPORTED)

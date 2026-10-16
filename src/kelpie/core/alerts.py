@@ -146,6 +146,8 @@ def intent(action: Action) -> str:
             return f"comment on {task}"
         case ActionKind.WIP_COMMIT:
             return f"make a WIP commit on {task}"
+        case ActionKind.ALERT | ActionKind.ESCALATE:
+            return "send this alert"
         case _:
             return f"{action.kind} {task}"
 
@@ -204,7 +206,7 @@ def failure_reason(exc: BaseException) -> str:
 
 
 def failed_line(action: Action, reason: str) -> str:
-    return f"Failed: could not {intent(action)}: {reason}, needs a human."
+    return f"Failed: could not {intent(action)}: {reason.rstrip('. ')}, needs a human."
 
 
 def not_executed_line(action: Action) -> str:

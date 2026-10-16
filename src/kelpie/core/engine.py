@@ -98,6 +98,7 @@ class Engine:
     _lines: dict[str, list[str]] = field(init=False, default_factory=dict)
     _held: dict[str, list[tuple[Action, bool, str, str]]] = field(init=False, default_factory=dict)
     _told: set[str] = field(init=False, default_factory=set)
+    _announcer_severity: dict[str, Severity] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         self.ledger = ActionLedger(
@@ -153,6 +154,11 @@ class Engine:
         ordered = sorted(actions, key=lambda a: a.kind in _ALERT_ACTIONS)
         self._announced = {k for a in ordered for k in _announces(a)}
         self._lines, self._held, self._told = {}, {}, set()
+        self._announcer_severity = {}
+        for a in ordered:
+            for k in _announces(a):
+                known = self._announcer_severity.get(k, Severity.INFO)
+                self._announcer_severity[k] = _higher(known, a.severity)
         try:
             for action in ordered:
                 if action.state is not None and action.kind in _ALERT_ACTIONS:
@@ -171,9 +177,13 @@ class Engine:
         for key, held in self._held.items():
             if key in self._told:
                 continue
+            # As urgent as the alert that would have carried it (a critical runaway's stop).
+            floor = self._announcer_severity.get(key, Severity.INFO)
             for action, executed, prefix, did in held:
-                self._safe_alert(action, executed=executed, prefix=prefix, did=did)
+                urgent = replace(action, severity=_higher(action.severity, floor))
+                self._safe_alert(urgent, executed=executed, prefix=prefix, did=did)
         self._announced, self._lines, self._held, self._told = set(), {}, {}, set()
+        self._announcer_severity = {}
 
     def _process(self, action: Action, snapshot: Snapshot) -> Dispatched:
         mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
@@ -354,6 +364,9 @@ class Engine:
         if action.kind in _ALERT_ACTIONS:
             keys = _announces(action)
             lines = [line for k in keys for line in self._lines.get(k, ())]
+            if any(not executed for k in keys for _, executed, _, _ in self._held.get(k, ())):
+                # It carries a failure: that needs a human, whatever the alert's severity.
+                action = replace(action, severity=_higher(action.severity, _NEEDS_HUMAN))
             if not self._alert(action, did=" ".join(lines) or None):
                 return Outcome.DROPPED
             self._told.update(k for k in keys if k in self._lines)
@@ -418,6 +431,10 @@ class Engine:
         else:
             self.alerter.send(title, action.reason, severity, did=did)
         return True
+
+
+def _higher(a: Severity, b: Severity) -> Severity:
+    return a if _RANK[a] >= _RANK[b] else b
 
 
 def _announces(action: Action) -> list[str]:
