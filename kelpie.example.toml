@@ -485,8 +485,8 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # pages, PRs, PR files and job lists
 # tick_budget = "10s"
 # included_minutes = 3000           # monthly quota -> a ci_minutes resource (optional);
-#                                   # minutes used are not read (the billing API needs
-#                                   # admin rights): the rule projects the burn instead
+#                                   # without billing_* below, minutes used are not read
+#                                   # and the rule projects the burn against the quota
 # quota_reset_day = 1               # day of the month the quota resets (UTC)
 # allow_cancel = false
 # cancel_repos = []                 # required with allow_cancel; among repos above
@@ -496,6 +496,16 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # but the repository's default branch (never cancelled)
 # cancel_token_env = "KELPIE_GITHUB_CANCEL_TOKEN"   # optional: a token with Actions: write
 #                                   # on cancel_repos only, used for the cancel request only
+#
+# Minutes used, for rule 9's "quota exhausted" (critical, with the tasks waiting on CI):
+# read from GitHub's billing usage report (enhanced billing platform), Actions items in
+# minutes since quota_reset_day, as reported (no Windows/macOS multipliers). Off unless
+# set; needs included_minutes. The token may read the account's billing and is used for
+# nothing else: keep it out of the token above.
+# billing_user = "your-login"       # or billing_org = "your-org" (one of them)
+# billing_token_env = "KELPIE_GITHUB_BILLING_TOKEN"  # required with billing_user/org
+# billing_interval = "15m"          # one read this often (5m to 1h); at most rule 9's
+#                                   # max_reading_age, or readings go stale in between
 #
 # Blocks that are really waits. When a blocked task's reason matches a pattern and names a
 # PR GitHub has confirmed to exist, Kelpie attaches a condition of that kind to the block,

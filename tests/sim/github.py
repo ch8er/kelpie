@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 TOKEN = "ghp_SimulatedFarmToken0123456789abcdef"
+BILLING_TOKEN = "ghp_SimulatedBillingToken0123456789ab"  # may read billing usage, nothing else
 
 
 def iso(dt: datetime) -> str:
@@ -118,7 +119,10 @@ class FakeGitHub:
         self.requests: list[Request] = []
         self.cancelled: list[tuple[str, int]] = []
         self.lock = threading.Lock()
-        self.tokens = {TOKEN}  # bearer tokens GitHub accepts
+        self.tokens = {TOKEN}  # bearer tokens GitHub accepts for repositories
+        self.billing_tokens = {BILLING_TOKEN}  # ...and for billing usage reports
+        # account -> billing usage items, as GET .../settings/billing/usage returns them
+        self.usage: dict[str, list[dict[str, Any]]] = {}
         self.url = ""
         self._next_run = 1000
 
@@ -136,6 +140,40 @@ class FakeGitHub:
     def checks(self, repo: str, sha: str, state: str, completed: datetime | None = None) -> None:
         with self.lock:
             self.repo(repo).checks[sha] = (state, completed)
+
+    def minutes(
+        self, account: str, day: datetime, quantity: float, sku: str = "actions_linux"
+    ) -> None:
+        """Actions minutes an account used on ``day``, in its billing usage report."""
+        with self.lock:
+            self.usage.setdefault(account.lower(), []).append(
+                {
+                    "date": day.astimezone(UTC).strftime("%Y-%m-%dT00:00:00Z"),
+                    "product": "Actions",
+                    "sku": sku,
+                    "quantity": quantity,
+                    "unitType": "minutes",
+                    "pricePerUnit": 0.008,
+                    "grossAmount": round(quantity * 0.008, 2),
+                    "discountAmount": round(quantity * 0.008, 2),
+                    "netAmount": 0.0,
+                }
+            )
+
+    def billing_answer(self, path: str) -> tuple[int, Any] | None:
+        """The billing usage report, for ``/users|organizations/{name}/settings/billing/usage``
+        (``year``/``month`` from the query); None for any other path."""
+        base, _, query = path.partition("?")
+        m = re.fullmatch(r"/(users|organizations)/([^/]+)/settings/billing/usage", base)
+        if m is None:
+            return None
+        params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+        now = datetime.now(UTC)
+        year, month = int(params.get("year", now.year)), int(params.get("month", now.month))
+        prefix = f"{year:04d}-{month:02d}-"
+        with self.lock:
+            items = [i for i in self.usage.get(m[2].lower(), []) if i["date"].startswith(prefix)]
+        return 200, {"usageItems": items}
 
     def run(self, repo: str, **fields: Any) -> Run:
         with self.lock:
@@ -238,7 +276,11 @@ def _handler(fake: FakeGitHub) -> type[BaseHTTPRequestHandler]:
             auth = self.headers.get("Authorization") or ""
             token = auth.removeprefix("Bearer ") if auth.startswith("Bearer ") else None
             fake.requests.append(Request(method, self.path, token))
-            if token not in fake.tokens:
+            billing = fake.billing_answer(self.path) if method == "GET" else None
+            if billing is not None:  # least privilege: the billing token reads billing only
+                ok = token in fake.billing_tokens
+                status, body = billing if ok else (403, {"message": "Resource not accessible"})
+            elif token not in fake.tokens:
                 status, body = 401, {"message": "Bad credentials"}
             else:
                 status, body = fake.answer(method, self.path)

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from kelpie.connectors.github.billing import CiBilling
 from kelpie.connectors.github.blocks import DEFAULT_MAX_REQUESTS, DEFAULT_TICK_BUDGET
 from kelpie.connectors.github.builds import CiSettings, GitHubCI, load_ci
 from kelpie.connectors.github.client import (
@@ -104,7 +105,9 @@ class GitHubSettings:
     ) -> GitHubCI | None:
         """The CI source sharing ``connector``'s client; None when not configured. With
         ``cancel_token_env`` the cancel request alone goes through a second client that
-        holds that token. Raises ValueError when that token is missing or unusable."""
+        holds that token; with ``billing_user``/``billing_org`` the billing usage report is
+        read through a third one holding ``billing_token_env``'s token. Raises ValueError
+        when one of those tokens is missing or unusable."""
         if self.ci is None or not self.ci.enabled:
             return None
         token = self.ci.cancel_token(environ)
@@ -118,7 +121,25 @@ class GitHubSettings:
                 clock=clock,
                 observer=observer or connector.client.observer,
             )
-        return GitHubCI(connector.client, self.ci, cancel_client)
+        billing = None
+        billing_token = self.ci.billing_token(environ)
+        if billing_token is not None and self.ci.billing_account is not None:
+            billing_client = GitHubClient(
+                self.api_url,
+                billing_token,
+                timeout=self.timeout,
+                cache_ttl=self.cache_ttl,
+                clock=clock,
+                observer=observer or connector.client.observer,
+            )
+            billing = CiBilling(
+                billing_client,
+                self.ci.billing_account,
+                organization=self.ci.billing_organization,
+                interval=self.ci.billing_interval,
+                reset_day=self.ci.quota_reset_day,
+            )
+        return GitHubCI(connector.client, self.ci, cancel_client, billing)
 
 
 def load_github(section: Any) -> GitHubSettings:

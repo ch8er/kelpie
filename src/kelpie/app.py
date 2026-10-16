@@ -796,6 +796,21 @@ def ci_window_errors(rules: Sequence[Rule], settings: Settings) -> list[str]:
     ]
 
 
+def billing_interval_warnings(rules: Sequence[Rule], settings: Settings) -> list[str]:
+    """Billing usage read less often than rule 9 keeps readings would come and go."""
+    github = settings.github
+    ci = github.ci if github is not None and github.enabled else None
+    if ci is None or not ci.enabled or ci.billing_account is None:
+        return []
+    return [
+        f"[connectors.github.ci] billing_interval ({ci.billing_interval}) is longer than rule "
+        f"'ci_economy' max_reading_age ({rule.max_reading_age}): minutes used would be "
+        "ignored as stale between reads"
+        for rule in rules
+        if isinstance(rule, CiEconomy) and ci.billing_interval > rule.max_reading_age
+    ]
+
+
 def resource_interval_warnings(rules: Sequence[Rule], resources: ResourceSettings) -> list[str]:
     """Readings older than the rule's ``max_reading_age`` are ignored: a slower fetch would
     leave the rule blind between fetches."""
@@ -849,6 +864,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         *serialize_warnings(settings.engine, loaded.rules),
         *dispatch_gate_warnings(settings.engine),
         *resource_interval_warnings(loaded.rules, settings.resources),
+        *billing_interval_warnings(loaded.rules, settings),
         *provider_interval_warnings(loaded.rules, settings.llm_quotas),
         *budget_provider_warnings(settings.budgets, settings.llm_quotas),
     ]:
@@ -1280,6 +1296,13 @@ def _github_status(settings: Settings) -> list[str]:
             else "read-only (allow_cancel = false)"
         )
         lines.append(f"github ci: builds of {', '.join(ci.repos)}, {cancel}")
+        if ci.billing_account is not None:
+            kind = "organization" if ci.billing_organization else "user"
+            lines.append(
+                f"github ci: minutes used from the billing usage of {kind} "
+                f"{ci.billing_account}, every {ci.billing_interval} (token from "
+                f"${ci.billing_token_env})"
+            )
     return lines
 
 
