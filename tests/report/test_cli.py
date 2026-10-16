@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -15,7 +15,7 @@ from kelpie.alerts import Delivery, PermanentError
 from kelpie.app import ConfigError, load_settings
 from kelpie.cli import main
 from kelpie.core.actions import Severity
-from kelpie.report.cli import run, sources
+from kelpie.report.cli import report_settings, run, sources
 
 
 def config(tmp_path: Path, extra: str = "") -> Path:
@@ -120,10 +120,6 @@ def test_old_database_says_how_to_upgrade(tmp_path: Path, monkeypatch: pytest.Mo
 def test_the_report_looks_back_as_far_as_its_day_needs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from datetime import timedelta
-
-    from kelpie.report.cli import report_settings
-
     monkeypatch.delenv("KELPIE_DB", raising=False)
     hermes = f'[adapters.hermes]\ndb_path = "{tmp_path / "kanban.db"}"\nspool = false\n'
     settings = load_settings(config(tmp_path, hermes))  # [report] timezone = Europe/Berlin

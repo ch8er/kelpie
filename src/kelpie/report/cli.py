@@ -62,8 +62,9 @@ def run(
     """``(stdout, stderr, exit code)``: the report on stdout, problems on stderr (so
     ``kelpie report > day.md`` under cron keeps them apart); 2: bad input, 1: the database
     could not be read or the summary did not reach every channel."""
+    now = clock()
     try:
-        day = date.fromisoformat(day_text) if day_text else default_day(clock(), settings.report)
+        day = date.fromisoformat(day_text) if day_text else default_day(now, settings.report)
     except ValueError:
         return "", f"kelpie: --date must be YYYY-MM-DD, got {day_text!r}\n", 2
     metrics = Metrics()

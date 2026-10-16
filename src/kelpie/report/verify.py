@@ -18,9 +18,9 @@ than ``min_sample`` observations, or an after-window shorter than a quarter of t
 is a small sample and labelled as such: it shows a direction, not a result. Metrics with no
 data on either side are left out.
 
-A side whose window starts before what the board still reports (adapters look back so far:
-Hermes ``lookback``) under-counts review time, failures and returns; with the defaults the
-board must reach back ``1d + 2 x verify_window`` (72h) when the report runs.
+A side whose window starts before what the board still reports under-counts review time,
+failures and returns; ``kelpie report`` widens the board's lookback to the before-window of
+the day before's fixes by itself (:func:`kelpie.report.cli.report_settings`).
 """
 
 from __future__ import annotations

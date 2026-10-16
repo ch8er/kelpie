@@ -319,6 +319,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # db_path = "~/.hermes/kanban.db"   # named boards: ~/.hermes/kanban/boards/<slug>/kanban.db
 # spool = "~/.hermes/kelpie/spool.jsonl"  # tool-call spans from the Hermes plugin; false = off
 # lookback = "24h"                  # runs, spans and finished tasks older than this are left out
+#                                    (the rules' window; kelpie report reads as far back as its day needs)
 # enabled = true
 # git_state = true                  # git state (commit, branch, dirty files) of live task workspaces
 # git_timeout = "5s"                # limit for each git call; 2x per snapshot in total
