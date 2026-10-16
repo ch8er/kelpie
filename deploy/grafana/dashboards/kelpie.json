@@ -1842,7 +1842,7 @@
         },
         "overrides": []
       },
-      "description": "Returns of the role's tasks in the last 24h over its tasks done in that time, and the share of its completions reopened after done. Not the daily report's rework rate (share of active tasks sent back)."
+      "description": "Returns in the last 24h, counted for the role that redoes the work (not the reviewer that sent it back), over the tasks done in that time by the task's role, and the share of the role's completions reopened after done. Where tasks finish under another role's assignment (a reviewer's), the ratio mixes the two; the daily report's rework rate (share of the tasks a role worked on that came back to it) is the precise one."
     }
   ],
   "templating": {

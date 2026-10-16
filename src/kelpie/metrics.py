@@ -557,7 +557,7 @@ class Metrics:
             (
                 "kelpie_role_returns_24h",
                 "returns_24h",
-                "Returns (sent back) of the role's tasks in the last 24h.",
+                "Returns (sent back) in the last 24h, counted for the role that redoes the work.",
             ),
             (
                 "kelpie_role_reopened_after_done_24h",

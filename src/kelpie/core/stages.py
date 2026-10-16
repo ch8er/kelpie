@@ -65,7 +65,7 @@ def rework_role(
     end runs until ``end``."""
     reviewers = set(review_roles)
     doers = sorted(
-        (s.started_at, s.ended_at or s.last_heartbeat or end, role)
+        (s.started_at, max(s.ended_at or s.last_heartbeat or end, s.started_at), role)
         for s in sessions
         if (role := role_of(s)) is not None and role not in reviewers
     )

@@ -64,7 +64,8 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         "waiting at midnight (the live gauge counts ownerless tasks only). Rework: share of "
         "the tasks the role worked on that came back to it within the day, counted for the "
         "role that redid the work, not the reviewer that sent it back; - for a role that "
-        "only reviews (the live gauges give returns per done task, counted the same way). "
+        "only reviews (the live returns gauge counts returns the same way; its done count "
+        "goes by the task's role). "
         "Reopened: done tasks moved back out of done within "
         "the day, over the day's completions (those still done plus those reopened; "
         'rule 1\'s "done" needs evidence).',
