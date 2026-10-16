@@ -213,7 +213,12 @@ def test_a_symlinked_spool_is_not_followed(spool: Path, tmp_path: Path) -> None:
         ("agent:dev:subagent:workboard-default-c1", True),
         ("agent:main:cron:nightly:run:8821", True),
         ("cron:nightly", True),
-        ("hook:2b9c", True),
+        ("hook:2b9c", False),
+        ("hook:imap:acct:inbox", False),
+        ("agent:main:direct:alice:thread:1700000000.000100", False),
+        ("agent:main:direct:u0123abcd:thread:99", False),
+        ("agent:main:slack:acct1:direct:u01:thread:5", False),
+        ("agent:main:telegram", False),
         ("agent:main:internal-session-effects:skill-workshop-review_x", True),
         ("unknown", True),
         ("agent:main:whatsapp:direct:+15550100", False),
@@ -229,9 +234,18 @@ def test_session_keys_lose_their_peer(key: str, kept: bool) -> None:
     if kept:
         assert out == key
     else:
-        peer = key.split(":")[-1]
-        assert peer not in out.split(":") and out.split(":")[-1].startswith("~")
+        kept_parts = out.split(":")[:-1]
+        assert out.split(":")[-1].startswith("~")
+        for secret in ("alice", "u0123abcd", "u01", "+15550100", "-100123", "imap", "123"):
+            assert secret not in kept_parts
         assert out == hook.safe_session_key(key)  # stable: the same peer, the same key
+
+
+def test_long_keys_are_hashed_whole() -> None:
+    base = "agent:main:whatsapp:direct:" + "9" * 200
+    a, b = hook.safe_session_key(base + "1"), hook.safe_session_key(base + "2")
+    assert a != b and a is not None and len(a) < 64
+    assert hook.safe_session_key("x" * 5000) is None
 
 
 def test_the_spool_holds_the_reduced_key(spool: Path) -> None:

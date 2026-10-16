@@ -86,6 +86,8 @@ SPOOL_TAIL = 65536  # bytes read from the end of the spool to find its newest li
 MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
 MAX_LINE = 16 * 1024  # a longer spool line is skipped (the hook writes well under 2 KB)
 MAX_FIELD = 128
+MAX_KEY = 256  # a session key as the hook reduced it (kept keys are at most 128)
+BOARD_GRACE = timedelta(minutes=5)  # the last board read stands in this long when a read fails
 MAX_COMMAND = 200  # the hook's redacted command prefix is at most this long
 
 UNSUPPORTED = (
@@ -183,7 +185,9 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         at=at,
         key=hashlib.sha256(line.strip().encode("utf-8", "replace")).hexdigest()[:16],
         session_id=session,
-        session_key=_text(rec.get("session_key")),
+        session_key=(rec["session_key"].strip()[:MAX_KEY] or None)
+        if isinstance(rec.get("session_key"), str)
+        else None,
         agent=_text(rec.get("agent")),
         run_id=_text(rec.get("run_id")),
         tool=_text(rec.get("tool")),
@@ -219,6 +223,10 @@ class OpenClawAdapter:
     token_spans: bool = True  # LLM spans from ``llm`` lines (off when OTLP reports tokens)
     name: str = NAME
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
+    _board_error: str | None = field(default=None, init=False, repr=False, compare=False)
+    _last_board: tuple[datetime, workboard.Board] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.state_dir = Path(self.state_dir).expanduser()
@@ -230,8 +238,11 @@ class OpenClawAdapter:
     # --- status --------------------------------------------------------------------------
 
     def check(self) -> str | None:
-        """``None`` if the Workboard can be read (or is not used), else why not. A Workboard
-        that does not exist yet is not a problem: sessions only."""
+        """``None`` if the Workboard can be read (or is not used), else why not: the last
+        snapshot's failure, else a look at its schema. A Workboard that does not exist yet is
+        not a problem: sessions only."""
+        if self._board_error is not None:
+            return self._board_error
         db = self.workboard_db
         if db is None or not db.exists():
             return None
@@ -318,13 +329,7 @@ class OpenClawAdapter:
             raise ValueError("now must be timezone-aware")
         cutoff = now - self.lookback
         events = sorted(self._events(cutoff, now + FUTURE_SKEW), key=lambda e: e.at)
-        try:
-            board = self.board(now)
-        except OpenClawError as exc:
-            # Sessions matter more than the board (they are what a stop acts on): keep them.
-            # Agents can write the file, so a broken board must not blind Kelpie to loops.
-            self._warn(f"board:{exc}", "openclaw: %s; sessions only until it can be read", exc)
-            board = workboard.Board(cards=(), dependencies=())
+        board = self._board_or_last(now)
         sessions = self._sessions(events, board.cards)
         tasks = tuple(c.task for c in board.cards)
         owners = {t.owner_id for t in tasks if t.owner_id} | {s.owner_id for s in sessions}
@@ -337,11 +342,30 @@ class OpenClawAdapter:
             spans=self._spans(events, sessions),
         )
 
+    def _board_or_last(self, now: datetime) -> workboard.Board:
+        """The board, or when it cannot be read: the last one read within ``BOARD_GRACE``
+        (a failure for a tick or two does not make every card vanish), else none. Sessions
+        matter more than the board (they are what a stop acts on), and agents can write the
+        file: a broken board must not blind Kelpie to loops."""
+        try:
+            board = self.board(now)
+        except OpenClawError as exc:
+            self._board_error = str(exc)
+            self._warn(f"board:{exc}", "openclaw: %s; sessions only until it can be read", exc)
+            last = self._last_board
+            if last is not None and now - last[0] <= BOARD_GRACE:
+                return last[1]
+            return workboard.Board(cards=(), dependencies=())
+        self._board_error = None
+        self._last_board = (now, board)
+        return board
+
     def _sessions(self, events: Sequence[SpoolEvent], cards: Sequence[Card]) -> tuple[Session, ...]:
         by_key: dict[str, Task] = {}
         for c in cards:  # newest first: on a tie the most recently updated card wins
-            if c.session_key and _rank(c.task) > _rank(by_key.get(c.session_key)):
-                by_key[c.session_key] = c.task
+            for k in (c.session_key, c.worker_key()):
+                if k and _rank(c.task) > _rank(by_key.get(k)):
+                    by_key[k] = c.task
         grouped: dict[str, list[SpoolEvent]] = {}
         for e in events:
             grouped.setdefault(e.session_id, []).append(e)
@@ -350,7 +374,7 @@ class OpenClawAdapter:
             last = evs[-1]
             ended = last.type == "session_end"
             key = next((e.session_key for e in reversed(evs) if e.session_key), None)
-            card: Task | None = by_key.get(key) if key else None
+            card = _card_for(key, by_key)
             agent = next((e.agent for e in reversed(evs) if e.agent), None)
             owner = card.owner_id if card is not None else None
             run_end = next((e for e in reversed(evs) if e.type == "run_end"), None)
@@ -491,6 +515,20 @@ class OpenClawAdapter:
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
     ) -> None:
         raise UnsupportedAction(UNSUPPORTED)
+
+
+def _card_for(key: str | None, by_key: Mapping[str, Task]) -> Task | None:
+    """The card a session key works on: the card that names the key, else, as Workboard
+    matches its workers, a card whose ``subagent:...`` key the session key ends with (the
+    Gateway puts the default agent in front of an unassigned card's worker key)."""
+    if key is None:
+        return None
+    if (card := by_key.get(key)) is not None:
+        return card
+    for k, task in by_key.items():
+        if k.startswith("subagent:") and key.endswith(":" + k):
+            return task
+    return None
 
 
 def _rank(task: Task | None) -> int:

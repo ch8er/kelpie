@@ -18,6 +18,7 @@ const HOOK = join(dirname(fileURLToPath(import.meta.url)), "kelpie_hook.py");
 const HOOK_TIMEOUT_MS = 10000;
 const MAX_RUNNING = 8;
 const MAX_QUEUED = 256;
+const MAX_QUEUED_BYTES = 32 * 1024 * 1024; // what waiting events may hold in Gateway memory
 // Tool arguments larger than this (as JSON) are not sent to the hook: the plugin hashes them
 // itself (paramsDigest) and the hook records that hash.
 const MAX_PARAMS = 1024 * 1024;
@@ -123,6 +124,7 @@ export function createForwarder(settings, logger, run = spawn) {
   }
   const python = settings.python || "python3";
   const queue = [];
+  let queuedBytes = 0;
   let running = 0;
   let dropped = 0;
   let failed = 0;
@@ -132,7 +134,9 @@ export function createForwarder(settings, logger, run = spawn) {
   function next() {
     try {
       while (running < MAX_RUNNING && queue.length > 0) {
-        start(queue.shift());
+        const payload = queue.shift();
+        queuedBytes -= payload.length;
+        start(payload);
       }
     } catch (err) {
       report(err);
@@ -178,10 +182,18 @@ export function createForwarder(settings, logger, run = spawn) {
     }
   }
 
+  function warn(message) {
+    try {
+      logger?.warn?.(message);
+    } catch {
+      // a throwing logger must not take the Gateway down with it
+    }
+  }
+
   function report(err, what = `run ${python} ${HOOK}`) {
     failed += 1;
     if (failed === 1 || failed % 1000 === 0) {
-      logger?.warn?.(`kelpie: cannot ${what} (${failed} failures): ${err?.message || err}`);
+      warn(`kelpie: cannot ${what} (${failed} failures): ${err?.message || err}`);
     }
   }
 
@@ -197,12 +209,13 @@ export function createForwarder(settings, logger, run = spawn) {
         // e.g. circular params: the call is still recorded, without its arguments hash input
         payload = toJson({ ...message, event: { ...message.event, params: null } });
       }
-      if (queue.length >= MAX_QUEUED) {
+      if (queue.length >= MAX_QUEUED || queuedBytes + payload.length > MAX_QUEUED_BYTES) {
         dropped += 1;
-        if (dropped === 1 || dropped % 1000 === 0) logger?.warn?.(`kelpie: ${dropped} hook events dropped (hook too slow)`);
+        if (dropped === 1 || dropped % 1000 === 0) warn(`kelpie: ${dropped} hook events dropped (hook too slow)`);
         return;
       }
       queue.push(payload);
+      queuedBytes += payload.length;
       next();
     } catch (err) {
       report(err, `forward ${hook}`);

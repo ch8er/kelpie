@@ -279,39 +279,52 @@ def redact_command(command: str) -> str | None:
 
 
 # Session keys that name no person: the agent's main session (and its heartbeat lane),
-# subagents, cron jobs, hooks and OpenClaw's internal background sessions.
-_PLAIN_KEYS = frozenset(
-    {"main", "subagent", "cron", "hook", "heartbeat", "internal-session-effects", "global"}
-)
+# subagents, cron jobs and OpenClaw's internal background sessions. Hook keys come from
+# operator templates (``hooks.mappings[].sessionKey``), so their tail is hashed.
+_PLAIN = frozenset({"main", "subagent", "cron", "heartbeat", "internal-session-effects"})
+_WHOLE = frozenset({"global", "unknown"})
+# Where a conversation key names its peer or group: everything after the marker is theirs.
+_KINDS = frozenset({"direct", "dm", "group", "channel"})
 _KEY_WORD = re.compile(r"[a-z][a-z0-9_-]{0,31}")  # used with fullmatch
+MAX_KEY_INPUT = 4096  # a longer session key is not looked at (it is not OpenClaw's)
 
 
 def safe_session_key(key: Any) -> str | None:
-    """A session key without the identity of the person it is with.
+    """A session key without the identity of the person or group it is with.
 
-    OpenClaw keys per-peer conversations as ``agent:<id>:<channel>:direct:<peerId>`` (and
-    groups as ``...:group:<groupId>``), where the peer id is a phone number or a chat user id.
-    Keys of the shapes in ``_PLAIN_KEYS`` (``agent:main:main``,
-    ``agent:main:subagent:workboard-...``, ``cron:<job>``) are kept; in any other key the part
-    after the channel and its kind (and at least the last part, so ``agent:main:direct:alice``
-    loses ``alice``) becomes ``~`` and 12 hex digits of its SHA-256, e.g.
+    OpenClaw keys a per-peer conversation as ``agent:<id>:<channel>:direct:<peerId>`` (or
+    ``agent:<id>:direct:<peerId>``, with ``:thread:<id>`` and the like appended), and a group
+    as ``...:group:<groupId>``; the peer id is a phone number, a chat user id or a linked name.
+    Kept as they are: ``global``, ``unknown``, ``cron:<job>`` and ``agent:<id>:<kind>:...``
+    with ``<kind>`` one of ``main``, ``subagent``, ``cron``, ``heartbeat``,
+    ``internal-session-effects``. In any other key everything after the first ``direct``,
+    ``dm``, ``group`` or ``channel`` within the channel part (else everything after
+    ``agent:<id>``, or the whole key) becomes ``~`` and 12 hex digits of its SHA-256, e.g.
     ``agent:main:whatsapp:direct:~3f2a9c01d4e5``: the same peer gives the same key, nobody
-    can read the peer back. Kelpie applies the same function to Workboard's keys.
+    can read the peer back. The whole key is hashed, never a cut-off part of it. Kelpie
+    applies the same function to Workboard's keys.
     """
-    text = _id(key)
-    if text is None:
+    if isinstance(key, bool) or not isinstance(key, str):
+        return None
+    text = key.strip()
+    if not text or len(text) > MAX_KEY_INPUT:
         return None
     parts = text.split(":")
-    if parts[0] in _PLAIN_KEYS or text == "unknown":
+    if text in _WHOLE or (parts[0] == "cron" and len(text) <= MAX_ID):
         return text
-    if parts[0] == "agent" and len(parts) >= 3:
-        if parts[2] in _PLAIN_KEYS:
+    if parts[0] == "agent" and len(parts) >= 3 and _KEY_WORD.fullmatch(parts[1]):
+        head = parts[:2]
+        if parts[2] in _PLAIN and len(text) <= MAX_ID:
             return text
-        kept = 2  # the channel and its kind, when they are plain words; never the last part
-        while kept < min(len(parts) - 1, 4) and _KEY_WORD.fullmatch(parts[kept]):
-            kept += 1
-        rest = ":".join(parts[kept:])
-        return ":".join([*parts[:kept], "~" + _digest(rest)])
+        marker = next(
+            (i for i in range(2, min(len(parts) - 1, 5)) if parts[i] in _KINDS),
+            None,
+        )
+        if marker is not None and all(_KEY_WORD.fullmatch(p) for p in parts[2:marker]):
+            head = parts[: marker + 1]
+        return ":".join([*head, "~" + _digest(":".join(parts[len(head) :]))])
+    if parts[0] == "hook" and len(parts) >= 2:
+        return "hook:~" + _digest(":".join(parts[1:]))
     return "~" + _digest(text)
 
 

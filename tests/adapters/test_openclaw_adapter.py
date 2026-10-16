@@ -314,6 +314,46 @@ def test_an_unreadable_workboard_leaves_sessions(
     assert a.check() is not None
 
 
+def test_a_failing_board_keeps_the_last_one_for_a_while(
+    tmp_path: Path, spool: Spool, board: Workboard
+) -> None:
+    board.card("c1", "running", ago(hours=1), session_key=MAIN)
+    spool.tool("s1", ago(minutes=1))
+    a = adapter(tmp_path, spool)
+    assert [t.id for t in a.snapshot(NOW).tasks] == ["c1"]
+    files = [board.path.with_name(board.path.name + x) for x in ("", "-wal", "-shm")]
+    for f in files:
+        if f.exists():
+            f.rename(f.with_name(f.name + ".away"))
+    board.path.write_bytes(b"not sqlite" * 100)
+    soon = a.snapshot(NOW + timedelta(minutes=2))
+    assert [t.id for t in soon.tasks] == ["c1"] and soon.sessions[0].task_id == "c1"
+    assert a.check() is not None
+    later = a.snapshot(NOW + timedelta(minutes=10))
+    assert later.tasks == () and later.sessions[0].task_id == f"{NO_TASK_PREFIX}{MAIN}"
+    for f in files:
+        away = f.with_name(f.name + ".away")
+        if away.exists():
+            away.replace(f)
+    assert [t.id for t in a.snapshot(NOW + timedelta(minutes=11)).tasks] == ["c1"]
+    assert a.check() is None
+
+
+def test_workers_link_to_their_cards(tmp_path: Path, spool: Spool, board: Workboard) -> None:
+    """Dispatch keys: an unassigned card's worker runs behind the default agent."""
+    board.card("c1", "running", ago(hours=1), agent="dev")
+    board.card("c2", "running", ago(hours=1))
+    spool.tool("s1", ago(minutes=1), key="agent:dev:subagent:workboard-default-c1", agent="dev")
+    spool.tool("s2", ago(minutes=1), key="agent:main:subagent:workboard-default-c2")
+    spool.tool("s3", ago(minutes=1), key="agent:main:subagent:workboard-default-c22")
+    by_id = {s.id: s.task_id for s in adapter(tmp_path, spool).snapshot(NOW).sessions}
+    assert by_id == {
+        "s1": "c1",
+        "s2": "c2",
+        "s3": f"{NO_TASK_PREFIX}agent:main:subagent:workboard-default-c22",
+    }
+
+
 def test_check(tmp_path: Path, spool: Spool, board: Workboard) -> None:
     assert adapter(tmp_path, spool).check() is None
     assert adapter(tmp_path, spool, workboard_db=tmp_path / "none.sqlite").check() is None

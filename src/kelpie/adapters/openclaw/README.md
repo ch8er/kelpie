@@ -109,7 +109,8 @@ ingest and the other hooks (one block, kept byte-identical by a test; details in
 recorded as `outcome: "error"`, without its message. Session keys that name a chat peer or a
 group (`agent:main:whatsapp:direct:<phone number>`) keep the channel and its kind and lose the
 rest to a hash (`agent:main:whatsapp:direct:~3f2a9c01d4e5`); keys that name no one
-(`agent:main:main`, subagents, cron, hooks) are kept, so Workboard cards still match. The hook
+(`agent:main:main`, subagents, cron) are kept, so Workboard cards still match; `hook:` keys,
+which come from operator templates, keep only `hook:`. The hook
 process gets only `PATH`, `HOME`,
 `LANG`, `LC_ALL`, `TMPDIR`, `SYSTEMROOT` of the Gateway's environment, never provider keys. The spool is
 created with mode `0600` (not through a symlink); keep its directory `0700` as above.
@@ -129,7 +130,7 @@ created with mode `0600` (not through a symlink); keep its directory `0700` as a
 | latest `created`/`moved` event into the current status, else `started_at`/`completed_at`/`created_at` | `status_since` |
 | a `blocked` card | `Block`: the error of its `blocked` attempt that ended with this block, else its latest comment since the block |
 | an OpenClaw `sessionId` in the spool | `Session` with that id |
-| the card linked to the session's `sessionKey` (dispatched workers use `agent:<agent>:subagent:workboard-<board>-<card>`; when several cards name one key, a running card, then an open one, then the most recently updated) | `Session.task_id`; else `session:<sessionKey>` |
+| the card linked to the session's `sessionKey`, or whose worker key it is (dispatched workers use `agent:<agent>:subagent:workboard-<board>-<card>`, or `subagent:workboard-<board>-<card>` behind the default agent for an unassigned card; when several cards match, a running card, then an open one, then the most recently updated) | `Session.task_id`; else `session:<sessionKey>` |
 | `tool` lines | `Span(kind=tool)` via `kelpie.traces.hooks` |
 | `llm` lines | one `Span(kind=llm)` per run with its tokens (`input_tokens` includes cache reads and writes); `token_spans = false` leaves them out |
 
@@ -155,13 +156,15 @@ for rules that take it.
 defensively: the spool and `<spool>.1` only as regular files (no symlinks, a FIFO is skipped),
 at most 64 MiB each per snapshot, lines over 16 KiB skipped. The Workboard database is opened
 read-only (`mode=ro`, `query_only`, SQLite's defensive mode, `trusted_schema = OFF`), one read
-transaction per snapshot, interrupted after 10 seconds; the tables must be tables (not views)
+transaction per snapshot, interrupted 10 seconds after it holds the read lock, and no value
+over 1 MB leaves SQLite (a larger one fails the read); the tables must be tables (not views)
 with the columns Kelpie reads, text is cut in the query (titles 200, notes 8000, comments and
 errors 2000 characters), card ids must be short strings, and of a claim only its holder and
 expiry leave SQLite. When the board cannot be read (a schema changed by an OpenClaw upgrade:
 it is the plugin's internal schema, version 3 in 2026.10.4, not a published interface; a
-corrupt or hostile file), Kelpie logs why once and goes on with sessions only, so loops are
-still caught; `kelpie status` names the problem.
+corrupt or hostile file), Kelpie logs why once and keeps the last board it read for up to 5
+minutes, then goes on with sessions only, so loops are still caught; `kelpie status` shows the
+last failure.
 
 **Traces.** OpenClaw exports OpenTelemetry through the separately installed
 `diagnostics-otel` plugin (OTLP/HTTP protobuf, so it can point at Kelpie's `/v1/traces`). Its

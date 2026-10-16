@@ -66,6 +66,7 @@ from kelpie.core.model import Block, Dependency, Status, Task
 
 BUSY_TIMEOUT_MS = 5000
 READ_DEADLINE = 10.0  # seconds one snapshot's read may take before it is interrupted
+MAX_VALUE = 1_000_000  # bytes; a larger text or blob in the database fails the read
 MAX_TITLE = 200
 MAX_BODY = 8000  # characters of a card's notes kept in the snapshot
 MAX_REASON = 500
@@ -111,7 +112,9 @@ COLUMNS: Mapping[str, frozenset[str]] = {
         }
     ),
     "workboard_card_labels": frozenset({"card_id", "ordinal", "label"}),
-    "workboard_card_events": frozenset({"card_id", "kind", "at", "from_status", "to_status"}),
+    "workboard_card_events": frozenset(
+        {"card_id", "ordinal", "kind", "at", "from_status", "to_status"}
+    ),
     "workboard_card_links": frozenset({"card_id", "type", "target_card_id"}),
     "workboard_card_attempts": frozenset({"card_id", "status", "started_at", "ended_at", "error"}),
     "workboard_card_comments": frozenset({"card_id", "body", "created_at"}),
@@ -144,8 +147,18 @@ class Card:
     """One card as Kelpie needs it. ``task`` is the Kelpie view of it."""
 
     task: Task
-    session_key: str | None  # the OpenClaw session linked to the card
+    session_key: str | None  # the OpenClaw session linked to the card (reduced, see the hook)
     run_id: str | None  # the run linked to the card
+    board: str | None = None  # the card's board id, for its derived worker session key
+
+    def worker_key(self) -> str | None:
+        """The session key Workboard dispatch gives the card's worker: with an agent
+        ``agent:<agent>:subagent:workboard-<board>-<card>``, else
+        ``subagent:workboard-<board>-<card>`` (the Gateway puts its default agent in front)."""
+        if self.board is None:
+            return None
+        tail = f"subagent:workboard-{self.board}-{self.task.id}"
+        return f"agent:{self.task.assignee}:{tail}" if self.task.assignee else tail
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,11 +190,19 @@ def connect(path: Path, deadline: float = READ_DEADLINE) -> sqlite3.Connection:
         conn.execute("PRAGMA trusted_schema=OFF")
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA query_only=1")
-        end = time.monotonic() + deadline
-        conn.set_progress_handler(lambda: int(time.monotonic() > end), 10000)
+        # No value larger than this leaves SQLite: a planted 300 MB string fails the read at
+        # once instead of filling Kelpie's memory (a single step is not interruptible).
+        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE)
+        start_deadline(conn, deadline)
     except sqlite3.Error as exc:
         raise WorkboardError(f"cannot open Workboard database {path}: {exc}") from exc
     return conn
+
+
+def start_deadline(conn: sqlite3.Connection, deadline: float) -> None:
+    """Interrupt any statement on ``conn`` once ``deadline`` seconds have passed from now."""
+    end = time.monotonic() + deadline
+    conn.set_progress_handler(lambda: int(time.monotonic() > end), 10000)
 
 
 def missing_columns(conn: sqlite3.Connection) -> list[str]:
@@ -211,6 +232,8 @@ def read_board(path: Path, cutoff: datetime, now: datetime, source: str) -> Boar
     conn = connect(path)
     try:
         conn.execute("BEGIN")  # one read transaction: a consistent view
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")  # takes the read lock
+        start_deadline(conn, READ_DEADLINE)  # the busy wait for the lock does not count
         if missing := missing_columns(conn):
             raise WorkboardError(
                 f"Workboard database {path} lacks {', '.join(missing)}: "
@@ -277,7 +300,8 @@ def read_board(path: Path, cutoff: datetime, now: datetime, source: str) -> Boar
 
 # Only what Kelpie uses; of ``claim_json`` only the holder and the expiry (never the token).
 CARDS_SQL = (
-    f"SELECT id, substr(title, 1, {MAX_TITLE}) AS title, substr(notes, 1, {MAX_BODY}) AS notes, "
+    f"SELECT id, board_id, substr(title, 1, {MAX_TITLE}) AS title, "
+    f"substr(notes, 1, {MAX_BODY}) AS notes, "
     "status, agent_id, session_key, run_id, created_at, updated_at, "
     "started_at, completed_at, execution_session_key, execution_run_id, "
     "CASE WHEN json_valid(claim_json) THEN json_extract(claim_json, '$.ownerId') END "
@@ -398,6 +422,7 @@ def _card(
         session_key=safe_session_key(row["session_key"])
         or safe_session_key(row["execution_session_key"]),
         run_id=_text(row["run_id"]) or _text(row["execution_run_id"]),
+        board=_text(row["board_id"]) or "default",
     )
 
 

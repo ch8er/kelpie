@@ -13,7 +13,7 @@ keep less. It describes the code as it is; the files named below are the referen
 | Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
 | Claude Code task lists | task id, subject (200 characters), status, owner, `blockedBy` | descriptions | read in place, not copied | |
 | OpenClaw hook records | session id, session key (the part naming a chat peer or group replaced by a hash), agent id, run id, session end reasons, the session id a session resumed or was replaced by; tool name, call id, hash of arguments, a redacted command, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
-| OpenClaw Workboard cards | card id, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, block reason (500 characters) | claim tokens, attachments, proof, worker logs | read in place, not copied | |
+| OpenClaw Workboard cards | card id, board, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, session key (reduced like the hook's) and run id, block reason (500 characters); every comment (2000 characters) and attempt error of the cards read is in memory for the tick, only the latest since a block is kept | claim tokens, attachments, proof, worker logs | read in place, not copied | |
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
 | Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
@@ -233,9 +233,12 @@ the Hermes spool.
 
 **Session keys name people.** OpenClaw keys a per-peer conversation as
 `agent:<id>:<channel>:direct:<peerId>` and a group as `...:group:<groupId>`, where the peer id
-is a phone number or a chat user id. The hook keeps keys that name no one (`agent:<id>:main`,
-subagents, cron, hooks, OpenClaw's internal sessions) and replaces the rest after the channel
-and its kind with `~` and 12 hex digits of its SHA-256 (`agent:main:whatsapp:direct:~3f2a…`),
+is a phone number or a chat user id. The hook keeps `agent:<id>:main`, subagent, cron and OpenClaw's
+internal-session keys, and replaces the rest of any other key after the channel and its
+`direct`/`dm`/`group`/`channel` marker (thread suffixes included; for a key without a marker,
+everything after `agent:<id>`; for `hook:` keys, which come from operator templates, all but
+`hook:`) with `~` and 12 hex digits of the SHA-256 of that whole rest
+(`agent:main:whatsapp:direct:~3f2a…`),
 so the key that reaches the spool, Kelpie's ledger, reports and alerts (as the task id
 `session:<key>` of a session without a card) does not carry the peer. Kelpie reduces the keys
 of Workboard cards the same way before matching them.

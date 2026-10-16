@@ -187,6 +187,29 @@ def test_text_is_cut_in_the_query(board: Workboard) -> None:
     assert task.block is not None and len(task.block.reason) == workboard.MAX_REASON
 
 
+def test_a_huge_value_fails_the_read_at_once(board: Workboard) -> None:
+    board.card("c", "running", ago(hours=1))
+    with sqlite3.connect(board.path) as db:
+        db.execute("UPDATE workboard_cards SET agent_id = ? WHERE id = 'c'", ("a" * 2_000_000,))
+    with pytest.raises(WorkboardError, match="too big"):
+        read_board(board.path, CUTOFF, NOW, "openclaw")
+
+
+def test_a_missing_ordering_column_is_named(board: Workboard) -> None:
+    with sqlite3.connect(board.path) as db:
+        db.execute("ALTER TABLE workboard_card_events DROP COLUMN ordinal")
+    with pytest.raises(WorkboardError, match=r"workboard_card_events\.ordinal"):
+        read_board(board.path, CUTOFF, NOW, "openclaw")
+
+
+def test_worker_keys(board: Workboard) -> None:
+    board.card("c1", "ready", ago(hours=1), agent="dev")
+    board.card("c2", "ready", ago(hours=1), board="docs")
+    found = tasks(board)
+    assert found["c1"].worker_key() == "agent:dev:subagent:workboard-default-c1"
+    assert found["c2"].worker_key() == "subagent:workboard-docs-c2"
+
+
 def test_a_view_in_place_of_a_table_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "workboard.sqlite"
     Workboard(path)
