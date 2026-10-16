@@ -16,6 +16,7 @@ SCHEMA = """
 CREATE TABLE tasks (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
+    body TEXT,
     assignee TEXT,
     status TEXT NOT NULL,
     created_at INTEGER NOT NULL,
@@ -81,6 +82,7 @@ class Board:
         created: datetime,
         *,
         title: str = "Synthetic task",
+        body: str | None = None,
         assignee: str | None = None,
         started: datetime | None = None,
         completed: datetime | None = None,
@@ -89,12 +91,13 @@ class Board:
         last_error: str | None = None,
     ) -> None:
         self.conn.execute(
-            "INSERT INTO tasks (id, title, assignee, status, created_at, started_at,"
+            "INSERT INTO tasks (id, title, body, assignee, status, created_at, started_at,"
             " completed_at, block_kind, consecutive_failures, last_failure_error)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 id,
                 title,
+                body,
                 assignee,
                 status,
                 epoch(created),

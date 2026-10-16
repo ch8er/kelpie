@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kelpie.connectors.github.blocks import ConditionSync, load_block_conditions
+from kelpie.connectors.github.blocks import MAX_READY_REFS, ConditionSync, load_block_conditions
 from kelpie.connectors.github.client import GitHubClient
 from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.core.actions import ActionKind
@@ -443,3 +443,38 @@ def test_dispatch_gate_park_then_wake_follows_the_prs_current_head() -> None:
     [wake] = WaitCondition().evaluate(green)
     assert wake.kind is ActionKind.WAKE and wake.task_id == "T-1"
     assert DispatchGate().evaluate(green) == []
+
+
+def test_ready_task_body_names_several_prerequisites() -> None:
+    task = replace(
+        ready("T-1", "Wire the orders API"),
+        body="Depends on: after #21 lands, and after #22 lands. Also after #21 lands again.",
+    )
+    with serve() as gh:
+        gh.pull(REPO, 21)
+        gh.pull(REPO, 22)
+        out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,)))
+    assert [c.id for c in out.conditions] == [
+        "ready:T-1:pr_merged:example/repo#21",
+        "ready:T-1:pr_merged:example/repo#22",
+    ]
+
+
+def test_ready_task_refs_are_capped() -> None:
+    body = " ".join(f"after #{n} lands" for n in range(1, MAX_READY_REFS + 3))
+    task = replace(ready("T-1", "Many"), body=body)
+    with serve() as gh:
+        for n in range(1, MAX_READY_REFS + 3):
+            gh.pull(REPO, n)
+        out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,)))
+    assert len(out.conditions) == MAX_READY_REFS
+
+
+def test_block_reason_still_takes_only_the_first_pr() -> None:
+    task = blocked("T-1", "waiting for CI/merge of #31 waiting for CI/merge of #32", NOW)
+    with serve() as gh:
+        gh.pull(REPO, 31)
+        gh.pull(REPO, 32)
+        out = sync(gh)(Snapshot(now=NOW, tasks=(task,)))
+    (c,) = out.conditions
+    assert c.params["pr"] == 31
