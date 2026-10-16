@@ -54,7 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     fix.add_argument(
         "--list", action="store_true", help="list the fixes recorded in the last --days instead"
     )
-    fix.add_argument("--days", type=int, default=7, help="how far back --list looks (7)")
+    fix.add_argument("--days", type=int, help="how far back --list looks (default 7)")
     doctor = sub.add_parser(
         "doctor", help="check a first live run: config, observe mode, board, hooks, spans, git"
     )
@@ -79,10 +79,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "fix":
             from kelpie.report.cli import list_fixes, note_fix
 
+            recording = [args.note, args.rule, args.command_prefix, args.role, args.at]
+            if args.list and any(v is not None for v in recording):
+                fix.error(
+                    "--list cannot be combined with a note, --rule, --command, --role or --at"
+                )
+            if not args.list and args.days is not None:
+                fix.error("--days only applies to --list")
+            if not args.list and args.note is None:
+                fix.error("a note is required unless --list is given")
             if args.list:
-                text, code = list_fixes(settings, args.days)
-            elif args.note is None:
-                text, code = "kelpie: fix needs a note (or --list)\n", 2
+                text, code = list_fixes(settings, 7 if args.days is None else args.days)
             else:
                 text, code = note_fix(
                     settings, args.note, args.rule, args.command_prefix, args.role, args.at

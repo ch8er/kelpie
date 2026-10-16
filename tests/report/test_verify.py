@@ -449,7 +449,16 @@ def test_kelpie_fix_list(
         "2026-03-01 09:00 CET  manual  lifted the merge hold  [rule=bottlenecks]"
     ]
     assert list_fixes(settings, days=0)[1] == 2
+    assert list_fixes(settings, days=10**9)[1] == 2
     args = ["--config", str(path), "fix"]
-    assert main(args) == 2 and "needs a note" in capsys.readouterr().out
-    assert main([*args, "--list", "--days", "4000"]) == 0
+    for bad, why in (
+        ([], "note is required"),
+        (["n", "--list"], "cannot be combined"),
+        (["--list", "--rule", "bottlenecks"], "cannot be combined"),
+        (["n", "--days", "3"], "only applies to --list"),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            main([*args, *bad])
+        assert exc.value.code == 2 and why in capsys.readouterr().err
+    assert main([*args, "--list", "--days", "3650"]) == 0
     assert "old" in capsys.readouterr().out

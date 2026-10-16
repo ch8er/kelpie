@@ -19,6 +19,7 @@ from kelpie.rules import REGISTRY
 
 log = logging.getLogger(__name__)
 FUTURE_SKEW = timedelta(minutes=5)  # clocks of the operator's machine and the farm
+MAX_LIST_DAYS = 3650
 
 
 def sources(settings: Settings) -> ReportSources:
@@ -115,9 +116,11 @@ def list_fixes(
 ) -> tuple[str, int]:
     """``kelpie fix --list``: the fixes recorded in the last ``days`` (manual and config;
     mode changes and filters are found when the report runs), in [report] timezone."""
-    if days <= 0:
-        return "kelpie: --days must be positive\n", 2
-    if settings.db_path is None or not settings.db_path.exists():
+    if not 0 < days <= MAX_LIST_DAYS:
+        return f"kelpie: --days must be between 1 and {MAX_LIST_DAYS}\n", 2
+    if settings.db_path is None:
+        return "kelpie: fixes need a database ([storage] path is :memory:)\n", 2
+    if not settings.db_path.exists():
         return "no fixes recorded (no database yet)\n", 0
     now = clock()
     try:
@@ -135,5 +138,6 @@ def list_fixes(
                         f.role and f"role={f.role}") if x
         )  # fmt: skip
         when = f.at.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
-        lines.append(f"{when}  {f.kind:<6}  {f.note}" + (f"  [{scope}]" if scope else ""))
+        note = " ".join(f.note.split())  # one line per fix
+        lines.append(f"{when}  {f.kind:<6}  {note}" + (f"  [{scope}]" if scope else ""))
     return "\n".join(lines) + "\n", 0

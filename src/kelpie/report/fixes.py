@@ -4,7 +4,8 @@ Three sources write here (table ``report_fixes`` in Kelpie's database, created o
 write; the report reads it read-only and treats a missing table as no events):
 
 - ``kelpie fix "<note>" [--rule R] [--command PREFIX] [--role ROLE] [--at TIME]``: a fix an
-  operator made by hand (a merge hold lifted, a role's instructions changed);
+  operator made by hand (a merge hold lifted, a role's instructions changed); ``--at``
+  backfills one, ``kelpie fix --list [--days N]`` shows what is recorded;
 - ``kelpie serve`` once it has started, when the config file's content changed since the
   last start (``config``);
 - nothing else writes: rule mode changes are read from the action ledger and filter
