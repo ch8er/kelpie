@@ -418,6 +418,18 @@ confirmed green CI and a clean merge only, and the PR merged without that eviden
 - [ ] return_causes: a test failing other tasks' PRs is classified as "flaky test" with the test name
 - [ ] Fixtures: new `18-acceptance-criterion-dropped.yaml`, `18-criterion-met.yaml` (synthetic names)
 
+### rules: resources — disk time-to-full and what is growing (rule 7, incident 19)
+labels: P0, week-3, area:rules
+Live case: disk at 94%, growing ~9 GB a day from an iOS simulator cache that never gets
+cleaned; Kelpie was blind because node_exporter and Prometheus were not installed.
+
+**Acceptance criteria**
+- [ ] Time-to-full forecast per filesystem from the growth rate over a window (config); alert when under a threshold (default 72 h), critical under 24 h
+- [ ] Top-growing paths: a script shipped with Kelpie measures configured directories (e.g. simulator devices, `~/.hermes`, worktrees, caches) every N minutes and writes node_exporter textfile-collector metrics; the alert names the top 3 growing paths with their growth per day
+- [ ] macOS and Linux setup documented (brew/systemd/launchd), including the textfile collector directory
+- [ ] doctor: FAIL when no resource source is configured on a farm with rule 7 enabled ("disk is not watched")
+- [ ] Fixtures: new `19-disk-growth-forecast.yaml` (synthetic paths)
+
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules
 Field evidence: a heartbeat/maintenance loop repeated the same tool call about 900 times
