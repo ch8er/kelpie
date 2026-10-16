@@ -25,7 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 0  # the main check below fetches with the read-only token
+          fetch-depth: 0  # all branches, so origin/main is there for the check below
+          persist-credentials: false
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           enable-cache: false  # nothing restored from caches written elsewhere
@@ -40,9 +41,7 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
       - name: The tagged commit is on main
-        run: |
-          git fetch origin main
-          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+        run: git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
       - run: uv lock --check  # uv.lock records the version too
       - run: uv sync --frozen
       - run: uv run ruff check .

@@ -116,8 +116,8 @@ before anything is built.
   bump it and tag again. (A plain re-run of the failed job is fine when TestPyPI was only
   slow to list the upload.)
 - **Re-running**: use *Re-run failed jobs*, not *Re-run all jobs*: a complete re-run
-  builds new files, which PyPI refuses for a version it already has (TestPyPI skips them,
-  and the install check then fails on the byte comparison).
+  repeats every step and fails at PyPI once it already has the version (TestPyPI skips
+  files it has; the install check compares the bytes either way).
 - **image or github-release**: PyPI already has the version; re-run just the failed jobs
   from the run page.
 
