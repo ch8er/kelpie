@@ -471,7 +471,8 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #
 # [connectors.github]
 # repos = ["example/repo"]          # owner/name; nothing else is ever queried
-# token_env = "GITHUB_TOKEN"        # a fine-grained token with read access to PRs and checks
+# token_env = "GITHUB_TOKEN"        # a fine-grained token, all read-only: Metadata, Pull requests,
+#                                   # Contents, Actions, Commit statuses (docs/configuration.md)
 # api_url = "https://api.github.com"  # GitHub Enterprise: "https://<host>/api/v3" (then
 #                                   # token_env must be set explicitly)
 # timeout = "10s"                   # whole request, connect to last byte (at most 60s)
@@ -480,6 +481,12 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # max_requests_per_tick = 50        # beyond this, cached answers or an unknown result
 # tick_budget = "10s"               # wall-clock time for GitHub per tick (at most 60s)
 # enabled = true                    # false keeps the section but does not query GitHub
+# ci_workflows = []                 # workflows (name or exact file path) that must have a
+#                                   # result, whatever check runs and statuses say, e.g.
+#                                   # ["CI Gate"]; read from the commit's Actions runs, which
+#                                   # are also the CI source where check runs or statuses answer
+#                                   # 403 (a fine-grained token). Or per repo:
+#                                   # ci_workflows = { "example/repo" = ["CI Gate"] }
 #
 # GitHub Actions runs for rule 9 (ci_economy). Reading needs Actions: read, Pull requests:
 # read and Contents: read. cancel_build is the only write Kelpie can make to GitHub: off

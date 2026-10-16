@@ -26,7 +26,19 @@ from kelpie.adapters.hermes.git_state import read_git_state
 from kelpie.adapters.openclaw import doctor as openclaw
 from kelpie.app import ConfigError, LoadedRules, Settings, load_rules, load_settings, utc_now
 from kelpie.connectors.github.blocks import MAX_REASON
-from kelpie.connectors.github.connector import parse_pr_ref, web_host
+from kelpie.connectors.github.client import GitHubError
+from kelpie.connectors.github.connector import (
+    ACTIONS,
+    CHECK_RUNS,
+    PERMISSIONS,
+    PULLS,
+    STATUSES,
+    CiState,
+    Forbidden,
+    GitHubConnector,
+    parse_pr_ref,
+    web_host,
+)
 from kelpie.core.config import Mode
 from kelpie.core.model import Status
 
@@ -48,6 +60,8 @@ PR_REFS = (
     ),
 )
 SHOWN = 5  # task ids named in a detail
+MAX_GITHUB_REPOS = 20  # GitHub is asked about at most this many repositories
+CI_SOURCES = {STATUSES: "statuses", CHECK_RUNS: "check-runs", ACTIONS: "Actions runs"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +344,197 @@ def check_prometheus(url: str | None, environ: Mapping[str, str]) -> Check:
     return _fail(name, f"{base}/-/ready: {problem}", fix)
 
 
+def check_github(settings: Settings, environ: Mapping[str, str]) -> list[Check]:
+    """Per repository: which source CI is read from (check-runs and statuses, or the
+    commit's Actions runs where those are refused) and the permission a 403 names. Probes
+    with the head of the newest pull request or workflow run. Empty without
+    ``[connectors.github]``."""
+    github = settings.github
+    if github is None:
+        return []
+    if not github.enabled:
+        return [_skip("github ci", "[connectors.github] is disabled")]
+    try:
+        token = github.token(environ)
+    except ValueError as exc:
+        return [
+            _fail("github token", str(exc), f"export ${github.token_env} before running doctor")
+        ]
+    connector = github.build(token, utc_now)
+    repos = sorted(connector.repos)
+    checks: list[Check] = []
+    rejected = False
+    for repo in repos[:MAX_GITHUB_REPOS]:
+        if rejected:
+            checks.append(_skip(f"github ci {repo}", "not asked: the token was rejected above"))
+            continue
+        connector.client.begin_tick(github.max_requests_per_tick, github.tick_budget)
+        found, rejected = _github_repo(connector, repo, github.token_env)
+        checks += found
+    if len(repos) > MAX_GITHUB_REPOS:
+        checks.append(_skip("github ci", f"{len(repos) - MAX_GITHUB_REPOS} more repos not asked"))
+    return checks
+
+
+def _github_repo(connector: GitHubConnector, repo: str, token_env: str) -> tuple[list[Check], bool]:
+    """The checks for one repository, and whether GitHub rejected the token."""
+    name, pulls = f"github ci {repo}", f"github pull requests {repo}"
+    found: list[Check] = []
+    try:
+        sample = connector.head_commit(repo)
+        if sample.pulls_refused:  # check() reads the PR first: no PR, no CI condition
+            found.append(_github_problem(pulls, repo, "forbidden", PULLS, token_env))
+        if sample.runs_refused:
+            found.append(_github_problem(name, repo, "forbidden", PERMISSIONS[ACTIONS], token_env))
+        elif sample.sha is None:
+            found.append(_github_problem(name, repo, "no_sample", "", token_env))
+        else:
+            found.append(
+                _ci_check(name, repo, connector.probe_ci(repo, sample.sha, sample.pr), connector)
+            )
+    except GitHubError as exc:
+        needs = exc.permission if isinstance(exc, Forbidden) else ""
+        problem = _github_problem(name, repo, exc.kind, needs, token_env)
+        if (
+            isinstance(exc, Forbidden)
+            and exc.permission == PERMISSIONS[ACTIONS]
+            and connector.workflows_for(repo)
+        ):
+            problem = replace(problem, detail=f"{problem.detail} (ci_workflows needs it)")
+        found.append(problem)
+        return found, exc.kind == "unauthorized"
+    if connector.workflows_for(repo) and not sample.runs_refused:
+        entries = f"github ci_workflows {repo}"
+        try:
+            found.append(_workflow_entries(connector, repo, entries))
+        except GitHubError as exc:  # its own line: the CI line above is not a duplicate
+            needs = exc.permission if isinstance(exc, Forbidden) else ""
+            found.append(_github_problem(entries, repo, exc.kind, needs, token_env))
+            return found, exc.kind == "unauthorized"
+    return found, False
+
+
+def _workflow_entries(connector: GitHubConnector, repo: str, name: str) -> Check:
+    """Every ``ci_workflows`` entry of ``repo`` must name a workflow, by name or by path; a
+    name that several workflow files share is ambiguous (the path form is exact)."""
+    entries = connector.workflows_for(repo)
+    found, complete = connector.workflow_list(repo, fresh=True)
+    paths = {w.path for w in found}
+    unmatched = [e for e in entries if not any(e in (w.name, w.path) for w in found)]
+    disabled = [
+        e
+        for e in entries
+        if e not in unmatched
+        and not any(e in (w.name, w.path) and w.state == "active" for w in found)
+    ]
+    shared = {
+        e: sorted(w.path for w in found if w.name == e)
+        for e in entries
+        if e not in paths and sum(w.name == e for w in found) > 1
+    }
+    if unmatched:
+        shown = ", ".join(repr(e) for e in unmatched)
+        fix = (
+            "write each entry as a workflow's name (its `name:`) or its file path, exactly; "
+            "a listed workflow with no run keeps every condition pending"
+        )
+        if not complete:  # only the first 100 workflows were read
+            return Check("WARN", name, f"{shown} not among the first 100 workflows", fix)
+        return _fail(name, f"matches no workflow: {shown}", fix)
+    if disabled:  # a disabled workflow never runs: the condition would wait for ever
+        shown = ", ".join(repr(e) for e in disabled)
+        fix = "enable the workflow, or remove the entry from ci_workflows"
+        if not complete:  # a name may match more workflows beyond the first 100
+            return Check("WARN", name, f"only disabled workflows match: {shown} (first 100)", fix)
+        return _fail(name, f"only disabled workflows match: {shown}", fix)
+    if shared:
+        text = "; ".join(f"{e!r} is {', '.join(p)}" for e, p in shared.items())
+        more = "; only the first 100 workflows were read, there may be more" if not complete else ""
+        return Check(
+            "WARN",
+            name,
+            f"a name is shared by several workflows ({text}){more}",
+            "list the path instead",
+        )
+    return _pass(name, f"{len(entries)} entries, each matching a workflow")
+
+
+def _ci_check(name: str, repo: str, ci: CiState, connector: GitHubConnector) -> Check:
+    """PASS when CI is read as intended; FAIL when the Actions runs are refused too (a red
+    status decides alone, nothing else can be told); WARN when statuses are refused."""
+    detail = _ci_source(ci, connector.workflows_for(repo))
+    if ACTIONS in ci.refused:
+        return _fail(
+            name,
+            f"{detail}; the Actions runs are refused (403), needs {PERMISSIONS[ACTIONS]}",
+            f"give the token {PERMISSIONS[ACTIONS]} on {repo}; without it only a red status "
+            "or check run can be told, never green",
+        )
+    if STATUSES in ci.refused:
+        return Check(
+            "WARN",
+            name,
+            detail,
+            f"give the token {PERMISSIONS[STATUSES]} on {repo} if any CI reports commit statuses "
+            "(Jenkins, Buildkite, CircleCI): Actions runs cannot stand in for them",
+        )
+    return _pass(name, detail)
+
+
+def _ci_source(ci: CiState, workflows: tuple[str, ...]) -> str:
+    """What CI is read from, why, and what the probe commit shows."""
+    sources = " and ".join(CI_SOURCES[s] for s in ci.sources)
+    detail = sources
+    refused = [s for s in ci.refused if s != ACTIONS]
+    if refused:
+        why = "; ".join(f"{CI_SOURCES[s]} refused (403), needs {PERMISSIONS[s]}" for s in refused)
+        counted = (
+            f"workflows required: {', '.join(workflows)}" if workflows else "all workflows count"
+        )
+        detail = f"{sources} ({why}; {counted})"
+        if CHECK_RUNS in refused:
+            detail += "; check runs of GitHub Apps other than Actions are not seen"
+    detail += f"; probe commit (newest pull request or run): {ci.state}"
+    if ci.missing:
+        detail += f" (no result yet from {', '.join(map(repr, ci.missing))} in ci_workflows)"
+    return detail
+
+
+def _github_problem(name: str, repo: str, kind: str, needs: str, token_env: str) -> Check:
+    """A GitHub call that gave no answer, as a check. Names the permission for a 403."""
+    if kind == "forbidden":
+        return _fail(
+            name,
+            f"HTTP 403, the token lacks {needs}",
+            f"give the token {needs} on {repo} (fine-grained token: repository permissions, "
+            "all read-only; see docs/configuration.md, [connectors.github])",
+        )
+    if kind == "unauthorized":
+        return _fail(
+            name,
+            "HTTP 401, the token is missing, invalid or expired",
+            f"set a valid token in ${token_env}",
+        )
+    if kind == "not_found":
+        fix = f"check the name and select {repo} in the token's repository access"
+        return _fail(name, "HTTP 404, no such repository or no access to it", fix)
+    if kind == "policy":
+        return _fail(
+            name,
+            "HTTP 403, blocked by an organization policy (SAML SSO or an IP allow list)",
+            "authorize the token for the organization's SSO, or allow this host's IP address",
+        )
+    if kind == "no_sample":
+        return _skip(name, "no pull request and no workflow run to probe with; run doctor again")
+    if kind in {"rate_limited", "backoff", "budget"}:
+        return _skip(name, f"GitHub was not asked ({kind}); run doctor again later")
+    if kind in {"network", "redirect", "server"}:
+        return _fail(
+            name, f"GitHub did not answer ({kind})", "check the network, proxy and api_url"
+        )
+    return _fail(name, f"unexpected answer ({kind})", "check api_url and the repository name")
+
+
 def run_checks(
     config: Path | None,
     prometheus: str | None = None,
@@ -389,6 +594,7 @@ def run_checks(
     )
     checks += cc_checks
     checks += oc_checks
+    checks += check_github(settings, environ)
     checks.append(check_prometheus(prometheus, environ))
     return checks
 

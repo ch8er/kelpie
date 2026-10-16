@@ -72,6 +72,38 @@ class FakeGitHub:
         body = {"total_count": len(runs) if total is None else total, "check_runs": runs}
         self.reply(f"/repos/{repo}/commits/{sha}/check-runs?per_page=100", body)
 
+    def forbid_ci(self, repo: str, sha: str, *, statuses: bool = True, checks: bool = True) -> None:
+        """Answer 403 like a fine-grained token without Checks / Commit statuses."""
+        denied = {"message": "Resource not accessible by personal access token"}
+        if statuses:
+            self.reply(f"/repos/{repo}/commits/{sha}/status?per_page=100", denied, 403)
+        if checks:
+            self.reply(f"/repos/{repo}/commits/{sha}/check-runs?per_page=100", denied, 403)
+
+    def actions(
+        self,
+        repo: str,
+        sha: str,
+        runs: list[dict[str, Any]] | None = None,
+        total: int | None = None,
+        page: int = 1,
+    ) -> None:
+        """The workflow runs of a commit (``?head_sha=``), one page of them."""
+        runs = runs or []
+        body = {"total_count": len(runs) if total is None else total, "workflow_runs": runs}
+        paging = "" if page == 1 else f"&page={page}"
+        self.reply(f"/repos/{repo}/actions/runs?head_sha={sha}{paging}&per_page=100", body)
+
+    def workflows(self, repo: str, *states: str | dict[str, Any]) -> None:
+        """The repository's workflows: a state (``active``, ``disabled_manually``) or a full
+        workflow object each."""
+        listed = [
+            {"id": i, **({"state": w} if isinstance(w, str) else w)}
+            for i, w in enumerate(states, 1)
+        ]
+        body = {"total_count": len(listed), "workflows": listed}
+        self.reply(f"/repos/{repo}/actions/workflows?per_page=100", body)
+
     def paths(self) -> list[str]:
         return [s.path for s in self.requests]
 

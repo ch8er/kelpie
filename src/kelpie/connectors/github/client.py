@@ -30,10 +30,11 @@ count against the GitHub rate limit). Error answers (404, 401, 403, other 4xx) a
 remembered for the same time. ``X-RateLimit-Remaining: 0``, a 403/429 with ``Retry-After``
 and a 403 for a secondary rate limit start a back-off for every request (until the reset,
 at least a minute for a secondary limit); so do 401, network errors and 5xx, shorter. A
-403 for missing access is cached for its URL only. :meth:`GitHubClient.begin_tick` caps the
-requests and the wall-clock time of one tick. During a back-off or past the budget nothing
-is sent: callers get the last cached answer, with the time it was fetched, or a
-:class:`GitHubError`.
+403 for missing access is cached for its URL only; so is a 403 from an organization
+policy (SAML SSO, an IP allow list), which has its own error kind ``policy``.
+:meth:`GitHubClient.begin_tick` caps the requests and the wall-clock time of one tick.
+During a back-off or past the budget nothing is sent: callers get the last cached answer,
+with the time it was fetched, or a :class:`GitHubError`.
 """
 
 from __future__ import annotations
@@ -75,6 +76,12 @@ READ_CHUNK = 16 * 1024
 _TOKEN = re.compile(r"[\x21-\x7e]{1,1024}")
 _PATH = re.compile(r"/[A-Za-z0-9._\-/]*")
 _SECONDARY = re.compile(rb"secondary rate limit|abuse detection", re.IGNORECASE)
+# A 403 from an organization policy, not from a permission the token lacks: lifting the
+# policy, not granting a permission, fixes it. Only GitHub's known phrases (SAML SSO
+# enforcement, an IP allow list, "forbids access via a personal access token") and the
+# X-GitHub-SSO header; any other 403 stays "forbidden", which is believed no further than the
+# next probe (an "Actions is disabled ... by an enterprise policy" body is one of those).
+_POLICY = re.compile(rb"SAML enforcement|IP allow list|forbids access via", re.IGNORECASE)
 
 # Errors after which a cached answer, if any, is still worth more than nothing. The others
 # (404, 401, 403, redirects, other 4xx) are answers too: they are cached for ``cache_ttl``.
@@ -495,6 +502,10 @@ class GitHubClient:
             elif self.rate_remaining != 0:
                 self._back_off(now + self.error_backoff, now)
             return GitHubError("rate_limited", f"{where} (rate limited)", code)
+        if code == 403 and (
+            reply.headers.get("X-GitHub-SSO") is not None or _POLICY.search(reply.body)
+        ):  # neither the header (it holds a session URL) nor the body goes into the message
+            return GitHubError("policy", f"{where} (blocked by an organization policy)", code)
         if code == 403:  # missing access to this resource: cached for this URL only
             return GitHubError("forbidden", f"{where} (no access)", code)
         if code >= 500:

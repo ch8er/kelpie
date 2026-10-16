@@ -10,7 +10,7 @@ import logging
 import os
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -36,6 +36,8 @@ log = logging.getLogger(__name__)
 DEFAULT_TOKEN_ENV = "GITHUB_TOKEN"
 MAX_TIMEOUT = timedelta(seconds=60)
 MAX_REQUESTS_PER_TICK = 5000
+MAX_CI_WORKFLOWS = 50
+MAX_WORKFLOW_NAME = 255
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
 _KEYS = {
     "repos",
@@ -46,6 +48,7 @@ _KEYS = {
     "max_requests_per_tick",
     "tick_budget",
     "enabled",
+    "ci_workflows",
     "ci",
     "pulls",
 }
@@ -62,6 +65,10 @@ class GitHubSettings:
     max_requests_per_tick: int = DEFAULT_MAX_REQUESTS
     tick_budget: timedelta = DEFAULT_TICK_BUDGET
     enabled: bool = True
+    # Workflows (names or paths) that must have run for ci_status, read from Actions runs:
+    # one list for every repo, or a list per repo (the other repos: every run counts).
+    ci_workflows: tuple[str, ...] = ()
+    ci_workflows_by_repo: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     ci: CiSettings | None = None  # None: no [connectors.github.ci] table
     pulls: PullSettings | None = None  # None: no [connectors.github.pulls] table
 
@@ -97,7 +104,8 @@ class GitHubSettings:
             clock=clock,
             observer=observer,
         )
-        return GitHubConnector(client, self.repos)
+        workflows = self.ci_workflows_by_repo or self.ci_workflows
+        return GitHubConnector(client, self.repos, ci_workflows=workflows)
 
     def build_ci(
         self,
@@ -206,6 +214,7 @@ def load_github(section: Any) -> GitHubSettings:
     if not isinstance(enabled, bool):
         raise ValueError("[connectors.github] enabled must be true or false")
     repos = list(dict.fromkeys(r.lower() for r in repos))
+    ci_workflows, ci_by_repo = _ci_workflows(section.get("ci_workflows", []), repos)
     ci = load_ci(section["ci"], repos) if "ci" in section else None
     if ci is not None and ci.billing_token_env is not None and ci.billing_token_env == token_env:
         raise ValueError(
@@ -223,9 +232,51 @@ def load_github(section: Any) -> GitHubSettings:
         max_requests_per_tick=max_requests,
         tick_budget=tick_budget,
         enabled=enabled,
+        ci_workflows=ci_workflows,
+        ci_workflows_by_repo=ci_by_repo,
         ci=ci,
         pulls=pulls,
     )
+
+
+def _ci_workflows(
+    value: Any, repos: list[str]
+) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+    """``ci_workflows``: a list for every repo, or a table ``{"owner/name" = [...]}`` whose
+    keys are among ``repos``. Names are kept as written: they are matched exactly."""
+    if isinstance(value, Mapping):
+        by_repo: dict[str, tuple[str, ...]] = {}
+        for repo, names in value.items():
+            key = repo.lower() if isinstance(repo, str) else repo
+            if key not in repos:
+                raise ValueError(
+                    f"[connectors.github] ci_workflows names {repo!r}, which is not in repos"
+                )
+            if key in by_repo:
+                raise ValueError(f"[connectors.github] ci_workflows names {repo!r} twice")
+            by_repo[key] = _workflow_names(names)
+        return (), by_repo
+    return _workflow_names(value), {}
+
+
+def _workflow_names(value: Any) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or len(value) > MAX_CI_WORKFLOWS
+        or not all(
+            isinstance(v, str)
+            and v.strip() == v
+            and 0 < len(v) <= MAX_WORKFLOW_NAME
+            and v.isprintable()
+            for v in value
+        )
+    ):
+        raise ValueError(
+            "[connectors.github] ci_workflows must be a list of at most "
+            f"{MAX_CI_WORKFLOWS} workflow names or paths (printable, no leading or trailing "
+            "space), or a table of such lists per repository"
+        )
+    return tuple(dict.fromkeys(value))
 
 
 def _duration(section: Mapping[str, Any], key: str, default: timedelta) -> timedelta:
