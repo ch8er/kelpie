@@ -229,6 +229,10 @@ def test_the_section_is_marked_quoted_and_says_what_it_saw() -> None:
         ("\\[a](b)", "\\\\\\[a\\](b)"),
         ("safe\u202etxt.exe\u200b", "safetxt.exe"),
         ("mail ops@evil.example", "mail ops[@]evil.example"),
+        (
+            "see _https://evil.example and _www.evil.example",
+            "see _https[:]//evil.example and _www[.]evil.example",
+        ),
         ("a `b` c", "a \\`b\\` c"),
     ],
 )
@@ -421,3 +425,12 @@ def test_openai_own_api_gets_max_completion_tokens_through_the_proxy(
     assert HttpLlm(settings, "k").complete("s", "p") == "ok"
     assert seen["path"] == "/v1/chat/completions" and seen["proxy"] is True
     assert seen["body"]["max_completion_tokens"] == 1000 and "max_tokens" not in seen["body"]
+
+
+def test_a_long_restored_id_is_cut() -> None:
+    report = poisoned_report()
+    long = replace(report, chaos=(replace(report.chaos[0], tasks=("T-" + "9" * 500,)),))
+    alias = next(iter(digest(long).aliases))
+    [section] = with_root_cause(long, SETTINGS, Fake(f"see {alias}")).sections
+    line = next(x for x in section.lines if x.startswith("> see"))
+    assert len(line) == len("> see ") + 80 and line.endswith("...")
