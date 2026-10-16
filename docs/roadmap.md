@@ -971,7 +971,8 @@ Platform adapter for Paperclip farms. Start on signal (a user or a validation co
 - [ ] Spans from OTLP or from hooks via the hooks-to-spans helper
 
 ### adapters: OpenClaw adapter
-labels: P2, adapter, area:adapters
+labels: P1, adapter, area:adapters
+Priority (Oct 16): third adapter, P1 — by far the most popular open-source agent (~400K GitHub stars as of Aug 2026), and it closed its own loop-guard request as "not planned", which rule 10 covers.
 Platform adapter for OpenClaw farms. OpenClaw has no built-in loop guard, so `stop` support
 makes `loop_breaker` useful there. Start on signal.
 
@@ -990,7 +991,8 @@ Platform adapter for Codex agents. Start on signal.
 - [ ] Spans from OTLP or from hooks via the hooks-to-spans helper
 
 ### adapters: GitHub Issues / Linear task-queue adapter
-labels: P2, adapter, area:adapters
+labels: P1, adapter, area:adapters
+Priority (Oct 16): fourth adapter, P1 — one adapter covers every agent that takes tasks from issues and returns PRs (cloud Codex, Copilot coding agent, the Claude Code GitHub Action, OpenHands), reusing the GitHub connector.
 A generic adapter for farms whose task queue is GitHub Issues or Linear rather than a
 platform's own board. Start on signal.
 

@@ -56,7 +56,7 @@ Kelpie is a **service, not an LLM agent**. Control is done by deterministic rule
 
 ### Architecture: a core and three kinds of adapters
 
-- **Platforms** — where tasks, statuses and sessions come from: Hermes first (`post_tool_call` and `on_session_end` hooks plus reading `kanban.db`), then Claude Code, Paperclip, OpenClaw, Codex, and a generic GitHub Issues / Linear task-queue adapter. Claude Code is the second adapter (P1, after the credit); the other platforms are a P2 backlog, one adapter each.
+- **Platforms** — where tasks, statuses and sessions come from: Hermes first (`post_tool_call` and `on_session_end` hooks plus reading `kanban.db`), then Claude Code, Paperclip, OpenClaw, Codex, and a generic GitHub Issues / Linear task-queue adapter. Claude Code is the second adapter; OpenClaw (the most popular open-source agent) and a generic GitHub Issues / Linear task-queue adapter (covers cloud Codex, Copilot coding agent, the Claude Code GitHub Action, OpenHands) are next, P1; Paperclip and Codex CLI stay P2, on request.
 - **Environment resources** — node_exporter on every machine that runs agents, scraped by Prometheus. Kelpie reads resources through the Prometheus API. Laptop, cloud VM or container — no difference. We do not write our own collector.
 - **External conditions** — what tasks wait for: PRs, CI, deploys, API responses, LLM provider quotas, human approval. CI is just one connector.
 
