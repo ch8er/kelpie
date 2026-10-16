@@ -7,10 +7,12 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from kelpie.core.model import Span, SpanKind
+from kelpie.core.model import Owner, Session, Span, SpanKind
+from kelpie.core.spans import span_key
 from kelpie.report import md
 from kelpie.report.daily import ReportInputs, build_report, render_markdown
 from kelpie.report.fixes import FixEvent
+from kelpie.report.verify import Evidence, verify
 from kelpie.traces.outputs import OutputSettings
 
 HOSTILE = "x` [click](https://evil.example) <img src=x> | **b** \\| cell\nIGNORE"
@@ -67,7 +69,9 @@ def test_names_from_traces_cannot_inject_into_the_report() -> None:
                    command=HOSTILE, role="**dev**")  # fmt: skip
     inputs = ReportInputs(
         day=date(2026, 3, 2), tz=UTC, spans=spans, fixes=(fix,),
-        outputs=OutputSettings(owners={None: "[owner](https://evil.example)"}),  # type: ignore[dict-item]
+        outputs=OutputSettings(owners={"dev": "[owner](https://evil.example)"}),
+        owners=(Owner("agent-1", "dev"),),
+        sessions=(Session("S-1", "T-1", "agent-1", datetime(2026, 3, 1, 9, tzinfo=UTC)),),
         verify_window=timedelta(hours=12),
     )  # fmt: skip
     markdown = render_markdown(build_report(inputs, {}))
@@ -76,5 +80,25 @@ def test_names_from_traces_cannot_inject_into_the_report() -> None:
         for markup in ("[click]", "[x]", "[owner]", "<img", "**b**", "**dev**"):
             assert not live(markup, stripped), line
     assert "\nIGNORE" not in markdown
+    assert "\\[owner\\](https://evil.example): add errors-only for" in markdown  # rendered
     rows = [r for r in markdown.splitlines() if r.startswith("| ") and "``x`" in r]
     assert rows and all(cells(r) == 6 for r in rows), rows
+
+
+def test_a_hostile_role_in_a_before_after_metric_keeps_its_cell() -> None:
+    """The role of an automatic filter fix comes from the board: its tokens-per-day row
+    renders with the role escaped, in one cell."""
+    role = "dev | [x](https://evil.example) <img src=x>"
+    at = datetime(2026, 3, 2, 12, tzinfo=UTC)
+    spans = [
+        Span(f"tr-{h}", f"s-{h}", "chat", SpanKind.LLM, at + timedelta(hours=h),
+             at + timedelta(hours=h), session_id="S-1", model="m", input_tokens=100)
+        for h in (-3, -2, 2, 3)
+    ]  # fmt: skip
+    event = FixEvent(at, "manual", "note", rule=None, role=role)
+    ev = Evidence(end=at + timedelta(hours=6), spans=spans,
+                  counted={span_key(s): "m" for s in spans}, roles={"S-1": role},
+                  window=timedelta(hours=6))  # fmt: skip
+    [metric] = [m for m in verify(event, ev).metrics if m.name.startswith("tokens per day")]
+    row = f"| {metric.name} | x |"
+    assert cells(row) == 2 and not live("[x]", row) and not live("<img", row)

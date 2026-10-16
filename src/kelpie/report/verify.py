@@ -213,7 +213,7 @@ def _tokens(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) ->
         return total / _days(w), n
 
     (tb, nb), (ta, na) = per_day(b), per_day(a)
-    who = f" ({event.role})" if event.role else ""
+    who = f" ({md.text(event.role)})" if event.role else ""
     small = short or min(nb, na) < ev.min_sample
     return Metric(f"tokens per day{who}", "tokens/day", tb, ta, nb, na, small)
 
