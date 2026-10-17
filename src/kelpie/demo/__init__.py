@@ -12,13 +12,15 @@ run that logged an error exits 1 and says where the log is (the farm is then kep
 With ``--web`` the day's report is also written as one self-contained HTML page
 (:mod:`kelpie.report.html`), in a new private directory that stays after the demo (the
 browser reads it later) or in the kept farm, and handed to a graphical browser when there is
-one; the path is printed first, so a text-only session still has it.
+one; the path is printed first, so a text-only session still has it. (With a display but no
+graphical browser installed, Python may still fall back to a text browser in the terminal.)
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import webbrowser
@@ -46,7 +48,7 @@ def run(
     """Tell the story; ``(exit code, what happened)``: 0, 1 when it failed or Kelpie
     logged an error, 2 on a platform it cannot run on, 130 when interrupted. The farm lives
     in a temporary directory (or ``root``), removed afterwards unless ``keep`` or something
-    went wrong."""
+    went wrong. With ``web`` the report is also written as a web page and opened."""
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
     if os.name != "posix" or not Path("/bin/sh").exists():
@@ -103,15 +105,20 @@ def _page(outcomes: Outcomes, farm: Path | None) -> Path:
     directory = farm if farm is not None else Path(tempfile.mkdtemp(prefix="kelpie-demo-web-"))
     path = directory / PAGE
     day = DAY.date().isoformat()
-    path.write_text(
-        html.render(
-            outcomes.report,
-            f"Kelpie daily report {day} (demo)",
-            "The day of a simulated farm from kelpie demo: synthetic tasks, people and "
-            "repository, no real farm data.",
-        ),
-        encoding="utf-8",
-    )
+    try:
+        path.write_text(
+            html.render(
+                outcomes.report,
+                f"Kelpie daily report {day} (demo)",
+                "The day of a simulated farm from kelpie demo: synthetic tasks, people and "
+                "repository, no real farm data.",
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        if farm is None:  # ours: leave no empty directory behind
+            shutil.rmtree(directory, ignore_errors=True)
+        raise
     return path
 
 

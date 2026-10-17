@@ -93,3 +93,13 @@ def test_a_page_without_a_heading_uses_its_title_as_text() -> None:
         "<p>Just text.</p>" in page
         and "<header>\n<h1>**not bold** &lt;x&gt;</h1>\n</header>" in page
     )
+
+
+def test_a_long_backtick_run_is_linear() -> None:
+    """``render`` is public: unescaped text with long backtick runs must not stall it."""
+    import time
+
+    started = time.perf_counter()
+    assert inline("`" * 5000) == "`" * 5000
+    assert inline("`" * 2000 + "x" + "`" * 2001) == "`" * 2000 + "x" + "`" * 2001
+    assert time.perf_counter() - started < 1.0

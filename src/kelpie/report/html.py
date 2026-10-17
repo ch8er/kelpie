@@ -21,8 +21,9 @@ _ITEM = re.compile(r"(-|\d+\.) (.*)")
 _DIVIDER = re.compile(r"\s*:?-{3,}:?\s*")
 _INLINE = re.compile(
     r"(?P<escape>\\[\\`*_\[\]<>|#()!&-])"
-    # A code span closes on a backtick run exactly as long as its fence (CommonMark).
-    r"|(?P<code>(?P<fence>`+)(?P<body>.+?)(?<!`)(?P=fence)(?!`))"
+    # A code span opens on a whole backtick run (taken atomically, so a long run is tried
+    # once, never at every length) and closes on a run exactly as long (CommonMark).
+    r"|(?P<code>(?<!`)(?P<fence>`++)(?P<body>.+?)(?<!`)(?P=fence)(?!`))"
     r"|(?P<link>\[(?P<label>(?:\\.|[^\]\\])+)\]\((?P<url>[^)\s]+)\))"
     # Emphasis bodies step over escapes, so an escaped ``*`` never closes them.
     r"|(?P<strong>\*\*(?P<strong_body>(?:\\.|[^*\\]|\*(?!\*))+?)\*\*)"

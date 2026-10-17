@@ -338,7 +338,8 @@ def test_web_writes_the_report_as_a_page_and_opens_it(
     html = page.read_text(encoding="utf-8")
     assert "<h2>Cost of chaos</h2>" in html and "<code>t_heartbeat</code>" in html
     assert f"The report as a web page:\n  {page}\n(sent to your browser)\n" in out.getvalue()
-    assert not list(tmp_path.glob("kelpie-demo-[!w]*"))  # the farm itself is gone
+    farms = [p for p in tmp_path.iterdir() if not p.name.startswith("kelpie-demo-web-")]
+    assert farms == []  # the farm itself is gone
 
 
 def test_web_without_a_display_only_prints_the_page(
@@ -372,11 +373,18 @@ def test_web_survives_a_browser_error_and_a_page_it_cannot_write(
     code, _ = run(fast=True, web=True, root=tmp_path / "a", out=out)
     assert code == 0 and "sent to your browser" not in out.getvalue()
 
-    def unwritable(*args: object, **kwargs: object) -> None:
-        raise OSError("read-only file system")
+    real_write = Path.write_text
 
-    monkeypatch.setattr("kelpie.demo.html.render", unwritable)
+    def unwritable(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name == "kelpie-demo-report.html":
+            raise OSError("read-only file system")
+        return real_write(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", unwritable)
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
     err = io.StringIO()
-    code, _ = run(fast=True, web=True, root=tmp_path / "b", out=io.StringIO(), err=err)
+    code, _ = run(fast=True, web=True, out=io.StringIO(), err=err)
     assert code == 0
     assert "the report page could not be written: read-only file system" in err.getvalue()
+    assert list((tmp_path / "tmp").iterdir()) == []  # no empty page directory, no farm
