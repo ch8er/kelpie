@@ -182,6 +182,12 @@ REMEDIES: Mapping[str, str] = {
     "no_progress": "longer heartbeat interval, a cheaper model for maintenance calls, "
     "bounded sessions with a handoff file",
 }
+# The remedy where the rule cannot act on this farm: never advice to switch act mode on.
+REMEDIES_WITHOUT_ACT: Mapping[str, str] = {
+    "orphan_status": "give ownerless statuses an owner: route them to a role",
+    "loop_breaker": "stop runaway sessions by hand when Kelpie alerts on them, and cap "
+    "spend with [[budgets]]",
+}
 # States whose id ends with the session they are about.
 SESSION_STATES = ("no_progress:", "loop_breaker:identical_calls:", "loop_breaker:error_streak:")
 FIX_KINDS = frozenset(
@@ -923,8 +929,10 @@ def _recommendations(
         else:
             title = f"Reduce {line.cause}"
             detail = REMEDIES[line.rule]
-            if fix is not None and mode is not Mode.ACT:
-                detail += f" (act mode is not available here: {md.text(blocked or '')})"
+            if blocked is not None:
+                detail = REMEDIES_WITHOUT_ACT.get(line.rule, detail)
+                if fix is not None and mode is not Mode.ACT:
+                    detail += f" (act mode is not available here: {md.text(blocked)})"
             tasks = line.tasks
         candidates.append(Advice(title, detail, line.spend.usd, line.hours, tasks))
     return tuple(_top(candidates, inputs.hour_usd))

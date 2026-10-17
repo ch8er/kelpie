@@ -460,6 +460,8 @@ FARMS = {
     ),
     "claude code": "[adapters.claude_code]\n",
     "openclaw": "[adapters.openclaw]\n",
+    "hermes and claude code": "[adapters.hermes]\n[adapters.claude_code]\n",
+    "claude code and openclaw": "[adapters.claude_code]\n[adapters.openclaw]\n",
     "nothing": "",
 }
 
@@ -501,3 +503,10 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     found = {r: b.reason for r, b in act_blockers(claude, build_adapters(claude)).items()}
     assert found["stale_blocks"] == "Claude Code can't clear blocks yet"
     assert "loop_breaker" not in found  # Claude Code stops sessions
+    both = load_settings(write(tmp_path, FARMS["claude code and openclaw"]))
+    found = {r: b.reason for r, b in act_blockers(both, build_adapters(both)).items()}
+    assert found["stale_blocks"] == "neither Claude Code nor OpenClaw can clear blocks yet"
+    assert "loop_breaker" not in found  # OpenClaw stops runs (SupportsStop, no declaration)
+    none = load_settings(write(tmp_path, ""))
+    found = {r: b.reason for r, b in act_blockers(none, build_adapters(none)).items()}
+    assert found["loop_breaker"] == "no platform adapter is configured to stop runs"

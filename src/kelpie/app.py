@@ -53,6 +53,10 @@ from kelpie.core.ports import (
     ProviderReader,
     ResourceReader,
     SnapshotSource,
+    SupportsClose,
+    SupportsReassign,
+    SupportsStop,
+    SupportsWait,
 )
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
@@ -1382,14 +1386,8 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
             found[name] = ActBlocker(reason, refused=has_hermes)
         elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
             found[name] = ActBlocker(_hermes_gap(name, platform), refused=True)
-        elif platform and not any(platform & _declared(a) for a in adapters):
-            names = sorted({_PLATFORMS.get(a.name, a.name) for a in adapters})
-            reason = (
-                f"{' or '.join(names)} can't {_verbs(platform)} yet"
-                if names
-                else f"no platform adapter is configured to {_verbs(platform)}"
-            )
-            found[name] = ActBlocker(reason, refused=False)
+        elif platform and not platform <= frozenset().union(*(_declared(a) for a in adapters)):
+            found[name] = ActBlocker(_platform_gap(adapters, platform, settings), refused=False)
     return found
 
 
@@ -1399,13 +1397,40 @@ def _hermes_gap(rule: str, platform: frozenset[ActionKind]) -> str:
     if lacking := platform - hermes.HermesAdapter.actions:
         return f"Hermes can't {_verbs(lacking)} yet"
     if platform:
-        return f"Hermes does not {_verbs(platform)} for {rule} yet"
-    return "on Hermes it stays in observe or suggest mode (it only alerts, as in suggest)"
+        return f"{rule} does not act on Hermes yet"
+    return "Hermes takes act mode only for rules that act; suggest sends the same alerts"
+
+
+def _platform_gap(
+    adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind], settings: Settings
+) -> str:
+    lacking = platform - frozenset().union(*(_declared(a) for a in adapters))
+    names = sorted({_PLATFORMS.get(a.name, a.name) for a in adapters})
+    if not names:
+        where = "on this host; agents' adapters count once they connect" if settings.hub else ""
+        return f"no platform adapter is configured to {_verbs(lacking)}" + (
+            f" {where}" if where else ""
+        )
+    if len(names) == 1:
+        return f"{names[0]} can't {_verbs(lacking)} yet"
+    return f"neither {' nor '.join(names)} can {_verbs(lacking)} yet"
+
+
+# A platform adapter without an ``actions`` declaration carries out what its capability
+# protocols offer.
+_CAPABILITY_KINDS: tuple[tuple[type, ActionKind], ...] = (
+    (SupportsStop, ActionKind.STOP),
+    (SupportsWait, ActionKind.WAIT),
+    (SupportsReassign, ActionKind.REASSIGN),
+    (SupportsClose, ActionKind.CLOSE),
+)
 
 
 def _declared(adapter: PlatformAdapter) -> frozenset[ActionKind]:
-    actions = getattr(adapter, "actions", frozenset())
-    return frozenset(actions) if isinstance(actions, frozenset | set) else frozenset()
+    actions = getattr(adapter, "actions", None)
+    if isinstance(actions, frozenset | set):
+        return frozenset(actions)
+    return frozenset(kind for protocol, kind in _CAPABILITY_KINDS if isinstance(adapter, protocol))
 
 
 def _verbs(kinds: frozenset[ActionKind]) -> str:
