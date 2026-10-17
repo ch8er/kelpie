@@ -406,3 +406,60 @@ def test_board_dependence_can_be_per_state() -> None:
     for unobserved in (("laptop",), ("hub",)):
         e.tick(lambda u=unobserved: Snapshot(now=T0 + H, unobserved=u))
     assert {s.id for s in e.states.store.open_states()} == {"resources:laptop:heavy"}
+
+
+def test_rules_see_the_open_states() -> None:
+    """The engine tells rules which states are open, so they can hold one (hysteresis)."""
+    seen: list[tuple[str, ...]] = []
+
+    class Spy(Toggle):
+        def evaluate(self, snapshot: Snapshot) -> list[Action]:
+            seen.append(snapshot.open_states)
+            return super().evaluate(snapshot)
+
+    e = engine(Spy(alert()), FakeAlerter())
+    tick(e, T0)
+    tick(e, T0 + H)
+    assert seen == [(), ("s1",)]
+    tick(e, T0 + 2 * H)
+    claimed = Snapshot(now=T0 + 3 * H, open_states=("made-up",))
+    e.tick(lambda: claimed)
+    assert seen[-1] == ("s1",)  # the engine's, not the source's
+    empty = engine(Spy(alert()), FakeAlerter())
+    empty.tick(lambda: Snapshot(now=T0, open_states=("made-up",)))
+    assert seen[-1] == ()  # nothing open: a source's claim is cleared
+
+
+def test_a_failing_state_store_shows_no_open_states_and_the_tick_goes_on() -> None:
+    class Down(MemoryStateStore):
+        def open_states(self):  # type: ignore[no-untyped-def]
+            raise OSError("disk full")
+
+    seen: list[tuple[str, ...]] = []
+
+    class Spy(Toggle):
+        def evaluate(self, snapshot: Snapshot) -> list[Action]:
+            seen.append(snapshot.open_states)
+            return super().evaluate(snapshot)
+
+    e = engine(Spy(alert()), FakeAlerter(), state_store=Down())
+    e.tick(lambda: Snapshot(now=T0))
+    assert seen == [()]
+
+
+def test_a_wobbling_disk_forecast_opens_once_and_does_not_flap() -> None:
+    from kelpie.core.model import Resource, ResourceKind
+    from kelpie.core.states import DEFAULT_RESOLVE_AFTER
+    from kelpie.rules.resources import Resources, Thresholds
+
+    rule = Resources(thresholds={ResourceKind.DISK: Thresholds(0.99, 0.999)})
+    alerter = FakeAlerter()
+    e = Engine([rule], adapters=[FakeAdapter()], alerter=alerter, config=LIVE)  # type: ignore[list-item]
+    step = 2 * DEFAULT_RESOLVE_AFTER  # each gap long enough to resolve without the hold
+    for i, left in enumerate([70, 80, 70, 82, 75, 90, 90]):  # hours to full at 24 GB a day
+        at = T0 + i * step
+        disk = Resource("host-a:/", ResourceKind.DISK, "host-a", 500 - left, 500, "GB", at=at,
+                        growth_per_day=24.0)  # fmt: skip
+        e.tick(lambda at=at, disk=disk: Snapshot(now=at, resources=(disk,)))
+    transitions = [str(ev.transition) for ev in alerter.events]
+    assert transitions == ["new", "resolved"]  # held through 80h and 82h; let go at 90h

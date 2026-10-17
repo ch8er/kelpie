@@ -148,6 +148,13 @@ class Engine:
     def evaluate(self, snapshot: Snapshot) -> list[Action]:
         actions: list[Action] = []
         evaluated: set[str] = set()
+        try:  # which states are open, for rules that keep one open on a lower bar
+            open_ids = tuple(sorted(s.id for s in self.states.store.open_states()))
+        except Exception:  # the state store's own errors are logged where it is written
+            log.debug("state store unavailable; rules see no open states", exc_info=True)
+            open_ids = ()
+        if open_ids or snapshot.open_states:  # never what a snapshot source claimed
+            snapshot = replace(snapshot, open_states=open_ids)
         for rule in self.rules:
             try:
                 actions.extend(rule.evaluate(snapshot))

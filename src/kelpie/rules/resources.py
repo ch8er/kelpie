@@ -38,8 +38,12 @@ counts it).
 **Disk time-to-full** (incident 19: a disk at 94 % grew about 9 GB a day from a simulator
 cache nobody cleaned). A disk reading with a growth rate (``Resource.growth_per_day``, the
 source's ``growth_window``) that would fill it within ``time_to_full_warning`` (72h) warns,
-within ``time_to_full_critical`` (24h) is critical. The alert names the fastest-growing
-directories on that filesystem (``path`` readings: sizes measured by the shipped
+within ``time_to_full_critical`` (24h) is critical. A disk's alert, once open (by the
+forecast or by its utilization: one disk is one condition), stays open as a warning while
+the disk would fill within ``time_to_full_release`` (84h: the warning plus a sixth; the
+critical plus a sixth with the warning off), so a growth rate that wobbles around 72h does
+not open and resolve it again and again. The alert names the fastest-growing directories
+on that filesystem (``path`` readings: sizes measured by the shipped
 ``scripts/kelpie-path-sizes.sh``, which records each directory's mountpoint), up to
 ``growing_paths_shown`` (3), with their growth per day; without them it says how to get
 them, and with none newer than ``path_max_age`` (1h) that the script stopped. Growth under
@@ -151,6 +155,9 @@ class Resources:
     provider_owners: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     time_to_full_warning: timedelta | None = timedelta(hours=72)  # None: off
     time_to_full_critical: timedelta | None = timedelta(hours=24)
+    # An open forecast resolves only once the disk would fill later than this (default the
+    # warning plus a sixth: 84h for 72h), so a growth rate wobbling around it does not flap.
+    time_to_full_release: timedelta | None = None
     min_growth_per_day: float = 0.1  # in the reading's unit (GB)
     growing_paths_shown: int = 3
     path_max_age: timedelta = timedelta(hours=1)  # directory sizes are measured every 15m
@@ -195,10 +202,13 @@ class Resources:
             # In hours, as a float: a huge filesystem (a network share of exabytes) would
             # overflow a timedelta.
             hours = max(0.0, r.limit - r.used) / growth * 24
+            held = f"{NAME}:{ResourceKind.DISK}:{r.name}" in snapshot.open_states
             if critical is not None and hours <= _in_hours(critical):
                 severity = Severity.CRITICAL
             elif warning is not None and hours <= _in_hours(warning):
                 severity = Severity.WARNING
+            elif held and hours <= _in_hours(self._release(warning, critical)):
+                severity = Severity.WARNING  # open already: kept until it clears the release
             else:
                 continue
             mine = [p for p in paths if p.host == host and _on(p, r, fresh)]
@@ -216,6 +226,13 @@ class Resources:
                 r, growth, hours, severity, tuple(growing), stale, elsewhere, unplaced
             )
         return out
+
+    def _release(self, warning: timedelta | None, critical: timedelta | None) -> timedelta:
+        if self.time_to_full_release is not None:
+            return self.time_to_full_release
+        bar = warning if warning is not None else critical
+        assert bar is not None  # _forecasts returns early when both are off
+        return bar * 7 / 6
 
     def _full_alert(self, c: Forecast) -> Action:
         r = c.disk
@@ -859,6 +876,18 @@ def build(config: dict[str, Any]) -> Resources:
     )
     if warn is not None and crit is not None and crit >= warn:
         raise ValueError("time_to_full_critical must be shorter than time_to_full_warning")
+    if "time_to_full_release" in config:
+        value = config.pop("time_to_full_release")
+        bar, bar_name = (
+            (warn, "time_to_full_warning") if warn is not None else (crit, "time_to_full_critical")
+        )
+        if value is False:  # no hold: an alert resolves where it opens
+            release = bar
+        else:
+            release = _positive_duration(value, "time_to_full_release")
+            if bar is not None and release < bar:
+                raise ValueError(f"time_to_full_release must not be shorter than {bar_name}")
+        kwargs["time_to_full_release"] = release
     if "min_growth_per_day" in config:
         value = config.pop("min_growth_per_day")
         if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:

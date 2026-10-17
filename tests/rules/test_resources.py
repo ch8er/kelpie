@@ -475,3 +475,52 @@ def test_build_path_max_age() -> None:
     assert build({"path_max_age": "2h"}).path_max_age == 120 * M
     with pytest.raises(ValueError, match="path_max_age"):
         build({"path_max_age": "0s"})
+
+
+def test_an_open_forecast_is_held_until_it_clears_the_release() -> None:
+    """72h opens it; it stays open, a warning, until the disk would fill after 84h."""
+    held = ("resources:disk:host-a:/",)
+    lax = Resources(thresholds={K.DISK: Thresholds(0.99, 0.999)})  # not past utilization
+
+    def forecast(left: float, open_: tuple[str, ...] = ()) -> list[Action]:
+        r = disk(500 - left, 24.0)  # 24 GB a day: hours to full == GB left
+        snap = Snapshot(now=NOW, resources=(r,), open_states=open_)
+        return full_alerts(list(lax.evaluate(snap)))
+
+    assert forecast(80) == []  # 80h: not opened
+    [a] = forecast(80, held)  # 80h, already open: held
+    assert a.severity is Severity.WARNING and a.state == "resources:disk:host-a:/"
+    assert forecast(90, held) == []  # past 84h: let go
+    assert forecast(20, held)[0].severity is Severity.CRITICAL
+    custom = Resources(thresholds=lax.thresholds, time_to_full_release=timedelta(hours=100))
+    snap = Snapshot(now=NOW, resources=(disk(410, 24.0),), open_states=held)
+    assert full_alerts(list(custom.evaluate(snap)))  # 90h, under a 100h release
+
+
+def test_build_time_to_full_release() -> None:
+    assert build({"time_to_full_release": "96h"}).time_to_full_release == timedelta(hours=96)
+    with pytest.raises(ValueError, match="not be shorter than time_to_full_warning"):
+        build({"time_to_full_release": "48h"})
+
+
+def test_the_hold_boundary_and_a_utilization_alert_held_by_the_forecast() -> None:
+    held = ("resources:disk:host-a:/",)
+    lax = Resources(thresholds={K.DISK: Thresholds(0.99, 0.999)})
+    at_84h = Snapshot(now=NOW, resources=(disk(416, 24.0),), open_states=held)  # 84 GB left
+    assert full_alerts(list(lax.evaluate(at_84h)))  # <= 84h: still held
+    # Opened by its utilization (86 %), now at 84 % but filling within 84h: one condition, held.
+    big = replace(res(K.DISK, 840, 1000, name="host-a:/"), growth_per_day=48.0)  # 80h
+    [a] = full_alerts(
+        list(Resources().evaluate(Snapshot(now=NOW, resources=(big,), open_states=held)))
+    )
+    assert a.state == "resources:disk:host-a:/" and a.severity is Severity.WARNING
+    assert full_alerts(list(Resources().evaluate(Snapshot(now=NOW, resources=(big,))))) == []
+
+
+def test_build_release_off_and_against_the_critical() -> None:
+    assert build({"time_to_full_release": False}).time_to_full_release == timedelta(hours=72)
+    with pytest.raises(ValueError, match="shorter than time_to_full_critical"):
+        build({"time_to_full_warning": False, "time_to_full_release": "12h"})
+    off = Resources(time_to_full_warning=None, thresholds={K.DISK: Thresholds(0.99, 0.999)})
+    snap = Snapshot(now=NOW, resources=(disk(474, 24.0),), open_states=("resources:disk:host-a:/",))
+    assert full_alerts(list(off.evaluate(snap)))  # 26h, under the critical's 28h release
