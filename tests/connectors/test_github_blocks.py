@@ -444,7 +444,8 @@ def test_dispatch_gate_park_then_wake_follows_the_prs_current_head() -> None:
         clock.advance(minutes=10)
         green = step(Snapshot(now=clock.now, tasks=(waiting,), conditions=(registered,)))
     [checked] = green.conditions
-    assert checked.satisfied is True and checked.params["sha"] == new
+    assert checked.satisfied is True and checked.params["head_sha"] == new
+    assert "sha" not in checked.params
     [wake] = WaitCondition().evaluate(green)
     assert wake.kind is ActionKind.WAKE and wake.task_id == "T-1"
     assert DispatchGate().evaluate(green) == []
@@ -525,3 +526,54 @@ def test_text_beyond_the_limit_is_not_read() -> None:
         gh.pull(REPO, 51)
         out = ready_sync(gh)(Snapshot(now=NOW, tasks=(task,)))
     assert out.conditions == ()
+
+
+def test_platform_ci_condition_without_a_sha_follows_the_head_after_a_park() -> None:
+    """Issue #147: a ``ci_status`` the platform registered with no ``sha`` was bound to the
+    head seen when the task was parked, so a fixing push never woke it."""
+    old, new = "1" * 40, "2" * 40
+    clock = Clock(NOW)
+    task = ready("T-1", "Plain title")
+    platform = Condition("C-1", ConditionKind.CI_STATUS, "T-1", {"repo": REPO, "pr": 7})
+    with serve() as gh:
+        connector = GitHubConnector(GitHubClient(gh.url, TOKEN, clock=clock), [REPO])
+        gh.pull(REPO, 7, sha=old)
+        gh.ci(REPO, old, statuses=[{"state": "failure", "updated_at": "2026-03-02T11:50:00Z"}])
+        red = replace(connector.check(platform), registered_at=NOW - timedelta(hours=1))
+        assert red.satisfied is False and red.params["head_sha"] == old
+        [wait] = DispatchGate().evaluate(Snapshot(now=NOW, tasks=(task,), conditions=(red,)))
+        assert wait.kind is ActionKind.WAIT
+        [registered] = wait_conditions(wait)
+        assert registered.params == {"repo": REPO, "pr": 7}  # no sha, no results
+        parked_at = NOW + timedelta(minutes=1)
+        registered = replace(registered, registered_at=parked_at)
+        waiting = replace(task, status=Status.WAITING, status_since=parked_at)
+        gh.pull(REPO, 7, sha=new)  # the fix is pushed and goes green
+        gh.ci(REPO, new, statuses=[{"state": "success", "updated_at": "2026-03-02T12:05:00Z"}])
+        clock.advance(minutes=10)
+        checked = connector.check(registered)
+    assert checked.satisfied is True and checked.params["head_sha"] == new
+    snap = Snapshot(now=clock.now, tasks=(waiting,), conditions=(checked,))
+    [wake] = WaitCondition().evaluate(snap)
+    assert wake.kind is ActionKind.WAKE and wake.task_id == "T-1"
+
+
+def test_platform_ci_condition_with_a_sha_stays_bound_to_it_across_a_park() -> None:
+    old, new = "1" * 40, "2" * 40
+    clock = Clock(NOW)
+    task = ready("T-1", "Plain title")
+    pinned = Condition("C-1", ConditionKind.CI_STATUS, "T-1", {"repo": REPO, "pr": 7, "sha": old})
+    with serve() as gh:
+        connector = GitHubConnector(GitHubClient(gh.url, TOKEN, clock=clock), [REPO])
+        gh.pull(REPO, 7, sha=old)
+        gh.ci(REPO, old, statuses=[{"state": "failure", "updated_at": "2026-03-02T11:50:00Z"}])
+        red = replace(connector.check(pinned), registered_at=NOW - timedelta(hours=1))
+        [wait] = DispatchGate().evaluate(Snapshot(now=NOW, tasks=(task,), conditions=(red,)))
+        [registered] = wait_conditions(wait)
+        assert registered.params == {"repo": REPO, "pr": 7, "sha": old}
+        gh.pull(REPO, 7, sha=new)  # a push does not move a condition pinned to a commit
+        gh.ci(REPO, new, statuses=[{"state": "success", "updated_at": "2026-03-02T12:05:00Z"}])
+        clock.advance(minutes=10)
+        checked = connector.check(registered)
+    assert checked.satisfied is False and checked.params["sha"] == old
+    assert checked.params["head_sha"] == new

@@ -1,7 +1,8 @@
 """GitHub condition connector: ``pr_merged`` and ``ci_status`` for configured repositories.
 
 Read-only. A condition names its pull request in ``params``: ``{repo: "owner/name", pr: N}``;
-a ``ci_status`` condition may name the commit (``sha``) instead of taking the PR's head, and
+a ``ci_status`` condition may name the commit (``sha``) instead of taking the PR's head (the
+connector never writes ``sha`` itself; the PR's head it saw is ``head_sha``), and
 ``expect`` (``success``, the default, or ``failure``).
 
 - ``pr_merged`` holds once the PR is merged (``satisfied_at`` = ``merged_at``). A closed,
@@ -311,6 +312,8 @@ class GitHubConnector:
             params["pr_state"] = pull.state
             if pull.head_sha:
                 params["head_sha"] = pull.head_sha  # a result key: dispatch_gate drops it
+            else:
+                params.pop("head_sha", None)  # always this check's result, never a stale one
             if condition.kind is ConditionKind.PR_MERGED and pull.state == "closed":
                 params["terminal"] = True  # closed unmerged: it can never be met
             if condition.kind is ConditionKind.PR_MERGED:
@@ -326,7 +329,10 @@ class GitHubConnector:
             if not isinstance(sha, str) or not _SHA.fullmatch(sha):
                 raise GitHubError("bad_response", f"{ref}: no usable head commit")
             ci = self.ci(ref.repo, sha, ref.number)
-            params.update(sha=sha, ci_state=ci.state, ci_source="+".join(ci.sources))
+            # ``sha`` is the condition's own binding and is never written back: a condition
+            # that had none follows the PR's head (``head_sha``, a result key) wherever it
+            # is parked and registered again.
+            params.update(ci_state=ci.state, ci_source="+".join(ci.sources))
             expect = condition.params.get("expect", "success")
             satisfied: bool | None = ci.state == expect
             if ci.state == "incomplete":

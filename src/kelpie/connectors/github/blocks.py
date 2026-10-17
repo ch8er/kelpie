@@ -31,7 +31,7 @@ title of a ready task instead ("Redo the migration after #123"), the first
 ``MAX_TASK_TEXT`` characters: every PR it names (up to ``MAX_READY_REFS`` that can be
 looked up, in pattern order) gets a condition linked by ``task_id`` alone (id
 ``ready:<task>:<kind>:<ref>``, registered when the task became ready), under the same rules:
-only for a confirmed PR, bound to its repo, number and head. The ``dispatch_gate`` rule
+only for a confirmed PR, bound to its repo, number and current head. The ``dispatch_gate`` rule
 parks a ready task whose condition is unmet. The description (``Task.body``) and comments
 are never read: on a live farm 8 of 10 PRs matched from mentions there were not the task's
 (incident 17). Patterns run on up to ``MAX_TASK_TEXT`` characters per ready task each tick:

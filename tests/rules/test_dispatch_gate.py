@@ -4,6 +4,8 @@ from typing import Any
 
 import pytest
 
+from kelpie.connectors.github.client import GitHubClient
+from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import (
     Condition,
@@ -18,6 +20,7 @@ from kelpie.core.model import (
 from kelpie.rules import REGISTRY
 from kelpie.rules.bottlenecks import Bottlenecks
 from kelpie.rules.dispatch_gate import DispatchGate, build
+from tests.connectors.fake_github import TOKEN, Clock, serve
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 M = timedelta(minutes=1)
@@ -219,6 +222,26 @@ def test_derived_pr_conditions_drop_the_head_sha_platform_ones_keep_it() -> None
     pinned = cond("C", ConditionKind.CI_STATUS, sha="abc")  # registered by the platform
     [kept] = run(task("T"), conditions=(pinned,))
     assert kept.params["conditions"][0]["params"]["sha"] == "abc"
+
+
+def test_a_checked_platform_condition_without_a_sha_is_passed_on_without_one() -> None:
+    """Issue #147. The input is what ``GitHubConnector.check`` returns (the checked head is
+    ``head_sha``), so this fails if the connector writes a ``sha`` back."""
+    head, pinned = "a" * 40, "b" * 40
+    repo = "example/repo"
+    free = cond("C", ConditionKind.CI_STATUS, satisfied=None, checked=None)
+    bound = cond("D", ConditionKind.CI_STATUS, satisfied=None, checked=None, sha=pinned)
+    with serve() as gh:
+        gh.pull(repo, 7, sha=head)
+        for sha in (head, pinned):
+            gh.ci(repo, sha, statuses=[{"state": "failure", "updated_at": "2026-03-02T11:50:00Z"}])
+        connector = GitHubConnector(GitHubClient(gh.url, TOKEN, clock=Clock(NOW)), [repo])
+        free, bound = connector.check(free), connector.check(bound)
+    assert free.satisfied is False and free.params["head_sha"] == head
+    [action] = run(task("T"), conditions=(free,))
+    assert action.params["conditions"][0]["params"] == {"repo": repo, "pr": 7}
+    [kept] = run(task("T"), conditions=(bound,))
+    assert kept.params["conditions"][0]["params"] == {"repo": repo, "pr": 7, "sha": pinned}
 
 
 @pytest.mark.parametrize(

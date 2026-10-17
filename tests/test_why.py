@@ -536,7 +536,46 @@ def test_render_conditions_with_target_and_offline_wording() -> None:
     assert "a [pr_merged] example/repo#9: unknown, never checked" in text
     assert "b [ci_status] example/repo#9 @ 0123456789ab: unmet (CI pending), checked 3m ago" in text
     target = as_json(ex)["conditions"][1]["target"]
-    assert target == {"repo": "example/repo", "pr": 9, "sha": "0123456789abcdef0123"}
+    assert target == {
+        "repo": "example/repo",
+        "pr": 9,
+        "sha": "0123456789abcdef0123",
+        "head_sha": None,
+    }
+
+
+def test_a_condition_without_a_sha_shows_the_head_the_connector_checked() -> None:
+    task = Task("T-1", "t", Status.WAITING, NOW - timedelta(hours=1))
+    checked = Condition(
+        "b", ConditionKind.CI_STATUS, "T-1",
+        {"repo": "example/repo", "pr": 9, "head_sha": "fedcba9876543210fedc",
+         "ci_state": "failure"},
+        satisfied=False, checked_at=NOW - timedelta(minutes=3),
+    )  # fmt: skip
+    pinned = replace(checked, id="c", params={**checked.params, "sha": "0123456789abcdef0123"})
+    snap = Snapshot(now=NOW, tasks=(task,), conditions=(checked, pinned))
+    ex = explain_snapshot(LoadedRules([], [], []), snap, "T-1")
+    assert ex is not None
+    ex.refreshed = True
+    text = render(ex)
+    assert "b [ci_status] example/repo#9 @ fedcba987654: unmet (CI failure)" in text
+    assert text.count("pinned to") == 1  # only c; b has no sha of its own
+    # A park made before #147 can leave a condition on an old commit: say so.
+    assert (
+        "c [ci_status] example/repo#9 @ 0123456789ab: unmet (CI failure, "
+        "pinned to 0123456789ab; PR head is now fedcba987654)"
+    ) in text
+    targets = [c["target"] for c in as_json(ex)["conditions"]]
+    assert [t["sha"] for t in targets] == ["fedcba9876543210fedc", "0123456789abcdef0123"]
+    assert [t["head_sha"] for t in targets] == ["fedcba9876543210fedc"] * 2
+
+    # A short or uppercase pin of the current head is not an old commit.
+    for pin in ("FEDCBA9", "FEDCBA9876543210FEDC"):
+        same = replace(pinned, params={**pinned.params, "sha": pin})
+        ex = explain_snapshot(LoadedRules([], [], []), replace(snap, conditions=(same,)), "T-1")
+        assert ex is not None
+        ex.refreshed = True
+        assert "pinned to" not in render(ex)
 
 
 def test_none_names_the_patterns_it_checked() -> None:

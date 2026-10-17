@@ -513,6 +513,11 @@ def _condition(c: Condition, now: datetime, offline: bool = False) -> str:
         extra.append(f"PR {_text(pr_state)}")
     if ci_state := c.params.get("ci_state"):
         extra.append(f"CI {_text(ci_state)}")
+    sha, head = c.params.get("sha"), c.params.get("head_sha")
+    # A park made before #147 can leave a condition on an old commit. A pin may be short or
+    # uppercase; GitHub's head is full and lowercase.
+    if sha and head and not str(head).lower().startswith(str(sha).lower()):
+        extra.append(f"pinned to {_text(str(sha)[:12])}; PR head is now {_text(str(head)[:12])}")
     if c.params.get("terminal") is True:
         extra.append("can never be met")
     if error := c.params.get("error"):
@@ -707,7 +712,12 @@ def _json_target(c: Condition) -> dict[str, Any] | None:
     repo, pr = c.params.get("repo"), c.params.get("pr")
     if not repo or pr is None:
         return None
-    return {"repo": repo, "pr": pr, "sha": c.params.get("sha") or c.params.get("head_sha")}
+    return {
+        "repo": repo,
+        "pr": pr,
+        "sha": c.params.get("sha") or c.params.get("head_sha"),
+        "head_sha": c.params.get("head_sha"),
+    }
 
 
 def as_json(ex: Explanation) -> dict[str, Any]:
