@@ -354,6 +354,32 @@ def test_workers_link_to_their_cards(tmp_path: Path, spool: Spool, board: Workbo
     }
 
 
+def test_a_card_captured_from_a_chat_links_its_session(
+    tmp_path: Path, spool: Spool, board: Workboard
+) -> None:
+    """Both sides reduce the peer's key with the hook's key file."""
+    dm = "agent:main:whatsapp:direct:+15550100"
+    board.card("c1", "running", ago(hours=1), session_key=dm)
+    spool.tool("s1", ago(minutes=1), key=dm)
+    snap = adapter(tmp_path, spool).snapshot(NOW)
+    (s,) = snap.sessions
+    assert s.task_id == "c1"
+    assert "+1555" not in repr(snap)
+
+
+def test_long_worker_keys_still_link(tmp_path: Path, spool: Spool, board: Workboard) -> None:
+    agent = "research-assistant-production01"
+    card = "0f8e2a64-7c1b-4d1e-9a5b-3c2d1e0f9a8b"
+    board.card(
+        card, "running", ago(hours=1), agent=agent, board="5b7d1c2e-1f3a-4b5c-8d9e-0a1b2c3d4e5f"
+    )
+    key = f"agent:{agent}:subagent:workboard-5b7d1c2e-1f3a-4b5c-8d9e-0a1b2c3d4e5f-{card}"
+    assert len(key) > 128
+    spool.tool("s1", ago(minutes=1), key=key, agent=agent)
+    (s,) = adapter(tmp_path, spool).snapshot(NOW).sessions
+    assert s.task_id == card
+
+
 def test_check(tmp_path: Path, spool: Spool, board: Workboard) -> None:
     assert adapter(tmp_path, spool).check() is None
     assert adapter(tmp_path, spool, workboard_db=tmp_path / "none.sqlite").check() is None

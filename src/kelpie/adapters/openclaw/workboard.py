@@ -66,7 +66,9 @@ from kelpie.core.model import Block, Dependency, Status, Task
 
 BUSY_TIMEOUT_MS = 5000
 READ_DEADLINE = 10.0  # seconds one snapshot's read may take before it is interrupted
-MAX_VALUE = 1_000_000  # bytes; a larger text or blob in the database fails the read
+# Bytes; a larger text or blob Kelpie reads fails the whole read (a single value is not
+# interruptible): big enough for a pasted log in a card's notes, small enough to bound memory.
+MAX_VALUE = 16 * 1024 * 1024
 MAX_TITLE = 200
 MAX_BODY = 8000  # characters of a card's notes kept in the snapshot
 MAX_REASON = 500
@@ -227,8 +229,12 @@ def missing_columns(conn: sqlite3.Connection) -> list[str]:
     return missing
 
 
-def read_board(path: Path, cutoff: datetime, now: datetime, source: str) -> Board:
-    """Cards and dependencies as of ``now``; raises :class:`WorkboardError`."""
+def read_board(
+    path: Path, cutoff: datetime, now: datetime, source: str, secret: bytes | None = None
+) -> Board:
+    """Cards and dependencies as of ``now``; raises :class:`WorkboardError`. ``secret`` is
+    the hook's key for session key pseudonyms (:func:`~kelpie.adapters.openclaw.plugin.
+    kelpie_hook.peer_key`)."""
     conn = connect(path)
     try:
         conn.execute("BEGIN")  # one read transaction: a consistent view
@@ -239,12 +245,7 @@ def read_board(path: Path, cutoff: datetime, now: datetime, source: str) -> Boar
                 f"Workboard database {path} lacks {', '.join(missing)}: "
                 "an OpenClaw version Kelpie does not know"
             )
-        rows = conn.execute(CARDS_SQL, (MAX_CARDS,)).fetchall()
-        rows = [
-            r
-            for r in rows
-            if r["status"] != "done" or (_ms(r["completed_at"] or r["updated_at"]) or now) >= cutoff
-        ]
+        rows = conn.execute(CARDS_SQL, (int(cutoff.timestamp() * 1000), MAX_CARDS)).fetchall()
         ids = [r["id"] for r in rows]
         labels = _grouped(conn, "SELECT card_id, label FROM workboard_card_labels", ids, "ordinal")
         events = _grouped(
@@ -276,7 +277,7 @@ def read_board(path: Path, cutoff: datetime, now: datetime, source: str) -> Boar
     cards: list[Card] = []
     unknown: set[str] = set()
     for row in rows:
-        card = _card(row, labels, events, attempts, comments, now, source)
+        card = _card(row, labels, events, attempts, comments, now, source, secret)
         if card is not None:
             cards.append(card)
         elif isinstance(row["status"], str) and row["status"] not in STATUS_MAP:
@@ -308,7 +309,9 @@ CARDS_SQL = (
     "AS claim_owner, "
     "CASE WHEN json_valid(claim_json) THEN json_extract(claim_json, '$.expiresAt') END "
     "AS claim_expires "
-    "FROM workboard_cards WHERE archived_at IS NULL ORDER BY updated_at DESC LIMIT ?"
+    "FROM workboard_cards WHERE archived_at IS NULL "
+    "AND (status != 'done' OR coalesce(completed_at, updated_at) >= ?) "
+    "ORDER BY updated_at DESC LIMIT ?"
 )
 
 
@@ -386,6 +389,7 @@ def _card(
     comments: Mapping[str, list[sqlite3.Row]],
     now: datetime,
     source: str,
+    secret: bytes | None,
 ) -> Card | None:
     card_id = row["id"]
     if not _valid_id(card_id):
@@ -419,8 +423,8 @@ def _card(
     return Card(
         task=task,
         # Reduced like the hook's, so a card captured from a person's chat still matches.
-        session_key=safe_session_key(row["session_key"])
-        or safe_session_key(row["execution_session_key"]),
+        session_key=safe_session_key(row["session_key"], secret)
+        or safe_session_key(row["execution_session_key"], secret),
         run_id=_text(row["run_id"]) or _text(row["execution_run_id"]),
         board=_text(row["board_id"]) or "default",
     )

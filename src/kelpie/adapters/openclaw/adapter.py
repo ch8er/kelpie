@@ -57,6 +57,11 @@ from pathlib import Path
 from typing import Any
 
 from kelpie.adapters.openclaw import workboard
+from kelpie.adapters.openclaw.plugin.kelpie_hook import (
+    peer_key_path,
+    read_peer_key,
+    safe_session_key,
+)
 from kelpie.adapters.openclaw.workboard import Card, WorkboardError
 from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
@@ -243,6 +248,12 @@ class OpenClawAdapter:
         not a problem: sessions only."""
         if self._board_error is not None:
             return self._board_error
+        if self._last_board is None:  # no snapshot yet (kelpie status): read it now
+            try:
+                self.board(datetime.now(UTC))
+            except OpenClawError as exc:
+                return str(exc)
+            return None
         db = self.workboard_db
         if db is None or not db.exists():
             return None
@@ -313,7 +324,7 @@ class OpenClawAdapter:
             )
             return workboard.Board(cards=(), dependencies=())
         try:
-            board = workboard.read_board(db, now - self.lookback, now, self.name)
+            board = workboard.read_board(db, now - self.lookback, now, self.name, self._peer_key())
         except WorkboardError as exc:
             raise OpenClawError(str(exc), "the OpenClaw Workboard could not be read") from exc
         for status in board.unknown:  # agents control the text: one warning per status
@@ -361,9 +372,15 @@ class OpenClawAdapter:
         return board
 
     def _sessions(self, events: Sequence[SpoolEvent], cards: Sequence[Card]) -> tuple[Session, ...]:
+        secret = self._peer_key()
         by_key: dict[str, Task] = {}
+        unassigned: list[tuple[str, Task]] = []  # worker keys the Gateway puts an agent in front of
         for c in cards:  # newest first: on a tie the most recently updated card wins
-            for k in (c.session_key, c.worker_key()):
+            worker = c.worker_key()
+            if worker is not None and worker.startswith("subagent:"):
+                unassigned.append((worker, c.task))
+                worker = None
+            for k in (c.session_key, safe_session_key(worker, secret)):
                 if k and _rank(c.task) > _rank(by_key.get(k)):
                     by_key[k] = c.task
         grouped: dict[str, list[SpoolEvent]] = {}
@@ -374,8 +391,8 @@ class OpenClawAdapter:
             last = evs[-1]
             ended = last.type == "session_end"
             key = next((e.session_key for e in reversed(evs) if e.session_key), None)
-            card = _card_for(key, by_key)
             agent = next((e.agent for e in reversed(evs) if e.agent), None)
+            card = _card_for(key, agent, by_key, unassigned, secret)
             owner = card.owner_id if card is not None else None
             run_end = next((e for e in reversed(evs) if e.type == "run_end"), None)
             failure = "run failed" if run_end is not None and run_end.success is False else None
@@ -486,6 +503,11 @@ class OpenClawAdapter:
             if (event := parse_line(line, cutoff, until)) is not None:
                 yield event
 
+    def _peer_key(self) -> bytes | None:
+        """The hook's key for session key pseudonyms (next to the spool), if Kelpie can read
+        it; never created here."""
+        return None if self.spool is None else read_peer_key(peer_key_path(self.spool))
+
     def _warn(self, key: str, message: str, *args: object) -> None:
         if key not in self._warned:
             self._warned.add(key)
@@ -517,18 +539,27 @@ class OpenClawAdapter:
         raise UnsupportedAction(UNSUPPORTED)
 
 
-def _card_for(key: str | None, by_key: Mapping[str, Task]) -> Task | None:
-    """The card a session key works on: the card that names the key, else, as Workboard
-    matches its workers, a card whose ``subagent:...`` key the session key ends with (the
-    Gateway puts the default agent in front of an unassigned card's worker key)."""
+def _card_for(
+    key: str | None,
+    agent: str | None,
+    by_key: Mapping[str, Task],
+    unassigned: Sequence[tuple[str, Task]],
+    secret: bytes | None,
+) -> Task | None:
+    """The card a session key works on: the card that names the key or whose worker it is,
+    else, as Workboard matches its workers, an unassigned card whose ``subagent:...`` key
+    the session's key is with its agent in front (the Gateway puts its default agent there).
+    Keys are compared as the hook reduced them."""
     if key is None:
         return None
     if (card := by_key.get(key)) is not None:
         return card
-    for k, task in by_key.items():
-        if k.startswith("subagent:") and key.endswith(":" + k):
-            return task
-    return None
+    best: Task | None = None
+    for worker, task in unassigned:
+        full = safe_session_key(f"agent:{agent}:{worker}", secret) if agent else None
+        if (key == full or key.endswith(":" + worker)) and _rank(task) > _rank(best):
+            best = task
+    return best
 
 
 def _rank(task: Task | None) -> int:

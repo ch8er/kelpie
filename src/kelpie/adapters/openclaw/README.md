@@ -108,7 +108,9 @@ ingest and the other hooks (one block, kept byte-identical by a test; details in
 [docs/privacy.md](../../../../docs/privacy.md#hermes-hooks-plugin)). A tool call that failed is
 recorded as `outcome: "error"`, without its message. Session keys that name a chat peer or a
 group (`agent:main:whatsapp:direct:<phone number>`) keep the channel and its kind and lose the
-rest to a hash (`agent:main:whatsapp:direct:~3f2a9c01d4e5`); keys that name no one
+rest to an HMAC keyed with the install's own secret, `peer.key` next to the spool
+(`agent:main:whatsapp:direct:~3f2a9c01d4e5`; a plain hash of a phone number could be reversed
+by trying every number); keys that name no one
 (`agent:main:main`, subagents, cron) are kept, so Workboard cards still match; `hook:` keys,
 which come from operator templates, keep only `hook:`. The hook
 process gets only `PATH`, `HOME`,

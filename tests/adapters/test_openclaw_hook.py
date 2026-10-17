@@ -4,6 +4,7 @@ never failing."""
 from __future__ import annotations
 
 import ast
+import hashlib
 import io
 import json
 import os
@@ -20,6 +21,7 @@ from kelpie.traces.args import args_hash
 from tests.traces.test_redaction import LEAKS
 
 SID = "1ce1fbe0-c1fc-4572-91c4-394ad62e4a40"
+SECRET = bytes(range(32))
 CTX = {"sessionId": SID, "sessionKey": "agent:main:main", "agentId": "main", "runId": "run-1"}
 
 
@@ -229,7 +231,7 @@ def test_a_symlinked_spool_is_not_followed(spool: Path, tmp_path: Path) -> None:
     ],
 )
 def test_session_keys_lose_their_peer(key: str, kept: bool) -> None:
-    out = hook.safe_session_key(key)
+    out = hook.safe_session_key(key, SECRET)
     assert out is not None
     if kept:
         assert out == key
@@ -238,14 +240,43 @@ def test_session_keys_lose_their_peer(key: str, kept: bool) -> None:
         assert out.split(":")[-1].startswith("~")
         for secret in ("alice", "u0123abcd", "u01", "+15550100", "-100123", "imap", "123"):
             assert secret not in kept_parts
-        assert out == hook.safe_session_key(key)  # stable: the same peer, the same key
+        assert out == hook.safe_session_key(key, SECRET)  # stable: the same peer, the same key
 
 
 def test_long_keys_are_hashed_whole() -> None:
     base = "agent:main:whatsapp:direct:" + "9" * 200
-    a, b = hook.safe_session_key(base + "1"), hook.safe_session_key(base + "2")
+    a, b = hook.safe_session_key(base + "1", SECRET), hook.safe_session_key(base + "2", SECRET)
     assert a != b and a is not None and len(a) < 64
-    assert hook.safe_session_key("x" * 5000) is None
+    assert hook.safe_session_key("x" * 5000, SECRET) is None
+
+
+def test_pseudonyms_are_keyed(tmp_path: Path) -> None:
+    """A phone number cannot be found by hashing every number: the digits are an HMAC."""
+    key = "agent:main:whatsapp:direct:+15550100"
+    plain = hashlib.sha256(b"+15550100").hexdigest()[:12]
+    one = hook.safe_session_key(key, SECRET)
+    other = hook.safe_session_key(key, bytes(32))
+    assert one is not None and other is not None and one != other and plain not in one
+    assert hook.safe_session_key(key, None) == "agent:main:whatsapp:direct:~nokey"
+    assert hook.safe_session_key("agent:main:main", None) == "agent:main:main"
+
+
+def test_the_peer_key_file(spool: Path) -> None:
+    path = hook.peer_key_path()
+    assert path == spool.with_name("peer.key") and not path.exists()
+    run(forwarded("after_tool_call", {"toolName": "read", "params": {}}))
+    assert not path.exists()  # a key that names no one needs no secret
+    dm = "agent:main:whatsapp:direct:+15550100"
+    run(forwarded("after_tool_call", {"toolName": "read", "params": {}}, sessionKey=dm))
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    secret = hook.read_peer_key(path)
+    assert secret is not None and len(secret) == 32
+    run(forwarded("after_tool_call", {"toolName": "read", "params": {}}, sessionKey=dm))
+    first, second = (r["session_key"] for r in lines(spool)[1:])
+    assert first == second == hook.safe_session_key(dm, secret)
+    path.write_text("short")
+    assert hook.read_peer_key(path) is None
+    assert hook.peer_key() is None  # an unusable key file is not replaced
 
 
 def test_the_spool_holds_the_reduced_key(spool: Path) -> None:

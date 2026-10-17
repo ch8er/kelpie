@@ -190,7 +190,7 @@ def test_text_is_cut_in_the_query(board: Workboard) -> None:
 def test_a_huge_value_fails_the_read_at_once(board: Workboard) -> None:
     board.card("c", "running", ago(hours=1))
     with sqlite3.connect(board.path) as db:
-        db.execute("UPDATE workboard_cards SET agent_id = ? WHERE id = 'c'", ("a" * 2_000_000,))
+        db.execute("UPDATE workboard_cards SET agent_id = ? WHERE id = 'c'", ("a" * 20_000_000,))
     with pytest.raises(WorkboardError, match="too big"):
         read_board(board.path, CUTOFF, NOW, "openclaw")
 
@@ -200,6 +200,13 @@ def test_a_missing_ordering_column_is_named(board: Workboard) -> None:
         db.execute("ALTER TABLE workboard_card_events DROP COLUMN ordinal")
     with pytest.raises(WorkboardError, match=r"workboard_card_events\.ordinal"):
         read_board(board.path, CUTOFF, NOW, "openclaw")
+
+
+def test_old_done_cards_are_not_read(board: Workboard) -> None:
+    """A huge value on a card Kelpie leaves out does not fail the board."""
+    board.card("old", "done", ago(days=3), completed_at=ago(days=2), notes="n" * 20_000_000)
+    board.card("c", "todo", ago(hours=1), notes="n" * 2_000_000)
+    assert set(tasks(board)) == {"c"}
 
 
 def test_worker_keys(board: Workboard) -> None:

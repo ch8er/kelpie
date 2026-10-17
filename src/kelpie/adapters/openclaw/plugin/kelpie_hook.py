@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -289,7 +290,54 @@ _KEY_WORD = re.compile(r"[a-z][a-z0-9_-]{0,31}")  # used with fullmatch
 MAX_KEY_INPUT = 4096  # a longer session key is not looked at (it is not OpenClaw's)
 
 
-def safe_session_key(key: Any) -> str | None:
+PEER_KEY_NAME = "peer.key"  # next to the spool: the secret of the session key pseudonyms
+PEER_KEY_BYTES = 32
+NO_KEY = "nokey"  # stands in for every pseudonym when the secret cannot be had
+
+
+def peer_key_path(spool: Path | None = None) -> Path:
+    return (spool or spool_path()).with_name(PEER_KEY_NAME)
+
+
+def read_peer_key(path: Path) -> bytes | None:
+    """The secret, if a usable one is there (a regular file, not a symlink, of the right
+    size); ``None`` otherwise."""
+    try:
+        fd = os.open(path, os.O_RDONLY | _NO_WAIT)
+    except OSError:
+        return None
+    try:
+        raw = os.read(fd, 2 * PEER_KEY_BYTES + 2)
+    finally:
+        os.close(fd)
+    try:
+        secret = bytes.fromhex(raw.decode("ascii").strip())
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return secret if len(secret) == PEER_KEY_BYTES else None
+
+
+def peer_key(spool: Path | None = None) -> bytes | None:
+    """The per-install secret, created on first use (mode 0600, never replaced)."""
+    path = peer_key_path(spool)
+    secret = read_peer_key(path)
+    if secret is not None:
+        return secret
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NO_WAIT, 0o600)
+    except FileExistsError:
+        return read_peer_key(path)  # another hook created it first
+    except OSError:
+        return None
+    try:
+        os.write(fd, os.urandom(PEER_KEY_BYTES).hex().encode("ascii") + b"\n")
+    finally:
+        os.close(fd)
+    return read_peer_key(path)
+
+
+def safe_session_key(key: Any, secret: bytes | None) -> str | None:
     """A session key without the identity of the person or group it is with.
 
     OpenClaw keys a per-peer conversation as ``agent:<id>:<channel>:direct:<peerId>`` (or
@@ -300,9 +348,12 @@ def safe_session_key(key: Any) -> str | None:
     ``internal-session-effects``. In any other key everything after the first ``direct``,
     ``dm``, ``group`` or ``channel`` within the channel part (else everything after
     ``agent:<id>``, or the whole key) becomes ``~`` and 12 hex digits of its SHA-256, e.g.
-    ``agent:main:whatsapp:direct:~3f2a9c01d4e5``: the same peer gives the same key, nobody
-    can read the peer back. The whole key is hashed, never a cut-off part of it. Kelpie
-    applies the same function to Workboard's keys.
+    ``agent:main:whatsapp:direct:~3f2a9c01d4e5``. The digits are an HMAC-SHA256 with
+    ``secret``, the install's own key (:func:`peer_key`), so the same peer gives the same key
+    and a phone number cannot be found by hashing every number; whoever holds the key file
+    can still do that. The whole key is hashed, never a cut-off part of it. Without a secret
+    every reduced part is ``~nokey``. Kelpie applies the same function, with the same key
+    file, to Workboard's keys.
     """
     if isinstance(key, bool) or not isinstance(key, str):
         return None
@@ -322,14 +373,17 @@ def safe_session_key(key: Any) -> str | None:
         )
         if marker is not None and all(_KEY_WORD.fullmatch(p) for p in parts[2:marker]):
             head = parts[: marker + 1]
-        return ":".join([*head, "~" + _digest(":".join(parts[len(head) :]))])
+        return ":".join([*head, "~" + _digest(":".join(parts[len(head) :]), secret)])
     if parts[0] == "hook" and len(parts) >= 2:
-        return "hook:~" + _digest(":".join(parts[1:]))
-    return "~" + _digest(text)
+        return "hook:~" + _digest(":".join(parts[1:]), secret)
+    return "~" + _digest(text, secret)
 
 
-def _digest(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
+def _digest(text: str, secret: bytes | None) -> str:
+    if secret is None:
+        return NO_KEY
+    mac = hmac.new(secret, text.encode("utf-8", "replace"), hashlib.sha256)
+    return mac.hexdigest()[:12]
 
 
 def _command(args: Any) -> str | None:
@@ -378,6 +432,19 @@ def _field(data: dict[str, Any], key: str) -> Any:
     return None
 
 
+def _session_key(key: Any) -> str | None:
+    """A key that names no one needs no secret: the key file is only read (or created) for
+    the others."""
+    plain = safe_session_key(key, None)
+    if plain is None or NO_KEY not in plain:
+        return plain
+    try:
+        secret = peer_key()
+    except Exception:  # the line matters more than its pseudonym
+        secret = None
+    return safe_session_key(key, secret)
+
+
 def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | None:
     """The spool line for one forwarded hook; ``None`` for hooks Kelpie does not record."""
     kind = EVENTS.get(str(data.get("hook")))
@@ -391,7 +458,7 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
         "at": _at(data.get("at"), clock),
         "session_id": session,
         "v": HOOK_VERSION,
-        "session_key": safe_session_key(_field(data, "sessionKey")),
+        "session_key": _session_key(_field(data, "sessionKey")),
         "agent": _id(_field(data, "agentId")),
         "run_id": _id(_field(data, "runId")),
     }
