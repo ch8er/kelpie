@@ -1,9 +1,15 @@
 """``kelpie doctor`` checks for ``[adapters.openclaw]``.
 
-Each check is ``(status, name, detail, fix)`` with status ``PASS``, ``FAIL`` or ``SKIP``;
+Each check is ``(status, name, detail, fix)`` with status ``PASS``, ``WARN``, ``FAIL`` or ``SKIP``;
 :mod:`kelpie.doctor` renders them. Nothing is created or written: the stop directory is only
 tested for being writable, and the Gateway is only asked for its health
 (``openclaw gateway call health``).
+
+What the checks expect of OpenClaw (2026.10.4, checked on a local Gateway): ``openclaw gateway
+call health --json`` prints ``{"ok": true, ..., "plugins": {"loaded": ["workboard", "kelpie",
+...], ...}}`` and exits 1 with ``ok: false`` when the Gateway is down; ``openclaw plugins
+install --link <dir>`` adds the absolute ``<dir>`` to ``plugins.load.paths``, and ``openclaw
+plugins enable kelpie`` sets ``plugins.entries.kelpie.enabled`` to true in ``openclaw.json``.
 """
 
 from __future__ import annotations
@@ -36,7 +42,7 @@ HEALTH_TIMEOUT = 20.0
 MAX_LOAD_PATHS = 32  # plugins.load.paths entries looked at
 PLUGIN_ID = "kelpie"
 PLUGIN_DIR = Path(kelpie_hook.__file__).parent  # this Kelpie's copy of the plugin
-PLUGIN_FILES = ("index.js", "kelpie_hook.py")
+PLUGIN_FILES = ("index.js", "kelpie_hook.py", "openclaw.plugin.json")
 QUICKSTART = "docs/quickstart-openclaw.md"
 
 WORKBOARD, HOOKS, CONFIGURED, GATEWAY, STOP = (
@@ -240,11 +246,7 @@ def check_configured(adapter: OpenClawAdapter) -> CheckTuple:
             "again and restart the Gateway"
         )
     hooks = entry.get("hooks")
-    if not (isinstance(hooks, Mapping) and hooks.get("allowConversationAccess") is True):
-        problems.append(
-            "no conversation access (needed for token usage, to refuse scheduled runs of a "
-            "stopped session and to let the operator lift a stop)"
-        )
+    access = isinstance(hooks, Mapping) and hooks.get("allowConversationAccess") is True
     settings = entry.get("config")
     settings = settings if isinstance(settings, Mapping) else {}
     for key, ours, default in (
@@ -253,11 +255,21 @@ def check_configured(adapter: OpenClawAdapter) -> CheckTuple:
     ):
         if ours is None:
             continue
-        theirs = settings.get(key, default)
+        theirs = settings.get(key) or default  # the plugin reads "" as its default
         if not isinstance(theirs, str) or _expanded(theirs) != ours:
             problems.append(f"the plugin's {key} is not Kelpie's ({_shown(ours)})")
     if problems:
         return _fail(CONFIGURED, "; ".join(problems) + f" ({_shown(path)})", fix)
+    if not access:
+        return (
+            "WARN",
+            CONFIGURED,
+            "enabled, but without conversation access: stops hold for tool calls only, "
+            "scheduled runs of a stopped session still start and token usage is not recorded "
+            f"({_shown(path)})",
+            "openclaw config set plugins.entries.kelpie.hooks.allowConversationAccess true "
+            "(unless it is off on purpose) and restart the Gateway",
+        )
     return _ok(
         CONFIGURED, f"enabled, this Kelpie's copy loaded from {_shown(found[0])} ({_shown(path)})"
     )

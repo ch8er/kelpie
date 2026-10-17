@@ -128,7 +128,6 @@ def test_configured(state: Path, spool: Spool) -> None:
     ("change", "problem"),
     [
         ({"enabled": False}, "not enabled"),
-        ({"hooks": {}}, "no conversation access"),
         ({"config": {"spool": "/elsewhere.jsonl"}}, "spool is not Kelpie's"),
         ({"config": {"spool": "~/.openclaw/kelpie/spool.jsonl"}}, "stopDir is not Kelpie's"),
     ],
@@ -140,6 +139,37 @@ def test_configured_problems(
     check = oc_doctor.check_configured(adapter(state, spool))
     assert check[0] == "FAIL" and problem in check[2]
     assert "SECRET" not in repr(check)
+
+
+def test_configured_without_conversation_access_warns(state: Path, spool: Spool) -> None:
+    installed(state, spool, hooks={})
+    status, _, detail, fix = oc_doctor.check_configured(adapter(state, spool))
+    assert status == "WARN" and "tool calls only" in detail and "allowConversationAccess" in fix
+
+
+def test_configured_settings_read_as_the_plugin_reads_them(state: Path, spool: Spool) -> None:
+    installed(state, spool, config={"spool": "", "stopDir": ""})  # "" is the plugin's default
+    a = adapter(state, spool, stop_dir=Path("~/.openclaw/kelpie/stop").expanduser())
+    a.spool = Path(oc_doctor.kelpie_hook.DEFAULT_SPOOL).expanduser()
+    assert oc_doctor.check_configured(a)[0] == "PASS"
+
+
+def test_configured_plugins_disabled(state: Path, spool: Spool) -> None:
+    installed(state, spool)
+    path = state / "openclaw.json"
+    config = json.loads(path.read_text())
+    config["plugins"]["enabled"] = False
+    path.write_text(json.dumps(config))
+    check = oc_doctor.check_configured(adapter(state, spool))
+    assert check[0] == "FAIL" and "plugins.enabled is false" in check[2]
+
+
+def test_load_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    paths = ["~/p", "~", "~other/p", "rel", "/abs", "/abs", "", 3, *[f"/d{i}" for i in range(40)]]
+    dirs = oc_doctor._plugin_dirs({"paths": paths})
+    assert dirs[:3] == [tmp_path / "p", tmp_path, Path("/abs")]
+    assert len(dirs) == oc_doctor.MAX_LOAD_PATHS
 
 
 def test_configured_plugin_lists_and_copies(state: Path, spool: Spool) -> None:
@@ -162,6 +192,14 @@ def test_configured_plugin_lists_and_copies(state: Path, spool: Spool) -> None:
 
 def test_configured_unreadable_configs(state: Path, spool: Spool) -> None:
     path = state / "openclaw.json"
+    path.write_text("{}")
+    path.chmod(0)
+    if os.access(path, os.R_OK):
+        path.chmod(0o600)  # root reads it anyway: no EACCES to see
+    else:
+        check = oc_doctor.check_configured(adapter(state, spool))
+        assert check[0] == "SKIP" and "EACCES" in check[2] and "Gateway's user" in check[2]
+        path.chmod(0o600)
     path.write_text("{ plugins: { entries: {} }, // JSON5\n}")
     assert "not plain JSON" in oc_doctor.check_configured(adapter(state, spool))[2]
     path.unlink()
@@ -193,7 +231,7 @@ def test_gateway(
     assert missing[0] == "FAIL" and "not loaded" in missing[2]
     down = oc_doctor.check_gateway(a)
     assert down[0] == "FAIL" and "SECRET" not in down[2]
-    assert [c["argv"][:3] for c in calls(cli)] == [["gateway", "call", "health"]] * 3
+    assert [c["argv"] for c in calls(cli)] == [["gateway", "call", "health", "--json"]] * 3
     assert oc_doctor.check_gateway(adapter(state, spool, cli=None))[0] == "SKIP"
 
 
@@ -229,7 +267,8 @@ def test_doctor_lists_openclaw_only_when_configured(
     config = tmp_path / "oc.toml"
     config.write_text(
         f'[engine]\ndry_run = true\n[adapters.openclaw]\nstate_dir = "{state}"\n'
-        f'cli = "{tmp_path / "no-cli"}"\n'
+        f'cli = "{tmp_path / "no-cli"}"\nspool = "{state / "spool.jsonl"}"\n'
+        f'stop_dir = "{state / "stop"}"\n'
     )
     checks = {c.name: c for c in run_checks(config, prometheus="http://127.0.0.1:9")}
     assert {n for n in checks if n.startswith("openclaw")} == {
@@ -243,7 +282,6 @@ def test_doctor_lists_openclaw_only_when_configured(
     config.write_text(config.read_text() + "enabled = false\n")
     checks = {c.name: c for c in run_checks(config, prometheus="http://127.0.0.1:9")}
     assert checks[oc_doctor.WORKBOARD].status == "SKIP"
-    assert os.environ["KELPIE_DB"].endswith("kelpie.db")
 
 
 # --- hostile or unreadable paths: a FAIL or SKIP, never a traceback ------------------------

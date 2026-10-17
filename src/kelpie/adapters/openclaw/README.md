@@ -193,7 +193,7 @@ Verified on OpenClaw 2026.10.4 (local Gateway, a mock model that loops on one to
 - a looping `openclaw agent` run: the marker refused the next tool calls, `sessions.abort`
   answered `{"ok": true, "status": "aborted"}` in about a second, and the model saw no request
   after it;
-- a heartbeat run (`openclaw system event --mode now`) on the stopped session was refused by
+- a heartbeat run (`openclaw system event --text check --mode now`) on the stopped session was refused by
   `before_agent_run` before any model call;
 - a message sent with `openclaw agent` (an operator client) lifted the stop and went through;
 - OpenClaw's own `skill-workshop-review` background run, which starts after a long run with

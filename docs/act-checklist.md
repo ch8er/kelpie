@@ -191,7 +191,7 @@ The steps above apply, with these differences
 - [ ] Instead of a test board (step 3), test on a throwaway agent: the quickstart's step 7
   writes a marker by hand. Then lower `loop_breaker`'s thresholds and let it stop a session you
   make loop on purpose. Expect the tool call refused with "Stopped by Kelpie: ...", a
-  heartbeat (`openclaw system event --mode now`) refused before any model call, the ledger
+  heartbeat (`openclaw system event --text check --mode now`) refused before any model call, the ledger
   `executed` and the message saying the run was aborted. A session shown as `stop not
   enforced` means the plugin did not see the marker: check the preconditions.
 - [ ] Undo: send the session a message from the CLI or the Control UI (the operator), `/new`,

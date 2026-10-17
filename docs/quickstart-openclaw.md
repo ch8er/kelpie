@@ -24,8 +24,9 @@ cd kelpie
 uv sync
 ```
 
-If the Gateway sets `OPENCLAW_STATE_DIR`, use that directory wherever this guide says
-`~/.openclaw`.
+If the Gateway sets `OPENCLAW_STATE_DIR`, set `state_dir` (step 4) to it: `openclaw.json` and
+the Workboard follow it. The spool and stop directory stay under `~/.openclaw/kelpie` on both
+sides unless you set them.
 
 ## 2. Tasks: the Workboard (optional)
 
@@ -102,15 +103,17 @@ What `kelpie doctor` checks for OpenClaw:
 - **workboard**: the Workboard database can be read with the columns Kelpie needs, how many
   cards there are and how many run. SKIP when the Workboard is off or not enabled.
 - **plugin fires**: the spool has a line from the last hour, from a plugin that enforces stops
-  (unless `stop_dir = false`). While no card runs, a missing or old spool is a SKIP, so run
-  doctor while an agent works.
+  (unless `stop_dir = false`). With the Workboard, a missing or old spool is a SKIP while no
+  card runs; without it, it is a FAIL. Run doctor within an hour of an agent run.
 - **plugin configured**: `openclaw.json` enables the plugin, loads it from a directory holding
-  this Kelpie's copy (byte for byte), grants conversation access, is not denied or left out of
-  `plugins.allow`, and points it at Kelpie's spool and stop directory. Only the `plugins`
-  section is looked at, and only the plugin's load path is shown. Relative and `~user` load
-  paths are not checked.
-- **gateway**: `openclaw gateway call health` answers and lists `kelpie` among the loaded
-  plugins (so stops can abort runs). The answer's shape was checked against OpenClaw 2026.10.4.
+  this Kelpie's copy (`index.js`, `kelpie_hook.py` and `openclaw.plugin.json`, byte for byte),
+  is not denied or left out of `plugins.allow`, and points it at Kelpie's spool and stop
+  directory. Only the `plugins` section is looked at, and only the plugin's load path is
+  shown. Relative and `~user` load paths are ignored, so a config with only those fails.
+  Without conversation access this is a WARN: stops then hold for tool calls only.
+- **gateway**: `openclaw gateway call health` answers (so the CLI can reach the Gateway to
+  abort a stopped session's run) and lists `kelpie` among the loaded plugins (so the Gateway
+  enforces stop markers). The answer's shape was checked against OpenClaw 2026.10.4.
 - **stop markers**: `stop_dir` is a plain directory Kelpie can write, or can be created.
 
 ## 6. Watch a loop (still observe)
@@ -129,16 +132,29 @@ heartbeat runs of the main session that repeat the same call count as one streak
 
 ## 7. Try a stop by hand (before any `act`)
 
-On a throwaway agent, write a stop marker the way Kelpie does and watch the plugin refuse:
+On a throwaway agent (`AGENT` below is its id; message it once first so the spool has a
+line from it), write a stop marker the way Kelpie does and watch the plugin refuse:
 
 ```bash
-SID=$(python3 -c "import json; print([json.loads(l) for l in open('$HOME/.openclaw/kelpie/spool.jsonl')][-1]['session_id'])")
-python3 - "$SID" <<'EOF'
+AGENT=scratch
+python3 - "$AGENT" <<'EOF'
 import json, os, sys, time
+sessions = []
+with open(os.path.expanduser("~/.openclaw/kelpie/spool.jsonl")) as spool:
+    for line in spool:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("agent") == sys.argv[1]:
+            sessions.append(event.get("session_id"))
+if not sessions or not sessions[-1]:
+    sys.exit(f"no spool line from agent {sys.argv[1]!r} yet")
 d = os.path.expanduser("~/.openclaw/kelpie/stop")
 os.makedirs(d, mode=0o700, exist_ok=True)
-with open(os.path.join(d, sys.argv[1] + ".json"), "w") as f:
+with open(os.path.join(d, sessions[-1] + ".json"), "w") as f:
     json.dump({"at": time.time(), "reason": "manual test"}, f)
+print("stopped session", sessions[-1])
 EOF
 ```
 
