@@ -23,7 +23,11 @@ skipped.
   same graph rule 3 uses) and what waits behind it;
 - the rule findings about it: actions on the task, or naming it in their params (a chain,
   a list of dependents), with each rule's configured mode; with none, what would make a rule
-  act on a task parked before work or on its conditions;
+  act on a task parked before work or on its conditions. A finding about the explained task
+  (never one that merely names it) whose verdict rests on something ``why`` cannot see
+  carries a ``note``: a block serve would give a condition (offline), or the code host's PR
+  lists, which serve knows in full only after two scans in a row while ``why`` reads them
+  once (``--refresh``) or not at all (offline);
 - its open alert states and its latest ledger entries, read from the database without
   writing to it.
 
@@ -73,6 +77,7 @@ from kelpie.core.storage import (
 from kelpie.metrics import Metrics
 from kelpie.rules._chains import BlockerGraph, Chain
 from kelpie.rules._tasks import DEFAULT_STALE_AFTER, is_live, last_seen, linked_conditions
+from kelpie.rules.orphan_status import PARENT_UNVERIFIED
 from kelpie.traces.store import SpanWindow
 
 log = logging.getLogger(__name__)
@@ -88,6 +93,17 @@ NOT_CHECKED = "not checked (offline; --refresh checks {})"  # {}: "it" or "them"
 # Rules whose verdict on a block rests on it having no condition: offline they judge the
 # bare block, while serve attaches the condition the reason would give.
 CONDITION_RULES = frozenset({"exit_contract", "stale_blocks"})
+# Verdicts that rest on the code host's PR lists being known in full
+# (``Snapshot.pull_requests_complete``), which the connector grants only after two full scans
+# in a row. ``why`` reads them once at most, so these may differ from what serve says.
+PR_LISTS_OFFLINE = (
+    "offline: why does not read the PR lists; serve, which does, may judge this parent "
+    "differently (ask to close it, name unmerged PRs, or not count it finished)"
+)
+PR_LISTS_REFRESH = (
+    "why reads the PR lists once; serve knows them in full only after two scans in a row "
+    "and may say parent-left-open instead"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,8 +201,8 @@ def read_snapshot(
     github = settings.github
     if not refresh and github is not None and github.enabled:
         problems.append(
-            "GitHub conditions were not read (offline); conditions and blocks that depend on "
-            "them may differ from what kelpie serve sees: pass --refresh"
+            "GitHub conditions were not read (offline); conditions, blocks and the PR lists "
+            "that some verdicts depend on may differ from what kelpie serve sees: pass --refresh"
         )
     store: SpanStore | None = None
     db = settings.db_path
@@ -383,6 +399,52 @@ def _offline_note(expected: Sequence[Expected]) -> str | None:
     )
 
 
+def _pr_lists_note(settings: Settings, snapshot: Snapshot, refresh: bool) -> str | None:
+    """The caveat for verdicts that rest on the PR lists, or None when there is no gap to
+    explain: serve reads the lists only through ``[connectors.github.pulls]``, and a snapshot
+    that already knows them in full needs no caveat."""
+    github = settings.github
+    if github is None or not github.enabled or github.pulls is None or not github.pulls.enabled:
+        return None
+    if snapshot.pull_requests_complete is True:
+        return None
+    return PR_LISTS_REFRESH if refresh else PR_LISTS_OFFLINE
+
+
+def _waits_on_pr_lists(action: Action, refreshed: bool) -> bool:
+    """Whether serve, knowing the PR lists in full, could judge this action differently: rule
+    3's ``parent-unverified``. Offline ``why`` has no PR at all, so any other verdict on the
+    parent is possible. After ``--refresh`` it has read the PRs once: unless every subtask
+    already has a merged PR of its own, serve is as unsure as ``why`` is; only then could it
+    say ``parent-left-open``."""
+    if action.rule != "orphan_status" or action.params.get("pattern") != PARENT_UNVERIFIED:
+        return False
+    if not refreshed:
+        return True
+    return not action.params.get("uncovered") and bool(action.params.get("merged_prs"))
+
+
+def _noted(
+    finding: Finding,
+    task_id: str,
+    block_note: str | None,
+    lists_note: str | None,
+    refreshed: bool = False,
+) -> Finding:
+    """``finding`` with the caveats that apply to it, for the task being explained only: a
+    block that serve would give a condition (``block_note``), a verdict that rests on PR lists
+    ``why`` does not know in full (``lists_note``). Other findings are untouched."""
+    action = finding.action
+    if action.task_id != task_id:
+        return finding
+    notes: list[str] = []
+    if block_note and action.rule in CONDITION_RULES:
+        notes.append(block_note)
+    if lists_note and _waits_on_pr_lists(action, refreshed):
+        notes.append(lists_note)
+    return replace(finding, note=" ".join(notes)) if notes else finding
+
+
 def explain_snapshot(
     loaded: LoadedRules, snapshot: Snapshot, task_id: str, dry_run: bool = True
 ) -> Explanation | None:
@@ -436,13 +498,9 @@ def explain(
         return Failure("not_found", f"task {task_id} is not on the board", read.problems, 1)
     ex.refreshed = refresh
     ex.expected, ex.block_patterns = expected_conditions(settings, read.snapshot, ex.task, refresh)
-    if note := _offline_note(ex.expected):
-        ex.findings = [
-            replace(f, note=note)
-            if f.action.rule in CONDITION_RULES and f.action.task_id == ex.task.id
-            else f
-            for f in ex.findings
-        ]
+    block_note = _offline_note(ex.expected)
+    lists_note = _pr_lists_note(settings, read.snapshot, refresh)
+    ex.findings = [_noted(f, ex.task.id, block_note, lists_note, refresh) for f in ex.findings]
     state_ids = [f.action.state for f in ex.findings if f.action.state is not None]
     ex.states, ex.entries, unread = read_history(settings.db_path, task_id, state_ids, entries)
     ex.problems = [*read.problems, *ex.problems, *unread]

@@ -61,13 +61,14 @@ class Pull:
     files: list[str] = field(default_factory=lambda: ["src/app.py"])
     title: str = ""
     branch: str = ""  # head branch, in the same repository
+    base: str = "main"  # the branch it targets; the simulated repositories' default is "main"
     mergeable_state: str = "unknown"  # clean | blocked | dirty | ... as GitHub reports it
     created: datetime | None = None
     updated: datetime | None = None
     # label -> when it was put on (issue events); the PR carries these labels now
     labels: dict[str, datetime] = field(default_factory=dict)
 
-    def body(self, repo: str = "") -> dict[str, Any]:
+    def body(self, repo: str = "", default_branch: str = "main") -> dict[str, Any]:
         stamp = self.updated or self.created or datetime.now(UTC)
         return {
             "number": self.number,
@@ -82,6 +83,7 @@ class Pull:
                 "ref": self.branch or f"pr-{self.number}",
                 "repo": {"full_name": repo},
             },
+            "base": {"ref": self.base, "repo": {"default_branch": default_branch}},
             "labels": [{"name": name} for name in self.labels],
             "mergeable_state": self.mergeable_state,
             "changed_files": len(self.files),
@@ -254,10 +256,17 @@ class FakeGitHub:
         if rest == "/pulls":
             state = (params or {}).get("state", "open")
             pulls = [p for p in repo.pulls.values() if state in ("all", p.state)]
-            return 200, [p.body(repo.name) for p in sorted(pulls, key=lambda p: -p.number)]
+            return 200, [
+                p.body(repo.name, repo.default_branch)
+                for p in sorted(pulls, key=lambda p: -p.number)
+            ]
         if m := re.fullmatch(r"/pulls/(\d+)", rest):
             pr = repo.pulls.get(int(m[1]))
-            return (200, pr.body(repo.name)) if pr else (404, {"message": "Not Found"})
+            return (
+                (200, pr.body(repo.name, repo.default_branch))
+                if pr
+                else (404, {"message": "Not Found"})
+            )
         if m := re.fullmatch(r"/issues/(\d+)/events", rest):
             pr = repo.pulls.get(int(m[1]))
             return (200, pr.events()) if pr else (404, {"message": "Not Found"})
