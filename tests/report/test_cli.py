@@ -73,7 +73,7 @@ def test_sources_follow_dry_run_and_budget_mode(
 def test_the_report_reads_the_board_s_conditions_and_the_hold_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from kelpie.core.model import Condition, ConditionKind, Snapshot
+    from kelpie.core.model import Condition, ConditionKind, Dependency, Snapshot, Status, Task
     from kelpie.report.run import load_inputs
 
     monkeypatch.delenv("KELPIE_DB", raising=False)
@@ -85,17 +85,34 @@ def test_the_report_reads_the_board_s_conditions_and_the_hold_labels(
         '[connectors.github]\nrepos = ["example/app"]\n'
         '[[block_conditions]]\npattern = "CI of #(?P<pr>\\\\d+)"\nkind = "ci_green"\n'
         'repo = "example/app"\n'
+        '[engine.rules.orphan_status]\nprework_after = "2h"\n'
     )
     src = sources(load_settings(config(tmp_path, extra)))
+    assert src.stuck_check is not None
+    now = datetime(2026, 3, 3, tzinfo=UTC)
+    card = Task("C-1", "c", Status.BACKLOG, now - timedelta(hours=3), prework=True)
+    held = replace(card, id="C-2", labels=("freeze",))  # rule 6's hold label, inherited
+    assert src.stuck_check(card, Snapshot(now=now, tasks=(card,))) == []  # 3 h > 2 h
+    assert src.stuck_check(held, Snapshot(now=now, tasks=(held,))) is None
     assert src.hold_labels == ("freeze", "merge-hold")
     [declared] = src.block_kinds
     assert declared.kind.value == "ci_status" and declared.repo == "example/app"
     assert declared.pattern.search("waiting for ci of #7")
     waits_on = (Condition("c-1", ConditionKind.CI_STATUS, "T-1"),)
-    board = Snapshot(now=datetime(2026, 3, 3, tzinfo=UTC), conditions=waits_on)
+    deps = (Dependency("T-2", "T-1"),)
+    board = Snapshot(now=datetime(2026, 3, 3, tzinfo=UTC), conditions=waits_on, dependencies=deps)
     loaded = load_inputs(replace(src, db_path=None), date(2026, 3, 2), board)
+    assert loaded.dependencies == deps and loaded.stuck_check is src.stuck_check
     assert loaded.conditions == waits_on and loaded.hold_labels == ("freeze", "merge-hold")
     assert loaded.block_kinds == src.block_kinds
+
+
+def test_an_invalid_rule_3_config_falls_back_to_its_defaults() -> None:
+    from kelpie.core.config import EngineConfig
+    from kelpie.report.cli import _stuck_check
+
+    bad = EngineConfig.from_mapping({"rules": {"orphan_status": {"prework_after": "soon"}}})
+    assert _stuck_check(bad) is None
 
 
 def test_the_report_board_attaches_human_task_conditions_without_network(

@@ -383,17 +383,26 @@ class OrphanStatus:
             },
         )
 
-    def _stuck_before_work(self, task: Task, snapshot: Snapshot) -> Action | None:
-        """f) In a pre-work status for too long while other tasks wait on it."""
+    def stuck_before_work(self, task: Task, snapshot: Snapshot) -> list[str] | None:
+        """Pattern f's test: the open tasks waiting behind a card stuck before work (``[]``
+        when nothing waits on it), or None when the card is not stuck: not a pre-work card,
+        not past ``prework_after`` (or the pattern is off), held or ignored, or queued
+        behind an unfinished parent of its own. The daily report lists the ``[]`` cards."""
         after = self.prework_after
-        if after is None or not task.prework or snapshot.now - task.status_since < after:
+        if after is None or not task.prework or task.status.is_terminal or self._skipped(task):
+            return None
+        if snapshot.now - task.status_since < after:
             return None
         if any(
             d.task_id == task.id and not _finished(d.depends_on, snapshot)
             for d in snapshot.dependencies
         ):
             return None  # it waits for its own parents: not stuck, queued
-        waiting = _open_dependents(task.id, snapshot)
+        return _open_dependents(task.id, snapshot)
+
+    def _stuck_before_work(self, task: Task, snapshot: Snapshot) -> Action | None:
+        """f) In a pre-work status for too long while other tasks wait on it."""
+        waiting = self.stuck_before_work(task, snapshot)
         if not waiting:
             return None
         return self._stop_alert(
