@@ -35,7 +35,7 @@ from kelpie.core.ledger import (
 from kelpie.core.model import Snapshot
 from kelpie.core.ports import ActionConnector, Alerter, Deferred, PlatformAdapter
 from kelpie.core.rule import Rule
-from kelpie.core.states import MemoryStateStore, StateStore, StateTracker, Transition
+from kelpie.core.states import MemoryStateStore, OpenState, StateStore, StateTracker, Transition
 
 log = logging.getLogger(__name__)
 
@@ -325,13 +325,13 @@ class Engine:
         ]
         results: list[Dispatched] = []
         for state in gone:
-            first_line = f"{state.summary.split('. ')[0].rstrip('.')}."
+            now_true = self._resolved_text(state, snapshot)
             age = snapshot.now - state.since
-            note = _StateNote(AlertTransition.RESOLVED, age, first_line)
+            note = _StateNote(AlertTransition.RESOLVED, age, now_true)
             notice = Action(
                 ActionKind.ALERT,
                 state.rule,
-                lead_in(AlertTransition.RESOLVED, age) + first_line,
+                lead_in(AlertTransition.RESOLVED, age) + now_true,
                 task_id=state.task_id,
                 key=f"resolved:{state.id}|{state.opened_at.isoformat()}",
                 params={"state": state.id},
@@ -341,6 +341,33 @@ class Engine:
             if dispatched.outcome in _HANDLED:  # otherwise retry the notice next tick
                 self._safe_state(lambda s=state: self.states.resolve(s, snapshot.now))
         return results
+
+    def _resolved_text(self, state: OpenState, snapshot: Snapshot) -> str:
+        """What changed, for a resolve notice: the rule's own account of what is true now
+        (``Rule`` docs: ``resolved``), else that it no longer reports it, naming the task;
+        never the opening alert again."""
+        hook = getattr(self._by_name.get(state.rule), "resolved", None)
+        if callable(hook):
+            try:
+                text = hook(state.id, snapshot)
+            except Exception:
+                log.exception("rule %s failed to describe resolved state %s", state.rule, state.id)
+                text = None
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+            if text is not None:
+                log.warning("rule %s described state %s with %r", state.rule, state.id, text)
+        # What it no longer reports, quoted as the past: a task can hold several states.
+        was = state.summary.split(". ")[0].rstrip(".")
+        was = was if len(was) <= 160 else f"{was[:157]}..."
+        task = snapshot.task(state.task_id) if state.task_id else None
+        if task is not None:
+            subject = f"task {task.id} ('{task.title}'): "
+        elif state.task_id:
+            subject = f"task {state.task_id}: "
+        else:
+            subject = ""
+        return f'{subject}no longer reported: "{was}".'
 
     def _process_noted(self, action: Action, snapshot: Snapshot, note: _StateNote) -> Dispatched:
         """:meth:`_process` an alert about a state; its event carries ``note``."""

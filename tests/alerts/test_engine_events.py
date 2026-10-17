@@ -65,7 +65,7 @@ def test_a_state_alert_carries_each_transition_as_a_field() -> None:
     # The rule's reason is never prefixed; the wording of a transition is the channel's.
     assert (resolved.transition, resolved.reason, resolved.age) == (
         Transition.RESOLVED,
-        "T-1 has no owner.",  # the first sentence of the last reason
+        'task T-1: no longer reported: "T-1 has no owner".',  # quoted as the past
         7 * H,
     )
     assert resolved.severity is Severity.INFO and resolved.did is Did.NOTIFIED

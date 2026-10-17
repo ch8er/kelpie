@@ -524,3 +524,51 @@ def test_build_release_off_and_against_the_critical() -> None:
     off = Resources(time_to_full_warning=None, thresholds={K.DISK: Thresholds(0.99, 0.999)})
     snap = Snapshot(now=NOW, resources=(disk(474, 24.0),), open_states=("resources:disk:host-a:/",))
     assert full_alerts(list(off.evaluate(snap)))  # 26h, under the critical's 28h release
+
+
+def test_a_resolved_disk_reads_as_it_is_now() -> None:
+    rule = Resources()
+    state = "resources:disk:host-a:/"
+    calm = Snapshot(now=NOW, resources=(disk(400, 0.05),))
+    assert (
+        rule.resolved(state, calm)
+        == "disk host-a:/ is 80% full (400 of 500 GB), under its threshold and not filling."
+    )
+    slow = Snapshot(now=NOW, resources=(disk(400, 10.0),))
+    assert "at 10.0 GB a day it would fill in about 10.0 days (240h)" in (
+        rule.resolved(state, slow) or ""
+    )
+    gone = Snapshot(now=NOW)
+    assert "no recent reading any more" in (rule.resolved(state, gone) or "")
+    assert rule.resolved("resources:host-a:heavy", calm) is None  # the engine's notice
+    mem = res(K.MEMORY, 8, 32, name="host-a:memory")
+    assert rule.resolved("resources:memory:host-a:memory", Snapshot(now=NOW, resources=(mem,))) == (
+        "memory on host-a is 25% used (8 of 32 GB), under its threshold."
+    )
+
+
+def test_resolved_texts_for_unknown_growth_stale_readings_and_others() -> None:
+    rule = Resources()
+    state = "resources:disk:host-a:/"
+    unknown = Snapshot(now=NOW, resources=(disk(250, None),))
+    assert rule.resolved(state, unknown) == (
+        "disk host-a:/ is 50% full (250 of 500 GB), under its threshold; its growth rate is no "
+        "longer reported."
+    )
+    stale = Snapshot(now=NOW, resources=(replace(disk(250, 1.0), at=NOW - 60 * M),))
+    assert rule.resolved(state, stale) == (
+        "disk host-a:/: no recent reading any more (its source stopped)."
+    )
+    mem = "resources:memory:host-a:memory"
+    assert rule.resolved(mem, Snapshot(now=NOW)) == (
+        "memory on host-a: no recent reading any more (its source stopped)."
+    )
+    load = res(K.LOAD, 4, 8, name="host-a:load1")
+    assert rule.resolved("resources:load:host-a:load1", Snapshot(now=NOW, resources=(load,))) == (
+        "load on host-a is 0.5x its cores (4 of 8 GB), under its threshold."
+    )
+    for other in ["resources:llm_quota:p1", "resources:auth:key", "resources:memory:heavy",
+                  "resources:heavy:unplaced", "other:disk:host-a:/"]:  # fmt: skip
+        assert rule.resolved(other, unknown) is None, other
+    off = Resources(thresholds={**Resources().thresholds, K.DISK: Thresholds(None, None)})
+    assert "under its threshold" not in (off.resolved(state, unknown) or "")
