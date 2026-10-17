@@ -708,6 +708,25 @@ def test_a_scan_that_fails_is_not_complete(monkeypatch: pytest.MonkeyPatch, late
         assert scans().pull_requests_complete is False
 
 
+def test_the_time_of_the_complete_scan_is_given() -> None:
+    with serve() as gh:
+        gh.reply(LIST, [])
+        gh.reply(CLOSED, [])
+        scans = Scans(gh)
+        assert scans().pull_requests_at is None  # not complete yet
+        snap = scans()
+        assert snap.pull_requests_complete and snap.pull_requests_at == snap.now
+        # Between polls the last scan's time stays.
+        later = scans.step(Snapshot(now=snap.now + timedelta(minutes=1)))
+        assert later.pull_requests_at == snap.now
+        # With another code host's older scan, the oldest counts.
+        older = snap.now - timedelta(minutes=5)
+        both = scans.step(
+            Snapshot(now=snap.now, pull_requests_complete=True, pull_requests_at=older)
+        )
+        assert both.pull_requests_at == older
+
+
 def test_completeness_of_several_code_hosts_combines() -> None:
     with serve() as gh:
         gh.reply(LIST, [])

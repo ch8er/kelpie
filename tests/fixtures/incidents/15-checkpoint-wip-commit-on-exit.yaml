@@ -13,6 +13,8 @@ rule: checkpoints
 config:
   wip_ci: "skip_ci"
 snapshot:
+  pull_requests_complete: true  # the task branch has no open PR
+  pull_requests_at: "2026-03-02T15:00:00+00:00"
   now: "2026-03-02T15:00:00+00:00"
   owners:
     - {id: agent-dev-1, role: developer}
@@ -26,8 +28,8 @@ snapshot:
     - {id: T-1504, title: "Old finished task", status: done, status_since: "2026-03-02T12:00:00+00:00", owner_id: agent-dev-3}
     - {id: T-1505, title: "Migrate settings page", status: in_progress, status_since: "2026-03-02T14:40:00+00:00", owner_id: agent-dev-4}
   sessions:
-    - {id: S-1501, task_id: T-1501, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T14:30:00+00:00", exit_reason: "context limit", dirty_worktree: true, changed_files: 6, branch: "task/T-1501", summary: "Exporter and tests written; header escaping still failing."}
-    - {id: S-1502, task_id: T-1502, owner_id: agent-dev-2, started_at: "2026-03-02T13:00:00+00:00", last_heartbeat: "2026-03-02T14:00:00+00:00", dirty_worktree: true, branch: "task/T-1502"}
+    - {id: S-1501, task_id: T-1501, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T14:55:00+00:00", exit_reason: "context limit", dirty_worktree: true, changed_files: 6, branch: "task/T-1501", summary: "Exporter and tests written; header escaping still failing."}
+    - {id: S-1502, task_id: T-1502, owner_id: agent-dev-2, started_at: "2026-03-02T13:00:00+00:00", last_heartbeat: "2026-03-02T14:25:00+00:00", dirty_worktree: true, branch: "task/T-1502"}
     - {id: S-1503, task_id: T-1503, owner_id: agent-dev-3, started_at: "2026-03-02T14:00:00+00:00", ended_at: "2026-03-02T14:20:00+00:00", dirty_worktree: false}
     - {id: S-1504, task_id: T-1504, owner_id: agent-dev-3, started_at: "2026-03-02T11:00:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: done, dirty_worktree: true}
     - {id: S-1505, task_id: T-1505, owner_id: agent-dev-4, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T14:30:00+00:00", dirty_worktree: true}
@@ -39,7 +41,7 @@ expected_actions:
     params: {session_id: S-1501, branch: "task/T-1501", skip_ci: true}
   - kind: comment
     task_id: T-1501
-    reason_contains: "Resume from the WIP commit Kelpie saved on task/T-1501"
+    reason_contains: "Resume from the WIP commit Kelpie is saving on task/T-1501"
   - kind: wip_commit
     task_id: T-1502
     params: {session_id: S-1502}

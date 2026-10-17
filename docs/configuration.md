@@ -181,16 +181,29 @@ Several rules share these terms:
 ### checkpoints
 
 Commit reminders for live sessions, a WIP commit when a session exits with uncommitted
-work, and a resume note for the next session. Needs git state from the adapter (Hermes:
-`git_state = true`).
+work, and a resume note for the next session (not after a session that declared a block
+or a wait). Needs git state from the adapter (Hermes: `git_state = true`).
+
+The WIP commit and the alert about changes left uncommitted share one once-key per session,
+so the first decision stands (per mode: switching to act decides again). No commit once the
+task was claimed again since the exit (a requeue alone is no claim; the adapter refuses
+while a run is active); none onto a branch with an open PR or a PR of the task that closed
+after the session started; and none for a session older than the closed PRs listed
+(`closed_lookback`).
+The resume note goes out with the commit and says where the changes are if it failed.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `commit_every` | `"30m"` | duration, > 0 | Remind a live session with uncommitted changes when its last commit (or its start) is older than this. |
+| `commit_every_by_role` | `{}` | table of role = duration | `commit_every` by role, e.g. `{ reviewer = "2h" }`: the task's role, or its owner's when the task has none. |
 | `max_changed_files` | `20` | count, >= 1 | ...or when it has more changed files than this. |
-| `wip_ci` | `"skip_ci"` | `skip_ci` \| `draft_pr` | How the WIP commit avoids CI: `[skip ci]` in the message, or a push to a draft PR. |
+| `tool_grace` | `"2h"` | duration, > 0 | No reminder while a long tool call is in progress (a build, a simulator run: `Session.running_tool` with its start, or an open TOOL span), up to this long after it started. No adapter reports running tool calls yet. |
+| `tool_long_after` | `"5m"` | duration, > 0 | ...once the call has run this long: short calls do not hold reminders. |
+| `wip_ci` | `"skip_ci"` | `skip_ci` \| `draft_pr` | How the WIP commit avoids CI: `[skip ci]` in the message, or a push to a draft PR. Never onto an open PR (drafts included, so with `draft_pr` the draft of a first WIP commit refuses the next ones), nor onto a branch whose PR closed after the session started: none whose head is the session's or task's branch or that belongs to the task, and not without a known branch. A person gets an alert about the uncommitted changes instead. |
+| `wip_pr_margin` | `"1m"` | duration, > 0, < `act_within` | A WIP commit waits until `[connectors.github.pulls]` read the open PRs in full at least this long after the exit (an agent's last act may be opening a PR); until then nothing is said, not even the resume note. A PR someone else opens between that scan and the commit (up to `poll_interval`) is not seen. |
+| `wip_without_pr_check` | `false` | bool | WIP commits without that wait, for a farm whose task branches never carry PRs. Without it and without `[connectors.github.pulls]`, there are no WIP commits (warned at startup). A fork's PR, or one in a repository not in `[connectors.github] repos`, is not seen. |
 | `session_stale_after` | `"30m"` | duration, > 0 | See [live session](#rules). |
-| `act_within` | `"24h"` | duration, > 0 | WIP commit and resume note only this long after the exit. Keep it shorter than `[engine] once_window`. |
+| `act_within` | `"24h"` | duration, > 0 | WIP commit and resume note only this long after the exit; a decision never made by then gets one alert. Keep it plus 1h shorter than `[engine] once_window`, and no longer than `[connectors.github.pulls] closed_lookback` (Kelpie warns at startup). |
 
 ### 1. exit_contract
 
@@ -779,7 +792,7 @@ a warning. The token needs Pull requests: read and Issues: read (label events).
 | `enabled` | `true` | bool | |
 | `poll_interval` | `"2m"` | duration, >= 30s | List open PRs this often; the last list is served in between. |
 | `max_details` | `20` | count, 0 to 100 | PRs whose mergeable state is read per scan, one request each, within `[connectors.github] max_requests_per_tick`. |
-| `closed_lookback` | `"7d"` | duration, 1h to 30d | Closed PRs (merged or not) are listed this far back, up to 300 per repository, after the open PRs and mergeable states of a scan. |
+| `closed_lookback` | `"7d"` | duration, 1h to 30d | Closed PRs (merged or not) are listed this far back, up to 300 per repository, after the open PRs and mergeable states of a scan. Rule 5 makes no WIP commit for a session that started before it (a PR closed during the session would not be seen). |
 | `task_code` | unset | regular expression, at most 200 characters | Task codes in task titles (besides the id) that link a PR whose title or branch carries them, e.g. `'^[A-Z][A-Z0-9]+-[0-9]+'` (anchored, so `UTF-8` later in a title is not a code). No capturing groups, no repeated group that itself repeats, no backreferences or lookarounds: it runs over agent-written titles every scan. |
 
 ### [[block_conditions]]

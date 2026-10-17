@@ -961,6 +961,35 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     loaded = load_rules(settings.engine)
     if errors := ci_window_errors(loaded.rules, settings):
         raise ConfigError("; ".join(errors))
+    checkpoints = next((r for r in loaded.rules if r.name == "checkpoints"), None)
+    github = settings.github
+    pulls = (
+        github is not None and github.enabled and github.pulls is not None and github.pulls.enabled
+    )
+    if (
+        checkpoints is not None
+        and not getattr(checkpoints, "wip_without_pr_check", True)
+        and not pulls
+    ):
+        log.warning(
+            "checkpoints makes no WIP commits: it needs [connectors.github.pulls] to see "
+            "that a branch has no open PR (or set wip_without_pr_check = true where task "
+            "branches never carry PRs)"
+        )
+    act_within = getattr(checkpoints, "act_within", None)
+    if act_within is not None:
+        if act_within + timedelta(hours=1) >= settings.engine.once_window:
+            log.warning(
+                "checkpoints act_within plus 1h should stay shorter than [engine] once_window: "
+                "a WIP commit's once-key may expire before the closing alert"
+            )
+        lookback = github.pulls.closed_lookback if github and github.pulls else None
+        checks_prs = not getattr(checkpoints, "wip_without_pr_check", False)
+        if pulls and checks_prs and lookback is not None and lookback < act_within:
+            log.warning(
+                "[connectors.github.pulls] closed_lookback is shorter than checkpoints "
+                "act_within: WIP commits for sessions older than it are refused"
+            )
     for warning in [
         *loaded.warnings,
         *trace_window_warnings(loaded.rules, settings.traces),
