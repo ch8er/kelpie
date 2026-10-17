@@ -19,6 +19,10 @@ adapter turned the spool and a real Workboard database into sessions, spans and 
 stop ended looping runs (see [Stopping a session](#stopping-a-session)).
 Nothing here has run on a production farm or with a hosted model.
 
+First live run, step by step: [docs/quickstart-openclaw.md](../../../../docs/quickstart-openclaw.md).
+`kelpie doctor` checks the Workboard, the spool, the plugin's registration in `openclaw.json`,
+the Gateway (and that it loaded the plugin) and the stop directory.
+
 ## Config
 
 ```toml
@@ -49,15 +53,17 @@ self-contained script (standard library only, Python 3.8+) that writes the spool
 on the Gateway host:
 
 ```bash
-mkdir -p -m 700 ~/.openclaw/kelpie
-cp -r src/kelpie/adapters/openclaw/plugin ~/.openclaw/kelpie/plugin
+mkdir -p ~/.openclaw/kelpie/plugin && chmod 700 ~/.openclaw/kelpie
+(cd src/kelpie/adapters/openclaw/plugin &&
+  install -m 0644 index.js kelpie_hook.py openclaw.plugin.json package.json ~/.openclaw/kelpie/plugin/)
 openclaw plugins install --link ~/.openclaw/kelpie/plugin --force --accept-capabilities
 openclaw plugins enable kelpie
 ```
 
 `--force` acknowledges a local source outside ClawHub; review the files first, since native
 plugins run in the Gateway process. Restart the Gateway (or `openclaw plugins reload kelpie`)
-after copying a new version.
+after copying a new version (the same `install` line: `cp -r` into an existing directory
+nests the copy and leaves the old one loaded).
 
 The plugin and its hook are only as trustworthy as the directory they live in. Agents whose
 `exec` runs on the host (no sandbox) run as the Gateway's user and can change any file that
@@ -187,7 +193,7 @@ Verified on OpenClaw 2026.10.4 (local Gateway, a mock model that loops on one to
 - a looping `openclaw agent` run: the marker refused the next tool calls, `sessions.abort`
   answered `{"ok": true, "status": "aborted"}` in about a second, and the model saw no request
   after it;
-- a heartbeat run (`openclaw system event --mode now`) on the stopped session was refused by
+- a heartbeat run (`openclaw system event --text check --mode now`) on the stopped session was refused by
   `before_agent_run` before any model call;
 - a message sent with `openclaw agent` (an operator client) lifted the stop and went through;
 - OpenClaw's own `skill-workshop-review` background run, which starts after a long run with

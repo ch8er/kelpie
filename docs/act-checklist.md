@@ -66,13 +66,14 @@ task as it is now and its recent ledger entries, not the board as the rule saw i
 
 With a Hermes adapter enabled, Kelpie refuses to start with `dry_run = false` if any other
 rule is in `act` mode (`_refuse_unimplemented_actions`, `HERMES_ACT_RULES` in
-`src/kelpie/app.py`). The Claude Code adapter refuses other actions at runtime
-(`UnsupportedAction`), so on Claude Code they become "not executed" alerts.
+`src/kelpie/app.py`). The Claude Code and OpenClaw adapters refuse other actions at runtime
+(`UnsupportedAction`), so on those platforms they become "not executed" alerts.
 
 | Rule | Action | Needs |
 | --- | --- | --- |
 | `loop_breaker` | `stop`: `hermes kanban block --kind needs_input` on the run Kelpie looked at | `[adapters.hermes]`; `cli` and `cli_timeout` if `hermes` is not on `PATH` |
 | `loop_breaker` | `stop` on Claude Code: a stop marker the hook enforces at the session's next tool call | `[adapters.claude_code]` with `stop_dir`; see [Claude Code](#claude-code) below |
+| `loop_breaker` | `stop` on OpenClaw: a stop marker the plugin enforces in the Gateway, and `openclaw gateway call sessions.abort` for the run in flight | `[adapters.openclaw]` with `stop_dir` and `cli`; see [OpenClaw](#openclaw) below |
 | `ci_economy` | `cancel_build` of a superseded GitHub Actions run, by the CI connector | `[connectors.github.ci]` with `allow_cancel = true`, `cancel_repos`, ideally `cancel_token_env` (a separate token with Actions: write on those repos only) |
 | `dispatch_gate` | `wait`: `hermes kanban schedule` of a ready task, with its conditions in the reason (**unverified**) | `wait_condition` in `act` too, or parked tasks are never woken (Kelpie warns at startup) |
 | `wait_condition` | `wake` of a task Kelpie parked: `hermes kanban unblock` (**unverified**); `comment` (`hermes kanban comment --author kelpie`) | |
@@ -178,13 +179,34 @@ The steps above apply, with these differences
 - [ ] A stop is cooperative (the next tool call) and lasts for the session only: a headless
   run ends, and a launcher may start the work again.
 
+## OpenClaw
+
+The steps above apply, with these differences
+([quickstart](quickstart-openclaw.md), [adapter README](../src/kelpie/adapters/openclaw/README.md#stopping-a-session)):
+
+- [ ] Preconditions: Kelpie runs on the Gateway host as the Gateway's user; the Gateway has
+  loaded this Kelpie's copy of the plugin, with conversation access; `stop_dir` and the
+  plugin's `stopDir` name the same directory; `cli` runs an `openclaw` that reaches the
+  Gateway. `kelpie doctor` checks all of these (the "openclaw" lines).
+- [ ] Instead of a test board (step 3), test on a throwaway agent: the quickstart's step 7
+  writes a marker by hand. Then lower `loop_breaker`'s thresholds and let it stop a session you
+  make loop on purpose. Expect the tool call refused with "Stopped by Kelpie: ...", a
+  heartbeat (`openclaw system event --text check --mode now`) refused before any model call, the ledger
+  `executed` and the message saying the run was aborted. A session shown as `stop not
+  enforced` means the plugin did not see the marker: check the preconditions.
+- [ ] Undo: send the session a message from the CLI or the Control UI (the operator), `/new`,
+  or delete `~/.openclaw/kelpie/stop/<session id>.json`.
+- [ ] A stop lasts for the session id (rollovers carry it) and up to 24 hours; a cron job that
+  starts a new session is not held back.
+
 ## 5. Rollback
 
 - Fastest: `dry_run = true` and restart. Every rule is back to log-only, whatever its mode.
 - Per rule: set its `mode` back to `suggest` or `observe` (or remove the line) and restart.
 - For `ci_economy`: set `allow_cancel = false`, and revoke the cancel token if in doubt.
 - Stopped tasks: `hermes kanban unblock <task>`. Stopped Claude Code sessions: delete the
-  marker or type a prompt. A cancelled CI run is re-run from GitHub.
+  marker or type a prompt. Stopped OpenClaw sessions: delete the marker or message the session
+  as the operator. A cancelled CI run is re-run from GitHub.
 - Check afterwards: `uv run kelpie status` shows each rule's mode, and `kelpie_dry_run` is 1.
 
 ## Not verified live

@@ -47,7 +47,7 @@ import subprocess
 import tempfile
 import time
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -144,11 +144,6 @@ def cli_env(base: Mapping[str, str]) -> dict[str, str]:
     return {k: v for k, v in base.items() if k in ENV_EXACT or k.startswith(ENV_PREFIXES)}
 
 
-def abort_command(exe: str, params: Mapping[str, object]) -> Sequence[str]:
-    body = json.dumps({**params, "clearQueued": True})
-    return [exe, "gateway", "call", "sessions.abort", "--params", body, "--json"]
-
-
 def abort_session(
     cli: str,
     session_key: str | None,
@@ -186,6 +181,22 @@ def abort_run(
 ) -> str:
     """One ``sessions.abort`` call; returns the Gateway's ``status`` (``aborted``,
     ``no-active-run``, ...). Raises :class:`OpenClawCliError` unless the Gateway says ok."""
+    body = {**params, "clearQueued": True}
+    answer = gateway_call(cli, "sessions.abort", body, timeout=timeout, environ=environ)
+    status = answer.get("status")
+    return status if isinstance(status, str) else "ok"
+
+
+def gateway_call(
+    cli: str,
+    method: str,
+    params: Mapping[str, object] | None = None,
+    *,
+    timeout: float = CLI_TIMEOUT,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """``openclaw gateway call <method> [--params <json>] --json``: the Gateway's answer.
+    Raises :class:`OpenClawCliError` unless it answers ``"ok": true``."""
     exe = shutil.which(cli)
     if exe is None:
         raise OpenClawCliError(
@@ -193,9 +204,12 @@ def abort_run(
             "the openclaw CLI was not found",
         )
     env = cli_env(os.environ if environ is None else environ)
+    argv = [exe, "gateway", "call", method]
+    if params is not None:
+        argv += ["--params", json.dumps(params)]
     try:
         proc = subprocess.Popen(
-            abort_command(exe, params),
+            [*argv, "--json"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -219,19 +233,18 @@ def abort_run(
                 if pipe is not None:
                     pipe.close()
         raise OpenClawCliError(
-            f"openclaw gateway call sessions.abort timed out after {timeout:g}s",
+            f"openclaw gateway call {method} timed out after {timeout:g}s",
             f"the Gateway did not answer within {timeout:g}s",
         ) from exc
     answer = _json_tail(out)
     if proc.returncode != 0 or not isinstance(answer, dict) or answer.get("ok") is not True:
         tail = (err or out or "").strip()[-ERROR_TAIL:]
         raise OpenClawCliError(
-            f"openclaw gateway call sessions.abort failed (exit {proc.returncode}): {tail}",
+            f"openclaw gateway call {method} failed (exit {proc.returncode}): {tail}",
             f"the Gateway refused or did not answer (exit {proc.returncode})",
             "refused" if isinstance(answer, dict) and answer.get("ok") is False else "failed",
         )
-    status = answer.get("status")
-    return status if isinstance(status, str) else "ok"
+    return answer
 
 
 def _json_tail(out: str | None) -> object:

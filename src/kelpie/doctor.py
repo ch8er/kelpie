@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
 from kelpie.adapters.hermes.git_state import read_git_state
+from kelpie.adapters.openclaw import doctor as openclaw
 from kelpie.app import ConfigError, LoadedRules, Settings, load_rules, load_settings, utc_now
 from kelpie.connectors.github.blocks import MAX_REASON
 from kelpie.connectors.github.connector import parse_pr_ref, web_host
@@ -366,6 +367,11 @@ def run_checks(
         else:
             found = claude_code.skipped("adapter disabled")
         cc_checks = [Check(*c) for c in found]
+    oc = settings.openclaw
+    oc_checks: list[Check] = []
+    if oc is not None:  # only when configured; its spans come from the plugin, not OTLP
+        found = openclaw.run(oc.build(), at) if oc.enabled else openclaw.skipped("adapter disabled")
+        oc_checks = [Check(*c) for c in found]
     total = None if not counts or None in counts else sum(c for c in counts if c is not None)
     exporters = [
         name
@@ -382,6 +388,7 @@ def run_checks(
         _skip(pr_blocks, why) if adapter is None else check_pr_blocks(settings, adapter, at)
     )
     checks += cc_checks
+    checks += oc_checks
     checks.append(check_prometheus(prometheus, environ))
     return checks
 
