@@ -181,6 +181,7 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # time_to_full_warning = "72h"   # a disk full within this at its growth rate warns (incident 19)
 # time_to_full_critical = "24h"  # ...and is critical within this; the alert names the directories
 #                                # that grow fastest (scripts/kelpie-path-sizes.sh)
+# time_to_full_release = "84h"   # an open forecast resolves only past this (no flapping)
 # min_growth_per_day = 0.1       # GB a day; slower growth forecasts nothing
 # growing_paths_shown = 3        # directories named in the alert
 # path_max_age = "1h"            # older directory sizes: "is the script still running?"

@@ -561,6 +561,11 @@ class Snapshot:
     # with ``<agent>:``; ``hub`` when no agent board could be read). A rule that stops
     # reporting a state on such a task, or a farm-wide state, may only be blind to it.
     unobserved: tuple[str, ...] = ()
+    # Ids of the alert states open when the engine evaluates (the engine sets this, whatever
+    # a source put here): a rule may keep one of its states open on a lower bar than it
+    # opens it on, so a reading near the threshold does not flap (hysteresis). Observe-mode
+    # states count too: observe shadows what act would do.
+    open_states: tuple[str, ...] = ()
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
