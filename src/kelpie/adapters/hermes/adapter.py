@@ -27,8 +27,11 @@ Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
     done                    -> DONE
     archived                -> (skipped)
 
-``body`` is ``tasks.body`` (the description; none for finished tasks), at most ``MAX_BODY``
-characters; PR references in it link nothing (incident 17). ``assignee`` is the assignee
+``body`` is ``tasks.body`` (the description), at most ``MAX_BODY`` characters; PR
+references in it link nothing (incident 17). ``comments`` are ``task_comments`` (people's,
+by ``human_owners``, and the last ones of the others; Kelpie's own left out), and
+``body_author`` is ``tasks.created_by`` when that is a person: rule 1 reads acceptance
+criteria from them. ``assignee`` is the assignee
 profile and ``role`` its role: on Hermes an assignee only routes a task until it is
 dispatched. ``owner_id`` is the profile of the live run that claims the task (its
 ``current_run_id`` names a run that has not ended), none while nothing runs, and the
@@ -113,6 +116,7 @@ from kelpie.adapters.hermes.git_state import (
     warn_once,
 )
 from kelpie.adapters.hermes.park import (
+    AUTHOR,
     DEFAULT_WAIT_KEY,
     comment_args,
     decode_wait,
@@ -138,6 +142,7 @@ from kelpie.core.actions import ActionKind, ActionResult
 from kelpie.core.model import (
     Artifact,
     Block,
+    Comment,
     Condition,
     ConditionKind,
     Dependency,
@@ -167,6 +172,8 @@ DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
 DEFAULT_BASE_REFS = ("origin/main", "main")
 BUSY_TIMEOUT_MS = 5000
 MAX_BODY = 8000  # characters of a task's description kept in the snapshot
+MAX_COMMENTS = 50  # the last comments of a task kept in the snapshot
+MAX_COMMENT = 2000  # characters of a comment kept
 # A trailing instance number of a profile name: dev-1, dev-2 -> role "dev".
 _INSTANCE = re.compile(r"^(.+?)-\d+$")
 # The ``tasks.workspace_kind`` whose directory is the task's own: ``dir`` may point to a shared
@@ -418,6 +425,11 @@ def _workspace(row: sqlite3.Row) -> Path | None:
     except (OSError, RuntimeError):
         return None
     return path if path.is_dir() else None
+
+
+def _author(row: sqlite3.Row) -> str | None:
+    name = _col(row, "created_by")
+    return name.strip() if isinstance(name, str) and name.strip() else None
 
 
 def _body(row: sqlite3.Row) -> str | None:
@@ -723,6 +735,7 @@ class HermesAdapter:
         claimed = self._claimed(conn, rows)
         returns = self._returns(conn, {r["id"] for r in rows})
         reopens = _reopens(conn, {r["id"] for r in rows})
+        comments = self._comments(conn, {r["id"] for r in rows})
         tasks: list[Task] = []
         owners: set[str] = set()
         known: dict[str, sqlite3.Row] = {}
@@ -802,7 +815,11 @@ class HermesAdapter:
                     assignee=assignee,
                     source=self.name,
                     block=block,
-                    body=None if status.is_terminal else _body(row),
+                    # Done tasks keep theirs: rule 1 reads the acceptance criteria in it.
+                    body=_body(row),
+                    body_author=_author(row) if self._human(_col(row, "created_by")) else None,
+                    created_at=_utc(row["created_at"]),
+                    comments=comments.get(row["id"], ()),
                     branch=str(_col(row, "branch_name") or "").strip() or None,
                     subtasks=_subtasks(splits.get(row["id"])),
                     prework=status is Status.BACKLOG and row["status"] in self.prework_statuses,
@@ -812,6 +829,49 @@ class HermesAdapter:
                 )
             )
         return tuple(tasks), owners, known, tuple(waits)
+
+    def _human(self, name: object) -> bool:
+        """Whether a profile or author name is one of the board's people (``human_owners``):
+        Hermes writes the caller's profile name ("user" by default) as a comment's author."""
+        return isinstance(name, str) and name.strip().casefold() in self.human_owners
+
+    def _comments(self, conn: _Connection, ids: set[str]) -> dict[str, tuple[Comment, ...]]:
+        """Comments of the tasks on the board, oldest first: every person's (up to
+        ``MAX_COMMENTS``, so an early criterion is never pushed out) and the last
+        ``MAX_COMMENTS`` of the others. Kelpie's own are left out. None on a board without
+        ``task_comments``; a board that cannot be read now gives none, with a warning."""
+        try:
+            rows = conn.execute(
+                "SELECT c.task_id, c.author, c.body, c.created_at FROM task_comments c"
+                " JOIN tasks t ON t.id = c.task_id WHERE t.status != 'archived'"
+                " ORDER BY c.task_id, c.created_at, c.id"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                warn_once(("comments", type(exc).__name__), "hermes: comments not read: %s", exc)
+            return {}
+        people: dict[str, list[Comment]] = {}
+        others: dict[str, list[Comment]] = {}
+        for r in rows:
+            at = _utc(r["created_at"])
+            if r["task_id"] not in ids or at is None:
+                continue
+            raw = r["body"]
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="replace")
+            text = raw.strip()[:MAX_COMMENT] if isinstance(raw, str) else ""
+            author = str(r["author"] or "").strip()
+            if not text or author == AUTHOR:
+                continue
+            human = self._human(author)
+            (people if human else others).setdefault(r["task_id"], []).append(
+                Comment(author, text, at, human)
+            )
+        found: dict[str, tuple[Comment, ...]] = {}
+        for task_id in people.keys() | others.keys():
+            kept = people.get(task_id, [])[:MAX_COMMENTS] + others.get(task_id, [])[-MAX_COMMENTS:]
+            found[task_id] = tuple(sorted(kept, key=lambda c: c.at))
+        return found
 
     @staticmethod
     def _returns(conn: _Connection, ids: set[str]) -> dict[str, tuple[Return, ...]]:

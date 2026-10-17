@@ -110,6 +110,17 @@ class Return:
 
 
 @dataclass(frozen=True, slots=True)
+class Comment:
+    """A comment on a task. ``human`` is set by the adapter when a person wrote it (one of
+    its human owners), not an agent or Kelpie."""
+
+    author: str
+    text: str
+    at: datetime
+    human: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Task:
     id: str
     title: str
@@ -146,6 +157,12 @@ class Task:
     # The platform's own status, before it was normalized into ``status`` (Hermes: triage,
     # todo and scheduled are all ``backlog``), for explanations, metrics and reports.
     platform_status: str | None = None
+    # Comments on the task, oldest first (people's kept apart from any cap on the others),
+    # the person who wrote ``body`` (None: an agent, or unknown) and when the task was made:
+    # rule 1 reads the acceptance criteria people state.
+    comments: tuple[Comment, ...] = ()
+    body_author: str | None = None
+    created_at: datetime | None = None
 
 
 class ResourceKind(StrEnum):

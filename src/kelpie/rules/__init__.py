@@ -77,7 +77,7 @@ PLANNED: tuple[PlannedRule, ...] = (
         _P0,
         "No final status / bad block -> requeue",
         (2,),
-        effects=_fx(_K.REQUEUE),
+        effects=_fx(_K.REQUEUE, _K.COMMENT),  # the comment announces an acceptance criterion
     ),
     PlannedRule(
         "wait_condition",

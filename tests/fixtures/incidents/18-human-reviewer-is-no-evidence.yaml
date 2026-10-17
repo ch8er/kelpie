@@ -1,0 +1,53 @@
+id: "18-human-reviewer-is-no-evidence"
+incident: 18
+title: "A human reviewer's green CI is no evidence for a person's criterion either"
+description: >
+  The same case as 18-acceptance-criterion-dropped, but the reviewer is a person: "CI green,
+  merges cleanly. Approved." is still no evidence for "20 runs in a row, 20 of 20", whoever
+  writes it. Only text that addresses the criterion (quotes it, or names its AC- reference)
+  and reports its result answers it; T-1804, where the person who asked quoted it and
+  confirmed it, is left alone.
+rule: exit_contract
+config:
+  acceptance_patterns:
+    - '\b\d+\s+(?:runs?|times)\b'
+    - '\b(\d+)\s*(?:of|/)\s*\1\b'
+    - '\bbefore\s+(?:auto)?merg'
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: human-lead, role: lead, kind: human}
+    - {id: agent-dev-1, role: developer}
+    - {id: human-rev, role: reviewer, kind: human}
+  tasks:
+    - id: T-1801
+      title: "APP-101 Fix flaky login test"
+      status: review
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      comments:
+        - {author: human-lead, human: true, at: "2026-03-02T10:00:00+00:00", text: "Before automerge: 20 runs in a row, 20 of 20."}
+        - {author: human-rev, at: "2026-03-02T13:00:00+00:00", text: "CI green, merges cleanly. Approved."}
+    - id: T-1804
+      title: "APP-104 Fix flaky upload test"
+      status: review
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      comments:
+        - {author: human-lead, human: true, at: "2026-03-02T10:00:00+00:00", text: "Before automerge: 20 runs in a row, 20 of 20."}
+        - {author: human-lead, human: true, at: "2026-03-02T14:00:00+00:00", text: "> Before automerge: 20 runs in a row, 20 of 20.\n\nMet: saw the log, 20/20 confirmed."}
+  pull_requests:
+    - {repo: example/app, number: 501, title: "APP-101: fix flaky login test", branch: "app/APP-101", labels: [automerge], mergeable: true, task_ids: [T-1801]}
+    - {repo: example/app, number: 504, title: "APP-104: fix flaky upload test", branch: "app/APP-104", labels: [automerge], mergeable: true, task_ids: [T-1804]}
+expected_actions:
+  - kind: alert
+    task_id: T-1801
+    severity: critical
+    reason_contains: "20 runs in a row, 20 of 20"
+    params:
+      pattern: acceptance-criterion-missing
+      asked_by: human-lead
+      notify: [human-lead, reviewer]
+not_expected_actions:
+  - kind: alert
+    task_id: T-1804

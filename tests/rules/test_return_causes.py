@@ -191,3 +191,140 @@ def test_short_windows_read_well() -> None:
     rule = ReturnCauses(window=timedelta(minutes=30), min_returns=1)
     tasks = (task("A", ret("merge conflict in src/x.py", ago=timedelta(minutes=5))),)
     assert "in the last 30m" in run(*tasks, rule=rule)[0].reason
+
+
+# --- flaky tests (incident 18) --------------------------------------------------------------
+
+
+def test_a_test_that_sends_several_tasks_back_is_flaky() -> None:
+    found = run(
+        task("T-1", ret("CI red: test_login_timeout failed")),
+        task("T-2", ret("returned: test_login_timeout flaked again")),
+        task("T-3", ret("test_upload failed: wrong size")),  # its own test
+    )
+    [alert] = found
+    assert alert.params == {
+        "finding": "flaky_test",
+        "test": "test_login_timeout",
+        "tasks": ["T-1", "T-2"],
+    }
+    assert "fails other tasks' work" in alert.reason and alert.state
+
+
+def test_flaky_returns_are_their_own_cause_and_xctest_names_count() -> None:
+    xc = "LoginTests.testTimeout failed on CI"
+    tasks = [task(f"T-{i}", ret(xc, category="review")) for i in range(5)]
+    tasks.append(task("T-9", ret("changes requested", category="review")))
+    found = run(*tasks)
+    assert [a.params["finding"] for a in found] == ["flaky_test"]  # no "dominant" duplicate
+    assert found[0].params["test"] == "LoginTests.testTimeout"
+    assert (
+        run(*tasks, rule=ReturnCauses(flaky_min_tasks=6))[0].params["finding"] == "dominant_cause"
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"flaky_min_tasks": 1}, "at least 2"),
+        ({"test_names": ["test_\\w+"]}, "named group 'test'"),
+        ({"test_names": "x"}, "list of regular expressions"),
+        ({"test_names": ["("]}, "invalid pattern"),
+    ],
+)
+def test_flaky_config_is_validated(config: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        build(config)
+    assert build({"test_names": [r"(?P<test>\w+Spec)"], "flaky_min_tasks": 3}).flaky_min_tasks == 3
+
+
+def test_test_files_in_conflicts_and_review_advice_are_not_flaky_tests() -> None:
+    conflict = "merge conflict in tests/test_models.py"
+    advice = "add a test like test_parse_empty"
+    found = run(*(task(f"C-{i}", ret(conflict)) for i in range(3)))
+    assert all(a.params.get("finding") != "flaky_test" for a in found)
+    assert run(task("A-1", ret(advice)), task("A-2", ret(advice))) == []
+    named = "failed: test_login_timeout."
+    [alert] = run(task("F-1", ret(named)), task("F-2", ret(named)))
+    assert alert.params["test"] == "test_login_timeout"
+
+
+def test_pytest_summary_lines_and_unrelated_failures() -> None:
+    line = "FAILED tests/unit/test_api.py::TestUser::test_create - AssertionError"
+    [alert] = run(task("P-1", ret(line)), task("P-2", ret(line)))
+    assert alert.params["test"] == "test_create"
+    advice = "Please add test_parse_empty; lint failed on CI"
+    assert run(task("A-1", ret(advice)), task("A-2", ret(advice))) == []
+
+
+@pytest.mark.parametrize(
+    ("reason", "flaky"),
+    [
+        ("Added test_parse_empty. Lint failed on CI.", False),  # another sentence
+        ("Added test_parse_empty! CI is red.", False),
+        ("test_login_timeout\nfailed 3 times in a row", True),  # the name on its own line
+        ("- test_login_timeout:\n  timed out on CI", True),
+        ("test_login_timeout\nadded; lint failed", False),
+        ("LoginTests.testTimeout failed again.", True),  # a dot inside a name
+        ("New tests:\ntest_parse_empty\nCI failed: mypy", False),  # the next line is no verdict
+        ("Added tests:\n- test_a\n- test_b\nLint failed on CI", False),
+        ("Tests failed:\n- test_login\n- test_logout", True),  # a list under its header
+        ("Flaky:\n  test_login_timeout\n  test_signup", True),
+        ("test_login (tests.test_auth.LoginTests) ... FAIL", True),  # no sentence end
+        ("test_login_timeout\r\nfailed 3 times", True),  # CRLF
+        ("test_login_timeout is fixed, but test_signup is flaky", True),
+    ],
+)
+def test_failure_wording_must_be_in_the_names_clause(reason: str, flaky: bool) -> None:
+    found = run(task("F-1", ret(reason)), task("F-2", ret(reason)))
+    assert any(a.params.get("finding") == "flaky_test" for a in found) is flaky
+
+
+def test_only_the_names_a_clause_says_failed() -> None:
+    rule = ReturnCauses()
+    assert rule._tests(ret("New tests:\n- test_a\n- test_b\nFailed:\n- test_c")) == {"test_c"}
+    assert rule._tests(ret("Failing on CI:\n- test_login: AssertionError")) == {"test_login"}
+    assert rule._tests(ret("Tests failed:\n- test_login (1/20)")) == {"test_login"}
+    assert rule._tests(ret("Tests failed:\n\n- test_a\n- test_b")) == {"test_a", "test_b"}
+    assert rule._tests(ret("Fixed the flaky tests:\n- test_login")) == set()
+    assert rule._tests(ret("Added test_a... lint failed on CI")) == set()
+    assert rule._tests(ret("test_a fixed, and test_b failed")) == {"test_b"}
+    assert rule._tests(ret("test_y ... FAILED")) == {"test_y"}
+    for quiet in ["Fixed TypeError in test_parse; lint failed",
+                  "test_parse passed with no error; lint failed",
+                  "test_parse: no error. Coverage dropped."]:  # fmt: skip
+        assert rule._tests(ret(quiet)) == set(), quiet
+    assert rule._tests(ret("New failures:\n- test_a\n- test_b")) == {"test_a", "test_b"}
+    assert rule._tests(ret("Tests failed after fix:\n- test_a")) == {"test_a"}
+    assert rule._tests(ret("test_login failed, not fixed yet")) == {"test_login"}
+    assert rule._tests(ret("test_login failed even though I fixed the timeout")) == {"test_login"}
+    for text in [
+        "Wasn't fixed: test_login is flaky",
+        "Not yet fixed: test_login fails",
+        "After I fixed the timeout, test_login failed again",
+        "Fixed test_login_timeout and test_login failed",
+        "Hasn't been fixed: test_login is flaky",
+        "Haven't fixed it: test_login fails",
+        "Never got fixed: test_login still fails",
+        "Nothing fixed yet: test_login fails",
+        "Fixed the timeout and test_login failed",
+        "Fixed the timeout, test_login is still flaky",
+        "Fixed the setup and test_login ... FAILED",
+        "Fixed the timeout, test_login: AssertionError",
+        "Fixed the mock, test_login (still flaky)",
+        "Fixed and verified test_login, it was flaky",
+        "Fixed the lint (no errors left) and test_login failed",
+        "Fixed the lint without errors, test_login failed again",
+    ]:  # fmt: skip (safe side)
+        assert "test_login" in rule._tests(ret(text)), text
+    for text in ["Fixed the flaky timeout and teardown in test_login",
+                 "Fixed race and flaky test_login"]:  # fmt: skip
+        assert "test_login" not in rule._tests(ret(text)), text
+    assert rule._tests(ret("Added:\n- test_a\n- test_b failed")) == {"test_b"}
+    assert rule._tests(ret("test_login_timeout is fixed, but test_signup is flaky")) == {
+        "test_signup"
+    }
+    assert rule._tests(ret("Failing tests:\n* test_login\n* test_logout")) == {
+        "test_login",
+        "test_logout",
+    }

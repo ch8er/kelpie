@@ -2,8 +2,9 @@
 writes it (WAL mode, one transaction per change) and read back for assertions.
 
 The tables are trimmed copies of ``SCHEMA_SQL`` in Hermes' ``hermes_cli/kanban_db.py``: the
-columns Kelpie reads (:data:`KANBAN_SCHEMA`, also the schema of the adapter's unit tests), plus
-``task_comments``, where the Hermes CLI writes the reason of a block. The rows are made up.
+columns Kelpie reads (:data:`KANBAN_SCHEMA`, also the schema of the adapter's unit tests),
+``task_comments`` included (the Hermes CLI writes the reason of a block there; rule 1 reads
+people's acceptance criteria from it). The rows are made up.
 """
 
 from __future__ import annotations
@@ -36,7 +37,8 @@ CREATE TABLE tasks (
     last_failure_error TEXT,
     workspace_kind TEXT NOT NULL DEFAULT 'scratch',
     workspace_path TEXT,
-    branch_name TEXT
+    branch_name TEXT,
+    created_by TEXT
 );
 CREATE TABLE task_links (
     parent_id TEXT NOT NULL,
@@ -63,11 +65,6 @@ CREATE TABLE task_runs (
     summary TEXT,
     error TEXT
 );
-"""
-
-SCHEMA = (
-    KANBAN_SCHEMA
-    + """
 CREATE TABLE task_comments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL,
@@ -76,7 +73,8 @@ CREATE TABLE task_comments (
     created_at INTEGER NOT NULL
 );
 """
-)
+
+SCHEMA = KANBAN_SCHEMA
 
 
 def epoch(dt: datetime) -> int:

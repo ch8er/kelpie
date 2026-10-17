@@ -34,13 +34,34 @@ back to the queue with the missing evidence in the reason (``done_evidence_actio
 (its evidence is its subtasks') are not judged. A platform that cannot requeue a done task
 (Hermes) tells a human instead. The reopened-after-done rate per role
 (``Task.reopened_at``) is on ``/metrics`` and in the daily report.
+
+**People's acceptance criteria need their own evidence** (incident 18; off until
+``acceptance_patterns`` is set). A person asked for "20 runs in a row, 20 of 20" before
+automerge; the reviewer confirmed green CI and a clean merge only, and the PR merged without
+it. The lines of a person's comments (and of the description, when a person created the
+task) that match ``acceptance_patterns`` are its criteria (:mod:`kelpie.rules._acceptance`).
+When the work is about to land or has landed, each criterion needs evidence written after
+it that addresses it, naming its reference (``AC-`` and six hex digits) or quoting it, and
+reports its result there (:mod:`kelpie.rules._acceptance`: a comment, a session summary, an
+artifact, a CI build of the task's branch named for it that passed). While a task with a
+criterion younger than ``ANNOUNCE_WITHIN`` (or a task that entered that status since) is
+ready, in progress or in review and not landing yet, the criterion is announced on it once
+(a comment with the reference, so the agent knows how to report it). Landing means, within
+``done_evidence_within``: an open PR of the task that carries one of
+``acceptance_merge_labels`` (it merges by itself once checks pass: critical), a PR of it
+merged (critical, whoever closed the task), a mergeable PR of a task in review or accepted,
+the task accepted, or an agent completing it. Parents are not judged, nor a task a person
+moved to done without a merge. Each criterion without evidence is
+alerted once per severity, naming it, the person who asked and the roles to tell
+(``acceptance_notify_roles``).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 from typing import Any
@@ -57,6 +78,7 @@ from kelpie.core.model import (
 )
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._acceptance import ANNOUNCEMENT, Criterion, unanswered
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     Exit,
@@ -67,6 +89,11 @@ from kelpie.rules._tasks import (
 )
 
 NAME = "exit_contract"
+# A criterion is announced on its task this long after it was stated (or the task entered
+# its status), at most: within the ledger's once_window (7d by default; keep it longer), so
+# a criterion is not announced again and again.
+ANNOUNCE_WITHIN = timedelta(hours=72)
+_ANNOUNCED_IN = frozenset({Status.READY, Status.IN_PROGRESS, Status.REVIEW})
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +156,9 @@ class ExitContract:
     done_evidence_require: str = "any"  # "any" or "all"
     done_evidence_action: str = "requeue"  # or "alert"
     done_evidence_within: timedelta = timedelta(hours=24)
+    acceptance_patterns: tuple[re.Pattern[str], ...] = ()  # empty: criteria are not read
+    acceptance_merge_labels: tuple[str, ...] = ("automerge",)
+    acceptance_notify_roles: tuple[str, ...] = ("reviewer",)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -138,6 +168,9 @@ class ExitContract:
             for task in snapshot.tasks:
                 if task.status is Status.DONE and (task.owner_id or task.assignee) not in humans:
                     actions.extend(self._check_done(task, snapshot))
+        if self.acceptance_patterns:
+            for task in snapshot.tasks:
+                actions.extend(self._check_acceptance(task, snapshot))
         for task in snapshot.tasks:
             if finished_parent(task, snapshot) is not None:
                 continue  # its subtasks did the work: rule 3 asks to close it, not resume it
@@ -198,6 +231,102 @@ class ExitContract:
             key=key,
             once=True,
             params=params,
+        )
+
+    def _landing(self, task: Task, snapshot: Snapshot) -> tuple[str, bool, datetime] | None:
+        """How the task's work is landing or landed, whether that happens without a person
+        (a merge by itself, or a merge done), and when; None when it is not yet. A parent is
+        not judged (its evidence is its subtasks'). A merged PR is judged whoever closed the
+        task; without one, a task a person moved to done is not."""
+        if task.subtasks:
+            return None
+        labels = {label.casefold() for label in self.acceptance_merge_labels}
+        mine = [pr for pr in snapshot.pull_requests if task.id in pr.task_ids and not pr.draft]
+        for pr in mine:
+            # Set to merge by itself: it merges the moment checks pass, so say it now.
+            if labels.intersection(x.casefold() for x in pr.labels):
+                return f"its PR {pr.ref} is set to merge by itself", True, snapshot.now
+        within = self.done_evidence_within
+        for pr in snapshot.closed_pull_requests:
+            merged = pr.merged_at
+            if task.id in pr.task_ids and merged is not None and snapshot.now - merged <= within:
+                # Whoever closed the task (trackers do it on merge), the merge landed it.
+                return f"its PR {pr.ref} was merged", True, merged
+        if task.status.is_terminal and not self._agent_completed(task, snapshot):
+            return None  # a person closed it: their call
+        handed_on = task.status in (Status.REVIEW, Status.ACCEPTED)
+        for pr in mine:
+            if pr.mergeable is True and handed_on:
+                return f"its PR {pr.ref} can be merged now", False, snapshot.now
+        age = snapshot.now - task.status_since
+        if task.status is Status.ACCEPTED and age <= within:
+            return "it was accepted", False, task.status_since
+        if task.status is Status.DONE and self.session_exit_grace <= age <= within:
+            return "it was moved to done", False, task.status_since
+        return None
+
+    def _check_acceptance(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
+        """Each criterion a person stated is announced on the task once, with the reference
+        evidence must name; one with no evidence when the work lands is alerted."""
+        landing = self._landing(task, snapshot)
+        if landing is None:
+            # Not landing yet: announce young criteria of a task being worked on, once. Not
+            # while landing: the alert names the reference, and comments sent first would
+            # use up the task's action budget before it.
+            if task.status in _ANNOUNCED_IN:
+                yield from (
+                    self._announce(task, c)
+                    for c in unanswered(task, snapshot, self.acceptance_patterns)
+                    # From when it was stated, or when work on the task began, if later.
+                    if snapshot.now - max(c.at, task.status_since) <= ANNOUNCE_WITHIN
+                )
+            return
+        left = unanswered(task, snapshot, self.acceptance_patterns)
+        how, merges, at = landing
+        for c in left:
+            if c.at > at:
+                continue  # asked after it landed: for the next change, not this one
+            notify = [c.asked_by, *self.acceptance_notify_roles]
+            yield Action(
+                ActionKind.ALERT,
+                NAME,
+                f"Task {task.id} ('{task.title}'): {how}, but nothing shows the acceptance "
+                f'criterion {c.asked_by} stated was met: "{c.text}" ({c.ref}). Tell '
+                f'{", ".join(notify)}: evidence is a comment that starts with "{c.ref}: met" '
+                f"and gives the result (or a CI job named {c.ref} that passed)"
+                f"{' before this lands' if at == snapshot.now else ''}.",
+                task_id=task.id,
+                severity=Severity.CRITICAL if merges else Severity.WARNING,
+                # The severity in the key: a step up to critical (a merge label put on
+                # later) is told again.
+                key=f"acceptance:{task.id}:{c.key}:{'critical' if merges else 'warning'}",
+                once=True,  # about one criterion of one task, not a lasting state
+                params={
+                    "pattern": "acceptance-criterion-missing",
+                    "criterion": c.text,
+                    "ref": c.ref,
+                    "asked_by": c.asked_by,
+                    "asked_at": c.at.isoformat(),
+                    "notify": notify,
+                    "landing": how,
+                },
+            )
+
+    @staticmethod
+    def _announce(task: Task, c: Criterion) -> Action:
+        """Tell whoever works on the task how to report the criterion, once."""
+        return Action(
+            ActionKind.COMMENT,
+            NAME,
+            f'{ANNOUNCEMENT}{c.ref[3:]} from {c.asked_by}: "{c.text}". Before this lands, '
+            f'report it in a comment of its own that starts with "{c.ref}: met", then the '
+            f'result with its numbers and a link, for example "{c.ref}: met, 20/20 passed, '
+            f'<link to the log or CI run>". Nothing else counts as its evidence, and a '
+            f"failure, a retry or a plan in that comment means not met.",
+            task_id=task.id,
+            key=f"acceptance-ask:{task.id}:{c.key}",
+            once=True,
+            params={"pattern": "acceptance-criterion-stated", "ref": c.ref, "criterion": c.text},
         )
 
     def _agent_completed(self, task: Task, snapshot: Snapshot) -> bool:
@@ -382,6 +511,27 @@ def build(config: dict[str, Any]) -> ExitContract:
             if value not in allowed:
                 raise ValueError(f"{key} must be one of {list(allowed)}")
             kwargs[key] = value
+    if "acceptance_patterns" in config:
+        patterns = config.pop("acceptance_patterns")
+        if not isinstance(patterns, list) or not all(
+            isinstance(p, str) and p.strip() for p in patterns
+        ):
+            raise ValueError("acceptance_patterns must be a list of regular expressions")
+        try:
+            compiled = tuple(re.compile(p, re.IGNORECASE) for p in patterns)
+        except re.error as exc:
+            raise ValueError(f"acceptance_patterns: invalid pattern: {exc}") from exc
+        if any(p.search("") for p in compiled):
+            raise ValueError("acceptance_patterns: a pattern matches an empty line (every line)")
+        kwargs["acceptance_patterns"] = compiled
+    for key in ("acceptance_merge_labels", "acceptance_notify_roles"):
+        if key in config:
+            values = config.pop(key)
+            if not isinstance(values, list) or not all(
+                isinstance(v, str) and v.strip() for v in values
+            ):
+                raise ValueError(f"{key} must be a list of names")
+            kwargs[key] = tuple(v.strip() for v in values)
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return ExitContract(**kwargs)

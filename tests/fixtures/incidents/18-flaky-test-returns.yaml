@@ -1,0 +1,39 @@
+id: "18-flaky-test-returns"
+incident: 18
+title: "A flaky test sends other tasks' PRs back"
+description: >
+  In incident 18 the PR at stake fixed a flaky test that had failed other tasks' PRs. When a
+  test sends several different tasks back in a day, it fails other tasks' work, not just its
+  own: Kelpie names it as a flaky test with the tasks it returned, so it gets fixed or
+  quarantined. A test named in one task's return only is that task's own failure.
+rule: return_causes
+config:
+  window: "24h"
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  tasks:
+    - id: T-1821
+      title: "APP-121 Export settings"
+      status: in_progress
+      status_since: "2026-03-02T13:00:00+00:00"
+      returns:
+        - {at: "2026-03-02T11:00:00+00:00", reason: "CI red: LoginTests.testSessionTimeout failed", category: review}
+    - id: T-1822
+      title: "APP-122 Profile photo"
+      status: in_progress
+      status_since: "2026-03-02T13:30:00+00:00"
+      returns:
+        - {at: "2026-03-02T12:30:00+00:00", reason: "LoginTests.testSessionTimeout timed out again on CI", category: review}
+    - id: T-1823
+      title: "APP-123 Upload retries"
+      status: in_progress
+      status_since: "2026-03-02T14:00:00+00:00"
+      returns:
+        - {at: "2026-03-02T13:40:00+00:00", reason: "UploadTests.testRetryCount failed: 2 retries, expected 3", category: review}
+expected_actions:
+  - kind: alert
+    reason_contains: "LoginTests.testSessionTimeout"
+    params: {finding: flaky_test, test: LoginTests.testSessionTimeout, tasks: [T-1821, T-1822]}
+not_expected_actions:
+  - kind: alert
+    params: {finding: flaky_test, test: UploadTests.testRetryCount}
