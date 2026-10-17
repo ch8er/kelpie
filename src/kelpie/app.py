@@ -1371,7 +1371,8 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
 
     On Hermes only the rules in :data:`HERMES_ACT_RULES` act (stop, park, wake of a parked
     task, comment), and ``ci_economy`` through the CI connector when ``[connectors.github.ci]
-    allow_cancel`` is set."""
+    allow_cancel`` is set. On a hub, what its agents' adapters carry out is known only once
+    they report, so a platform gap is not judged there."""
     ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
     cancel = ci is not None and ci.enabled and ci.allow_cancel
     has_hermes = any(isinstance(a, hermes.HermesAdapter) for a in adapters)
@@ -1382,18 +1383,30 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
             continue
         platform = effects - {ActionKind.CANCEL_BUILD}
         if ActionKind.CANCEL_BUILD in effects and not cancel:
-            reason = "Kelpie cancels no builds: [connectors.github.ci] allow_cancel is off"
-            found[name] = ActBlocker(reason, refused=has_hermes)
+            found[name] = ActBlocker(_no_cancel(settings), refused=has_hermes)
         elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
             found[name] = ActBlocker(_hermes_gap(name, platform), refused=True)
-        elif platform and not platform <= frozenset().union(*(_declared(a) for a in adapters)):
-            found[name] = ActBlocker(_platform_gap(adapters, platform, settings), refused=False)
+        elif (
+            platform
+            and settings.hub is None
+            and not platform <= frozenset().union(*(_declared(a) for a in adapters))
+        ):
+            found[name] = ActBlocker(_platform_gap(adapters, platform), refused=False)
     return found
+
+
+def _no_cancel(settings: Settings) -> str:
+    github = settings.github if settings.github is not None and settings.github.enabled else None
+    if github is not None and github.ci is not None and github.ci.enabled:
+        return "Kelpie cancels no builds: [connectors.github.ci] allow_cancel is off"
+    if github is not None:
+        return "Kelpie cancels no builds: [connectors.github.ci] is not configured"
+    return "Kelpie cancels no builds: no CI connector is configured ([connectors.github.ci])"
 
 
 def _hermes_gap(rule: str, platform: frozenset[ActionKind]) -> str:
     if rule == "exit_contract":  # Hermes requeues only its own parks (a wake)
-        return "Hermes can't requeue a task Kelpie did not park yet"
+        return "Hermes requeues only tasks Kelpie parked"
     if lacking := platform - hermes.HermesAdapter.actions:
         return f"Hermes can't {_verbs(lacking)} yet"
     if platform:
@@ -1401,16 +1414,15 @@ def _hermes_gap(rule: str, platform: frozenset[ActionKind]) -> str:
     return "Hermes takes act mode only for rules that act; suggest sends the same alerts"
 
 
-def _platform_gap(
-    adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind], settings: Settings
-) -> str:
+def _platform_gap(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) -> str:
     lacking = platform - frozenset().union(*(_declared(a) for a in adapters))
     names = sorted({_PLATFORMS.get(a.name, a.name) for a in adapters})
     if not names:
-        where = "on this host; agents' adapters count once they connect" if settings.hub else ""
-        return f"no platform adapter is configured to {_verbs(lacking)}" + (
-            f" {where}" if where else ""
-        )
+        return f"no platform adapter is configured to {_verbs(lacking)}"
+    if lacking == {ActionKind.STOP} and (
+        off := sorted(_PLATFORMS.get(a.name, a.name) for a in adapters if _stop_off(a))
+    ):
+        return f"stop is turned off (stop_dir = false) for {' and '.join(off)}"
     if len(names) == 1:
         return f"{names[0]} can't {_verbs(lacking)} yet"
     return f"neither {' nor '.join(names)} can {_verbs(lacking)} yet"
@@ -1429,8 +1441,15 @@ _CAPABILITY_KINDS: tuple[tuple[type, ActionKind], ...] = (
 def _declared(adapter: PlatformAdapter) -> frozenset[ActionKind]:
     actions = getattr(adapter, "actions", None)
     if isinstance(actions, frozenset | set):
-        return frozenset(actions)
-    return frozenset(kind for protocol, kind in _CAPABILITY_KINDS if isinstance(adapter, protocol))
+        kinds = frozenset(actions)
+    else:
+        kinds = frozenset(k for protocol, k in _CAPABILITY_KINDS if isinstance(adapter, protocol))
+    return kinds - {ActionKind.STOP} if _stop_off(adapter) else kinds
+
+
+def _stop_off(adapter: PlatformAdapter) -> bool:
+    """``stop_dir = false``: the adapter refuses stops (Claude Code, OpenClaw)."""
+    return hasattr(adapter, "stop_dir") and adapter.stop_dir is None
 
 
 def _verbs(kinds: frozenset[ActionKind]) -> str:
@@ -1457,8 +1476,7 @@ def _refuse_unimplemented_actions(
     if acting:
         why = "; ".join(f"{name}: {blockers[name].reason}" for name in acting)
         raise ConfigError(
-            "these rules emit actions the Hermes adapter does not carry out (it does stop, "
-            "wait, wake of a parked task and comment); use observe or suggest mode "
+            "these rules cannot run in act mode on this farm; use observe or suggest mode "
             f"(rules in act mode: {acting}; {why})"
         )
 

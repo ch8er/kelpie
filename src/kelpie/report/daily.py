@@ -182,9 +182,11 @@ REMEDIES: Mapping[str, str] = {
     "no_progress": "longer heartbeat interval, a cheaper model for maintenance calls, "
     "bounded sessions with a handoff file",
 }
-# The remedy where the rule cannot act on this farm: never advice to switch act mode on.
+# The remedy where the rule cannot act on this farm: never advise switching act mode on.
 REMEDIES_WITHOUT_ACT: Mapping[str, str] = {
     "orphan_status": "give ownerless statuses an owner: route them to a role",
+    "stale_blocks": "attach conditions to block reasons ([[block_conditions]]) so Kelpie "
+    "alerts when a block's cause is fixed",
     "loop_breaker": "stop runaway sessions by hand when Kelpie alerts on them, and cap "
     "spend with [[budgets]]",
 }

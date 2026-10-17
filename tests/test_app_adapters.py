@@ -278,7 +278,7 @@ def test_act_mode_with_only_hermes_is_refused(tmp_path: Path) -> None:
         {"dry_run": False, "rules": {"exit_contract": {"mode": "act"}}}
     )
     hermes = HermesSettings(db_path=tmp_path / "kanban.db")
-    with pytest.raises(ConfigError, match="actions the Hermes adapter does not carry out"):
+    with pytest.raises(ConfigError, match="cannot run in act mode on this farm"):
         build_app(Settings(engine=config, db_path=None, hermes=hermes))
     # Allowed: dry-run on, observe/suggest modes, or no Hermes at all.
     for ok in (
@@ -438,7 +438,9 @@ def test_a_person_is_a_person_in_any_case() -> None:
 
 
 def test_rule_effects_are_what_the_rules_emit() -> None:
-    """``PlannedRule.effects`` is what act_blockers and the startup check judge a rule by."""
+    """``PlannedRule.effects`` is what act_blockers and the startup check judge a rule by.
+    Read from each rule's module: a kind only compared there, or emitted from a helper
+    module, would need this test changed (none is today)."""
     import importlib
 
     from kelpie.rules import PLANNED, REGISTRY
@@ -462,6 +464,12 @@ FARMS = {
     "openclaw": "[adapters.openclaw]\n",
     "hermes and claude code": "[adapters.hermes]\n[adapters.claude_code]\n",
     "claude code and openclaw": "[adapters.claude_code]\n[adapters.openclaw]\n",
+    "claude code, stop off": "[adapters.claude_code]\nstop_dir = false\n",
+    "openclaw, stop off": "[adapters.openclaw]\nstop_dir = false\n",
+    "hub": (  # its agents' adapters are known only once they report
+        '[hub]\nlisten = "127.0.0.1:9465"\nallow_plain_http = true\n'
+        '[[hub.agents]]\nname = "laptop"\ntoken_env = "KELPIE_TEST_AGENT_TOKEN"\n'
+    ),
     "nothing": "",
 }
 
@@ -496,8 +504,10 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     found = {r: b.reason for r, b in act_blockers(hermes, build_adapters(hermes)).items()}
     assert found["stale_blocks"] == "Hermes can't clear blocks yet"
     assert found["orphan_status"] == "Hermes can't close tasks or reassign tasks yet"
-    assert found["exit_contract"] == "Hermes can't requeue a task Kelpie did not park yet"
-    assert "allow_cancel is off" in found["ci_economy"]
+    assert found["exit_contract"] == "Hermes requeues only tasks Kelpie parked"
+    assert found["ci_economy"] == (
+        "Kelpie cancels no builds: no CI connector is configured ([connectors.github.ci])"
+    )
     assert "loop_breaker" not in found and "dispatch_gate" not in found
     claude = load_settings(write(tmp_path, FARMS["claude code"]))
     found = {r: b.reason for r, b in act_blockers(claude, build_adapters(claude)).items()}
@@ -510,3 +520,21 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     none = load_settings(write(tmp_path, ""))
     found = {r: b.reason for r, b in act_blockers(none, build_adapters(none)).items()}
     assert found["loop_breaker"] == "no platform adapter is configured to stop runs"
+    for farm, name in (
+        ("claude code, stop off", "Claude Code"),
+        ("openclaw, stop off", "OpenClaw"),
+    ):
+        off = load_settings(write(tmp_path, FARMS[farm]))
+        found = {r: b.reason for r, b in act_blockers(off, build_adapters(off)).items()}
+        assert found["loop_breaker"] == f"stop is turned off (stop_dir = false) for {name}"
+    hub = load_settings(write(tmp_path, FARMS["hub"]))
+    found = {r: b.reason for r, b in act_blockers(hub, build_adapters(hub)).items()}
+    assert "loop_breaker" not in found and "stale_blocks" not in found  # agents may offer them
+    ci = '[connectors.github]\nrepos = ["example/repo"]\n'
+    for extra, reason in (
+        (ci, "[connectors.github.ci] is not configured"),
+        (ci + "[connectors.github.ci]\n", "[connectors.github.ci] allow_cancel is off"),
+    ):
+        builds = load_settings(write(tmp_path, FARMS["hermes"] + extra))
+        found = {r: b.reason for r, b in act_blockers(builds, build_adapters(builds)).items()}
+        assert found["ci_economy"] == f"Kelpie cancels no builds: {reason}"

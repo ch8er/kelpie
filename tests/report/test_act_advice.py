@@ -40,6 +40,7 @@ def test_every_act_advice_starts(
 ) -> None:
     monkeypatch.delenv("KELPIE_DB", raising=False)
     monkeypatch.setenv("KELPIE_GITHUB_TOKEN", "ghp_" + "x" * 36)
+    monkeypatch.setenv("KELPIE_TEST_AGENT_TOKEN", "0123456789abcdef" * 3)
     settings = load_settings(config(tmp_path, farm))
     blockers = sources(settings).act_blockers
     advised = []
@@ -64,7 +65,8 @@ def test_every_act_advice_starts(
         acting = f'[engine]\ndry_run = false\n[engine.rules.{rule}]\nmode = "act"\n'
         app = build_app(load_settings(config(tmp_path, farm, acting)))  # must not refuse
         app.close()
-    assert advised or not build_adapters(settings), farm  # some rule acts on every farm
+    if farm in ("hermes", "claude code", "openclaw", "hub"):  # these farms stop runaways
+        assert "loop_breaker" in advised, farm
     for rule in FIXERS:
         if rule in blockers and blockers[rule].endswith("yet"):
             assert rule not in advised
