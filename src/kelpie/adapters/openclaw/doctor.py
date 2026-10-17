@@ -301,24 +301,24 @@ def check_stop_dir(adapter: OpenClawAdapter) -> CheckTuple:
         return _skip(STOP, "stop_dir = false: stop actions become alerts")
     fix = (
         f"run Kelpie as the Gateway's user, or set stop_dir (and the plugin's stopDir) to a "
-        f"directory both can use (now {path})"
+        f"directory both can use (now {_shown(path)})"
     )
     link, found = _probe(path.is_symlink), _probe(path.exists)
     for answer in (link, found):
         if isinstance(answer, OSError):
             return _fail(STOP, f"{_shown(path)} not accessible: {_errname(answer)}", fix)
     if link:
-        return _fail(STOP, f"{path} is a symlink; markers are not written through one", fix)
+        return _fail(STOP, f"{_shown(path)} is a symlink; markers are not written through one", fix)
     if found:
         if not path.is_dir():
-            return _fail(STOP, f"{path} is not a directory", fix)
+            return _fail(STOP, f"{_shown(path)} is not a directory", fix)
         if not os.access(path, os.W_OK | os.X_OK):
-            return _fail(STOP, f"{path} is not writable by this user", fix)
-        return _ok(STOP, f"{path} writable")
+            return _fail(STOP, f"{_shown(path)} is not writable by this user", fix)
+        return _ok(STOP, f"{_shown(path)} writable")
     parent = next((p for p in path.parents if _probe(p.exists) is True), None)
     if parent is None or not parent.is_dir() or not os.access(parent, os.W_OK | os.X_OK):
-        return _fail(STOP, f"{path} does not exist and cannot be created here", fix)
-    return _ok(STOP, f"{path} will be created on the first stop")
+        return _fail(STOP, f"{_shown(path)} does not exist and cannot be created here", fix)
+    return _ok(STOP, f"{_shown(path)} will be created on the first stop")
 
 
 def _guarded(name: str, check: Callable[[], CheckTuple]) -> CheckTuple:
@@ -327,7 +327,8 @@ def _guarded(name: str, check: Callable[[], CheckTuple]) -> CheckTuple:
     try:
         return check()
     except Exception as exc:  # the report must go on
-        return _fail(name, f"the check failed: {_errname(exc)}", f"{WRONG_USER}; {QUICKSTART}")
+        fix = WRONG_USER if isinstance(exc, PermissionError) else f"see {QUICKSTART}"
+        return _fail(name, f"the check failed: {_errname(exc)}", fix)
 
 
 def run(adapter: OpenClawAdapter, now: datetime) -> list[CheckTuple]:
