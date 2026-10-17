@@ -12,13 +12,19 @@ subprocess harness and the alert channels:
 - fake GitHub (pull requests, CI, Actions runs and cancel), Telegram and Slack servers on
   loopback.
 
+`test_openclaw.py` adds an OpenClaw Gateway next to the Hermes farm (`tests/sim/openclaw.py`):
+a Workboard database, a spool written through the real Kelpie hook script, and a fake
+`openclaw` executable that records `sessions.abort` calls. When `node` is installed, the real
+plugin (`index.js`) is then run against the stop markers Kelpie wrote; without Node that check
+is skipped locally and fails on CI.
+
 `test_multi_host.py` runs one farm on two simulated machines instead (`tests/sim/hosts.py`):
 each has its own board, spool, fake CLI and a real `kelpie agent`, reporting to a central
 `kelpie serve` with a hub.
 
 A scenario builds the board, starts Kelpie with the rules it needs in `suggest` or `act`
-mode (act only where Kelpie can act on Hermes: `loop_breaker` stops a run, `ci_economy`
-cancels a build), waits a few 1-second ticks on `/metrics`, and asserts on the board, the
+mode (act only where Kelpie can act on the platform: `loop_breaker` stops a Hermes run or an
+OpenClaw session, `ci_economy` cancels a build), waits a few 1-second ticks on `/metrics`, and asserts on the board, the
 Hermes calls and the messages in the channels.
 
 The `farm` fixture fails a scenario when `kelpie serve` logs anything at ERROR or above, a

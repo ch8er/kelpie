@@ -1,30 +1,27 @@
 """A simulated OpenClaw Gateway for end-to-end scenarios.
 
-- **The spool** is written by the real hook script (:mod:`kelpie.adapters.openclaw.plugin.
-  kelpie_hook`), fed the reduced events the plugin forwards, so the lines are what a Gateway
-  with the Kelpie plugin (and conversation access) writes. Calls in the past (a loop that ran
-  all night) carry their own time.
+- **The spool** is written by the real hook script (``plugin/kelpie_hook.py``, run as the
+  plugin runs it: ``python -I``, a minimal environment), fed the reduced events the plugin
+  forwards, so the lines are what a Gateway with the Kelpie plugin (and conversation access)
+  writes. Calls in the past (a loop that ran all night) carry their own time.
 - **The Workboard** is :class:`tests.sim.workboard.Workboard` under the state directory.
-- **A fake ``openclaw`` executable** answers ``gateway call health`` and ``gateway call
-  sessions.abort`` and records every call (arguments and the names of the environment
-  variables it got, never their values) in ``openclaw-calls.jsonl``. A file ``openclaw-fail``
-  next to it makes every call fail as an unreachable Gateway does.
+- **A fake ``openclaw`` executable** answers ``gateway call sessions.abort`` and records
+  every call (arguments and the names of the environment variables it got, never their values)
+  in ``openclaw-calls.jsonl``. A file ``openclaw-fail`` next to it makes every call fail as an
+  unreachable Gateway does.
 - :meth:`Gateway.plugin_refuses` runs the real ``index.js`` under Node (when installed) to
-  ask whether the plugin would refuse a session's next tool call with the markers on disk.
+  ask whether the plugin would refuse a session's next tool call with the markers on disk;
+  what the plugin itself records then is in :meth:`Gateway.plugin_spool`.
 """
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
-import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,7 +32,6 @@ from tests.sim.workboard import Workboard
 PLUGIN = Path(kelpie_hook.__file__).parent
 CALLS = "openclaw-calls.jsonl"
 FAIL = "openclaw-fail"
-_LOCK = threading.Lock()  # the hook reads os.environ: one writer at a time
 
 FAKE_CLI = """#!{python}
 import json, os, sys
@@ -47,9 +43,7 @@ if os.path.exists(os.path.join(here, {fail!r})):
     print(json.dumps({{"ok": False, "error": {{"type": "gateway_transport_error",
         "message": "Gateway not reachable at ws://127.0.0.1:18789 (ECONNREFUSED)."}}}}))
     sys.exit(1)
-if args[:3] == ["gateway", "call", "health"]:
-    print(json.dumps({{"ok": True, "plugins": {{"loaded": ["workboard", "kelpie"]}}}}))
-elif args[:3] == ["gateway", "call", "sessions.abort"]:
+if args[:3] == ["gateway", "call", "sessions.abort"]:
     print("[gateway] connecting")
     print(json.dumps({{"ok": True, "abortedRunId": "run", "status": "aborted"}}, indent=2))
 else:
@@ -64,7 +58,6 @@ plugin.register({ pluginConfig: %(config)s, logger: { warn: () => {} },
 const out = %(sessions)s.map((sessionId) =>
   handlers.before_tool_call({ toolName: "read", params: {} }, { sessionId }) ?? null);
 console.log(JSON.stringify(out));
-setTimeout(() => process.exit(0), 300);
 """
 
 
@@ -107,24 +100,18 @@ class Gateway:
 
     # --- the plugin's hooks, through the real hook script --------------------------------
 
-    @contextmanager
-    def _hook_env(self) -> Iterator[None]:
-        with _LOCK:
-            old = os.environ.get(kelpie_hook.SPOOL_ENV)
-            os.environ[kelpie_hook.SPOOL_ENV] = str(self.spool_path)
-            try:
-                yield
-            finally:
-                if old is None:
-                    del os.environ[kelpie_hook.SPOOL_ENV]
-                else:
-                    os.environ[kelpie_hook.SPOOL_ENV] = old
-
     def _forward(self, hook: str, at: datetime, event: dict[str, Any], ctx: dict[str, Any]) -> None:
         data = {"hook": hook, "at": at.timestamp(), "plugin": 2, "gate": True, "event": event}
         data["ctx"] = ctx
-        with self._hook_env():
-            kelpie_hook.main(io.StringIO(json.dumps(data)))
+        env = {"PATH": os.environ["PATH"], kelpie_hook.SPOOL_ENV: str(self.spool_path)}
+        subprocess.run(
+            [sys.executable, "-I", str(PLUGIN / "kelpie_hook.py")],
+            input=json.dumps(data),
+            env=env,
+            text=True,
+            timeout=30,
+            check=True,
+        )
 
     def tool_call(
         self,
@@ -179,7 +166,17 @@ class Gateway:
             }
         )
         done = subprocess.run(
-            [node, str(script)], capture_output=True, text=True, timeout=60, check=True
+            [node, str(script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={"PATH": os.environ["PATH"], "HOME": str(self.state)},
         )
+        assert done.returncode == 0, done.stderr
         answers = json.loads(done.stdout.strip().splitlines()[0])
         return [bool(a and a.get("block")) for a in answers]
+
+    def plugin_spool(self) -> list[dict[str, Any]]:
+        """The lines the plugin run by :meth:`plugin_refuses` recorded."""
+        path = self.state / "plugin-spool.jsonl"
+        return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
