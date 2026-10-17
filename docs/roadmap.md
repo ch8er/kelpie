@@ -432,6 +432,27 @@ cleaned; Kelpie was blind because node_exporter and Prometheus were not installe
 - [x] Prometheus setup docs include a retention size cap (e.g. 2 GB) so monitoring cannot fill the disk it watches
 - [x] Fixtures: new `19-disk-growth-forecast.yaml` (synthetic paths)
 
+### rules: ci_economy — CI outage as one incident (rule 9, incident 20)
+labels: P0, week-3, area:rules
+Live case: the farm's Xcode broke for ~12 h; every iOS PR stayed red. Kelpie alerted per
+blocked task and the report blamed "waiting for merges".
+
+**Acceptance criteria**
+- [ ] Correlated failures: N or more PRs (config) failing within a window on the same job/step or the same error signature → one `alert` "CI outage since <time>" with scope (repos, workflows, runners), the shared signature and the PRs affected; resolve when runs go green again
+- [ ] While an outage is open, per-task block and wait alerts that it explains are folded under it (no separate alerts); the report attributes their waiting time to "CI outage"
+- [ ] The error signature comes from the Actions runs/jobs API the connector already reads (job and step names, conclusion); no log scraping in the first version
+- [ ] Fixtures: new `20-ci-outage.yaml` (synthetic), with an unrelated single red PR as the negative case
+
+### rules: needs_you and bottlenecks — planned waits are not waiting (incident 20)
+labels: P0, week-3, area:rules
+Live case: a post-release task depending on a planned human task counted as 143 agent-hours
+of waiting on a person.
+
+**Acceptance criteria**
+- [ ] A dependent task that is not ready for work for its own reasons (backlog, scheduled for later, a milestone or label marking it as later — config) does not count as waiting on its blocker
+- [ ] Rule 13, rule 6 and the report use the same definition
+- [ ] Fixtures: new `20-planned-wait.yaml`
+
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules
 Field evidence: a heartbeat/maintenance loop repeated the same tool call about 900 times
