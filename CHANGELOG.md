@@ -189,6 +189,13 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 ### Fixed
 
+- `kelpie why` showed a finished parent as `parent-unverified` ("the code host's PRs are not
+  fully known") while `kelpie serve` asked to close it: serve knows the PR lists in full only
+  after two scans in a row, `why` reads them once (`--refresh`) or not at all. A
+  `parent-unverified` finding now carries a note saying so where serve may judge it
+  differently, in the text and in `--json` (`findings[].note`); `why` stays read-only and
+  scans only once
+  ([#148](https://github.com/ch8er/kelpie/issues/148)).
 - A run Kelpie stopped was alerted on as a stale block after 4 hours, and the report then
   advised block conditions for it. Kelpie now signs its stops, as it signs its parks; rule
   4 leaves a verified stop to rule 13, which lists it as waiting for a person, and rule 1

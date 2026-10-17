@@ -27,16 +27,19 @@ from kelpie.core.model import (
     Status,
     Task,
 )
+from kelpie.rules.orphan_status import PARENT_UNVERIFIED
 from kelpie.why import (
     Expected,
     Explanation,
     Finding,
+    SnapshotRead,
     _age,
     _chain,
     _condition,
     _expected,
     _mentions,
     _mode,
+    _noted,
     _offline_note,
     _text,
     as_json,
@@ -347,6 +350,7 @@ def test_offline_by_default_refresh_reads_github(
     assert main(why("t_review")) == 0
     out = capsys.readouterr().out
     assert calls == [] and "GitHub conditions were not read (offline)" in out
+    assert "the PR lists that some verdicts depend on" in out
     assert main(why("t_review", "--refresh")) == 0
     out = capsys.readouterr().out
     assert calls == [True] and "offline" not in out
@@ -826,3 +830,168 @@ def test_text_escapes_controls_but_keeps_emoji_joiners_and_spaces() -> None:
         out = _text(f"a{bad}b")
         assert bad not in out and out.startswith("a\\") and out.endswith("b"), repr(bad)
     assert _text("x\N{RIGHT-TO-LEFT OVERRIDE}y") == "x\\u202ey"
+
+
+# -- #148: findings that rest on the PR lists being known in full ------------------------------
+
+PULLS_CONFIG = """
+[connectors.github.pulls]
+"""
+OFFLINE_LISTS = (
+    "offline: why does not read the PR lists; serve, which does, may judge this parent "
+    "differently (ask to close it, name unmerged PRs, or not count it finished)"
+)
+REFRESH_LISTS = (
+    "why reads the PR lists once; serve knows them in full only after two scans in a row "
+    "and may say parent-left-open instead"
+)
+
+
+def _lists_farm(farm: Path, pulls: bool = True) -> Settings:
+    with (farm / "kelpie.toml").open("a") as f:
+        f.write(GITHUB_CONFIG + (PULLS_CONFIG if pulls else ""))
+    return load_settings(find_config(None))
+
+
+def _read(monkeypatch: pytest.MonkeyPatch, snapshot: Snapshot) -> None:
+    monkeypatch.setattr("kelpie.why.read_snapshot", lambda *a, **k: SnapshotRead(snapshot, [], []))
+
+
+def _parent_snapshot(complete: bool | None) -> Snapshot:
+    snapshot = load(FIXTURES / "17-parent-left-open.yaml").snapshot
+    return replace(snapshot, pull_requests_complete=complete)
+
+
+def _explained(settings: Settings, task_id: str, refresh: bool = False) -> Explanation:
+    ex = explain(settings, task_id, refresh=refresh)
+    assert isinstance(ex, Explanation)
+    return ex
+
+
+def _orphan(ex: Explanation) -> Finding:
+    [finding] = [
+        f
+        for f in ex.findings
+        if f.action.rule == "orphan_status" and f.action.kind is ActionKind.ALERT
+    ]
+    return finding
+
+
+@pytest.mark.parametrize("complete", [None, False])
+def test_unverified_parent_says_serve_may_know_better(
+    farm: Path, monkeypatch: pytest.MonkeyPatch, complete: bool | None
+) -> None:
+    settings = _lists_farm(farm)
+    _read(monkeypatch, _parent_snapshot(complete))
+    for refresh, want in ((False, OFFLINE_LISTS), (True, REFRESH_LISTS)):
+        ex = _explained(settings, "T-1700", refresh)
+        finding = _orphan(ex)
+        assert finding.action.params["pattern"] == "parent-unverified"
+        assert "the code host's PRs are not fully known" in finding.action.reason
+        assert finding.note == want
+        assert f"    note: {want}" in render(ex)
+        data = as_json(ex)
+        [row] = [f for f in data["findings"] if f["rule"] == "orphan_status"]
+        assert row["note"] == want and data["schema_version"] == 1
+
+
+def test_no_note_once_the_lists_are_known_in_full(
+    farm: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _lists_farm(farm)
+    _read(monkeypatch, _parent_snapshot(True))
+    for refresh in (False, True):
+        ex = _explained(settings, "T-1700", refresh)
+        finding = _orphan(ex)
+        assert finding.action.params["pattern"] == "parent-left-open"
+        assert ActionKind.CLOSE in {f.action.kind for f in ex.findings}
+        assert finding.note is None and "PR lists" not in render(ex)
+        assert all(f["note"] is None for f in as_json(ex)["findings"])
+
+
+def test_no_note_without_the_pulls_step(farm: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Serve reads the lists only through [connectors.github.pulls]: without it serve is
+    # just as unsure as why, so there is nothing to caveat.
+    settings = _lists_farm(farm, pulls=False)
+    _read(monkeypatch, _parent_snapshot(None))
+    assert _orphan(_explained(settings, "T-1700")).note is None
+    assert _orphan(_explained(settings, "T-1700", refresh=True)).note is None
+
+
+def test_unrelated_findings_get_no_lists_note(farm: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _lists_farm(farm)
+    _read(monkeypatch, _parent_snapshot(None))
+    # A parent with a subtask still in progress, one with its own open PR and a task waiting
+    # behind the parent are no verdict on the lists.
+    for task_id in ("T-1710", "T-1720", "T-1704"):
+        ex = _explained(settings, task_id)
+        assert all(f.note is None for f in ex.findings), task_id
+    parent = _explained(settings, "T-1700")
+    assert _orphan(parent).note == OFFLINE_LISTS
+    assert [f.action.rule for f in parent.findings if f.note] == ["orphan_status"]
+
+
+def test_a_refreshed_parent_with_an_uncovered_subtask_gets_no_note(
+    farm: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One scan already shows T-1703 without a merged PR: complete lists would not change
+    # that, so serve agrees the parent is unverified. Offline nothing is known: note.
+    settings = _lists_farm(farm)
+    snapshot = _parent_snapshot(False)
+    pulls = tuple(p for p in snapshot.closed_pull_requests if 1703 not in (p.number,))
+    _read(monkeypatch, replace(snapshot, closed_pull_requests=pulls))
+    refreshed = _explained(settings, "T-1700", refresh=True)
+    finding = _orphan(refreshed)
+    assert finding.action.params["pattern"] == "parent-unverified"
+    assert finding.action.params["uncovered"] == ["T-1703"]
+    assert finding.note is None and "PR lists" not in render(refreshed)
+    assert _orphan(_explained(settings, "T-1700")).note == OFFLINE_LISTS
+    # No PR seen at all after --refresh: nothing shows the work landed either.
+    _read(monkeypatch, replace(snapshot, closed_pull_requests=()))
+    assert _orphan(_explained(settings, "T-1700", refresh=True)).note is None
+
+
+def test_a_wip_decision_made_without_the_lists_gets_no_note(
+    farm: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Rule 5 only alerts once it gave up (act_within), whatever the lists say: no caveat.
+    settings = _lists_farm(farm)
+    ended = NOW - timedelta(hours=24, minutes=5)
+    task = Task("T-1", "Do the thing", Status.IN_PROGRESS, NOW - timedelta(hours=27), branch="b")
+    session = Session(
+        "S-1", "T-1", "dev", started_at=NOW - timedelta(hours=26), last_heartbeat=ended,
+        ended_at=ended, dirty_worktree=True, branch="b",
+    )  # fmt: skip
+    _read(monkeypatch, Snapshot(now=NOW, tasks=(task,), sessions=(session,)))
+    for refresh in (False, True):
+        [finding] = [
+            f
+            for f in _explained(settings, "T-1", refresh=refresh).findings
+            if f.action.rule == "checkpoints"
+        ]
+        assert "never known in time" in finding.action.reason and finding.note is None
+
+
+def test_notes_are_per_finding_and_per_task() -> None:
+    def alert(rule: str, task_id: str = "T-1", **params: object) -> Finding:
+        return Finding(
+            Action(ActionKind.ALERT, rule, "r", task_id=task_id, params=params), Mode.OBSERVE
+        )
+
+    unverified = alert("orphan_status", pattern=PARENT_UNVERIFIED, uncovered=[], merged_prs=["a#1"])
+    assert _noted(unverified, "T-1", "block", "lists").note == "lists"
+    assert _noted(unverified, "T-1", "block", None).note is None
+    assert _noted(unverified, "T-1", "block", "lists", refreshed=True).note == "lists"
+    gap = alert("orphan_status", pattern=PARENT_UNVERIFIED, uncovered=["T-9"], merged_prs=["a#1"])
+    assert _noted(gap, "T-1", None, "lists").note == "lists"
+    assert _noted(gap, "T-1", None, "lists", refreshed=True).note is None
+    bare = alert("orphan_status", pattern=PARENT_UNVERIFIED, uncovered=[], merged_prs=[])
+    assert _noted(bare, "T-1", None, "lists", refreshed=True).note is None
+    elsewhere = alert("orphan_status", "T-2", pattern=PARENT_UNVERIFIED)
+    assert _noted(elsewhere, "T-1", "b", "lists").note is None
+    assert (
+        _noted(alert("orphan_status", pattern="review-undriven"), "T-1", "b", "lists").note is None
+    )
+    assert _noted(alert("checkpoints", why="never known"), "T-1", "b", "lists").note is None
+    assert _noted(alert("stale_blocks"), "T-1", "block", "lists").note == "block"
+    assert _noted(alert("stale_blocks"), "T-1", None, "lists").note is None

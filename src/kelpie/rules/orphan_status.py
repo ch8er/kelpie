@@ -111,6 +111,7 @@ from kelpie.rules._tasks import (
 )
 
 NAME = "orphan_status"
+PARENT_UNVERIFIED = "parent-unverified"  # a finished parent whose PRs cannot be confirmed
 
 _NEVER = {Status.BLOCKED, Status.WAITING, Status.BACKLOG, Status.READY}
 _BUSY = {Status.IN_PROGRESS, Status.REVIEW}
@@ -339,7 +340,7 @@ class OrphanStatus:
                     "them; if they were replaced, a person decides whether to close it."
                 )
             else:
-                pattern, unmerged = "parent-unverified", []
+                pattern, unmerged = PARENT_UNVERIFIED, []
                 gap = (
                     "the code host's PRs are not fully known"
                     if not prs.known

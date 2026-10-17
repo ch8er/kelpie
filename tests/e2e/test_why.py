@@ -125,3 +125,74 @@ def test_a_pattern_hit_that_attaches_nothing_says_why(farm: Farm) -> None:
     [line] = conditions_section(elsewhere)
     assert "names other/repo#5, a repository outside [connectors.github] repos" in line
     assert line.endswith("nothing is attached")
+
+
+# -- #148: a parent whose subtasks' PRs all merged ---------------------------------------------
+
+# Serve knows the lists in full after its second scan. cache_ttl (30s, the shortest) plus
+# tick_budget (10s) must stay below poll_interval, or the scans are answered from the cache.
+PULLS = {"connectors": {"github": {"pulls": {"poll_interval": "45s"}}}}
+OFFLINE_LISTS = (
+    "offline: why does not read the PR lists; serve, which does, may judge this parent "
+    "differently (ask to close it, name unmerged PRs, or not count it finished)"
+)
+REFRESH_LISTS = (
+    "why reads the PR lists once; serve knows them in full only after two scans in a row "
+    "and may say parent-left-open instead"
+)
+
+
+def test_a_parent_with_merged_prs_says_serve_may_know_better(farm: Farm) -> None:
+    """The live case of #148: ``why`` says parent-unverified, a note says serve may know
+    better, and after its second PR scan serve does ask to close the parent."""
+    b = farm.board
+    b.task("t_parent", "ready", farm.ago(days=2), title="Store front", assignee="orch")
+    b.event("t_parent", "decomposed", farm.ago(days=1), {"child_ids": ["t_1a", "t_1b"]})
+    done = farm.ago(hours=4)
+    for number, child in ((71, "t_1a"), (72, "t_1b")):
+        b.task(
+            child, "done", farm.ago(days=1), title=f"Part {child}", assignee="dev", completed=done
+        )
+        b.event(child, "completed", done)
+        farm.github.pull(
+            REPO, number, state="closed", merged_at=done, title=f"{child}: part", branch=child
+        )  # merged into the default branch ("main")
+    kelpie = farm.serve(farm.config(github=True, extra=PULLS))
+    wait_for(
+        "a tick", lambda: kelpie.metrics().get("kelpie_engine_ticks_total", 0) >= 1, timeout=30
+    )
+
+    for extra, want in (((), OFFLINE_LISTS), (("--refresh",), REFRESH_LISTS)):
+        out = kelpie.cli("why", "t_parent", *extra)
+        assert out.code == 0, out.stderr
+        assert "the code host's PRs are not fully known" in out.stdout
+        assert f"    note: {want}" in out.stdout.splitlines()
+        data = json.loads(kelpie.cli("why", "t_parent", "--json", *extra).stdout)
+        [finding] = [f for f in data["findings"] if f["rule"] == "orphan_status"]
+        assert finding["note"] == want and data["schema_version"] == 1
+
+    # Serve's second scan completes the lists: it asks to close the parent. That is the
+    # premise of the note.
+    # The rule is in observe mode, so the alert is an open state, not a message.
+    def left_open() -> str | None:
+        out = kelpie.cli("why", "t_parent", "--json")
+        states = json.loads(out.stdout).get("states") if out.code == 0 else None
+        if not states:  # a transient failure (or nothing open yet): poll again
+            return None
+        return next((s["id"] for s in states if ":parent-left-open:t_parent:" in s["id"]), None)
+
+    wait_for("serve to ask to close t_parent (its second PR scan)", left_open, timeout=90)
+
+    # ...while one scan of why still reads the lists as not known in full, and says so.
+    again = kelpie.cli("why", "t_parent", "--refresh")
+    assert "the code host's PRs are not fully known" in again.stdout
+    assert f"    note: {REFRESH_LISTS}" in again.stdout.splitlines()
+
+    # A finished subtask has no verdict on the lists: no such note on it.
+    other = kelpie.cli("why", "t_1a", "--refresh")
+    assert other.code == 0, other.stderr
+    assert "PR lists" not in other.stdout
+
+    # why is read-only: the board is untouched and Hermes was never called.
+    assert farm.board.statuses()["t_parent"] == "ready"
+    assert farm.hermes_calls() == []
