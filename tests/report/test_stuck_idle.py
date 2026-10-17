@@ -168,3 +168,12 @@ def test_links_and_the_report_time_zone() -> None:
     markdown = render_markdown(r, "https://board.example/t/{id}")
     line = "- [C-1](https://board.example/t/C-1) (scheduled) for 21.0 h, since 2026-03-02 03:00 CET"
     assert line in markdown
+
+
+def test_a_card_counted_under_another_cause_is_not_listed() -> None:
+    """Rule 3's no-next-action on a card in scheduled counts as ownerless work: it is in the
+    cost of chaos, so it is not "blocking nothing"."""
+    sid = "orphan_status:no-next-action:C-1"
+    state = OpenState(sid, "orphan_status", at(2), at(2), at(20), 0, Severity.WARNING, "s", "C-1")
+    r = report(tasks=(card("C-1", at(1)),), states=(StateRow(state),))
+    assert r.stuck_idle == () and [c.tasks for c in r.chaos] == [("C-1",)]

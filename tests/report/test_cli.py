@@ -107,6 +107,14 @@ def test_the_report_reads_the_board_s_conditions_and_the_hold_labels(
     assert loaded.block_kinds == src.block_kinds
 
 
+def test_an_invalid_rule_3_config_falls_back_to_its_defaults() -> None:
+    from kelpie.core.config import EngineConfig
+    from kelpie.report.cli import _stuck_check
+
+    bad = EngineConfig.from_mapping({"rules": {"orphan_status": {"prework_after": "soon"}}})
+    assert _stuck_check(bad) is None
+
+
 def test_the_report_board_attaches_human_task_conditions_without_network(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

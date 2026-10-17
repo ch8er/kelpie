@@ -417,13 +417,14 @@ def build_report(
 def _stuck_idle(inputs: ReportInputs, start: datetime, end: datetime) -> tuple[StuckCard, ...]:
     """Cards stuck before work, by rule 3's own test at the end of the day (pattern f, as
     configured: past ``prework_after``, not held, ignored or queued behind a parent), that
-    nothing waits on, and that rule 3 did not report during the day (those count in the cost
-    of chaos). Statuses and dependencies are the board's as reported now. Oldest first."""
+    nothing waits on, and that no chaos state of the day names (those count in the cost of
+    chaos, e.g. rule 3's stuck-before-work or no-next-action). Statuses and dependencies
+    are the board's as reported now. Oldest first."""
     check = inputs.stuck_check or OrphanStatus().stuck_before_work
     alerted = {
         row.state.task_id
         for row in inputs.states
-        if cause_of(row.state) == PREWORK
+        if is_chaos(row.state)  # counted in the cost of chaos under any cause
         and max(counts_from(row.state), start) < min(row.state.last_seen, end)
     }
     board = Snapshot(now=end, tasks=tuple(inputs.tasks), dependencies=tuple(inputs.dependencies))
