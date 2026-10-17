@@ -871,3 +871,33 @@ def test_a_person_listed_by_an_old_hold_alert_is_not_idle_capacity() -> None:
     owners = [Owner("alice", "owner", OwnerKind.HUMAN), Owner("agent-dev-1", "developer")]
     [line] = build_report(day_inputs(states=[hold], actions=[alert], owners=owners)).chaos
     assert line.hours == pytest.approx(4.0)  # one agent for 10:00-14:00, not two
+
+
+def test_act_mode_is_recommended_only_where_the_farm_can_act() -> None:
+    """Issue 142: a rule the adapters cannot carry out gets the cause's remedy and what is
+    missing, never "Let it act"; a rule that can act names the tasks it would have acted on."""
+    suggested = entry(
+        at(9), "stale_blocks", ActionKind.UNBLOCK, Outcome.SUGGESTED, "T-1", Mode.SUGGEST
+    )
+    other = opened("stale_blocks:T-9", "stale_blocks", at(8), at(8), at(12))  # another block
+    kw: dict[str, Any] = {
+        "actions": [suggested],
+        "states": [other],
+        "modes": {"stale_blocks": Mode.SUGGEST},
+    }
+    can = build_report(day_inputs(**kw))
+    (advice,) = [a for a in can.recommendations if a.title == "Let stale_blocks act"]
+    assert advice.tasks == ("T-1",)  # the task it would have unblocked, not T-9
+
+    blocked = build_report(
+        day_inputs(**kw, act_blockers={"stale_blocks": "Hermes can't clear blocks yet"})
+    )
+    titles = [a.title for a in blocked.recommendations]
+    assert "Let stale_blocks act" not in titles
+    (advice,) = [a for a in blocked.recommendations if a.title.startswith("Reduce blocks")]
+    assert "act mode is not available here: Hermes can't clear blocks yet" in advice.detail
+    markdown = render_markdown(blocked)
+    assert (
+        "- `stale_blocks`: unblock x1 `T-1` (act mode is not available here: Hermes can't "
+        "clear blocks yet)" in markdown
+    )

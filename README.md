@@ -65,7 +65,8 @@ hours. 5 tasks completed, $0.49 per completed task.
 
 Would have done in act mode (observe, suggest or dry-run):
 
-- `stale_blocks`: unblock x1 `t_review`
+- `stale_blocks`: unblock x1 `t_review` (act mode is not available here:
+  Hermes can't clear blocks yet)
 ...
 ```
 
