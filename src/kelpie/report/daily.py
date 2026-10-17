@@ -18,8 +18,9 @@ person's inbox (rule 13, ``needs_you:*``): the agent-hours of the agent tasks wa
 them (:func:`people_agent_hours`). A card stuck in a pre-work status with work behind it
 (rule 3, ``orphan_status:stuck-before-work:*``) is its own cause too, in card-hours. All
 are "hours lost"; ``[report] hour_usd`` turns them into dollars. A card in a pre-work status
-past rule 3's ``prework_after`` that no open task depends on (so rule 3 never reported it)
-is listed under "Stuck, blocking nothing" with its age, and counts nowhere: it delays no work.
+that rule 3 finds stuck (past ``prework_after``, not held, ignored or queued behind its own
+parent) but that no open task depends on, so rule 3 never reported it, is listed under
+"Stuck, blocking nothing" with its age, and counts nowhere: it delays no work.
 
 **Cost of chaos, dollars.** Tokens burned by sessions that were going nowhere: a session in
 a ``loop_breaker`` (identical calls, error streak) or ``no_progress`` state while it lasted,
@@ -118,6 +119,7 @@ from kelpie.report.verify import (
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
 from kelpie.report.waits import UNKNOWN as UNKNOWN_WAIT
 from kelpie.report.waits import BiggestWait, BlockKind, WaitCauses, biggest_wait
+from kelpie.rules.orphan_status import OrphanStatus
 from kelpie.traces.outputs import (
     OutputGroup,
     OutputSettings,
@@ -130,8 +132,9 @@ from kelpie.traces.outputs import (
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PREWORK_AFTER = timedelta(hours=4)  # rule 3's default
 _SHOWN_STUCK = 10
+# Rule 3's pattern f test: open tasks behind a card stuck before work, None if not stuck.
+type StuckCheck = Callable[[Task, Snapshot], list[str] | None]
 
 # Rule 6's forgotten holds: a cause of their own, counted in idle agent-hours.
 HOLDS = "bottlenecks:hold"
@@ -231,8 +234,8 @@ class ReportInputs:
     hold_labels: tuple[str, ...] = ()  # rule 6's hold labels: a held task waits for a hold
     block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]]: waits a block declares
     dependencies: Sequence[Dependency] = ()  # the board's, as reported now
-    # rule 3's threshold for a card stuck before work (None: off)
-    prework_after: timedelta | None = DEFAULT_PREWORK_AFTER
+    # rule 3's test for a card stuck before work, as configured (None: rule 3's defaults)
+    stuck_check: StuckCheck | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,50 +415,28 @@ def build_report(
 
 
 def _stuck_idle(inputs: ReportInputs, start: datetime, end: datetime) -> tuple[StuckCard, ...]:
-    """Cards still in a pre-work status at the end of the day for longer than
-    ``prework_after`` that rule 3 did not report as stuck before work during the day (those
-    count in the cost of chaos), with no open task depending on them and no unfinished task
-    of their own to wait for (rule 3: queued, not stuck). Oldest first."""
-    after = inputs.prework_after
-    if after is None:
-        return ()
+    """Cards stuck before work, by rule 3's own test at the end of the day (pattern f, as
+    configured: past ``prework_after``, not held, ignored or queued behind a parent), that
+    nothing waits on, and that rule 3 did not report during the day (those count in the cost
+    of chaos). Statuses and dependencies are the board's as reported now. Oldest first."""
+    check = inputs.stuck_check or OrphanStatus().stuck_before_work
     alerted = {
         row.state.task_id
         for row in inputs.states
-        if cause_of(row.state) == PREWORK and row.state.since < end and row.state.last_seen >= start
+        if cause_of(row.state) == PREWORK
+        and max(counts_from(row.state), start) < min(row.state.last_seen, end)
     }
-    status = {t.id: t.status for t in inputs.tasks}
-    parents: dict[str, list[str]] = defaultdict(list)
-    children: dict[str, list[str]] = defaultdict(list)
-    for d in inputs.dependencies:
-        parents[d.task_id].append(d.depends_on)
-        children[d.depends_on].append(d.task_id)
-
-    def open_task(task_id: str) -> bool:
-        found = status.get(task_id)
-        return found is not None and not found.is_terminal
-
-    def blocks_work(task_id: str) -> bool:  # an open task depends on it, at any depth
-        seen, todo = {task_id}, list(children.get(task_id, ()))
-        while todo:
-            t = todo.pop()
-            if t in seen:
-                continue
-            seen.add(t)
-            if open_task(t):
-                return True
-            todo.extend(children.get(t, ()))
-        return False
-
-    out = []
-    for t in inputs.tasks:
-        if not t.prework or t.status.is_terminal or t.id in alerted or t.status_since >= end:
-            continue
-        age = end - t.status_since
-        if age < after or blocks_work(t.id) or any(open_task(p) for p in parents.get(t.id, ())):
-            continue
-        name = t.platform_status or t.status.value
-        out.append(StuckCard(t.id, name, t.status_since, age.total_seconds() / 3600))
+    board = Snapshot(now=end, tasks=tuple(inputs.tasks), dependencies=tuple(inputs.dependencies))
+    out = [
+        StuckCard(
+            t.id,
+            t.platform_status or t.status.value,
+            t.status_since,
+            (end - t.status_since).total_seconds() / 3600,
+        )
+        for t in inputs.tasks
+        if t.id not in alerted and t.status_since < end and check(t, board) == []
+    ]
     out.sort(key=lambda c: (c.since, c.task_id))
     return tuple(out)
 
@@ -1000,7 +981,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             "human gate rule 6 also reports counts in both lines).",
         ]
     else:
-        lines.append("Nothing stuck and no tokens burned on loops, idle sessions or restarts.")
+        lines.append("No hours lost and no tokens burned on loops, idle sessions or restarts.")
     if report.stuck_idle:
         lines += [
             "",

@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta
-from typing import Any
 
 from kelpie.app import (
     Settings,
+    _rule_config,
     build_adapters,
     connector_steps,
     hold_labels,
@@ -19,11 +19,10 @@ from kelpie.app import (
     utc_now,
 )
 from kelpie.core.budgets import BudgetMode
-from kelpie.core.config import Mode
+from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import Snapshot
-from kelpie.core.serde import parse_duration
 from kelpie.metrics import Metrics
-from kelpie.report.daily import DEFAULT_PREWORK_AFTER, day_bounds
+from kelpie.report.daily import StuckCheck, day_bounds
 from kelpie.report.fixes import MANUAL, FixEvent, FixStore
 from kelpie.report.run import ReportSources, Sender, default_day, generate, send, write
 from kelpie.report.schedule import ReportScheduler, RunLog
@@ -53,22 +52,19 @@ def sources(settings: Settings) -> ReportSources:
             for b in settings.block_conditions
             if "block" in b.applies_to
         ),
-        prework_after=_prework_after(engine.rules.get("orphan_status", {})),
+        stuck_check=_stuck_check(engine),
     )
 
 
-def _prework_after(orphan_status: Mapping[str, Any]) -> timedelta | None:
-    """Rule 3's ``prework_after`` (``false``: off); invalid values are the rule's to refuse
-    at startup, so the default stands in."""
-    raw = orphan_status.get("prework_after")
-    if raw is False:
-        return None
-    if raw is None:
-        return DEFAULT_PREWORK_AFTER
+def _stuck_check(engine: EngineConfig) -> StuckCheck | None:
+    """Rule 3's stuck-before-work test, built from its config as ``kelpie serve`` builds it
+    (hold labels inherited from rule 6 included); None (its defaults) if the config is
+    invalid, which ``kelpie serve`` refuses at startup."""
     try:
-        return parse_duration(raw)
+        rule = REGISTRY["orphan_status"](_rule_config("orphan_status", engine))
     except (TypeError, ValueError):
-        return DEFAULT_PREWORK_AFTER
+        return None
+    return getattr(rule, "stuck_before_work", None)
 
 
 def report_settings(settings: Settings, day: date, now: datetime) -> Settings:

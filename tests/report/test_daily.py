@@ -344,7 +344,7 @@ def report_headline(report: Any) -> str:
 def test_missing_database_is_an_empty_day(tmp_path: Path) -> None:
     report, markdown = generate(sources(tmp_path / "none.db"), DAY, BOARD)
     assert report.chaos == () and report.completed == ("T-1", "T-2")
-    assert "Nothing stuck" in markdown
+    assert "No hours lost" in markdown
 
 
 def test_store_reads_only_the_day(db: Path) -> None:

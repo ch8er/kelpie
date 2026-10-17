@@ -231,9 +231,9 @@ report; no LLM is involved.
   waiting on them (approvals, human tasks); a human gate rule 6 also reports counts
   in both lines. Cards stuck in a pre-work status such as
   triage or scheduled while other tasks wait on them (rule 3) are a line of their own; a
-  card past rule 3's `prework_after` that nothing waits on is listed under "Stuck,
-  blocking nothing" with its age, and not counted in the hours or dollars (it delays no
-  work).
+  card rule 3 finds stuck (past `prework_after`, not held, ignored or queued behind its own
+  parent) that nothing waits on is listed under "Stuck, blocking nothing" with its age, and
+  not counted in the hours or dollars (it delays no work).
   Humans (owners of kind `human`) never count as idle agents. `[report] hour_usd` prices
   them all.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while

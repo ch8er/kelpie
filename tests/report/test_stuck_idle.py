@@ -9,16 +9,13 @@ from typing import Any
 import pytest
 
 from kelpie.core.actions import Severity
-from kelpie.core.model import Dependency, Status, Task
+from kelpie.core.model import Dependency, Snapshot, Status, Task
 from kelpie.core.states import OpenState
-from kelpie.report.daily import (
-    DEFAULT_PREWORK_AFTER,
-    ReportInputs,
-    build_report,
-    render_markdown,
-    render_summary,
-)
+from kelpie.report.daily import ReportInputs, build_report, render_markdown, render_summary
 from kelpie.report.store import StateRow
+from kelpie.rules.orphan_status import OrphanStatus, build
+
+PREWORK_AFTER = timedelta(hours=4)  # rule 3's default
 
 DAY = date(2026, 3, 2)
 END = datetime(2026, 3, 3, tzinfo=UTC)
@@ -85,13 +82,15 @@ def test_a_card_reported_earlier_in_the_day_is_not_counted_twice() -> None:
 
 
 def test_threshold_order_and_switch() -> None:
-    young = card("C-7", END - DEFAULT_PREWORK_AFTER + timedelta(minutes=1))
+    young = card("C-7", END - PREWORK_AFTER + timedelta(minutes=1))
     old, older = card("C-8", at(2)), card("C-9", at(1), status="triage")
     finished = Task("C-0", "c", Status.DONE, at(1), prework=True)
     tasks = (young, old, older, finished)
     assert [c.task_id for c in report(tasks=tasks).stuck_idle] == ["C-9", "C-8"]
-    assert report(tasks=tasks, prework_after=None).stuck_idle == ()
-    assert [c.task_id for c in report(tasks=tasks, prework_after=timedelta(0)).stuck_idle] == [
+    off = build({"prework_after": False}).stuck_before_work
+    assert report(tasks=tasks, stuck_check=off).stuck_idle == ()
+    sooner = build({"prework_after": "1m"}).stuck_before_work
+    assert [c.task_id for c in report(tasks=tasks, stuck_check=sooner).stuck_idle] == [
         "C-9",
         "C-8",
         "C-7",
@@ -106,15 +105,66 @@ def test_the_list_is_capped_and_escaped() -> None:
 
 
 def test_the_default_threshold_is_rule_3_s() -> None:
-    from kelpie.rules.orphan_status import OrphanStatus
-
-    assert OrphanStatus().prework_after == DEFAULT_PREWORK_AFTER
+    assert OrphanStatus().prework_after == PREWORK_AFTER
 
 
-def test_prework_after_comes_from_rule_3_config() -> None:
-    from kelpie.report.cli import _prework_after
+def test_held_and_ignored_cards_are_parked_on_purpose() -> None:
+    held = Task("C-1", "c", Status.BACKLOG, at(1), labels=("freeze",), prework=True)
+    ignored = card("PARKED-1", at(1))
+    plain = card("C-2", at(1))
+    check = build({"hold_labels": ["freeze"], "ignore_tasks": ["PARKED-*"]}).stuck_before_work
+    r = report(tasks=(held, ignored, plain), stuck_check=check)
+    assert [c.task_id for c in r.stuck_idle] == ["C-2"]
 
-    assert _prework_after({}) == DEFAULT_PREWORK_AFTER
-    assert _prework_after({"prework_after": False}) is None
-    assert _prework_after({"prework_after": "2h"}) == timedelta(hours=2)
-    assert _prework_after({"prework_after": "soon"}) == DEFAULT_PREWORK_AFTER
+
+def test_dependents_are_walked_as_rule_3_walks_them() -> None:
+    # C-1 <- T-1 (done) <- U-1 (open): rule 3 stops at the done task, so nothing waits on C-1
+    through_done = (card("C-1", at(1)), Task("T-1", "t", Status.DONE, at(2)),
+                    Task("U-1", "u", Status.READY, at(2)))  # fmt: skip
+    deps = (Dependency("T-1", "C-1"), Dependency("U-1", "T-1"))
+    assert [c.task_id for c in report(tasks=through_done, dependencies=deps).stuck_idle] == ["C-1"]
+    # C-2 <- T-2 (open) <- U-2 (open), with a cycle back to T-2: work waits, not listed
+    through_open = (card("C-2", at(1)), Task("T-2", "t", Status.READY, at(2)),
+                    Task("U-2", "u", Status.READY, at(2)))  # fmt: skip
+    cyc = (Dependency("T-2", "C-2"), Dependency("U-2", "T-2"), Dependency("T-2", "U-2"))
+    assert report(tasks=through_open, dependencies=cyc).stuck_idle == ()
+
+
+def test_rule_3_and_the_list_split_the_stuck_cards() -> None:
+    """Whatever the graph, a stuck card is either alerted by rule 3 or listed, never both."""
+    import random
+
+    rule = OrphanStatus()
+    rng = random.Random(7)
+    for _ in range(50):
+        tasks = [card(f"C-{i}", at(rng.choice([1, 10, 22]))) for i in range(4)]
+        tasks += [Task(f"T-{i}", "t", rng.choice(list(Status)), at(1)) for i in range(4)]
+        ids = [t.id for t in tasks]
+        deps = tuple({Dependency(*rng.sample(ids, 2)) for _ in range(5)})
+        snapshot = Snapshot(now=END, tasks=tuple(tasks), dependencies=deps)
+        actions = rule.evaluate(snapshot)
+        alerts = {a.task_id for a in actions if "stuck-before-work" in (a.state or "")}
+        listed = {c.task_id for c in report(tasks=tuple(tasks), dependencies=deps).stuck_idle}
+        lone = {t.id for t in tasks if rule.stuck_before_work(t, snapshot) == []}
+        blocking = {t.id for t in tasks if rule.stuck_before_work(t, snapshot)}
+        assert listed == lone and alerts <= blocking and not alerts & listed
+
+
+def test_a_card_whose_alert_closed_before_the_day_is_listed_again() -> None:
+    old = card("C-1", at(0, day=1))
+    yesterday = stuck_state("C-1", at(4, day=1), at(20, day=1))  # its dependent finished
+    assert [c.task_id for c in report(tasks=(old,), states=(yesterday,)).stuck_idle] == ["C-1"]
+    later = card("C-2", at(1, day=3))  # moved into pre-work after the day
+    assert report(tasks=(later,)).stuck_idle == ()
+
+
+def test_links_and_the_report_time_zone() -> None:
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Europe/Berlin")
+    start = datetime(2026, 3, 2, tzinfo=tz)
+    lone = card("C-1", start + timedelta(hours=3))
+    r = build_report(ReportInputs(day=DAY, tz=tz, tasks=(lone,)), sections={})
+    markdown = render_markdown(r, "https://board.example/t/{id}")
+    line = "- [C-1](https://board.example/t/C-1) (scheduled) for 21.0 h, since 2026-03-02 03:00 CET"
+    assert line in markdown
