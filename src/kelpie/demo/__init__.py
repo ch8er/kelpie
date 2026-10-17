@@ -8,25 +8,38 @@ nothing sent anywhere.
 
 Kelpie's own log goes to ``kelpie-demo.log`` in the farm directory, not to the terminal; a
 run that logged an error exits 1 and says where the log is (the farm is then kept).
+
+With ``--web`` the day's report is also written as one self-contained HTML page
+(:mod:`kelpie.report.html`), in a new private directory that stays after the demo (the
+browser reads it later) or in the kept farm, and handed to a graphical browser when there is
+one; the path is printed first, so a text-only session still has it. (With a display but no
+graphical browser installed, Python may still fall back to a text browser in the terminal.)
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
+import tempfile
+import webbrowser
 from pathlib import Path
 from typing import TextIO
 
 from kelpie.demo.farm import LOG, DemoFarm
 from kelpie.demo.narrate import Narrator
 from kelpie.demo.story import DAY, Outcomes, Story
+from kelpie.report import html
+
+PAGE = "kelpie-demo-report.html"
 
 
 def run(
     *,
     fast: bool = False,
     keep: bool = False,
+    web: bool = False,
     root: Path | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
@@ -35,7 +48,7 @@ def run(
     """Tell the story; ``(exit code, what happened)``: 0, 1 when it failed or Kelpie
     logged an error, 2 on a platform it cannot run on, 130 when interrupted. The farm lives
     in a temporary directory (or ``root``), removed afterwards unless ``keep`` or something
-    went wrong."""
+    went wrong. With ``web`` the report is also written as a web page and opened."""
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
     if os.name != "posix" or not Path("/bin/sh").exists():
@@ -68,12 +81,59 @@ def run(
         for line in [] if failed else errors[:5]:
             err.write(f"  {line}\n")
         return 1, outcomes
+    if web and outcomes is not None:
+        try:
+            page = _page(outcomes, farm.root if keep or root is not None else None)
+        except OSError as exc:
+            err.write(f"kelpie demo: the report page could not be written: {exc}\n")
+        else:
+            out.write(f"\nThe report as a web page:\n  {page}\n")
+            out.flush()
+            if _open(page):
+                out.write("(sent to your browser)\n")
     if keep or root is not None:
         out.write("\nKept the farm: its board, kelpie.toml, Kelpie's log and the full report:\n")
         out.write(f"  {farm.root}\n")
     else:
         farm.remove()
     return 0, outcomes
+
+
+def _page(outcomes: Outcomes, farm: Path | None) -> Path:
+    """The report as HTML: in the kept farm, else in a new private directory of its own
+    (never a predictable path in a shared temporary directory)."""
+    directory = farm if farm is not None else Path(tempfile.mkdtemp(prefix="kelpie-demo-web-"))
+    path = directory / PAGE
+    day = DAY.date().isoformat()
+    try:
+        path.write_text(
+            html.render(
+                outcomes.report,
+                f"Kelpie daily report {day} (demo)",
+                "The day of a simulated farm from kelpie demo: synthetic tasks, people and "
+                "repository, no real farm data.",
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        if farm is None:  # ours: leave no empty directory behind
+            shutil.rmtree(directory, ignore_errors=True)
+        raise
+    return path
+
+
+def _open(path: Path) -> bool:
+    """Hand ``path`` to a graphical browser; False when there is none. Without a display on
+    Linux (a server, SSH, CI) nothing is opened: Python's fallback would be a text browser
+    that takes over the terminal."""
+    if sys.platform.startswith("linux") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        return False
+    try:
+        return webbrowser.open(path.resolve().as_uri())
+    except webbrowser.Error:
+        return False
 
 
 _Saved = tuple[list[logging.Handler], int, logging.Handler]

@@ -51,7 +51,7 @@ restart `kelpie serve` after a change. Unknown sections or keys stop Kelpie with
 
 | Command | What it does |
 | --- | --- |
-| `kelpie demo [--fast] [--keep]` | A working day on a simulated Hermes farm, narrated, then its daily report: offline, no config, about a minute (`--fast`: no pauses). `--keep` keeps the farm directory (board, `kelpie.toml`, Kelpie's log, the full report). |
+| `kelpie demo [--fast] [--keep] [--web]` | A working day on a simulated Hermes farm, narrated, then its daily report: offline, no config, about a minute (`--fast`: no pauses). `--keep` keeps the farm directory (board, `kelpie.toml`, Kelpie's log, the full report); `--web` writes the report as one self-contained HTML page, prints its path (it stays after the demo, in a new `kelpie-demo-web-*` temporary directory, or in the kept farm) and opens it in a graphical browser when there is one. |
 | `kelpie serve [--host H] [--port P]` | Control loop plus HTTP endpoints. Defaults: `$KELPIE_HOST` or `127.0.0.1`, `$KELPIE_PORT` or `9464`. |
 | `kelpie status` | Rules with their mode, adapters, traces, connectors, alert channels and budgets. Reads the database without changing it. |
 | `kelpie doctor [--prometheus URL]` | Checks a first live run (see below). |
