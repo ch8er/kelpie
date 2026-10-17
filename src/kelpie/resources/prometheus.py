@@ -43,8 +43,9 @@ GB = 1e9
 # Filesystems that are not storage the agents can fill.
 _FS = 'fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs"'
 
-# ``{host_label}`` is replaced by the configured host label. Custom queries are used as
-# written and must keep that label in their result.
+# ``{host_label}`` is replaced by the configured host label, ``{window}`` and
+# ``{half_window}`` by ``growth_window`` and its half, in custom queries too. Every result
+# must keep the host label.
 DEFAULT_QUERIES: Mapping[str, str] = {
     "disk_size": f"node_filesystem_size_bytes{{{_FS}}}",
     "disk_avail": f"node_filesystem_avail_bytes{{{_FS}}}",
@@ -58,7 +59,22 @@ DEFAULT_QUERIES: Mapping[str, str] = {
     # Needs node_exporter's --collector.processes; without it there is no reading.
     "processes": "node_processes_pids",
     "processes_max": "node_processes_max_processes",
+    # How fast used space grows, in bytes per day, over ``growth_window`` (incident 19);
+    # only for series that existed half a window ago, so a fresh Prometheus or host does not
+    # forecast from a few minutes (one build's 5 GB in 3 minutes is no daily rate).
+    "disk_growth": (
+        f"-deriv(node_filesystem_avail_bytes{{{_FS}}}[{{window}}]) * 86400"
+        f" and node_filesystem_avail_bytes{{{_FS}}} offset {{half_window}}"
+    ),
+    # Directory sizes from scripts/kelpie-path-sizes.sh (node_exporter's textfile collector),
+    # and when that file was last written: sizes from a script that stopped are old.
+    "path_bytes": "kelpie_path_bytes",
+    "path_growth": (
+        "deriv(kelpie_path_bytes[{window}]) * 86400 and kelpie_path_bytes offset {half_window}"
+    ),
+    "path_written": 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}',
 }
+DEFAULT_GROWTH_WINDOW = timedelta(hours=6)
 QUERY_NAMES = frozenset(DEFAULT_QUERIES)
 
 valid_token = net.valid_header_value
@@ -68,6 +84,8 @@ class ReadObserver(Protocol):
     def resource_read(self, readings: int) -> None: ...
 
     def resource_failed(self, cause: str) -> None: ...
+
+    def resource_query_failed(self, cause: str) -> None: ...
 
 
 # A failed query. ``cause`` is a short category (a metric label); ``detail`` is safe to
@@ -158,12 +176,18 @@ class PrometheusConfig:
     interval: timedelta = DEFAULT_INTERVAL
     token: str | None = field(default=None, repr=False)
     queries: Mapping[str, str] = field(default_factory=dict)  # overrides of DEFAULT_QUERIES
+    growth_window: timedelta = DEFAULT_GROWTH_WINDOW
 
     def query_text(self, name: str) -> str:
-        text = self.queries.get(name)
-        if text is not None:
-            return text
-        return DEFAULT_QUERIES[name].replace("{host_label}", self.host_label)
+        """The query, its placeholders filled in (in custom queries too): ``{host_label}``,
+        ``{window}`` (``growth_window``) and ``{half_window}``."""
+        text = self.queries.get(name, DEFAULT_QUERIES[name])
+        seconds = int(self.growth_window.total_seconds())
+        return (
+            text.replace("{host_label}", self.host_label)
+            .replace("{half_window}", f"{seconds // 2}s")
+            .replace("{window}", f"{seconds}s")
+        )
 
 
 class PrometheusSource:
@@ -182,6 +206,7 @@ class PrometheusSource:
         self._cached: tuple[Resource, ...] = ()
         self._next_at: datetime | None = None
         self._warned: set[str] = set()
+        self._optional_warned: set[str] = set()
 
     def read(self, now: datetime) -> tuple[Resource, ...]:
         if self._next_at is not None and now < self._next_at:
@@ -216,28 +241,50 @@ class PrometheusSource:
 
     # --- queries ------------------------------------------------------------------------
 
-    def _series(
-        self, name: str, now: datetime, by_mount: bool = False
+    def _optional(
+        self, name: str, now: datetime, by_mount: bool = False, label: str = "mountpoint"
     ) -> dict[tuple[str, str], Point]:
-        """Values of one query per (Kelpie host, mount); unconfigured hosts are dropped."""
+        """A query whose metric may not exist (growth needs history, directory sizes need
+        the shipped script): an empty answer is fine, and so is a failure of only this
+        query, logged once, so the readings that need no history still arrive."""
+        try:
+            found = self._series(name, now, by_mount, label)
+        except QueryError as exc:
+            if name not in self._optional_warned:  # once per process
+                self._optional_warned.add(name)
+                log.warning(
+                    "Prometheus query %s failed (%s); readings come without it", name, exc.cause
+                )
+            if self.observer is not None:  # counted each time: a forecast quietly off shows
+                self.observer.resource_query_failed(f"{name}_{exc.cause}")
+            return {}
+        return {k: p for k, p in found.items() if math.isfinite(p.value)}
+
+    def _series(
+        self, name: str, now: datetime, by_mount: bool = False, label: str = "mountpoint"
+    ) -> dict[tuple[str, str], Point]:
+        """Values of one query per (Kelpie host, mount or ``label``); unconfigured hosts are
+        dropped."""
         out: dict[tuple[str, str], Point] = {}
         samples = self.client.query(self.config.query_text(name))
         for sample in sorted(samples, key=lambda s: sorted(s.labels.items())):
             host = self._hosts.get(sample.labels.get(self.config.host_label, ""))
             if host is None:
                 continue
-            mount = sample.labels.get("mountpoint", "") if by_mount else ""
+            mount = sample.labels.get(label, "") if by_mount else ""
             # First wins: bind mounts repeat.
-            out.setdefault((host, mount), Point(sample.value, _stamp(sample, now)))
+            out.setdefault((host, mount), Point(sample.value, _stamp(sample, now), sample.labels))
         return out
 
     def _fetch(self, now: datetime) -> tuple[Resource, ...]:
         readings: list[Resource] = []
         size = self._series("disk_size", now, True)
         avail = self._series("disk_avail", now, True)
+        growth = self._optional("disk_growth", now, True)
         for (host, mount), total in sorted(size.items()):
             if total.value > 0 and (host, mount) in avail:
                 free = avail[(host, mount)]
+                rate = growth.get((host, mount))
                 readings.append(
                     Resource(
                         f"{host}:{mount}",
@@ -247,8 +294,32 @@ class PrometheusSource:
                         limit=total.value / GB,
                         unit="GB",
                         at=min(total.at, free.at),
+                        growth_per_day=rate.value / GB if rate is not None else None,
+                        mount=mount,
                     )
                 )
+        sizes = self._optional("path_bytes", now, True, "path")
+        grows = self._optional("path_growth", now, True, "path")
+        written = self._optional("path_written", now)
+        for (host, path), point in sorted(sizes.items()):
+            if not path:
+                continue
+            rate = grows.get((host, path))
+            at = point.at
+            if (mtime := written.get((host, ""))) is not None:
+                at = min(at, _when(mtime.value, now))  # the sizes are as old as the file
+            readings.append(
+                Resource(
+                    f"{host}:path:{path}",
+                    ResourceKind.PATH,
+                    host,
+                    used=max(0.0, point.value) / GB,
+                    unit="GB",
+                    at=at,
+                    growth_per_day=rate.value / GB if rate is not None else None,
+                    mount=point.labels.get("mountpoint") or None,
+                )
+            )
         total_mem = self._series("memory_total", now)
         avail_mem = self._series("memory_available", now)
         for (host, _), total in sorted(total_mem.items()):
@@ -312,6 +383,15 @@ class PrometheusSource:
 class Point:
     value: float
     at: datetime
+    labels: Mapping[str, str] = field(default_factory=dict)
+
+
+def _when(seconds: float, now: datetime) -> datetime:
+    """A Unix time as a datetime, never later than ``now``."""
+    try:
+        return min(datetime.fromtimestamp(seconds, UTC), now)
+    except (OverflowError, OSError, ValueError):
+        return now
 
 
 def _stamp(sample: Sample, now: datetime) -> datetime:

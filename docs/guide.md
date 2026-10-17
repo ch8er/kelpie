@@ -431,7 +431,9 @@ the default process ceiling is the kernel's `pid_max`, so process alerts rarely 
 
 Redirects and proxies are never followed, and the token is never logged. If Prometheus is
 down, rules see no host readings (never stale ones), the failure is counted in
-`kelpie_resource_read_failures_total` and logged once per cause. Queries are configurable
+`kelpie_resource_read_failures_total` and logged once per cause. A cause named
+`<query>_<cause>` (e.g. `disk_growth_query_failed`) is one optional query (growth,
+directory sizes) that failed while the other readings continued. Queries are configurable
 under `[resources.prometheus.queries]`; see `kelpie.example.toml`. LLM provider quotas and
 auth health are not part of this step yet.
 

@@ -171,6 +171,12 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #                           # (the Hermes adapter does not yet): with several hosts and tasks
 #                           # that do not say where they run, you get one alert without a host
 # max_reading_age = "10m"
+# time_to_full_warning = "72h"   # a disk full within this at its growth rate warns (incident 19)
+# time_to_full_critical = "24h"  # ...and is critical within this; the alert names the directories
+#                                # that grow fastest (scripts/kelpie-path-sizes.sh)
+# min_growth_per_day = 0.1       # GB a day; slower growth forecasts nothing
+# growing_paths_shown = 3        # directories named in the alert
+# path_max_age = "1h"            # older directory sizes: "is the script still running?"
 #
 # LLM providers (readings from [connectors.llm_quotas] below, or llm_quota/auth resources):
 # quota_warning = 0.1       # warn at this share of the quota left (remaining / limit)
@@ -315,6 +321,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # host_label = "instance"             # label that identifies the machine in node_exporter series
 # timeout = "5s"                      # per query (at most 60s); a failed query ends the fetch
 # interval = "60s"                    # at most one fetch this often (at least 5s)
+# growth_window = "6h"                # disk and directory growth rates (rule 7's time-to-full)
 # token_env = "KELPIE_PROMETHEUS_TOKEN"  # bearer token from this env var. Used when set; when
 #                                     # written here the variable must be set or Kelpie refuses to start
 #
@@ -331,6 +338,12 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # cpu_busy = '100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])))'
 # processes = "node_processes_pids"           # needs node_exporter --collector.processes
 # processes_max = "node_processes_max_processes"
+# disk_growth = '-deriv(node_filesystem_avail_bytes{fstype!~"..."}[{window}]) * 86400 and node_filesystem_avail_bytes{fstype!~"..."} offset {half_window}'
+# path_bytes = "kelpie_path_bytes"             # from scripts/kelpie-path-sizes.sh
+# path_growth = "deriv(kelpie_path_bytes[{window}]) * 86400 and kelpie_path_bytes offset {half_window}"
+# path_written = 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}'
+# ({host_label}, {window} = growth_window and {half_window} are filled in, here too; the
+# "..." stands for the fstype filter of disk_size.)
 
 # LLM provider quotas and key health, for rule 7. Off unless providers are listed. Each
 # provider is probed with one GET of `path` at most once per `interval`. Probes must cost

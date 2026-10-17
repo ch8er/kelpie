@@ -1,0 +1,14 @@
+# Directory sizes for Kelpie's rule 7 (Linux). Replace YOU and the paths, then:
+#   sudo cp kelpie-path-sizes.service kelpie-path-sizes.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now kelpie-path-sizes.timer
+# The first argument is node_exporter's --collector.textfile.directory.
+[Unit]
+Description=Directory sizes for Kelpie (node_exporter textfile collector)
+
+[Service]
+Type=oneshot
+Nice=10
+# du on a hung network mount must not block every later run.
+TimeoutStartSec=30min
+IOSchedulingClass=idle
+ExecStart=/usr/local/share/kelpie/kelpie-path-sizes.sh /var/lib/node_exporter/textfile /home/YOU/.hermes /home/YOU/.cache /var/lib/docker

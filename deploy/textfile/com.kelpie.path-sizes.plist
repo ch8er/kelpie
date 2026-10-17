@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Directory sizes for Kelpie's rule 7, every 15 minutes (macOS). Replace YOU and the paths
+  (and /opt/homebrew with /usr/local on an Intel Mac), copy to
+  ~/Library/LaunchAgents/ and load it with:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kelpie.path-sizes.plist
+  The output directory is node_exporter's textfile directory
+  (brew services: node_exporter's collector.textfile.directory flag, see docs/install.md).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kelpie.path-sizes</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/share/kelpie/kelpie-path-sizes.sh</string>
+    <string>/opt/homebrew/var/node_exporter/textfile</string>
+    <string>/Users/YOU/Library/Developer/CoreSimulator/Devices</string>
+    <string>/Users/YOU/Library/Developer/Xcode/DerivedData</string>
+    <string>/Users/YOU/Library/Caches</string>
+    <string>/Users/YOU/.hermes</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- gtimeout (brew install coreutils) bounds each du; launchd's PATH lacks Homebrew. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>

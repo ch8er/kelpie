@@ -16,30 +16,49 @@ import pytest
 from kelpie.cli import main
 from kelpie.core.storage import SqliteSpanStore
 from kelpie.doctor import Check, run_checks
+from kelpie.resources.prometheus import PrometheusConfig
 from tests.adapters.kanban import Board
+from tests.resources.fake_prometheus import FakeProm, fake_prometheus, vector
 from tests.traces.test_span_store import span
 
 NOW = datetime.now(UTC)
 DOWN = "http://127.0.0.1:9"  # the discard port: nothing listens there
 
 
+def count(name: str, queries: dict[str, str] | None = None) -> str:
+    """The doctor's question for one of rule 7's queries."""
+    config = PrometheusConfig("http://x", {}, queries=queries or {})
+    return f"count by (instance) (\n{config.query_text(name)}\n)"
+
+
 class Farm:
     """A temporary Hermes farm: board, spool, span store and a kelpie.toml for them."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, prom: FakeProm) -> None:
         self.root = root
+        self.prom = prom
+        prom.responses.update(
+            {
+                count(name): vector(({"instance": "mac-1:9100"}, "3"))
+                for name in ("disk_size", "path_bytes")
+            }
+        )
         self.board = Board(root / "kanban.db")
         self.spool = root / "spool.jsonl"
         self.db = root / "kelpie.db"
         self.extra = ""
         self.adapter_extra = ""
+        # Rule 7's source: doctor fails without one (incident 19).
+        self.resources = (
+            f'[resources.prometheus]\nurl = "{prom.url}"\nhosts = {{ mac-1 = "mac-1:9100" }}\n'
+        )
 
     def config(self) -> Path:
         path = self.root / "kelpie.toml"
         path.write_text(
             f'[storage]\npath = "{self.db}"\n'
             f'[adapters.hermes]\ndb_path = "{self.board.path}"\nspool = "{self.spool}"\n'
-            f"{self.adapter_extra}\n{self.extra}"
+            f"{self.adapter_extra}\n{self.resources}{self.extra}"
         )
         return path
 
@@ -64,9 +83,10 @@ class Farm:
 
 @pytest.fixture
 def farm(tmp_path: Path) -> Iterator[Farm]:
-    f = Farm(tmp_path)
-    yield f
-    f.board.close()
+    with fake_prometheus() as prom:
+        f = Farm(tmp_path, prom)
+        yield f
+        f.board.close()
 
 
 def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
@@ -80,6 +100,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "OTLP spans arrive": "PASS",
         "worktrees readable": "SKIP",
         "PR blocks have conditions": "PASS",
+        "disk watched": "PASS",
         "Prometheus reachable": "SKIP",
     }
     assert "1 tasks" in checks["kanban.db"].detail
@@ -371,3 +392,48 @@ def test_many_pr_blocks_are_cut_short(farm: Farm) -> None:
         blocked(farm, f"t_{n}", f"automerge PR #{n}")
     detail = farm.checks()["PR blocks have conditions"].detail
     assert "(t_2, t_3, t_4, t_5, t_6 and 5 more)" in detail
+
+
+def test_a_farm_whose_disks_nobody_watches_fails(farm: Farm) -> None:
+    farm.make_healthy()
+    assert "mac-1" in farm.checks()["disk watched"].detail
+    # Configured, but node_exporter is missing on a host (incident 19).
+    farm.resources = farm.resources.replace(
+        'mac-1 = "mac-1:9100" }', 'mac-1 = "mac-1:9100", mac-2 = "mac-2:9100" }'
+    )
+    check = farm.checks()["disk watched"]
+    assert check.status == "FAIL" and "no disk readings for mac-2" in check.detail
+    # Disks read, but no directory sizes: a warning.
+    farm.prom.responses[count("path_bytes")] = vector()
+    farm.resources = farm.resources.replace(', mac-2 = "mac-2:9100"', "")
+    check = farm.checks()["disk watched"]
+    assert check.status == "WARN" and "no directory sizes from mac-1" in check.detail
+    # The queries rule 7 runs are the ones asked, custom ones too.
+    custom = {"disk_size": "my_disk_size_bytes", "path_bytes": "my_dirs  # from a recording"}
+    farm.prom.responses[count("path_bytes")] = farm.prom.responses[count("disk_size")]
+    for name in custom:
+        farm.prom.responses[count(name, custom)] = farm.prom.responses[count("disk_size")]
+    farm.resources += (
+        '[resources.prometheus.queries]\ndisk_size = "my_disk_size_bytes"\n'
+        'path_bytes = "my_dirs  # from a recording"\n'
+    )
+    assert farm.checks()["disk watched"].status == "PASS"
+    farm.resources = farm.resources.split("[resources.prometheus.queries]")[0]
+    # A token Prometheus refuses: rule 7 reads nothing.
+    farm.prom.status = 401
+    check = farm.checks()["disk watched"]
+    assert check.status == "FAIL" and "requires a token" in check.detail  # none was sent
+    farm.prom.status = 200
+    # A token_env that is not set.
+    farm.resources += 'token_env = "NO_SUCH_KELPIE_TOKEN"\n'
+    check = farm.checks()["disk watched"]
+    assert check.status == "FAIL" and "NO_SUCH_KELPIE_TOKEN" in check.detail
+    farm.resources = farm.resources.replace('token_env = "NO_SUCH_KELPIE_TOKEN"\n', "")
+    # Prometheus does not answer: a warning, doctor may run elsewhere.
+    farm.resources = farm.resources.replace(farm.prom.url, DOWN)
+    check = farm.checks()["disk watched"]
+    assert check.status == "WARN" and "did not answer" in check.detail
+    farm.resources = ""
+    check = farm.checks()["disk watched"]
+    assert check.status == "FAIL" and "disk is not watched" in check.detail
+    assert "node_exporter" in check.fix

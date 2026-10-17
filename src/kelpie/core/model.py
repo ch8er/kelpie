@@ -154,6 +154,7 @@ class ResourceKind(StrEnum):
     CPU = "cpu"
     LOAD = "load"
     PROCESSES = "processes"
+    PATH = "path"  # the size of a directory on a host (what fills a disk)
     LLM_QUOTA = "llm_quota"
     CI_MINUTES = "ci_minutes"
     AUTH = "auth"
@@ -178,6 +179,11 @@ class Resource:
     resets_at: datetime | None = None
     events: int = 0
     at: datetime | None = None
+    # How fast ``used`` grows, in ``unit`` per day, over the source's window (negative when
+    # it shrinks); None when unknown.
+    growth_per_day: float | None = None
+    # The mountpoint of the filesystem it is on (disks and directory sizes); None: unknown.
+    mount: str | None = None
 
     @property
     def utilization(self) -> float | None:

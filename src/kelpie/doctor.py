@@ -41,6 +41,7 @@ from kelpie.connectors.github.connector import (
 )
 from kelpie.core.config import Mode
 from kelpie.core.model import Status
+from kelpie.resources.prometheus import PrometheusClient, QueryError
 
 FRESH = timedelta(hours=1)  # newest spool line or span must be younger than this
 MAX_WORKTREES = 20  # git is asked about at most this many workspaces
@@ -324,6 +325,82 @@ def check_worktrees(adapter: HermesAdapter) -> Check:
     )
 
 
+def check_resources_watched(
+    settings: Settings, loaded: LoadedRules, environ: Mapping[str, str] = os.environ
+) -> Check:
+    """Rule 7 sees disks only through ``[resources.prometheus]`` (node_exporter): without it
+    a disk fills unseen (incident 19: 94 % full, growing 9 GB a day, and nothing was told).
+    It asks that Prometheus once which configured hosts report disks and directory sizes."""
+    name = "disk watched"
+    if not any(r.name == "resources" for r in loaded.rules):
+        return _skip(name, "rule 7 (resources) is not loaded")
+    prometheus = settings.resources.prometheus
+    if prometheus is None or not prometheus.hosts:
+        return _fail(
+            name,
+            "disk is not watched: rule 7 has no resource source",
+            "install node_exporter on every agent host and Prometheus, then set "
+            "[resources.prometheus] url and hosts (docs/install.md, Host resources)",
+        )
+    where = f"[resources.prometheus] {prometheus.display_url}"
+    try:
+        source = prometheus.build(environ=environ)
+    except ValueError as exc:
+        return _fail(name, str(exc), "set the variable, or drop token_env")
+    config = source.config
+    client = PrometheusClient(config.url, min(config.timeout, 5), config.token)
+    label = config.host_label
+    try:  # the queries rule 7 runs, custom ones included
+        # On lines of their own: a "#" comment in a custom query ends at its line.
+        disks = _labels(client, f"count by ({label}) (\n{config.query_text('disk_size')}\n)", label)
+        paths = _labels(
+            client, f"count by ({label}) (\n{config.query_text('path_bytes')}\n)", label
+        )
+    except QueryError as exc:
+        if exc.cause == "http_auth":
+            refused = "refused the token" if config.token else "requires a token"
+            return _fail(
+                name,
+                f"{where} {refused} ({exc.detail}): rule 7 reads nothing",
+                f"{'check' if config.token else 'set'} ${prometheus.token_env}",
+            )
+        return _warn(
+            name,
+            f"{where} did not answer ({exc.cause}: {exc.detail}): cannot tell whether "
+            "node_exporter reports the disks",
+            "run doctor where Kelpie runs, or check the url and the Prometheus server",
+        )
+    blind = sorted(h for h, value in prometheus.hosts.items() if value not in disks)
+    if blind:
+        return _fail(
+            name,
+            f"{where} has no disk readings for {', '.join(blind)}",
+            "install node_exporter on those hosts and add them to Prometheus's scrape "
+            f"targets, with {label} as in [resources.prometheus] hosts (docs/install.md)",
+        )
+    hosts = ", ".join(sorted(prometheus.hosts))
+    unsized = sorted(h for h, value in prometheus.hosts.items() if value not in paths)
+    if unsized:
+        return _warn(
+            name,
+            f"{where} reads the disks of {hosts}; no directory sizes from "
+            f"{', '.join(unsized)}, so a filling disk's alert cannot say what grows",
+            "run scripts/kelpie-path-sizes.sh there (deploy/textfile, docs/install.md)",
+        )
+    if prometheus.sends_token_in_clear(environ):
+        return _warn(
+            name,
+            f"{where} reads the disks and directory sizes of {hosts}, but the token goes "
+            "over plain http",
+            "use https, or keep Prometheus on loopback",
+        )
+    return _pass(name, f"{where} reads the disks and directory sizes of {hosts}")
+
+
+def _labels(client: PrometheusClient, promql: str, label: str) -> set[str]:
+    return {s.labels.get(label, "") for s in client.query(promql)}
+
+
 def check_prometheus(url: str | None, environ: Mapping[str, str]) -> Check:
     name = "Prometheus reachable"
     explicit = url or environ.get(PROMETHEUS_ENV)
@@ -595,6 +672,7 @@ def run_checks(
     checks += cc_checks
     checks += oc_checks
     checks += check_github(settings, environ)
+    checks.append(check_resources_watched(settings, loaded, environ))
     checks.append(check_prometheus(prometheus, environ))
     return checks
 
