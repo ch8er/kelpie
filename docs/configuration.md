@@ -796,9 +796,13 @@ The Actions runs themselves (`kelpie.connectors.github.ci_runs`):
   PR (a failed fork `pull_request` run, listed or not). A concluded red makes the commit
   `failure`; it never makes it green. It makes it `pending` only while a re-run (attempt 2
   or more) is in progress, because the runs list shows only the latest attempt and would
-  otherwise forget the red it replaced; the re-run concludes, so this cannot get stuck. So
-  `ci_workflows` and the PR filter add requirements and remove nothing: a failed unlisted
-  `Lint` run is red with or without a list, as its check run would be on the check-run path.
+  otherwise forget the red it replaced. GitHub bounds that wait as it bounds the job on the
+  check-run path (a job queued without a runner is cancelled after 24 hours; a run waiting
+  for an environment approval can wait up to 30 days). A one-sided run still on its first
+  attempt is not waited for: it reads as nothing until it fails. List a workflow in
+  `ci_workflows` to wait for it. So `ci_workflows` and the PR filter add requirements and
+  remove nothing: a failed unlisted `Lint` run is red with or without a list, as its check
+  run would be on the check-run path.
 - Per workflow and event (and per set of PRs for the one-sided runs) only the latest run
   counts: the one that started last (a re-run starts again), then the highest attempt. A
   later run that was skipped does not replace an earlier real result. A failed first attempt
