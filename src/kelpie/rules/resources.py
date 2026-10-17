@@ -35,6 +35,18 @@ expired is critical, expiring within ``auth_expiry_warning`` is a warning. A pro
 failed for another reason means "unknown" and raises nothing here (the connector logs and
 counts it).
 
+**Disk time-to-full** (incident 19: a disk at 94 % grew about 9 GB a day from a simulator
+cache nobody cleaned). A disk reading with a growth rate (``Resource.growth_per_day``, the
+source's ``growth_window``) that would fill it within ``time_to_full_warning`` (72h) warns,
+within ``time_to_full_critical`` (24h) is critical. The alert names the fastest-growing
+directories on that filesystem (``path`` readings: sizes measured by the shipped
+``scripts/kelpie-path-sizes.sh``, which records each directory's mountpoint), up to
+``growing_paths_shown`` (3), with their growth per day; without them it says how to get
+them, and with none newer than ``path_max_age`` (1h) that the script stopped. Growth under
+``min_growth_per_day`` (0.1 GB) is noise and forecasts nothing. A disk already past its
+utilization threshold gets the forecast in that alert, at the worse of the two severities,
+not a second alert.
+
 Every alert is about a lasting state: a stable ``state`` and ``key`` per resource, so the
 engine alerts when it opens, when it gets worse and when it ends, not on every tick.
 """
@@ -102,6 +114,20 @@ class Finding:
 
 
 @dataclass(frozen=True, slots=True)
+class Forecast:
+    """A disk that fills within a threshold at its current growth rate."""
+
+    disk: Resource
+    growth: float  # in the disk's unit per day
+    hours: float  # until full
+    severity: Severity
+    growing: tuple[Resource, ...]  # its fastest-growing directories, fastest first
+    stale: bool  # directory sizes exist for it, but none recent: the script stopped
+    elsewhere: bool = False  # the host's directory sizes are all on other filesystems
+    unplaced: bool = False  # the host has directory sizes that do not say their filesystem
+
+
+@dataclass(frozen=True, slots=True)
 class Resources:
     @staticmethod
     def boards(state: str) -> bool:
@@ -123,6 +149,11 @@ class Resources:
     ignore_resets_within: timedelta = DEFAULT_IGNORE_RESETS_WITHIN
     provider_roles: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     provider_owners: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    time_to_full_warning: timedelta | None = timedelta(hours=72)  # None: off
+    time_to_full_critical: timedelta | None = timedelta(hours=24)
+    min_growth_per_day: float = 0.1  # in the reading's unit (GB)
+    growing_paths_shown: int = 3
+    path_max_age: timedelta = timedelta(hours=1)  # directory sizes are measured every 15m
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -137,7 +168,75 @@ class Resources:
         covered: set[str] = set()
         if self.max_heavy_per_host is not None:
             heavy, covered = self._heavy_alerts(findings, {h for h, _, _ in fresh}, snapshot)
-        return [*heavy, *(self._alert(f, covered) for f in findings)]
+        forecasts = self._forecasts(fresh, snapshot)
+        # A disk past its threshold gets one alert, with the forecast in it.
+        alerted = {f.resource.name for f in findings}
+        return [
+            *heavy,
+            *(self._alert(f, covered, forecasts.get(f.resource.name)) for f in findings),
+            *(self._full_alert(c) for name, c in sorted(forecasts.items()) if name not in alerted),
+        ]
+
+    def _forecasts(
+        self, fresh: Mapping[tuple[str, ResourceKind, str], Resource], snapshot: Snapshot
+    ) -> dict[str, Forecast]:
+        """Disks that fill within the thresholds at their current growth rate, by name."""
+        warning, critical = self.time_to_full_warning, self.time_to_full_critical
+        if warning is None and critical is None:
+            return {}
+        paths = [r for r in snapshot.resources if r.kind is ResourceKind.PATH and r.host]
+        out: dict[str, Forecast] = {}
+        for (host, kind, _), r in sorted(fresh.items(), key=lambda kv: kv[0]):
+            growth = r.growth_per_day
+            if kind is not ResourceKind.DISK or growth is None or growth < self.min_growth_per_day:
+                continue
+            if r.used is None or not r.limit:
+                continue
+            # In hours, as a float: a huge filesystem (a network share of exabytes) would
+            # overflow a timedelta.
+            hours = max(0.0, r.limit - r.used) / growth * 24
+            if critical is not None and hours <= _in_hours(critical):
+                severity = Severity.CRITICAL
+            elif warning is not None and hours <= _in_hours(warning):
+                severity = Severity.WARNING
+            else:
+                continue
+            mine = [p for p in paths if p.host == host and _on(p, r, fresh)]
+            current = [p for p in mine if p.at is None or snapshot.now - p.at <= self.path_max_age]
+            growing = sorted(
+                (p for p in current if (p.growth_per_day or 0) > 0),
+                key=lambda p: (-(p.growth_per_day or 0), p.name),
+            )[: self.growing_paths_shown]
+            stale = bool(mine) and not current
+            unplaced = not mine and any(not p.mount for p in paths if p.host == host)
+            # Directory sizes on the host, all with a known filesystem, none this one.
+            theirs = [p for p in paths if p.host == host]
+            elsewhere = not mine and bool(theirs) and all(p.mount for p in theirs)
+            out[r.name] = Forecast(
+                r, growth, hours, severity, tuple(growing), stale, elsewhere, unplaced
+            )
+        return out
+
+    def _full_alert(self, c: Forecast) -> Action:
+        r = c.disk
+        # The utilization alert's state: a disk that crosses its threshold while it fills
+        # stays one condition, not one closing as the other opens.
+        state = f"{NAME}:{ResourceKind.DISK}:{r.name}"
+        return Action(
+            ActionKind.ALERT,
+            NAME,
+            f"disk {r.name} ({_pct(r.utilization or 0)} full) {_forecast_text(c)} "
+            "Free space before builds start failing.",
+            severity=c.severity,
+            key=state,  # one state per disk; the tracker escalates on a worse severity
+            state=state,
+            params={
+                "host": r.host,
+                "resource": r.name,
+                "kind": "disk_full",
+                **_forecast_params(c),
+            },
+        )
 
     def _fresh(self, snapshot: Snapshot) -> dict[tuple[str, ResourceKind, str], Resource]:
         newest: dict[tuple[str, ResourceKind, str], Resource] = {}
@@ -171,17 +270,21 @@ class Resources:
                 hosts.setdefault(f.resource.host, []).append(f)
         return hosts
 
-    def _alert(self, f: Finding, covered: set[str]) -> Action:
+    def _alert(self, f: Finding, covered: set[str], forecast: Forecast | None = None) -> Action:
         r = f.resource
         state = f"{NAME}:{r.kind}:{r.name}"
         limit = f.thresholds.critical if f.severity is Severity.CRITICAL else f.thresholds.warning
+        severity = f.severity
+        if forecast is not None and _RANK[forecast.severity] > _RANK[severity]:
+            severity = forecast.severity
         return Action(
             ActionKind.ALERT,
             NAME,
             f"{_describe(f)}. "
+            + (f"It {_forecast_text(forecast)} " if forecast is not None else "")
             + (
                 "Agents fail in confusing ways when it runs out."
-                if f.severity is Severity.CRITICAL
+                if severity is Severity.CRITICAL
                 else "Free it before the agents stop."
             )
             + (
@@ -189,7 +292,7 @@ class Resources:
                 if r.host in covered and f.resource.kind in PRESSURE_KINDS
                 else ""
             ),
-            severity=f.severity,
+            severity=severity,
             # One state per resource, and the severity is not part of the key: a rule keeps
             # no history, so a reading that wobbles around the critical threshold must not
             # be announced again each time. The state tracker remembers the worst severity
@@ -205,6 +308,7 @@ class Resources:
                 "limit": r.limit,
                 "unit": r.unit,
                 "threshold": limit,
+                **(_forecast_params(forecast) if forecast is not None else {}),
             },
         )
 
@@ -580,6 +684,75 @@ def _describe(f: Finding) -> str:
             return f"{r.kind} {r.name} is at {_pct(f.utilization)}"
 
 
+def _in_hours(d: timedelta) -> float:
+    return d.total_seconds() / 3600
+
+
+def _on(
+    path: Resource, disk: Resource, fresh: Mapping[tuple[str, ResourceKind, str], Resource]
+) -> bool:
+    """Whether a directory is on ``disk``: by the filesystem the script recorded for it;
+    without one, only when the host has no other disk."""
+    if path.mount is not None:
+        return path.mount == disk.mount
+    return [k for k in fresh if k[0] == disk.host and k[1] is ResourceKind.DISK] == [
+        (disk.host, ResourceKind.DISK, disk.name)
+    ]
+
+
+def _forecast_text(c: Forecast) -> str:
+    unit = c.disk.unit
+    if c.growing:
+        what = (
+            "Growing fastest: "
+            + ", ".join(
+                f"{_path(p)} (+{round(p.growth_per_day or 0, 2):g} {unit}/day)" for p in c.growing
+            )
+            + "."
+        )
+    elif c.elsewhere:
+        what = (
+            "None of the directories measured on this host is on this filesystem: measure "
+            "some that are (scripts/kelpie-path-sizes.sh records each one's mountpoint)."
+        )
+    elif c.unplaced:
+        what = (
+            "The directory sizes of this host do not say which filesystem they are on: "
+            "update scripts/kelpie-path-sizes.sh (it records each one's mountpoint)."
+        )
+    elif c.stale:
+        what = (
+            "Its directory sizes are over an hour old: is scripts/kelpie-path-sizes.sh still "
+            "running on the host?"
+        )
+    else:
+        what = (
+            "Which directories grow is not measured: run scripts/kelpie-path-sizes.sh on the "
+            "host (node_exporter's textfile collector) to see them here."
+        )
+    return f"grows {c.growth:.1f} {unit} a day: full in about {_hours(c.hours)}. {what}"
+
+
+def _forecast_params(c: Forecast) -> dict[str, object]:
+    return {
+        "growth_per_day": round(c.growth, 2),
+        "hours_to_full": round(c.hours, 1),
+        "growing_paths": [
+            {"path": _path(p), "growth_per_day": round(p.growth_per_day or 0, 2), "size": p.used}
+            for p in c.growing
+        ],
+    }
+
+
+def _path(r: Resource) -> str:
+    """The directory of a ``path`` reading (named ``<host>:path:<directory>``)."""
+    return r.name.split(":path:", 1)[1] if ":path:" in r.name else r.name
+
+
+def _hours(hours: float) -> str:
+    return f"{hours:.0f}h" if hours < 48 else f"{hours / 24:.1f} days ({hours:.0f}h)"
+
+
 # --- configuration ----------------------------------------------------------------------
 
 _KINDS = {
@@ -676,6 +849,28 @@ def build(config: dict[str, Any]) -> Resources:
     for key in ("provider_roles", "provider_owners"):
         if key in config:
             kwargs[key] = _provider_map(config.pop(key), key)
+    for key in ("time_to_full_warning", "time_to_full_critical"):
+        if key in config:
+            value = config.pop(key)
+            kwargs[key] = None if value is False else _positive_duration(value, key)
+    warn, crit = (
+        kwargs.get("time_to_full_warning", timedelta(hours=72)),
+        kwargs.get("time_to_full_critical", timedelta(hours=24)),
+    )
+    if warn is not None and crit is not None and crit >= warn:
+        raise ValueError("time_to_full_critical must be shorter than time_to_full_warning")
+    if "min_growth_per_day" in config:
+        value = config.pop("min_growth_per_day")
+        if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+            raise ValueError("min_growth_per_day must be a positive number")
+        kwargs["min_growth_per_day"] = float(value)
+    if "path_max_age" in config:
+        kwargs["path_max_age"] = _positive_duration(config.pop("path_max_age"), "path_max_age")
+    if "growing_paths_shown" in config:
+        value = config.pop("growing_paths_shown")
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 20:
+            raise ValueError("growing_paths_shown must be 0 to 20")
+        kwargs["growing_paths_shown"] = value
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return Resources(**kwargs)

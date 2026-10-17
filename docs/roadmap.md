@@ -424,13 +424,13 @@ Live case: disk at 94%, growing ~9 GB a day from an iOS simulator cache that nev
 cleaned; Kelpie was blind because node_exporter and Prometheus were not installed.
 
 **Acceptance criteria**
-- [ ] Time-to-full forecast per filesystem from the growth rate over a window (config); alert when under a threshold (default 72 h), critical under 24 h
-- [ ] Top-growing paths: a script shipped with Kelpie measures configured directories (e.g. simulator devices, `~/.hermes`, worktrees, caches) every N minutes and writes node_exporter textfile-collector metrics; the alert names the top 3 growing paths with their growth per day
-- [ ] macOS and Linux setup documented (brew/systemd/launchd), including the textfile collector directory
-- [ ] doctor: FAIL when no resource source is configured on a farm with rule 7 enabled ("disk is not watched")
+- [x] Time-to-full forecast per filesystem from the growth rate over a window (config); alert when under a threshold (default 72 h), critical under 24 h
+- [x] Top-growing paths: a script shipped with Kelpie measures configured directories (e.g. simulator devices, `~/.hermes`, worktrees, caches) every N minutes and writes node_exporter textfile-collector metrics; the alert names the top 3 growing paths with their growth per day
+- [x] macOS and Linux setup documented (brew/systemd/launchd), including the textfile collector directory
+- [x] doctor: FAIL when no resource source is configured on a farm with rule 7 enabled ("disk is not watched")
 - [ ] macOS hosts (field setup on the farm): load average counts waiting threads and runs at 300–800 on a healthy Mac, so the load alert is off by default on darwin; instead, user processes vs `kern.maxprocperuid` (the farm hit the limit twice) via a shipped textfile script with a launchd plist; memory as free + inactive when MemAvailable is missing; disk only for the data volume, ignoring APFS system volumes. Linux gets the same process-limit metric from node_exporter's processes collector
-- [ ] Prometheus setup docs include a retention size cap (e.g. 2 GB) so monitoring cannot fill the disk it watches
-- [ ] Fixtures: new `19-disk-growth-forecast.yaml` (synthetic paths)
+- [x] Prometheus setup docs include a retention size cap (e.g. 2 GB) so monitoring cannot fill the disk it watches
+- [x] Fixtures: new `19-disk-growth-forecast.yaml` (synthetic paths)
 
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules

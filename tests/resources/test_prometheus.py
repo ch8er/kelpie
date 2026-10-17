@@ -26,12 +26,16 @@ class Observer:
     def __init__(self) -> None:
         self.reads: list[int] = []
         self.failures: list[str] = []
+        self.query_failures: list[str] = []
 
     def resource_read(self, readings: int) -> None:
         self.reads.append(readings)
 
     def resource_failed(self, cause: str) -> None:
         self.failures.append(cause)
+
+    def resource_query_failed(self, cause: str) -> None:
+        self.query_failures.append(cause)
 
 
 def config(prom: FakeProm, **kwargs: object) -> PrometheusConfig:
@@ -449,3 +453,101 @@ def test_series_beyond_the_cap_are_logged(
         with caplog.at_level(logging.WARNING):
             assert len(PrometheusClient(prom.url, 2.0).query("up")) == 2
     assert "only the first 2 are read" in caplog.text
+
+
+# --- growth and directory sizes (incident 19) ---------------------------------------------
+
+
+def test_disk_growth_and_directory_sizes() -> None:
+    def mount(inst: dict[str, str], path: str) -> dict[str, str]:
+        return {**inst, "mountpoint": path, "fstype": "ext4"}
+
+    with fake_prometheus() as prom:
+        cfg = config(prom, growth_window=timedelta(hours=12))
+        load_farm(prom, cfg)
+        for name in ("disk_growth", "path_growth"):
+            # Over the window, and only for series that existed half a window ago.
+            assert "[43200s]" in text(cfg, name) and "offset 21600s" in text(cfg, name)
+        prom.responses[text(cfg, "disk_growth")] = vector((mount(A, "/"), str(9 * GB)))
+        sims = "/Users/agent/Library/Developer/CoreSimulator/Devices"
+        prom.responses[text(cfg, "path_bytes")] = vector(
+            ({**A, "path": sims, "mountpoint": "/"}, str(34 * GB)),
+            ({**A, "path": ""}, "1"),
+            ({**X, "path": "/x"}, "1"),
+        )
+        prom.responses[text(cfg, "path_growth")] = vector(({**A, "path": sims}, str(8.7 * GB)))
+        readings = by_name(PrometheusSource(cfg).read(NOW))
+    assert readings["host-a:/"].growth_per_day == pytest.approx(9)
+    assert readings["host-a:/data"].growth_per_day is None
+    assert readings["host-a:/data"].mount == "/data"
+    path = readings[f"host-a:path:{sims}"]
+    assert path.mount == "/" and path.at == NOW
+    assert (path.kind, path.used, path.growth_per_day) == (
+        ResourceKind.PATH,
+        pytest.approx(34),
+        pytest.approx(8.7),
+    )
+    assert not [n for n in readings if n.endswith(":path:") or "/x" in n]
+
+
+def test_growth_queries_that_fail_cost_nothing_else(caplog: pytest.LogCaptureFixture) -> None:
+    """Growth needs history and directory sizes need the shipped script: without them the
+    other readings still arrive, with one warning per query."""
+    with fake_prometheus() as prom:
+        cfg = config(prom, interval=timedelta(seconds=0))
+        load_farm(prom, cfg)
+        prom.responses[text(cfg, "disk_growth")] = {"status": "error", "errorType": "bad_data"}
+        source = PrometheusSource(cfg)
+        first = by_name(source.read(NOW))
+        source.read(NOW + timedelta(minutes=1))
+    assert "host-a:/" in first and first["host-a:/"].growth_per_day is None
+    assert caplog.text.count("query disk_growth failed") == 1
+
+
+def test_optional_query_failures_are_counted() -> None:
+    with fake_prometheus() as prom:
+        cfg = config(prom, interval=timedelta(seconds=0))
+        load_farm(prom, cfg)
+        prom.responses[text(cfg, "disk_growth")] = {"status": "error", "errorType": "bad_data"}
+        observer = Observer()
+        source = PrometheusSource(cfg, observer)
+        source.read(NOW)
+        source.read(NOW + timedelta(minutes=1))
+    assert observer.query_failures == ["disk_growth_query_failed"] * 2  # each time
+    assert observer.failures == [] and observer.reads[-1] > 0  # the source still answers
+
+
+def test_directory_sizes_are_as_old_as_the_file_the_script_wrote() -> None:
+    with fake_prometheus() as prom:
+        cfg = config(prom)
+        load_farm(prom, cfg)
+        prom.responses[text(cfg, "path_bytes")] = vector(({**A, "path": "/srv"}, str(GB)))
+        written = (NOW - timedelta(hours=3)).timestamp()
+        prom.responses[text(cfg, "path_written")] = vector(
+            ({**A, "file": "/var/lib/node_exporter/textfile/kelpie_paths.prom"}, str(written))
+        )
+        readings = by_name(PrometheusSource(cfg).read(NOW))
+    assert readings["host-a:path:/srv"].at == NOW - timedelta(hours=3)
+    assert readings["host-a:path:/srv"].mount is None  # an older script: no mountpoint
+
+
+def test_custom_queries_get_their_placeholders_filled() -> None:
+    cfg = PrometheusConfig(
+        url="http://127.0.0.1:9", hosts=HOSTS, host_label="node",
+        queries={"disk_growth": "-deriv(my_avail[{window}]) and my_avail offset {half_window}",
+                 "cores": "count by ({host_label}) (cpu)"},
+    )  # fmt: skip
+    assert cfg.query_text("disk_growth") == "-deriv(my_avail[21600s]) and my_avail offset 10800s"
+    assert cfg.query_text("cores") == "count by (node) (cpu)"
+
+
+def test_the_metrics_keep_the_source_up_on_an_optional_failure() -> None:
+    from kelpie.metrics import Metrics
+
+    metrics = Metrics()
+    metrics.set_resources(True)
+    metrics.resource_read(5)
+    metrics.resource_query_failed("disk_growth_query_failed")
+    text = metrics.render()
+    assert "kelpie_resource_source_up 1" in text
+    assert 'cause="disk_growth_query_failed"} 1' in text

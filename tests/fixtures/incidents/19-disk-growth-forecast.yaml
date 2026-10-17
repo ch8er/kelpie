@@ -1,0 +1,46 @@
+id: "19-disk-growth-forecast"
+incident: 19
+title: "A disk fills in two days from a simulator cache nobody cleans"
+description: >
+  On a live farm the data disk sat at 94% and grew about 9 GB a day: an iOS simulator system
+  cache that the simulator never cleans was 34 GB of 59 GB of simulators. Kelpie saw nothing
+  because no resource source was installed. With node_exporter, its textfile collector and
+  the shipped path-size script, rule 7 forecasts when the disk is full from its growth rate
+  and names the directories on that filesystem that grow fastest, in the one alert the disk
+  gets (it is past its utilization threshold too). A directory on another filesystem of the
+  host is not named. A second host's disk, as full but not growing, gets the plain
+  utilization alert and no forecast; a slowly growing disk far from full gets nothing.
+rule: resources
+config:
+  time_to_full_warning: "72h"
+  time_to_full_critical: "24h"
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  resources:
+    - {name: "mac-1:/System/Volumes/Data", kind: disk, host: mac-1, used: 480, limit: 500, unit: GB, at: "2026-03-02T11:59:00+00:00", growth_per_day: 9.2, mount: "/System/Volumes/Data"}
+    - {name: "mac-1:path:/Users/agent/Library/Developer/CoreSimulator/Devices", kind: path, host: mac-1, used: 34, unit: GB, at: "2026-03-02T11:55:00+00:00", growth_per_day: 8.7, mount: "/System/Volumes/Data"}
+    - {name: "mac-1:path:/Users/agent/.hermes/worktrees", kind: path, host: mac-1, used: 12, unit: GB, at: "2026-03-02T11:55:00+00:00", growth_per_day: 0.4, mount: "/System/Volumes/Data"}
+    - {name: "mac-1:path:/Users/agent/Library/Caches", kind: path, host: mac-1, used: 6, unit: GB, at: "2026-03-02T11:55:00+00:00", growth_per_day: 0.1, mount: "/System/Volumes/Data"}
+    - {name: "mac-1:path:/Users/agent/Downloads", kind: path, host: mac-1, used: 3, unit: GB, at: "2026-03-02T11:55:00+00:00", growth_per_day: 0.0, mount: "/System/Volumes/Data"}
+    - {name: "mac-1:path:/Volumes/Scratch/builds", kind: path, host: mac-1, used: 40, unit: GB, at: "2026-03-02T11:55:00+00:00", growth_per_day: 20.0, mount: "/Volumes/Scratch"}
+    - {name: "mac-2:/System/Volumes/Data", kind: disk, host: mac-2, used: 470, limit: 500, unit: GB, at: "2026-03-02T11:59:00+00:00", growth_per_day: 0.0}
+    - {name: "linux-1:/", kind: disk, host: linux-1, used: 100, limit: 500, unit: GB, at: "2026-03-02T11:59:00+00:00", growth_per_day: 2.0}
+expected_actions:
+  - kind: alert
+    severity: critical
+    reason_contains: "full in about 2.2 days (52h). Growing fastest: /Users/agent/Library/Developer/CoreSimulator/Devices (+8.7 GB/day)"
+    params:
+      kind: disk
+      resource: "mac-1:/System/Volumes/Data"
+      hours_to_full: 52.2
+  - kind: alert
+    params: {resource: "mac-2:/System/Volumes/Data"}
+not_expected_actions:
+  - kind: alert
+    params: {kind: disk_full, resource: "mac-1:/System/Volumes/Data"}  # one alert per disk
+  - kind: alert
+    reason_contains: "/Volumes/Scratch/builds"  # another filesystem
+  - kind: alert
+    params: {kind: disk_full, resource: "mac-2:/System/Volumes/Data"}
+  - kind: alert
+    params: {kind: disk_full, resource: "linux-1:/"}

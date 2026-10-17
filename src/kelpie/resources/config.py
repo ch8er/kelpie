@@ -13,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from kelpie.core.serde import parse_duration
 from kelpie.resources.prometheus import (
+    DEFAULT_GROWTH_WINDOW,
     DEFAULT_HOST_LABEL,
     DEFAULT_INTERVAL,
     DEFAULT_TIMEOUT,
@@ -28,7 +29,7 @@ MAX_TIMEOUT = timedelta(seconds=60)
 MIN_INTERVAL = timedelta(seconds=5)
 SECTIONS = frozenset({"prometheus"})
 PROMETHEUS_KEYS = frozenset(
-    {"url", "hosts", "host_label", "timeout", "interval", "token_env", "queries"}
+    {"url", "hosts", "host_label", "timeout", "interval", "token_env", "queries", "growth_window"}
 )
 _LABEL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -48,6 +49,7 @@ class PrometheusSettings:
     token_env: str = DEFAULT_TOKEN_ENV
     token_env_explicit: bool = False  # set in the config: the variable must then be set
     queries: Mapping[str, str] = field(default_factory=dict)
+    growth_window: timedelta = DEFAULT_GROWTH_WINDOW  # disk and directory growth rates
 
     @property
     def display_url(self) -> str:
@@ -92,6 +94,7 @@ class PrometheusSettings:
             interval=self.interval,
             token=self.token(environ),
             queries=dict(self.queries),
+            growth_window=self.growth_window,
         )
         return PrometheusSource(config, observer)
 
@@ -192,6 +195,9 @@ def _load_prometheus(section: Any) -> PrometheusSettings:
     token_env = _string(section, "token_env", DEFAULT_TOKEN_ENV)
     if not _ENV_NAME.fullmatch(token_env):
         raise ValueError("[resources.prometheus] token_env must be an environment variable name")
+    growth_window = _duration(section, "growth_window", DEFAULT_GROWTH_WINDOW)
+    if not timedelta(minutes=30) <= growth_window <= timedelta(days=7):
+        raise ValueError("[resources.prometheus] growth_window must be 30m to 7d")
     raw_queries = section.get("queries", {})
     if not isinstance(raw_queries, Mapping):
         raise ValueError("[resources.prometheus.queries] must be a table")
@@ -217,4 +223,5 @@ def _load_prometheus(section: Any) -> PrometheusSettings:
         token_env=token_env,
         token_env_explicit="token_env" in section,
         queries=queries,
+        growth_window=growth_window,
     )

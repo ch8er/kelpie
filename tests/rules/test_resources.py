@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -359,3 +360,118 @@ def test_build_rejects_bad_config(config: dict) -> None:
 
 def test_load_may_exceed_one_per_core() -> None:
     assert build({"load_warning": 4, "load_critical": 8}).thresholds[K.LOAD] == Thresholds(4, 8)
+
+
+# --- disk time-to-full (incident 19) -----------------------------------------------------
+
+
+def disk(used: float, growth: float | None, limit: float = 500) -> Resource:
+    return replace(res(K.DISK, used, limit, name="host-a:/"), growth_per_day=growth)
+
+
+def path(directory: str, growth: float, size: float = 10, host: str = "host-a") -> Resource:
+    return Resource(f"{host}:path:{directory}", K.PATH, host, size, None, "GB", at=NOW,
+                    growth_per_day=growth)  # fmt: skip
+
+
+def full_alerts(actions: list[Action]) -> list[Action]:
+    """Alerts with a forecast: their own, or a utilization alert that carries it."""
+    return [a for a in actions if "hours_to_full" in a.params]
+
+
+def test_a_disk_that_fills_soon_alerts_with_what_grows() -> None:
+    sims = "/Users/agent/Library/Developer/CoreSimulator/Devices"
+    paths = (
+        path(sims, 8.7, 34),
+        path("/Users/agent/.hermes", 0.3),
+        path("/tmp", -1.0),
+        path("/var/cache", 0.2),
+        path("/srv/x", 0.1),
+        path("/other", 50, host="host-b"),
+    )
+    # 30 GB left at 9 GB a day: about 80 hours -> no alert; 18 GB left: 48h -> warning.
+    assert full_alerts(run(disk(470, 9.0), *paths)) == []
+    lax = Resources(thresholds={K.DISK: Thresholds(0.99, 0.999)})  # not past utilization
+    [a] = full_alerts(run(disk(482, 9.0), *paths, rule=lax))
+    assert a.severity is Severity.WARNING and a.state == "resources:disk:host-a:/"
+    assert a.params["hours_to_full"] == 48.0
+    assert [p["path"] for p in a.params["growing_paths"]] == [
+        sims,
+        "/Users/agent/.hermes",
+        "/var/cache",
+    ]
+    assert f"{sims} (+8.7 GB/day)" in a.reason and "2.0 days (48h)" in a.reason
+    [c] = full_alerts(run(disk(491, 9.0), *paths, rule=lax))
+    assert c.severity is Severity.CRITICAL and c.key == a.key  # one state; it escalates
+    [bare] = full_alerts(run(disk(495, 9.0)))
+    assert bare.state == a.state  # past its threshold: one alert, the same condition
+    assert "scripts/kelpie-path-sizes.sh" in bare.reason and bare.params["growing_paths"] == []
+
+
+def test_no_forecast_without_real_growth() -> None:
+    assert full_alerts(run(disk(495, None))) == []
+    assert full_alerts(run(disk(495, 0.05))) == []  # under min_growth_per_day: noise
+    assert full_alerts(run(disk(495, -3.0))) == []  # shrinking
+    off = Resources(time_to_full_warning=None, time_to_full_critical=None)
+    assert full_alerts(run(disk(495, 9.0), rule=off)) == []
+    stale = Resource("host-a:/", K.DISK, "host-a", 495, 500, "GB", at=NOW - 60 * M,
+                     growth_per_day=9.0)  # fmt: skip
+    assert full_alerts(run(stale)) == []
+
+
+def test_build_time_to_full() -> None:
+    r = build({"time_to_full_warning": "48h", "time_to_full_critical": "12h",
+               "min_growth_per_day": 1, "growing_paths_shown": 5})  # fmt: skip
+    assert (r.time_to_full_warning, r.time_to_full_critical) == (48 * 60 * M, 12 * 60 * M)
+    assert r.min_growth_per_day == 1.0 and r.growing_paths_shown == 5
+    assert build({"time_to_full_warning": False}).time_to_full_warning is None
+    for bad, message in [
+        ({"time_to_full_critical": "80h"}, "shorter than time_to_full_warning"),
+        ({"min_growth_per_day": 0}, "positive number"),
+        ({"growing_paths_shown": 50}, "0 to 20"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            build(bad)
+
+
+def test_one_alert_per_disk_at_the_worse_severity() -> None:
+    # 90 % full is a utilization warning; 50 GB left at 60 GB a day is a critical forecast.
+    actions = run(disk(450, 60.0), path("/srv/cache", 55))
+    [a] = [x for x in actions if x.params.get("resource") == "host-a:/"]
+    assert a.state == "resources:disk:host-a:/" and a.severity is Severity.CRITICAL
+    assert "full in about 20h" in a.reason and "/srv/cache (+55 GB/day)" in a.reason
+
+
+def test_a_huge_filesystem_forecasts_nothing_and_does_not_crash() -> None:
+    # A network share of about 8 EiB: days to full overflow a timedelta.
+    share = replace(res(K.DISK, 12, 9.22e9, name="host-a:/mnt/share"), growth_per_day=0.5)
+    assert full_alerts(run(share)) == []
+
+
+def test_directories_are_listed_under_the_disk_they_are_on() -> None:
+    root = replace(res(K.DISK, 498, 500, name="host-a:/"), growth_per_day=9.0, mount="/")
+    docker = replace(
+        res(K.DISK, 10, 500, name="host-a:/var/lib/docker"), growth_per_day=0.0,
+        mount="/var/lib/docker",
+    )  # fmt: skip
+    on_root = replace(path("/home/agent/.cache", 8), mount="/")
+    on_docker = replace(path("/var/lib/docker/overlay2", 20), mount="/var/lib/docker")
+    unknown = path("/srv/x", 30)  # no mountpoint, and the host has two disks: not listed
+    [a] = full_alerts(run(root, docker, on_root, on_docker, unknown))
+    assert [p["path"] for p in a.params["growing_paths"]] == ["/home/agent/.cache"]
+    [b] = full_alerts(run(root, docker, on_docker))  # measured, but on the other disk
+    assert b.params["growing_paths"] == [] and "None of the directories measured" in b.reason
+    [u] = full_alerts(run(root, docker, unknown))  # measured, filesystem unknown
+    assert "do not say which filesystem" in u.reason
+
+
+def test_directory_sizes_from_a_stopped_script_are_said_to_be_old() -> None:
+    old = replace(path("/srv/cache", 5), at=NOW - 3 * 60 * M)
+    [a] = full_alerts(run(disk(495, 9.0), old))
+    assert a.params["growing_paths"] == [] and "over an hour old" in a.reason
+
+
+def test_build_path_max_age() -> None:
+    assert build({"path_max_age": "2h"}).path_max_age == 120 * M
+    with pytest.raises(ValueError, match="path_max_age"):
+        build({"path_max_age": "0s"})

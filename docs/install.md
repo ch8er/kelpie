@@ -84,7 +84,7 @@ docker compose --profile local-agents up -d   # also node_exporter, when agents 
 | Service | Address | Notes |
 | --- | --- | --- |
 | `kelpie` | `127.0.0.1:9464` | Runs as uid 10001. Database in the `kelpie-data` volume at `/data/kelpie.db`. |
-| `prometheus` | `127.0.0.1:9090` | Scrapes `kelpie:9464` and `node-exporter:9100` (`deploy/prometheus/prometheus.yml`); keeps 30 days. |
+| `prometheus` | `127.0.0.1:9090` | Scrapes `kelpie:9464` and `node-exporter:9100` (`deploy/prometheus/prometheus.yml`); keeps 30 days, at most 2 GB. |
 | `grafana` | `127.0.0.1:3000` | Prometheus data source and the **Kelpie** dashboard are provisioned from `deploy/grafana/`. Anonymous access is off. |
 | `node-exporter` | not published | Only with `--profile local-agents`. |
 
@@ -101,6 +101,49 @@ Inside the image `KELPIE_HOST` is `0.0.0.0`, so the exposure check below applies
 file sets `KELPIE_TRACES_ALLOW_UNAUTHENTICATED=1` because it publishes the port on
 `127.0.0.1` only. Set `KELPIE_TRACES_TOKEN` and remove that variable before you publish the
 port on another address.
+
+## Host resources: node_exporter, Prometheus and directory sizes
+
+Rule 7 sees disks, memory and processes only through node_exporter and Prometheus (Kelpie
+has no collector of its own). Without them a disk fills unseen: on a live farm one sat at
+94 % and grew 9 GB a day from a simulator cache (incident 19). `kelpie doctor` fails with
+"disk is not watched" until `[resources.prometheus]` is set.
+
+**macOS** (Homebrew):
+
+```sh
+brew install node_exporter prometheus
+mkdir -p /opt/homebrew/var/node_exporter/textfile
+# node_exporter's flags live in this file under brew services:
+echo '--collector.textfile.directory=/opt/homebrew/var/node_exporter/textfile' \
+  > /opt/homebrew/etc/node_exporter.args
+brew services start node_exporter
+# Cap what Prometheus keeps, so monitoring cannot fill the disk it watches:
+echo '--storage.tsdb.retention.size=2GB' >> /opt/homebrew/etc/prometheus.args
+brew services start prometheus
+```
+
+**Linux** (Debian/Ubuntu; the same flags with any packaging):
+
+```sh
+sudo apt install prometheus-node-exporter prometheus
+sudo mkdir -p /var/lib/node_exporter/textfile
+# /etc/default/prometheus-node-exporter:
+#   ARGS="--collector.textfile.directory=/var/lib/node_exporter/textfile --collector.processes"
+# /etc/default/prometheus:
+#   ARGS="--storage.tsdb.retention.size=2GB"
+sudo systemctl restart prometheus-node-exporter prometheus
+```
+
+Add each agent host's node_exporter (`host:9100`) to Prometheus' scrape config, and the hosts
+to `[resources.prometheus] hosts`.
+
+**What grows.** The time-to-full alert names the fastest-growing directories when they are
+measured: copy `scripts/kelpie-path-sizes.sh` to `/usr/local/share/kelpie/` and run it every
+15 minutes with node_exporter's textfile directory and the directories that grow (simulator
+devices, Xcode DerivedData, caches, `~/.hermes`, Docker). `deploy/textfile/` has a launchd
+agent (`com.kelpie.path-sizes.plist`, macOS) and a systemd service and timer (Linux): edit the
+paths in them first. Pick a few directories, not the whole disk: `du` walks every file.
 
 ## Hermes plugin
 
@@ -134,6 +177,7 @@ board and the database read-only and writes nothing.
 | OTLP spans arrive | A span arrived in the last hour (skipped if none ever did: OTLP is optional). |
 | worktrees readable | git can read the workspaces of live tasks (skipped with `git_state = false`). |
 | PR blocks have conditions | No block reason on the board names a PR (`PR #12`, `owner/repo#12`, a `/pull/12` link, `#12` next to PR or merge wording; `guard:` blocks are left out), or every one that does matches a `[[block_conditions]]` pattern whose `pr` names a PR of `[connectors.github] repos`, as `kelpie serve` resolves it. Otherwise a WARN: those blocks would look like stuck tasks or questions for a person (on a live farm, most of the noise of a 24 h review). |
+| disk watched | Rule 7 is loaded and `[resources.prometheus]` is set, and that Prometheus has `node_filesystem_size_bytes` for every configured host (FAIL otherwise: incident 19, a disk filled with no node_exporter). WARN when it has no `kelpie_path_bytes` for a host (the alert cannot say what grows) or does not answer (doctor may run where Prometheus is out of reach). |
 | claude code task lists | Every list in `[adapters.claude_code] task_lists` is readable (only with that section, like the next three). |
 | claude code hooks fire | The hook's spool has a line from the last hour, from a hook that can enforce stops (unless `stop_dir = false`). |
 | claude code hook registered | `settings.json` next to `tasks_dir` registers the hook for every event, `PreToolUse` included unless `stop_dir = false` (skipped when no Kelpie hook is there: it may be in project settings). |

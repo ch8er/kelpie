@@ -221,6 +221,11 @@ class Metrics:
             self.resource_readings = 0
             self.resource_failures[cause] += 1
 
+    def resource_query_failed(self, cause: str) -> None:
+        """One optional query failed; the source still answers."""
+        with self._lock:
+            self.resource_failures[cause] += 1
+
     # --- alert channels (kelpie.alerts.delivery.AlertObserver) -------------------------
 
     def set_alert_channels(self, names: Iterable[str]) -> None:
@@ -666,7 +671,8 @@ class Metrics:
         metric(
             "kelpie_resource_read_failures_total",
             "counter",
-            "Failed reads of host resources, by cause; rules see no host readings meanwhile.",
+            "Failed reads of host resources, by cause; rules see no host readings meanwhile, "
+            "except for causes named <query>_<cause>: one optional query failed.",
             [
                 f"kelpie_resource_read_failures_total{_labels(cause=c)} {n}"
                 for c, n in sorted(self.resource_failures.items())

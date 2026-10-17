@@ -358,6 +358,10 @@ set `[resources.prometheus.queries] processes_max` to a real ceiling.
 | `heavy_roles` | `[]` | string or list | Roles whose tasks are heavy. |
 | `max_heavy_per_host` | unset | count, >= 1, or `false` | Alert when a host under pressure runs more heavy tasks than this. Unset: not checked. Needs `Task.host` from the adapter (Hermes does not set it yet). |
 | `max_reading_age` | `"10m"` | duration, > 0 | Readings older than this are ignored. |
+| `time_to_full_warning`, `time_to_full_critical` | `"72h"`, `"24h"` | duration, or `false`; critical shorter than warning (also against the other's default: a warning under 24h needs a shorter critical, or `false`) | A disk that fills within this at its growth rate (`[resources.prometheus] growth_window`) warns, or is critical (incident 19). The alert names the fastest-growing measured directories on that filesystem. A disk past its utilization threshold gets the forecast in that alert, at the worse severity, not a second alert. |
+| `min_growth_per_day` | `0.1` | GB per day | Slower growth forecasts nothing. |
+| `growing_paths_shown` | `3` | count, 0 to 20 | Directories named in the alert. |
+| `path_max_age` | `"1h"` | duration | Directory sizes older than this are not named; the alert asks whether the script still runs. |
 | `quota_warning` | `0.1` | ratio or `false` | Warn when `remaining / limit` of a provider quota is at or below this. |
 | `rate_limit_events_warning` | `20` | count or `false` | Warn at this many limit hits per provider... |
 | `rate_limit_window` | `"24h"` | duration, > 0 | ...within this window. |
@@ -703,11 +707,22 @@ present.
 | `interval` | `"60s"` | duration, >= 5s | At most one fetch this often. Keep it at most rule 7's `max_reading_age`. |
 | `token_env` | `"KELPIE_PROMETHEUS_TOKEN"` | variable name | Bearer token, sent only to `url`. Written here, the variable must be set. |
 | `queries` | built-in | table | PromQL overrides, one per reading, see below. |
+| `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. |
 
 `[resources.prometheus.queries]` keys: `disk_size`, `disk_avail`, `memory_total`,
-`memory_available`, `load1`, `cores`, `cpu_busy`, `processes`, `processes_max`. Each result
-must keep the `host_label` label (and `mountpoint` for disk). The defaults are in
-`kelpie.example.toml`. `processes` needs node_exporter's `--collector.processes`.
+`memory_available`, `load1`, `cores`, `cpu_busy`, `processes`, `processes_max`,
+`disk_growth`, `path_bytes`, `path_growth`, `path_written`. Each result must keep the
+`host_label` label (and `mountpoint` for disk, `path` for directories, whose `mountpoint`
+names the filesystem they are on). `path_bytes` and `path_growth` read `kelpie_path_bytes`
+from `scripts/kelpie-path-sizes.sh` (install.md, Host resources); `path_written` is when
+node_exporter last saw that file change, so sizes from a script that stopped count as old.
+The growth queries only answer for series that existed half a window ago, so a new
+Prometheus or host forecasts nothing at first. The growth and directory queries may fail or
+be empty without costing the other readings (each failure is counted in
+`kelpie_resource_read_failures_total`, cause `<query>_<cause>`). In every query, custom ones
+too, `{host_label}`, `{window}` (`growth_window`) and `{half_window}` are filled in. The
+defaults are in `kelpie.example.toml`. `processes` needs node_exporter's
+`--collector.processes`.
 
 ## [connectors.github]
 

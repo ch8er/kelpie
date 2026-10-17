@@ -153,3 +153,13 @@ def test_structure_errors(raw: Any) -> None:
 def test_value_errors(overrides: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         load_resources(section(**overrides))
+
+
+def test_growth_window() -> None:
+    assert prometheus().growth_window == timedelta(hours=6)
+    settings = prometheus(growth_window="12h")
+    assert settings.growth_window == timedelta(hours=12)
+    assert settings.build().config.growth_window == timedelta(hours=12)
+    for bad in ("10m", "8d"):
+        with pytest.raises(ValueError, match="growth_window must be 30m to 7d"):
+            load_resources(section(growth_window=bad))
