@@ -62,7 +62,15 @@ from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
-from kelpie.core.model import Condition, ConditionKind, OwnerKind, Snapshot, Status, Task
+from kelpie.core.model import (
+    Condition,
+    ConditionKind,
+    KelpieMark,
+    OwnerKind,
+    Snapshot,
+    Status,
+    Task,
+)
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules.bottlenecks import HumanGate, human_gates
@@ -71,7 +79,6 @@ NAME = "needs_you"
 UNASSIGNED = "unassigned"
 DEFAULT_APPROVAL_REASONS = ("waiting_human", "needs_input", "approval")
 TRANSIENT = re.compile(r"waiting_human:\s*transient\b")
-STOPPED = "stopped by kelpie"  # Hermes stop (adapters/hermes/stop.py): a human unblocks it
 _SHOWN = 5
 _FROZEN = frozenset({Status.BLOCKED, Status.WAITING})
 MAX_REASON = 2000  # characters of a block reason searched, as [[block_conditions]] does
@@ -207,7 +214,10 @@ class NeedsYou:
         """Whether the task's block asks a person for input or approval: its reason starts
         with an approval reason, and it does not wait on a condition instead (a reason that
         matches ``condition_reasons``, or an unmet linked condition other than a human
-        task; one that already holds is waited on no longer)."""
+        task; one that already holds is waited on no longer). A run Kelpie stopped always
+        waits for a person (``Block.kelpie``, verified by the adapter)."""
+        if task.block is not None and task.block.kelpie is KelpieMark.STOP:
+            return True
         if task.block is None or not _asks_a_person(task.block.reason, self.approval_reasons):
             return False
         if any(p.search(task.block.reason[:MAX_REASON]) for p in self.condition_reasons):
@@ -346,7 +356,7 @@ def _asks_a_person(reason: str, prefixes: Sequence[str]) -> bool:
 
 
 def _stopped(task: Task) -> bool:
-    return task.block is not None and STOPPED in task.block.reason.lower()
+    return task.block is not None and task.block.kelpie is KelpieMark.STOP
 
 
 def _duration(value: Any, what: str) -> timedelta:

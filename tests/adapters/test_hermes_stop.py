@@ -20,13 +20,16 @@ import pytest
 
 from kelpie.adapters.hermes import HermesAdapter
 from kelpie.adapters.hermes.adapter import HermesError
+from kelpie.adapters.hermes.park import load_key
 from kelpie.adapters.hermes.stop import (
     MAX_REASON,
     HermesCliError,
     block_task,
     cli_env,
+    has_stop_marker,
     run_id,
     stop_comment,
+    verify_stop,
 )
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.config import EngineConfig, Mode
@@ -126,8 +129,9 @@ def running(board: Board, task: str = "t1") -> int:
     return rid
 
 
-def make(board: Board, cli: str) -> HermesAdapter:
-    return HermesAdapter(db_path=board.path, spool=None, cli=cli)
+def make(board: Board, cli: str, **kw: object) -> HermesAdapter:
+    kw.setdefault("wait_key", board.path.parent / "wait.key")
+    return HermesAdapter(db_path=board.path, spool=None, cli=cli, **kw)  # type: ignore[arg-type]
 
 
 def task_state(board: Board, task: str = "t1") -> str:
@@ -412,3 +416,28 @@ def test_a_refused_stop_has_a_reason_safe_to_show(board: Board, fake_cli: tuple[
     with pytest.raises(HermesError) as unknown:
         make(board, exe).stop("hermes-run-999", "x")
     assert unknown.value.public_reason == "the run is not on the board"
+
+
+def test_the_stop_is_signed(board: Board, fake_cli: tuple[str, Path]) -> None:
+    """Issue 141: the block carries Kelpie's marker, so it reads back as Kelpie's own stop."""
+    exe, log = fake_cli
+    rid = running(board)
+    make(board, exe).stop(f"hermes-run-{rid}", "same call 12 times")
+    comment = str(calls(log)[0]["argv"][6])  # type: ignore[index]
+    key = load_key(board.path.parent / "wait.key", create=False)
+    assert key is not None and has_stop_marker(comment)
+    assert verify_stop(comment, "t1", key, datetime.now(UTC), timedelta(seconds=10))
+
+
+def test_without_a_usable_key_the_run_is_still_stopped(
+    board: Board, fake_cli: tuple[str, Path], tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    exe, log = fake_cli
+    rid = running(board)
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    with caplog.at_level("WARNING"):
+        make(board, exe, wait_key=blocker / "wait.key").stop(f"hermes-run-{rid}", "loop")
+    assert task_state(board) == "blocked"
+    assert not has_stop_marker(str(calls(log)[0]["argv"][6]))  # type: ignore[index]
+    assert "stopping without a signed marker" in caplog.text

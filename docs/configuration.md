@@ -276,7 +276,8 @@ Statuses: `in_progress`, `review`, `accepted`. Terminal statuses and `blocked`, 
 ### 4. stale_blocks
 
 Clears a block when every linked condition holds on fresh evidence. Alerts on blocks it
-cannot clear.
+cannot clear. A block Kelpie set itself (a run rule 10 stopped, recognised by its signed
+marker) is not one of them: it waits for a human, so rule 13 lists it instead.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |

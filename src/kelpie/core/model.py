@@ -85,11 +85,19 @@ class Condition:
     registered_at: datetime | None = None
 
 
+class KelpieMark(StrEnum):
+    """A block Kelpie set itself, as the platform adapter verified it from a signed marker
+    (agents write block reasons, so the text alone proves nothing)."""
+
+    STOP = "stop"  # Kelpie stopped the run (rule 10): it waits for a human to resume it
+
+
 @dataclass(frozen=True, slots=True)
 class Block:
     reason: str
     since: datetime
     condition_id: str | None = None
+    kelpie: KelpieMark | None = None  # set only by an adapter that verified Kelpie's marker
 
 
 @dataclass(frozen=True, slots=True)

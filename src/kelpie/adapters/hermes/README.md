@@ -22,7 +22,7 @@ git_state = true                         # read git state of live task workspace
 git_timeout = "5s"                       # limit for each git call; 2x per snapshot in total
 cli = "hermes"                           # Hermes executable used by stop, park, wake, comment
 cli_timeout = "10s"                      # limit for each command (at most 60s)
-# wait_key = "/data/hermes-wait.key"     # signs Kelpie's parks; default: next to the ledger
+# wait_key = "/data/hermes-wait.key"     # signs Kelpie's parks and stops; default: next to the ledger
 human_owners = ["alice"]                 # assignees that are people, not agents (optional)
 
 # Hermes tolerates heartbeats up to an hour old; Kelpie's default is 30 minutes.
@@ -72,8 +72,13 @@ implements it (`SupportsStop`) with Hermes' own operator command, not with signa
 writing `kanban.db`:
 
 ```
-hermes kanban block --kind needs_input -- <task> "Stopped by Kelpie: <reason>. ... hermes kanban unblock <task>"
+hermes kanban block --kind needs_input -- <task> "Stopped by Kelpie: <reason>. ... hermes kanban unblock <task> [kelpie-stop:v1:...]"
 ```
+
+The reason ends with a signed marker, `[kelpie-stop:v1:...]`: the adapter reads the block back
+as Kelpie's own stop only when the marker verifies for that task and Hermes recorded the block
+within one CLI call of its issue (agents write block reasons too). Such a block waits for a
+human: rule 4 (`stale_blocks`) does not alert on it and rule 13 (`needs_you`) lists it.
 
 The command is pinned to exactly the run Kelpie looked at: `HERMES_KANBAN_TASK` and
 `HERMES_KANBAN_RUN_ID` name that task and run, so Hermes passes the run as `expected_run_id` and
@@ -126,9 +131,10 @@ conditions in a signed marker, `[kelpie-wait:v2:...]`, which the adapter reads b
 a running task pinned to the run the rule saw, is parked; only a task Kelpie parked is woken.
 
 The marker is signed with a key Kelpie creates on first use (`wait_key`, by default next to
-the ledger database, mode 0600). Keep it with the ledger (a container's data volume) and out
-of the agents' reach: losing it leaves Kelpie's parks unrecognised (logged; wake those tasks
-by hand), and an agent that can read it can forge parks. A marker copied from an earlier park
+the ledger database, mode 0600), which signs stops too. Keep it with the ledger (a container's
+data volume) and out of the agents' reach: losing it leaves Kelpie's parks unrecognised
+(logged; wake those tasks by hand) and its stops ordinary blocks, and an agent that can read
+it can forge parks and stops. A marker copied from an earlier park
 (it is visible in the `SCHEDULED:` comment) does not verify. Comments are written with
 `hermes kanban comment --author kelpie`. Every text Kelpie writes has GitHub PR URLs
 rewritten to `owner/repo#N`: a PR URL in a comment holds a ready task back for 24 hours in

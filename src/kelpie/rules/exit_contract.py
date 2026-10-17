@@ -46,7 +46,15 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import ConditionKind, OwnerKind, Session, Snapshot, Status, Task
+from kelpie.core.model import (
+    ConditionKind,
+    KelpieMark,
+    OwnerKind,
+    Session,
+    Snapshot,
+    Status,
+    Task,
+)
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._tasks import (
@@ -219,6 +227,8 @@ class ExitContract:
         block = task.block
         if conditions or missing or (block is not None and self._allowed(block.reason)):
             return
+        if block is not None and block.kelpie is KelpieMark.STOP:
+            return  # Kelpie stopped this run: requeueing it would undo the stop
         yield self._requeue_block(task, last)
 
     def _check_unapplied(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:

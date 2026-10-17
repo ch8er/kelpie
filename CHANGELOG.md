@@ -189,6 +189,12 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 ### Fixed
 
+- A run Kelpie stopped was alerted on as a stale block after 4 hours, and the report then
+  advised block conditions for it. Kelpie now signs its stops, as it signs its parks; rule
+  4 leaves a verified stop to rule 13, which lists it as waiting for a person, and rule 1
+  never requeues it. Stops made before the upgrade are unsigned: they still alert after 4
+  hours and are listed as waiting for input. On the demo farm, parks and stops are issued
+  on its virtual clock ([#141](https://github.com/ch8er/kelpie/issues/141), [#158](https://github.com/ch8er/kelpie/pull/158)).
 - Lasting-state alerts failed to read their escalation defaults from a slotted dataclass,
   found on the first live run ([#24](https://github.com/ch8er/kelpie/pull/24)).
 - Nested LLM spans were counted twice in token totals ([#29](https://github.com/ch8er/kelpie/pull/29)).
