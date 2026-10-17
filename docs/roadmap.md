@@ -413,10 +413,10 @@ Live case: a human asked for "20 runs in a row, 20 of 20" before automerge; the 
 confirmed green CI and a clean merge only, and the PR merged without that evidence.
 
 **Acceptance criteria**
-- [ ] Acceptance criteria stated by a human (owner kind = "human") in the task body or its comments are extracted by config patterns (e.g. "N runs", "N of N", "before merge", "must"), kept per task
-- [ ] Before a task moves to done or its PR is approved/automerged, each criterion needs matching evidence in the review or handoff (comment, CI job, artifact); missing → `alert` to the reviewer role and the human who asked, naming the criterion
-- [ ] return_causes: a test failing other tasks' PRs is classified as "flaky test" with the test name
-- [ ] Fixtures: new `18-acceptance-criterion-dropped.yaml`, `18-criterion-met.yaml` (synthetic names)
+- [x] Acceptance criteria stated by a human (owner kind = "human") in the task body or its comments are extracted by config patterns (e.g. "N runs", "N of N", "before merge", "must"), kept per task
+- [x] Before a task moves to done or its PR is approved/automerged, each criterion needs matching evidence in the review or handoff (comment, CI job, artifact); missing → `alert` to the reviewer role and the human who asked, naming the criterion
+- [x] return_causes: a test failing other tasks' PRs is classified as "flaky test" with the test name
+- [x] Fixtures: new `18-acceptance-criterion-dropped.yaml`, `18-criterion-met.yaml` (synthetic names)
 
 ### rules: resources — disk time-to-full and what is growing (rule 7, incident 19)
 labels: P0, week-3, area:rules

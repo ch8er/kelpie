@@ -32,6 +32,14 @@ once per task and set of files.
 **Otherwise**, a cause behind at least ``dominant_ratio`` (0.5) of the returns (``other``
 excepted), such as conflicts spread over many files, gets one informational lasting alert
 with the shares: there is no file to act on.
+
+**Flaky tests** (incident 18). A test named as failing (``test_names``: patterns with a named
+group ``test``; by default pytest's ``test_...`` and XCTest's ``SomeTests.testSomething``;
+next to failure wording, not a file path, not in a merge conflict) in the returns of at
+least ``flaky_min_tasks`` (2) different tasks in the window fails other tasks' work, not
+just its own: its returns count as cause ``flaky_test``, and it gets one lasting
+alert naming the test and the tasks it sent back (fix or quarantine it). This needs no
+``min_returns``.
 """
 
 from __future__ import annotations
@@ -53,6 +61,31 @@ from kelpie.rules import register
 NAME = "return_causes"
 CONFLICT = "merge_conflict"
 OTHER = "other"
+FLAKY = "flaky_test"
+_FAILED = re.compile(
+    r"\b(?:(?i:fail\w*|flak\w*|timed? ?out|red|errored|broke\w*)|[A-Z]\w*Error)\b"
+)  # an exception name ("AssertionError") is case-sensitive: "no error" is none
+_NO_FAILURE = re.compile(r"\b(?:no|without|0)\s+(?:\w+\s+)?(?:errors?|failures?)\b", re.I)
+# "Fixed TypeError in test_parse": resolved before the name, not "not fixed" after it.
+_RESOLVED = re.compile(r"\b(?:fixed|resolved)\b", re.IGNORECASE)
+_NEGATED = re.compile(
+    r"(?:\b(?:not|never|nothing)|n't)\s+(?:(?:yet|been|got|it)\s+)*$", re.IGNORECASE
+)
+_FIXED = re.compile(r"\b(?:fix(?:ed|es)?|added|new|renamed)\b", re.IGNORECASE)
+# Where a clause ends: "add test_x; lint failed", "Added test_x. Lint failed." or "test_x is
+# fixed, but test_y is flaky" names no failing test_x. A dot inside a name
+# ("LoginTests.testTimeout") is followed by no space, and the dots of "test_x ... FAIL"
+# (unittest's verbose output) end nothing.
+_CLAUSE_END = re.compile(
+    r"[;\n]|[!?](?=\s)|\.{3}(?!\s*(?:FAIL|ERROR|ok|PASS|SKIP))|(?<!\.)\.(?=\s)"
+    r"|,\s*(?=(?:but|while|whereas|and|then)\b)"
+)
+_BULLET = " \t:-*>"
+_ITEM = re.compile(r"\s*(?:[-*•>]|\d+[.)])\s+\S")  # a bulleted or numbered line
+DEFAULT_TEST_NAMES = (
+    r"\b(?P<test>test_\w+)",  # pytest (also "FAILED tests/test_api.py::test_create")
+    r"\b(?P<test>[A-Z]\w*Tests?[./]test\w+)",  # XCTest: LoginTests.testTimeout
+)
 # Git's own wording, so review prose ("this conflicts with the design doc", "no merge
 # conflicts") is not a conflict.
 DEFAULT_CAUSES: Mapping[str, tuple[str, ...]] = {
@@ -83,6 +116,10 @@ class ReturnCauses:
     cause_patterns: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = field(
         default_factory=lambda: _compile(DEFAULT_CAUSES)
     )
+    test_names: tuple[re.Pattern[str], ...] = field(
+        default_factory=lambda: tuple(re.compile(p) for p in DEFAULT_TEST_NAMES)
+    )
+    flaky_min_tasks: int = 2
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -93,9 +130,66 @@ class ReturnCauses:
             for r in task.returns
             if since <= r.at <= snapshot.now
         ]
+        flaky = self._flaky(returns)
+        found = [self._flaky_alert(test, tasks) for test, tasks in sorted(flaky.items())]
         if len(returns) < self.min_returns:
-            return []
-        causes = Counter(self.cause(r) for _, r in returns)
+            return found
+        causes = Counter(
+            FLAKY if self._tests(r) & flaky.keys() else self.cause(r) for _, r in returns
+        )
+        return found + list(self._causes(snapshot, returns, causes))
+
+    def _tests(self, r: Return) -> set[str]:
+        """Tests the return says failed: a name next to failure wording ("failed", "flaky",
+        "timed out", "red"), not a file path (``tests/test_models.py`` in a conflict), and
+        never in a merge conflict's reason."""
+        if self.cause(r) == CONFLICT:
+            return set()
+        reason = r.reason[:MAX_REASON].replace("\r\n", "\n")
+        found = set()
+        for p in self.test_names:
+            for m in p.finditer(reason):
+                name = m["test"]
+                start, end = m.span("test")
+                if (
+                    not name
+                    or reason[start - 1 : start] in ("/", "\\")
+                    or re.match(r"\.\w", reason[end : end + 2])
+                ):
+                    continue  # a path, or a file name with its extension
+                clause = _clause(reason, start, end, self.test_names)
+                failed = _FAILED.search(_NO_FAILURE.sub(" ", clause))
+                if failed and not _resolved_before(clause, name, self.test_names):
+                    found.add(name)
+        return found
+
+    def _flaky(self, returns: Sequence[tuple[Task, Return]]) -> dict[str, list[str]]:
+        """Tests named in the returns of at least ``flaky_min_tasks`` tasks, with them."""
+        by_test: dict[str, set[str]] = {}
+        for task, r in returns:
+            for test in self._tests(r):
+                by_test.setdefault(test, set()).add(task.id)
+        return {t: sorted(ids) for t, ids in by_test.items() if len(ids) >= self.flaky_min_tasks}
+
+    def _flaky_alert(self, test: str, tasks: list[str]) -> Action:
+        shown = ", ".join(tasks[:_SHOWN]) + (
+            f" and {len(tasks) - _SHOWN} more" if len(tasks) > _SHOWN else ""
+        )
+        return Action(
+            ActionKind.ALERT,
+            NAME,
+            f"Test {test} sent {len(tasks)} different tasks back in the last "
+            f"{_span(self.window)} ({shown}): it fails other tasks' work, not only its own. "
+            "Fix or quarantine it before more PRs are returned for it.",
+            severity=Severity.WARNING,
+            key=f"{NAME}:flaky:{test}",
+            state=f"{NAME}:flaky:{test}",
+            params={"finding": "flaky_test", "test": test, "tasks": tasks},
+        )
+
+    def _causes(
+        self, snapshot: Snapshot, returns: Sequence[tuple[Task, Return]], causes: Counter[str]
+    ) -> Sequence[Action]:
         conflicts = [(task, r) for task, r in returns if self.cause(r) == CONFLICT]
         if len(conflicts) / len(returns) >= self.conflict_ratio_threshold:
             names = _names_index(snapshot.tasks)
@@ -108,8 +202,8 @@ class ReturnCauses:
                     if t.status is Status.IN_PROGRESS and (touched := self._touching(t, hot, names))
                 ]
         cause, n = max(causes.items(), key=lambda c: (c[1], c[0]))
-        if cause == OTHER or n / len(returns) < self.dominant_ratio:
-            return []
+        if cause in (OTHER, FLAKY) or n / len(returns) < self.dominant_ratio:
+            return []  # flaky tests have alerts of their own
         return [self._dominant(cause, n, causes, len(returns))]
 
     def cause(self, r: Return) -> str:
@@ -297,6 +391,24 @@ def build(config: dict[str, Any]) -> ReturnCauses:
         ):
             raise ValueError("expected_shared must be a list of non-empty glob patterns")
         kwargs["expected_shared"] = tuple(patterns)
+    if "flaky_min_tasks" in config:
+        n = _positive_int(config.pop("flaky_min_tasks"), "flaky_min_tasks")
+        if n < 2:
+            raise ValueError(
+                "flaky_min_tasks must be at least 2 (one task's own test is not flaky)"
+            )
+        kwargs["flaky_min_tasks"] = n
+    if "test_names" in config:
+        raw_tests = config.pop("test_names")
+        if not isinstance(raw_tests, list) or not all(isinstance(p, str) and p for p in raw_tests):
+            raise ValueError("test_names must be a list of regular expressions")
+        try:
+            compiled = tuple(re.compile(p) for p in raw_tests)
+        except re.error as exc:
+            raise ValueError(f"test_names: invalid pattern: {exc}") from None
+        if any("test" not in p.groupindex for p in compiled):
+            raise ValueError("test_names: every pattern needs a named group 'test'")
+        kwargs["test_names"] = compiled
     if "cause_patterns" in config:
         raw = config.pop("cause_patterns")
         if not isinstance(raw, Mapping) or not all(
@@ -314,3 +426,60 @@ def build(config: dict[str, Any]) -> ReturnCauses:
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return ReturnCauses(**kwargs)
+
+
+def _clause(reason: str, start: int, end: int, names: Sequence[re.Pattern[str]]) -> str:
+    """The clause of ``reason`` around ``reason[start:end]``. A name alone on its line
+    belongs to the next line when that line is the failure ("test_login_timeout" over
+    "failed 3 times"), and to the header of its list ("Tests failed:" over "- test_a")."""
+    heads = [m.end() for m in _CLAUSE_END.finditer(reason, 0, start)]
+    head = heads[-1] if heads else 0
+    tail = _CLAUSE_END.search(reason, end)
+    stop = tail.start() if tail else len(reason)
+    clause = reason[head:stop]
+    lines = reason.split("\n")
+    at = reason.count("\n", 0, start)
+    alone = not clause.replace(reason[start:end], "").strip(_BULLET)
+    if alone:
+        below = lines[at + 1] if at + 1 < len(lines) else ""
+        if (
+            _FAILED.match(below.lstrip(_BULLET))
+            and not below.rstrip().endswith(":")  # the next list's header
+            and not any(p.search(below) for p in names)
+        ):
+            return clause + "\n" + below
+    elif _FAILED.search(clause) or not _ITEM.match(lines[at]):
+        return clause  # the name has words around it, its own verdict or none
+    # A list item: up through the list to its header ("Tests failed:", "Flaky:").
+    blank = False
+    for line in reversed(lines[:at]):
+        if not line.strip():
+            if blank:
+                break
+            blank = True  # one blank line between a header and its list
+            continue
+        if line.rstrip().endswith(":") and not _ITEM.match(line):
+            fixed = _FIXED.search(line) and not _FAILED.search(line)  # "Fixed tests:"
+            return clause if fixed else line + "\n" + clause  # the header, then the item
+        if not _ITEM.match(line) and not any(p.fullmatch(line.strip(_BULLET)) for p in names):
+            break  # a line of prose: no list
+    return clause
+
+
+def _resolved_before(clause: str, name: str, names: Sequence[re.Pattern[str]]) -> bool:
+    """The clause says the failure was fixed before it names the test, and the test with
+    it ("Fixed TypeError in test_parse"; not "wasn't fixed", nor "after I fixed the
+    timeout, test_login failed")."""
+    named = re.search(rf"\b{re.escape(name)}\b", clause)
+    at = named.start() if named else len(clause)
+    for m in _RESOLVED.finditer(clause, 0, at):
+        between = clause[m.end() : at]
+        if _NEGATED.search(clause[: m.start()]):
+            continue  # not fixed
+        rest = _NO_FAILURE.sub(" ", clause[at + len(name) :])
+        if ("," in between or " and " in between) and _FAILED.search(rest):
+            continue  # "fixed the timeout and test_login failed": the fix was of another thing
+        if any(p.search(between) for p in names):
+            continue  # it fixed another test
+        return True
+    return False

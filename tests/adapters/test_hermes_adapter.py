@@ -576,14 +576,64 @@ def test_older_schema_without_body(tmp_path: Path) -> None:
     assert task.body is None
 
 
-def test_bytes_body_is_decoded_and_finished_tasks_keep_none(board: Board) -> None:
+def test_bytes_body_is_decoded_and_finished_tasks_keep_theirs(board: Board) -> None:
     board.task("t_1", "ready", ago(days=1), assignee="dev")
     board.task("t_2", "done", ago(days=1), assignee="dev", completed=ago(hours=1), body="old")
     board.conn.execute("UPDATE tasks SET body = ? WHERE id = 't_1'", (b"after #7 lands \xff",))
     board.conn.commit()
     tasks = {t.id: t for t in adapter(board).snapshot(NOW).tasks}
     assert tasks["t_1"].body == "after #7 lands \ufffd"
-    assert tasks["t_2"].body is None
+    assert tasks["t_2"].body == "old"  # rule 1 reads acceptance criteria in done tasks
+
+
+def test_comments_and_who_wrote_them(board: Board) -> None:
+    board.task("t_1", "review", ago(days=1), assignee="dev", body="Ship it")
+    board.update("t_1", created_by="alice")
+    board.comment("t_1", "Alice", "Before automerge: 20 runs in a row, 20 of 20.", ago(hours=5))
+    board.comment("t_1", "reviewer-1", "CI green, merges cleanly.", ago(hours=1))
+    board.comment("t_1", "kelpie", "Checkpoint: please commit", ago(minutes=20))  # our own
+    board.comment("t_1", "dev", "   ", ago(minutes=5))  # empty: left out
+    board.task("t_2", "ready", ago(days=1), assignee="dev")
+    board.update("t_2", created_by="dev")
+    a = HermesAdapter(db_path=board.path, spool=None, human_owners=("alice",))
+    tasks = {t.id: t for t in a.snapshot(NOW).tasks}
+    first, second = tasks["t_1"].comments
+    assert (first.author, first.human, first.at) == ("Alice", True, ago(hours=5))
+    assert first.text.startswith("Before automerge") and not second.human
+    assert tasks["t_1"].body_author == "alice" and tasks["t_2"].body_author is None
+    assert tasks["t_1"].created_at == ago(days=1)
+    assert tasks["t_2"].comments == ()
+
+
+def test_a_persons_early_comment_is_never_pushed_out(board: Board) -> None:
+    from kelpie.adapters.hermes.adapter import MAX_COMMENTS
+
+    board.task("t_1", "ready", ago(days=1), assignee="dev")
+    board.comment("t_1", "alice", "Before merge: 5 runs in a row.", ago(hours=20))
+    for i in range(MAX_COMMENTS + 3):
+        board.comment("t_1", "dev", f"note {i}", ago(hours=10) + timedelta(minutes=i))
+    a = HermesAdapter(db_path=board.path, spool=None, human_owners=("alice",))
+    (task,) = a.snapshot(NOW).tasks
+    assert task.comments[0].author == "alice" and len(task.comments) == MAX_COMMENTS + 1
+
+
+def test_only_the_last_comments_are_kept(board: Board) -> None:
+    from kelpie.adapters.hermes.adapter import MAX_COMMENTS
+
+    board.task("t_1", "ready", ago(days=1), assignee="dev")
+    for i in range(MAX_COMMENTS + 3):
+        board.comment("t_1", "dev", f"note {i}", ago(hours=10) + timedelta(minutes=i))
+    (task,) = adapter(board).snapshot(NOW).tasks
+    assert (
+        len(task.comments) == MAX_COMMENTS and task.comments[-1].text == f"note {MAX_COMMENTS + 2}"
+    )
+
+
+def test_a_board_without_comments_still_reads(board: Board) -> None:
+    board.task("t_1", "ready", ago(days=1), assignee="dev")
+    board.conn.execute("DROP TABLE task_comments")
+    (task,) = adapter(board).snapshot(NOW).tasks
+    assert task.comments == ()
 
 
 def test_roles_from_the_table_or_the_profile_without_instance_number(board: Board) -> None:

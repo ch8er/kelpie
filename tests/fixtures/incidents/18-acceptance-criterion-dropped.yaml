@@ -1,0 +1,67 @@
+id: "18-acceptance-criterion-dropped"
+incident: 18
+title: "A person's acceptance criterion is dropped before automerge"
+description: >
+  A person asked, in a comment on a flaky-test fix, for "20 runs in a row, 20 of 20" before
+  automerge. The reviewer confirmed only green CI and a clean merge, and the PR, labelled
+  automerge, was about to merge by itself. Kelpie alerts (critical: nothing stops the merge)
+  naming the criterion, the person who asked and the reviewer role. A task with the same
+  criterion whose PR is not ready to land yet, and a task where only an agent wrote "20 runs"
+  (not a person's criterion), get no alert; the first is told, once, how to report the
+  criterion's result (its AC- reference).
+rule: exit_contract
+config:
+  acceptance_patterns:
+    - '\b\d+\s+(?:runs?|times)\b'
+    - '\b(\d+)\s*(?:of|/)\s*\1\b'
+    - '\bbefore\s+(?:auto)?merg'
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: human-lead, role: lead, kind: human}
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-rev-1, role: reviewer}
+  tasks:
+    - id: T-1801
+      title: "APP-101 Fix flaky login test"
+      status: review
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      comments:
+        - {author: human-lead, human: true, at: "2026-03-02T10:00:00+00:00", text: "Before automerge: 20 runs in a row, 20 of 20."}
+        - {author: agent-rev-1, at: "2026-03-02T13:00:00+00:00", text: "CI green, merges cleanly. Approved."}
+    - id: T-1802
+      title: "APP-102 Fix flaky sync test"
+      status: review
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      comments:
+        - {author: human-lead, human: true, at: "2026-03-02T10:00:00+00:00", text: "Before automerge: 20 runs in a row, 20 of 20."}
+    - id: T-1803
+      title: "APP-103 Speed up tests"
+      status: accepted
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: developer
+      comments:
+        - {author: agent-dev-1, at: "2026-03-02T11:00:00+00:00", text: "Plan: 20 runs of the suite to measure."}
+  pull_requests:
+    - {repo: example/app, number: 501, title: "APP-101: fix flaky login test", branch: "app/APP-101", labels: [automerge], mergeable: true, task_ids: [T-1801]}
+    - {repo: example/app, number: 502, title: "APP-102: fix flaky sync test", branch: "app/APP-102", mergeable: false, task_ids: [T-1802]}
+expected_actions:
+  - kind: alert
+    task_id: T-1801
+    severity: critical
+    reason_contains: "20 runs in a row, 20 of 20"
+    params:
+      pattern: acceptance-criterion-missing
+      asked_by: human-lead
+      notify: [human-lead, reviewer]
+  - kind: comment
+    task_id: T-1802
+    reason_contains: 'a comment of its own that starts with "AC-87d75a: met"'
+    params: {pattern: acceptance-criterion-stated}
+not_expected_actions:
+  - kind: alert
+    task_id: T-1802
+  - kind: alert
+    task_id: T-1803

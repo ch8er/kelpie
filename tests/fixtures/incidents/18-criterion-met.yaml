@@ -1,0 +1,48 @@
+id: "18-criterion-met"
+incident: 18
+title: "A criterion with its evidence lands quietly; one without is flagged"
+description: >
+  Two tasks with acceptance criteria from a person. On the first, the developer quoted the
+  criterion and reported "ran it 20 times in a row: 20/20 passed" under it, so its automerge
+  PR lands without an alert. The second was moved to done two hours ago and nothing after
+  the person's "check it on a tablet before merge" mentions a tablet check: Kelpie alerts.
+rule: exit_contract
+config:
+  acceptance_patterns:
+    - '\b\d+\s+(?:runs?|times)\b'
+    - '\b(\d+)\s*(?:of|/)\s*\1\b'
+    - '\bbefore\s+(?:auto)?merg'
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: human-lead, role: lead, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - id: T-1811
+      title: "APP-111 Fix flaky upload test"
+      status: review
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      comments:
+        - {author: human-lead, human: true, at: "2026-03-02T10:00:00+00:00", text: "Needs 20 runs in a row, 20 of 20, before automerge."}
+        - {author: agent-dev-1, at: "2026-03-02T11:30:00+00:00", text: "> Needs 20 runs in a row, 20 of 20, before automerge.\n\nMet: ran it 20 times in a row, 20/20 passed (log attached)."}
+    - id: T-1812
+      title: "APP-112 Settings layout"
+      status: done
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: developer
+      comments:
+        - {author: human-lead, human: true, at: "2026-03-02T09:00:00+00:00", text: "Looks good. Check it on a tablet before merge."}
+  sessions:
+    - {id: S-1812, task_id: T-1812, owner_id: agent-dev-1, started_at: "2026-03-02T11:00:00+00:00", ended_at: "2026-03-02T13:00:00+00:00", final_status: done, summary: "Fixed the layout; screenshots of the phone build."}
+  pull_requests:
+    - {repo: example/app, number: 511, title: "APP-111: fix flaky upload test", branch: "app/APP-111", labels: [automerge], mergeable: true, task_ids: [T-1811]}
+expected_actions:
+  - kind: alert
+    task_id: T-1812
+    severity: warning
+    reason_contains: "Check it on a tablet before merge."
+    params: {pattern: acceptance-criterion-missing, landing: "it was moved to done"}
+not_expected_actions:
+  - kind: alert
+    task_id: T-1811

@@ -64,6 +64,13 @@ class Board:
         )
         self.conn.commit()
 
+    def comment(self, task_id: str, author: str, body: str, at: datetime) -> None:
+        self.conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, author, body, epoch(at)),
+        )
+        self.conn.commit()
+
     def update(self, task_id: str, **columns: datetime | int | str | None) -> None:
         """Change task columns; datetimes are stored as epoch seconds."""
         values = [epoch(v) if isinstance(v, datetime) else v for v in columns.values()]
