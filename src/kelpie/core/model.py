@@ -209,6 +209,10 @@ class Session:
     summary: str | None = None  # the agent's own progress note, if it left one
     artifacts: tuple[Artifact, ...] = ()
     source: str | None = None  # name of the platform adapter that reported the session
+    # A tool call in progress (a build, a simulator run), if the adapter knows: its name and
+    # when it started. Open TOOL spans of the session say the same.
+    running_tool: str | None = None
+    running_tool_since: datetime | None = None
 
 
 class SpanKind(StrEnum):
@@ -513,6 +517,12 @@ class Snapshot:
     # only then does a task with no unmerged PR in the snapshot really have none (a parent is
     # proposed for closing only then). False otherwise; None when no connector lists PRs.
     pull_requests_complete: bool | None = None
+    # When the scan that made them complete ran (the oldest, with several code hosts): PRs
+    # opened after it are not in the snapshot yet.
+    pull_requests_at: datetime | None = None
+    # The closed PRs listed are those closed since this time (the connector's lookback; the
+    # latest, with several code hosts): one that closed before is not in the snapshot.
+    closed_pull_requests_since: datetime | None = None
     # Repeated huge-output offenders over [traces.outputs] repeat_days (span store).
     output_offenders: tuple[OutputOffender, ...] = ()
     # Parts of the farm that are not in this snapshot (multi-host: agents and

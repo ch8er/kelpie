@@ -67,7 +67,12 @@ class PlatformAdapter(Protocol):
         """Commit and push everything uncommitted in the task's worktree, on ``branch`` when
         given. With ``draft_pr`` the push goes to a draft PR (which does not run CI) instead
         of relying on ``[skip ci]`` in the message. Afterwards the adapter reports the new
-        commit as the session's ``last_commit``, so the next session can resume from it."""
+        commit as the session's ``last_commit``, so the next session can resume from it.
+
+        The commit and the push go to ``branch`` exactly: rule 5 checked that branch for open
+        PRs, not whatever the worktree has checked out. Raise (do nothing) when ``branch`` is
+        None, the worktree's HEAD is another branch, or a run is active on the task (a new
+        session may be starting in that worktree)."""
         ...
 
     def events(self, since: datetime) -> Iterable[PlatformEvent]: ...

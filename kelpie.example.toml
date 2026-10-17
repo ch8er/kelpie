@@ -34,7 +34,14 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # [engine.rules.checkpoints]
 # commit_every = "30m"      # remind a live session to commit after this long
 # max_changed_files = 20    # ...or once it has more changed files than this
-# wip_ci = "skip_ci"        # WIP commit on exit: "skip_ci" ([skip ci]) or "draft_pr"
+# commit_every_by_role = { reviewer = "2h" }  # per-role commit_every
+# tool_grace = "2h"         # no reminder while a tool call (build, simulator) runs, up to this
+# wip_ci = "skip_ci"        # WIP commit on exit: "skip_ci" ([skip ci]) or "draft_pr"; never to
+#                           # a branch with an open PR (needs [connectors.github.pulls])
+# wip_pr_margin = "1m"      # WIP commit only once the open PRs were read this long after
+#                           # the exit (it waits for that; never onto an open PR)
+# tool_long_after = "5m"    # a tool call holds reminders once it has run this long
+# wip_without_pr_check = false  # allow WIP commits when the open PRs are not known
 # act_within = "24h"        # WIP commit and resume note only this long after the exit
 #
 # [engine.rules.orphan_status]

@@ -320,10 +320,26 @@ def test_build_app_wires_the_pull_requests_step(
         "open PRs, and those closed within 7d, of example/repo; hold labels read: "
         "merge-first, park" in caplog.text
     )
+    assert "checkpoints makes no WIP commits" not in caplog.text
+    caplog.clear()
+    build_app(load_settings(write(tmp_path, CONFIG))).close()  # no [connectors.github.pulls]
+    assert "checkpoints makes no WIP commits" in caplog.text
     assert "cache_ttl" not in caplog.text
     slow = text.replace('poll_interval = "5m"', 'poll_interval = "1m"')
     build_app(load_settings(write(tmp_path, slow))).close()
     assert "is not below [connectors.github.pulls] poll_interval (1m)" in caplog.text
+    assert "closed_lookback is shorter" not in caplog.text
+    assert "act_within plus 1h" not in caplog.text
+    caplog.clear()
+    short = text.replace('poll_interval = "5m"', 'poll_interval = "5m"\nclosed_lookback = "1h"')
+    short += '[engine]\nonce_window = "24h"\n'
+    build_app(load_settings(write(tmp_path, short))).close()
+    assert "closed_lookback is shorter than checkpoints act_within" in caplog.text
+    assert "act_within plus 1h should stay shorter" in caplog.text
+    caplog.clear()
+    unchecked = short + "[engine.rules.checkpoints]\nwip_without_pr_check = true\n"
+    build_app(load_settings(write(tmp_path, unchecked))).close()
+    assert "closed_lookback is shorter" not in caplog.text  # no PR check, no refusal
 
 
 def test_pull_requests_step_off_unless_configured(

@@ -1,0 +1,75 @@
+id: "20-checkpoint-live-review"
+incident: null
+title: "Checkpoints in a live 24 h review: blocks, automerge PRs, reviewers and long builds"
+description: >
+  From a live 24 h review in observe mode, four kinds of noise or danger:
+  - A session that declared a block was later unblocked, and Kelpie told the next session
+    to resume, as if it had been lost.
+  - A session left uncommitted changes on a branch whose PR was open with automerge:
+    a [skip ci] WIP commit would have given that PR a new head that no CI ran on.
+  - A reviewer who commits rarely was reminded every 30 minutes.
+  - An agent in the middle of a long simulator run was reminded to commit.
+  Now:
+  - There is no resume note after a declared block.
+  - There is no WIP commit to a branch with an open PR; a person is told the changes were
+    left uncommitted.
+  - Reviewers have their own threshold (commit_every_by_role).
+  - There is no reminder while a tool call is in progress.
+  A developer with no commit for 90 minutes is still reminded, and a dirty exit on a branch
+  without a PR still gets its WIP commit.
+rule: checkpoints
+config:
+  commit_every: "30m"
+  commit_every_by_role:
+    reviewer: "2h"
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  pull_requests_complete: true
+  pull_requests_at: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: agent-rev-1, role: reviewer}
+  tasks:
+    - {id: T-1501, title: "APP-091 Push settings", status: ready, status_since: "2026-03-02T14:30:00+00:00", role: developer, branch: "app/APP-091"}
+    - {id: T-1502, title: "APP-092 Login polish", status: review, status_since: "2026-03-02T14:40:00+00:00", role: developer, branch: "app/APP-092"}
+    - {id: T-1503, title: "APP-093 Review sync", status: in_progress, status_since: "2026-03-02T13:30:00+00:00", role: reviewer, owner_id: agent-rev-1}
+    - {id: T-1504, title: "APP-094 Simulator UI tests", status: in_progress, status_since: "2026-03-02T13:30:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-1505, title: "APP-095 Offline cache", status: in_progress, status_since: "2026-03-02T13:30:00+00:00", role: developer, owner_id: agent-dev-2}
+    - {id: T-1506, title: "APP-096 Error states", status: in_progress, status_since: "2026-03-02T13:00:00+00:00", role: developer}
+  sessions:
+    # Declared a block ("waiting on API keys"); a person unblocked the task since.
+    - {id: S-1501, task_id: T-1501, owner_id: agent-dev-3, started_at: "2026-03-02T12:00:00+00:00", ended_at: "2026-03-02T13:00:00+00:00", final_status: blocked, exit_reason: "waiting on API keys", last_commit: "1a2b3c4", last_commit_at: "2026-03-02T12:50:00+00:00", branch: "app/APP-091"}
+    # Left uncommitted changes; its PR is open with automerge.
+    - {id: S-1502, task_id: T-1502, owner_id: agent-dev-3, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T14:40:00+00:00", final_status: review, branch: "app/APP-092", dirty_worktree: true}
+    # A reviewer 90 minutes without a commit.
+    - {id: S-1503, task_id: T-1503, owner_id: agent-rev-1, started_at: "2026-03-02T13:30:00+00:00", last_heartbeat: "2026-03-02T14:58:00+00:00", dirty_worktree: true}
+    # In the middle of a simulator run.
+    - {id: S-1504, task_id: T-1504, owner_id: agent-dev-1, started_at: "2026-03-02T13:30:00+00:00", last_heartbeat: "2026-03-02T14:58:00+00:00", dirty_worktree: true}
+    # A developer 90 minutes without a commit: reminded.
+    - {id: S-1505, task_id: T-1505, owner_id: agent-dev-2, started_at: "2026-03-02T13:30:00+00:00", last_heartbeat: "2026-03-02T14:58:00+00:00", dirty_worktree: true}
+    # Died with uncommitted work on a branch without a PR: WIP commit.
+    - {id: S-1506, task_id: T-1506, owner_id: agent-dev-3, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T14:55:00+00:00", branch: "app/APP-096", dirty_worktree: true}
+  spans:
+    - {trace_id: tr-1504, span_id: sp-1504, name: "execute_tool", kind: tool, tool: "simulator_test", start: "2026-03-02T14:20:00+00:00", session_id: S-1504, task_id: T-1504}
+  pull_requests:
+    - {repo: example/app, number: 402, title: "APP-092: login polish", branch: "app/APP-092", labels: [automerge], task_ids: [T-1502]}
+expected_actions:
+  - kind: comment
+    task_id: T-1505
+    reason_contains: "no commit for 90 minutes"
+  - kind: wip_commit
+    task_id: T-1506
+  - kind: alert
+    task_id: T-1502
+    reason_contains: "app/APP-092 has an open PR, example/app#402"
+not_expected_actions:
+  - kind: comment
+    task_id: T-1501
+  - kind: wip_commit
+    task_id: T-1502
+  - kind: comment
+    task_id: T-1503
+  - kind: comment
+    task_id: T-1504

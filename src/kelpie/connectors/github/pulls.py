@@ -190,11 +190,22 @@ class PullRequestSync:
         repos = self.connector.repos
         complete = bool(repos) and self._whole.issuperset(repos)
         known = snapshot.pull_requests_complete  # another code host's, if any
+        at = self._scanned_at if complete else None
+        if known is True:  # another code host's lists: the older scan time, if it has one
+            at = (
+                None
+                if snapshot.pull_requests_at is None or at is None
+                else min(at, snapshot.pull_requests_at)
+            )
         return replace(
             snapshot,
             pull_requests=snapshot.pull_requests + pulls,
             closed_pull_requests=snapshot.closed_pull_requests + closed,
             pull_requests_complete=complete if known is None else known and complete,
+            pull_requests_at=at if known is not False else None,
+            closed_pull_requests_since=_latest(
+                snapshot.closed_pull_requests_since, snapshot.now - self.settings.closed_lookback
+            ),
         )
 
     def _linked(
@@ -280,7 +291,7 @@ class PullRequestSync:
                 log.warning(
                     "[connectors.github.pulls] %s: its open and closed PRs were not read in full "
                     "for %d scans (errors, cached answers, more than %d PRs, the request budget): "
-                    "rule 3 proposes closing no parent meanwhile",
+                    "rule 3 proposes closing no parent and rule 5 makes no WIP commit meanwhile",
                     repo,
                     UNKNOWN_WARN,
                     MAX_PAGES * PAGE,
@@ -485,6 +496,10 @@ class PullRequestSync:
             if (at := self._labeled.get((p.repo, p.number, label), (None, None))[0]) is not None
         )
         return replace(p, mergeable=False if p.draft else mergeable, labeled=labeled)
+
+
+def _latest(a: datetime | None, b: datetime) -> datetime:
+    return b if a is None else max(a, b)
 
 
 def _pull(repo: str, item: Any) -> PullRequest | None:
