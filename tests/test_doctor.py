@@ -101,6 +101,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "worktrees readable": "SKIP",
         "PR blocks have conditions": "PASS",
         "disk watched": "PASS",
+        "process counts fresh": "SKIP",
         "Prometheus reachable": "SKIP",
     }
     assert "1 tasks" in checks["kanban.db"].detail
@@ -437,3 +438,32 @@ def test_a_farm_whose_disks_nobody_watches_fails(farm: Farm) -> None:
     check = farm.checks()["disk watched"]
     assert check.status == "FAIL" and "disk is not watched" in check.detail
     assert "node_exporter" in check.fix
+
+
+def test_a_mac_whose_process_count_stopped_is_a_warning(farm: Farm) -> None:
+    farm.make_healthy()
+    mac = vector(({"instance": "mac-1:9100"}, "1"))
+    farm.prom.responses['count by (instance) (node_uname_info{sysname="Darwin"})'] = mac
+    ages = "max by (instance) (time() - " + (
+        'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_processes[.]prom"})'
+    )
+    farm.prom.responses[ages] = vector(({"instance": "mac-1:9100"}, str(3 * 3600)))
+    check = farm.checks()["process counts fresh"]
+    assert check.status == "WARN" and "mac-1 (last written 3h ago)" in check.detail
+    assert "process-limit.plist" in check.fix
+    farm.prom.responses[ages] = vector()
+    assert "no kelpie_processes.prom" in farm.checks()["process counts fresh"].detail
+    farm.prom.responses[count("processes")] = mac  # the script writes again
+    check = farm.checks()["process counts fresh"]
+    assert check.status == "PASS" and "fresh process counts from mac-1" in check.detail
+
+
+def test_process_counts_skip_without_a_mac_or_an_answer(farm: Farm) -> None:
+    farm.make_healthy()
+    check = farm.checks()["process counts fresh"]
+    assert check.status == "SKIP" and "no macOS host" in check.detail
+    farm.prom.status = 500
+    assert farm.checks()["process counts fresh"].status == "SKIP"
+    farm.prom.status = 200
+    farm.resources = ""
+    assert farm.checks()["process counts fresh"].status == "SKIP"

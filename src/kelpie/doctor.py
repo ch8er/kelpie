@@ -397,6 +397,71 @@ def check_resources_watched(
     return _pass(name, f"{where} reads the disks and directory sizes of {hosts}")
 
 
+# kelpie_processes.prom: the macOS process count rule 7 reads (scripts/kelpie-process-limit.sh).
+_PROCESS_FILE = 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_processes[.]prom"}'
+
+
+def check_process_counts(
+    settings: Settings, loaded: LoadedRules, environ: Mapping[str, str] = os.environ
+) -> Check:
+    """On macOS rule 7 counts processes from a textfile the shipped script rewrites every
+    minute, and ignores it once it is 5 minutes old: a script that stopped (a LaunchAgent
+    ends at logout) leaves the process limit unwatched, and the reading just disappears."""
+    name = "process counts fresh"
+    prometheus = settings.resources.prometheus
+    if not any(r.name == "resources" for r in loaded.rules) or prometheus is None:
+        return _skip(name, "rule 7 reads no host resources")
+    try:
+        config = prometheus.build(environ=environ).config
+    except ValueError as exc:
+        return _skip(name, str(exc))
+    client = PrometheusClient(config.url, min(config.timeout, 5), config.token)
+    label = config.host_label
+    try:
+        darwin = 'node_uname_info{sysname="Darwin"}'
+        macs = _labels(client, f"count by ({label}) ({darwin})", label)
+        hosts = {value: host for host, value in prometheus.hosts.items() if value in macs}
+        if not hosts:  # most farms: ask nothing more
+            return _skip(name, "no macOS host (node_uname_info) among [resources.prometheus] hosts")
+        counted = _labels(
+            client, f"count by ({label}) (\n{config.query_text('processes')}\n)", label
+        )
+        ages = {
+            s.labels.get(label, ""): s.value
+            for s in client.query(f"max by ({label}) (time() - {_PROCESS_FILE})")
+        }
+    except QueryError as exc:
+        return _skip(name, f"Prometheus did not answer ({exc.cause})")
+    blind = sorted(hosts[v] for v in hosts if v not in counted)
+    if not blind:
+        return _pass(name, f"fresh process counts from {', '.join(sorted(hosts.values()))}")
+    by_host = {host: value for value, host in hosts.items()}
+    custom = "processes" in config.queries
+
+    def why(host: str) -> str:
+        age = ages.get(by_host[host])
+        if age is None:
+            return f"{host} (no kelpie_processes.prom in node_exporter's textfile collector)"
+        written = f"last written {format_age(timedelta(seconds=min(max(age, 0), 10**9)))} ago"
+        if age < 300 and custom:
+            return f"{host} ({written}, but the custom processes query returns nothing for it)"
+        return f"{host} ({written})"
+
+    fix = (
+        "check [resources.prometheus.queries] processes: it must return the host's count"
+        if custom and all(ages.get(by_host[h], 10**9) < 300 for h in blind)
+        else "load deploy/textfile/com.kelpie.process-limit.plist as the agent user (a "
+        "LaunchDaemon with UserName on a headless farm), and keep the host's clock in sync "
+        "with Prometheus's (docs/install.md, Host resources)"
+    )
+    return _warn(
+        name,
+        f"no fresh process count from {', '.join(why(h) for h in blind)}: rule 7 cannot "
+        "see them near kern.maxprocperuid",
+        fix,
+    )
+
+
 def _labels(client: PrometheusClient, promql: str, label: str) -> set[str]:
     return {s.labels.get(label, "") for s in client.query(promql)}
 
@@ -673,6 +738,7 @@ def run_checks(
     checks += oc_checks
     checks += check_github(settings, environ)
     checks.append(check_resources_watched(settings, loaded, environ))
+    checks.append(check_process_counts(settings, loaded, environ))
     checks.append(check_prometheus(prometheus, environ))
     return checks
 
