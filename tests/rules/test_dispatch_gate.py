@@ -202,7 +202,14 @@ def test_no_release_for_waits_that_are_not_only_parent_waits() -> None:
 
 
 def test_derived_pr_conditions_drop_the_head_sha_platform_ones_keep_it() -> None:
-    derived = cond("C", ConditionKind.CI_STATUS, source="task_text", sha="old", ci_state="failure")
+    derived = cond(
+        "C",
+        ConditionKind.CI_STATUS,
+        source="task_text",
+        sha="old",
+        ci_state="failure",
+        ci_source="actions",
+    )
     [action] = run(task("T"), conditions=(derived,))
     assert action.params["conditions"][0]["params"] == {
         "repo": "example/repo",

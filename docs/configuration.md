@@ -717,13 +717,131 @@ repositories only.
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `repos` | *required* | list of `owner/name` | Nothing else is ever queried. |
-| `token_env` | `"GITHUB_TOKEN"` | variable name | Token with read access to PRs and checks. Unset variable: anonymous (60 requests an hour, public repos). Written here, the variable must be set. |
+| `token_env` | `"GITHUB_TOKEN"` | variable name | Token with read access to PRs and CI, see [token permissions](#github-token-permissions). Unset variable: anonymous (60 requests an hour, public repos). Written here, the variable must be set. |
 | `api_url` | `"https://api.github.com"` | URL | GitHub Enterprise: `https://<host>/api/v3`; `token_env` must then be set explicitly. |
 | `timeout` | `"10s"` | duration, > 0 and <= 60s | Whole request. |
 | `cache_ttl` | `"60s"` | duration, >= 30s | Answers are reused this long, then revalidated by ETag. |
 | `max_requests_per_tick` | `50` | count, 1 to 5000 | Beyond this, cached answers or an unknown result. |
 | `tick_budget` | `"10s"` | duration, > 0 and <= 60s | Wall-clock time for GitHub per tick. |
+| `ci_workflows` | `[]` | list of workflow names or paths, or a table `"owner/name" = [...]` | The workflows that **must** have a result for `ci_green` / `ci_status`, whatever check runs and statuses say (see below). Each entry is a workflow's name (its `name:`, or the file path if it has none) or its file path such as `.github/workflows/ci.yml`, like `cancel_workflows`; matched exactly, case included. A name that several workflow files share matches all of them: use the path, which is exact. A list applies to every repo; a table gives lists per repo (keys must be in `repos`; a repo left out has no list). Empty: no workflow is required. Needs `Actions: read`. At most 50 per list. |
 | `enabled` | `true` | bool | `false` keeps the section but does not query GitHub. |
+
+### GitHub token permissions
+
+The least a read-only fine-grained personal access token needs, on the configured
+repositories (repository permissions, all **read-only**):
+
+| Permission | For |
+| --- | --- |
+| Metadata | Always granted: repository identity. |
+| Pull requests | `pr_merged`, the PR head commit, open PRs and their files; the sample commit `kelpie doctor` probes with. |
+| Contents | Rule 9 (`[connectors.github.ci]`) reads runs and pull request data with it. CI conditions alone do not need it. |
+| Actions | Workflow runs: rule 9 (`[connectors.github.ci]`) and the CI fallback below. |
+| Commit statuses | The combined commit status (legacy CI and external services). |
+
+Plus, only for `[connectors.github.ci]` `billing_user`: the user permission **Plan**
+(read), on a token of its own (see below). Cancelling builds needs `Actions: write` on yet
+another token. **Checks** is not in the list because fine-grained personal access tokens
+cannot be given it (a GitHub App can).
+
+**Where CI is read from.** A `ci_status` condition (and a `ci_green` block condition) is
+decided per commit from the check runs and the combined status. When one of those answers
+HTTP 403, which is what a token without `Checks` or `Commit statuses` gets, Kelpie also
+reads the commit's workflow runs (`GET /repos/{repo}/actions/runs?head_sha=...`,
+`Actions: read`) and judges them with whichever of the two it can still read; everything it
+reads must be green. What is **not** seen then:
+
+- With check runs refused, check runs of GitHub Apps other than Actions are invisible.
+- With statuses refused, so are commit statuses, which is how Jenkins, Buildkite or
+  CircleCI usually report. Actions runs cannot stand in for them. Grant
+  `Commit statuses: read` if any CI reports that way; `kelpie doctor` warns about it.
+
+A 403 for a rate limit or for an organization policy (SAML SSO enforcement, an IP allow
+list, an organization that forbids classic tokens, recognised by GitHub's own wording or
+the `X-GitHub-SSO` header) is not a missing permission: the result is unknown
+(`params.error` is `rate_limited` or `policy`) and nothing is remembered. Any other 403 is
+taken as a refusal, including "Actions is disabled ... by an enterprise policy": the runs
+cannot be read either, so the result is unknown and, again, nothing is remembered. That a repository needs the fallback is remembered for an hour,
+and only when the Actions runs could be read in the same probe; a tick then asks for the
+runs only, and the two refused calls are tried again after the hour, in case the
+permission was granted. `params.ci_source` on the condition says which sources were read
+(`statuses+check-runs`, `statuses+actions`, ...); `kelpie doctor` prints it per repository
+with the exact permission each refusal means (a missing `Actions: read` or `Pull requests:
+read` fails, a refused `Commit statuses` warns).
+
+**Verdict.** Every readable result and the Actions verdict are combined; the first row that
+applies wins.
+
+| Sources say | Verdict |
+| --- | --- |
+| any red (failure, error, cancelled, timed out, `action_required`, ...) | `failure` |
+| more results than were read (statuses or check runs over 100, runs over 300) | `incomplete`, unknown |
+| nothing at all (no status, check run or counted run) | `none`, never green |
+| something still running, or a `ci_workflows` entry without a result | `pending` |
+| check runs refused, the Actions runs have none that count, a readable source is green, and the repository has an active workflow of its own | `pending` (the real CI may not have started) |
+| every result green, at least one `success` | `success` |
+
+The Actions runs themselves (`kelpie.connectors.github.ci_runs`):
+
+- What can make the commit green, and satisfy a `ci_workflows` entry, is a run that counts
+  *in full*: a run of a listed workflow, whatever triggered it; with `ci_workflows` empty, a
+  run of the events `push`, `pull_request` and `merge_group`. A `pull_request` run counts in
+  full only for the pull request the condition names (the run's `pull_requests`): the same
+  commit in two PRs does not share a green, and a run whose PR is unknown (from a fork) is
+  not trusted for one.
+- **Every run that does not count in full counts one-sided**, whatever the reason: an
+  unlisted workflow, another event (`workflow_run`, `pull_request_target`, `issue_comment`,
+  `schedule`, `workflow_dispatch`, `repository_dispatch`, ... , whose relation to the commit
+  `head_sha` cannot vouch for), another PR's run on the same head, or a run with an unknown
+  PR (a failed fork `pull_request` run, listed or not). A concluded red makes the commit
+  `failure`; it never makes it green. It makes it `pending` only while a re-run (attempt 2
+  or more) is in progress, because the runs list shows only the latest attempt and would
+  otherwise forget the red it replaced. GitHub bounds that wait as it bounds the job on the
+  check-run path (a job queued without a runner is cancelled after 24 hours; a run waiting
+  for an environment approval can wait up to 30 days). A one-sided run still on its first
+  attempt is not waited for: it reads as nothing until it fails. List a workflow in
+  `ci_workflows` to wait for it. So `ci_workflows` and the PR filter add requirements and
+  remove nothing: a failed unlisted `Lint` run is red with or without a list, as its check
+  run would be on the check-run path.
+- Per workflow and event (and per set of PRs for the one-sided runs) only the latest run
+  counts: the one that started last (a re-run starts again), then the highest attempt. A
+  later run that was skipped does not replace an earlier real result. A failed first attempt
+  that a re-run fixed is green; a failed `pull_request` run is not hidden by a later manual
+  or `push` run.
+- Green only when every counted workflow concluded `success`. `failure`, `cancelled`,
+  `timed_out`, `action_required`, `startup_failure` and `stale` make it red, even while
+  another workflow is still running. A run that is queued, waiting or in progress, or
+  completed with a conclusion Kelpie does not know, makes it pending.
+- `skipped` and `neutral` do not block, but they are no evidence of passing CI either: if
+  nothing but skipped or neutral runs counts, or no run exists for the commit, the runs
+  have nothing to say. Alone that is `none`. Beside a green status it is `pending` while
+  check runs are refused and the repository has an active workflow of its own (read from
+  `GET /repos/{repo}/actions/workflows`, remembered for an hour; GitHub's built-in
+  `dynamic/...` workflows, such as Dependabot updates, CodeQL default setup and pages
+  builds, do not count): the status decides only for a repository without one. With check
+  runs readable they already include Actions' own, and this guard is off. The check-run
+  path counts `skipped` and `neutral` as success, because GitHub itself has reported those
+  checks.
+- `ci_workflows` lists the workflows that must have run, for example the aggregator
+  workflow, so that a fast DCO or labeler check cannot make a commit green before the real
+  CI exists. It adds requirements and removes nothing from the readable sources: check runs
+  and statuses, where readable, always count in full. It holds on **every** path: when it is
+  set for a repo, the Actions runs are always read, whatever check runs and statuses say.
+  Among the runs the listed workflows are required: one with no run on the commit, or
+  with nothing but skipped runs, makes the state `pending`; unlisted runs can only add red. If the runs cannot be
+  read (`Actions: read` missing, Actions disabled), the state is unknown, never green; a red
+  check run or status still gives `failure`. `kelpie doctor` checks every entry against the
+  repository's workflows (a name that matches none, or only a disabled workflow, fails; a
+  name shared by several files warns, use the path; with more than 100 workflows these
+  become warnings) and fails when the runs cannot be read.
+- A commit on which no workflow runs (path filters, a fork PR) stays `pending` while a
+  repository has an active workflow and check runs are refused; that is the price of not
+  trusting a lone status. List the workflows that gate merging to make the wait explicit.
+- Up to 300 runs of a commit are read (3 pages of 100 within the tick budget; a run seen
+  twice because one started between two pages counts once). More runs than that, or a
+  total that grew between pages, with no failure among those seen, is unknown.
+- The runs are asked for by the full commit id: a `ci_status` condition naming an
+  abbreviated `sha` is unknown while a source is refused or `ci_workflows` is set.
 
 ### [connectors.github.ci]
 

@@ -79,6 +79,62 @@ def test_incident_01_guard_block_with_green_ci_is_suggested_for_unblock(farm: Fa
     assert any(p.endswith(f"/commits/{green.head_sha}/status?per_page=100") for p in gh.paths())
 
 
+def test_incident_01_with_a_fine_grained_token_ci_is_read_from_actions_runs(farm: Farm) -> None:
+    """The farm's token gets 403 on check runs and statuses (no Checks permission for a
+    fine-grained token): CI is derived from the Actions runs of the head commit instead."""
+    gh = farm.github
+    gh.repo(REPO).fine_grained = True
+    green, red, pending = gh.pull(REPO, 41), gh.pull(REPO, 42), gh.pull(REPO, 43)
+    nightly_red = gh.pull(REPO, 44)
+    started = farm.ago(minutes=50)
+    ci, nightly = ".github/workflows/ci.yml", ".github/workflows/nightly.yml"
+    done = {"created": started, "status": "completed"}
+    gh.run(REPO, workflow=ci, branch="b41", sha=green.head_sha, conclusion="success", **done)
+    # Only the listed workflow is required: the unlisted nightly one still running on #41 is
+    # no reason to wait (it could only add red).
+    gh.run(REPO, workflow=nightly, branch="b41", sha=green.head_sha, created=started)
+    gh.run(REPO, workflow=ci, branch="b42", sha=red.head_sha, conclusion="failure", **done)
+    gh.run(REPO, workflow=ci, branch="b43", sha=pending.head_sha, created=started)
+    # The required workflow is green on #44, but an unlisted one failed there: that is red too
+    # (the check-run path would show it), so the block is not stale.
+    gh.run(REPO, workflow=ci, branch="b44", sha=nightly_red.head_sha, conclusion="success", **done)
+    gh.run(
+        REPO, workflow=nightly, branch="b44", sha=nightly_red.head_sha, conclusion="failure", **done
+    )
+    blocked_by_agent(farm, "t_green", "guard: waiting for green ci on #41")
+    blocked_by_agent(farm, "t_red", "guard: waiting for green ci on #42", hours=1)
+    blocked_by_agent(farm, "t_running", "guard: waiting for green ci on #43", hours=1)
+    blocked_by_agent(farm, "t_nightly", "guard: waiting for green ci on #44", hours=1)
+    before = farm.board.statuses()
+
+    config = farm.config(
+        {"stale_blocks": SUGGEST},
+        github=True,
+        extra={
+            "block_conditions": [
+                {
+                    "pattern": r"waiting for (?:green )?ci (?:on|of) (?P<pr>\S+)",
+                    "kind": "ci_green",
+                    "repo": REPO,
+                }
+            ],
+            "connectors": {"github": {"ci_workflows": ["ci.yml"]}},
+        },
+    )
+    farm.serve(config)
+
+    text = farm.wait_message("stale_blocks", "unblock t_green")
+    assert "is stale: its condition is met" in text and DID_SUGGEST in text
+    settle(farm)
+    for task in ("t_red", "t_running", "t_nightly"):
+        assert farm.messages(task) == [], task
+    board_unchanged(farm, before)
+    paths = gh.paths()
+    assert any("/actions/runs?" in p and f"head_sha={green.head_sha}" in p for p in paths)
+    # The refusal is learned once per repository, not repeated on every tick.
+    assert len([p for p in paths if "/check-runs" in p]) == 1
+
+
 # --- incident 15: a reviewer blocks its own card while the PR sits in the merge queue ----
 
 

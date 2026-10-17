@@ -8,9 +8,12 @@ progress until the runner stops, so a later scan may still see it active; the fa
 produces that case). Every request is recorded with its method, path and the bearer token
 it carried; one without the farm's token gets 401, as GitHub answers bad credentials.
 
-Query strings are ignored but for ``state`` of the pull request list: the run list returns
-every run of the repository (the farm only creates recent ones) and the pull request list
-every pull request in that state, on one page.
+Query strings are ignored but for ``state`` of the pull request list and ``head_sha`` of
+the run list: the run list returns every run of the repository (the farm only creates recent
+ones), or those of one commit, and the pull request list every pull request in that state,
+on one page. A repository with ``fine_grained`` set answers 403 on check runs and commit
+statuses, as a fine-grained token does that has no Checks permission and no Commit statuses
+access.
 """
 
 from __future__ import annotations
@@ -144,6 +147,7 @@ class Repo:
     # sha -> (state, completed) per commit: "success" | "failure" | "pending"
     checks: dict[str, tuple[str, datetime | None]] = field(default_factory=dict)
     runs: dict[int, Run] = field(default_factory=dict)
+    fine_grained: bool = False  # 403 on check runs and statuses; Actions runs stay readable
 
 
 class FakeGitHub:
@@ -262,6 +266,8 @@ class FakeGitHub:
             if pr is None:
                 return 404, {"message": "Not Found"}
             return 200, [{"filename": f} for f in pr.files]
+        if repo.fine_grained and re.fullmatch(r"/commits/[0-9a-f]{7,40}/(status|check-runs)", rest):
+            return 403, {"message": "Resource not accessible by personal access token"}
         if m := re.fullmatch(r"/commits/([0-9a-f]{7,40})/status", rest):
             state, completed = repo.checks.get(m[1], ("none", None))
             statuses = []
@@ -279,6 +285,8 @@ class FakeGitHub:
             return 200, {"total_count": 0, "check_runs": []}
         if rest == "/actions/runs":
             runs = sorted(repo.runs.values(), key=lambda r: r.created, reverse=True)
+            if "head_sha" in (params or {}):
+                runs = [r for r in runs if r.sha == (params or {})["head_sha"]]
             return 200, {
                 "total_count": len(runs),
                 "workflow_runs": [r.body(repo.name) for r in runs],
