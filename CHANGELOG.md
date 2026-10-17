@@ -200,6 +200,14 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   only where the startup check accepts it and says what is missing for the others; the
   advice lists the tasks the rule would have acted on
   ([#142](https://github.com/ch8er/kelpie/issues/142), [#159](https://github.com/ch8er/kelpie/pull/159)).
+- A task parked by `dispatch_gate` on a CI condition the platform registered without a commit
+  was never woken by a fixing push: the GitHub connector wrote the head it saw into the
+  condition's `sha`, and the park marker pinned it there. The connector now records that head
+  only as `head_sha`, a result that is not parked. Upgrade note: tasks parked before the fix
+  may stay pinned to an old commit. `kelpie why <task> --refresh` shows "pinned to <sha>; PR
+  head is now <sha>"; unpark such a task by hand (`hermes kanban unblock <task>`, or the
+  platform's equivalent) ([#147](https://github.com/ch8er/kelpie/issues/147),
+  [#162](https://github.com/ch8er/kelpie/pull/162)).
 - Lasting-state alerts failed to read their escalation defaults from a slotted dataclass,
   found on the first live run ([#24](https://github.com/ch8er/kelpie/pull/24)).
 - Nested LLM spans were counted twice in token totals ([#29](https://github.com/ch8er/kelpie/pull/29)).

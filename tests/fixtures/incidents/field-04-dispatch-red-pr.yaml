@@ -7,6 +7,9 @@ description: >
   session on a base that would change. The dispatch gate parks such a task in waiting on
   its prerequisites (the red PR, an unfinished parent task) so no session is wasted; rule 2
   wakes it when they hold. Tasks whose prerequisites hold or cannot be judged are left alone.
+  A CI condition the platform registered without a commit is parked without one (the head the
+  connector checked is only a result), so it follows the PR's head and a fixing push wakes the
+  task; one registered with a commit stays bound to it.
 rule: dispatch_gate
 config:
   max_condition_age: "15m"
@@ -30,14 +33,23 @@ snapshot:
     # Distractor: parent finished.
     - {id: T-F407, title: "Orders dashboard", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: developer}
     - {id: T-F408, title: "Orders metrics", status: done, status_since: "2026-03-02T10:30:00+00:00", role: developer}
+    # #147: the platform registered a CI condition on #45 without a commit; it is red.
+    - {id: T-F409, title: "Rebuild the cache layer", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: developer}
+    # Same, but green: left alone.
+    - {id: T-F410, title: "Rebuild the search index", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: developer}
+    # The platform registered this one on a named commit: it stays bound to it.
+    - {id: T-F411, title: "Rebuild the mail templates", status: ready, status_since: "2026-03-02T11:00:00+00:00", role: developer}
   dependencies:
     - {task_id: T-F402, depends_on: T-F403}
     - {task_id: T-F407, depends_on: T-F408}
   conditions:
-    - {id: "ready:T-F401:ci_green:example/repo#41", kind: ci_status, task_id: T-F401, params: {repo: example/repo, pr: 41, source: task_text, expect: success, sha: "aaaa", ci_state: failure}, satisfied: false, checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
+    - {id: "ready:T-F401:ci_green:example/repo#41", kind: ci_status, task_id: T-F401, params: {repo: example/repo, pr: 41, source: task_text, expect: success, head_sha: "aaaa", ci_state: failure}, satisfied: false, checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
     - {id: "ready:T-F404:pr_merged:example/repo#42", kind: pr_merged, task_id: T-F404, params: {repo: example/repo, pr: 42, source: task_text, pr_state: closed}, satisfied: true, satisfied_at: "2026-03-02T11:20:00+00:00", checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
     - {id: "ready:T-F405:pr_merged:example/repo#43", kind: pr_merged, task_id: T-F405, params: {repo: example/repo, pr: 43, source: task_text, error: network}, checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
     - {id: "ready:T-F406:ci_green:example/repo#44", kind: ci_status, task_id: T-F406, params: {repo: example/repo, pr: 44, source: task_text, expect: success}, satisfied: false, checked_at: "2026-03-02T11:00:00+00:00", registered_at: "2026-03-02T10:00:00+00:00"}
+    - {id: "plat:T-F409:ci", kind: ci_status, task_id: T-F409, params: {repo: example/repo, pr: 45, expect: success, ci_state: failure, head_sha: "aaaa"}, satisfied: false, checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
+    - {id: "plat:T-F410:ci", kind: ci_status, task_id: T-F410, params: {repo: example/repo, pr: 46, expect: success, ci_state: success, head_sha: "cccc"}, satisfied: true, satisfied_at: "2026-03-02T11:50:00+00:00", checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
+    - {id: "plat:T-F411:ci", kind: ci_status, task_id: T-F411, params: {repo: example/repo, pr: 47, expect: success, sha: "bbbb", ci_state: failure, head_sha: "dddd"}, satisfied: false, checked_at: "2026-03-02T11:58:00+00:00", registered_at: "2026-03-02T11:00:00+00:00"}
 expected_actions:
   - kind: wait
     task_id: T-F401
@@ -50,7 +62,29 @@ expected_actions:
     reason_contains: "parent T-F403 is in_progress"
     params:
       open_parents: [T-F403]
+  # #147: no sha, no result keys in what is parked.
+  - kind: wait
+    task_id: T-F409
+    reason_contains: "CI on PR example/repo#45 is not green"
+    params:
+      conditions:
+        - {id: "plat:T-F409:ci", kind: ci_status, params: {repo: example/repo, pr: 45, expect: success}}
+  # The platform's own commit is kept.
+  - kind: wait
+    task_id: T-F411
+    params:
+      conditions:
+        - {id: "plat:T-F411:ci", kind: ci_status, params: {repo: example/repo, pr: 47, expect: success, sha: "bbbb"}}
 not_expected_actions:
+  - kind: wait
+    task_id: T-F410
+  # dispatch_gate must not turn the checked head_sha into a sha (#147's shape; the bug
+  # itself was in the connector and is guarded by the connector-driven tests).
+  - kind: wait
+    task_id: T-F409
+    params:
+      conditions:
+        - {id: "plat:T-F409:ci", kind: ci_status, params: {repo: example/repo, pr: 45, expect: success, sha: "aaaa"}}
   - kind: wait
     task_id: T-F404
   - kind: wait

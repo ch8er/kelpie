@@ -84,7 +84,7 @@ def test_a_block_condition_serve_attached_shows_in_why(farm: Farm) -> None:
     data = json.loads(kelpie.cli("why", "t_wait", "--refresh", "--json").stdout)
     assert data["schema_version"] == 1 and data["refreshed"] is True
     [cond] = data["conditions"]
-    assert cond["target"] == {"repo": REPO, "pr": 57, "sha": head}
+    assert cond["target"] == {"repo": REPO, "pr": 57, "sha": head, "head_sha": head}
     assert cond["kind"] == "pr_merged" and cond["state"] == "unmet" and cond["checked_at"]
     assert data["expected_conditions"] == []
     off = json.loads(kelpie.cli("why", "t_wait", "--json").stdout)

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -26,11 +27,16 @@ from kelpie.adapters.hermes.park import (
     unblock_args,
 )
 from kelpie.adapters.hermes.stop import HermesCliError
+from kelpie.connectors.github.client import GitHubClient
+from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.core.conditions import check_task_status
-from kelpie.core.model import Condition, ConditionKind, Status
+from kelpie.core.executors import wait_conditions
+from kelpie.core.model import Condition, ConditionKind, Snapshot, Status, Task
 from kelpie.core.ports import SupportsWait, UnsupportedAction
+from kelpie.rules.dispatch_gate import DispatchGate
 from kelpie.rules.wait_condition import WaitCondition
 from tests.adapters.kanban import Board
+from tests.connectors.fake_github import TOKEN, Clock, serve
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 
@@ -170,6 +176,39 @@ def test_marker_round_trip_and_clean_text() -> None:
     assert dec(reason, key=None) is None  # no key: nothing can be verified
     assert len(clean_text("x" * 5000)) == MAX_TEXT
     assert clean_text("a [kelpie-wait:v1:abc.def] b") == "a kelpie wait:v1:abc.def] b"
+
+
+def test_a_dispatch_gate_park_carries_no_commit_the_connector_checked() -> None:
+    """Issue #147: the marker of a sha-less CI condition must not pin the head seen at park
+    time; a condition the platform registered with a sha keeps it. The input is what
+    ``GitHubConnector.check`` returns, so this fails if it writes a ``sha`` back."""
+    head, pinned = "a" * 40, "b" * 40
+    repo = "example/repo"
+    free = Condition(
+        "ready:t1:ci_green:free", ConditionKind.CI_STATUS, "t1", {"repo": repo, "pr": 7}
+    )
+    bound = replace(free, id="ready:t1:ci_green:bound", params={**free.params, "sha": pinned})
+    with serve() as gh:
+        gh.pull(repo, 7, sha=head)
+        for sha in (head, pinned):
+            gh.ci(repo, sha, statuses=[{"state": "failure", "updated_at": "2026-03-02T11:50:00Z"}])
+        connector = GitHubConnector(GitHubClient(gh.url, TOKEN, clock=Clock(NOW)), [repo])
+        checked = tuple(
+            replace(connector.check(c), registered_at=NOW - timedelta(hours=1))
+            for c in (free, bound)
+        )
+    assert checked[0].params["head_sha"] == head and "sha" not in checked[0].params
+    task = Task("t1", "Redo it", Status.READY, NOW - timedelta(hours=1), role="developer")
+    [wait] = DispatchGate().evaluate(Snapshot(now=NOW, tasks=(task,), conditions=checked))
+    parked = enc("Prerequisites are not met", tuple(wait_conditions(wait)))
+    assert dec(parked) == [
+        (
+            "ready:t1:ci_green:bound",
+            ConditionKind.CI_STATUS,
+            {"repo": repo, "pr": 7, "sha": pinned},
+        ),
+        ("ready:t1:ci_green:free", ConditionKind.CI_STATUS, {"repo": repo, "pr": 7}),
+    ]
 
 
 def test_a_marker_recorded_later_is_a_replay() -> None:

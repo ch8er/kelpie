@@ -102,7 +102,8 @@ def test_ci_green_from_statuses_and_check_runs() -> None:
         out = connector(gh).check(cond(ConditionKind.CI_STATUS, expect="success"))
     assert out.satisfied is True
     assert out.satisfied_at == datetime(2026, 3, 2, 10, 30, tzinfo=UTC)
-    assert out.params["ci_state"] == "success" and out.params["sha"] == SHA
+    assert out.params["ci_state"] == "success" and out.params["head_sha"] == SHA
+    assert "sha" not in out.params  # the checked head is a result, not the condition's binding
 
 
 @pytest.mark.parametrize(
@@ -144,7 +145,8 @@ def test_ci_uses_the_named_commit() -> None:
         gh.pull(REPO, 7, sha=SHA)
         gh.ci(REPO, sha, statuses=[{"state": "success"}])
         out = connector(gh).check(cond(ConditionKind.CI_STATUS, sha=sha))
-    assert out.satisfied is True and out.params["sha"] == sha
+    assert out.satisfied is True and out.params["sha"] == sha  # its own binding, kept
+    assert out.params["head_sha"] == SHA  # the PR's head, which it ignores
 
 
 def test_ci_with_a_bad_head_sha_is_unknown() -> None:
@@ -231,3 +233,6 @@ def test_check_records_the_head_commit_only_when_the_pr_reports_one() -> None:
         gh.pull(REPO, 8, head=None)
         out = connector(gh).check(cond(ConditionKind.PR_MERGED, pr=8))
         assert out.params["pr_state"] == "open" and "head_sha" not in out.params
+        # A head_sha from an earlier check is not carried over when this one has none.
+        stale = cond(ConditionKind.PR_MERGED, pr=8, head_sha="a" * 40)
+        assert "head_sha" not in connector(gh).check(stale).params

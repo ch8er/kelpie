@@ -22,17 +22,18 @@ Prerequisites of a ready task nobody is working on yet (no live session):
   ``linked_conditions`` reads them): those the platform registered, and those the GitHub
   step attaches from PR references in the task's title, never its description or comments
   (incident 17) (``[[block_conditions]]`` with
-  ``applies_to = ["ready_task"]``), bound to the PR's repo, number and head like block
+  ``applies_to = ["ready_task"]``), bound to the PR's repo, number and current head like block
   conditions (``pr_merged`` when the task needs the PR landed, ``ci_green`` when it needs
   its head green). Only an unmet condition checked within ``max_condition_age`` counts.
 
 A task whose prerequisites cannot be resolved is left alone: a condition that is unknown
 (``satisfied`` None), stale, or can never be met (``params.terminal``, rules 2 and 4 alert
-on those) never gates it, and neither does a parent that is not on the board. PR conditions
-derived from text are passed on without the head ``sha`` they were checked at, so the
-condition follows the PR's current head and a fixing push wakes the task. Once woken, a
-task is not gated again on the same PR reference (its condition id is kept by the adapter):
-a human who moves a gated task back to ready overrides the gate. The ``wait``
+on those) never gates it, and neither does a parent that is not on the board. The GitHub
+connector records the head it checked as ``head_sha``, a result that is dropped when
+parking, so a PR condition without a ``sha`` of its own follows the PR's current head and a
+fixing push wakes the task. A ``sha`` is kept only when the platform registered it. Once
+woken, a task is not gated again on the same PR reference (its condition id is kept by the
+adapter): a human who moves a gated task back to ready overrides the gate. The ``wait``
 action carries every unmet prerequisite and is sent once per stay in ready; it needs an
 adapter with ``SupportsWait``, and the engine tells a human otherwise.
 """
@@ -177,14 +178,16 @@ class DispatchGate:
 
 
 # Keys connectors write into ``Condition.params`` as results of a check; a condition the
-# adapter registers again starts without them. ``sha`` stays on conditions the platform
-# registered (their own head binding) and is dropped from those derived from text (below).
+# adapter registers again starts without them (``head_sha`` is the PR head the connector
+# saw). ``sha`` is not a result: it stays on conditions the platform registered with one
+# (their own binding to a commit) and is dropped from those derived from text (below).
 _RESULTS = frozenset(
     {"error", "terminal", "observed_status", "pr_state", "ci_state", "ci_source", "head_sha"}
 )
 # Conditions the GitHub step derives from text are rebuilt every tick for the PR's current
 # head; re-registered with ``sha`` they would stay pinned to the commit seen when parked,
-# and a fixing push would never wake the task.
+# and a fixing push would never wake the task. The connector never writes ``sha``, so this
+# is purely defensive: it covers a platform-supplied ``sha`` on a derived source.
 _DERIVED = frozenset({"task_text", "block_reason"})
 _HUMAN_RESULTS = frozenset({"status", "owner", "task_left_board"})  # human_tasks connector
 
