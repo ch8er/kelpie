@@ -12,6 +12,8 @@ keep less. It describes the code as it is; the files named below are the referen
 | Hermes hook records | tool name, ids, hash of arguments, a redacted command, outcome, duration, output size | raw arguments and results | spool file on the Hermes host | until rotated: one backup file at 20 MiB |
 | Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
 | Claude Code task lists | task id, subject (200 characters), status, owner, `blockedBy` | descriptions | read in place, not copied | |
+| OpenClaw hook records | session id, session key (the part naming a chat peer or group replaced by a keyed hash), agent id, run id, session end reasons, the session id a session resumed or was replaced by; tool name, call id, hash of arguments, a redacted command, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
+| OpenClaw Workboard cards | card id, board, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, session key (reduced like the hook's) and run id, block reason (500 characters); every comment (2000 characters) and attempt error of the cards read is in memory for the tick, only the latest since a block is kept | claim tokens, attachments, proof, worker logs | read in place, not copied | |
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
 | Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
@@ -208,6 +210,48 @@ an expired marker is ignored but stays on disk until then. Kelpie reads the shar
 (id, subject cut to 200 characters, status, owner, `blockedBy`) and never reads session
 transcripts.
 
+## OpenClaw plugin
+
+Code: [`src/kelpie/adapters/openclaw/plugin/`](../src/kelpie/adapters/openclaw/plugin/).
+
+The plugin runs inside the OpenClaw Gateway. For each forwarded hook it builds a reduced copy
+of the event in `index.js` and hands only that to `kelpie_hook.py` (a separate `python3`
+process that gets `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR` and `SYSTEMROOT` of the Gateway's environment,
+never its provider keys). Prompts, messages, tool results, error messages and assistant text
+are dropped in `index.js` and never leave the Gateway process; tool arguments go to the hook
+process only to be hashed and, for `exec`-like tools, reduced to a redacted command with the
+shared redaction (see [above](#hermes-hooks-plugin)); "`exec`-like" means any tool whose
+arguments have a top-level `command` or `cmd` string. Arguments larger than 1 MiB are not
+passed at all: the plugin sends its own hash of them. The hook writes one JSON line per
+session start, tool call, run usage, run end and session end to the spool
+(`~/.openclaw/kelpie/spool.jsonl`): the OpenClaw session id and key, the agent id, the run id
+and the fields listed in the summary. `commands = false` in the plugin's config records no
+command. The spool is created with mode `0600` (not through a symlink) and, when the hook
+creates its directory, in a `0700` directory; an existing directory or spool keeps its
+mode, so create `~/.openclaw/kelpie` with `0700` as the install steps do. It is rotated like
+the Hermes spool.
+
+**Session keys name people.** OpenClaw keys a per-peer conversation as
+`agent:<id>:<channel>:direct:<peerId>` and a group as `...:group:<groupId>`, where the peer id
+is a phone number or a chat user id. The hook keeps `agent:<id>:main`, subagent, cron and OpenClaw's
+internal-session keys, and replaces the rest of any other key after the channel and its
+`direct`/`dm`/`group`/`channel` marker (thread suffixes included; for a key without a marker,
+everything after `agent:<id>`; for `hook:` keys, which come from operator templates, all but
+`hook:`) with `~` and 12 hex digits of an HMAC-SHA256 of that whole rest
+(`agent:main:whatsapp:direct:~3f2a…`), so the key that reaches the spool, Kelpie's ledger,
+reports and alerts (as the task id `session:<key>` of a session without a card) does not carry
+the peer. The HMAC key is the install's own secret, `peer.key` next to the spool (32 random
+bytes, mode `0600`, created by the hook the first time it needs it): a plain hash of a phone
+number could be reversed by hashing every number, this one only by whoever can read
+`peer.key`. Without a usable key file the reduced part is `~nokey`. Kelpie reads the same
+file (never creates it) to reduce the keys of Workboard cards before matching them; delete it
+and both sides start new pseudonyms.
+
+Kelpie opens the Workboard database read-only and keeps what it reads in memory for one tick.
+Of a claimed card's claim it reads only the holder and the expiry; the claim token stays
+inside SQLite (the query extracts the two fields). It never reads card attachments, proof or
+worker logs, OpenClaw's session database or transcripts.
+
 ## Task boards and git
 
 The Hermes adapter opens `kanban.db` read-only and keeps what it reads in memory for one
@@ -286,6 +330,9 @@ that runs Kelpie. To remove everything Kelpie stored, stop it and delete `kelpie
 | Store no command prefixes from OTLP | `[traces] commands = false` |
 | Record no commands in the Hermes spool | `KELPIE_HERMES_SPOOL_COMMANDS=0` on the Hermes hosts |
 | Read no hook data at all | `[adapters.hermes] spool = false` and do not install the plugin |
+| Record no commands from OpenClaw | `"commands": false` in `plugins.entries.kelpie.config` on the Gateway |
+| Record no OpenClaw token usage | leave `plugins.entries.kelpie.hooks.allowConversationAccess` unset |
+| Read no OpenClaw data at all | `[adapters.openclaw] spool = false`, `workboard = false`, and do not install the plugin |
 | Keep spans for a shorter time | `[traces] retention = "2d"` (budgets and reports that look further back then count less) |
 | Store no spans | `[traces] enabled = false` (no budgets; loop detection then relies on Hermes hook spans only) |
 | Read no git state | `[adapters.hermes] git_state = false` |

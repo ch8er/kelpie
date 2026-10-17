@@ -2,10 +2,11 @@
 which output filter a command already runs through.
 
 :func:`redact_command` and its constants form one block (between the ``shared redaction``
-markers) kept byte-for-byte identical in :mod:`kelpie.adapters.hermes.plugin` and
-:mod:`kelpie.adapters.claude_code.hook`, which run on agent hosts, must stay standard-library
-only and import nothing from Kelpie; ``tests/traces/test_redaction.py`` compares the three. A
-command reported by OTLP and by a hook is therefore redacted the same way.
+markers) kept byte-for-byte identical in :mod:`kelpie.adapters.hermes.plugin`,
+:mod:`kelpie.adapters.claude_code.hook` and :mod:`kelpie.adapters.openclaw.plugin.kelpie_hook`,
+which run on agent hosts, must stay standard-library only and import nothing from Kelpie;
+``tests/traces/test_redaction.py`` compares the four. A command reported by OTLP and by a
+hook is therefore redacted the same way.
 
 :func:`command_prefix` groups calls: the executable (without its directory) and, for tools
 known to take subcommands, the subcommand (``npm test``, ``git status``, ``xcodebuild``,
@@ -26,9 +27,10 @@ import re
 _COMMAND_KEYS = ("command", "cmd")
 
 # --- shared redaction: begin ---
-# Byte-for-byte identical in kelpie.traces.command, the Hermes plugin and the Claude Code
-# hook (tests/traces/test_redaction.py compares them): the hooks run on agent hosts without
-# Kelpie installed, and a command reported both by a hook and over OTLP must redact the same.
+# Byte-for-byte identical in kelpie.traces.command, the Hermes plugin, the Claude Code hook
+# and the OpenClaw hook (tests/traces/test_redaction.py compares them): the hooks run on agent
+# hosts without Kelpie installed, and a command reported both by a hook and over OTLP must
+# redact the same.
 COMMAND_LIMIT = 200
 _MAX_TOKENS = 4
 _MAX_LINE = 4096  # characters of the first line that are looked at
