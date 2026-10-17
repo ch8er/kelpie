@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 from kelpie.app import (
     Settings,
     _rule_config,
+    act_blockers,
     build_adapters,
     connector_steps,
     hold_labels,
@@ -53,6 +54,10 @@ def sources(settings: Settings) -> ReportSources:
             if "block" in b.applies_to
         ),
         stuck_check=_stuck_check(engine),
+        # What keeps a rule from acting here: never recommend a config kelpie serve refuses.
+        act_blockers={
+            rule: b.reason for rule, b in act_blockers(settings, build_adapters(settings)).items()
+        },
     )
 
 

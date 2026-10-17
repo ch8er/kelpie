@@ -236,6 +236,8 @@ class ReportInputs:
     dependencies: Sequence[Dependency] = ()  # the board's, as reported now
     # rule 3's test for a card stuck before work, as configured (None: rule 3's defaults)
     stuck_check: StuckCheck | None = None
+    # Rules that cannot act on this farm, with what is missing (``kelpie.app.act_blockers``).
+    act_blockers: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +310,7 @@ class DailyReport:
     biggest_wait: BiggestWait | None = None  # the role and cause tasks waited longest for
     # cards stuck before work that nothing waits on: listed, never counted as hours lost
     stuck_idle: tuple[StuckCard, ...] = ()
+    act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
 
     @property
     def chaos_hours(self) -> float:
@@ -411,6 +414,7 @@ def build_report(
         sections=extra,
         biggest_wait=wait,
         stuck_idle=_stuck_idle(inputs, start, end),
+        act_blockers=inputs.act_blockers,
     )
 
 
@@ -907,16 +911,22 @@ def _recommendations(
     for line in chaos:
         mode = inputs.modes.get(line.rule, Mode.OBSERVE)
         fix = acting.get(line.rule)
-        if fix is not None and mode is not Mode.ACT:
+        blocked = inputs.act_blockers.get(line.rule)
+        if fix is not None and mode is not Mode.ACT and blocked is None:
+            # The tasks it would have acted on, not every task of the cause.
             title = f"Let {line.rule} act"
             detail = (
                 f"in {mode} mode it would have done {fix.kind} on {fix.count} "
                 f"subject(s); {line.cause} lasted {line.hours:.1f} condition-hours"
             )
+            tasks = fix.tasks or line.tasks
         else:
             title = f"Reduce {line.cause}"
             detail = REMEDIES[line.rule]
-        candidates.append(Advice(title, detail, line.spend.usd, line.hours, line.tasks))
+            if fix is not None and mode is not Mode.ACT:
+                detail += f" (act mode is not available here: {md.text(blocked or '')})"
+            tasks = line.tasks
+        candidates.append(Advice(title, detail, line.spend.usd, line.hours, tasks))
     return tuple(_top(candidates, inputs.hour_usd))
 
 
@@ -1013,7 +1023,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     lines += _fix_lines(report.fixed, tasks) or ["Nothing this day."]
     if report.would_fix:
         lines += ["", "Would have done in act mode (observe, suggest or dry-run):", ""]
-        lines += _fix_lines(report.would_fix, tasks)
+        lines += _fix_lines(report.would_fix, tasks, report.act_blockers)
     lines += ["", "## Needs a human", ""]
     needs = _needs_lines(report, tasks)
     lines += needs or ["Nothing open."]
@@ -1150,8 +1160,18 @@ def _usd(spend: Spend, report: DailyReport) -> str:
     return f"${spend.usd:,.2f}" if report.priced else "n/a"
 
 
-def _fix_lines(lines: Sequence[FixLine], tasks: _TaskLinks) -> list[str]:
-    return [f"- `{f.rule}`: {f.kind} x{f.count} {tasks(f.tasks)}".rstrip() for f in lines]
+def _fix_lines(
+    lines: Sequence[FixLine], tasks: _TaskLinks, blockers: Mapping[str, str] | None = None
+) -> list[str]:
+    """One line per rule and action; with ``blockers``, a rule that cannot act on this farm
+    says what is missing."""
+    out = []
+    for f in lines:
+        text = f"- `{f.rule}`: {f.kind} x{f.count} {tasks(f.tasks)}".rstrip()
+        if blockers and (why := blockers.get(f.rule)):
+            text += f" (act mode is not available here: {md.text(why)})"
+        out.append(text)
+    return out
 
 
 def _inbox(

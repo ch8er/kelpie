@@ -223,3 +223,13 @@ def test_the_report_looks_back_as_far_as_its_day_needs(
     assert settings.hermes.lookback == timedelta(hours=24)
     no_hermes = load_settings(config(tmp_path))
     assert report_settings(no_hermes, date(2026, 3, 2), now) is no_hermes
+
+
+def test_sources_say_what_keeps_a_rule_from_acting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report gets the same answer as kelpie serve's startup check (issue 142)."""
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    src = sources(load_settings(config(tmp_path, "[adapters.hermes]\n")))
+    assert src.act_blockers["stale_blocks"] == "Hermes can't clear blocks yet"
+    assert "loop_breaker" not in src.act_blockers

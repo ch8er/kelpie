@@ -263,8 +263,11 @@ report; no LLM is involved.
   savings compete for the top 3; they overlap with the token optimization section and are
   not additive.
 - **Top 3 recommendations**: output filters for huge tool outputs (RTK first; see
-  `[traces.outputs]`), rules that would have fixed part of the chaos in act mode, and fixed
-  remedies for the largest causes, ranked by dollars (hours count when `hour_usd` is set).
+  `[traces.outputs]`), rules that would have fixed part of the chaos in act mode (only rules
+  the farm's adapters can carry out, so `kelpie serve` starts with the advice applied; for
+  the others the report says what is missing, such as "Hermes can't clear blocks yet", here
+  and under "Would have done in act mode"), and fixed remedies for the largest causes,
+  ranked by dollars (hours count when `hour_usd` is set).
 - **Token optimization** (from traces, `kelpie.traces.tokens`): prompt-cache hit rate per
   role and model with the steps where the cache breaks, expires or covers only a fixed
   prefix; context growth per step with runaway sessions (grew past 100k tokens without

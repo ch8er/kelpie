@@ -10,7 +10,7 @@ spool may have rotated, so run it daily.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -54,6 +54,7 @@ class ReportSources:
     hold_labels: tuple[str, ...] = ()  # rule 6's hold labels (bottlenecks)
     block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]], matched offline
     stuck_check: StuckCheck | None = None  # rule 3's, as configured (None: its defaults)
+    act_blockers: Mapping[str, str] = field(default_factory=dict)  # rule -> what is missing
 
 
 def default_day(now: datetime, settings: ReportSettings) -> date:
@@ -111,6 +112,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         block_kinds=sources.block_kinds,
         dependencies=board.dependencies,
         stuck_check=sources.stuck_check,
+        act_blockers=sources.act_blockers,
     )
 
 

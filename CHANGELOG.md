@@ -195,6 +195,11 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   never requeues it. Stops made before the upgrade are unsigned: they still alert after 4
   hours and are listed as waiting for input. On the demo farm, parks and stops are issued
   on its virtual clock ([#141](https://github.com/ch8er/kelpie/issues/141), [#158](https://github.com/ch8er/kelpie/pull/158)).
+- The daily report recommended act mode for rules the farm's adapters cannot carry out, a
+  config `kelpie serve` then refused (on Hermes, `stale_blocks`). It now recommends act mode
+  only where the startup check accepts it and says what is missing for the others; the
+  advice lists the tasks the rule would have acted on
+  ([#142](https://github.com/ch8er/kelpie/issues/142), [#159](https://github.com/ch8er/kelpie/pull/159)).
 - Lasting-state alerts failed to read their escalation defaults from a slotted dataclass,
   found on the first live run ([#24](https://github.com/ch8er/kelpie/pull/24)).
 - Nested LLM spans were counted twice in token totals ([#29](https://github.com/ch8er/kelpie/pull/29)).

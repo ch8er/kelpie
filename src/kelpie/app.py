@@ -40,6 +40,7 @@ from kelpie.connectors.human_tasks import (
     load_human_tasks,
 )
 from kelpie.connectors.llm_quotas import LlmQuotaSettings, load_llm_quotas
+from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
 from kelpie.core.conditions import check_task_status
 from kelpie.core.config import EngineConfig, Mode
@@ -1333,31 +1334,107 @@ HERMES_ACT_RULES = frozenset(
 )
 
 
+# What an action kind does, for "Hermes can't <verb> yet".
+_VERBS: dict[ActionKind, str] = {
+    ActionKind.UNBLOCK: "clear blocks",
+    ActionKind.REQUEUE: "requeue tasks",
+    ActionKind.WAKE: "wake tasks",
+    ActionKind.WAIT: "park tasks",
+    ActionKind.REASSIGN: "reassign tasks",
+    ActionKind.CLOSE: "close tasks",
+    ActionKind.WIP_COMMIT: "make WIP commits",
+    ActionKind.COMMENT: "comment on tasks",
+    ActionKind.STOP: "stop runs",
+    ActionKind.CANCEL_BUILD: "cancel builds",
+}
+_PLATFORMS = {"hermes": "Hermes", "claude-code": "Claude Code", "openclaw": "OpenClaw"}
+
+
+@dataclass(frozen=True, slots=True)
+class ActBlocker:
+    """Why a rule cannot act on this farm."""
+
+    reason: str  # what is missing, e.g. "Hermes can't close tasks yet"
+    refused: bool  # kelpie serve refuses the rule in act mode (unless dry-run)
+
+
+def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dict[str, ActBlocker]:
+    """The implemented rules that cannot act on this farm, with what is missing. A rule left
+    out can act: its effects (``PlannedRule.effects``) are carried out by a configured
+    adapter or connector. The startup check refuses those marked ``refused`` in act mode;
+    the others would turn their actions into alerts at runtime (no adapter declares them).
+    The daily report recommends act mode only for rules left out.
+
+    On Hermes only the rules in :data:`HERMES_ACT_RULES` act (stop, park, wake of a parked
+    task, comment), and ``ci_economy`` through the CI connector when ``[connectors.github.ci]
+    allow_cancel`` is set."""
+    ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
+    cancel = ci is not None and ci.enabled and ci.allow_cancel
+    has_hermes = any(isinstance(a, hermes.HermesAdapter) for a in adapters)
+    found: dict[str, ActBlocker] = {}
+    for planned in PLANNED:
+        name, effects = planned.name, planned.effects
+        if name not in REGISTRY:
+            continue
+        platform = effects - {ActionKind.CANCEL_BUILD}
+        if ActionKind.CANCEL_BUILD in effects and not cancel:
+            reason = "Kelpie cancels no builds: [connectors.github.ci] allow_cancel is off"
+            found[name] = ActBlocker(reason, refused=has_hermes)
+        elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
+            found[name] = ActBlocker(_hermes_gap(name, platform), refused=True)
+        elif platform and not any(platform & _declared(a) for a in adapters):
+            names = sorted({_PLATFORMS.get(a.name, a.name) for a in adapters})
+            reason = (
+                f"{' or '.join(names)} can't {_verbs(platform)} yet"
+                if names
+                else f"no platform adapter is configured to {_verbs(platform)}"
+            )
+            found[name] = ActBlocker(reason, refused=False)
+    return found
+
+
+def _hermes_gap(rule: str, platform: frozenset[ActionKind]) -> str:
+    if rule == "exit_contract":  # Hermes requeues only its own parks (a wake)
+        return "Hermes can't requeue a task Kelpie did not park yet"
+    if lacking := platform - hermes.HermesAdapter.actions:
+        return f"Hermes can't {_verbs(lacking)} yet"
+    if platform:
+        return f"Hermes does not {_verbs(platform)} for {rule} yet"
+    return "on Hermes it stays in observe or suggest mode (it only alerts, as in suggest)"
+
+
+def _declared(adapter: PlatformAdapter) -> frozenset[ActionKind]:
+    actions = getattr(adapter, "actions", frozenset())
+    return frozenset(actions) if isinstance(actions, frozenset | set) else frozenset()
+
+
+def _verbs(kinds: frozenset[ActionKind]) -> str:
+    words = sorted(_VERBS.get(k, str(k)) for k in kinds)
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " or " + words[-1]
+
+
 def _refuse_unimplemented_actions(
     settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter]
 ) -> None:
-    """Hermes carries out stop, wait, wake of a parked task and comment; any other act-mode
-    rule would only fail at runtime on Hermes tasks, also next to adapters that refuse
-    actions with ``UnsupportedAction``.
-
-    ``ci_economy`` acts through the CI connector (``cancel_build``), not the platform, so
-    it may act when ``[connectors.github.ci] allow_cancel`` is set."""
-    has_hermes = any(isinstance(a, hermes.HermesAdapter) for a in adapters)
-    ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
-    by_connector = {"ci_economy"} if ci is not None and ci.enabled and ci.allow_cancel else set()
+    """Refuse act mode for the rules :func:`act_blockers` marks ``refused``: on Hermes their
+    actions would only fail at runtime. Dry-run acts on nothing, so it refuses nothing."""
+    if settings.engine.dry_run:
+        return
+    blockers = act_blockers(settings, adapters)
     acting = sorted(
         s.name
         for s in loaded.statuses
         if s.implemented
         and s.mode is Mode.ACT
-        and s.name not in HERMES_ACT_RULES
-        and s.name not in by_connector
+        and (b := blockers.get(s.name)) is not None
+        and b.refused
     )
-    if has_hermes and acting and not settings.engine.dry_run:
+    if acting:
+        why = "; ".join(f"{name}: {blockers[name].reason}" for name in acting)
         raise ConfigError(
             "these rules emit actions the Hermes adapter does not carry out (it does stop, "
             "wait, wake of a parked task and comment); use observe or suggest mode "
-            f"(rules in act mode: {acting})"
+            f"(rules in act mode: {acting}; {why})"
         )
 
 
