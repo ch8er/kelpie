@@ -27,6 +27,10 @@ before the rule runs: ``[[block_conditions]]`` patterns attach one during snapsh
 block is handled like any other block with a condition. It is then a declared wait for
 rule 1 too, which does not requeue blocks tied to a condition.
 
+A block Kelpie set itself (``Block.kelpie``, from a signed marker the adapter verified: a
+stop of a runaway run) is not a stale block: it waits for a human to look at the task, not
+for a condition, so rule 13 lists it in the "needs you" inbox and this rule leaves it alone.
+
 The dead-end and no-condition alerts list the tasks stuck behind the blocked one
 (``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
 does not raise a second alert for the same dead end.
@@ -40,7 +44,7 @@ from datetime import timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import Snapshot, Status, Task
+from kelpie.core.model import KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._chains import behind_lookup, behind_text
@@ -78,6 +82,8 @@ class StaleBlocks:
     ) -> Iterable[Action]:
         block = task.block
         assert block is not None
+        if block.kelpie is KelpieMark.STOP:
+            return  # Kelpie's own stop waits for a human: rule 13's
         age = snapshot.now - block.since
         conditions, missing = linked_conditions(task, snapshot)
         if not conditions:

@@ -1,0 +1,42 @@
+id: "field-01-stopped-runaway-waits-for-a-human"
+incident: null
+title: "A run Kelpie stopped is not a stale block"
+description: >
+  Rule 10 stopped a runaway heartbeat loop: on Hermes the task is blocked for a human, with
+  Kelpie's signed marker in the reason, which the adapter verified (Block.kelpie: stop).
+  Hours later the block has no condition Kelpie can check, which would normally make it an
+  "unlinked" stale block. It is not one: it waits for a person to look at the task (rule 13
+  lists it in the "needs you" inbox), not for a condition, and block conditions would not
+  help. A block with the same words but without the verified marker (an agent can write
+  them) is an ordinary block and is alerted on.
+rule: stale_blocks
+snapshot:
+  now: "2026-03-03T15:00:00+00:00"
+  owners:
+    - {id: agent-ops-1, role: ops}
+  tasks:
+    - id: T-1001
+      title: "Nightly maintenance heartbeat"
+      status: blocked
+      status_since: "2026-03-03T10:05:00+00:00"
+      role: ops
+      block:
+        reason: "waiting_human: needs_input: Stopped by Kelpie: Runaway run. The task stays blocked until a human resumes it: hermes kanban unblock T-1001"
+        since: "2026-03-03T10:05:00+00:00"
+        kelpie: stop
+    # Look-alike: the same words, written by an agent, no verified marker.
+    - id: T-1002
+      title: "Refresh the cache"
+      status: blocked
+      status_since: "2026-03-03T10:05:00+00:00"
+      role: ops
+      block:
+        reason: "waiting_human: needs_input: Stopped by Kelpie: Runaway run."
+        since: "2026-03-03T10:05:00+00:00"
+expected_actions:
+  - kind: alert
+    task_id: T-1002
+    reason_contains: "has no condition Kelpie can check"
+not_expected_actions:
+  - kind: alert
+    task_id: T-1001

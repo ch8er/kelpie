@@ -24,6 +24,15 @@ the queue, where the dispatcher can respawn it before a second command blocks it
 ``hermes kanban archive`` terminates the worker but is terminal; signalling the recorded pid
 from Kelpie would duplicate Hermes' fingerprint checks and could hit a stranger.
 
+The block is signed. Its reason ends with a marker, ``[kelpie-stop:v1:<issued>:<nonce>.<mac>]``:
+HMAC-SHA256 over a domain string, the task, the time of issue and a nonce, keyed by
+the same secret that signs parks (``wait_key``, see park.py). The adapter reads a block as
+Kelpie's own stop (``Block.kelpie``) only when the marker verifies for that task and Hermes
+recorded the block within one CLI call of its issue, so a worker cannot pass its own block
+off as Kelpie's by copying the text. Rule 4 then leaves it to rule 13: it waits for a human,
+not for a condition. Without a usable key the stop still happens, unsigned (stopping a
+runaway matters more), and the block is treated like any other.
+
 The command is pinned to exactly the run Kelpie looked at. ``HERMES_KANBAN_TASK`` and
 ``HERMES_KANBAN_RUN_ID`` name that task and run, so the CLI passes the run as
 ``expected_run_id`` and ``block_task`` adds ``AND current_run_id = ?``: if the task was
@@ -42,12 +51,16 @@ dispatcher runs. Anything that must end spend at once (a hard budget) is delayed
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DEFAULT_CLI = "hermes"
@@ -76,6 +89,13 @@ ENV_DENIED = frozenset(
 )
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+_STOP_DOMAIN = "kelpie-stop:v1"
+# The marker is the reason's last word: "[kelpie-stop:v1:<issued>:<nonce>.<mac>]".
+_STOP_MARKER = re.compile(
+    r"\s*\[kelpie-stop:v1:([0-9]{1,12}):([0-9a-f]{16})\.([0-9a-f]{64})\]\s*\Z"
+)
+_ANY_STOP_MARKER = re.compile(r"\[?kelpie-stop", re.IGNORECASE)
+STOP_SKEW = timedelta(seconds=5)  # between Kelpie's clock and the time Hermes records
 # What a done stop means on Hermes, for the human reading "Stopped run <id>; ..." (the reap
 # grace is TERMINAL_WORKER_REAP_GRACE_SECONDS, see above).
 STOP_DONE = (
@@ -101,16 +121,65 @@ def run_id(session_id: str) -> int | None:
     return int(digits) if digits.isascii() and digits.isdigit() else None
 
 
-def stop_comment(task_id: str, reason: str) -> str:
-    """The text left on the task: why it was stopped and how to resume it."""
-    clean = _CONTROL.sub(" ", reason).strip() or "no reason given"
+def stop_comment(
+    task_id: str,
+    reason: str,
+    *,
+    key: bytes | None = None,
+    now: datetime | None = None,
+) -> str:
+    """The text left on the task: why it was stopped and how to resume it, ending with the
+    signed stop marker when there is a ``key`` (issued at ``now``)."""
+    clean = _CONTROL.sub(" ", reason)
+    while _ANY_STOP_MARKER.search(clean):  # rule text may quote agents: it carries no marker
+        clean = _ANY_STOP_MARKER.sub("kelpie stop", clean)
+    clean = clean.strip() or "no reason given"
     if len(clean) > MAX_REASON:
         clean = clean[: MAX_REASON - 3] + "..."
     end = "" if clean.endswith(".") else "."  # reasons are sentences: no ".."
-    return (
+    text = (
         f"Stopped by Kelpie: {clean}{end} The task stays blocked until a human resumes it: "
         f"hermes kanban unblock {task_id}"
     )
+    if key is None or now is None:
+        return text
+    issued, nonce = str(int(now.timestamp())), secrets.token_hex(8)
+    return f"{text} [kelpie-stop:v1:{issued}:{nonce}.{_stop_mac(key, task_id, issued, nonce)}]"
+
+
+def verify_stop(
+    reason: str,
+    task_id: str,
+    key: bytes | None,
+    recorded_at: datetime | None,
+    window: timedelta,
+) -> str | None:
+    """The reason without its marker when it ends with Kelpie's stop marker for ``task_id``,
+    signed with ``key`` and recorded by Hermes (``recorded_at``) within ``window`` of its
+    issue; else ``None``. A marker names the task it was made for, and a copy recorded later
+    (the text stays on the task as a comment) is not Kelpie's stop."""
+    if key is None or recorded_at is None or reason.lower().count("kelpie-stop") != 1:
+        return None
+    m = _STOP_MARKER.search(reason)
+    if m is None:
+        return None
+    issued, nonce, mac = m.groups()
+    if not hmac.compare_digest(mac, _stop_mac(key, task_id, issued, nonce)):
+        return None
+    at = datetime.fromtimestamp(int(issued), recorded_at.tzinfo)
+    if not at - STOP_SKEW <= recorded_at <= at + window + STOP_SKEW:
+        return None
+    return reason[: m.start()]
+
+
+def has_stop_marker(reason: object) -> bool:
+    """Whether a reason looks like it carries a Kelpie stop marker (valid or not)."""
+    return isinstance(reason, str) and "[kelpie-stop:" in reason
+
+
+def _stop_mac(key: bytes, task_id: str, issued: str, nonce: str) -> str:
+    msg = f"{_STOP_DOMAIN}\n{task_id}\n{issued}\n{nonce}".encode()
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
 def cli_env(base: Mapping[str, str], db_path: Path, task_id: str, rid: int) -> dict[str, str]:

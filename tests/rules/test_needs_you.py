@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -14,6 +15,7 @@ from kelpie.core.model import (
     Condition,
     ConditionKind,
     Dependency,
+    KelpieMark,
     Owner,
     OwnerKind,
     Snapshot,
@@ -279,8 +281,21 @@ def test_reasons_that_ask_a_person(reason: str) -> None:
 
 def test_tasks_kelpie_stopped_say_so() -> None:
     task = blocked("A-1", ago(hours=1), "waiting_human: needs_input: Stopped by Kelpie: loop")
-    [action] = run(snap([task]), default_approver="human-lead")
+    stopped = replace(task, block=replace(task.block, kelpie=KelpieMark.STOP))
+    [action] = run(snap([stopped]), default_approver="human-lead")
     assert "stopped by Kelpie and needs unblocking" in action.reason
+    # The words alone (an agent can write them) only ask for input.
+    [action] = run(snap([task]), default_approver="human-lead")
+    assert "stopped by Kelpie" not in action.reason and "waits for your input" in action.reason
+
+
+def test_a_kelpie_stop_always_waits_for_a_person() -> None:
+    """Whatever approval_reasons say: the adapter verified that Kelpie stopped the run."""
+    task = blocked("A-1", ago(hours=1), "Stopped by Kelpie: loop")
+    stopped = replace(task, block=replace(task.block, kelpie=KelpieMark.STOP))
+    assert run(snap([task]), approval_reasons=("approval",)) == []
+    [action] = run(snap([stopped]), approval_reasons=("approval",))
+    assert action.params["approvals"] == ["A-1"]
 
 
 def test_routing_falls_back_to_the_owner_role() -> None:

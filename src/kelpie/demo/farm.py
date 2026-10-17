@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from kelpie.adapters.hermes import HermesAdapter
 from kelpie.alerts import telegram
 from kelpie.app import App, build_app, load_settings
 from kelpie.core.alerts import AlertEvent
@@ -167,6 +168,9 @@ class DemoFarm:
         with _environment({GITHUB_TOKEN_ENV: github.TOKEN, TRACES_TOKEN_ENV: TRACES_TOKEN}):
             app = build_app(load_settings(path), clock=lambda: self.now)
         app.engine.alerter = self.inbox
+        for adapter in app.engine.adapters:  # Kelpie's markers, issued on the farm's clock
+            if isinstance(adapter, HermesAdapter):
+                adapter.clock = lambda: self.now
         self.app = app
         self._stack.callback(app.close)
         return app

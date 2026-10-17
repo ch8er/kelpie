@@ -180,8 +180,9 @@ def load_key(path: Path, *, create: bool) -> bytes | None:
     if not created:
         return key
     log.warning(
-        "hermes: created the key that signs Kelpie's parks at %s; keep it with the ledger and "
-        "out of the agents' reach (parks made with an earlier key are no longer recognised)",
+        "hermes: created the key that signs Kelpie's parks and stops at %s; keep it with the "
+        "ledger and out of the agents' reach (marks made with an earlier key are no longer "
+        "recognised)",
         path.resolve(),
     )
     return key

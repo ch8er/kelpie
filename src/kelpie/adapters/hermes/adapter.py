@@ -96,7 +96,7 @@ import logging
 import re
 import sqlite3
 import time
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -129,8 +129,10 @@ from kelpie.adapters.hermes.stop import (
     STOP_DONE,
     HermesCliError,
     block_task,
+    has_stop_marker,
     run_id,
     stop_comment,
+    verify_stop,
 )
 from kelpie.core.actions import ActionKind, ActionResult
 from kelpie.core.model import (
@@ -139,6 +141,7 @@ from kelpie.core.model import (
     Condition,
     ConditionKind,
     Dependency,
+    KelpieMark,
     Owner,
     OwnerKind,
     Return,
@@ -457,11 +460,17 @@ def _park_reason(scheduled: sqlite3.Row | None) -> object:
     return None if scheduled is None else _payload(scheduled["payload"]).get("reason")
 
 
-def _block_text(row: sqlite3.Row, status_event: sqlite3.Row | None, block_event: Any) -> str:
+def _block_text(
+    row: sqlite3.Row, status_event: sqlite3.Row | None, block_event: Any, reason: str | None = None
+) -> str:
+    """The block's reason as rules read it; ``reason`` replaces the event's own (Kelpie's
+    stop without its marker)."""
     if block_event is not None:  # a block event at/after the block's start: current evidence
         payload = _payload(block_event["payload"])
         kind = str(payload.get("kind") or _col(row, "block_kind") or "")
-        reason = str(payload.get("reason") or "").strip()
+        if reason is None:
+            reason = str(payload.get("reason") or "")
+        reason = reason.strip()
         if kind in TYPED_BLOCKS:  # Hermes parks these for an operator
             return f"waiting_human: {kind}" + (f": {reason}" if reason else "")
         return ": ".join(x for x in (kind, reason) if x)
@@ -519,7 +528,10 @@ class HermesAdapter:
     _git_backoff: dict[Path, datetime] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
-    wait_key: Path = DEFAULT_WAIT_KEY  # signs park markers (see park.py); created on first park
+    wait_key: Path = DEFAULT_WAIT_KEY  # signs park and stop markers (park.py, stop.py)
+    # When a marker is issued: Hermes records the park or stop on its own clock, and the two
+    # must agree within one CLI call (a simulated farm runs both on a virtual clock).
+    clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC), repr=False)
     # Hermes status and run of each task in the latest snapshot: a park needs both unchanged
     _seen: dict[str, tuple[str, int | None]] = field(
         default_factory=dict, init=False, repr=False, compare=False
@@ -662,6 +674,28 @@ class HermesAdapter:
         """How long after issuing a park marker Hermes may record it: one CLI call."""
         return timedelta(seconds=self.cli_timeout)
 
+    def _own_stop(self, task_id: str, event: sqlite3.Row | None, key: bytes | None) -> str | None:
+        """The reason of Kelpie's own stop without its marker, when ``event`` (the task's
+        current block) carries a stop marker that verifies; else ``None`` (and a marker that
+        does not verify is logged once)."""
+        if event is None:
+            return None
+        reason = _payload(event["payload"]).get("reason")
+        if not has_stop_marker(reason):
+            return None
+        assert isinstance(reason, str)
+        verified = verify_stop(reason, task_id, key, _utc(event["created_at"]), self._park_window)
+        if verified is None:
+            warn_once(
+                (task_id, f"stop:{event['created_at']}"),
+                "hermes: task %s is blocked with a Kelpie stop marker that does not verify "
+                "(written by someone else, copied from an earlier stop, or the wait key %s is "
+                "missing or changed); it is treated as any other block",
+                task_id,
+                self.wait_key,
+            )
+        return verified
+
     def _key(self, create: bool = False) -> bytes | None:
         try:
             return load_key(self.wait_key, create=create)
@@ -683,7 +717,7 @@ class HermesAdapter:
         blocks = self._latest_events(conn, BLOCK_EVENTS)
         parks = self._latest_events(conn, ("scheduled",))
         splits = self._latest_events(conn, ("decomposed",))
-        key = self._key() if parks else None
+        key = self._key() if parks or blocks else None  # parks and stops are signed
         claimed = self._claimed(conn, rows)
         returns = self._returns(conn, {r["id"] for r in rows})
         reopens = _reopens(conn, {r["id"] for r in rows})
@@ -712,9 +746,11 @@ class HermesAdapter:
                 found = blocks.get(row["id"])
                 at = _utc(found["created_at"]) if found else None
                 current = found if at is not None and at >= since else None
+                stop = self._own_stop(row["id"], current, key)
                 block = Block(
-                    reason=_block_text(row, event, current),
+                    reason=_block_text(row, event, current, stop),
                     since=at if current is not None and at is not None else since,
+                    kelpie=KelpieMark.STOP if stop is not None else None,
                 )
             self._seen[row["id"]] = (row["status"], _run_id(_col(row, "current_run_id")))
             park = parks.get(row["id"])
@@ -1098,7 +1134,7 @@ class HermesAdapter:
                 self.db_path,
                 task_id,
                 rid,
-                stop_comment(task_id, reason),
+                stop_comment(task_id, reason, key=self._stop_key(), now=self.clock()),
                 timeout=self.cli_timeout,
             )
         except HermesCliError as exc:
@@ -1170,7 +1206,7 @@ class HermesAdapter:
         else:
             raise UnsupportedAction(f"cannot park Hermes task {task_id} in status {state.status!r}")
         try:
-            text = encode_wait(reason, conditions, task_id, self._wait_key(), datetime.now(UTC))
+            text = encode_wait(reason, conditions, task_id, self._wait_key(), self.clock())
             run_kanban(
                 self.cli,
                 self.db_path,
@@ -1204,6 +1240,15 @@ class HermesAdapter:
                 f"task {task_id} is scheduled but Kelpie cannot read back its park, and "
                 f"waking it failed: {exc}; unblock it by hand"
             ) from exc
+
+    def _stop_key(self) -> bytes | None:
+        """The key that signs the stop, created if need be; ``None`` when it is unusable: the
+        run is still stopped, unsigned, and its block is then treated as any other."""
+        try:
+            return self._key(create=True)
+        except HermesError as exc:
+            log.warning("hermes: stopping without a signed marker: %s", exc)
+            return None
 
     def _wait_key(self) -> bytes:
         key = self._key(create=True)

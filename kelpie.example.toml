@@ -398,9 +398,9 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # merge-base with these, plus uncommitted files
 # cli = "hermes"                    # Hermes executable used to stop, park, wake and comment
 # cli_timeout = "10s"               # limit for each command (at most 60s); it runs inside the tick
-# wait_key = "/data/hermes-wait.key"  # signs Kelpie's parks (mode 0600, out of the agents'
-#                                   # reach); default: next to the ledger. Losing it leaves
-#                                   # parked tasks unrecognised
+# wait_key = "/data/hermes-wait.key"  # signs Kelpie's parks and stops (mode 0600, out of
+#                                   # the agents' reach); default: next to the ledger. Losing
+#                                   # it leaves parked tasks unrecognised
 # prework_statuses = ["triage", "scheduled"]  # before any work starts (rule 3, incident 17)
 # human_owners = ["alice"]         # assignees that are people, not agents (see
 #                                   # [connectors.human_tasks]); case-insensitive. Not a Hermes

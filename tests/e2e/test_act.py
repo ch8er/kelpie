@@ -87,7 +87,7 @@ def test_runaway_loop_is_stopped_through_the_hermes_cli(farm: Farm) -> None:
         assert call["code"] == 0
         assert call["argv"][:6] == ["kanban", "block", "--kind", "needs_input", "--", call["task"]]
         assert call["argv"][6].startswith("Stopped by Kelpie: Runaway run: session hermes-run-")
-        assert call["argv"][6].endswith(f"hermes kanban unblock {call['task']}")
+        assert f"hermes kanban unblock {call['task']} [kelpie-stop:v1:" in call["argv"][6]
         assert call["board"] == str(farm.board.path)
         assert not any(k.startswith(("KELPIE_", "GITHUB")) for k in call["env"])
     for task_id, rid in (("t_loop", runs.loop), ("t_errors", runs.errors)):

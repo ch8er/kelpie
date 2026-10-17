@@ -83,10 +83,12 @@ Everything else stays `observe` or `suggest`. That includes `stale_blocks`: its 
 requeue of tasks Kelpie did not park and WIP commit, are not implemented for Hermes. Kelpie
 never writes a GitHub PR URL into a Hermes comment or reason: Hermes holds a ready task back
 for 24 h after one appears (a URL its worker wrote still does, also after a wake). A wake
-(`unblocked`) pages chats subscribed to the task. Parks are signed with a key Kelpie creates
-next to its ledger database (`[adapters.hermes] wait_key`): run Kelpie as a user the agents
-cannot read it as, or a worker could forge a park that Kelpie then wakes, and keep it on the
-persistent volume, or Kelpie no longer recognises its parks (logged; wake them by hand).
+(`unblocked`) pages chats subscribed to the task. Parks and stops are signed with a key Kelpie
+creates next to its ledger database (`[adapters.hermes] wait_key`): run Kelpie as a user the
+agents cannot read it as, or a worker could forge a park that Kelpie then wakes (or pass its
+own block off as Kelpie's stop, which rule 4 does not alert on), and keep it on the persistent
+volume, or Kelpie no longer recognises its parks (logged; wake them by hand) and treats its
+stops as ordinary blocks.
 
 ## 1. Preconditions
 
