@@ -9,7 +9,7 @@ from kelpie.core.alerts import AlertEvent
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Dispatched, Outcome, Suppression
-from kelpie.core.model import Snapshot
+from kelpie.core.model import Snapshot, Status, Task
 from kelpie.core.states import MemoryStateStore, OpenState, StateTracker, Transition
 from kelpie.core.storage import SqliteLedgerStore
 from tests.fakes import Emit, FakeAdapter, FakeAlerter
@@ -463,3 +463,77 @@ def test_a_wobbling_disk_forecast_opens_once_and_does_not_flap() -> None:
         e.tick(lambda at=at, disk=disk: Snapshot(now=at, resources=(disk,)))
     transitions = [str(ev.transition) for ev in alerter.events]
     assert transitions == ["new", "resolved"]  # held through 80h and 82h; let go at 90h
+
+
+def test_the_resolve_notice_says_what_changed() -> None:
+    """Not the opening alert again: the rule's account of now, else that it stopped."""
+
+    class Describing(Toggle):
+        def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
+            return f"{state_id} is fine now." if state_id == "s1" else None
+
+    alerter = FakeAlerter()
+    rule = Describing(alert())
+    e = engine(rule, alerter)
+    tick(e, T0)
+    rule.on = False
+    tick(e, T0 + H)
+    assert alerter.events[-1].reason == "s1 is fine now."
+    plain_alerter = FakeAlerter()
+    plain = Toggle(alert())
+    e = engine(plain, plain_alerter)
+    tick(e, T0)
+    plain.on = False
+    tick(e, T0 + H)
+    assert plain_alerter.events[-1].reason == 'task T-1: no longer reported: "T-1 is stuck".'
+
+
+def test_a_failing_resolved_hook_falls_back() -> None:
+    class Broken(Toggle):
+        def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
+            raise RuntimeError("bug")
+
+    alerter = FakeAlerter()
+    rule = Broken(alert())
+    e = engine(rule, alerter)
+    tick(e, T0)
+    rule.on = False
+    tick(e, T0 + H)
+    assert alerter.events[-1].reason == 'task T-1: no longer reported: "T-1 is stuck".'
+
+
+def test_the_fallback_names_the_task_or_none_and_quotes_what_ended() -> None:
+    class Blank(Toggle):
+        def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
+            return "  "
+
+    farm_wide = Action(ActionKind.ALERT, "emit", "Idle agents: 3. Queue empty.", key="k",
+                       state="s2", since=T0)  # fmt: skip
+    for rule, task_snapshot, expected in [
+        (Blank(alert()), (), 'task T-1: no longer reported: "T-1 is stuck".'),
+        (Toggle(alert()), ("titled",), "task T-1 ('Fix login'): no longer reported"),
+        (Toggle(farm_wide), (), 'no longer reported: "Idle agents: 3".'),
+    ]:
+        alerter = FakeAlerter()
+        e = engine(rule, alerter)
+        tick(e, T0)
+        rule.on = False
+        tasks = (Task("T-1", "Fix login", Status.READY, T0),) if task_snapshot else ()
+        e.tick(lambda tasks=tasks: Snapshot(now=T0 + H, tasks=tasks))
+        assert alerter.events[-1].reason.startswith(expected), alerter.events[-1].reason
+
+
+def test_rule_seven_says_how_the_disk_reads_through_the_engine() -> None:
+    from kelpie.core.model import Resource, ResourceKind
+    from kelpie.rules.resources import Resources
+
+    alerter = FakeAlerter()
+    e = Engine([Resources()], adapters=[FakeAdapter()], alerter=alerter, config=LIVE)  # type: ignore[list-item]
+    full = Resource("host-a:/", ResourceKind.DISK, "host-a", 480, 500, "GB", at=T0)
+    e.tick(lambda: Snapshot(now=T0, resources=(full,)))
+    calm = Resource("host-a:/", ResourceKind.DISK, "host-a", 300, 500, "GB", at=T0 + H,
+                    growth_per_day=0.0)  # fmt: skip
+    e.tick(lambda: Snapshot(now=T0 + H, resources=(calm,)))
+    assert alerter.events[-1].reason == (
+        "disk host-a:/ is 60% full (300 of 500 GB), under its threshold and not filling."
+    )

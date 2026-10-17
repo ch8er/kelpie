@@ -107,7 +107,7 @@ Variables named by `token_env`, `webhook_env`, `headers_env`, `cancel_token_env`
 | `once_window` | `"7d"` | duration, > 0 | One-off actions (WIP commit, resume note, conflict comment) are carried out once per fingerprint within this window. |
 | `once_attempts` | `3` | count, >= 1 | A one-off action is given up after this many failed attempts. |
 | `state_escalations` | `["4h", "12h", "24h"]` | list of durations, increasing | Alerts about a lasting condition are sent again when its age passes each of these. |
-| `state_resolve_after` | `"10m"` | duration, >= 0 | A lasting condition no rule reported for this long is resolved, and a short "resolved" alert goes out. |
+| `state_resolve_after` | `"10m"` | duration, >= 0 | A lasting condition no rule reported for this long is resolved, and a short "resolved" alert goes out: what is true now, from the rule (rule 7: the current reading, "disk h:/ is 80% full, ..."), or, quoted as the past, what the rule no longer reports ('task T-1 (...): no longer reported: "..."'). |
 | `rules` | `{}` | tables | One table per rule, `[engine.rules.<name>]`; see [Rules](#rules). |
 
 ## Modes and dry-run

@@ -255,6 +255,43 @@ class Resources:
             },
         )
 
+    def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
+        """What a host resource reads now that its alert resolves (the engine's notice):
+        the current reading, not the alert that opened it. None for the others (heavy
+        tasks, quotas, credentials): the engine's general notice. A reading is matched by
+        its name, which the shipped source prefixes with the host ("host-a:/")."""
+        if state_id.endswith(":heavy"):
+            return None  # a host's heavy tasks (a host may be named "memory")
+        rule, _, rest = state_id.partition(":")
+        kind_name, _, name = rest.partition(":")
+        try:
+            kind = ResourceKind(kind_name)
+        except ValueError:
+            return None
+        if rule != NAME or kind not in self.thresholds:
+            return None
+        found = [r for (_, k, n), r in self._fresh(snapshot).items() if k is kind and n == name]
+        if not found:
+            return f"{_subject(kind, name)}: no recent reading any more (its source stopped)."
+        r = found[0]
+        if r.utilization is None:
+            return None
+        t = self.thresholds[kind]
+        now = _describe(Finding(r, r.utilization, Severity.INFO, t))
+        under = ", under its threshold" if t.warning is not None or t.critical is not None else ""
+        growth = r.growth_per_day
+        if kind is ResourceKind.DISK and r.used is not None and r.limit:
+            if growth is None:
+                return f"{now}{under}; its growth rate is no longer reported."
+            if growth < self.min_growth_per_day:
+                return f"{now}{under} and not filling."
+            hours = max(0.0, r.limit - r.used) / growth * 24
+            return (
+                f"{now}{under}; at {growth:.1f} {r.unit} a day it would fill in about "
+                f"{_hours(hours)}."
+            )
+        return f"{now}{under}."
+
     def _fresh(self, snapshot: Snapshot) -> dict[tuple[str, ResourceKind, str], Resource]:
         newest: dict[tuple[str, ResourceKind, str], Resource] = {}
         for r in snapshot.resources:
@@ -699,6 +736,20 @@ def _describe(f: Finding) -> str:
             return f"{host} runs {_pct(f.utilization)} of its process limit{amount}"
         case _:
             return f"{r.kind} {r.name} is at {_pct(f.utilization)}"
+
+
+def _subject(kind: ResourceKind, name: str) -> str:
+    """What a reading is about, without its value: "disk host-a:/", "memory on host-a"."""
+    host = name.split(":", 1)[0]
+    match kind:
+        case ResourceKind.DISK:
+            return f"disk {name}"
+        case ResourceKind.MEMORY | ResourceKind.LOAD | ResourceKind.CPU:
+            return f"{kind} on {host}"
+        case ResourceKind.PROCESSES:
+            return f"processes on {host}"
+        case _:
+            return f"{kind} {name}"
 
 
 def _in_hours(d: timedelta) -> float:

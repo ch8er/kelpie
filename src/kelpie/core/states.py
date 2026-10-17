@@ -16,7 +16,8 @@ what each sighting means:
 A transition is committed only after the alert was handled (delivered, or logged in
 observe/dry-run); if the ledger suppressed it or delivery failed, the next tick tries
 again. States a rule (that ran fine) has not reported for ``resolve_after`` are resolved:
-the engine sends a short "resolved" and closes them, again only once that notice was
+the engine sends a short "resolved" (what is true now, from the rule's ``resolved`` hook,
+else that the rule no longer reports it) and closes them, again only once that notice was
 handled. Open states persist so the daily report can list them and a restart does not
 re-announce everything.
 """
