@@ -1028,6 +1028,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     # Without [[alerts.channels]] there is no alerter: an effect nobody can carry out turns
     # into an alert that is only logged. The defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
+    for adapter in adapters:  # Kelpie's park and stop markers are issued on the app's clock
+        if isinstance(adapter, hermes.HermesAdapter):
+            adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
     hub = _build_hub(settings, adapters, clock)
     # SQLite keeps open alert states across restarts; in memory they live with the process.

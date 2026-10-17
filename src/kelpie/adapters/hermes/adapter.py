@@ -531,7 +531,9 @@ class HermesAdapter:
     wait_key: Path = DEFAULT_WAIT_KEY  # signs park and stop markers (park.py, stop.py)
     # When a marker is issued: Hermes records the park or stop on its own clock, and the two
     # must agree within one CLI call (a simulated farm runs both on a virtual clock).
-    clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC), repr=False)
+    clock: Callable[[], datetime] = field(
+        default=lambda: datetime.now(UTC), repr=False, compare=False
+    )
     # Hermes status and run of each task in the latest snapshot: a park needs both unchanged
     _seen: dict[str, tuple[str, int | None]] = field(
         default_factory=dict, init=False, repr=False, compare=False

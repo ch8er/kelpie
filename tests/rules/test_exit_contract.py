@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from kelpie.core.actions import ActionKind
-from kelpie.core.model import Block, Session, Snapshot, Status, Task
+from kelpie.core.model import Block, KelpieMark, Session, Snapshot, Status, Task
 from kelpie.rules import REGISTRY
 from kelpie.rules.exit_contract import ExitContract, build
 
@@ -180,6 +180,19 @@ def test_block_with_condition_is_allowed() -> None:
 def test_block_grace_period() -> None:
     recent = NOW - timedelta(minutes=5)
     assert run(blocked("", since=recent), session(ended=recent)) == []
+
+
+def test_a_run_kelpie_stopped_is_never_requeued() -> None:
+    """Even with block reasons that do not allow it: requeueing would undo the stop."""
+    rule = build({"allowed_block_reasons": ["vendor"]})
+    stop = Block("waiting_human: needs_input: Stopped by Kelpie: loop", NOW - H)
+    signed = task(
+        Status.BLOCKED, since=NOW - H, block=Block(stop.reason, stop.since, None, KelpieMark.STOP)
+    )
+    assert run(signed, session(), rule=rule) == []
+    # The words alone (an agent can write them) are an ordinary block.
+    words = task(Status.BLOCKED, since=NOW - H, block=stop)
+    assert run(words, session(), rule=rule) == [ActionKind.REQUEUE]
 
 
 def test_custom_allowed_reasons() -> None:
