@@ -148,6 +148,16 @@ def test_abort_failures(cli: Path, monkeypatch: pytest.MonkeyPatch, answer: Any)
     assert err.value.public_reason is not None and "SECRET" not in err.value.public_reason
 
 
+def test_a_refused_key_falls_back_to_the_run(cli: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    refused = {"ok": False, "error": {"message": "session target is unavailable"}}
+    answers(monkeypatch, refused, {"ok": True, "status": "aborted"})
+    assert oc_stop.abort_session("openclaw", MAIN, "run-1") == "aborted"
+    assert [json.loads(c["argv"][4]) for c in calls(cli)][1] == {
+        "runId": "run-1",
+        "clearQueued": True,
+    }
+
+
 def test_abort_timeout_kills_the_command(cli: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     answers(monkeypatch, "sleep")
     started = time.monotonic()
@@ -166,6 +176,15 @@ def test_a_missing_cli(tmp_path: Path) -> None:
 
 def test_is_supports_stop(tmp_path: Path, spool: Spool) -> None:
     assert isinstance(adapter(tmp_path, spool), SupportsStop)
+
+
+def test_the_marker_names_the_operators_lane(tmp_path: Path, spool: Spool, cli: Path) -> None:
+    live(spool)
+    review = "agent:main:internal-session-effects:skill-workshop-review_0ed69936"
+    spool.tool(SID, datetime.now(UTC), key=review)  # a background lane under the same id
+    adapter(tmp_path, spool).stop(SID, "loop")
+    marker = json.loads((tmp_path / "kelpie" / "stop" / f"{SID}.json").read_text())
+    assert marker["key"] == MAIN
 
 
 def test_stop_writes_the_marker_and_aborts(tmp_path: Path, spool: Spool, cli: Path) -> None:
@@ -266,6 +285,36 @@ def test_what_the_stop_says_depends_on_conversation_access(
     spool.write("agent_end", datetime.now(UTC), {"success": True}, sessionId="other")
     said = adapter(tmp_path, spool).stop(SID, "loop")
     assert isinstance(said, str) and "until the operator messages it" in said
+
+
+def test_the_plugin_says_it_has_access(tmp_path: Path, spool: Spool, cli: Path) -> None:
+    """A runaway run never ends, so no run_end line: the plugin's own flag tells."""
+    spool.path.parent.mkdir(parents=True)
+    line = {"type": "tool", "at": time.time(), "session_id": SID, "plugin": 2, "gate": True}
+    spool.path.write_text(json.dumps(line) + "\n")
+    said = adapter(tmp_path, spool).stop(SID, "loop")
+    assert isinstance(said, str) and "until the operator messages it" in said
+
+
+def test_a_huge_duration_does_not_blind_the_adapter(tmp_path: Path, spool: Spool) -> None:
+    now = datetime.now(UTC)
+    oc_stop.write_marker(tmp_path / "kelpie" / "stop", SID, "loop", now.timestamp() - 600)
+    spool.path.parent.mkdir(parents=True, exist_ok=True)
+    line = {"type": "tool", "at": now.timestamp(), "session_id": SID, "duration_ms": 10**15}
+    spool.path.write_text(json.dumps(line) + "\n")
+    (s,) = adapter(tmp_path, spool).snapshot(now).sessions
+    assert s.id == SID
+
+
+def test_an_idle_session_after_an_upgrade_can_be_stopped(
+    tmp_path: Path, spool: Spool, cli: Path
+) -> None:
+    """Its own lines predate the plugin's reload; the Gateway's newest line says v2."""
+    spool.path.parent.mkdir(parents=True)
+    old = {"type": "tool", "at": time.time() - 60, "session_id": SID, "v": 1}
+    spool.path.write_text(json.dumps(old) + "\n")
+    spool.tool("other", datetime.now(UTC))
+    assert isinstance(adapter(tmp_path, spool).stop(SID, "loop"), str)
 
 
 def test_a_plugin_not_yet_loaded_is_refused(tmp_path: Path, spool: Spool) -> None:

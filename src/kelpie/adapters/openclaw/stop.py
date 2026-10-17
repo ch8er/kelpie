@@ -67,9 +67,12 @@ class OpenClawCliError(RuntimeError):
     """The ``openclaw`` CLI is missing, timed out or refused the command. ``public_reason``
     says so without anything the CLI printed, for the human told."""
 
-    def __init__(self, message: str, public_reason: str | None = None) -> None:
+    def __init__(
+        self, message: str, public_reason: str | None = None, kind: str = "failed"
+    ) -> None:
         super().__init__(message)
         self.public_reason = public_reason
+        self.kind = kind  # "refused": the Gateway answered and said no
 
 
 def clean_reason(reason: str) -> str:
@@ -82,14 +85,21 @@ def clean_reason(reason: str) -> str:
     return text if len(text) <= MAX_REASON else text[: MAX_REASON - 3] + "..."
 
 
-def write_marker(directory: Path, session_id: str, reason: str, at: float) -> Path:
-    """Write ``<directory>/<session_id>.json`` atomically (mode 0600), replacing an older one."""
+def write_marker(
+    directory: Path, session_id: str, reason: str, at: float, key: str | None = None
+) -> Path:
+    """Write ``<directory>/<session_id>.json`` atomically (mode 0600), replacing an older one.
+    ``key`` is the session key the stopped session ran under (as the spool has it): only an
+    operator's message under that key lifts the stop."""
     if not SESSION_ID.fullmatch(session_id):
         raise ValueError(f"not an OpenClaw session id: {session_id!r}")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if directory.is_symlink() or not directory.is_dir():
         raise OSError(f"{directory} is not a plain directory")
-    body = json.dumps({"at": at, "reason": clean_reason(reason)}).encode()
+    data: dict[str, object] = {"at": at, "reason": clean_reason(reason)}
+    if key:
+        data["key"] = key[:256]
+    body = json.dumps(data).encode()
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".stop-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
@@ -154,7 +164,13 @@ def abort_session(
     end = time.monotonic() + timeout  # one budget for both calls: they run inside the tick
     # A key the hook reduced (a chat peer replaced by "~<hash>") is not the Gateway's key.
     if session_key and "~" not in session_key:
-        status = abort_run(cli, {"key": session_key}, timeout=timeout, environ=environ)
+        try:
+            status = abort_run(cli, {"key": session_key}, timeout=timeout, environ=environ)
+        except OpenClawCliError as exc:
+            # Refused (e.g. "session target is unavailable"): the run id may still be known.
+            # A timeout or a missing CLI is not worth a second try.
+            if not run_id or exc.kind != "refused":
+                raise
     left = end - time.monotonic()
     if status == "no-active-run" and run_id and left > 1:
         status = abort_run(cli, {"runId": run_id}, timeout=left, environ=environ)
@@ -212,6 +228,7 @@ def abort_run(
         raise OpenClawCliError(
             f"openclaw gateway call sessions.abort failed (exit {proc.returncode}): {tail}",
             f"the Gateway refused or did not answer (exit {proc.returncode})",
+            "refused" if isinstance(answer, dict) and answer.get("ok") is False else "failed",
         )
     status = answer.get("status")
     return status if isinstance(status, str) else "ok"

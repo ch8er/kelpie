@@ -466,6 +466,8 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
         "v": HOOK_VERSION,
         # The version of the plugin as the Gateway loaded it (index.js): what enforces stops.
         "plugin": _count(data.get("plugin")),
+        # The plugin's before_agent_run has run: it has conversation access.
+        "gate": data.get("gate") is True,
         "session_key": _session_key(_field(data, "sessionKey")),
         "agent": _id(_field(data, "agentId")),
         "run_id": _id(_field(data, "runId")),

@@ -572,7 +572,7 @@ OpenClaw's Workboard plugin as tasks, and stop markers the plugin enforces. Abse
 | `stop_dir` | `"~/.openclaw/kelpie/stop"` | path or `false` | Where `stop` writes markers; the plugin's `stopDir` must name the same directory. `false`: `stop` becomes an alert. |
 | `cli` | `"openclaw"` | name or path or `false` | OpenClaw CLI that aborts a stopped session's run in flight (`openclaw gateway call sessions.abort`). `false`: markers only. |
 | `stop_ttl` | `"24h"` | duration, > 0 | How long a stop marker holds; must match the plugin's `stopTtl`. |
-| `cli_timeout` | `"20s"` | duration, > 0 and <= 60s | Limit for the abort of one stop (up to two commands: by session key, then by run id); it runs inside the tick. |
+| `cli_timeout` | `"20s"` | duration, > 0 and <= 60s | Limit for the abort of one stop (up to two commands: by session key, then by run id), plus up to 2 seconds to reap a command that timed out; it runs inside the tick. |
 | `token_spans` | `true` | bool | LLM spans with each run's tokens from the plugin (it needs conversation access). Set `false` if OpenClaw's `diagnostics-otel` also sends its token spans to Kelpie: the daily report would count a run twice. |
 | `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
 

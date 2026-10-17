@@ -71,19 +71,24 @@ def run(tmp_path: Path, steps: list[dict[str, Any]], **config: Any) -> dict[str,
     return json.loads(done.stdout.strip().splitlines()[-1])
 
 
-def marker(tmp_path: Path, at: float | None = None, reason: str = "loop") -> Path:
-    return oc_stop.write_marker(tmp_path / "stop", SID, reason, time.time() if at is None else at)
+def marker(
+    tmp_path: Path, at: float | None = None, reason: str = "loop", key: str | None = None
+) -> Path:
+    when = time.time() if at is None else at
+    return oc_stop.write_marker(tmp_path / "stop", SID, reason, when, key)
 
 
 def tool() -> dict[str, Any]:
     return {"call": ["before_tool_call", {"toolName": "read", "params": {}}, CTX]}
 
 
-def agent_run(trigger: str, owner: bool | None = None) -> dict[str, Any]:
+def agent_run(
+    trigger: str, owner: bool | None = None, key: str = "agent:main:main"
+) -> dict[str, Any]:
     event: dict[str, Any] = {"prompt": "SECRET PROMPT", "messages": []}
     if owner is not None:
         event["senderIsOwner"] = owner
-    return {"call": ["before_agent_run", event, {**CTX, "trigger": trigger}]}
+    return {"call": ["before_agent_run", event, {**CTX, "sessionKey": key, "trigger": trigger}]}
 
 
 def spool_lines(tmp_path: Path) -> list[dict[str, Any]]:
@@ -132,6 +137,30 @@ def test_the_owners_message_resumes(tmp_path: Path) -> None:
     assert [(r["type"], r["event"]) for r in spool_lines(tmp_path)] == [
         ("resumed", "before_agent_run")
     ]
+
+
+def test_only_the_operators_message_in_the_stopped_lane_lifts(tmp_path: Path) -> None:
+    """Seen live: OpenClaw's skill-workshop review runs with trigger "user" and senderIsOwner
+    under the main session's id."""
+    path = marker(tmp_path, key="agent:main:main")
+    review = "agent:main:internal-session-effects:skill-workshop-review_0ed69936"
+    result = run(
+        tmp_path,
+        [
+            agent_run("user", owner=True, key=review),
+            agent_run("user", owner=True, key="agent:main:other"),
+            agent_run("user", owner=True, key="agent:main:main"),
+        ],
+    )
+    internal, other, operator = result["out"]
+    assert internal["outcome"] == "block" and other["outcome"] == "block"
+    assert operator == {"outcome": "pass"} and not path.exists()
+
+
+def test_a_reduced_key_cannot_be_compared(tmp_path: Path) -> None:
+    path = marker(tmp_path, key="agent:main:whatsapp:direct:~3f2a9c01d4e5")
+    result = run(tmp_path, [agent_run("user", owner=True, key="agent:main:whatsapp:direct:+1555")])
+    assert result["out"] == [{"outcome": "pass"}] and not path.exists()
 
 
 def test_session_ends(tmp_path: Path) -> None:
@@ -223,7 +252,13 @@ def test_reasons_are_cleaned(tmp_path: Path) -> None:
 def test_every_line_carries_the_plugin_version(tmp_path: Path) -> None:
     marker(tmp_path)
     run(tmp_path, [tool()])
-    assert [r["plugin"] for r in spool_lines(tmp_path)] == [2]
+    assert [(r["plugin"], r["gate"]) for r in spool_lines(tmp_path)] == [(2, False)]
+
+
+def test_lines_say_when_runs_are_gated(tmp_path: Path) -> None:
+    marker(tmp_path)
+    run(tmp_path, [agent_run("heartbeat"), tool()])
+    assert {r["gate"] for r in spool_lines(tmp_path)} == {True}
 
 
 def test_a_shorter_ttl(tmp_path: Path) -> None:

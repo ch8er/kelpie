@@ -46,6 +46,7 @@ const MAX_MARKER = 4096; // bytes; a larger marker file is ignored
 const MAX_REASON = 500;
 const FUTURE_SKEW = 300; // seconds; a marker dated further ahead is ignored
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const INTERNAL = /(^|:)internal-session-effects(:|$)/; // OpenClaw's own background lanes
 // The plugin's own version, in every spool line ("plugin"): 2 enforces stop markers. It is the
 // version of this file as the Gateway loaded it, so a copied but not yet reloaded plugin shows.
 const PLUGIN_VERSION = 2;
@@ -152,6 +153,11 @@ function reduceCtx(ctx) {
   };
 }
 
+// What the plugin knows about itself, sent with every event: "gate" once before_agent_run has
+// run in this Gateway (it has conversation access, so it can refuse runs and see the
+// operator's message).
+const state = { gate: false };
+
 export function createForwarder(settings, logger, run = spawn) {
   const env = {};
   for (const key of ENV_KEEP) if (process.env[key] !== undefined) env[key] = process.env[key];
@@ -243,6 +249,7 @@ export function createForwarder(settings, logger, run = spawn) {
         hook,
         at: Date.now() / 1000,
         plugin: PLUGIN_VERSION,
+        gate: state.gate,
         event: reduce(event || {}),
         ctx: reduceCtx(ctx),
       };
@@ -269,7 +276,8 @@ export function createForwarder(settings, logger, run = spawn) {
 
 function cleanReason(reason) {
   const clean = reason.replace(UNSAFE, " ").trim() || "no reason given";
-  return clean.length <= MAX_REASON ? clean : `${clean.slice(0, MAX_REASON - 3)}...`;
+  const chars = Array.from(clean); // code points, as Python counts them: no split pairs
+  return chars.length <= MAX_REASON ? clean : `${chars.slice(0, MAX_REASON - 3).join("")}...`;
 }
 
 // Stop markers: read without following a symlink or blocking on a FIFO, bounded, and only
@@ -286,6 +294,16 @@ export function createStops(settings, logger) {
 
   function active(sessionId, now = Date.now() / 1000) {
     return read(sessionId, now)?.reason;
+  }
+
+  // Whether a run under sessionKey may lift the stop of sessionId: not one of OpenClaw's own
+  // background lanes (seen live: a skill-workshop review reports trigger "user" and
+  // senderIsOwner under the main session's id), and under the key Kelpie stopped when the
+  // marker names one (a key Kelpie only has reduced, "~", cannot be compared).
+  function liftable(sessionId, sessionKey) {
+    if (typeof sessionKey !== "string" || INTERNAL.test(sessionKey)) return false;
+    const key = read(sessionId)?.key;
+    return key === undefined || key.includes("~") || key === sessionKey;
   }
 
   // The marker while it holds: { at, reason }.
@@ -307,7 +325,8 @@ export function createStops(settings, logger) {
       const at = data?.at;
       if (typeof at !== "number" || typeof data.reason !== "string") return undefined;
       if (!(now - ttl <= at && at <= now + FUTURE_SKEW)) return undefined;
-      return { at, reason: cleanReason(data.reason) };
+      const key = typeof data.key === "string" && data.key.length <= 256 ? data.key : undefined;
+      return { at, reason: cleanReason(data.reason), key };
     } catch {
       once(file, `kelpie: unreadable stop marker ${file}`); // never its content
       return undefined;
@@ -362,7 +381,7 @@ export function createStops(settings, logger) {
     }
   }
 
-  return { active, lift, carry, path };
+  return { active, liftable, lift, carry, path };
 }
 
 export default {
@@ -405,11 +424,12 @@ export default {
     });
     api.on("before_agent_run", (event, ctx) => {
       try {
+        state.gate = true;
         const reason = stops.active(ctx?.sessionId);
         if (reason === undefined) return { outcome: "pass" };
         // The operator (OpenClaw's senderIsOwner: an admin-scoped client such as the CLI or
         // Control UI) resumes the session: the message goes through.
-        if (ctx?.trigger === "user" && event?.senderIsOwner === true) {
+        if (ctx?.trigger === "user" && event?.senderIsOwner === true && stops.liftable(ctx.sessionId, ctx.sessionKey)) {
           if (stops.lift(ctx.sessionId)) forward("kelpie_resumed", { event: "before_agent_run" }, ctx);
           return { outcome: "pass" };
         }

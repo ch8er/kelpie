@@ -36,8 +36,10 @@ enabled = true                             # default when the section exists
 ```
 
 Unknown keys stop Kelpie at startup. `kelpie status` shows the Workboard path and how old the
-newest spool line is. Kelpie only reads these files; it must run on the Gateway host, as a user
-that can read them.
+newest spool line is. Kelpie reads the spool and the Workboard, writes stop markers and runs
+the `openclaw` CLI to abort runs; it must run on the Gateway host, as the Gateway's user. Set
+`cli` to an absolute path: the CLI gets Kelpie's `OPENCLAW_*` variables, which can hold the
+Gateway token.
 
 ## Plugin
 
@@ -99,12 +101,17 @@ identical calls is still one streak.
 ### Spool format
 
 ```json
-{"type":"session_start","at":1792191660.1,"session_id":"1ce1fbe0-…","v":1,"session_key":"agent:main:main","agent":"main","run_id":null,"resumed_from":null}
-{"type":"tool","at":1792191669.08,"session_id":"1ce1fbe0-…","v":1,"session_key":"agent:main:main","agent":"main","run_id":"784417ea-…","tool":"read","tool_call_id":"call_1","args_hash":"a97158125c6af75c","command":null,"outcome":"error","duration_ms":41,"output_chars":null}
-{"type":"llm","at":1792191670.4,"session_id":"1ce1fbe0-…","v":1,"session_key":"agent:main:main","agent":"main","run_id":"784417ea-…","provider":"anthropic","model":"…","trigger":"heartbeat","input":4000,"output":40,"cacheRead":0,"cacheWrite":0}
-{"type":"run_end","at":1792191670.5,"session_id":"1ce1fbe0-…","v":1,"session_key":"agent:main:main","agent":"main","run_id":"784417ea-…","success":true,"duration_ms":994,"trigger":"heartbeat"}
-{"type":"session_end","at":1792195000.0,"session_id":"1ce1fbe0-…","v":1,"session_key":"agent:main:main","agent":"main","run_id":null,"reason":"reset","next_session_id":"…"}
+{"type":"session_start","at":1792191660.1,"session_id":"1ce1fbe0-…","v":2,"plugin":2,"gate":true,"session_key":"agent:main:main","agent":"main","run_id":null,"resumed_from":null}
+{"type":"tool","at":1792191669.08,"session_id":"1ce1fbe0-…","v":2,"plugin":2,"gate":true,"session_key":"agent:main:main","agent":"main","run_id":"784417ea-…","tool":"read","tool_call_id":"call_1","args_hash":"a97158125c6af75c","command":null,"outcome":"error","duration_ms":41,"output_chars":null}
+{"type":"llm","at":1792191670.4,"session_id":"1ce1fbe0-…","v":2,"plugin":2,"gate":true,"session_key":"agent:main:main","agent":"main","run_id":"784417ea-…","provider":"anthropic","model":"…","trigger":"heartbeat","input":4000,"output":40,"cacheRead":0,"cacheWrite":0}
+{"type":"run_end","at":1792191670.5,"session_id":"1ce1fbe0-…","v":2,"plugin":2,"gate":true,"session_key":"agent:main:main","agent":"main","run_id":"784417ea-…","success":true,"duration_ms":994,"trigger":"heartbeat"}
+{"type":"stopped","at":1792191671.0,"session_id":"1ce1fbe0-…","v":2,"plugin":2,"gate":true,"session_key":"agent:main:main","agent":"main","run_id":"784417ea-…","event":"before_tool_call"}
+{"type":"session_end","at":1792195000.0,"session_id":"1ce1fbe0-…","v":2,"plugin":2,"gate":true,"session_key":"agent:main:main","agent":"main","run_id":null,"reason":"reset","next_session_id":"…"}
 ```
+
+`v` is the hook's format, `plugin` the version of `index.js` the Gateway has loaded (2 enforces
+stops) and `gate` whether its `before_agent_run` has run (conversation access). `stopped` lines
+record a refusal (`event`: the hook that refused), `resumed` lines a lifted stop.
 
 ### Privacy
 
@@ -155,10 +162,13 @@ message starts another. So a stop has two parts:
    the run is still aborted, then the stop fails and a human is told.
 
 "The operator" is what OpenClaw calls the owner (`senderIsOwner`): a client with admin scope,
-such as the `openclaw` CLI or the Control UI, not a chat peer. The stop is lifted when the
-operator sends the session a message (`before_agent_run` with trigger `user` and
+such as the `openclaw` CLI or the Control UI, not a chat peer. The marker names the session
+key Kelpie stopped, and only a run under that key counts; OpenClaw's own background lanes
+(`...:internal-session-effects:...`) never do, though they report trigger `user` and
+`senderIsOwner`. The stop is lifted when the operator sends the session a message (`before_agent_run` with trigger `user` and
 `senderIsOwner`; that message goes through), when the session is reset, started anew (`/new`)
-or deleted, when someone deletes the marker file, or after the plugin's `stopTtl` (24 hours;
+or deleted (OpenClaw lets any sender authorized for `/new` and `/reset` do that, not only the
+operator), when someone deletes the marker file, or after the plugin's `stopTtl` (24 hours;
 set `[adapters.openclaw] stop_ttl` to the same). The stop belongs to the session id; when
 OpenClaw rolls the conversation over to a new id (idle or daily reset, compaction), the plugin
 copies the marker to the new id, so the stop follows. A Gateway restart does not lift it.
@@ -167,7 +177,7 @@ What the human told about the stop reads: "Stopped run <session>; its current ru
 every tool call and every run but the operator's message is refused until the operator
 messages it, the session is reset or the stop expires". Without conversation access it says
 instead that only tool calls are refused, scheduled runs still start and a message does not
-lift the stop (Kelpie knows access is granted when the spool holds run usage or run ends).
+lift the stop (the plugin marks its lines once its `before_agent_run` has run, which only happens with access).
 When the abort fails (no `openclaw` on Kelpie's `PATH`, the Gateway is down or refuses), the
 marker still holds and the message says the run could not be aborted: the run then goes on
 until the model gives up on the refused tools, spending a model call per refused tool call.
@@ -180,6 +190,10 @@ Verified on OpenClaw 2026.10.4 (local Gateway, a mock model that loops on one to
 - a heartbeat run (`openclaw system event --mode now`) on the stopped session was refused by
   `before_agent_run` before any model call;
 - a message sent with `openclaw agent` (an operator client) lifted the stop and went through;
+- OpenClaw's own `skill-workshop-review` background run, which starts after a long run with
+  trigger `user` and `senderIsOwner` and at times under the main session's id, was refused
+  instead of lifting the stop (the marker names the stopped key, and `internal-session-effects`
+  lanes never lift);
 - an internal `skill-workshop-review` run that OpenClaw started on its own looped on the same
   call under its own session: the key answered `no-active-run`, the run id aborted it.
 

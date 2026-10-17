@@ -53,6 +53,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import stat
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -111,6 +112,7 @@ MAX_FIELD = 128
 MAX_KEY = 256  # a session key as the hook reduced it (kept keys are at most 128)
 BOARD_GRACE = timedelta(minutes=5)  # the last board read stands in this long when a read fails
 MAX_COMMAND = 200  # the hook's redacted command prefix is at most this long
+MAX_DURATION_MS = 7 * 24 * 3600 * 1000  # a tool call's duration is cut to a week
 
 UNSUPPORTED = (
     "the OpenClaw adapter does not carry out this action; "
@@ -124,6 +126,7 @@ _EVENT_TYPES = frozenset(
 STOP_GRACE = timedelta(minutes=2)
 STOP_VERSION = 2  # the first plugin (index.js) version that enforces stop markers
 STOP_LINES = ("stopped", "resumed")
+_INTERNAL = re.compile(r"(^|:)internal-session-effects(:|$)")  # OpenClaw's own background lanes
 
 
 class OpenClawError(RuntimeError):
@@ -191,6 +194,7 @@ class SpoolEvent:
     reason: str | None = None
     version: int = 0  # the hook's spool format version (``v``)
     plugin: int = 0  # the version of the plugin (index.js) the Gateway had loaded
+    gate: bool = False  # the plugin's before_agent_run had run (conversation access)
 
 
 def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> SpoolEvent | None:
@@ -227,7 +231,8 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         if isinstance(rec.get("command"), str)
         else None,
         outcome=outcome if outcome in ("ok", "error") else None,
-        duration_ms=_count(rec.get("duration_ms")) or 0,
+        # Bounded: a forged huge duration must not overflow date arithmetic.
+        duration_ms=min(_count(rec.get("duration_ms")) or 0, MAX_DURATION_MS),
         output_chars=_count(rec.get("output_chars")),
         provider=_text(rec.get("provider")),
         model=_text(rec.get("model")),
@@ -240,6 +245,7 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         reason=_text(rec.get("reason")),
         version=version if isinstance(version, int) and not isinstance(version, bool) else 0,
         plugin=_count(rec.get("plugin")) or 0,
+        gate=rec.get("gate") is True,
     )
 
 
@@ -615,14 +621,17 @@ class OpenClawAdapter:
         if real[-1].type == "session_end":
             log.info("openclaw: session %s has ended; nothing to stop", session_id)
             return ActionResult.NOTHING_TO_DO
-        if own[-1].plugin < STOP_VERSION:
+        # The plugin is per Gateway: its newest line says what the Gateway runs now (a session
+        # idle since an upgrade still has older lines of its own).
+        if max(own[-1].plugin, events[-1].plugin) < STOP_VERSION:
             raise UnsupportedAction(
                 f"session {session_id} runs a Kelpie plugin without stop support (or one copied "
                 "but not yet loaded); copy the current plugin and restart the Gateway"
             )
-        # With conversation access (the plugin then records each run's usage and end), the
-        # plugin also refuses scheduled runs and lets the operator's message lift the stop.
-        access = any(e.type in ("llm", "run_end") for e in events)
+        # With conversation access the plugin also refuses scheduled runs and lets the
+        # operator's message lift the stop. It says so in its lines ("gate") once a run has
+        # started; the usage and end of runs are only recorded with access too.
+        access = any(e.type in ("llm", "run_end") or e.gate for e in events)
         if access:
             held = (
                 "every tool call and every run but the operator's message is refused until the "
@@ -636,7 +645,11 @@ class OpenClawAdapter:
             )
         problem: OSError | None = None
         try:
-            write_marker(self.stop_dir, session_id, reason, now.timestamp())
+            # The key the operator's message comes under: not one of OpenClaw's background
+            # lanes, which can share the session id.
+            keys = [e.session_key for e in reversed(own) if e.session_key]
+            key = next((k for k in keys if not _INTERNAL.search(k)), keys[0] if keys else None)
+            write_marker(self.stop_dir, session_id, reason, now.timestamp(), key)
             log.info("openclaw: stop requested for session %s", session_id)
         except OSError as exc:  # an agent can sabotage the marker: still end the run below
             problem = exc
