@@ -40,25 +40,56 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_SERIES = 10_000
 GB = 1e9
 
-# Filesystems that are not storage the agents can fill.
-_FS = 'fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs"'
+# Filesystems that are not storage the agents can fill, nor macOS's own APFS volumes (VM,
+# Preboot, Update...: the data volume is /System/Volumes/Data).
+_FS = (
+    'fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs",'
+    'mountpoint!~"/System/Volumes/(?:VM|Preboot|Update|xarts|iSCPreboot|Hardware|Recovery)(?:/.*)?"'
+)
+# The process script's file, written in the last 5 minutes (Prometheus's clock against the
+# host's: keep them in sync).
+_PROCESSES_FRESH = (
+    '(time() - node_textfile_mtime_seconds{file=~"(.*/)?kelpie_processes[.]prom"} < 300)'
+)
+# On macOS, read-only filesystems cannot fill: the sealed system volume (/), mounted
+# simulator runtimes and disk images (100 % full by design). Not on Linux, where a disk
+# remounted read-only after errors must stay in sight.
+_WRITABLE = (
+    f"unless (node_filesystem_readonly{{{_FS}}} == 1"
+    ' and on({host_label}) node_uname_info{sysname="Darwin"})'
+)
 
 # ``{host_label}`` is replaced by the configured host label, ``{window}`` and
 # ``{half_window}`` by ``growth_window`` and its half, in custom queries too. Every result
 # must keep the host label.
 DEFAULT_QUERIES: Mapping[str, str] = {
-    "disk_size": f"node_filesystem_size_bytes{{{_FS}}}",
-    "disk_avail": f"node_filesystem_avail_bytes{{{_FS}}}",
-    "memory_total": "node_memory_MemTotal_bytes",
-    "memory_available": "node_memory_MemAvailable_bytes",
+    "disk_size": f"node_filesystem_size_bytes{{{_FS}}} {_WRITABLE}",
+    "disk_avail": f"node_filesystem_avail_bytes{{{_FS}}} {_WRITABLE}",
+    # Linux, else macOS (no MemAvailable there: free + inactive is what can be had).
+    "memory_total": "node_memory_MemTotal_bytes or on({host_label}) node_memory_total_bytes",
+    "memory_available": (
+        "node_memory_MemAvailable_bytes"
+        " or on({host_label}) (node_memory_free_bytes + node_memory_inactive_bytes)"
+    ),
     "load1": "node_load1",
     "cores": 'count by ({host_label}) (node_cpu_seconds_total{mode="idle"})',
     "cpu_busy": (
         '100 * (1 - avg by ({host_label}) (rate(node_cpu_seconds_total{mode="idle"}[5m])))'
     ),
-    # Needs node_exporter's --collector.processes; without it there is no reading.
-    "processes": "node_processes_pids",
-    "processes_max": "node_processes_max_processes",
+    # Linux: node_exporter's --collector.processes. macOS (no such collector): the agent
+    # user's processes against kern.maxprocperuid, from scripts/kelpie-process-limit.sh.
+    # The script's numbers only while its file is fresh: a stopped script must not freeze
+    # the count.
+    "processes": (
+        "node_processes_pids or on({host_label}) max by ({host_label}) (kelpie_user_processes"
+        f" and on({{host_label}}) {_PROCESSES_FRESH})"
+    ),
+    "processes_max": (
+        "node_processes_max_processes or on({host_label}) min by ({host_label})"
+        f" (kelpie_user_processes_max and on({{host_label}}) {_PROCESSES_FRESH})"
+    ),
+    # The host's OS (node_exporter's uname collector): load is off on macOS by default.
+    "os": "node_uname_info",
     # How fast used space grows, in bytes per day, over ``growth_window`` (incident 19);
     # only for series that existed half a window ago, so a fresh Prometheus or host does not
     # forecast from a few minutes (one build's 5 GB in 3 minutes is no daily rate).
@@ -177,6 +208,8 @@ class PrometheusConfig:
     token: str | None = field(default=None, repr=False)
     queries: Mapping[str, str] = field(default_factory=dict)  # overrides of DEFAULT_QUERIES
     growth_window: timedelta = DEFAULT_GROWTH_WINDOW
+    # macOS counts threads waiting on I/O in its load average: 300-800 on a healthy Mac.
+    load_on_macos: bool = False
 
     def query_text(self, name: str) -> str:
         """The query, its placeholders filled in (in custom queries too): ``{host_label}``,
@@ -207,6 +240,8 @@ class PrometheusSource:
         self._next_at: datetime | None = None
         self._warned: set[str] = set()
         self._optional_warned: set[str] = set()
+        self._macs: set[str] = set()  # hosts seen running macOS: an OS does not change
+        self._os_known = False  # the os query answered at least once
 
     def read(self, now: datetime) -> tuple[Resource, ...]:
         if self._next_at is not None and now < self._next_at:
@@ -337,8 +372,21 @@ class PrometheusSource:
                     )
                 )
         load, cores = self._series("load1", now), self._series("cores", now)
+        if not self.config.load_on_macos:
+            # Remembered: one failed os query must not bring every Mac's load (300-800) back.
+            # Until one answer came, a failure drops every host's load for that fetch.
+            try:
+                os_names = self._series("os", now, True, "sysname")
+                self._os_known = True
+            except QueryError as exc:
+                os_names = {}
+                if not self._os_known:
+                    load = {}
+                    log.debug("os query failed (%s): no load readings until it answers", exc.cause)
+            self._macs |= {host for host, name in os_names if name == "Darwin"}
         for (host, _), point in sorted(load.items()):
-            if cores.get((host, ""), Point(0, now)).value > 0:
+            mac = host in self._macs and not self.config.load_on_macos
+            if not mac and cores.get((host, ""), Point(0, now)).value > 0:
                 readings.append(
                     Resource(
                         f"{host}:load1",

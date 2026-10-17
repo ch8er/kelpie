@@ -708,10 +708,16 @@ present.
 | `token_env` | `"KELPIE_PROMETHEUS_TOKEN"` | variable name | Bearer token, sent only to `url`. Written here, the variable must be set. |
 | `queries` | built-in | table | PromQL overrides, one per reading, see below. |
 | `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. |
+| `load_on_macos` | `false` | bool | macOS counts threads waiting on I/O in its load average (300 to 800 on a healthy farm Mac), so hosts whose `node_uname_info` says Darwin get no load reading unless this is true. Needs node_exporter's uname collector (on by default), as does leaving out macOS's read-only volumes; a host once seen as macOS stays so when that query fails, and until it first answers no host gets a load reading. |
 
 `[resources.prometheus.queries]` keys: `disk_size`, `disk_avail`, `memory_total`,
-`memory_available`, `load1`, `cores`, `cpu_busy`, `processes`, `processes_max`,
-`disk_growth`, `path_bytes`, `path_growth`, `path_written`. Each result must keep the
+`memory_available`, `load1`, `cores`, `cpu_busy`, `processes`, `processes_max`, `os`,
+`disk_growth`, `path_bytes`, `path_growth`, `path_written`. The defaults read Linux and macOS
+alike: memory is `MemAvailable`, else free + inactive (macOS); processes are node_exporter's
+`--collector.processes` (Linux), else the agent user's processes against
+`kern.maxprocperuid` (or a lower process ulimit) from `scripts/kelpie-process-limit.sh` (macOS), while its file is under 5 minutes old; disks leave out
+read-only filesystems on macOS (its sealed `/`, simulator runtimes, disk images; on Linux a disk remounted read-only stays in sight) and the APFS
+system volumes, so a Mac shows its data volume, `/System/Volumes/Data`. Each result must keep the
 `host_label` label (and `mountpoint` for disk, `path` for directories, whose `mountpoint`
 names the filesystem they are on). `path_bytes` and `path_growth` read `kelpie_path_bytes`
 from `scripts/kelpie-path-sizes.sh` (install.md, Host resources); `path_written` is when

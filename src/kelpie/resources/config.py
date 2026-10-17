@@ -29,8 +29,11 @@ MAX_TIMEOUT = timedelta(seconds=60)
 MIN_INTERVAL = timedelta(seconds=5)
 SECTIONS = frozenset({"prometheus"})
 PROMETHEUS_KEYS = frozenset(
-    {"url", "hosts", "host_label", "timeout", "interval", "token_env", "queries", "growth_window"}
-)
+    {
+        "url", "hosts", "host_label", "timeout", "interval", "token_env", "queries",
+        "growth_window", "load_on_macos",
+    }
+)  # fmt: skip
 _LABEL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -50,6 +53,7 @@ class PrometheusSettings:
     token_env_explicit: bool = False  # set in the config: the variable must then be set
     queries: Mapping[str, str] = field(default_factory=dict)
     growth_window: timedelta = DEFAULT_GROWTH_WINDOW  # disk and directory growth rates
+    load_on_macos: bool = False  # macOS load counts waiting threads: off by default
 
     @property
     def display_url(self) -> str:
@@ -95,6 +99,7 @@ class PrometheusSettings:
             token=self.token(environ),
             queries=dict(self.queries),
             growth_window=self.growth_window,
+            load_on_macos=self.load_on_macos,
         )
         return PrometheusSource(config, observer)
 
@@ -198,6 +203,9 @@ def _load_prometheus(section: Any) -> PrometheusSettings:
     growth_window = _duration(section, "growth_window", DEFAULT_GROWTH_WINDOW)
     if not timedelta(minutes=30) <= growth_window <= timedelta(days=7):
         raise ValueError("[resources.prometheus] growth_window must be 30m to 7d")
+    load_on_macos = section.get("load_on_macos", False)
+    if not isinstance(load_on_macos, bool):
+        raise ValueError("[resources.prometheus] load_on_macos must be true or false")
     raw_queries = section.get("queries", {})
     if not isinstance(raw_queries, Mapping):
         raise ValueError("[resources.prometheus.queries] must be a table")
@@ -224,4 +232,5 @@ def _load_prometheus(section: Any) -> PrometheusSettings:
         token_env_explicit="token_env" in section,
         queries=queries,
         growth_window=growth_window,
+        load_on_macos=load_on_macos,
     )

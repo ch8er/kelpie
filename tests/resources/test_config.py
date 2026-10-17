@@ -163,3 +163,24 @@ def test_growth_window() -> None:
     for bad in ("10m", "8d"):
         with pytest.raises(ValueError, match="growth_window must be 30m to 7d"):
             load_resources(section(growth_window=bad))
+
+
+def test_load_on_macos() -> None:
+    assert prometheus().load_on_macos is False
+    assert prometheus(load_on_macos=True).build().config.load_on_macos is True
+    with pytest.raises(ValueError, match="load_on_macos must be true or false"):
+        load_resources(section(load_on_macos="yes"))
+
+
+def test_the_example_lists_the_default_queries() -> None:
+    """kelpie.example.toml shows each default query as the code has it."""
+    import tomllib
+    from pathlib import Path
+
+    from kelpie.resources.prometheus import DEFAULT_QUERIES
+
+    text = (Path(__file__).parents[2] / "kelpie.example.toml").read_text()
+    block = text.split("# [resources.prometheus.queries]\n", 1)[1].split("\n# (", 1)[0]
+    lines = [line[2:].split("   #")[0] for line in block.splitlines()]
+    shown = tomllib.loads("\n".join(lines))
+    assert shown == {k: v.replace("{host_label}", "instance") for k, v in DEFAULT_QUERIES.items()}

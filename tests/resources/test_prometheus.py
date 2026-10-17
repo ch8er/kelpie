@@ -551,3 +551,72 @@ def test_the_metrics_keep_the_source_up_on_an_optional_failure() -> None:
     text = metrics.render()
     assert "kelpie_resource_source_up 1" in text
     assert 'cause="disk_growth_query_failed"} 1' in text
+
+
+# --- macOS hosts (incident 19) -------------------------------------------------------------
+
+
+def test_macos_load_is_off_by_default_and_its_memory_and_volumes_are_read() -> None:
+    with fake_prometheus() as prom:
+        cfg = config(prom)
+        load_farm(prom, cfg)
+        prom.responses[text(cfg, "os")] = vector(
+            ({**A, "sysname": "Darwin"}, "1"), ({**B, "sysname": "Linux"}, "1")
+        )
+        readings = by_name(PrometheusSource(cfg).read(NOW))
+        on = config(prom, load_on_macos=True)
+        prom.responses[text(on, "os")] = prom.responses[text(cfg, "os")]
+        loaded = by_name(PrometheusSource(on).read(NOW))
+    assert "host-a:load1" not in readings and "host-b:load1" in readings
+    assert "host-a:memory" in readings  # load alone is off
+    assert "host-a:load1" in loaded
+    # No MemAvailable on macOS: free + inactive; APFS system volumes and read-only
+    # filesystems (the sealed /, simulator runtimes, disk images) are no disks.
+    assert "node_memory_free_bytes + node_memory_inactive_bytes" in text(cfg, "memory_available")
+    assert "or on(instance) node_memory_total_bytes" in text(cfg, "memory_total")
+    for name in ("disk_size", "disk_avail"):
+        assert "unless (node_filesystem_readonly" in text(cfg, name)
+        assert 'and on(instance) node_uname_info{sysname="Darwin"})' in text(cfg, name)
+        assert "/System/Volumes/(?:VM|Preboot|Update" in text(cfg, name)
+    # Processes: node_exporter's collector on Linux, else the user's against its limit.
+    assert "or on(instance) max by (instance) (kelpie_user_processes and" in text(cfg, "processes")
+    assert "kelpie_user_processes_max" in text(cfg, "processes_max")
+
+
+def test_without_the_uname_collector_load_stays_on() -> None:
+    with fake_prometheus() as prom:
+        cfg = config(prom)
+        load_farm(prom, cfg)
+        prom.responses[text(cfg, "os")] = vector()  # no uname collector: no series
+        readings = by_name(PrometheusSource(cfg).read(NOW))
+    assert "host-a:load1" in readings
+
+
+def test_a_mac_stays_a_mac_when_the_os_query_fails() -> None:
+    with fake_prometheus() as prom:
+        cfg = config(prom, interval=timedelta(seconds=0))
+        load_farm(prom, cfg)
+        prom.responses[text(cfg, "os")] = vector(({**A, "sysname": "Darwin"}, "1"))
+        source = PrometheusSource(cfg)
+        assert "host-a:load1" not in by_name(source.read(NOW))
+        prom.responses[text(cfg, "os")] = {"status": "error", "errorType": "timeout"}
+        assert "host-a:load1" not in by_name(source.read(NOW + timedelta(minutes=1)))
+
+
+def test_the_scripts_process_count_needs_a_fresh_file() -> None:
+    cfg = PrometheusConfig(url="http://127.0.0.1:9", hosts=HOSTS)
+    for name in ("processes", "processes_max"):
+        assert "node_textfile_mtime_seconds" in text(cfg, name) and "< 300" in text(cfg, name)
+
+
+def test_no_load_readings_until_the_os_query_first_answers() -> None:
+    with fake_prometheus() as prom:
+        cfg = config(prom, interval=timedelta(seconds=0))
+        load_farm(prom, cfg)
+        prom.responses[text(cfg, "os")] = {"status": "error", "errorType": "timeout"}
+        source = PrometheusSource(cfg)
+        first = by_name(source.read(NOW))
+        assert "host-a:load1" not in first and "host-b:load1" not in first
+        assert "host-a:memory" in first  # only load waits
+        prom.responses[text(cfg, "os")] = vector(({**B, "sysname": "Linux"}, "1"))
+        assert "host-b:load1" in by_name(source.read(NOW + timedelta(minutes=1)))
