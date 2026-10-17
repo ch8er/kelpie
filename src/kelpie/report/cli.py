@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from kelpie.app import (
     Settings,
@@ -20,8 +21,9 @@ from kelpie.app import (
 from kelpie.core.budgets import BudgetMode
 from kelpie.core.config import Mode
 from kelpie.core.model import Snapshot
+from kelpie.core.serde import parse_duration
 from kelpie.metrics import Metrics
-from kelpie.report.daily import day_bounds
+from kelpie.report.daily import DEFAULT_PREWORK_AFTER, day_bounds
 from kelpie.report.fixes import MANUAL, FixEvent, FixStore
 from kelpie.report.run import ReportSources, Sender, default_day, generate, send, write
 from kelpie.report.schedule import ReportScheduler, RunLog
@@ -51,7 +53,22 @@ def sources(settings: Settings) -> ReportSources:
             for b in settings.block_conditions
             if "block" in b.applies_to
         ),
+        prework_after=_prework_after(engine.rules.get("orphan_status", {})),
     )
+
+
+def _prework_after(orphan_status: Mapping[str, Any]) -> timedelta | None:
+    """Rule 3's ``prework_after`` (``false``: off); invalid values are the rule's to refuse
+    at startup, so the default stands in."""
+    raw = orphan_status.get("prework_after")
+    if raw is False:
+        return None
+    if raw is None:
+        return DEFAULT_PREWORK_AFTER
+    try:
+        return parse_duration(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_PREWORK_AFTER
 
 
 def report_settings(settings: Settings, day: date, now: datetime) -> Settings:

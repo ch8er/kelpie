@@ -20,6 +20,7 @@ from kelpie.core.config import Mode
 from kelpie.core.model import Snapshot
 from kelpie.report.config import ReportSettings
 from kelpie.report.daily import (
+    DEFAULT_PREWORK_AFTER,
     DailyReport,
     ReportInputs,
     build_report,
@@ -52,6 +53,7 @@ class ReportSources:
     modes: Mapping[str, Mode]
     hold_labels: tuple[str, ...] = ()  # rule 6's hold labels (bottlenecks)
     block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]], matched offline
+    prework_after: timedelta | None = DEFAULT_PREWORK_AFTER  # rule 3's
 
 
 def default_day(now: datetime, settings: ReportSettings) -> date:
@@ -107,6 +109,8 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         conditions=board.conditions,
         hold_labels=sources.hold_labels,
         block_kinds=sources.block_kinds,
+        dependencies=board.dependencies,
+        prework_after=sources.prework_after,
     )
 
 
