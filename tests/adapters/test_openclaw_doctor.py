@@ -157,7 +157,7 @@ def test_configured_plugin_lists_and_copies(state: Path, spool: Spool) -> None:
     assert check[0] == "FAIL" and "not this Kelpie's copy" in check[2]
     shutil.rmtree(plugin)
     check = oc_doctor.check_configured(adapter(state, spool))
-    assert "no plugins.load.paths entry" in check[2]
+    assert "no absolute plugins.load.paths entry" in check[2]
 
 
 def test_configured_unreadable_configs(state: Path, spool: Spool) -> None:
@@ -244,3 +244,72 @@ def test_doctor_lists_openclaw_only_when_configured(
     checks = {c.name: c for c in run_checks(config, prometheus="http://127.0.0.1:9")}
     assert checks[oc_doctor.WORKBOARD].status == "SKIP"
     assert os.environ["KELPIE_DB"].endswith("kelpie.db")
+
+
+# --- hostile or unreadable paths: a FAIL or SKIP, never a traceback ------------------------
+
+
+def test_hostile_load_paths_and_settings(state: Path, spool: Spool) -> None:
+    plugin = installed(state, spool)
+    path = state / "openclaw.json"
+    config = json.loads(path.read_text())
+    config["plugins"]["load"]["paths"] = [
+        "~nosuchuser-kelpie/x",
+        "relative/dir",
+        "/" + "x" * 300 + "/y",
+        "/tmp/a\x00b",
+        *[str(plugin)] * 100,
+    ]
+    config["plugins"]["entries"]["kelpie"]["config"]["stopDir"] = "~nosuchuser-kelpie/s"
+    path.write_text(json.dumps(config))
+    check = oc_doctor.check_configured(adapter(state, spool))
+    assert check[0] == "FAIL" and "stopDir is not Kelpie's" in check[2]
+    assert "is not this Kelpie's copy" not in check[2]  # the real entry was still found
+
+
+def test_control_characters_in_shown_paths(state: Path, spool: Spool, tmp_path: Path) -> None:
+    odd = tmp_path / "evil\x1b[2Jdir"
+    shutil.copytree(oc_doctor.PLUGIN_DIR, odd, ignore=shutil.ignore_patterns("__pycache__"))
+    installed(state, spool)
+    path = state / "openclaw.json"
+    config = json.loads(path.read_text())
+    config["plugins"]["load"]["paths"] = [str(odd)]
+    path.write_text(json.dumps(config))
+    check = oc_doctor.check_configured(adapter(state, spool))
+    assert check[0] == "PASS" and "\x1b" not in check[2] and "evil?[2Jdir" in check[2]
+
+
+def test_unreadable_paths_fail_instead_of_crashing(
+    state: Path, spool: Spool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kelpie running as another user than the Gateway: every probe of ~/.openclaw is EACCES."""
+    real_exists, real_is_symlink = Path.exists, Path.is_symlink
+
+    def denied(test):  # type: ignore[no-untyped-def]
+        def probe(self: Path, *a: Any, **kw: Any) -> bool:
+            if self.is_relative_to(state) and self != state:
+                raise PermissionError(13, "Permission denied")
+            return test(self, *a, **kw)
+
+        return probe
+
+    board = state / "plugins" / "workboard" / "workboard.sqlite"
+    Workboard(board).card("c1", "running", NOW)
+    spool.tool("s1", NOW)
+    monkeypatch.setattr(Path, "exists", denied(real_exists))
+    monkeypatch.setattr(Path, "is_symlink", denied(real_is_symlink))
+    checks = by_name(oc_doctor.run(adapter(state, spool, cli=None), NOW))
+    for name in (oc_doctor.WORKBOARD, oc_doctor.HOOKS, oc_doctor.STOP):
+        status, detail, fix = checks[name]
+        assert status == "FAIL" and "EACCES" in detail and "Gateway's user" in fix
+
+
+def test_an_unexpected_error_is_a_fail(
+    state: Path, spool: Spool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(adapter: OpenClawAdapter) -> Any:
+        raise RuntimeError("secret content")
+
+    monkeypatch.setattr(oc_doctor, "check_configured", boom)
+    status, detail, _ = by_name(oc_doctor.run(adapter(state, spool), NOW))[oc_doctor.CONFIGURED]
+    assert status == "FAIL" and "RuntimeError" in detail and "secret" not in detail

@@ -180,12 +180,13 @@ it Kelpie watches sessions, which is enough to stop runaway loops):
 
 ```bash
 pip install kelpie-sre
-mkdir -p -m 700 ~/.openclaw/kelpie
-cp -r "$(python -c 'import kelpie.adapters.openclaw.plugin as m, os; print(os.path.dirname(m.__file__))')" \
-   ~/.openclaw/kelpie/plugin
+mkdir -p ~/.openclaw/kelpie/plugin && chmod 700 ~/.openclaw/kelpie
+(cd "$(python -c 'import kelpie.adapters.openclaw.plugin as m, os; print(os.path.dirname(m.__file__))')" &&
+  install -m 0644 index.js kelpie_hook.py openclaw.plugin.json package.json ~/.openclaw/kelpie/plugin/)
 openclaw plugins install --link ~/.openclaw/kelpie/plugin --force --accept-capabilities
 openclaw plugins enable kelpie
 openclaw config set plugins.entries.kelpie.hooks.allowConversationAccess true
+openclaw config set plugins.entries.kelpie.config.python "$(command -v python3)"
 openclaw gateway restart
 ```
 
@@ -193,6 +194,7 @@ openclaw gateway restart
 # kelpie.toml
 [adapters.openclaw]
 state_dir = "~/.openclaw"
+cli = "/usr/local/bin/openclaw"   # the output of `command -v openclaw`, absolute
 ```
 
 ```bash

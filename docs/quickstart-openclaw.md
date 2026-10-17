@@ -39,8 +39,9 @@ openclaw plugins enable workboard
 ## 3. The Kelpie plugin
 
 ```bash
-mkdir -p -m 700 ~/.openclaw/kelpie
-cp -r src/kelpie/adapters/openclaw/plugin ~/.openclaw/kelpie/plugin
+mkdir -p ~/.openclaw/kelpie/plugin && chmod 700 ~/.openclaw/kelpie
+(cd src/kelpie/adapters/openclaw/plugin &&
+  install -m 0644 index.js kelpie_hook.py openclaw.plugin.json package.json ~/.openclaw/kelpie/plugin/)
 openclaw plugins install --link ~/.openclaw/kelpie/plugin --force --accept-capabilities
 openclaw plugins enable kelpie
 openclaw config set plugins.entries.kelpie.hooks.allowConversationAccess true
@@ -49,12 +50,18 @@ openclaw gateway restart
 ```
 
 Read the four files first: native plugins run inside the Gateway. `--force` acknowledges a
-local source outside ClawHub. Conversation access lets the plugin see each run's token usage
-and refuse scheduled runs of a stopped session; the plugin drops prompts, messages and replies
-before anything leaves the Gateway (adapter README, "Privacy"). Without it, the Gateway logs
-`typed hook "llm_output" blocked ...` at start and stops hold only for tool calls.
+local source outside ClawHub; `--accept-capabilities` accepts that the plugin starts a process
+(`python -I kelpie_hook.py`, through `node:child_process`) for each event it records. Use an
+absolute `python` the Gateway's agents cannot write to. The directory mode keeps other users
+out, not the Gateway's agents: anything that can write as the Gateway's user can change the
+plugin, as it can change any of the Gateway's code. Conversation access lets the plugin see
+each run's token usage and refuse scheduled runs of a stopped session; the plugin drops
+prompts, messages and replies before anything leaves the Gateway (adapter README, "Privacy").
+Without it, the Gateway logs `typed hook "llm_output" blocked ...` at start and stops hold
+only for tool calls.
 
-After an upgrade of Kelpie, copy the plugin again and restart the Gateway.
+After an upgrade of Kelpie, run the `install` line again and restart the Gateway (`kelpie
+doctor` says when the loaded copy is not this Kelpie's).
 
 ## 4. Config
 
@@ -67,8 +74,12 @@ default_mode = "observe"  # no rule suggests or acts
 
 [adapters.openclaw]
 state_dir = "~/.openclaw"
-cli = "/usr/local/bin/openclaw"   # absolute: the CLI gets Kelpie's OPENCLAW_* variables
+cli = "/usr/local/bin/openclaw"   # the output of `command -v openclaw`
 ```
+
+`cli` gets Kelpie's `OPENCLAW_*` variables (the Gateway token among them), so give the
+absolute path of the executable, in a directory the Gateway's agents cannot write to (a
+user-owned npm prefix such as `~/.npm-global/bin` is one they can).
 
 The spool (`~/.openclaw/kelpie/spool.jsonl`), the Workboard database and the stop directory
 default to places under `~/.openclaw`; the plugin's own defaults match. If you change one,
@@ -96,9 +107,10 @@ What `kelpie doctor` checks for OpenClaw:
 - **plugin configured**: `openclaw.json` enables the plugin, loads it from a directory holding
   this Kelpie's copy (byte for byte), grants conversation access, is not denied or left out of
   `plugins.allow`, and points it at Kelpie's spool and stop directory. Only the `plugins`
-  section is looked at; nothing of the file reaches the output.
+  section is looked at, and only the plugin's load path is shown. Relative and `~user` load
+  paths are not checked.
 - **gateway**: `openclaw gateway call health` answers and lists `kelpie` among the loaded
-  plugins (so stops can abort runs).
+  plugins (so stops can abort runs). The answer's shape was checked against OpenClaw 2026.10.4.
 - **stop markers**: `stop_dir` is a plain directory Kelpie can write, or can be created.
 
 ## 6. Watch a loop (still observe)

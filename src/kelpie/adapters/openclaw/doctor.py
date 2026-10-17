@@ -11,7 +11,7 @@ from __future__ import annotations
 import errno
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ CheckTuple = tuple[str, str, str, str]
 FRESH = timedelta(hours=1)  # the newest spool line must be younger than this
 MAX_FILE = 1024 * 1024  # bytes read of the OpenClaw config and of the installed plugin files
 HEALTH_TIMEOUT = 20.0
+MAX_LOAD_PATHS = 32  # plugins.load.paths entries looked at
 PLUGIN_ID = "kelpie"
 PLUGIN_DIR = Path(kelpie_hook.__file__).parent  # this Kelpie's copy of the plugin
 PLUGIN_FILES = ("index.js", "kelpie_hook.py")
@@ -59,15 +60,42 @@ def _fail(name: str, detail: str, fix: str) -> CheckTuple:
     return ("FAIL", name, detail, fix)
 
 
+WRONG_USER = "run Kelpie as the Gateway's user"
+
+
+def _shown(value: object) -> str:
+    """A path for the terminal: names come from config an agent can edit, so control
+    characters are replaced."""
+    return "".join(c if c.isprintable() else "?" for c in str(value))
+
+
+def _errname(exc: BaseException) -> str:
+    if isinstance(exc, OSError) and exc.errno:
+        return errno.errorcode.get(exc.errno, type(exc).__name__)
+    return type(exc).__name__
+
+
+def _probe(test: Callable[[], bool]) -> bool | OSError:
+    """A pathlib test (``exists``, ``is_file``, ...): its answer, or the OSError that kept
+    it from answering (EACCES when Kelpie is not the Gateway's user, ENAMETOOLONG, ...)."""
+    try:
+        return test()
+    except OSError as exc:
+        return exc
+
+
 def check_workboard(adapter: OpenClawAdapter, now: datetime) -> tuple[CheckTuple, int | None]:
     """The check, and how many cards run (None when unknown)."""
     db = adapter.workboard_db
     if db is None:
         return _skip(WORKBOARD, "workboard = false: sessions only, no board tasks"), None
-    if not db.exists():
+    found = _probe(db.exists)
+    if isinstance(found, OSError):
+        return _fail(WORKBOARD, f"{_shown(db)} not accessible: {_errname(found)}", WRONG_USER), None
+    if not found:
         return _skip(
             WORKBOARD,
-            f"{db} not found: sessions only (openclaw plugins enable workboard for tasks)",
+            f"{_shown(db)} not found: sessions only (openclaw plugins enable workboard for tasks)",
         ), None
     try:
         board = adapter.board(now)
@@ -93,7 +121,10 @@ def check_hooks(adapter: OpenClawAdapter, now: datetime, running: int | None) ->
             return _skip(HOOKS, f"{detail}; no card is running, let an agent work and run again")
         return _fail(HOOKS, detail, fix)
 
-    if not spool.exists():
+    found = _probe(spool.exists)
+    if isinstance(found, OSError):
+        return _fail(HOOKS, f"{_shown(spool)} not accessible: {_errname(found)}", WRONG_USER)
+    if not found:
         return quiet(f"spool missing ({spool})")
     newest = adapter.last_spool_event(until=now + FUTURE_SKEW)
     if newest is None:
@@ -128,25 +159,40 @@ def _read(path: Path) -> bytes:
 
 
 def _why(path: Path, exc: Exception) -> str:
-    if path.is_symlink():
+    if _probe(path.is_symlink) is True:
         return "a symlink, not followed (agents can write next to it)"
     if isinstance(exc, OSError):
-        return errno.errorcode.get(exc.errno or 0, type(exc).__name__)
+        hint = f" ({WRONG_USER})" if exc.errno == errno.EACCES else ""
+        return _errname(exc) + hint
     return str(exc)
 
 
 def _plugin_dirs(load: Any) -> list[Path]:
+    """The absolute directories of ``plugins.load.paths`` (``~/`` expanded), each once, at
+    most :data:`MAX_LOAD_PATHS`. Relative and ``~user`` paths are left out: they would
+    resolve against Kelpie's directory or another user's home, not as OpenClaw reads them."""
     paths = load.get("paths") if isinstance(load, Mapping) else None
-    return [
-        Path(p).expanduser()
-        for p in (paths if isinstance(paths, list) else [])
-        if isinstance(p, str) and p.strip()
-    ]
+    dirs: list[Path] = []
+    for raw in paths if isinstance(paths, list) else []:
+        if not isinstance(raw, str) or "\0" in raw or not raw.strip():
+            continue
+        if raw == "~" or raw.startswith("~/"):
+            raw = str(Path.home()) + raw[1:]
+        path = Path(raw)
+        if path.is_absolute() and path not in dirs:
+            dirs.append(path)
+        if len(dirs) == MAX_LOAD_PATHS:
+            break
+    return dirs
 
 
-def _same_file(a: Path, b: Path) -> bool:
+def _holds_plugin(path: Path) -> bool:
+    return all(_probe((path / f).is_file) is True for f in PLUGIN_FILES)
+
+
+def _same_files(path: Path, ours: Mapping[str, bytes]) -> bool:
     try:
-        return _read(a) == _read(b)
+        return all(_read(path / f) == content for f, content in ours.items())
     except (OSError, ValueError):
         return False
 
@@ -159,13 +205,15 @@ def check_configured(adapter: OpenClawAdapter) -> CheckTuple:
     try:
         raw = _read(path)
     except FileNotFoundError:
-        return _skip(CONFIGURED, f"{path} not found; is state_dir the Gateway's?")
+        return _skip(CONFIGURED, f"{_shown(path)} not found; is state_dir the Gateway's?")
     except (OSError, ValueError) as exc:
-        return _skip(CONFIGURED, f"{path} not readable: {_why(path, exc)}")
+        return _skip(CONFIGURED, f"{_shown(path)} not readable: {_why(path, exc)}")
     try:
         config = json.loads(raw.decode("utf-8", "replace"))
     except (ValueError, RecursionError):
-        return _skip(CONFIGURED, f"{path} is not plain JSON (JSON5?); check {QUICKSTART} by hand")
+        return _skip(
+            CONFIGURED, f"{_shown(path)} is not plain JSON (JSON5?); check {QUICKSTART} by hand"
+        )
     plugins = config.get("plugins") if isinstance(config, Mapping) else None
     plugins = plugins if isinstance(plugins, Mapping) else {}
     entries = plugins.get("entries")
@@ -182,14 +230,14 @@ def check_configured(adapter: OpenClawAdapter) -> CheckTuple:
         problems.append("plugins.allow does not list kelpie")
     if entry.get("enabled") is not True:
         problems.append("the plugin is not enabled (openclaw plugins enable kelpie)")
-    found = [d for d in _plugin_dirs(plugins.get("load")) if (d / "index.js").is_file()]
-    found = [d for d in found if (d / "kelpie_hook.py").is_file()]
+    found = [d for d in _plugin_dirs(plugins.get("load")) if _holds_plugin(d)]
+    ours = {f: (PLUGIN_DIR / f).read_bytes() for f in PLUGIN_FILES}
     if not found:
-        problems.append("no plugins.load.paths entry holds the Kelpie plugin")
-    elif not any(all(_same_file(d / f, PLUGIN_DIR / f) for f in PLUGIN_FILES) for d in found):
+        problems.append("no absolute plugins.load.paths entry holds the Kelpie plugin")
+    elif not any(_same_files(d, ours) for d in found):
         problems.append(
-            f"the installed plugin ({found[0]}) is not this Kelpie's copy: copy it again and "
-            "restart the Gateway"
+            f"the installed plugin ({_shown(found[0])}) is not this Kelpie's copy: copy it "
+            "again and restart the Gateway"
         )
     hooks = entry.get("hooks")
     if not (isinstance(hooks, Mapping) and hooks.get("allowConversationAccess") is True):
@@ -206,11 +254,20 @@ def check_configured(adapter: OpenClawAdapter) -> CheckTuple:
         if ours is None:
             continue
         theirs = settings.get(key, default)
-        if not isinstance(theirs, str) or Path(theirs).expanduser() != ours:
-            problems.append(f"the plugin's {key} is not Kelpie's ({ours})")
+        if not isinstance(theirs, str) or _expanded(theirs) != ours:
+            problems.append(f"the plugin's {key} is not Kelpie's ({_shown(ours)})")
     if problems:
-        return _fail(CONFIGURED, "; ".join(problems) + f" ({path})", fix)
-    return _ok(CONFIGURED, f"enabled, this Kelpie's copy loaded from {found[0]} ({path})")
+        return _fail(CONFIGURED, "; ".join(problems) + f" ({_shown(path)})", fix)
+    return _ok(
+        CONFIGURED, f"enabled, this Kelpie's copy loaded from {_shown(found[0])} ({_shown(path)})"
+    )
+
+
+def _expanded(value: str) -> Path | None:
+    try:
+        return Path(value).expanduser()
+    except (RuntimeError, ValueError):  # ~user of no such user
+        return None
 
 
 def check_gateway(adapter: OpenClawAdapter) -> CheckTuple:
@@ -246,28 +303,46 @@ def check_stop_dir(adapter: OpenClawAdapter) -> CheckTuple:
         f"run Kelpie as the Gateway's user, or set stop_dir (and the plugin's stopDir) to a "
         f"directory both can use (now {path})"
     )
-    if path.is_symlink():
+    link, found = _probe(path.is_symlink), _probe(path.exists)
+    for answer in (link, found):
+        if isinstance(answer, OSError):
+            return _fail(STOP, f"{_shown(path)} not accessible: {_errname(answer)}", fix)
+    if link:
         return _fail(STOP, f"{path} is a symlink; markers are not written through one", fix)
-    if path.exists():
+    if found:
         if not path.is_dir():
             return _fail(STOP, f"{path} is not a directory", fix)
         if not os.access(path, os.W_OK | os.X_OK):
             return _fail(STOP, f"{path} is not writable by this user", fix)
         return _ok(STOP, f"{path} writable")
-    parent = next((p for p in path.parents if p.exists()), None)
+    parent = next((p for p in path.parents if _probe(p.exists) is True), None)
     if parent is None or not parent.is_dir() or not os.access(parent, os.W_OK | os.X_OK):
         return _fail(STOP, f"{path} does not exist and cannot be created here", fix)
     return _ok(STOP, f"{path} will be created on the first stop")
 
 
+def _guarded(name: str, check: Callable[[], CheckTuple]) -> CheckTuple:
+    """A check that cannot take ``kelpie doctor`` down: an unexpected error is a FAIL that
+    shows its type only (never a message, which could hold file content)."""
+    try:
+        return check()
+    except Exception as exc:  # the report must go on
+        return _fail(name, f"the check failed: {_errname(exc)}", f"{WRONG_USER}; {QUICKSTART}")
+
+
 def run(adapter: OpenClawAdapter, now: datetime) -> list[CheckTuple]:
-    board, running = check_workboard(adapter, now)
+    running: list[int | None] = [None]
+
+    def board() -> CheckTuple:
+        check, running[0] = check_workboard(adapter, now)
+        return check
+
     return [
-        board,
-        check_hooks(adapter, now, running),
-        check_configured(adapter),
-        check_gateway(adapter),
-        check_stop_dir(adapter),
+        _guarded(WORKBOARD, board),
+        _guarded(HOOKS, lambda: check_hooks(adapter, now, running[0])),
+        _guarded(CONFIGURED, lambda: check_configured(adapter)),
+        _guarded(GATEWAY, lambda: check_gateway(adapter)),
+        _guarded(STOP, lambda: check_stop_dir(adapter)),
     ]
 
 
