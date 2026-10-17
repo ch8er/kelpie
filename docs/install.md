@@ -123,6 +123,22 @@ echo '--storage.tsdb.retention.size=2GB' >> /opt/homebrew/etc/prometheus.args
 brew services start prometheus
 ```
 
+On a Mac, node_exporter has no processes collector, and the farm hit `kern.maxprocperuid`
+twice (every new process of the agents failed). Copy `scripts/kelpie-process-limit.sh` to
+`/usr/local/share/kelpie/` and load `deploy/textfile/com.kelpie.process-limit.plist` as the
+user the agents run as: it writes that user's processes and limit every minute, and rule 7
+warns as they near it. The agent user must be able to write the textfile directory. A
+LaunchAgent stops at logout, so on a headless farm install the plist as a LaunchDaemon
+(`/Library/LaunchDaemons`) with a `UserName` key. Kelpie ignores the count once its file is
+5 minutes old (by Prometheus's clock: keep the hosts' clocks in sync), so a stopped script
+does not freeze it. Give the plist the same `SoftResourceLimits` as the agents' own job, since
+the process ulimit it reports is its own. The load alert is off on macOS (`load_on_macos`): its load average
+counts waiting threads and runs at 300 to 800 on a healthy Mac; Kelpie knows a Mac from
+node_exporter's uname collector (on by default; leaving out the read-only volumes needs it
+too). Memory is free + inactive (there is no
+MemAvailable; this leaves out active file cache, so it reads a little high), and the disk is the data volume (`/System/Volumes/Data`); the
+APFS system volumes and read-only mounts such as simulator runtimes are left out.
+
 **Linux** (Debian/Ubuntu; the same flags with any packaging):
 
 ```sh
@@ -134,6 +150,9 @@ sudo mkdir -p /var/lib/node_exporter/textfile
 #   ARGS="--storage.tsdb.retention.size=2GB"
 sudo systemctl restart prometheus-node-exporter prometheus
 ```
+
+On Linux the process limit comes from node_exporter's `--collector.processes`
+(`node_processes_pids` against `node_processes_max_processes`).
 
 Add each agent host's node_exporter (`host:9100`) to Prometheus' scrape config, and the hosts
 to `[resources.prometheus] hosts`.

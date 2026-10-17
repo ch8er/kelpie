@@ -428,7 +428,7 @@ cleaned; Kelpie was blind because node_exporter and Prometheus were not installe
 - [x] Top-growing paths: a script shipped with Kelpie measures configured directories (e.g. simulator devices, `~/.hermes`, worktrees, caches) every N minutes and writes node_exporter textfile-collector metrics; the alert names the top 3 growing paths with their growth per day
 - [x] macOS and Linux setup documented (brew/systemd/launchd), including the textfile collector directory
 - [x] doctor: FAIL when no resource source is configured on a farm with rule 7 enabled ("disk is not watched")
-- [ ] macOS hosts (field setup on the farm): load average counts waiting threads and runs at 300–800 on a healthy Mac, so the load alert is off by default on darwin; instead, user processes vs `kern.maxprocperuid` (the farm hit the limit twice) via a shipped textfile script with a launchd plist; memory as free + inactive when MemAvailable is missing; disk only for the data volume, ignoring APFS system volumes. Linux gets the same process-limit metric from node_exporter's processes collector
+- [x] macOS hosts (field setup on the farm): load average counts waiting threads and runs at 300–800 on a healthy Mac, so the load alert is off by default on darwin; instead, user processes vs `kern.maxprocperuid` (the farm hit the limit twice) via a shipped textfile script with a launchd plist; memory as free + inactive when MemAvailable is missing; disk only for the data volume, ignoring APFS system volumes. Linux gets the same process-limit metric from node_exporter's processes collector
 - [x] Prometheus setup docs include a retention size cap (e.g. 2 GB) so monitoring cannot fill the disk it watches
 - [x] Fixtures: new `19-disk-growth-forecast.yaml` (synthetic paths)
 

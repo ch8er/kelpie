@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Processes of the agent user against kern.maxprocperuid, every minute, for Kelpie's rule 7
+  (macOS: node_exporter has no processes collector there). Run it as the user the agents run
+  as: copy it to that user's ~/Library/LaunchAgents/ (replace /opt/homebrew with /usr/local
+  on an Intel Mac) and load it with:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kelpie.process-limit.plist
+  The output directory is node_exporter's textfile directory (docs/install.md); the agent
+  user must be able to write there. A LaunchAgent stops when the user logs out of the GUI:
+  on a headless farm, install it as a LaunchDaemon (/Library/LaunchDaemons) with a UserName
+  key naming the agent user. Give it the same SoftResourceLimits (NumberOfProcesses) as the
+  agents' own job: the process ulimit it reports is its own.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kelpie.process-limit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/share/kelpie/kelpie-process-limit.sh</string>
+    <string>/opt/homebrew/var/node_exporter/textfile</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/tmp/kelpie-process-limit.log</string>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>
