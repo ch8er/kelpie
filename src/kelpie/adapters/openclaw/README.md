@@ -19,6 +19,10 @@ adapter turned the spool and a real Workboard database into sessions, spans and 
 stop ended looping runs (see [Stopping a session](#stopping-a-session)).
 Nothing here has run on a production farm or with a hosted model.
 
+First live run, step by step: [docs/quickstart-openclaw.md](../../../../docs/quickstart-openclaw.md).
+`kelpie doctor` checks the Workboard, the spool, the plugin's registration in `openclaw.json`,
+the Gateway (and that it loaded the plugin) and the stop directory.
+
 ## Config
 
 ```toml

@@ -561,7 +561,8 @@ stop markers the hook enforces. Absent: no Claude Code sessions. Details: the
 
 The OpenClaw platform adapter: the spool written by the Kelpie OpenClaw plugin, the cards of
 OpenClaw's Workboard plugin as tasks, and stop markers the plugin enforces. Absent: no OpenClaw sessions. Details: the
-[OpenClaw adapter README](../src/kelpie/adapters/openclaw/README.md).
+[OpenClaw adapter README](../src/kelpie/adapters/openclaw/README.md); first run:
+[quickstart](quickstart-openclaw.md).
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |

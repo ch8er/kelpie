@@ -45,6 +45,10 @@ print(json.dumps(answer, indent=2))
 
 @pytest.fixture
 def cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return fake_cli(tmp_path, monkeypatch)
+
+
+def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A fake ``openclaw`` on PATH; its calls go to ``<tmp>/cli.log``."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()

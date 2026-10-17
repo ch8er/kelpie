@@ -173,8 +173,38 @@ Claude Code's own OpenTelemetry traces: the [Claude Code quickstart](https://git
 With traces alone, the loop and budget breaker, budgets and the token sections of the
 daily report work for any platform; rules about the task board need a platform adapter. See [Traces](https://github.com/ch8er/kelpie/blob/main/docs/guide.md#traces-otlp).
 
-OpenClaw and other platforms: adapters are on the way, and
-[CONTRIBUTING](https://github.com/ch8er/kelpie/blob/main/CONTRIBUTING.md) explains how to add one.
+### OpenClaw
+
+On the Gateway host, as the Gateway's user (the Workboard plugin gives Kelpie tasks; without
+it Kelpie watches sessions, which is enough to stop runaway loops):
+
+```bash
+pip install kelpie-sre
+mkdir -p -m 700 ~/.openclaw/kelpie
+cp -r "$(python -c 'import kelpie.adapters.openclaw.plugin as m, os; print(os.path.dirname(m.__file__))')" \
+   ~/.openclaw/kelpie/plugin
+openclaw plugins install --link ~/.openclaw/kelpie/plugin --force --accept-capabilities
+openclaw plugins enable kelpie
+openclaw config set plugins.entries.kelpie.hooks.allowConversationAccess true
+openclaw gateway restart
+```
+
+```toml
+# kelpie.toml
+[adapters.openclaw]
+state_dir = "~/.openclaw"
+```
+
+```bash
+kelpie serve
+kelpie doctor
+```
+
+Stopping runaway loops (OpenClaw has no loop guard by default): the
+[OpenClaw quickstart](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-openclaw.md).
+
+Other platforms: [CONTRIBUTING](https://github.com/ch8er/kelpie/blob/main/CONTRIBUTING.md)
+explains how to add an adapter.
 
 ### Docker
 
@@ -237,7 +267,7 @@ The incidents behind each rule, the design and the daily report in full:
 - [Install and run](https://github.com/ch8er/kelpie/blob/main/docs/install.md): uv, Docker, `kelpie doctor`, ports, tokens, data
 - [Several machines](https://github.com/ch8er/kelpie/blob/main/docs/deploy.md): `kelpie agent` on each, a central `kelpie serve` (laptop + cloud VM, two VMs)
 - [Configuration reference](https://github.com/ch8er/kelpie/blob/main/docs/configuration.md): every section, rule and threshold
-- Quickstarts: [Hermes](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md), [Claude Code](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md);
+- Quickstarts: [Hermes](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md), [Claude Code](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md), [OpenClaw](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-openclaw.md);
   the [observe-to-act checklist](https://github.com/ch8er/kelpie/blob/main/docs/act-checklist.md)
 - [Privacy](https://github.com/ch8er/kelpie/blob/main/docs/privacy.md): what Kelpie stores from traces and hooks, and how to keep less
 - [Extending Kelpie](https://github.com/ch8er/kelpie/blob/main/docs/extending.md): rules, adapters, connectors, report sections
