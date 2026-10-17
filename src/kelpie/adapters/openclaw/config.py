@@ -15,10 +15,22 @@ from kelpie.adapters.openclaw.adapter import (
     OpenClawAdapter,
     workboard_path,
 )
+from kelpie.adapters.openclaw.stop import (
+    CLI_TIMEOUT,
+    DEFAULT_CLI,
+    DEFAULT_STOP_DIR,
+    DEFAULT_STOP_TTL,
+)
 from kelpie.core.serde import parse_duration
 
 SECTION = "[adapters.openclaw]"
-KEYS = frozenset({"enabled", "state_dir", "workboard", "spool", "lookback", "token_spans"})
+KEYS = frozenset(
+    {
+        *("enabled", "state_dir", "workboard", "spool", "lookback", "token_spans"),
+        *("stop_dir", "stop_ttl", "cli", "cli_timeout"),
+    }
+)
+MAX_CLI_TIMEOUT = timedelta(seconds=60)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +42,10 @@ class OpenClawSettings:
     lookback: timedelta = DEFAULT_LOOKBACK
     enabled: bool = True
     token_spans: bool = True
+    stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused
+    stop_ttl: timedelta = timedelta(seconds=DEFAULT_STOP_TTL)  # the plugin's stopTtl
+    cli: str | None = DEFAULT_CLI  # None: no abort of the run in flight
+    cli_timeout: timedelta = timedelta(seconds=CLI_TIMEOUT)
 
     def build(self) -> OpenClawAdapter:
         return OpenClawAdapter(
@@ -38,6 +54,10 @@ class OpenClawSettings:
             spool=self.spool,
             lookback=self.lookback,
             token_spans=self.token_spans,
+            stop_dir=self.stop_dir,
+            stop_ttl=self.stop_ttl,
+            cli=self.cli,
+            cli_timeout=self.cli_timeout.total_seconds(),
         )
 
 
@@ -66,6 +86,22 @@ def load_openclaw(section: Any) -> OpenClawSettings:
         raise ValueError(f"{SECTION} state_dir must be a non-empty string")
     board = _path_or_false(section, "workboard", str(workboard_path(Path(state_dir))))
     spool = _path_or_false(section, "spool", str(DEFAULT_SPOOL))
+    stop_dir = _path_or_false(section, "stop_dir", str(DEFAULT_STOP_DIR))
+    try:
+        stop_ttl = parse_duration(section.get("stop_ttl", f"{DEFAULT_STOP_TTL}s"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{SECTION} stop_ttl: {exc}") from exc
+    if stop_ttl <= timedelta(0):
+        raise ValueError(f"{SECTION} stop_ttl must be positive")
+    cli = section.get("cli", DEFAULT_CLI)
+    if cli is not False and (not isinstance(cli, str) or not cli.strip()):
+        raise ValueError(f"{SECTION} cli must be a non-empty string or false")
+    try:
+        cli_timeout = parse_duration(section.get("cli_timeout", f"{CLI_TIMEOUT:g}s"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"{SECTION} cli_timeout: {exc}") from exc
+    if not timedelta(0) < cli_timeout <= MAX_CLI_TIMEOUT:
+        raise ValueError(f"{SECTION} cli_timeout must be above 0s and at most 60s")
     try:
         lookback = parse_duration(section.get("lookback", DEFAULT_LOOKBACK))
     except (ValueError, TypeError, AttributeError) as exc:
@@ -79,4 +115,8 @@ def load_openclaw(section: Any) -> OpenClawSettings:
         lookback=lookback,
         enabled=enabled,
         token_spans=token_spans,
+        stop_dir=stop_dir,
+        stop_ttl=stop_ttl,
+        cli=None if cli is False else cli.strip(),
+        cli_timeout=cli_timeout,
     )

@@ -23,7 +23,9 @@ loop detection, off by default, counts per run)::
     ended_at        ``session_end`` (reset, new, idle, daily, deleted, shutdown...), unless
                     lines of the same session follow it
     last_heartbeat  latest line of any kind
-    exit_reason     the ``session_end`` reason; a failed last run adds "run failed"
+    exit_reason     the ``session_end`` reason; a failed last run adds "run failed"; "stopped
+                    by kelpie" once the plugin refused something for a stop, until the stop
+                    is lifted; "stop not enforced" (see :meth:`OpenClawAdapter.stop`)
     task_id         the Workboard card linked to the session's ``sessionKey`` (several cards
                     can name one key, e.g. the main chat session: a running card wins, then
                     any open card, then a finished one, the most recently updated first),
@@ -40,6 +42,9 @@ lines (plugin with conversation access), one LLM span per run with the run's tok
 them, as the GenAI conventions do). ``token_spans = False`` leaves the LLM spans out: OpenClaw's
 own OTLP export (``diagnostics-otel``) reports the same tokens without a session, and the
 daily report would count a run twice if both reached it.
+
+Actions: ``stop`` (``SupportsStop``, see :mod:`kelpie.adapters.openclaw.stop`). Task actions
+raise ``UnsupportedAction`` (the engine alerts a human).
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import stat
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -62,7 +68,19 @@ from kelpie.adapters.openclaw.plugin.kelpie_hook import (
     read_peer_key,
     safe_session_key,
 )
+from kelpie.adapters.openclaw.stop import (
+    CLI_TIMEOUT,
+    DEFAULT_CLI,
+    DEFAULT_STOP_DIR,
+    DEFAULT_STOP_TTL,
+    SESSION_ID,
+    OpenClawCliError,
+    abort_session,
+    read_marker,
+    write_marker,
+)
 from kelpie.adapters.openclaw.workboard import Card, WorkboardError
+from kelpie.core.actions import ActionResult
 from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
 from kelpie.traces.command import redact_command
@@ -94,13 +112,21 @@ MAX_FIELD = 128
 MAX_KEY = 256  # a session key as the hook reduced it (kept keys are at most 128)
 BOARD_GRACE = timedelta(minutes=5)  # the last board read stands in this long when a read fails
 MAX_COMMAND = 200  # the hook's redacted command prefix is at most this long
+MAX_DURATION_MS = 7 * 24 * 3600 * 1000  # a tool call's duration is cut to a week
 
 UNSUPPORTED = (
     "the OpenClaw adapter does not carry out this action; "
     "Kelpie alerts a human instead (run the rule in observe or suggest mode)"
 )
 
-_EVENT_TYPES = frozenset({"session_start", "tool", "llm", "run_end", "session_end"})
+_EVENT_TYPES = frozenset(
+    {"session_start", "tool", "llm", "run_end", "session_end", "stopped", "resumed"}
+)
+# A stop not enforced: the session still records tool calls this long after its marker.
+STOP_GRACE = timedelta(minutes=2)
+STOP_VERSION = 2  # the first plugin (index.js) version that enforces stop markers
+STOP_LINES = ("stopped", "resumed")
+_INTERNAL = re.compile(r"(^|:)internal-session-effects(:|$)")  # OpenClaw's own background lanes
 
 
 class OpenClawError(RuntimeError):
@@ -167,6 +193,8 @@ class SpoolEvent:
     success: bool | None = None
     reason: str | None = None
     version: int = 0  # the hook's spool format version (``v``)
+    plugin: int = 0  # the version of the plugin (index.js) the Gateway had loaded
+    gate: bool = False  # the plugin's before_agent_run had run (conversation access)
 
 
 def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> SpoolEvent | None:
@@ -203,7 +231,8 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         if isinstance(rec.get("command"), str)
         else None,
         outcome=outcome if outcome in ("ok", "error") else None,
-        duration_ms=_count(rec.get("duration_ms")) or 0,
+        # Bounded: a forged huge duration must not overflow date arithmetic.
+        duration_ms=min(_count(rec.get("duration_ms")) or 0, MAX_DURATION_MS),
         output_chars=_count(rec.get("output_chars")),
         provider=_text(rec.get("provider")),
         model=_text(rec.get("model")),
@@ -215,6 +244,8 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         success=success if isinstance(success, bool) else None,
         reason=_text(rec.get("reason")),
         version=version if isinstance(version, int) and not isinstance(version, bool) else 0,
+        plugin=_count(rec.get("plugin")) or 0,
+        gate=rec.get("gate") is True,
     )
 
 
@@ -226,6 +257,10 @@ class OpenClawAdapter:
     spool: Path | None = DEFAULT_SPOOL  # None: no hook data, no sessions
     lookback: timedelta = DEFAULT_LOOKBACK
     token_spans: bool = True  # LLM spans from ``llm`` lines (off when OTLP reports tokens)
+    stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused (alerts instead)
+    stop_ttl: timedelta = timedelta(seconds=DEFAULT_STOP_TTL)  # must match the plugin's stopTtl
+    cli: str | None = DEFAULT_CLI  # runs ``sessions.abort``; None: markers only
+    cli_timeout: float = CLI_TIMEOUT
     name: str = NAME
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
     _board_error: str | None = field(default=None, init=False, repr=False, compare=False)
@@ -235,6 +270,8 @@ class OpenClawAdapter:
 
     def __post_init__(self) -> None:
         self.state_dir = Path(self.state_dir).expanduser()
+        if self.stop_dir is not None:
+            self.stop_dir = Path(self.stop_dir).expanduser()
         if self.workboard_db is not None:
             self.workboard_db = Path(self.workboard_db).expanduser()
         if self.spool is not None:
@@ -341,7 +378,7 @@ class OpenClawAdapter:
         cutoff = now - self.lookback
         events = sorted(self._events(cutoff, now + FUTURE_SKEW), key=lambda e: e.at)
         board = self._board_or_last(now)
-        sessions = self._sessions(events, board.cards)
+        sessions = self._sessions(events, board.cards, now, self._markers(events))
         tasks = tuple(c.task for c in board.cards)
         owners = {t.owner_id for t in tasks if t.owner_id} | {s.owner_id for s in sessions}
         return Snapshot(
@@ -371,7 +408,25 @@ class OpenClawAdapter:
         self._last_board = (now, board)
         return board
 
-    def _sessions(self, events: Sequence[SpoolEvent], cards: Sequence[Card]) -> tuple[Session, ...]:
+    def _markers(self, events: Sequence[SpoolEvent]) -> dict[str, datetime]:
+        """Stop marker times of sessions in the spool (``{}`` without a stop directory). Each
+        session's marker is opened by name: agents can fill the directory, so it is never
+        listed."""
+        if self.stop_dir is None:
+            return {}
+        found: dict[str, datetime] = {}
+        for sid in {e.session_id for e in events}:
+            if (at := read_marker(self.stop_dir, sid)) is not None:
+                found[sid] = at
+        return found
+
+    def _sessions(
+        self,
+        events: Sequence[SpoolEvent],
+        cards: Sequence[Card],
+        now: datetime,
+        markers: dict[str, datetime] | None = None,
+    ) -> tuple[Session, ...]:
         secret = self._peer_key()
         by_key: dict[str, Task] = {}
         unassigned: list[tuple[str, Task]] = []  # worker keys the Gateway puts an agent in front of
@@ -388,7 +443,9 @@ class OpenClawAdapter:
             grouped.setdefault(e.session_id, []).append(e)
         sessions: list[Session] = []
         for sid, evs in grouped.items():
-            last = evs[-1]
+            # What the plugin did about a stop says nothing about whether the session lives.
+            real = [e for e in evs if e.type not in STOP_LINES] or evs
+            last = real[-1]
             ended = last.type == "session_end"
             key = next((e.session_key for e in reversed(evs) if e.session_key), None)
             agent = next((e.agent for e in reversed(evs) if e.agent), None)
@@ -396,6 +453,20 @@ class OpenClawAdapter:
             owner = card.owner_id if card is not None else None
             run_end = next((e for e in reversed(evs) if e.type == "run_end"), None)
             failure = "run failed" if run_end is not None and run_end.success is False else None
+            stop = next((e for e in reversed(evs) if e.type in STOP_LINES), None)
+            marked = (markers or {}).get(sid)
+            held = marked is not None and now - marked <= self.stop_ttl
+            if stop is not None and stop.type == "stopped" and held:
+                failure = " ".join(x for x in ("stopped by kelpie", failure) if x)
+            if marked is not None and not ended and _ignored_stop(evs, marked, self.stop_ttl):
+                self._warn(
+                    f"unenforced:{sid}",
+                    "openclaw: session %s still calls tools %s after its stop; is the Kelpie "
+                    "plugin current and enabled, and does its stopDir match stop_dir?",
+                    sid,
+                    STOP_GRACE,
+                )
+                failure = " ".join(x for x in ("stop not enforced", failure) if x)
             reason = last.reason if ended else None
             sessions.append(
                 Session(
@@ -524,6 +595,104 @@ class OpenClawAdapter:
     def events(self, since: datetime) -> Iterable[PlatformEvent]:
         return ()
 
+    def stop(self, session_id: str, reason: str) -> str | ActionResult:
+        """Stop a session: a stop marker the plugin enforces, then an abort of its run in
+        flight through the Gateway (see :mod:`kelpie.adapters.openclaw.stop`).
+
+        Idempotent: an ended session is left alone (``NOTHING_TO_DO``); a second stop rewrites
+        the marker. Returns what the stop means here, for the human told about it. Raises
+        :class:`UnsupportedAction` when stop is turned off, the session is not in the spool or
+        its plugin predates stop support; :class:`OpenClawError` for an id that is not an
+        OpenClaw session id or a marker that cannot be written.
+        """
+        if not SESSION_ID.fullmatch(session_id):
+            raise OpenClawError(f"not an OpenClaw session id: {session_id!r}")
+        if self.stop_dir is None:
+            raise UnsupportedAction("stop is turned off ([adapters.openclaw] stop_dir = false)")
+        now = datetime.now(UTC)
+        events = sorted(self._events(now - self.lookback, now + FUTURE_SKEW), key=lambda e: e.at)
+        own = [e for e in events if e.session_id == session_id]
+        if not own:
+            raise UnsupportedAction(
+                f"session {session_id} is not in the hooks spool, so the Kelpie plugin cannot "
+                "stop it"
+            )
+        real = [e for e in own if e.type not in STOP_LINES] or own
+        if real[-1].type == "session_end":
+            log.info("openclaw: session %s has ended; nothing to stop", session_id)
+            return ActionResult.NOTHING_TO_DO
+        # The plugin is per Gateway: its newest line says what the Gateway runs now (a session
+        # idle since an upgrade still has older lines of its own).
+        if max(own[-1].plugin, events[-1].plugin) < STOP_VERSION:
+            raise UnsupportedAction(
+                f"session {session_id} runs a Kelpie plugin without stop support (or one copied "
+                "but not yet loaded); copy the current plugin and restart the Gateway"
+            )
+        # With conversation access the plugin also refuses scheduled runs and lets the
+        # operator's message lift the stop. It says so in its lines ("gate") once a run has
+        # started; the usage and end of runs are only recorded with access too.
+        access = any(e.type in ("llm", "run_end") or e.gate for e in events)
+        if access:
+            held = (
+                "every tool call and every run but the operator's message is refused until the "
+                "operator messages it, the session is reset or the stop expires"
+            )
+        else:
+            held = (
+                "every tool call is refused until the session is reset or the stop expires (the "
+                "plugin has no conversation access: scheduled runs still start, and a message "
+                "does not lift the stop)"
+            )
+        problem: OSError | None = None
+        try:
+            # The key the operator's message comes under: not one of OpenClaw's background
+            # lanes, which can share the session id.
+            keys = [e.session_key for e in reversed(own) if e.session_key]
+            key = next((k for k in keys if not _INTERNAL.search(k)), keys[0] if keys else None)
+            write_marker(self.stop_dir, session_id, reason, now.timestamp(), key)
+            log.info("openclaw: stop requested for session %s", session_id)
+        except OSError as exc:  # an agent can sabotage the marker: still end the run below
+            problem = exc
+        aborted = self._abort(session_id, own, events)
+        if problem is not None:
+            raise OpenClawError(
+                f"cannot write the stop marker for {session_id}: {problem} ({aborted})",
+                f"the stop marker could not be written ({aborted})",
+            ) from problem
+        if aborted == "its current run was aborted":
+            return f"{aborted}; {held}"
+        return f"{held}; {aborted}" if aborted else held
+
+    def _abort(
+        self, session_id: str, own: Sequence[SpoolEvent], events: Sequence[SpoolEvent]
+    ) -> str:
+        """Abort the session's run in flight; what happened, in a few words ("" when nothing
+        was running). The session key is not used when a newer session has taken it (a
+        stopped id after ``/new`` or a rollover): only the session's own run id is."""
+        key = next((e.session_key for e in reversed(own) if e.session_key), None)
+        run = next((e.run_id for e in reversed(own) if e.run_id), None)
+        if key is not None and any(
+            e.session_key == key and e.session_id != session_id and e.at > own[-1].at
+            for e in events
+        ):
+            key = None
+        if self.cli is None or (key is None and run is None):
+            why = "cli = false" if self.cli is None else "no current session key or run"
+            return f"its current run was not aborted ({why})"
+        try:
+            status = abort_session(self.cli, key, run, timeout=self.cli_timeout)
+        except OpenClawCliError as exc:
+            log.warning("openclaw: cannot abort the run of session %s: %s", session_id, exc)
+            return f"its current run could not be aborted ({exc.public_reason})"
+        log.info(
+            "openclaw: sessions.abort for session %s (key %s, run %s): %s",
+            session_id,
+            key,
+            run,
+            status,
+        )
+        return "its current run was aborted" if status == "aborted" else ""
+
     def requeue(self, task_id: str, reason: str) -> None:
         raise UnsupportedAction(UNSUPPORTED)
 
@@ -570,6 +739,22 @@ def _rank(task: Task | None) -> int:
     if task.status is Status.IN_PROGRESS:
         return 2
     return 0 if task.status.is_terminal else 1
+
+
+def _ignored_stop(events: Sequence[SpoolEvent], marked: datetime, ttl: timedelta) -> bool:
+    """The session went on calling tools well after its stop marker, and the plugin never
+    refused anything: the stop is not enforced."""
+    after = [e for e in events if e.at >= marked]
+    if any(e.type in STOP_LINES for e in after):
+        return False
+    # A call counts by its start (a long call begun before the stop is not a miss), and only
+    # while the marker holds for the plugin (it ignores markers older than its TTL).
+    expires = marked + ttl
+    return any(
+        e.type == "tool"
+        and marked + STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) < expires
+        for e in after
+    )
 
 
 def workboard_path(state_dir: Path) -> Path:

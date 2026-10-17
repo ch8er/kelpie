@@ -19,6 +19,10 @@ seen in a live Gateway run):
   -> ``llm``: the run's token usage
 - ``agent_end`` (``success``, ``durationMs``; needs conversation access) -> ``run_end``
 - ``session_end`` (``reason``, ``nextSessionId``) -> ``session_end``
+- ``kelpie_stopped`` (the plugin refused a tool call or a run because of a stop marker; the
+  ``event`` it refused) -> ``stopped``
+- ``kelpie_resumed`` (the plugin lifted a stop: the owner sent a message, or the session was
+  reset; the ``event``) -> ``resumed``
 
 Every line carries the OpenClaw ``sessionId`` (``session_id``: Kelpie's session id, it changes
 on ``/new``, reset and daily rollover), ``sessionKey`` (``session_key``, e.g.
@@ -60,8 +64,8 @@ MAX_INPUT = 16 * 1024 * 1024  # a hook input larger than this is not read
 MAX_ID = 128  # ids and short enums are cut to this many characters
 FUTURE_SKEW = 300  # seconds; an ``at`` further ahead (or missing) is replaced by now
 _COMMAND_KEYS = ("command", "cmd")
-# Spool format version, in every line.
-HOOK_VERSION = 1
+# Spool format version, in every line. 2: the plugin enforces stop markers.
+HOOK_VERSION = 2
 
 EVENTS = {
     "session_start": "session_start",
@@ -69,6 +73,8 @@ EVENTS = {
     "llm_output": "llm",
     "agent_end": "run_end",
     "session_end": "session_end",
+    "kelpie_stopped": "stopped",
+    "kelpie_resumed": "resumed",
 }
 USAGE_KEYS = ("input", "output", "cacheRead", "cacheWrite")
 
@@ -458,6 +464,10 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
         "at": _at(data.get("at"), clock),
         "session_id": session,
         "v": HOOK_VERSION,
+        # The version of the plugin as the Gateway loaded it (index.js): what enforces stops.
+        "plugin": _count(data.get("plugin")),
+        # The plugin's before_agent_run has run: it has conversation access.
+        "gate": data.get("gate") is True,
         "session_key": _session_key(_field(data, "sessionKey")),
         "agent": _id(_field(data, "agentId")),
         "run_id": _id(_field(data, "runId")),
@@ -494,6 +504,8 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
         )
     elif kind == "session_end":
         rec.update(reason=_id(event.get("reason")), next_session_id=_id(event.get("nextSessionId")))
+    elif kind in ("stopped", "resumed"):
+        rec["event"] = _id(event.get("event"))
     return rec
 
 

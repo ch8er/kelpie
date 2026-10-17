@@ -140,6 +140,8 @@ def test_forwards_reduced_events(tmp_path: Path) -> None:
     assert out["registered"] == [
         "after_tool_call",
         "agent_end",
+        "before_agent_run",
+        "before_tool_call",
         "llm_output",
         "session_end",
         "session_start",

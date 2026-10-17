@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -66,8 +68,16 @@ class Workboard:
             db.executescript(SCHEMA)
             db.execute("PRAGMA journal_mode=WAL")  # as OpenClaw opens it
 
-    def _db(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path)
+    @contextmanager
+    def _db(self) -> Iterator[sqlite3.Connection]:
+        """A connection that commits and closes (a connection left to the garbage collector
+        checkpoints the WAL into the file whenever it goes, mid-test)."""
+        db = sqlite3.connect(self.path)
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def _ordinal(self, db: sqlite3.Connection, table: str, card_id: str) -> int:
         row = db.execute(f"SELECT COUNT(*) FROM {table} WHERE card_id = ?", (card_id,)).fetchone()
@@ -216,9 +226,6 @@ class Workboard:
             )
 
     def get(self, card_id: str) -> sqlite3.Row:
-        db = self._db()
-        db.row_factory = sqlite3.Row
-        try:
+        with self._db() as db:
+            db.row_factory = sqlite3.Row
             return db.execute("SELECT * FROM workboard_cards WHERE id = ?", (card_id,)).fetchone()
-        finally:
-            db.close()

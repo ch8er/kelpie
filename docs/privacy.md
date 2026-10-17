@@ -247,6 +247,18 @@ number could be reversed by hashing every number, this one only by whoever can r
 file (never creates it) to reduce the keys of Workboard cards before matching them; delete it
 and both sides start new pseudonyms.
 
+Stop markers (`~/.openclaw/kelpie/stop/<sessionId>.json`, mode `0600`) hold a time and the
+stopping rule's reason. The plugin deletes a marker when the operator messages the session or
+the session is reset, started anew (`/new`) or deleted, and copies it to the new id when the
+session rolls over; an expired marker is ignored but stays on disk until then. The reason
+reaches the model of the stopped session (as the refusal of its tool calls) and OpenClaw's
+internal block reason; a run the plugin refuses is answered, to whoever sent it, with a fixed
+text that names no reason. When
+the plugin refuses something for a stop it records a `stopped` line (session, run, which hook);
+when it lifts one, a `resumed` line. To abort a run, Kelpie runs `openclaw gateway call
+sessions.abort` with the session key or run id, with only `PATH`, `HOME`, `USER`, `LOGNAME`,
+`LANG`, `TMPDIR`, `LC_*`, `XDG_*` and `OPENCLAW_*` of its environment.
+
 Kelpie opens the Workboard database read-only and keeps what it reads in memory for one tick.
 Of a claimed card's claim it reads only the holder and the expiry; the claim token stays
 inside SQLite (the query extracts the two fields). It never reads card attachments, proof or
