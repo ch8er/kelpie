@@ -383,3 +383,64 @@ def test_https_goes_through_an_environment_proxy_as_a_tunnel(
     assert c._connection(1.0).host == "api.example.test"
     loopback = GitHubClient("http://127.0.0.1:1", TOKEN)._connection(1.0)
     assert loopback.host == "127.0.0.1" and loopback._tunnel_host is None  # type: ignore[attr-defined]
+
+
+def test_send_writes_json_and_drops_the_cached_read() -> None:
+    with serve() as gh:
+        clock = Clock()
+        client = GitHubClient(gh.url, TOKEN, clock=clock)
+        gh.reply("/repos/a/b/issues/1/labels", [{"name": "old"}])
+        assert client.get("/repos/a/b/issues/1/labels").body == [{"name": "old"}]
+        gh.reply("PUT /repos/a/b/issues/1/labels", [{"name": "new"}])
+        answer = client.send("PUT", "/repos/a/b/issues/1/labels", {"labels": ["new"]})
+        assert answer == [{"name": "new"}]
+        put = gh.requests[-1]
+        assert (put.method, put.body) == ("PUT", {"labels": ["new"]})
+        assert put.headers["Content-Type"] == "application/json"
+        assert put.headers["Authorization"] == f"Bearer {TOKEN}"
+        gh.reply("/repos/a/b/issues/1/labels", [{"name": "new"}])
+        assert client.get("/repos/a/b/issues/1/labels").body == [{"name": "new"}]  # not cached
+        gh.reply("DELETE /repos/a/b/issues/1/assignees", None, 204)
+        assert client.send("DELETE", "/repos/a/b/issues/1/assignees", {"assignees": ["x"]}) is None
+
+
+def test_send_refuses_reads_errors_and_backoff() -> None:
+    with serve() as gh:
+        clock = Clock()
+        client = GitHubClient(gh.url, TOKEN, clock=clock)
+        with pytest.raises(GitHubError) as err:
+            client.send("GET", "/repos/a/b")
+        assert err.value.kind == "invalid_request"
+        gh.reply("POST /repos/a/b/issues/1/comments", {"message": "Conflict"}, 409)
+        with pytest.raises(GitHubError) as err:  # unlike post(), a conflict is an error
+            client.send("POST", "/repos/a/b/issues/1/comments", {"body": "x"})
+        assert err.value.status == 409
+        gh.reply("PATCH /repos/a/b/issues/1", b"not json")  # made: no answer to decode
+        assert client.send("PATCH", "/repos/a/b/issues/1", {"state": "open"}) is None
+        gh.reply("POST /repos/a/b/issues/1/assignees", {"body": "x" * 100_000}, 201)
+        answer = client.send("POST", "/repos/a/b/issues/1/assignees", {"assignees": ["x"]})
+        assert answer == {"body": "x" * 100_000}  # a large 2xx is read whole
+        gh.reply(
+            "POST /repos/a/b/issues/2/comments",
+            {"message": "You have exceeded a secondary rate limit."},
+            403,
+        )
+        with pytest.raises(GitHubError) as err:
+            client.send("POST", "/repos/a/b/issues/2/comments", {"body": "x"})
+        assert err.value.kind == "rate_limited"
+        writes = len(gh.requests)
+        with pytest.raises(GitHubError) as err:
+            client.send("POST", "/repos/a/b/issues/3/comments", {"body": "x"})
+        assert err.value.kind == "backoff" and len(gh.requests) == writes
+
+
+def test_revalidate_skips_the_ttl_but_not_the_budget() -> None:
+    with serve() as gh:
+        client = GitHubClient(gh.url, TOKEN, clock=Clock())
+        gh.reply("/repos/a/b/issues", [1])
+        client.get("/repos/a/b/issues")
+        client.begin_tick(1, timedelta(seconds=10))
+        assert client.get("/repos/a/b/issues", revalidate=True).body == [1]
+        assert len(gh.requests) == 2  # asked again within the TTL
+        stale = client.get("/repos/a/b/issues", revalidate=True)
+        assert stale.stale and client.budget_exhausted and len(gh.requests) == 2

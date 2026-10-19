@@ -26,11 +26,12 @@ class Seen:
     path: str
     headers: Any  # case-insensitive, like HTTP
     method: str = "GET"
+    body: Any = None  # a write's decoded JSON body
 
 
 class FakeGitHub:
-    """Routes ``path`` (with query) to a :class:`Reply`; records every request. A POST
-    route is keyed ``"POST <path>"``."""
+    """Routes ``path`` (with query) to a :class:`Reply`; records every request. A write's
+    route is keyed ``"<METHOD> <path>"`` (``"POST /repos/..."``)."""
 
     def __init__(self) -> None:
         self.routes: dict[str, Reply] = {}
@@ -114,12 +115,25 @@ def _handler(fake: FakeGitHub) -> type[BaseHTTPRequestHandler]:
             self._answer("GET", self.path)
 
         def do_POST(self) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            self.rfile.read(length)
-            self._answer("POST", f"POST {self.path}")
+            self._write("POST")
 
-        def _answer(self, method: str, route: str) -> None:
-            fake.requests.append(Seen(self.path, self.headers, method))
+        def do_PATCH(self) -> None:
+            self._write("PATCH")
+
+        def do_PUT(self) -> None:
+            self._write("PUT")
+
+        def do_DELETE(self) -> None:
+            self._write("DELETE")
+
+        def _write(self, method: str) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length)
+            body = json.loads(raw) if raw else None
+            self._answer(method, f"{method} {self.path}", body)
+
+        def _answer(self, method: str, route: str, body: Any = None) -> None:
+            fake.requests.append(Seen(self.path, self.headers, method, body))
             reply = fake.routes.get(route, Reply(404, {"message": "Not Found"}))
             body = reply.body
             raw = body if isinstance(body, bytes) else json.dumps(body).encode()

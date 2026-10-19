@@ -101,14 +101,67 @@ requests, read; Metadata).
 
 ## Actions
 
-None yet: `requeue`, `unblock`, `comment` and `reassign` are refused, so a rule in `act` mode
-alerts a human instead. They come next, through the issues API.
+Through the issues API, only on tasks of the last read (an issue of a configured repository
+that carried the board's `label`): each action re-reads the issue first and refuses one that
+is no task now. Writes go one at a time, at least a second apart (GitHub's guidance against
+secondary rate limits), at most 10 a tick and 300 an hour; beyond that, and while GitHub asks
+for a back-off, the action is deferred (not a failed attempt) and the engine asks again. A
+write makes the next read of that repository ask GitHub rather than the cache.
+
+| Action | On the issue |
+| --- | --- |
+| `comment` | a comment |
+| `unblock` | the board's blocked labels come off, each by itself (`DELETE /labels/{name}`; a name that cannot be a path: the other labels are put back) |
+| `requeue` | the task starts over: a closed issue is reopened (not one closed as not planned or duplicate), and the agent holding it restarted: unassigned and assigned again, its label removed and put back, or its mention posted again. No agent holds an open issue: refused |
+| `reassign` | the new agent is assigned, labelled or mentioned first, then the one holding it is unassigned (or its label removed): a failure halfway leaves the issue held. Only an agent of this adapter the board allows, only on an open issue. A mention cannot be taken back |
+| `wake`, `wip_commit`, `stop`, `wait`, `close` | refused: these agents run on someone else's machines, and Kelpie parks no issue task |
+
+**What Kelpie writes.** Rule reasons can quote text anyone wrote (issue titles, block
+reasons, labels), so a comment is Kelpie's own words (fixed text and names from the config)
+followed by the reason in a code block, where mentions, `Fixes #n`, links and HTML do
+nothing for GitHub. Bots that match the raw comment text (the Claude Code Action's `@claude`,
+`/command` lines) would still see them, so every `@` in the reason is followed by an
+invisible word joiner and every line is indented: a note starts no agent and pings nobody.
+A mention that starts an agent carries fixed words only (`@codex please pick this issue up
+again …`). Comments are signed `— Kelpie`. The
+note after a change is best effort: when it cannot be posted the change stands, and the
+engine does not repeat it.
+
+What cannot be done is refused before anything changes (`UnsupportedAction`), so a human is
+alerted instead. A write GitHub refuses fails the action with a reason a human can read
+(`GitHub refused the change (http_error)`), and the engine retries it.
+
+Every action holds all its writes before the first: one the caps cannot take whole is
+deferred, never cut halfway. When a write fails after others were made, the error says what
+state the issue was left in (`copilot was taken off … but not started again completely`).
+GitHub answers an assignment with 201 also when it drops the login; the adapter checks the
+issue it returns. A requeue restarts only an agent the issue still shows (or one seen through
+its pull request): a person who unassigned it is not overruled.
+
+**Which rules act here today.** The adapter has no sessions and parks no task, so the session
+rules (1's requeues, checkpoints, wait_condition's comments) never target issue tasks. What
+can: `stale_blocks` unblock (a condition linked to the block), the `once` comments
+(acceptance criteria, conflict and return heads-ups) and, rarely, `orphan_status` reassign.
+Notes quote rule reasons, which can name other tasks, files and sessions: on a public
+repository they are public.
+
+The token needs Issues: write (and Pull requests: read) on the repositories. Use a token of
+an account the agents' own triggers accept: a GitHub Actions `GITHUB_TOKEN` starts no
+workflow, so Kelpie could not restart an Action-based agent with it.
 
 ## Limits and unverified
 
 - **Unverified against live agents**: the assignee login a Copilot assignment shows
   (`Copilot`), its pull requests' author (`copilot-swe-agent[bot]`), and the accounts Codex
   and OpenHands open pull requests from. Logins compare without case and without `[bot]`.
+  Whether assigning Copilot through `POST /assignees` starts it (GitHub documents an
+  assignment API for it; community reports say it needs a user token), whether unassigning
+  stops it, and whether a GitHub Action listening to `labeled` restarts on a label put back
+  within a second.
+- Anyone who can label or assign can steer what Kelpie sees: putting an agent's label on an
+  issue makes that agent its holder for Kelpie, whose requeue then puts the label back under
+  its own account; toggling labels or assignees restarts a task's clock. The per-task action
+  limits cap the effect; who applied a label is not checked.
 - An issue with more than 300 events is timed from its first 300; `reopened_at` comes from
   events, read only for open issues with labels or assignees.
 - A page of a list is cached on its own: an issue closing while a list is read can shift it

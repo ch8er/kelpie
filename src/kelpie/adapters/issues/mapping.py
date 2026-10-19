@@ -59,6 +59,18 @@ DEFAULT_BLOCKED_LABELS = ("blocked",)
 CANCELLED_REASONS = frozenset({"not_planned", "duplicate"})
 
 
+class IssuesError(RuntimeError):
+    """A repository's issues could not be read or changed. ``public_reason`` is safe to
+    show; ``kind`` is the GitHub error kind, when there was one."""
+
+    def __init__(
+        self, message: str, public_reason: str | None = None, kind: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.public_reason = public_reason or message
+        self.kind = kind
+
+
 def login_key(login: str) -> str:
     """Logins compare without case and without GitHub's ``[bot]`` suffix (a bot is assigned
     as ``Copilot`` and opens pull requests as ``copilot-swe-agent[bot]``)."""
