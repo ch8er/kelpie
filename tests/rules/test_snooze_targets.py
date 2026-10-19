@@ -16,7 +16,7 @@ from kelpie.rules.needs_you import build as build_needs_you
 from kelpie.rules.stale_blocks import StaleBlocks
 from kelpie.rules.wait_condition import WaitCondition
 from tests.incidents import load
-from tests.rules.test_snoozes import NOW, NY, H, blocked, question, snap, waiting
+from tests.rules.test_snoozes import NOW, NY, H, blocked, question, snap, snooze, waiting
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "incidents"
 
@@ -99,3 +99,31 @@ def test_rule_2_offers_no_snooze_where_a_snooze_would_hold_nothing(
     # ...and indeed a snooze on that task would not hold the alert
     held = Snooze("H-1", NOW + 72 * H, None, "Alice", NOW, source="chat")
     assert rule.evaluate(replace(board, snoozes=MappingProxyType({"H-1": held})))
+
+
+@pytest.mark.parametrize("source", ["cli", "chat"])
+def test_the_hand_off_reads_a_chat_snooze_like_kelpie_snooze(source: str) -> None:
+    """The hand-off to rule 13 (#169, #213) and its resolve notices treat a snooze set from a
+    chat button (``source="chat"``) as one from ``kelpie snooze``."""
+    h = Task("H-1", "sign", Status.READY, NOW - 40 * H, role="owner", owner_id="ceo")
+    cond = Condition("C-1", ConditionKind.HUMAN_TASK, "W-1", {"task": "H-1"}, False, checked_at=NOW)
+    wait = waiting("W-1", NOW - 30 * H)
+    held = snooze("H-1", behind=1, source=source, reason=None, by="Alice")
+    board = snap([h, wait], [held], conditions=[cond])
+    # Rule 2: held with or without the hand-off, so its closing is the snooze's own news
+    # (the engine's general notice), not the hand-off's.
+    assert WaitCondition().evaluate(board) == []
+    assert WaitCondition(inbox=NY).evaluate(board) == []
+    state = f"wait_condition:W-1:{(NOW - 30 * H).isoformat()}"
+    assert WaitCondition(inbox=NY).resolved(state, board) is None
+    # Rule 4: A-2, parked on the snoozed H-2, is in the digest's footer.
+    incident = load(FIXTURES / "13-snoozed-item-dead-end.yaml")
+    snoozes = {k: replace(s, source=source) for k, s in incident.snapshot.snoozes.items()}
+    assert snoozes, "the fixture has snoozes"
+    four_board = replace(incident.snapshot, snoozes=MappingProxyType(snoozes))
+    four = StaleBlocks(inbox=build_needs_you(dict(incident.config)))
+    block = four_board.task("A-2").block  # type: ignore[union-attr]
+    assert block is not None
+    notice = four.resolved(f"stale_blocks:A-2:{block.since.isoformat()}", four_board)
+    assert notice is not None
+    assert "A-2 is snoozed in the person's needs-you digest, under H-2" in notice
