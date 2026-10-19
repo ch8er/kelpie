@@ -159,27 +159,24 @@ def test_a_silent_agent_does_not_make_its_tasks_look_abandoned(hosts: MultiHostF
         hosts.hosts["laptop"].kill()
         silent = hosts.wait_message("No fresh report from agent laptop", timeout=TIMEOUT)
         assert "not evaluated" in silent
-        assert not hosts.up("laptop")
+        assert not hosts.up("laptop") and hosts.up("vm-1")
         # The other machine carries on: only its board is evaluated, and its review gets an
-        # owner, so its alert resolves.
-        wait_for("only vm-1's board", lambda: task_count(kelpie) == 4, timeout=TIMEOUT)
+        # owner, so its alert resolves. The task count lags the silence notice by at most a
+        # tick (metrics refresh at the end of one): a longer wait would hide a hub that
+        # keeps merging the silent board for a while.
+        wait_for("only vm-1's board", lambda: task_count(kelpie) == 4, timeout=5)
         hosts.hosts["vm-1"].farm.board.update("t_auth", assignee="dev")
         resolved = hosts.wait_message("resolved after", "vm-1:t_auth", timeout=TIMEOUT)
         # Long enough for a stale laptop board to show a dead session, and for any laptop
         # state to resolve (2s). Silence longer than this only makes the check stronger.
-        wait_for(
-            "the laptop to stay silent past the stale window",
-            lambda: time.monotonic() - killed > STALE_AFTER + 10,
-            timeout=2 * STALE_AFTER + TIMEOUT,
-        )
+        time.sleep(max(0.0, killed + STALE_AFTER + 10 - time.monotonic()))
         kelpie.wait_ticks(2)
         during = hosts.channels.telegram_texts()[before:]
-        # Nothing claims the laptop's tasks are abandoned, orphaned or dead: no message
-        # names one of them. Other notices (a late heartbeat of vm-1's, say) may come, in
-        # any order, but the silence is told once and so is the resolution.
-        assert [t for t in during if "laptop:t_" in t] == [], during
-        assert [t for t in during if "agent laptop" in t.lower()] == [silent], during
-        assert [t for t in during if "resolved after" in t and "vm-1:t_auth" in t] == [resolved]
+        # Nothing claims the laptop's tasks are abandoned, orphaned or dead, and vm-1 keeps
+        # its heartbeats: the silence and the resolution are the only messages, each told
+        # once, in whatever order they were delivered.
+        assert sorted(during) == sorted([silent, resolved]), during
+        assert hosts.up("vm-1")
         wait_for(
             "the laptop's state held, vm-1's resolved",
             lambda: open_states(kelpie, "orphan_status") == 1,
