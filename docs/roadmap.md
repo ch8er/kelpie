@@ -454,7 +454,7 @@ blocked task and the report blamed "waiting for merges".
 
 **Acceptance criteria**
 - [x] Correlated failures: N or more PRs (config) failing within a window on the same job/step or the same error signature → one `alert` "CI outage since <time>" with scope (repos, workflows, runners), the shared signature and the PRs affected; resolve when runs go green again
-- [ ] While an outage is open, per-task block and wait alerts that it explains are folded under it (no separate alerts); the report attributes their waiting time to "CI outage"
+- [x] While an outage is open, per-task block and wait alerts that it explains are folded under it (no separate alerts); the report attributes their waiting time to "CI outage"
 - [x] The error signature comes from the Actions runs/jobs API the connector already reads (job and step names, conclusion); no log scraping in the first version
 - [x] Fixtures: new `20-ci-outage.yaml` (synthetic), with an unrelated single red PR as the negative case
 

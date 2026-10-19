@@ -35,8 +35,8 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from kelpie.core.incidents import CiOutage, is_outage_state
-from kelpie.core.ledger import LedgerEntry
+from kelpie.core.incidents import FOLDED_UNDER, CiOutage, is_outage_state
+from kelpie.core.ledger import LedgerEntry, Suppression
 from kelpie.core.model import Condition, ConditionKind, Task
 from kelpie.core.states import OpenState
 from kelpie.report import farm, md
@@ -148,6 +148,8 @@ class Outage:
     repos: frozenset[str] = frozenset()  # lower-case owner/name
     prs: frozenset[str] = frozenset()  # lower-case owner/name#N
     tasks: frozenset[str] = frozenset()
+    state: str = ""
+    signature: str | None = None  # how people read it, e.g. "ci.yml > build > Select toolchain"
 
 
 def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[Outage]:
@@ -155,6 +157,7 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
     the state (``params.state``) within that occurrence's time span (the same signature
     failing again later reuses the state id). Entries are as of their time (written at most
     hourly), so the repository clause in :meth:`WaitCauses.split` covers later joiners."""
+    entries = list(entries)
     found = [s for s in states if is_outage_state(s.id)]
     samples = [
         (e.at, o)
@@ -171,9 +174,49 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
                 repos=frozenset(r.lower() for o in mine for r in o.repos),
                 prs=frozenset(p.lower() for o in mine for p in o.prs),
                 tasks=frozenset(t for o in mine for t in o.tasks),
+                state=s.id,
+                signature=mine[-1].signature if mine else None,
             )
         )
     return out
+
+
+def outage_day(
+    outage: Outage,
+    entries: Iterable[LedgerEntry],
+    start: datetime,
+    end: datetime,
+    closed_at: datetime | None = None,
+) -> tuple[int, int]:
+    """The PRs in an outage's scope and the alerts folded under it between ``start`` and ``end``:
+    the PRs in its scope during that span, from its samples in it and the last one before
+    it (its scope as the span began; samples are hourly, so a PR that went green just
+    before may count); and the alerts folded under it with an entry in that span until
+    it closed (``closed_at``; the engine keeps folding for a while after its last
+    sighting), counted once each (one entry when a fold starts, then at most one an hour),
+    a lower bound."""
+    a, b = max(outage.since, start), min(outage.until, end)
+    folds_until = end if closed_at is None else min(closed_at, end)
+    prs: set[str] = set()
+    before: CiOutage | None = None
+    folded: set[tuple[str, str]] = set()
+    for e in sorted(entries, key=lambda e: e.at):
+        if e.rule == "ci_economy" and (o := CiOutage.from_params(e.params)) is not None:
+            if o.state != outage.state or not outage.since <= e.at <= b:
+                continue
+            if e.at < a:
+                before = o
+            else:
+                prs.update(p.lower() for p in o.prs)
+        elif (
+            a <= e.at <= folds_until
+            and e.suppression is Suppression.INCIDENT
+            and e.params.get(FOLDED_UNDER) == outage.state
+        ):
+            folded.add((e.rule, e.fingerprint))
+    if before is not None:
+        prs.update(p.lower() for p in before.prs)
+    return len(prs), len(folded)
 
 
 class WaitCauses:
@@ -205,6 +248,10 @@ class WaitCauses:
             if e.rule == "needs_you" and "escalate_to" in e.params:
                 self._people.update(_ids(e.params.get("approvals")))
                 self._people.update(_ids(e.params.get("waiting")))
+
+    @property
+    def outages(self) -> tuple[Outage, ...]:
+        return self._outages
 
     def __call__(self, task: Task) -> str:
         if self._labels.intersection(task.labels):
