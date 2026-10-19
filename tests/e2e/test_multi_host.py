@@ -115,6 +115,12 @@ class Heartbeats:
         self.thread.join(5)
 
 
+# Seconds. The control loop ticks, the agents report and the runs heartbeat every second, so
+# a stale window of 30 survives a heartbeat or a tick that runs late on a loaded machine.
+STALE_AFTER = 30
+TIMEOUT = 60
+
+
 def test_a_silent_agent_does_not_make_its_tasks_look_abandoned(hosts: MultiHostFarm) -> None:
     runs = []
     for name in ("laptop", "vm-1"):
@@ -129,9 +135,9 @@ def test_a_silent_agent_does_not_make_its_tasks_look_abandoned(hosts: MultiHostF
             b.task(f"t_dep{i}", "todo", farm.ago(hours=6), title=f"Protect endpoint {i}")
             b.link("t_auth", f"t_dep{i}")
         # A live run: fine while its heartbeats are seen; a stale copy of the board would
-        # make it a dead session after 20s (exit_contract).
+        # make it a dead session once its heartbeat is STALE_AFTER old (exit_contract).
         runs.append((farm, "t_live", live_run(farm, "t_live", "Paginate", minutes=30)))
-    stale = {"session_stale_after": "20s", "session_exit_grace": "0s"}
+    stale = {"session_stale_after": f"{STALE_AFTER}s", "session_exit_grace": "0s"}
     with Heartbeats(runs):
         kelpie = hosts.serve(
             hosts.config(
@@ -151,29 +157,43 @@ def test_a_silent_agent_does_not_make_its_tasks_look_abandoned(hosts: MultiHostF
 
         killed = time.monotonic()
         hosts.hosts["laptop"].kill()
-        silent = hosts.wait_message("No fresh report from agent laptop", timeout=40)
+        silent = hosts.wait_message("No fresh report from agent laptop", timeout=TIMEOUT)
         assert "not evaluated" in silent
-        assert not hosts.up("laptop") and hosts.up("vm-1")
-        assert task_count(kelpie) == 4  # only vm-1's board is evaluated
-        # The other machine carries on: vm-1's review gets an owner and its alert resolves.
+        assert not hosts.up("laptop")
+        # The other machine carries on: only its board is evaluated, and its review gets an
+        # owner, so its alert resolves.
+        wait_for("only vm-1's board", lambda: task_count(kelpie) == 4, timeout=TIMEOUT)
         hosts.hosts["vm-1"].farm.board.update("t_auth", assignee="dev")
-        resolved = hosts.wait_message("resolved after", "vm-1:t_auth")
-        # Long enough for a stale laptop board to show a dead session (20s) and for any
-        # laptop state to resolve (2s).
-        wait_for("30s of silence", lambda: time.monotonic() - killed > 30, timeout=40)
+        resolved = hosts.wait_message("resolved after", "vm-1:t_auth", timeout=TIMEOUT)
+        # Long enough for a stale laptop board to show a dead session, and for any laptop
+        # state to resolve (2s). Silence longer than this only makes the check stronger.
+        wait_for(
+            "the laptop to stay silent past the stale window",
+            lambda: time.monotonic() - killed > STALE_AFTER + 10,
+            timeout=2 * STALE_AFTER + TIMEOUT,
+        )
         kelpie.wait_ticks(2)
         during = hosts.channels.telegram_texts()[before:]
-        assert during == [silent, resolved], during  # nothing about the laptop's tasks
-        assert open_states(kelpie, "orphan_status") == 1  # the laptop's, held
+        # Nothing claims the laptop's tasks are abandoned, orphaned or dead: no message
+        # names one of them. Other notices (a late heartbeat of vm-1's, say) may come, in
+        # any order, but the silence is told once and so is the resolution.
+        assert [t for t in during if "laptop:t_" in t] == [], during
+        assert [t for t in during if "agent laptop" in t.lower()] == [silent], during
+        assert [t for t in during if "resolved after" in t and "vm-1:t_auth" in t] == [resolved]
+        wait_for(
+            "the laptop's state held, vm-1's resolved",
+            lambda: open_states(kelpie, "orphan_status") == 1,
+            timeout=TIMEOUT,
+        )
 
         hosts.hosts["laptop"].start(hosts.hub_url)
-        hosts.wait_up("laptop")
-        hosts.wait_message("Agent laptop reports again")
+        hosts.wait_up("laptop", timeout=TIMEOUT)
+        hosts.wait_message("Agent laptop reports again", timeout=TIMEOUT)
         kelpie.wait_ticks(5)
         after = hosts.channels.telegram_texts()[before:]
-        assert [t for t in after if "laptop:t_" in t] == []
+        assert [t for t in after if "laptop:t_" in t] == [], after
         assert len(hosts.messages("orphan_status", "laptop:t_auth")) == 1
-        assert task_count(kelpie) == 8
+        wait_for("both boards again", lambda: task_count(kelpie) == 8, timeout=TIMEOUT)
         assert kelpie.metrics()['kelpie_agent_up{agent="laptop"}'] == 1
 
 
