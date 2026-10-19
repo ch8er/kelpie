@@ -1,9 +1,10 @@
 # Kelpie
 
-**Kelpie keeps an AI agent farm moving.** It watches the task board, agent sessions, traces
-and hosts of farms like Hermes and Claude Code, and applies deterministic rules (no LLM in
-the loop) to unstick work and stop waste, then tells you each day what the chaos cost and
-what fixed it.
+**Kelpie keeps an AI agent farm moving.** Open-source SRE for fleets of coding agents on
+Hermes, Claude Code and OpenClaw: it stops runaway agent loops before they burn a night of
+tokens, unsticks blocked, forgotten and orphaned tasks, catches CI outages and wasted
+builds, and tells you each day what the chaos cost and what fixed it. Deterministic rules,
+no LLM in the loop, and every rule starts observe-only until you let it act.
 
 ```bash
 pip install kelpie-sre && kelpie demo
