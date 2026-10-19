@@ -447,3 +447,36 @@ def test_block_reason_prs_ending_in_punctuation() -> None:
     task = Task("B", "b", Status.BLOCKED, at(8), block=Block("waiting for CI of #12).", at(8)))
     found = WaitCauses((), (), (), kinds).condition(task)
     assert found is not None and found.params == {"repo": "x/y", "pr": 12}
+
+
+def test_the_report_names_each_outage_with_its_folded_alerts() -> None:
+    from kelpie.core.incidents import FOLDED_UNDER
+    from kelpie.core.ledger import Outcome, Suppression
+
+    state = outage_state(SID, at(2), at(20))
+    sample = outage_sample(at(3), repos=("example/app",), prs=("example/app#1", "example/app#2"))
+
+    def folded(when: float, fingerprint: str) -> LedgerEntry:
+        e = replace(ledger("stale_blocks", **{FOLDED_UNDER: SID}), at=at(when))
+        return replace(e, fingerprint=fingerprint, outcome=Outcome.SUPPRESSED,
+                       suppression=Suppression.INCIDENT)  # fmt: skip
+
+    entries = (sample, folded(4, "a"), folded(5, "a"), folded(6, "b"), folded(21, "late"))
+    report = build_report(inputs(states=(state,), actions=entries), sections={})
+    [line] = report.outages
+    assert (line.signature, line.prs, line.folded, line.open) == (
+        "ci.yml > build > Select toolchain",
+        2,
+        2,  # alert "a" twice (hourly repeat) counts once; "late" is after the outage
+        False,
+    )
+    assert line.waited_hours == pytest.approx(3 * 12)  # R1-R3 from 08:00 to 20:00
+    markdown = render_markdown(report)
+    assert "**CI outages** (rule 9; 36.0 task-hours of waiting fell inside them" in markdown
+    assert "`ci.yml > build > Select toolchain` since 2026-03-02 02:00 UTC, until" in markdown
+    assert "2 PR(s), 2 alert(s) folded under it" in markdown
+
+
+def test_no_outage_no_list() -> None:
+    report = build_report(inputs(), sections={})
+    assert report.outages == () and "CI outages" not in render_markdown(report)

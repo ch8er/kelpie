@@ -35,8 +35,8 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from kelpie.core.incidents import CiOutage, is_outage_state
-from kelpie.core.ledger import LedgerEntry
+from kelpie.core.incidents import FOLDED_UNDER, CiOutage, is_outage_state
+from kelpie.core.ledger import LedgerEntry, Suppression
 from kelpie.core.model import Condition, ConditionKind, Task
 from kelpie.core.states import OpenState
 from kelpie.report import farm, md
@@ -148,6 +148,9 @@ class Outage:
     repos: frozenset[str] = frozenset()  # lower-case owner/name
     prs: frozenset[str] = frozenset()  # lower-case owner/name#N
     tasks: frozenset[str] = frozenset()
+    state: str = ""
+    signature: str | None = None  # how people read it, e.g. "ci.yml > build > Select toolchain"
+    folded: int = 0  # other rules' alerts held back under it (a lower bound, core.incidents)
 
 
 def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[Outage]:
@@ -155,6 +158,7 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
     the state (``params.state``) within that occurrence's time span (the same signature
     failing again later reuses the state id). Entries are as of their time (written at most
     hourly), so the repository clause in :meth:`WaitCauses.split` covers later joiners."""
+    entries = list(entries)
     found = [s for s in states if is_outage_state(s.id)]
     samples = [
         (e.at, o)
@@ -164,6 +168,14 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
     out = []
     for s in found:
         mine = [o for at, o in samples if o.state == s.id and s.since <= at <= s.last_seen]
+        # each folded alert is stored once, then at most once an hour: count alerts, not rows
+        folded = {
+            (e.rule, e.fingerprint)
+            for e in entries
+            if e.suppression is Suppression.INCIDENT
+            and e.params.get(FOLDED_UNDER) == s.id
+            and s.since <= e.at <= s.last_seen
+        }
         out.append(
             Outage(
                 since=s.since,
@@ -171,6 +183,9 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
                 repos=frozenset(r.lower() for o in mine for r in o.repos),
                 prs=frozenset(p.lower() for o in mine for p in o.prs),
                 tasks=frozenset(t for o in mine for t in o.tasks),
+                state=s.id,
+                signature=mine[-1].signature if mine else None,
+                folded=len(folded),
             )
         )
     return out
@@ -190,6 +205,7 @@ class WaitCauses:
     ) -> None:
         self._labels = frozenset(hold_labels)
         self._outages = tuple(outages)
+        self.outages = self._outages
         self._block_kinds = tuple(block_kinds)
         self._by_id: dict[str, Condition] = {}
         self._by_task: dict[str, list[Condition]] = {}

@@ -118,8 +118,15 @@ from kelpie.report.verify import (
     verify,
 )
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
+from kelpie.report.waits import (
+    CI_OUTAGE,
+    BiggestWait,
+    BlockKind,
+    WaitCauses,
+    biggest_wait,
+    outages,
+)
 from kelpie.report.waits import UNKNOWN as UNKNOWN_WAIT
-from kelpie.report.waits import BiggestWait, BlockKind, WaitCauses, biggest_wait, outages
 from kelpie.rules.orphan_status import OrphanStatus
 from kelpie.traces.outputs import (
     OutputGroup,
@@ -268,6 +275,21 @@ class ReportInputs:
 
 
 @dataclass(frozen=True, slots=True)
+class OutageLine:
+    """A CI outage of the day (rule 9), for the report: what failed, when, how many PRs it
+    held and how many alerts were folded under it (a lower bound). ``waited_hours`` (on the
+    first line only) is the waiting time of the day all outages explained."""
+
+    signature: str
+    since: datetime  # clipped to the day
+    until: datetime
+    open: bool  # still open at the end of the day
+    prs: int
+    folded: int
+    waited_hours: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class StuckCard:
     """A card in a pre-work status (triage, scheduled) past rule 3's ``prework_after`` that no
     open task depends on: it delays no work, so it is listed, not counted."""
@@ -337,6 +359,7 @@ class DailyReport:
     biggest_wait: BiggestWait | None = None  # the role and cause tasks waited longest for
     # cards stuck before work that nothing waits on: listed, never counted as hours lost
     stuck_idle: tuple[StuckCard, ...] = ()
+    outages: tuple[OutageLine, ...] = ()  # rule 9's CI outages of the day
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
 
     @property
@@ -407,7 +430,7 @@ def build_report(
         roles=MappingProxyType(_roles(inputs, end)),
     )
     extra = run_sections(sections, context, failed, inputs.section_config, section_keys)
-    wait = _biggest_wait(inputs, start, end, context.roles)
+    wait, outage_lines = _biggest_wait(inputs, start, end, context.roles)
     advice = _recommendations(
         inputs,
         chaos,
@@ -441,6 +464,7 @@ def build_report(
         verifications=_verifications(inputs, index, start, end),
         sections=extra,
         biggest_wait=wait,
+        outages=outage_lines,
         stuck_idle=_stuck_idle(inputs, start, end),
         act_blockers=inputs.act_blockers,
     )
@@ -486,7 +510,8 @@ def wait_causes(inputs: ReportInputs, start: datetime, end: datetime) -> WaitCau
 
 def _biggest_wait(
     inputs: ReportInputs, start: datetime, end: datetime, roles: Mapping[str, str]
-) -> BiggestWait | None:
+) -> tuple[BiggestWait | None, tuple[OutageLine, ...]]:
+    """The biggest wait, and the day's CI outages with the waiting time they explain."""
     causes = wait_causes(inputs, start, end)
     per_role = throughput(
         inputs.tasks,
@@ -499,7 +524,21 @@ def _biggest_wait(
         roles,
         causes.split,
     )
-    return biggest_wait(per_role, inputs.tasks, causes, inputs.farm)
+    explained = sum(r.waits.get(CI_OUTAGE, 0.0) for r in per_role)
+    lines = tuple(
+        OutageLine(
+            o.signature or o.state,
+            max(o.since, start),
+            min(o.until, end),
+            o.until >= end,
+            len(o.prs),
+            o.folded,
+        )
+        for o in sorted(causes.outages, key=lambda o: (o.since, o.state))
+        if o.since < end and o.until > start
+    )
+    found = biggest_wait(per_role, inputs.tasks, causes, inputs.farm)
+    return found, tuple(replace(x, waited_hours=explained) for x in lines[:1]) + lines[1:]
 
 
 def _roles(inputs: ReportInputs, end: datetime) -> dict[str, str]:
@@ -1036,6 +1075,20 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
         ]
     else:
         lines.append("No hours lost and no tokens burned on loops, idle sessions or restarts.")
+    if report.outages:
+        waited = report.outages[0].waited_hours
+        lines += [
+            "",
+            f"**CI outages** (rule 9; {waited:.1f} task-hours of waiting fell inside them and "
+            'count under "a shared CI failure", not CI or merges):',
+            "",
+        ]
+        for o in report.outages:
+            until = "still open" if o.open else f"until {_local(o.until, report)}"
+            lines.append(
+                f"- {md.code(o.signature)} since {_local(o.since, report)}, {until}: "
+                f"{o.prs} PR(s), {o.folded} alert(s) folded under it"
+            )
     if report.stuck_idle:
         lines += [
             "",
