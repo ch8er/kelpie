@@ -31,19 +31,23 @@ Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
 references in it link nothing (incident 17). ``comments`` are ``task_comments`` (people's,
 by ``human_owners``, and the last ones of the others; Kelpie's own left out), and
 ``body_author`` is ``tasks.created_by`` when that is a person: rule 1 reads acceptance
-criteria from them. ``assignee`` is the assignee
-profile and ``role`` its role: on Hermes an assignee only routes a task until it is
-dispatched. ``owner_id`` is the profile of the live run that claims the task (its
-``current_run_id`` names a run that has not ended), none while nothing runs, and the
-assignee itself for a human owner (``human_owners``). Hermes has no roles, so ``roles``
-(``[adapters.hermes.roles]``) maps profiles to roles, and any other profile's role is its name
-without a trailing ``-<number>`` (``dev-1``, ``dev-2`` -> ``dev``; ``role_from_name = false``
-turns that off), else the profile itself. Unclaimed tasks are therefore queued work of their
-role for rule 6 (rule 6's ``ready_is_queued`` is not needed for Hermes).
-``status_since`` is the time of the latest status-changing event of the task (any
-``task_events`` kind except the non-status ones in ``NON_STATUS_EVENTS``), else
-``started_at``/``completed_at``/``created_at``. Done tasks older than ``lookback`` are left
-out.
+criteria from them. A person's decision recorded by an agent counts as the person's too: a
+comment (or description) by one of a ``human_decisions`` entry's ``relays`` that opens
+with its ``marker`` (on a live farm a partner agent records the CEO's decisions with the note
+"решение CEO"), written by the entry's ``person`` when it names one (the CEO, so rule 1
+asks them), else by the relay. Only the configured relays: any agent can write the words.
+``assignee`` is the assignee profile and ``role`` its role: on Hermes an assignee only
+routes a task until it is dispatched. ``owner_id`` is the profile of the live run that
+claims the task (its ``current_run_id`` names a run that has not ended), none while
+nothing runs, and the assignee itself for a human owner (``human_owners``). Hermes has no
+roles, so ``roles`` (``[adapters.hermes.roles]``) maps profiles to roles, and any other
+profile's role is its name without a trailing ``-<number>`` (``dev-1``, ``dev-2`` ->
+``dev``; ``role_from_name = false`` turns that off), else the profile itself. Unclaimed
+tasks are therefore queued work of their role for rule 6 (rule 6's ``ready_is_queued`` is
+not needed for Hermes). ``status_since`` is the time of the latest status-changing event
+of the task (any ``task_events`` kind except the non-status ones in
+``NON_STATUS_EVENTS``), else ``started_at``/``completed_at``/``created_at``. Done tasks
+older than ``lookback`` are left out.
 
 Blocks. A ``blocked`` task gets a :class:`~kelpie.core.model.Block` only from evidence that is
 current, that is a ``blocked`` event at or after ``status_since``:
@@ -99,6 +103,7 @@ import logging
 import re
 import sqlite3
 import time
+import unicodedata
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -427,6 +432,47 @@ def _workspace(row: sqlite3.Row) -> Path | None:
     return path if path.is_dir() else None
 
 
+@dataclass(frozen=True, slots=True)
+class HumanDecision:
+    """A person's decision an agent records on the board: a comment or description by one
+    of ``relays`` (profiles, case-insensitive) that opens with ``marker`` and a separator on
+    its line (a colon, a hyphen before no word, an en or em dash), case-insensitive,
+    Unicode-normalized, past invisible characters and markdown emphasis ("Решение CEO: ...",
+    "**Решение CEO**: ..."), is the person's word, all of it, and is written by ``person``
+    when it is set. "Жду решение CEO", "Решение CEO пока не принято", a quote or the marker
+    further on are the agent's own words. Letters typed in another script (Cyrillic
+    look-alikes of "CEO") are another marker."""
+
+    marker: str
+    relays: frozenset[str]
+    person: str | None = None
+    _pattern: re.Pattern[str] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.relays, str):
+            raise ValueError("relays must be a collection of profile names, not a string")
+        relays = frozenset(r.strip().casefold() for r in self.relays)
+        if not self.marker.strip() or not relays or "" in relays:
+            raise ValueError("a human decision needs a marker and at least one relay")
+        object.__setattr__(self, "marker", self.marker.strip())
+        object.__setattr__(self, "relays", relays)
+        if self.person is not None:
+            object.__setattr__(self, "person", self.person.strip().casefold() or None)
+        words = unicodedata.normalize("NFKC", self.marker).split()
+        phrase = r"\s+".join(re.escape(w) for w in words)  # normalized, then escaped
+        # The separator on the marker's line; a hyphen only before no word ("CEO-level").
+        sep = r"[ \t]*(?::|\u2013|\u2014|-(?!\w))"
+        object.__setattr__(self, "_pattern", re.compile(rf"[\s*_#]*{phrase}[*_]*{sep}", re.I))
+
+    def recorded(self, author: str, text: str) -> bool:
+        """``author`` (casefolded) relays it and ``text`` opens with the marker."""
+        if author not in self.relays:
+            return False
+        plain = unicodedata.normalize("NFKC", text[:500])
+        plain = "".join(c for c in plain if unicodedata.category(c) != "Cf")  # BOM, ZWSP
+        return bool(self._pattern.match(plain))
+
+
 def _author(row: sqlite3.Row) -> str | None:
     name = _col(row, "created_by")
     return name.strip() if isinstance(name, str) and name.strip() else None
@@ -525,6 +571,9 @@ class HermesAdapter:
     cli_timeout: float = CLI_TIMEOUT  # seconds; a stop runs inside the control loop tick
     # Assignees that are people, not agents (Hermes lowercases profile names).
     human_owners: Collection[str] = ()
+    # A comment by one of an entry's relays that opens with its marker records its person's
+    # decision ("Решение CEO: ..."); see HumanDecision.
+    human_decisions: Sequence[HumanDecision] = ()
     prework_statuses: Collection[str] = DEFAULT_PREWORK
     # Profile -> role (Hermes lowercases profiles). Others: the profile without a trailing
     # "-<number>" (dev-1 -> dev), else the profile itself.
@@ -554,6 +603,7 @@ class HermesAdapter:
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path).expanduser()
         self.human_owners = frozenset(h.strip().casefold() for h in self.human_owners)
+        self.human_decisions = tuple(self.human_decisions)
         self.base_refs = tuple(self.base_refs)
         if bad := [r for r in self.base_refs if not valid_base_ref(r)]:
             raise ValueError(f"invalid base refs: {bad}")
@@ -817,7 +867,9 @@ class HermesAdapter:
                     block=block,
                     # Done tasks keep theirs: rule 1 reads the acceptance criteria in it.
                     body=_body(row),
-                    body_author=_author(row) if self._human(_col(row, "created_by")) else None,
+                    body_author=_author(row)
+                    if self._human(_col(row, "created_by"))
+                    else self._decision(_col(row, "created_by"), _body(row)),
                     created_at=_utc(row["created_at"]),
                     comments=comments.get(row["id"], ()),
                     branch=str(_col(row, "branch_name") or "").strip() or None,
@@ -835,11 +887,23 @@ class HermesAdapter:
         Hermes writes the caller's profile name ("user" by default) as a comment's author."""
         return isinstance(name, str) and name.strip().casefold() in self.human_owners
 
+    def _decision(self, author: object, text: object) -> str | None:
+        """Whose decision a text records, if any: its author relays one
+        (``human_decisions``) and it carries that entry's marker. The entry's ``person``,
+        else the relay."""
+        if not isinstance(author, str) or not isinstance(text, str):
+            return None
+        name = author.strip().casefold()
+        found = next((d for d in self.human_decisions if d.recorded(name, text)), None)
+        return None if found is None else found.person or author.strip()
+
     def _comments(self, conn: _Connection, ids: set[str]) -> dict[str, tuple[Comment, ...]]:
         """Comments of the tasks on the board, oldest first: every person's (up to
-        ``MAX_COMMENTS``, so an early criterion is never pushed out) and the last
-        ``MAX_COMMENTS`` of the others. Kelpie's own are left out. None on a board without
-        ``task_comments``; a board that cannot be read now gives none, with a warning."""
+        ``MAX_COMMENTS``, so an early criterion is never pushed out), as many decisions
+        relays recorded for a person (``human_decisions``, kept apart so they never push out
+        a person's own) and the last ``MAX_COMMENTS`` of the others. Kelpie's own are left
+        out. None on a board without ``task_comments``; a board that cannot be read now
+        gives none, with a warning."""
         try:
             rows = conn.execute(
                 "SELECT c.task_id, c.author, c.body, c.created_at FROM task_comments c"
@@ -851,6 +915,7 @@ class HermesAdapter:
                 warn_once(("comments", type(exc).__name__), "hermes: comments not read: %s", exc)
             return {}
         people: dict[str, list[Comment]] = {}
+        relayed: dict[str, list[Comment]] = {}  # kept apart: they never push out people's
         others: dict[str, list[Comment]] = {}
         for r in rows:
             at = _utc(r["created_at"])
@@ -863,13 +928,22 @@ class HermesAdapter:
             author = str(r["author"] or "").strip()
             if not text or author == AUTHOR:
                 continue
-            human = self._human(author)
-            (people if human else others).setdefault(r["task_id"], []).append(
-                Comment(author, text, at, human)
+            if self._human(author):
+                bucket = people
+            elif (person := self._decision(author, text)) is not None:
+                author, bucket = person, relayed  # a person's decision an agent recorded
+            else:
+                bucket = others
+            bucket.setdefault(r["task_id"], []).append(
+                Comment(author, text, at, bucket is not others)
             )
         found: dict[str, tuple[Comment, ...]] = {}
-        for task_id in people.keys() | others.keys():
-            kept = people.get(task_id, [])[:MAX_COMMENTS] + others.get(task_id, [])[-MAX_COMMENTS:]
+        for task_id in people.keys() | relayed.keys() | others.keys():
+            kept = (
+                people.get(task_id, [])[:MAX_COMMENTS]
+                + relayed.get(task_id, [])[:MAX_COMMENTS]
+                + others.get(task_id, [])[-MAX_COMMENTS:]
+            )
             found[task_id] = tuple(sorted(kept, key=lambda c: c.at))
         return found
 

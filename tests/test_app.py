@@ -438,3 +438,21 @@ def test_return_causes_inherits_expected_shared_from_conflict_warning() -> None:
     )
     assert _rule_config("return_causes", own) == {"expected_shared": []}
     assert _rule_config("return_causes", EngineConfig.from_mapping({})) == {}
+
+
+def test_status_lists_who_may_record_a_persons_decisions(tmp_path: Path) -> None:
+    from kelpie.app import _human_decisions_status, load_settings
+
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        '[adapters.hermes]\nhuman_owners = ["ceo"]\n'
+        '[[adapters.hermes.human_decisions]]\nmarker = "решение CEO"\nrelays = ["partner"]\n'
+        'person = "ceo"\n'
+    )
+    assert _human_decisions_status(load_settings(path)) == [
+        "human decisions: partner may record ceo's, opening with 'решение CEO'"
+    ]
+    path.write_text(
+        path.read_text().replace("[adapters.hermes]\n", "[adapters.hermes]\nenabled = false\n")
+    )
+    assert _human_decisions_status(load_settings(path)) == []

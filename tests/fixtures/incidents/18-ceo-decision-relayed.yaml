@@ -1,0 +1,61 @@
+id: "18-ceo-decision-relayed"
+incident: 18
+title: "A person's decision recorded by an agent is the person's criterion"
+description: >
+  From a live review: human_owners on the farm is the CEO only, and a partner agent
+  records the CEO's decisions on tasks with the note "решение CEO". The rule's side of it
+  (the adapter's is in tests/adapters/test_hermes_adapter.py): the Hermes adapter
+  reads such a comment from a configured relay ([[adapters.hermes.human_decisions]]) as
+  the CEO's (Comment.human, written by the entry's person), so the acceptance criterion in it needs its own evidence
+  before automerge. The same words from the partner without the note, and the note from
+  another agent, are an agent's and state no criterion.
+rule: exit_contract
+config:
+  acceptance_patterns:
+    - '\b\d+\s+(?:runs?|times)\b'
+    - '\b(\d+)\s*(?:of|/)\s*\1\b'
+snapshot:
+  now: "2026-05-12T15:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: partner, role: partner}
+    - {id: dev-1, role: dev}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - id: t_1851
+      title: "Fix flaky checkout test"
+      status: review
+      status_since: "2026-05-12T12:00:00+00:00"
+      role: dev
+      source: hermes
+      comments:
+        # As the adapter reads it: by a relay, with the marker, for the CEO (person = "ceo").
+        - {author: ceo, human: true, at: "2026-05-12T10:00:00+00:00", text: "Решение CEO: перед automerge 20 runs in a row, 20 of 20."}
+        - {author: reviewer-1, at: "2026-05-12T13:00:00+00:00", text: "CI green, merges cleanly. Approved."}
+    - id: t_1852
+      title: "Fix flaky cart test"
+      status: review
+      status_since: "2026-05-12T12:00:00+00:00"
+      role: dev
+      source: hermes
+      comments:
+        # The partner's own note, and the marker from an agent that relays nothing.
+        - {author: partner, at: "2026-05-12T10:00:00+00:00", text: "Предлагаю 20 runs in a row, 20 of 20."}
+        - {author: dev-1, at: "2026-05-12T10:30:00+00:00", text: "решение CEO: 20 runs, 20 of 20."}
+        - {author: reviewer-1, at: "2026-05-12T13:00:00+00:00", text: "CI green, merges cleanly. Approved."}
+  pull_requests:
+    - {repo: example/shop, number: 851, title: "t_1851: fix flaky checkout test", branch: "t_1851", labels: [automerge], mergeable: true, task_ids: [t_1851]}
+    - {repo: example/shop, number: 852, title: "t_1852: fix flaky cart test", branch: "t_1852", labels: [automerge], mergeable: true, task_ids: [t_1852]}
+expected_actions:
+  - kind: alert
+    task_id: t_1851
+    severity: critical
+    reason_contains: "20 runs in a row, 20 of 20"
+    params:
+      pattern: acceptance-criterion-missing
+      asked_by: ceo
+not_expected_actions:
+  - kind: alert
+    task_id: t_1852
+  - kind: comment
+    task_id: t_1852

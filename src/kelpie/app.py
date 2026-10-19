@@ -21,7 +21,7 @@ from typing import Any, Protocol
 from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_code
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes.git_state import valid_base_ref
-from kelpie.adapters.hermes.park import DEFAULT_WAIT_KEY, WAIT_KEY_NAME
+from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
@@ -112,6 +112,9 @@ class HermesSettings:
     wait_key: Path | None = None
     # Hermes statuses before any work starts (rule 3's cards stuck before work)
     prework_statuses: tuple[str, ...] = hermes.DEFAULT_PREWORK
+    # A person's decisions agents record: (marker, relay profiles, person or None),
+    # [[adapters.hermes.human_decisions]]
+    human_decisions: tuple[tuple[str, tuple[str, ...], str | None], ...] = ()
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -124,6 +127,9 @@ class HermesSettings:
             cli=self.cli,
             cli_timeout=self.cli_timeout.total_seconds(),
             human_owners=self.human_owners,
+            human_decisions=tuple(
+                hermes.HumanDecision(m, frozenset(r), p) for m, r, p in self.human_decisions
+            ),
             roles=dict(self.roles),
             role_from_name=self.role_from_name,
             wait_key=self.wait_key or DEFAULT_WAIT_KEY,
@@ -297,6 +303,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "cli",
         "cli_timeout",
         "human_owners",
+        "human_decisions",
         "roles",
         "role_from_name",
         "prework_statuses",
@@ -361,6 +368,40 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError(
             "[adapters.hermes] human_owners must be a list of distinct non-empty strings"
         )
+    decisions = section.get("human_decisions", [])
+    if not isinstance(decisions, list) or not all(
+        isinstance(d, Mapping)
+        and {"marker", "relays"} <= set(d) <= {"marker", "relays", "person"}
+        and isinstance(d["marker"], str)
+        and d["marker"].strip()
+        and isinstance(d["relays"], list)
+        and d["relays"]
+        and all(isinstance(r, str) and r.strip() for r in d["relays"])
+        and (isinstance(d.get("person", "x"), str) and d.get("person", "x").strip())
+        for d in decisions
+    ):
+        raise ConfigError(
+            "[[adapters.hermes.human_decisions]] entries need a marker (the note an agent "
+            'writes, e.g. "решение CEO") and relays (the agent profiles trusted to record '
+            "it), optionally the person whose decisions they are, and nothing else"
+        )
+    people = {h.strip().casefold() for h in humans}
+    seen: set[str] = set()
+    for d in decisions:
+        relays = {r.strip().casefold() for r in d["relays"]}
+        if bad := sorted(relays & (people | {AUTHOR, "user"})):
+            raise ConfigError(
+                f"[[adapters.hermes.human_decisions]] relays {bad}: a relay is an agent "
+                "profile, not a human owner, Kelpie or Hermes' default CLI author (user)"
+            )
+        if twice := sorted(relays & seen):
+            raise ConfigError(f"[[adapters.hermes.human_decisions]] relays {twice} twice")
+        seen |= relays
+        if "person" in d and d["person"].strip().casefold() not in people:
+            raise ConfigError(
+                f"[[adapters.hermes.human_decisions]] person {d['person'].strip()!r} must be "
+                "one of [adapters.hermes] human_owners"
+            )
     role_from_name = section.get("role_from_name", True)
     if not isinstance(role_from_name, bool):
         raise ConfigError("[adapters.hermes] role_from_name must be true or false")
@@ -398,6 +439,14 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         role_from_name,
         None if wait_key is None else Path(wait_key),
         tuple(dict.fromkeys(x.strip() for x in prework)),
+        tuple(
+            (
+                d["marker"].strip(),
+                tuple(sorted({r.strip().casefold() for r in d["relays"]})),
+                d["person"].strip().casefold() if "person" in d else None,
+            )
+            for d in decisions
+        ),
     )
 
 
@@ -1763,6 +1812,18 @@ def _human_tasks_status(settings: Settings) -> list[str]:
     return [f"human_tasks: human_task conditions on the board, {who}"]
 
 
+def _human_decisions_status(settings: Settings) -> list[str]:
+    """Who may record a person's decisions on the Hermes board: a trust setting."""
+    hermes = settings.hermes
+    if hermes is None or not hermes.enabled:
+        return []
+    return [
+        f"human decisions: {', '.join(relays)} may record {person or 'a person'}'s, "
+        f"opening with {marker!r}"
+        for marker, relays, person in hermes.human_decisions
+    ]
+
+
 def _providers_status(quotas: LlmQuotaSettings | None) -> str:
     if quotas is None:
         return "disabled (no [connectors.llm_quotas])"
@@ -1808,6 +1869,7 @@ def render_status(
         f"resources: {_resources_status(settings.resources)}",
         *_github_status(settings),
         *_human_tasks_status(settings),
+        *_human_decisions_status(settings),
         f"providers: {_providers_status(settings.llm_quotas)}",
         *_alerts_status(settings.alerts),
         "",
