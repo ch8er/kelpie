@@ -135,6 +135,11 @@ _NONE_BEFORE = re.compile(
 # A resolution of the failure itself: "Fixed failing tests" (before it, not negated), "the
 # failing test is now fixed", "CI was red, now green" (after it). Not "please fix", "needs
 # a fix" or "even though I fixed the timeout".
+# Where the failure's own phrase starts: "No changelog and CI is red" negates the changelog.
+# "or" joins one phrase ("No flaky or failing tests").
+_PHRASE_BREAK = re.compile(
+    r"[:,;]|\b(?:but|and|because|why|so|while|though|although|yet|then)\b", re.IGNORECASE
+)
 _FIXED_BEFORE = re.compile(r"\b(?:fixed|resolved)\s+(?:\w+\s+){0,2}$", re.IGNORECASE)
 _FIXED_AFTER = re.compile(
     r"\b(?:(?:is|are|was|were)\s+(?:now\s+)?(?:fixed|resolved)"
@@ -419,12 +424,12 @@ def _ci_failed(reason: str) -> bool:
     for clause in _CLAUSE_END.split(reason.replace("\r\n", "\n")):
         for m in _CI_FAILED.finditer(clause):
             before = clause[: m.start()]
-            phrase = re.split(r"[:,]", before)[-1][-40:]
-            if _NONE_BEFORE.search(phrase) or _FIXED_AFTER.search(clause, m.end()):
-                continue
+            phrase = _PHRASE_BREAK.split(before)[-1][-40:]
             fixed = _FIXED_BEFORE.search(phrase)
-            if fixed and not _NEGATED.search(phrase[: fixed.start()]):
-                continue  # "Fixed failing tests"; not "Fixed the import, CI is still red"
+            if fixed and _NEGATED.search(phrase[: fixed.start()]):
+                return True  # "Never fixed failing tests": the negation is of the fix
+            if fixed or _NONE_BEFORE.search(phrase) or _FIXED_AFTER.search(clause, m.end()):
+                continue  # "Fixed failing tests", "no unit tests failed", "is now fixed"
             return True
     return False
 

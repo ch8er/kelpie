@@ -389,6 +389,17 @@ def test_only_the_names_a_clause_says_failed() -> None:
         ("Fixed the lint but the tests still fail", "failing_tests"),
         ("Not a single test failed, but the naming is off", "review_findings"),
         ("No flaky or failing tests, but rename it", "review_findings"),
+        # fourth review: a conjunction ends the phrase a negation or a fix belongs to
+        ("No changelog and CI is red", "failing_tests"),
+        ("No docs and tests failed", "failing_tests"),
+        ("No idea why CI is red", "failing_tests"),
+        ("Not merged because CI is red", "failing_tests"),
+        ("Fixed lint but tests still fail", "failing_tests"),
+        ("Fixed lint and CI is red", "failing_tests"),
+        ("Fixed typo but CI is red", "failing_tests"),
+        ("Fixed it but tests still fail", "failing_tests"),
+        ("Fixed the two flaky failing tests", "failing_tests"),  # 3 words: the safe side
+        ("Never fixed failing tests from last round", "failing_tests"),
     ],
 )
 def test_a_review_return_is_classified_by_what_sent_it_back(reason: str, cause: str) -> None:
