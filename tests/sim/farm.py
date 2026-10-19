@@ -133,7 +133,11 @@ class Farm:
                 (t for t in self.channels.telegram_texts() if all(n in t for n in needles)), None
             )
 
-        return wait_for(f"a Telegram message with {needles}", probe, timeout)
+        try:
+            return wait_for(f"a Telegram message with {needles}", probe, timeout)
+        except AssertionError as exc:  # say what did arrive
+            got = "\n---\n".join(self.channels.telegram_texts()) or "(none)"
+            raise AssertionError(f"{exc}; messages sent:\n{got}") from None
 
     def messages(self, *needles: str) -> list[str]:
         """Telegram messages containing all ``needles``."""

@@ -71,7 +71,8 @@ def test_an_action_is_routed_to_the_host_that_owns_the_task(hosts: MultiHostFarm
 
     wait_for("the stop", lambda: laptop.board.get("t_loop").status == "blocked", timeout=30)
     message = hosts.wait_message("loop_breaker", "laptop:t_loop")
-    assert message.startswith("[CRITICAL] loop_breaker: alert laptop:t_loop")
+    assert message.startswith("\U0001f534 Runaway run: ")
+    assert " · laptop:t_loop" in message
     assert f"Stopped run laptop:hermes-run-{loop}" in message
     kelpie.wait_ticks(3)  # a stopped run is not stopped again; the healthy one never is
 
@@ -150,13 +151,13 @@ def test_a_silent_agent_does_not_make_its_tasks_look_abandoned(hosts: MultiHostF
 
         killed = time.monotonic()
         hosts.hosts["laptop"].kill()
-        silent = hosts.wait_message("agent laptop silent", timeout=40)
+        silent = hosts.wait_message("No fresh report from agent laptop", timeout=40)
         assert "not evaluated" in silent
         assert not hosts.up("laptop") and hosts.up("vm-1")
         assert task_count(kelpie) == 4  # only vm-1's board is evaluated
         # The other machine carries on: vm-1's review gets an owner and its alert resolves.
         hosts.hosts["vm-1"].farm.board.update("t_auth", assignee="dev")
-        resolved = hosts.wait_message("Resolved", "vm-1:t_auth")
+        resolved = hosts.wait_message("resolved after", "vm-1:t_auth")
         # Long enough for a stale laptop board to show a dead session (20s) and for any
         # laptop state to resolve (2s).
         wait_for("30s of silence", lambda: time.monotonic() - killed > 30, timeout=40)
@@ -167,7 +168,7 @@ def test_a_silent_agent_does_not_make_its_tasks_look_abandoned(hosts: MultiHostF
 
         hosts.hosts["laptop"].start(hosts.hub_url)
         hosts.wait_up("laptop")
-        hosts.wait_message("agent laptop silent", "reports again")
+        hosts.wait_message("Agent laptop reports again")
         kelpie.wait_ticks(5)
         after = hosts.channels.telegram_texts()[before:]
         assert [t for t in after if "laptop:t_" in t] == []

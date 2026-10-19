@@ -1,0 +1,52 @@
+{
+  "text": "✅ ok. · решено спустя 3,0 ч\nПравило: stale_blocks",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "✅ "
+            },
+            {
+              "type": "text",
+              "text": "ok.",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " · решено спустя 3,0 ч"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Правило: "
+            },
+            {
+              "type": "text",
+              "text": "stale_blocks",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

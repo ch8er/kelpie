@@ -395,11 +395,33 @@ An alerter is what the engine sends alerts to: the `Alerter` protocol in
 | `did` | What Kelpie itself did: `notified`, `suggested`, `done`, `failed` or `not_executed`. |
 | `did_text` | The engine's one-line account of that, worded from the action and its outcome; show it as it is. `None` for a plain notification and for free text: word it from `did` then. |
 | `text` | Free text (the daily report goes through `Delivery.send(text, severity, channels)`); sent as it is, without the alert layout. |
+| `headline` | The rule's own one-line summary (`Action.params["headline"]`), untrusted; `None` when the rule gave none. |
+| `items` | The tasks the alert is about, as `AlertItem`s, in the rule's order: from `Action.params["items"]` (mappings with `task_id` and optional `needed`, `since`, `blocking`; malformed entries are skipped), else the action's own task. Empty for a farm-wide alert. |
+
+An entry of `params["items"]` may also name its task `task` and give a `behind` list (the
+tasks waiting on it) instead of `blocking`, the shape rule 13 already persists.
+
+`AlertItem` has `task_id`, `title` (the entry's, else the board's, `None` when neither has one),
+`since` and `age` (from the item's `since`, `Action.since` or the task's `status_since`),
+`needed` (what a human must do, untrusted: `params["needed"]` or the item's own) and
+`blocking` (how many tasks wait behind it: `params["blocking"]` or the item's own, else
+`None`). The fingerprint covers the headline and the items, each with its `since` to the
+minute.
 
 Format from the fields only and never read them back out of a rendered line: a reason may
-start with "Changed: " and a rule name may hold a bracket. `kelpie.core.alerts.lead_in`
-words the transition once ("Still open after 4.0h: "), so every channel says the same.
-The engine's ledger records the reason with that wording in front of it; the event does not.
+start with "Changed: " and a rule name may hold a bracket. The engine's ledger records the
+reason with the transition worded in front of it (`kelpie.core.alerts.lead_in`); the event
+does not.
+
+The channels Kelpie ships lay an event out with `kelpie.alerts.render`: `layout(event,
+RenderSettings(language, task_url))` builds one neutral `Layout` (headline line with the
+severity icon and the transition, one entry per item with title, age, id, a short
+"Needed" line, "Blocking" and the "Open task" link, the reason (unless every item says what
+is needed), then "Kelpie did" only when Kelpie acted, would act or failed, and the rule),
+and `plain`, `telegram_payload` and `slack_payload` render it. The fixed words come from
+`kelpie.alerts.i18n` (`[alerts] language`); all other text is passed through cleaned
+(`clean`, `defang`) and escaped per format (Slack: `rich_text` text elements). A new channel
+should reuse `layout` and write only its own renderer.
 
 ## Adding a daily report section
 

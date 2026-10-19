@@ -1,0 +1,183 @@
+{
+  "text": "🟡 Ждут вас: 2 задачи (самая давняя — 46 ч)\n\n1. Enable R2 for backups — 44 ч · t_6fb7a27a\n   Нужно: Enable R2 in the Cloudflare dashboard.\n   Блокирует: ничего · Открыть задачу: https://board.example.org/tasks/t_6fb7a27a\n2. Approve the store listing — 46 ч · t_c3f82477\n   Нужно: approval: Approve the new store listing; the release waits for it\n   Блокирует: 2 задачи · Открыть задачу: https://board.example.org/tasks/t_c3f82477\nПочему: Needs you (sam): 2 item(s) hold 2 agent task(s), 90.0 agent-hours waited so far.\nПравило: needs_you",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Ждут вас: 2 задачи (самая давняя — 46 ч)",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Enable R2 for backups",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 44 ч · "
+            },
+            {
+              "type": "text",
+              "text": "t_6fb7a27a",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Нужно: "
+            },
+            {
+              "type": "text",
+              "text": "Enable R2 in the Cloudflare dashboard."
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Блокирует: ничего"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_6fb7a27a",
+              "text": "Открыть задачу"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "2. "
+            },
+            {
+              "type": "text",
+              "text": "Approve the store listing",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 46 ч · "
+            },
+            {
+              "type": "text",
+              "text": "t_c3f82477",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Нужно: "
+            },
+            {
+              "type": "text",
+              "text": "approval: Approve the new store listing; the release waits for it"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Блокирует: 2 задачи"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_c3f82477",
+              "text": "Открыть задачу"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Почему: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Needs you (sam): 2 item(s) hold 2 agent task(s), 90.0 agent-hours waited so far."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Правило: "
+            },
+            {
+              "type": "text",
+              "text": "needs_you",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

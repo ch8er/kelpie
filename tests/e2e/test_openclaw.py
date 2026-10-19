@@ -104,8 +104,9 @@ def test_runaway_loop_is_stopped_on_an_openclaw_session(farm: Farm, gateway: Gat
     kelpie.wait_ticks(3)  # a stopped session must not be stopped again
     farm.stop()
 
-    assert message.startswith("[CRITICAL] loop_breaker: alert c1")
-    assert message.splitlines()[-1] == (f"Stopped run {LOOP}; its current run was aborted; {HELD}.")
+    assert message.startswith("\U0001f534 Runaway run: ") and " · c1" in message
+    did = f"Kelpie did: Stopped run {LOOP}; its current run was aborted; {HELD}."
+    assert message.splitlines()[-2] == did
     (abort,) = gateway.calls()
     assert abort["argv"] == [
         "gateway",
@@ -123,7 +124,7 @@ def test_runaway_loop_is_stopped_on_an_openclaw_session(farm: Farm, gateway: Gat
     assert farm.messages("c2") == []
     assert len(farm.messages("loop_breaker", "c1")) == 1
     slack = farm.channels.slack_texts()
-    assert sum(t.startswith("[CRITICAL]") and "c1" in t for t in slack) == 1
+    assert sum(t.startswith("\U0001f534") and "c1" in t for t in slack) == 1
     plugin_enforces_the_stop(gateway)
 
 
@@ -138,9 +139,9 @@ def test_an_unreachable_gateway_still_leaves_the_stop_marker(farm: Farm, gateway
     kelpie.wait_ticks(3)
     farm.stop()
 
-    assert message.splitlines()[-1] == (
-        f"Stopped run {LOOP}; {HELD}; its current run could not be aborted (the Gateway "
-        "refused or did not answer (exit 1))."
+    assert message.splitlines()[-2] == (
+        f"Kelpie did: Stopped run {LOOP}; {HELD}; its current run could not be aborted (the "
+        "Gateway refused or did not answer (exit 1))."
     )
     assert len(farm.messages("loop_breaker", "c1")) == 1
     # The key is refused, so the run id is tried next; neither is retried on later ticks.

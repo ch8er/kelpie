@@ -78,11 +78,11 @@ def test_alerts_reach_both_channels_and_github_is_read_with_the_token(farm: Farm
     pattern = {"pattern": r"waiting for merge of (?P<pr>\S+)", "kind": "pr_merged", "repo": REPO}
     farm.serve(farm.config(rules, github=True, extra={"block_conditions": [pattern]}))
 
-    farm.wait_message("stale_blocks", "unblock t_wait")  # info: Telegram only
-    farm.wait_message("exit_contract", "requeue t_vague")  # warning: Slack too
+    farm.wait_message("stale_blocks", "Suggested: clear the block on t_wait")  # info: Telegram
+    farm.wait_message("exit_contract", "return t_vague to the queue")  # warning: Slack too
     farm.stop()
     slack = farm.channels.slack_texts()
-    assert len(slack) == 1 and "requeue t_vague" in slack[0]
+    assert len(slack) == 1 and "return t_vague to the queue" in slack[0]
     reads = farm.github.requests
     assert any(r.path == f"/repos/{REPO}/pulls/7" for r in reads)
     assert {r.token for r in reads} == {TOKEN}

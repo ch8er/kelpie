@@ -28,7 +28,8 @@ The engine already de-duplicates through the action ledger and state transitions
 window here is a cheap safety net. An alert is a duplicate only when the last alert sent to
 that channel for the same (rule, subject) is identical, so open, resolved, open again within
 the window is delivered in full. An alert whose delivery fails for good gives up its
-entry. The fingerprint covers the reason, severity, transition, age and what Kelpie did.
+entry. The fingerprint covers the reason, severity, transition, age, what Kelpie did, the
+headline and the items (their ages as worded).
 """
 
 from __future__ import annotations

@@ -65,7 +65,7 @@ def test_incident_05_exhausted_ci_minutes_name_billing_and_the_waiting_tasks(far
 
     text = farm.wait_message("ci_economy", "exhausted")
     farm.stop()
-    assert text.startswith("[CRITICAL] ci_economy: alert")
+    assert text.startswith("\U0001f534 CI minutes quota") and "Rule: ci_economy" in text
     assert "(3000 of 3000 minutes)" in text and "the cause is billing, not the code" in text
     assert "3 tasks wait for CI that will not run: t_ci0, t_ci1, t_ci2" in text
     assert any("exhausted" in t for t in farm.channels.slack_texts())  # critical: Slack too

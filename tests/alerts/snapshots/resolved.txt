@@ -1,0 +1,2 @@
+✅ task t_6fb7a27a: no longer reported: "blocked". · resolved after 3.0 h
+Rule: stale_blocks

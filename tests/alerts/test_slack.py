@@ -9,10 +9,11 @@ import pytest
 
 from kelpie.alerts import Delivery, PermanentError, TransientError
 from kelpie.alerts.config import load_alerts
-from kelpie.alerts.slack import SlackChannel, SlackSettings, format_message, load_slack
-from kelpie.alerts.telegram import MAX_TEXT, utf16_len
+from kelpie.alerts.slack import SlackChannel, SlackSettings, load_slack
+from kelpie.alerts.slack import payload as render_payload
+from kelpie.alerts.telegram import MAX_TEXT
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import AlertEvent, Did, Transition
+from kelpie.core.alerts import AlertEvent, AlertItem, Did, Transition
 from kelpie.metrics import Metrics
 from tests.alerts.fake_slack import FakeSlack, fake_slack
 from tests.alerts.fake_telegram import fake_telegram
@@ -52,53 +53,93 @@ def wait_for(cond: Callable[[], bool], timeout: float = 3.0) -> None:
         time.sleep(0.005)
 
 
-def test_message_has_the_telegram_layout() -> None:
-    text = format_message(message(transition=Transition.ESCALATED, did=Did.SUGGESTED))
-    first, second, third = text.split("\n")
-    assert first == "[WARNING] orphans: alert task-1"
-    assert second == "Still open. task-1 has had no owner for 3h."
-    assert third.startswith("Kelpie did: nothing, mode suggest")
-    assert "failed" in format_message(message(did=Did.FAILED))
-    resolved = message(
-        reason="gone.",
-        severity=Severity.INFO,
-        transition=Transition.RESOLVED,
-        age=timedelta(hours=1),
-    )
-    # The transition is worded from the fields (core.alerts.lead_in), once.
-    assert format_message(resolved).split("\n")[1] == "Resolved after 1.0h: gone."
+def sections(payload: dict[str, object]) -> list[str]:
+    """The text a person sees, per rich_text block."""
+    blocks = payload["blocks"]
+    assert isinstance(blocks, list)
+    return [
+        "".join(e["text"] for section in b["elements"] for e in section["elements"]) for b in blocks
+    ]
+
+
+def test_message_has_the_telegram_layout_as_blocks() -> None:
+    payload = render_payload(message(transition=Transition.ESCALATED, did=Did.SUGGESTED))
+    head, tail = sections(payload)
+    assert head == "\U0001f7e1 task-1 has had no owner for 3h. · still open"
+    assert tail == "Kelpie did: nothing, mode suggest. A human decides.\nRule: orphans"
+    assert all(b["type"] == "rich_text" for b in payload["blocks"])
+    headline = payload["blocks"][0]["elements"][0]["elements"][1]
+    assert headline == {
+        "type": "text",
+        "text": "task-1 has had no owner for 3h.",
+        "style": {"bold": True},
+    }
+    assert payload["text"].splitlines() == [
+        "\U0001f7e1 task-1 has had no owner for 3h. · still open",
+        "Kelpie did: nothing, mode suggest. A human decides.",
+        "Rule: orphans",
+    ]
+    assert payload["mrkdwn"] is False  # the fallback is plain text
+    assert "failed" in sections(render_payload(message(did=Did.FAILED)))[-1]
     still = message(reason="no owner", transition=Transition.ESCALATED, age=timedelta(hours=4))
-    assert format_message(still).split("\n")[1] == "Still open after 4.0h: no owner"
-    changed = message(
-        reason="now critical", severity=Severity.CRITICAL, transition=Transition.CHANGED
-    )
-    assert format_message(changed).split("\n")[1] == "Changed: now critical"
+    assert sections(render_payload(still))[0] == "\U0001f7e1 no owner · still open after 4.0 h"
 
 
-def test_ampersand_and_angle_brackets_are_escaped_once_and_control_chars_removed() -> None:
-    text = format_message(message(reason="<!channel> <http://evil|x> a & b &lt; \x00\x1b"))
-    assert "&lt;!channel&gt; &lt;http://evil|x&gt; a &amp; b &amp;lt;" in text
-    assert "<" not in text and ">" not in text and "\x00" not in text
-    assert format_message(message(text="a<b&c>d")) == "a&lt;b&amp;c&gt;d"
+def test_one_block_per_item() -> None:
+    items = (AlertItem("t-1", "One", blocking=0), AlertItem("t-2", "Two", needed="Do it."))
+    payload = render_payload(message(rule="needs_you", items=items))
+    assert len(payload["blocks"]) == 5  # headline, two items, the reason, the tail
+    assert sections(payload)[-2] == "Why: task-1 has had no owner for 3h."  # not all say
+    assert sections(payload)[1:-2] == [
+        "1. One · t-1\n   Blocking: none",
+        "2. Two · t-2\n   Needed: Do it.",
+    ]
 
 
-def test_caps_match_telegram_and_kelpie_did_survives() -> None:
-    text = format_message(message(reason="y" * 20_000, subject="s" * 5000, did=Did.FAILED))
-    assert "tried, and it failed" in text.split("\n")[-1]
-    assert utf16_len(text) <= MAX_TEXT
-    assert len(format_message(message(text="<" * 20_000))) <= 5 * MAX_TEXT  # escaped, still small
-    format_message(message(subject="task \ud800 x", reason="r \udfff \ud83d")).encode("utf-8")
+def test_the_fallback_is_escaped_and_the_blocks_carry_the_text_as_it_is() -> None:
+    reason = "<!channel> <http://evil|x> a & b &lt; \x00\x1b"
+    payload = render_payload(message(reason=reason))
+    assert "&lt;!channel&gt; &lt;http://evil|x&gt; a &amp; b &amp;lt;" in payload["text"]
+    assert "<" not in payload["text"] and ">" not in payload["text"]
+    head = sections(payload)[0]
+    assert "<!channel> <http://evil|x> a & b &lt;" in head  # a text element: not parsed
+    assert "\x00" not in head and "\x1b" not in head
+    links = [
+        e
+        for b in payload["blocks"]
+        for section in b["elements"]
+        for e in section["elements"]
+        if e["type"] != "text"
+    ]
+    assert links == []  # agent text never becomes a link
+    assert render_payload(message(text="a<b&c>d")) == {"text": "a&lt;b&amp;c&gt;d", "mrkdwn": False}
 
 
-def test_posts_plain_text_json_to_the_webhook_path() -> None:
+def test_caps_keep_every_block_below_slacks_limit_and_kelpie_did_survives() -> None:
+    payload = render_payload(message(reason="y" * 20_000, subject="s" * 5000, did=Did.FAILED))
+    assert "tried, and it failed" in sections(payload)[-1]
+    assert all(len(t) <= 3000 for t in sections(payload)) and len(payload["text"]) <= 4000
+    assert len(render_payload(message(text="<" * 20_000))["text"]) <= 5 * MAX_TEXT
+    render_payload(message(subject="task \ud800 x", reason="r \udfff \ud83d"))
+
+
+def test_posts_blocks_to_the_webhook_path() -> None:
     with fake_slack() as fake:
         channel(fake).send(message(severity=Severity.CRITICAL))
-    ((path, headers, body),) = fake.requests
+        channel(fake).send(message(text="free text"))
+    ((path, headers, body), (_, _, free)) = fake.requests
     assert path == PATH
     assert headers["Content-Type"] == "application/json"
-    assert body["text"].startswith("[CRITICAL] orphans: alert task-1")
-    assert body["mrkdwn"] is False and body["unfurl_links"] is False
-    assert set(body) == {"text", "mrkdwn", "unfurl_links", "unfurl_media"}
+    assert body["text"].startswith("\U0001f534 task-1 has had no owner")
+    assert body["blocks"][0]["type"] == "rich_text" and body["mrkdwn"] is False
+    assert body["unfurl_links"] is False and body["unfurl_media"] is False
+    assert set(body) == {"text", "mrkdwn", "blocks", "unfurl_links", "unfurl_media"}
+    assert free == {
+        "text": "free text",
+        "mrkdwn": False,
+        "unfurl_links": False,
+        "unfurl_media": False,
+    }
 
 
 def test_429_with_retry_after_is_retried_and_a_huge_one_fails_as_rate_limited() -> None:
@@ -306,29 +347,31 @@ def test_fan_out_to_telegram_and_slack_with_per_channel_filters() -> None:
     assert metrics.alerts_sent["telegram"] == 2 and metrics.alerts_sent["slack"] == 2
 
 
-def test_slack_mentions_in_agent_text_are_neutralised_by_escaping() -> None:
+def test_slack_mentions_in_agent_text_are_neutralised() -> None:
     hostile = "<!channel> <!here> <!everyone> <@U012ABCDEF> <#C012ABCDEF|general> <!subteam^S1>"
-    for text in (
-        format_message(message(reason=hostile, subject=hostile, rule="<!here>")),
-        format_message(message(text=hostile)),
-    ):
-        assert "<" not in text and ">" not in text  # nothing Slack could parse as markup
-        for token in ("&lt;!channel&gt;", "&lt;!here&gt;", "&lt;@U012ABCDEF&gt;"):
-            assert token in text
-    # the whole payload as sent
+    item = AlertItem(hostile, hostile, needed=hostile + " @here @channel")
+    alert = render_payload(message(reason=hostile, rule="<!here>", items=(item,)))
+    # the fallback: Slack's escaping, nothing it could parse as a mention or a link
+    for text in (alert["text"], render_payload(message(text=hostile))["text"]):
+        assert "<!" not in text and "<@" not in text and "<#" not in text
+        assert "@" not in text and "&lt;!channel&gt;" in text
+    # the blocks: text elements (never parsed), and @ broken all the same
+    for text in sections(alert):
+        assert "@" not in text
     with fake_slack() as fake:
         channel(fake).send(message(reason=hostile))
-    sent = fake.requests[0][2]["text"]
-    assert "<!channel>" not in sent and "<@U012ABCDEF>" not in sent
-    assert sent.count("&lt;!here&gt;") == 1
-    assert "​" not in format_message(message(reason="a​<!here>"))  # Cf removed first
+    sent = fake.requests[0][2]
+    assert sent["text"].count("&lt;!here&gt;") == 1
+    assert "<@U012ABCDEF>" not in str(sent)  # broken: a fullwidth @
+    assert "\u200b" not in str(render_payload(message(reason="a\u200b<!here>")))  # Cf removed
 
 
 def test_slack_a_reason_that_looks_like_transition_wording_is_only_text() -> None:
     reason = "Changed: Still open after 4.0h: task-1 has no owner."
-    assert format_message(message(reason=reason)).split("\n")[1] == reason
+    assert sections(render_payload(message(reason=reason)))[0] == f"\U0001f7e1 {reason}"
     again = message(reason=reason, transition=Transition.ESCALATED, age=timedelta(hours=4))
-    assert format_message(again).split("\n")[1] == f"Still open after 4.0h: {reason}"
+    expected = f"\U0001f7e1 {reason} · still open after 4.0 h"
+    assert sections(render_payload(again))[0] == expected
 
 
 def test_a_huge_error_page_from_a_5xx_or_429_is_still_transient() -> None:

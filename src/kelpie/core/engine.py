@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
@@ -12,6 +12,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import (
     ANNOUNCES,
     AlertEvent,
+    AlertItem,
     Did,
     done_line,
     failed_line,
@@ -211,7 +212,7 @@ class Engine:
                     results.append(self._process(action, snapshot))
             results.extend(self._resolve_gone(seen, snapshot))
         finally:
-            self._release_held()
+            self._release_held(snapshot)
             self._evaluated = None  # resolution is only valid right after evaluate()
         return results
 
@@ -301,7 +302,7 @@ class Engine:
         self._record(dispatched, snapshot.now)
         return dispatched
 
-    def _release_held(self) -> None:
+    def _release_held(self, snapshot: Snapshot) -> None:
         """Send the effect messages whose announcing alert did not go out this tick."""
         for key, held in self._held.items():
             if key in self._told:
@@ -310,7 +311,7 @@ class Engine:
             floor = self._announcer_severity.get(key, Severity.INFO)
             for action, executed, kind, did in held:
                 urgent = replace(action, severity=_higher(action.severity, floor))
-                self._safe_alert(urgent, executed=executed, kind=kind, did=did)
+                self._safe_alert(urgent, snapshot, executed=executed, kind=kind, did=did)
         self._announced, self._lines, self._held, self._told = set(), {}, {}, set()
         self._announcer_severity = {}
 
@@ -324,14 +325,14 @@ class Engine:
             first = self._ledger_down_since is None
             if first:  # tell a human once per outage, not once per tick
                 self._ledger_down_since = snapshot.now
-                self._notice(Suppression.LEDGER_DOWN, action)
+                self._notice(Suppression.LEDGER_DOWN, action, snapshot)
             # Fail closed: nothing with an effect leaves Kelpie without a ledger.
             hit = None if mode is Mode.OBSERVE else (Suppression.LEDGER_DOWN, first)
         if hit is not None:
             why, first = hit
             log.info("suppressed (%s): %s", why, action)
             if first and why is Suppression.RATE_LIMIT:
-                self._notice(why, action)
+                self._notice(why, action, snapshot)
             dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, why, first)
         else:
             self._detail = None
@@ -354,9 +355,11 @@ class Engine:
                 if self._last_attempt(action, mode, snapshot.now):
                     did = failed_line(action, failure_reason(exc))
                     if action.kind in _ALERT_ACTIONS:
-                        self._safe_alert(action, executed=False, kind=Did.FAILED, did=did)
+                        self._safe_alert(action, snapshot, executed=False, kind=Did.FAILED, did=did)
                     else:
-                        self._effect_message(action, executed=False, kind=Did.FAILED, did=did)
+                        self._effect_message(
+                            action, snapshot, executed=False, kind=Did.FAILED, did=did
+                        )
             dispatched = Dispatched(action, mode, outcome, detail=self._detail)
         self._record(dispatched, snapshot.now)
         return dispatched
@@ -509,7 +512,7 @@ class Engine:
             log.exception("could not persist ledger entry; kept in memory")
             self._ledger_write_failed = True
 
-    def _notice(self, why: Suppression, action: Action) -> None:
+    def _notice(self, why: Suppression, action: Action, snapshot: Snapshot) -> None:
         if why is Suppression.RATE_LIMIT:
             reason = (
                 f"Rate limit of {self.config.max_actions_per_task_per_hour} actions/hour "
@@ -520,23 +523,30 @@ class Engine:
             reason = "Action ledger unavailable; actions with effects are held back."
             notice = Action(ActionKind.ALERT, "kelpie", reason)
         if not self.config.dry_run:
-            self._safe_alert(replace(notice, severity=Severity.WARNING))
+            self._safe_alert(replace(notice, severity=Severity.WARNING), snapshot)
 
     def _safe_alert(
         self,
         action: Action,
+        snapshot: Snapshot,
         executed: bool = True,
         kind: Did | None = None,
         did: str | None = None,
     ) -> None:
         """Alert without ever raising out of the loop."""
         try:
-            self._alert(action, executed=executed, kind=kind, did=did)
+            self._alert(action, snapshot, executed=executed, kind=kind, did=did)
         except Exception:
             log.exception("could not send alert: %s", action)
 
     def _effect_message(
-        self, action: Action, *, executed: bool = True, kind: Did | None = None, did: str
+        self,
+        action: Action,
+        snapshot: Snapshot,
+        *,
+        executed: bool = True,
+        kind: Did | None = None,
+        did: str,
     ) -> bool:
         """Tell a human what happened to an effect, or hold it for the alert of this tick
         that announces it. False if there is no alerter."""
@@ -548,7 +558,7 @@ class Engine:
             self._lines.setdefault(key, []).append(did)
             self._held.setdefault(key, []).append((action, executed, kind, did))
             return True
-        return self._alert(action, executed=executed, kind=kind, did=did)
+        return self._alert(action, snapshot, executed=executed, kind=kind, did=did)
 
     def tick(self, snapshot_source: Callable[[], Snapshot]) -> list[Dispatched]:
         snapshot = snapshot_source()
@@ -567,12 +577,13 @@ class Engine:
             if any(not executed for k in keys for _, executed, _, _ in self._held.get(k, ())):
                 # It carries a failure: that needs a human, whatever the alert's severity.
                 action = replace(action, severity=_higher(action.severity, _NEEDS_HUMAN))
-            if not self._alert(action, did=" ".join(lines) or None):
+            if not self._alert(action, snapshot, did=" ".join(lines) or None):
                 return Outcome.DROPPED
             self._told.update(k for k in keys if k in self._lines)
             return Outcome.ALERTED
         if mode is Mode.SUGGEST:
-            sent = self._effect_message(action, kind=Did.SUGGESTED, did=suggested_line(action))
+            line = suggested_line(action)
+            sent = self._effect_message(action, snapshot, kind=Did.SUGGESTED, did=line)
             return Outcome.SUGGESTED if sent else Outcome.DROPPED
         return self._dispatch(action, snapshot)
 
@@ -613,19 +624,22 @@ class Engine:
             self._detail = detail
             if action.kind not in _QUIET_WHEN_DONE:
                 try:  # it is done: a message that cannot be sent must not undo that
-                    self._effect_message(action, kind=Did.DONE, did=done_line(action, detail))
+                    line = done_line(action, detail)
+                    self._effect_message(action, snapshot, kind=Did.DONE, did=line)
                 except Exception:
                     log.exception("could not announce: %s", action)
             return Outcome.EXECUTED
         else:
             # e.g. missing task_id or session_id, no target owner, or a missing capability.
             log.warning("%s cannot execute; alerting instead: %s", executor.name, action)
-        sent = self._effect_message(action, executed=False, did=not_executed_line(action))
+        line = not_executed_line(action)
+        sent = self._effect_message(action, snapshot, executed=False, did=line)
         return Outcome.NOT_EXECUTED if sent else Outcome.DROPPED
 
     def _alert(
         self,
         action: Action,
+        snapshot: Snapshot,
         executed: bool = True,
         kind: Did | None = None,
         did: str | None = None,
@@ -654,6 +668,8 @@ class Engine:
                 did=kind,
                 did_text=did,
                 age=None if note is None else note.age,
+                headline=_headline(action),
+                items=alert_items(action, snapshot),
             )
         )
         return True
@@ -717,3 +733,130 @@ def _incident(action: Action) -> CiOutage | None:
         return None
     outage = CiOutage.from_params(action.params)
     return outage if outage is not None and outage.state == action.state else None
+
+
+# --- what an alert is about, for its layout ------------------------------------------------
+
+
+def _headline(action: Action) -> str | None:
+    """The rule's own one-line summary (``params.headline``), if it gave one."""
+    value = action.params.get("headline")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def alert_items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
+    """The tasks an alert is about: ``params.items`` (mappings with ``task_id`` and optional
+    ``title``, ``needed``, ``since`` and ``blocking``; malformed entries are skipped), else
+    the action's own task. ``task`` is accepted for ``task_id``, a ``behind`` list (the
+    tasks waiting on it; not for an approval, whose list is the task itself) for ``blocking``
+    and ``waiting_minutes`` for ``since``: the shape rule 13 already persists in the ledger.
+    Titles come from the entry, else the snapshot; ages are counted to ``snapshot.now``.
+    Pure, and never raises on a rule's params."""
+    raw = action.params.get("items")
+    if isinstance(raw, list):
+        items = tuple(i for e in raw if (i := _item(e, snapshot)) is not None)
+        if items:
+            return items
+    if not action.task_id:
+        return ()
+    task = snapshot.task(action.task_id)
+    since = action.since or (task.status_since if task is not None else None)
+    needed = action.params.get("needed")
+    return (
+        AlertItem(
+            action.task_id,
+            _title(action.task_id, snapshot),
+            _age(since, snapshot.now),
+            needed.strip() if isinstance(needed, str) and needed.strip() else None,
+            _count(action.params.get("blocking")),
+            _start(since),
+        ),
+    )
+
+
+def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
+    """One entry of ``params.items``, or None when it is malformed.
+
+    Temporary shim: besides the layout's own keys (``task_id``, ``title``, ``needed``,
+    ``since``, ``blocking``) this reads rule 13's legacy item shape, which the ledger already
+    holds and the daily report reads: ``task`` for the id, a ``behind`` list counted for
+    ``blocking`` (not for ``kind == "approval"``, whose list is the task itself; a list at
+    ``BEHIND_CAP`` is "at least"), and ``waiting_minutes`` for the age. It goes away in part 2
+    of #169, when rule 13 sends exact ``task_id``, ``blocking`` and ``since``."""
+    if not isinstance(entry, Mapping):
+        return None
+    task_id = entry.get("task_id", entry.get("task"))
+    needed, blocking, title = entry.get("needed"), entry.get("blocking"), entry.get("title")
+    if not isinstance(task_id, str) or not task_id.strip():
+        return None
+    behind, more = entry.get("behind"), False
+    # An approval's ``behind`` is the task itself, not tasks behind it.
+    if blocking is None and isinstance(behind, list) and entry.get("kind") != "approval":
+        blocking, more = len(behind), len(behind) >= BEHIND_CAP
+    if title is not None and not isinstance(title, str):
+        return None
+    if needed is not None and not isinstance(needed, str):
+        return None
+    if blocking is not None and _count(blocking) is None:
+        return None
+    ok, since = _since(entry.get("since"))
+    if not ok:
+        return None
+    age = _age(since, snapshot.now)
+    minutes = entry.get("waiting_minutes")  # how long the item has held its tasks (legacy)
+    if since is None and (whole := _count(minutes)) is not None:
+        # Whole minutes: a start computed from them would move a minute between ticks and
+        # change the fingerprint, so only the age is known (worded, it is stable).
+        age = timedelta(minutes=whole)
+    return AlertItem(
+        task_id,
+        title.strip() if title and title.strip() else _title(task_id, snapshot),
+        age,
+        needed.strip() if needed and needed.strip() else None,
+        _count(blocking),
+        _start(since),
+        more,
+    )
+
+
+# Rule 13 persists at most this many of the tasks behind an item (``params.items[].behind``,
+# ``_SHOWN * 2`` in rules/needs_you.py; a test pins the two together): a list that long
+# counts as "at least". Part of the temporary shim in ``_item``.
+BEHIND_CAP = 10
+
+
+def _since(value: object) -> tuple[bool, datetime | None]:
+    """(usable, a timezone-aware datetime or None when absent) from a datetime or ISO text."""
+    if value is None:
+        return True, None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return False, None
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        return False, None
+    return True, value
+
+
+def _count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _title(task_id: str, snapshot: Snapshot) -> str | None:
+    task = snapshot.task(task_id)
+    if task is None or not task.title or not task.title.strip():
+        return None
+    return task.title.strip()
+
+
+def _start(since: datetime | None) -> datetime | None:
+    return since if since is not None and since.tzinfo is not None else None
+
+
+def _age(since: datetime | None, now: datetime) -> timedelta | None:
+    if since is None or since.tzinfo is None:
+        return None
+    return max(now - since, timedelta(0))

@@ -279,7 +279,8 @@ quote parts of it (see the next section).
   dry-run. Reasons may quote task ids and titles, block reasons, review return reasons,
   owner ids, branch names and progress notes. These tables are not pruned.
 - **Alerts** go to the Telegram and Slack channels you configure, with the same reason
-  text. Those services keep them under their own terms.
+  text, the titles of the tasks they are about and, with `[alerts] task_url`, links to them.
+  Those services keep them under their own terms.
 - **Daily reports** (`kelpie report`) contain task ids, owner ids, roles, command prefixes
   and token counts. Written to `[report] dir` when set; with `--send` a short summary goes to
   the alert channels.

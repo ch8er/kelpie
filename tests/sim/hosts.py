@@ -197,11 +197,15 @@ class MultiHostFarm:
         return [t for t in self.channels.telegram_texts() if all(n in t for n in needles)]
 
     def wait_message(self, *needles: str, timeout: float = 30) -> str:
-        return wait_for(
-            f"a Telegram message with {needles}",
-            lambda: next(iter(self.messages(*needles)), None),
-            timeout,
-        )
+        try:
+            return wait_for(
+                f"a Telegram message with {needles}",
+                lambda: next(iter(self.messages(*needles)), None),
+                timeout,
+            )
+        except AssertionError as exc:  # say what did arrive
+            got = "\n---\n".join(self.channels.telegram_texts()) or "(none)"
+            raise AssertionError(f"{exc}; messages sent:\n{got}") from None
 
     def close(self) -> None:
         """Stop every process (whatever fails on the way), then fail on a bad exit or a

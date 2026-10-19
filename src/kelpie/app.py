@@ -242,8 +242,8 @@ def load_settings(path: Path | None) -> Settings:
         raise ConfigError("[[budgets]] read spend from traces: they need [traces] enabled")
     github, block_conditions, human_tasks, llm_quotas = _load_connectors(data)
     try:
-        alerts = load_alerts(data.get("alerts"))
         report = load_report(data.get("report"))
+        alerts = load_alerts(data.get("alerts"), report.task_url)
         agent = load_agent(data.get("agent"))
         hub = load_hub(data.get("hub"))
     except ValueError as exc:
@@ -1967,6 +1967,8 @@ def _alerts_status(alerts: AlertSettings) -> list[str]:
     problems = alerts.problems()
     lines = [f"alerts:   {c.name}: {c.describe()}" for c in alerts.channels]
     lines += [f"alerts:   NOT ready: {p}" for p in problems]
+    if alerts.links_note:
+        lines.append(f"alerts:   task links: off ({alerts.links_note})")
     return lines
 
 

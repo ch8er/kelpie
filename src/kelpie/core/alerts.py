@@ -9,13 +9,18 @@ the action's kind and params, the rule's mode and the actual outcome
 situation and what they want done, never whether it was done. The wording of a transition
 ("Still open after 4.0h: ") is defined here once (:func:`lead_in`), for the engine's ledger
 and for every channel.
+
+An event can also carry a ``headline`` (a rule's own one-line summary) and ``items``: the
+tasks it is about (:class:`AlertItem`), with their title, age, what is needed and how many
+tasks wait behind each. The engine fills them from the action and the tick's snapshot;
+channels lay them out (:mod:`kelpie.alerts.render`).
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from kelpie.core.actions import Action, ActionKind, Severity
@@ -68,6 +73,32 @@ def lead_in(transition: Transition, age: timedelta | None = None) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class AlertItem:
+    """One task an alert is about. ``title`` is the board's (None when the task is not on
+    the board), ``age`` how long it has been in the situation (since ``since``), ``needed``
+    what a human must do (a rule's or an agent's text, untrusted), ``blocking`` how many
+    tasks wait behind it (None: unknown; at least that many when ``blocking_more``)."""
+
+    task_id: str
+    title: str | None = None
+    age: timedelta | None = None
+    needed: str | None = None
+    blocking: int | None = None
+    since: datetime | None = None
+    blocking_more: bool = False  # ``blocking`` is a lower bound (a list that was capped)
+
+    @property
+    def fingerprint(self) -> tuple[str, str | None, str | None, str | None, int | None, bool]:
+        """When it started, to the minute (else the age as worded), so the same item sent
+        again a tick later is the same item."""
+        if self.since is not None:
+            start: str | None = self.since.replace(second=0, microsecond=0).isoformat()
+        else:
+            start = format_age(self.age) if self.age is not None else None
+        return (self.task_id, self.title, start, self.needed, self.blocking, self.blocking_more)
+
+
+@dataclass(frozen=True, slots=True)
 class AlertEvent:
     """An alert as the engine hands it over and as a channel sees it.
 
@@ -75,7 +106,9 @@ class AlertEvent:
     possibly with untrusted task text: channels send it as plain text or escape it.
     ``subject`` is what the alert is about, e.g. ``requeue task-12``; with ``rule`` it
     identifies the alert for de-duplication. ``age`` is how long a lasting condition has been
-    open, for the transitions ``ESCALATED`` and ``RESOLVED``.
+    open, for the transitions ``ESCALATED`` and ``RESOLVED``. ``headline`` is the rule's own
+    one-line summary, if it gave one (else a channel words one); ``items`` are the tasks the
+    alert is about, in the rule's order.
     """
 
     rule: str
@@ -87,12 +120,12 @@ class AlertEvent:
     did_text: str | None = None  # what Kelpie did, as the engine rendered it (else from did)
     age: timedelta | None = None
     text: str | None = None  # free text (e.g. a report): sent as is, without the alert layout
+    headline: str | None = None
+    items: tuple[AlertItem, ...] = ()
 
     @property
-    def fingerprint(
-        self,
-    ) -> tuple[str, str, str, Severity, str | None, Transition, str | None, Did, str | None]:
-        """What makes two alerts the same one for de-duplication. The age counts as it is
+    def fingerprint(self) -> tuple[object, ...]:
+        """What makes two alerts the same one for de-duplication. Ages count as they are
         worded ("4.0h"), so an alert re-sent a minute later is still the same one."""
         return (
             self.rule,
@@ -104,6 +137,8 @@ class AlertEvent:
             format_age(self.age) if self.age is not None else None,
             self.did,
             self.did_text,
+            self.headline,
+            tuple(item.fingerprint for item in self.items),
         )
 
 

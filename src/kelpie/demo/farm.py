@@ -62,9 +62,9 @@ class Message:
         return telegram.format_message(self.event)
 
     @property
-    def did(self) -> str:
-        """What Kelpie did, as the alert's last line says it."""
-        return telegram.did_line(self.event)
+    def did(self) -> str | None:
+        """What Kelpie did, as the engine worded it (None: it only sent the alert)."""
+        return self.event.did_text
 
     def mentions(self, *needles: str) -> bool:
         return all(n in self.text for n in needles)

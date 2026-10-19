@@ -87,7 +87,26 @@ def test_the_engine_delivers_through_the_channel_and_metrics_count_it(
             app.close()
     (path, _, body) = fake.requests[0]
     assert path == f"/bot{TOKEN}/sendMessage"
-    assert "[WARNING] r: requeue task-1" in body["text"]
+    assert body["parse_mode"] == "HTML"
+    assert body["text"].startswith("\U0001f7e1 <b>Requeue it.</b>")
     assert "Kelpie did: nothing, mode suggest" in body["text"]
     assert TOKEN not in rendered
     assert 'kelpie_alerts_sent_total{channel="telegram"} 1' in rendered
+
+
+def test_alert_language_and_task_link_come_from_config(tmp_path: Path) -> None:
+    settings = load_settings(write(tmp_path, extra='language = "ru"'))
+    assert (settings.alerts.rendering.language, settings.alerts.rendering.task_url) == ("ru", None)
+    path = write(tmp_path)
+    path.write_text(
+        path.read_text() + '\n[report]\ntask_url = "https://board.example.org/t/{id}"\n'
+    )
+    assert load_settings(path).alerts.rendering.task_url == "https://board.example.org/t/{id}"
+    path.write_text(path.read_text().replace("https://board.example.org/t/{id}", "board://{id}"))
+    settings = load_settings(path)
+    status = render_status(settings, load_rules(settings.engine))
+    assert "alerts:   task links: off ([report] task_url is not an http(s) URL" in status
+    with pytest.raises(ConfigError, match=r"\[alerts\] language"):
+        load_settings(write(tmp_path, extra='language = "de"'))
+    with pytest.raises(ConfigError, match=r"\[alerts\] task_url"):
+        load_settings(write(tmp_path, extra='task_url = "ftp://x/{id}"'))

@@ -1,0 +1,93 @@
+{
+  "text": "🔴 Runaway run: session S-1 made 10 identical calls.\n\n1. Heartbeat · t_loop\n   Open task: https://board.example.org/tasks/t_loop\nKelpie did: Stopped run S-1; the worker exits within ~2 min.\nRule: loop_breaker",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🔴 "
+            },
+            {
+              "type": "text",
+              "text": "Runaway run: session S-1 made 10 identical calls.",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Heartbeat",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "text",
+              "text": "t_loop",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_loop",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Kelpie did: Stopped run S-1; the worker exits within ~2 min."
+            },
+            {
+              "type": "text",
+              "text": "\nRule: "
+            },
+            {
+              "type": "text",
+              "text": "loop_breaker",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

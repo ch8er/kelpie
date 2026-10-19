@@ -1168,6 +1168,8 @@ whatever the modes. An alert goes to every channel whose `min_severity` it reach
 | --- | --- | --- | --- |
 | `dedup_window` | `"10m"` | duration, >= 0 | Identical alerts within this window are sent once per channel. |
 | `queue_size` | `50` | count, 1 to 1000 | Per channel; alerts that do not fit are dropped and counted. |
+| `language` | `"en"` | `en` \| `ru` | Language of Kelpie's own words in an alert (headlines, labels, units, "Kelpie did"). Text that rules and agents wrote is shown as it is. Any other value stops startup. |
+| `task_url` | `[report] task_url` | http(s) URL with `{id}` | The "Open task" link of each task in an alert; the id is URL-quoted into `{id}`, which must not be in the host. Unset: `[report] task_url` when that is an http(s) URL, else no links. |
 | `channels` | `[]` | array of tables | `[[alerts.channels]]`, see below. Names must be unique. |
 
 Telegram channel (`type = "telegram"`):
@@ -1180,6 +1182,7 @@ Telegram channel (`type = "telegram"`):
 | `timeout` | `"10s"` | > 0 and <= 60s. |
 | `name` | `"telegram"` | Lower-case word; needed with two Telegram channels. |
 | `api_url` | `"https://api.telegram.org"` | Another Bot API server; plain http only on loopback. |
+| `format` | `"html"` | `html` (bold headline and titles, links) or `plain`. An HTML message Telegram cannot parse is sent once more as plain text. |
 
 Slack channel (`type = "slack"`):
 
@@ -1190,6 +1193,20 @@ Slack channel (`type = "slack"`):
 | `timeout` | `"10s"` | > 0 and <= 60s. |
 | `name` | `"slack"` | Lower-case word; needed with two Slack channels. |
 | `allow_host` | unset | Another host for the webhook (a relay); plain http only if it is loopback. |
+
+An alert reads the same in every channel: a severity icon and a one-line headline (with
+the transition: still open after, changed, resolved after), then one entry per task with
+its title, age and id, a short "Needed" line of at most 140 characters, how many tasks it
+blocks and the "Open task" link, then the reason ("Why", up to 1000 characters, unless every
+task says what is needed), "Kelpie did" only when Kelpie acted, would act or failed, and
+the rule. Telegram gets HTML with every task and agent value escaped. Slack gets Block
+Kit `rich_text` blocks: each such value is a text element, which Slack shows as it is (no
+formatting, mentions or links can come from it); Kelpie's own emphasis is an element style
+(bold headline and titles, code for ids and the rule), and "Open task" is a link element.
+The plain `text` fallback is sent with formatting off and `&`, `<` and `>` escaped. Nothing
+is inserted into the text, so ids, commands and URLs copy as they are. In every channel `@`
+in task and agent text is shown as a fullwidth `＠`, so `@here` or `<!channel>` ping nobody,
+and invisible format characters are removed.
 
 ## [report]
 

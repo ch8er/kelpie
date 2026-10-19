@@ -1,0 +1,122 @@
+{
+  "text": "🟡 Task t_6fb7a27a has been blocked for 44h 21m on 'waiting_human: needs_input: CEO: backup-d1' and has no condition Kelpie can check, so…\n\n1. Nightly backup of d1 — 44 h · t_6fb7a27a\n   Blocking: none · Open task: https://board.example.org/tasks/t_6fb7a27a\nWhy: Task t_6fb7a27a has been blocked for 44h 21m on 'waiting_human: needs_input: CEO: backup-d1' and has no condition Kelpie can check, so nothing will clear it automatically.\nKelpie did: carried it out.\nRule: stale_blocks",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Task t_6fb7a27a has been blocked for 44h 21m on 'waiting_human: needs_input: CEO: backup-d1' and has no condition Kelpie can check, so…",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Nightly backup of d1",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 44 h · "
+            },
+            {
+              "type": "text",
+              "text": "t_6fb7a27a",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Blocking: none"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_6fb7a27a",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Task t_6fb7a27a has been blocked for 44h 21m on 'waiting_human: needs_input: CEO: backup-d1' and has no condition Kelpie can check, so nothing will clear it automatically."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Kelpie did: carried it out."
+            },
+            {
+              "type": "text",
+              "text": "\nRule: "
+            },
+            {
+              "type": "text",
+              "text": "stale_blocks",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

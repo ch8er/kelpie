@@ -320,7 +320,7 @@ Alerts are off until a channel is configured. Each `[[alerts.channels]]` entry h
 executor could carry out, needs a human: its alert is sent at `warning` or above, whatever the
 action's own severity.
 
-The last line of every alert says what Kelpie itself did, worded by the engine from the
+The "Kelpie did" line of an alert says what Kelpie itself did, worded by the engine from the
 rule's mode and the actual outcome, never by the rule: "Suggested: clear the block on T-1
 (not done, rule in suggest mode)." in suggest mode; in act mode, once done, the past tense with
 the executor's specifics ("Stopped run hermes-run-7; task T-1 is blocked for a human (hermes
@@ -328,7 +328,8 @@ kanban unblock T-1); its worker ended 0.4s after SIGTERM."), or "Failed:
 could not ...: <reason>, needs a human." (the reason only when the error marks it safe to show;
 otherwise its type, details in Kelpie's log). An alert that a rule raises together with an effect
 (rule 10's runaway alert with its stop, rule 3's orphan alert with its reassignment) carries the
-effect's line instead of a second message. Plain alerts end with "only sent this alert".
+effect's line instead of a second message. An alert where Kelpie only tells a human has no
+"Kelpie did" line.
 
 Delivery runs on a background
 worker per channel (bounded queue), so a slow chat service never stalls the control loop.
@@ -355,12 +356,15 @@ min_severity = "critical"
 ```
 
 The token and the webhook URL are never logged or shown, and a missing or malformed one stops
-Kelpie at startup (a Slack webhook must be https on `hooks.slack.com`). Slack messages are
-plain text with `&`, `<` and `>` escaped, so task text cannot become a mention (in Telegram,
-`@` in task text is shown as a fullwidth `＠`, and invisible format characters are removed).
-Every message
-states the transition (new, still open, changed, resolved) and what Kelpie already did.
-See `kelpie.example.toml`.
+Kelpie at startup (a Slack webhook must be https on `hooks.slack.com`). An alert starts with
+a severity icon and a one-line headline with its transition (still open after, changed,
+resolved after), then lists each task with its title, age, id, a short "Needed" line, how
+many tasks it blocks and an "Open task" link (`[alerts] task_url`). Telegram gets HTML (or
+plain text with `format = "plain"`), Slack gets Block Kit `rich_text` blocks. Every value
+from a task or an agent is escaped (Telegram) or sent as a text element Slack does not parse
+(Slack), `@` in it is shown as a fullwidth `＠` (so `@here` and `<!channel>` ping nobody),
+and invisible format characters are removed. `[alerts] language = "ru"`
+switches Kelpie's own words to Russian. See `kelpie.example.toml`.
 
 ## Running from source
 

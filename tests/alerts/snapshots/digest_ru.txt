@@ -1,0 +1,10 @@
+🟡 Ждут вас: 2 задачи (самая давняя — 46 ч)
+
+1. Enable R2 for backups — 44 ч · t_6fb7a27a
+   Нужно: Enable R2 in the Cloudflare dashboard.
+   Блокирует: ничего · Открыть задачу: https://board.example.org/tasks/t_6fb7a27a
+2. Approve the store listing — 46 ч · t_c3f82477
+   Нужно: approval: Approve the new store listing; the release waits for it
+   Блокирует: 2 задачи · Открыть задачу: https://board.example.org/tasks/t_c3f82477
+Почему: Needs you (sam): 2 item(s) hold 2 agent task(s), 90.0 agent-hours waited so far.
+Правило: needs_you
