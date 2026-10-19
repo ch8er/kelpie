@@ -69,7 +69,7 @@ from kelpie.core.prices import CHECKED, canonical_model
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
-from kelpie.core.spend import SpendSettings, load_spend
+from kelpie.core.spend import ProviderMode, SpendConfig, SpendSettings, load_spend
 from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
@@ -163,7 +163,7 @@ class Settings:
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)  # [[budgets]], [prices]
-    spend: SpendSettings = field(default_factory=SpendSettings)  # [spend]
+    spend_settings: SpendSettings = field(default_factory=SpendSettings)  # [spend]
     resources: ResourceSettings = field(default_factory=ResourceSettings)
     github: GitHubSettings | None = None  # None: no [connectors.github] section
     block_conditions: tuple[BlockConditionPattern, ...] = ()
@@ -173,6 +173,11 @@ class Settings:
     report: ReportSettings = field(default_factory=ReportSettings)  # [report]
     agent: AgentSettings | None = None  # [agent]: this host runs ``kelpie agent``
     hub: HubSettings | None = None  # [hub]: ``kelpie serve`` takes reports from agents
+
+    @property
+    def spend(self) -> SpendConfig:
+        """``[spend]`` with what decides each provider's spend mode (budgets, prices)."""
+        return SpendConfig(self.spend_settings, self.budgets.prices, self.budgets.budgets)
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -229,12 +234,12 @@ def load_settings(path: Path | None) -> Settings:
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     try:
-        spend = load_spend(data.get("spend"))
+        spend_settings = load_spend(data.get("spend"))
         budgets = load_budgets(
             data.get("budgets"),
             data.get("prices"),
             traces.retention,
-            default_prices=spend.default_prices,
+            default_prices=spend_settings.default_prices,
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
@@ -261,7 +266,7 @@ def load_settings(path: Path | None) -> Settings:
         source=path,
         traces=traces,
         budgets=budgets,
-        spend=spend,
+        spend_settings=spend_settings,
         resources=resources,
         llm_quotas=llm_quotas,
         alerts=alerts,
@@ -1194,6 +1199,11 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         *billing_interval_warnings(loaded.rules, settings),
         *provider_interval_warnings(loaded.rules, settings.llm_quotas),
         *budget_provider_warnings(settings.budgets, settings.llm_quotas),
+        *(
+            f"subscription budget {b!r} names {n!r}, which no [spend.providers.<name>] quotas"
+            " lists: it sets no provider's spend mode"
+            for b, n in settings.spend.unlinked()
+        ),
     ]:
         log.warning(warning)
     try:
@@ -1756,13 +1766,12 @@ def read_budgets(
 UNPRICED_WINDOW = timedelta(days=7)  # how far back models without a price are looked for
 
 
-def read_unpriced(
+def read_models(
     settings: Settings, now: datetime | None = None
 ) -> tuple[tuple[str, int], ...] | str:
-    """Model families (:func:`kelpie.core.prices.canonical_model`) the span store saw in
-    the last :data:`UNPRICED_WINDOW` (at most the span retention) that nothing in the
-    price table prices, with their tokens, most first; a string says why the store cannot
-    be read. No database or traces off: none."""
+    """The models of the counted LLM calls the span store saw in the last
+    :data:`UNPRICED_WINDOW` (at most the span retention), with their tokens, most first; a
+    string says why the store cannot be read. No database or traces off: none."""
     db = settings.db_path
     if not settings.traces.enabled or db is None or not db.exists():
         return ()
@@ -1780,18 +1789,93 @@ def read_unpriced(
         return f"cannot read the span store {db}: {exc}"
     finally:
         store.close()
-    prices = settings.budgets.prices
-    priced: dict[str, bool] = {}
     found: dict[str, int] = {}
     for row in rows:
-        if not row.model:
+        if row.model:
+            found[row.model] = found.get(row.model, 0) + row.input_tokens + row.output_tokens
+    return _most_first(found)
+
+
+def _most_first(tokens: Mapping[str, int]) -> tuple[tuple[str, int], ...]:
+    return tuple(sorted(tokens.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def read_unpriced(
+    settings: Settings,
+    now: datetime | None = None,
+    models: Sequence[tuple[str, int]] | str | None = None,
+) -> tuple[tuple[str, int], ...] | str:
+    """Model families (:func:`kelpie.core.prices.canonical_model`) of ``models`` (read
+    with :func:`read_models` when not given) that nothing in the price table prices, with
+    their tokens, most first; a string says why the store cannot be read."""
+    at = now or utc_now()
+    seen = read_models(settings, at) if models is None else models
+    if isinstance(seen, str):
+        return seen
+    prices = settings.budgets.prices
+    found: dict[str, int] = {}
+    for model, tokens in seen:
+        if prices.price_for(model, at.date()) is None:
+            family = canonical_model(model)
+            found[family] = found.get(family, 0) + tokens
+    return _most_first(found)
+
+
+def spend_modes(
+    settings: Settings, models: Sequence[tuple[str, int]] | str = ()
+) -> tuple[tuple[ProviderMode, int], ...]:
+    """Each provider's spend mode with the tokens its models used in ``models`` (configured
+    providers first, then those seen); models whose provider nothing tells are one row
+    with provider None."""
+    spend = settings.spend
+    tokens: dict[str | None, int] = {}
+    for model, n in models if not isinstance(models, str) else ():
+        provider = spend.provider_for(model)
+        tokens[provider] = tokens.get(provider, 0) + n
+    rows = [(m, tokens.get(m.provider, 0)) for m in spend.modes(tokens)]
+    return tuple(sorted(rows, key=lambda r: r[0].provider is None))  # the unknown ones last
+
+
+def unknown_provider_models(
+    settings: Settings, models: Sequence[tuple[str, int]] | str
+) -> tuple[str, ...]:
+    """Model families in ``models`` whose provider nothing tells."""
+    if isinstance(models, str):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            canonical_model(m) for m, _ in models if settings.spend.provider_for(m) is None
+        )
+    )
+
+
+def render_spend_modes(
+    settings: Settings, models: Sequence[tuple[str, int]] | str = ()
+) -> list[str]:
+    """The ``spend modes:`` block of ``kelpie status``: each provider's mode and why."""
+    rows = spend_modes(settings, models)
+    if not rows and not settings.spend.unlinked():
+        return []
+    lines = ["", "spend modes:"]
+    for mode, tokens in rows:
+        window = _span(min(UNPRICED_WINDOW, settings.traces.retention))
+        used = f", {tokens:,} tokens in the last {window}" if tokens else ""
+        if mode.provider is None:
+            loose = unknown_provider_models(settings, models)
+            more = f" and {len(loose) - 10} more" if len(loose) > 10 else ""
+            lines.append(f"  (no provider known): {', '.join(loose[:10])}{more}{used}; add them")
+            lines.append("    to [spend.providers.<name>] models to give them a spend mode")
             continue
-        if row.model not in priced:
-            priced[row.model] = prices.price_for(row.model, at.date()) is not None
-        if not priced[row.model]:
-            family = canonical_model(row.model)
-            found[family] = found.get(family, 0) + row.input_tokens + row.output_tokens
-    return tuple(sorted(found.items(), key=lambda kv: (-kv[1], kv[0])))
+        limit = settings.spend.limit_for(mode.provider)
+        share = f", limit {limit[0]:,} tokens per {_span(limit[1])}" if limit else ""
+        lines.append(f"  {mode.provider}: {mode.mode}{share}{used}")
+        lines.append(f"    why: {mode.reason}")
+    lines += [
+        f"  warning: subscription budget {b!r} names {n!r}, which no [spend.providers.<name>]"
+        " quotas lists: it sets no provider's spend mode"
+        for b, n in settings.spend.unlinked()
+    ]
+    return lines
 
 
 def render_prices(settings: Settings, unpriced: Sequence[tuple[str, int]] | str = ()) -> list[str]:
@@ -1979,6 +2063,7 @@ def render_status(
     budgets: Sequence[BudgetStatus] | str = (),
     now: datetime | None = None,
     unpriced: Sequence[tuple[str, int]] | str = (),
+    models: Sequence[tuple[str, int]] | str = (),
 ) -> str:
     """Human-readable view of what ``kelpie serve`` would load with these settings."""
     engine = settings.engine
@@ -2008,6 +2093,7 @@ def render_status(
         lines.append(f"{number:>3}  {s.name:<17} {prio:<4}  {status:<16} {mode}")
     lines += [f"warning: {w}" for w in loaded.warnings]
     lines += render_budgets(settings, budgets, now or utc_now())
+    lines += render_spend_modes(settings, models)
     lines += render_adapters(adapters)
     return "\n".join(lines) + "\n"
 

@@ -834,6 +834,41 @@ the default's 1.25 × input.
 | --- | --- | --- |
 | `default_prices` | `true` | Price models from Kelpie's default table when `[prices]` has no entry for them. `false`: only `[prices]`. |
 
+`[spend.providers.<name>]`, one per model provider (1-63 letters, digits, `_` or `-`:
+`anthropic`, `openai`, `google`, or your own, such as a gateway):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `"auto"` | `api`: pay per token, spend is dollars. `subscription`: a plan with a usage limit, spend is tokens and the share of the limit (dollars only as an estimate). `auto`: decided from the rest of the config, below. |
+| `models` | `[]` | Model names or globs that belong to this provider (on the id as written, or case-insensitively on its family id). Needed only for models the default table and the name rules below do not place. |
+| `quotas` | `[]` | Names of `[connectors.llm_quotas]` probes that watch this provider's limits, so a subscription budget's `providers` (those names) can tell this provider's mode. |
+| `limit_tokens` | unset | Subscriptions: the tokens your plan allows per `limit_window`, as you know them; Kelpie never guesses a limit. |
+| `limit_window` | unset | Duration (`"5h"`, `"7d"`), together with `limit_tokens`. |
+
+**The provider of a model:** the first `models` pattern that matches, then the provider the
+default table knows it under, then its name: `claude-*` is `anthropic`, `gpt-*`,
+`chatgpt-*`, `codex-*` and `o<digit>*` are `openai`, `gemini-*` is `google`.
+
+**`auto` mode** reads nothing but the config, so every command gives the same answer;
+first match wins:
+
+1. a `[[budgets]]` entry with `mode = "subscription"` whose `providers` name the provider or
+   one of its `quotas`, or that names no providers (it covers them all): `subscription`;
+2. `limit_tokens` is set: `subscription`;
+3. a `day` budget (the whole farm) in `usd` with mode `api`, the budget default: `api`
+   (weak evidence: set `mode` to be sure);
+4. otherwise `unknown`: `kelpie doctor` warns and says what to set.
+
+A model whose provider nothing tells is `subscription` only under a subscription budget
+that names no providers (it covers them all); otherwise `unknown`.
+
+A subscription budget whose `providers` names a probe that no `quotas` lists sets no
+provider's mode; `kelpie serve` logs it and `kelpie doctor` warns.
+
+`kelpie status` lists each configured provider and each provider seen in the last 7 days
+of spans with its mode and the reason; `kelpie doctor` warns about providers without a
+mode and models whose provider nothing tells.
+
 **The default table** (`kelpie.core.prices`) holds the standard API prices of popular
 Anthropic, OpenAI and Google models, as their pricing pages showed them on the date
 `kelpie status` prints ("checked ..."). Each row has input, output and cache read prices,

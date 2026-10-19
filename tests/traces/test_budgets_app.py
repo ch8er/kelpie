@@ -21,7 +21,9 @@ from kelpie.app import (
     load_settings,
     merged_snapshot,
     read_budgets,
+    read_models,
     read_unpriced,
+    render_spend_modes,
     render_status,
 )
 from kelpie.cli import main
@@ -36,7 +38,7 @@ from kelpie.core.budgets import (
 from kelpie.core.model import LimitHit, Session, Snapshot, Span, SpanKind
 from kelpie.core.spans import MemorySpanStore, SpanStore, TokenUsage
 from kelpie.core.storage import SqliteSpanStore
-from kelpie.doctor import check_prices
+from kelpie.doctor import check_prices, check_spend_modes
 from kelpie.metrics import Metrics
 from kelpie.traces.store import SpanWindow
 from tests.fakes import FakeAdapter
@@ -505,3 +507,72 @@ def test_unpriced_models_on_an_old_database(tmp_path: Path) -> None:
     settings = replace(load_settings(write(tmp_path, CONFIG)), db_path=db_path)
     assert "predates budgets" in str(read_unpriced(settings, NOW))
     assert check_prices(settings, NOW).status == "SKIP"
+
+
+def test_status_and_doctor_show_spend_modes(tmp_path: Path) -> None:
+    db = tmp_path / "kelpie.db"
+    store = SqliteSpanStore(db)
+    store.append_spans(
+        [*SPANS, chat("cc", None, 5_000, trace="d" * 32, model="claude-haiku-4-5-20251001")],
+        NOW,
+    )
+    store.close()
+    text = (
+        CONFIG.replace('mode = "subscription"\n', "") + '\n[spend.providers.openai]\nmode = "api"\n'
+    )
+    settings = replace(load_settings(write(tmp_path, text)), db_path=db)
+    models = read_models(settings, NOW)
+    assert dict(models)["claude-haiku-4-5-20251001"] == 5_500
+    lines = "\n".join(render_spend_modes(settings, models))
+    assert "  openai: api\n    why: mode set in [spend.providers.openai]" in lines
+    assert "  anthropic: api, 5,500 tokens in the last 7d\n" in lines
+    assert "why: day budget 'farm-daily' counts the farm's spend in usd" in lines
+    assert "(no provider known): model-a, model-b-mini, unpriced" in lines
+    check = check_spend_modes(settings, NOW)
+    assert check.status == "WARN" and "no provider known for the models model-a" in check.detail
+    assert '[spend.providers.<name>] models = ["model-a"]' in check.fix
+    # a provider whose mode nothing tells
+    bare = replace(load_settings(write(tmp_path, "[traces]\nenabled = true\n")), db_path=db)
+    check = check_spend_modes(bare, NOW)
+    assert check.status == "WARN" and "no spend mode for anthropic" in check.detail
+    assert '[spend.providers.anthropic] mode = "api"' in check.fix
+    # all known
+    known = replace(
+        load_settings(
+            write(
+                tmp_path,
+                '[spend.providers.anthropic]\nmode = "subscription"\nlimit_tokens = 1000000\n'
+                'limit_window = "5h"\n[spend.providers.lab]\nmode = "api"\n'
+                'models = ["model-*", "unpriced"]\n',
+            )
+        ),
+        db_path=db,
+    )
+    check = check_spend_modes(known, NOW)
+    assert check.status == "PASS" and check.detail == "anthropic: subscription, lab: api"
+    assert "limit 1,000,000 tokens per 5h" in "\n".join(render_spend_modes(known, models))
+    # a subscription budget that links to no provider
+    odd = load_settings(
+        write(
+            tmp_path,
+            '[[budgets]]\nname = "max"\nscope = "day"\nunit = "tokens"\nhard = 5\n'
+            'mode = "subscription"\nproviders = ["claude-max"]\n',
+        )
+    )
+    check = check_spend_modes(replace(odd, db_path=None), NOW)
+    assert (
+        check.status == "WARN" and "'max' names 'claude-max', linked to no provider" in check.detail
+    )
+    assert 'quotas = ["claude-max"]' in check.fix
+    assert "it sets no provider's spend mode" in "\n".join(render_spend_modes(odd))
+    # a short retention: the window says so
+    short = replace(settings, traces=replace(settings.traces, retention=timedelta(days=2)))
+    assert "tokens in the last 2d" in "\n".join(render_spend_modes(short, models))
+    # an unreadable store, traces off, nothing configured or seen
+    assert check_spend_modes(replace(settings, db_path=tmp_path), NOW).status == "SKIP"
+    off = replace(Settings(), traces=replace(Settings().traces, enabled=False))
+    assert "[traces] disabled" in check_spend_modes(off, NOW).detail
+    assert check_spend_modes(Settings(), NOW).status == "SKIP"
+    assert render_spend_modes(Settings()) == []
+    full = render_status(settings, load_rules(settings.engine), models=models)
+    assert "spend modes:" in full
