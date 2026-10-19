@@ -1007,17 +1007,43 @@ and implements the actions the platform allows.
 - [x] Tests against synthetic data, no network access
 - [x] `docs/quickstart-claude-code.md` and `kelpie doctor` checks
 
+### adapters: OpenClaw adapter
+labels: P1, adapter, area:adapters
+Priority (Oct 16): third adapter, P1 — by far the most popular open-source agent (~400K GitHub stars as of Aug 2026), and it closed its own loop-guard request as "not planned", which rule 10 covers.
+Platform adapter for OpenClaw farms. OpenClaw has no built-in loop guard, so `stop` support
+makes `loop_breaker` useful there.
+
+**Acceptance criteria**
+- [x] Tasks, statuses, owners and sessions mapped onto `kelpie.core.model`; status mapping documented
+- [x] `SupportsStop` implemented if the platform allows it; other unsupported actions fall back to alerts
+- [x] Spans from OTLP or from hooks via the hooks-to-spans helper
+
+Done in #140 (Workboard cards and the plugin's hook spool: tasks, sessions, spans), #149 (stop: a marker the plugin enforces, plus `sessions.abort`), #154 (doctor checks and quickstart) and #155 (e2e: a runaway loop stopped). Unverified against a real OpenClaw gateway: listed in `src/kelpie/adapters/openclaw/README.md`.
+
+### adapters: GitHub Issues / Linear task-queue adapter
+labels: P1, adapter, area:adapters
+Priority (Oct 16): fourth adapter, P1 — one adapter covers every agent that takes tasks from issues and returns PRs (cloud Codex, Copilot coding agent, the Claude Code GitHub Action, OpenHands), reusing the GitHub connector.
+A generic adapter for farms whose task queue is GitHub Issues or Linear rather than a
+platform's own board.
+
+**Acceptance criteria**
+- [x] Issues mapped to tasks; statuses, assignees and blockers configurable per board (labels, states)
+- [x] `requeue`, `unblock`, `comment` and `reassign` implemented through the tracker API
+- [x] Respects API rate limits; tests with mocked HTTP
+
+Done in #180 (GitHub Issues read side), #192 (actions through the GitHub API), #200 (doctor, quickstart, e2e on a simulated GitHub) and #203 (Linear as a second tracker). What is unverified against live agents and a real Linear workspace: the batch report on #203 and `src/kelpie/adapters/issues/README.md`.
+
 ### core: declared actions judged per adapter on mixed farms
 labels: P1, area:core
 Follow-up of the issues adapter. `app._declared` takes the union of the action kinds every
 adapter declares, so on a farm with, say, Claude Code and GitHub Issues, the issues
-adapter's `requeue` hides Claude Code's missing `requeue` from the act checklist and
-`kelpie status`. And `PlatformExecutor` routes `wake` to `adapter.requeue` whatever the
-adapter declares, so an adapter that leaves `wake` out of its `actions` would still be
-asked to restart a task on it.
+adapter's `requeue` hides Claude Code's missing `requeue` from `kelpie doctor` (rule modes)
+and the daily report's act advice. And `PlatformExecutor` routes `wake` to
+`adapter.requeue` whatever the adapter declares: the issues adapter leaves `wake` out on
+purpose, yet a wake on one of its tasks would restart the agent.
 
 **Acceptance criteria**
-- [ ] The act checklist and `kelpie status` judge each rule's actions per adapter whose tasks it can target
+- [ ] `kelpie doctor` and the daily report judge each rule's actions per adapter whose tasks it can target, telling "acts on some adapters' tasks" from "cannot act here"
 - [ ] `PlatformExecutor` does not run an action kind an adapter's declared `actions` leaves out (the engine alerts instead)
 - [ ] Tests on a two-adapter farm
 
@@ -1056,19 +1082,6 @@ Platform adapter for Paperclip farms. Start on signal (a user or a validation co
 - [ ] Supported actions implemented, unsupported ones fall back to alerts through action routing
 - [ ] Spans from OTLP or from hooks via the hooks-to-spans helper
 
-### adapters: OpenClaw adapter
-labels: P1, adapter, area:adapters
-Priority (Oct 16): third adapter, P1 — by far the most popular open-source agent (~400K GitHub stars as of Aug 2026), and it closed its own loop-guard request as "not planned", which rule 10 covers.
-Platform adapter for OpenClaw farms. OpenClaw has no built-in loop guard, so `stop` support
-makes `loop_breaker` useful there. Start on signal.
-
-**Acceptance criteria**
-- [x] Tasks, statuses, owners and sessions mapped onto `kelpie.core.model`; status mapping documented
-- [x] `SupportsStop` implemented if the platform allows it; other unsupported actions fall back to alerts
-- [x] Spans from OTLP or from hooks via the hooks-to-spans helper
-
-Done in #140 (Workboard cards and the plugin's hook spool: tasks, sessions, spans), #149 (stop: a marker the plugin enforces, plus `sessions.abort`), #154 (doctor checks and quickstart) and #155 (e2e: a runaway loop stopped). Unverified against a real OpenClaw gateway: listed in `src/kelpie/adapters/openclaw/README.md`.
-
 ### adapters: Codex adapter
 labels: P2, adapter, area:adapters
 Platform adapter for Codex agents. Start on signal.
@@ -1077,19 +1090,6 @@ Platform adapter for Codex agents. Start on signal.
 - [ ] Sessions and tasks mapped onto `kelpie.core.model`; status mapping documented
 - [ ] Supported actions implemented, unsupported ones fall back to alerts through action routing
 - [ ] Spans from OTLP or from hooks via the hooks-to-spans helper
-
-### adapters: GitHub Issues / Linear task-queue adapter
-labels: P1, adapter, area:adapters
-Priority (Oct 16): fourth adapter, P1 — one adapter covers every agent that takes tasks from issues and returns PRs (cloud Codex, Copilot coding agent, the Claude Code GitHub Action, OpenHands), reusing the GitHub connector.
-A generic adapter for farms whose task queue is GitHub Issues or Linear rather than a
-platform's own board. Start on signal.
-
-**Acceptance criteria**
-- [x] Issues mapped to tasks; statuses, assignees and blockers configurable per board (labels, states)
-- [x] `requeue`, `unblock`, `comment` and `reassign` implemented through the tracker API
-- [x] Respects API rate limits; tests with mocked HTTP
-
-Done in #180 (GitHub Issues read side), #192 (actions through the GitHub API), #200 (doctor, quickstart, e2e on a simulated GitHub) and #203 (Linear as a second tracker). What is unverified against live agents and a real Linear workspace: the batch report on #203 and `src/kelpie/adapters/issues/README.md`.
 
 ### adapters: Linear — read reserve per team, history matched by user id
 labels: P2, area:adapters
