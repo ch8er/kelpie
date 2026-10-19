@@ -201,6 +201,15 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   ([#22](https://github.com/ch8er/kelpie/pull/22), [#89](https://github.com/ch8er/kelpie/pull/89), [#137](https://github.com/ch8er/kelpie/pull/137)).
 - `kelpie why <task>` explains why a task is not moving, read-only and offline by default
   ([#87](https://github.com/ch8er/kelpie/pull/87)).
+- Snoozes, part 1 ([#176](https://github.com/ch8er/kelpie/issues/176)): `kelpie snooze <task>
+  --until <date|duration>` records that a task waits on purpose until a date (a bare date
+  means through that day, in `[report] timezone`), and `kelpie unsnooze` and `kelpie
+  snoozes [--json] [--all]` manage them. With `[snooze] marker = true` (off by default:
+  any agent can write it), an `until:YYYY-MM-DD` marker in a block reason records one from
+  the board, ending at most `marker_max_days` (30) after the block was set. Snoozes are
+  stored in `kelpie.db` (schema 8), put into every snapshot and shown by `kelpie why`;
+  `kelpie doctor` counts the markers it cannot honour on every local board. No rule acts on
+  them yet.
 - `kelpie report` prints the daily report as Markdown, and `--send` posts the summary to the
   alert channels ([#47](https://github.com/ch8er/kelpie/pull/47), [#52](https://github.com/ch8er/kelpie/pull/52)).
 - Prometheus metrics for the engine, adapters, connectors, traces and budgets, and a

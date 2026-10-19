@@ -71,6 +71,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="also read network connectors (GitHub) as a tick would; default: offline",
     )
+    snooze = sub.add_parser(
+        "snooze", help="acknowledge a deliberate wait on a task until a date (stored)"
+    )
+    snooze.add_argument("task", help="the task id, as the board shows it")
+    snooze.add_argument(
+        "--until",
+        required=True,
+        help="a date (2026-10-25: through that day, until the next one starts), a date and "
+        "time (2026-10-25T09:00; with an offset such as +02:00 that instant) or a duration "
+        "(3d, 12h); dates and times without an offset are in [report] timezone; at most "
+        "[snooze] max_days (90) ahead",
+    )
+    snooze.add_argument("--reason", help="why it waits, e.g. 'deferred to the release'")
+    snooze.add_argument("--by", help="who decided (default: the OS user)")
+    unsnooze = sub.add_parser("unsnooze", help="remove a task's snooze")
+    unsnooze.add_argument("task", help="the task id")
+    snoozes = sub.add_parser("snoozes", help="list the active snoozes")
+    snoozes.add_argument("--json", action="store_true", help="machine-readable output")
+    snoozes.add_argument(
+        "--all", action="store_true", help="also the expired ones not pruned yet (30 days)"
+    )
     doctor = sub.add_parser(
         "doctor",
         help="check a first live run: config, rule modes, boards and task lists, hooks, spans, "
@@ -163,6 +184,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             out, err, code = run_why(
                 settings, args.task, args.json, max(0, args.entries), refresh=args.refresh
             )
+            sys.stdout.write(out)
+            sys.stderr.write(err)
+            return code
+        if args.command in ("snooze", "unsnooze", "snoozes"):
+            from kelpie import snooze as snoozing
+
+            if args.command == "snooze":
+                out, err, code = snoozing.snooze(
+                    settings, args.task, args.until, args.reason, args.by
+                )
+            elif args.command == "unsnooze":
+                out, err, code = snoozing.unsnooze(settings, args.task)
+            else:
+                out, err, code = snoozing.list_snoozes(settings, args.json, args.all)
             sys.stdout.write(out)
             sys.stderr.write(err)
             return code

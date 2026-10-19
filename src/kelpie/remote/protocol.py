@@ -282,6 +282,10 @@ def _value(tp: Any, value: Any, where: str, is_id: bool) -> Any:
         return value if all(a is b for a, b in zip(items, value, strict=True)) else tuple(items)
     if origin is dict or tp is Any:
         return _plain(value, where, 1)
+    if origin is Mapping:
+        # Snapshot.snoozes, left at its empty default: SNAPSHOT_FIELDS refuses the field
+        # from an agent before this check runs.
+        return value
     if dataclasses.is_dataclass(tp):
         return _checked(value, where)
     if tp is str:

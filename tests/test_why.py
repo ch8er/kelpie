@@ -25,6 +25,7 @@ from kelpie.core.model import (
     Dependency,
     Session,
     Snapshot,
+    Snooze,
     Status,
     Task,
 )
@@ -1017,3 +1018,66 @@ def test_notes_are_per_finding_and_per_task() -> None:
     assert _noted(alert("checkpoints", why="never known"), "T-1", "b", "lists").note is None
     assert _noted(alert("stale_blocks"), "T-1", "block", "lists").note == "block"
     assert _noted(alert("stale_blocks"), "T-1", None, "lists").note is None
+
+
+def test_why_shows_a_snooze_read_only(
+    farm: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("kelpie.why.utc_now", lambda: NOW)
+    store = SqliteLedgerStore(farm / "kelpie.db")
+    until = datetime(2026, 3, 9, tzinfo=UTC)
+    store.put_snooze(Snooze("t_blocked", until, "deferred to the release", "ceo", ago(hours=1)))
+    store.close()
+    before = (farm / "kelpie.db").stat().st_mtime_ns
+    assert main(why("t_blocked")) == 0
+    out = capsys.readouterr().out
+    assert (
+        "  snooze   snoozed until 2026-03-09 00:00 UTC (deferred to the release, by ceo), "
+        "6d 9h left\n" in out
+    )
+    assert main(why("t_blocked", "--json")) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["snooze"]["until"] == until.isoformat() and data["snooze"]["active"] is True
+    assert data["snooze"]["by"] == "ceo" and data["problems"] == []
+    assert (farm / "kelpie.db").stat().st_mtime_ns == before
+    assert main(why("t_review", "--json")) == 0
+    assert json.loads(capsys.readouterr().out)["snooze"] is None
+
+
+def test_why_on_an_outdated_database_leaves_snoozes_out(
+    farm: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = sqlite3.connect(farm / "kelpie.db")
+    db.execute("PRAGMA user_version = 1")
+    db.close()
+    assert main(why("t_blocked", "--json")) == 0
+    problems = json.loads(capsys.readouterr().out)["problems"]
+    assert any(p.startswith("snoozes left out: database schema 1 is older") for p in problems)
+
+
+def test_render_marker_and_expired_snoozes() -> None:
+    since = ago(hours=3)
+    task = Task(
+        "T-1",
+        "Enable R2",
+        Status.BLOCKED,
+        since,
+        block=Block(reason="CEO decides until:2026-03-05", since=since),
+    )
+    marker = Snooze("T-1", datetime(2026, 3, 5, tzinfo=UTC), None, None, since, "marker")
+    snap = Snapshot(now=NOW, tasks=(task,), snoozes={"T-1": marker})
+    ex = explain_snapshot(load_rules(EngineConfig()), snap, "T-1")
+    assert ex is not None
+    assert "  snooze   snoozed until 2026-03-05 00:00 UTC (from marker), 2d 9h left" in render(ex)
+    expired = Snooze("T-1", ago(days=2), None, "bob", ago(days=3), "chat")
+    ex.snapshot = replace(snap, snoozes={"T-1": expired})
+    assert (
+        "  snooze   snooze expired 2d 0h ago, at 2026-02-28 15:00 UTC (by bob, from chat)"
+        in render(ex)
+    )
+    assert as_json(ex)["snooze"]["source"] == "chat"
+    from zoneinfo import ZoneInfo
+
+    ex.snapshot, ex.tz = snap, ZoneInfo("Europe/Berlin")  # [report] timezone, as the CLI shows
+    assert "snoozed until 2026-03-05 01:00 CET (2026-03-05 00:00 UTC) (from marker)" in render(ex)
+    assert as_json(ex)["snooze"]["until_text"] == "2026-03-05 01:00 CET (2026-03-05 00:00 UTC)"

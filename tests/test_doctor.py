@@ -102,6 +102,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "providers have a spend mode": "SKIP",
         "worktrees readable": "SKIP",
         "PR blocks have conditions": "PASS",
+        "snooze markers parse": "SKIP",
         "disk watched": "PASS",
         "process counts fresh": "SKIP",
         "Prometheus reachable": "SKIP",
@@ -498,6 +499,62 @@ def blocked(farm: Farm, tid: str, reason: str, kind: str = "needs_input") -> Non
     farm.board.task(tid, "blocked", NOW - timedelta(hours=3))
     payload = {"kind": kind, "reason": reason}
     farm.board.event(tid, "blocked", NOW - timedelta(hours=2), payload)
+
+
+def test_snooze_markers_that_serve_ignores_warn(farm: Farm) -> None:
+    farm.make_healthy()
+    check = farm.checks()["snooze markers parse"]
+    assert check.status == "SKIP" and "markers are off" in check.detail  # the default
+    farm.extra = "[snooze]\nmarker = true\n"
+    day = (NOW + timedelta(days=3)).date().isoformat()
+    blocked(farm, "t_2", f"CEO deferred R2 until:{day}")
+    check = farm.checks()["snooze markers parse"]
+    assert (
+        check.status == "PASS" and "1 block reason(s) carry a valid until: marker" in check.detail
+    )
+    blocked(farm, "t_10", "until:2026-13-01")
+    blocked(farm, "t_3", "until:soon and until:later")
+    blocked(farm, "t_4", f"until:{(NOW + timedelta(days=60)).date().isoformat()}")
+    check = farm.checks()["snooze markers parse"]
+    assert check.status == "WARN"
+    assert "4 marker(s) ignored in 3 block reason(s) (t_3, t_4, t_10)" in check.detail
+    assert "t_3: until:soon: not a valid date" in check.detail
+    assert "fix: write until:YYYY-MM-DD" in check.render()
+    farm.extra = "[snooze]\nmarker = false\n"
+    assert farm.checks()["snooze markers parse"].status == "SKIP"
+
+
+def test_snooze_markers_read_every_local_board(farm: Farm, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataclasses import replace
+
+    from kelpie.app import load_settings
+    from kelpie.core.model import Block, Snapshot, Status, Task
+    from kelpie.core.snooze import SnoozeSettings
+    from kelpie.doctor import check_snooze_markers
+
+    since = NOW - timedelta(days=1)
+    card = Task(
+        "card-1",
+        "Synthetic card",
+        Status.BLOCKED,
+        since,
+        source="openclaw",
+        block=Block("until:2026-02-31", since),
+    )
+    monkeypatch.setattr(
+        "kelpie.doctor.local_board", lambda s, now: Snapshot(now=now, tasks=(card,))
+    )
+    settings = replace(load_settings(farm.config()), snooze=SnoozeSettings(marker=True))
+    check = check_snooze_markers(settings, NOW)
+    assert check.status == "WARN" and "card-1: until:2026-02-31: not a valid date" in check.detail
+
+
+def test_snooze_markers_on_an_unreadable_board_skip(farm: Farm) -> None:
+    farm.extra = "[snooze]\nmarker = true\n"
+    farm.board.conn.execute("DROP TABLE tasks")
+    farm.board.conn.commit()
+    check = farm.checks()["snooze markers parse"]
+    assert check.status == "SKIP" and "board not readable" in check.detail
 
 
 @pytest.mark.parametrize(

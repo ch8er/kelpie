@@ -37,6 +37,10 @@ snapshot:                    # passed verbatim to kelpie.core.serde.snapshot_fro
                              # PRs closed within the connector's lookback
   pull_requests_complete: true # the code host listed both in full (omitted: no code host)
   output_offenders: [...]    # OutputOffender: repeated huge tool outputs ([traces.outputs])
+  snoozes:                   # Snooze by task id: deliberate waits (kelpie snooze, markers)
+    T-101: {task_id: T-101, until: "2026-03-05T00:00:00+00:00", reason: "the release",
+            by: ceo, created_at: "2026-03-01T09:00:00+00:00", source: cli,
+            behind_at_snooze: 2}
 expected_actions:            # must be emitted; subset match, order-insensitive
   - kind: unblock            # ActionKind value
     task_id: T-101           # optional (omit for host/global alerts)
@@ -57,6 +61,10 @@ Snapshot rules (enforced by `snapshot_from_dict`):
 - Durations are strings like `"1h30m"`, `"2h"`, `"30m"`, `"1d"`.
 - Enums use their lowercase values (`in_progress`, `ci_status`, `disk`, `tool`, ...).
 - Empty snapshot lists are omitted.
+- `snoozes` is a mapping, not a list: each key is a task id and must equal its entry's
+  `task_id`; `reason` and `by` may be `null`; `source` is `cli`, `chat` or `marker`
+  (default `cli`). A snooze is active while `now` is before its `until`; rules see the
+  active ones and those that expired within the last 7 days, as the store loads them.
 
 Fixture-only `repeat` key (spans only). Long runs of identical spans, such as 900 heartbeat
 calls overnight, would make a fixture unreadable. A span entry may instead carry

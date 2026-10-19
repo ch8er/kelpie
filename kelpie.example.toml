@@ -226,6 +226,14 @@ once_attempts = 3         # ...and given up after this many failed attempts
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.
                           # $KELPIE_DB overrides this.
 
+# Snoozes: a person acknowledges a deliberate wait until a date (`kelpie snooze <task>
+# --until 2026-10-25`: through that day, in [report] timezone).
+# [snooze]
+# max_days = 90           # how far ahead kelpie snooze may reach (1 to 365)
+# marker = false          # read until:2026-10-25 markers in block reasons; any agent can
+#                         # write them, so only where agents record people's decisions
+# marker_max_days = 30    # a marker may end at most this long after its block was set
+
 # OTLP trace ingest on POST /v1/traces (same port as /metrics). See docs/guide.md, "Traces".
 [traces]
 enabled = true

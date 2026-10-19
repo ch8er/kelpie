@@ -21,7 +21,7 @@ configure what exists.
   [ci_economy](#9-ci_economy), [loop_breaker](#10-loop_breaker),
   [no_progress](#11-no_progress), [conflict_warning](#12-conflict_warning),
   [dispatch_gate](#dispatch_gate)
-- [[storage]](#storage)
+- [[storage]](#storage), [[snooze]](#snooze)
 - [[adapters.hermes]](#adaptershermes), [[adapters.claude_code]](#adaptersclaude_code),
   [[adapters.openclaw]](#adaptersopenclaw), [[adapters.github_issues]](#adaptersgithub_issues),
   [[adapters.linear]](#adapterslinear)
@@ -585,7 +585,37 @@ tool calls only through hooks, `[adapters.hermes] lookback` must cover `repeat_d
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `path` | `"kelpie.db"` | SQLite database: action ledger, alert states, spans, recorded fixes. `":memory:"` keeps it in memory. `$KELPIE_DB` overrides it. |
+| `path` | `"kelpie.db"` | SQLite database: action ledger, alert states, snoozes, spans, recorded fixes. `":memory:"` keeps it in memory. `$KELPIE_DB` overrides it. |
+
+## [snooze]
+
+A snooze records that a person knows a task waits on purpose until a date (a decision
+deferred to a release, a manual pass planned for a day). `kelpie snooze <task> --until ...`
+stores one ([install.md, "Command line"](install.md)). A stored snooze wins over a marker
+for the same task. `kelpie serve` puts active snoozes, and those expired within the last 7
+days, into every snapshot; expired snoozes are pruned from the database after 30 days.
+`kelpie why <task>` shows the task's snooze.
+
+Dates and times, for `--until` and markers alike: a bare date (`2026-10-25`) means through
+that day, so the snooze ends when the next day starts in `[report] timezone`; a date and
+time without an offset (`2026-10-25T09:00`) is in `[report] timezone` too; with an offset
+(`Z`, `+02:00`, `-0500`) it is that instant. Kelpie echoes the resolved time in
+`[report] timezone` and in UTC.
+
+**Markers** (off by default). With `marker = true`, an agent can record a person's decision
+in the block reason as `until:YYYY-MM-DD` or `until:YYYY-MM-DDTHH:MM` (seconds allowed).
+With several markers the latest wins. A marker inside double quotes (`"..."`), typographic
+double or single quotes (U+201C/U+201D, U+2018/U+2019) or backticks is not read: that is
+text the agent copied. Any agent can write these words, so turn markers on only where
+agents record people's decisions, as with `[[adapters.hermes.human_decisions]]`. A marker
+snooze is weaker than a person's: rules may only hold repeat human-wait alerts on it, never
+agent-health alerts, and list it as "from marker".
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `max_days` | `90` | How far ahead `kelpie snooze --until` may reach, 1 to 365 days. A bare date is counted by date: the date exactly `max_days` after today is the last one allowed. A later one is refused (exit 2), and the message names the last date or time allowed. |
+| `marker` | `false` | Read `until:` markers in block reasons. A marker that is not a valid date, or ends too late (`marker_max_days`), is ignored and logged once; `kelpie doctor` counts them on every local board ("snooze markers parse"). |
+| `marker_max_days` | `30` | How long after its block was set (`Block.since`, when the agent wrote the reason) a marker may end, 1 to `max_days`. A bare date is counted by date: the date exactly `marker_max_days` after the block's is the last one allowed. A marker ending later is never honoured, even once that date comes within reach; a new block starts a new period. The default is lowered to `max_days` when that is smaller. |
 
 ## [adapters.hermes]
 

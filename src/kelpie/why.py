@@ -28,6 +28,9 @@ skipped.
   carries a ``note``: a block serve would give a condition (offline), or the code host's PR
   lists, which serve knows in full only after two scans in a row while ``why`` reads them
   once (``--refresh``) or not at all (offline);
+- its snooze, if a person snoozed the wait (``kelpie snooze``, read from the database
+  without writing to it) or an ``until:`` marker in the block reason records one: "snoozed
+  until <date> (<reason>, by <who>)", or when it expired;
 - its open alert states and its latest ledger entries, read from the database without
   writing to it.
 
@@ -46,13 +49,14 @@ import sqlite3
 import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
 from kelpie.app import (
     LoadedRules,
     Settings,
+    SnoozeReader,
     build_adapters,
     connector_steps,
     load_rules,
@@ -64,13 +68,23 @@ from kelpie.connectors.github.connector import PrRef, web_host
 from kelpie.core.actions import Action
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry
-from kelpie.core.model import Condition, ConditionKind, Session, Snapshot, Status, Task
+from kelpie.core.model import (
+    Condition,
+    ConditionKind,
+    Session,
+    Snapshot,
+    Snooze,
+    Status,
+    Task,
+)
+from kelpie.core.snooze import format_when, snooze_json
 from kelpie.core.spans import SpanStore
 from kelpie.core.states import OpenState
 from kelpie.core.storage import (
     SchemaOutdated,
     SqliteSpanStore,
     ledger_entry,
+    load_snoozes,
     open_readonly,
     open_state,
 )
@@ -174,6 +188,7 @@ class Explanation:
     refreshed: bool = False  # the network connector steps ran (--refresh)
     expected: list[Expected] = field(default_factory=list)
     block_patterns: int = 0  # [[block_conditions]] patterns that apply to the task's text
+    tz: tzinfo = UTC  # [report] timezone: where a snooze's time is also shown
 
 
 class _Capture(logging.Handler):
@@ -224,8 +239,16 @@ def read_snapshot(
             else None
         )
         budgets = settings.budgets if window is not None else None
+        snoozes = SnoozeReader(settings.snooze, lambda now: read_snoozes(db, now, problems))
         snapshot = merged_snapshot(
-            adapters, metrics, clock, window, budgets, remember=False, enrich=enrich
+            adapters,
+            metrics,
+            clock,
+            window,
+            budgets,
+            remember=False,
+            enrich=enrich,
+            snoozes=snoozes,
         )()
     finally:
         app_log.removeHandler(capture)
@@ -243,6 +266,25 @@ def read_snapshot(
     if metrics.span_store_errors:
         problems.append("the span store could not be read")
     return SnapshotRead(snapshot, failures, problems)
+
+
+def read_snoozes(db: Path | None, now: datetime, problems: list[str]) -> dict[str, Snooze]:
+    """The stored snoozes a snapshot at ``now`` holds, read-only; a database that cannot be
+    read adds to ``problems`` (no database yet: there are none)."""
+    if db is None or not db.exists():
+        return {}
+    try:
+        conn = open_readonly(db, 5000)
+    except (SchemaOutdated, RuntimeError, sqlite3.Error) as exc:
+        problems.append(f"snoozes left out: {exc}")
+        return {}
+    try:
+        return load_snoozes(conn, now)
+    except sqlite3.Error as exc:
+        problems.append(f"snoozes left out: {exc}")
+        return {}
+    finally:
+        conn.close()
 
 
 def _mentions(value: Any, task_id: str) -> bool:
@@ -497,6 +539,7 @@ def explain(
     if ex is None:
         return Failure("not_found", f"task {task_id} is not on the board", read.problems, 1)
     ex.refreshed = refresh
+    ex.tz = settings.snooze.tz
     ex.expected, ex.block_patterns = expected_conditions(settings, read.snapshot, ex.task, refresh)
     block_note = _offline_note(ex.expected)
     lists_note = _pr_lists_note(settings, read.snapshot, refresh)
@@ -649,6 +692,8 @@ def render(ex: Explanation) -> str:
     if t.block is not None:
         cond = f", condition {t.block.condition_id}" if t.block.condition_id else ""
         lines.append(f"  block    '{t.block.reason}' for {_age(now - t.block.since)}{cond}")
+    if (snooze := ex.snapshot.snoozes.get(t.id)) is not None:
+        lines.append(f"  snooze   {_snooze(snooze, now, ex.tz)}")
     sessions = sorted(ex.snapshot.sessions_for(t.id), key=lambda s: s.started_at, reverse=True)
     live = [s for s in sessions if is_live(s, now, ex.stale_after)]
     lines.append(f"  session  {'live' if live else 'none live'}")
@@ -711,6 +756,20 @@ def render(ex: Explanation) -> str:
         out.append(_text(first))
         out += [f"    | {_text(part)}" for part in more if part.strip()]
     return "\n".join(out) + "\n"
+
+
+def _snooze(s: Snooze, now: datetime, tz: tzinfo = UTC) -> str:
+    """``snoozed until <date> (<reason>, by <who>)``, or when it expired."""
+    parts = [s.reason] if s.reason else []
+    if s.by:
+        parts.append(f"by {s.by}")
+    if s.source != "cli":
+        parts.append(f"from {s.source}")
+    detail = f" ({', '.join(parts)})" if parts else ""
+    when = format_when(s.until, tz)
+    if s.active(now):
+        return f"snoozed until {when}{detail}, {_age(s.until - now)} left"
+    return f"snooze expired {_age(now - s.until)} ago, at {when}{detail}"
 
 
 def _raw(t: Task) -> str:
@@ -783,6 +842,7 @@ def _json_target(c: Condition) -> dict[str, Any] | None:
 def as_json(ex: Explanation) -> dict[str, Any]:
     t, now = ex.task, ex.snapshot.now
     sessions = sorted(ex.snapshot.sessions_for(t.id), key=lambda s: s.started_at, reverse=True)
+    snooze = ex.snapshot.snoozes.get(t.id)
     return {
         "schema_version": SCHEMA_VERSION,
         "task": {
@@ -818,6 +878,7 @@ def as_json(ex: Explanation) -> dict[str, Any]:
             for s in sessions[:JSON_SESSIONS]
         ],
         "sessions_total": len(sessions),
+        "snooze": None if snooze is None else snooze_json(snooze, now, ex.tz),
         "conditions": [
             {
                 "id": c.id,
