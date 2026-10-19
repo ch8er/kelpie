@@ -132,14 +132,17 @@ _NONE_BEFORE = re.compile(
     r"|\b(?:add|adding|write|writing)\s+(?:an?\s+|the\s+|some\s+)?$",
     re.IGNORECASE,
 )
-# A resolution of the failure itself: "Fixed failing tests" (before it, not negated), "the
-# failing test is now fixed", "CI was red, now green" (after it). Not "please fix", "needs
-# a fix" or "even though I fixed the timeout".
 # Where the failure's own phrase starts: "No changelog and CI is red" negates the changelog.
 # "or" joins one phrase ("No flaky or failing tests").
 _PHRASE_BREAK = re.compile(
-    r"[:,;]|\b(?:but|and|because|why|so|while|though|although|yet|then)\b", re.IGNORECASE
+    r"[:,;]|\b(?:but|and|because|why|so|while|though|although|then)\b", re.IGNORECASE
 )
+# An "and" right before "failing tests" or "integration tests" joins words, not clauses.
+_JOINED = re.compile(r"(?:failing|unit|ui|integration|e2e|snapshot)\b", re.IGNORECASE)
+_TRAILING_AND = re.compile(r"\s+and\s+$", re.IGNORECASE)
+# A resolution of the failure itself: "Fixed failing tests" (before it, not negated), "the
+# failing test is now fixed", "CI was red, now green" (after it). Not "please fix", "needs
+# a fix" or "even though I fixed the timeout".
 _FIXED_BEFORE = re.compile(r"\b(?:fixed|resolved)\s+(?:\w+\s+){0,2}$", re.IGNORECASE)
 _FIXED_AFTER = re.compile(
     r"\b(?:(?:is|are|was|were)\s+(?:now\s+)?(?:fixed|resolved)"
@@ -424,6 +427,8 @@ def _ci_failed(reason: str) -> bool:
     for clause in _CLAUSE_END.split(reason.replace("\r\n", "\n")):
         for m in _CI_FAILED.finditer(clause):
             before = clause[: m.start()]
+            if _JOINED.match(m.group()):  # "No unit and integration tests failed"
+                before = _TRAILING_AND.sub(" ", before)
             phrase = _PHRASE_BREAK.split(before)[-1][-40:]
             fixed = _FIXED_BEFORE.search(phrase)
             if fixed and _NEGATED.search(phrase[: fixed.start()]):

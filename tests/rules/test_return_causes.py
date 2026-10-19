@@ -400,6 +400,12 @@ def test_only_the_names_a_clause_says_failed() -> None:
         ("Fixed it but tests still fail", "failing_tests"),
         ("Fixed the two flaky failing tests", "failing_tests"),  # 3 words: the safe side
         ("Never fixed failing tests from last round", "failing_tests"),
+        ("No unit and integration tests failed", "review_findings"),
+        ("Fixed lint and failing tests", "review_findings"),
+        ("Resolved lint and failing CI", "review_findings"),
+        ("Fixed flaky and failing tests", "review_findings"),
+        ("Not yet fixed failing tests", "failing_tests"),
+        ("Both unit and integration tests failed", "failing_tests"),
     ],
 )
 def test_a_review_return_is_classified_by_what_sent_it_back(reason: str, cause: str) -> None:
