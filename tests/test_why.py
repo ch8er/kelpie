@@ -17,6 +17,7 @@ from kelpie.connectors.github.blocks import load_block_conditions
 from kelpie.connectors.github.settings import GitHubSettings
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.ledger import Dispatched, LedgerEntry, Outcome
 from kelpie.core.model import (
     Block,
     Condition,
@@ -27,6 +28,7 @@ from kelpie.core.model import (
     Status,
     Task,
 )
+from kelpie.core.storage import SqliteLedgerStore
 from kelpie.rules.orphan_status import PARENT_UNVERIFIED
 from kelpie.why import (
     Expected,
@@ -186,6 +188,26 @@ def test_reads_states_and_ledger_without_writing(
     assert [s["rule"] for s in data["states"]] == ["orphan_status", "bottlenecks"]
     assert data["ledger"] and data["problems"] == []
     assert data["task"]["owner_id"] is None and data["task"]["assignee"] == "dev"
+
+
+def test_ledger_lines_carry_what_the_executor_reported(
+    farm: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("kelpie.why.utc_now", lambda: NOW + timedelta(minutes=1))
+    store = SqliteLedgerStore(farm / "kelpie.db")
+    stop = Action(
+        ActionKind.STOP, "loop_breaker", "looping", task_id="t_blocked", params={"session_id": "s"}
+    )
+    done = Dispatched(
+        stop, Mode.ACT, Outcome.EXECUTED, detail="its worker ended 0.4s after SIGTERM"
+    )
+    store.append(LedgerEntry.of(done, NOW))
+    store.close()
+    assert main(why("t_blocked")) == 0
+    assert "    -> its worker ended 0.4s after SIGTERM" in capsys.readouterr().out
+    assert main(why("t_blocked", "--json")) == 0
+    (entry,) = json.loads(capsys.readouterr().out)["ledger"]
+    assert entry["detail"] == "its worker ended 0.4s after SIGTERM"
 
 
 def test_config_error_exits_2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

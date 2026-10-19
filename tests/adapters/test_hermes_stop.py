@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -21,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from kelpie.adapters.hermes import HermesAdapter
+from kelpie.adapters.hermes import adapter as adapter_module
 from kelpie.adapters.hermes.adapter import HermesError
 from kelpie.adapters.hermes.park import load_key
 from kelpie.adapters.hermes.stop import (
@@ -439,10 +441,53 @@ def test_stop_says_what_it_did_or_that_there_was_nothing_to_do(
     adapter = make(board, exe)
     done = adapter.stop(f"hermes-run-{rid}", "loop")
     assert done == (
-        "task t1 is blocked for a human (hermes kanban unblock t1); its worker was left to "
-        "Hermes' dispatcher, which reaps it (the board records no worker process for the run)"
+        "task t1 is blocked for a human (hermes kanban unblock t1); Kelpie did not end its "
+        "worker (the board records no worker process for the run)"
     )
     assert adapter.stop(f"hermes-run-{rid}", "loop") is ActionResult.NOTHING_TO_DO  # over now
+
+
+def test_a_failure_ending_the_worker_does_not_fail_the_stop(
+    board: Board, fake_cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The block already happened: the stop is done, and says the worker was not ended."""
+    exe, _ = fake_cli
+    rid = running(board)
+    board.conn.execute(
+        "UPDATE task_runs SET worker_pid = 99999999, worker_started_at = 'e|1',"
+        " claim_lock = ? WHERE id = ?",
+        (f"{socket.gethostname()}:1", rid),
+    )
+    board.conn.commit()
+
+    def broken(*args: object, **kw: object) -> object:
+        raise PermissionError("/proc")
+
+    monkeypatch.setattr(adapter_module, "worker_targets", broken)
+    done = make(board, exe).stop(f"hermes-run-{rid}", "loop")
+    assert task_state(board) == "blocked"
+    assert isinstance(done, str) and done.endswith(
+        "Kelpie did not end its worker (ending it failed: PermissionError)"
+    )
+
+
+def test_an_unreadable_or_older_board_says_so(
+    board: Board, fake_cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exe, _ = fake_cli
+    adapter = make(board, exe)
+    monkeypatch.setattr(adapter_module, "run_worker", lambda conn, rid: None)
+    assert adapter._end_worker(1) == (
+        "Kelpie did not end its worker (this Hermes records no worker processes on the board)"
+    )
+
+    def unreadable(conn: object, rid: int) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(adapter_module, "run_worker", unreadable)
+    assert adapter._end_worker(1) == (
+        "Kelpie did not end its worker (Kelpie could not read the run's worker from the board)"
+    )
 
 
 def test_a_refused_stop_has_a_reason_safe_to_show(board: Board, fake_cli: tuple[str, Path]) -> None:

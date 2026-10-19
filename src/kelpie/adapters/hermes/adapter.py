@@ -144,7 +144,7 @@ from kelpie.adapters.hermes.stop import (
     stop_comment,
     verify_stop,
 )
-from kelpie.adapters.hermes.worker import DEFAULT_GRACE, NO_WORKER, Ended, run_worker
+from kelpie.adapters.hermes.worker import DEFAULT_GRACE, OLD_BOARD, Ended, run_worker
 from kelpie.adapters.hermes.worker import end as end_workers
 from kelpie.adapters.hermes.worker import targets as worker_targets
 from kelpie.core.actions import ActionKind, ActionResult
@@ -1292,7 +1292,8 @@ class HermesAdapter:
         return STOP_DONE.format(task=task_id, worker=self._end_worker(rid))
 
     def _end_worker(self, rid: int) -> str:
-        """End the stopped run's worker processes; what became of them, for a human."""
+        """End the stopped run's worker processes; what became of them, for a human. Never
+        raises: the block already happened, so the stop is done whatever comes of this."""
         if not self.end_worker:
             return WORKER_LEFT
         try:
@@ -1300,15 +1301,21 @@ class HermesAdapter:
                 recorded = run_worker(conn, rid)
         except (HermesError, sqlite3.Error) as exc:
             log.warning("cannot read the worker of run %s: %s", rid, exc)
-            recorded = None
+            return Ended(refused="Kelpie could not read the run's worker from the board").describe()
         if recorded is None:
-            return Ended(refused=NO_WORKER).describe()
-        procs, refused = worker_targets(recorded)
-        if refused is not None:
-            log.info("run %s: worker not signalled: %s", rid, refused)
-            return Ended(refused=refused).describe()
-        result = end_workers(procs, self.worker_grace)
-        log.info("run %s: worker processes %s: %s", rid, [p.pid for p in procs], result.describe())
+            return Ended(refused=OLD_BOARD).describe()
+        try:
+            plan = worker_targets(recorded)
+            if plan.refused is not None or not plan.procs:
+                log.info("run %s: worker not signalled: %s", rid, plan.outcome().describe())
+                return plan.outcome().describe()
+            result = end_workers(plan.procs, self.worker_grace)
+            result.unchecked = plan.unchecked
+        except Exception as exc:  # the stop itself succeeded; say what is left
+            log.exception("run %s: ending its worker failed", rid)
+            return Ended(refused=f"ending it failed: {type(exc).__name__}").describe()
+        pids = [p.pid for p in plan.procs]
+        log.info("run %s: worker processes %s: %s", rid, pids, result.describe())
         return result.describe()
 
     def _run_state(self, rid: int) -> tuple[str, bool] | None:

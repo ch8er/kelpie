@@ -437,3 +437,24 @@ def test_the_executors_detail_is_recorded(tmp_path: Path) -> None:
         Outcome.EXECUTED,
         "the worker ended 0.4s after SIGTERM",
     )
+
+
+def test_a_failures_reason_is_recorded(tmp_path: Path) -> None:
+    store = SqliteLedgerStore(tmp_path / "kelpie.db")
+
+    class Broken(FakeAdapter):
+        def stop(self, session_id: str, reason: str) -> str:
+            raise RuntimeError("cli exploded")
+
+    action = Action(ActionKind.STOP, "loop_breaker", "looping", params={"session_id": "s1"})
+    engine = Engine(
+        [Emit([action])],  # type: ignore[list-item]
+        adapters=[Broken()],
+        config=EngineConfig(dry_run=False, default_mode=Mode.ACT),
+        ledger_store=store,
+    )
+    now = datetime(2026, 3, 2, 10, tzinfo=UTC)
+    engine.tick(lambda: Snapshot(now=now))
+    (entry,) = store.since(now - timedelta(hours=1))
+    assert entry.outcome is Outcome.FAILED
+    assert entry.detail == "RuntimeError (details in the Kelpie log)"  # never the message

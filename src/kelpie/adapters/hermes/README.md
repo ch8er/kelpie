@@ -134,17 +134,32 @@ proof of identity Hermes' reaper uses:
   none runs, and that gateway serves the profile's other runs).
 - **Proof.** Each recorded pid must still carry the start fingerprint Hermes recorded for it
   (`"<boot_id>:<pid 1 start>|<process start>"`, computed the same way from `/proc`): a reused
-  pid, a reboot or another PID namespace never matches. The run's claim lock must name this
-  host, every process must belong to the user Kelpie runs as, and Kelpie never signals itself
-  or its ancestors. A run recorded without a fingerprint (older Hermes, or `unverified`) is not
-  signalled. Identity is checked again right before each signal, through a pidfd where the
-  kernel has one.
+  pid or a reboot never matches. The run's claim lock must name this host, every process must
+  belong to the user Kelpie runs as, and Kelpie never signals itself or its ancestors (when
+  Kelpie runs inside the run's worker, nothing is signalled). A process recorded without a
+  fingerprint (older Hermes, or `unverified`) is not signalled. Right before each signal the
+  process's start time is checked again, through a pidfd where the kernel has one (within one
+  boot and PID namespace, the same start time on the same pid is the same process).
+- **Gone or not Kelpie's to end.** A worker counts as gone only when Kelpie can tell: no such
+  pid, a dead one, another start time, another boot. When it cannot tell or may not signal it,
+  nothing is signalled and the alert says why: the worker runs as another user, Hermes runs in
+  another PID namespace (Kelpie in a container of its own), `/proc` hides other users'
+  processes (`hidepid`) or cannot be read.
 - **How.** SIGTERM to all of them, SIGKILL to those still running after `worker_grace`
   (default 5 s). Kelpie never writes `kanban.db`: the reaper later finds the processes gone.
 - **What it says.** The alert and the ledger (`kelpie why`) carry what actually happened: "its
   worker ended 0.4s after SIGTERM", "no worker process of the run was still running on this
-  host", "its worker was left to Hermes' dispatcher, which reaps it (<why>)", or "its worker
-  did not end even after SIGKILL (pid ...)".
+  host", "Kelpie did not end its worker (<why>)", or "its worker did not end even after
+  SIGKILL (pid ...)". A failure while ending the worker never fails the stop: the task is
+  blocked either way.
+- **Time.** Ending the worker takes up to `worker_grace` + 2 s on top of the block
+  (`cli_timeout`), inside the tick. In multi-host mode keep `cli_timeout` + `worker_grace` +
+  2 s below `[hub] action_timeout` (defaults: 10 + 5 + 2 = 17 s of 30 s).
+- **Trust.** Kelpie trusts the board's records, as Hermes' reaper does. Anyone who can write
+  `kanban.db` (the agents, as the same user) could record another process of that user as a
+  run's agent and have Kelpie end it and its process tree; Hermes' reaper signals the recorded
+  pid only. Nothing beyond what that user can do anyway, but with `end_worker` the board is
+  trusted to name processes, so keep it writable by Hermes' user only.
 
 Without `/proc` (macOS) nothing is signalled and the stop says so. With `end_worker = false` a
 stop is "block the task now, reap the worker after about two minutes, and never without a
