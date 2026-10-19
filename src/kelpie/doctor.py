@@ -34,6 +34,7 @@ from kelpie.app import (
     LoadedRules,
     Settings,
     act_blockers,
+    act_gaps,
     build_adapters,
     dispatch_gate_warnings,
     load_rules,
@@ -245,6 +246,16 @@ def check_rule_modes(
                 "use suggest for those rules, or configure what they need "
                 f"({CHECKLIST}, What can act today)"
             )
+    # Acting on some adapters' tasks, not on others': there its actions become alerts.
+    gaps = act_gaps(settings, adapters) if acting else {}
+    if gapped := [f"{r} ({gaps[r]})" for r in acting if r in gaps]:
+        problems.append(
+            f"in act, but on some adapters' tasks their actions become alerts: {_first(gapped)}"
+        )
+        fixes.append(
+            "expected while those adapters lack the actions; to act there too, see "
+            f"{CHECKLIST}, What can act today"
+        )
     # A parking rule that cannot act here parks nothing; "cannot act" already says so.
     if unwoken := [
         *(dispatch_gate_warnings(engine) if "dispatch_gate" not in blocked else []),

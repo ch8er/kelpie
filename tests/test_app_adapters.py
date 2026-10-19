@@ -561,6 +561,11 @@ FARMS = {
     "openclaw": "[adapters.openclaw]\n",
     "hermes and claude code": "[adapters.hermes]\n[adapters.claude_code]\n",
     "claude code and openclaw": "[adapters.claude_code]\n[adapters.openclaw]\n",
+    "github issues": '[connectors.github]\nrepos = ["example/repo"]\n[adapters.github_issues]\n',
+    "claude code and github issues": (
+        '[adapters.claude_code]\n[connectors.github]\nrepos = ["example/repo"]\n'
+        "[adapters.github_issues]\n"
+    ),
     "claude code, stop off": "[adapters.claude_code]\nstop_dir = false\n",
     "openclaw, stop off": "[adapters.openclaw]\nstop_dir = false\n",
     "hub": (  # its agents' adapters are known only once they report
@@ -595,7 +600,7 @@ def test_a_rule_kelpie_can_act_with_passes_the_startup_check(tmp_path: Path, far
 
 
 def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
-    from kelpie.app import act_blockers
+    from kelpie.app import act_blockers, act_gaps
 
     hermes = load_settings(write(tmp_path, FARMS["hermes"]))
     found = {r: b.reason for r, b in act_blockers(hermes, build_adapters(hermes)).items()}
@@ -614,6 +619,33 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     found = {r: b.reason for r, b in act_blockers(both, build_adapters(both)).items()}
     assert found["stale_blocks"] == "neither Claude Code nor OpenClaw can clear blocks yet"
     assert "loop_breaker" not in found  # OpenClaw stops runs (SupportsStop, no declaration)
+    # Judged per adapter: GitHub Issues requeueing its own tasks does not requeue Claude
+    # Code's; such a rule can act here, but on some tasks its actions become alerts.
+    issues = load_settings(write(tmp_path, FARMS["github issues"]))
+    found = {r: b.reason for r, b in act_blockers(issues, build_adapters(issues)).items()}
+    assert "exit_contract" not in found and "stale_blocks" not in found
+    assert found["loop_breaker"] == "GitHub Issues tasks never need to stop runs"
+    assert act_gaps(issues, build_adapters(issues)) == {}
+    mixed = load_settings(write(tmp_path, FARMS["claude code and github issues"]))
+    found = {r: b.reason for r, b in act_blockers(mixed, build_adapters(mixed)).items()}
+    assert "exit_contract" not in found and "stale_blocks" not in found
+    assert "loop_breaker" not in found  # Claude Code stops; issue tasks have no runs
+    gaps = act_gaps(mixed, build_adapters(mixed))
+    assert gaps["exit_contract"] == "Claude Code can't comment on tasks or requeue tasks yet"
+    assert gaps["stale_blocks"] == "Claude Code can't clear blocks yet"
+    assert "dispatch_gate" not in gaps  # nothing parks here at all: a blocker, not a gap
+    assert found["dispatch_gate"] == (
+        "neither Claude Code nor GitHub Issues can park tasks or wake tasks yet"
+    )
+    hermes_cc = load_settings(write(tmp_path, FARMS["hermes and claude code"]))
+    gaps = act_gaps(hermes_cc, build_adapters(hermes_cc))
+    assert gaps["dispatch_gate"] == "Claude Code can't park tasks or wake tasks yet"
+    assert gaps["wait_condition"] == "Claude Code can't comment on tasks or wake tasks yet"
+    off = load_settings(
+        write(tmp_path, "[adapters.claude_code]\nstop_dir = false\n[adapters.openclaw]\n")
+    )
+    gaps = act_gaps(off, build_adapters(off))
+    assert gaps["loop_breaker"] == "stop is turned off (stop_dir = false) for Claude Code"
     none = load_settings(write(tmp_path, ""))
     found = {r: b.reason for r, b in act_blockers(none, build_adapters(none)).items()}
     assert found["loop_breaker"] == "no platform adapter is configured to stop runs"

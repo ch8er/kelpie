@@ -95,6 +95,11 @@ rule is in `act` mode (`_refuse_unimplemented_actions`, `HERMES_ACT_RULES` in
 Issues adapter carries `requeue`, `unblock`, `comment` and `reassign` through the issues API
 (**unverified** against live agents), and refuses the rest the same way.
 
+On a farm with several adapters, each adapter's tasks get only what that adapter carries
+out: with Claude Code and GitHub Issues, `stale_blocks` unblocks issues but only alerts on
+Claude Code's tasks. `kelpie doctor` and the daily report say so ("on some adapters' tasks
+their actions become alerts"); such a rule can still go to `act`.
+
 | Rule | Action | Needs |
 | --- | --- | --- |
 | `loop_breaker` | `stop`: `hermes kanban block --kind needs_input` on the run Kelpie looked at, then SIGTERM (SIGKILL after `worker_grace`) to that run's worker processes once their pid and start fingerprint match what Hermes recorded | `[adapters.hermes]`; `cli` and `cli_timeout` if `hermes` is not on `PATH`; Kelpie on the same host, in the same PID namespace and as the same user as the workers (else Kelpie does not signal them, and the alert says why); `end_worker = false` to leave it to the reaper always |

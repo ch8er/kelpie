@@ -80,6 +80,8 @@ from kelpie.core.ports import (
     SupportsReassign,
     SupportsStop,
     SupportsWait,
+    declared_actions,
+    inapplicable_actions,
 )
 from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
 from kelpie.core.rule import Rule
@@ -2098,13 +2100,61 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
             found[name] = ActBlocker(_no_cancel(settings), refused=has_hermes)
         elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
             found[name] = ActBlocker(_hermes_gap(name, platform), refused=True)
-        elif (
-            platform
-            and settings.hub is None
-            and not platform <= frozenset().union(*(_declared(a) for a in adapters))
-        ):
+        elif platform and settings.hub is None and platform - _carried(adapters):
             found[name] = ActBlocker(_platform_gap(adapters, platform), refused=False)
     return found
+
+
+def act_gaps(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dict[str, str]:
+    """The rules that can act here, yet not on every adapter's tasks: some adapter lacks
+    kinds its tasks can draw (all but its ``inapplicable``) that another adapter carries out
+    (judged per adapter: one adapter's requeue does not requeue another's tasks). On those
+    tasks the rule's actions become alerts; on the others it acts. Rules in
+    :func:`act_blockers` are left out (they cannot act here at all)."""
+    if settings.hub is not None:
+        return {}
+    blocked = act_blockers(settings, adapters)
+    gaps: dict[str, str] = {}
+    for planned in PLANNED:
+        if planned.name not in REGISTRY or planned.name in blocked:
+            continue
+        platform = planned.effects - {ActionKind.CANCEL_BUILD}
+        if platform and (said := _gaps(adapters, platform)):
+            gaps[planned.name] = said
+    return gaps
+
+
+def _carried(adapters: Sequence[PlatformAdapter]) -> frozenset[ActionKind]:
+    return frozenset().union(*(_declared(a) for a in adapters))
+
+
+def _gaps(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) -> str:
+    """Per adapter, what of ``platform`` its tasks can draw and it does not carry out:
+    "Claude Code can't requeue tasks yet"; the same gap on several adapters reads "neither
+    A nor B can ..."; different gaps are joined with "and"."""
+    by_gap: dict[frozenset[ActionKind], list[str]] = {}
+    for adapter in adapters:
+        lacking = platform - _declared(adapter) - inapplicable_actions(adapter)
+        name = _PLATFORMS.get(adapter.name, adapter.name)
+        if lacking and name not in (names := by_gap.setdefault(lacking, [])):
+            names.append(name)
+    said = []
+    for lacking, names in by_gap.items():
+        if not names:
+            continue
+        names.sort()
+        off = sorted(
+            _PLATFORMS.get(a.name, a.name)
+            for a in adapters
+            if _stop_off(a) and _PLATFORMS.get(a.name, a.name) in names
+        )
+        if lacking == {ActionKind.STOP} and off:
+            said.append(f"stop is turned off (stop_dir = false) for {' and '.join(off)}")
+        elif len(names) == 1:
+            said.append(f"{names[0]} can't {_verbs(lacking)} yet")
+        else:
+            said.append(f"neither {' nor '.join(names)} can {_verbs(lacking)} yet")
+    return " and ".join(sorted(said))
 
 
 def _no_cancel(settings: Settings) -> str:
@@ -2127,7 +2177,7 @@ def _hermes_gap(rule: str, platform: frozenset[ActionKind]) -> str:
 
 
 def _platform_gap(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) -> str:
-    lacking = platform - frozenset().union(*(_declared(a) for a in adapters))
+    lacking = platform - _carried(adapters)
     names = sorted({_PLATFORMS.get(a.name, a.name) for a in adapters})
     if not names:
         return f"no platform adapter is configured to {_verbs(lacking)}"
@@ -2135,6 +2185,9 @@ def _platform_gap(adapters: Sequence[PlatformAdapter], platform: frozenset[Actio
         off := sorted(_PLATFORMS.get(a.name, a.name) for a in adapters if _stop_off(a))
     ):
         return f"stop is turned off (stop_dir = false) for {' and '.join(off)}"
+    if all(lacking <= inapplicable_actions(a) for a in adapters):
+        # Nothing to do, not something missing: e.g. issue tasks have no runs to stop.
+        return f"{' and '.join(names)} tasks never need to {_verbs(lacking)}"
     if len(names) == 1:
         return f"{names[0]} can't {_verbs(lacking)} yet"
     return f"neither {' nor '.join(names)} can {_verbs(lacking)} yet"
@@ -2151,9 +2204,8 @@ _CAPABILITY_KINDS: tuple[tuple[type, ActionKind], ...] = (
 
 
 def _declared(adapter: PlatformAdapter) -> frozenset[ActionKind]:
-    actions = getattr(adapter, "actions", None)
-    if isinstance(actions, frozenset | set):
-        kinds = frozenset(actions)
+    if (actions := declared_actions(adapter)) is not None:
+        kinds = actions
     else:
         kinds = frozenset(k for protocol, k in _CAPABILITY_KINDS if isinstance(adapter, protocol))
     return kinds - {ActionKind.STOP} if _stop_off(adapter) else kinds
