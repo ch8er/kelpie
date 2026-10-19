@@ -222,3 +222,56 @@ def test_the_resolved_notice_says_where_the_job_passed_again() -> None:
     assert rule.resolved(alert.state, stale) is None
     assert rule.resolved(alert.state, Snapshot(now=NOW, builds=(green(20),))) is None  # gone
     assert rule.resolved("ci_economy:waste", later) is None
+
+
+def test_the_scope_is_the_outage_s_repositories_not_every_red_one() -> None:
+    """A web PR red at the same generic step for its own reasons stays its own business."""
+    own = Job("build", FAILED, step="Select toolchain", runner="hosted-x")
+    web = red(5, 200, repo="example/web", job=own)
+    mate = red(6, 150, repo="example/lib")  # fails the same way on the outage's runner
+    [alert] = outages(BEFORE, RERUN, *THREE, web, mate)
+    outage = CiOutage.from_params(alert.params)
+    assert outage is not None and outage.repos == ("example/app", "example/lib")
+    assert "hosted-x" not in outage.runners and "example/web#5" not in outage.prs
+
+
+def test_a_stale_re_run_is_no_evidence_for_today() -> None:
+    """A flaky nightly hours before three PRs red at their own tests proves nothing."""
+    tests = Job("test", FAILED, step="Run tests")
+    nightly = red(0, 400, branch="main", pr=None, sha="base", job=tests)
+    green_base = green(500, jobs=(Job("test", PASSED),))
+    prs = [red(n, 100 - 10 * n, job=tests) for n in (1, 2, 3)]
+    assert outages(green_base, nightly, *prs) == []
+
+
+def test_one_change_red_since_yesterday_does_not_move_the_start() -> None:
+    # Red since yesterday in a quiet repository on the same runner, retried in the window.
+    old, retry = red(9, 1300, repo="example/lib"), red(9, 260, repo="example/lib")
+    [alert] = outages(BEFORE, RERUN, *THREE, old, retry)
+    assert alert.since == NOW - 300 * M
+
+
+def test_the_resolved_notice_looks_at_each_repository_s_own_last_failure() -> None:
+    rule = CiEconomy()
+    [alert] = outages(BEFORE, RERUN, *THREE)
+    assert alert.state is not None
+    # web failed last; the app passed after its own last failure: that pass is the news.
+    later = (red(1, 300), red(7, 10, repo="example/web"), green(20))
+    notice = rule.resolved(alert.state, Snapshot(now=NOW, builds=later))
+    assert notice is not None and "in example/app at 2026-03-02 08:40 UTC" in notice
+
+
+def test_a_condition_naming_another_repository_is_not_the_own_pr_s() -> None:
+    lib = Condition(
+        "C-1", ConditionKind.CI_STATUS, "T-1", {"repo": "example/lib", "branch": "main"}
+    )
+    same = Condition("C-2", ConditionKind.CI_STATUS, "T-2", {"repo": "example/app"})
+    tasks = (task("T-1", Status.WAITING), task("T-2", Status.WAITING))
+    pulls = (
+        PullRequest("example/app", 1, branch="task/T-1", task_ids=("T-1",)),
+        PullRequest("example/app", 2, branch="task/T-2", task_ids=("T-2",)),
+    )
+    [alert] = outages(
+        BEFORE, RERUN, *THREE, tasks=tasks, conditions=(lib, same), pull_requests=pulls
+    )
+    assert CiOutage.from_params(alert.params).tasks == ("T-2",)  # type: ignore[union-attr]

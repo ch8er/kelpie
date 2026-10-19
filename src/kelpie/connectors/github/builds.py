@@ -109,6 +109,7 @@ DEFAULT_RATE_RESERVE = 1000
 MAX_RESERVE_SHARE = 0.2  # of X-RateLimit-Limit: a small limit is not all reserve
 DEFAULT_BRANCH_TTL = timedelta(hours=1)
 _FAILED = frozenset({"failure", "timed_out", "cancelled"})
+HOSTED_GROUP = "GitHub Actions"  # runner group of GitHub-hosted runners
 MAX_NAME = 100  # characters kept of a job, step, runner or label name
 MAX_LABELS = 5
 MAX_JOB_LOOKUPS = 10  # per scan; the rest use wall-clock minutes until a later scan
@@ -806,6 +807,8 @@ def _job(job: Mapping[str, Any]) -> Job | None:
         if isinstance(c := s.get("conclusion"), str) and c in _FAILED and (n := _str(s.get("name")))
     )
     step, runner = next(steps, None), _str(job.get("runner_name"))
+    if job.get("runner_group_name") == HOSTED_GROUP:
+        runner = None  # a pool name GitHub reuses across machines, not a machine
     labels = job.get("labels") if isinstance(job.get("labels"), list) else []
     return Job(
         name=name[:MAX_NAME],

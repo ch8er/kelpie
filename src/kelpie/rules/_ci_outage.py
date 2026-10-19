@@ -17,15 +17,19 @@ builds' finish times.
 (repository and branch; retries count, so a slow farm whose PRs stay red still qualifies),
 and there is evidence that the environment broke rather than each change:
 
-- two repositories fail on the same runner (same machine, different code), or
+- two repositories fail on the same runner (same machine, different code; a CI's shared
+  hosted pool names no machine), or
 - a commit that passed the job before fails it now in one of their repositories (a re-run:
-  the code did not change), still active; that re-run's change request does not count
-  toward ``min_prs``.
+  the code did not change), since the group began failing; that re-run's change request
+  does not count toward ``min_prs``.
 
 Without such evidence it takes twice ``min_prs`` change requests: three unrelated PRs red at
 a generic step ("Run tests") within two hours happen on a busy farm; six with nothing
-passing in between rarely do. A shared runner counts only among the change requests of that
-window. ``since`` is their earliest active failure.
+passing in between rarely do. Only change requests in the repositories the evidence ties
+together count (those on the shared runner, or of the re-run, and any repository failing
+the same way on their runners); a PR red at the same step elsewhere stays its own business.
+``since`` walks back from the window while the group's failures follow each other within
+``window``: one change red since yesterday does not move it.
 
 **Resolve.** One long-lived alert state (:func:`kelpie.core.incidents.outage_state_id`); the
 rule stops reporting it when a build passes the job again in one of its repositories, when
@@ -34,8 +38,8 @@ its failures leave the CI connector's window, or when too few failing builds sta
 ``resolve_after`` and may open again as a new announcement.
 
 **Scope** (the alert's params, :class:`kelpie.core.incidents.CiOutage`): the repositories,
-workflows, runners (names and labels) and PRs of the active failures since ``since``, and
-the tasks the outage explains:
+workflows, runners (names and labels) and PRs of the active failures since ``since`` in
+those repositories, and the tasks the outage explains:
 
 - a PR's own task when it is blocked or waiting on its CI or merge: an unmet CI or merge
   condition that names no other PR, or no condition at all, waiting since the outage began
@@ -91,27 +95,32 @@ def outages(snapshot: Snapshot, rule: str, min_prs: int, window: timedelta) -> l
     actions = []
     for sig, found in sorted(_failures(snapshot).items(), key=lambda kv: str(kv[0])):
         active = _active(found, passes, sig)
-        if (since := _since(active, passes, sig, min_prs, window)) is not None:
-            scope = [f for f in active if f.at >= since]
+        if (opened := _opened(active, passes, sig, min_prs, window)) is not None:
+            since, repos = opened
+            scope = [f for f in active if f.at >= since and _repo(f.build) in repos]
             actions.append(_alert(snapshot, rule, sig, scope, since, window))
     return actions
 
 
 def passed_again(state_id: str, snapshot: Snapshot) -> str | None:
-    """For the "Resolved" notice: a build that passed the outage's job again after the last
-    failure, in the repository that failed last; None when there is none (the outage
-    stopped being reported for another reason: the engine's general notice says so)."""
+    """For the "Resolved" notice: the first build that passed the outage's job again after
+    its repository's last failure; None when there is none (the outage stopped being
+    reported for another reason: the engine's general notice says so)."""
     found = next(
         (fs for sig, fs in _failures(snapshot).items() if outage_state_id(*sig) == state_id), []
     )
     if not found:
         return None
-    latest = max(found, key=lambda f: (f.at, f.build.id))
-    workflow, job, repo = latest.build.workflow, latest.job.name, _repo(latest.build)
+    workflow, job = found[0].build.workflow, found[0].job.name
+    passes = _passes(snapshot)
+    last: dict[str, datetime] = {}
+    for f in found:
+        last[_repo(f.build)] = max(f.at, last.get(_repo(f.build), f.at))
     after = [
         (at, b.id, b)
-        for at, b in _passes(snapshot).get((repo, workflow, job), ())
-        if at > latest.at
+        for repo, failed in last.items()
+        for at, b in passes.get((repo, workflow, job), ())
+        if at > failed
     ]
     if not after:
         return None
@@ -157,14 +166,15 @@ def _active(found: list[_Failure], passes: _Passes, sig: Signature) -> list[_Fai
     return [f for f in found if (p := last[_repo(f.build)]) is None or f.at > p]
 
 
-def _since(
+def _opened(
     active: list[_Failure], passes: _Passes, sig: Signature, min_prs: int, window: timedelta
-) -> datetime | None:
-    """The earliest active failure of the first window that qualifies, or None (see "Open"
-    in the module docs)."""
+) -> tuple[datetime, set[str]] | None:
+    """When the outage began and its repositories, for the first window that qualifies, or
+    None (see "Open" in the module docs)."""
     by_change: dict[tuple[str, str], list[_Failure]] = {}
     for f in active:
         by_change.setdefault(_change(f.build), []).append(f)
+    reruns = [f for f in active if _rerun(f, passes, sig)]
     for start in sorted({f.at for f in active}):
         group = {
             c for c, fs in by_change.items() if any(start <= f.at <= start + window for f in fs)
@@ -172,25 +182,53 @@ def _since(
         if len(group) < min_prs:
             continue
         failures = [f for c in group for f in by_change[c]]
-        shared = _shared_runner(failures)
-        # A failed re-run stays evidence while nothing passed in its repository since.
-        repos = {c[0] for c in group}
-        reruns = {
-            _change(f.build) for f in active if _repo(f.build) in repos and _rerun(f, passes, sig)
+        since = _began(sorted(f.at for f in failures), start, window)
+        shared = _shared_runners(failures)
+        # A failed re-run in one of these repositories since the group began failing.
+        evidence = {
+            _change(f.build)
+            for f in reruns
+            if (f.build.repo and _repo(f.build) in {c[0] for c in group}) and f.at >= since - window
         }
-        counted = len(group - reruns)
-        if counted >= (min_prs if shared or reruns else min_prs * UNSURE_FACTOR):
-            return min(f.at for f in failures)
+        # The repositories the evidence ties together, and those failing on their runners.
+        if shared:
+            core = {_repo(f.build) for f in failures if f.job.runner in shared}
+        elif evidence:
+            core = {c[0] for c in evidence}
+        else:
+            core = {c[0] for c in group}
+        tied = [f for f in failures if _repo(f.build) in core]
+        repos = core | _runner_mates(tied, active)
+        counted = len({c for c in group if c[0] in repos} - evidence)
+        if counted >= (min_prs if shared or evidence else min_prs * UNSURE_FACTOR):
+            return since, repos
     return None
 
 
-def _shared_runner(failures: list[_Failure]) -> bool:
-    """Two repositories fail on the same runner."""
+def _began(times: list[datetime], start: datetime, window: timedelta) -> datetime:
+    """Walk back from the window's start while the group's failures follow each other
+    within ``window``: one change red since yesterday does not move the outage's start."""
+    began = start
+    for at in reversed([t for t in times if t < start]):
+        if began - at > window:
+            break
+        began = at
+    return began
+
+
+def _shared_runners(failures: list[_Failure]) -> set[str]:
+    """Runners two or more repositories fail on."""
     repos: dict[str, set[str]] = {}
     for f in failures:
         if f.job.runner and f.build.repo:
             repos.setdefault(f.job.runner, set()).add(_repo(f.build))
-    return any(len(r) >= 2 for r in repos.values())
+    return {runner for runner, r in repos.items() if len(r) >= 2}
+
+
+def _runner_mates(group: list[_Failure], active: list[_Failure]) -> set[str]:
+    """Other repositories failing the same way on a runner the group failed on."""
+    runners = {f.job.runner for f in group if f.job.runner}
+    return {_repo(f.build) for f in active if f.build.repo and f.job.runner in runners}
 
 
 def _rerun(f: _Failure, passes: _Passes, sig: Signature) -> bool:
@@ -279,11 +317,15 @@ def _tasks(
     snapshot: Snapshot, pulls: dict[tuple[str, int], PullRequest], began: datetime
 ) -> list[str]:
     """The tasks the outage explains (see "Scope" in the module docs)."""
-    own = {t for p in pulls.values() for t in p.task_ids}
+    own: dict[str, set[str]] = {}  # task -> repositories of its PRs in scope
+    for (repo, _), pull in pulls.items():
+        for task_id in pull.task_ids:
+            own.setdefault(task_id, set()).add(repo)
     return sorted(
         task.id
         for task in snapshot.tasks
-        if task.status in _WAITING and _explained(task, snapshot, pulls, task.id in own, began)
+        if task.status in _WAITING
+        and _explained(task, snapshot, pulls, own.get(task.id, set()), began)
     )
 
 
@@ -291,16 +333,23 @@ def _explained(
     task: Task,
     snapshot: Snapshot,
     pulls: dict[tuple[str, int], PullRequest],
-    own: bool,
+    own_repos: set[str],
     began: datetime,
 ) -> bool:
+    """See "Scope" in the module docs; ``own_repos``: the repositories of the task's own PRs
+    in scope (empty: none of them is the task's)."""
     conditions, missing = linked_conditions(task, snapshot)
     unmet = [c for c in conditions if c.satisfied is not True]
     if any(c.kind in _PR_CONDITIONS and _pr_of(c.params) in pulls for c in unmet):
         return True
-    if not own:
+    if not own_repos:
         return False
-    if any(c.kind in _PR_CONDITIONS and _pr_of(c.params) is None for c in unmet):
+    if any(
+        c.kind in _PR_CONDITIONS
+        and _pr_of(c.params) is None
+        and _repo_of(c.params) in (None, *own_repos)
+        for c in unmet
+    ):
         return True  # its own PR's CI or merge, named another way
     return (
         not conditions
@@ -312,6 +361,11 @@ def _explained(
             if d.task_id == task.id
         )
     )
+
+
+def _repo_of(params: dict[str, object]) -> str | None:
+    repo = params.get("repo")
+    return repo.lower() if isinstance(repo, str) else None
 
 
 def _pr_of(params: dict[str, object]) -> tuple[str, int] | None:

@@ -412,9 +412,11 @@ commit, docs-only, draft, WIP commit.
 A CI outage (incident 20) is one `warning` "CI outage since <time>": the failing workflow,
 job and step, the repositories, runners and PRs it affects, and the tasks waiting on those
 PRs' CI or merge. Evidence that the environment broke, not each change: two repositories
-fail on the same runner, or a commit that passed the job before fails it now (a re-run; it
-does not count toward `outage_min_prs` itself). Without it, `outage_min_prs` doubles, so a
-few PRs red at their own tests are not called an outage. It stays open, without repeating
+fail on the same self-hosted runner, or a commit that passed the job before fails it now
+(a re-run; it does not count toward `outage_min_prs` itself). Without it, `outage_min_prs`
+doubles, so a few PRs red at their own tests are not called an outage. Only the
+repositories the evidence ties together (and those failing the same way on their runners)
+are in the outage; a PR red at the same step elsewhere is not. It stays open, without repeating
 itself, until a build passes that job again in its repositories; it also closes when its
 failures leave the CI connector's window or too few of them stay readable, and may then
 open again. The failing step comes from the job list the CI connector reads for billable

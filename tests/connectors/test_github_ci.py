@@ -698,3 +698,19 @@ def test_a_build_names_the_pull_request_it_builds() -> None:
         gh.reply(f"/repos/{REPO}/pulls/7", {"number": 7, "draft": False, "head": {"sha": "x"}})
         by_id = {b.id: b for b in ci(gh)(Snapshot(now=NOW)).builds}
         assert by_id[f"{REPO}:1"].pr == 7 and by_id[f"{REPO}:2"].pr is None
+
+
+def test_a_hosted_runner_has_no_machine_name() -> None:
+    """GitHub reuses hosted pool names ("GitHub Actions 2"): they name no machine."""
+    with serve() as gh:
+        runs_page(gh, [run(1, 30, status="completed", conclusion="failure")])
+        hosted = {"name": "test", "status": "completed", "conclusion": "failure",
+                  "runner_name": "GitHub Actions 2", "runner_group_name": "GitHub Actions",
+                  "labels": ["ubuntu-latest"]}  # fmt: skip
+        mine = {**hosted, "name": "build", "runner_name": "mac-1", "runner_group_name": "Default"}
+        gh.reply(f"{RUNS}/1/attempts/1/jobs?per_page=100", job_list(hosted, mine))
+        jobs = ci(gh)(Snapshot(now=NOW)).builds[0].jobs or ()
+        assert [(j.name, j.runner, j.labels) for j in jobs] == [
+            ("test", None, ("ubuntu-latest",)),
+            ("build", "mac-1", ("ubuntu-latest",)),
+        ]
