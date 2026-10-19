@@ -783,6 +783,7 @@ def test_gate_with_enough_work_behind_is_escalated_to_its_owner() -> None:
         "blocked_agent_tasks": 3,
         "blocked_tasks": ["A", "B", "C"],
         "agent_hours": 1.5,
+        "planned_agent_tasks": 0,
     }
     assert "does not change dependencies" in esc.reason and "1h 30m of agent work" in esc.reason
     rule = Bottlenecks(human_gate_min_tasks=4, escalate_human_gates=True)
@@ -833,6 +834,7 @@ def test_idle_agents_and_only_human_tasks_ready_alert() -> None:
         "slots": 4,
         "human_tasks": ["H"],
         "blocked_agent_tasks": 2,
+        "planned_agent_tasks": 0,
         "ready_human_tasks": ["H", "LONE"],
         "recommendation": "unblock_human_tasks",
     }
@@ -1415,3 +1417,15 @@ def test_build_planned_labels() -> None:
     assert build({"planned_labels": ["later"]}).planned_labels == {"later"}
     with pytest.raises(ValueError, match="planned_labels must be a list"):
         build({"planned_labels": "later"})
+
+
+def test_a_gate_escalation_counts_its_planned_work() -> None:
+    from dataclasses import replace
+
+    planned = replace(task("P"), prework=True)
+    tasks = (human("H"), task("A", estimate=H), task("B"), task("C"), planned)
+    deps = (*chain("H", "A", "B", "C"), Dependency("P", "H"))
+    escalations = [
+        a for a in run(Snapshot(NOW, tasks, HUMANS, deps), GATES) if a.kind is ActionKind.ESCALATE
+    ]
+    assert [e.params["planned_agent_tasks"] for e in escalations] == [1]

@@ -537,3 +537,41 @@ def test_planned_labels_are_validated(value: object) -> None:
         REGISTRY["needs_you"]({"planned_labels": value})
     with pytest.raises(ValueError, match="planned_labels must be a list"):
         REGISTRY["bottlenecks"]({"planned_labels": value})
+
+
+def test_planned_work_behind_a_human_task_is_reported_apart() -> None:
+    from kelpie.rules.needs_you import PLANNED_AGENT_TASKS, PLANNED_TASKS
+
+    gate = human("H-1", ago(hours=6))
+    waiting = Task("A-1", "next", Status.BACKLOG, ago(hours=3))
+    later = Task("A-2", "after release", Status.BACKLOG, ago(hours=140), prework=True)
+    behind_later = Task("A-3", "follow-up", Status.BACKLOG, ago(hours=140))
+    deps = [Dependency("A-1", "H-1"), Dependency("A-2", "H-1"), Dependency("A-3", "A-2")]
+    [esc] = run(snap([gate, waiting, later, behind_later], deps=deps))
+    assert esc.params["waiting"] == ["A-1"] and esc.params["cost_hours"] == 3.0
+    assert esc.params[PLANNED_TASKS] == ["A-2"] and esc.params[PLANNED_AGENT_TASKS] == 1
+    # Nothing planned: the params are there, empty.
+    [esc] = run(snap([gate, waiting], deps=deps[:1]))
+    assert esc.params[PLANNED_TASKS] == [] and esc.params[PLANNED_AGENT_TASKS] == 0
+
+
+def test_planned_params_dedupe_skip_people_and_cap() -> None:
+    from kelpie.rules.needs_you import PLANNED_AGENT_TASKS, PLANNED_TASKS
+
+    gates = [human("H-1", ago(hours=6)), human("H-2", ago(hours=6))]
+    waiting = Task("A-1", "next", Status.BACKLOG, ago(hours=3))
+    shared = Task("P-1", "later", Status.BACKLOG, ago(hours=9), prework=True)
+    person = Task(
+        "P-2", "a person's", Status.BACKLOG, ago(hours=9), prework=True, owner_id="human-lead"
+    )
+    many = [
+        Task(f"P-{i:02}", "later", Status.BACKLOG, ago(hours=9), prework=True)
+        for i in range(10, 35)
+    ]
+    deps = [Dependency("A-1", "H-1"), Dependency("A-1", "H-2"), Dependency("P-1", "H-1")]
+    deps += [Dependency("P-1", "H-2"), Dependency("P-2", "H-1")]
+    deps += [Dependency(t.id, "H-1") for t in many]
+    [esc] = run(snap([*gates, waiting, shared, person, *many], deps=deps))
+    assert "P-2" not in esc.params[PLANNED_TASKS]  # a person's own task is no agent work
+    assert esc.params[PLANNED_AGENT_TASKS] == 26  # P-1 once, across both human tasks
+    assert len(esc.params[PLANNED_TASKS]) == 20  # capped

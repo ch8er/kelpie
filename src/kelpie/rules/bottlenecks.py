@@ -120,6 +120,9 @@ from kelpie.rules._tasks import (
 )
 
 NAME = "bottlenecks"
+# A param of the human-gate alerts: planned agent tasks behind the gates (incident 20),
+# named as rule 13 names it (needs_you imports this module, so the name lives here).
+PLANNED_AGENT_TASKS = "planned_agent_tasks"
 
 _RUNNABLE = frozenset({Status.READY, Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED})
 _FROZEN = frozenset({Status.BLOCKED, Status.WAITING})  # wait for the outside world
@@ -365,6 +368,9 @@ class HumanGate:
     behind: tuple[str, ...]  # agent task ids, sorted
     estimate: timedelta | None  # summed estimates of the tasks behind that have one
     actionable: bool  # the human can do it now: ready or in progress, nothing open before it
+    # planned agent tasks a dependency puts behind it, where the walk stopped (incident 20):
+    # not waiting on it, reported apart (``planned_agent_tasks``)
+    planned: tuple[str, ...] = ()
 
 
 def human_gates(snapshot: Snapshot, planned_labels: Collection[str] = ()) -> list[HumanGate]:
@@ -379,6 +385,8 @@ def human_gates(snapshot: Snapshot, planned_labels: Collection[str] = ()) -> lis
     (they were started and wait on it explicitly), not those that merely depend on it: it
     is not the person's to do yet. Agent tasks are open tasks not owned by a human. Labels
     of linked PRs count when the caller applied :func:`with_pr_labels` (both rules do).
+    ``HumanGate.planned`` lists the planned agent tasks where the walk stopped (the first
+    planned task on each path).
     """
     humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
     by_id = {t.id: t for t in snapshot.tasks if not t.status.is_terminal}
@@ -408,13 +416,16 @@ def human_gates(snapshot: Snapshot, planned_labels: Collection[str] = ()) -> lis
     result: list[HumanGate] = []
     for gate in gates:
         seen: set[str] = set()
+        stopped: set[str] = set()  # planned tasks the walk reached and did not enter
         todo = [gate.id]
         if gate.id in later:  # planned: only what a condition parks on it waits for it
             seen = {t for t in parked.get(gate.id, ()) if t != gate.id}
             todo = sorted(seen)
         while todo:
             for nxt in successors.get(todo.pop(), ()):
-                if nxt not in seen and nxt != gate.id and nxt not in later:
+                if nxt in later:
+                    stopped.add(nxt)
+                elif nxt not in seen and nxt != gate.id:
                     seen.add(nxt)
                     todo.append(nxt)
         behind = sorted(tid for tid in seen if by_id[tid].owner_id not in humans)
@@ -425,7 +436,8 @@ def human_gates(snapshot: Snapshot, planned_labels: Collection[str] = ()) -> lis
             gate.id
         )
         estimate = sum(known, timedelta(0)) if known else None
-        result.append(HumanGate(gate, tuple(behind), estimate, actionable))
+        planned_ids = tuple(sorted(t for t in stopped if by_id[t].owner_id not in humans))
+        result.append(HumanGate(gate, tuple(behind), estimate, actionable, planned_ids))
     result.sort(key=lambda g: (-len(g.behind), g.task.status_since, g.task.id))
     return result
 
@@ -881,6 +893,7 @@ class Bottlenecks:
                     "slots": total,
                     "human_tasks": [g.task.id for g in top],
                     "blocked_agent_tasks": len(behind),
+                    PLANNED_AGENT_TASKS: len({t for g in gates for t in g.planned}),
                     "ready_human_tasks": ready_human,
                     "recommendation": "unblock_human_tasks",
                 },
@@ -915,6 +928,7 @@ class Bottlenecks:
                         "blocked_agent_tasks": len(gate.behind),
                         "blocked_tasks": list(gate.behind[: _SHOWN * 2]),
                         "agent_hours": hours,
+                        PLANNED_AGENT_TASKS: len(gate.planned),
                     },
                 )
             )
