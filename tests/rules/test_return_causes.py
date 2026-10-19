@@ -59,7 +59,7 @@ def test_dominant_conflicts_on_a_hot_file_alert_and_warn_live_tasks() -> None:
 def test_the_reason_beats_the_category() -> None:
     rule = ReturnCauses()
     assert rule.cause(ret("merge conflict in a.py", category="review")) == "merge_conflict"
-    assert rule.cause(ret("needs tests", category="review")) == "review"
+    assert rule.cause(ret("needs tests", category="review")) == "review_findings"
     assert rule.cause(ret("needs tests")) == "other"
 
 
@@ -96,7 +96,9 @@ def test_conflicts_spread_over_many_files_only_report_the_shares() -> None:
 def test_another_dominant_cause_is_reported() -> None:
     reviews = tuple(task(f"T{i}", ret("needs tests", category="review")) for i in range(5))
     [alert] = run(*reviews, task("X", ret("why not")))
-    assert alert.params["dominant_cause"] == "review" and alert.params["shares"]["review"] == 0.83
+    assert alert.params["dominant_cause"] == "review_findings"
+    assert alert.params["shares"]["review_findings"] == 0.83
+    assert "were review findings (by cause: review findings 83%, other 17%)" in alert.reason
     others = tuple(task(f"T{i}", ret("no idea")) for i in range(6))
     assert run(*others) == []  # "other" is no finding
 
@@ -328,3 +330,144 @@ def test_only_the_names_a_clause_says_failed() -> None:
         "test_login",
         "test_logout",
     }
+
+
+# --- causes, not the stage (live review: "95-100% from review") -------------------------
+
+
+@pytest.mark.parametrize(
+    ("reason", "cause"),
+    [
+        ("CI is red on the PR", "failing_tests"),
+        ("unit tests failed after the rebase", "failing_tests"),
+        ("FAILED tests/test_api.py::test_create - KeyError", "failing_tests"),
+        ("3 failed, 120 passed", "failing_tests"),
+        ("test_login_timeout fails on iOS 17", "failing_tests"),
+        ("build still failing", "failing_tests"),
+        ("no failing tests, but the naming is off", "review_findings"),
+        ("all checks green; please split the view model", "review_findings"),
+        ("0 failed, 12 passed; add a test for the empty case", "review_findings"),
+        ("Merge conflict in src/app/routes.py", "merge_conflict"),
+        ("changes requested", "review_findings"),
+        # none failed, or it was fixed (review of #174)
+        ("0 tests failed, 12 passed", "review_findings"),
+        ("0 checks failed", "review_findings"),
+        ("no unit tests failed", "review_findings"),
+        ("none of the tests failed", "review_findings"),
+        ("not failing tests, just naming", "review_findings"),
+        ("no  failing tests", "review_findings"),
+        ("Fixed failing tests, but rename the helper", "review_findings"),
+        ("the failing test is now fixed", "review_findings"),
+        ("tests were failing before, now fixed", "review_findings"),
+        ("CI was red earlier, now green", "review_findings"),
+        # prose about the code under review
+        ("handle the case where the build fails", "review_findings"),
+        ("the spec failed to describe X", "review_findings"),
+        ("health check failed in prod code", "review_findings"),
+        # still failing
+        ("CI checks are red", "failing_tests"),
+        ("the build is broken on main", "failing_tests"),
+        ("Fixed the typo, but tests still fail", "failing_tests"),
+        # second review: a request to fix, a fix of something else, an opener, a count
+        ("CI is red, please fix", "failing_tests"),
+        ("Tests failed - please fix before merge", "failing_tests"),
+        ("Unit tests are failing, needs a fix", "failing_tests"),
+        ("The build is broken: fix the import", "failing_tests"),
+        ("tests still failing after your fix", "failing_tests"),
+        ("CI is red, not fixed yet", "failing_tests"),
+        ("unit tests failed even though I fixed the timeout", "failing_tests"),
+        ("Not ready: unit tests failed", "failing_tests"),
+        ("Not approved, CI is red", "failing_tests"),
+        ("PR #12 failed to merge, retry", "review_findings"),
+        ("Step 2 failed: lint", "review_findings"),
+        ("Please add a failing test that reproduces the bug", "review_findings"),
+        ("Test red banner on the login screen", "review_findings"),
+        # third review: a fix of something else earlier in the clause; a wider negation
+        ("Fixed the import, CI is still red", "failing_tests"),
+        ("I resolved the merge conflict, unit tests failed", "failing_tests"),
+        ("Rebased and fixed the conflict, CI is red now", "failing_tests"),
+        ("Fixed the lint but the tests still fail", "failing_tests"),
+        ("Not a single test failed, but the naming is off", "review_findings"),
+        ("No flaky or failing tests, but rename it", "review_findings"),
+        # fourth review: a conjunction ends the phrase a negation or a fix belongs to
+        ("No changelog and CI is red", "failing_tests"),
+        ("No docs and tests failed", "failing_tests"),
+        ("No idea why CI is red", "failing_tests"),
+        ("Not merged because CI is red", "failing_tests"),
+        ("Fixed lint but tests still fail", "failing_tests"),
+        ("Fixed lint and CI is red", "failing_tests"),
+        ("Fixed typo but CI is red", "failing_tests"),
+        ("Fixed it but tests still fail", "failing_tests"),
+        ("Fixed the two flaky failing tests", "failing_tests"),  # 3 words: the safe side
+        ("Never fixed failing tests from last round", "failing_tests"),
+        ("No unit and integration tests failed", "review_findings"),
+        ("Fixed lint and failing tests", "review_findings"),
+        ("Resolved lint and failing CI", "review_findings"),
+        ("Fixed flaky and failing tests", "review_findings"),
+        ("Not yet fixed failing tests", "failing_tests"),
+        ("Both unit and integration tests failed", "failing_tests"),
+    ],
+)
+def test_a_review_return_is_classified_by_what_sent_it_back(reason: str, cause: str) -> None:
+    assert ReturnCauses().cause(ret(reason, category="review")) == cause
+
+
+def test_review_findings_are_not_dominant_when_every_return_went_through_review() -> None:
+    reviews = [task(f"T{i}", ret("please rename the helper", category="review")) for i in range(9)]
+    reviews.append(task("T9", ret("CI is red", category="review")))
+    assert run(*reviews) == []  # 90% review findings: how a review farm works
+    # A cause behind most of them is still reported, with the shares by cause.
+    red = [task(f"R{i}", ret("tests failed on CI", category="review")) for i in range(6)]
+    [alert] = run(*red, *reviews[:4])
+    assert alert.params["dominant_cause"] == "failing_tests"
+    assert alert.params["shares"] == {"failing_tests": 0.6, "review_findings": 0.4}
+    assert "by cause: failing tests 60%, review findings 40%" in alert.reason
+    # Returns of another path too: review findings dominating says something.
+    [alert] = run(*reviews, task("C", ret("lint", category="ci")))
+    assert alert.params["dominant_cause"] == "review_findings"
+
+
+def test_stage_categories_are_config() -> None:
+    rule = build({"stage_categories": ["qa"]})
+    assert rule.cause(ret("looks off", category="qa")) == "qa_findings"
+    assert rule.cause(ret("looks off", category="review")) == "review"
+    with pytest.raises(ValueError, match="stage_categories must be a list"):
+        build({"stage_categories": "review"})
+    with pytest.raises(ValueError, match="stage_categories must be a list"):
+        build({"stage_categories": [" "]})
+
+
+def test_configured_categories_come_before_ci_wording() -> None:
+    rule = build({"cause_patterns": {"infra": ["runner (?:lost|offline)", "no space left"]}})
+    assert rule.cause(ret("CI is red: runner lost", category="review")) == "infra"
+    assert rule.cause(ret("build failed: no space left on device", category="review")) == "infra"
+    assert rule.cause(ret("tests failed", category="review")) == "failing_tests"
+
+
+def test_ci_wording_can_be_off_and_named_tests_still_count() -> None:
+    rule = build({"ci_wording": False})
+    assert rule.cause(ret("CI is red", category="review")) == "review_findings"
+    assert rule.cause(ret("test_login failed", category="review")) == "failing_tests"
+    with pytest.raises(ValueError, match="ci_wording"):
+        build({"ci_wording": "no"})
+
+
+def test_several_stages_and_a_conflict_category() -> None:
+    rule = ReturnCauses(stage_categories=("review", "qa"))
+    staged = [task(f"T{i}", ret("rename it", category="review")) for i in range(4)]
+    staged += [task(f"Q{i}", ret("looks off", category="qa")) for i in range(3)]
+    assert run(*staged, rule=rule) == []  # every return through a stage
+    # A platform-filed conflict names no failing test.
+    conflict = ret("test_login conflicts", category="merge_conflict")
+    assert ReturnCauses().cause(conflict) == "merge_conflict"
+
+
+def test_ci_wording_is_linear_on_long_reasons() -> None:
+    import time
+
+    from kelpie.rules.return_causes import _ci_failed
+
+    for reason in ("tests " + "keep " * 200 + "x", "CI " + "is " * 300, "no " * 400 + "tests"):
+        started = time.perf_counter()
+        _ci_failed(reason[:1000])
+        assert time.perf_counter() - started < 0.1, reason[:20]
