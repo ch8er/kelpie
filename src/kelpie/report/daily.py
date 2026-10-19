@@ -708,8 +708,10 @@ class _Pricer:
         for row in rows:
             tokens = row.input_tokens + row.output_tokens
             provider, mode = self._mode(row.model)
-            if mode is SpendMode.SUBSCRIPTION and provider is not None:
-                plans = ((provider, tokens),)
+            if mode is SpendMode.SUBSCRIPTION:
+                # no known provider: a subscription budget over every provider covers it,
+                # with no plan to compare its tokens with
+                plans = ((provider, tokens),) if provider is not None else ()
                 total = total + Spend(tokens, 0.0, 0, tokens, plans)
                 continue
             found = self.prices.price_for(row.model, self.day)
@@ -1391,6 +1393,9 @@ def _plans(spend: Spend, report: DailyReport) -> str:
             parts.append(
                 f"{provider}: on average {share:.0%} of its {_window(window)} limit per window"
             )
+    unnamed = spend.plan_tokens - sum(tokens for _, tokens in spend.plans)
+    if unnamed > 0:
+        parts.append(f"{unnamed:,} of models of no known provider: no plan limit to compare")
     return f"{spend.plan_tokens:,} tokens on subscriptions ({'; '.join(parts)})"
 
 

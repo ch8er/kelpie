@@ -204,3 +204,19 @@ def test_unpriced_billed_tokens_still_show_plan_tokens_per_task() -> None:
     spans = [*PLAN_ONLY, *calls("S-9", "T-2", "gpt-unknown-model")]
     head = render_summary(report(spend(PLAN, API), spans))
     assert "2 tasks completed, 500,000 plan tokens per completed task." in head
+
+
+def test_a_subscription_over_every_provider_covers_models_of_no_known_provider() -> None:
+    from kelpie.core.budgets import Budget, BudgetMode, BudgetScope, BudgetUnit
+
+    every = Budget("plan", BudgetScope.DAY, BudgetUnit.TOKENS, timedelta(days=1),
+                   hard=1e9, mode=BudgetMode.SUBSCRIPTION)  # fmt: skip
+    config = SpendConfig(settings=SpendSettings(providers=(API,)), prices=PRICES, budgets=(every,))
+    local = calls("S-7", "T-1", "local-model-x")
+    r = report(config, local)
+    assert r.spend.plan_tokens == r.spend.tokens == 1_000_000 and r.spend.plans == ()
+    assert r.spend.usd == 0 and r.spend.unpriced_tokens == 0
+    markdown = render_markdown(r)
+    assert "1,000,000 of models of no known provider: no plan limit to compare" in markdown
+    unpriced = report(spend(API), local)  # no such budget: its mode is not known
+    assert unpriced.spend.plan_tokens == 0 and unpriced.spend.unpriced_tokens == 1_000_000
