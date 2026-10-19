@@ -11,7 +11,9 @@ A file ``mode`` next to the executable (its directory is ``BIN_DIR``) changes th
 ``nonspawnable`` (dispatch skips the task), ``crash`` (the run ends crashed before an agent
 takes it), ``author`` (blocks are signed ``default``, as a Hermes that ignores
 ``HERMES_PROFILE_NAME``), ``deaf`` (the worker and its tool command ignore SIGTERM),
-``silent`` (no tool call reaches the spool: rule 10 never fires). Several words combine.
+``silent`` (no tool call reaches the spool: rule 10 never fires), ``noenv`` (the submitter
+and the tool command show no ``HERMES_HOME``). Several words combine. ``kanban block`` writes
+the ``HERMES_HOME``, ``HOME`` and ``HERMES_PROFILE_NAME`` it got to ``block-env.json``.
 """
 
 from __future__ import annotations
@@ -59,15 +61,21 @@ def option(args: list[str], name: str) -> str | None:
     return args[args.index(name) + 1] if name in args else None
 
 
-def spawn(code: str) -> subprocess.Popen[bytes]:
+def spawn(code: str, *, keep_env: bool = False) -> subprocess.Popen[bytes]:
+    """``noenv``: the process's environment shows no HERMES_HOME (as after Hermes'
+    setproctitle without SPT_NOENV); it works in the throwaway HOME instead."""
     prefix = DEAF if "deaf" in mode() else ""
+    env = dict(os.environ)
+    if "noenv" in mode() and not keep_env:
+        env.pop("HERMES_HOME", None)
     return subprocess.Popen(
         [sys.executable, "-c", prefix + code],
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        env=dict(os.environ),
+        env=env,
+        cwd=os.environ.get("HOME"),
     )
 
 
@@ -118,7 +126,8 @@ def dispatch(board: str) -> int:
     assert base_url is not None
     agent = spawn(
         f"import sys; sys.argv = ['agent', {board!r}, {task!r}, '{rid}', {base_url[1]!r}]\n"
-        f"import runpy; runpy.run_path({__file__!r}, {{'BIN_DIR': {BIN_DIR!r}}}, 'agent')"
+        f"import runpy; runpy.run_path({__file__!r}, {{'BIN_DIR': {BIN_DIR!r}}}, 'agent')",
+        keep_env=True,
     )
     payload = {"pid": agent.pid, "claim_lock": lock, "started_at": print_of(agent.pid)}
     conn.execute(
@@ -192,6 +201,8 @@ def main(argv: list[str]) -> int:
         if verb == "dispatch":
             return dispatch(board)
     if argv[:2] == ["kanban", "block"]:
+        seen = {k: os.environ.get(k) for k in ("HERMES_HOME", "HOME", "HERMES_PROFILE_NAME")}
+        (Path(BIN_DIR) / "block-env.json").write_text(json.dumps(seen))
         if "author" in mode():
             os.environ["HERMES_PROFILE_NAME"] = "default"
         return hermes_cli.main(argv)

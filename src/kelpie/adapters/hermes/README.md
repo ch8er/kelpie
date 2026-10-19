@@ -212,15 +212,17 @@ It never touches your Hermes home: everything happens in a new temporary `HERMES
 a dummy profile (`kelpie-selftest`, in `kanban.dispatch_profiles` there), a throwaway board and
 Kelpie's hooks plugin. The profile's model is a local OpenAI-compatible mock that always asks
 for the same `terminal` call, so the run is a runaway and **no real tokens are spent**: Hermes
-gets no provider key from Kelpie's environment, a throwaway `HOME` (no credential files of
-yours to discover), no fallback providers, and the profile's only model is the mock.
+gets no provider key from Kelpie's environment, a throwaway `HOME` and no `XDG_*_HOME` (no
+credential files of yours to discover), no fallback providers, and the profile's only model is
+the mock.
 Hermes' own loop guard is off in that profile, so the loop runs until something stops it. Then
 rule 10 runs in `act`, with your `[engine.rules.loop_breaker]` thresholds and your
 `[adapters.hermes]` (`cli`, `cli_timeout`, `end_worker`, `worker_grace`, `author`), and the
 self-test checks, one line each: the task was dispatched, its agent started, rule 10 stopped the
 run, the task is blocked for a human, the block is signed by Kelpie, the worker processes are
 gone and the model gets no further calls. It prints the alert as Telegram would show it (nothing
-is sent), ends every process still running with that `HERMES_HOME` (the gateway Hermes
+is sent), ends every process still running with that `HERMES_HOME` or working in the
+throwaway directory (the gateway Hermes
 started for it, a runaway left by a failed step; never `hermes gateway stop`, which a service
 manager could route to a real gateway), deletes the directory, and exits 0 only if every step
 passed. SIGTERM to the self-test cleans up the same way.

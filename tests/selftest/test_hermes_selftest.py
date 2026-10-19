@@ -6,8 +6,11 @@ failures it must report.
 
 from __future__ import annotations
 
+import json
 import os
+import signal
 import sys
+import threading
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -76,6 +79,11 @@ def test_a_stop_passes_end_to_end(fake: Path, tmp_path: Path) -> None:
     assert any("| [CRITICAL] loop_breaker: alert t_1" in line for line in lines)
     assert lines[-1] == "selftest stop: passed"
     assert [p for p in tmp_path.iterdir() if p.name.startswith("kelpie-selftest-")] == []
+    # Kelpie's block ran against the throwaway home, never the user's.
+    block = json.loads((fake.parent / "block-env.json").read_text())
+    assert block["HERMES_HOME"].startswith(str(tmp_path / "kelpie-selftest-"))
+    assert block["HOME"].startswith(str(tmp_path / "kelpie-selftest-"))
+    assert block["HERMES_PROFILE_NAME"] == "kelpie"
 
 
 def test_a_worker_ignoring_sigterm_is_killed(fake: Path) -> None:
@@ -132,6 +140,8 @@ def test_hermes_gets_no_provider_keys_nor_the_users_home(tmp_path: Path) -> None
         "OPENROUTER_API_KEY": "sk-or-secret",
         "ANTHROPIC_API_KEY": "secret",
         "OPENAI_BASE_URL": "https://api.example.com",
+        "XDG_CONFIG_HOME": "/home/u/.config",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
     }
     env = hermes_env(base, tmp_path / "home", tmp_path / "spool.jsonl", tmp_path / "user")
     assert env == {
@@ -140,6 +150,8 @@ def test_hermes_gets_no_provider_keys_nor_the_users_home(tmp_path: Path) -> None
         "LANG": "C",
         "HERMES_HOME": str(tmp_path / "home"),
         "KELPIE_HERMES_SPOOL": str(tmp_path / "spool.jsonl"),
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "SPT_NOENV": "1",
     }
 
 
@@ -153,21 +165,22 @@ def test_the_cli_runs_it(fake: Path, tmp_path: Path, capsys: pytest.CaptureFixtu
 
 
 def leftovers(tmp_path: Path) -> list[int]:
-    """Processes still running with a throwaway home under ``tmp_path``."""
+    """Processes still running with a throwaway home under ``tmp_path``, or working there."""
     needle = f"HERMES_HOME={tmp_path}".encode()
     found = []
     for entry in Path("/proc").iterdir():
-        if entry.name.isdigit():
+        if entry.name.isdigit() and int(entry.name) != os.getpid():
             try:
                 env = (entry / "environ").read_bytes().split(b"\0")
+                cwd = Path(os.readlink(entry / "cwd"))
             except OSError:
                 continue
-            if any(v.startswith(needle) for v in env):
+            if any(v.startswith(needle) for v in env) or tmp_path in cwd.parents:
                 found.append(int(entry.name))
     return found
 
 
-@pytest.mark.parametrize("mode", ["silent", "silent deaf"])
+@pytest.mark.parametrize("mode", ["silent", "silent deaf", "silent noenv"])
 def test_a_runaway_rule_10_never_sees_is_cleaned_up(
     fake: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
@@ -228,3 +241,33 @@ def test_json_after_other_output() -> None:
     cli.run = lambda *a, **kw: "nothing"  # type: ignore[method-assign]
     with pytest.raises(selftest.Failed, match="no JSON object"):
         cli.json("x")
+
+
+def test_sigterm_mid_run_cleans_up_and_restores_the_handler(
+    fake: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (fake.parent / "mode").write_text("silent")
+    monkeypatch.setattr(selftest, "STOP_TIMEOUT", 60.0)
+    before = signal.getsignal(signal.SIGTERM)
+    timer = threading.Timer(4.0, os.kill, (os.getpid(), signal.SIGTERM))
+    timer.start()
+    try:
+        code, lines = run(fake)
+    finally:
+        timer.cancel()
+    assert code == 1 and "FAIL  selftest: interrupted; cleaning up" in lines
+    assert signal.getsignal(signal.SIGTERM) == before
+    assert leftovers(tmp_path) == []
+    assert [p for p in tmp_path.iterdir() if p.name.startswith("kelpie-selftest-")] == []
+
+
+def test_a_cli_that_does_not_use_the_throwaway_home_is_refused(fake: Path, tmp_path: Path) -> None:
+    """A ``cli`` such as ``docker exec ... hermes`` would act on another home."""
+    elsewhere = tmp_path / "bin2" / "hermes"
+    elsewhere.parent.mkdir()
+    elsewhere.write_text(f'#!/bin/sh\nif [ "$1" = profile ]; then exit 0; fi\nexec {fake} "$@"\n')
+    elsewhere.chmod(0o755)
+    code, lines = run(elsewhere)
+    assert code == 1
+    assert any("did not create" in line and "throwaway HERMES_HOME" in line for line in lines)
+    assert not any(line.startswith("PASS  task dispatched") for line in lines)

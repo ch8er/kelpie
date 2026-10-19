@@ -182,6 +182,18 @@ def test_stop_signs_the_block_with_the_configured_author(
     assert call["env"]["HERMES_PROFILE_NAME"] == "ops-bot"  # type: ignore[index]
 
 
+def test_the_block_starts_from_the_given_environment(
+    board: Board, fake_cli: tuple[str, Path]
+) -> None:
+    exe, log = fake_cli
+    rid = running(board)
+    adapter = make(board, exe)
+    adapter.cli_environ = {"PATH": os.environ["PATH"], "HERMES_HOME": "/throwaway/home"}
+    adapter.stop(f"hermes-run-{rid}", "loop")
+    (call,) = calls(log)
+    assert call["env"]["HERMES_HOME"] == "/throwaway/home"  # type: ignore[index]
+
+
 def test_stop_is_idempotent(board: Board, fake_cli: tuple[str, Path]) -> None:
     exe, log = fake_cli
     rid = running(board)

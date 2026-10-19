@@ -18,8 +18,9 @@ Hermes home, boards, profiles and gateway are never read or written. In it:
    ``author``), until it stops the run;
 4. checks: the task is blocked for a human, the block is signed by Kelpie, the run's worker
    processes are gone and the model gets no more calls;
-5. cleanup: the throwaway home's gateway is stopped, any process still running with that
-   ``HERMES_HOME`` is ended, the directory is removed (unless ``keep``).
+5. cleanup: every process still running with that ``HERMES_HOME`` (or working in the
+   throwaway directory) is ended, the gateway Hermes started for it included, and the
+   directory is removed (unless ``keep``).
 
 Each step prints one line, ``PASS|FAIL  <step>: <detail>``. Alerts are printed, not sent.
 """
@@ -36,7 +37,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,7 +46,7 @@ from typing import Any
 from kelpie.adapters.hermes import adapter as hermes_adapter
 from kelpie.adapters.hermes.adapter import HermesAdapter
 from kelpie.adapters.hermes.stop import ENV_EXACT, ENV_PREFIXES
-from kelpie.adapters.hermes.worker import PROC, read_proc, run_worker
+from kelpie.adapters.hermes.worker import PROC, Proc, _same, read_proc, run_worker
 from kelpie.adapters.hermes.worker import end as end_processes
 from kelpie.alerts.telegram import format_message
 from kelpie.app import ConfigError, HermesSettings, Settings, load_rules
@@ -68,6 +69,7 @@ CLI_TIMEOUT = 120.0  # one Hermes command (a first dispatch starts a gateway)
 WORKER_TIMEOUT = 120.0  # from dispatch until the agent is bound to the run
 STOP_TIMEOUT = 300.0  # from the agent's start until rule 10 stops the run
 QUIET = 5.0  # seconds without a model call after the stop
+CLEANUP_GRACE = 5.0  # SIGTERM to SIGKILL for leftovers
 TICK = 1.0
 
 
@@ -112,17 +114,26 @@ class CaptureAlerts:
 def hermes_env(base: Mapping[str, str], home: Path, spool: Path, user: Path) -> dict[str, str]:
     """Hermes' environment: the allow-list Kelpie gives its CLI, minus every ``HERMES_*`` of
     the user's own (their home, profile, board), plus the throwaway home and spool, and a
-    throwaway ``HOME`` (``user``): no provider key in the environment and no credential file
-    of the user's (``~/.codex``, ``~/.config/gh``, ...) for Hermes to discover."""
+    throwaway ``HOME`` (``user``, and no ``XDG_*_HOME``): no provider key in the environment
+    and no credential file of the user's (``~/.codex``, ``~/.config/gh``, ...) for Hermes to
+    discover."""
     env = {
         k: v
         for k, v in base.items()
-        if (k in ENV_EXACT or k.startswith(ENV_PREFIXES)) and not k.startswith("HERMES_")
+        if (k in ENV_EXACT or k.startswith(ENV_PREFIXES))
+        and not k.startswith("HERMES_")
+        and k not in _XDG_HOMES
     }
     env["HERMES_HOME"] = str(home)
-    env["HOME"] = str(user)
+    env["HOME"] = str(user)  # and no XDG_*_HOME: the XDG defaults are under it
     env["KELPIE_HERMES_SPOOL"] = str(spool)
+    # Hermes renames its processes (setproctitle), which blanks /proc/<pid>/environ unless
+    # this is set: the cleanup finds Hermes' processes by their HERMES_HOME.
+    env["SPT_NOENV"] = "1"
     return env
+
+
+_XDG_HOMES = frozenset({"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"})
 
 
 def profile_config(base_url: str) -> str:
@@ -228,6 +239,23 @@ def _on_sigterm(signum: int, frame: object) -> None:
     raise _Interrupted
 
 
+_UNSET = object()
+
+
+@contextlib.contextmanager
+def _signals_ignored() -> Iterator[None]:
+    """While cleaning up: a second SIGTERM or Ctrl-C must not cut the cleanup short."""
+    saved = []
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        with contextlib.suppress(ValueError):  # not the main thread
+            saved.append((sig, signal.signal(sig, signal.SIG_IGN)))
+    try:
+        yield
+    finally:
+        for sig, handler in saved:
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+
+
 def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -> int:
     """Run the self-test; 0 when every step passed."""
     report = Report(out)
@@ -254,12 +282,12 @@ def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -
     except (ConfigError, ValueError, TypeError) as exc:
         report.fail("rule 10", f"its configuration does not load: {exc}")
         return 1
+    previous: Any = _UNSET
+    tmp: Path | None = None
     try:
-        previous = signal.signal(signal.SIGTERM, _on_sigterm)
-    except ValueError:  # not the main thread
-        previous = None
-    tmp = Path(tempfile.mkdtemp(prefix="kelpie-selftest-")).resolve()
-    try:
+        with contextlib.suppress(ValueError):  # not the main thread
+            previous = signal.signal(signal.SIGTERM, _on_sigterm)
+        tmp = Path(tempfile.mkdtemp(prefix="kelpie-selftest-")).resolve()
         home, spool = tmp / "home", tmp / "spool.jsonl"
         home.mkdir(mode=0o700)
         (tmp / "user").mkdir(mode=0o700)
@@ -270,18 +298,21 @@ def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -
             except Failed as exc:
                 what, _, fix = str(exc).partition("\n")
                 report.fail("selftest", f"{what}\n{fix}" if fix else what)
+            except (_Interrupted, KeyboardInterrupt):
+                report.fail("selftest", "interrupted; cleaning up")
             except Exception as exc:
                 report.fail("selftest", f"unexpected {type(exc).__name__}: {exc}")
             finally:
-                _cleanup(report, home)  # while the mock still answers: no fallback hunting
-    except _Interrupted:
-        report.fail("selftest", "interrupted (SIGTERM); cleaned up")
+                with _signals_ignored():  # while the mock still answers: no fallback hunting
+                    _cleanup(report, tmp)
+    except (_Interrupted, KeyboardInterrupt):  # before the steps started
+        report.fail("selftest", "interrupted")
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
-        if keep:
+        if previous is not _UNSET:
+            signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+        if tmp is not None and keep:
             report.note(f"kept {tmp} (Hermes home, spool, logs under home/logs)")
-        else:
+        elif tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
     out("")
     if report.failed:
@@ -306,6 +337,11 @@ def _steps(
 
     cli.run("profile", "create", "--no-alias", "--no-skills", PROFILE)
     profile = home / "profiles" / PROFILE
+    if not profile.is_dir():  # e.g. a `cli` that runs Hermes elsewhere (docker exec ...)
+        raise Failed(
+            f"hermes profile create did not create {profile}: this Hermes does not use the "
+            "throwaway HERMES_HOME\nset [adapters.hermes] cli to the hermes executable itself"
+        )
     (profile / "config.yaml").write_text(profile_config(llm.base_url), encoding="utf-8")
     (home / "config.yaml").write_text(ROOT_CONFIG, encoding="utf-8")
     plugin = profile / "plugins" / "kelpie"
@@ -493,9 +529,7 @@ def _check_board(report: Report, db: Path, task: str, adapter: HermesAdapter) ->
 def _check_processes(report: Report, recorded: Any, end_worker: bool) -> None:
     pids = [p for p in (recorded.submitter, recorded.agent) if p is not None]
     alive = [p for p in pids if (q := read_proc(p)) is not None and q.state not in "ZXx"]
-    if not (PROC / "self" / "stat").exists():
-        report.fail("worker ended", "no /proc on this system: Kelpie cannot end Hermes workers")
-    elif alive:
+    if alive:
         fix = (
             "set [adapters.hermes] end_worker = true"
             if not end_worker
@@ -520,36 +554,45 @@ def _check_quiet(report: Report, llm: MockLLM, stopped_at: float) -> None:
         )
 
 
-def _cleanup(report: Report, home: Path) -> None:
-    """End every process still running with the throwaway ``HERMES_HOME`` (only processes this
-    self-test started carry it): the gateway Hermes started for it, a runaway left by a failed
-    step. SIGTERM, then SIGKILL, each re-checked against the process's start time (a pid
-    reused meanwhile is never signalled); again until none is left, for children started in
-    between. No ``hermes gateway stop``: under a service manager it may reach a real gateway."""
-    killed = 0
+def _cleanup(report: Report, tmp: Path) -> None:
+    """End every process still running for the throwaway setup (only processes this self-test
+    started can carry its ``HERMES_HOME`` or work in its directory): the gateway Hermes started
+    for it, a runaway left by a failed step. SIGTERM, then SIGKILL, each re-checked against the
+    process's start time (a pid reused meanwhile is never signalled); again until none is left,
+    for children started in between. No ``hermes gateway stop``: under a service manager it may
+    reach a real gateway."""
+    killed = False
     for _ in range(3):
-        left = [p for pid in _processes_of(home) if (p := read_proc(pid)) is not None]
+        left = _processes_of(tmp)
         if not left:
             break
-        ended = end_processes(left, grace=5.0)
-        killed += len(left) if ended.killed else 0
+        killed = end_processes(left, grace=CLEANUP_GRACE).killed or killed
     if killed:
         report.note("cleanup: some processes of the throwaway home needed SIGKILL")
-    if left := _processes_of(home):
-        report.fail("cleanup", f"processes of the throwaway home still running: pid {left}")
+    if left := _processes_of(tmp):
+        pids = [p.pid for p in left]
+        report.fail("cleanup", f"processes of the throwaway home still running: pid {pids}")
 
 
-def _processes_of(home: Path) -> list[int]:
-    """Processes of this user whose ``HERMES_HOME`` is ``home`` or inside it (a profile)."""
-    needle = f"HERMES_HOME={home}".encode()
-    found: list[int] = []
+def _processes_of(tmp: Path) -> list[Proc]:
+    """Processes of this user whose ``HERMES_HOME`` is in ``tmp`` or that work in it. The start
+    time is read before and after the environment, so a pid reused in between never counts."""
+    home = f"HERMES_HOME={tmp}".encode()
+    found: list[Proc] = []
     me = os.getpid()
     with contextlib.suppress(OSError):
         for entry in PROC.iterdir():
             if not entry.name.isdigit() or int(entry.name) == me:
                 continue
+            before = read_proc(int(entry.name))
+            if before is None:
+                continue
             with contextlib.suppress(OSError):
                 env = (entry / "environ").read_bytes().split(b"\0")
-                if any(v == needle or v.startswith(needle + b"/") for v in env):
-                    found.append(int(entry.name))
+                ours = any(v == home or v.startswith(home + b"/") for v in env)
+                if not ours:
+                    cwd = Path(os.readlink(entry / "cwd"))
+                    ours = cwd == tmp or tmp in cwd.parents
+                if ours and _same(before, PROC):
+                    found.append(before)
     return found
