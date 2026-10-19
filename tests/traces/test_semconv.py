@@ -60,6 +60,26 @@ def test_cache_writes(attrs: dict[str, object], written: int) -> None:
     assert (s.input_tokens, s.cached_tokens, s.cache_write_tokens) == (1_000, 200, written)
 
 
+def test_claude_code_cache_writes_from_semconv_keys_add_to_input() -> None:
+    s = one(
+        {
+            "model": "m",
+            "input_tokens": 10,
+            "cache_read_tokens": 100,
+            "gen_ai.usage.cache_creation.input_tokens": 40,
+        },
+        name="claude_code.llm_request",
+    )
+    assert (s.input_tokens, s.cached_tokens, s.cache_write_tokens) == (150, 100, 40)
+
+
+def test_a_span_with_only_cache_reads_has_no_usage() -> None:
+    """Reads are part of the input: with no input there is nothing to read, so the span
+    carries no usage (it neither counts nor hides a nested call)."""
+    s = one({"gen_ai.operation.name": "chat", "gen_ai.usage.cache_read.input_tokens": 50})
+    assert (s.input_tokens, s.cached_tokens, s.cache_write_tokens) == (0, 0, 0)
+
+
 def test_cache_reads_are_capped_at_the_input() -> None:
     s = one({"gen_ai.operation.name": "chat", "gen_ai.usage.input_tokens": 10,
              "gen_ai.usage.cache_read.input_tokens": 50})  # fmt: skip

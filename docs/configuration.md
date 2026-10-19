@@ -818,9 +818,12 @@ and left out of `usd` budgets, and `kelpie status` and `kelpie doctor` name such
 | `cache_write` | `input` | Input tokens written to the prompt cache (Anthropic: 1.25 × `input` for 5-minute writes). |
 
 Cache reads and writes come from the spans: `gen_ai.usage.cache_read.input_tokens` and
-`gen_ai.usage.cache_creation.input_tokens` (also `cache_write.input_tokens` and
-OpenLLMetry's `cache_read_input_tokens` / `cache_creation_input_tokens`), Claude Code's
-`cache_read_tokens` / `cache_creation_tokens`, and OpenClaw's usage records.
+`gen_ai.usage.cache_creation.input_tokens` (also `gen_ai.usage.cache_write.input_tokens`
+and OpenLLMetry's `gen_ai.usage.cache_read_input_tokens` /
+`gen_ai.usage.cache_creation_input_tokens`), Claude Code's `cache_read_tokens` /
+`cache_creation_tokens`, and OpenClaw's usage records. A `[prices]` entry replaces the
+default row as a whole: without `cache_write` it prices cache writes at its `input`, not at
+the default's 1.25 × input.
 
 ## [spend]
 

@@ -85,8 +85,8 @@ class Price:
     cache_write: float | None = None
 
     def cost(self, usage: TokenUsage) -> float:
-        cached = min(usage.cached_tokens, usage.input_tokens)
-        written = min(usage.cache_write_tokens, usage.input_tokens - cached)
+        cached = min(max(usage.cached_tokens, 0), usage.input_tokens)
+        written = min(max(usage.cache_write_tokens, 0), usage.input_tokens - cached)
         write = self.input if self.cache_write is None else self.cache_write
         return (
             (usage.input_tokens - cached - written) * self.input

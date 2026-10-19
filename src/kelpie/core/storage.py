@@ -146,13 +146,15 @@ ALTER TABLE actions ADD COLUMN detail TEXT;
 
 # Cache writes priced on their own (kelpie.core.prices): a column, filled for stored spans
 # from the attribute OTLP ingest kept them in, and the covering indexes rebuilt with it.
-_CACHE_WRITE_KEYS = (
+# Frozen with migration 6 (a released migration never changes): not kelpie.traces.semconv's
+# list, which may grow. A span store of a million spans takes some seconds to upgrade.
+_V6_CACHE_WRITE_KEYS = (
     "gen_ai.usage.cache_creation.input_tokens",
     "gen_ai.usage.cache_write.input_tokens",
     "gen_ai.usage.cache_creation_input_tokens",
     "cache_creation_tokens",
 )
-_WRITTEN = ", ".join(f"json_extract(attributes, '$.\"{k}\"')" for k in _CACHE_WRITE_KEYS)
+_WRITTEN = ", ".join(f"json_extract(attributes, '$.\"{k}\"')" for k in _V6_CACHE_WRITE_KEYS)
 _V6 = f"""
 ALTER TABLE spans ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
 UPDATE spans SET cache_write_tokens = MAX(0, MIN(input_tokens - MIN(cached_tokens, input_tokens),

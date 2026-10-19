@@ -26,8 +26,9 @@ linkage within the request and then dropped (counted as ``ignored``).
 ``gen_ai.usage.input_tokens`` / ``output_tokens`` (deprecated ``prompt_tokens`` /
 ``completion_tokens`` accepted), cached = ``gen_ai.usage.cache_read.input_tokens`` (or
 OpenLLMetry's ``gen_ai.usage.cache_read_input_tokens``), cache writes =
-``gen_ai.usage.cache_creation.input_tokens`` (or ``cache_write.input_tokens``, or
-OpenLLMetry's ``cache_creation_input_tokens``). Input tokens follow the conventions and
+``gen_ai.usage.cache_creation.input_tokens`` (or
+``gen_ai.usage.cache_write.input_tokens``, or OpenLLMetry's
+``gen_ai.usage.cache_creation_input_tokens``). Input tokens follow the conventions and
 include cache reads and writes (each is capped at what is left of the input). Claude Code
 reports Anthropic usage, where ``input_tokens`` excludes cache reads and writes, so for
 ``claude_code.*`` spans Kelpie stores ``input_tokens + cache_read_tokens +

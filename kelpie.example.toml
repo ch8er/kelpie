@@ -320,6 +320,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # input = 3
 # output = 15
 # cached_input = 0.3        # default: the input price
+# cache_write = 3.75        # default: the input price
 #
 # [spend]
 # default_prices = true     # false: only [prices]

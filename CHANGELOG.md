@@ -124,6 +124,12 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   `[prices]` (`[spend] default_prices`), so `usd` budgets work without a price list; model
   ids are matched across platforms (Bedrock, Vertex, OpenRouter, dated snapshots), and
   `kelpie status` and `kelpie doctor` name the models that have no price ([#184](https://github.com/ch8er/kelpie/pull/184)).
+- Prompt-cache writes are counted from the spans and priced at `cache_write` (Anthropic:
+  1.25 × input) instead of the input price. Cache reads and writes are capped at a span's
+  input on arrival, so a span with cache reads and no input carries no usage. Upgrading
+  rebuilds the span store indexes (some seconds per million spans) and fills cache writes
+  of stored OTLP spans; stored OpenClaw spans keep pricing writes at the input price until
+  they leave the retention.
 
 #### Token optimization
 

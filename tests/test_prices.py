@@ -169,6 +169,8 @@ def test_cost_prices_cache_writes_apart() -> None:
     assert Price(4, 20, 0.2).cost(usage) == pytest.approx(0.8 * 4 + 0.2 * 0.2)
     too_many = TokenUsage("s", "t", "m", 1, 1_000_000, 0, 900_000, 900_000)
     assert opus.cost(too_many) == pytest.approx(0.9 * 0.2 + 0.1 * 5)
+    negative = TokenUsage("s", "t", "m", 1, 1_000_000, 0, -500_000, -5)  # never lowers a cost
+    assert opus.cost(negative) == pytest.approx(4)
 
 
 def test_cheaper_model_finds_dated_candidates() -> None:
