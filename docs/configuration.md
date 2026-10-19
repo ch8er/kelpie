@@ -831,8 +831,8 @@ OpenLLMetry's `cache_read_input_tokens` / `cache_creation_input_tokens`), Claude
 **The default table** (`kelpie.core.prices`) holds the standard API prices of popular
 Anthropic, OpenAI and Google models, as their pricing pages showed them on the date
 `kelpie status` prints ("checked ..."). Each row has input, output and cache read prices,
-and Anthropic rows the 5-minute cache write price (other providers charge no more than the
-input price to write their cache). An announced price change (an introductory price that
+and Anthropic rows the 5-minute cache write price (the OpenAI and Google rows have none, so
+their cache writes cost the input price). An announced price change (an introductory price that
 ends) applies from its day, and a row prices every snapshot of its model. Prices change
 after Kelpie is released: check the rows you rely on against the provider's page, and add
 `[prices]` entries where they differ. The estimate leaves out what the table does not
