@@ -94,7 +94,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
     checks = farm.checks()
     assert {n: c.status for n, c in checks.items()} == {
         "config loads": "PASS",
-        "observe only": "PASS",
+        "rule modes": "PASS",
         "kanban.db": "PASS",
         "hooks fire": "PASS",
         "OTLP spans arrive": "PASS",
@@ -122,23 +122,102 @@ def test_no_hermes_section_skips_the_board_checks() -> None:
     checks = {c.name: c.status for c in run_checks(None, environ={})}
     assert checks["kanban.db"] == checks["hooks fire"] == checks["worktrees readable"] == "SKIP"
     assert checks["PR blocks have conditions"] == "SKIP"
-    assert checks["observe only"] == "PASS"
+    assert checks["rule modes"] == "PASS"
+
+
+def test_rule_modes_on_the_defaults_list_observe_from_default_mode(farm: Farm) -> None:
+    check = farm.checks()["rule modes"]
+    assert check.status == "PASS"
+    assert check.detail.startswith("dry_run on; observe: ")
+    assert check.detail.endswith(" rules (default_mode)")
 
 
 @pytest.mark.parametrize(
-    ("extra", "needle"),
+    ("extra", "listed"),
     [
-        ("[engine]\ndry_run = false\n", "dry_run is off"),
-        ('[engine]\ndefault_mode = "suggest"\n', "exit_contract"),
-        ('[engine.rules.exit_contract]\nmode = "act"\n', "exit_contract"),
+        (  # what the live farm runs: a stop and a suggestion, chosen per rule
+            '[engine]\ndry_run = false\n[engine.rules.loop_breaker]\nmode = "act"\n'
+            '[engine.rules.needs_you]\nmode = "suggest"\n',
+            "dry_run off; act: loop_breaker (per rule); suggest: needs_you (per rule); observe: ",
+        ),
+        ("[engine]\ndry_run = false\n", "dry_run off; observe: "),
+        (  # suggest for every rule sends alerts, never changes the board: deliberate enough
+            '[engine]\ndry_run = false\ndefault_mode = "suggest"\n'
+            '[engine.rules.resources]\nmode = "observe"\n',
+            "observe: resources (per rule)",
+        ),
     ],
 )
-def test_observe_only_fails_with_a_fix(farm: Farm, extra: str, needle: str) -> None:
+def test_deliberate_modes_pass_and_are_listed(farm: Farm, extra: str, listed: str) -> None:
     farm.extra = extra
-    check = farm.checks()["observe only"]
+    check = farm.checks()["rule modes"]
+    assert check.status == "PASS", check.detail
+    assert listed in check.detail
+
+
+def test_explicit_and_default_rules_in_one_mode_are_told_apart(farm: Farm) -> None:
+    farm.extra = '[engine]\ndry_run = false\ndefault_mode = "suggest"\n'
+    farm.extra += '[engine.rules.needs_you]\nmode = "suggest"\n'
+    detail = farm.checks()["rule modes"].detail
+    assert "suggest: needs_you (per rule), " in detail and " more (default_mode)" in detail
+
+
+def test_act_on_a_farm_that_cannot_carry_it_out_warns(tmp_path: Path) -> None:
+    path = tmp_path / "kelpie.toml"  # no CI connector: nothing cancels a build
+    path.write_text('[engine]\ndry_run = false\n[engine.rules.ci_economy]\nmode = "act"\n')
+    check = {c.name: c for c in run_checks(path, environ={})}["rule modes"]
+    assert check.status == "WARN"
+    assert "act: ci_economy (per rule)" in check.detail
+    assert "in act but cannot act on this farm: ci_economy (Kelpie cancels no builds" in (
+        check.detail
+    )
+    assert "its actions become alerts" in check.detail
+    assert "docs/act-checklist.md" in check.fix
+
+
+def test_dry_run_with_rules_configured_to_act_warns_that_nothing_acts(farm: Farm) -> None:
+    farm.extra = '[engine.rules.loop_breaker]\nmode = "act"\n'
+    farm.extra += '[engine.rules.needs_you]\nmode = "suggest"\n'
+    check = farm.checks()["rule modes"]
+    assert check.status == "WARN"
+    assert "dry_run on; act: loop_breaker (per rule)" in check.detail
+    assert "dry_run is on, so nothing acts and nothing is sent" in check.detail
+    assert "loop_breaker in act and needs_you in suggest" in check.detail
+    assert "dry_run = false" in check.fix and "docs/act-checklist.md" in check.fix
+
+
+def test_act_from_default_mode_warns(farm: Farm) -> None:
+    farm.extra = '[engine]\ndry_run = true\ndefault_mode = "act"\n'
+    check = farm.checks()["rule modes"]
+    assert check.status == "WARN"
+    assert "act comes from default_mode, not per rule" in check.detail
+    assert check.detail.startswith("dry_run on; act: ") and " rules (default_mode);" in check.detail
+    assert " more; act comes from" in check.detail  # the rules that cannot act, cut short
+    assert 'set default_mode = "observe"' in check.fix
+
+
+def test_act_that_kelpie_serve_refuses_fails_and_only_warns_under_dry_run(farm: Farm) -> None:
+    act = '[engine.rules.exit_contract]\nmode = "act"\n'
+    farm.extra = "[engine]\ndry_run = false\n" + act  # Hermes cannot requeue: serve refuses
+    check = farm.checks()["rule modes"]
     assert check.status == "FAIL"
-    assert needle in check.detail
-    assert "dry_run = true" in check.fix
+    assert "kelpie serve refuses to start" in check.detail and "exit_contract" in check.detail
+    assert 'mode = "suggest" or "observe"' in check.fix and "act-checklist" in check.fix
+    farm.extra = act  # dry_run on: serve starts, nothing acts
+    check = farm.checks()["rule modes"]
+    assert check.status == "WARN"
+    assert "kelpie serve refuses it once dry_run is off" in check.detail
+
+
+def test_cli_exits_0_on_a_rule_modes_warning(
+    farm: Farm, prometheus: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    farm.make_healthy()
+    farm.extra = '[engine.rules.loop_breaker]\nmode = "act"\n'  # dry_run on: a WARN
+    assert main(["--config", str(farm.config()), "doctor", "--prometheus", prometheus]) == 0
+    out = capsys.readouterr().out
+    assert "WARN  rule modes: " in out and "\n  fix: " in out
+    assert "FAIL" not in out
 
 
 def test_board_missing_fails(farm: Farm) -> None:

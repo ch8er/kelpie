@@ -94,9 +94,12 @@ stops as ordinary blocks.
 
 - [ ] `uv run kelpie doctor` has no FAIL ("disk watched" needs node_exporter behind `[resources.prometheus]`), and every WARN and SKIP has a reason you understand
   (a "PR blocks have conditions" WARN means rules 2 and 4 treat those blocks as stuck), run while a
-  task is running so the hooks and spans checks count. Do this **before** you change any
-  mode: its "observe only" check FAILs by design once `dry_run` is off or a rule is not in
-  `observe`.
+  task is running so the hooks and spans checks count. Run it again after every mode
+  change: its "rule modes" line lists each mode with its rules (set per rule or from
+  `default_mode`) and passes when that is what you configured. It warns while `dry_run`
+  holds back a rule you put in `suggest` or `act`, for a rule in `act` that cannot act on
+  this farm (see What can act today) and for `act` from `default_mode`; it fails only when
+  `kelpie serve` would refuse to start.
 - [ ] The ledger is healthy: `kelpie_ledger_up 1` on `/metrics`, and `[storage] path` points
   at a real file (not `:memory:`), so cooldowns and once-actions survive a restart.
 - [ ] You know the `dry_run` semantics: `dry_run = true` overrides every rule's mode, so

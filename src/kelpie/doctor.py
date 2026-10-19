@@ -14,7 +14,7 @@ import sqlite3
 import time
 import urllib.request
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,6 +29,8 @@ from kelpie.app import (
     ConfigError,
     LoadedRules,
     Settings,
+    act_blockers,
+    build_adapters,
     load_rules,
     load_settings,
     read_unpriced,
@@ -50,6 +52,7 @@ from kelpie.connectors.github.connector import (
 )
 from kelpie.core.config import Mode
 from kelpie.core.model import Status
+from kelpie.core.ports import PlatformAdapter
 from kelpie.resources.prometheus import PrometheusClient, QueryError
 
 FRESH = timedelta(hours=1)  # newest spool line or span must be younger than this
@@ -110,22 +113,106 @@ def _quiet_or_fail(name: str, detail: str, fix: str, running: int | None) -> Che
     return _fail(name, detail, fix)
 
 
-def check_dry_run(settings: Settings, loaded: LoadedRules) -> Check:
-    name = "observe only"
-    acting = sorted(s.name for s in loaded.statuses if s.implemented and s.mode is not Mode.OBSERVE)
-    problems = []
-    if not settings.engine.dry_run:
-        problems.append("dry_run is off")
-    if acting:
-        problems.append(f"rules not in observe: {', '.join(acting)}")
-    if problems:
+CHECKLIST = "docs/act-checklist.md"
+MODE_ORDER = (Mode.ACT, Mode.SUGGEST, Mode.OBSERVE)
+
+
+def _names(names: list[str], *, more: bool = False) -> str:
+    """Rule names, or a count once there are more than :data:`SHOWN`."""
+    if len(names) <= SHOWN:
+        return ", ".join(names)
+    return f"{len(names)} {'more' if more else 'rules'}"
+
+
+def _modes_summary(settings: Settings, loaded: LoadedRules) -> str:
+    """``dry_run on; act: a (per rule); observe: 14 rules (default_mode)``: each mode with
+    its implemented rules, and whether ``[engine.rules.<name>] mode`` or ``default_mode``
+    puts them there."""
+    engine = settings.engine
+    parts = [f"dry_run {'on' if engine.dry_run else 'off'}"]
+    for mode in MODE_ORDER:
+        rules = [s.name for s in loaded.statuses if s.implemented and s.mode is mode]
+        explicit = [r for r in rules if r in engine.modes]
+        default = [r for r in rules if r not in engine.modes]
+        sources = []
+        if explicit:
+            sources.append(f"{_names(explicit)} (per rule)")
+        if default:
+            sources.append(f"{_names(default, more=bool(explicit))} (default_mode)")
+        if sources:
+            parts.append(f"{mode}: {', '.join(sources)}")
+    return "; ".join(parts)
+
+
+def check_rule_modes(
+    settings: Settings, loaded: LoadedRules, adapters: Sequence[PlatformAdapter]
+) -> Check:
+    """PASS when every rule runs in the mode the config gives it, a deliberate ``suggest``
+    or ``act`` included. WARN for a surprise: ``dry_run`` holding back rules configured to
+    suggest or act, ``act`` that comes from ``default_mode`` alone, or a rule in ``act`` that
+    cannot act on this farm (:func:`kelpie.app.act_blockers`). FAIL only when ``kelpie
+    serve`` would refuse to start: ``dry_run`` off and a rule in ``act`` that its startup
+    check refuses."""
+    name = "rule modes"
+    engine = settings.engine
+    summary = _modes_summary(settings, loaded)
+    implemented = [s for s in loaded.statuses if s.implemented]
+    acting = [s.name for s in implemented if s.mode is Mode.ACT]
+    suggesting = [s.name for s in implemented if s.mode is Mode.SUGGEST]
+    blockers = act_blockers(settings, adapters) if acting else {}
+    blocked = {r: blockers[r] for r in acting if r in blockers}
+    refused = [r for r in acting if r in blocked and blocked[r].refused]
+    if refused and not engine.dry_run:
+        why = "; ".join(f"{r}: {blocked[r].reason}" for r in refused)
         return _fail(
             name,
-            "; ".join(problems),
-            'in [engine] set dry_run = true and default_mode = "observe", and remove '
-            "mode = ... from [engine.rules.*]",
+            f"{summary}; kelpie serve refuses to start, these rules cannot act on this farm: {why}",
+            f'set mode = "suggest" or "observe" in [engine.rules.<name>] for '
+            f"{', '.join(refused)} ({CHECKLIST}, What can act today)",
         )
-    return _pass(name, "dry_run on, every rule in observe")
+    problems: list[str] = []
+    fixes: list[str] = []
+    if engine.dry_run and (acting or suggesting):
+        held = " and ".join(
+            f"{_names(rules)} in {mode}"
+            for mode, rules in ((Mode.ACT, acting), (Mode.SUGGEST, suggesting))
+            if rules
+        )
+        problems.append(
+            f"dry_run is on, so nothing acts and nothing is sent: what {held} would do "
+            "is only logged as dry_run"
+        )
+        fixes.append(
+            f"set dry_run = false once {CHECKLIST} is done, or put those rules back in observe"
+        )
+    if blocked:
+        shown = list(blocked.items())[:SHOWN]
+        why = "; ".join(
+            f"{r} ({b.reason}; "
+            + (
+                "kelpie serve refuses it once dry_run is off"
+                if b.refused
+                else "its actions become alerts"
+            )
+            + ")"
+            for r, b in shown
+        )
+        if len(blocked) > len(shown):
+            why += f"; and {len(blocked) - len(shown)} more"
+        problems.append(f"in act but cannot act on this farm: {why}")
+        fixes.append(
+            "use suggest for those rules, or configure what they need "
+            f"({CHECKLIST}, What can act today)"
+        )
+    if by_default := [r for r in acting if r not in engine.modes]:
+        problems.append(f"act comes from default_mode, not per rule: {_names(by_default)}")
+        fixes.append(
+            'set default_mode = "observe" and mode = "act" in [engine.rules.<name>] for each '
+            f"rule that passed the gate ({CHECKLIST}, 4. Go live, small)"
+        )
+    if problems:
+        return _warn(name, f"{summary}; {'; '.join(problems)}", "; ".join(fixes))
+    return _pass(name, summary)
 
 
 def check_board(adapter: HermesAdapter) -> tuple[Check, int | None]:
@@ -725,7 +812,7 @@ def run_checks(
     at = now().astimezone(UTC)
     checks = [
         _pass("config loads", f"{settings.source or 'defaults'}, {len(loaded.rules)} rules"),
-        check_dry_run(settings, loaded),
+        check_rule_modes(settings, loaded, build_adapters(settings)),
     ]
     hermes = settings.hermes
     adapter = hermes.build() if hermes is not None and hermes.enabled else None
