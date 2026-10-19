@@ -79,7 +79,16 @@ def test_workflow_states_delegates_and_relations(lin: FakeLinear) -> None:
         state_type="started",
         delegate="Codex",
         updated=ago(minutes=5),
-        history=[{"createdAt": iso(ago(hours=1)), "toDelegate": {"displayName": "Codex"}}],
+        history=[
+            {
+                "createdAt": iso(ago(hours=1)),
+                "toDelegate": {"id": "user-codex", "displayName": "Codex", "app": True},
+            },
+            {
+                "createdAt": iso(ago(minutes=30)),  # someone else under the agent's name
+                "toDelegate": {"id": "user-impostor", "displayName": "Codex", "app": True},
+            },
+        ],
         attachments=[
             {
                 "url": "https://github.com/acme/app/pull/7",
@@ -841,7 +850,11 @@ def test_history_of_an_odd_shape_is_read_as_far_as_it_makes_sense() -> None:
 
     at = iso(ago(hours=1))
     assert (
-        _events([{"createdAt": at, "addedLabels": 5, "removedLabels": [None, {"name": 3}]}]) == ()
+        _events(
+            [{"createdAt": at, "addedLabels": 5, "removedLabels": [None, {"name": 3}]}],
+            lambda user, delegate: None,
+        )
+        == ()
     )
 
 
@@ -987,3 +1000,18 @@ def test_the_agents_stay_known_when_the_hourly_lookup_fails(lin: FakeLinear) -> 
     lin.rate_limited = False
     snap = a.snapshot(NOW + timedelta(minutes=3))
     assert {t.id: t.owner_id for t in snap.tasks} == {"ENG-2": "codex"}
+
+
+def test_a_teams_read_waits_until_the_hour_has_room_for_it_and_the_reserve(
+    lin: FakeLinear,
+) -> None:
+    lin.issue("ENG-1", "x", ago(days=1))
+    lin.headers = {"X-Complexity": "5000"}  # each request, users and two pages: 15,000
+    a = adapter(lin)
+    a.snapshot(NOW)
+    lin.headers = {"X-RateLimit-Complexity-Remaining": "59000"}  # room for the reserve only
+    a.comment("ENG-1", "x")
+    count = len(lin.requests)
+    a.snapshot(NOW + timedelta(minutes=3))
+    assert "KelpieIssues" not in lin.ops()[count:]  # 50,000 kept + 10,000 last read > 59,000
+    assert "kept for writes" in (a.tracker.problem or "")  # type: ignore[attr-defined]

@@ -190,7 +190,9 @@ GraphQL API (`linear.py`) and maps them with the same rules. What differs:
   Kelpie does not take (unprintable, with spaces around it, ending in `[bot]`, or an agent's
   name on another user) is held by someone unknown (`@unknown`), never free; so is an agent's
   own issue while its user cannot be looked up (the read reports it). Slots are compared by
-  user id when Kelpie writes: it never replaces anyone but an agent. The config
+  user id when Kelpie writes: it never replaces anyone but an agent. The history's
+  assignments and delegations are named the same way, so an agent's name on another user
+  does not move when the agent was started. The config
   refuses agent names that could never match. Unassigning clears the slot that holds the
   name; writes go to the UUID of the issue the action checked.
 - **Reading**: at most every `refresh` (2 minutes): GraphQL has no conditional requests, and
@@ -199,7 +201,8 @@ GraphQL API (`linear.py`) and maps them with the same rules. What differs:
   the closed issues are the most recently updated page), then history within
   `max_requests_per_tick`. A team that cannot be read is served from its last good read for
   10 minutes, then left out, and the problem is reported. Reads stop while less than 100
-  requests or 50,000 complexity points are left of the hour (writes still go), until that
+  requests or 50,000 complexity points (plus what a team's last read cost, before that team's
+  read) are left of the hour (writes still go), until that
   limit's reset or for 5 minutes, then ask Linear again; the refresh stretches so reads take
   at most half the hour's complexity (Linear's `X-Complexity` and
   `X-RateLimit-Complexity-Limit` headers; several large teams read less often), to 25 minutes

@@ -151,8 +151,8 @@ query KelpieHistory($id: String!) {
       nodes {
         createdAt
         actor { app guest } botActor { id } updatedDescription
-        fromAssignee { displayName } toAssignee { displayName }
-        fromDelegate { displayName } toDelegate { displayName }
+        fromAssignee { id displayName app } toAssignee { id displayName app }
+        fromDelegate { id displayName app } toDelegate { id displayName app }
         addedLabels { name } removedLabels { name }
         fromState { type } toState { type }
       }
@@ -266,15 +266,15 @@ class LinearClient:
     def backing_off(self) -> bool:
         return self.backoff_until is not None and self.clock() < self.backoff_until
 
-    def may_read(self) -> bool:
-        """Whether more than the reserve kept for writes is left of the hour, as far as
-        Linear's last answer says; figures past their reset (or ``LIMITS_TTL``) say nothing,
-        so the next read asks Linear again."""
+    def may_read(self, cost: int = 0) -> bool:
+        """Whether a read costing ``cost`` (complexity points) leaves the reserve kept for
+        writes, as far as Linear's last answer says; figures past their reset (or
+        ``LIMITS_TTL``) say nothing, so the next read asks Linear again."""
         if self.limits_until is None or self.clock() >= self.limits_until:
             return True
         low_requests = self.hour_requests is not None and self.hour_requests < RESERVE_REQUESTS
         low_complexity = (
-            self.hour_complexity is not None and self.hour_complexity < RESERVE_COMPLEXITY
+            self.hour_complexity is not None and self.hour_complexity < RESERVE_COMPLEXITY + cost
         )
         return not (low_requests or low_complexity)
 
@@ -480,6 +480,7 @@ class LinearIssues:
     _last: tuple[datetime, list[Item]] | None = field(default=None, init=False, repr=False)
     _next: datetime | None = field(default=None, init=False, repr=False)  # the next read
     _failed: IssuesError | None = field(default=None, init=False, repr=False)
+    _team_cost: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _good: dict[str, tuple[datetime, list[Any]]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -590,14 +591,21 @@ class LinearIssues:
             raise IssuesError(str(exc), reason, exc.kind) from exc
 
     def _lists(self, board: Board, now: datetime) -> list[Any]:
-        """A team's lists, whole or not at all: the reserve is checked once, before the
-        first page (a page refused halfway would throw away the pages before it)."""
-        if not self.client.may_read():
+        """A team's lists, whole or not at all: checked once, before the first page (a page
+        refused halfway would throw away the pages before it), that the hour has room for
+        the reserve kept for writes plus what this team's last read cost."""
+        if not self.client.may_read(self._team_cost.get(board.key, 0)):
             raise IssuesError(
                 "KelpieIssues: reserve",
                 "the rest of the hour's Linear limit is kept for writes",
                 "reserve",
             )
+        before = self.client.complexity_spent
+        lists = self._list_pages(board, now)
+        self._team_cost[board.key] = self.client.complexity_spent - before
+        return lists
+
+    def _list_pages(self, board: Board, now: datetime) -> list[Any]:
         team: dict[str, Any] = {"team": {"key": {"eq": board.key}}}
         if board.label is not None:
             team["labels"] = {"some": {"name": {"eqIgnoreCase": board.label}}}
@@ -737,7 +745,8 @@ class LinearIssues:
         nodes = _nodes(history)
         info = history.get("pageInfo") if isinstance(history, Mapping) else None
         whole = isinstance(info, Mapping) and info.get("hasNextPage") is False
-        detail = _Detail(updated, now, _events(nodes), whole and _members_edited(nodes))
+        events = _events(nodes, self._holder)
+        detail = _Detail(updated, now, events, whole and _members_edited(nodes))
         self._details[key] = detail
         return detail
 
@@ -1089,19 +1098,23 @@ class LinearIssues:
         return labels, [u for u in users if self._users.get(u.casefold()) is None]
 
 
-def _events(nodes: list[Mapping[str, Any]]) -> tuple[Event, ...]:
+def _events(
+    nodes: list[Mapping[str, Any]], holder: Callable[[Any, bool], str | None]
+) -> tuple[Event, ...]:
+    """A history as events. Who was assigned or delegated to is named as the issue's slots
+    name them (``holder``): an agent only on the user looked up for it."""
     events: list[Event] = []
     for entry in nodes:
         at = _time(entry.get("createdAt"))
         if at is None:
             continue
-        for who, kind in (
-            ("toAssignee", "assigned"),
-            ("fromAssignee", "unassigned"),
-            ("toDelegate", "assigned"),
-            ("fromDelegate", "unassigned"),
+        for who, kind, delegate in (
+            ("toAssignee", "assigned", False),
+            ("fromAssignee", "unassigned", False),
+            ("toDelegate", "assigned", True),
+            ("fromDelegate", "unassigned", True),
         ):
-            if (name := _name(entry.get(who))) is not None:
+            if (name := holder(entry.get(who), delegate)) is not None:
                 events.append(Event(kind, at, name))
         for key, kind in (("addedLabels", "labeled"), ("removedLabels", "unlabeled")):
             labels = entry.get(key)
