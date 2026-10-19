@@ -9,15 +9,15 @@ spool may have rotated, so run it daily.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.model import Snapshot
+from kelpie.core.model import Reconciliation, Snapshot
 from kelpie.core.spend import SpendConfig
 from kelpie.report.config import ReportSettings
 from kelpie.report.daily import (
@@ -68,6 +68,9 @@ class ReportSources:
     stuck_check: StuckCheck | None = None  # rule 3's, as configured (None: its defaults)
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # rule -> what is missing
     farm: FarmFacts = UNKNOWN_FARM  # what the farm already has (from config)
+    # Providers' bills against the estimate for UTC days ``since`` to ``until``
+    # (``kelpie.app.read_reconciliations``); None: no cost reports read.
+    reconcile: Callable[[date, date], Sequence[Reconciliation] | str] | None = None
 
 
 def default_day(now: datetime, settings: ReportSettings) -> date:
@@ -101,6 +104,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         [*spans, *(s for s in board.spans if history <= (s.end or s.start) < end)]
     ).spans
     return ReportInputs(
+        reconciliations=_bills(sources, end),
         day=day,
         tz=tz,
         actions=actions,
@@ -129,6 +133,22 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         act_blockers=sources.act_blockers,
         farm=sources.farm,
     )
+
+
+def bill_days(end: datetime) -> tuple[date, date]:
+    """The UTC day whose bills the report of a day ending at ``end`` shows: the one that
+    ended 12 to 36 hours before (a bill settles hours after its day ends, and the report
+    runs just after ``end``), so each UTC day is in one report, in any time zone (around
+    a DST change one may be shown twice or skipped)."""
+    t = end.astimezone(UTC) - timedelta(hours=12)
+    day = t.date() - timedelta(days=1)
+    return day, day
+
+
+def _bills(sources: ReportSources, end: datetime) -> Sequence[Reconciliation] | str:
+    if sources.reconcile is None:
+        return ()
+    return sources.reconcile(*bill_days(end))
 
 
 def write(markdown: str, settings: ReportSettings, day: date) -> Path | None:
