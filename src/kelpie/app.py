@@ -112,6 +112,9 @@ class HermesSettings:
     wait_key: Path | None = None
     # Hermes statuses before any work starts (rule 3's cards stuck before work)
     prework_statuses: tuple[str, ...] = hermes.DEFAULT_PREWORK
+    # A person's decisions agents record: (marker, relay profiles, person or None),
+    # [[adapters.hermes.human_decisions]]
+    human_decisions: tuple[tuple[str, tuple[str, ...], str | None], ...] = ()
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -124,6 +127,9 @@ class HermesSettings:
             cli=self.cli,
             cli_timeout=self.cli_timeout.total_seconds(),
             human_owners=self.human_owners,
+            human_decisions=tuple(
+                hermes.HumanDecision(m, frozenset(r), p) for m, r, p in self.human_decisions
+            ),
             roles=dict(self.roles),
             role_from_name=self.role_from_name,
             wait_key=self.wait_key or DEFAULT_WAIT_KEY,
@@ -297,6 +303,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "cli",
         "cli_timeout",
         "human_owners",
+        "human_decisions",
         "roles",
         "role_from_name",
         "prework_statuses",
@@ -361,6 +368,23 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError(
             "[adapters.hermes] human_owners must be a list of distinct non-empty strings"
         )
+    decisions = section.get("human_decisions", [])
+    if not isinstance(decisions, list) or not all(
+        isinstance(d, Mapping)
+        and {"marker", "relays"} <= set(d) <= {"marker", "relays", "person"}
+        and isinstance(d["marker"], str)
+        and d["marker"].strip()
+        and isinstance(d["relays"], list)
+        and d["relays"]
+        and all(isinstance(r, str) and r.strip() for r in d["relays"])
+        and (isinstance(d.get("person", "x"), str) and d.get("person", "x").strip())
+        for d in decisions
+    ):
+        raise ConfigError(
+            "[[adapters.hermes.human_decisions]] entries need a marker (the note an agent "
+            'writes, e.g. "решение CEO") and relays (the agent profiles trusted to record '
+            "it), optionally the person whose decisions they are, and nothing else"
+        )
     role_from_name = section.get("role_from_name", True)
     if not isinstance(role_from_name, bool):
         raise ConfigError("[adapters.hermes] role_from_name must be true or false")
@@ -398,6 +422,14 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         role_from_name,
         None if wait_key is None else Path(wait_key),
         tuple(dict.fromkeys(x.strip() for x in prework)),
+        tuple(
+            (
+                d["marker"].strip(),
+                tuple(sorted({r.strip().casefold() for r in d["relays"]})),
+                d["person"].strip() if "person" in d else None,
+            )
+            for d in decisions
+        ),
     )
 
 

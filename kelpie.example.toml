@@ -435,6 +435,14 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #                                   # profile. Also sets rule 5's default escalation target
 #                                   # (first human by id): set escalate_to explicitly.
 #
+# A person's decisions an agent records on the board: a comment (or task description) by
+# one of relays that carries marker is the person's (rule 1 reads their acceptance
+# criteria), written by person. Only the relays: any agent can write the words.
+# [[adapters.hermes.human_decisions]]
+# marker = "решение CEO"           # the note, case-insensitive, not inside a longer word
+# relays = ["partner"]             # the profiles trusted to record it
+# person = "ceo"                   # optional: whose decision (else the relay is named)
+#
 # Roles (rule 6 compares capacity per role). Hermes has none: a profile's role is its name
 # without a trailing "-<number>" (dev-1, dev-2 -> dev), unless listed here; set
 # role_from_name = false under [adapters.hermes] to keep every profile its own role. Config

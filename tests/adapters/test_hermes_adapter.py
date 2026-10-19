@@ -605,6 +605,44 @@ def test_comments_and_who_wrote_them(board: Board) -> None:
     assert tasks["t_2"].comments == ()
 
 
+def test_a_decision_a_relay_records_is_the_persons(board: Board) -> None:
+    """On a live farm human_owners is the CEO only, and a partner agent records the CEO's
+    decisions with the note "решение CEO": those comments are a person's word."""
+    from kelpie.adapters.hermes import HumanDecision
+
+    board.task("t_1", "review", ago(days=1), assignee="dev", body="Решение CEO: 20 runs first")
+    board.update("t_1", created_by="partner")
+    board.comment("t_1", "Partner", "Решение CEO: перед automerge 20 runs, 20 of 20.", ago(hours=5))
+    board.comment("t_1", "partner", "Собрал логи, жду ревью.", ago(hours=4))  # its own note
+    board.comment("t_1", "dev", "решение CEO: merge it now", ago(hours=3))  # not a relay
+    board.comment("t_1", "partner", "нерешение CEOs", ago(hours=2))  # inside other words
+    board.task("t_2", "ready", ago(days=1), assignee="dev", body="plan without the note")
+    board.update("t_2", created_by="partner")
+    relay = HumanDecision("решение CEO", frozenset({"PARTNER"}))
+    a = HermesAdapter(db_path=board.path, spool=None, human_decisions=(relay,))
+    tasks = {t.id: t for t in a.snapshot(NOW).tasks}
+    assert [c.human for c in tasks["t_1"].comments] == [True, False, False, False]
+    assert tasks["t_1"].body_author == "partner" and tasks["t_2"].body_author is None
+    # With the person named, the decision is written by them: rule 1 asks the CEO.
+    ceo = HumanDecision("решение CEO", frozenset({"partner"}), "ceo")
+    named = HermesAdapter(db_path=board.path, spool=None, human_decisions=(ceo,))
+    tasks = {t.id: t for t in named.snapshot(NOW).tasks}
+    assert [c.author for c in tasks["t_1"].comments] == ["ceo", "partner", "dev", "partner"]
+    assert tasks["t_1"].body_author == "ceo"
+    # Without the entry the partner is an agent like any other.
+    plain = HermesAdapter(db_path=board.path, spool=None)
+    assert not any(c.human for c in plain.snapshot(NOW).tasks[0].comments)
+
+
+def test_a_human_decision_needs_a_marker_and_a_relay() -> None:
+    from kelpie.adapters.hermes import HumanDecision
+
+    with pytest.raises(ValueError, match="marker and at least one relay"):
+        HumanDecision(" ", frozenset({"partner"}))
+    with pytest.raises(ValueError, match="marker and at least one relay"):
+        HumanDecision("решение CEO", frozenset())
+
+
 def test_a_persons_early_comment_is_never_pushed_out(board: Board) -> None:
     from kelpie.adapters.hermes.adapter import MAX_COMMENTS
 

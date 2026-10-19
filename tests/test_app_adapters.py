@@ -109,6 +109,39 @@ def test_hermes_values(tmp_path: Path) -> None:
     )
 
 
+def test_hermes_human_decisions(tmp_path: Path) -> None:
+    path = write(
+        tmp_path,
+        '[adapters.hermes]\nhuman_owners = ["ceo"]\n'
+        '[[adapters.hermes.human_decisions]]\nmarker = " решение CEO "\nrelays = ["Partner"]\n'
+        'person = "ceo"\n',
+    )
+    settings = load_settings(path)
+    assert settings.hermes is not None
+    assert settings.hermes.human_decisions == (("решение CEO", ("partner",), "ceo"),)
+    (adapter,) = build_adapters(settings)
+    assert isinstance(adapter, HermesAdapter)
+    (decision,) = adapter.human_decisions
+    assert decision.recorded("partner", "Решение CEO: ship it") and decision.person == "ceo"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        'marker = "решение CEO"',  # no relays: any agent could write the words
+        'marker = "решение CEO"\nrelays = []',
+        'marker = " "\nrelays = ["partner"]',
+        'marker = "решение CEO"\nrelays = ["partner"]\nperson = " "',
+        'marker = "решение CEO"\nrelays = ["partner"]\nby = "ceo"',
+        'marker = "решение CEO"\nrelays = "partner"',
+    ],
+)
+def test_hermes_human_decisions_rejected(tmp_path: Path, entry: str) -> None:
+    path = write(tmp_path, f"[adapters.hermes]\n[[adapters.hermes.human_decisions]]\n{entry}\n")
+    with pytest.raises(ConfigError, match="human_decisions"):
+        load_settings(path)
+
+
 def test_hermes_disabled_builds_no_adapter(tmp_path: Path) -> None:
     settings = load_settings(write(tmp_path, "[adapters.hermes]\nenabled = false\n"))
     assert settings.hermes is not None and build_adapters(settings) == []
