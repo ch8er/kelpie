@@ -34,7 +34,7 @@ import logging
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, timedelta, tzinfo
 from typing import Any
 
 from kelpie.alerts import i18n, slack, telegram
@@ -93,12 +93,15 @@ class AlertSettings:
 _KEYS = {"dedup_window", "queue_size", "retry_horizon", "channels", "language", "task_url"}
 
 
-def load_alerts(section: Any, report_task_url: str | None = None) -> AlertSettings:
+def load_alerts(
+    section: Any, report_task_url: str | None = None, tz: tzinfo = UTC
+) -> AlertSettings:
     """``[alerts]``; ``report_task_url`` is ``[report] task_url``, the default link
-    template (used only when it is an http(s) URL: the report may link elsewhere)."""
+    template (used only when it is an http(s) URL: the report may link elsewhere); ``tz``
+    is ``[report] timezone``, where alerts show when a snooze ends."""
     if section is None:
         url, note = _inherited(report_task_url)
-        return AlertSettings(rendering=RenderSettings(task_url=url), links_note=note)
+        return AlertSettings(rendering=RenderSettings(task_url=url, tz=tz), links_note=note)
     if not isinstance(section, Mapping):
         raise ValueError(f"{SECTION} must be a table")
     if extra := set(section) - _KEYS:
@@ -124,7 +127,7 @@ def load_alerts(section: Any, report_task_url: str | None = None) -> AlertSettin
         raise ValueError(f"{SECTION} retry_horizon: {exc}") from exc
     if not timedelta(0) <= horizon <= MAX_RETRY_HORIZON:
         raise ValueError(f"{SECTION} retry_horizon must be between 0 and {MAX_RETRY_HORIZON}")
-    rendering = RenderSettings(language, task_url)
+    rendering = RenderSettings(language, task_url, tz)
     channels = _channels(section.get("channels", []))
     return AlertSettings(channels, window, size, horizon, rendering, note)
 

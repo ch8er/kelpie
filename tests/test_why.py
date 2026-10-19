@@ -1032,9 +1032,24 @@ def test_why_shows_a_snooze_read_only(
     assert main(why("t_blocked")) == 0
     out = capsys.readouterr().out
     assert (
-        "  snooze   snoozed until 2026-03-09 00:00 UTC (deferred to the release, by ceo), "
-        "6d 9h left\n" in out
+        "  snooze   snoozed until 2026-03-09 00:00 UTC (deferred to the release, by ceo, "
+        "baseline pending: growth is checked once kelpie serve counts it), 6d 9h left\n" in out
     )
+    store = SqliteLedgerStore(farm / "kelpie.db")
+    (stored,) = store.snoozes()
+    store.set_snooze_baseline(stored, 1)
+    store.close()
+    assert main(why("t_blocked")) == 0
+    assert "(deferred to the release, by ceo), 6d 9h left\n" in capsys.readouterr().out
+    store = SqliteLedgerStore(farm / "kelpie.db")
+    store.set_snooze_growth(stored, ago(minutes=30), 2)
+    store.close()
+    assert main(why("t_blocked")) == 0
+    assert (
+        "by ceo, 2 more task(s) blocked since 2026-03-02 14:30 UTC: it holds nothing now), "
+        in capsys.readouterr().out
+    )
+    before = (farm / "kelpie.db").stat().st_mtime_ns
     assert main(why("t_blocked", "--json")) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["snooze"]["until"] == until.isoformat() and data["snooze"]["active"] is True

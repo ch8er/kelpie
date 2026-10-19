@@ -1,0 +1,69 @@
+id: "13-snoozed-wait"
+incident: 13
+title: "A wait the person deferred on purpose leaves the digest for its footer"
+description: >
+  Live suggest-mode feedback: two blocks waiting for the CEO (enable R2 for backups, a
+  manual QA pass) were real, but the CEO knew about them and had deferred them until the
+  release, and Kelpie re-reminded at every escalation step. With a snooze the R2 question
+  leaves the CEO's digest (its state key, counts and cost) and is listed in the footer. The
+  CEO's other question still escalates. The QA pass, which the agent recorded with an
+  until: marker, is the lead's only item and is held the same way, so the lead gets no
+  digest at all.
+rule: needs_you
+config:
+  approval_wait_after: "30m"
+  approvers: {ops: ceo, qa: lead}
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: lead, role: lead, kind: human}
+    - {id: agent-ops-1, role: ops}
+    - {id: agent-qa-1, role: qa}
+  tasks:
+    - id: t_r2a1b2c3
+      title: "Enable R2 for backups"
+      status: blocked
+      status_since: "2026-10-17T14:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block:
+        reason: "waiting_human: needs_input: CEO: enable R2 in the Cloudflare dashboard"
+        since: "2026-10-17T14:00:00+00:00"
+    - id: t_qa4d5e6f
+      title: "Manual QA pass before release"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: qa
+      owner_id: agent-qa-1
+      block:
+        reason: "waiting_human: needs_input: CEO decided: manual QA pass after the freeze until:2026-10-24"
+        since: "2026-10-18T09:00:00+00:00"
+    # The CEO's question nobody snoozed: it still escalates.
+    - id: t_dns7a8b9
+      title: "Pick the DNS provider"
+      status: blocked
+      status_since: "2026-10-19T08:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block: {reason: "waiting_human: needs_input: which DNS provider?", since: "2026-10-19T08:00:00+00:00"}
+  snoozes:
+    t_r2a1b2c3: {task_id: t_r2a1b2c3, until: "2026-10-26T00:00:00+00:00", reason: "deferred to the release",
+                 by: ceo, created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 0}
+    t_qa4d5e6f: {task_id: t_qa4d5e6f, until: "2026-10-25T00:00:00+00:00", reason: null, by: null,
+                 created_at: "2026-10-18T09:00:00+00:00", source: marker}
+expected_actions:
+  - kind: escalate
+    reason_contains: "Snoozed, not counted: 1 item(s)"
+    params:
+      escalate_to: ceo
+      approvals: [t_dns7a8b9]
+      waiting: [t_dns7a8b9]
+      waiting_agent_tasks: 1
+      cost_hours: 2.0
+      snoozed_total: 1
+not_expected_actions:
+  - kind: escalate
+    params: {approvals: [t_dns7a8b9, t_r2a1b2c3]}
+  - kind: escalate
+    params: {escalate_to: lead}

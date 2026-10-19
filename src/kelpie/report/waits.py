@@ -23,6 +23,24 @@ waiting time it explains counts under ``ci_outage`` instead: tasks its alerts na
 repository it covers (``repos``). Only the part of a wait inside the outage moves; the rest
 keeps the task's own cause.
 
+**Snoozed** (issue #176). A wait a person chose is not one the farm lost. The part of a
+task's wait in ``[a, b)`` counts under ``snoozed`` only where all of these hold:
+
+- its own cause is ``people`` or ``unknown`` (never a hold, CI, a merge or another
+  condition, nor a CI outage: those are the farm's waits whatever a person snoozed);
+- a snooze holds there (from when it was set to its end, or to when ``kelpie serve``
+  latched growth behind it): the task's own, or that of a task it waits on on the board
+  (a dependency on it, or an unmet ``human_task`` condition naming it; also the
+  ``waiting`` ids rule 13 lists under a snoozed item). On purpose this covers an
+  unknown-cause task that depends on any snoozed task, a person's or not: the snooze says
+  the wait in front of it is deliberate;
+- rule 13 did not list the task as live in a person's ``waiting`` then (a step function
+  over its escalations, as :func:`kelpie.report.daily.people_agent_hours` reads them, ended
+  by the inbox's resolve notice): a live item, one that grew or broke included, is people
+  chaos.
+
+:func:`biggest_wait` never names it.
+
 The board only says what a task waits for now (or last), so outside an outage the cause is
 the task's latest known one. Pure and deterministic.
 """
@@ -37,7 +55,7 @@ from datetime import datetime
 
 from kelpie.core.incidents import FOLDED_UNDER, CiOutage, is_outage_state
 from kelpie.core.ledger import LedgerEntry, Suppression
-from kelpie.core.model import Condition, ConditionKind, Task
+from kelpie.core.model import Condition, ConditionKind, Dependency, Snooze, Task
 from kelpie.core.states import OpenState
 from kelpie.report import farm, md
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
@@ -50,6 +68,7 @@ WAIT_CAUSES: Mapping[str, str] = {
     "merge": "PRs to pass checks and merge",
     "ci_outage": "a shared CI failure (an outage of the CI or of the base branch)",
     "people": "people (approvals, human tasks)",
+    "snoozed": "snoozed (deliberate)",
     "hold": "holds",
     "quota": "LLM quotas",
     "tasks": "other tasks",
@@ -65,6 +84,8 @@ _SUGGESTIONS: Mapping[str, str] = {
     "quota": "spread the role over more providers or models, or raise the quota",
     "tasks": "unblock the tasks they depend on first, or drop the dependency",
     "timer": "shorten the scheduled waits",
+    "snoozed": "nothing to fix: a person deferred these waits on purpose (kelpie snoozes "
+    "lists them; kelpie unsnooze ends one early)",
     "other": "check what the custom conditions wait for and whether a connector can resolve "
     "them sooner",
 }
@@ -95,6 +116,7 @@ _KINDS: Mapping[ConditionKind, str] = {
 }
 MIN_HOURS = 1.0  # a smaller wait is no headline
 CI_OUTAGE = "ci_outage"
+SNOOZED = "snoozed"  # waits a person snoozed: deliberate, never the biggest wait
 MAX_REASON = 2000  # characters of a block reason matched, as the GitHub step does
 # "owner/name#12" or a pull request URL in a pattern's ``pr`` group: the repository
 _REPO_IN_REF = re.compile(r"([\w.-]+/[\w.-]+)(?:#|/pull/)\d+")
@@ -230,7 +252,12 @@ class WaitCauses:
         hold_labels: Collection[str] = (),
         block_kinds: Sequence[BlockKind] = (),
         outages: Sequence[Outage] = (),
+        snoozes: Iterable[Snooze] = (),
+        dependencies: Iterable[Dependency] = (),
+        inboxes: Iterable[OpenState] = (),
+        history: Iterable[LedgerEntry] | None = None,
     ) -> None:
+        self._snoozes = {s.task_id: s for s in snoozes}
         self._labels = frozenset(hold_labels)
         self._outages = tuple(outages)
         self._block_kinds = tuple(block_kinds)
@@ -244,10 +271,33 @@ class WaitCauses:
         # tasks parked on a person's human task (``waiting``); not ``items[].behind``,
         # which reaches tasks further down the chain that may wait on something else.
         self._people: set[str] = set()
+        # The tasks a task waits on that a snooze may be on (#176), from the board: its
+        # dependencies and its unmet human_task conditions; and the ids rule 13 lists as
+        # parked on a snoozed item (``snoozed[].waiting``).
+        self._humans: dict[str, set[str]] = {}
+        for d in dependencies:
+            if d.task_id != d.depends_on:
+                self._humans.setdefault(d.task_id, set()).add(d.depends_on)
+        for c in conditions:
+            ref = c.params.get("task")
+            unmet = c.kind is ConditionKind.HUMAN_TASK and c.satisfied is not True
+            if unmet and c.task_id and isinstance(ref, str) and ref != c.task_id:
+                self._humans.setdefault(c.task_id, set()).add(ref)
+        entries = sorted(entries, key=lambda e: e.at)
         for e in entries:
             if e.rule == "needs_you" and "escalate_to" in e.params:
                 self._people.update(_ids(e.params.get("approvals")))
                 self._people.update(_ids(e.params.get("waiting")))
+                for item in _list(e.params.get("snoozed")):
+                    human = item.get("task_id") if isinstance(item, Mapping) else None
+                    if isinstance(human, str) and human and isinstance(item, Mapping):
+                        for tid in _ids(item.get("waiting")):
+                            if tid != human:
+                                self._humans.setdefault(tid, set()).add(human)
+        # rule 13's escalations before the day too: the latest earlier one applies at its
+        # start, as the people line reads them (kelpie.report.daily._sampled_hours)
+        before = entries if history is None else sorted(history, key=lambda e: e.at)
+        self._live = _live_waits(before, inboxes)
 
     @property
     def outages(self) -> tuple[Outage, ...]:
@@ -265,28 +315,43 @@ class WaitCauses:
 
     def split(self, task: Task, a: datetime, b: datetime) -> dict[str, float]:
         """Hours of the task's wait in ``[a, b)`` by cause: the part an open CI outage
-        explains counts under ``ci_outage``, the rest under the task's own cause. A hold is
-        deliberate: a held task's wait stays the hold's, outage or not."""
+        explains under ``ci_outage``, the part a snooze holds under ``snoozed`` (see the
+        module docs: only a people or unknown wait, never while rule 13 listed the task as
+        live), the rest under the task's own cause. A hold is deliberate: a held task's
+        wait stays the hold's, outage or not."""
         total = (b - a).total_seconds() / 3600
         if self._labels.intersection(task.labels):
             return {"hold": total}
-        spans = sorted(
+        outage = _merged(
             (max(a, o.since), min(b, o.until))
             for o in self._outages
             if o.since < b and o.until > a and self._explains(o, task)
         )
-        covered, reach = 0.0, a
-        for lo, hi in spans:
-            lo = max(lo, reach)
-            if hi > lo:
-                covered += (hi - lo).total_seconds() / 3600
-                reach = hi
+        own = self(task)
+        snoozed: _Spans = []
+        if own in ("people", UNKNOWN):
+            windows = _merged(
+                (max(a, s.created_at), min(b, _holds_until(s))) for s in self.snooze_sources(task)
+            )
+            live = _merged(
+                (max(a, lo or a), min(b, hi or b)) for lo, hi in self._live.get(task.id, ())
+            )
+            snoozed = _minus(_minus(windows, live), outage)
+        held, covered = _hours(snoozed), _hours(outage)
         out: dict[str, float] = {}
-        if covered > 0:
+        if held > 1e-9:
+            out[SNOOZED] = held
+        if covered > 1e-9:
             out[CI_OUTAGE] = covered
-        if total - covered > 1e-9:
-            out[self(task)] = total - covered
+        if total - held - covered > 1e-9:
+            out[own] = total - held - covered
         return out
+
+    def snooze_sources(self, task: Task) -> list[Snooze]:
+        """The snoozes that may hold the task's wait: its own, and those of the tasks it
+        waits on on the board (or that rule 13 listed it under while snoozed)."""
+        ids = {task.id} | self._humans.get(task.id, set())
+        return [self._snoozes[i] for i in sorted(ids) if i in self._snoozes]
 
     def _explains(self, outage: Outage, task: Task) -> bool:
         """The outage names the task, or the task waits on CI or a merge of a PR in its
@@ -356,7 +421,7 @@ def biggest_wait(
         (-hours, r.role, cause, r)
         for r in roles
         for cause, hours in r.waits.items()
-        if hours >= MIN_HOURS
+        if hours >= MIN_HOURS and cause != SNOOZED  # chosen by a person: nothing to fix
     ]
     if not found:
         return None
@@ -373,6 +438,88 @@ def biggest_wait(
                 repos[repo] += 1
     repo = min(repos, key=lambda x: (-repos[x], x)) if repos else None
     return BiggestWait(role, cause, hours, r.busy_hours, waited, repo, facts)
+
+
+type _Spans = list[tuple[datetime, datetime]]
+
+
+def _merged(spans: Iterable[tuple[datetime, datetime]]) -> _Spans:
+    """Non-empty spans, sorted and merged where they overlap."""
+    out: _Spans = []
+    for lo, hi in sorted(x for x in spans if x[1] > x[0]):
+        if out and lo <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], hi))
+        else:
+            out.append((lo, hi))
+    return out
+
+
+def _hours(spans: _Spans) -> float:
+    return sum((hi - lo).total_seconds() for lo, hi in spans) / 3600
+
+
+def _minus(x: _Spans, y: _Spans) -> _Spans:
+    """The parts of merged spans ``x`` outside merged spans ``y``."""
+    out: _Spans = []
+    for lo, hi in x:
+        start = lo
+        for lo2, hi2 in y:
+            if hi2 <= start or lo2 >= hi:
+                continue
+            if lo2 > start:
+                out.append((start, lo2))
+            start = max(start, hi2)
+        if hi > start:
+            out.append((start, hi))
+    return out
+
+
+def _holds_until(s: Snooze) -> datetime:
+    """When a snooze stopped holding: its end, or when growth behind it was latched."""
+    return s.until if s.grown_at is None else min(s.until, s.grown_at)
+
+
+type _Live = list[tuple[datetime | None, datetime | None]]  # None: open-ended
+
+
+def _live_waits(
+    entries: Sequence[LedgerEntry], inboxes: Iterable[OpenState] = ()
+) -> dict[str, _Live]:
+    """When rule 13 listed each task as live in a person's ``waiting``: every escalation of
+    a person holds until their next one or the inbox's resolve notice (``params.state``
+    ``needs_you:<person>``). ``entries`` reach back before the day, so at its start the
+    latest earlier escalation applies, as the people line reads rule 13's samples; before a
+    person's first escalation of all, the first one applies, back to when that inbox opened
+    (``inboxes``: rule 13's states, ``needs_you:<person>``; without one, from the start).
+    ``entries`` sorted by time."""
+    opened: dict[str, list[OpenState]] = {}
+    for state in inboxes:
+        if state.id.startswith("needs_you:"):
+            opened.setdefault(state.id.removeprefix("needs_you:"), []).append(state)
+    samples: dict[str, list[tuple[datetime, list[str]]]] = {}
+    ends: dict[str, list[datetime]] = {}
+    for e in entries:
+        if e.rule != "needs_you":
+            continue
+        if "escalate_to" in e.params:
+            who = e.params.get("escalate_to")
+            person = who if isinstance(who, str) else "unassigned"
+            samples.setdefault(person, []).append((e.at, _ids(e.params.get("waiting"))))
+        elif isinstance(state := e.params.get("state"), str) and state.startswith("needs_you:"):
+            ends.setdefault(state.removeprefix("needs_you:"), []).append(e.at)
+    out: dict[str, _Live] = {}
+    for person, found in samples.items():
+        for i, (at, ids) in enumerate(found):
+            nxt = found[i + 1][0] if i + 1 < len(found) else None
+            closed = [t for t in ends.get(person, ()) if t >= at and (nxt is None or t < nxt)]
+            hi = closed[0] if closed else nxt
+            lo: datetime | None = at
+            if i == 0:  # back to when this inbox opened, if known
+                mine = [s for s in opened.get(person, ()) if s.opened_at <= at <= s.last_seen]
+                lo = mine[0].opened_at if mine else None
+            for tid in ids:
+                out.setdefault(tid, []).append((lo, hi))
+    return out
 
 
 def _pr_of(c: Condition) -> tuple[str, str] | None:

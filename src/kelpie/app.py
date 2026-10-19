@@ -108,6 +108,7 @@ from kelpie.remote.hub import Hub, HubServer, HubService
 from kelpie.report.config import ReportSettings, load_report
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
+from kelpie.rules._snoozes import behind_counter
 from kelpie.rules.ci_economy import CiEconomy
 from kelpie.rules.conflict_warning import ConflictWarning
 from kelpie.rules.no_progress import NoProgress
@@ -282,7 +283,7 @@ def load_settings(path: Path | None) -> Settings:
     github, block_conditions, human_tasks, llm_quotas, cost_reports = _load_connectors(data)
     try:
         report = load_report(data.get("report"))
-        alerts = load_alerts(data.get("alerts"), report.task_url)
+        alerts = load_alerts(data.get("alerts"), report.task_url, report.tz)
         agent = load_agent(data.get("agent"))
         hub = load_hub(data.get("hub"))
         snooze = load_snooze(data.get("snooze"), report.tz)
@@ -901,6 +902,7 @@ def merged_snapshot(
     def source() -> Snapshot:
         now = clock()
         merged = Snapshot(now=now)
+        complete = True  # every local adapter and connector step read fine (snooze baselines)
         for adapter in adapters:
             if not isinstance(adapter, SnapshotSource):
                 continue
@@ -909,6 +911,7 @@ def merged_snapshot(
             except Exception as exc:
                 log.error("adapter %s failed to snapshot: %s", adapter.name, exc)
                 metrics.adapter_failed(adapter.name)
+                complete = False
                 continue
             merged = Snapshot(
                 now=now,
@@ -946,8 +949,9 @@ def merged_snapshot(
             except Exception as exc:
                 log.error("connector %s failed to update the snapshot: %s", name, exc)
                 metrics.connector_failed(name)
+                complete = False
         if snoozes is not None:
-            merged = snoozes.apply(merged)
+            merged = snoozes.apply(merged, complete)
         if spans is not None:
             try:
                 stored, totals = spans.spans(now), spans.totals(now)
@@ -1005,18 +1009,41 @@ class SnoozeReader:
     long-expired snoozes at most every ``prune_every``; a failed prune is logged and does not
     keep the snoozes from being read. No metric counts these failures: the span store's and
     the connectors' counters are theirs, and a snooze read is one query on the ledger's own
-    connection."""
+    connection.
+
+    **Growth** (#176). ``baseline``, when set, records a stored snooze's baseline: at the
+    first complete tick after the snooze, the work behind its task on the merged snapshot
+    (:func:`kelpie.rules._snoozes.behind_count`, the count the rules compare with), written
+    once. ``growth``, when set, latches growth the same way: the first complete tick that
+    counts more than the baseline stores when (``grown_at``) and how much more
+    (``grown_by``), so a count that drops again (a dependent's condition that comes and
+    goes) does not bring the snooze back. A tick is complete for a snooze when every local
+    adapter and connector step read fine (``apply(..., complete=False)`` otherwise) and the
+    task's own part of the farm is observed (``Snapshot.unobserved`` names parts by the
+    ``<agent>:`` prefix of their task ids; ``hub``: no agent board at all); a silent agent
+    elsewhere does not hold it up. A snooze still without a baseline an hour after it was set
+    is logged once (``kelpie why`` shows "baseline pending"). A write that fails is logged
+    once as an error, then quietly tried again every tick until one succeeds. ``kelpie
+    snooze`` stores no baseline: its offline board lacks the connectors' conditions. Markers
+    never get one."""
 
     settings: SnoozeSettings
     stored: Callable[[datetime], Mapping[str, Snooze]] | None = None
     prune: Callable[[datetime], int] | None = None
+    baseline: Callable[[Snooze, int], bool] | None = None
+    growth: Callable[[Snooze, datetime, int], bool] | None = None
     prune_every: timedelta = timedelta(hours=1)
+    pending_after: timedelta = timedelta(hours=1)
     _pruned_at: datetime | None = field(default=None, init=False)
     _warned: set[tuple[str, str]] = field(default_factory=set, init=False)
     _last: Mapping[str, Snooze] = field(default_factory=dict, init=False)
     _failing: bool = field(default=False, init=False)
+    _write_failing: bool = field(default=False, init=False)
+    _pending: set[tuple[str, datetime]] = field(default_factory=set, init=False)
 
-    def apply(self, snapshot: Snapshot) -> Snapshot:
+    def apply(self, snapshot: Snapshot, complete: bool = True) -> Snapshot:
+        """``snapshot`` with its snoozes. ``complete``: every local adapter and connector
+        step of the tick read fine; without it no baseline or growth is recorded."""
         now = snapshot.now
         if self.stored is not None:
             if self.prune is not None and (
@@ -1035,9 +1062,66 @@ class SnoozeReader:
                 self._failing = True
             else:
                 self._failing = False
+            if self.baseline is not None or self.growth is not None:
+                self._last = self._record(snapshot, complete)
         merged, problems = with_snoozes(snapshot, self._last, self.settings)
         self._warn(problems)
         return merged
+
+    def _record(self, snapshot: Snapshot, complete: bool) -> Mapping[str, Snooze]:
+        """The stored snoozes with the baselines and growth this tick records."""
+        now = snapshot.now
+        on_board = {t.id for t in snapshot.tasks}
+        count = behind_counter(snapshot)
+        out = dict(self._last)
+        for tid, s in self._last.items():
+            if s.source == "marker" or not s.active(now):
+                continue
+            seen = complete and tid in on_board and _observed(tid, snapshot.unobserved)
+            if s.behind_at_snooze is None:
+                if seen and self.baseline is not None:
+                    behind = count(tid)
+                    if self._write(tid, "baseline", self.baseline, s, behind):
+                        out[tid] = replace(s, behind_at_snooze=behind)
+                        continue
+                self._still_pending(s, now, tid in on_board)
+            elif s.grown_at is None and seen and self.growth is not None:
+                more = count(tid) - s.behind_at_snooze
+                if more > 0 and self._write(tid, "growth", self.growth, s, now, more):
+                    out[tid] = replace(s, grown_at=now, grown_by=more)
+        return out
+
+    def _write(self, task_id: str, what: str, write: Callable[..., bool], *args: object) -> bool:
+        """Run one write; a failure is logged as an error once until a write succeeds."""
+        try:
+            done = write(*args)
+        except Exception as exc:
+            if not self._write_failing:
+                log.error(
+                    "snooze store failed to record the %s of %s, retrying every tick: %s",
+                    what, task_id, exc,
+                )  # fmt: skip
+            self._write_failing = True
+            return False
+        if self._write_failing:
+            log.info("snooze store records snooze %ss again", what)
+        self._write_failing = False
+        return bool(done)
+
+    def _still_pending(self, s: Snooze, now: datetime, on_board: bool) -> None:
+        key = (s.task_id, s.created_at)
+        if now - s.created_at >= self.pending_after and key not in self._pending:
+            self._pending.add(key)
+            why = (
+                "its part of the farm was not observed in full since"
+                if on_board
+                else "the task is not on the board"
+            )
+            log.warning(
+                "snooze of %s has no growth baseline yet, %s after it was set: %s; growth is "
+                "not checked until it is counted",
+                s.task_id, now - s.created_at, why,
+            )  # fmt: skip
 
     def _warn(self, problems: Sequence[MarkerProblem]) -> None:
         for p in problems:
@@ -1046,10 +1130,25 @@ class SnoozeReader:
                 log.warning("task %s: snooze marker %r ignored: %s", p.task_id, p.token, p.why)
 
 
+def _observed(task_id: str, unobserved: Sequence[str]) -> bool:
+    """Whether the task's own part of the farm is in the snapshot (as the engine's
+    ``_blind`` reads ``Snapshot.unobserved``: ``hub`` means no agent board at all)."""
+    if "hub" in unobserved:
+        return False
+    return not any(task_id.startswith(f"{part.split('/')[0]}:") for part in unobserved)
+
+
 def snooze_reader(settings: Settings, store: LedgerStore) -> SnoozeReader:
-    """The snooze reader of ``kelpie serve``: stored snoozes when the ledger is SQLite."""
+    """The snooze reader of ``kelpie serve``: stored snoozes when the ledger is SQLite, with
+    their growth baseline and latch recorded there."""
     if isinstance(store, SqliteLedgerStore):
-        return SnoozeReader(settings.snooze, store.load_snoozes, store.prune_snoozes)
+        return SnoozeReader(
+            settings.snooze,
+            store.load_snoozes,
+            store.prune_snoozes,
+            store.set_snooze_baseline,
+            store.set_snooze_growth,
+        )
     return SnoozeReader(settings.snooze)
 
 

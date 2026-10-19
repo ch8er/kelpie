@@ -1,0 +1,197 @@
+{
+  "text": "🟡 Waiting for you: 2 tasks (oldest 24 h)\n\n1. Enable R2 for backups — 24 h · t_r2a1b2c3\n   Needed: CEO: enable R2 in the Cloudflare dashboard\n   Snooze ran through 2026-10-25\n   Blocking: none · Open task: https://board.example.org/tasks/t_r2a1b2c3\n2. Sign the vendor contract — 6.0 h · H-1\n   2 more tasks blocked since the snooze (through 2026-11-01)\n   Blocking: 3 tasks · Open task: https://board.example.org/tasks/H-1\nSnoozed: Manual QA pass before release through 2026-11-01 (after the freeze, by ceo) · t_qa4d5e6f\nSnoozed: Approve the data export until 2026-11-03 09:00 UTC (from marker) · t_dx0e1f2a\nWhy: Needs you (ceo): 2 item(s) hold 3 agent task(s), 30.0 agent-hours waited so far. Snoozed, not counted: 2 item(s).\nRule: needs_you",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Waiting for you: 2 tasks (oldest 24 h)",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Enable R2 for backups",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 24 h · "
+            },
+            {
+              "type": "text",
+              "text": "t_r2a1b2c3",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Needed: "
+            },
+            {
+              "type": "text",
+              "text": "CEO: enable R2 in the Cloudflare dashboard"
+            },
+            {
+              "type": "text",
+              "text": "\n   Snooze ran through 2026-10-25"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Blocking: none"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_r2a1b2c3",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "2. "
+            },
+            {
+              "type": "text",
+              "text": "Sign the vendor contract",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 6.0 h · "
+            },
+            {
+              "type": "text",
+              "text": "H-1",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   2 more tasks blocked since the snooze (through 2026-11-01)"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Blocking: 3 tasks"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/H-1",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Snoozed: Manual QA pass before release through 2026-11-01 (after the freeze, by ceo) · t_qa4d5e6f\nSnoozed: Approve the data export until 2026-11-03 09:00 UTC (from marker) · t_dx0e1f2a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Needs you (ceo): 2 item(s) hold 3 agent task(s), 30.0 agent-hours waited so far. Snoozed, not counted: 2 item(s)."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "needs_you",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

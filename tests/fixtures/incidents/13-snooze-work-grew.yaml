@@ -1,0 +1,95 @@
+id: "13-snooze-work-grew"
+incident: 13
+title: "A snoozed wait comes back when more work is blocked behind it"
+description: >
+  The CEO snoozed their own task (sign the vendor contract) until the release, when one
+  agent task waited on it. Since then two more agent tasks were planned behind it and now
+  wait too: the deferral costs more than the CEO agreed to, so the task is back in the
+  digest, marked with how many more tasks are blocked since the snooze. The distractors
+  keep their snoozes: the security review, with as much work behind it as when it was
+  snoozed, and the data export, snoozed by an until: marker, which does not know how much
+  work was behind it and so never comes back on growth.
+rule: needs_you
+config:
+  human_wait_alert_after: "1h"
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: H-1, title: "Sign the vendor contract", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    - {id: H-2, title: "Security review sign-off", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    - {id: H-3, title: "Approve the data export", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    - id: A-1
+      title: "Integrate the vendor API"
+      status: blocked
+      status_since: "2026-10-16T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: H-1", since: "2026-10-16T09:00:00+00:00", condition_id: C-1}
+    - id: A-2
+      title: "Vendor webhooks"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: H-1", since: "2026-10-18T09:00:00+00:00", condition_id: C-2}
+    - id: A-3
+      title: "Vendor billing sync"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: H-1", since: "2026-10-18T09:00:00+00:00", condition_id: C-3}
+    - id: A-4
+      title: "Harden the login flow"
+      status: blocked
+      status_since: "2026-10-16T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: H-2", since: "2026-10-16T09:00:00+00:00", condition_id: C-4}
+    - id: A-5
+      title: "Run the export job"
+      status: blocked
+      status_since: "2026-10-16T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: H-3", since: "2026-10-16T09:00:00+00:00", condition_id: C-5}
+    - id: A-6
+      title: "Publish the export"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: H-3", since: "2026-10-18T09:00:00+00:00", condition_id: C-6}
+  conditions:
+    - {id: C-1, kind: human_task, task_id: A-1, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:59:00+00:00"}
+    - {id: C-2, kind: human_task, task_id: A-2, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:59:00+00:00"}
+    - {id: C-3, kind: human_task, task_id: A-3, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:59:00+00:00"}
+    - {id: C-4, kind: human_task, task_id: A-4, params: {task: H-2}, satisfied: false, checked_at: "2026-10-19T09:59:00+00:00"}
+    - {id: C-5, kind: human_task, task_id: A-5, params: {task: H-3}, satisfied: false, checked_at: "2026-10-19T09:59:00+00:00"}
+    - {id: C-6, kind: human_task, task_id: A-6, params: {task: H-3}, satisfied: false, checked_at: "2026-10-19T09:59:00+00:00"}
+  snoozes:
+    H-1: {task_id: H-1, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo,
+          created_at: "2026-10-17T09:00:00+00:00", source: cli, behind_at_snooze: 1}
+    H-2: {task_id: H-2, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo,
+          created_at: "2026-10-17T09:00:00+00:00", source: cli, behind_at_snooze: 1}
+    H-3: {task_id: H-3, until: "2026-10-26T00:00:00+00:00", reason: null, by: null,
+          created_at: "2026-10-17T09:00:00+00:00", source: marker}
+expected_actions:
+  - kind: escalate
+    reason_contains: "2 more task(s) blocked since its snooze"
+    params:
+      escalate_to: ceo
+      human_tasks: [H-1]
+      waiting: [A-1, A-2, A-3]
+      blocked_agent_tasks: 3
+      snoozed_total: 2
+not_expected_actions:
+  - kind: escalate
+    params: {human_tasks: [H-1, H-2]}
+  - kind: escalate
+    params: {human_tasks: [H-1, H-3]}
+  - kind: escalate
+    params: {human_tasks: [H-1, H-2, H-3]}

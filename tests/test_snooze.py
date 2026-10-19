@@ -458,7 +458,7 @@ def test_an_existing_database_is_migrated(tmp_path: Path) -> None:
     s.close()
     conn = open_readonly(path, 1000)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 8
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 9
         assert list(load_snoozes(conn, NOW)) == ["T-101"]
     finally:
         conn.close()

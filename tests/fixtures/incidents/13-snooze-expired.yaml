@@ -1,0 +1,55 @@
+id: "13-snooze-expired"
+incident: 13
+title: "A snoozed wait comes back into the digest once its date passes"
+description: >
+  The CEO snoozed the R2 question until the release, and the release date has passed
+  without an answer. The snooze has expired (it is still in the snapshot, which keeps
+  expired snoozes for 7 days), so the question is back in the CEO's digest, counted and
+  marked as expired. The distractor is the QA pass, whose snooze is still active: it stays
+  in the footer.
+rule: needs_you
+config:
+  approval_wait_after: "30m"
+  default_approver: ceo
+snapshot:
+  now: "2026-10-27T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-ops-1, role: ops}
+    - {id: agent-qa-1, role: qa}
+  tasks:
+    - id: t_r2a1b2c3
+      title: "Enable R2 for backups"
+      status: blocked
+      status_since: "2026-10-26T10:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block:
+        reason: "waiting_human: needs_input: CEO: enable R2 in the Cloudflare dashboard"
+        since: "2026-10-26T10:00:00+00:00"
+    - id: t_qa4d5e6f
+      title: "Manual QA pass before release"
+      status: blocked
+      status_since: "2026-10-26T09:00:00+00:00"
+      role: qa
+      owner_id: agent-qa-1
+      block: {reason: "waiting_human: needs_input: manual QA pass", since: "2026-10-26T09:00:00+00:00"}
+  snoozes:
+    t_r2a1b2c3: {task_id: t_r2a1b2c3, until: "2026-10-26T00:00:00+00:00", reason: "deferred to the release",
+                 by: ceo, created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 0}
+    t_qa4d5e6f: {task_id: t_qa4d5e6f, until: "2026-11-02T00:00:00+00:00", reason: "after the freeze",
+                 by: ceo, created_at: "2026-10-26T12:00:00+00:00", source: cli, behind_at_snooze: 0}
+expected_actions:
+  - kind: escalate
+    reason_contains: "its snooze expired at 2026-10-26T00:00:00+00:00"
+    params:
+      escalate_to: ceo
+      approvals: [t_r2a1b2c3]
+      waiting: [t_r2a1b2c3]
+      cost_hours: 24.0
+      snoozed_total: 1
+not_expected_actions:
+  - kind: escalate
+    params: {approvals: [t_qa4d5e6f, t_r2a1b2c3]}
+  - kind: escalate
+    params: {approvals: [t_qa4d5e6f]}

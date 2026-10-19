@@ -1,0 +1,49 @@
+id: "10-wait-on-snoozed-human-task"
+incident: 10
+title: "A wait on a human task the person deferred gets no overdue reminder"
+description: >
+  Agents registered human_task conditions and exited, as rule 2 asks. The CEO snoozed
+  their task (sign the vendor contract) until the release, so the agent waiting on it
+  past max_wait gets no overdue reminder: the person knows. Everything else still alerts:
+  a wait on a person's task nobody snoozed, a wait on the snoozed task and a PR as well,
+  and a wait on a snoozed human task that was cancelled (a dead end: nothing will wake it).
+rule: wait_condition
+config:
+  max_wait: "24h"
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: H-1, title: "Sign the vendor contract", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    - {id: H-2, title: "Approve the budget", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    - {id: H-3, title: "Pick the vendor", status: cancelled, status_since: "2026-10-18T09:00:00+00:00", role: owner, owner_id: ceo}
+    - {id: W-1, title: "Integrate the vendor API", status: waiting, status_since: "2026-10-18T06:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: W-2, title: "Plan the budget", status: waiting, status_since: "2026-10-18T06:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: W-3, title: "Vendor webhooks", status: waiting, status_since: "2026-10-18T06:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: W-4, title: "Vendor onboarding", status: waiting, status_since: "2026-10-18T06:00:00+00:00", role: developer, owner_id: agent-dev-1}
+  conditions:
+    - {id: C-1, kind: human_task, task_id: W-1, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00"}
+    - {id: C-2, kind: human_task, task_id: W-2, params: {task: H-2}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00"}
+    - {id: C-3a, kind: human_task, task_id: W-3, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00"}
+    - {id: C-3b, kind: pr_merged, task_id: W-3, params: {pr: 7}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00"}
+    - {id: C-4, kind: human_task, task_id: W-4, params: {task: H-3, terminal: true}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00"}
+  snoozes:
+    H-1: {task_id: H-1, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo,
+          created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 2}
+    H-3: {task_id: H-3, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo,
+          created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 1}
+expected_actions:
+  - kind: alert
+    task_id: W-2
+    reason_contains: "limit 24.0h"
+  - kind: alert
+    task_id: W-3
+    reason_contains: "limit 24.0h"
+  - kind: alert
+    task_id: W-4
+    reason_contains: "nothing will ever wake it"
+not_expected_actions:
+  - kind: alert
+    task_id: W-1

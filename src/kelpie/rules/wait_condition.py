@@ -18,6 +18,14 @@ patterns it stays silent. Generic loops are rule 10's (``loop_breaker``).
 The can-never-be-met and waits-on-nothing alerts list the tasks stuck behind the waiting one
 (``params.stuck_ids``, as rule 3 reads chains), so rule 3 does not alert on the same dead end.
 
+**Snoozed human tasks** (issue #176, :mod:`kelpie.rules._snoozes`). A task waiting past
+``max_wait`` only on ``human_task`` conditions, each checked unmet (``satisfied`` false, no
+``params.error``: one Kelpie cannot check keeps alerting), whose human tasks a snooze holds
+(a person deferred them on purpose) gets no overdue alert while the snooze holds: it would
+repeat a wait the person knows about. It alerts again once a snooze expires or more work is blocked
+behind the human task; a dead end still alerts at once. A snooze on the waiting task itself
+changes nothing here.
+
 Keeping the dispatcher from declaring a waiting task dead is the adapter's job (see
 :class:`kelpie.core.ports.PlatformAdapter`); this rule never requeues waiting tasks.
 """
@@ -31,7 +39,16 @@ from datetime import timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import Session, Snapshot, Span, SpanKind, Status, Task
+from kelpie.core.model import (
+    Condition,
+    ConditionKind,
+    Session,
+    Snapshot,
+    Span,
+    SpanKind,
+    Status,
+    Task,
+)
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
@@ -44,6 +61,7 @@ from kelpie.rules._calls import (
     tool_calls,
 )
 from kelpie.rules._chains import behind_lookup, behind_text
+from kelpie.rules._snoozes import checker
 from kelpie.rules._tasks import (
     DEFAULT_MAX_CONDITION_AGE,
     DEFAULT_STALE_AFTER,
@@ -175,6 +193,8 @@ class WaitCondition:
             return
         if waited >= self.max_wait:
             pending = [c for c in conditions if not c.satisfied]
+            if _snoozed_people(pending, snapshot):
+                return  # deferred on purpose by the person it waits on: no reminder
             yield Action(
                 ActionKind.ALERT,
                 NAME,
@@ -260,6 +280,21 @@ class WaitCondition:
 
     def _kind_for(self, span: Span) -> str | None:
         return poll_kind(self.poll_patterns, span)
+
+
+def _snoozed_people(pending: Sequence[Condition], snapshot: Snapshot) -> bool:
+    """Whether every unmet condition is a human task that a snooze holds."""
+    held = checker(snapshot)
+    for c in pending:
+        ref = c.params.get("task")
+        if c.kind is not ConditionKind.HUMAN_TASK or not isinstance(ref, str):
+            return False
+        if c.satisfied is not False or "error" in c.params:
+            return False  # not known unmet (unchecked, or Kelpie cannot check it): it alerts
+        found = held(ref)
+        if found is None or not found.holds:
+            return False
+    return bool(pending)
 
 
 def _hours(d: timedelta) -> str:

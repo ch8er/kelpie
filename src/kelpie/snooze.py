@@ -8,10 +8,14 @@ board instead and are not listed here (``kelpie why <task>`` shows both).
 
 The task need not be on the board, which may be offline: when the local adapters can be
 read cheaply (not a hub, no issue tracker read over the network), an unknown task is
-warned about and snoozed anyway, and the number of tasks waiting behind a known one is kept
-with the snooze. Exit codes: 0; 1 when ``unsnooze`` finds no snooze for the task or the
-database cannot be written or read; 2 for a config error, a bad ``--until``, no database
-yet or ``[storage] path = ":memory:"``. ``kelpie snoozes`` only reads (it never upgrades the
+warned about and snoozed anyway, and so is a task that is only parked behind a person's
+human task (a snooze on it holds nothing: the human task is what rule 13 lists). How much
+work waits behind the task is not counted here: ``kelpie serve`` records that baseline on
+the first tick that sees the snooze, on the full board (``kelpie.app.SnoozeReader``).
+
+Exit codes: 0; 1 when ``unsnooze`` finds no snooze for the task or the database cannot be
+written or read; 2 for a config error, a bad ``--until``, no database yet or
+``[storage] path = ":memory:"``. ``kelpie snoozes`` only reads (it never upgrades the
 database).
 """
 
@@ -29,8 +33,15 @@ from kelpie.app import Settings, board_only, build_adapters, utc_now
 from kelpie.core.model import Snapshot, Snooze
 from kelpie.core.ports import SnapshotSource
 from kelpie.core.snooze import format_when, is_date, parse_until, snooze_json, until_problem
-from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, open_readonly, read_snoozes
-from kelpie.rules._chains import BlockerGraph
+from kelpie.core.storage import (
+    SNOOZES_SINCE,
+    SchemaOutdated,
+    SqliteLedgerStore,
+    open_readonly,
+    read_snoozes,
+)
+from kelpie.rules.needs_you import NeedsYou, parked_on
+from kelpie.rules.needs_you import build as build_needs_you
 
 SCHEMA_VERSION = 1  # of the --json object (fields are only ever added within a version)
 PREDATES = "no snoozes (the database predates snoozes; kelpie serve upgrades it)"
@@ -69,6 +80,7 @@ def local_board(settings: Settings, now: datetime) -> Snapshot | str:
             tasks=board.tasks + part.tasks,
             owners=board.owners + part.owners,
             dependencies=board.dependencies + part.dependencies,
+            conditions=board.conditions + part.conditions,
             sessions=board.sessions + part.sessions,
         )
     return board
@@ -81,6 +93,14 @@ def _board(settings: Settings, now: datetime) -> Snapshot | None:
         return None
     board = local_board(settings, now)
     return None if isinstance(board, str) else board
+
+
+def _inbox_settings(settings: Settings) -> NeedsYou:
+    """Rule 13 as configured, else with its defaults (a bad section is the engine's error)."""
+    try:
+        return build_needs_you(dict(settings.engine.rules.get("needs_you", {})))
+    except ValueError:
+        return NeedsYou()
 
 
 def _database(settings: Settings) -> Path | str:
@@ -118,13 +138,16 @@ def snooze(
     if isinstance(db := _database(settings), str):
         return "", db, 2
     err = ""
-    behind: int | None = None
     snapshot = board(settings, now)
     if snapshot is not None:
         if snapshot.task(task_id) is None:
             err = f"kelpie: warning: {task_id} is not on the board; snoozed anyway\n"
-        else:
-            behind = len(BlockerGraph(snapshot).behind(task_id))
+        elif parked := parked_on(snapshot, _inbox_settings(settings), task_id):
+            human = ", ".join(parked)
+            err = (
+                f"kelpie: warning: snoozing {task_id} holds nothing; snooze the human task "
+                f"{human} instead (snoozed anyway)\n"
+            )
     record = Snooze(
         task_id=task_id,
         until=at,
@@ -132,7 +155,7 @@ def snooze(
         by=(by if by is not None else default_by()),
         created_at=now,
         source="cli",
-        behind_at_snooze=behind,
+        behind_at_snooze=None,  # kelpie serve counts it on the full board
     )
     try:
         store = SqliteLedgerStore(db)
@@ -187,7 +210,7 @@ def list_snoozes(
     note: str | None = None
     if settings.db_path.exists():
         try:
-            conn = open_readonly(settings.db_path, 5000)
+            conn = open_readonly(settings.db_path, 5000, SNOOZES_SINCE)
         except SchemaOutdated:
             note = PREDATES
         except (OSError, sqlite3.Error, RuntimeError) as exc:

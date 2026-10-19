@@ -58,6 +58,20 @@ plumbing, not the person's question). The block is still cleared once its condit
 Without rule 13 reaching people (it is not loaded, or it runs in ``observe`` while this rule
 does not), this rule alerts on every block as before, so nothing goes silent.
 
+**Snoozes** (issue #176, :mod:`kelpie.rules._snoozes`). A block whose task a person snoozed
+(``kelpie snooze``, a chat reply, or an ``until:`` marker where agents record people's
+decisions) gets no no-condition and no overdue alert while the snooze holds: those repeat a
+wait the person already knows about. A marker is an agent's words: it holds only a block
+that waits on a person (it asks one, by rule 13's test, or every unmet condition is a human
+task), never an agent's wait on CI or its own parking ("tests flaky, parking this
+until:…"). Its dead-end, unseen-condition and stale-evidence
+alerts still fire (facts about the block or Kelpie's plumbing, not reminders), and a block
+whose condition is met is still cleared. The alerts come back once the snooze has expired
+(within the last 7 days) or more tasks are blocked behind the task than when it was
+snoozed; they then say so (``params.snooze``, as rule 13's items carry it). While a
+snooze holds the block's alert state resolves; when the snooze is what closed it, the
+notice says the block is snoozed.
+
 The dead-end and no-condition alerts list the tasks stuck behind the blocked one
 (``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
 does not raise a second alert for the same dead end.
@@ -66,17 +80,20 @@ does not raise a second alert for the same dead end.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
+from types import MappingProxyType
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import KelpieMark, Snapshot, Status, Task
+from kelpie.core.model import Condition, ConditionKind, KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import needs_you, register
 from kelpie.rules._chains import behind_lookup, behind_text
+from kelpie.rules._snoozes import SnoozeCheck, checker, describe
 from kelpie.rules._tasks import (
     DEFAULT_MAX_CONDITION_AGE,
+    asks_a_person,
     dead_end_text,
     dead_ends,
     fresh,
@@ -103,9 +120,10 @@ class StaleBlocks:
         actions: list[Action] = []
         behind = behind_lookup(snapshot)
         listed = needs_you.inbox_task_ids(snapshot, self.inbox) if self.inbox is not None else None
+        snoozed = checker(snapshot)  # one graph for every block's growth check
         for task in snapshot.tasks:
             if task.status is Status.BLOCKED and task.block is not None:
-                actions.extend(self._check(task, snapshot, behind, listed))
+                actions.extend(self._check(task, snapshot, behind, listed, snoozed))
         return actions
 
     def _check(
@@ -114,6 +132,7 @@ class StaleBlocks:
         snapshot: Snapshot,
         behind: Callable[[str], list[str]],
         listed: frozenset[str] | None = None,
+        snoozed: Callable[[str], SnoozeCheck | None] | None = None,
     ) -> Iterable[Action]:
         block = task.block
         assert block is not None
@@ -124,9 +143,21 @@ class StaleBlocks:
         # In the person's "needs you" digest: no alert of ours tells them the same again
         # (stale evidence still does: it is about the connector, not the question).
         theirs = listed is not None and task.id in listed
+        snooze = (snoozed or checker(snapshot))(task.id)
+        # A deliberate wait: no reminders. A marker (an agent's words) holds only a wait
+        # on a person, never an agent's own wait on CI or its own parking.
+        held = (
+            snooze is not None
+            and snooze.holds
+            and (not snooze.marker or self._waits_on_people(task, snapshot, conditions))
+        )
+        if snooze is not None and snooze.holds and not held:
+            snooze = None  # an ignored marker: the alert is as without it
         if not conditions:
             if theirs:
                 return  # a question for a person: nothing to check, rule 13 lists it
+            if held and not missing:
+                return  # snoozed: the person knows (a condition Kelpie cannot see is broken)
             if self.unlinked_alert_after is not None and age >= self.unlinked_alert_after:
                 what = (
                     f"names condition {missing}, which Kelpie cannot see"
@@ -139,8 +170,9 @@ class StaleBlocks:
                     "unlinked",
                     f"Task {task.id} has been blocked for {_human(age)} on "
                     f"'{block.reason}' and {what}, so nothing will clear it automatically."
-                    + behind_text(stuck),
-                    {"stuck_ids": stuck},
+                    + behind_text(stuck)
+                    + _back(snooze),
+                    {"stuck_ids": stuck, **_snooze_params(snooze)},
                     about_wait=not missing,  # a reference Kelpie cannot see is broken
                 )
             return
@@ -181,15 +213,16 @@ class StaleBlocks:
             )
             return
         if not all(c.satisfied for c in conditions):
-            if theirs:
-                return  # it waits on a human task: rule 13 lists it there
+            if theirs or held:
+                return  # rule 13 lists it (it waits on a human task), or it is snoozed
             if self.max_block is not None and age >= self.max_block:
                 pending = ", ".join(f"{c.id} ({c.kind})" for c in conditions if not c.satisfied)
                 yield self._alert(
                     task,
                     "overdue",
                     f"Task {task.id} has been blocked for {_human(age)} "
-                    f"(limit {_human(self.max_block)}) waiting for {pending}.",
+                    f"(limit {_human(self.max_block)}) waiting for {pending}." + _back(snooze),
+                    _snooze_params(snooze),
                 )
             return
         if not all(fresh(c, block.since, snapshot.now, self.max_condition_age) for c in conditions):
@@ -212,6 +245,47 @@ class StaleBlocks:
                 "conditions": [c.id for c in conditions],
                 "outlived_minutes": int(outlived.total_seconds() // 60),
             },
+        )
+
+    def _waits_on_people(
+        self, task: Task, snapshot: Snapshot, conditions: Sequence[Condition]
+    ) -> bool:
+        """Whether the block waits on a person: it asks one (rule 13's test, with its
+        settings), or every unmet condition it waits on is a human task."""
+        unmet = [c for c in conditions if c.satisfied is not True]
+        if unmet and all(c.kind is ConditionKind.HUMAN_TASK for c in unmet):
+            return True
+        settings = self.inbox or needs_you.NeedsYou()
+        return asks_a_person(task, snapshot, settings.approval_reasons, settings.condition_reasons)
+
+    def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
+        """The resolve notice of a block whose snooze is what closed its state (without the
+        snooze this rule would still alert on it): that it is snoozed and until when, not
+        that the block is gone. None otherwise: the engine's general notice."""
+        task = next(
+            (
+                t
+                for t in snapshot.tasks
+                if t.block is not None and state_id == f"{NAME}:{t.id}:{t.block.since.isoformat()}"
+            ),
+            None,
+        )
+        if task is None or task.status is not Status.BLOCKED:
+            return None
+        snooze = checker(snapshot)(task.id)
+        if snooze is None or not snooze.holds:
+            return None
+        others = {k: v for k, v in snapshot.snoozes.items() if k != task.id}
+        unsnoozed = replace(snapshot, snoozes=MappingProxyType(others))
+        behind = behind_lookup(snapshot)
+        listed = needs_you.inbox_task_ids(snapshot, self.inbox) if self.inbox is not None else None
+        if any(a.state == state_id for a in self._check(task, snapshot, behind, listed)):
+            return None  # still reported: the snooze held nothing
+        if not any(a.state == state_id for a in self._check(task, unsnoozed, behind, listed)):
+            return None  # it would be gone anyway: the block's own news, not the snooze's
+        return (
+            f"{describe(snooze.snooze, task.title)}: no reminders on its block until then, "
+            "unless more work is blocked behind it."
         )
 
     def _alert(
@@ -239,6 +313,18 @@ class StaleBlocks:
             # Long or unexplained, not broken: a CI outage that explains the block folds it.
             about_wait=about_wait or kind == "overdue",
         )
+
+
+def _back(snooze: SnoozeCheck | None) -> str:
+    """Why an alert a snooze held is back: " Its snooze expired at …." (none without one)."""
+    if snooze is None or snooze.holds:
+        return ""
+    text = snooze.text()
+    return f" {text[0].upper()}{text[1:]}."
+
+
+def _snooze_params(snooze: SnoozeCheck | None) -> dict[str, Any]:
+    return {"snooze": snooze.params()} if snooze is not None and not snooze.holds else {}
 
 
 def _human(d: timedelta) -> str:

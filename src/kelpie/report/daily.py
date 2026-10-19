@@ -48,6 +48,18 @@ tokens per completed task.
 open inbox) are listed under "Planned waits" in agent-hours and never counted: they have not
 started, so they do not wait.
 
+**Snoozed waits** (issue #176). Waits a person snoozed (``kelpie snooze``, a chat reply)
+are deliberate, not chaos: rules 13, 4 and 2 leave a snoozed wait out of their alerts while
+the snooze holds, so it is in no person's ``waiting`` and opens no stale-block state, and
+the cost of chaos never counts it. In the wait causes (:mod:`kelpie.report.waits`) the
+part of a people or unknown wait that a snooze holds (the task's own, or that of a
+task it waits on, on the board) while rule 13 does not list the task as live is its own
+cause, ``snoozed``, never the biggest wait. The report lists those hours apart, from that one
+source: "Snoozed: X task-hours of N task(s) waiting on purpose, until … at the latest",
+with each snooze that covered part of the day and the tasks it held. Task-hours, which
+are agent-hours for agent tasks. A lower bound: a snooze removed by ``kelpie unsnooze`` is
+gone from the database, and ``until:`` markers live on the board, not in the database.
+
 **Fixed by Kelpie.** Ledger entries of the day that an executor carried out, per rule and
 action; entries logged in observe mode or dry-run, or suggested, are listed as what Kelpie
 *would* have done in act mode. **Needs a human.** Long-lived states still open at the end
@@ -91,11 +103,13 @@ from kelpie.core.model import (
     Reconciliation,
     Session,
     Snapshot,
+    Snooze,
     Span,
     SpanKind,
     Status,
     Task,
 )
+from kelpie.core.snooze import snooze_end
 from kelpie.core.spans import (
     Attribution,
     SpanKey,
@@ -121,7 +135,7 @@ from kelpie.report.sections import (
     run_sections,
 )
 from kelpie.report.store import StateRow
-from kelpie.report.throughput import throughput
+from kelpie.report.throughput import RoleThroughput, throughput
 from kelpie.report.verify import (
     DEFAULT_MIN_SAMPLE,
     DEFAULT_REVIEW_ROLES,
@@ -135,6 +149,7 @@ from kelpie.report.verify import (
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
 from kelpie.report.waits import (
     CI_OUTAGE,
+    SNOOZED,
     BiggestWait,
     BlockKind,
     Outage,
@@ -253,6 +268,7 @@ FIX_KINDS = frozenset(
 LOGGED_ONLY = frozenset({Outcome.OBSERVED, Outcome.DRY_RUN, Outcome.SUGGESTED})
 NOT_DONE = frozenset({Outcome.FAILED, Outcome.NOT_EXECUTED, Outcome.DROPPED})
 MAX_TASKS = 5  # task ids listed per line before "+N more"
+MAX_SNOOZED = 10  # snoozed waits listed in the report (#176)
 TOP = 3
 
 
@@ -299,6 +315,25 @@ class ReportInputs:
     # cannot be read.
     reconciliations: Sequence[Reconciliation] | str = ()
     bill_day: date | None = None  # the UTC day checked, when cost reports are configured
+    # Stored snoozes that ended after the day began (#176): deliberate waits, not chaos.
+    snoozes: Sequence[Snooze] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SnoozedWaits:
+    """The day's snoozed waits (#176), apart from the cost of chaos: ``hours`` the
+    task-hours of the wait cause ``snoozed`` (:mod:`kelpie.report.waits`), ``tasks`` the
+    tasks that waited on purpose, ``snoozes`` the snoozes that covered them, latest end
+    last, each with the tasks it held (``held``, by snooze task id)."""
+
+    hours: float
+    tasks: tuple[str, ...]
+    snoozes: tuple[Snooze, ...]
+    held: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+
+    @property
+    def until(self) -> datetime:
+        return max(s.until for s in self.snoozes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,6 +437,7 @@ class DailyReport:
     outages: tuple[OutageLine, ...] = ()  # rule 9's CI outages of the day
     outage_wait_hours: float = 0.0  # the day's waiting time all of them explained
     planned: PlannedWaits | None = None  # behind work planned for later: never counted
+    snoozed: SnoozedWaits | None = None  # deliberate waits a person snoozed: never chaos
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
     # models without a price (billed, not on a subscription), most tokens first
     unpriced_models: tuple[tuple[str | None, int], ...] = ()  # None: no model
@@ -478,7 +514,7 @@ def build_report(
         roles=MappingProxyType(_roles(inputs, end)),
     )
     extra = run_sections(sections, context, failed, inputs.section_config, section_keys)
-    wait, outage_lines, outage_hours = _biggest_wait(inputs, start, end, context.roles)
+    wait, outage_lines, outage_hours, snoozed = _biggest_wait(inputs, start, end, context.roles)
     advice = _recommendations(
         inputs,
         chaos,
@@ -517,6 +553,7 @@ def build_report(
         outage_wait_hours=outage_hours,
         stuck_idle=_stuck_idle(inputs, start, end),
         planned=_planned_waits(inputs, start, end),
+        snoozed=snoozed,
         unpriced_models=pricer.unpriced(rows),
         reconciliations=_reconciled(inputs.reconciliations),
         reconcile_error=(
@@ -547,6 +584,28 @@ def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> Plan
     held = {t.id for t in inputs.tasks if set(t.labels) & set(inputs.hold_labels)}
     listed = tuple(sorted(tasks))
     return PlannedWaits(hours, listed, tuple(t for t in listed if t in held)) if hours > 0 else None
+
+
+def snoozed_waits(
+    roles: Sequence[RoleThroughput], tasks: Sequence[Task], causes: WaitCauses
+) -> SnoozedWaits | None:
+    """The day's snoozed waits from the wait cause ``snoozed``: its task-hours, the tasks,
+    and the snoozes that covered them. None when no snooze covered a wait of the day."""
+    hours = sum(r.waits.get(SNOOZED, 0.0) for r in roles)
+    waited = sorted({t for r in roles for t in r.waited.get(SNOOZED, ())})
+    if hours <= 0:
+        return None
+    by_id = {t.id: t for t in tasks}
+    held: dict[str, set[str]] = {}
+    found: dict[str, Snooze] = {}
+    for tid in waited:
+        for s in causes.snooze_sources(by_id[tid]) if tid in by_id else ():
+            found[s.task_id] = s
+            held.setdefault(s.task_id, set()).add(tid)
+    listed = tuple(sorted(found.values(), key=lambda s: (s.until, s.task_id)))
+    return SnoozedWaits(
+        hours, tuple(waited), listed, {k: tuple(sorted(v)) for k, v in held.items()}
+    )
 
 
 def _stuck_idle(inputs: ReportInputs, start: datetime, end: datetime) -> tuple[StuckCard, ...]:
@@ -584,13 +643,24 @@ def wait_causes(inputs: ReportInputs, start: datetime, end: datetime) -> WaitCau
     # Rule 9 writes an outage's scope at most hourly: an outage open since yesterday may
     # have its only sample before midnight, so read every entry loaded before the end.
     found = outages([row.state for row in inputs.states], [e for e in inputs.actions if e.at < end])
-    return WaitCauses(inputs.conditions, entries, inputs.hold_labels, inputs.block_kinds, found)
+    return WaitCauses(
+        inputs.conditions,
+        entries,
+        inputs.hold_labels,
+        inputs.block_kinds,
+        found,
+        inputs.snoozes,
+        inputs.dependencies,
+        [row.state for row in inputs.states],
+        [e for e in inputs.actions if e.at < end],  # rule 13's samples from before the day
+    )
 
 
 def _biggest_wait(
     inputs: ReportInputs, start: datetime, end: datetime, roles: Mapping[str, str]
-) -> tuple[BiggestWait | None, tuple[OutageLine, ...], float]:
-    """The biggest wait, the day's CI outages and the waiting time they explain."""
+) -> tuple[BiggestWait | None, tuple[OutageLine, ...], float, SnoozedWaits | None]:
+    """The biggest wait, the day's CI outages and the waiting time they explain, and the
+    snoozed waits (the same split, so no hour counts twice)."""
     causes = wait_causes(inputs, start, end)
     per_role = throughput(
         inputs.tasks,
@@ -605,7 +675,8 @@ def _biggest_wait(
     )
     explained = sum(r.waits.get(CI_OUTAGE, 0.0) for r in per_role)
     found = biggest_wait(per_role, inputs.tasks, causes, inputs.farm)
-    return found, _outage_lines(inputs, causes.outages, start, end), explained
+    snoozed = snoozed_waits(per_role, inputs.tasks, causes)
+    return found, _outage_lines(inputs, causes.outages, start, end), explained, snoozed
 
 
 def _outage_lines(
@@ -1278,6 +1349,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             "person's open inbox; not waiting, so not counted in the hours lost (rule 13 lists "
             f"at most 20 ids per alert){listed}",
         ]
+    lines += _snoozed_lines(report, tasks)
     lines += ["", "## Spend", ""]
     note = " (as the board reports them now; adapters only look back so far)"
     if _plans_only(report.spend):
@@ -1461,6 +1533,37 @@ def _window(window: timedelta) -> str:
     if hours >= 24 and hours % 24 == 0:
         return f"{int(hours // 24)}-day"
     return f"{hours:g}-hour"
+
+
+def _snoozed_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
+    """Snoozed waits (#176), listed apart from the cost of chaos: deliberate, not lost."""
+    if report.snoozed is None:
+        return []
+    snoozed = report.snoozed
+    found = snoozed.snoozes
+    latest = f", {_snooze_end(snoozed.until, report)} at the latest" if found else ""
+    out = [
+        "",
+        f"**Snoozed**: {snoozed.hours:.1f} task-hours of {len(snoozed.tasks)} task(s) "
+        f"waiting on purpose{latest}. Deliberate waits a person acknowledged (kelpie "
+        "snooze): not counted in the hours lost, nor in the biggest wait.",
+        "",
+    ]
+    for s in found[:MAX_SNOOZED]:
+        who = [md.text(x) for x in (s.reason, f"by {s.by}" if s.by else None) if x]
+        extra = f" ({', '.join(who)})" if who else ""
+        mine = [t for t in snoozed.held.get(s.task_id, ()) if t != s.task_id]
+        behind = f": held {tasks(mine)}" if mine else ""
+        out.append(f"- {tasks((s.task_id,))} {_snooze_end(s.until, report)}{extra}{behind}")
+    if len(found) > MAX_SNOOZED:
+        out.append(f"- and {len(found) - MAX_SNOOZED} more")
+    return out
+
+
+def _snooze_end(at: datetime, report: DailyReport) -> str:
+    """ "through 2026-10-25" or "until 2026-10-25 09:00 UTC", as alerts word it."""
+    when, through_day = snooze_end(at, report.tz)
+    return f"through {when}" if through_day else f"until {when}"
 
 
 def _local(at: datetime, report: DailyReport) -> str:

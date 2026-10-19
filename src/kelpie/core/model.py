@@ -595,8 +595,11 @@ class Snooze:
     """A person acknowledged that a task waits on purpose until ``until`` (a deliberate
     wait: a decision deferred to a release, a manual pass planned for a date). Rules may
     hold repeat alerts on it while it is active, list it, and alert again once it expires
-    or the work behind it grows past ``behind_at_snooze`` (tasks waiting behind it when it
-    was set; None when unknown). One per task: a new one replaces the old."""
+    or the work behind it grows past ``behind_at_snooze`` (tasks behind it when ``kelpie
+    serve`` first saw it on a complete board; None until then, and always for a marker).
+    ``grown_at`` latches growth: when ``kelpie serve`` first saw more work behind it, and
+    ``grown_by`` how much more; once set, the snooze no longer holds anything (#176). One
+    per task: a new one replaces the old."""
 
     task_id: str
     until: datetime
@@ -605,6 +608,14 @@ class Snooze:
     created_at: datetime
     source: SnoozeSource = "cli"
     behind_at_snooze: int | None = None
+    grown_at: datetime | None = None
+    grown_by: int | None = None
+
+    def holds_at(self, at: datetime) -> bool:
+        """Whether the snooze held its task's reminders at ``at``: set, not expired, and
+        not past a latched growth."""
+        end = self.until if self.grown_at is None else min(self.until, self.grown_at)
+        return self.created_at <= at < end
 
     def active(self, now: datetime) -> bool:
         return now < self.until
