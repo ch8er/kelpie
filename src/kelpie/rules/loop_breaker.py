@@ -64,6 +64,7 @@ from kelpie.core.model import (
     Span,
 )
 from kelpie.core.serde import parse_duration
+from kelpie.core.spend import gap_causes
 from kelpie.rules import register
 from kelpie.rules._calls import (
     PollPatterns,
@@ -162,7 +163,7 @@ class LoopBreaker:
                 NAME,
                 f"Spend from traces and the {provider} bill disagree for {r.day:%Y-%m-%d}: "
                 f"${r.estimated_usd:,.2f} priced from traces, ${r.reported_usd:,.2f} in the "
-                f"cost report{_share(r)}; {_causes(r)}. Dollar budgets of {provider} follow "
+                f"cost report{_share(r)}; {gap_causes(r)}. Dollar budgets of {provider} follow "
                 "the traces, not the bill.",
                 severity=Severity.WARNING,
                 key=f"bill:{provider}",
@@ -544,21 +545,3 @@ def _check_limits(limits: Thresholds, where: str) -> None:
 
 def _share(r: Reconciliation) -> str:
     return f" ({r.gap_ratio:+.0%})" if r.gap_ratio is not None else ""
-
-
-def _causes(r: Reconciliation) -> str:
-    """The likely causes of a day's gap, most likely first."""
-    if r.gap_usd < 0:
-        causes = ["agents that do not export spans", "other users of the same key"]
-        if r.unpriced_tokens:
-            causes.insert(0, f"models without a price ({r.unpriced_tokens:,} tokens that day)")
-        if r.unknown_tokens:
-            causes.append(f"calls whose provider is not known ({r.unknown_tokens:,} tokens)")
-        if r.bill_scope == "total":
-            causes.insert(0, "non-token items the bill includes (web search, tools, storage)")
-        return "traces show less than was billed: " + ", ".join(causes)
-    return (
-        "traces show more than was billed: prices above the bill's (a discount, batch, "
-        "credits or a [prices] entry), or calls the provider did not bill (another "
-        "platform's, matched by [spend.providers] models)"
-    )

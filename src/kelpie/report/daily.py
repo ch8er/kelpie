@@ -88,6 +88,7 @@ from kelpie.core.model import (
     Dependency,
     Owner,
     OwnerKind,
+    Reconciliation,
     Session,
     Snapshot,
     Span,
@@ -104,7 +105,7 @@ from kelpie.core.spans import (
     span_key,
     usage,
 )
-from kelpie.core.spend import SpendConfig, SpendMode
+from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
 from kelpie.report import farm, md
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
@@ -158,6 +159,7 @@ from kelpie.traces.outputs import (
 log = logging.getLogger(__name__)
 
 _SHOWN_STUCK = 10
+_SHOWN_MODELS = 10  # models without a price named in the report
 # Rule 3's pattern f test: open tasks behind a card stuck before work, None if not stuck.
 type StuckCheck = Callable[[Task, Snapshot], list[str] | None]
 
@@ -292,6 +294,11 @@ class ReportInputs:
     # Rules that cannot act on this farm, with what is missing (``kelpie.app.act_blockers``).
     act_blockers: Mapping[str, str] = field(default_factory=dict)
     farm: FarmFacts = UNKNOWN_FARM  # what the farm already has: advice never repeats it
+    # Providers' bills against the estimate from traces (``kelpie.app.read_reconciliations``,
+    # for one settled UTC day: ``kelpie.report.run.bill_days``); a string says why they
+    # cannot be read.
+    reconciliations: Sequence[Reconciliation] | str = ()
+    bill_day: date | None = None  # the UTC day checked, when cost reports are configured
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,6 +403,11 @@ class DailyReport:
     outage_wait_hours: float = 0.0  # the day's waiting time all of them explained
     planned: PlannedWaits | None = None  # behind work planned for later: never counted
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
+    # models without a price (billed, not on a subscription), most tokens first
+    unpriced_models: tuple[tuple[str | None, int], ...] = ()  # None: no model
+    reconciliations: tuple[Reconciliation, ...] = ()  # as in ReportInputs
+    reconcile_error: str | None = None  # why the bills could not be read
+    bill_day: date | None = None  # as in ReportInputs
 
     @property
     def chaos_hours(self) -> float:
@@ -438,7 +450,8 @@ def build_report(
     index = {span_key(s): s for s in inputs.spans}
     counted = counted_llm(index, spans)
     pricer = _Pricer(inputs.prices, inputs.spend, inputs.day)
-    spend = pricer.price(usage(spans, counted))
+    rows = usage(spans, counted)
+    spend = pricer.price(rows)
     actions = [e for e in inputs.actions if start <= e.at < end]
     chaos = _chaos(inputs, actions, spans, counted, pricer, start, end)
     fixed, would_fix, not_done = _actions(actions)
@@ -504,6 +517,12 @@ def build_report(
         outage_wait_hours=outage_hours,
         stuck_idle=_stuck_idle(inputs, start, end),
         planned=_planned_waits(inputs, start, end),
+        unpriced_models=pricer.unpriced(rows),
+        reconciliations=_reconciled(inputs.reconciliations),
+        reconcile_error=(
+            inputs.reconciliations if isinstance(inputs.reconciliations, str) else None
+        ),
+        bill_day=inputs.bill_day,
         act_blockers=inputs.act_blockers,
     )
 
@@ -615,6 +634,12 @@ def _outage_lines(
     return tuple(out)
 
 
+def _reconciled(found: Sequence[Reconciliation] | str) -> tuple[Reconciliation, ...]:
+    if isinstance(found, str):
+        return ()
+    return tuple(sorted(found, key=lambda r: (r.day, r.provider)))
+
+
 def _roles(inputs: ReportInputs, end: datetime) -> dict[str, str]:
     board = Snapshot(
         now=end,
@@ -722,6 +747,17 @@ class _Pricer:
                 unknown = usd if mode is SpendMode.UNKNOWN else 0.0
                 total = total + Spend(tokens, usd, 0, unknown_usd=unknown)
         return total
+
+    def unpriced(self, rows: Iterable[TokenUsage]) -> tuple[tuple[str | None, int], ...]:
+        """The models of ``rows`` whose tokens :meth:`price` leaves unpriced (None: calls
+        with no model), with their tokens, most first."""
+        found: Counter[str | None] = Counter()
+        for row in rows:
+            if self._mode(row.model)[1] is SpendMode.SUBSCRIPTION:
+                continue
+            if self.prices.price_for(row.model, self.day) is None:
+                found[row.model or None] += row.input_tokens + row.output_tokens
+        return tuple(sorted(found.items(), key=lambda m: (-m[1], m[0] or "")))
 
     def input_usd(self, tokens: int, model: str | None) -> float:
         if self._mode(model)[1] is SpendMode.SUBSCRIPTION:
@@ -1258,8 +1294,9 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     if report.spend.unpriced_tokens:
         lines.append(
             f"{report.spend.unpriced_tokens:,} tokens are of models without a price in "
-            "[prices] and are not in the dollar figures."
+            f"[prices] and are not in the dollar figures{_unpriced(report)}."
         )
+    lines += _bill_lines(report)
     lines += ["", "## Fixed by Kelpie", ""]
     lines += _fix_lines(report.fixed, tasks) or ["Nothing this day."]
     if report.would_fix:
@@ -1483,6 +1520,81 @@ def _change(m: Metric) -> str:
         return "new, worse" if m.improved is False else "n/a"
     mark = {True: " better", False: " worse", None: ""}[m.improved]
     return f"{change:+.0%}{mark}"
+
+
+def _unpriced(report: DailyReport) -> str:
+    """The models without a price, most tokens first (add them to [prices])."""
+    found = report.unpriced_models
+    if not found:
+        return ""
+    shown = ", ".join(
+        f"{md.code(m) if m is not None else 'calls with no model'} {n:,}"
+        for m, n in found[:_SHOWN_MODELS]
+    )
+    more = f" and {len(found) - _SHOWN_MODELS} more" if len(found) > _SHOWN_MODELS else ""
+    return f": {shown}{more}"
+
+
+def _bill_lines(report: DailyReport) -> list[str]:
+    """Each provider's cost report against the estimate from traces, for one settled UTC
+    day: the gap, and what may explain it (rule 10's causes, :func:`gap_causes`)."""
+    if report.reconcile_error is not None:
+        return ["", f"**Bill check**: {md.text(report.reconcile_error)}."]
+    if not report.reconciliations:
+        if report.bill_day is None:
+            return []
+        # nothing stored for that day yet, or traces off or not held for the whole day
+        return ["", f"**Bill check**: no cost report reconciled for {report.bill_day} (UTC) yet."]
+    out = [
+        "",
+        "**Bill check** (each provider's cost report against Kelpie's estimate from traces, "
+        "for the UTC day that ended 18 to 42 hours before this report's day did):",
+        "",
+    ]
+    for r in report.reconciliations:
+        out.append(_bill_line(r))
+    return out
+
+
+def _bill_line(r: Reconciliation) -> str:
+    gap = abs(r.gap_usd)
+    if gap < 0.005:
+        side = "matches the bill"
+    else:
+        ratio = f" ({abs(r.gap_ratio):.0%})" if r.gap_ratio is not None else ""
+        side = f"${gap:,.2f}{ratio} {'below' if r.gap_usd < 0 else 'above'} the bill"
+    billed = (
+        f"a credit of ${-r.reported_usd:,.2f}"
+        if r.reported_usd < 0
+        else f"billed ${r.reported_usd:,.2f}"
+    )
+    line = (
+        f"- {md.text(r.provider)}, {r.day.astimezone(UTC).date().isoformat()}: estimated "
+        f"${r.estimated_usd:,.2f}, {billed}; the estimate {side}."
+    )
+    below = r.gap_usd < 0
+    if r.large:
+        line += f" **Large gap**: {gap_causes(r)}."
+        if r.bill_scope == "total" and below:
+            line += (
+                " Part of it may be expected: the bill covers everything billed that day; "
+                "if a gap like this is routine, raise `warn_gap` "
+                "([[connectors.cost_reports]])."
+            )
+        if below:
+            return line  # the causes name the unpriced and unknown tokens
+    elif r.bill_scope == "total" and below:
+        line += (
+            " The bill covers everything billed that day (web search and other tools too), "
+            "so part of the gap may be expected."
+        )
+    if r.unpriced_tokens:
+        line += f" {r.unpriced_tokens:,} tokens of models without a price are not estimated."
+    if r.unknown_tokens:
+        line += (
+            f" {r.unknown_tokens:,} tokens of calls with no known provider may belong to this bill."
+        )
+    return line
 
 
 def _usd(spend: Spend, report: DailyReport) -> str:

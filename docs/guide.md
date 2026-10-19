@@ -243,11 +243,21 @@ report; no LLM is involved.
   flagged, and by every session `exit_contract` requeued (a restart). Spend follows each
   provider's spend mode (`[spend]`): with an API key, dollars (`[prices]` over Kelpie's
   dated default price table); on a subscription, tokens and the share of the plan's limit
-  (`limit_tokens` per `limit_window`, else "limit not configured"; for a window shorter than a day, the day's tokens spread over all its windows, so a farm that runs part of the day reads low), never dollars and never
-  summed with them; a provider whose mode is not set shows dollars marked "(estimate, mode
-  not set)".
+  (`limit_tokens` per `limit_window`, else "limit not configured"; for a window shorter
+  than a day, the day's tokens spread over all its windows, so a farm that runs part of
+  the day reads low), never dollars and never summed with them; a provider whose mode is
+  not set shows dollars marked "(estimate, mode not set)". Billed models without a price
+  are named with their tokens (add them to `[prices]`); they are not in the dollars.
 - **Cost per completed task**: the day's billed spend over the tasks that reached `done`
   (plan tokens per task on a subscription-only farm).
+- **Bill check**: with `[connectors.cost_reports]`, each provider's cost report for one
+  settled UTC day (the one that ended 18 to 42 hours before the report's day did, so
+  consecutive reports show consecutive days; "no cost report reconciled" when there is
+  none yet) against Kelpie's estimate from traces: both
+  figures, the gap and its share, and what the estimate leaves out (tokens of models
+  without a price, and of calls with no known provider). A gap past `warn_gap` is marked
+  large, with rule 10's likely causes for its sign. A bill that covers everything billed
+  that day (OpenAI's) may be above the estimate by its non-token items.
 - **Biggest wait** (`kelpie.report.waits`), under the headline: the role and cause whose
   tasks spent the most task-hours waiting for conditions, against the agent-hours the
   role's agents had a session running, with a concrete suggestion. A task's wait counts

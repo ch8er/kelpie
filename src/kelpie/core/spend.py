@@ -356,3 +356,22 @@ def reconcile(
             )
         )
     return tuple(sorted(out, key=lambda r: (-r.day.timestamp(), r.provider)))
+
+
+def gap_causes(r: Reconciliation) -> str:
+    """The likely causes of a day's gap between the estimate and the bill, most likely
+    first (rule 10's alert and the daily report's bill check say the same)."""
+    if r.gap_usd < 0:
+        causes = ["agents that do not export spans", "other users of the same key"]
+        if r.unpriced_tokens:
+            causes.insert(0, f"models without a price ({r.unpriced_tokens:,} tokens that day)")
+        if r.unknown_tokens:
+            causes.append(f"calls whose provider is not known ({r.unknown_tokens:,} tokens)")
+        if r.bill_scope == "total":
+            causes.insert(0, "non-token items the bill includes (web search, tools, storage)")
+        return "traces show less than was billed: " + ", ".join(causes)
+    return (
+        "traces show more than was billed: prices above the bill's (a discount, batch, "
+        "credits or a [prices] entry), or calls the provider did not bill (another "
+        "platform's, matched by [spend.providers] models)"
+    )
