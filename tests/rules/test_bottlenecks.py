@@ -1368,12 +1368,15 @@ def test_planned_tasks_are_not_behind_a_human_task() -> None:
     assert gate.behind == ("D",)  # P planned, C only behind it, D also directly behind H
     [gate] = human_gates(Snapshot(NOW, tasks, HUMANS, deps))  # without the label
     assert gate.behind == ("C", "D", "P")  # Q, in pre-work, is planned anyway
-    # Through a human_task condition too.
+    # A task parked on the human task was started: it waits on it, labels or not.
     parked = replace(task("W", Status.WAITING), labels=("later",))
     cond = Condition("C1", ConditionKind.HUMAN_TASK, "W", {"task": "H"}, satisfied=False)
     snapshot = Snapshot(NOW, (human("H"), parked), HUMANS, (), (cond,))
-    assert human_gates(snapshot, {"later"}) == []
-    assert [g.behind for g in human_gates(snapshot)] == [("W",)]
+    assert [g.behind for g in human_gates(snapshot, {"later"})] == [("W",)]
+    # A ready one labelled later is planned.
+    ready = replace(task("R", Status.READY), labels=("later",))
+    deps = (Dependency("R", "H"),)
+    assert human_gates(Snapshot(NOW, (human("H"), ready), HUMANS, deps), {"later"}) == []
 
 
 def test_a_planned_human_task_gates_nothing() -> None:

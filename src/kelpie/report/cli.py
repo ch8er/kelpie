@@ -15,8 +15,8 @@ from kelpie.app import (
     act_blockers,
     build_adapters,
     connector_steps,
+    hold_labels,
     merged_snapshot,
-    planned_labels,
     utc_now,
 )
 from kelpie.core.budgets import BudgetMode
@@ -48,8 +48,7 @@ def sources(settings: Settings) -> ReportSources:
         outputs=settings.traces.outputs,
         estimated=any(b.mode is BudgetMode.SUBSCRIPTION for b in settings.budgets.budgets),
         modes=modes,
-        # planned tasks wait on nothing they depend on (incident 20): a hold of their own
-        hold_labels=tuple(planned_labels(engine.rules.get("bottlenecks", {}))),
+        hold_labels=tuple(hold_labels(engine.rules.get("bottlenecks", {}))),
         block_kinds=tuple(
             BlockKind(b.pattern, b.condition_kind, b.repo)
             for b in settings.block_conditions

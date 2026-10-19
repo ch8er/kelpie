@@ -491,15 +491,17 @@ def test_a_planned_dependent_is_not_waiting_on_the_human_task() -> None:
     assert item.params["waiting"] == ["A-3"] and item.params["cost_hours"] == 143.0
 
 
-def test_a_planned_task_blocked_asking_a_person_is_still_their_question() -> None:
-    """It was started: labels or not, a block that asks a person is an approval."""
+def test_a_started_task_waits_on_what_it_names_labels_or_not() -> None:
+    """Blocked or waiting, it was started: parked on the human task, or asking a person."""
     gate = human("H-1", ago(hours=3))
-    asks = replace(blocked("A-1", ago(hours=2), "waiting_human: H-1", "C-1"), labels=("later",))
+    parked = replace(blocked("A-1", ago(hours=2), "waiting_human: H-1", "C-1"), labels=("later",))
     c = waits_on("C-1", "A-1", "H-1")
-    [item] = run(snap([gate, asks], [c]), planned_labels=frozenset({"later"}))
-    assert item.params["approvals"] == ["A-1"] and item.params["human_tasks"] == []
-    [item] = run(snap([gate, asks], [c]))
-    assert item.params["human_tasks"] == ["H-1"]
+    for labels in (frozenset({"later"}), frozenset()):
+        [item] = run(snap([gate, parked], [c]), planned_labels=labels)
+        assert item.params["human_tasks"] == ["H-1"] and item.params["waiting"] == ["A-1"]
+    asks = replace(blocked("A-2", ago(hours=2), "needs_input: which key?"), labels=("later",))
+    [item] = run(snap([asks]), planned_labels=frozenset({"later"}))
+    assert item.params["approvals"] == ["A-2"]
 
 
 def test_a_planned_human_task_and_a_label_on_a_pr_read_as_rule_6_does() -> None:
