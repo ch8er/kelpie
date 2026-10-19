@@ -205,6 +205,22 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   repeat the title; for a person's own task whose block can never clear, it names the dead
   end or the condition Kelpie cannot see, which rule 4 no longer alerts on separately
   ([#169](https://github.com/ch8er/kelpie/issues/169)).
+- A waiting agent task parked on a person's task by a `human_task` condition reaches them
+  once, in rule 13's "Waiting for you" digest: rule 2 (`wait_condition`) no longer sends its
+  overdue alert for a waiting task rule 13 lists, while rule 13 reaches people (it is loaded
+  and not in `observe` while rule 2 is not), the way rule 4 leaves blocks to it. Rule 2
+  reads the farm with rule 13's settings and leaves exactly what rule 13 lists; its dead-end,
+  condition-not-visible, no-condition and wake outputs, a wait on a task the person cannot
+  move yet and a wait that also depends on a PR or CI stay its own. Without rule 13 reaching
+  people rule 2 alerts as before, and a snoozed human wait is still held. A listed wait
+  whose conditions Kelpie cannot check (never checked, not checked within `max_condition_age`, or the connector reports an error)
+  keeps rule 2's overdue alert, snoozed or not, worded as a connector problem ("C-1 was not
+  checked on this pass: is the connector running?"). When a wait or a block
+  moves to the digest while its alert is open, the "Resolved" notice says it is in the
+  person's digest now instead of "no longer reported". Kelpie logs a
+  warning at startup when rule 13's `human_wait_alert_after` is longer than rule 2's
+  `max_wait`, the same check as for rule 4
+  ([#213](https://github.com/ch8er/kelpie/issues/213)).
 - The daily report's "agents waiting on people" no longer counts an agent task that also
   waits on a PR or CI first: rule 13 does not count it as waiting on the person's task,
   nor in that person's cost of delay ([#169](https://github.com/ch8er/kelpie/issues/169)).

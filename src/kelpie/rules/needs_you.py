@@ -34,6 +34,9 @@ both and never by neither: a task parked on a human task the person cannot move 
 listed here nowhere, so rule 4 alerts on it; one that waits on something else too (a PR),
 or that has a dead end or a condition Kelpie cannot see, is not parked here, so rule 4
 alerts on it. Only stale evidence (a connector that stopped checking) alerts either way.
+Rule 2 (``wait_condition``) does the same for waiting tasks (#213): it sends no overdue alert
+for a waiting task :func:`inbox_task_ids` returns, and keeps its dead-end, unseen-condition,
+no-condition and wake outputs.
 
 **Planned waits are not waiting** (incident 20). A task that is not ready for work for its
 own reasons (:func:`~kelpie.rules._tasks.planned`: not started yet, and in a pre-work
@@ -518,13 +521,53 @@ def parked_on(snapshot: Snapshot, settings: NeedsYou, task_id: str) -> tuple[str
 def inbox_task_ids(snapshot: Snapshot, settings: NeedsYou) -> frozenset[str]:
     """The tasks the inbox lists, with ``settings``' reasons and labels and its time
     thresholds ignored: its items (approvals and human tasks) and the tasks waiting on a
-    listed human task. Rule 4 leaves exactly these to this rule (with its own thresholds),
-    so every block reaches a person through one of the two rules and none through both.
+    listed human task. Rules 4 and 2 leave exactly these to this rule (with their own
+    thresholds), so every block and wait reaches a person through one rule and none through two.
     Pure: the same code path as :meth:`NeedsYou.evaluate`."""
     inbox = settings._inbox(snapshot, waited=False)
     return frozenset(
         tid for items in inbox.values() for i in items for tid in (i.task.id, *i.waits)
     )
+
+
+def digest_notice(snapshot: Snapshot, settings: NeedsYou, task_id: str, noun: str) -> str:
+    """The resolve notice of a block or wait (``noun``) that rule 13 lists now: where, and,
+    when this rule holds what it is listed under (the human task, or the task itself when it
+    is an item) in the digest's footer, that the digest does not announce it yet. Held is
+    decided by the digest's own split (:meth:`NeedsYou._split`): an item whose block can never
+    clear is live even when snoozed."""
+    under = parked_on(snapshot, settings, task_id)
+    where = f", under {', '.join(under)}" if under else ""
+    split = settings._split(snapshot, settings._inbox(snapshot, waited=False))
+
+    def about(item: Item) -> bool:
+        return item.task.id == task_id or task_id in item.waits
+
+    live = any(about(i) for items, _ in split.values() for i in items)
+    held = any(about(i) for _, items in split.values() for i in items)
+    if held and not live:
+        return (
+            f"Task {task_id} is snoozed in the person's needs-you digest{where}: its footer "
+            f"lists it, and the digest announces the {noun} again when the snooze ends or "
+            "more work is blocked behind it."
+        )
+    return (
+        f"Task {task_id} is in the person's needs-you digest now{where}: that digest "
+        f"announces the {noun} from here on."
+    )
+
+
+def hand_off(value: Any) -> NeedsYou | None:
+    """The ``needs_you`` setting of a rule that leaves tasks to this one (rules 2 and 4):
+    false (this rule does not reach people: the rule keeps all its alerts), true (this
+    rule's defaults) or this rule's config section, which :func:`build` validates."""
+    if value is False:
+        return None
+    if value is True:
+        return build({})
+    if isinstance(value, Mapping):
+        return build(dict(value))
+    raise ValueError("needs_you must be false, true or rule 13's settings")
 
 
 def _broken(task: Task, unmet: Sequence[Condition], snapshot: Snapshot) -> str | None:

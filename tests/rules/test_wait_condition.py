@@ -17,6 +17,7 @@ from kelpie.core.model import (
 )
 from kelpie.rules import REGISTRY
 from kelpie.rules._calls import call_key, error_streak, identical_streak, tool_calls
+from kelpie.rules.needs_you import NeedsYou
 from kelpie.rules.wait_condition import WaitCondition, build
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
@@ -275,9 +276,23 @@ def test_build_from_config() -> None:
     assert rule.poll_patterns == {"ci_status": ("gh pr checks",)}
 
 
+def test_build_reads_the_inbox_settings() -> None:
+    """``needs_you`` is rule 13 as it reaches people (kelpie.app sets it): false, true or its
+    config section, checked by rule 13's own build."""
+    assert build({}).inbox is None
+    assert build({"needs_you": False}).inbox is None
+    assert build({"needs_you": True}).inbox == NeedsYou()
+    inbox = build({"needs_you": {"human_wait_alert_after": "2h", "default_approver": "ceo"}}).inbox
+    assert inbox is not None
+    assert (inbox.human_wait_alert_after, inbox.default_approver) == (timedelta(hours=2), "ceo")
+
+
 @pytest.mark.parametrize(
     "config",
     [
+        {"needs_you": "yes"},
+        {"needs_you": {"human_wait_alert_after": "0m"}},
+        {"needs_you": {"nope": 1}},
         {"poll_min_repeats": 0},
         {"poll_error_streak": True},
         {"poll_patterns": ["gh"]},
