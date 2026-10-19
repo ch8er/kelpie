@@ -385,8 +385,8 @@ def check_pr_blocks(settings: Settings, adapter: HermesAdapter, now: datetime) -
     considered."""
     name = "PR blocks have conditions"
     try:
-        # The board only: no spool, no git (worktrees readable already asked git).
-        tasks = replace(adapter, git_state=False, spool=None).snapshot(now).tasks
+        # The board only: no spool, no git (worktrees readable already asked git), no ps.
+        tasks = replace(adapter, git_state=False, spool=None, tools=None).snapshot(now).tasks
     except (HermesError, sqlite3.Error) as exc:
         return _skip(name, f"board not readable: {exc}")
     blocks = {

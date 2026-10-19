@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
 from kelpie import __version__
-from kelpie.core.model import Session, Snapshot, Status
+from kelpie.core.model import ResourceKind, Session, Snapshot, Status
 from kelpie.core.stages import STAGES, UNKNOWN_ROLE, live_stage, rework_role, task_roles
 from kelpie.rules._tasks import is_live
 from kelpie.rules.bottlenecks import RoleLoad, role_loads
@@ -49,6 +49,7 @@ def _labels(**labels: str) -> str:
 # highest spend), plus every task past a threshold.
 MAX_TASK_SERIES = 20
 MAX_PREWORK_SERIES = 10  # pre-work statuses exported (platform statuses are config data)
+MAX_SLOT_POOLS = 20  # tool slot pools exported (pools are config data)
 
 
 def _bounded(statuses: Iterable[BudgetStatus]) -> tuple[BudgetStatus, ...]:
@@ -91,6 +92,8 @@ class Metrics:
         self.idle_agents: Counter[str] = Counter()  # role -> idle agents (0 if all busy)
         # platform status -> (cards in it before work, seconds the oldest has sat there)
         self.prework: dict[str, tuple[int, float]] = {}
+        # tool slot pool -> (slots, {holder: slots held}) (Hermes [adapters.hermes.tools])
+        self.slots: dict[str, tuple[int, dict[str, int]]] = {}
         # throughput per role now; open tasks per stage and role
         self.roles: dict[str, RoleGauges] = {}
         # roles that review: returns count for the role that redoes the work ([report])
@@ -350,6 +353,13 @@ class Metrics:
         self.prework = {
             k: (len(v), max(v)) for k, v in sorted(prework.items())[:MAX_PREWORK_SERIES]
         }
+        slots: dict[str, tuple[int, dict[str, int]]] = {}
+        for r in snapshot.resources:
+            if r.kind is ResourceKind.SLOTS and r.used is not None and r.limit is not None:
+                pool, _, holder = r.name.rpartition(":")
+                held = slots.setdefault(pool, (int(r.limit), {}))[1]
+                held[holder] = held.get(holder, 0) + int(r.used)
+        self.slots = dict(sorted(slots.items())[:MAX_SLOT_POOLS])
         loads = role_loads(snapshot)
         self.idle_agents = Counter({r: len(load.idle) for r, load in loads.items()})
         self._throughput(snapshot, loads)
@@ -567,6 +577,27 @@ class Metrics:
                         for k, (_, age) in self.prework.items()
                     ],
                 )
+                if self.slots:
+                    metric(
+                        "kelpie_tool_slots",
+                        "gauge",
+                        "Tool slots of each pool (simulator lock files, [adapters.hermes.tools]).",
+                        [
+                            f"kelpie_tool_slots{_labels(pool=p)} {total}"
+                            for p, (total, _) in self.slots.items()
+                        ],
+                    )
+                    metric(
+                        "kelpie_tool_slots_held",
+                        "gauge",
+                        "Tool slots held now, by pool and holder: agent (a holder working in a "
+                        "task workspace) or ci (any other: CI runners share the slots).",
+                        [
+                            f"kelpie_tool_slots_held{_labels(pool=p, holder=h)} {n}"
+                            for p, (_, held) in self.slots.items()
+                            for h, n in sorted(held.items())
+                        ],
+                    )
                 metric(
                     "kelpie_idle_agents",
                     "gauge",

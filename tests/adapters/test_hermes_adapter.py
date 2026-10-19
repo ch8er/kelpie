@@ -253,6 +253,76 @@ def test_open_run_is_a_live_session(board: Board) -> None:
     assert s.source == "hermes"  # session-scoped actions (stop) are routed back here
 
 
+def test_a_live_tool_run_marks_the_session_and_slots_are_readings(
+    board: Board, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kelpie.adapters.hermes import adapter as hermes_adapter
+    from kelpie.adapters.hermes.processes import HostTools, PoolUse, ToolProcesses, ToolRun
+    from kelpie.core.model import ResourceKind
+
+    board.task("t_1", "running", ago(days=1), assignee="dev")
+    board.run("t_1", "dev", ago(hours=1), heartbeat=ago(minutes=2))
+    board.task("t_2", "running", ago(days=1), assignee="dev-2")
+    board.run("t_2", "dev-2", ago(hours=1), ended=ago(minutes=30), outcome="crashed")
+    board.task("t_3", "done", ago(hours=1), assignee="dev-3")
+    seen: dict[str, object] = {}
+
+    def host(config, now, tasks, workspaces):  # type: ignore[no-untyped-def]
+        seen["tasks"] = set(tasks)
+        seen["workspaces"] = dict(workspaces)
+        runs = {"t_1": ToolRun("xcodebuild", ago(minutes=12)), "t_2": ToolRun("x", ago(hours=1))}
+        return HostTools(runs, {"sim": PoolUse(4, agent=1, ci=2)})
+
+    monkeypatch.setattr(hermes_adapter, "read_host", host)
+    a = HermesAdapter(db_path=board.path, spool=None, tools=ToolProcesses())
+    snap = a.snapshot(NOW)
+    by_task = {s.task_id: s for s in snap.sessions}
+    assert by_task["t_1"].running_tool == "xcodebuild"
+    assert by_task["t_1"].running_tool_since == ago(minutes=12)
+    assert by_task["t_2"].running_tool is None  # its run ended: no live session to hold
+    assert seen["tasks"] == {"t_1", "t_2"}  # unfinished tasks only
+    assert seen["workspaces"] == {}  # no worktree recorded on this board
+    slots = {r.name: (r.used, r.limit) for r in snap.resources if r.kind is ResourceKind.SLOTS}
+    assert slots == {"sim:agent": (1.0, 4.0), "sim:ci": (2.0, 4.0)}
+    # One failed read reuses the last good one (a slow lsof must not remind mid-build)...
+    monkeypatch.setattr(hermes_adapter, "read_host", lambda *a: None)
+    snap = a.snapshot(NOW + timedelta(minutes=1))
+    assert {s.task_id: s.running_tool for s in snap.sessions}["t_1"] == "xcodebuild"
+    slots = [r for r in snap.resources if r.kind is ResourceKind.SLOTS]
+    assert slots and all(r.at == NOW for r in slots)  # the read's own time, not now
+    # ...for a few minutes; then no tool runs, no readings, and the snapshot goes on.
+    snap = a.snapshot(NOW + timedelta(minutes=6))
+    assert snap.resources == () and all(s.running_tool is None for s in snap.sessions)
+    # Not configured: nothing is read.
+    monkeypatch.setattr(hermes_adapter, "read_host", lambda *a: pytest.fail("read"))
+    assert adapter(board).snapshot(NOW).resources == ()
+
+
+def test_a_shared_workspace_is_no_task_workspace(
+    board: Board, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kelpie.adapters.hermes import adapter as hermes_adapter
+    from kelpie.adapters.hermes.processes import HostTools, ToolProcesses
+
+    own, shared = tmp_path / "own", tmp_path / "shared"
+    own.mkdir()
+    shared.mkdir()
+    for tid, path in (("t_1", own), ("t_2", shared), ("t_3", shared)):
+        board.task(tid, "running", ago(days=1), assignee="dev")
+        board.update(tid, workspace_kind="worktree", workspace_path=str(path))
+    seen: dict[str, object] = {}
+
+    def host(config, now, tasks, workspaces):  # type: ignore[no-untyped-def]
+        seen.update(tasks=set(tasks), workspaces=dict(workspaces))
+        return HostTools()
+
+    monkeypatch.setattr(hermes_adapter, "read_host", host)
+    a = HermesAdapter(db_path=board.path, spool=None, git_state=False, tools=ToolProcesses())
+    a.snapshot(NOW)
+    assert seen["workspaces"] == {os.path.realpath(own): "t_1", os.path.realpath(shared): None}
+    assert seen["tasks"] == {"t_1"}  # t_2 and t_3 share theirs: their tool runs are no one's
+
+
 def test_lookback_filters_old_runs_but_keeps_open_ones(board: Board) -> None:
     board.task("t_1", "ready", ago(days=9))
     old = board.run("t_1", "dev", ago(days=3), ended=ago(days=2), outcome="crashed")

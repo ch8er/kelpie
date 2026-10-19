@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -22,6 +23,10 @@ from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_c
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes.git_state import valid_base_ref
 from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME
+from kelpie.adapters.hermes.processes import (
+    DEFAULT_TIMEOUT as DEFAULT_TOOL_TIMEOUT,
+)
+from kelpie.adapters.hermes.processes import SlotPool, ToolProcesses
 from kelpie.adapters.hermes.worker import DEFAULT_GRACE
 from kelpie.adapters.issues.config import GitHubIssuesSettings, load_github_issues
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
@@ -120,6 +125,8 @@ class HermesSettings:
     # After a stop, end the run's worker processes at once; SIGKILL after ``worker_grace``.
     end_worker: bool = True
     worker_grace: timedelta = timedelta(seconds=DEFAULT_GRACE)
+    # Long tool runs and tool slots read from the host's processes ([adapters.hermes.tools])
+    tools: ToolProcesses | None = None
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -141,6 +148,7 @@ class HermesSettings:
             prework_statuses=self.prework_statuses,
             end_worker=self.end_worker,
             worker_grace=self.worker_grace.total_seconds(),
+            tools=self.tools,
         )
 
 
@@ -319,6 +327,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "wait_key",
         "end_worker",
         "worker_grace",
+        "tools",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     paths: dict[str, Path | None] = {}
@@ -469,7 +478,76 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         ),
         end_worker,
         worker_grace,
+        _hermes_tools(section.get("tools")),
     )
+
+
+def _hermes_tools(raw: Any) -> ToolProcesses | None:
+    """``[adapters.hermes.tools]``: tool process names, workspace patterns, slot pools."""
+    if raw is None:
+        return None
+    where = "[adapters.hermes.tools]"
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"{where} must be a table")
+    if extra := set(raw) - {"names", "workspace_patterns", "timeout", "slots"}:
+        raise ConfigError(f"unknown {where} keys: {sorted(extra)}")
+
+    def names(key: str, required: bool) -> tuple[str, ...]:
+        value = raw.get(key)
+        if value is None and not required:
+            return ()
+        if (
+            not isinstance(value, list)
+            or not value
+            or not all(isinstance(x, str) and x.strip() for x in value)
+        ):
+            example = ' (the tools that keep a task busy, e.g. ["xcodebuild"])' if required else ""
+            raise ConfigError(f"{where} {key} must be a non-empty list of strings{example}")
+        return tuple(dict.fromkeys(x.strip() for x in value))
+
+    tool_names = names("names", True)
+    if bad := [n for n in tool_names if "/" in n]:
+        raise ConfigError(f"{where} names are base names of processes, not paths: {bad}")
+    try:
+        timeout = parse_duration(raw.get("timeout", f"{DEFAULT_TOOL_TIMEOUT:g}s"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ConfigError(f"{where} timeout: {exc}") from exc
+    if not timedelta(0) < timeout <= timedelta(seconds=30):
+        raise ConfigError(f"{where} timeout must be positive and at most 30s")
+    pools = raw.get("slots", [])
+    if not isinstance(pools, list) or not all(
+        isinstance(p, Mapping)
+        and {"name", "paths"} <= set(p) <= {"name", "paths", "size"}
+        and (
+            "size" not in p
+            or (isinstance(p["size"], int) and not isinstance(p["size"], bool) and p["size"] > 0)
+        )
+        and isinstance(p["name"], str)
+        and re.fullmatch(r"[\w.-]{1,64}", p["name"])
+        and isinstance(p["paths"], list)
+        and p["paths"]
+        and all(isinstance(x, str) and x.strip() for x in p["paths"])
+        for p in pools
+    ):
+        raise ConfigError(
+            "[[adapters.hermes.tools.slots]] entries need a name (letters, digits, . _ -) "
+            "and paths (glob patterns of the slot lock files), optionally size (a positive "
+            "count), and nothing else"
+        )
+    if len({p["name"] for p in pools}) != len(pools):
+        raise ConfigError("[[adapters.hermes.tools.slots]] names a pool twice")
+    try:
+        return ToolProcesses(
+            names=tool_names,
+            workspace_patterns=names("workspace_patterns", False),
+            slots=tuple(
+                SlotPool(p["name"], tuple(x.strip() for x in p["paths"]), p.get("size"))
+                for p in pools
+            ),
+            timeout=timeout.total_seconds(),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"{where} {exc}") from exc
 
 
 def _with_wait_key(hermes: HermesSettings | None, db: Path | None) -> HermesSettings | None:

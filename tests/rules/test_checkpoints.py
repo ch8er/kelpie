@@ -367,8 +367,11 @@ def test_no_reminder_while_a_long_tool_call_is_in_progress() -> None:
     assert run(task(), live(), spans=(finished,))  # it is over: commit now
     # Past tool_grace a call no longer holds the reminder (it may be hung).
     assert run(task(), live(running_tool="xcodebuild", running_tool_since=NOW - 150 * M))
-    # A short call, one with no start time, or one starting in the future holds nothing.
-    assert run(task(), live(running_tool="ls", running_tool_since=NOW - 2 * M))
+    # The adapter's tool run (a build process) holds from its start; a short span does not.
+    assert run(task(), live(running_tool="xcodebuild", running_tool_since=NOW - 2 * M)) == []
+    short = Span("t", "s", "ls", SpanKind.TOOL, NOW - 2 * M, session_id="S-1")
+    assert run(task(), live(), spans=(short,))
+    # One with no start time, or one starting in the future, holds nothing.
     assert run(task(), live(running_tool="sim"))
     assert run(task(), live(running_tool="sim", running_tool_since=NOW + 300 * M))
 

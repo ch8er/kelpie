@@ -1,0 +1,36 @@
+id: "14-checkpoint-build-in-progress"
+incident: null
+title: "No commit reminder while a build or simulator run is in progress"
+description: >
+  From a live review (rule 9 on Hermes): an agent running xcodebuild or ios_sim.sh from its
+  task worktree is busy, and a "no commit" reminder interrupts it for nothing. The Hermes
+  adapter reads such a process from the host ([adapters.hermes.tools]) as the session's
+  running_tool, from its start; this is the rule's side. A session whose build started 3
+  minutes ago is not reminded; one with the same uncommitted work and no tool running is;
+  so is one whose build has run past tool_grace (it may be hung).
+rule: checkpoints
+config:
+  commit_every: "30m"
+  tool_grace: "2h"
+snapshot:
+  now: "2026-05-12T12:00:00+00:00"
+  owners:
+    - {id: dev-1, role: dev}
+    - {id: dev-2, role: dev}
+    - {id: dev-3, role: dev}
+  tasks:
+    - {id: t_1451, title: "Login screen tests", status: in_progress, status_since: "2026-05-12T10:30:00+00:00", owner_id: dev-1, source: hermes}
+    - {id: t_1452, title: "Settings screen tests", status: in_progress, status_since: "2026-05-12T10:30:00+00:00", owner_id: dev-2, source: hermes}
+    - {id: t_1453, title: "Checkout UI tests", status: in_progress, status_since: "2026-05-12T09:00:00+00:00", owner_id: dev-3, source: hermes}
+  sessions:
+    - {id: S-1451, task_id: t_1451, owner_id: dev-1, started_at: "2026-05-12T10:30:00+00:00", last_heartbeat: "2026-05-12T11:59:00+00:00", last_commit_at: "2026-05-12T11:10:00+00:00", dirty_worktree: true, changed_files: 4, running_tool: xcodebuild, running_tool_since: "2026-05-12T11:57:00+00:00"}
+    - {id: S-1452, task_id: t_1452, owner_id: dev-2, started_at: "2026-05-12T10:30:00+00:00", last_heartbeat: "2026-05-12T11:59:00+00:00", last_commit_at: "2026-05-12T11:10:00+00:00", dirty_worktree: true, changed_files: 4}
+    - {id: S-1453, task_id: t_1453, owner_id: dev-3, started_at: "2026-05-12T09:00:00+00:00", last_heartbeat: "2026-05-12T11:59:00+00:00", last_commit_at: "2026-05-12T09:30:00+00:00", dirty_worktree: true, changed_files: 4, running_tool: ios_sim.sh, running_tool_since: "2026-05-12T09:40:00+00:00"}
+expected_actions:
+  - kind: comment
+    task_id: t_1452
+    reason_contains: "no commit for 50 minutes"
+  - kind: comment
+    task_id: t_1453
+not_expected_actions:
+  - {kind: comment, task_id: t_1451}
