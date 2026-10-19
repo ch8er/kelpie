@@ -19,7 +19,12 @@ src/kelpie/
   traces/       OTLP ingest (OpenTelemetry GenAI semconv), storage, export
   report/       daily report — the only place an LLM may be used, optionally
   remote/       multi-host: kelpie agent, the hub of kelpie serve, the wire protocol
-  cli.py, server.py
+  alerts/       real-time alert delivery: one router over channels (Telegram, Slack)
+  resources/    host resource readings from Prometheus/node_exporter (optional)
+  selftest/     kelpie selftest: live checks of act paths on a throwaway board, mock model
+  sim/          a simulated farm (loopback only) for kelpie demo and the e2e tests
+  demo/         kelpie demo: the simulated farm's day, narrated
+  cli.py, server.py, app.py, doctor.py, why.py, snooze.py
 tests/fixtures/incidents/   synthetic incident fixtures (format: README.md there)
 ```
 
