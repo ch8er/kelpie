@@ -35,6 +35,10 @@ no bill: dollars are an estimate and marked so.
 **Cost per completed task.** The day's priced spend divided by the tasks that reached
 ``done`` during the day, as the board reports them now.
 
+**Planned waits.** Agent tasks planned for later (rule 13's ``planned``, behind a person's
+open inbox) are listed under "Planned waits" in agent-hours and never counted: they have not
+started, so they do not wait.
+
 **Fixed by Kelpie.** Ledger entries of the day that an executor carried out, per rule and
 action; entries logged in observe mode or dry-run, or suggested, are listed as what Kelpie
 *would* have done in act mode. **Needs a human.** Long-lived states still open at the end
@@ -129,6 +133,7 @@ from kelpie.report.waits import (
     outages,
 )
 from kelpie.report.waits import UNKNOWN as UNKNOWN_WAIT
+from kelpie.rules.needs_you import PLANNED_AGENT_TASKS, PLANNED_TASKS
 from kelpie.rules.orphan_status import OrphanStatus
 from kelpie.traces.outputs import (
     OutputGroup,
@@ -291,6 +296,17 @@ class OutageLine:
 
 
 @dataclass(frozen=True, slots=True)
+class PlannedWaits:
+    """Agent tasks planned for later behind a person's open inbox (rule 13's ``planned``):
+    not waiting, so listed and never counted as hours lost. Planned work behind a human task
+    rule 13 does not escalate (nothing real waits on it) is not seen here."""
+
+    agent_hours: float
+    tasks: tuple[str, ...]
+    held: tuple[str, ...] = ()  # those of ``tasks`` under a hold label on the board
+
+
+@dataclass(frozen=True, slots=True)
 class StuckCard:
     """A card in a pre-work status (triage, scheduled) past rule 3's ``prework_after`` that no
     open task depends on: it delays no work, so it is listed, not counted."""
@@ -362,6 +378,7 @@ class DailyReport:
     stuck_idle: tuple[StuckCard, ...] = ()
     outages: tuple[OutageLine, ...] = ()  # rule 9's CI outages of the day
     outage_wait_hours: float = 0.0  # the day's waiting time all of them explained
+    planned: PlannedWaits | None = None  # behind work planned for later: never counted
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
 
     @property
@@ -469,8 +486,31 @@ def build_report(
         outages=outage_lines,
         outage_wait_hours=outage_hours,
         stuck_idle=_stuck_idle(inputs, start, end),
+        planned=_planned_waits(inputs, start, end),
         act_blockers=inputs.act_blockers,
     )
+
+
+def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> PlannedWaits | None:
+    """The agent-hours of planned agent tasks behind people's open inboxes over the day, from
+    rule 13 (counted like the people line, :func:`people_agent_hours`: per person, so a task
+    behind two people's human tasks counts for each, as in rule 13's counts). Held tasks are
+    planned to rule 13 too (hold labels are planned labels): they are listed like the others,
+    marked as held where the board shows the hold label."""
+    hours, tasks = 0.0, set()
+    for row in inputs.states:
+        state = row.state
+        if not state.id.startswith(PEOPLE_STATE):
+            continue
+        a, b = max(counts_from(state), start), min(state.last_seen, end)
+        if b <= a:
+            continue
+        h, ids = people_agent_hours(inputs.actions, state, a, b, planned=True)
+        hours += h
+        tasks.update(ids)
+    held = {t.id for t in inputs.tasks if set(t.labels) & set(inputs.hold_labels)}
+    listed = tuple(sorted(tasks))
+    return PlannedWaits(hours, listed, tuple(t for t in listed if t in held)) if hours > 0 else None
 
 
 def _stuck_idle(inputs: ReportInputs, start: datetime, end: datetime) -> tuple[StuckCard, ...]:
@@ -790,14 +830,24 @@ def hold_agent_hours(
 
 
 def people_agent_hours(
-    entries: Sequence[LedgerEntry], state: OpenState, a: datetime, b: datetime
+    entries: Sequence[LedgerEntry],
+    state: OpenState,
+    a: datetime,
+    b: datetime,
+    planned: bool = False,
 ) -> tuple[float, tuple[str, ...]]:
     """Agent-hours spent waiting on a person in ``[a, b)``, and the agent tasks that waited.
 
     Rule 13 reports how many agent tasks wait on the person (``waiting_agent_tasks``) with
     every handling of their inbox's alert, including the hourly suppressed repeats; see
-    :func:`_sampled_hours`. Alerts recorded before that parameter existed count as 0."""
+    :func:`_sampled_hours`. Alerts recorded before that parameter existed count as 0. Tasks
+    planned for later are not waiting (incident 20): rule 13 leaves them out of that count
+    and reports them apart (``planned_agent_tasks``, ``planned``), which ``planned`` reads
+    instead; they never count as hours lost."""
     person = state.id[len(PEOPLE_STATE) :]
+    count_key, ids_key = (
+        (PLANNED_AGENT_TASKS, PLANNED_TASKS) if planned else ("waiting_agent_tasks", "waiting")
+    )
 
     def sample(e: LedgerEntry) -> tuple[int, list[object]] | None:
         who = e.params.get("escalate_to")
@@ -805,8 +855,8 @@ def people_agent_hours(
             return None  # a resolution notice or another rule's entry: no view of the inbox
         if (who if isinstance(who, str) else "unassigned") != person:
             return None
-        count = e.params.get("waiting_agent_tasks")
-        waiting = e.params.get("waiting")
+        count = e.params.get(count_key)
+        waiting = e.params.get(ids_key)
         n = count if isinstance(count, int) and not isinstance(count, bool) else 0
         return max(n, 0), waiting if isinstance(waiting, list) else []
 
@@ -1120,6 +1170,17 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             )
         if len(report.stuck_idle) > _SHOWN_STUCK:
             lines.append(f"- and {len(report.stuck_idle) - _SHOWN_STUCK} more")
+    if report.planned is not None:
+        listed = f": {tasks(report.planned.tasks)}" if report.planned.tasks else ""
+        if report.planned.held:
+            listed += f" (held: {tasks(report.planned.held)})"
+        lines += [
+            "",
+            f"**Planned waits**: {report.planned.agent_hours:.1f} agent-hours of agent tasks "
+            "planned for later (not started: a pre-work status or a planned label) behind a "
+            "person's open inbox; not waiting, so not counted in the hours lost (rule 13 lists "
+            f"at most 20 ids per alert){listed}",
+        ]
     lines += ["", "## Spend", ""]
     note = " (as the board reports them now; adapters only look back so far)"
     lines.append(

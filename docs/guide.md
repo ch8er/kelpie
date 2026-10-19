@@ -233,7 +233,10 @@ report; no LLM is involved.
   triage or scheduled while other tasks wait on them (rule 3) are a line of their own; a
   card rule 3 finds stuck (past `prework_after`, not held, ignored or queued behind its own
   parent) that nothing waits on is listed under "Stuck, blocking nothing" with its age, and
-  not counted in the hours or dollars (it delays no work).
+  not counted in the hours or dollars (it delays no work). Agent tasks planned for later
+  (not started: a pre-work status or a planned label; incident 20) never count as waiting:
+  rule 13 leaves them out of its count, and those behind a person's open inbox are listed
+  under "Planned waits" in agent-hours, never counted.
   Humans (owners of kind `human`) never count as idle agents. `[report] hour_usd` prices
   them all.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
