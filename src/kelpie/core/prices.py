@@ -61,6 +61,7 @@ __all__ = [
     "PriceTable",
     "canonical_model",
     "model_id",
+    "platform_wrapped",
 ]
 
 PER_TOKENS = 1_000_000  # prices are USD per this many tokens
@@ -173,6 +174,15 @@ def model_id(model: str) -> str:
     if s.startswith("claude-"):
         s = _CLAUDE_DOT.sub("-", s)
     return s
+
+
+@lru_cache(maxsize=4096)
+def platform_wrapped(model: str) -> bool:
+    """Whether ``model`` carries another platform's wrapping (:func:`model_id`): a
+    ``vendor/`` prefix (not Gemini's own ``models/``), Vertex's ``@date`` or Bedrock's ids.
+    Such calls are billed by that platform, not by the model's own provider."""
+    s = _TAG.sub("", model.strip().lower()[:MAX_MODEL]).removeprefix("models/")
+    return "/" in s or "@" in s or bool(_BEDROCK_PREFIX.match(s))
 
 
 @lru_cache(maxsize=4096)

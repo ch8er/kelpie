@@ -842,6 +842,8 @@ class Metrics:
                 for p, ok in sorted(self.cost_reports.items())
             ],
         )
+        if not self.reconciled:
+            return
         rows = [(r, _labels(provider=r.provider)) for _, r in sorted(self.reconciled.items())]
         metric(
             "kelpie_spend_reported_usd",

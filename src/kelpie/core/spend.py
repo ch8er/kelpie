@@ -54,6 +54,7 @@ from kelpie.core.serde import parse_duration
 
 __all__ = [
     "PROVIDER_PATTERNS",
+    "Estimate",
     "GapThreshold",
     "ProviderMode",
     "ProviderSpend",
@@ -133,16 +134,25 @@ class SpendConfig:
     def _own(self, name: str | None) -> ProviderSpend | None:
         return next((p for p in self.settings.providers if p.name == name), None)
 
-    def provider_for(self, model: str | None) -> str | None:
-        """The provider ``model`` belongs to, if anything tells (module docstring)."""
+    def configured_provider(self, model: str | None) -> str | None:
+        """The ``[spend.providers.<name>]`` whose ``models`` match ``model``, if any."""
         if not model:
             return None
         canonical = canonical_model(model)
         for p in self.settings.providers:
             if any(fnmatchcase(model, m) or fnmatchcase(canonical, m.lower()) for m in p.models):
                 return p.name
+        return None
+
+    def provider_for(self, model: str | None) -> str | None:
+        """The provider ``model`` belongs to, if anything tells (module docstring)."""
+        if not model:
+            return None
+        if (found := self.configured_provider(model)) is not None:
+            return found
         if (found := self.prices.provider_for(model)) is not None:
             return found
+        canonical = canonical_model(model)
         return next((v for pat, v in PROVIDER_PATTERNS if fnmatchcase(canonical, pat)), None)
 
     def mode_for(self, provider: str | None) -> ProviderMode:
@@ -286,37 +296,55 @@ class GapThreshold:
     min_usd: float = 5.0
 
 
+@dataclass(frozen=True, slots=True)
+class Estimate:
+    """A provider's day priced from traces: USD, and the tokens left out of it (models
+    without a price, calls whose model is not known)."""
+
+    usd: float = 0.0
+    unpriced_tokens: int = 0
+    unknown_tokens: int = 0
+
+
 def reconcile(
     reported: Iterable[ReportedCost],
-    estimated: Mapping[tuple[str, date], tuple[float, int]],
+    estimated: Mapping[tuple[str, date], Estimate],
     thresholds: Mapping[str, GapThreshold] | None = None,
+    scopes: Mapping[str, str] | None = None,
 ) -> tuple[Reconciliation, ...]:
-    """Each (provider, day) a cost report covers that has an estimate: ``estimated`` maps
-    it to (USD priced from traces, tokens of models without a price). Newest day first,
-    then by provider."""
+    """Each (provider, day) a cost report covers that has an estimate. ``scopes`` gives
+    what a provider's figures cover (``Reconciliation.bill_scope``; ``"tokens"`` by
+    default). A day is ``large`` when it has a gap past the provider's thresholds and the
+    bill is not a credit. Newest day first, then by provider."""
     bills: dict[tuple[str, date], float] = {}
     for c in reported:
         bills[(c.provider, c.day)] = bills.get((c.provider, c.day), 0.0) + c.usd
     out = []
     for (provider, day), bill in bills.items():
-        if (provider, day) not in estimated:
+        if (found := estimated.get((provider, day))) is None:
             continue
-        usd, unpriced = estimated[(provider, day)]
-        gap = usd - bill
+        usd, bill = round(found.usd, 6), round(bill, 6)
+        gap = round(usd - bill, 6)
         ratio = gap / bill if bill > 0 else None
         limit = (thresholds or {}).get(provider, GapThreshold())
-        large = abs(gap) >= limit.min_usd and (ratio is None or abs(ratio) >= limit.ratio)
-        start = datetime.combine(day, datetime.min.time(), UTC)
+        large = (
+            gap != 0
+            and bill >= 0
+            and abs(gap) >= limit.min_usd
+            and (ratio is None or abs(ratio) >= limit.ratio)
+        )
         out.append(
             Reconciliation(
-                provider,
-                start,
-                round(usd, 6),
-                round(bill, 6),
-                round(gap, 6),
-                ratio,
-                large,
-                unpriced,
+                provider=provider,
+                day=datetime.combine(day, datetime.min.time(), UTC),
+                estimated_usd=usd,
+                reported_usd=bill,
+                gap_usd=gap,
+                gap_ratio=ratio,
+                large=large,
+                unpriced_tokens=found.unpriced_tokens,
+                unknown_tokens=found.unknown_tokens,
+                bill_scope=(scopes or {}).get(provider, "tokens"),
             )
         )
     return tuple(sorted(out, key=lambda r: (-r.day.timestamp(), r.provider)))

@@ -133,7 +133,13 @@ class SpanStore(Protocol):
 
     def usage_between(self, start: datetime, end: datetime) -> tuple[TokenUsage, ...]:
         """Counted tokens per (session, task, pricing model) of the spans whose last time
-        is in ``[start, end)``: a closed day, for reconciling it with the bill."""
+        is in ``[start, end)``: a closed day, for reconciling it with the bill. A call
+        that spans midnight belongs to the day it ended in."""
+        ...
+
+    def oldest_at(self) -> datetime | None:
+        """The last time of the oldest stored span (None when empty): days before it are
+        not held whole (pruned, or before spans were recorded)."""
         ...
 
     def record_attribution(
@@ -447,6 +453,10 @@ class MemorySpanStore:
             ids.discard(key[1])
             if not ids:
                 del self._traces[key[0]]
+
+    def oldest_at(self) -> datetime | None:
+        with self._lock:
+            return min((last_at(s) for s, _ in self._spans.values()), default=None)
 
     def count(self) -> int:
         with self._lock:

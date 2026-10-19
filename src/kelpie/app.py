@@ -74,11 +74,18 @@ from kelpie.core.ports import (
     SupportsStop,
     SupportsWait,
 )
-from kelpie.core.prices import CHECKED, canonical_model
+from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
-from kelpie.core.spend import ProviderMode, SpendConfig, SpendSettings, load_spend, reconcile
+from kelpie.core.spend import (
+    Estimate,
+    ProviderMode,
+    SpendConfig,
+    SpendSettings,
+    load_spend,
+    reconcile,
+)
 from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import (
     SchemaOutdated,
@@ -1261,7 +1268,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
     enrich, connectors = connector_steps(settings, metrics, clock)
-    costs = cost_report_steps(settings)  # kelpie serve only: it reads with the admin key
+    costs = cost_report_steps(settings, metrics)  # kelpie serve only: reads with the admin key
     enrich += costs
     engine = Engine(
         loaded.rules,
@@ -1347,7 +1354,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         forwarder.start()
     for _, step in costs:  # reconcile the bill with the spend in this span store
         if isinstance(step, CostReportStep):
-            step.spans, step.metrics = span_store, metrics
+            step.spans = span_store
     retention = SpanRetention(span_store, clock, traces.retention, traces.max_rows, metrics)
     window = SpanWindow(
         span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
@@ -1463,13 +1470,18 @@ def connector_steps(
 
 
 RECONCILE_EVERY = timedelta(hours=1)  # also when the reported figures change
+RECONCILE_RETRY = timedelta(minutes=5)  # after a failure
+# A day is reconciled once it ended this long ago: spans of calls still running at
+# midnight arrive late, and the providers' reports fill in over some hours.
+SETTLE = timedelta(hours=6)
 
 
 class CostReportStep:
     """Takes the providers' latest cost report figures (the reader keeps the interval and
     reads in the background), stores each provider's when they change, and reconciles
-    them with the spend priced from traces for the same closed days (when there is a span
-    store): ``Snapshot.reconciliations``, and the ``kelpie_spend_*`` metrics."""
+    them with the spend priced from traces for the same settled days (when there is a span
+    store): ``Snapshot.reconciliations``, and the ``kelpie_spend_*`` metrics. A failed
+    reconciliation keeps the last result and is retried after :data:`RECONCILE_RETRY`."""
 
     def __init__(
         self,
@@ -1487,7 +1499,8 @@ class CostReportStep:
         self._stored: dict[str, tuple[ReportedCost, ...]] = {}
         self._reconciled: tuple[Reconciliation, ...] = ()
         self._reconciled_from: tuple[ReportedCost, ...] | None = None
-        self._reconciled_at: datetime | None = None
+        self._next_at: datetime | None = None  # when to reconcile again, figures unchanged
+        self._failing = False
 
     def __call__(self, snapshot: Snapshot) -> Snapshot:
         now = snapshot.now
@@ -1503,14 +1516,20 @@ class CostReportStep:
         if self.spans is None or self.settings is None:
             self._observe(())
             return snapshot
-        stale = self._reconciled_at is None or now - self._reconciled_at >= RECONCILE_EVERY
-        if costs != self._reconciled_from or stale:
+        due = self._next_at is None or now >= self._next_at
+        if due or (costs != self._reconciled_from and not self._failing):
             try:
                 self._reconciled = reconcile_spend(self.settings, self.spans, costs, now)
-            except Exception as exc:  # spans not readable: keep the last
-                log.error("cost reports: spend could not be reconciled: %s", exc)
+            except Exception as exc:  # spans not readable: keep the last, retry later
+                if not self._failing:
+                    log.error("cost reports: spend could not be reconciled: %s", exc)
+                self._failing = True
+                self._next_at = now + RECONCILE_RETRY
             else:
-                self._reconciled_from, self._reconciled_at = costs, now
+                if self._failing:
+                    log.info("cost reports: spend reconciled again")
+                self._failing = False
+                self._reconciled_from, self._next_at = costs, now + RECONCILE_EVERY
         self._observe(self._reconciled)
         return replace(snapshot, reconciliations=self._reconciled)
 
@@ -1518,43 +1537,64 @@ class CostReportStep:
         if self.metrics is None:
             return
         statuses = getattr(self.source, "statuses", None)
-        up = {s.provider: bool(s.ok) for s in statuses()} if callable(statuses) else {}
+        found = statuses() if callable(statuses) else ()
+        up = {s.provider: bool(s.ok) for s in found if s.ok is not None}  # None: not read yet
         self.metrics.set_cost_reports(up, reconciled)
 
 
 def reconcile_spend(
     settings: Settings, spans: SpanStore, costs: Sequence[ReportedCost], now: datetime
 ) -> tuple[Reconciliation, ...]:
-    """The closed UTC days ``costs`` cover that the span store still holds whole (within
-    the retention), priced from traces per provider and compared with the bill."""
+    """The UTC days ``costs`` cover that ended :data:`SETTLE` ago and that the span store
+    holds whole (within the retention, and not older than its oldest span), priced from
+    traces per provider and compared with the bill.
+
+    A call counts for the provider ``[spend.providers.<name>] models`` puts it under,
+    else the one its model belongs to unless another platform wraps the id (Bedrock,
+    Vertex, a ``vendor/`` router): that platform bills it, not the provider's cost report.
+    Calls without a known provider are counted as ``unknown_tokens`` of every provider."""
     spend = settings.spend
     reports = settings.cost_reports
     thresholds = reports.thresholds if reports is not None else {}
-    today = now.astimezone(UTC).date()
+    scopes = reports.scopes if reports is not None else {}
     oldest = (now - settings.traces.retention).astimezone(UTC)
-    days = sorted({c.day for c in costs})
+    held = spans.oldest_at()
+    if held is not None:
+        oldest = max(oldest, held.astimezone(UTC))
     providers = {c.provider for c in costs}
-    estimated: dict[tuple[str, date], tuple[float, int]] = {}
-    for day in days:
+    estimated: dict[tuple[str, date], Estimate] = {}
+    for day in sorted({c.day for c in costs}):
         start = datetime.combine(day, datetime.min.time(), UTC)
-        if day >= today or start < oldest:
-            continue  # not closed, or partly beyond the retention
-        sums = {p: [0.0, 0] for p in providers}
-        for row in spans.usage_between(start, start + timedelta(days=1)):
-            provider = spend.provider_for(row.model)
-            if provider not in sums:
+        end = start + timedelta(days=1)
+        if held is None or end + SETTLE > now or start < oldest:
+            continue  # not settled, or not held whole
+        usd = dict.fromkeys(providers, 0.0)
+        unpriced = dict.fromkeys(providers, 0)
+        unknown = 0
+        for row in spans.usage_between(start, end):
+            tokens = row.input_tokens + row.output_tokens
+            provider = spend.configured_provider(row.model)
+            if provider is None and row.model and not platform_wrapped(row.model):
+                provider = spend.provider_for(row.model)
+            if provider is None:
+                if not row.model or spend.provider_for(row.model) is None:
+                    unknown += tokens  # could be any provider's
+                continue  # or another platform's
+            if provider not in usd:
                 continue
             price = settings.budgets.prices.price_for(row.model, day)
             if price is None:
-                sums[provider][1] += row.input_tokens + row.output_tokens
+                unpriced[provider] += tokens
             else:
-                sums[provider][0] += price.cost(row)
-        for provider, (usd, unpriced) in sums.items():
-            estimated[(provider, day)] = (usd, int(unpriced))
-    return reconcile(costs, estimated, thresholds)
+                usd[provider] += price.cost(row)
+        for provider in providers:
+            estimated[(provider, day)] = Estimate(usd[provider], unpriced[provider], unknown)
+    return reconcile(costs, estimated, thresholds, scopes)
 
 
-def cost_report_steps(settings: Settings) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+def cost_report_steps(
+    settings: Settings, metrics: Metrics | None = None
+) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
     reports = settings.cost_reports
     if reports is None:
         return []
@@ -1570,7 +1610,7 @@ def cost_report_steps(settings: Settings) -> list[tuple[str, Callable[[Snapshot]
         store = SqliteCostReports(settings.db_path) if settings.db_path is not None else None
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open the cost report store {settings.db_path}: {exc}") from exc
-    return [("cost_reports", CostReportStep(source, store, settings))]
+    return [("cost_reports", CostReportStep(source, store, settings, metrics=metrics))]
 
 
 def _github_steps(

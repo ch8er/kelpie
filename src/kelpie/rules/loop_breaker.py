@@ -18,10 +18,13 @@ checks, all ending in ``stop`` (carrying ``session_id``) plus an ``alert``:
   emitted;
 - **the bill**: when a provider's cost report disagrees with the spend priced from traces
   for its newest reconciled day (``Snapshot.reconciliations``, ``large`` past the
-  provider's ``warn_gap`` and ``warn_min_usd``), a warning: dollar budgets of that
-  provider are off by as much. Traces lower than the bill point at agents that do not
-  export spans or models without a price; higher, at prices above the bill (a missed
-  discount) or a call counted twice.
+  provider's ``warn_gap`` and ``warn_min_usd``), a warning naming the likely causes, so
+  dollar budgets of that provider can be trusted again. Traces lower than the bill point
+  at usage the farm's traces do not show (agents that do not export spans, other users
+  of the same key, models without a price, and for a bill of everything rather than
+  tokens: web search, tools and other non-token items); higher, at prices above the
+  bill's (a discount, batch, credits or a ``[prices]`` entry) or calls the provider did
+  not bill (another platform's under the provider's ``models``).
 
 Precedence with rule 2 (``wait_condition``): a run of identical calls that matches
 ``poll_patterns`` is polling, which rule 2 coaches with a ``comment`` once the same check
@@ -154,26 +157,13 @@ class LoopBreaker:
         for provider, r in sorted(newest.items()):
             if not r.large:
                 continue
-            share = f" ({r.gap_ratio:+.0%})" if r.gap_ratio is not None else ""
-            if r.gap_usd < 0:
-                cause = (
-                    "traces show less than was billed: agents that do not export spans, or "
-                    "models without a price"
-                )
-                if r.unpriced_tokens:
-                    cause += f" ({r.unpriced_tokens:,} tokens of them that day)"
-            else:
-                cause = (
-                    "traces show more than was billed: prices above the bill's (a discount, "
-                    "batch or a [prices] entry), or a call counted twice"
-                )
             yield Action(
                 ActionKind.ALERT,
                 NAME,
                 f"Spend from traces and the {provider} bill disagree for {r.day:%Y-%m-%d}: "
                 f"${r.estimated_usd:,.2f} priced from traces, ${r.reported_usd:,.2f} in the "
-                f"cost report{share}; {cause}. Dollar budgets of {provider} are off by as "
-                "much.",
+                f"cost report{_share(r)}; {_causes(r)}. Dollar budgets of {provider} follow "
+                "the traces, not the bill.",
                 severity=Severity.WARNING,
                 key=f"bill:{provider}",
                 state=f"{NAME}:bill:{provider}",
@@ -186,6 +176,22 @@ class LoopBreaker:
                     "gap_ratio": r.gap_ratio,
                 },
             )
+
+    def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
+        """What the newest reconciled day of a ``bill:`` state's provider shows now."""
+        prefix = f"{NAME}:bill:"
+        if not state_id.startswith(prefix):
+            return None
+        provider = state_id.removeprefix(prefix)
+        days = [r for r in snapshot.reconciliations if r.provider == provider]
+        if not days:
+            return f"the {provider} bill is no longer reconciled with the traces."
+        r = max(days, key=lambda d: d.day)
+        return (
+            f"the {provider} bill and the spend from traces agree within the thresholds for "
+            f"{r.day:%Y-%m-%d}: ${r.estimated_usd:,.2f} priced from traces, "
+            f"${r.reported_usd:,.2f} in the cost report{_share(r)}."
+        )
 
     # --- thresholds ---------------------------------------------------------------------
 
@@ -531,3 +537,25 @@ def _check_limits(limits: Thresholds, where: str) -> None:
             f"{where}: poll_hard_limit ({limits.poll_hard_limit}) must not be below "
             f"identical_calls ({limits.identical_calls})"
         )
+
+
+def _share(r: Reconciliation) -> str:
+    return f" ({r.gap_ratio:+.0%})" if r.gap_ratio is not None else ""
+
+
+def _causes(r: Reconciliation) -> str:
+    """The likely causes of a day's gap, most likely first."""
+    if r.gap_usd < 0:
+        causes = ["agents that do not export spans", "other users of the same key"]
+        if r.unpriced_tokens:
+            causes.insert(0, f"models without a price ({r.unpriced_tokens:,} tokens that day)")
+        if r.unknown_tokens:
+            causes.append(f"calls without a known model ({r.unknown_tokens:,} tokens)")
+        if r.bill_scope == "total":
+            causes.insert(0, "non-token items the bill includes (web search, tools, storage)")
+        return "traces show less than was billed: " + ", ".join(causes)
+    return (
+        "traces show more than was billed: prices above the bill's (a discount, batch, "
+        "credits or a [prices] entry), or calls the provider did not bill (another "
+        "platform's, matched by [spend.providers] models)"
+    )

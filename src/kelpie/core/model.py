@@ -305,11 +305,14 @@ class ReportedCost:
 
 @dataclass(frozen=True, slots=True)
 class Reconciliation:
-    """One provider's day: what Kelpie priced from traces against what its cost report
-    says. ``day`` is the UTC midnight the day starts at. ``gap_usd`` is estimate minus
-    bill (negative: traces show less than was billed, e.g. agents not exporting);
-    ``gap_ratio`` is that over the bill (None when the bill is 0). ``large``: past the
-    provider's warning thresholds."""
+    """One provider's closed day: what Kelpie priced from traces against what its cost
+    report says. ``day`` is the UTC midnight the day starts at; a call belongs to the day
+    its span ended in. ``gap_usd`` is estimate minus bill (negative: traces show less
+    than was billed, e.g. agents not exporting or usage outside the farm on the same
+    key); ``gap_ratio`` is that over the bill (None when the bill is 0 or a credit).
+    ``large``: past the provider's warning thresholds. ``bill_scope`` is what the figures
+    cover: ``"tokens"`` (token charges only) or ``"total"`` (everything billed that day,
+    web search and other tools too, so a gap is expected)."""
 
     provider: str
     day: datetime
@@ -319,6 +322,8 @@ class Reconciliation:
     gap_ratio: float | None = None
     large: bool = False
     unpriced_tokens: int = 0  # tokens of the day's models without a price (not estimated)
+    unknown_tokens: int = 0  # tokens of calls whose provider is not known (maybe this one)
+    bill_scope: str = "tokens"
 
 
 @dataclass(frozen=True, slots=True)

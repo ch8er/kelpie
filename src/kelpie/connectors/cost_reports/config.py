@@ -117,6 +117,14 @@ class CostReportsSettings:
     def thresholds(self) -> dict[str, GapThreshold]:
         return {r.provider: r.gap for r in self.reports}
 
+    @property
+    def scopes(self) -> dict[str, str]:
+        """What each provider's figures cover (``Reconciliation.bill_scope``): Anthropic's
+        are its token charges, OpenAI's the day's total."""
+        return {
+            r.provider: "total" if r.kind is ReportKind.OPENAI else "tokens" for r in self.reports
+        }
+
     def build(self, environ: Mapping[str, str] = os.environ) -> CostReportSource:
         return CostReportSource([r.build(environ) for r in self.reports])
 

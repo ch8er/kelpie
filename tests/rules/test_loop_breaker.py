@@ -591,3 +591,28 @@ def test_the_newest_day_decides_even_when_it_agrees() -> None:
         ),
     )
     assert LoopBreaker().evaluate(snap) == []
+
+
+def test_a_bill_of_everything_names_non_token_items_first() -> None:
+    snap = Snapshot(
+        now=NOW,
+        reconciliations=(
+            _rec("openai", 1, 10.0, 30.0, True, bill_scope="total", unknown_tokens=900),
+        ),
+    )
+    (alert,) = LoopBreaker().evaluate(snap)
+    causes = alert.reason.split("traces show less than was billed: ")[1]
+    assert causes.startswith("non-token items the bill includes")
+    assert "calls without a known model (900 tokens)" in causes
+    assert "off by as much" not in alert.reason
+
+
+def test_a_resolved_bill_says_what_the_newest_day_shows() -> None:
+    rule = LoopBreaker()
+    calm = Snapshot(now=NOW, reconciliations=(_rec("anthropic", 2, 84.0, 84.5, False),))
+    text = rule.resolved("loop_breaker:bill:anthropic", calm)
+    assert text is not None and "agree within the thresholds for 2026-03-02" in text
+    assert "$84.00 priced from traces, $84.50 in the cost report (-1%)" in text
+    gone = rule.resolved("loop_breaker:bill:anthropic", Snapshot(now=NOW))
+    assert gone == "the anthropic bill is no longer reconciled with the traces."
+    assert rule.resolved("loop_breaker:budget:x", calm) is None

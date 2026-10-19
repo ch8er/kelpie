@@ -1227,9 +1227,9 @@ spend mode unless `mode` says otherwise. At most 10.
 | `timeout` | `"10s"` | Each request (> 0, <= 60s). |
 | `days` | `7` | Complete UTC days read each time (1 to 31); today is never read, its figure is not final. |
 | `workspaces` | all | `anthropic`: count only these workspace ids (the default workspace has none). |
+| `projects` | all | `openai`: count only these project ids (sent as repeated `project_ids`; whether OpenAI filters by them reliably is not confirmed, so compare the figure with the dashboard once). |
 | `warn_gap` | `0.25` | Rule 10 warns when a day's estimate and bill differ by at least this share of the bill... |
 | `warn_min_usd` | `5` | ...and by at least this many dollars (either way). |
-| `projects` | all | `openai`: count only these project ids (sent as repeated `project_ids`; whether OpenAI filters by them reliably is not confirmed, so compare the figure with the dashboard once). |
 
 What is counted: Anthropic, token costs per model (`cost_type = "tokens"`; web search, code
 execution and session costs are left out). OpenAI, the day's total over all line items
@@ -1241,17 +1241,30 @@ stored in the Kelpie database (90 days) for the daily report. A report that cann
 keeps its last figures and is tried again after 5 minutes; `kelpie doctor` reads one day
 of each to check the key.
 
-**Reconciliation.** For each closed UTC day a report covers and the span store still holds
-whole (within `[traces] retention`), Kelpie prices that day's counted LLM calls of the
-provider (by the provider of each model, see [[spend]](#spend)) and compares the sum with
-the bill: `Snapshot.reconciliations`, recomputed when the figures change and at least
-hourly. `/metrics` has, for the newest reconciled day of each provider,
-`kelpie_spend_reported_usd`, `kelpie_spend_estimated_usd`, `kelpie_spend_gap_ratio`
-((estimate - bill) / bill) and `kelpie_spend_reconciled_day_timestamp_seconds`, and
-`kelpie_cost_report_up` per provider. A gap past the thresholds is a rule 10 warning:
-traces below the bill point at agents that do not export spans or models without a price;
-above, at prices above the bill's (batch discounts, a `[prices]` entry) or a call counted
-twice. Kelpie needs traces enabled for this; without them figures are only stored.
+**Reconciliation.** For each UTC day a report covers that ended at least 6 hours ago
+(late spans and the providers' own figures settle) and that the span store holds whole
+(within `[traces] retention` and not before its oldest span), Kelpie prices that day's
+counted LLM calls of the provider and compares the sum with the bill:
+`Snapshot.reconciliations`, recomputed when the figures change and at least hourly (after
+a failure, in 5 minutes). A call belongs to the day its span ended in. A call counts for
+the provider whose `[spend.providers.<name>] models` match it, else for the provider of
+its model unless another platform wraps the id (Bedrock, Vertex `@date`, a `vendor/`
+router such as OpenRouter): that platform bills it, not this cost report. Calls without a
+known provider are reported as unknown tokens.
+
+What the bill covers differs: Anthropic's figure is its token charges only, OpenAI's is
+the day's total (web search, tools and other items too), so an OpenAI estimate is
+expected to sit below its bill by those items; raise its `warn_gap` if they are routine.
+
+`/metrics` has `kelpie_cost_report_up` per provider once it was read, and, for the newest
+reconciled day of each provider, `kelpie_spend_reported_usd`, `kelpie_spend_estimated_usd`,
+`kelpie_spend_gap_ratio` ((estimate - bill) / bill, absent when the bill is 0 or a credit)
+and `kelpie_spend_reconciled_day_timestamp_seconds`. A gap past the thresholds (never a day
+billed as a credit) is a rule 10 warning naming the likely causes: traces below the bill
+point at agents that do not export spans, other users of the same key, models without a
+price or the bill's non-token items; above, at prices above the bill's (batch discounts,
+credits, a `[prices]` entry) or another platform's calls counted under the provider's
+`models`. Kelpie needs traces enabled for this; without them figures are only stored.
 
 ## [alerts]
 

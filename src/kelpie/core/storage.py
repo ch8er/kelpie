@@ -795,6 +795,10 @@ class SqliteSpanStore:
                 self.epoch += 1  # after the commit: a reload must not see the rows again
             return n
 
+    def oldest_at(self) -> datetime | None:
+        rows = self._read("SELECT MIN(last_at) FROM spans INDEXED BY spans_last", ())
+        return datetime.fromisoformat(rows[0][0]) if rows and rows[0][0] is not None else None
+
     def count(self) -> int:
         return self._rows  # an int read is atomic; never waits for a write batch
 
