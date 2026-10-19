@@ -132,11 +132,11 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   they leave the retention.
 - Spend mode per provider (`[spend.providers]`): dollars for API keys, tokens and the share
   of a configured limit for subscriptions, decided from the config; `kelpie status` and
-  `kelpie doctor` show each provider's mode and why.
+  `kelpie doctor` show each provider's mode and why ([#202](https://github.com/ch8er/kelpie/pull/202)).
 - Providers' cost reports read with an admin key (`[connectors.cost_reports]`: Anthropic
-  token costs per model, OpenAI daily totals), stored for the report, and reconciled with
-  the spend priced from traces per settled day: on `/metrics` and as a rule 10 warning when
-  they disagree.
+  token costs per model, OpenAI daily totals), stored for the report ([#204](https://github.com/ch8er/kelpie/pull/204)), and
+  reconciled with the spend priced from traces per settled day: on `/metrics` and as a
+  rule 10 warning when they disagree ([#205](https://github.com/ch8er/kelpie/pull/205)).
 
 #### Token optimization
 
