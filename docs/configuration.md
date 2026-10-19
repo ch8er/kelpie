@@ -834,6 +834,34 @@ the default's 1.25 × input.
 | --- | --- | --- |
 | `default_prices` | `true` | Price models from Kelpie's default table when `[prices]` has no entry for them. `false`: only `[prices]`. |
 
+`[spend.providers.<name>]`, one per model provider (any name: `anthropic`, `openai`,
+`google`, or your own, such as a gateway):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `"auto"` | `api`: pay per token, spend is dollars. `subscription`: a plan with a usage limit, spend is tokens and the share of the limit (dollars only as an estimate). `auto`: decided from the rest of the config, below. |
+| `models` | `[]` | Model names or globs that belong to this provider (on the id as written, or case-insensitively on its family id). Needed only for models the default table and the name rules below do not place. |
+| `limit_tokens` | unset | Subscriptions: the tokens your plan allows per `limit_window`, as you know them; Kelpie never guesses a limit. |
+| `limit_window` | unset | Duration (`"5h"`, `"7d"`), together with `limit_tokens`. |
+
+**The provider of a model:** the first `models` pattern that matches, then the provider the
+default table knows it under, then its name: `claude-*` is `anthropic`, `gpt-*`,
+`chatgpt-*`, `codex-*` and `o<digit>*` are `openai`, `gemini-*` is `google`.
+
+**`auto` mode**, first match wins, so `kelpie serve`, `kelpie status` and the report agree
+without reading anything but the config:
+
+1. the provider has a cost report configured (an admin key: there is a bill): `api`;
+2. a `[[budgets]]` entry with `mode = "subscription"` names the provider in `providers`,
+   or names no providers: `subscription`;
+3. `limit_tokens` is set: `subscription`;
+4. a `[[budgets]]` entry in `usd` with `mode = "api"` exists: `api`;
+5. otherwise `unknown`: `kelpie doctor` warns and says what to set.
+
+`kelpie status` lists each configured provider and each provider seen in the last 7 days
+of spans with its mode and the reason; `kelpie doctor` warns about providers without a
+mode and models whose provider nothing tells.
+
 **The default table** (`kelpie.core.prices`) holds the standard API prices of popular
 Anthropic, OpenAI and Google models, as their pricing pages showed them on the date
 `kelpie status` prints ("checked ..."). Each row has input, output and cache read prices,

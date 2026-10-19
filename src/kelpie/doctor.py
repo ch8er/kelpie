@@ -37,8 +37,11 @@ from kelpie.app import (
     dispatch_gate_warnings,
     load_rules,
     load_settings,
+    read_models,
     read_unpriced,
     serialize_warnings,
+    spend_modes,
+    unknown_provider_models,
     utc_now,
 )
 from kelpie.connectors.github.blocks import MAX_REASON
@@ -58,6 +61,7 @@ from kelpie.connectors.github.connector import (
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import Status
 from kelpie.core.ports import PlatformAdapter
+from kelpie.core.spend import SpendMode
 from kelpie.resources.prometheus import PrometheusClient, QueryError
 
 FRESH = timedelta(hours=1)  # newest spool line or span must be younger than this
@@ -367,6 +371,36 @@ def check_prices(settings: Settings, now: datetime) -> Check:
         f'add [prices."{first}"] input = <USD/1M>, output = <USD/1M>'
         " (cached_input and cache_write optional)",
     )
+
+
+def check_spend_modes(settings: Settings, now: datetime) -> Check:
+    """Every provider the farm uses (configured, or seen in recent spans) has a spend mode:
+    dollars for API keys, tokens and limit share for subscriptions."""
+    name = "providers have a spend mode"
+    db = settings.db_path
+    seen = read_models(settings, now) if db is not None and db.exists() else ()
+    if isinstance(seen, str):
+        seen = ()
+    rows = spend_modes(settings, seen)
+    if not rows:
+        return _skip(name, "no provider configured or seen in the spans yet")
+    unknown = [m for m, _ in rows if m.mode is SpendMode.UNKNOWN]
+    if not unknown:
+        return _pass(name, "; ".join(f"{m.provider}: {m.mode} ({m.reason})" for m, _ in rows))
+    named = [m.provider for m in unknown if m.provider is not None]
+    loose = unknown_provider_models(settings, seen)
+    parts = []
+    if named:
+        parts.append(f"no spend mode for {', '.join(named)}")
+    if loose:
+        parts.append(f"no provider known for the models {_named(list(loose))}")
+    fix = (
+        f'set [spend.providers.{named[0]}] mode = "api" (pay per token: dollars) or '
+        '"subscription" (a plan with a usage limit: tokens and limit share)'
+        if named
+        else f'name the provider: [spend.providers.<name>] models = ["{loose[0]}"]'
+    )
+    return _warn(name, "; ".join(parts) + "; the report cannot tell dollars from estimates", fix)
 
 
 def _named(ids: list[str]) -> str:
@@ -952,6 +986,7 @@ def run_checks(
     ]
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
     checks.append(check_prices(settings, at))
+    checks.append(check_spend_modes(settings, at))
     checks.append(_skip("worktrees readable", why) if adapter is None else check_worktrees(adapter))
     pr_blocks = "PR blocks have conditions"
     checks.append(

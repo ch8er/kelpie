@@ -324,6 +324,22 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #
 # [spend]
 # default_prices = true     # false: only [prices]
+#
+# Spend mode per provider: "api" (pay per token: dollars), "subscription" (a plan with a
+# usage limit: tokens and limit share) or "auto" (decided from the rest of the config;
+# kelpie status shows the mode and why).
+#
+# [spend.providers.anthropic]
+# mode = "subscription"
+# limit_tokens = 40000000   # what your plan allows per limit_window, if you know it
+# limit_window = "7d"
+#
+# [spend.providers.openai]
+# mode = "api"
+#
+# [spend.providers.gateway]
+# mode = "api"
+# models = ["llama-*", "mistral-*"]   # models the default table and name rules miss
 
 # Host metrics from node_exporter through the Prometheus HTTP API. Off unless this table
 # exists. Kelpie runs fixed instant queries (GET /api/v1/query) and keeps only the hosts
