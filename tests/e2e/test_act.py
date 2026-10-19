@@ -10,10 +10,19 @@
 from __future__ import annotations
 
 import re
+import signal
+import socket
+import subprocess
+import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
+import pytest
+
+from kelpie.adapters.hermes.worker import fingerprint, instantiation_epoch, read_proc
 from kelpie.sim.github import Run, sha_of
 from tests.sim.farm import REPO, Farm
 from tests.sim.kelpie import wait_for
@@ -104,9 +113,33 @@ def test_runaway_loop_is_stopped_through_the_hermes_cli(farm: Farm) -> None:
     assert sum("t_errors" in t for t in runaway) == 1
 
 
-def test_a_stop_is_announced_as_done(farm: Farm) -> None:
-    """One critical message, and it says what Kelpie did, with Hermes' specifics (#70)."""
+@pytest.fixture
+def worker() -> Iterator[subprocess.Popen[bytes]]:
+    """A process standing in for a run's worker."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    yield child
+    child.kill()
+    child.wait(timeout=10)
+
+
+def bind(farm: Farm, run_id: int, child: subprocess.Popen[bytes]) -> None:
+    """Record ``child`` as the run's worker, with Hermes' proof of identity."""
+    p = read_proc(child.pid)
+    assert p is not None
+    farm.board.bind_worker(
+        run_id,
+        farm.ago(minutes=1),
+        claim_lock=f"{socket.gethostname()}:{child.pid}",
+        submitter=(child.pid, fingerprint(p, instantiation_epoch())),
+    )
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
+def test_a_stop_is_announced_as_done(farm: Farm, worker: subprocess.Popen[bytes]) -> None:
+    """One critical message, and it says what Kelpie did, with Hermes' specifics (#70): the
+    task is blocked and the run's worker process ended (#175)."""
     loop = live_run(farm, "t_loop", "Nightly maintenance heartbeat")
+    bind(farm, loop, worker)
     heartbeat_loop(farm, "t_loop", loop)
     farm.serve(farm.config({"loop_breaker": ACT}))
     wait_for("the stop", lambda: farm.board.get("t_loop").status == "blocked", timeout=20)
@@ -119,11 +152,12 @@ def test_a_stop_is_announced_as_done(farm: Farm) -> None:
     assert any(re.search(r"\b(stopped|blocked)\b", t, re.IGNORECASE) for t in about_loop)
     (message,) = about_loop  # the runaway alert carries the stop: no second message
     assert message.startswith("[CRITICAL] loop_breaker: alert t_loop")
-    assert message.splitlines()[-1] == (
-        f"Stopped run hermes-run-{loop}; task t_loop is blocked for a human "
-        "(hermes kanban unblock t_loop); Hermes' dispatcher ends the worker within about 2 "
-        "minutes."
+    assert re.fullmatch(
+        rf"Stopped run hermes-run-{loop}; task t_loop is blocked for a human "
+        r"\(hermes kanban unblock t_loop\); its worker ended \d+\.\ds after SIGTERM\.",
+        message.splitlines()[-1],
     )
+    assert worker.wait(timeout=5) == -signal.SIGTERM  # the worker itself, not just the card
 
 
 def test_a_refused_stop_reaches_a_human(farm: Farm) -> None:

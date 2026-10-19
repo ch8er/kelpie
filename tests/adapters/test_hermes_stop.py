@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -31,6 +33,7 @@ from kelpie.adapters.hermes.stop import (
     stop_comment,
     verify_stop,
 )
+from kelpie.adapters.hermes.worker import fingerprint, instantiation_epoch, read_proc
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
@@ -380,17 +383,51 @@ def test_engine_dispatches_stop_to_hermes(board: Board, fake_cli: tuple[str, Pat
     assert len(calls(log)) == 1
 
 
-def test_kelpie_never_signals_the_worker(board: Board, fake_cli: tuple[str, Path]) -> None:
-    """The worker is reaped by Hermes' dispatcher; stop() leaves the process alone."""
+def sleeper() -> subprocess.Popen[bytes]:
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+def record_worker(board: Board, rid: int, pid: int) -> None:
+    """The run's submitter as Hermes records it: pid, start fingerprint, this host's claim."""
+    p = read_proc(pid)
+    assert p is not None
+    board.conn.execute(
+        "UPDATE task_runs SET worker_pid = ?, worker_started_at = ?, claim_lock = ? WHERE id = ?",
+        (pid, fingerprint(p, instantiation_epoch()), f"{socket.gethostname()}:1", rid),
+    )
+    board.conn.commit()
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
+def test_stop_ends_the_runs_worker(board: Board, fake_cli: tuple[str, Path]) -> None:
     exe, _ = fake_cli
     rid = running(board)
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    child = sleeper()
     try:
-        make(board, exe).stop(f"hermes-run-{rid}", "loop")
+        record_worker(board, rid, child.pid)
+        done = make(board, exe, worker_grace=5.0).stop(f"hermes-run-{rid}", "loop")
+        assert child.wait(timeout=5) == -signal.SIGTERM
+        assert isinstance(done, str) and "blocked for a human" in done
+        assert re.search(r"its worker ended \d+\.\ds after SIGTERM$", done)
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+
+
+def test_with_end_worker_off_the_worker_is_left_to_hermes(
+    board: Board, fake_cli: tuple[str, Path]
+) -> None:
+    exe, _ = fake_cli
+    rid = running(board)
+    child = sleeper()
+    try:
+        record_worker(board, rid, child.pid)
+        done = make(board, exe, end_worker=False).stop(f"hermes-run-{rid}", "loop")
         assert child.poll() is None
         os.kill(child.pid, 0)
+        assert isinstance(done, str) and done.endswith("(end_worker = false)")
     finally:
-        child.send_signal(signal.SIGKILL)
+        child.kill()
         child.wait(timeout=10)
 
 
@@ -398,10 +435,13 @@ def test_stop_says_what_it_did_or_that_there_was_nothing_to_do(
     board: Board, fake_cli: tuple[str, Path]
 ) -> None:
     exe, _ = fake_cli
-    rid = running(board)
+    rid = running(board)  # Hermes recorded no worker process for this run
     adapter = make(board, exe)
     done = adapter.stop(f"hermes-run-{rid}", "loop")
-    assert isinstance(done, str) and "blocked for a human" in done and "2 minutes" in done
+    assert done == (
+        "task t1 is blocked for a human (hermes kanban unblock t1); its worker was left to "
+        "Hermes' dispatcher, which reaps it (the board records no worker process for the run)"
+    )
     assert adapter.stop(f"hermes-run-{rid}", "loop") is ActionResult.NOTHING_TO_DO  # over now
 
 

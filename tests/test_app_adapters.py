@@ -591,3 +591,17 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
         builds = load_settings(write(tmp_path, FARMS["hermes"] + extra))
         found = {r: b.reason for r, b in act_blockers(builds, build_adapters(builds)).items()}
         assert found["ci_economy"] == f"Kelpie cancels no builds: {reason}"
+
+
+def test_hermes_worker_settings(tmp_path: Path) -> None:
+    (default,) = build_adapters(load_settings(write(tmp_path, "[adapters.hermes]\n")))
+    assert isinstance(default, HermesAdapter)
+    assert default.end_worker is True and default.worker_grace == 5.0
+    path = write(tmp_path, '[adapters.hermes]\nend_worker = false\nworker_grace = "12s"\n')
+    (adapter,) = build_adapters(load_settings(path))
+    assert isinstance(adapter, HermesAdapter)
+    assert adapter.end_worker is False and adapter.worker_grace == 12.0
+    for key, bad in (("end_worker", '"yes"'), ("worker_grace", '"0s"'), ("worker_grace", '"31s"'),
+                     ("worker_grace", '"soon"')):  # fmt: skip
+        with pytest.raises(ConfigError, match=key):
+            load_settings(write(tmp_path, f"[adapters.hermes]\n{key} = {bad}\n"))

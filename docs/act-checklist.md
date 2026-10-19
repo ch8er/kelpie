@@ -71,7 +71,7 @@ rule is in `act` mode (`_refuse_unimplemented_actions`, `HERMES_ACT_RULES` in
 
 | Rule | Action | Needs |
 | --- | --- | --- |
-| `loop_breaker` | `stop`: `hermes kanban block --kind needs_input` on the run Kelpie looked at | `[adapters.hermes]`; `cli` and `cli_timeout` if `hermes` is not on `PATH` |
+| `loop_breaker` | `stop`: `hermes kanban block --kind needs_input` on the run Kelpie looked at, then SIGTERM (SIGKILL after `worker_grace`) to that run's worker processes once their pid and start fingerprint match what Hermes recorded | `[adapters.hermes]`; `cli` and `cli_timeout` if `hermes` is not on `PATH`; Kelpie on the same host and as the same user as the workers (else the worker is left to Hermes' reaper, and the alert says so); `end_worker = false` to leave it to the reaper always |
 | `loop_breaker` | `stop` on Claude Code: a stop marker the hook enforces at the session's next tool call | `[adapters.claude_code]` with `stop_dir`; see [Claude Code](#claude-code) below |
 | `loop_breaker` | `stop` on OpenClaw: a stop marker the plugin enforces in the Gateway, and `openclaw gateway call sessions.abort` for the run in flight | `[adapters.openclaw]` with `stop_dir` and `cli`; see [OpenClaw](#openclaw) below |
 | `ci_economy` | `cancel_build` of a superseded GitHub Actions run, by the CI connector | `[connectors.github.ci]` with `allow_cancel = true`, `cancel_repos`, ideally `cancel_token_env` (a separate token with Actions: write on those repos only) |

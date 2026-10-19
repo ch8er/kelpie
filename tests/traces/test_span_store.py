@@ -293,7 +293,7 @@ def test_sqlite_spans_share_the_ledger_file_and_survive_reopen(tmp_path: Path) -
     reopened = SqliteSpanStore(path)
     assert [s.span_id for s in reopened.spans_since(NOW)] == [f"{1:016x}"]
     db = sqlite3.connect(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 4
+    assert db.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 5
     assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     (received,) = db.execute("SELECT received_at FROM spans").fetchone()
     assert received == "2026-03-02T12:00:00.000000+00:00"
@@ -330,7 +330,7 @@ def test_v3_database_is_upgraded_and_its_spans_decided(tmp_path: Path) -> None:
     assert [u.input_tokens for u in s.usage_since(NOW, [timedelta(hours=1)])[0]] == [107]
     s.close()
     db = sqlite3.connect(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert db.execute("PRAGMA user_version").fetchone()[0] == 5
     assert db.execute("SELECT COUNT(*) FROM spans WHERE counted IS NULL").fetchone()[0] == 0
 
 

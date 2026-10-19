@@ -22,6 +22,8 @@ git_state = true                         # read git state of live task workspace
 git_timeout = "5s"                       # limit for each git call; 2x per snapshot in total
 cli = "hermes"                           # Hermes executable used by stop, park, wake, comment
 cli_timeout = "10s"                      # limit for each command (at most 60s)
+end_worker = true                        # stop also ends the run's worker processes (below)
+worker_grace = "5s"                      # SIGTERM, then SIGKILL after this (at most 30s)
 # wait_key = "/data/hermes-wait.key"     # signs Kelpie's parks and stops; default: next to the ledger
 human_owners = ["alice"]                 # assignees that are people, not agents (optional)
 
@@ -118,19 +120,39 @@ human, never re-queued by Hermes itself), releases the claim, ends the run and a
 as a `BLOCKED:` comment that also says how to resume. A human resumes the task with
 `hermes kanban unblock <task>`.
 
-The worker process is not signalled by `block`. Hermes' dispatcher reaps a worker that
-outlived its closed run on a later tick (`reap_terminal_workers`, after a 120 s grace period)
-and signals it only when the run's recorded start fingerprint (`worker_started_at`) still
-matches, so a reused pid is never touched. Kelpie never signals a process itself. If no Hermes
-dispatcher is running, the task is still blocked and not re-queued, but the worker process
-lives until it exits by itself.
+`block` does not signal the worker process. Hermes' dispatcher reaps a worker that outlived
+its closed run only on a later tick (`reap_terminal_workers`, after a 120 s grace period), and
+never when no dispatcher runs; meanwhile the worker keeps calling its model. So after a
+successful block Kelpie ends the run's worker itself (`end_worker`, on by default), with the
+proof of identity Hermes' reaper uses:
 
-So on Hermes `stop` means "block the task now, reap the worker after about two minutes, and
-never without a dispatcher". A budget hard-stop (`[[budgets]]`) therefore ends the *task* at once
-but the spend of a still-running worker only when the dispatcher reaps it.
+- **Which processes.** The run's submitter (`task_runs.worker_pid`, the process the dispatcher
+  spawned), the run's agent (the pid of the run's `worker_bound` event, recorded by the
+  profile's gateway with the run's claim lock), and every descendant of the two (tool commands
+  start their own sessions and would outlive the agent). Nothing else.
+- **Proof.** Each recorded pid must still carry the start fingerprint Hermes recorded for it
+  (`"<boot_id>:<pid 1 start>|<process start>"`, computed the same way from `/proc`): a reused
+  pid, a reboot or another PID namespace never matches. The run's claim lock must name this
+  host, every process must belong to the user Kelpie runs as, and Kelpie never signals itself
+  or its ancestors. A run recorded without a fingerprint (older Hermes, or `unverified`) is not
+  signalled. Identity is checked again right before each signal, through a pidfd where the
+  kernel has one.
+- **How.** SIGTERM to all of them, SIGKILL to those still running after `worker_grace`
+  (default 5 s). Kelpie never writes `kanban.db`: the reaper later finds the processes gone.
+- **What it says.** The alert and the ledger (`kelpie why`) carry what actually happened: "its
+  worker ended 0.4s after SIGTERM", "no worker process of the run was still running on this
+  host", "its worker was left to Hermes' dispatcher, which reaps it (<why>)", or "its worker
+  did not end even after SIGKILL (pid ...)".
+
+Without `/proc` (macOS) nothing is signalled and the stop says so. With `end_worker = false` a
+stop is "block the task now, reap the worker after about two minutes, and never without a
+dispatcher", as before; a budget hard-stop (`[[budgets]]`) then ends the *task* at once but the
+spend of a still-running worker only when the dispatcher reaps it. In multi-host mode the
+worker is ended by the `kelpie agent` on the host that claimed the run.
 
 Why not `hermes kanban reclaim`: it terminates the worker but puts the task back in the queue,
 where the dispatcher can respawn it before a second command blocks it. `archive` is terminal.
+Hermes has no command that ends a worker and leaves the task blocked.
 
 `stop` is idempotent: a run that has already ended, or is no longer the task's current run,
 is left alone (no command is run). It fails, and the engine logs it, when the id is not a

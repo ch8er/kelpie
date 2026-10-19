@@ -136,6 +136,7 @@ from kelpie.adapters.hermes.stop import (
     CLI_TIMEOUT,
     DEFAULT_CLI,
     STOP_DONE,
+    WORKER_LEFT,
     HermesCliError,
     block_task,
     has_stop_marker,
@@ -143,6 +144,9 @@ from kelpie.adapters.hermes.stop import (
     stop_comment,
     verify_stop,
 )
+from kelpie.adapters.hermes.worker import DEFAULT_GRACE, NO_WORKER, Ended, run_worker
+from kelpie.adapters.hermes.worker import end as end_workers
+from kelpie.adapters.hermes.worker import targets as worker_targets
 from kelpie.core.actions import ActionKind, ActionResult
 from kelpie.core.model import (
     Artifact,
@@ -569,6 +573,10 @@ class HermesAdapter:
     base_refs: tuple[str, ...] = DEFAULT_BASE_REFS  # see DEFAULT_BASE_REFS
     cli: str = DEFAULT_CLI  # the Hermes executable that carries out ``stop``
     cli_timeout: float = CLI_TIMEOUT  # seconds; a stop runs inside the control loop tick
+    # After a stop, end the run's worker processes at once (worker.py) instead of leaving them
+    # to Hermes' reaper; ``worker_grace`` seconds between SIGTERM and SIGKILL.
+    end_worker: bool = True
+    worker_grace: float = DEFAULT_GRACE
     # Assignees that are people, not agents (Hermes lowercases profile names).
     human_owners: Collection[str] = ()
     # A comment by one of an entry's relays that opens with its marker records its person's
@@ -1281,7 +1289,27 @@ class HermesAdapter:
         if self._run_state(rid) != (task_id, False):
             message = f"task {task_id} is still running after its block"
             raise HermesError(message, message)
-        return STOP_DONE.format(task=task_id)
+        return STOP_DONE.format(task=task_id, worker=self._end_worker(rid))
+
+    def _end_worker(self, rid: int) -> str:
+        """End the stopped run's worker processes; what became of them, for a human."""
+        if not self.end_worker:
+            return WORKER_LEFT
+        try:
+            with self._connect() as conn:
+                recorded = run_worker(conn, rid)
+        except (HermesError, sqlite3.Error) as exc:
+            log.warning("cannot read the worker of run %s: %s", rid, exc)
+            recorded = None
+        if recorded is None:
+            return Ended(refused=NO_WORKER).describe()
+        procs, refused = worker_targets(recorded)
+        if refused is not None:
+            log.info("run %s: worker not signalled: %s", rid, refused)
+            return Ended(refused=refused).describe()
+        result = end_workers(procs, self.worker_grace)
+        log.info("run %s: worker processes %s: %s", rid, [p.pid for p in procs], result.describe())
+        return result.describe()
 
     def _run_state(self, rid: int) -> tuple[str, bool] | None:
         """``(task id, run is the task's active run)`` for a run, ``None`` if it is unknown."""

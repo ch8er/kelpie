@@ -31,8 +31,9 @@ Kelpie demo: one working day on a simulated agent farm
        │ 10 identical consecutive `heartbeat_check` calls (limit 8 within 10
        │ minutes). Check the task before resuming it.
        │ Stopped run hermes-run-4; task t_heartbeat is blocked for a human
-       │ (hermes kanban unblock t_heartbeat); Hermes' dispatcher ends the
-       │ worker within about 2 minutes.
+       │ (hermes kanban unblock t_heartbeat); its worker was left to Hermes'
+       │ dispatcher, which reaps it (the board records no worker process for
+       │ the run).
        └
 10:05  Kelpie ran `hermes kanban block --kind needs_input -- t_heartbeat ...`:
        t_heartbeat is blocked.
