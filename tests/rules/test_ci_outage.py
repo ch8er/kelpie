@@ -269,6 +269,27 @@ def test_the_resolved_notice_never_cites_another_repository_s_pass() -> None:
         assert notice is not None and "in example/app at 2026-03-02 08:40 UTC" in notice
 
 
+def test_the_resolved_notice_ignores_red_prs_fixed_before_the_outage() -> None:
+    """Six unrelated PRs red then fixed one after another just before the outage: their
+    passes are not its end."""
+    rule = CiEconomy()
+    hosted = Job("build", FAILED, step="Select toolchain")
+    fixed = [
+        b
+        for n in range(1, 7)
+        for b in (
+            red(n, 400 - 5 * n, repo=f"example/r{n}", job=hosted),
+            green(392 - 5 * n, repo=f"example/r{n}"),
+        )
+    ]
+    outage = (BEFORE, RERUN, *THREE, red(1, 120), red(2, 60))
+    [alert] = outages(*fixed, *outage)
+    assert alert.state is not None
+    later = Snapshot(now=NOW, builds=(*fixed, *outage, green(20)))
+    notice = rule.resolved(alert.state, later)
+    assert notice is not None and "in example/app at 2026-03-02 08:40 UTC" in notice
+
+
 def test_a_re_run_pr_still_counts_toward_the_unsure_threshold() -> None:
     """Six repositories red, two of them re-running a PR commit that passed: an outage."""
     hosted = Job("build", FAILED, step="Select toolchain")

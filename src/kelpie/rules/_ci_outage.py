@@ -108,25 +108,26 @@ def outages(snapshot: Snapshot, rule: str, min_prs: int, window: timedelta) -> l
 def passed_again(state_id: str, snapshot: Snapshot, min_prs: int, window: timedelta) -> str | None:
     """For the "Resolved" notice: the first build that passed the outage's job again in one
     of its repositories after that repository's last failure. The outage is found again as
-    :func:`outages` found it, on its latest run of failures (following each other within
-    ``window``) and the passes before that run. None when there is none: the outage stopped
-    being reported for another reason, and the engine's general notice says so."""
+    :func:`outages` found it at its last failure (with the passes before that). None when
+    there is none: the outage stopped being reported for another reason, and the engine's
+    general notice says so."""
     found = next(
         (fs for sig, fs in _failures(snapshot).items() if outage_state_id(*sig) == state_id), []
     )
     if not found or min_prs <= 0:
         return None
     sig = (found[0].build.workflow, found[0].job.name, found[0].job.step)
-    times = sorted(f.at for f in found)
-    began = _began(times, times[-1], window)
+    # As the rule saw it at the last failure: the passes before it.
+    latest = max(f.at for f in found)
     passes = _passes(snapshot)
-    before = {k: [(at, b) for at, b in v if at < began] for k, v in passes.items()}
+    before = {k: [(at, b) for at, b in v if at < latest] for k, v in passes.items()}
     opened = _opened(_active(found, before, sig), before, sig, min_prs, window)
     if opened is None:
         return None
+    since, repos = opened
     last: dict[str, datetime] = {}
     for f in found:
-        if f.at >= began and _repo(f.build) in opened[1]:
+        if f.at >= since and _repo(f.build) in repos:
             last[_repo(f.build)] = max(f.at, last.get(_repo(f.build), f.at))
     workflow, job, _ = sig
     after = [
