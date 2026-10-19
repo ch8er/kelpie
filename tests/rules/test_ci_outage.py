@@ -15,6 +15,7 @@ from kelpie.core.model import (
     BuildStatus,
     Condition,
     ConditionKind,
+    Dependency,
     Job,
     PullRequest,
     Snapshot,
@@ -59,22 +60,34 @@ def outages(*builds: Build, rule: CiEconomy | None = None, **snap: Any) -> list[
     return [a for a in (rule or CiEconomy()).evaluate(snapshot) if is_outage_state(a.state or "")]
 
 
+THREE = (red(1, 300), red(2, 250), red(3, 240))
+
+
 def test_prs_failing_the_same_way_after_a_green_commit_broke_are_one_outage() -> None:
-    [alert] = outages(BEFORE, RERUN, red(1, 300), red(2, 250), red(1, 30))
+    [alert] = outages(BEFORE, RERUN, *THREE, red(1, 30))
     outage = CiOutage.from_params(alert.params)
     assert outage is not None and alert.state == alert.key == outage.state
     assert alert.since == NOW - 300 * M
     assert outage.state == outage_state_id("ci.yml", "build", "Select toolchain")
-    assert outage.prs == ("example/app#1", "example/app#2")
+    assert outage.prs == ("example/app#1", "example/app#2", "example/app#3")
     assert outage.runners == ("runner-1", "self-hosted")
     assert outage.builds[0] == "B-1-30"  # newest first
-    assert "CI outage since 2026-03-02 04:00 UTC: 3 change(s) in example/app" in alert.reason
+    assert "CI outage since 2026-03-02 04:00 UTC: 4 change(s) in example/app" in alert.reason
     assert "the CI (toolchain, runner, service) or the base they build on" in alert.reason
 
 
-def test_two_repositories_failing_the_same_way_are_evidence_enough() -> None:
+def test_the_re_run_that_is_the_evidence_does_not_count_toward_the_prs() -> None:
+    """A flaky nightly re-run and two red PRs are not three changes failing the same way."""
+    assert outages(BEFORE, RERUN, red(1, 300), red(2, 250)) == []
+
+
+def test_two_repositories_failing_on_the_same_runner_are_evidence_enough() -> None:
     other = red(9, 200, repo="example/other")
     assert outages(red(1, 300), red(2, 250), other) != []
+    elsewhere = Job("build", FAILED, step="Select toolchain", runner="hosted-7")
+    assert outages(red(1, 300), red(2, 250), red(9, 200, repo="example/other", job=elsewhere)) == []
+    no_repo = red(9, 200, repo=None)
+    assert outages(red(1, 300), red(2, 250), no_repo) == []  # unknown repository: not a second
 
 
 def test_without_evidence_it_takes_twice_the_prs() -> None:
@@ -87,26 +100,40 @@ def test_without_evidence_it_takes_twice_the_prs() -> None:
     assert "6 change(s)" in alert.reason
 
 
+def test_a_slow_farm_whose_prs_stay_red_is_an_outage() -> None:
+    """PRs that started failing hours apart and are retried hourly: red together all night."""
+    starts = ((1, 600), (2, 420), (3, 240))
+    retried = [red(n, t) for n, first in starts for t in range(first, 0, -60)]
+    old_rerun = red(0, 700, branch="main", pr=None, sha="base")  # long before the PRs
+    [alert] = outages(green(800), old_rerun, *retried)
+    assert alert.since == NOW - 600 * M  # the earliest active failure of the group
+    assert outages(*retried) == []  # without evidence: three PRs are not enough
+
+
 def test_not_an_outage() -> None:
     evidence = (BEFORE, RERUN)
-    assert outages(*evidence, red(1, 300)) == []  # with main, two changes
+    assert outages(*evidence, red(1, 300), red(2, 250)) == []  # two PRs
     assert outages(*evidence, red(1, 270), red(1, 200), red(1, 100)) == []  # one PR, often
-    assert outages(*evidence, red(1, 150), red(2, 30)) == []  # not within 2h of main's
+    assert outages(*evidence, red(1, 300), red(2, 150), red(3, 20)) == []  # spread out
     other = Job("build", FAILED, step="Run tests")
-    assert outages(*evidence, red(1, 300), red(2, 250, job=other)) == []  # another step
-    assert outages(*evidence, red(1, 300), red(2, 250, workflow="lint.yml")) == []
-    assert outages(*evidence, red(1, 300), red(2, 250, jobs=None)) == []  # jobs not read
+    assert outages(*evidence, *THREE[:2], red(3, 240, job=other)) == []  # another step
+    assert outages(*evidence, *THREE[:2], red(3, 240, workflow="lint.yml")) == []
+    assert outages(*evidence, *THREE[:2], red(3, 240, jobs=None)) == []  # jobs not read
     cancelled = Job("build", BuildStatus.CANCELLED, step="Select toolchain")
-    assert outages(*evidence, red(1, 300), red(2, 250, job=cancelled)) == []
+    assert outages(*evidence, *THREE[:2], red(3, 240, job=cancelled)) == []
     off = CiEconomy(outage_min_prs=0)
-    assert outages(*evidence, red(1, 300), red(2, 250), rule=off) == []
+    assert outages(*evidence, *THREE, rule=off) == []
 
 
-def test_a_pass_in_the_same_repository_ends_it_one_elsewhere_does_not() -> None:
-    reds = (BEFORE, RERUN, red(1, 300), red(2, 250))
+def test_a_pass_ends_it_in_its_repository_only() -> None:
+    reds = (BEFORE, RERUN, *THREE)
     assert outages(*reds, green(100)) == []
     assert outages(*reds, green(100, repo="example/other")) != []  # another repo's runner
-    [again] = outages(*reds, green(100), red(4, 60), red(5, 50), red(6, 40, repo="example/x"))
+    # An old failure elsewhere does not let that repository's passes end this outage.
+    elsewhere = red(9, 960, repo="example/other")
+    assert outages(*reds, elsewhere, green(100, repo="example/other")) != []
+    after = (red(4, 60), red(5, 50), red(6, 40, repo="example/x"))
+    [again] = outages(*reds, green(100), *after)
     assert again.since == NOW - 60 * M  # failures after the pass start over
 
 
@@ -136,7 +163,11 @@ def test_the_outage_explains_the_tasks_waiting_on_its_prs_ci_or_merge() -> None:
         task("R-1", Status.BLOCKED, block=on_merge),  # a reviewer waits for #1 to merge
         task("R-2", Status.WAITING),  # waits for CI of a PR outside the outage
         task("R-3", Status.WAITING),  # its condition holds already
+        task("T-6", Status.BLOCKED, 280),  # its PR is red, but it waits on another repo's PR
+        task("T-7", Status.BLOCKED, 280),  # its PR is red, but it waits for task D-1
+        task("D-1", Status.IN_PROGRESS),
     )
+    deps = (Dependency("T-7", "D-1"),)
     conditions = (
         Condition("C-1", ConditionKind.PR_MERGED, "R-1", {"repo": "Example/App", "pr": "1"}),
         Condition("C-2", ConditionKind.CI_STATUS, "R-2", {"repo": "example/app", "pr": 9}),
@@ -145,33 +176,41 @@ def test_the_outage_explains_the_tasks_waiting_on_its_prs_ci_or_merge() -> None:
         ),
         Condition("C-4", ConditionKind.HUMAN_TASK, "T-4", {"task": "H-1"}),
         Condition("C-5", ConditionKind.CI_STATUS, "T-5", {"ref": "https://example/pull/5"}),
+        Condition("C-6", ConditionKind.PR_MERGED, "T-6", {"repo": "example/lib", "pr": 9}),
     )
     pulls = (
         PullRequest("example/app", 1, branch="task/T-1", task_ids=("T-1",)),
         PullRequest("example/app", 2, branch="task/T-2", task_ids=("T-2",)),
         PullRequest("example/app", 3, branch="task/T-3", task_ids=("T-3", "T-4", "T-5")),
         PullRequest("example/app", 4, branch="task/T-3", fork=True),  # a fork's branch
+        PullRequest("example/app", 5, branch="task/T-5", task_ids=("T-6", "T-7")),
     )
-    reds = (BEFORE, RERUN, red(1, 300), red(2, 250), red(3, 200, pr=None))
-    [alert] = outages(*reds, tasks=tasks, conditions=conditions, pull_requests=pulls)
+    reds = (BEFORE, RERUN, red(1, 300), red(2, 250), red(3, 200, pr=None), red(5, 230))
+    [alert] = outages(
+        *reds, tasks=tasks, conditions=conditions, pull_requests=pulls, dependencies=deps
+    )
     outage = CiOutage.from_params(alert.params)
     assert outage is not None and outage.tasks == ("R-1", "T-1", "T-5")
-    assert outage.prs == ("example/app#1", "example/app#2", "example/app#3")
+    assert outage.prs == ("example/app#1", "example/app#2", "example/app#3", "example/app#5")
     assert "3 task(s) wait on it: R-1, T-1, T-5." in alert.reason
 
 
 def test_closed_prs_are_left_out_when_the_code_host_listed_them_all() -> None:
-    reds = (BEFORE, RERUN, red(1, 300), red(2, 250))
+    reds = (BEFORE, RERUN, *THREE)
     open_only = (PullRequest("example/app", 1, branch="task/T-1"),)
     [alert] = outages(*reds, pull_requests=open_only, pull_requests_complete=True)
     assert CiOutage.from_params(alert.params).prs == ("example/app#1",)  # type: ignore[union-attr]
     [unsure] = outages(*reds, pull_requests=open_only)
-    assert CiOutage.from_params(unsure.params).prs == ("example/app#1", "example/app#2")  # type: ignore[union-attr]
+    assert CiOutage.from_params(unsure.params).prs == (  # type: ignore[union-attr]
+        "example/app#1",
+        "example/app#2",
+        "example/app#3",
+    )
 
 
 def test_the_resolved_notice_says_where_the_job_passed_again() -> None:
     rule = CiEconomy()
-    [alert] = outages(BEFORE, RERUN, red(1, 300), red(2, 250))
+    [alert] = outages(BEFORE, RERUN, *THREE)
     assert alert.state is not None
     later = Snapshot(now=NOW, builds=(BEFORE, red(1, 300), green(20)))
     assert rule.resolved(alert.state, later) == (

@@ -9,20 +9,23 @@ runner, a service) or the base the changes build on, not each change.
 signature *workflow, job, first failing step*. Builds whose jobs the connector did not read
 take no part. No log scraping.
 
-**Active failures.** For each signature, the failures newer than the last build that passed
-that workflow's job *in one of the failing repositories* (a pass elsewhere, on other runners,
-fixes nothing here). Each change request (repository and branch) counts once, at its first
-active failure. Times are the builds' finish times.
+**Active failures.** A failure is active until a build passes that workflow's job again in
+its own repository (a pass elsewhere, on other runners, fixes nothing there). Times are the
+builds' finish times.
 
-**Open.** At least ``min_prs`` change requests started failing within ``window`` of each
-other, and there is evidence that the environment broke rather than each change:
+**Open.** Some ``window`` holds active failures of at least ``min_prs`` change requests
+(repository and branch; retries count, so a slow farm whose PRs stay red still qualifies),
+and there is evidence that the environment broke rather than each change:
 
-- the failures span two or more repositories (different code, same failure), or
-- a commit that passed the job before fails it now (a re-run: the code did not change).
+- two repositories fail on the same runner (same machine, different code), or
+- a commit that passed the job before fails it now in one of their repositories (a re-run:
+  the code did not change), still active; that re-run's change request does not count
+  toward ``min_prs``.
 
 Without such evidence it takes twice ``min_prs`` change requests: three unrelated PRs red at
 a generic step ("Run tests") within two hours happen on a busy farm; six with nothing
-passing in between rarely do. ``since`` is the first failure of the earliest such group.
+passing in between rarely do. A shared runner counts only among the change requests of that
+window. ``since`` is their earliest active failure.
 
 **Resolve.** One long-lived alert state (:func:`kelpie.core.incidents.outage_state_id`); the
 rule stops reporting it when a build passes the job again in one of its repositories, when
@@ -31,12 +34,13 @@ its failures leave the CI connector's window, or when too few failing builds sta
 ``resolve_after`` and may open again as a new announcement.
 
 **Scope** (the alert's params, :class:`kelpie.core.incidents.CiOutage`): the repositories,
-workflows, runners (names and labels) and PRs of the active failures, and the tasks the
-outage explains:
+workflows, runners (names and labels) and PRs of the active failures since ``since``, and
+the tasks the outage explains:
 
 - a PR's own task when it is blocked or waiting on its CI or merge: an unmet CI or merge
-  condition, or no condition at all and waiting since the outage began (``since`` minus
-  ``window``); a task waiting on something else (a person, another task) is not explained;
+  condition that names no other PR, or no condition at all, waiting since the outage began
+  (``since`` minus ``window``) and on no unfinished task; a heuristic: a block reason that
+  asks a person without registering a condition looks the same;
 - any task waiting on an unmet CI or merge condition of one of those PRs.
 
 When the code host listed its PRs in full, PRs that are no longer open are left out.
@@ -88,30 +92,30 @@ def outages(snapshot: Snapshot, rule: str, min_prs: int, window: timedelta) -> l
     for sig, found in sorted(_failures(snapshot).items(), key=lambda kv: str(kv[0])):
         active = _active(found, passes, sig)
         if (since := _since(active, passes, sig, min_prs, window)) is not None:
-            actions.append(_alert(snapshot, rule, sig, active, since, window))
+            scope = [f for f in active if f.at >= since]
+            actions.append(_alert(snapshot, rule, sig, scope, since, window))
     return actions
 
 
 def passed_again(state_id: str, snapshot: Snapshot) -> str | None:
-    """For the "Resolved" notice: the build that passed the outage's job again after its
-    last failure, in one of its repositories; None when there is none (the outage stopped
-    being reported for another reason: the engine's general notice says so)."""
+    """For the "Resolved" notice: a build that passed the outage's job again after the last
+    failure, in the repository that failed last; None when there is none (the outage
+    stopped being reported for another reason: the engine's general notice says so)."""
     found = next(
         (fs for sig, fs in _failures(snapshot).items() if outage_state_id(*sig) == state_id), []
     )
     if not found:
         return None
-    workflow, job = found[0].build.workflow, found[0].job.name
-    last, repos = max(f.at for f in found), {_repo(f.build) for f in found}
+    latest = max(found, key=lambda f: (f.at, f.build.id))
+    workflow, job, repo = latest.build.workflow, latest.job.name, _repo(latest.build)
     after = [
         (at, b.id, b)
-        for repo in repos
         for at, b in _passes(snapshot).get((repo, workflow, job), ())
-        if at > last
+        if at > latest.at
     ]
     if not after:
         return None
-    at, _, build = max(after, key=lambda p: (p[0], p[1]))
+    at, _, build = min(after, key=lambda p: (p[0], p[1]))
     where = f" in {build.repo}" if build.repo else ""
     return (
         f"CI outage over: {outage_signature(workflow, job, None)} passed again{where} at "
@@ -143,43 +147,57 @@ def _passes(snapshot: Snapshot) -> _Passes:
 
 
 def _active(found: list[_Failure], passes: _Passes, sig: Signature) -> list[_Failure]:
-    """The failures newer than the job's last pass in any of the failing repositories."""
+    """The failures newer than the job's last pass in their own repository."""
     workflow, job, _ = sig
-    repos = {_repo(f.build) for f in found}
-    last = max(
-        (at for repo in repos for at, _ in passes.get((repo, workflow, job), ())), default=None
-    )
-    return [f for f in found if last is None or f.at > last]
+
+    def last_pass(repo: str) -> datetime | None:
+        return max((at for at, _ in passes.get((repo, workflow, job), ())), default=None)
+
+    last = {repo: last_pass(repo) for repo in {_repo(f.build) for f in found}}
+    return [f for f in found if (p := last[_repo(f.build)]) is None or f.at > p]
 
 
 def _since(
     active: list[_Failure], passes: _Passes, sig: Signature, min_prs: int, window: timedelta
 ) -> datetime | None:
-    """The start of the earliest group of enough change requests that started failing
-    within ``window`` of each other, or None (see "Open" in the module docs)."""
-    first: dict[tuple[str, str], datetime] = {}
+    """The earliest active failure of the first window that qualifies, or None (see "Open"
+    in the module docs)."""
+    by_change: dict[tuple[str, str], list[_Failure]] = {}
     for f in active:
-        change = _change(f.build)
-        first[change] = min(f.at, first.get(change, f.at))
-    needed = min_prs if _evidence(active, passes, sig) else min_prs * UNSURE_FACTOR
-    times = sorted(first.values())
-    for i in range(len(times) - needed + 1):
-        if times[i + needed - 1] - times[i] <= window:
-            return times[i]
+        by_change.setdefault(_change(f.build), []).append(f)
+    for start in sorted({f.at for f in active}):
+        group = {
+            c for c, fs in by_change.items() if any(start <= f.at <= start + window for f in fs)
+        }
+        if len(group) < min_prs:
+            continue
+        failures = [f for c in group for f in by_change[c]]
+        shared = _shared_runner(failures)
+        # A failed re-run stays evidence while nothing passed in its repository since.
+        repos = {c[0] for c in group}
+        reruns = {
+            _change(f.build) for f in active if _repo(f.build) in repos and _rerun(f, passes, sig)
+        }
+        counted = len(group - reruns)
+        if counted >= (min_prs if shared or reruns else min_prs * UNSURE_FACTOR):
+            return min(f.at for f in failures)
     return None
 
 
-def _evidence(active: list[_Failure], passes: _Passes, sig: Signature) -> bool:
-    """The environment broke, not the changes: two or more repositories fail the same way,
-    or a commit that passed the job before fails it now."""
-    if len({_repo(f.build) for f in active}) >= 2:
-        return True
+def _shared_runner(failures: list[_Failure]) -> bool:
+    """Two repositories fail on the same runner."""
+    repos: dict[str, set[str]] = {}
+    for f in failures:
+        if f.job.runner and f.build.repo:
+            repos.setdefault(f.job.runner, set()).add(_repo(f.build))
+    return any(len(r) >= 2 for r in repos.values())
+
+
+def _rerun(f: _Failure, passes: _Passes, sig: Signature) -> bool:
+    """The failing build's commit passed this job before in the same repository."""
     workflow, job, _ = sig
-    return any(
-        f.build.sha and b.sha == f.build.sha and at < f.at
-        for f in active
-        for at, b in passes.get((_repo(f.build), workflow, job), ())
-    )
+    passed = passes.get((_repo(f.build), workflow, job), ())
+    return bool(f.build.sha) and any(b.sha == f.build.sha and at < f.at for at, b in passed)
 
 
 def _alert(
@@ -282,9 +300,18 @@ def _explained(
         return True
     if not own:
         return False
-    if any(c.kind in _PR_CONDITIONS for c in unmet):
+    if any(c.kind in _PR_CONDITIONS and _pr_of(c.params) is None for c in unmet):
         return True  # its own PR's CI or merge, named another way
-    return not conditions and missing is None and task.status_since >= began
+    return (
+        not conditions
+        and missing is None
+        and task.status_since >= began
+        and not any(
+            (other := snapshot.task(d.depends_on)) is not None and not other.status.is_terminal
+            for d in snapshot.dependencies
+            if d.task_id == task.id
+        )
+    )
 
 
 def _pr_of(params: dict[str, object]) -> tuple[str, int] | None:

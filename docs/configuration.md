@@ -403,22 +403,23 @@ forecasts the CI minutes quota, and reports a CI outage as one incident. Needs b
 | `forecast_horizon` | `"7d"` | duration, > 0 | Warn when the quota runs out within this, before it resets. |
 | `quota_period` | `"30d"` | duration, > 0 | Without a usage reading: warn when the burn over this period would exceed the quota. |
 | `max_reading_age` | `"1h"` | duration, > 0 | Quota readings older than this are ignored. |
-| `outage_min_prs` | `3` | count, 0 (off) or 2–1000 | A CI outage: this many change requests (repository and branch) failing at the same workflow, job and step, with evidence that the environment broke; twice as many without it... |
-| `outage_window` | `"2h"` | duration, > 0 | ...that started failing within this of each other, with nothing passing that job in their repositories since. |
+| `outage_min_prs` | `3` | count, 0 (off) or 2–1000 | A CI outage: some window holds failures of this many change requests (repository and branch; retries count) at the same workflow, job and step, with evidence that the environment broke; twice as many without it... |
+| `outage_window` | `"2h"` | duration, > 0 | ...that window's length; a failure counts until the job passes again in its repository. |
 
 Waste categories, each build counted once in this order: superseded, already verified
 commit, docs-only, draft, WIP commit.
 
 A CI outage (incident 20) is one `warning` "CI outage since <time>": the failing workflow,
 job and step, the repositories, runners and PRs it affects, and the tasks waiting on those
-PRs' CI or merge. Evidence that the environment broke, not each change: the failures span two
-or more repositories, or a commit that passed the job before fails it now (a re-run). Without
-it, `outage_min_prs` doubles, so a few PRs red at their own tests are not called an outage.
-It stays open, without repeating itself, until a build passes that job again in one of its
-repositories; it also closes when its failures leave the CI connector's window or too few of
-them stay readable, and may then open again. The failing step comes from the job list the CI
-connector reads for billable minutes (no logs); a build whose jobs it did not read takes no
-part. Times are the builds' finish times.
+PRs' CI or merge. Evidence that the environment broke, not each change: two repositories
+fail on the same runner, or a commit that passed the job before fails it now (a re-run; it
+does not count toward `outage_min_prs` itself). Without it, `outage_min_prs` doubles, so a
+few PRs red at their own tests are not called an outage. It stays open, without repeating
+itself, until a build passes that job again in its repositories; it also closes when its
+failures leave the CI connector's window or too few of them stay readable, and may then
+open again. The failing step comes from the job list the CI connector reads for billable
+minutes (no logs); a build whose jobs it did not read takes no part. Times are the builds'
+finish times.
 
 ### 10. loop_breaker
 

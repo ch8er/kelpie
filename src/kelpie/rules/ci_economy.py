@@ -38,10 +38,10 @@ connector's business.
    known (no usage reading), a burn that would exceed it over ``quota_period`` →
    ``warning``. Readings older than ``max_reading_age`` are ignored.
 
-4. **CI outage** (incident 20): ``outage_min_prs`` or more change requests that started
-   failing at the same workflow, job and step within ``outage_window`` of each other, with
-   nothing passing that job in their repositories since and evidence that the environment
-   broke (twice as many without it) → one ``warning`` "CI outage since ..." with its scope
+4. **CI outage** (incident 20): some ``outage_window`` holds failures of ``outage_min_prs``
+   or more change requests at the same workflow, job and step, each still active (nothing
+   passed that job in its repository since), with evidence that the environment broke
+   (twice as many without it) → one ``warning`` "CI outage since ..." with its scope
    (repositories, workflows, runners, PRs) and the tasks it explains, open until a build
    passes that job again. See :mod:`kelpie.rules._ci_outage`; the params are the contract
    in :mod:`kelpie.core.incidents`. ``outage_min_prs = 0`` turns it off.
