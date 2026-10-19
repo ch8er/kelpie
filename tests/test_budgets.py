@@ -439,6 +439,13 @@ def test_snapshot_fixtures_can_carry_budget_state() -> None:
     assert snap.limit_hits[0].limit == "5h"
 
 
+def test_prices_take_a_cache_write_price() -> None:
+    table = load(prices={"m": {"input": 3, "output": 15, "cache_write": 3.75}}).prices
+    assert table.price_for("m") == Price(3, 15, 3, 3.75)
+    with pytest.raises(ValueError, match="cache_write must be a number"):
+        load(prices={"m": {"input": 3, "output": 15, "cache_write": "x"}})
+
+
 def test_evaluation_prices_from_the_default_table_by_day() -> None:
     """No [prices]: the default table prices usd budgets, as of the snapshot's day."""
     config = load(budget(), prices=None)

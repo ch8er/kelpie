@@ -160,6 +160,17 @@ def test_cost_prices_cached_input_apart() -> None:
     assert price.cost(usage) == pytest.approx(0.6 * 4 + 0.4 * 0.2 + 0.1 * 20)
 
 
+def test_cost_prices_cache_writes_apart() -> None:
+    """Cache writes at ``cache_write`` (the input price without one), never more tokens
+    than the uncached input."""
+    opus = Price(4, 20, 0.2, 5)
+    usage = TokenUsage("s", "t", "m", 1, 1_000_000, 0, 200_000, 300_000)
+    assert opus.cost(usage) == pytest.approx(0.5 * 4 + 0.2 * 0.2 + 0.3 * 5)
+    assert Price(4, 20, 0.2).cost(usage) == pytest.approx(0.8 * 4 + 0.2 * 0.2)
+    too_many = TokenUsage("s", "t", "m", 1, 1_000_000, 0, 900_000, 900_000)
+    assert opus.cost(too_many) == pytest.approx(0.9 * 0.2 + 0.1 * 5)
+
+
 def test_cheaper_model_finds_dated_candidates() -> None:
     seen = {"claude-opus-5-5", "claude-haiku-4-5-20251001", "llama"}
     assert cheaper_model(DEFAULTS, "claude-opus-5-5", seen) == "claude-haiku-4-5-20251001"

@@ -144,8 +144,35 @@ _V5 = """
 ALTER TABLE actions ADD COLUMN detail TEXT;
 """
 
+# Cache writes priced on their own (kelpie.core.prices): a column, filled for stored spans
+# from the attribute OTLP ingest kept them in, and the covering indexes rebuilt with it.
+_CACHE_WRITE_KEYS = (
+    "gen_ai.usage.cache_creation.input_tokens",
+    "gen_ai.usage.cache_write.input_tokens",
+    "gen_ai.usage.cache_creation_input_tokens",
+    "cache_creation_tokens",
+)
+_WRITTEN = ", ".join(f"json_extract(attributes, '$.\"{k}\"')" for k in _CACHE_WRITE_KEYS)
+_V6 = f"""
+ALTER TABLE spans ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+UPDATE spans SET cache_write_tokens = MAX(0, MIN(input_tokens - MIN(cached_tokens, input_tokens),
+    CAST(COALESCE({_WRITTEN}, 0) AS INTEGER)))
+    WHERE kind = 'llm' AND (attributes LIKE '%cache_creation%' OR attributes LIKE '%cache_write%')
+    AND json_valid(attributes);
+DROP INDEX spans_counted;
+DROP INDEX spans_counted_by_subject;
+CREATE INDEX spans_counted ON spans
+    (last_at, session_id, task_id, price_model, input_tokens, output_tokens, cached_tokens,
+     cache_write_tokens)
+    WHERE counted = 1;
+CREATE INDEX spans_counted_by_subject ON spans
+    (session_id, task_id, price_model, last_at, input_tokens, output_tokens, cached_tokens,
+     cache_write_tokens)
+    WHERE counted = 1;
+"""
+
 # version -> script that upgrades from version - 1. Append, never edit a released one.
-MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5}
+MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 _COLUMNS = (
@@ -343,7 +370,7 @@ def open_state(r: sqlite3.Row) -> OpenState:
 _SPAN_COLUMNS = (
     "trace_id, span_id, parent_id, name, kind, start, end_at, last_at, task_id, session_id,"
     " model, tool, args_hash, input_tokens, output_tokens, cached_tokens, outcome, attributes,"
-    " received_at, version, counted"
+    " received_at, version, counted, cache_write_tokens"
 )
 
 
@@ -411,6 +438,7 @@ def _span_row(span: Span, received: str, version: int) -> tuple[object, ...]:
         # Only an LLM span with usage can count, and only its trace can tell: undecided
         # (NULL) until _decide; any other span is decided now and needs no update.
         None if has_usage(span) else 0,
+        span.cache_write_tokens,
     )
 
 
@@ -434,6 +462,7 @@ def _span(r: sqlite3.Row) -> Span:
         cached_tokens=r["cached_tokens"],
         outcome=r["outcome"],
         attributes=attributes if isinstance(attributes, dict) else {},
+        cache_write_tokens=r["cache_write_tokens"],
     )
 
 
@@ -630,7 +659,8 @@ class SqliteSpanStore:
             index = "spans_counted" if window <= SHORT_WINDOW else "spans_counted_by_subject"
             sql = (
                 "SELECT session_id, task_id, price_model, COUNT(*), SUM(input_tokens),"
-                f" SUM(output_tokens), SUM(cached_tokens) FROM spans INDEXED BY {index}"
+                " SUM(output_tokens), SUM(cached_tokens), SUM(cache_write_tokens)"
+                f" FROM spans INDEXED BY {index}"
                 " WHERE counted = 1 AND last_at >= ? GROUP BY session_id, task_id, price_model"
             )
             rows = [TokenUsage(*r) for r in self._read(sql, (_ts(now - window),))]

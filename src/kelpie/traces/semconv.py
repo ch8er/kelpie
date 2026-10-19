@@ -25,11 +25,13 @@ linkage within the request and then dropped (counted as ``ignored``).
 **Fields.** ``model``: ``gen_ai.response.model``, else ``gen_ai.request.model``. Tokens:
 ``gen_ai.usage.input_tokens`` / ``output_tokens`` (deprecated ``prompt_tokens`` /
 ``completion_tokens`` accepted), cached = ``gen_ai.usage.cache_read.input_tokens`` (or
-OpenLLMetry's ``gen_ai.usage.cache_read_input_tokens``); cache writes stay in
-``attributes`` as ``gen_ai.usage.cache_write.input_tokens``. Input tokens
-follow the conventions and include cached tokens. Claude Code reports Anthropic usage,
-where ``input_tokens`` excludes cache reads and writes, so for ``claude_code.*`` spans
-Kelpie stores ``input_tokens + cache_read_tokens + cache_creation_tokens``.
+OpenLLMetry's ``gen_ai.usage.cache_read_input_tokens``), cache writes =
+``gen_ai.usage.cache_creation.input_tokens`` (or ``cache_write.input_tokens``, or
+OpenLLMetry's ``cache_creation_input_tokens``). Input tokens follow the conventions and
+include cache reads and writes (each is capped at what is left of the input). Claude Code
+reports Anthropic usage, where ``input_tokens`` excludes cache reads and writes, so for
+``claude_code.*`` spans Kelpie stores ``input_tokens + cache_read_tokens +
+cache_creation_tokens``.
 ``tool``: ``gen_ai.tool.name``. ``outcome``: ``error`` when the span status is ERROR, when
 ``error.type`` is set, or when Claude Code's ``success`` is false; else ``ok``.
 
@@ -110,6 +112,11 @@ MODEL = ("gen_ai.response.model", "gen_ai.request.model")
 INPUT_TOKENS = ("gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens")
 OUTPUT_TOKENS = ("gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens")
 CACHED_TOKENS = ("gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.cache_read_input_tokens")
+CACHE_WRITE_TOKENS = (
+    "gen_ai.usage.cache_creation.input_tokens",
+    "gen_ai.usage.cache_write.input_tokens",
+    "gen_ai.usage.cache_creation_input_tokens",
+)
 TOOL_NAME = ("gen_ai.tool.name",)
 ARGUMENTS = "gen_ai.tool.call.arguments"
 CC_MODEL = ("model",)
@@ -384,13 +391,16 @@ def _span(r: RawSpan, task_id: str | None, session_id: str | None) -> Span | Non
     )
     if claude_code:
         cached = _tokens(attrs, (*CACHED_TOKENS, *CC_CACHED))
-        written = _tokens(attrs, CC_CACHE_WRITE)
+        written = _tokens(attrs, (*CACHE_WRITE_TOKENS, *CC_CACHE_WRITE))
         reported = _tokens(attrs, (*INPUT_TOKENS, *CC_INPUT))
         # semconv input tokens include cached ones; Anthropic usage does not
         input_tokens = reported if _first(attrs, INPUT_TOKENS) else reported + cached + written
     else:
         cached = _tokens(attrs, CACHED_TOKENS)
+        written = _tokens(attrs, CACHE_WRITE_TOKENS)
         input_tokens = _tokens(attrs, INPUT_TOKENS)
+    cached = min(cached, input_tokens)
+    written = min(written, input_tokens - cached)
     consumed = {*model_keys, *tool_keys, KIND_ATTRIBUTE, *INPUT_TOKENS, *OUTPUT_TOKENS}
     consumed.update(CACHED_TOKENS)
     attributes = _kept(attrs, consumed, claude_code)
@@ -422,6 +432,7 @@ def _span(r: RawSpan, task_id: str | None, session_id: str | None) -> Span | Non
             attrs, (*OUTPUT_TOKENS, *CC_OUTPUT) if claude_code else OUTPUT_TOKENS
         ),
         cached_tokens=cached,
+        cache_write_tokens=written,
         outcome="error" if failed else "ok",
         attributes=attributes,
     )

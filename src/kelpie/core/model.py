@@ -263,7 +263,8 @@ class Span:
     """A trace span following OpenTelemetry GenAI semantic conventions.
 
     ``input_tokens`` includes cached input tokens, as in the conventions;
-    ``cached_tokens`` is the part read from a provider cache.
+    ``cached_tokens`` is the part read from a provider cache and ``cache_write_tokens``
+    the part written to it.
     """
 
     trace_id: str
@@ -283,6 +284,7 @@ class Span:
     cached_tokens: int = 0
     outcome: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
+    cache_write_tokens: int = 0
 
     @property
     def duration(self) -> timedelta | None:

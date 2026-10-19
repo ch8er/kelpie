@@ -551,6 +551,7 @@ class OpenClawAdapter:
                     input_tokens=e.input + e.cache_read + e.cache_write,
                     output_tokens=e.output,
                     cached_tokens=e.cache_read,
+                    cache_write_tokens=e.cache_write,
                     outcome="ok",
                     attributes=attributes,
                 )
