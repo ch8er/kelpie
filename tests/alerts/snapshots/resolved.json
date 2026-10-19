@@ -1,0 +1,52 @@
+{
+  "text": "✅ task t_6fb7a27a: no longer reported: \"blocked\". · resolved after 3.0 h\nRule: stale_blocks",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "✅ "
+            },
+            {
+              "type": "text",
+              "text": "task t_6fb7a27a: no longer reported: \"blocked\".",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " · resolved after 3.0 h"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "stale_blocks",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

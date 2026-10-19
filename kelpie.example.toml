@@ -660,6 +660,9 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # dedup_window = "10m"      # identical alerts within this window are sent once per channel
 # queue_size = 50           # per channel
 # retry_horizon = "15m"     # how long a transient failure is retried before the alert is lost
+# language = "en"           # en | ru: Kelpie's own words in alerts; agents' text is shown as is
+# task_url = "https://board.example.org/tasks/{id}"  # "Open task" link per task; http(s) and
+#                           # {id} required. Unset: [report] task_url, if it is an http(s) URL
 #
 # [[alerts.channels]]
 # type = "telegram"
@@ -668,6 +671,8 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # chat_id = "-1001234567890"           # a chat id, or "@channelname"
 # timeout = "10s"
 # min_severity = "warning"             # info | warning | critical
+# # format = "html"                    # html | plain (html falls back to plain if Telegram
+# #                                    # cannot parse it)
 # # name = "telegram"                  # only needed with two telegram channels
 # # api_url = "https://api.telegram.org"  # e.g. a local Bot API server (http only on loopback)
 #

@@ -23,7 +23,7 @@ from kelpie.alerts.telegram import (
     utf16_len,
 )
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import AlertEvent, Did, Transition
+from kelpie.core.alerts import AlertEvent, AlertItem, Did, Transition
 from kelpie.metrics import Metrics
 from tests.alerts.fake_telegram import FakeTelegram, fake_telegram
 
@@ -61,11 +61,11 @@ def wait_for(cond: Callable[[], bool], timeout: float = 3.0) -> None:
 
 def test_message_shows_severity_transition_and_what_kelpie_did() -> None:
     text = format_message(message(transition=Transition.ESCALATED, did=Did.SUGGESTED))
-    first, second, third = text.split("\n")
-    assert first == "[WARNING] orphans: alert task-1"
-    assert second == "Still open. task-1 has had no owner for 3h."
-    assert third.startswith("Kelpie did: nothing, mode suggest")
-    assert "only sent this alert" in format_message(message())
+    head, did, rule = text.split("\n")  # one sentence: the headline says it all
+    assert rule == "Rule: orphans"
+    assert head == "\U0001f7e1 task-1 has had no owner for 3h. · still open"
+    assert did == "Kelpie did: nothing, mode suggest. A human decides."
+    assert "Kelpie did" not in format_message(message())  # only told a human: no line
     assert "failed" in format_message(message(did=Did.FAILED))
     assert "no executor" in format_message(message(did=Did.NOT_EXECUTED))
     resolved = message(
@@ -74,14 +74,14 @@ def test_message_shows_severity_transition_and_what_kelpie_did() -> None:
         transition=Transition.RESOLVED,
         age=timedelta(hours=1),
     )
-    # The transition is worded from the fields (core.alerts.lead_in), once.
-    assert format_message(resolved).split("\n")[1] == "Resolved after 1.0h: gone."
+    # The transition is worded from the fields, once, in the headline line.
+    assert format_message(resolved).splitlines()[0] == "\u2705 gone. · resolved after 1.0 h"
     still = message(reason="no owner", transition=Transition.ESCALATED, age=timedelta(hours=4))
-    assert format_message(still).split("\n")[1] == "Still open after 4.0h: no owner"
+    assert format_message(still).splitlines()[0] == "\U0001f7e1 no owner · still open after 4.0 h"
     changed = message(
         reason="now critical", severity=Severity.CRITICAL, transition=Transition.CHANGED
     )
-    assert format_message(changed).split("\n")[1] == "Changed: now critical"
+    assert format_message(changed).splitlines()[0] == "\U0001f534 now critical · changed"
 
 
 def test_untrusted_text_is_plain_and_control_characters_are_removed() -> None:
@@ -99,18 +99,78 @@ def test_text_is_cut_to_the_telegram_limit_in_utf16_units() -> None:
     assert utf16_len(format_message(message(reason="y" * 20_000))) <= MAX_TEXT
 
 
-def test_sends_plain_text_to_the_configured_chat() -> None:
+def test_sends_html_to_the_configured_chat() -> None:
     with fake_telegram() as fake:
-        channel(fake).send(message(severity=Severity.CRITICAL))
+        channel(fake).send(message(severity=Severity.CRITICAL, reason="a <b> & c"))
         channel(fake).send(message(severity=Severity.INFO))
     (path, headers, body), (_, _, quiet) = fake.requests
     assert path == f"/bot{TOKEN}/sendMessage"
     assert headers["Content-Type"] == "application/json"
     assert body["chat_id"] == "-100123"
     assert body["disable_web_page_preview"] is True
-    assert "parse_mode" not in body
-    assert body["text"].startswith("[CRITICAL] orphans: alert task-1")
+    assert body["parse_mode"] == "HTML"
+    assert body["text"] == "\U0001f534 <b>a &lt;b&gt; &amp; c</b>\nRule: <code>orphans</code>"
     assert body["disable_notification"] is False and quiet["disable_notification"] is True
+
+
+def test_format_plain_sends_no_markup() -> None:
+    with fake_telegram() as fake:
+        channel(fake, format="plain").send(message(reason="a <b> & c"))
+    body = fake.requests[0][2]
+    assert "parse_mode" not in body and body["text"] == "\U0001f7e1 a <b> & c\nRule: orphans"
+    with pytest.raises(ValueError, match="format"):
+        settings(fake.url, format="markdown")
+
+
+def test_html_telegram_cannot_parse_is_sent_once_more_as_plain_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    refused = {"ok": False, "description": "Bad Request: can't parse entities: unclosed tag"}
+    with fake_telegram() as fake:
+        fake.replies = [(400, refused)]
+        with caplog.at_level(logging.WARNING):
+            channel(fake).send(message(reason="a <b> & c"))
+        (warning,) = [r for r in caplog.records if "plain text" in r.getMessage()]
+        assert "telegram" in warning.getMessage()  # names the channel...
+        assert TOKEN not in caplog.text and "a <b> & c" not in caplog.text  # ...nothing more
+        fake.replies = [(400, refused), (400, refused)]
+        with pytest.raises(PermanentError):  # the plain resend is refused too: no third try
+            channel(fake).send(message())
+    first, second, third, fourth = (r[2] for r in fake.requests)
+    assert first["parse_mode"] == "HTML" and "parse_mode" not in second
+    assert second["text"] == "\U0001f7e1 a <b> & c\nRule: orphans"
+    assert third["parse_mode"] == "HTML" and "parse_mode" not in fourth
+
+
+def test_other_400s_are_not_resent_as_plain_text() -> None:
+    with fake_telegram() as fake:
+        fake.replies = [(400, {"ok": False, "description": "Bad Request: chat not found"})]
+        with pytest.raises(PermanentError):
+            channel(fake).send(message())
+    assert len(fake.requests) == 1
+
+
+def test_free_text_is_plain_without_parse_mode() -> None:
+    with fake_telegram() as fake:
+        channel(fake).send(message(text="Daily <report> & @team"))
+    body = fake.requests[0][2]
+    assert "parse_mode" not in body and body["text"] == f"Daily <report> & {AT_SIGN}team"
+
+
+def test_the_channel_renders_with_the_alerts_language_and_link() -> None:
+    alerts = load_alerts({"language": "ru", "task_url": "https://board.example.org/t/{id}"})
+    assert (alerts.rendering.language, alerts.rendering.task_url) == (
+        "ru",
+        "https://board.example.org/t/{id}",
+    )
+    with fake_telegram() as fake:
+        cfg = settings(fake.url)
+        cfg.build({ENV: TOKEN}, alerts.rendering).send(
+            message(items=(AlertItem("task-1", "Fix it", blocking=3),))
+        )
+    text = fake.requests[0][2]["text"]
+    assert "Блокирует: 3 задачи" in text
+    assert '<a href="https://board.example.org/t/task-1">Открыть задачу</a>' in text
 
 
 def test_429_carries_retry_after_and_is_retried_by_delivery() -> None:
@@ -265,22 +325,25 @@ def test_lone_surrogates_do_not_crash_formatting_or_sending() -> None:
 
 def test_a_huge_body_never_cuts_off_what_kelpie_did() -> None:
     text = format_message(message(reason="y" * 20_000, subject="s" * 5000, did=Did.FAILED))
-    assert "tried, and it failed" in text.split("\n")[-1]
+    assert "tried, and it failed" in text.split("\n")[-2]
     assert utf16_len(text) <= MAX_TEXT
 
 
 def test_invisible_format_characters_are_removed() -> None:
     sneaky = "pay‮evil‬ ok​‍go﻿ ⁦x⁩"  # bidi, zero-width, BOM
-    text = format_message(message(reason=sneaky, subject="task​-1"))
+    item = AlertItem("task​-1", "ti‮tle")
+    text = format_message(message(reason=sneaky, items=(item,)))
     assert all(unicodedata.category(c) != "Cf" for c in text)
-    assert "payevil okgo x" in text and "task-1" in text
+    assert "payevil okgo x" in text and "task-1" in text and "title" in text
     assert clean("a­b") == "ab"  # soft hyphen too
 
 
 def test_mentions_in_agent_controlled_text_are_broken() -> None:
     body = "ping @everyone and @some_user, mail a@b.example"
-    text = format_message(message(reason=body, subject="@admin task", rule="@rule"))
+    item = AlertItem("@admin", "@admin task", needed="ask @admin")
+    text = format_message(message(reason=body, rule="@rule", items=(item,)))
     assert "@" not in text  # none left in the agent's fields
+    assert "@" not in format_message(message(reason=body))
     assert all(f"{AT_SIGN}{n}" in text for n in ("everyone", "some_user", "admin"))
     assert "@" not in format_message(message(text="Daily report for @team"))
     assert defang("x@y") == f"x{AT_SIGN}y"

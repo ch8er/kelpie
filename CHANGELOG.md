@@ -161,6 +161,11 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - A shared delivery layer with per-channel queues, retries and flood control, with Telegram
   and Slack incoming-webhook channels ([#47](https://github.com/ch8er/kelpie/pull/47), [#50](https://github.com/ch8er/kelpie/pull/50), [#64](https://github.com/ch8er/kelpie/pull/64)).
 - Alert text says what Kelpie did, taken from the outcome and the rule's mode ([#97](https://github.com/ch8er/kelpie/pull/97)).
+- Readable alerts: a severity icon and a one-line headline, then each task with its title,
+  age, id, a short "Needed" line, what it blocks and an "Open task" link (`[alerts]
+  task_url`); "Kelpie did" only when Kelpie acted or would act. Telegram gets HTML (with a
+  plain-text fallback and `format = "plain"`), Slack gets Block Kit rich_text blocks, and Kelpie's
+  own words come in English or Russian (`[alerts] language`) ([#169](https://github.com/ch8er/kelpie/issues/169)).
 
 #### Operations
 

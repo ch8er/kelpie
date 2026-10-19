@@ -1,0 +1,109 @@
+{
+  "text": "🟡 &lt;b&gt;bold&lt;/b&gt; *bold* _it_ ~gone~ ```fence``` &amp;amp; ＠everyone &lt;!channel&gt; payevil \"quoted\" &lt;a href=\"x\"&gt;\n\n1. Fix &lt;b&gt;\"login\"&lt;/b&gt; *bold* _it_ ~gone~ `code` &amp; ＠here &lt;!channel&gt; x — 2.0 h · t/1 ?&amp;x=\"y\"*_~`\n   Needed: &lt;script&gt;alert(1)&lt;/script&gt; ```fence``` *now* ＠everyone &amp;amp; &lt;http://evil|click&gt;\n   Blocking: 1 task · Open task: https://board.example.org/tasks/t%2F1%20%3F%26x%3D%22y%22%2A_~%60\nKelpie did: Suggested: clear the block on &lt;b&gt;t/1&lt;/b&gt; *now* ＠here.\nRule: &lt;b&gt;rule&lt;/b&gt;",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "<b>bold</b> *bold* _it_ ~gone~ ```fence``` &amp; ＠everyone <!channel> payevil \"quoted\" <a href=\"x\">",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Fix <b>\"login\"</b> *bold* _it_ ~gone~ `code` & ＠here <!channel> x",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 2.0 h · "
+            },
+            {
+              "type": "text",
+              "text": "t/1 ?&x=\"y\"*_~`",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Needed: "
+            },
+            {
+              "type": "text",
+              "text": "<script>alert(1)</script> ```fence``` *now* ＠everyone &amp; <http://evil|click>"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Blocking: 1 task"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t%2F1%20%3F%26x%3D%22y%22%2A_~%60",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Kelpie did: Suggested: clear the block on <b>t/1</b> *now* ＠here."
+            },
+            {
+              "type": "text",
+              "text": "\nRule: "
+            },
+            {
+              "type": "text",
+              "text": "<b>rule</b>",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

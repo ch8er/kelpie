@@ -76,7 +76,7 @@ def test_the_story_runs_offline_and_kelpie_does_what_it_says(
     assert any(
         m.mentions("Hold 'merge-first' looks forgotten", "Owner: dana") for m in outcomes.messages
     )
-    assert any(m.mentions("Resolved after", "merge-first") for m in outcomes.messages)
+    assert any(m.mentions("resolved after", "merge-first") for m in outcomes.messages)
     # 4. the human gate
     assert any(
         m.mentions("Needs you (sam)", "t_store", "5 agent task(s)") for m in outcomes.messages
@@ -256,7 +256,7 @@ def test_a_hold_alert_is_only_recorded_in_observe_mode(
 ) -> None:
     tale = scene(tmp_path, monkeypatch, bottlenecks="observe")
     try:
-        with pytest.raises(RuntimeError, match="no 'Resolved' message"):
+        with pytest.raises(RuntimeError, match="no 'resolved after' message"):
             tale.forgotten_hold()  # observed, never sent: nothing to resolve
         farm = tale.farm
         assert [m for m in farm.inbox.messages if m.rule == "bottlenecks"] == []

@@ -1,0 +1,6 @@
+🔴 Runaway run: session S-1 made 10 identical calls.
+
+1. Heartbeat · t_loop
+   Open task: https://board.example.org/tasks/t_loop
+Kelpie did: Stopped run S-1; the worker exits within ~2 min.
+Rule: loop_breaker

@@ -1,0 +1,4 @@
+🟡 Disk host-a is 95% full.
+
+It fills in 3h.
+Rule: resources

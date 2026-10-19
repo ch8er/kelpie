@@ -69,7 +69,7 @@ def test_incident_01_guard_block_with_green_ci_is_suggested_for_unblock(farm: Fa
     )
     farm.serve(config)
 
-    text = farm.wait_message("stale_blocks", "unblock t_guard")
+    text = farm.wait_message("stale_blocks", "Suggested: clear the block on t_guard")
     assert "is stale: its condition is met" in text and DID_SUGGEST in text
     assert "Suggested: clear the block on t_guard" in text
     assert "Clearing it" not in text  # the rule no longer words it as done (#69)
@@ -123,7 +123,7 @@ def test_incident_01_with_a_fine_grained_token_ci_is_read_from_actions_runs(farm
     )
     farm.serve(config)
 
-    text = farm.wait_message("stale_blocks", "unblock t_green")
+    text = farm.wait_message("stale_blocks", "Suggested: clear the block on t_green")
     assert "is stale: its condition is met" in text and DID_SUGGEST in text
     settle(farm)
     for task in ("t_red", "t_running", "t_nightly"):
@@ -163,7 +163,7 @@ def test_incident_15_waiting_for_merge_block_clears_once_merged(farm: Farm) -> N
     )
     farm.serve(config)
 
-    text = farm.wait_message("stale_blocks", "unblock t_merged")
+    text = farm.wait_message("stale_blocks", "Suggested: clear the block on t_merged")
     assert "pr_merged" in text
     dead = farm.wait_message("stale_blocks", "t_closed")
     assert "never clear on its own" in dead
@@ -199,9 +199,9 @@ def test_incident_02_exit_without_status_is_suggested_for_requeue(farm: Farm) ->
 
     farm.serve(farm.config({"exit_contract": {**SUGGEST, **HERMES_STALE}}))
 
-    gone = farm.wait_message("exit_contract", "requeue t_gone")
+    gone = farm.wait_message("exit_contract", "return t_gone to the queue")
     assert f"hermes-run-{rid}" in gone and "stopped sending heartbeats" in gone
-    vague = farm.wait_message("exit_contract", "requeue t_vague")
+    vague = farm.wait_message("exit_contract", "return t_vague to the queue")
     assert "not an allowed block reason" in vague
     settle(farm)
     assert farm.messages("t_question") == [] and farm.messages("t_slow") == []
@@ -240,7 +240,7 @@ def test_incident_10_polling_ci_in_a_session_is_coached_not_stopped(farm: Farm) 
     }
     farm.serve(farm.config(rules))
 
-    text = farm.wait_message("wait_condition", "comment t_review")
+    text = farm.wait_message("wait_condition", "comment on t_review")
     assert "same check" in text and "register" in text.lower()
     settle(farm)
     assert farm.messages("loop_breaker") == []
@@ -271,7 +271,7 @@ def test_incident_11_ownerless_review_with_dependents_is_critical(farm: Farm) ->
     farm.serve(farm.config({"orphan_status": {**SUGGEST, **HERMES_STALE}}))
 
     text = farm.wait_message("orphan_status", "t_auth")
-    assert text.startswith("[CRITICAL]") and "4 open task(s) depend on it" in text
+    assert text.startswith("\U0001f534") and "4 open task(s) depend on it" in text
     settle(farm)
     assert farm.messages("t_fresh") == []
     board_unchanged(farm, before)
@@ -366,7 +366,7 @@ def test_incident_16_human_task_gating_a_chain_is_escalated(farm: Farm) -> None:
     assert "holds 5 agent task(s)" in text
     settle(farm)
     assert farm.messages("t_calendar") == []
-    assert farm.messages("bottlenecks", "escalate") == []
+    assert farm.messages("Rule: bottlenecks", " · t_store") == []  # no per-gate alert
     board_unchanged(farm, before)
 
 
@@ -378,7 +378,7 @@ def test_incident_16_per_gate_escalation_is_opt_in(farm: Farm) -> None:
     }
     farm.serve(farm.config(rules, human_owners=["alice"]))
 
-    text = farm.wait_message("bottlenecks", "escalate t_store", "gates 5 agent task(s)")
+    text = farm.wait_message("Rule: bottlenecks", " · t_store", "gates 5 agent task(s)")
     assert "owner alice" in text and "Kelpie does not change dependencies" in text
     settle(farm)
     assert farm.messages("t_calendar") == []
@@ -389,5 +389,5 @@ def test_incident_16_idle_capacity_behind_a_human_gate_is_alerted(farm: Farm) ->
     human_gate(farm)
     farm.serve(farm.config(HUMAN_GATE_RULES, human_owners=["alice"]))
 
-    text = farm.wait_message("bottlenecks: alert", "idle with no ready work", "t_store", timeout=5)
+    text = farm.wait_message("Rule: bottlenecks", "idle with no ready work", "t_store", timeout=5)
     assert "dev" in text

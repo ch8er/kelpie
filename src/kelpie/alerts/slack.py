@@ -11,11 +11,14 @@ The URL must be https on ``hooks.slack.com``, or on the host named in ``allow_ho
 http only for a loopback ``allow_host``, for tests and local relays). Redirects are refused,
 so the URL is never sent anywhere else.
 
-Messages have the layout of the Telegram ones: plain text in the ``text`` field. Slack
-formatting is switched off (``mrkdwn: false``, no link unfurling) and ``&``, ``<`` and ``>``
-are escaped as Slack requires, so untrusted task text cannot become a mention or a link.
-The caps are Telegram's (the text stays far below Slack's limit of about 40000 characters,
-even with every character escaped).
+Alerts are Block Kit ``rich_text`` messages laid out by :mod:`kelpie.alerts.render`
+(the headline, one block per task, the reason, what Kelpie did and the rule) with a plain
+top-level ``text`` fallback for notifications (``mrkdwn: false``, ``&``, ``<`` and ``>``
+escaped). Every dynamic value is cleaned and its @mentions broken, and sits in a text
+element, which Slack does not parse, so untrusted task text cannot become a mention
+(``<!channel>``, ``@here``), formatting or a link; links are built only from ``[alerts]
+task_url``. Free text (the daily report) is plain text with formatting off. Link unfurling
+is off.
 """
 
 from __future__ import annotations
@@ -30,21 +33,17 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from kelpie import net
+from kelpie.alerts import render
 from kelpie.alerts.delivery import PermanentError, TransientError
+from kelpie.alerts.render import DEFAULT_RENDERING, RenderSettings, defang
+from kelpie.alerts.render import slack_escape as escape
 from kelpie.alerts.telegram import (
     DEFAULT_TIMEOUT,
-    MAX_BODY,
-    MAX_HEAD,
     MAX_RESPONSE,
-    MAX_TEXT,
     MAX_TIMEOUT,
-    clean,
-    did_line,
-    lead,
     loopback,
     redact,
     truncate,
-    utf16_len,
 )
 from kelpie.core.actions import Severity
 from kelpie.core.alerts import AlertEvent
@@ -60,23 +59,16 @@ _ERROR = re.compile(r"[a-z][a-z_]{0,39}")  # Slack's short error codes, e.g. no_
 _KEYS = {"type", "name", "webhook_env", "timeout", "min_severity", "allow_host"}
 
 
-def escape(text: str) -> str:
-    """Slack's required escaping; ``&`` first so the entities are not escaped again."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+__all__ = ["escape"]
 
 
-def format_message(message: AlertEvent) -> str:
-    """The text of a message, laid out as in Telegram, then escaped for Slack."""
+def payload(message: AlertEvent, settings: RenderSettings = DEFAULT_RENDERING) -> dict[str, Any]:
+    """The message fields of a webhook post: ``text`` and ``blocks`` for an alert
+    (:func:`kelpie.alerts.render.slack_payload`); free text as escaped plain text, with
+    formatting off."""
     if message.text is not None:
-        return escape(truncate(clean(message.text)))
-    head = f"[{message.severity.value.upper()}] "
-    head += f"{truncate(clean(message.rule), MAX_HEAD)}: " if message.rule else ""
-    # As in Telegram: the body yields room, so the last line (what Kelpie did) survives.
-    first = head + truncate(clean(message.subject), MAX_HEAD)
-    did = did_line(message)
-    room = min(MAX_BODY, MAX_TEXT - utf16_len(first) - utf16_len(did) - 2)
-    body = truncate(clean(lead(message) + message.reason.strip()), room)
-    return escape(truncate("\n".join([first, body, did])))
+        return {"text": escape(truncate(defang(message.text))), "mrkdwn": False}
+    return render.slack_payload(message, settings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +101,12 @@ class SlackSettings:
     def check(self, environ: Mapping[str, str] = os.environ) -> None:
         self.webhook(environ)
 
-    def build(self, environ: Mapping[str, str] = os.environ) -> SlackChannel:
-        return SlackChannel(self, *self.webhook(environ))
+    def build(
+        self,
+        environ: Mapping[str, str] = os.environ,
+        rendering: RenderSettings = DEFAULT_RENDERING,
+    ) -> SlackChannel:
+        return SlackChannel(self, *self.webhook(environ), rendering)
 
 
 def _split(value: str, allow_host: str) -> tuple[str, str]:
@@ -164,9 +160,16 @@ def load_slack(entry: Mapping[str, Any], where: str) -> SlackSettings:
 class SlackChannel:
     """Posts alerts to a webhook. Holds the URL; its ``repr`` does not show it."""
 
-    def __init__(self, settings: SlackSettings, origin: str, path: str) -> None:
+    def __init__(
+        self,
+        settings: SlackSettings,
+        origin: str,
+        path: str,
+        rendering: RenderSettings = DEFAULT_RENDERING,
+    ) -> None:
         self.name = settings.name
         self.min_severity = settings.min_severity
+        self._rendering = rendering
         self._settings = settings
         self._origin = origin
         self._path = path  # the secret part of the URL
@@ -175,9 +178,8 @@ class SlackChannel:
         return f"SlackChannel(name={self.name!r})"
 
     def send(self, message: AlertEvent) -> None:
-        payload = {
-            "text": format_message(message),
-            "mrkdwn": False,
+        body = {
+            **payload(message, self._rendering),
             "unfurl_links": False,
             "unfurl_media": False,
         }
@@ -187,7 +189,7 @@ class SlackChannel:
                 self._origin,
                 self._path,
                 {"Content-Type": "application/json"},
-                json.dumps(payload).encode(),
+                json.dumps(body).encode(),
                 self._settings.timeout.total_seconds(),
                 max_bytes=MAX_RESPONSE,
                 proxy=self._origin.startswith("https:"),

@@ -7,7 +7,7 @@ import pytest
 
 from kelpie.alerts import slack, telegram
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.alerts import AlertEvent, Did, Transition, lead_in
+from kelpie.core.alerts import AlertEvent, AlertItem, Did, Transition, lead_in
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.model import Snapshot
@@ -51,16 +51,21 @@ def run_lifecycle(rule: str, reason: str, task_id: str = "T-1") -> list[AlertEve
 
 def test_a_state_alert_carries_each_transition_as_a_field() -> None:
     opened, escalated, changed, resolved = run_lifecycle("orphans", "T-1 has no owner.")
-    assert opened == AlertEvent("orphans", "alert T-1", "T-1 has no owner.", Severity.WARNING)
+    item = AlertItem("T-1", age=timedelta(0), since=T0)  # not on the board: no title
+    assert opened == AlertEvent(
+        "orphans", "alert T-1", "T-1 has no owner.", Severity.WARNING, items=(item,)
+    )
     assert escalated == replace(
         opened,
         transition=Transition.ESCALATED,
         age=5 * H,  # counted from `since`
+        items=(replace(item, age=5 * H),),
     )
     assert changed == replace(
         opened,
         reason="T-1 has no owner. Now worse.",
         transition=Transition.CHANGED,
+        items=(replace(item, age=6 * H),),
     )
     # The rule's reason is never prefixed; the wording of a transition is the channel's.
     assert (resolved.transition, resolved.reason, resolved.age) == (
@@ -86,9 +91,12 @@ def test_a_reason_that_looks_like_transition_wording_stays_a_reason(reason: str)
     assert (escalated.transition, escalated.reason) == (Transition.ESCALATED, reason)
     assert (changed.transition, changed.reason) == (Transition.CHANGED, reason + " Now worse.")
     assert resolved.transition is Transition.RESOLVED
-    for fmt in (telegram.format_message, slack.format_message):
-        assert fmt(opened).split("\n")[1] == reason  # no label added for a new alert
-        assert fmt(escalated).split("\n")[1] == f"Still open after 5.0h: {reason}"
+    # No catalog headline for this rule: the reason's first sentence is the headline, and
+    # the transition is worded once, after it.
+    assert telegram.format_message(opened).splitlines()[0] == f"\U0001f7e1 {reason}"
+    escalated_head = f"\U0001f7e1 {reason} · still open after 5.0 h"
+    assert telegram.format_message(escalated).splitlines()[0] == escalated_head
+    assert slack.payload(escalated)["text"].splitlines()[0] == escalated_head
 
 
 def test_a_rule_or_subject_with_brackets_keeps_its_fields() -> None:
@@ -100,8 +108,7 @@ def test_a_rule_or_subject_with_brackets_keeps_its_fields() -> None:
         Transition.CHANGED,
         Transition.RESOLVED,
     ]
-    head = telegram.format_message(events[0]).split("\n")[0]
-    assert head == "[WARNING] odd] rule [x: alert T-]1"
+    assert "1. T-]1" in telegram.format_message(events[0])
 
 
 def test_effects_carry_what_kelpie_did_as_fields() -> None:

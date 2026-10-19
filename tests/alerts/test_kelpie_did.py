@@ -236,7 +236,12 @@ def test_observe_and_dry_run_send_nothing() -> None:
 # --- channels print the engine's line ------------------------------------------------------
 
 
-@pytest.mark.parametrize("fmt", [telegram.format_message, slack.format_message])
+def _text(fmt: object, message: AlertEvent) -> str:
+    out = fmt(message)  # type: ignore[operator]
+    return out if isinstance(out, str) else out["text"]
+
+
+@pytest.mark.parametrize("fmt", [telegram.format_message, slack.payload])
 def test_channels_print_the_engines_line_last(fmt: object) -> None:
     message = AlertEvent(
         "loop",
@@ -245,11 +250,10 @@ def test_channels_print_the_engines_line_last(fmt: object) -> None:
         Severity.CRITICAL,
         did_text="Stopped run S-1; exits soon.",
     )
-    text = fmt(message)  # type: ignore[operator]
-    assert text.splitlines()[-1] == "Stopped run S-1; exits soon."
-    assert "Kelpie did:" not in text
-    plain = fmt(AlertEvent("loop", "alert T-1", "Runaway run.", Severity.CRITICAL))  # type: ignore[operator]
-    assert plain.splitlines()[-1] == telegram.DID[Did.NOTIFIED]
+    text = _text(fmt, message)
+    assert text.splitlines()[-2:] == ["Kelpie did: Stopped run S-1; exits soon.", "Rule: loop"]
+    plain = _text(fmt, AlertEvent("loop", "alert T-1", "Runaway run.", Severity.CRITICAL))
+    assert "Kelpie did" not in plain  # it only told a human: no line about it
 
 
 def test_the_did_line_is_part_of_what_makes_two_alerts_the_same() -> None:
@@ -336,9 +340,9 @@ def test_a_public_reason_ending_in_a_period_reads_cleanly() -> None:
 def test_the_did_line_survives_a_long_body_whole() -> None:
     body = "x" * 5000
     did = "Stopped run S-1; " + "y" * 1200 + "."
-    for fmt in (telegram.format_message, slack.format_message):
-        text = fmt(AlertEvent("loop", "alert T-1", body, Severity.CRITICAL, did_text=did))
-        assert text.splitlines()[-1] == did and len(text) <= telegram.MAX_TEXT
+    for fmt in (telegram.format_message, slack.payload):
+        text = _text(fmt, AlertEvent("loop", "alert T-1", body, Severity.CRITICAL, did_text=did))
+        assert text.splitlines()[-2] == f"Kelpie did: {did}" and len(text) <= telegram.MAX_TEXT
 
 
 @pytest.mark.parametrize(

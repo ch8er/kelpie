@@ -180,6 +180,21 @@ subscription.
 - [x] Message shows what Kelpie already did and what needs a human
 - [x] Tests mock HTTP; no network access
 
+### alerts: readable alert messages, part 2 — rules supply headline, needed and items (#169)
+labels: P1, area:rules
+Part 1 (#187) built the layout: icon and headline, one entry per task (title, age, id,
+"Needed", "Blocking", "Open task"), the reason as "Why", "Kelpie did" only when Kelpie
+acted, the rule. The rules still send only a reason, so the layout falls back to the reason's
+first sentence as the headline, and a headline longer than 140 characters is a cut whose
+opening words come again in the "Why" under it.
+
+**Acceptance criteria**
+- [ ] Rules set `params.headline` per alert kind (stale_blocks: stale evidence, nothing to check, overdue; bottlenecks: forgotten hold, gate, idle with ready work), so no headline repeats the reason
+- [ ] Rules set `needed` (first what a human must do) and `blocking` (e.g. stale_blocks and wait_condition from their stuck tasks, which no longer reach the "Blocking" line)
+- [ ] Rule 4 hands `waiting_human` / `needs_input` / person-addressed blocks to rule 13 and does not alert on them itself
+- [ ] Rule 13 sends one digest per person per escalation step (`params.items` with `task_id`, `since`, `needed`, `blocking`), sorted by cost of delay; each item carries its exact `task_id`, `blocking` and `since`, and the temporary shim in the engine (`_item`: rule 13's legacy `task`, `kind == "approval"`, the capped `behind` list shown as "10+", `waiting_minutes`) is removed
+- [ ] The daily report's chat summary uses the same layout
+
 ### core: condition registration API
 labels: P0, week-1, area:core
 HTTP endpoint (and a helper in the Hermes plugin) for an agent to register a condition for
@@ -897,7 +912,7 @@ Telegram (bot token and chat id) is the first channel.
 
 **Acceptance criteria**
 - [x] Severity, the transition, what Kelpie already did and what needs a human are shown
-- [x] Message length limit handled; untrusted text sent as plain text
+- [x] Message length limit handled; untrusted text escaped for Telegram HTML and sent to Slack as rich_text text elements, never as markup
 - [x] The bot token never appears in logs, errors, reprs, metrics or `kelpie status`
 - [x] Delivery never blocks or crashes the control loop; drops are counted per channel
 - [x] Tests use a local fake server; no network access

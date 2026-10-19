@@ -26,13 +26,18 @@ Kelpie demo: one working day on a simulated agent farm
 10:05  Kelpie notices (loop_breaker): identical consecutive calls, past the
        limit.
        ┌ alert, as Telegram shows it
-       │ [CRITICAL] loop_breaker: alert t_heartbeat
-       │ Runaway run: session hermes-run-4 (agent ops, task t_heartbeat) made
-       │ 10 identical consecutive `heartbeat_check` calls (limit 8 within 10
-       │ minutes). Check the task before resuming it.
-       │ Stopped run hermes-run-4; task t_heartbeat is blocked for a human
-       │ (hermes kanban unblock t_heartbeat); Kelpie did not end its worker
-       │ (the board records no worker process for the run).
+       │ 🔴 Runaway run: session hermes-run-4 (agent ops, task t_heartbeat)
+       │ made 10 identical consecutive `heartbeat_check` calls (limit 8 within
+       │ 10…
+       │ 
+       │ 1. Nightly maintenance heartbeat · t_heartbeat
+       │ Why: Runaway run: session hermes-run-4 (agent ops, task t_heartbeat)
+       │ made 10 identical consecutive `heartbeat_check` calls (limit 8 within
+       │ 10 minutes). Check the task before resuming it.
+       │ Kelpie did: Stopped run hermes-run-4; task t_heartbeat is blocked for
+       │ a human (hermes kanban unblock t_heartbeat); Kelpie did not end its
+       │ worker (the board records no worker process for the run).
+       │ Rule: loop_breaker
        └
 10:05  Kelpie ran `hermes kanban block --kind needs_input -- t_heartbeat ...`:
        t_heartbeat is blocked.

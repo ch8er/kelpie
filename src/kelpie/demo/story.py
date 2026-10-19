@@ -324,7 +324,7 @@ class Story:
             b.update(tid, status="done", completed_at=f.now)
             b.event(tid, "completed", f.now)
         o.event(f.now, "dana lifts the hold, 1.5 hours late; both PRs merge.")
-        self._tick_until_message("bottlenecks", "Resolved")
+        self._tick_until_message("bottlenecks", "resolved after")
         o.noticed(f.now, "Kelpie sees the held tasks move and closes its alert.")
         self._narrate_messages("bottlenecks")
         o.line()

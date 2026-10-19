@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import signal
 import socket
@@ -106,9 +107,13 @@ def test_runaway_loop_is_stopped_through_the_hermes_cli(farm: Farm) -> None:
         assert farm.board.comments(task_id)[0].startswith("BLOCKED: Stopped by Kelpie")
     assert farm.board.get("t_ok").status == "running"
     assert farm.messages("t_ok") == []
+    # The task id reaches Slack byte for byte, as a code element a person can copy.
+    raw = [json.dumps(b, ensure_ascii=False) for b in farm.channels.slack_bodies()]
+    code = '{"type": "text", "text": "t_loop", "style": {"code": true}}'
+    assert any(code in r for r in raw) and all("\u200b" not in r for r in raw)
     # Critical: both channels hear about each runaway, once.
     slack = farm.channels.slack_texts()
-    runaway = [t for t in slack if t.startswith("[CRITICAL]") and "Runaway run" in t]
+    runaway = [t for t in slack if t.startswith("\U0001f534") and "Rule: loop_breaker" in t]
     assert sum("t_loop" in t for t in runaway) == 1
     assert sum("t_errors" in t for t in runaway) == 1
 
@@ -151,11 +156,11 @@ def test_a_stop_is_announced_as_done(farm: Farm, worker: subprocess.Popen[bytes]
     assert all("only sent this alert" not in t for t in about_loop)
     assert any(re.search(r"\b(stopped|blocked)\b", t, re.IGNORECASE) for t in about_loop)
     (message,) = about_loop  # the runaway alert carries the stop: no second message
-    assert message.startswith("[CRITICAL] loop_breaker: alert t_loop")
+    assert message.startswith("\U0001f534 Runaway run: ") and " · t_loop" in message
     assert re.fullmatch(
-        rf"Stopped run hermes-run-{loop}; task t_loop is blocked for a human "
+        rf"Kelpie did: Stopped run hermes-run-{loop}; task t_loop is blocked for a human "
         r"\(hermes kanban unblock t_loop\); its worker ended \d+\.\ds after SIGTERM\.",
-        message.splitlines()[-1],
+        message.splitlines()[-2],
     )
     assert worker.wait(timeout=5) == -signal.SIGTERM  # the worker itself, not just the card
 
@@ -172,10 +177,10 @@ def test_a_refused_stop_reaches_a_human(farm: Farm) -> None:
 
     # The runaway alert carries what happened to its stop: one critical message.
     text = farm.wait_message("loop_breaker", "t_loop", "Failed: could not stop run")
-    assert text.startswith("[CRITICAL] loop_breaker: alert t_loop")
-    assert text.splitlines()[-1] == (
-        f"Failed: could not stop run hermes-run-{loop}: hermes kanban block failed (exit 1), "
-        "needs a human."
+    assert text.startswith("\U0001f534 Runaway run: ") and " · t_loop" in text
+    assert text.splitlines()[-2] == (
+        f"Kelpie did: Failed: could not stop run hermes-run-{loop}: hermes kanban block "
+        "failed (exit 1), needs a human."
     )
     kelpie.wait_ticks(3)
     farm.stop()
@@ -293,7 +298,8 @@ def test_a_cancel_is_announced_as_done(farm: Farm) -> None:
     ]
     assert announced, "nothing says the build was cancelled"
     (done,) = announced  # the waste summary of that tick carries it: one message
-    assert done.startswith("[INFO] ci_economy: alert") and "still runs" not in done
-    assert done.splitlines()[-1] == (
-        f"Cancelled build {REPO}:{builds.old.id} (superseded by {REPO}:{builds.new.id})."
+    assert done.startswith("\U0001f535 CI waste in the last 24h") and "still runs" not in done
+    assert done.splitlines()[-2] == (
+        f"Kelpie did: Cancelled build {REPO}:{builds.old.id} "
+        f"(superseded by {REPO}:{builds.new.id})."
     )
