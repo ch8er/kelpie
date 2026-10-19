@@ -8,10 +8,16 @@ from typing import Any
 
 import pytest
 
-from kelpie.connectors.github.builds import CiSettings, GitHubCI, load_ci, next_reset
+from kelpie.connectors.github.builds import (
+    MAX_JOB_LOOKUPS,
+    CiSettings,
+    GitHubCI,
+    load_ci,
+    next_reset,
+)
 from kelpie.connectors.github.client import GitHubClient, GitHubError
 from kelpie.core.actions import Action, ActionKind, ActionResult
-from kelpie.core.model import BuildStatus, ResourceKind, Snapshot
+from kelpie.core.model import BuildStatus, Job, ResourceKind, Snapshot
 from kelpie.core.ports import ActionConnector
 from tests.connectors.fake_github import TOKEN, Clock, FakeGitHub, serve
 
@@ -317,11 +323,95 @@ def test_minutes_from_jobs_are_read_once() -> None:
         assert gh.paths().count(jobs) == 1
 
 
+def job_list(*jobs: dict[str, Any]) -> dict[str, Any]:
+    return {"total_count": len(jobs), "jobs": list(jobs)}
+
+
+def test_a_finished_build_says_which_job_and_step_failed_and_where() -> None:
+    """Rule 9 tells a CI outage from a broken PR by the failing job, step and runner."""
+    with serve() as gh:
+        runs_page(gh, [run(1, 30, status="completed", conclusion="failure"), run(2, 1)])
+        steps = [
+            {"name": "Checkout", "conclusion": "success"},
+            {"conclusion": "failure"},  # unnamed
+            {"name": "Odd", "conclusion": ["failure"]},  # junk: not a string
+            "not a step",
+            {"name": "Select toolchain", "conclusion": "failure"},
+            {"name": "Build", "conclusion": "skipped"},
+        ]
+        failed = {
+            "name": "build",
+            "status": "completed",
+            "conclusion": "timed_out",
+            "steps": steps,
+            "runner_name": "runner-1",
+            "labels": ["self-hosted", "linux", 7, ""],
+        }
+        soft = [{"name": "Optional lint", "conclusion": "failure"}]  # continue-on-error
+        passed = {"name": "lint", "status": "completed", "conclusion": "success", "steps": soft,
+                  "runner_name": "runner-2", "labels": ["linux"]}  # fmt: skip
+        others = [
+            {"name": "deploy", "status": "completed", "conclusion": "cancelled"},
+            {"name": "docs", "status": "completed", "conclusion": "skipped"},
+            {"name": "odd", "status": "completed", "conclusion": "new_word"},
+            {"conclusion": "failure"},  # no name: left out
+        ]
+        gh.reply(f"{RUNS}/1/attempts/1/jobs?per_page=100", job_list(failed, passed, *others))
+        done, active = sorted(ci(gh)(Snapshot(now=NOW)).builds, key=lambda b: b.id)
+        assert done.jobs == (
+            Job(
+                "build",
+                BuildStatus.FAILURE,
+                "Select toolchain",
+                "runner-1",
+                ("self-hosted", "linux"),
+            ),
+            Job("lint", BuildStatus.SUCCESS),
+            Job("deploy", BuildStatus.CANCELLED),
+            Job("docs", BuildStatus.SKIPPED),
+            Job("odd", BuildStatus.UNKNOWN),
+        )
+        assert [j.failed for j in done.jobs] == [True, False, False, False, False]
+        assert active.jobs is None  # an active run's jobs are not read
+
+
+def test_jobs_are_read_once_per_attempt_and_none_when_not_read() -> None:
+    with serve() as gh:
+        runs_page(gh, [run(1, 30, status="completed", conclusion="failure", run_attempt=2)])
+        jobs = f"{RUNS}/1/attempts/2/jobs?per_page=100"
+        gh.reply(jobs, job_list({"name": "build", "status": "completed", "conclusion": "failure"}))
+        clock = Clock(NOW)
+        source = ci(gh, clock)
+        first = source(Snapshot(now=NOW)).builds[0].jobs
+        clock.advance(minutes=5)
+        assert source(Snapshot(now=clock.now)).builds[0].jobs == first
+        assert first == (Job("build", BuildStatus.FAILURE),) and gh.paths().count(jobs) == 1
+    with serve() as gh:  # the request fails: not read, and asked again next scan
+        runs_page(gh, [run(1, 30, status="completed", conclusion="failure")])
+        gh.reply(f"{RUNS}/1/attempts/1/jobs?per_page=100", {"message": "boom"}, status=500)
+        assert ci(gh)(Snapshot(now=NOW)).builds[0].jobs is None
+    with serve() as gh:  # no job list in the body
+        runs_page(gh, [run(1, 30, status="completed", conclusion="failure")])
+        gh.reply(f"{RUNS}/1/attempts/1/jobs?per_page=100", {"total_count": 0})
+        assert ci(gh)(Snapshot(now=NOW)).builds[0].jobs is None
+
+
+def test_jobs_past_the_lookup_budget_are_not_read() -> None:
+    with serve() as gh:
+        done = [run(i, 30 + i, status="completed", conclusion="failure") for i in range(1, 13)]
+        runs_page(gh, done)
+        for i in range(1, 13):
+            gh.reply(f"{RUNS}/{i}/attempts/1/jobs?per_page=100", job_list())
+        builds = ci(gh)(Snapshot(now=NOW)).builds
+        assert sum(b.jobs is None for b in builds) == 12 - MAX_JOB_LOOKUPS
+
+
 def test_partial_job_list_falls_back_to_wall_clock() -> None:
     with serve() as gh:
         runs_page(gh, [run(1, 30, status="completed", conclusion="success")])
         gh.reply(f"{RUNS}/1/attempts/1/jobs?per_page=100", {"total_count": 200, "jobs": []})
-        assert ci(gh)(Snapshot(now=NOW)).builds[0].minutes == 5.0
+        [build] = ci(gh)(Snapshot(now=NOW)).builds
+        assert build.minutes == 5.0 and build.jobs is None
 
 
 def test_draft_and_changed_paths_from_the_pull_request() -> None:

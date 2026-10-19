@@ -387,6 +387,25 @@ class BuildStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class Job:
+    """One job of a finished CI build. ``conclusion`` is how it ended, mapped by the
+    connector like ``Build.status``. ``step`` is the first named step that did not succeed in
+    a job that did not succeed, when the CI names one. ``runner`` is the machine a job that
+    did not succeed ran on and ``labels`` the runner labels it asked for (e.g.
+    ``self-hosted``, an OS)."""
+
+    name: str
+    conclusion: BuildStatus
+    step: str | None = None
+    runner: str | None = None
+    labels: tuple[str, ...] = ()
+
+    @property
+    def failed(self) -> bool:
+        return self.conclusion is BuildStatus.FAILURE
+
+
+@dataclass(frozen=True, slots=True)
 class Build:
     """One CI build (a pipeline run for one commit), as a CI connector reports it.
 
@@ -399,7 +418,10 @@ class Build:
     where the CI reports them). ``superseded_by`` is the id of a newer build of the same
     pipeline and branch that started after this one. ``cancellable`` is set by the
     connector: the build is superseded, still active, and within what the connector is
-    configured to cancel; rules only ask to cancel such builds.
+    configured to cancel; rules only ask to cancel such builds. ``jobs`` are the build's
+    jobs once it finished (jobs the connector could not read left out; empty: none
+    listed). None means not read: an active, queued or skipped build, a partial job list, a
+    failed request or no request budget left. None never means "nothing failed".
     """
 
     id: str
@@ -418,6 +440,7 @@ class Build:
     minutes: float = 0.0
     superseded_by: str | None = None
     cancellable: bool = False
+    jobs: tuple[Job, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
