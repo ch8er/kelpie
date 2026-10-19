@@ -119,3 +119,11 @@ def test_folds_after_the_last_sighting_count_until_the_outage_closes() -> None:
     entries = (outage_sample(at(3)), folded(4, "a"), folded(10.25, "b"), folded(11.5, "late"))
     report = build_report(inputs(states=(state,), actions=entries), sections={})
     assert [o.folded for o in report.outages] == [2]
+
+
+@pytest.mark.parametrize("closed_at", [None, END + timedelta(hours=1)])
+def test_folds_after_the_last_sighting_count_while_still_open(closed_at: datetime | None) -> None:
+    state = closed(outage_state(SID, at(2), at(10)), closed_at)
+    entries = (outage_sample(at(3)), folded(4, "a"), folded(23, "b"))
+    report = build_report(inputs(states=(state,), actions=entries), sections={})
+    assert [(o.folded, o.open) for o in report.outages] == [(2, True)]

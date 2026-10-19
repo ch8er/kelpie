@@ -188,7 +188,7 @@ def outage_day(
     end: datetime,
     closed_at: datetime | None = None,
 ) -> tuple[int, int]:
-    """The PRs an outage held and the alerts folded under it between ``start`` and ``end``:
+    """The PRs in an outage's scope and the alerts folded under it between ``start`` and ``end``:
     the PRs in its scope during that span, from its samples in it and the last one before
     it (its scope as the span began; samples are hourly, so a PR that went green just
     before may count); and the alerts folded under it with an entry in that span until

@@ -255,8 +255,8 @@ report; no LLM is involved.
   time all of them explained together. The report makes no network calls: it runs the
   connector steps that read only the board (`task_status`, human tasks from block
   reasons), and a block reason a `[[block_conditions]]` pattern matches counts as a CI or
-  merge wait by the pattern's kind, without a PR lookup. The "Farm throughput" section breaks each role's waiting time down
-  by cause.
+  merge wait by the pattern's kind, without a PR lookup. The "Farm throughput" section
+  breaks each role's waiting time down by cause.
 - **Context and model fit** (from traces, `kelpie.traces.fit`): content a read-like tool
   loaded unchanged into many sessions of a role (same tool, arguments hash and size); tools
   offered but never called, when the platform lists them in the span attribute

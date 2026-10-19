@@ -539,6 +539,8 @@ def _outage_lines(
     entries = [e for e in inputs.actions if e.at < end]
     out: list[OutageLine] = []
     for o in sorted(found, key=lambda o: (o.since, o.state)):
+        # last seen before the day: not listed, even if it closed after midnight (folds in
+        # between, at most resolve_after long, count on neither day)
         if o.since >= end or o.until <= start:
             continue
         closed_at = closed.get((o.state, o.since))
@@ -1094,7 +1096,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
         lines += [
             "",
             f"**CI outages** (rule 9; {report.outage_wait_hours:.1f} task-hours of waiting fell "
-            'inside them and count under "a shared CI failure", not CI or merges; PRs held and '
+            'inside them and count under "a shared CI failure", not CI or merges; PRs in scope and '
             "alerts folded under each are the day's):",
             "",
         ]
