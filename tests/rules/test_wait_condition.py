@@ -136,6 +136,10 @@ def test_overdue_boundary() -> None:
     rule = WaitCondition(max_wait=timedelta(hours=2))
     assert kinds(rule, waiting(NOW - 119 * M), cond("a", False)) == []
     assert kinds(rule, waiting(NOW - 120 * M), cond("a", False)) == [ActionKind.ALERT]
+    snap = Snapshot(now=NOW, tasks=(waiting(NOW - 120 * M),), conditions=(cond("a", False),))
+    assert [a.about_wait for a in rule.evaluate(snap)] == [True]  # an outage folds it
+    dead = Snapshot(now=NOW, tasks=(waiting(),), conditions=(cond("x", True, task_id="T-2"),))
+    assert [a.about_wait for a in rule.evaluate(dead)] == [False]  # broken, not just long
 
 
 @pytest.mark.parametrize("status", [Status.BLOCKED, Status.IN_PROGRESS, Status.READY])

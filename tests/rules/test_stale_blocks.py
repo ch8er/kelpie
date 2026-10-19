@@ -46,6 +46,7 @@ def test_pr_closed_without_merge_alerts_at_once_on_fresh_evidence() -> None:
     )
     (action,) = run(blocked(since=NOW - 10 * M), closed)
     assert action.kind is ActionKind.ALERT and "closed without merging" in action.reason
+    assert action.about_wait  # a CI outage that explains the block folds it (incident 20)
     # Evidence from before the block, or a PR still open: no early alert.
     old = replace(closed, checked_at=NOW - 20 * M)  # before the block: not evidence
     assert run(blocked(since=NOW - 10 * M), old) == []

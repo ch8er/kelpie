@@ -185,6 +185,7 @@ class StaleBlocks:
             state=f"{NAME}:{task.id}:{block.since.isoformat()}",
             since=block.since,
             params=params or {},
+            about_wait=True,  # a CI outage that explains the block folds it
         )
 
 

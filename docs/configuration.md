@@ -230,7 +230,9 @@ on `/metrics` (`kelpie_role_reopened_after_done_ratio`) and in the daily report.
 
 Wakes a waiting task when every condition of its current wait holds on fresh evidence;
 alerts when a wait can never be met, runs past `max_wait`, or has no condition; comments on
-sessions that poll a known check instead of registering a condition and exiting.
+sessions that poll a known check instead of registering a condition and exiting. A wait
+past `max_wait` that an open CI outage explains (rule 9) is folded under the outage's
+alert instead of being sent.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
@@ -280,7 +282,9 @@ Statuses: `in_progress`, `review`, `accepted`. Terminal statuses and `blocked`, 
 
 Clears a block when every linked condition holds on fresh evidence. Alerts on blocks it
 cannot clear. A block Kelpie set itself (a run rule 10 stopped, recognised by its signed
-marker) is not one of them: it waits for a human, so rule 13 lists it instead.
+marker) is not one of them: it waits for a human, so rule 13 lists it instead. While a CI
+outage that explains the block is open (rule 9), its alerts are folded under the outage's
+one alert instead of being sent; they come back if the block outlives the outage.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |

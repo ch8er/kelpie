@@ -157,6 +157,7 @@ class WaitCondition:
                 state=f"{NAME}:{task.id}:{since}",
                 since=task.status_since,
                 params={"pending_conditions": [c.id for c in pending]},
+                about_wait=True,  # a CI outage that explains the wait folds it
             )
 
     # --- polling inside a session -------------------------------------------------------

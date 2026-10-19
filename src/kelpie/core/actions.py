@@ -63,6 +63,10 @@ class Action:
     ``once_per_key`` makes ``key`` alone (with the rule) the fingerprint, whatever the
     task, kind or executor: for a request that may land on a different task each time
     (or as an alert when there is none) but must be made once.
+
+    ``about_wait`` marks an alert about a task's block or wait lasting too long (not about a
+    wait that is broken). While a farm-wide incident that explains the task's wait is open
+    (a CI outage, :mod:`kelpie.core.incidents`), the engine folds such alerts under it.
     """
 
     kind: ActionKind
@@ -77,3 +81,4 @@ class Action:
     since: datetime | None = None
     once: bool = False
     once_per_key: bool = False
+    about_wait: bool = False

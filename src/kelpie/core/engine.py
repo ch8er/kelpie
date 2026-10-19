@@ -23,6 +23,7 @@ from kelpie.core.alerts import (
 from kelpie.core.alerts import Transition as AlertTransition
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
+from kelpie.core.incidents import FOLDED_UNDER, CiOutage, is_outage_state
 from kelpie.core.ledger import (
     ActionLedger,
     Dispatched,
@@ -186,9 +187,15 @@ class Engine:
             for k in _announces(a):
                 known = self._announcer_severity.get(k, Severity.INFO)
                 self._announcer_severity[k] = _higher(known, a.severity)
+        folds = self._folds(ordered)
         try:
             for action in ordered:
-                if action.state is not None and action.kind in _ALERT_ACTIONS:
+                under = self._folded_under(action, folds)
+                if under is not None:
+                    if action.state is not None:
+                        seen.add(action.state)  # held back, not gone: it must not resolve
+                    results.append(self._fold(action, under, snapshot))
+                elif action.state is not None and action.kind in _ALERT_ACTIONS:
                     seen.add(action.state)
                     results.append(self._state_alert(action, snapshot))
                 else:
@@ -198,6 +205,50 @@ class Engine:
             self._release_held()
             self._evaluated = None  # resolution is only valid right after evaluate()
         return results
+
+    # --- incidents ----------------------------------------------------------------------
+
+    def _folds(self, actions: Sequence[Action]) -> dict[str, tuple[str, bool]]:
+        """The tasks whose waits an open incident explains this tick: the incident's state
+        id, and whether its alert reaches people (its rule is not in observe)."""
+        found: dict[str, tuple[str, bool]] = {}
+        for a in actions:
+            if a.kind is not ActionKind.ALERT or a.state is None or not is_outage_state(a.state):
+                continue
+            outage = CiOutage.from_params(a.params)
+            if outage is not None and outage.state == a.state:
+                live = self._mode(a.rule) is not Mode.OBSERVE
+                for task_id in outage.tasks:
+                    found.setdefault(task_id, (a.state, live))
+        return found
+
+    def _folded_under(self, action: Action, folds: dict[str, tuple[str, bool]]) -> str | None:
+        """The incident this alert is folded under, if any. An incident whose alert is only
+        logged folds only alerts that would only be logged too: a person never loses an
+        alert with nothing in its place. Critical alerts are never folded."""
+        if (
+            not action.about_wait
+            or action.kind is not ActionKind.ALERT
+            or action.severity is Severity.CRITICAL
+            or action.task_id is None
+            or action.task_id not in folds
+        ):
+            return None
+        under, live = folds[action.task_id]
+        return under if live or self._mode(action.rule) is Mode.OBSERVE else None
+
+    def _fold(self, action: Action, under: str, snapshot: Snapshot) -> Dispatched:
+        """Hold the alert back and record it under its incident. It gets a fingerprint of its
+        own, so the ledger keeps ``folded_under`` instead of counting it on an earlier
+        delivery of the same alert."""
+        key = f"{action.key or action.state or action.reason}|{FOLDED_UNDER}:{under}"
+        folded = replace(action, key=key, params={**action.params, FOLDED_UNDER: under})
+        log.info("folded under %s: %s", under, action)
+        dispatched = Dispatched(
+            folded, self._mode(action.rule), Outcome.SUPPRESSED, Suppression.INCIDENT
+        )
+        self._record(dispatched, snapshot.now)
+        return dispatched
 
     def _release_held(self) -> None:
         """Send the effect messages whose announcing alert did not go out this tick."""
