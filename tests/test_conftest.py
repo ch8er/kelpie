@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from pathlib import Path
 
@@ -97,7 +98,8 @@ def test_an_existing_database_is_never_removed(tmp_path: Path) -> None:
     touched = cwd_db_leaks(str(tmp_path), before)
     assert "kelpie.db-wal" in touched  # reported...
     assert (tmp_path / "kelpie.db-wal").exists()  # ...never removed
-    assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM t").fetchone() == (1,)
+    with contextlib.closing(sqlite3.connect(db)) as other:
+        assert other.execute("SELECT COUNT(*) FROM t").fetchone() == (1,)
     open_.close()
 
 

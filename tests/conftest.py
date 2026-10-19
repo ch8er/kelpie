@@ -25,18 +25,20 @@ def _private_home(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
             os.environ["HOME"] = saved
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _no_kelpie_env() -> Iterator[None]:
+_SHELL_KELPIE: dict[str, str] = {}
+
+
+def pytest_configure(config: pytest.Config) -> None:
     """No test reads or writes what the developer's shell points Kelpie at (``KELPIE_DB``
     would replace every database path, ``KELPIE_CONFIG`` the config): every ``KELPIE_*``
-    variable is unset for the run; a test sets what it needs."""
-    saved = {k: v for k, v in os.environ.items() if k.startswith("KELPIE_")}
-    for key in saved:
+    variable is unset for the run, collection included; a test sets what it needs."""
+    _SHELL_KELPIE.update({k: v for k, v in os.environ.items() if k.startswith("KELPIE_")})
+    for key in _SHELL_KELPIE:
         del os.environ[key]
-    try:
-        yield
-    finally:
-        os.environ.update(saved)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    os.environ.update(_SHELL_KELPIE)
 
 
 _CWD_DB = ("kelpie.db", "kelpie.db-wal", "kelpie.db-shm")
