@@ -51,7 +51,8 @@ spare. An alert lasts as long as spare capacity exists.
   behind a human task gets no parallelization advice. A planned task (incident 20: in a
   pre-work status such as Hermes triage or scheduled, or labelled with one of
   ``planned_labels`` or a hold label) is not ready for work for its own reasons: it is not
-  behind the human task, and neither is what waits on it. Rule 13 inherits the labels.
+  behind the human task, and neither is what waits on it; a planned human task gates
+  nothing. Rule 13 inherits the labels and reads PR labels alike.
 
 ``ready_is_queued`` (default off; for platforms that report the assignee of a task nobody has
 started as its owner; the Hermes adapter does not, since it sets the owner only while a run
@@ -109,7 +110,14 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import ConditionKind, OwnerKind, PullRequest, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import is_live, last_seen, linked_conditions, planned, responsible
+from kelpie.rules._tasks import (
+    is_live,
+    labels_list,
+    last_seen,
+    linked_conditions,
+    planned,
+    responsible,
+)
 
 NAME = "bottlenecks"
 
@@ -367,11 +375,13 @@ def human_gates(snapshot: Snapshot, planned_labels: Collection[str] = ()) -> lis
     ``linked_conditions`` reads it) whose ``params.task`` names the human task, through any
     open task that is not planned (:func:`~kelpie.rules._tasks.planned`, with
     ``planned_labels``): a planned task does not wait on the human task, and neither does
-    what waits on it. Agent tasks are open tasks not owned by a human.
+    what waits on it. A planned human task is no gate: it is not the person's to do yet.
+    Agent tasks are open tasks not owned by a human. Labels of linked PRs count when the
+    caller applied :func:`with_pr_labels` (both rule 6 and rule 13 do).
     """
     humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
     by_id = {t.id: t for t in snapshot.tasks if not t.status.is_terminal}
-    gates = [t for t in by_id.values() if t.owner_id in humans]
+    gates = [t for t in by_id.values() if t.owner_id in humans and not planned(t, planned_labels)]
     if not gates:
         return []
     successors: dict[str, set[str]] = {}
@@ -905,13 +915,6 @@ class Bottlenecks:
         return actions
 
 
-def labels_list(value: Any, name: str) -> list[str]:
-    """A config list of non-empty labels."""
-    if not isinstance(value, list | tuple) or not all(isinstance(x, str) and x for x in value):
-        raise ValueError(f"{name} must be a list of non-empty strings")
-    return list(value)
-
-
 def _who_could_take(
     work: Sequence[Task],
     idle_roles: dict[str, tuple[str, ...]],
@@ -1030,12 +1033,7 @@ def build(config: dict[str, Any]) -> Bottlenecks:
         if kwargs["hold_expiry"] <= timedelta(0):
             raise ValueError("hold_expiry must be positive")
     if "hold_labels" in config:
-        labels = config.pop("hold_labels")
-        if not isinstance(labels, list | tuple) or not all(
-            isinstance(label, str) and label for label in labels
-        ):
-            raise ValueError("hold_labels must be a list of non-empty strings")
-        kwargs["hold_labels"] = frozenset(labels)
+        kwargs["hold_labels"] = frozenset(labels_list(config.pop("hold_labels"), "hold_labels"))
     if "planned_labels" in config:
         kwargs["planned_labels"] = frozenset(
             labels_list(config.pop("planned_labels"), "planned_labels")

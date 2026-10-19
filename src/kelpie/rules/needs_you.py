@@ -24,11 +24,12 @@ delay, so the human sees one list instead of scattered blocks:
 
 **Planned waits are not waiting** (incident 20). A task that is not ready for work for its
 own reasons (:func:`~kelpie.rules._tasks.planned`: a pre-work status such as Hermes triage
-or scheduled, or one of ``planned_labels``, which default to rule 6's ``planned_labels``
-and hold labels) waits on nothing it depends on: it is not behind a human task, adds no
-cost, and is no approval either (unless Kelpie stopped its run), as rule 6 reads it. On a
-live farm a post-release task behind a person's planned task counted as 143 agent-hours of
-waiting on that person.
+or scheduled, or one of ``planned_labels``, on the task or a linked PR; they default to
+rule 6's ``planned_labels`` and hold labels) waits on nothing it depends on: it is not
+behind a human task and adds no cost, and a planned human task is not in the inbox, as
+rule 6 reads it. A task blocked asking a person is an approval whatever its labels: it was
+started. On a live farm a post-release task behind a person's planned task counted as 143
+agent-hours of waiting on that person.
 
 **Cost of delay** of an item: the agent-hours spent waiting on it so far, the sum over the
 agent tasks that wait on it directly of how long each has waited: a task parked on it since
@@ -81,8 +82,8 @@ from kelpie.core.model import (
 )
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import planned
-from kelpie.rules.bottlenecks import HumanGate, human_gates, labels_list
+from kelpie.rules._tasks import labels_list
+from kelpie.rules.bottlenecks import HumanGate, human_gates, link_pull_requests, with_pr_labels
 
 NAME = "needs_you"
 UNASSIGNED = "unassigned"
@@ -138,6 +139,7 @@ class NeedsYou:
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> list[Action]:
+        snapshot = with_pr_labels(snapshot, link_pull_requests(snapshot)[0])  # as rule 6
         roles = {o.id: o.role for o in snapshot.owners}
         inbox: dict[str, list[Item]] = {}
         found, claimed = self._human_tasks(snapshot, human_gates(snapshot, self.planned_labels))
@@ -246,8 +248,6 @@ class NeedsYou:
                 continue
             if t.id in claimed:
                 continue  # it waits on a human task directly: listed under that task
-            if planned(t, self.planned_labels) and t.block.kelpie is not KelpieMark.STOP:
-                continue  # not ready for work anyway: its question can wait too
             if not self._question_for_a_person(t, snapshot):
                 continue
             waited = snapshot.now - t.block.since

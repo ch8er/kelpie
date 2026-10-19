@@ -3,7 +3,9 @@
 
 **Cause of a task's wait**, the first that applies:
 
-1. ``hold``: the task carries a hold label (rule 6's ``hold_labels`` and ``holds``);
+1. ``hold``: the task carries a hold label (rule 6's ``hold_labels`` and ``holds``) or a
+   planned one (its ``planned_labels``: planned for later, it waits on nothing it depends
+   on, as rules 6 and 13 read it; incident 20);
 2. the kind of an unmet condition it waits on: ``people`` (``human_task``), ``ci``
    (``ci_status``), ``merge`` (``pr_merged``), ``quota`` (``quota_reset``), ``tasks``
    (``task_status``), ``timer`` (``time``), ``other`` (``custom``). The condition its block

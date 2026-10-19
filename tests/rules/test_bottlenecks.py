@@ -1352,3 +1352,57 @@ def test_work_routed_to_a_busy_agent_suggests_reassigning() -> None:
     assert alert.key == "bottlenecks:idle-ready"
     assert alert.params["likely_cause"] == "assigned_busy" and "dev-1" in alert.reason
     assert alert.params["assigned_busy_tasks"] == ["A"]
+
+
+# --- planned waits are not waiting (incident 20) ----------------------------------------
+
+
+def test_planned_tasks_are_not_behind_a_human_task() -> None:
+    from dataclasses import replace
+
+    later = replace(task("P"), labels=("later",))
+    tasks = (human("H"), later, task("C"), task("D"), replace(task("Q"), prework=True))
+    deps = (Dependency("P", "H"), Dependency("C", "P"), Dependency("D", "H"))
+    deps += (Dependency("D", "P"), Dependency("Q", "H"))
+    [gate] = human_gates(Snapshot(NOW, tasks, HUMANS, deps), frozenset({"later"}))
+    assert gate.behind == ("D",)  # P planned, C only behind it, D also directly behind H
+    [gate] = human_gates(Snapshot(NOW, tasks, HUMANS, deps))  # without the label
+    assert gate.behind == ("C", "D", "P")  # Q, in pre-work, is planned anyway
+    # Through a human_task condition too.
+    parked = replace(task("W", Status.WAITING), labels=("later",))
+    cond = Condition("C1", ConditionKind.HUMAN_TASK, "W", {"task": "H"}, satisfied=False)
+    snapshot = Snapshot(NOW, (human("H"), parked), HUMANS, (), (cond,))
+    assert human_gates(snapshot, {"later"}) == []
+    assert [g.behind for g in human_gates(snapshot)] == [("W",)]
+
+
+def test_a_planned_human_task_gates_nothing() -> None:
+    from dataclasses import replace
+
+    gate = replace(human("H"), labels=("later",))
+    deps = (Dependency("A", "H"),)
+    assert human_gates(Snapshot(NOW, (gate, task("A")), HUMANS, deps), {"later"}) == []
+    assert human_gates(Snapshot(NOW, (gate, task("A")), HUMANS, deps))
+
+
+def test_rule_6_reads_held_dependents_and_pr_labels_as_planned() -> None:
+    from dataclasses import replace
+
+    tasks = (human("H", since=3 * H), task("A"), task("B"))
+    deps = (Dependency("A", "H"), Dependency("B", "H"))
+    rule = Bottlenecks(
+        escalate_human_gates=True, human_gate_min_tasks=2, hold_labels=frozenset({"hold"})
+    )
+    [esc] = of(run(Snapshot(NOW, tasks, HUMANS, deps), rule), "human-gate:")
+    assert esc.params["blocked_agent_tasks"] == 2
+    held = (tasks[0], replace(tasks[1], labels=("hold",)), tasks[2])
+    assert of(run(Snapshot(NOW, held, HUMANS, deps), rule), "human-gate:") == []  # 1 left
+    pr = PullRequest("org/repo", 12, "B: thing", branch="b", labels=("hold",), task_ids=("B",))
+    on_pr = Snapshot(NOW, held, HUMANS, deps, pull_requests=(pr,))
+    assert human_gates(with_pr_labels(on_pr, link_pull_requests(on_pr)[0]), {"hold"}) == []
+
+
+def test_build_planned_labels() -> None:
+    assert build({"planned_labels": ["later"]}).planned_labels == {"later"}
+    with pytest.raises(ValueError, match="planned_labels must be a list"):
+        build({"planned_labels": "later"})

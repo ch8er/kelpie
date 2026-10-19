@@ -130,10 +130,20 @@ def planned(task: Task, labels: Collection[str] = ()) -> bool:
     It is in a pre-work status only a person moves it out of (``Task.prework``: Hermes
     triage, or scheduled for later; the adapter's config), or it carries one of ``labels``
     (a milestone or label that marks it as later, or a hold: rule 6's ``planned_labels``
-    and hold labels). A plain backlog task is not planned: platforms keep dependents there
-    until their parents finish (Hermes todo). Rules 6 and 13, and through rule 13 the daily
-    report's agent-hours waiting on people, read it alike."""
+    and hold labels; a label on a linked PR counts, see ``bottlenecks.with_pr_labels``). A
+    plain backlog task is not planned: platforms keep dependents there until their parents
+    finish (Hermes todo). Rules 6 and 13, and through rule 13 the daily report's agent-hours
+    waiting on people, read it alike. A planned task does not wait on what it depends on, and
+    a planned human task gates nothing; a task blocked asking a person is still a question
+    for them, labels or not (it was started)."""
     return task.prework or not frozenset(labels).isdisjoint(task.labels)
+
+
+def labels_list(value: object, name: str) -> list[str]:
+    """A config list of non-empty labels (``hold_labels``, ``planned_labels``)."""
+    if not isinstance(value, list | tuple) or not all(isinstance(x, str) and x for x in value):
+        raise ValueError(f"{name} must be a list of non-empty strings")
+    return list(value)
 
 
 def responsible(task: Task) -> str | None:

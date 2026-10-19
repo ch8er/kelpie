@@ -499,11 +499,9 @@ def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
     ``conflict_warning``'s ``expected_shared`` the same way."""
     section = dict(config.rules.get(name, {}))
     if name == "needs_you" and "planned_labels" not in section:
-        six = config.rules.get("bottlenecks", {})
-        own = six.get("planned_labels", [])
-        found = [x for x in own if isinstance(x, str)] if isinstance(own, list) else []
-        if found or hold_labels(six):
-            section["planned_labels"] = sorted({*found, *hold_labels(six)})
+        planned = planned_labels(config.rules.get("bottlenecks", {}))
+        if planned:
+            section["planned_labels"] = planned
         return section
     if name == "return_causes" and "expected_shared" not in section:
         # Files many tasks are meant to edit are not conflict hot spots either.
@@ -542,6 +540,14 @@ def hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
         if isinstance(hold, Mapping) and isinstance(hold.get("label"), str):
             found.append(hold["label"])
     return sorted(set(found))
+
+
+def planned_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
+    """What rule 6 reads as planned by label: its ``planned_labels`` and hold labels
+    (incident 20); rule 13 and the daily report read the same."""
+    own = bottlenecks.get("planned_labels", [])
+    found = [x for x in own if isinstance(x, str)] if isinstance(own, list) else []
+    return sorted({*found, *hold_labels(bottlenecks)})
 
 
 def _normalized(patterns: Any) -> Any:

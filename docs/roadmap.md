@@ -453,6 +453,9 @@ of waiting on a person.
 - [x] Rule 13, rule 6 and the report use the same definition
 - [x] Fixtures: new `20-planned-wait.yaml`
 
+Backlog here means a pre-work status (Hermes triage, scheduled: `Task.prework`); a plain
+backlog task (Hermes todo) is where dependents wait for their parents, so it still counts.
+
 ### core: budgets and spend for API-key farms — default prices, provider reconciliation, auto mode
 labels: P0, week-3, area:core
 On a subscription, wasted tokens cost limit and time; with API keys they cost money directly.
