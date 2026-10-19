@@ -783,6 +783,7 @@ def test_gate_with_enough_work_behind_is_escalated_to_its_owner() -> None:
         "blocked_agent_tasks": 3,
         "blocked_tasks": ["A", "B", "C"],
         "agent_hours": 1.5,
+        "planned_agent_tasks": 0,
     }
     assert "does not change dependencies" in esc.reason and "1h 30m of agent work" in esc.reason
     rule = Bottlenecks(human_gate_min_tasks=4, escalate_human_gates=True)
@@ -833,6 +834,7 @@ def test_idle_agents_and_only_human_tasks_ready_alert() -> None:
         "slots": 4,
         "human_tasks": ["H"],
         "blocked_agent_tasks": 2,
+        "planned_agent_tasks": 0,
         "ready_human_tasks": ["H", "LONE"],
         "recommendation": "unblock_human_tasks",
     }

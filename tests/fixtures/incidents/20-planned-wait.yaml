@@ -45,6 +45,9 @@ expected_actions:
       waiting_agent_tasks: 1
       waiting: [t_2004]
       cost_hours: 3.0
+      # planned work behind it, reported apart (not waiting): the report's uncounted line
+      planned_agent_tasks: 2
+      planned: [t_2001, t_2002]
 not_expected_actions:
   - kind: escalate
     reason_contains: "t_2010"

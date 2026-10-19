@@ -537,3 +537,19 @@ def test_planned_labels_are_validated(value: object) -> None:
         REGISTRY["needs_you"]({"planned_labels": value})
     with pytest.raises(ValueError, match="planned_labels must be a list"):
         REGISTRY["bottlenecks"]({"planned_labels": value})
+
+
+def test_planned_work_behind_a_human_task_is_reported_apart() -> None:
+    from kelpie.rules.needs_you import PLANNED, PLANNED_AGENT_TASKS
+
+    gate = human("H-1", ago(hours=6))
+    waiting = Task("A-1", "next", Status.BACKLOG, ago(hours=3))
+    later = Task("A-2", "after release", Status.BACKLOG, ago(hours=140), prework=True)
+    behind_later = Task("A-3", "follow-up", Status.BACKLOG, ago(hours=140))
+    deps = [Dependency("A-1", "H-1"), Dependency("A-2", "H-1"), Dependency("A-3", "A-2")]
+    [esc] = run(snap([gate, waiting, later, behind_later], deps=deps))
+    assert esc.params["waiting"] == ["A-1"] and esc.params["cost_hours"] == 3.0
+    assert esc.params[PLANNED] == ["A-2"] and esc.params[PLANNED_AGENT_TASKS] == 1
+    # Nothing planned: the params are there, empty.
+    [esc] = run(snap([gate, waiting], deps=deps[:1]))
+    assert esc.params[PLANNED] == [] and esc.params[PLANNED_AGENT_TASKS] == 0
