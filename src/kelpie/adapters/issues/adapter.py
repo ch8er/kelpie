@@ -1,7 +1,8 @@
 """The issues adapter: a farm whose task queue is a tracker's issues (see :mod:`.mapping`).
 
 One adapter per tracker: ``github-issues`` reads GitHub Issues through the GitHub
-connector's client (:mod:`.github`). Agents there (Copilot coding agent, Codex cloud, the
+connector's client (:mod:`.github`), ``linear`` a Linear workspace's teams (:mod:`.linear`).
+Agents there (Copilot coding agent, Codex cloud, the
 Claude Code GitHub Action, OpenHands) run on someone else's machines, so the adapter has
 tasks and owners but no sessions or spans.
 
@@ -78,7 +79,7 @@ class Tracker(Protocol):
 
     def reopen(self, item_id: str) -> None: ...
 
-    def reserve(self, writes: int) -> None: ...
+    def reserve(self, writes: int, agents: Sequence[Agent] = ()) -> None: ...
 
 
 def signed(text: str) -> str:
@@ -236,7 +237,7 @@ class IssuesAdapter:
             raise UnsupportedAction(
                 f"{task_id} was closed as {item.closed_reason}; Kelpie does not reopen it"
             )
-        self.tracker.reserve(RESERVE)
+        self.tracker.reserve(RESERVE, (agent,) if agent is not None else ())
         if not item.open:
             self.tracker.reopen(task_id)
         if agent is None:
@@ -275,7 +276,7 @@ class IssuesAdapter:
         if old is not None and old.name == new.name:
             log.info("issues: %s is already %s's; nothing to reassign", task_id, owner_id)
             return
-        self.tracker.reserve(RESERVE)
+        self.tracker.reserve(RESERVE, (new,) if old is None else (new, old))
         # The new agent first: a failure halfway leaves the issue held, never by nobody.
         self._start(new, item)
         if old is not None:
@@ -307,7 +308,7 @@ class IssuesAdapter:
             item = self.tracker.fetch(task_id)
         except IssuesError as exc:
             if exc.kind in WAIT_KINDS:  # nothing changed yet: ask again later
-                raise Deferred(f"issues: GitHub cannot be read now ({exc.kind})") from exc
+                raise Deferred(f"issues: {self.name} cannot be read now ({exc.kind})") from exc
             raise
         board = self._board(item)
         if board.label is not None and board.label.casefold() not in {

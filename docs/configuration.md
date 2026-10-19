@@ -23,7 +23,8 @@ configure what exists.
   [dispatch_gate](#dispatch_gate)
 - [[storage]](#storage)
 - [[adapters.hermes]](#adaptershermes), [[adapters.claude_code]](#adaptersclaude_code),
-  [[adapters.openclaw]](#adaptersopenclaw), [[adapters.github_issues]](#adaptersgithub_issues)
+  [[adapters.openclaw]](#adaptersopenclaw), [[adapters.github_issues]](#adaptersgithub_issues),
+  [[adapters.linear]](#adapterslinear)
 - [[traces]](#traces), [[[traces.forward]]](#tracesforward),
   [[traces.outputs]](#tracesoutputs)
 - [[[budgets]] and [prices]](#budgets-and-prices), [[spend]](#spend)
@@ -708,6 +709,30 @@ rules: the [issues adapter README](../src/kelpie/adapters/issues/README.md); fir
 | `role` | `"issue-agent"` | string | The role of tasks no agent holds, and the agents' default. Distinct from other adapters' roles, so rule 3 never proposes an issue agent for another platform's task (or the reverse) unless you give them the same role. |
 | `agents.<name>` | none | table | An agent that works issues; `<name>` is its owner id in Kelpie. Keys: `assignee` (the login it is assigned as, e.g. `Copilot`), `label` (the label that starts it, e.g. `fix-me`), `author` (the login its pull requests come from, e.g. `copilot-swe-agent[bot]`), `mention` (the comment text that starts it, e.g. `@codex`: `requeue` and `reassign` post it), `role` (default `"issue-agent"`). One of `assignee`, `label` or `author` is required. An account or label names one agent, and an agent's label cannot also be a board's `label`, blocked or ready label. |
 | `boards.<owner/name>` | the keys above | table | Per repository: `label` (`false`: every issue), `blocked_labels`, `ready_labels`, `role`, and `agents` (the agent names Kelpie may hand its tasks to; default all). |
+| `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
+
+## [adapters.linear]
+
+Linear issues as the task queue, with the same status and owner rules as
+[[adapters.github_issues]](#adaptersgithub_issues) (the [issues adapter
+README](../src/kelpie/adapters/issues/README.md), "Linear"). Adapter name `linear`; boards are
+teams, task ids Linear's identifiers (`ENG-123`). Agents integrated in Linear are app users an
+issue is **delegated** to: name the app user as an agent's `assignee`.
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `teams` | (required) | list of team keys | The teams whose issues are tasks (`ENG`), one board each. |
+| `token_env` | `"LINEAR_API_KEY"` | variable name | A Linear API key (personal, `lin_api_…`; an OAuth token is sent as Bearer). Required: Linear has no anonymous access. Writes need a key that may comment and edit issues. |
+| `api_url` | `"https://api.linear.app/graphql"` | URL | https, or http on loopback; a different one needs `token_env` set here. |
+| `timeout` | `"10s"` | duration, <= 60s | One request. |
+| `refresh` | `"2m"` | duration, >= 30s | How often the issues are read again (GraphQL has no conditional requests, and Linear meters requests and query complexity per hour); between refreshes the last read is served. A write makes the next tick read again, unless reads are stretched: they take at most half the hour's complexity limit (25 minutes apart at most). |
+| `lookback` | `"7d"` | duration, > 0 | Closed issues updated within this are read (the most recently updated page of 25). |
+| `max_requests_per_tick` | `20` | count, 0–5000 | Per-issue history reads per refresh (who was assigned, labels put on, who edited the description); the rest use what was read before. The lists are always read, bounded by their page caps (pages of 25, at most 20 open and 1 closed per team). |
+| `pull_repos` | `[]` (github.com, any repository) | list of `owner/repo` or `host/owner/repo` | The repositories whose pull requests, attached by Linear's GitHub integration, count as an issue's (`review`). Links anyone pastes never count. |
+| `label`, `blocked_labels`, `ready_labels`, `role` | as for GitHub Issues | | A `ready_labels` label makes an issue nobody holds `ready`; a started state with nobody on it is `in_progress` with no owner (rule 3 may hand it to one of the board's agents). |
+| `ready_states` | `[]` | list of workflow state names | An issue nobody holds in one of these states (`["Todo"]`, any case) is `ready`; otherwise `backlog`, as on GitHub. |
+| `agents.<name>` | none | table | As for GitHub Issues; `assignee` is a Linear display name (a person, or an agent's app user, which Kelpie delegates to; printable, not ending in `[bot]`), `label`, `mention` (unverified on Linear), `role`. No `author`: Linear shows no pull request author. |
+| `boards.<TEAM>` | the keys above | table | Per team: `label` (`false`: every issue), `blocked_labels`, `ready_labels`, `ready_states`, `role`, `agents`. |
 | `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
 
 ## [traces]

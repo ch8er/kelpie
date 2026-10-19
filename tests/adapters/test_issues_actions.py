@@ -12,14 +12,9 @@ from typing import Any
 import pytest
 
 from kelpie.adapters.issues.adapter import MENTION_TEXT, SIGNATURE, IssuesAdapter, note
-from kelpie.adapters.issues.github import (
-    MAX_WRITES_PER_TICK,
-    PAGE,
-    WRITE_GAP,
-    GitHubIssues,
-    IssuesError,
-)
+from kelpie.adapters.issues.github import PAGE, GitHubIssues, IssuesError
 from kelpie.adapters.issues.mapping import Agent, Board
+from kelpie.adapters.issues.writes import MAX_WRITES_PER_TICK, WRITE_GAP
 from kelpie.connectors.github.client import GitHubClient
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.executors import PlatformExecutor

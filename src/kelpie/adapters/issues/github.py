@@ -51,13 +51,13 @@ from __future__ import annotations
 import logging
 import re
 import time
-from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kelpie.adapters.issues.mapping import (
+    Agent,
     Board,
     Event,
     IssuesError,
@@ -65,6 +65,7 @@ from kelpie.adapters.issues.mapping import (
     LinkedPull,
     login_key,
 )
+from kelpie.adapters.issues.writes import WriteGate
 from kelpie.connectors.github.client import GitHubClient, GitHubError
 from kelpie.connectors.github.connector import valid_repo, web_host
 from kelpie.core.ports import Deferred
@@ -87,9 +88,6 @@ MAX_LABELS = 100
 MAX_LABEL = 50
 MAX_BRANCH = 255
 MAX_NUMBER = 10**9
-WRITE_GAP = 1.0  # seconds between writes
-MAX_WRITES_PER_TICK = 10  # beyond: deferred to the next tick (pacing blocks the loop)
-MAX_WRITES_PER_HOUR = 300  # GitHub allows 500 content-creating requests an hour
 MAX_COMMENT = 60_000  # characters of a comment (GitHub's limit is 65536)
 TRUSTED = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})  # GitHub's author_association
 EVENT_KINDS = frozenset({"labeled", "unlabeled", "assigned", "unassigned", "closed", "reopened"})
@@ -218,14 +216,16 @@ class GitHubIssues:
     _spent: int = field(default=0, init=False, repr=False)
     _good: dict[str, _Lists] = field(default_factory=dict, init=False, repr=False)
     _touched: set[str] = field(default_factory=set, init=False, repr=False)  # repos written
-    _last_write: float | None = field(default=None, init=False, repr=False)
-    _tick_writes: int = field(default=0, init=False, repr=False)
-    _reserved: int = field(default=0, init=False, repr=False)  # writes left of this action's
-    _written: int = field(default=0, init=False, repr=False)  # writes made by this action
     _raw_labels: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
-    _hour: deque[float] = field(default_factory=deque, init=False, repr=False)
     sleep: Callable[[float], None] = field(default=time.sleep, repr=False)
     monotonic: Callable[[], float] = field(default=time.monotonic, repr=False)
+    _gate: WriteGate | None = field(default=None, init=False, repr=False)
+
+    @property
+    def gate(self) -> WriteGate:
+        if self._gate is None:
+            self._gate = WriteGate(sleep=self.sleep, monotonic=self.monotonic)
+        return self._gate
 
     def read(self, now: datetime) -> list[Item]:
         """Every board's items: all lists first, then per-issue details with the budget left.
@@ -233,8 +233,7 @@ class GitHubIssues:
         ``BOARD_GRACE``, then left out; raises :class:`IssuesError` when no board can be
         read at all."""
         self._spent = 0
-        self._tick_writes = 0
-        self._reserved = self._written = 0
+        self.gate.new_tick()
         self._raw_labels.clear()
         self.problem = None
         # Lists are bounded by their page caps and each request's timeout, not by
@@ -506,7 +505,7 @@ class GitHubIssues:
         back (``PUT``), right after reading them, which loses a label added in between."""
         drop = {label.casefold() for label in labels}
         repo, number = self._target(item_id)
-        self._pace()  # before the read: no wait between it and the write
+        self.gate.pace()  # before the read: no wait between it and the write
         self.fetch(item_id)
         current = self._raw_labels.pop(item_id, [])  # every label, also ones not shown
         present = [label for label in current if label.casefold() in drop]
@@ -560,30 +559,12 @@ class GitHubIssues:
             )
         return match["repo"], int(match["number"])
 
-    def _pace(self) -> None:
-        if self._last_write is not None:
-            wait = self._last_write + WRITE_GAP - self.monotonic()
-            if wait > 0:
-                self.sleep(min(wait, WRITE_GAP))
-
-    def reserve(self, writes: int) -> None:
-        """Hold ``writes`` for one action before its first one: an action is deferred whole
-        (``Deferred``: not an attempt, asked again later) when the tick's or the hour's cap
-        cannot take it or GitHub asks Kelpie to back off, never cut halfway. Once it has
-        started, a refused write is an error that says what state it left."""
-        now = self.monotonic()
-        while self._hour and now - self._hour[0] > 3600:
-            self._hour.popleft()
+    def reserve(self, writes: int, agents: Sequence[Agent] = ()) -> None:
+        """Hold ``writes`` for one action before its first (:class:`.writes.WriteGate`):
+        deferred whole while GitHub asks Kelpie to back off or the caps cannot take it."""
         backoff = self.client.backoff_until
-        if backoff is not None and self.clock() < backoff:
-            raise Deferred("issues: GitHub asks Kelpie to wait (backoff)")
-        tick_full = self._tick_writes + writes > MAX_WRITES_PER_TICK
-        if tick_full or len(self._hour) + writes > MAX_WRITES_PER_HOUR:
-            raise Deferred(
-                f"issues: write cap reached ({MAX_WRITES_PER_TICK} a tick, "
-                f"{MAX_WRITES_PER_HOUR} an hour)"
-            )
-        self._reserved, self._written = writes, 0
+        waiting = "backoff" if backoff is not None and self.clock() < backoff else None
+        self.gate.reserve(writes, waiting)
 
     def _send(
         self,
@@ -596,27 +577,20 @@ class GitHubIssues:
     ) -> Any:
         """One write of the reserved ones; GitHub's answer. Before the action's first
         write, a rate limit or back-off defers it; after, it is an error."""
-        if self._reserved <= 0:
-            self.reserve(1)
-        self._reserved -= 1
-        first = self._written == 0
-        self._pace()
-        self._tick_writes += 1
-        self._written += 1
-        self._hour.append(self.monotonic())
+        first = self.gate.begin()
         try:
             return self.client.send(method, path, body)
         except GitHubError as exc:
             if gone_ok and exc.kind == "not_found":
                 return None
             if first and exc.kind in ("backoff", "rate_limited"):
-                self._reserved = 0
+                self.gate.defer_rest()
                 raise Deferred(f"issues: GitHub asks Kelpie to wait ({exc.kind})") from exc
             raise IssuesError(
                 str(exc), f"GitHub refused the change ({exc.kind})", exc.kind
             ) from exc
         finally:
-            self._last_write = self.monotonic()
+            self.gate.done()
             self._touched.add(repo)
 
     def _warn(self, key: str, message: str, *args: object) -> None:
