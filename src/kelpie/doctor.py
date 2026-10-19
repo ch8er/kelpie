@@ -364,7 +364,8 @@ def check_prices(settings: Settings, now: datetime) -> Check:
     return _warn(
         name,
         f"no price for these models in the last {window}, so their cost is unknown: {named}",
-        f'add [prices."{first}"] input = <USD/1M>, output = <USD/1M> (cached_input optional)',
+        f'add [prices."{first}"] input = <USD/1M>, output = <USD/1M>'
+        " (cached_input and cache_write optional)",
     )
 
 

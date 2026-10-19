@@ -85,7 +85,7 @@ BUDGET_KEYS = frozenset(
         "min_limit_window",
     }
 )
-PRICE_KEYS = frozenset({"input", "output", "cached_input"})
+PRICE_KEYS = frozenset({"input", "output", "cached_input", "cache_write"})
 
 
 def _is_glob(pattern: str) -> bool:
@@ -207,7 +207,8 @@ def _load_prices(data: Any, defaults: tuple[Any, ...] = ()) -> PriceTable:
                 raise ValueError(f"{where} needs {key} (USD per 1M tokens)")
         values = {k: _number(section[k], f"{where} {k}", allow_zero=True) for k in section}
         cached = values.get("cached_input", values["input"])
-        entries.append((model, Price(values["input"], values["output"], cached)))
+        price = Price(values["input"], values["output"], cached, values.get("cache_write"))
+        entries.append((model, price))
     return PriceTable(tuple(entries), defaults)
 
 

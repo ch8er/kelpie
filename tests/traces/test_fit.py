@@ -397,3 +397,13 @@ def test_offered_tools_survive_ingest_and_are_cut() -> None:
         resource={"kelpie.tools.offered": "Read,Bash"},
     ).spans[0]
     assert "kelpie.tools.offered" not in on_resource.attributes  # a span attribute only
+
+
+def test_role_models_carry_cache_writes() -> None:
+    call = Span(
+        "t", "s1", "chat", SpanKind.LLM, T0, session_id="S", model="m",
+        input_tokens=1000, output_tokens=10, cached_tokens=900, cache_write_tokens=500,
+    )  # fmt: skip
+    (r,) = role_models([call], {("t", "s1"): "m"}, {"S": "dev"})
+    (u,) = r.usage
+    assert (u.cached_tokens, u.cache_write_tokens) == (900, 100)  # capped at the uncached rest

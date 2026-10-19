@@ -108,8 +108,10 @@ class Step:
     output_tokens: int
     cached_tokens: int
     after_tool: str | None = None  # the last tool called since the previous step
+    cache_write_tokens: int = 0
 
     def usage(self, task_id: str | None = None) -> TokenUsage:
+        cached = min(self.cached_tokens, self.input_tokens)
         return TokenUsage(
             self.session_id,
             task_id,
@@ -117,7 +119,8 @@ class Step:
             1,
             self.input_tokens,
             self.output_tokens,
-            min(self.cached_tokens, self.input_tokens),
+            cached,
+            min(self.cache_write_tokens, self.input_tokens - cached),
         )
 
 
@@ -280,6 +283,7 @@ def session_steps(
                     output_tokens=span.output_tokens,
                     cached_tokens=min(span.cached_tokens, span.input_tokens),
                     after_tool=after,
+                    cache_write_tokens=span.cache_write_tokens,
                 )
             )
         out[session] = SessionSteps(

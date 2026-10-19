@@ -476,8 +476,9 @@ end more than an hour in the future, or ended before `retention`, are rejected a
 Other spans with a model or token usage count as LLM calls, with `gen_ai.tool.name` as tool
 calls; spans that are not GenAI steps (HTTP spans and the like) are used to link their
 children and then dropped. Mapped: model (`gen_ai.response.model`, else
-`gen_ai.request.model`), `gen_ai.usage.input_tokens`, `output_tokens` and
-`cache_read.input_tokens`, `gen_ai.tool.name`, outcome (`error` when the span status is
+`gen_ai.request.model`), `gen_ai.usage.input_tokens`, `output_tokens`,
+`cache_read.input_tokens` and `cache_creation.input_tokens` (cache writes, priced on their
+own), `gen_ai.tool.name`, outcome (`error` when the span status is
 ERROR or `error.type` is set). Input tokens include cached tokens, as in the conventions;
 Claude Code's Anthropic-style counts are normalized to that on arrival. Session totals,
 budgets and rule 11 count a call once when two instrumentations report it (a framework

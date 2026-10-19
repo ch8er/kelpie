@@ -812,9 +812,18 @@ and left out of `usd` budgets, and `kelpie status` and `kelpie doctor` name such
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `input` | *required* | Input tokens (cached tokens excluded). |
+| `input` | *required* | Input tokens (cache reads and writes excluded). |
 | `output` | *required* | Output tokens. |
-| `cached_input` | `input` | Cached input tokens. |
+| `cached_input` | `input` | Input tokens read from the prompt cache. |
+| `cache_write` | `input` | Input tokens written to the prompt cache (Anthropic: 1.25 × `input` for 5-minute writes). |
+
+Cache reads and writes come from the spans: `gen_ai.usage.cache_read.input_tokens` and
+`gen_ai.usage.cache_creation.input_tokens` (also `gen_ai.usage.cache_write.input_tokens`
+and OpenLLMetry's `gen_ai.usage.cache_read_input_tokens` /
+`gen_ai.usage.cache_creation_input_tokens`), Claude Code's `cache_read_tokens` /
+`cache_creation_tokens`, and OpenClaw's usage records. A `[prices]` entry replaces the
+default row as a whole: without `cache_write` it prices cache writes at its `input`, not at
+the default's 1.25 × input.
 
 ## [spend]
 
@@ -825,8 +834,8 @@ and left out of `usd` budgets, and `kelpie status` and `kelpie doctor` name such
 **The default table** (`kelpie.core.prices`) holds the standard API prices of popular
 Anthropic, OpenAI and Google models, as their pricing pages showed them on the date
 `kelpie status` prints ("checked ..."). Each row has input, output and cache read prices,
-and Anthropic rows the 5-minute cache write price, which is not used yet: cache writes are
-priced at the input price for now. An announced price change (an introductory price that
+and Anthropic rows the 5-minute cache write price (the OpenAI and Google rows have none, so
+their cache writes cost the input price). An announced price change (an introductory price that
 ends) applies from its day, and a row prices every snapshot of its model. Prices change
 after Kelpie is released: check the rows you rely on against the provider's page, and add
 `[prices]` entries where they differ. The estimate leaves out what the table does not

@@ -46,7 +46,8 @@ class SpanChanges:
 @dataclass(frozen=True, slots=True)
 class TokenUsage:
     """Counted tokens for one (session, task, pricing model); ``input_tokens`` includes
-    ``cached_tokens``, as in :class:`kelpie.core.model.SpanTotals`."""
+    ``cached_tokens`` (cache reads) and ``cache_write_tokens``, as in
+    :class:`kelpie.core.model.Span`."""
 
     session_id: str | None
     task_id: str | None
@@ -55,6 +56,7 @@ class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,12 +242,14 @@ class _Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+    cache_write_tokens: int = 0
 
     def add(self, span: Span) -> None:
         self.calls += 1
         self.input_tokens += span.input_tokens
         self.output_tokens += span.output_tokens
         self.cached_tokens += span.cached_tokens
+        self.cache_write_tokens += span.cache_write_tokens
 
     def result(self, session: str | None, task: str | None, model: str | None) -> TokenUsage:
         return TokenUsage(
@@ -256,6 +260,7 @@ class _Usage:
             self.input_tokens,
             self.output_tokens,
             self.cached_tokens,
+            self.cache_write_tokens,
         )
 
 

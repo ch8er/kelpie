@@ -39,10 +39,58 @@ LLM = {
 }
 
 
+@pytest.mark.parametrize(
+    ("attrs", "written"),
+    [
+        ({"gen_ai.usage.cache_creation.input_tokens": 300}, 300),
+        ({"gen_ai.usage.cache_creation_input_tokens": 300}, 300),  # OpenLLMetry
+        ({"gen_ai.usage.cache_write.input_tokens": 300}, 300),
+        ({"gen_ai.usage.cache_write.input_tokens": 5_000}, 1_000 - 200),  # capped at input
+        ({"gen_ai.usage.cache_write.input_tokens": "lots"}, 0),
+        ({}, 0),
+    ],
+)
+def test_cache_writes(attrs: dict[str, object], written: int) -> None:
+    base = {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.usage.input_tokens": 1_000,
+        "gen_ai.usage.cache_read.input_tokens": 200,
+    }
+    s = one({**base, **attrs})
+    assert (s.input_tokens, s.cached_tokens, s.cache_write_tokens) == (1_000, 200, written)
+
+
+def test_claude_code_cache_writes_from_semconv_keys_add_to_input() -> None:
+    s = one(
+        {
+            "model": "m",
+            "input_tokens": 10,
+            "cache_read_tokens": 100,
+            "gen_ai.usage.cache_creation.input_tokens": 40,
+        },
+        name="claude_code.llm_request",
+    )
+    assert (s.input_tokens, s.cached_tokens, s.cache_write_tokens) == (150, 100, 40)
+
+
+def test_a_span_with_only_cache_reads_has_no_usage() -> None:
+    """Reads are part of the input: with no input there is nothing to read, so the span
+    carries no usage (it neither counts nor hides a nested call)."""
+    s = one({"gen_ai.operation.name": "chat", "gen_ai.usage.cache_read.input_tokens": 50})
+    assert (s.input_tokens, s.cached_tokens, s.cache_write_tokens) == (0, 0, 0)
+
+
+def test_cache_reads_are_capped_at_the_input() -> None:
+    s = one({"gen_ai.operation.name": "chat", "gen_ai.usage.input_tokens": 10,
+             "gen_ai.usage.cache_read.input_tokens": 50})  # fmt: skip
+    assert (s.input_tokens, s.cached_tokens) == (10, 10)
+
+
 def test_llm_span_fields() -> None:
     s = one(LLM, start=NOW, duration=timedelta(seconds=3))
     assert s.kind is SpanKind.LLM and s.model == "model-a-2026"
     assert (s.input_tokens, s.output_tokens, s.cached_tokens) == (80_000, 512, 76_000)
+    assert s.cache_write_tokens == 1_000
     assert s.start == NOW and s.duration == timedelta(seconds=3) and s.outcome == "ok"
     assert s.attributes == {
         "gen_ai.operation.name": "chat",
@@ -375,6 +423,7 @@ def test_claude_code_spans() -> None:
     assert llm.kind is SpanKind.LLM and llm.model == "synthetic-model"
     # Anthropic usage excludes cache reads and writes; stored as semconv (includes them)
     assert (llm.input_tokens, llm.output_tokens, llm.cached_tokens) == (4112, 30, 4000)
+    assert llm.cache_write_tokens == 100
     assert llm.session_id == "cc-1" and llm.outcome == "ok"
     assert llm.attributes["cache_creation_tokens"] == 100
     assert tool.kind is SpanKind.TOOL and tool.tool == "Bash" and tool.outcome == "error"

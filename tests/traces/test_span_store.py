@@ -293,7 +293,7 @@ def test_sqlite_spans_share_the_ledger_file_and_survive_reopen(tmp_path: Path) -
     reopened = SqliteSpanStore(path)
     assert [s.span_id for s in reopened.spans_since(NOW)] == [f"{1:016x}"]
     db = sqlite3.connect(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 5
+    assert db.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 6
     assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     (received,) = db.execute("SELECT received_at FROM spans").fetchone()
     assert received == "2026-03-02T12:00:00.000000+00:00"
@@ -330,8 +330,60 @@ def test_v3_database_is_upgraded_and_its_spans_decided(tmp_path: Path) -> None:
     assert [u.input_tokens for u in s.usage_since(NOW, [timedelta(hours=1)])[0]] == [107]
     s.close()
     db = sqlite3.connect(path)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert db.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION
     assert db.execute("SELECT COUNT(*) FROM spans WHERE counted IS NULL").fetchone()[0] == 0
+
+
+def test_v4_database_gets_cache_writes_from_kept_attributes(tmp_path: Path) -> None:
+    """Spans stored before cache writes had a column kept them in ``attributes``: the
+    upgrade fills the column from there, capped at the uncached input."""
+    path = tmp_path / "v4.db"
+    db = sqlite3.connect(path)
+    db.executescript("".join(storage.MIGRATIONS[v] for v in (1, 2, 3, 4)))
+    db.execute("PRAGMA user_version = 4")
+    columns = (
+        "trace_id, span_id, name, kind, start, last_at, session_id, model,"
+        " input_tokens, cached_tokens, attributes, received_at, counted, price_model"
+    )
+    at = storage._ts(NOW - timedelta(minutes=5))
+    for sid, kind, tokens, cached, attrs in (
+        ("A", "llm", 1000, 200, '{"gen_ai.usage.cache_creation.input_tokens":300}'),
+        ("B", "llm", 1000, 0, '{"cache_creation_tokens":"400"}'),
+        ("C", "llm", 1000, 900, '{"gen_ai.usage.cache_write.input_tokens":500}'),  # capped
+        ("D", "llm", 1000, 0, '{"gen_ai.usage.cache_creation_input_tokens":-5}'),
+        ("E", "tool", 0, 0, '{"cache_creation_tokens":9}'),  # not an LLM call
+        ("F", "llm", 1000, 0, "not json cache_creation"),
+    ):
+        db.execute(
+            f"INSERT INTO spans ({columns}) VALUES (?, ?, 'chat', ?, ?, ?, 's', 'm', ?, ?, ?, ?,"
+            " ?, 'm')",
+            ("t" * 32, sid, kind, at, at, tokens, cached, attrs, at, int(kind == "llm")),
+        )
+    db.commit()
+    db.close()
+    s = SqliteSpanStore(path)
+    (rows,) = s.usage_since(NOW, [timedelta(hours=1)])
+    assert [(u.cache_write_tokens, u.cached_tokens) for u in rows] == [(300 + 400 + 100, 1100)]
+    s.close()
+    db = sqlite3.connect(path)
+    found = dict(db.execute("SELECT span_id, cache_write_tokens FROM spans").fetchall())
+    assert found == {"A": 300, "B": 400, "C": 100, "D": 0, "E": 0, "F": 0}
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_cache_writes_are_summed_with_the_counted_calls(tmp_path: Path, kind: str) -> None:
+    store: SpanStore = MemorySpanStore() if kind == "memory" else SqliteSpanStore(tmp_path / "k.db")
+    outer = replace(llm("t" * 32, "W", None, 1000), cache_write_tokens=600)
+    inner = replace(llm("t" * 32, "P", "W", 1000), cache_write_tokens=600)  # same call
+    other = replace(llm("u" * 32, "S", None, 500), cache_write_tokens=50)
+    store.append_spans([outer, inner, other], NOW)
+    (rows,) = store.usage_since(NOW, [timedelta(hours=1)])
+    assert sum(u.cache_write_tokens for u in rows) == 650
+    assert [s.cache_write_tokens for s in store.spans_since(NOW - timedelta(hours=1))] == [
+        600,
+        600,
+        50,
+    ]
 
 
 def test_read_only_open_never_writes(tmp_path: Path) -> None:

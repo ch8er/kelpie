@@ -277,6 +277,10 @@ def role_models(
                 span.input_tokens,
                 span.output_tokens,
                 min(span.cached_tokens, span.input_tokens),
+                min(
+                    span.cache_write_tokens,
+                    span.input_tokens - min(span.cached_tokens, span.input_tokens),
+                ),
             )
         )
     out = [
