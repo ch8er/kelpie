@@ -494,9 +494,15 @@ def _with_condition_reasons(
 def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
     """A rule's config section. ``loop_breaker`` polls the same checks rule 2 coaches, so it
     inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own; ``orphan_status``
-    inherits ``bottlenecks``' hold labels and ``return_causes`` ``conflict_warning``'s
-    ``expected_shared`` the same way."""
+    inherits ``bottlenecks``' hold labels, ``needs_you`` its planned and hold labels as
+    ``planned_labels`` (one definition of a planned wait), and ``return_causes``
+    ``conflict_warning``'s ``expected_shared`` the same way."""
     section = dict(config.rules.get(name, {}))
+    if name == "needs_you" and "planned_labels" not in section:
+        planned = planned_labels(config.rules.get("bottlenecks", {}))
+        if planned:
+            section["planned_labels"] = planned
+        return section
     if name == "return_causes" and "expected_shared" not in section:
         # Files many tasks are meant to edit are not conflict hot spots either.
         shared = config.rules.get("conflict_warning", {}).get("expected_shared")
@@ -534,6 +540,14 @@ def hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
         if isinstance(hold, Mapping) and isinstance(hold.get("label"), str):
             found.append(hold["label"])
     return sorted(set(found))
+
+
+def planned_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
+    """What rule 6 reads as planned by label: its ``planned_labels`` and hold labels
+    (incident 20); rule 13 inherits the same unless it sets its own."""
+    own = bottlenecks.get("planned_labels", [])
+    found = [x for x in own if isinstance(x, str)] if isinstance(own, list) else []
+    return sorted({*found, *hold_labels(bottlenecks)})
 
 
 def _normalized(patterns: Any) -> Any:

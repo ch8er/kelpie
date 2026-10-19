@@ -350,6 +350,21 @@ def test_orphan_status_inherits_hold_labels_from_bottlenecks() -> None:
     assert hold_labels({"hold_labels": "bad", "holds": ["junk", {"label": 1}]}) == []
 
 
+def test_needs_you_inherits_planned_and_hold_labels_from_bottlenecks() -> None:
+    """One definition of a planned wait for rules 6 and 13 (incident 20)."""
+    six = {"planned_labels": ["post-release"], "holds": [{"label": "merge-hold"}]}
+
+    def planned(rules: dict) -> frozenset[str]:
+        loaded = load_rules(EngineConfig(rules=rules))
+        rule = next(r for r in loaded.rules if r.name == "needs_you")
+        return rule.planned_labels  # type: ignore[attr-defined]
+
+    assert planned({"bottlenecks": six}) == {"post-release", "merge-hold"}
+    own = {"bottlenecks": six, "needs_you": {"planned_labels": ["later"]}}
+    assert planned(own) == {"later"}  # its own list wins
+    assert planned({"needs_you": {}}) == frozenset()
+
+
 def test_loop_breaker_inherits_poll_patterns_from_wait_condition(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

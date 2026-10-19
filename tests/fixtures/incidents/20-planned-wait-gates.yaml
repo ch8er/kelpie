@@ -1,0 +1,53 @@
+id: "20-planned-wait-gates"
+incident: 20
+title: "Planned work behind a human task does not make it a gate"
+description: >
+  The farm of 20-planned-wait, seen by rule 6: two developers idle with no ready work and
+  only human tasks ready. The farm-level alert names the human task that real agent work
+  waits on, with one agent task behind it; the planned tasks (scheduled for later, in
+  triage, labelled post-release) and the task behind one of them are not gated, so the
+  human task with only planned work behind it is not named.
+rule: bottlenecks
+config:
+  min_idle_time: "30m"
+  human_gate_after: "1h"
+  slots: 3
+  planned_labels: [post-release]
+snapshot:
+  now: "2026-05-10T12:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+  tasks:
+    - {id: t_2000, title: "Approve the release notes", status: ready, status_since: "2026-05-04T13:00:00+00:00", role: owner, owner_id: ceo, source: hermes, platform_status: ready}
+    - {id: t_2004, title: "Ship the release build", status: backlog, status_since: "2026-05-10T09:00:00+00:00", role: developer, source: hermes, platform_status: todo}
+    - {id: t_2001, title: "Post-release announcement", status: backlog, status_since: "2026-05-04T13:00:00+00:00", role: developer, source: hermes, prework: true, platform_status: scheduled}
+    - {id: t_2003, title: "Announcement translations", status: backlog, status_since: "2026-05-04T13:00:00+00:00", role: developer, source: hermes, platform_status: todo}
+    - {id: t_2002, title: "Release retrospective notes", status: backlog, status_since: "2026-05-04T13:00:00+00:00", role: developer, source: hermes, platform_status: todo, labels: [post-release]}
+    - {id: t_2010, title: "Pick the next quarter's themes", status: ready, status_since: "2026-05-01T09:00:00+00:00", role: owner, owner_id: ceo, source: hermes, platform_status: ready}
+    - {id: t_2011, title: "Next quarter roadmap draft", status: backlog, status_since: "2026-05-01T09:00:00+00:00", role: developer, source: hermes, prework: true, platform_status: triage}
+    - {id: t_2020, title: "Fix the crash on launch", status: done, status_since: "2026-05-10T10:00:00+00:00", role: developer, owner_id: agent-dev-1, source: hermes, platform_status: done}
+  dependencies:
+    - {task_id: t_2004, depends_on: t_2000}
+    - {task_id: t_2001, depends_on: t_2000}
+    - {task_id: t_2003, depends_on: t_2001}
+    - {task_id: t_2002, depends_on: t_2000}
+    - {task_id: t_2011, depends_on: t_2010}
+  sessions:
+    - {id: S-2020, task_id: t_2020, owner_id: agent-dev-1, started_at: "2026-05-10T08:00:00+00:00", ended_at: "2026-05-10T10:00:00+00:00", final_status: done}
+    - {id: S-2021, task_id: t_2020, owner_id: agent-dev-2, started_at: "2026-05-10T07:00:00+00:00", ended_at: "2026-05-10T09:00:00+00:00", final_status: review}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "Human tasks gate 1 agent task(s)"
+    params:
+      idle_agents: [agent-dev-1, agent-dev-2]
+      human_tasks: [t_2000]
+      blocked_agent_tasks: 1
+not_expected_actions:
+  - kind: alert
+    params: {human_tasks: [t_2000, t_2010]}
+  - kind: alert
+    params: {human_tasks: [t_2010]}
+  - kind: escalate

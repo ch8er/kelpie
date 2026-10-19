@@ -22,6 +22,16 @@ delay, so the human sees one list instead of scattered blocks:
   ``needs_input: automerge PR #12``). On a live farm reviewers blocked with ``needs_input``
   to get past Hermes' block loop guard while they waited for a merge.
 
+**Planned waits are not waiting** (incident 20). A task that is not ready for work for its
+own reasons (:func:`~kelpie.rules._tasks.planned`: not started yet, and in a pre-work
+status such as Hermes triage or scheduled, or labelled with one of ``planned_labels``, on
+the task or a linked PR; they default to rule 6's ``planned_labels`` and hold labels)
+waits on nothing it depends on: it is not behind a human task and adds no cost, and a
+planned human task is in the inbox only for the tasks a condition parks on it, as rule 6
+reads it. A blocked or waiting task was started: it waits on what it names (an approval, a
+human task), labels or not. On a live farm a post-release task behind a person's planned
+task counted as 143 agent-hours of waiting on that person.
+
 **Cost of delay** of an item: the agent-hours spent waiting on it so far, the sum over the
 agent tasks that wait on it directly of how long each has waited: a task parked on it since
 it was parked, and a ready or backlog task that depends on it since its last status change
@@ -73,7 +83,8 @@ from kelpie.core.model import (
 )
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules.bottlenecks import HumanGate, human_gates
+from kelpie.rules._tasks import labels_list
+from kelpie.rules.bottlenecks import HumanGate, human_gates, link_pull_requests, with_pr_labels
 
 NAME = "needs_you"
 UNASSIGNED = "unassigned"
@@ -124,12 +135,15 @@ class NeedsYou:
     # Block reasons that name something a condition checks (inherited from
     # [[block_conditions]]): such a block waits on the condition, not on a person.
     condition_reasons: tuple[re.Pattern[str], ...] = ()
+    # Labels marking a task as later (inherited from rule 6's planned and hold labels).
+    planned_labels: frozenset[str] = frozenset()
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> list[Action]:
+        snapshot = with_pr_labels(snapshot, link_pull_requests(snapshot)[0])  # as rule 6
         roles = {o.id: o.role for o in snapshot.owners}
         inbox: dict[str, list[Item]] = {}
-        found, claimed = self._human_tasks(snapshot, human_gates(snapshot))
+        found, claimed = self._human_tasks(snapshot, human_gates(snapshot, self.planned_labels))
         for item in found:
             inbox.setdefault(item.task.owner_id or UNASSIGNED, []).append(item)
         for item in self._approvals(snapshot, claimed):
@@ -411,6 +425,10 @@ def build(config: dict[str, Any]) -> NeedsYou:
         if any(p.search("") for p in compiled):
             raise ValueError("condition_reasons: a pattern matches an empty reason (every block)")
         kwargs["condition_reasons"] = compiled
+    if "planned_labels" in config:
+        kwargs["planned_labels"] = frozenset(
+            labels_list(config.pop("planned_labels"), "planned_labels")
+        )
     if "critical_after_hours" in config:
         hours = config.pop("critical_after_hours")
         if isinstance(hours, bool) or not isinstance(hours, int | float) or hours <= 0:

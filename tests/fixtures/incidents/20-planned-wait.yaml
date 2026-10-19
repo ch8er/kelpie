@@ -1,0 +1,56 @@
+id: "20-planned-wait"
+incident: 20
+title: "Planned waits are not waiting on a person"
+description: >
+  From a live review: a post-release task depending on a person's planned task counted as
+  143 agent-hours of waiting on that person. A task that is not ready for work for its own
+  reasons (scheduled for later, in triage, or labelled as later) does not wait on what it
+  depends on, nor does what waits on it. The person's inbox lists only the agent task
+  that would start once they act, with its cost; a human task with only planned work
+  behind it is not listed at all.
+rule: needs_you
+config:
+  human_wait_alert_after: "1h"
+  planned_labels: [post-release]
+snapshot:
+  now: "2026-05-10T12:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: t_2000, title: "Approve the release notes", status: ready, status_since: "2026-05-04T13:00:00+00:00", role: owner, owner_id: ceo, source: hermes, platform_status: ready}
+    # Real work behind it: starts once the notes are approved (waited 3h).
+    - {id: t_2004, title: "Ship the release build", status: backlog, status_since: "2026-05-10T09:00:00+00:00", role: developer, source: hermes, platform_status: todo}
+    # Scheduled for after the release since 143h ago, and the task behind it.
+    - {id: t_2001, title: "Post-release announcement", status: backlog, status_since: "2026-05-04T13:00:00+00:00", role: developer, source: hermes, prework: true, platform_status: scheduled}
+    - {id: t_2003, title: "Announcement translations", status: backlog, status_since: "2026-05-04T13:00:00+00:00", role: developer, source: hermes, platform_status: todo}
+    # Labelled as later (planned_labels).
+    - {id: t_2002, title: "Release retrospective notes", status: backlog, status_since: "2026-05-04T13:00:00+00:00", role: developer, source: hermes, platform_status: todo, labels: [post-release]}
+    # A human task with only planned work behind it: in triage.
+    - {id: t_2010, title: "Pick the next quarter's themes", status: ready, status_since: "2026-05-01T09:00:00+00:00", role: owner, owner_id: ceo, source: hermes, platform_status: ready}
+    - {id: t_2011, title: "Next quarter roadmap draft", status: backlog, status_since: "2026-05-01T09:00:00+00:00", role: developer, source: hermes, prework: true, platform_status: triage}
+  dependencies:
+    - {task_id: t_2004, depends_on: t_2000}
+    - {task_id: t_2001, depends_on: t_2000}
+    - {task_id: t_2003, depends_on: t_2001}
+    - {task_id: t_2002, depends_on: t_2000}
+    - {task_id: t_2011, depends_on: t_2010}
+expected_actions:
+  - kind: escalate
+    reason_contains: "t_2000"
+    params:
+      escalate_to: ceo
+      human_tasks: [t_2000]
+      blocked_agent_tasks: 1
+      waiting_agent_tasks: 1
+      waiting: [t_2004]
+      cost_hours: 3.0
+not_expected_actions:
+  - kind: escalate
+    reason_contains: "t_2010"
+  - kind: escalate
+    reason_contains: "t_2001"
+  - kind: escalate
+    reason_contains: "t_2002"
+  - kind: escalate
+    reason_contains: "t_2003"

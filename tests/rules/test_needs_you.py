@@ -473,3 +473,67 @@ def test_a_dependent_waiting_on_a_merge_is_not_parked_on_the_human_task() -> Non
     named = blocked("A-1", ago(hours=2), reason="needs_input: waiting for H-1 (see PR #12)")
     [item] = run(snap([gate, named], deps=deps), condition_reasons=patterns)
     assert item.params["human_tasks"] == ["H-1"]
+
+
+# --- planned waits are not waiting (incident 20) ----------------------------------------
+
+
+def test_a_planned_dependent_is_not_waiting_on_the_human_task() -> None:
+    gate = human("H-1", ago(hours=150))
+    later = Task("A-1", "after release", Status.BACKLOG, ago(hours=143), prework=True)
+    behind_later = Task("A-2", "follow-up", Status.BACKLOG, ago(hours=143))
+    labelled = Task("A-3", "retro", Status.BACKLOG, ago(hours=143), labels=("post-release",))
+    deps = [Dependency("A-1", "H-1"), Dependency("A-2", "A-1"), Dependency("A-3", "H-1")]
+    tasks = [gate, later, behind_later, labelled]
+    assert run(snap(tasks, deps=deps), planned_labels=frozenset({"post-release"})) == []
+    # Without the label, the labelled one waits: 143 agent-hours.
+    [item] = run(snap(tasks, deps=deps))
+    assert item.params["waiting"] == ["A-3"] and item.params["cost_hours"] == 143.0
+
+
+def test_a_started_task_waits_on_what_it_names_labels_or_not() -> None:
+    """Blocked or waiting, it was started: parked on the human task, or asking a person."""
+    gate = human("H-1", ago(hours=3))
+    parked = replace(blocked("A-1", ago(hours=2), "waiting_human: H-1", "C-1"), labels=("later",))
+    c = waits_on("C-1", "A-1", "H-1")
+    for labels in (frozenset({"later"}), frozenset()):
+        [item] = run(snap([gate, parked], [c]), planned_labels=labels)
+        assert item.params["human_tasks"] == ["H-1"] and item.params["waiting"] == ["A-1"]
+    asks = replace(blocked("A-2", ago(hours=2), "needs_input: which key?"), labels=("later",))
+    [item] = run(snap([asks]), planned_labels=frozenset({"later"}))
+    assert item.params["approvals"] == ["A-2"]
+
+
+def test_a_planned_human_task_and_a_label_on_a_pr_read_as_rule_6_does() -> None:
+    from kelpie.core.model import PullRequest
+
+    deps = [Dependency("A-1", "H-1")]
+    dependent = Task("A-1", "next", Status.BACKLOG, ago(hours=10))
+    later = replace(human("H-1", ago(hours=150)), labels=("later",))
+    assert run(snap([later, dependent], deps=deps), planned_labels=frozenset({"later"})) == []
+    # A task a condition parks on the planned human task still waits on it.
+    parked = blocked("A-2", ago(hours=5), "waiting_human: H-1", "C-2")
+    c = waits_on("C-2", "A-2", "H-1")
+    [item] = run(snap([later, parked], [c]), planned_labels=frozenset({"later"}))
+    assert item.params["human_tasks"] == ["H-1"] and item.params["waiting"] == ["A-2"]
+    pr = PullRequest("org/repo", 12, "A-1: next", branch="a-1", labels=("hold",), task_ids=("A-1",))
+    on_pr = replace(snap([human("H-1", ago(hours=150)), dependent], deps=deps), pull_requests=(pr,))
+    assert run(on_pr, planned_labels=frozenset({"hold"})) == []
+    assert run(on_pr)  # without the label the dependent waits
+
+
+def test_a_run_kelpie_stopped_needs_a_person_even_when_planned() -> None:
+    stopped = blocked("A-1", ago(hours=2), "kelpie: stopped a runaway loop")
+    stopped = replace(
+        stopped, labels=("later",), block=replace(stopped.block, kelpie=KelpieMark.STOP)
+    )
+    [item] = run(snap([stopped]), planned_labels=frozenset({"later"}))
+    assert item.params["approvals"] == ["A-1"]
+
+
+@pytest.mark.parametrize("value", ["later", [""], [1]])
+def test_planned_labels_are_validated(value: object) -> None:
+    with pytest.raises(ValueError, match="planned_labels must be a list"):
+        REGISTRY["needs_you"]({"planned_labels": value})
+    with pytest.raises(ValueError, match="planned_labels must be a list"):
+        REGISTRY["bottlenecks"]({"planned_labels": value})
