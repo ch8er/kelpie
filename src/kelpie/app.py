@@ -23,6 +23,7 @@ from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes.git_state import valid_base_ref
 from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME
 from kelpie.adapters.hermes.worker import DEFAULT_GRACE
+from kelpie.adapters.issues.config import GitHubIssuesSettings, load_github_issues
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
@@ -149,6 +150,7 @@ class Settings:
     hermes: HermesSettings | None = None  # None: no [adapters.hermes] section
     claude_code: ClaudeCodeSettings | None = None  # None: no [adapters.claude_code] section
     openclaw: OpenClawSettings | None = None  # None: no [adapters.openclaw] section
+    github_issues: GitHubIssuesSettings | None = None  # None: no [adapters.github_issues]
     db_path: Path | None = DEFAULT_DB  # None keeps the ledger in memory
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
@@ -246,6 +248,7 @@ def load_settings(path: Path | None) -> Settings:
         hermes=_with_wait_key(_load_hermes(data.get("adapters", {})), db_path),
         claude_code=_load_claude_code(data.get("adapters", {})),
         openclaw=_load_openclaw(data.get("adapters", {})),
+        github_issues=_load_github_issues(data.get("adapters", {}), github),
         db_path=db_path,
         source=path,
         traces=traces,
@@ -291,7 +294,7 @@ def _load_connectors(
 def _load_hermes(adapters: Any) -> HermesSettings | None:
     if not isinstance(adapters, Mapping):
         raise ConfigError("[adapters] must be a table")
-    if extra := set(adapters) - {"hermes", "claude_code", "openclaw"}:
+    if extra := set(adapters) - {"hermes", "claude_code", "openclaw", "github_issues"}:
         raise ConfigError(f"unknown [adapters] entries: {sorted(extra)}")
     if "hermes" not in adapters:
         return None
@@ -483,6 +486,17 @@ def _load_claude_code(adapters: Mapping[str, Any]) -> ClaudeCodeSettings | None:
         return None
     try:
         return load_claude_code(adapters["claude_code"])
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def _load_github_issues(
+    adapters: Mapping[str, Any], github: GitHubSettings | None
+) -> GitHubIssuesSettings | None:
+    if "github_issues" not in adapters:
+        return None
+    try:
+        return load_github_issues(adapters["github_issues"], github)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -840,6 +854,11 @@ def build_adapters(settings: Settings) -> list[PlatformAdapter]:
         adapters.append(settings.claude_code.build())
     if settings.openclaw is not None and settings.openclaw.enabled:
         adapters.append(settings.openclaw.build())
+    if settings.github_issues is not None and settings.github_issues.enabled:
+        try:
+            adapters.append(settings.github_issues.build())
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
     return adapters
 
 
@@ -1444,7 +1463,12 @@ _VERBS: dict[ActionKind, str] = {
     ActionKind.STOP: "stop runs",
     ActionKind.CANCEL_BUILD: "cancel builds",
 }
-_PLATFORMS = {"hermes": "Hermes", "claude-code": "Claude Code", "openclaw": "OpenClaw"}
+_PLATFORMS = {
+    "hermes": "Hermes",
+    "claude-code": "Claude Code",
+    "openclaw": "OpenClaw",
+    "github-issues": "GitHub Issues",
+}
 
 
 @dataclass(frozen=True, slots=True)
