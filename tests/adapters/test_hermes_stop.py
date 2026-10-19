@@ -172,6 +172,16 @@ def test_stop_blocks_the_task_through_the_cli(board: Board, fake_cli: tuple[str,
     assert env["HERMES_PROFILE_NAME"] == "kelpie"  # type: ignore[index]  # the block's author
 
 
+def test_stop_signs_the_block_with_the_configured_author(
+    board: Board, fake_cli: tuple[str, Path]
+) -> None:
+    exe, log = fake_cli
+    rid = running(board)
+    make(board, exe, author="ops-bot").stop(f"hermes-run-{rid}", "loop")
+    (call,) = calls(log)
+    assert call["env"]["HERMES_PROFILE_NAME"] == "ops-bot"  # type: ignore[index]
+
+
 def test_stop_is_idempotent(board: Board, fake_cli: tuple[str, Path]) -> None:
     exe, log = fake_cli
     rid = running(board)
@@ -285,6 +295,7 @@ def test_env_is_an_allow_list_with_board_and_run_pinned(tmp_path: Path) -> None:
         "VIRTUAL_ENV": "/venv",
         "HERMES_HOME": "/profile",
         "HERMES_PROFILE": "coder",
+        "HERMES_PROFILE_NAME": "coder",  # a worker's: never Kelpie's signature
         "HERMES_KANBAN_TASK": "t9",
         "HERMES_KANBAN_RUN_ID": "7",
         "HERMES_KANBAN_DB": "/elsewhere/kanban.db",

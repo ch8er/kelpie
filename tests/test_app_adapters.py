@@ -658,7 +658,7 @@ def test_hermes_author(tmp_path: Path) -> None:
         load_settings(write(tmp_path, '[adapters.hermes]\nauthor = "ops-bot"\n'))
     )
     assert isinstance(adapter, HermesAdapter) and adapter.author == "ops-bot"
-    for bad in ('""', '"Kelpie"', '"-x"', '"a b"', "1", f'"{"a" * 65}"'):
+    for bad in ('""', '"Kelpie"', '"-x"', '"a b"', "1", f'"{"a" * 65}"', '"default"', '"user"'):
         with pytest.raises(ConfigError, match="author"):
             load_settings(write(tmp_path, f"[adapters.hermes]\nauthor = {bad}\n"))
     with pytest.raises(ConfigError, match="human_owners"):

@@ -54,7 +54,8 @@ class Refused(Exception):
 
 def _author() -> str:
     """Who Hermes signs a block's comment with (``hermes_cli.profiles.current_profile_name``):
-    ``$HERMES_PROFILE_NAME``, ``$HERMES_PROFILE``, else the profile of ``HERMES_HOME``."""
+    ``$HERMES_PROFILE_NAME``, ``$HERMES_PROFILE``, else the profile of ``HERMES_HOME`` (here
+    always ``default``)."""
     for name in ("HERMES_PROFILE_NAME", "HERMES_PROFILE"):
         if value := os.environ.get(name, "").strip():
             return value

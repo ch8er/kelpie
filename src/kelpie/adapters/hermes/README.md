@@ -218,9 +218,13 @@ Everything Kelpie writes on the board is signed `kelpie` (`author`): comments wi
 `hermes kanban comment --author kelpie`, and the comments Hermes adds to a block, schedule or
 unblock (`BLOCKED: ...`, `SCHEDULED: ...`, `UNBLOCK: ...`), which have no `--author` option,
 through `HERMES_PROFILE_NAME=kelpie` in the command's environment (Hermes signs them with that
-before the profile Kelpie runs under, which would otherwise show as `default`). Kelpie skips
-comments with that author when it reads people's comments, so `author` must not be the name
-of a profile or a person on the board. Every text Kelpie writes has GitHub PR URLs
+before anything else; otherwise they would show the profile of the `HERMES_HOME` Kelpie runs
+with, `default` for `~/.hermes`). Kelpie skips comments with that author when it reads
+people's comments, so `author` must not be the name of a profile or a person on the board
+(`default`, `user` and Hermes' other reserved names are refused). After changing `author`,
+comments Kelpie signed with the old name read as someone else's. `HERMES_PROFILE_NAME` also
+names the profile for Hermes' credential aliases (`<VAR>_KELPIE`) in those commands; Kelpie's
+commands read no credentials. Every text Kelpie writes has GitHub PR URLs
 rewritten to `owner/repo#N`: a PR URL in a comment holds a ready task back for 24 hours in
 Hermes.
 

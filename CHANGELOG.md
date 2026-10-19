@@ -298,6 +298,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 ### Fixed
 
+- Kelpie's blocks, parks and wakes on a Hermes board showed up as written by the profile
+  Kelpie runs under (`default`): they are signed `kelpie` now, like its comments, and the name
+  is `[adapters.hermes] author` ([#189](https://github.com/ch8er/kelpie/pull/189)).
 - `kelpie why` showed a finished parent as `parent-unverified` ("the code host's PRs are not
   fully known") while `kelpie serve` asked to close it: serve knows the PR lists in full only
   after two scans in a row, `why` reads them once (`--refresh`) or not at all. A

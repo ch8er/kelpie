@@ -587,6 +587,7 @@ def test_a_park_that_cannot_be_read_back_is_undone(board: Board, cli: tuple[str,
     with pytest.raises(HermesError, match="not parked"):
         a.wait("t1", CONDS, "r")
     assert [c["argv"][1] for c in calls(log)] == ["schedule", "unblock"]  # type: ignore[index]
+    assert {c["env"]["HERMES_PROFILE_NAME"] for c in calls(log)} == {"kelpie"}  # type: ignore[index]
     assert status(board) == "ready"
 
 

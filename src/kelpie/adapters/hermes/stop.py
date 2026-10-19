@@ -75,7 +75,7 @@ ERROR_TAIL = 300
 BOARD_ENV = "HERMES_KANBAN_DB"
 TASK_ENV = "HERMES_KANBAN_TASK"
 RUN_ENV = "HERMES_KANBAN_RUN_ID"
-# Hermes signs a block, schedule or unblock (its comment and event) with the profile name it
+# Hermes signs the comment of a block, schedule or unblock with the profile name it
 # reads from here first (hermes_cli.profiles.current_profile_name); ``comment`` takes --author.
 PROFILE_ENV = "HERMES_PROFILE_NAME"
 DEFAULT_AUTHOR = "kelpie"
