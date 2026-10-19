@@ -382,6 +382,13 @@ def test_only_the_names_a_clause_says_failed() -> None:
         ("Step 2 failed: lint", "review_findings"),
         ("Please add a failing test that reproduces the bug", "review_findings"),
         ("Test red banner on the login screen", "review_findings"),
+        # third review: a fix of something else earlier in the clause; a wider negation
+        ("Fixed the import, CI is still red", "failing_tests"),
+        ("I resolved the merge conflict, unit tests failed", "failing_tests"),
+        ("Rebased and fixed the conflict, CI is red now", "failing_tests"),
+        ("Fixed the lint but the tests still fail", "failing_tests"),
+        ("Not a single test failed, but the naming is off", "review_findings"),
+        ("No flaky or failing tests, but rename it", "review_findings"),
     ],
 )
 def test_a_review_return_is_classified_by_what_sent_it_back(reason: str, cause: str) -> None:

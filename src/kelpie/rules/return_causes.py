@@ -111,7 +111,7 @@ DEFAULT_CAUSES: Mapping[str, tuple[str, ...]] = {
 # CI's wording for failing tests, when no test is named ("tests failed", "CI is red", "the
 # build failed", "3 failed", pytest's "FAILED x::y"); a clause at a time, see _ci_failed.
 _CI_FAILED = re.compile(
-    # Each repeated word matches one way and at most three times: no backtracking blow-up.
+    # Each repeated word matches one way and at most three times: no exponential backtracking.
     r"\b(?:(?:unit|ui|integration|e2e|snapshot)\s+)?(?:tests?|specs?)"
     r"\s+(?:(?:is|are|was|were|still|keeps?|now|all)\s+){0,3}"
     r"(?:fail(?:ed|ing|s)?|broken)\b(?!\s+to\b)"
@@ -128,14 +128,14 @@ _CI_FAILED = re.compile(
 # failed ("no unit tests failed", "none of the tests", "0 tests failed", "not failing
 # tests") or that ask for one ("add a failing test").
 _NONE_BEFORE = re.compile(
-    r"(?:^|[^\w])(?:no|not|never|none\s+of\s+the|zero|0|without)\s+(?:\w+\s+)?$"
+    r"(?:^|[^\w])(?:no|not|never|none\s+of\s+the|zero|0|without)\s+(?:\w+\s+){0,2}$"
     r"|\b(?:add|adding|write|writing)\s+(?:an?\s+|the\s+|some\s+)?$",
     re.IGNORECASE,
 )
 # A resolution of the failure itself: "Fixed failing tests" (before it, not negated), "the
 # failing test is now fixed", "CI was red, now green" (after it). Not "please fix", "needs
 # a fix" or "even though I fixed the timeout".
-_FIXED_BEFORE = re.compile(r"\b(?:fixed|resolved)\b", re.IGNORECASE)
+_FIXED_BEFORE = re.compile(r"\b(?:fixed|resolved)\s+(?:\w+\s+){0,2}$", re.IGNORECASE)
 _FIXED_AFTER = re.compile(
     r"\b(?:(?:is|are|was|were)\s+(?:now\s+)?(?:fixed|resolved)"
     r"|now\s+(?:fixed|resolved|green|passing|passes|pass))\b",
@@ -422,10 +422,9 @@ def _ci_failed(reason: str) -> bool:
             phrase = re.split(r"[:,]", before)[-1][-40:]
             if _NONE_BEFORE.search(phrase) or _FIXED_AFTER.search(clause, m.end()):
                 continue
-            if any(
-                not _NEGATED.search(before[: f.start()]) for f in _FIXED_BEFORE.finditer(before)
-            ):
-                continue  # "Fixed failing tests"; not "not fixed yet: tests failed"
+            fixed = _FIXED_BEFORE.search(phrase)
+            if fixed and not _NEGATED.search(phrase[: fixed.start()]):
+                continue  # "Fixed failing tests"; not "Fixed the import, CI is still red"
             return True
     return False
 
