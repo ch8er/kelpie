@@ -1086,3 +1086,28 @@ def test_a_large_team_is_not_starved_by_its_own_last_read(lin: FakeLinear) -> No
     count = len(lin.requests)
     a.snapshot(NOW + timedelta(minutes=3))
     assert "KelpieIssues" in lin.ops()[count:]  # 50,000 + at most 150,000 <= 250,000
+
+
+def test_a_teams_read_waits_for_room_for_its_requests_too(lin: FakeLinear) -> None:
+    lin.issue("ENG-1", "x", ago(days=1))
+    a = adapter(lin)
+    a.snapshot(NOW)  # the lists: two requests
+    lin.headers = {"X-RateLimit-Requests-Remaining": "101"}  # the reserve and one more
+    a.comment("ENG-1", "x")
+    count = len(lin.requests)
+    a.snapshot(NOW + timedelta(minutes=3))
+    assert "KelpieIssues" not in lin.ops()[count:]  # 100 kept + 2 the last read took > 101
+
+
+def test_an_action_whose_lookups_fail_keeps_the_agents_known(lin: FakeLinear) -> None:
+    lin.issue("ENG-2", "x", ago(days=1), state_type="started", delegate="Codex")
+    a = adapter(lin)
+    assert tasks(a)["ENG-2"].owner_id == "codex"
+    reader = a.tracker
+    reader._looked_up = NOW - timedelta(hours=2)  # type: ignore[attr-defined]
+    lin.broken_ops = {"KelpieUsers"}  # the hourly lookup fails, in the action and after
+    with pytest.raises(IssuesError):
+        a.requeue("ENG-2", "quiet")
+    assert "KelpieUpdate" not in lin.ops()
+    t = {x.id: x for x in a.snapshot(NOW + timedelta(minutes=3)).tasks}
+    assert t["ENG-2"].owner_id == "codex"

@@ -816,8 +816,8 @@ class LinearIssues:
         team = self._target(item_id)
         board = self._board(team)
         labels = [*board.blocked_labels, *(a.label for a in self.agents.values() if a.label)]
-        self._look_up_labels(team, labels)
         try:
+            self._look_up_labels(team, labels)
             self._look_up_users([a.assignee for a in self.agents.values() if a.assignee])
         except IssuesError:
             self._users = {**before, **self._users}
