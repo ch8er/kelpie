@@ -384,4 +384,4 @@ def test_the_report_headlines_a_ci_outage() -> None:
     assert wait is not None and wait.cause == "ci_outage" and wait.role == "reviewer"
     assert wait.hours == pytest.approx(3 * 12)  # R1-R3 from 08:00 to 20:00 (R4's CI is green)
     markdown = render_markdown(report)
-    assert "waiting for a CI outage" in markdown and "fix the CI outage first" in markdown
+    assert "waiting for a shared CI failure" in markdown and "fix the shared failure" in markdown

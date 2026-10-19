@@ -47,7 +47,7 @@ UNKNOWN = "unknown"
 WAIT_CAUSES: Mapping[str, str] = {
     "ci": "CI",
     "merge": "PRs to pass checks and merge",
-    "ci_outage": "a CI outage",
+    "ci_outage": "a shared CI failure (an outage of the CI or of the base branch)",
     "people": "people (approvals, human tasks)",
     "hold": "holds",
     "quota": "LLM quotas",
@@ -59,8 +59,8 @@ WAIT_CAUSES: Mapping[str, str] = {
 _SUGGESTIONS: Mapping[str, str] = {
     "ci": "add CI capacity where the tasks queue (another runner for that pipeline), run only "
     "the checks a change needs, or let fewer tasks of the role wait on CI at once",
-    "ci_outage": "fix the CI outage first (see its alert): no PR of the affected repositories "
-    "can go green until then, so more agent time on them is wasted",
+    "ci_outage": "fix the shared failure first (see its CI outage alert: the CI, or the base "
+    "branch the changes build on): no PR it covers can go green until then",
     "quota": "spread the role over more providers or models, or raise the quota",
     "tasks": "unblock the tasks they depend on first, or drop the dependency",
     "timer": "shorten the scheduled waits",
