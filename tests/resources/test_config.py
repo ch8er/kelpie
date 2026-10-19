@@ -165,6 +165,33 @@ def test_growth_window() -> None:
             load_resources(section(growth_window=bad))
 
 
+def test_growth_sustain() -> None:
+    assert prometheus().growth_sustain == timedelta(hours=1)
+    settings = prometheus(growth_sustain="2h")
+    assert settings.growth_sustain == timedelta(hours=2)
+    assert settings.build().config.growth_sustain == timedelta(hours=2)
+    assert prometheus(growth_sustain="5m").growth_sustain == timedelta(minutes=5)
+    # Unset, it never outlasts the window: configs with a short window still load.
+    short = prometheus(growth_window="30m")
+    assert short.growth_sustain == timedelta(minutes=30)
+    assert "[1800s:450s]" in short.build().config.query_text("disk_growth")
+    assert prometheus(growth_window="1h").growth_sustain == timedelta(hours=1)
+    assert prometheus(growth_window="2h", growth_sustain="2h").growth_sustain == timedelta(hours=2)
+    assert prometheus(growth_window="7d", growth_sustain="24h").growth_sustain == timedelta(days=1)
+    for bad in (
+        {"growth_sustain": "4m"},
+        {"growth_sustain": "7h"},  # longer than the 6h default window
+        {"growth_window": "2h", "growth_sustain": "3h"},
+        {"growth_window": "7d", "growth_sustain": "25h"},
+    ):
+        with pytest.raises(
+            ValueError, match="growth_sustain must be 5m to 24h and at most growth_window"
+        ):
+            load_resources(section(**bad))
+    with pytest.raises(ValueError, match="growth_sustain"):
+        load_resources(section(growth_sustain="soon"))
+
+
 def test_load_on_macos() -> None:
     assert prometheus().load_on_macos is False
     assert prometheus(load_on_macos=True).build().config.load_on_macos is True

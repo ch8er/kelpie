@@ -36,13 +36,17 @@ failed for another reason means "unknown" and raises nothing here (the connector
 counts it).
 
 **Disk time-to-full** (incident 19: a disk at 94 % grew about 9 GB a day from a simulator
-cache nobody cleaned). A disk reading with a growth rate (``Resource.growth_per_day``, the
-source's ``growth_window``) that would fill it within ``time_to_full_warning`` (72h) warns,
-within ``time_to_full_critical`` (24h) is critical. A disk's alert, once open (by the
-forecast or by its utilization: one disk is one condition), stays open as a warning while
-the disk would fill within ``time_to_full_release`` (84h: the warning plus a sixth; the
-critical plus a sixth with the warning off), so a growth rate that wobbles around 72h does
-not open and resolve it again and again. The alert names the fastest-growing directories
+cache nobody cleaned). A disk reading with a growth rate (``Resource.growth_per_day``: the
+source's rate over ``growth_window``, capped at what held in most slices of the last
+``growth_sustain``: a burst within about half of that adds a few GB a day for about a
+slice at most, and a cleanup of less than a few hours' growth leaves the rate; a larger
+one turns the trend negative for a few hours) that would fill it
+within ``time_to_full_warning`` (72h) warns, within ``time_to_full_critical`` (24h) is
+critical. A disk's alert, once open (by the forecast or by its utilization: one disk is one
+condition), stays open as a warning while the disk would fill within
+``time_to_full_release`` (84h: the warning plus a sixth; the critical plus a sixth with the
+warning off), so a growth rate that wobbles around 72h does not open and resolve it again
+and again. The alert names the fastest-growing directories
 on that filesystem (``path`` readings: sizes measured by the shipped
 ``scripts/kelpie-path-sizes.sh``, which records each directory's mountpoint), up to
 ``growing_paths_shown`` (3), with their growth per day; without them it says how to get

@@ -1,0 +1,37 @@
+id: "19-disk-growth-spike"
+incident: 19
+title: "Boundary: a 17-minute burst of writes arrives as no daily growth"
+description: >
+  On a live farm rule 7 forecast a disk full from a 17-minute burst of build writes: the
+  growth rate over the window extrapolated minutes into days. Rules keep no history, so the
+  fix lives in the Prometheus growth query (the window's rate, capped at the first quartile
+  of the rates in the slices of the last growth_sustain); this boundary fixture feeds in the
+  growth_per_day that query gives. In promtool runs, a 5 GB burst on a disk growing 0.4 GB a
+  day reads at most 5.3 GB a day, for about one slice, then 0.4 again, kept or cleaned up;
+  the window's rate alone read up to 30. Even that peak leaves host-a, 100 GB free, far from
+  full. host-b, whose disk has grown 30 GB a day all along, still gets the time-to-full
+  warning.
+rule: resources
+config:
+  disk_warning: 0.85
+  disk_critical: 0.95
+  time_to_full_warning: "72h"
+  time_to_full_critical: "24h"
+  min_growth_per_day: 0.1
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  resources:
+    # The burst's peak reading (the window's rate alone: up to 30 GB/day).
+    - {name: "host-a:/", kind: disk, host: host-a, used: 400, limit: 500, unit: GB, at: "2026-03-02T14:59:00+00:00", growth_per_day: 5.3}
+    - {name: "host-b:/", kind: disk, host: host-b, used: 420, limit: 500, unit: GB, at: "2026-03-02T14:59:00+00:00", growth_per_day: 30.0}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "grows 30.0 GB a day: full in about 2.7 days"
+    params: {resource: "host-b:/", hours_to_full: 64.0}
+not_expected_actions:
+  - kind: alert
+    params: {resource: "host-a:/"}
+  - kind: alert
+    severity: critical
+    params: {resource: "host-b:/"}

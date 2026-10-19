@@ -468,6 +468,15 @@ def test_disk_growth_and_directory_sizes() -> None:
         for name in ("disk_growth", "path_growth"):
             # Over the window, and only for series that existed half a window ago.
             assert "[43200s]" in text(cfg, name) and "offset 21600s" in text(cfg, name)
+            # ((trend < held) or held): the window's rate, capped at the first quartile of
+            # the quarter-hour slices of the last hour, each at least 0 (a cleanup is no
+            # negative rate). tests/resources/test_growth_promql.py runs it in promtool.
+            trend, rest = text(cfg, name).split(" and ")[0].split(" < ")
+            held, again = rest.split(") or ")
+            assert trend.startswith("((") and "[43200s]) * 86400" in trend
+            assert held.startswith("quantile_over_time(0.25, clamp_min(")
+            assert held.endswith("[900s]) * 86400, 0)[3600s:900s])")
+            assert again == f"{held})"
         prom.responses[text(cfg, "disk_growth")] = vector((mount(A, "/"), str(9 * GB)))
         sims = "/Users/agent/Library/Developer/CoreSimulator/Devices"
         prom.responses[text(cfg, "path_bytes")] = vector(
@@ -539,6 +548,17 @@ def test_custom_queries_get_their_placeholders_filled() -> None:
     )  # fmt: skip
     assert cfg.query_text("disk_growth") == "-deriv(my_avail[21600s]) and my_avail offset 10800s"
     assert cfg.query_text("cores") == "count by (node) (cpu)"
+    sustained = PrometheusConfig(
+        url="http://127.0.0.1:9", hosts=HOSTS, growth_sustain=timedelta(minutes=90),
+        queries={"path_growth": "min_over_time(deriv(my_bytes[{slice}])[{sustain}:{slice}])"},
+    )  # fmt: skip
+    assert (
+        sustained.query_text("path_growth") == "min_over_time(deriv(my_bytes[1350s])[5400s:1350s])"
+    )
+    short = PrometheusConfig(
+        url="http://127.0.0.1:9", hosts=HOSTS, growth_sustain=timedelta(minutes=2)
+    )
+    assert short.growth_slice == timedelta(minutes=1)  # a slice holds a few scrapes
 
 
 def test_the_metrics_keep_the_source_up_on_an_optional_failure() -> None:

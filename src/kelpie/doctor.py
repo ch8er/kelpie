@@ -552,22 +552,53 @@ def check_resources_watched(
             f"targets, with {label} as in [resources.prometheus] hosts (docs/install.md)",
         )
     hosts = ", ".join(sorted(prometheus.hosts))
+    warnings: list[tuple[str, str]] = []  # (detail, fix), reported together
+    note = ""
+    try:  # the forecast's growth query, with subqueries (Prometheus 2.7 or later)
+        growing = _labels(
+            client, f"count by ({label}) (\n{config.query_text('disk_growth')}\n)", label
+        )
+    except QueryError as exc:
+        # Prometheus rejects a query it cannot parse or run: 400 or 422 with an error body.
+        rejected = exc.cause == "query_failed" or exc.detail in ("HTTP 400", "HTTP 422")
+        warnings.append(
+            (
+                f"the disk_growth query failed ({exc.cause}: {exc.detail}), so rule 7 cannot "
+                "forecast a disk filling up",
+                "use Prometheus 2.7 or later (the query uses subqueries), or check "
+                "[resources.prometheus.queries] disk_growth"
+                if rejected
+                else "check that Prometheus answers the disk_growth query within the timeout",
+            )
+        )
+    else:
+        if flat := sorted(h for h, value in prometheus.hosts.items() if value not in growing):
+            note = (
+                f"; no disk growth rate yet for {', '.join(flat)} (normal for half of "
+                "growth_window on a new Prometheus or host; otherwise a slice, growth_sustain "
+                "/ 4, may hold fewer than 2 scrapes: keep growth_sustain at least 8 scrape "
+                "intervals)"
+            )
     unsized = sorted(h for h, value in prometheus.hosts.items() if value not in paths)
     if unsized:
-        return _warn(
-            name,
-            f"{where} reads the disks of {hosts}; no directory sizes from "
-            f"{', '.join(unsized)}, so a filling disk's alert cannot say what grows",
-            "run scripts/kelpie-path-sizes.sh there (deploy/textfile, docs/install.md)",
+        warnings.append(
+            (
+                f"no directory sizes from {', '.join(unsized)}, so a filling disk's alert "
+                "cannot say what grows",
+                "run scripts/kelpie-path-sizes.sh there (deploy/textfile, docs/install.md)",
+            )
         )
     if prometheus.sends_token_in_clear(environ):
+        warnings.append(
+            ("the token goes over plain http", "use https, or keep Prometheus on loopback")
+        )
+    if warnings:
         return _warn(
             name,
-            f"{where} reads the disks and directory sizes of {hosts}, but the token goes "
-            "over plain http",
-            "use https, or keep Prometheus on loopback",
+            f"{where} reads the disks of {hosts}; " + "; ".join(d for d, _ in warnings) + note,
+            "; ".join(f for _, f in warnings),
         )
-    return _pass(name, f"{where} reads the disks and directory sizes of {hosts}")
+    return _pass(name, f"{where} reads the disks and directory sizes of {hosts}{note}")
 
 
 # kelpie_processes.prom: the macOS process count rule 7 reads (scripts/kelpie-process-limit.sh).

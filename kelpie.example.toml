@@ -338,6 +338,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # timeout = "5s"                      # per query (at most 60s); a failed query ends the fetch
 # interval = "60s"                    # at most one fetch this often (at least 5s)
 # growth_window = "6h"                # disk and directory growth rates (rule 7's time-to-full)
+# growth_sustain = "1h"               # ...capped at what held in most quarters of this (5m-24h)
 # load_on_macos = false               # macOS load counts waiting threads (300-800 when healthy)
 # token_env = "KELPIE_PROMETHEUS_TOKEN"  # bearer token from this env var. Used when set; when
 #                                     # written here the variable must be set or Kelpie refuses to start
@@ -356,12 +357,13 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # processes = 'node_processes_pids or on(instance) max by (instance) (kelpie_user_processes and on(instance) (time() - node_textfile_mtime_seconds{file=~"(.*/)?kelpie_processes[.]prom"} < 300))'   # Linux: node_exporter --collector.processes; macOS: scripts/kelpie-process-limit.sh
 # processes_max = 'node_processes_max_processes or on(instance) min by (instance) (kelpie_user_processes_max and on(instance) (time() - node_textfile_mtime_seconds{file=~"(.*/)?kelpie_processes[.]prom"} < 300))'
 # os = "node_uname_info"   # macOS hosts get no load reading unless load_on_macos
-# disk_growth = '-deriv(node_filesystem_avail_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs",mountpoint!~"/System/Volumes/(?:VM|Preboot|Update|xarts|iSCPreboot|Hardware|Recovery)(?:/.*)?"}[{window}]) * 86400 and node_filesystem_avail_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs",mountpoint!~"/System/Volumes/(?:VM|Preboot|Update|xarts|iSCPreboot|Hardware|Recovery)(?:/.*)?"} offset {half_window}'
+# disk_growth = '((-deriv(node_filesystem_avail_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs",mountpoint!~"/System/Volumes/(?:VM|Preboot|Update|xarts|iSCPreboot|Hardware|Recovery)(?:/.*)?"}[{window}]) * 86400 < quantile_over_time(0.25, clamp_min(-deriv(node_filesystem_avail_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs",mountpoint!~"/System/Volumes/(?:VM|Preboot|Update|xarts|iSCPreboot|Hardware|Recovery)(?:/.*)?"}[{slice}]) * 86400, 0)[{sustain}:{slice}])) or quantile_over_time(0.25, clamp_min(-deriv(node_filesystem_avail_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs",mountpoint!~"/System/Volumes/(?:VM|Preboot|Update|xarts|iSCPreboot|Hardware|Recovery)(?:/.*)?"}[{slice}]) * 86400, 0)[{sustain}:{slice}])) and node_filesystem_avail_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|devtmpfs|nsfs|proc|sysfs|cgroup.*|fuse.*|autofs",mountpoint!~"/System/Volumes/(?:VM|Preboot|Update|xarts|iSCPreboot|Hardware|Recovery)(?:/.*)?"} offset {half_window}'
 # path_bytes = "kelpie_path_bytes"   # from scripts/kelpie-path-sizes.sh
-# path_growth = "deriv(kelpie_path_bytes[{window}]) * 86400 and kelpie_path_bytes offset {half_window}"
+# path_growth = "((deriv(kelpie_path_bytes[{window}]) * 86400 < quantile_over_time(0.25, clamp_min(deriv(kelpie_path_bytes[{slice}]) * 86400, 0)[{sustain}:{slice}])) or quantile_over_time(0.25, clamp_min(deriv(kelpie_path_bytes[{slice}]) * 86400, 0)[{sustain}:{slice}])) and kelpie_path_bytes offset {half_window}"
 # path_written = 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}'
-# ({host_label}, written here as instance, {window} = growth_window and {half_window} are
-# filled in, in custom queries too.)
+# ({host_label}, written here as instance, {window} = growth_window, {half_window},
+# {sustain} = growth_sustain and {slice} = a quarter of it are filled in, in custom queries
+# too.)
 
 # LLM provider quotas and key health, for rule 7. Off unless providers are listed. Each
 # provider is probed with one GET of `path` at most once per `interval`. Probes must cost
