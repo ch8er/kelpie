@@ -283,8 +283,10 @@ Statuses: `in_progress`, `review`, `accepted`. Terminal statuses and `blocked`, 
 Clears a block when every linked condition holds on fresh evidence. Alerts on blocks it
 cannot clear. A block Kelpie set itself (a run rule 10 stopped, recognised by its signed
 marker) is not one of them: it waits for a human, so rule 13 lists it instead. While a CI
-outage that explains the block is open (rule 9), its alerts are folded under the outage's
-one alert instead of being sent; they come back if the block outlives the outage.
+outage that explains the block is open (rule 9), its overdue and no-condition alerts are
+folded under the outage's one alert instead of being sent; dead ends and stale evidence are
+not. A block first seen during the outage is announced if it outlives it; an escalation
+that came due during the outage is sent when it ends.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |

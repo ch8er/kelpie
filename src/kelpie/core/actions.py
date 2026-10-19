@@ -64,9 +64,10 @@ class Action:
     task, kind or executor: for a request that may land on a different task each time
     (or as an alert when there is none) but must be made once.
 
-    ``about_wait`` marks an alert about a task's block or wait lasting too long (not about a
-    wait that is broken). While a farm-wide incident that explains the task's wait is open
-    (a CI outage, :mod:`kelpie.core.incidents`), the engine folds such alerts under it.
+    ``about_wait`` marks an alert that a task's block or wait lasts too long or names no
+    condition, not that it is broken (a dead end, stale evidence). While a farm-wide
+    incident that explains the task's wait is open (a CI outage, :mod:`kelpie.core.incidents`),
+    the engine folds such alerts under it.
     """
 
     kind: ActionKind

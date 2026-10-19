@@ -20,11 +20,15 @@ with its rule's name.
   entry is as of that entry: a task that joined since is matched by its repository
   (``repos``).
 - **Folded alerts** (the engine): other rules' alerts that a task's block or wait lasts too
-  long (``Action.about_wait``) about tasks in ``tasks`` are held back while the outage is
-  open, unless critical, and only while the outage's own alert reaches people (or theirs
-  would not either). The ledger records them as suppressed (``incident``) with
-  ``params[FOLDED_UNDER]`` set to the outage's state id, under a fingerprint of their own:
-  one entry when a fold starts, then at most one an hour.
+  long or names no condition (``Action.about_wait``) about tasks in ``tasks`` are held back
+  while the outage is open: not critical ones, not ones more severe than the outage's alert,
+  and only while that alert reached people (or, when it was only logged, alerts that would
+  only be logged too); dry-run folds what live mode would. A tick in which the outage is not
+  reported keeps its last folds while its state stays open. The ledger records each folded
+  alert as suppressed (``incident``) with ``params[FOLDED_UNDER]`` set to the outage's state
+  id, under a fingerprint of its own: one entry when a fold starts, then at most one an hour
+  (the same outage recurring within the hour adds to the previous occurrence's entry). Its
+  own state stays open and is seen, so it neither resolves nor re-announces meanwhile.
 """
 
 from __future__ import annotations
