@@ -369,7 +369,7 @@ set `[resources.prometheus.queries] processes_max` to a real ceiling.
 | `heavy_roles` | `[]` | string or list | Roles whose tasks are heavy. |
 | `max_heavy_per_host` | unset | count, >= 1, or `false` | Alert when a host under pressure runs more heavy tasks than this. Unset: not checked. Needs `Task.host` from the adapter (Hermes does not set it yet). |
 | `max_reading_age` | `"10m"` | duration, > 0 | Readings older than this are ignored. |
-| `time_to_full_warning`, `time_to_full_critical` | `"72h"`, `"24h"` | duration, or `false`; critical shorter than warning (also against the other's default: a warning under 24h needs a shorter critical, or `false`) | A disk that fills within this at its growth rate (`[resources.prometheus] growth_window`) warns, or is critical (incident 19). The alert names the fastest-growing measured directories on that filesystem. A disk past its utilization threshold gets the forecast in that alert, at the worse severity, not a second alert. |
+| `time_to_full_warning`, `time_to_full_critical` | `"72h"`, `"24h"` | duration, or `false`; critical shorter than warning (also against the other's default: a warning under 24h needs a shorter critical, or `false`) | A disk that fills within this at its growth rate (`[resources.prometheus] growth_window`, capped at what held over `growth_sustain`) warns, or is critical (incident 19). The alert names the fastest-growing measured directories on that filesystem. A disk past its utilization threshold gets the forecast in that alert, at the worse severity, not a second alert. |
 | `time_to_full_release` | warning × 7/6 (`"84h"`; critical × 7/6 with the warning off) | duration, not shorter than the warning; `false`: no hold | A disk's open alert (opened by the forecast or by its utilization: one condition per disk) stays open, a warning, until the disk would fill later than this, so a growth rate near the warning does not open and resolve it again and again. |
 | `min_growth_per_day` | `0.1` | GB per day | Slower growth forecasts nothing. |
 | `growing_paths_shown` | `3` | count, 0 to 20 | Directories named in the alert. |
@@ -867,6 +867,7 @@ present.
 | `token_env` | `"KELPIE_PROMETHEUS_TOKEN"` | variable name | Bearer token, sent only to `url`. Written here, the variable must be set. |
 | `queries` | built-in | table | PromQL overrides, one per reading, see below. |
 | `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. |
+| `growth_sustain` | `"1h"`, or `growth_window` when that is shorter | duration, 5m to 24h and at most `growth_window` | How long growth must go on to count. The growth rate is the rate over `growth_window`, capped at the first quartile of the rates in the slices (`growth_sustain` / 4, at least 1m, aligned to the clock) of the last `growth_sustain`, a slice that shrank counting as 0. So a burst within about half of `growth_sustain` adds a few GB a day at most, for about one slice (5 GB written in 17 minutes reads at most about 5 GB a day on a flat disk, 35 on one growing 30 GB a day), then nothing; a cleanup of less than a few hours' growth leaves about the rate (an open forecast does not resolve), while a larger one turns the window's trend negative, so an open forecast resolves until the cleanup leaves the window (about 4 to 5 hours with the 6h default); a longer burst counts in part (5 GB in 40 to 50 minutes reads up to about 15 to 18 GB a day). Growth that comes in bursts with gaps longer than a slice (a build every 30 minutes, nothing written in between) reads as no growth. A shrinking trend stays negative: no forecast. |
 | `load_on_macos` | `false` | bool | macOS counts threads waiting on I/O in its load average (300 to 800 on a healthy farm Mac), so hosts whose `node_uname_info` says Darwin get no load reading unless this is true. Needs node_exporter's uname collector (on by default), as does leaving out macOS's read-only volumes; a host once seen as macOS stays so when that query fails, and until it first answers no host gets a load reading. |
 
 `[resources.prometheus.queries]` keys: `disk_size`, `disk_avail`, `memory_total`,
@@ -881,12 +882,20 @@ system volumes, so a Mac shows its data volume, `/System/Volumes/Data`. Each res
 names the filesystem they are on). `path_bytes` and `path_growth` read `kelpie_path_bytes`
 from `scripts/kelpie-path-sizes.sh` (install.md, Host resources); `path_written` is when
 node_exporter last saw that file change, so sizes from a script that stopped count as old.
-The growth queries only answer for series that existed half a window ago, so a new
-Prometheus or host forecasts nothing at first. The growth and directory queries may fail or
-be empty without costing the other readings (each failure is counted in
-`kelpie_resource_read_failures_total`, cause `<query>_<cause>`). In every query, custom ones
-too, `{host_label}`, `{window}` (`growth_window`) and `{half_window}` are filled in. The
-defaults are in `kelpie.example.toml`. `processes` needs node_exporter's
+The growth queries take the lower of two rates (`deriv`, in bytes per day): over
+`growth_window` (the trend) and the first quartile over the slices of the last
+`growth_sustain`, each at least 0 (`quantile_over_time` of a subquery, Prometheus 2.7 or
+later; doctor warns when the query fails). The trend is not clamped: a disk that shrinks
+over the window reads negative and forecasts nothing. A slice needs at least two scrapes, or
+the query answers nothing: keep `growth_sustain` at least 8 scrape intervals long (doctor
+notes a host with no growth rate). The growth queries only answer for series
+that existed half a window ago, so a new Prometheus or host forecasts nothing at first. The
+growth and directory queries may fail or be empty without costing the other readings (each
+failure is counted in `kelpie_resource_read_failures_total`, cause `<query>_<cause>`). In
+every query, custom ones too, `{host_label}`, `{window}` (`growth_window`), `{half_window}`,
+`{sustain}` (`growth_sustain`) and `{slice}` (a quarter of it, at least 1m) are filled in; a
+custom `disk_growth` or `path_growth` is sustained only if it uses `{sustain}` and `{slice}`
+itself. The defaults are in `kelpie.example.toml`. `processes` needs node_exporter's
 `--collector.processes`.
 
 ## [connectors.github]

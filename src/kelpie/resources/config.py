@@ -13,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from kelpie.core.serde import parse_duration
 from kelpie.resources.prometheus import (
+    DEFAULT_GROWTH_SUSTAIN,
     DEFAULT_GROWTH_WINDOW,
     DEFAULT_HOST_LABEL,
     DEFAULT_INTERVAL,
@@ -27,11 +28,13 @@ from kelpie.resources.prometheus import (
 DEFAULT_TOKEN_ENV = "KELPIE_PROMETHEUS_TOKEN"
 MAX_TIMEOUT = timedelta(seconds=60)
 MIN_INTERVAL = timedelta(seconds=5)
+MIN_GROWTH_SUSTAIN = timedelta(minutes=5)
+MAX_GROWTH_SUSTAIN = timedelta(hours=24)  # bounds how far back the growth subquery reads
 SECTIONS = frozenset({"prometheus"})
 PROMETHEUS_KEYS = frozenset(
     {
         "url", "hosts", "host_label", "timeout", "interval", "token_env", "queries",
-        "growth_window", "load_on_macos",
+        "growth_window", "growth_sustain", "load_on_macos",
     }
 )  # fmt: skip
 _LABEL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -53,6 +56,7 @@ class PrometheusSettings:
     token_env_explicit: bool = False  # set in the config: the variable must then be set
     queries: Mapping[str, str] = field(default_factory=dict)
     growth_window: timedelta = DEFAULT_GROWTH_WINDOW  # disk and directory growth rates
+    growth_sustain: timedelta = DEFAULT_GROWTH_SUSTAIN  # ...capped at what held this long
     load_on_macos: bool = False  # macOS load counts waiting threads: off by default
 
     @property
@@ -99,6 +103,7 @@ class PrometheusSettings:
             token=self.token(environ),
             queries=dict(self.queries),
             growth_window=self.growth_window,
+            growth_sustain=self.growth_sustain,
             load_on_macos=self.load_on_macos,
         )
         return PrometheusSource(config, observer)
@@ -203,6 +208,14 @@ def _load_prometheus(section: Any) -> PrometheusSettings:
     growth_window = _duration(section, "growth_window", DEFAULT_GROWTH_WINDOW)
     if not timedelta(minutes=30) <= growth_window <= timedelta(days=7):
         raise ValueError("[resources.prometheus] growth_window must be 30m to 7d")
+    # Unset: an hour, or the whole window when that is shorter (30m and 1h windows load).
+    growth_sustain = min(DEFAULT_GROWTH_SUSTAIN, growth_window)
+    if "growth_sustain" in section:
+        growth_sustain = _duration(section, "growth_sustain", DEFAULT_GROWTH_SUSTAIN)
+        if not MIN_GROWTH_SUSTAIN <= growth_sustain <= min(growth_window, MAX_GROWTH_SUSTAIN):
+            raise ValueError(
+                "[resources.prometheus] growth_sustain must be 5m to 24h and at most growth_window"
+            )
     load_on_macos = section.get("load_on_macos", False)
     if not isinstance(load_on_macos, bool):
         raise ValueError("[resources.prometheus] load_on_macos must be true or false")
@@ -232,5 +245,6 @@ def _load_prometheus(section: Any) -> PrometheusSettings:
         token_env_explicit="token_env" in section,
         queries=queries,
         growth_window=growth_window,
+        growth_sustain=growth_sustain,
         load_on_macos=load_on_macos,
     )

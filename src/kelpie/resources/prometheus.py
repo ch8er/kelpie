@@ -59,8 +59,25 @@ _WRITABLE = (
     ' and on({host_label}) node_uname_info{sysname="Darwin"})'
 )
 
+
+def _sustained(rate: str) -> str:
+    """The lower of ``rate`` over ``{window}`` (the trend, a real shrink stays negative) and
+    the first quartile of ``rate`` over the ``{slice}`` steps of the last ``{sustain}`` (what
+    held in most of them). A slice that shrank counts as 0, so a cleanup cannot drag this
+    side below zero (the trend can: a cleanup larger than a few hours' growth). With the
+    usual 4 slices the quartile is a quarter of the lowest plus three quarters of the second
+    lowest, so one odd slice (a burst or a cleanup) moves it little. Both sides carry the
+    same labels, so ``or`` adds a series only where ``<`` dropped it: one result per
+    series."""
+    trend = rate.replace("{range}", "{window}")
+    sliced = rate.replace("{range}", "{slice}")
+    held = f"quantile_over_time(0.25, clamp_min({sliced}, 0)[{{sustain}}:{{slice}}])"
+    return f"(({trend} < {held}) or {held})"
+
+
 # ``{host_label}`` is replaced by the configured host label, ``{window}`` and
-# ``{half_window}`` by ``growth_window`` and its half, in custom queries too. Every result
+# ``{half_window}`` by ``growth_window`` and its half, ``{sustain}`` by ``growth_sustain``
+# and ``{slice}`` by a quarter of it (at least a minute), in custom queries too. Every result
 # must keep the host label.
 DEFAULT_QUERIES: Mapping[str, str] = {
     "disk_size": f"node_filesystem_size_bytes{{{_FS}}} {_WRITABLE}",
@@ -90,22 +107,29 @@ DEFAULT_QUERIES: Mapping[str, str] = {
     ),
     # The host's OS (node_exporter's uname collector): load is off on macOS by default.
     "os": "node_uname_info",
-    # How fast used space grows, in bytes per day, over ``growth_window`` (incident 19);
-    # only for series that existed half a window ago, so a fresh Prometheus or host does not
-    # forecast from a few minutes (one build's 5 GB in 3 minutes is no daily rate).
+    # How fast used space grows, in bytes per day (incident 19): the rate over
+    # ``growth_window``, but no more than what held in most slices of the last
+    # ``growth_sustain`` (see _sustained). A burst within about half of that (one build's 5 GB
+    # in 17 minutes) adds a few GB a day for about a slice at most, a cleanup of less than a
+    # few hours' growth leaves the rate, and steady growth reads as itself. Only for series
+    # that existed half a window ago, so a fresh Prometheus or host forecasts nothing.
     "disk_growth": (
-        f"-deriv(node_filesystem_avail_bytes{{{_FS}}}[{{window}}]) * 86400"
-        f" and node_filesystem_avail_bytes{{{_FS}}} offset {{half_window}}"
+        _sustained(f"-deriv(node_filesystem_avail_bytes{{{_FS}}}[{{range}}]) * 86400")
+        + f" and node_filesystem_avail_bytes{{{_FS}}} offset {{half_window}}"
     ),
     # Directory sizes from scripts/kelpie-path-sizes.sh (node_exporter's textfile collector),
     # and when that file was last written: sizes from a script that stopped are old.
     "path_bytes": "kelpie_path_bytes",
+    # Sustained like disk_growth, so the directories an alert names grew all along too.
     "path_growth": (
-        "deriv(kelpie_path_bytes[{window}]) * 86400 and kelpie_path_bytes offset {half_window}"
+        _sustained("deriv(kelpie_path_bytes[{range}]) * 86400")
+        + " and kelpie_path_bytes offset {half_window}"
     ),
     "path_written": 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}',
 }
 DEFAULT_GROWTH_WINDOW = timedelta(hours=6)
+DEFAULT_GROWTH_SUSTAIN = timedelta(hours=1)  # at most growth_window (config.py)
+MIN_GROWTH_SLICE = timedelta(minutes=1)
 QUERY_NAMES = frozenset(DEFAULT_QUERIES)
 
 valid_token = net.valid_header_value
@@ -208,19 +232,29 @@ class PrometheusConfig:
     token: str | None = field(default=None, repr=False)
     queries: Mapping[str, str] = field(default_factory=dict)  # overrides of DEFAULT_QUERIES
     growth_window: timedelta = DEFAULT_GROWTH_WINDOW
+    growth_sustain: timedelta = DEFAULT_GROWTH_SUSTAIN  # rates capped at what held over this
     # macOS counts threads waiting on I/O in its load average: 300-800 on a healthy Mac.
     load_on_macos: bool = False
 
     def query_text(self, name: str) -> str:
         """The query, its placeholders filled in (in custom queries too): ``{host_label}``,
-        ``{window}`` (``growth_window``) and ``{half_window}``."""
+        ``{window}`` (``growth_window``), ``{half_window}``, ``{sustain}``
+        (``growth_sustain``) and ``{slice}``."""
         text = self.queries.get(name, DEFAULT_QUERIES[name])
         seconds = int(self.growth_window.total_seconds())
         return (
             text.replace("{host_label}", self.host_label)
             .replace("{half_window}", f"{seconds // 2}s")
             .replace("{window}", f"{seconds}s")
+            .replace("{sustain}", f"{int(self.growth_sustain.total_seconds())}s")
+            .replace("{slice}", f"{int(self.growth_slice.total_seconds())}s")
         )
+
+    @property
+    def growth_slice(self) -> timedelta:
+        """A quarter of ``growth_sustain``, at least a minute: growth must show in each."""
+        quarter = timedelta(seconds=int(self.growth_sustain.total_seconds()) // 4)
+        return max(quarter, MIN_GROWTH_SLICE)
 
 
 class PrometheusSource:

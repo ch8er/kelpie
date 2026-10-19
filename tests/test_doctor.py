@@ -639,6 +639,39 @@ def test_a_farm_whose_disks_nobody_watches_fails(farm: Farm) -> None:
     assert "node_exporter" in check.fix
 
 
+def test_a_prometheus_without_subqueries_is_a_warning(farm: Farm) -> None:
+    """The growth query uses subqueries (Prometheus 2.7+): an older one rejects it."""
+    farm.make_healthy()
+    growth = count("disk_growth")
+    farm.prom.responses[growth] = vector(({"instance": "mac-1:9100"}, "2"))
+    check = farm.checks()["disk watched"]
+    assert check.status == "PASS" and "no disk growth" not in check.detail
+    # Rejected: the hint names the version.
+    farm.prom.responses[growth] = {"status": "error", "errorType": "bad_data"}
+    check = farm.checks()["disk watched"]
+    assert check.status == "WARN" and "the disk_growth query failed (query_failed" in check.detail
+    assert "Prometheus 2.7 or later" in check.fix
+    # Another failure is no version problem.
+    farm.prom.responses[growth] = []
+    check = farm.checks()["disk watched"]
+    assert check.status == "WARN" and "(invalid_response" in check.detail
+    assert "2.7" not in check.fix
+    # Reported together with missing directory sizes, not instead of them.
+    farm.prom.responses[count("path_bytes")] = vector()
+    check = farm.checks()["disk watched"]
+    assert "the disk_growth query failed" in check.detail
+    assert "no directory sizes from mac-1" in check.detail
+    assert "kelpie-path-sizes.sh" in check.fix
+
+
+def test_no_growth_rate_yet_is_only_a_note(farm: Farm) -> None:
+    """A new Prometheus has no growth for half a window; slices of too few scrapes neither."""
+    farm.make_healthy()
+    check = farm.checks()["disk watched"]  # the fake answers the growth query with nothing
+    assert check.status == "PASS" and "no disk growth rate yet for mac-1" in check.detail
+    assert "8 scrape intervals" in check.detail
+
+
 def test_a_mac_whose_process_count_stopped_is_a_warning(farm: Farm) -> None:
     farm.make_healthy()
     mac = vector(({"instance": "mac-1:9100"}, "1"))
