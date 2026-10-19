@@ -10,15 +10,18 @@ out and why are printed; nothing is written, whatever the rule's mode or the dry
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import re
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 
 from kelpie.app import Settings, load_rules, utc_now
-from kelpie.connectors.github.client import GitHubError
-from kelpie.connectors.github.proposals import WORKFLOW_PATH, default_branch, read_workflow
-from kelpie.connectors.github.workflow_config import DOCS_WARNING, WorkflowError, render
+from kelpie.connectors.github.proposals import preview
 from kelpie.core.actions import ActionKind
 from kelpie.why import read_snapshot
+
+# Terminal control characters: the workflow files are the repository's, not Kelpie's text.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 
 
 def run(settings: Settings, clock: Callable[[], datetime] | None = None) -> tuple[str, str, int]:
@@ -34,33 +37,32 @@ def run(settings: Settings, clock: Callable[[], datetime] | None = None) -> tupl
         client = github.build(github.token(), clock).client
     except ValueError as exc:
         return "", f"{exc}\n", 2
-    read = read_snapshot(settings, clock, refresh=True)
+    # Reading needs no write token: the snapshot is built with proposing and cancelling off.
+    reading = replace(
+        settings,
+        github=replace(github, ci=replace(github.ci, allow_propose=False, allow_cancel=False)),
+    )
+    read = read_snapshot(reading, clock, refresh=True)
     problems = [*read.adapter_failures, *read.problems]
+    if not getattr(rule, "propose_config", False):
+        problems.append(
+            "[engine.rules.ci_economy] propose_config is off: the proposals below are what it "
+            "would make"
+        )
+        rule = replace(rule, propose_config=True)  # type: ignore[type-var]
     proposals = [a for a in rule.evaluate(read.snapshot) if a.kind is ActionKind.PROPOSE_CI_CONFIG]
     out: list[str] = []
     for action in proposals:
-        repo, path = str(action.params.get("repo")), str(action.params.get("workflow"))
-        out.append(f"# {path} in {repo}: {action.reason}")
-        if WORKFLOW_PATH.fullmatch(path) is None:
-            out += ["(not a workflow file Kelpie edits)", ""]
-            continue
-        changes = [c for c in action.params.get("changes", []) if isinstance(c, Mapping)]
-        try:
-            before, _ = read_workflow(client, repo, path, default_branch(client, repo))
-            rendered = render(before, changes)
-        except (GitHubError, WorkflowError) as exc:
-            out += [f"(not rendered: {exc})", ""]
-            continue
-        diff = rendered.diff(before, path)
-        out.append(diff.rstrip("\n") if diff else "(nothing to change in this file)")
-        out += [f"left out: {name}: {why}" for name, why in rendered.left_out]
-        if "ignore_docs_paths" in rendered.applied:
-            out.append(f"note: {DOCS_WARNING}")
-        out.append("")
+        repo, path = action.params.get("repo"), action.params.get("workflow")
+        out += [f"# {path} in {repo}: {action.reason}", preview(client, action), ""]
     if not proposals:
         out.append(
             "No pipeline wasted enough minutes for a proposal "
-            "(ci_economy propose_min_minutes, within its window)."
+            "(ci_economy propose_min_minutes and waste_min_minutes, within its window)."
         )
     err = "".join(f"warning: {p}\n" for p in problems)
-    return "\n".join(out).rstrip("\n") + "\n", err, 0
+    return _printable("\n".join(out).rstrip("\n") + "\n"), _printable(err), 0
+
+
+def _printable(text: str) -> str:
+    return _CONTROL.sub("\N{REPLACEMENT CHARACTER}", text)

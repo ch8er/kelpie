@@ -435,8 +435,8 @@ forecasts the CI minutes quota, and reports a CI outage as one incident. Needs b
 | `wip_patterns` | `['^\s*\[?wip\b', '^\s*(fixup\|squash)!']` | list of patterns | Commit messages that mark a WIP commit. |
 | `waste_min_minutes` | `30` | minutes, >= 0 | Send the waste summary once this many minutes were wasted in the window. |
 | `cancel_superseded` | `true` | bool | Emit `cancel_build` for superseded builds the connector marked cancellable. |
-| `propose_config` | `true` | bool | Emit `propose_ci_config` for pipelines with enough minutes to save; the CI connector opens it as a pull request when `allow_propose` is set. |
-| `propose_min_minutes` | `60` | minutes, >= 0 | A pipeline's minutes to save in the window before a proposal. |
+| `propose_config` | `false` | bool | Emit `propose_ci_config` for pipelines with enough minutes to save; the CI connector opens it as a draft pull request when `allow_propose` is set. See [Proposed workflow changes](#connectorsgithubci). |
+| `propose_min_minutes` | `60` | minutes, >= 0 | A pipeline's minutes to save in the window before a proposal (the waste summary's `waste_min_minutes` must be reached too). |
 | `quota_critical` | `1.0` | ratio, > 0 and <= 1 | Used / quota at which the quota counts as exhausted. |
 | `forecast_horizon` | `"7d"` | duration, > 0 | Warn when the quota runs out within this, before it resets. |
 | `quota_period` | `"30d"` | duration, > 0 | Without a usage reading: warn when the burn over this period would exceed the quota. |
@@ -1259,19 +1259,40 @@ GitHub Actions runs for rule 9, and its two opt-in writes: `cancel_build` and
 | `billing_skus` | `["actions_linux", "actions_windows", "actions_macos"]` | non-empty list | SKUs that draw on `included_minutes`; any case, spaces or hyphens read as `_`. |
 | `allow_propose` | `false` | bool | Allow `propose_ci_config`: rule 9's changes for a workflow, opened as a draft pull request. Needs `propose_repos` and `propose_token_env`. |
 | `propose_repos` | `[]` | list | Required with `allow_propose`; among `repos`. |
-| `propose_token_env` | unset | variable name | A token of its own (not `token_env` or `billing_token_env`) with Contents, Pull requests and Workflows: write on `propose_repos`, used only to open the pull request. |
+| `propose_token_env` | unset | variable name | A token of its own (not `token_env`, `cancel_token_env` or `billing_token_env`, by name or by value) with Contents, Pull requests and Workflows: write on `propose_repos`, used only to open the pull request. |
 
-**Proposed workflow changes** (`propose_ci_config`). For a pipeline that wasted at least
-`ci_economy` `propose_min_minutes`, Kelpie reads the workflow file from the default branch,
-writes in the changes it can place safely (a `concurrency` group that cancels a running build
-on a newer push, except on the default branch; `paths-ignore` for the docs globs on `push` and
-`pull_request`; a draft condition on jobs without an `if`, with `ready_for_review` among the
-pull request types), commits them on `kelpie/ci-config/<workflow file>` and opens a **draft**
-pull request listing each change with the minutes it would have saved and what it left out
-and why (WIP commits and already verified commits are never rendered). Nothing twice: an open
-pull request, or a branch left from one a human closed, means it was proposed already. A
-`paths-ignore` filter leaves a required check pending on docs-only pull requests; the pull
-request says so. `kelpie ci-config` prints the same changes as a diff and writes nothing.
+**Proposed workflow changes** (`propose_ci_config`). Off unless both `ci_economy`
+`propose_config` and `allow_propose` are set. For a pipeline that wasted at least
+`propose_min_minutes` in the rule's window (and only once the window's waste reached
+`waste_min_minutes`), Kelpie reads the workflow file from the default branch and writes in
+the changes it can place safely:
+
+- a `concurrency` group with `cancel-in-progress: true`, one group per pull request and per
+  branch, so a newer push cancels the running build. Pushes to the default branch, manual
+  and scheduled runs and other events each get a group of their own and are never
+  cancelled;
+- `paths-ignore` for the docs globs on `push` and `pull_request`;
+- a draft condition on jobs, with `ready_for_review` among the pull request types; only
+  when no job has an `if` of its own.
+
+It commits them on `kelpie/ci-config/<workflow file>` and opens a **draft** pull request
+listing each change with the minutes it would have saved, what it left out and why (WIP
+commits and already verified commits are never rendered: GitHub Actions has no setting for
+them), and what to check before merging: a `paths-ignore` filter leaves a required check
+pending on docs-only pull requests, and a skipped draft run counts as passed for a required
+check, so a pull request marked ready (by auto-merge or an agent) could merge before its
+real run. The description holds Kelpie's own words and the rule's numbers only, never text
+from the workflow file. Kelpie never merges it.
+
+Nothing twice: an open pull request from that branch means it was proposed already. A
+branch of that name with a closed pull request means a human turned it down: Kelpie does not
+propose for that file again until the branch is deleted. A branch Kelpie could not take back
+after a failure (for example while rate limited) is carried on from on the next attempt
+when it is still at the default branch's head, or one commit ahead holding exactly this
+change to this file only; any other branch of that name is someone else's, and Kelpie
+refuses (a human is told). The rule emits a proposal once per `[engine] once_window` for the
+same changes. `kelpie ci-config` prints the same changes as a diff and writes nothing; it
+needs only the read token, with `Contents: read` on the repositories.
 
 **Minutes used.** With `billing_user` or `billing_org`, Kelpie reads GitHub's billing usage
 report (`/users/{user}/settings/billing/usage` or `/organizations/{org}/...`, the enhanced
@@ -1652,8 +1673,8 @@ Kelpie refuses to start when:
   or both are set; `billing_token_env` names `token_env`'s or `cancel_token_env`'s variable,
   or its variable is missing or malformed; `billing_skus` is empty.
 - `allow_propose` is set without `propose_repos` or `propose_token_env`; `propose_token_env`
-  names `token_env`'s or `billing_token_env`'s variable, or its variable is missing or
-  malformed.
+  names `token_env`'s, `cancel_token_env`'s or `billing_token_env`'s variable, or its
+  variable is missing or malformed, or holds the same token as one of those.
 - The [exposure check](install.md#otlp-token-and-the-exposure-check) fails.
 
 Kelpie logs a warning when:

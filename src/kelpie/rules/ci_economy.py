@@ -137,7 +137,7 @@ class CiEconomy:
     max_reading_age: timedelta = timedelta(hours=1)
     outage_min_prs: int = 3
     outage_window: timedelta = timedelta(hours=2)
-    propose_config: bool = True
+    propose_config: bool = False  # opt-in, with the CI connector's allow_propose
     propose_min_minutes: float = 60.0
     name: str = NAME
 

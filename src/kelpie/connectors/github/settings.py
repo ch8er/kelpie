@@ -168,12 +168,15 @@ class GitHubSettings:
         proposer = None
         propose_token = self.ci.propose_token(environ)
         if propose_token is not None:
-            if propose_token == environ.get(self.token_env, "").strip():
-                log.warning(
-                    "[connectors.github.ci] $%s holds the same token as $%s: the token that "
-                    "reads everything could then change workflows; give it a token of its own",
-                    self.ci.propose_token_env,
-                    self.token_env,
+            others = {
+                name: environ.get(name, "").strip()
+                for name in (self.token_env, self.ci.cancel_token_env, self.ci.billing_token_env)
+                if name is not None
+            }
+            if same := [name for name, value in others.items() if value == propose_token]:
+                raise ValueError(
+                    f"[connectors.github.ci] ${self.ci.propose_token_env} holds the same token "
+                    f"as ${same[0]}: proposals need a token of their own"
                 )
             proposer = Proposer(
                 GitHubClient(
@@ -241,6 +244,11 @@ def load_github(section: Any) -> GitHubSettings:
         raise ValueError(
             "[connectors.github.ci] billing_token_env must not be [connectors.github] "
             "token_env: billing gets a token of its own"
+        )
+    if ci is not None and ci.propose_token_env is not None and ci.propose_token_env == token_env:
+        raise ValueError(
+            "[connectors.github.ci] propose_token_env must not be [connectors.github] "
+            "token_env: the token that reads everything does not change workflows"
         )
     pulls = load_pulls(section["pulls"]) if "pulls" in section else None
     return GitHubSettings(

@@ -509,7 +509,7 @@ def test_a_superseded_build_whose_successor_is_unknown_counts_whole_and_a_zero_r
 
 
 def test_a_pipeline_with_enough_waste_gets_a_proposal_for_its_connector() -> None:
-    rule = CiEconomy(waste_min_minutes=0, propose_min_minutes=30)
+    rule = CiEconomy(waste_min_minutes=0, propose_min_minutes=30, propose_config=True)
     snap = Snapshot(
         now=NOW,
         builds=(

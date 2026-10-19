@@ -296,13 +296,13 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
         isinstance(included, bool) or not isinstance(included, int | float) or included <= 0
     ):
         raise ValueError(f"{where} included_minutes must be a positive number")
-    token_env = section.get("cancel_token_env")
-    if token_env is not None and (
-        not isinstance(token_env, str) or not _ENV_NAME.fullmatch(token_env)
+    cancel_env = section.get("cancel_token_env")
+    if cancel_env is not None and (
+        not isinstance(cancel_env, str) or not _ENV_NAME.fullmatch(cancel_env)
     ):
         raise ValueError(f"{where} cancel_token_env must be an environment variable name")
     account, organization, billing_env, billing_interval = _billing(section, included, where)
-    if billing_env is not None and billing_env == token_env:
+    if billing_env is not None and billing_env == cancel_env:
         raise ValueError(f"{where} billing_token_env must not be cancel_token_env: one token each")
     skus = _strings(section, "billing_skus", where) if "billing_skus" in section else None
     if skus == ():
@@ -319,8 +319,11 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
             f"{where} allow_propose needs propose_repos (an allow-list) and propose_token_env "
             "(a token of its own with Contents, Pull requests and Workflows: write)"
         )
-    if propose_env is not None and propose_env in (token_env, billing_env):
-        raise ValueError(f"{where} propose_token_env must be a token of its own")
+    if propose_env is not None and propose_env in (cancel_env, billing_env):
+        raise ValueError(
+            f"{where} propose_token_env must be a token of its own, not cancel_token_env's "
+            "or billing_token_env's"
+        )
     reserve = section.get("rate_reserve", DEFAULT_RATE_RESERVE)
     if isinstance(reserve, bool) or not isinstance(reserve, int) or not 0 <= reserve <= 4000:
         raise ValueError(f"{where} rate_reserve must be an integer from 0 to 4000")
@@ -341,7 +344,7 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
         cancel_repos=cancel_repos,
         cancel_workflows=_strings(section, "cancel_workflows", where),
         cancel_branches=_strings(section, "cancel_branches", where),
-        cancel_token_env=token_env,
+        cancel_token_env=cancel_env,
         billing_account=account,
         billing_organization=organization,
         billing_token_env=billing_env,

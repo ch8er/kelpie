@@ -306,6 +306,19 @@ def test_ci_economy_may_act_with_only_hermes_when_proposals_are_allowed(
     monkeypatch.delenv("KELPIE_GH_PROPOSE")
     with pytest.raises(ConfigError, match="KELPIE_GH_PROPOSE"):
         build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=proposing))
+    monkeypatch.setenv("KELPIE_GH_PROPOSE", TOKEN)  # the read token under another name
+    with pytest.raises(ConfigError, match=r"holds the same token as \$GITHUB_TOKEN"):
+        build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=proposing))
+
+
+def test_the_propose_token_is_not_the_read_token(tmp_path: Path) -> None:
+    text = CI_CONFIG.replace(
+        'cancel_repos = ["example/repo"]\n',
+        'cancel_repos = ["example/repo"]\nallow_propose = true\npropose_repos = ["example/repo"]\n'
+        'propose_token_env = "GITHUB_TOKEN"\n',
+    )
+    with pytest.raises(ConfigError, match="propose_token_env must not be"):
+        load_settings(write(tmp_path, text))
 
 
 def test_cancel_token_env_must_be_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

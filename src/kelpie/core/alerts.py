@@ -197,6 +197,13 @@ def _target(action: Action, key: str, fallback: str) -> str:
     return str(value) if value not in (None, "") else fallback
 
 
+def _workflow(action: Action) -> str:
+    """``.github/workflows/ci.yml in owner/repo``, as far as the action names it."""
+    workflow = _target(action, "workflow", "the CI config")
+    repo = action.params.get("repo")
+    return f"{workflow} in {repo}" if repo not in (None, "") else workflow
+
+
 def intent(action: Action) -> str:
     """What the action asks for, in the imperative ("clear the block on t_1")."""
     task = action.task_id or "the task"
@@ -218,7 +225,7 @@ def intent(action: Action) -> str:
         case ActionKind.CANCEL_BUILD:
             return f"cancel build {_target(action, 'build_id', 'of ' + task)}"
         case ActionKind.PROPOSE_CI_CONFIG:
-            return f"open a pull request changing {_target(action, 'workflow', 'the CI config')}"
+            return f"open a pull request changing {_workflow(action)}"
         case ActionKind.COMMENT:
             return f"comment on {task}"
         case ActionKind.WIP_COMMIT:
@@ -247,8 +254,7 @@ def _past(action: Action) -> str:
         case ActionKind.STOP:
             return f"Stopped run {_target(action, 'session_id', 'of ' + task)}"
         case ActionKind.PROPOSE_CI_CONFIG:
-            where = f"{_target(action, 'workflow', 'the CI config')}"
-            return f"Opened a draft pull request changing {where}"
+            return f"Opened a draft pull request changing {_workflow(action)}"
         case ActionKind.CANCEL_BUILD:
             done = f"Cancelled build {_target(action, 'build_id', 'of ' + task)}"
             newer = action.params.get("superseded_by")
