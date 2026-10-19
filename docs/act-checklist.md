@@ -108,9 +108,9 @@ stops as ordinary blocks.
   nothing leaves Kelpie and actions are logged as `dry_run`. With `dry_run = false` each
   rule runs in its own mode. Keep it `true` while editing modes, and flip it last.
 - [ ] An alert channel is configured (`[[alerts.channels]]`, docs/configuration.md) before
-  step 2. Without one there is no alerter: every alert, suggestion and notice of an action
-  in `suggest` or `act` is recorded as `dropped` in the ledger and shows only in
-  `kelpie_actions_total` and the logs, and `kelpie doctor` warns until a channel exists.
+  step 2. Without one there is no alerter: alerts and suggestions are recorded as `dropped`
+  in the ledger and show only in `kelpie_actions_total` and the logs, notices of actions
+  that were carried out are only logged, and `kelpie doctor` warns until a channel exists.
 - [ ] `[engine]` limits are what you want: `cooldown`, `retry_after`,
   `max_actions_per_task_per_hour`.
 - [ ] Run Kelpie as the user (and with the `HERMES_HOME`) that owns the board, so

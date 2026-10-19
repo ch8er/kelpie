@@ -177,7 +177,8 @@ def check_rule_modes(
     suggest or act; a rule in ``act`` that cannot act on this farm
     (:func:`kelpie.app.act_blockers`); parks that nothing wakes (the startup warnings of
     :func:`kelpie.app.dispatch_gate_warnings` and :func:`kelpie.app.serialize_warnings`);
-    alerts and suggestions with no ``[[alerts.channels]]`` to go to; ``act`` that comes from
+    rules in suggest or act with no ``[[alerts.channels]]`` for their alerts, suggestions and
+    action notices (``dry_run`` off); ``act`` that comes from
     ``default_mode`` alone. FAIL only when ``kelpie serve`` would refuse to start:
     ``dry_run`` off and a rule in ``act`` that its startup check refuses."""
     name = "rule modes"
