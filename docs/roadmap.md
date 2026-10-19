@@ -1096,5 +1096,7 @@ labels: P2, area:adapters
 Follow-up of the Linear tracker (#203), from its reviews; both minor.
 
 **Acceptance criteria**
-- [ ] A team's read starts only while the hour's complexity left covers the reserve kept for writes plus that team's last read cost
-- [ ] History events (assigned, unassigned, delegated) match agents by user id, as the issue's slots do, not by display name
+- [x] A team's read starts only while the hour's complexity left covers the reserve kept for writes plus that team's last read cost
+- [x] History events (assigned, unassigned, delegated) match agents by user id, as the issue's slots do, not by display name
+
+Done in #221, which also keeps the history raw and names it each time an item is built, and counts a team's requests against the request reserve. Left open: once Linear's figures are older than `LIMITS_TTL`, the next read is not checked against them.
