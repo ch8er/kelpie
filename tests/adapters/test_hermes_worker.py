@@ -128,6 +128,27 @@ def test_descendants_in_their_own_session_are_ended_too(spawn: Spawn, tmp_path: 
             os.kill(tool, 9)
 
 
+def test_the_submitters_children_are_not_the_runs(spawn: Spawn, tmp_path: Path) -> None:
+    """A submitter starts the profile's gateway as its child when none runs; the gateway serves
+    the profile's other runs too, so it is never ended with this one."""
+    pidfile = tmp_path / "gateway.pid"
+    submitter = spawn(
+        "import subprocess, sys, time;"
+        f" c = subprocess.Popen([sys.executable, '-c', {SLEEP!r}], start_new_session=True);"
+        f" open({str(pidfile)!r}, 'w').write(str(c.pid)); print('ready', flush=True);"
+        " time.sleep(60)",
+        ready=True,
+    )
+    gateway = int(pidfile.read_text())
+    try:
+        procs, _ = targets(recorded(submitter.pid))
+        assert [p.pid for p in procs] == [submitter.pid]
+        assert end(procs, grace=5).ended == 1
+        assert alive(gateway)
+    finally:
+        os.kill(gateway, 9)
+
+
 def test_a_recycled_pid_is_never_signalled(spawn: Spawn) -> None:
     stranger = spawn()
     epoch = instantiation_epoch()

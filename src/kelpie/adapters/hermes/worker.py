@@ -10,12 +10,17 @@ with the same proof of identity.
 Which processes (Hermes ``hermes_cli/kanban_db_dispatch.py`` and ``gateway/session_kanban.py``):
 
 - the run's **submitter**, ``task_runs.worker_pid``: the process the dispatcher spawned. The
-  agent watches it and exits within a second once it is gone;
+  agent watches it and exits within a second once it is gone. Only the submitter itself: when
+  no gateway serves the profile it starts one as its child, and that gateway is shared by the
+  profile's other runs;
 - the run's **agent**, the pid of the run's ``worker_bound`` event (its claim lock must be the
-  run's): it runs in the profile's gateway, not under the submitter, and is ended directly;
-- every **descendant** of those two, found by parent pid before anything is signalled: tool
+  run's): a process of its own that the profile's gateway spawned for this run only;
+- every **descendant** of the agent, found by parent pid before anything is signalled: tool
   commands (the ``terminal`` tool) start their own sessions, lose the run's environment and
   would outlive the agent.
+
+(An older Hermes ran the agent inside the submitter and records no ``worker_bound``: then the
+submitter is ended and tool commands it started are left to finish.)
 
 What makes a process safe to signal, all of it checked again right before each signal:
 
@@ -219,7 +224,7 @@ def targets(
     uid = os.getuid() if uid is None else uid
     epoch = instantiation_epoch(proc)
     mine = ancestors(os.getpid(), proc)
-    roots: list[Proc] = []
+    found: dict[int, Proc] = {}
     unverified = False
     for pid, recorded in ((worker.submitter, worker.submitter_print),
                           (worker.agent, worker.agent_print)):  # fmt: skip
@@ -233,12 +238,14 @@ def targets(
             continue
         if fingerprint(p, epoch) != recorded or p.uid != uid:
             continue  # the pid now belongs to another process: the worker is gone
-        roots.append(p)
-    if not roots and unverified:
+        found[p.pid] = p
+    if not found and unverified:
         return [], "Hermes recorded no fingerprint Kelpie can check"
-    by_parent = children(proc)
-    found = {p.pid: p for p in roots}
-    queue = list(roots)
+    agent = found.get(worker.agent) if worker.agent is not None else None
+    if agent is None:
+        return list(found.values()), None
+    by_parent = children(proc)  # the agent's descendants only (see above)
+    queue = [agent]
     while queue:
         for child in by_parent.get(queue.pop().pid, ()):
             fresh = child.pid not in found and child.pid not in mine

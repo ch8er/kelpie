@@ -127,9 +127,11 @@ successful block Kelpie ends the run's worker itself (`end_worker`, on by defaul
 proof of identity Hermes' reaper uses:
 
 - **Which processes.** The run's submitter (`task_runs.worker_pid`, the process the dispatcher
-  spawned), the run's agent (the pid of the run's `worker_bound` event, recorded by the
-  profile's gateway with the run's claim lock), and every descendant of the two (tool commands
-  start their own sessions and would outlive the agent). Nothing else.
+  spawned), the run's agent (the pid of the run's `worker_bound` event: the process the
+  profile's gateway started for this run, recorded with the run's claim lock), and every
+  descendant of the agent (tool commands start their own sessions and would outlive it).
+  Nothing else: not the submitter's children (a submitter starts the profile's gateway when
+  none runs, and that gateway serves the profile's other runs).
 - **Proof.** Each recorded pid must still carry the start fingerprint Hermes recorded for it
   (`"<boot_id>:<pid 1 start>|<process start>"`, computed the same way from `/proc`): a reused
   pid, a reboot or another PID namespace never matches. The run's claim lock must name this
