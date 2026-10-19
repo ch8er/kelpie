@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from kelpie.app import App, build_adapters, build_app, load_settings
+from kelpie.app import App, ConfigError, build_adapters, build_app, load_settings
 from kelpie.core.alerts import AlertEvent, Transition
 from kelpie.remote.agent import Agent
 from kelpie.remote.config import AgentSettings
@@ -25,6 +25,7 @@ from kelpie.remote.hub import HubService
 from kelpie.sim import toml
 from kelpie.sim.board import Board, connect, epoch
 from tests.remote.test_wiring import free_port
+from tests.sim.farm import HERMES_STALE
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 HOSTS = ("laptop", "vm-1")
@@ -55,7 +56,8 @@ class Recorder:
 
 
 def about(event: AlertEvent, *needles: str) -> bool:
-    text = repr(event)
+    """Whether the alert's rule, subject, text and tasks name every one of ``needles``."""
+    text = " ".join([event.rule, event.subject, event.reason, *(repr(i) for i in event.items)])
     return all(n in text for n in needles)
 
 
@@ -123,46 +125,64 @@ class Host:
 
 class Farm:
     def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("KELPIE_DB", raising=False)  # it would replace every [storage] path
+        monkeypatch.delenv("KELPIE_CONFIG", raising=False)
         for host in HOSTS:
             monkeypatch.setenv(token_env(host), TOKENS[host])
         self.clock = Clock()
-        port = free_port()
-        central = root / "central"
-        central.mkdir()
-        config = central / "kelpie.toml"
+        self.central = root / "central"
+        self.central.mkdir()
+        self.app, port = self._build()
+        try:
+            self.alerts = Recorder()
+            self.app.engine.alerter = self.alerts
+            server = f"http://127.0.0.1:{port}"
+            self.hosts = {name: Host(root, name, self.clock, server) for name in HOSTS}
+            (service,) = [s for s in self.app.services if isinstance(s, HubService)]
+            service.start()  # last: nothing is left listening when the setup fails
+        except BaseException:
+            self.close()
+            raise
+
+    def _build(self, attempts: int = 3) -> tuple[App, int]:
+        """The central ``kelpie serve``; its hub port is picked free just before, so another
+        process may take it in between: then another one."""
+        config = self.central / "kelpie.toml"
         stale = {"session_stale_after": "20s", "session_exit_grace": "0s"}
-        config.write_text(
-            toml.dumps(
-                {
-                    "engine": {
-                        "interval": "1s",
-                        "dry_run": False,
-                        "default_mode": "observe",
-                        # Without the freeze, a state its rule stops reporting resolves in 2s.
-                        "state_resolve_after": "2s",
-                        "rules": {
-                            "orphan_status": {"mode": "suggest", "session_stale_after": "60m"},
-                            "exit_contract": {"mode": "suggest", **stale},
+        for attempt in range(attempts):
+            port = free_port()
+            config.write_text(
+                toml.dumps(
+                    {
+                        "engine": {
+                            "interval": "1s",
+                            "dry_run": False,
+                            "default_mode": "observe",
+                            # Without the freeze, a state its rule stops reporting resolves
+                            # within 2s.
+                            "state_resolve_after": "2s",
+                            "rules": {
+                                "orphan_status": {"mode": "suggest", **HERMES_STALE},
+                                "exit_contract": {"mode": "suggest", **stale},
+                            },
                         },
-                    },
-                    "storage": {"path": str(central / "kelpie.db")},
-                    "hub": {
-                        "listen": f"127.0.0.1:{port}",
-                        "allow_plain_http": True,
-                        "silent_after": "10s",
-                        "action_timeout": "10s",
-                        "agents": [{"name": h, "token_env": token_env(h)} for h in HOSTS],
-                    },
-                }
+                        "storage": {"path": str(self.central / "kelpie.db")},
+                        "hub": {
+                            "listen": f"127.0.0.1:{port}",
+                            "allow_plain_http": True,
+                            "silent_after": "10s",
+                            "action_timeout": "10s",
+                            "agents": [{"name": h, "token_env": token_env(h)} for h in HOSTS],
+                        },
+                    }
+                )
             )
-        )
-        self.app: App = build_app(load_settings(config), clock=self.clock)
-        (self.service,) = [s for s in self.app.services if isinstance(s, HubService)]
-        self.service.start()
-        self.alerts = Recorder()
-        self.app.engine.alerter = self.alerts
-        server = f"http://127.0.0.1:{port}"
-        self.hosts = {name: Host(root, name, self.clock, server) for name in HOSTS}
+            try:
+                return build_app(load_settings(config), clock=self.clock), port
+            except ConfigError as exc:
+                if "cannot listen" not in str(exc) or attempt == attempts - 1:
+                    raise
+        raise AssertionError("unreachable")
 
     def tick(self, n: int = 1) -> None:
         """``n`` seconds: heartbeats, each running agent's report, one control-loop tick."""
@@ -187,8 +207,7 @@ class Farm:
         return sum(v for k, v in self.metrics().items() if k.startswith("kelpie_tasks{"))
 
     def close(self) -> None:
-        self.service.stop()
-        self.app.close()
+        self.app.close()  # stops the hub too
 
 
 @pytest.fixture
