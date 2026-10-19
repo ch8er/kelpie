@@ -256,9 +256,34 @@ def test_the_resolved_notice_looks_at_each_repository_s_own_last_failure() -> No
     [alert] = outages(BEFORE, RERUN, *THREE)
     assert alert.state is not None
     # web failed last; the app passed after its own last failure: that pass is the news.
-    later = (red(1, 300), red(7, 10, repo="example/web"), green(20))
+    later = (red(1, 300), red(1, 60), red(7, 10, repo="example/web"), green(20))
     notice = rule.resolved(alert.state, Snapshot(now=NOW, builds=later))
     assert notice is not None and "in example/app at 2026-03-02 08:40 UTC" in notice
+    # A red-then-green in another repository the day before is not this outage's end.
+    yesterday = (red(8, 1400, repo="example/web"), green(1340, repo="example/web"))
+    notice = rule.resolved(
+        alert.state, Snapshot(now=NOW, builds=(*yesterday, *later[:2], later[3]))
+    )
+    assert notice is not None and "in example/app" in notice
+
+
+def test_evidence_never_holds_back_what_opens_without_it() -> None:
+    hosted = Job("build", FAILED, step="Select toolchain")  # no machine name
+    six = [red(n, 300 - 5 * n, repo=f"example/r{n}", job=hosted) for n in range(1, 7)]
+    assert outages(*six) != []  # six repositories, no evidence
+    rerun_r1 = red(0, 290, repo="example/r1", branch="main", pr=None, sha="base", job=hosted)
+    passed_r1 = green(400, repo="example/r1")
+    assert outages(passed_r1, rerun_r1, *six) != []  # with a re-run in one of them
+    mac = Job("build", FAILED, step="Select toolchain", runner="mac-1")
+    two = [red(n, 280, repo=f"example/m{n}", job=mac) for n in (7, 8)]
+    assert outages(*six, *two) != []  # with two of them on a shared runner
+
+
+def test_the_start_is_the_outage_s_not_an_excluded_repository_s() -> None:
+    web = Job("build", FAILED, step="Select toolchain", runner="hosted-x")
+    early = red(5, 360, repo="example/web", job=web)  # red for its own reasons, earlier
+    [alert] = outages(BEFORE, RERUN, *THREE, early)
+    assert alert.since == NOW - 300 * M
 
 
 def test_a_condition_naming_another_repository_is_not_the_own_pr_s() -> None:

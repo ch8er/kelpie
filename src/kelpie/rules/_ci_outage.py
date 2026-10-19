@@ -25,11 +25,14 @@ and there is evidence that the environment broke rather than each change:
 
 Without such evidence it takes twice ``min_prs`` change requests: three unrelated PRs red at
 a generic step ("Run tests") within two hours happen on a busy farm; six with nothing
-passing in between rarely do. Only change requests in the repositories the evidence ties
-together count (those on the shared runner, or of the re-run, and any repository failing
-the same way on their runners); a PR red at the same step elsewhere stays its own business.
-``since`` walks back from the window while the group's failures follow each other within
-``window``: one change red since yesterday does not move it.
+passing in between rarely do. With evidence, only change requests in the repositories it
+ties together count (those on a shared runner or of a re-run, and any repository failing the
+same way on their runners), so a PR red at the same step elsewhere stays its own business;
+when they are too few, the group still opens at twice ``min_prs`` (evidence never holds back
+what would open without it). Runners are matched by name: a pool of self-hosted machines
+with different names counts as different runners. ``since`` is the first failure of the
+outage's repositories in the window, walked back while their failures follow each other
+within ``window``: one change red since yesterday does not move it.
 
 **Resolve.** One long-lived alert state (:func:`kelpie.core.incidents.outage_state_id`); the
 rule stops reporting it when a build passes the job again in one of its repositories, when
@@ -72,6 +75,7 @@ from kelpie.core.model import (
 
 MAX_LISTED = 10  # PRs and tasks named in the alert text
 UNSURE_FACTOR = 2  # change requests needed, in multiples of min_prs, without evidence
+_NOTICE_RUN = timedelta(hours=2)  # failures this close are one run, for the resolved notice
 _WAITING = frozenset({Status.BLOCKED, Status.WAITING})
 _PR_CONDITIONS = frozenset({ConditionKind.CI_STATUS, ConditionKind.PR_MERGED})
 
@@ -103,19 +107,24 @@ def outages(snapshot: Snapshot, rule: str, min_prs: int, window: timedelta) -> l
 
 
 def passed_again(state_id: str, snapshot: Snapshot) -> str | None:
-    """For the "Resolved" notice: the first build that passed the outage's job again after
-    its repository's last failure; None when there is none (the outage stopped being
-    reported for another reason: the engine's general notice says so)."""
+    """For the "Resolved" notice: the first build that passed the outage's job again in one
+    of the repositories of its latest run of failures (those following each other within
+    two hours of the last one), after that repository's last failure; None when there is
+    none (the outage stopped being reported for another reason: the engine's general
+    notice says so)."""
     found = next(
         (fs for sig, fs in _failures(snapshot).items() if outage_state_id(*sig) == state_id), []
     )
     if not found:
         return None
+    times = sorted(f.at for f in found)
+    began = _began(times, times[-1], _NOTICE_RUN)
     workflow, job = found[0].build.workflow, found[0].job.name
     passes = _passes(snapshot)
     last: dict[str, datetime] = {}
     for f in found:
-        last[_repo(f.build)] = max(f.at, last.get(_repo(f.build), f.at))
+        if f.at >= began:
+            last[_repo(f.build)] = max(f.at, last.get(_repo(f.build), f.at))
     after = [
         (at, b.id, b)
         for repo, failed in last.items()
@@ -182,26 +191,28 @@ def _opened(
         if len(group) < min_prs:
             continue
         failures = [f for c in group for f in by_change[c]]
-        since = _began(sorted(f.at for f in failures), start, window)
-        shared = _shared_runners(failures)
+        began = _began(sorted(f.at for f in failures), start, window)
+        group_repos = {c[0] for c in group}
         # A failed re-run in one of these repositories since the group began failing.
         evidence = {
             _change(f.build)
             for f in reruns
-            if (f.build.repo and _repo(f.build) in {c[0] for c in group}) and f.at >= since - window
+            if _repo(f.build) in group_repos and f.at >= began - window
         }
+        shared = _shared_runners(failures)
         # The repositories the evidence ties together, and those failing on their runners.
-        if shared:
-            core = {_repo(f.build) for f in failures if f.job.runner in shared}
-        elif evidence:
-            core = {c[0] for c in evidence}
+        core = {_repo(f.build) for f in failures if f.job.runner in shared}
+        core |= {c[0] for c in evidence}
+        tied = core | _runner_mates([f for f in failures if _repo(f.build) in core], active)
+        if core and len({c for c in group if c[0] in tied} - evidence) >= min_prs:
+            repos = tied
+        elif len(group - evidence) >= min_prs * UNSURE_FACTOR:
+            repos = group_repos | tied  # evidence never holds back what opens without it
         else:
-            core = {c[0] for c in group}
-        tied = [f for f in failures if _repo(f.build) in core]
-        repos = core | _runner_mates(tied, active)
-        counted = len({c for c in group if c[0] in repos} - evidence)
-        if counted >= (min_prs if shared or evidence else min_prs * UNSURE_FACTOR):
-            return since, repos
+            continue
+        mine = [f for c in group if c[0] in repos for f in by_change[c]]
+        first = min(f.at for f in mine if start <= f.at <= start + window)
+        return _began(sorted(f.at for f in mine), first, window), repos
     return None
 
 
