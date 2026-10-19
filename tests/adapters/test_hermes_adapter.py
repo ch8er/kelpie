@@ -677,6 +677,10 @@ def test_only_a_comment_that_opens_with_the_marker_is_a_decision(text: str) -> N
         ("Решение CEO пока не принято. Предлагаю 20 runs", False),  # no separator
         ("Решение CEO? Жду", False),
         ("> Решение CEO: 20 runs", False),  # a quote
+        ("Решение CEO-подобное, но я бы подождал", False),  # a compound word
+        ("Решение CEO-level: подождём", False),
+        ("Решение CEO - 20 runs", True),
+        ("Решение CEO\n\n- вариант A\n- вариант B", False),  # options for the CEO, a list
     ],
 )
 def test_the_marker_opens_the_text_with_a_separator(text: str, recorded: bool) -> None:
@@ -1019,3 +1023,11 @@ def test_a_persons_approval_is_not_an_agents_completion(board: Board) -> None:
     assert [s.final_status for s in snap.sessions] == [Status.REVIEW]
     rule = build({"done_evidence": [{"name": "tests", "artifacts": ["*pytest*"]}]})
     assert rule.evaluate(snap) == []
+
+
+def test_a_marker_with_full_width_punctuation_matches_itself() -> None:
+    from kelpie.adapters.hermes import HumanDecision
+
+    d = HumanDecision("решение\uff08CEO\uff09", frozenset({"partner"}))  # full-width ( )
+    assert d.recorded("partner", "Решение(CEO): 20 runs")  # NFKC, then escaped
+    assert not d.recorded("partner", "Решение CEO: 20 runs")

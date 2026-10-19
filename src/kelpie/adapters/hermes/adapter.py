@@ -458,11 +458,11 @@ class HumanDecision:
         object.__setattr__(self, "relays", relays)
         if self.person is not None:
             object.__setattr__(self, "person", self.person.strip().casefold() or None)
-        phrase = r"\s+".join(re.escape(w) for w in self.marker.split())
-        phrase = unicodedata.normalize("NFKC", phrase)
-        object.__setattr__(
-            self, "_pattern", re.compile(rf"[\s*_#]*{phrase}[*_]*\s*[:\-\u2013\u2014]", re.I)
-        )
+        words = unicodedata.normalize("NFKC", self.marker).split()
+        phrase = r"\s+".join(re.escape(w) for w in words)  # normalized, then escaped
+        # The separator on the marker's line; a hyphen only before no word ("CEO-level").
+        sep = r"[ \t]*(?::|\u2013|\u2014|-(?!\w))"
+        object.__setattr__(self, "_pattern", re.compile(rf"[\s*_#]*{phrase}[*_]*{sep}", re.I))
 
     def recorded(self, author: str, text: str) -> bool:
         """``author`` (casefolded) relays it and ``text`` opens with the marker."""
