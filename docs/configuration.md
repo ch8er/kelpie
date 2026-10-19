@@ -32,6 +32,7 @@ configure what exists.
   [[connectors.github.pulls]](#connectorsgithubpulls), [[[block_conditions]]](#block_conditions)
 - [[connectors.human_tasks]](#connectorshuman_tasks)
 - [[connectors.llm_quotas]](#connectorsllm_quotas)
+- [[connectors.cost_reports]](#connectorscost_reports)
 - [[alerts]](#alerts)
 - [[report]](#report), [report sections](#report-sections)
 - [[agent]](#agent) and [[hub]](#hub): multi-host
@@ -91,8 +92,8 @@ configure what exists.
 | `CLAUDE_CODE_TASK_LIST_ID`, `KELPIE_TASK_ID`, `KELPIE_AGENT` | Claude Code sessions | The shared task list; a task id from a launcher; the agent's name. Read by the hook. |
 | `KELPIE_OPENCLAW_SPOOL`, `KELPIE_OPENCLAW_SPOOL_COMMANDS`, `KELPIE_OPENCLAW_SPOOL_MAX_BYTES` | OpenClaw hook | Spool path, `0` for no command prefix, rotation size. Not read from the Gateway's environment: the plugin sets them from its own settings `spool`, `commands` and `maxBytes` (`plugins.entries.kelpie.config`). |
 
-Variables named by `token_env`, `webhook_env`, `headers_env`, `cancel_token_env` and
-`billing_token_env` keys are read as configured.
+Variables named by `token_env`, `webhook_env`, `headers_env`, `cancel_token_env`,
+`billing_token_env` and `admin_key_env` keys are read as configured.
 
 ## [engine]
 
@@ -1204,6 +1205,32 @@ values are header names; the default is `remaining = "ratelimit-remaining"`,
 `limit = "ratelimit-limit"`, `resets_at = "ratelimit-reset"`, and a `fields` table replaces
 it as a whole. For `status_url` the values are dotted JSON paths and `fields` is required.
 `remaining` is `limit - used` when only `used` is given.
+
+## [connectors.cost_reports]
+
+Reads what each provider's cost report says was spent per day (the bill), so the spend
+Kelpie prices from traces can be checked against it. Off unless present; one table per
+provider, `[connectors.cost_reports.<provider>]`, where `<provider>` is the provider's name
+in [[spend]](#spend) (`anthropic`, `openai`): a provider with a cost report is in `api`
+spend mode unless `mode` says otherwise. At most 10.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `kind` | *required* | `anthropic` (`GET /v1/organizations/cost_report`) or `openai` (`GET /v1/organization/costs`). |
+| `admin_key_env` | *required* | Variable holding an admin key with read access to costs: Anthropic's Admin API key (`sk-ant-admin...`), OpenAI's admin key. Never the agents' key. Must be set when `kelpie serve` starts. |
+| `api_url` | the provider's API | https URL; plain http only to loopback. No credentials, query or fragment. |
+| `interval` | `"1h"` | Read at most this often (>= 5m); the reports fill in within minutes. |
+| `timeout` | `"10s"` | Each request (> 0, <= 60s). |
+| `days` | `7` | Complete UTC days read each time (1 to 31); today is never read, its figure is not final. |
+| `workspaces` | all | `anthropic`: count only these workspace ids (the default workspace has none). |
+| `projects` | all | `openai`: count only these project ids. |
+
+What is counted: Anthropic, token costs per model (`cost_type = "tokens"`; web search, code
+execution and session costs are left out). OpenAI, the day's total over all line items
+(images, audio, fine-tuning and storage included): use `projects` to keep it to the farm's
+keys. Priority Tier usage is not in Anthropic's cost report. Figures are stored in the
+Kelpie database (90 days) for the daily report. A report that cannot be read keeps its
+last figures; `kelpie doctor` reads one day of each to check the key.
 
 ## [alerts]
 

@@ -17,14 +17,14 @@ import json
 import sqlite3
 import threading
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
-from kelpie.core.model import Span, SpanKind, SpanTotals
+from kelpie.core.model import ReportedCost, Span, SpanKind, SpanTotals
 from kelpie.core.spans import (
     MAX_LINK_DEPTH,
     Attribution,
@@ -173,8 +173,21 @@ CREATE INDEX spans_counted_by_subject ON spans
     WHERE counted = 1;
 """
 
+# Providers' daily cost reports (kelpie.connectors.cost_reports): the bill per provider,
+# UTC day and model ('' for the rest of the day's figure), as last read.
+_V7 = """
+CREATE TABLE cost_reports (
+    provider   TEXT NOT NULL,
+    day        TEXT NOT NULL,
+    model      TEXT NOT NULL DEFAULT '',
+    usd        REAL NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (provider, day, model)
+);
+"""
+
 # version -> script that upgrades from version - 1. Append, never edit a released one.
-MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6}
+MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 _COLUMNS = (
@@ -817,3 +830,63 @@ def _labels(raw: str) -> list[str]:
 
 # Earlier private names, still imported by readers of the database (the report).
 _entry, _state, _open_readonly = ledger_entry, open_state, open_readonly
+
+
+# --- providers' cost reports (kelpie.connectors.cost_reports) -----------------------------
+
+COST_REPORT_RETENTION = timedelta(days=90)
+
+
+class SqliteCostReports:
+    """The daily figures of providers' cost reports, as last read: a new reading of a
+    provider replaces its rows for the days it covers; rows older than
+    :data:`COST_REPORT_RETENTION` are dropped. ``readonly`` as in :class:`SqliteSpanStore`."""
+
+    def __init__(
+        self, path: Path | str, busy_timeout_ms: int = 5000, *, readonly: bool = False
+    ) -> None:
+        self._lock = threading.Lock()
+        self._db = (
+            open_readonly(path, busy_timeout_ms) if readonly else _open(path, busy_timeout_ms)
+        )
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    def replace(self, costs: Sequence[ReportedCost], fetched_at: datetime) -> None:
+        """Store ``costs`` (any providers): per provider, its rows for the days ``costs``
+        cover are replaced."""
+        days: dict[str, set[str]] = {}
+        for c in costs:
+            days.setdefault(c.provider, set()).add(c.day.isoformat())
+        cutoff = (fetched_at - COST_REPORT_RETENTION).date().isoformat()
+        with self._lock, self._db:
+            for provider, covered in days.items():
+                self._db.execute(
+                    "DELETE FROM cost_reports WHERE provider = ? AND day >= ? AND day <= ?",
+                    (provider, min(covered), max(covered)),
+                )
+            self._db.executemany(
+                "INSERT OR REPLACE INTO cost_reports (provider, day, model, usd, fetched_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                [
+                    (c.provider, c.day.isoformat(), c.model or "", c.usd, _ts(fetched_at))
+                    for c in costs
+                ],
+            )
+            self._db.execute("DELETE FROM cost_reports WHERE day < ?", (cutoff,))
+
+    def read(self, since: date, until: date | None = None) -> tuple[ReportedCost, ...]:
+        """The stored figures of the days from ``since`` to ``until`` (inclusive)."""
+        sql = "SELECT provider, day, model, usd FROM cost_reports WHERE day >= ?"
+        args: list[object] = [since.isoformat()]
+        if until is not None:
+            sql += " AND day <= ?"
+            args.append(until.isoformat())
+        with self._lock:
+            rows = self._db.execute(sql + " ORDER BY provider, day, model", args).fetchall()
+        return tuple(
+            ReportedCost(r["provider"], date.fromisoformat(r["day"]), r["usd"], r["model"] or None)
+            for r in rows
+        )

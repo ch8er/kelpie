@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import http.client
+import ipaddress
 import logging
 import re
 import socket
@@ -313,3 +314,38 @@ def _read_limited(
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+_URL_CONTROL = re.compile(r"[\x00-\x20\x7f]")
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def check_api_url(value: object, where: str) -> str:
+    """``value`` as the base URL of an API that gets a secret: https with a host (plain http
+    only to loopback), no credentials, query or fragment; raises ValueError starting with
+    ``where``. Use the variable that holds the key instead of credentials in the URL."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{where} api_url is required")
+    url = value.strip()
+    parts = urllib.parse.urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        raise ValueError(f"{where} api_url has an invalid port") from None
+    if parts.scheme not in ("http", "https") or not parts.hostname or port == 0:
+        raise ValueError(f"{where} api_url must be an https URL with a host")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError(f"{where} api_url must not contain credentials (the key has a variable)")
+    if parts.query or parts.fragment or _URL_CONTROL.search(url):
+        raise ValueError(f"{where} api_url must not contain a query, fragment or spaces")
+    if parts.scheme == "http" and not _is_loopback(parts.hostname):
+        raise ValueError(f"{where} api_url must use https (plain http only to loopback)")
+    return url

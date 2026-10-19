@@ -32,6 +32,7 @@ from kelpie.adapters.issues.config import GitHubIssuesSettings, load_github_issu
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
+from kelpie.connectors.cost_reports import CostReportSource, CostReportsSettings, load_cost_reports
 from kelpie.connectors.github import (
     BlockConditionPattern,
     ConditionSync,
@@ -53,7 +54,7 @@ from kelpie.core.conditions import check_task_status
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
-from kelpie.core.model import Owner, OwnerKind, Snapshot, SpanKind
+from kelpie.core.model import Owner, OwnerKind, ReportedCost, Snapshot, SpanKind
 from kelpie.core.ports import (
     ActionConnector,
     PlatformAdapter,
@@ -71,7 +72,12 @@ from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.spend import ProviderMode, SpendConfig, SpendSettings, load_spend
 from kelpie.core.states import MemoryStateStore, StateStore
-from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
+from kelpie.core.storage import (
+    SchemaOutdated,
+    SqliteCostReports,
+    SqliteLedgerStore,
+    SqliteSpanStore,
+)
 from kelpie.metrics import Metrics
 from kelpie.remote.config import AgentSettings, HubSettings, load_agent, load_hub
 from kelpie.remote.farm import RemoteFarm
@@ -169,6 +175,7 @@ class Settings:
     block_conditions: tuple[BlockConditionPattern, ...] = ()
     human_tasks: HumanTaskSettings | None = None  # None: no [connectors.human_tasks]
     llm_quotas: LlmQuotaSettings | None = None  # [connectors.llm_quotas]
+    cost_reports: CostReportsSettings | None = None  # [connectors.cost_reports]
     alerts: AlertSettings = field(default_factory=AlertSettings)  # [alerts]
     report: ReportSettings = field(default_factory=ReportSettings)  # [report]
     agent: AgentSettings | None = None  # [agent]: this host runs ``kelpie agent``
@@ -245,7 +252,9 @@ def load_settings(path: Path | None) -> Settings:
         raise ConfigError(str(exc)) from exc
     if budgets.budgets and not traces.enabled:
         raise ConfigError("[[budgets]] read spend from traces: they need [traces] enabled")
-    github, block_conditions, human_tasks, llm_quotas = _load_connectors(data)
+    github, block_conditions, human_tasks, llm_quotas, cost_reports = _load_connectors(data)
+    if cost_reports is not None:
+        spend = replace(spend, cost_reports=cost_reports.providers)
     try:
         report = load_report(data.get("report"))
         alerts = load_alerts(data.get("alerts"), report.task_url)
@@ -269,6 +278,7 @@ def load_settings(path: Path | None) -> Settings:
         spend_settings=spend_settings,
         resources=resources,
         llm_quotas=llm_quotas,
+        cost_reports=cost_reports,
         alerts=alerts,
         report=report,
         agent=agent,
@@ -283,13 +293,14 @@ def _load_connectors(
     tuple[BlockConditionPattern, ...],
     HumanTaskSettings | None,
     LlmQuotaSettings | None,
+    CostReportsSettings | None,
 ]:
-    """``[connectors.github]`` (with ``[[block_conditions]]``), ``[connectors.human_tasks]``
-    and ``[connectors.llm_quotas]``."""
+    """``[connectors.github]`` (with ``[[block_conditions]]``), ``[connectors.human_tasks]``,
+    ``[connectors.llm_quotas]`` and ``[connectors.cost_reports]``."""
     connectors = data.get("connectors", {})
     if not isinstance(connectors, Mapping):
         raise ConfigError("[connectors] must be a table")
-    if extra := set(connectors) - {"github", "human_tasks", "llm_quotas"}:
+    if extra := set(connectors) - {"github", "human_tasks", "llm_quotas", "cost_reports"}:
         raise ConfigError(f"unknown [connectors] entries: {sorted(extra)}")
     try:
         github = load_github(connectors["github"]) if "github" in connectors else None
@@ -299,9 +310,10 @@ def _load_connectors(
             load_human_tasks(connectors["human_tasks"]) if "human_tasks" in connectors else None
         )
         llm_quotas = load_llm_quotas(connectors.get("llm_quotas"))
+        cost_reports = load_cost_reports(connectors.get("cost_reports"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    return github, patterns, human_tasks, llm_quotas
+    return github, patterns, human_tasks, llm_quotas, cost_reports
 
 
 def _load_hermes(adapters: Any) -> HermesSettings | None:
@@ -1435,7 +1447,43 @@ def connector_steps(
     if not network:
         return steps, []
     github_steps, connectors = _github_steps(settings, metrics, clock)
-    return steps + github_steps, connectors
+    return steps + github_steps + _cost_report_steps(settings), connectors
+
+
+class CostReportStep:
+    """Reads the providers' cost reports that are due (the source keeps the interval) and
+    stores new figures for the report and reconciliation; the snapshot passes unchanged."""
+
+    def __init__(self, source: CostReportSource, store: SqliteCostReports | None) -> None:
+        self.source = source
+        self.store = store
+        self._stored: tuple[ReportedCost, ...] = ()
+
+    def __call__(self, snapshot: Snapshot) -> Snapshot:
+        costs = tuple(self.source.read(snapshot.now))
+        if self.store is not None and costs != self._stored:
+            self.store.replace(costs, snapshot.now)
+            self._stored = costs
+        return snapshot
+
+
+def _cost_report_steps(settings: Settings) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+    reports = settings.cost_reports
+    if reports is None:
+        return []
+    try:
+        source = reports.build()
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+    for r in reports.reports:  # the variable's name only, never its value
+        log.info(
+            "[connectors.cost_reports.%s] admin key read from $%s", r.provider, r.admin_key_env
+        )
+    try:
+        store = SqliteCostReports(settings.db_path) if settings.db_path is not None else None
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        raise ConfigError(f"cannot open the cost report store {settings.db_path}: {exc}") from exc
+    return [("cost_reports", CostReportStep(source, store))]
 
 
 def _github_steps(
@@ -2029,6 +2077,22 @@ def _human_decisions_status(settings: Settings) -> list[str]:
     ]
 
 
+def _cost_reports_status(settings: Settings) -> str:
+    reports = settings.cost_reports
+    if reports is None:
+        return "disabled (no [connectors.cost_reports])"
+    parts = []
+    for r in reports.reports:
+        try:
+            r.admin_key()
+        except ValueError as exc:
+            return f"NOT ready: {exc}"
+        parts.append(
+            f"{r.provider} ({r.kind} {r.api_url}, every {_span(r.interval)}, last {r.days} days)"
+        )
+    return ", ".join(parts)
+
+
 def _providers_status(quotas: LlmQuotaSettings | None) -> str:
     if quotas is None:
         return "disabled (no [connectors.llm_quotas])"
@@ -2079,6 +2143,7 @@ def render_status(
         *_human_tasks_status(settings),
         *_human_decisions_status(settings),
         f"providers: {_providers_status(settings.llm_quotas)}",
+        f"cost reports: {_cost_reports_status(settings)}",
         *_alerts_status(settings.alerts),
         "",
         f"{'#':>3}  {'rule':<17} {'prio':<4}  {'status':<16} mode",
