@@ -245,7 +245,7 @@ report; no LLM is involved.
   role's agents had a session running, with a concrete suggestion. A task's wait counts
   under a hold (rule 6's hold labels), else the kind of the unmet condition it waits on (a
   person's `human_task`, CI, PRs to pass checks and merge, LLM quotas, other tasks,
-  timers; a red CI comes before the merge it holds up), else a person when rule 13 listed
+  timers; a CI found red comes before the merge of the same PR), else a person when rule 13 listed
   it that day (an approval, parked on a human task), else unknown. While rule 9's CI outage
   incident is open, the waits it explains (tasks it names, CI and merge waits in its
   repositories) count under "a shared CI failure" for that time (a held task's wait stays the hold's). The

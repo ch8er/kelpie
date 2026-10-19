@@ -266,13 +266,13 @@ class WaitCauses:
         last = max(mine, key=rank) if mine else None
         if last is not None and last.satisfied is not True:
             if last.kind is ConditionKind.PR_MERGED:  # a red CI of that PR comes first
-                ref = (last.params.get("repo"), last.params.get("pr"))
+                ref = _pr_of(last)
                 red = [
                     c
                     for c in mine
                     if c.kind is ConditionKind.CI_STATUS
                     and c.satisfied is False
-                    and (c.params.get("repo"), c.params.get("pr")) == ref
+                    and _pr_of(c) == ref
                 ]
                 if red:
                     return max(red, key=rank)
@@ -326,6 +326,14 @@ def biggest_wait(
                 repos[repo] += 1
     repo = min(repos, key=lambda x: (-repos[x], x)) if repos else None
     return BiggestWait(role, cause, hours, r.busy_hours, waited, repo, facts)
+
+
+def _pr_of(c: Condition) -> tuple[str, str] | None:
+    """The condition's PR as (lower-case repo, number as text), however it was written."""
+    repo, pr = c.params.get("repo"), c.params.get("pr")
+    if not isinstance(repo, str) or pr is None or isinstance(pr, bool):
+        return None
+    return repo.lower(), str(pr).strip().lstrip("#")
 
 
 def _list(value: object) -> list[object]:

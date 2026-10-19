@@ -345,6 +345,8 @@ def test_a_red_ci_comes_before_the_merge_it_holds_up() -> None:
     assert WaitCauses(both, ())(t) == "ci"  # found red: CI
     unchecked = (replace(both[0], satisfied=None), both[1])
     assert WaitCauses(unchecked, ())(t) == "merge"  # not known red
+    as_text = (replace(both[0], params={"repo": "X/Y", "pr": "4"}), both[1])
+    assert WaitCauses(as_text, ())(t) == "ci"  # the same PR, written differently
     other_pr = (replace(both[0], params={"repo": "x/y", "pr": 5}), both[1])
     assert WaitCauses(other_pr, ())(t) == "merge"  # another PR's CI
     green = (replace(both[0], satisfied=True), both[1])
