@@ -151,6 +151,16 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   agents waiting on people and cards stuck before work, with the top three things to fix
   ([#52](https://github.com/ch8er/kelpie/pull/52), [#59](https://github.com/ch8er/kelpie/pull/59), [#121](https://github.com/ch8er/kelpie/pull/121)).
 - The biggest wait of the day by cause, with a suggestion ([#123](https://github.com/ch8er/kelpie/pull/123)).
+- Waits inside an open CI outage (rule 9) count under "a shared CI failure", not CI or merges, and
+  the report lists each outage of the day with its PRs and the alerts folded under it
+  ([#182](https://github.com/ch8er/kelpie/pull/182), [#201](https://github.com/ch8er/kelpie/pull/201)).
+- Suggestions check what the farm already has (approvers, holds, block conditions, budgets,
+  modes); merge automation is never advised ([#173](https://github.com/ch8er/kelpie/pull/173)).
+- Listed, never counted: cards stuck before work that block nothing, and agent tasks behind
+  work planned for later ([#156](https://github.com/ch8er/kelpie/pull/156), [#188](https://github.com/ch8er/kelpie/pull/188)).
+- Spend follows each provider's mode: dollars with an API key, tokens and the share of the
+  plan's limit on a subscription; models without a price are named, and each provider's
+  bill is checked against the estimate from traces ([#195](https://github.com/ch8er/kelpie/pull/195), [#209](https://github.com/ch8er/kelpie/pull/209)).
 - Before/after verification of fixes recorded with `kelpie fix`, and `kelpie fix --list`
   ([#54](https://github.com/ch8er/kelpie/pull/54), [#57](https://github.com/ch8er/kelpie/pull/57)).
 - Farm throughput per role, live gauges and Grafana panels; rework counted for the role that

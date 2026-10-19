@@ -484,7 +484,7 @@ dollars, and the trace-based estimate is never checked against the real bill.
 - [x] The report's cost-of-chaos and cost-per-task lines follow the mode (no empty dollars on subscriptions)
 - [x] Fixtures/tests for both modes; the provider APIs only behind fakes in tests
 
-Done in #184, #196, #202, #204, #205: the price table, cache writes, spend modes, cost reports and reconciliation, with doctor, `kelpie status` and `/metrics`. The daily report's side in #195 (cost lines follow the mode) and BILL_PR (models without a price named, the bill check).
+Done in #184, #196, #202, #204, #205: the price table, cache writes, spend modes, cost reports and reconciliation, with doctor, `kelpie status` and `/metrics`. The daily report's side in #195 (cost lines follow the mode) and #209 (models without a price named, the bill check).
 
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules
