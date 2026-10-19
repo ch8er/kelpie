@@ -1,0 +1,69 @@
+id: "01-block-names-unseen-condition"
+incident: 1
+title: "Block points at a condition Kelpie cannot see"
+description: >
+  A card was blocked on a condition id that is not in the snapshot (the connector that owned
+  it was removed, or the id is mistyped), so nothing will ever clear the block, and a task
+  waits behind it. Rule 4 cannot check anything, so it alerts after the unlinked limit and
+  asks for the reference to be fixed, or the block cleared. A card whose condition is
+  visible and pending is left waiting.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+  max_condition_age: "15m"
+  unlinked_alert_after: "4h"
+  max_block: "8h"
+  stale_evidence_after: "1h"
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - id: T-181
+      title: "Review: tighten the upload limits"
+      status: blocked
+      status_since: "2026-03-02T09:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for CI on the release branch"
+        since: "2026-03-02T09:00:00+00:00"
+        condition_id: "C-gone"
+    # Waits for T-181 to be done.
+    - id: T-183
+      title: "Cut the release"
+      status: backlog
+      status_since: "2026-03-02T09:00:00+00:00"
+      role: developer
+    # Distractor: the same wait, but its condition is visible, fresh and pending.
+    - id: T-182
+      title: "Review: cache the schema"
+      status: blocked
+      status_since: "2026-03-02T09:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for CI on the release branch"
+        since: "2026-03-02T09:00:00+00:00"
+        condition_id: "C-182"
+  dependencies:
+    - {task_id: T-183, depends_on: T-181}
+  conditions:
+    - id: "C-182"
+      kind: ci_status
+      task_id: T-182
+      params: {repo: example/repo, branch: release}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T09:00:00+00:00"
+expected_actions:
+  - kind: alert
+    task_id: T-181
+    reason_contains: "names condition C-gone, which Kelpie cannot see"
+    params: {stuck_ids: [T-183]}
+not_expected_actions:
+  - kind: alert
+    task_id: T-182
+  - kind: unblock
+    task_id: T-181

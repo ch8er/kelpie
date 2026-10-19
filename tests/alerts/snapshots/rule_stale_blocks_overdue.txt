@@ -1,0 +1,7 @@
+🟡 T-1022 blocked 10h, past the 8h limit: waiting for pr_merged
+
+1. Review: split config loader — 10 h · T-1022
+   Needed: Check why the condition has not cleared, or clear the block
+   Blocking: none · Open task: https://board.example.org/tasks/T-1022
+Why: Task T-1022 has been blocked for 10h (limit 8h) waiting for block:T-1022:pr_merged:example/repo#124 (pr_merged).
+Rule: stale_blocks

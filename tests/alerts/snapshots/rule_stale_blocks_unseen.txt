@@ -1,0 +1,7 @@
+🟡 T-181 blocked 5h on a condition Kelpie cannot see: C-gone
+
+1. Review: tighten the upload limits — 5.0 h · T-181
+   Needed: Fix the condition the block points at, or clear the block
+   Blocking: 1 task · Open task: https://board.example.org/tasks/T-181
+Why: Task T-181 has been blocked for 5h on 'waiting for CI on the release branch' and names condition C-gone, which Kelpie cannot see, so nothing will clear it automatically. 1 task(s) wait behind it: T-183.
+Rule: stale_blocks

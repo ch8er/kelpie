@@ -80,6 +80,7 @@ EN: dict[str, str] = {
     "headline.ping_pong": "Review ping-pong",
     "headline.resources": "Resources running out",
     "headline.return_causes": "A recurring cause of task returns",
+    # the fallback for an alert that lists several tasks; rule 4 words its own alerts
     "headline.stale_blocks": "Block Kelpie cannot clear",
     "headline.wait_condition": "Waiting task that will not wake",
 }
@@ -136,6 +137,7 @@ RU: dict[str, str] = {
     "headline.ping_pong": "Пинг-понг на ревью",
     "headline.resources": "Ресурсы на исходе",
     "headline.return_causes": "Повторяющаяся причина возвратов",
+    # the fallback for an alert that lists several tasks; rule 4 words its own alerts
     "headline.stale_blocks": "Блок, который Kelpie не может снять",
     "headline.wait_condition": "Ожидание, которое не закончится",
 }

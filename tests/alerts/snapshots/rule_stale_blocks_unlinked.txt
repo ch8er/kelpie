@@ -1,0 +1,7 @@
+🟡 T-1023 blocked 13h with nothing Kelpie can check
+
+1. FIX: flaky upload test — 13 h · T-1023
+   Needed: Clear the block, or register a condition Kelpie can check
+   Blocking: none · Open task: https://board.example.org/tasks/T-1023
+Why: Task T-1023 has been blocked for 13h on 'need a decision on the upload timeout' and has no condition Kelpie can check, so nothing will clear it automatically.
+Rule: stale_blocks
