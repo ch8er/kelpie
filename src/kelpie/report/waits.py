@@ -150,10 +150,13 @@ class BiggestWait:
         return suggestion(self.cause, self.facts, self.role)
 
     def headline(self) -> str:
-        """One line of Markdown-safe text."""
-        where = f", mostly on {md.code(self.repo)}" if self.repo else ""
+        """One line of Markdown-safe text. The role and repository take at most
+        :data:`kelpie.report.md.MAX_NAME` characters each once escaped, so the suggestion at
+        the end survives a chat line's cut (:data:`kelpie.alerts.summary.MAX_LINE`) even with
+        names from a misconfigured board."""
+        where = f", mostly on {md.short_code(self.repo)}" if self.repo else ""
         return (
-            f"Biggest wait: {md.text(self.role)} tasks spent {self.hours:.1f} task-hours "
+            f"Biggest wait: {md.short_text(self.role)} tasks spent {self.hours:.1f} task-hours "
             f"waiting for {self.label} ({len(self.tasks)} task(s){where}), against "
             f"{self.work_hours:.1f} agent-hours of work. Suggestion: {self.suggestion}."
         )
