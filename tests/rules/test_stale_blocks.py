@@ -46,6 +46,7 @@ def test_pr_closed_without_merge_alerts_at_once_on_fresh_evidence() -> None:
     )
     (action,) = run(blocked(since=NOW - 10 * M), closed)
     assert action.kind is ActionKind.ALERT and "closed without merging" in action.reason
+    assert not action.about_wait  # a dead end is broken, not long: never folded (incident 20)
     # Evidence from before the block, or a PR still open: no early alert.
     old = replace(closed, checked_at=NOW - 20 * M)  # before the block: not evidence
     assert run(blocked(since=NOW - 10 * M), old) == []
@@ -156,21 +157,25 @@ def alerts(actions: list) -> list[str]:
 def test_unlinked_and_missing_condition_blocks_alert_after_threshold() -> None:
     rule = StaleBlocks(unlinked_alert_after=120 * M)
     assert alerts(run(blocked(None), rule=rule)) == ["unlinked"]
+    assert all(a.about_wait for a in run(blocked(None), rule=rule))  # an outage may explain it
     assert run(blocked(None, since=NOW - 119 * M), rule=rule) == []
     [alert] = run(blocked("C-404"), rule=rule)
     assert "C-404" in alert.reason and "cannot see" in alert.reason
+    assert not alert.about_wait  # a reference Kelpie cannot see is broken, not long
     assert run(blocked(None), rule=StaleBlocks(unlinked_alert_after=None)) == []
 
 
 def test_unmet_condition_past_max_block_alerts() -> None:
     rule = StaleBlocks(max_block=180 * M)
     assert alerts(run(blocked(), cond(satisfied=False, at=None), rule=rule)) == ["overdue"]
+    assert all(a.about_wait for a in run(blocked(), cond(satisfied=False, at=None), rule=rule))
     assert run(blocked(since=NOW - 179 * M), cond(satisfied=False, at=None), rule=rule) == []
 
 
 def test_connector_that_stopped_checking_alerts_instead_of_unblocking() -> None:
     rule = StaleBlocks(stale_evidence_after=60 * M)
     assert alerts(run(blocked(), cond(checked=NOW - 61 * M), rule=rule)) == ["stale-evidence"]
+    assert not any(a.about_wait for a in run(blocked(), cond(checked=NOW - 61 * M), rule=rule))
     assert alerts(run(blocked(), cond(satisfied=False, checked=None), rule=rule)) == [
         "stale-evidence"
     ]

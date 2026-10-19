@@ -23,6 +23,7 @@ from kelpie.core.alerts import (
 from kelpie.core.alerts import Transition as AlertTransition
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
+from kelpie.core.incidents import FOLDED_UNDER, CiOutage, is_outage_state
 from kelpie.core.ledger import (
     ActionLedger,
     Dispatched,
@@ -99,6 +100,8 @@ class Engine:
     rule_errors: Counter[str] = field(init=False, default_factory=Counter)
     _ledger_down_since: datetime | None = field(init=False, default=None)
     _ledger_write_failed: bool = field(init=False, default=False)
+    # Open incidents and what they fold, kept across ticks while their state is open.
+    _incidents: dict[str, _Incident] = field(init=False, default_factory=dict)
     executors: dict[str, Executor] = field(init=False)
     _platforms: list[str] = field(init=False)
     # Per tick: keys of effects an alert announces, what happened to them, the messages held
@@ -178,7 +181,8 @@ class Engine:
         seen: set[str] = set()
         # Effects first: an alert that announces one of them (params.announces) then says
         # what actually happened to it, and the effect's own message is not sent twice.
-        ordered = sorted(actions, key=lambda a: a.kind in _ALERT_ACTIONS)
+        # Incident alerts before the other alerts: what happened to them decides what folds.
+        ordered = sorted(actions, key=lambda a: (a.kind in _ALERT_ACTIONS, _incident(a) is None))
         self._announced = {k for a in ordered for k in _announces(a)}
         self._lines, self._held, self._told = {}, {}, set()
         self._announcer_severity = {}
@@ -186,11 +190,22 @@ class Engine:
             for k in _announces(a):
                 known = self._announcer_severity.get(k, Severity.INFO)
                 self._announcer_severity[k] = _higher(known, a.severity)
+        self._keep_open_incidents(
+            {a.state for a in ordered if _incident(a) is not None}, snapshot.now
+        )
         try:
             for action in ordered:
-                if action.state is not None and action.kind in _ALERT_ACTIONS:
+                under = self._folded_under(action)
+                if under is not None:
+                    if action.state is not None:
+                        seen.add(action.state)  # held back, not gone: it must not resolve
+                    results.append(self._fold(action, under, snapshot))
+                elif action.state is not None and action.kind in _ALERT_ACTIONS:
                     seen.add(action.state)
-                    results.append(self._state_alert(action, snapshot))
+                    dispatched = self._state_alert(action, snapshot)
+                    if (outage := _incident(action)) is not None:
+                        self._note_incident(action, outage, dispatched)
+                    results.append(dispatched)
                 else:
                     results.append(self._process(action, snapshot))
             results.extend(self._resolve_gone(seen, snapshot))
@@ -198,6 +213,92 @@ class Engine:
             self._release_held()
             self._evaluated = None  # resolution is only valid right after evaluate()
         return results
+
+    # --- incidents ----------------------------------------------------------------------
+
+    def _keep_open_incidents(self, reported: set[str | None], now: datetime) -> None:
+        """Forget incidents whose state closed. One not reported this tick (its rule failed,
+        or its detection flickered) keeps folding what it folded last, but only within
+        ``resolve_after`` of its last sighting: a rule that keeps failing must not hold
+        alerts back for ever. Kept in memory only: after a restart an outage folds again
+        once its rule reports it."""
+        for state_id in list(self._incidents):
+            if state_id in reported:
+                continue
+            try:
+                state = self.states.store.get_state(state_id)
+            except Exception:
+                log.exception("state store unavailable; not folding under %s", state_id)
+                state = None
+            if state is None or now - state.last_seen >= self.states.resolve_after:
+                del self._incidents[state_id]
+
+    def _note_incident(self, action: Action, outage: CiOutage, dispatched: Dispatched) -> None:
+        """Remember what an incident alert folds, by whether people got it: delivered now, or
+        announced live before (its state is committed only once handled live, so a failed
+        escalation of an outage people already know of keeps folding; a failed first
+        announcement folds nothing). Under dry-run, what live mode would do (the rules'
+        configured modes)."""
+        if self.config.dry_run:
+            reaches = self.config.mode_for(action.rule) is not Mode.OBSERVE
+            logged = not reaches
+        else:
+            known = self._safe_get_state(outage.state)
+            reaches = dispatched.outcome is Outcome.ALERTED or (
+                known is not None and known.mode is not Mode.OBSERVE
+            )
+            logged = dispatched.outcome is Outcome.OBSERVED
+        if reaches or logged:
+            self._incidents[outage.state] = _Incident(
+                frozenset(outage.tasks), action.severity, reaches
+            )
+        else:  # never got to people: they have nothing in place of what it would fold
+            self._incidents.pop(outage.state, None)
+
+    def _safe_get_state(self, state_id: str) -> OpenState | None:
+        try:
+            return self.states.store.get_state(state_id)
+        except Exception:
+            log.exception("state store unavailable")
+            return None
+
+    def _folded_under(self, action: Action) -> str | None:
+        """The incident this alert is folded under, if any: an alert about a task's wait
+        (``about_wait``), not critical, about a task the incident explains, no more severe
+        than the incident's alert, and only while that alert reached people, or while
+        neither would (both only logged)."""
+        if (
+            not action.about_wait
+            or action.kind is not ActionKind.ALERT
+            or action.severity is Severity.CRITICAL
+            or action.task_id is None
+        ):
+            return None
+        quiet = self.config.mode_for(action.rule) is Mode.OBSERVE
+        for state_id, incident in sorted(self._incidents.items()):
+            if (
+                action.task_id in incident.tasks
+                and _RANK[incident.severity] >= _RANK[action.severity]
+                and (incident.reaches or quiet)
+            ):
+                return state_id
+        return None
+
+    def _fold(self, action: Action, under: str, snapshot: Snapshot) -> Dispatched:
+        """Hold the alert back and record it under its incident. It gets a fingerprint of its
+        own, so the ledger keeps ``folded_under`` instead of counting it on an earlier
+        delivery of the same alert."""
+        key = f"{action.key or action.state or action.reason}|{FOLDED_UNDER}:{under}"
+        folded = replace(action, key=key, params={**action.params, FOLDED_UNDER: under})
+        log.info("folded under %s: %s", under, action)
+        if action.state is not None:  # still seen: last_seen moves on, no transition
+            state_id, now = action.state, snapshot.now
+            self._safe_state(lambda: self.states.touch(self.states.store.get_state(state_id), now))
+        dispatched = Dispatched(
+            folded, self._mode(action.rule), Outcome.SUPPRESSED, Suppression.INCIDENT
+        )
+        self._record(dispatched, snapshot.now)
+        return dispatched
 
     def _release_held(self) -> None:
         """Send the effect messages whose announcing alert did not go out this tick."""
@@ -593,3 +694,22 @@ def _announces(action: Action) -> list[str]:
     raw = action.params.get(ANNOUNCES)
     keys = [raw] if isinstance(raw, str) else raw if isinstance(raw, list) else []
     return [k for k in keys if isinstance(k, str) and k]
+
+
+@dataclass(frozen=True, slots=True)
+class _Incident:
+    """An open incident's alert as the engine last handled it: what it folds."""
+
+    tasks: frozenset[str]
+    severity: Severity
+    reaches: bool  # people got its alert; else it was only logged
+
+
+def _incident(action: Action) -> CiOutage | None:
+    """The CI outage an alert reports, if it is one (its params name its own state)."""
+    if action.kind is not ActionKind.ALERT or action.state is None:
+        return None
+    if not is_outage_state(action.state):
+        return None
+    outage = CiOutage.from_params(action.params)
+    return outage if outage is not None and outage.state == action.state else None

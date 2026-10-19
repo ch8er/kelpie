@@ -112,6 +112,7 @@ class WaitCondition:
                 state=f"{NAME}:{task.id}:{since}",
                 since=task.status_since,
                 params={"stuck_ids": stuck},
+                about_wait=not missing,  # unexplained, not broken: a CI outage may explain it
             )
             return
         ended = dead_ends(conditions, task.status_since)
@@ -157,6 +158,7 @@ class WaitCondition:
                 state=f"{NAME}:{task.id}:{since}",
                 since=task.status_since,
                 params={"pending_conditions": [c.id for c in pending]},
+                about_wait=True,  # a CI outage that explains the wait folds it
             )
 
     # --- polling inside a session -------------------------------------------------------
