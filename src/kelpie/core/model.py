@@ -388,20 +388,21 @@ class BuildStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Job:
-    """One job of a finished CI build. ``conclusion`` is the CI's word for how it ended
-    (``success``, ``failure``, ``timed_out``, ``cancelled``, ``skipped``...). ``step`` is the
-    first step that did not succeed, when the CI names one. ``runner`` is the machine the
-    job ran on and ``labels`` the runner labels it asked for (e.g. ``self-hosted``, an OS)."""
+    """One job of a finished CI build. ``conclusion`` is how it ended, mapped by the
+    connector like ``Build.status``. ``step`` is the first named step that did not succeed in
+    a job that did not succeed, when the CI names one. ``runner`` is the machine a job that
+    did not succeed ran on and ``labels`` the runner labels it asked for (e.g.
+    ``self-hosted``, an OS)."""
 
     name: str
-    conclusion: str
+    conclusion: BuildStatus
     step: str | None = None
     runner: str | None = None
     labels: tuple[str, ...] = ()
 
     @property
     def failed(self) -> bool:
-        return self.conclusion in {"failure", "timed_out"}
+        return self.conclusion is BuildStatus.FAILURE
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,8 +419,9 @@ class Build:
     pipeline and branch that started after this one. ``cancellable`` is set by the
     connector: the build is superseded, still active, and within what the connector is
     configured to cancel; rules only ask to cancel such builds. ``jobs`` are the build's
-    jobs once it finished, as the CI reported them; None when the connector did not read
-    them (an active build, a partial job list, or no request budget left).
+    jobs once it finished (jobs the connector could not read left out; empty: none
+    listed). None means not read: an active, queued or skipped build, a partial job list, a
+    failed request or no request budget left. None never means "nothing failed".
     """
 
     id: str

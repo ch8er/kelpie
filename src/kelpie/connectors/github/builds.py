@@ -25,9 +25,10 @@ Mapping:
   and understates matrix fan-out; a run list served from the cache because GitHub could
   not be asked is never extrapolated to now;
 - ``jobs``: from the same job list, read once per finished run attempt: each job's name and
-  conclusion, its first step that did not succeed, the runner it ran on and the labels it
-  asked for (rule 9 tells a CI outage from a broken PR by them). None while the run is
-  active, when the list is partial or when the scan's budget for job lists is spent;
+  conclusion (mapped like the run's), and for a job that did not succeed its first named
+  step that did not succeed, the runner it ran on and the labels it asked for (rule 9 tells
+  a CI outage from a broken PR by them). None when not read: the run is active, the list is
+  partial or missing, the request failed, or the scan's budget for job lists is spent;
 - ``superseded_by``: a newer run of the same workflow, branch, head repository and event,
   and for ``pull_request`` runs the same PR number and base branch, was created after it.
   Only ``push`` and ``pull_request`` runs are marked (never deploys, schedules or manual
@@ -108,8 +109,8 @@ DEFAULT_RATE_RESERVE = 1000
 MAX_RESERVE_SHARE = 0.2  # of X-RateLimit-Limit: a small limit is not all reserve
 DEFAULT_BRANCH_TTL = timedelta(hours=1)
 _FAILED = frozenset({"failure", "timed_out", "cancelled"})
-MAX_NAME = 200  # characters kept of a job, step, runner or label name
-MAX_LABELS = 10
+MAX_NAME = 100  # characters kept of a job, step, runner or label name
+MAX_LABELS = 5
 MAX_JOB_LOOKUPS = 10  # per scan; the rest use wall-clock minutes until a later scan
 MAX_REMEMBERED = 4096  # run minutes and PR files kept across scans
 MAX_MESSAGE = 200  # characters of a commit message's first line
@@ -634,7 +635,9 @@ class GitHubCI:
             return wall, None
         listed = _list(body.get("jobs"))
         total = body.get("total_count")
-        if isinstance(total, int) and total > len(listed):
+        if not isinstance(body.get("jobs"), list) or (
+            isinstance(total, int) and total > len(listed)
+        ):
             return wall, None  # not every job visible: the wall clock is the estimate
         billed = 0
         for job in listed:
@@ -784,11 +787,20 @@ def next_reset(now: datetime, day: int) -> datetime:
 
 
 def _job(job: Mapping[str, Any]) -> Job | None:
-    """A job of the jobs list; its failing step is the first step that did not succeed."""
-    name, conclusion = _str(job.get("name")), _str(job.get("conclusion"))
-    if name is None or conclusion is None:
+    """A job of the jobs list (None without a name). A job that did not succeed keeps its
+    first named step that did not succeed, its runner and labels; a passing one only its
+    name, which is all rule 9 needs of it and keeps the cache small."""
+    name = _str(job.get("name"))
+    if name is None:
         return None
-    steps = (_str(s.get("name")) for s in _list(job.get("steps")) if s.get("conclusion") in _FAILED)
+    conclusion = _status(job)
+    if conclusion in {BuildStatus.SUCCESS, BuildStatus.SKIPPED}:
+        return Job(name=name[:MAX_NAME], conclusion=conclusion)
+    steps = (
+        n
+        for s in _list(job.get("steps"))
+        if isinstance(c := s.get("conclusion"), str) and c in _FAILED and (n := _str(s.get("name")))
+    )
     step, runner = next(steps, None), _str(job.get("runner_name"))
     labels = job.get("labels") if isinstance(job.get("labels"), list) else []
     return Job(
