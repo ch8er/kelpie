@@ -641,7 +641,9 @@ OpenClaw's Workboard plugin as tasks, and stop markers the plugin enforces. Abse
 
 GitHub Issues as the task queue, for agents that take issues and return pull requests
 (Copilot coding agent, Codex cloud, the Claude Code GitHub Action, OpenHands). Adapter name
-`github-issues`; task ids are `owner/repo#12`. Reads only, for now: actions become alerts.
+`github-issues`; task ids are `owner/repo#12`. Actions (`requeue`, `unblock`, `comment`,
+`reassign`) go through the issues API; the token then needs Issues: write, and Kelpie's notes
+(quoting rule reasons) are as public as the repository.
 Where to reach GitHub defaults to [[connectors.github]](#connectorsgithub); the adapter
 makes its own client from it (its own cache and per-tick budget). The status and owner
 rules: the [issues adapter README](../src/kelpie/adapters/issues/README.md).
@@ -660,7 +662,7 @@ rules: the [issues adapter README](../src/kelpie/adapters/issues/README.md).
 | `blocked_labels` | `["blocked"]` | list of labels | An open issue with one is `blocked`, since the label was put on. |
 | `ready_labels` | `[]` | list of labels | An open issue nobody holds with one is `ready` (waiting for an agent); without one it is `backlog`. People start these agents, not a dispatcher, so only a label says an issue waits for one. |
 | `role` | `"issue-agent"` | string | The role of tasks no agent holds, and the agents' default. Distinct from other adapters' roles, so rule 3 never proposes an issue agent for another platform's task (or the reverse) unless you give them the same role. |
-| `agents.<name>` | none | table | An agent that works issues; `<name>` is its owner id in Kelpie. Keys: `assignee` (the login it is assigned as, e.g. `Copilot`), `label` (the label that starts it, e.g. `fix-me`), `author` (the login its pull requests come from, e.g. `copilot-swe-agent[bot]`), `mention` (the comment text that starts it, e.g. `@codex`; used by actions later), `role` (default `"issue-agent"`). One of `assignee`, `label` or `author` is required. An account or label names one agent, and an agent's label cannot also be a board's `label`, blocked or ready label. |
+| `agents.<name>` | none | table | An agent that works issues; `<name>` is its owner id in Kelpie. Keys: `assignee` (the login it is assigned as, e.g. `Copilot`), `label` (the label that starts it, e.g. `fix-me`), `author` (the login its pull requests come from, e.g. `copilot-swe-agent[bot]`), `mention` (the comment text that starts it, e.g. `@codex`: `requeue` and `reassign` post it), `role` (default `"issue-agent"`). One of `assignee`, `label` or `author` is required. An account or label names one agent, and an agent's label cannot also be a board's `label`, blocked or ready label. |
 | `boards.<owner/name>` | the keys above | table | Per repository: `label` (`false`: every issue), `blocked_labels`, `ready_labels`, `role`, and `agents` (the agent names Kelpie may hand its tasks to; default all). |
 | `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
 

@@ -30,21 +30,44 @@ bounded (ids, logins, labels, branches, titles) and the "Fixes #n" search runs i
 time. Only owners, members and collaborators write a task's acceptance criteria
 (``author_trusted``).
 
-Times are GitHub's. Nothing here writes.
+Times are GitHub's.
+
+**Writes** (the adapter's actions) re-read the issue first (``fresh``), go one at a time at
+least ``WRITE_GAP`` apart (GitHub's guidance against secondary rate limits for requests that
+create content), at most ``MAX_WRITES_PER_TICK`` a tick and ``MAX_WRITES_PER_HOUR`` an hour
+(beyond, and while GitHub asks for a back-off, the action is deferred: ``Deferred``, not a
+failed attempt), only to issues of the configured repositories, and make the next read of
+that repository's lists ask GitHub again rather than the cache (within the tick's budget):
+
+- labels: ``POST /issues/{n}/labels`` to add; ``DELETE /issues/{n}/labels/{name}`` to remove
+  one whose name is path-safe, else ``PUT /issues/{n}/labels`` with the rest;
+- assignees: ``POST`` / ``DELETE /issues/{n}/assignees``;
+- comments: ``POST /issues/{n}/comments``;
+- reopen: ``PATCH /issues/{n}`` (``state: open``).
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import time
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from kelpie.adapters.issues.mapping import Board, Event, Item, LinkedPull
+from kelpie.adapters.issues.mapping import (
+    Board,
+    Event,
+    IssuesError,
+    Item,
+    LinkedPull,
+    login_key,
+)
 from kelpie.connectors.github.client import GitHubClient, GitHubError
 from kelpie.connectors.github.connector import valid_repo, web_host
+from kelpie.core.ports import Deferred
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +87,10 @@ MAX_LABELS = 100
 MAX_LABEL = 50
 MAX_BRANCH = 255
 MAX_NUMBER = 10**9
+WRITE_GAP = 1.0  # seconds between writes
+MAX_WRITES_PER_TICK = 10  # beyond: deferred to the next tick (pacing blocks the loop)
+MAX_WRITES_PER_HOUR = 300  # GitHub allows 500 content-creating requests an hour
+MAX_COMMENT = 60_000  # characters of a comment (GitHub's limit is 65536)
 TRUSTED = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})  # GitHub's author_association
 EVENT_KINDS = frozenset({"labeled", "unlabeled", "assigned", "unassigned", "closed", "reopened"})
 # GitHub's closing keywords: https://docs.github.com/issues/tracking-your-work-with-issues/
@@ -80,12 +107,8 @@ _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?")
 _BRANCH = re.compile(r"[\w./-]{1,255}")
 
 
-class IssuesError(RuntimeError):
-    """A repository's issues could not be read. ``public_reason`` is safe to show."""
-
-    def __init__(self, message: str, public_reason: str | None = None) -> None:
-        super().__init__(message)
-        self.public_reason = public_reason or message
+_LABEL_PATH = re.compile(r"(?!\.\.?$)[A-Za-z0-9_-][A-Za-z0-9._-]{0,49}")
+_ID = re.compile(r"(?P<repo>[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100})#(?P<number>[1-9][0-9]{0,8})")
 
 
 def issue_id(repo: str, number: int) -> str:
@@ -194,6 +217,15 @@ class GitHubIssues:
     _warned: set[str] = field(default_factory=set, init=False, repr=False)
     _spent: int = field(default=0, init=False, repr=False)
     _good: dict[str, _Lists] = field(default_factory=dict, init=False, repr=False)
+    _touched: set[str] = field(default_factory=set, init=False, repr=False)  # repos written
+    _last_write: float | None = field(default=None, init=False, repr=False)
+    _tick_writes: int = field(default=0, init=False, repr=False)
+    _reserved: int = field(default=0, init=False, repr=False)  # writes left of this action's
+    _written: int = field(default=0, init=False, repr=False)  # writes made by this action
+    _raw_labels: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
+    _hour: deque[float] = field(default_factory=deque, init=False, repr=False)
+    sleep: Callable[[float], None] = field(default=time.sleep, repr=False)
+    monotonic: Callable[[], float] = field(default=time.monotonic, repr=False)
 
     def read(self, now: datetime) -> list[Item]:
         """Every board's items: all lists first, then per-issue details with the budget left.
@@ -201,6 +233,9 @@ class GitHubIssues:
         ``BOARD_GRACE``, then left out; raises :class:`IssuesError` when no board can be
         read at all."""
         self._spent = 0
+        self._tick_writes = 0
+        self._reserved = self._written = 0
+        self._raw_labels.clear()
         self.problem = None
         # Lists are bounded by their page caps and each request's timeout, not by
         # max_requests or tick_budget (cutting them would drop boards); those are for details.
@@ -236,10 +271,16 @@ class GitHubIssues:
     # --- lists ---------------------------------------------------------------------------
 
     def _pages(
-        self, path: str, query: Mapping[str, str], pages: int, per_page: int
+        self,
+        path: str,
+        query: Mapping[str, str],
+        pages: int,
+        per_page: int,
+        revalidate: bool = False,
     ) -> Iterator[Any]:
         for page in range(1, pages + 1):
-            body = self._get(path, {**query, "per_page": str(per_page), "page": str(page)})
+            paged = {**query, "per_page": str(per_page), "page": str(page)}
+            body = self._get(path, paged, revalidate=revalidate)
             if not isinstance(body, list):
                 raise IssuesError(f"GET {path}: not a list", "GitHub answered something else")
             yield from body
@@ -247,14 +288,18 @@ class GitHubIssues:
                 return
         self._warn(path, "issues: %s has more than %d pages; the rest are left out", path, pages)
 
-    def _get(self, path: str, query: Mapping[str, str]) -> Any:
+    def _get(
+        self, path: str, query: Mapping[str, str], revalidate: bool = False, fresh: bool = False
+    ) -> Any:
         try:
-            answer = self.client.get(path, query)
+            answer = self.client.get(path, query, fresh=fresh, revalidate=revalidate)
         except GitHubError as exc:
-            raise IssuesError(str(exc), f"GitHub could not be read ({exc.kind})") from exc
+            raise IssuesError(str(exc), f"GitHub could not be read ({exc.kind})", exc.kind) from exc
         if answer.stale:
             raise IssuesError(
-                f"GET {path}: only an old cached answer", "GitHub could not be read just now"
+                f"GET {path}: only an old cached answer",
+                "GitHub could not be read just now",
+                "stale",
             )
         return answer.body
 
@@ -263,17 +308,19 @@ class GitHubIssues:
 
     def _lists(self, board: Board, now: datetime) -> _Lists:
         repo = board.key
+        revalidate = repo in self._touched  # written since: ask GitHub, not the cache
         base = f"/repos/{repo}/issues"
         query = {"state": "open", "sort": "created", "direction": "desc"}
         if board.label is not None:
             query["labels"] = board.label
-        raw = list(self._pages(base, query, MAX_PAGES, PAGE))
+        raw = list(self._pages(base, query, MAX_PAGES, PAGE, revalidate))
         closed = {"state": "closed", "since": _iso(now - self.lookback), "sort": "updated"}
         if board.label is not None:
             closed["labels"] = board.label
-        raw += list(self._pages(base, closed, 1, PAGE))
+        raw += list(self._pages(base, closed, 1, PAGE, revalidate))
+        self._touched.discard(repo)
         try:
-            pulls = self._linked_pulls(repo)
+            pulls = self._linked_pulls(repo, revalidate)
         except IssuesError as exc:
             self._warn(f"pulls:{repo}", "issues: %s: pull requests not read: %s", repo, exc)
             kept = self._good.get(repo)
@@ -302,10 +349,13 @@ class GitHubIssues:
                 items.append(item)
         return items
 
-    def _linked_pulls(self, repo: str) -> dict[int, tuple[LinkedPull, ...]]:
+    def _linked_pulls(
+        self, repo: str, revalidate: bool = False
+    ) -> dict[int, tuple[LinkedPull, ...]]:
         linked: dict[int, list[LinkedPull]] = {}
         path = f"/repos/{repo}/pulls"
-        for pull in self._pages(path, {"state": "open"}, MAX_PULL_PAGES, PULL_PAGE):
+        pages = self._pages(path, {"state": "open"}, MAX_PULL_PAGES, PULL_PAGE, revalidate)
+        for pull in pages:
             if not isinstance(pull, Mapping):
                 continue
             number, body, head = _number(pull.get("number")), pull.get("body"), pull.get("head")
@@ -331,7 +381,12 @@ class GitHubIssues:
     # --- one issue -----------------------------------------------------------------------
 
     def _item(
-        self, repo: str, number: int, issue: Mapping[str, Any], pulls: tuple[LinkedPull, ...]
+        self,
+        repo: str,
+        number: int,
+        issue: Mapping[str, Any],
+        pulls: tuple[LinkedPull, ...],
+        details: bool = True,
     ) -> Item | None:
         created, updated = _time(issue.get("created_at")), _time(issue.get("updated_at"))
         title = issue.get("title")
@@ -344,19 +399,19 @@ class GitHubIssues:
         key = issue_id(repo, number)
         base = f"/repos/{repo}/issues/{number}"
         events = None
-        if open_ and (labels or assignees):
+        if details and open_ and (labels or assignees):
             path = f"{base}/events"
             events = self._detail(key, "events", updated, path, _events, EVENT_PAGES)
         blocked_by: tuple[str, ...] = ()
         blockers_unknown = False
-        if open_ and _count(issue.get("issue_dependencies_summary"), "blocked_by") > 0:
+        if details and open_ and _count(issue.get("issue_dependencies_summary"), "blocked_by"):
             path = f"{base}/dependencies/blocked_by"
             read = self._detail(key, "blocked_by", updated, path, _open_issues)
             blocked_by = read if read is not None else ()
             blockers_unknown = read is None
         sub_items: tuple[str, ...] = ()
         open_subs: tuple[str, ...] = ()
-        if _count(issue.get("sub_issues_summary"), "total") > 0:
+        if details and _count(issue.get("sub_issues_summary"), "total") > 0:
             path = f"{base}/sub_issues"
             subs = self._detail(key, "sub_issues", updated, path, _subs)
             sub_items, open_subs = subs or ((), ())
@@ -426,6 +481,144 @@ class GitHubIssues:
         self._details[memo_key] = _Detail(updated, now, value)
         return value
 
+    # --- writing -------------------------------------------------------------------------
+
+    def fetch(self, item_id: str) -> Item:
+        """The issue as GitHub has it now (labels, assignees, state; no events or links)."""
+        repo, number = self._target(item_id)
+        path = f"/repos/{repo}/issues/{number}"
+        issue = self._get(path, {}, fresh=True)
+        self._raw_labels[item_id] = _raw_labels(issue)
+        item = None
+        if isinstance(issue, Mapping) and "pull_request" not in issue:
+            item = self._item(repo, number, issue, (), details=False)
+        if item is None:
+            raise IssuesError(f"GET {path}: not an issue", f"{item_id} is not an issue")
+        return item
+
+    def add_labels(self, item_id: str, labels: Sequence[str]) -> None:
+        repo, number = self._target(item_id)
+        self._send("POST", repo, f"/repos/{repo}/issues/{number}/labels", {"labels": [*labels]})
+
+    def remove_labels(self, item_id: str, labels: Sequence[str]) -> None:
+        """Drop ``labels`` (any case) the issue carries now. Each goes by itself
+        (``DELETE /labels/{name}``) when its name can be a path; otherwise the rest are put
+        back (``PUT``), right after reading them, which loses a label added in between."""
+        drop = {label.casefold() for label in labels}
+        repo, number = self._target(item_id)
+        self._pace()  # before the read: no wait between it and the write
+        self.fetch(item_id)
+        current = self._raw_labels.pop(item_id, [])  # every label, also ones not shown
+        present = [label for label in current if label.casefold() in drop]
+        if not present:
+            return
+        if all(_LABEL_PATH.fullmatch(label) for label in present):
+            for label in present:
+                path = f"/repos/{repo}/issues/{number}/labels/{label}"
+                self._send("DELETE", repo, path, None, gone_ok=True)
+            return
+        keep = [label for label in current if label.casefold() not in drop]
+        self._send("PUT", repo, f"/repos/{repo}/issues/{number}/labels", {"labels": keep})
+
+    def assign(self, item_id: str, logins: Sequence[str]) -> None:
+        """Assign ``logins``; GitHub answers 201 also when it drops a login it cannot assign,
+        so the issue it returns is checked."""
+        repo, number = self._target(item_id)
+        path = f"/repos/{repo}/issues/{number}/assignees"
+        answer = self._send("POST", repo, path, {"assignees": [*logins]})
+        if not isinstance(answer, Mapping):
+            return  # nothing to check against (an answer too large or not JSON)
+        assigned = {login_key(a) for a in _logins(answer.get("assignees"))}
+        missing = [login for login in logins if login_key(login) not in assigned]
+        if missing:
+            raise IssuesError(
+                f"POST {path}: GitHub did not assign {missing}",
+                f"GitHub did not assign {', '.join(missing)} (can the token assign it?)",
+            )
+
+    def unassign(self, item_id: str, logins: Sequence[str]) -> None:
+        repo, number = self._target(item_id)
+        path = f"/repos/{repo}/issues/{number}/assignees"
+        self._send("DELETE", repo, path, {"assignees": [*logins]})
+
+    def comment(self, item_id: str, body: str) -> None:
+        repo, number = self._target(item_id)
+        path = f"/repos/{repo}/issues/{number}/comments"
+        self._send("POST", repo, path, {"body": body[:MAX_COMMENT]})
+
+    def reopen(self, item_id: str) -> None:
+        repo, number = self._target(item_id)
+        path = f"/repos/{repo}/issues/{number}"
+        self._send("PATCH", repo, path, {"state": "open", "state_reason": "reopened"})
+
+    def _target(self, item_id: str) -> tuple[str, int]:
+        match = _ID.fullmatch(item_id)
+        if match is None or match["repo"] not in {b.key for b in self.boards}:
+            raise IssuesError(
+                f"{item_id!r} is not an issue of a configured repository",
+                "not an issue of a configured repository",
+            )
+        return match["repo"], int(match["number"])
+
+    def _pace(self) -> None:
+        if self._last_write is not None:
+            wait = self._last_write + WRITE_GAP - self.monotonic()
+            if wait > 0:
+                self.sleep(min(wait, WRITE_GAP))
+
+    def reserve(self, writes: int) -> None:
+        """Hold ``writes`` for one action before its first one: an action is deferred whole
+        (``Deferred``: not an attempt, asked again later) when the tick's or the hour's cap
+        cannot take it or GitHub asks Kelpie to back off, never cut halfway. Once it has
+        started, a refused write is an error that says what state it left."""
+        now = self.monotonic()
+        while self._hour and now - self._hour[0] > 3600:
+            self._hour.popleft()
+        backoff = self.client.backoff_until
+        if backoff is not None and self.clock() < backoff:
+            raise Deferred("issues: GitHub asks Kelpie to wait (backoff)")
+        tick_full = self._tick_writes + writes > MAX_WRITES_PER_TICK
+        if tick_full or len(self._hour) + writes > MAX_WRITES_PER_HOUR:
+            raise Deferred(
+                f"issues: write cap reached ({MAX_WRITES_PER_TICK} a tick, "
+                f"{MAX_WRITES_PER_HOUR} an hour)"
+            )
+        self._reserved, self._written = writes, 0
+
+    def _send(
+        self,
+        method: str,
+        repo: str,
+        path: str,
+        body: Mapping[str, Any] | None,
+        *,
+        gone_ok: bool = False,
+    ) -> Any:
+        """One write of the reserved ones; GitHub's answer. Before the action's first
+        write, a rate limit or back-off defers it; after, it is an error."""
+        if self._reserved <= 0:
+            self.reserve(1)
+        self._reserved -= 1
+        first = self._written == 0
+        self._pace()
+        self._tick_writes += 1
+        self._written += 1
+        self._hour.append(self.monotonic())
+        try:
+            return self.client.send(method, path, body)
+        except GitHubError as exc:
+            if gone_ok and exc.kind == "not_found":
+                return None
+            if first and exc.kind in ("backoff", "rate_limited"):
+                self._reserved = 0
+                raise Deferred(f"issues: GitHub asks Kelpie to wait ({exc.kind})") from exc
+            raise IssuesError(
+                str(exc), f"GitHub refused the change ({exc.kind})", exc.kind
+            ) from exc
+        finally:
+            self._last_write = self.monotonic()
+            self._touched.add(repo)
+
     def _warn(self, key: str, message: str, *args: object) -> None:
         if key not in self._warned:
             self._warned.add(key)
@@ -473,6 +666,13 @@ def _all_issues(raw: list[Any], only_open: bool = False) -> tuple[str, ...]:
             continue
         ids.append(issue_id(repo, number))
     return tuple(ids)
+
+
+def _raw_labels(issue: Any) -> list[str]:
+    """Every label name as GitHub has it (unfiltered: a write must keep them all)."""
+    labels = issue.get("labels") if isinstance(issue, Mapping) else None
+    names = [v.get("name") if isinstance(v, Mapping) else None for v in labels or []]
+    return [n for n in names if isinstance(n, str) and n]
 
 
 def _open_issues(raw: list[Any]) -> tuple[str, ...]:

@@ -67,7 +67,9 @@ task as it is now and its recent ledger entries, not the board as the rule saw i
 With a Hermes adapter enabled, Kelpie refuses to start with `dry_run = false` if any other
 rule is in `act` mode (`_refuse_unimplemented_actions`, `HERMES_ACT_RULES` in
 `src/kelpie/app.py`). The Claude Code and OpenClaw adapters refuse other actions at runtime
-(`UnsupportedAction`), so on those platforms they become "not executed" alerts.
+(`UnsupportedAction`), so on those platforms they become "not executed" alerts. The GitHub
+Issues adapter carries `requeue`, `unblock`, `comment` and `reassign` through the issues API
+(**unverified** against live agents), and refuses the rest the same way.
 
 | Rule | Action | Needs |
 | --- | --- | --- |
@@ -78,6 +80,9 @@ rule is in `act` mode (`_refuse_unimplemented_actions`, `HERMES_ACT_RULES` in
 | `dispatch_gate` | `wait`: `hermes kanban schedule` of a ready task, with its conditions in the reason (**unverified**) | `wait_condition` in `act` too, or parked tasks are never woken (Kelpie warns at startup) |
 | `wait_condition` | `wake` of a task Kelpie parked: `hermes kanban unblock` (**unverified**); `comment` (`hermes kanban comment --author kelpie`) | |
 | `conflict_warning` | `comment` on both tasks; with `serialize`, `wait` of the later running task pinned to its run (**unverified**) | `wait_condition` in `act` too |
+| `orphan_status` | `reassign` on GitHub Issues: the new agent assigned (or labelled, or mentioned) first, then the one holding the issue unassigned (or its label removed), with a signed note (**unverified**) | `[adapters.github_issues]` agents with the same `role`; a token with Issues: write |
+| `stale_blocks` | `unblock` on GitHub Issues: the board's blocked labels come off, with a signed note (**unverified**) | a condition linked to the block; as above |
+| `exit_contract`, `conflict_warning`, `return_causes` | `comment` on GitHub Issues: their `once` notes, the rule's text quoted inert (**unverified**) | as above |
 
 Everything else stays `observe` or `suggest`. That includes `stale_blocks`: its unblock, and
 requeue of tasks Kelpie did not park and WIP commit, are not implemented for Hermes. Kelpie

@@ -301,21 +301,14 @@ def test_snapshot_needs_an_aware_time(gh: FakeGitHub) -> None:
         IssuesAdapter(reader(gh), (Board(REPO),), AGENTS).snapshot(datetime(2026, 1, 1))
 
 
-def test_actions_are_refused_for_a_human(gh: FakeGitHub) -> None:
+def test_list_get_and_events(gh: FakeGitHub) -> None:
     Repo(gh).lists([issue(1)])
     adapter = IssuesAdapter(reader(gh), (Board(REPO),), AGENTS, clock=lambda: NOW)
     assert [t.id for t in adapter.list_tasks()] == [f"{REPO}#1"]
     assert adapter.get_task(f"{REPO}#1") is not None and adapter.get_task("x#9") is None
     assert list(adapter.events(NOW)) == []
-    calls = [
-        lambda: adapter.requeue(f"{REPO}#1", "r"),
-        lambda: adapter.unblock(f"{REPO}#1", "r"),
-        lambda: adapter.comment(f"{REPO}#1", "r"),
-        lambda: adapter.wip_commit(f"{REPO}#1", "m"),
-    ]
-    for call in calls:
-        with pytest.raises(UnsupportedAction):
-            call()
+    with pytest.raises(UnsupportedAction):
+        adapter.wip_commit(f"{REPO}#1", "m")
     assert not any(s.method != "GET" for s in gh.requests)
 
 
