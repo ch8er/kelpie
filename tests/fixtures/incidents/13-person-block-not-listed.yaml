@@ -1,0 +1,85 @@
+id: "13-person-block-not-listed"
+incident: 13
+title: "A person's block the inbox does not list stays rule 4's"
+description: >
+  Review of the hand-off in 13-person-block-left-to-inbox: rule 13 lists an agent task
+  parked on a person's task only while the person can move that task (ready or in progress
+  with nothing open before it, or blocked itself). Parked on a task still in the backlog,
+  in triage, or behind agent work, the block is listed nowhere ("agent work comes first"),
+  so rule 4 keeps its alerts on it: overdue for a human_task condition, no condition for a
+  block that only names the human task it depends on. Otherwise both rules would stay
+  silent for as long as the block lasts. A block parked on a task the person can do now is
+  in the inbox and gets no alert of rule 4's.
+rule: stale_blocks
+config:
+  unlinked_alert_after: "4h"
+  max_block: "8h"
+  stale_evidence_after: "1h"
+  needs_you: {approval_wait_after: "30m", human_wait_alert_after: "1h", default_approver: ceo}
+snapshot:
+  now: "2026-03-04T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # S1: the person's task is still in the backlog.
+    - {id: H-1, title: "Approve the listing", status: backlog, status_since: "2026-03-01T10:00:00+00:00", role: owner, owner_id: ceo}
+    - id: T-1
+      title: "Publish the listing"
+      status: blocked
+      status_since: "2026-03-03T14:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: approve the listing", since: "2026-03-03T14:00:00+00:00", condition_id: "human:H-1"}
+    # S1b: in triage (a pre-work status only a person moves it out of).
+    - {id: H-2, title: "Pick the price tier", status: backlog, status_since: "2026-03-01T10:00:00+00:00", role: owner, owner_id: ceo, prework: true}
+    - id: T-2
+      title: "Set the prices"
+      status: blocked
+      status_since: "2026-03-03T14:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: pick a tier", since: "2026-03-03T14:00:00+00:00", condition_id: "human:H-2"}
+    # S2: ready, but behind agent work still in progress.
+    - {id: A-3, title: "Prepare the screenshots", status: in_progress, status_since: "2026-03-04T09:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: H-3, title: "Upload the screenshots", status: ready, status_since: "2026-03-01T10:00:00+00:00", role: owner, owner_id: ceo}
+    - id: T-3
+      title: "Submit for review"
+      status: blocked
+      status_since: "2026-03-03T14:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: upload them", since: "2026-03-03T14:00:00+00:00", condition_id: "human:H-3"}
+    # S3: linked by a dependency only, the reason names the human task, still in the backlog.
+    - {id: H-4, title: "Sign the contract", status: backlog, status_since: "2026-03-01T10:00:00+00:00", role: owner, owner_id: ceo}
+    - id: T-4
+      title: "Integrate the vendor API"
+      status: blocked
+      status_since: "2026-03-03T14:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: need H-4 done", since: "2026-03-03T14:00:00+00:00"}
+    # Control: the person can do H-5 now: T-5 is in the inbox, under H-5.
+    - {id: H-5, title: "Approve the banner", status: ready, status_since: "2026-03-01T10:00:00+00:00", role: owner, owner_id: ceo}
+    - id: T-5
+      title: "Ship the banner"
+      status: blocked
+      status_since: "2026-03-03T14:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: approve the banner", since: "2026-03-03T14:00:00+00:00", condition_id: "human:H-5"}
+  dependencies:
+    - {task_id: H-3, depends_on: A-3}
+    - {task_id: T-4, depends_on: H-4}
+  conditions:
+    - {id: "human:H-1", kind: human_task, task_id: T-1, params: {task: H-1}, satisfied: false, checked_at: "2026-03-04T09:58:00+00:00"}
+    - {id: "human:H-2", kind: human_task, task_id: T-2, params: {task: H-2}, satisfied: false, checked_at: "2026-03-04T09:58:00+00:00"}
+    - {id: "human:H-3", kind: human_task, task_id: T-3, params: {task: H-3}, satisfied: false, checked_at: "2026-03-04T09:58:00+00:00"}
+    - {id: "human:H-5", kind: human_task, task_id: T-5, params: {task: H-5}, satisfied: false, checked_at: "2026-03-04T09:58:00+00:00"}
+expected_actions:
+  - {kind: alert, task_id: T-1, reason_contains: "limit 8h"}
+  - {kind: alert, task_id: T-2, reason_contains: "limit 8h"}
+  - {kind: alert, task_id: T-3, reason_contains: "limit 8h"}
+  - {kind: alert, task_id: T-4, reason_contains: "has no condition Kelpie can check"}
+not_expected_actions:
+  - {kind: alert, task_id: T-5}

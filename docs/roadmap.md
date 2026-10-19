@@ -191,8 +191,8 @@ opening words come again in the "Why" under it.
 **Acceptance criteria**
 - [ ] Rules set `params.headline` per alert kind (stale_blocks: stale evidence, nothing to check, overdue; bottlenecks: forgotten hold, gate, idle with ready work), so no headline repeats the reason
 - [ ] Rules set `needed` (first what a human must do) and `blocking` (e.g. stale_blocks and wait_condition from their stuck tasks, which no longer reach the "Blocking" line)
-- [ ] Rule 4 hands `waiting_human` / `needs_input` / person-addressed blocks to rule 13 and does not alert on them itself
-- [ ] Rule 13 sends one digest per person per escalation step (`params.items` with `task_id`, `since`, `needed`, `blocking`), sorted by cost of delay; each item carries its exact `task_id`, `blocking` and `since`, and the temporary shim in the engine (`_item`: rule 13's legacy `task`, `kind == "approval"`, the capped `behind` list shown as "10+", `waiting_minutes`) is removed
+- [x] Rule 4 hands `waiting_human` / `needs_input` / person-addressed blocks to rule 13 and does not alert on them itself (no-condition, overdue and dead-end alerts on what rule 13 lists, `kelpie.rules.needs_you.inbox_task_ids`; agents' dead ends, a condition Kelpie cannot see and blocks rule 13 does not list stay rule 4's), while rule 13 reaches people
+- [x] Rule 13 sends one digest per person per escalation step (`params.items` with `task_id`, `since`, `needed`, `blocking`), sorted by cost of delay; each item carries its exact `task_id`, `blocking` and `since`, and the temporary shim in the engine (`_item`: rule 13's legacy `task`, `kind == "approval"`, the capped `behind` list shown as "10+", `waiting_minutes`) is removed
 - [x] The daily report's chat summary uses the same layout (its "Open report" link shows once the report has a configurable address)
 
 ### core: condition registration API

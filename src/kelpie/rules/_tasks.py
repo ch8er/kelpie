@@ -4,7 +4,7 @@ which conditions belong to a task right now, and is anyone still working on it."
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -12,6 +12,8 @@ from kelpie.core.conditions import linked_conditions
 from kelpie.core.model import (
     Condition,
     ConditionKind,
+    KelpieMark,
+    OwnerKind,
     PullRequest,
     Session,
     Snapshot,
@@ -143,6 +145,90 @@ def planned(task: Task, labels: Collection[str] = ()) -> bool:
 
 
 _NOT_STARTED = frozenset({Status.BACKLOG, Status.READY})
+
+
+# Block reasons that ask a person (rule 13's ``approval_reasons``), and how much of a reason
+# the ``condition_reasons`` patterns search, as ``[[block_conditions]]`` does.
+DEFAULT_APPROVAL_REASONS = ("waiting_human", "needs_input", "approval")
+MAX_REASON = 2000
+_TRANSIENT = re.compile(r"waiting_human:\s*transient\b")
+
+
+def asks_a_person(
+    task: Task,
+    snapshot: Snapshot,
+    approval_reasons: Sequence[str] = DEFAULT_APPROVAL_REASONS,
+    condition_reasons: Sequence[re.Pattern[str]] = (),
+) -> bool:
+    """Whether an agent's task is blocked on a question for a person: rule 13 lists such a
+    block as an approval, and rule 4 leaves the blocks rule 13 lists to it
+    (:func:`kelpie.rules.needs_you.inbox_task_ids`).
+
+    The task is not owned by a person (their own blocked task is theirs), and its block
+    reason starts with one of ``approval_reasons`` as a whole word (``waiting_human:``,
+    Hermes' typed ``needs_input``; not ``waiting_human: transient``, which waits for the
+    outside world), unless it waits on a condition instead: its reason matches one of
+    ``condition_reasons`` (``needs_input: automerge PR #12``; agents block with
+    ``needs_input`` to get past Hermes' block loop guard while a PR merges), or it has an
+    unmet linked condition other than a human task (one that already holds is waited on no
+    longer). A run Kelpie stopped (``Block.kelpie``, verified by the adapter) always waits
+    for a person. A block that names a condition Kelpie cannot see, or one of whose
+    conditions can never be met (:func:`dead_ends`: the human task it waited on was
+    cancelled), is not a question either: rule 4 alerts on it with what is stuck behind it,
+    and rule 13 does not list it, so the person hears of it once. Status is the caller's:
+    rule 13 reads it for blocked and waiting tasks."""
+    block = task.block
+    if block is None:
+        return False
+    owner = snapshot.owner(task.owner_id) if task.owner_id else None
+    if owner is not None and owner.kind is OwnerKind.HUMAN:
+        return False
+    if block.kelpie is KelpieMark.STOP:
+        return True
+    if not reason_asks_a_person(block.reason, approval_reasons):
+        return False
+    if any(p.search(block.reason[:MAX_REASON]) for p in condition_reasons):
+        return False
+    conditions, missing = linked_conditions(task, snapshot)
+    if missing is not None or dead_ends(conditions, block.since):
+        return False  # a broken link or a dead end: rule 4's alert
+    return not any(
+        c.kind is not ConditionKind.HUMAN_TASK and c.satisfied is not True for c in conditions
+    )
+
+
+def reason_asks_a_person(reason: str, prefixes: Sequence[str]) -> bool:
+    """The block reason starts with one of ``prefixes`` as a whole word (``waiting_human:``,
+    ``needs_input ...``), not as part of a longer one (``approved``, ``needs_input_x``).
+    Hermes' ``transient`` blocks wait for the outside world, not for a person."""
+    text = reason.strip().lower()
+    if _TRANSIENT.match(text):
+        return False
+    return any(re.match(rf"{re.escape(p)}(?![\w-])", text) for p in prefixes)
+
+
+def approval_reasons_list(value: object) -> tuple[str, ...]:
+    """The ``approval_reasons`` config: a non-empty list of prefixes, lower-cased."""
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(r, str) and r.strip() for r in value)
+    ):
+        raise ValueError("approval_reasons must be a non-empty list of strings")
+    return tuple(r.strip().lower() for r in value)
+
+
+def condition_patterns(value: object) -> tuple[re.Pattern[str], ...]:
+    """The ``condition_reasons`` config: regular expressions, searched case-insensitive."""
+    if not isinstance(value, list) or not all(isinstance(p, str) and p.strip() for p in value):
+        raise ValueError("condition_reasons must be a list of regular expressions")
+    try:
+        compiled = tuple(re.compile(p, re.IGNORECASE) for p in value)
+    except re.error as exc:
+        raise ValueError(f"condition_reasons: invalid pattern: {exc}") from exc
+    if any(p.search("") for p in compiled):
+        raise ValueError("condition_reasons: a pattern matches an empty reason (every block)")
+    return compiled
 
 
 def labels_list(value: object, name: str) -> list[str]:

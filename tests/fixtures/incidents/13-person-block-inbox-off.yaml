@@ -1,0 +1,41 @@
+id: "13-person-block-inbox-off"
+incident: 13
+title: "Without the needs-you inbox, rule 4 still alerts on a person's block"
+description: >
+  The hand-off of 13-person-block-left-to-inbox holds only while rule 13 reaches people.
+  When it does not (it is not loaded, or it runs in observe while rule 4 alerts: needs_you
+  is false), rule 4 alerts on a 'waiting_human: needs_input' block with no condition after
+  unlinked_alert_after as before, so nothing goes silent. A younger block is not alerted on
+  yet.
+rule: stale_blocks
+config:
+  needs_you: false
+  unlinked_alert_after: "4h"
+snapshot:
+  now: "2026-03-04T10:00:00+00:00"
+  owners:
+    - {id: agent-ops-1, role: ops}
+  tasks:
+    - id: t_a1b2c3d4
+      title: "Nightly backup to R2"
+      status: blocked
+      status_since: "2026-03-02T14:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block:
+        reason: "waiting_human: needs_input: CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2 through the Cloudflare dashboard.»"
+        since: "2026-03-02T14:00:00+00:00"
+    - id: t_a1b2c3d5
+      title: "Rotate the backup key"
+      status: blocked
+      status_since: "2026-03-04T08:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block: {reason: "needs_input: which key store?", since: "2026-03-04T08:00:00+00:00"}
+expected_actions:
+  - kind: alert
+    task_id: t_a1b2c3d4
+    reason_contains: "has no condition Kelpie can check"
+not_expected_actions:
+  - kind: alert
+    task_id: t_a1b2c3d5

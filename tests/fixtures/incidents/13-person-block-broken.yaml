@@ -1,0 +1,60 @@
+id: "13-person-block-broken"
+incident: 13
+title: "A person's own block that can never clear is said once, in their digest"
+description: >
+  Third review of the hand-off: a person's own blocked task with agent work behind it is an
+  item of their "needs you" digest, so rule 4 sends no alert on it. When that block can
+  never clear on its own (the PR it waits for was closed without merging, or it names a
+  condition Kelpie cannot see), rule 4 used to say so; the digest now says it in the item's
+  "Needed" line instead (tests/alerts/test_person_block_digest.py checks that), so the
+  person hears it once. A person's blocked task with nothing behind it is in no digest
+  and keeps rule 4's dead-end alert.
+rule: stale_blocks
+config:
+  unlinked_alert_after: "4h"
+  max_block: "8h"
+  stale_evidence_after: "1h"
+  needs_you: {approval_wait_after: "30m", human_wait_alert_after: "1h", default_approver: ceo}
+snapshot:
+  now: "2026-03-04T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # S10: waits for a PR that was closed without merging; agent work behind it.
+    - id: H-10
+      title: "Merge the vendor's fix"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: owner
+      owner_id: ceo
+      block: {reason: "waiting for the vendor PR", since: "2026-03-02T10:00:00+00:00", condition_id: "pr:x"}
+    - {id: A-10, title: "Integrate the fix", status: backlog, status_since: "2026-03-02T10:00:00+00:00", role: developer}
+    # S11: names a condition Kelpie cannot see; agent work behind it.
+    - id: H-11
+      title: "Sign the contract"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: owner
+      owner_id: ceo
+      block: {reason: "waiting for the signed copy", since: "2026-03-02T10:00:00+00:00", condition_id: "pr:gone"}
+    - {id: A-11, title: "Integrate the vendor API", status: backlog, status_since: "2026-03-02T10:00:00+00:00", role: developer}
+    # Look-alike: the same dead end with nothing behind it is in no digest.
+    - id: H-12
+      title: "Merge the docs fix"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: owner
+      owner_id: ceo
+      block: {reason: "waiting for the docs PR", since: "2026-03-02T10:00:00+00:00", condition_id: "pr:y"}
+  dependencies:
+    - {task_id: A-10, depends_on: H-10}
+    - {task_id: A-11, depends_on: H-11}
+  conditions:
+    - {id: "pr:x", kind: pr_merged, task_id: H-10, params: {repo: example/repo, pr: 9, terminal: true}, satisfied: false, checked_at: "2026-03-04T09:58:00+00:00"}
+    - {id: "pr:y", kind: pr_merged, task_id: H-12, params: {repo: example/repo, pr: 10, terminal: true}, satisfied: false, checked_at: "2026-03-04T09:58:00+00:00"}
+expected_actions:
+  - {kind: alert, task_id: H-12, reason_contains: "closed without merging"}
+not_expected_actions:
+  - {kind: alert, task_id: H-10}
+  - {kind: alert, task_id: H-11}

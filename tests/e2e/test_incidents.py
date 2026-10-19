@@ -391,3 +391,24 @@ def test_incident_16_idle_capacity_behind_a_human_gate_is_alerted(farm: Farm) ->
 
     text = farm.wait_message("Rule: bottlenecks", "idle with no ready work", "t_store", timeout=5)
     assert "dev" in text
+
+
+# --- #169: a block that asks a person reaches them once, in rule 13's digest ---------------
+
+
+def test_a_block_that_asks_a_person_is_left_to_the_inbox(farm: Farm) -> None:
+    """Live alerts in suggest mode: rule 4 alerted on a typed block for a person next to
+    rule 13's digest. Now only the digest lists it; a block that asks nobody still alerts."""
+    question = "CEO: enable R2 for the backup bucket"
+    blocked_by_agent(farm, "t_r2", question, kind="needs_input", hours=5)
+    blocked_by_agent(farm, "t_vague", "stuck on the vendor sandbox", hours=5)
+    before = farm.board.statuses()
+    rules = {"stale_blocks": SUGGEST, "needs_you": {**SUGGEST, "default_approver": "alice"}}
+    farm.serve(farm.config(rules))
+
+    digest = farm.wait_message("Rule: needs_you", "t_r2")
+    assert "Waiting for you: 1 task" in digest and question in digest
+    farm.wait_message("Rule: stale_blocks", "t_vague", "no condition Kelpie can check")
+    settle(farm)
+    assert farm.messages("Rule: stale_blocks", "t_r2") == []
+    board_unchanged(farm, before)

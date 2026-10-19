@@ -31,6 +31,33 @@ A block Kelpie set itself (``Block.kelpie``, from a signed marker the adapter ve
 stop of a runaway run) is not a stale block: it waits for a human to look at the task, not
 for a condition, so rule 13 lists it in the "needs you" inbox and this rule leaves it alone.
 
+**Blocks rule 13 lists are rule 13's** (issue #169). While rule 13 reaches people, this
+rule gets its settings (``needs_you``, set by ``kelpie.app``: rule 13's config section, else
+``false``) and leaves it every task it lists (:func:`~kelpie.rules.needs_you.inbox_task_ids`,
+its time thresholds ignored, so this rule's own still apply): approvals (an agent's block
+that asks a person, ``waiting_human: needs_input: CEO: …``, by
+:func:`~kelpie.rules._tasks.asks_a_person`), agent tasks parked on a human task the person
+can move now, and the person's own blocked task. For those it raises no no-condition, overdue
+or dead-end alert ("nothing Kelpie can check" means nothing to a person): one message, not
+two. A person's own listed task whose block can never clear (a dead end, a condition Kelpie
+cannot see) carries that in the digest's "Needed" line instead. Rule 13 lists no agent task
+with a dead end (the human task it waited on was cancelled), a condition Kelpie cannot see,
+or another unmet condition (a PR, CI), so those alert here as before, the dead end with
+what is stuck behind it. Everything else stays this
+rule's too, so every block reaches a person through exactly one rule:
+
+- a block rule 13 does not list: parked on a person's task the person cannot move yet
+  (in the backlog or triage, or behind agent work), or one that names a human task it
+  depends on that is not the person's to move yet;
+- a block that names a condition (``needs_input: automerge PR #12``, matching
+  ``condition_reasons``) or has an unmet linked condition other than a human task: it waits
+  on that condition.
+
+A condition the connector stopped checking alerts whoever lists the task (Kelpie's
+plumbing, not the person's question). The block is still cleared once its conditions hold.
+Without rule 13 reaching people (it is not loaded, or it runs in ``observe`` while this rule
+does not), this rule alerts on every block as before, so nothing goes silent.
+
 The dead-end and no-condition alerts list the tasks stuck behind the blocked one
 (``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
 does not raise a second alert for the same dead end.
@@ -38,7 +65,7 @@ does not raise a second alert for the same dead end.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -46,7 +73,7 @@ from typing import Any
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
-from kelpie.rules import register
+from kelpie.rules import needs_you, register
 from kelpie.rules._chains import behind_lookup, behind_text
 from kelpie.rules._tasks import (
     DEFAULT_MAX_CONDITION_AGE,
@@ -67,18 +94,26 @@ class StaleBlocks:
     unlinked_alert_after: timedelta | None = timedelta(hours=4)  # no condition Kelpie sees
     max_block: timedelta | None = timedelta(hours=8)  # condition still not met
     stale_evidence_after: timedelta | None = timedelta(hours=1)  # connector stopped checking
+    # Rule 13 as it reaches people (kelpie.app sets it from needs_you's config while it
+    # does), or None: the blocks it lists that ask a person are left to it.
+    inbox: needs_you.NeedsYou | None = None
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         actions: list[Action] = []
         behind = behind_lookup(snapshot)
+        listed = needs_you.inbox_task_ids(snapshot, self.inbox) if self.inbox is not None else None
         for task in snapshot.tasks:
             if task.status is Status.BLOCKED and task.block is not None:
-                actions.extend(self._check(task, snapshot, behind))
+                actions.extend(self._check(task, snapshot, behind, listed))
         return actions
 
     def _check(
-        self, task: Task, snapshot: Snapshot, behind: Callable[[str], list[str]]
+        self,
+        task: Task,
+        snapshot: Snapshot,
+        behind: Callable[[str], list[str]],
+        listed: frozenset[str] | None = None,
     ) -> Iterable[Action]:
         block = task.block
         assert block is not None
@@ -86,7 +121,12 @@ class StaleBlocks:
             return  # Kelpie's own stop waits for a human: rule 13's
         age = snapshot.now - block.since
         conditions, missing = linked_conditions(task, snapshot)
+        # In the person's "needs you" digest: no alert of ours tells them the same again
+        # (stale evidence still does: it is about the connector, not the question).
+        theirs = listed is not None and task.id in listed
         if not conditions:
+            if theirs:
+                return  # a question for a person: nothing to check, rule 13 lists it
             if self.unlinked_alert_after is not None and age >= self.unlinked_alert_after:
                 what = (
                     f"names condition {missing}, which Kelpie cannot see"
@@ -129,6 +169,8 @@ class StaleBlocks:
             return
         ended = dead_ends(conditions, block.since)
         if ended:
+            if theirs:
+                return  # a person's own task, in their digest with its block reason
             stuck = behind(task.id)
             yield self._alert(
                 task,
@@ -139,6 +181,8 @@ class StaleBlocks:
             )
             return
         if not all(c.satisfied for c in conditions):
+            if theirs:
+                return  # it waits on a human task: rule 13 lists it there
             if self.max_block is not None and age >= self.max_block:
                 pending = ", ".join(f"{c.id} ({c.kind})" for c in conditions if not c.satisfied)
                 yield self._alert(
@@ -215,6 +259,17 @@ def _duration(value: Any, name: str, allow_zero: bool = False) -> timedelta:
     return result
 
 
+def _inbox(value: Any) -> needs_you.NeedsYou | None:
+    """``needs_you``: false, or rule 13's config section (true: its defaults)."""
+    if value is False:
+        return None
+    if value is True:
+        return needs_you.build({})
+    if isinstance(value, Mapping):
+        return needs_you.build(dict(value))
+    raise ValueError("needs_you must be false, true or rule 13's settings")
+
+
 @register(NAME)
 def build(config: dict[str, Any]) -> StaleBlocks:
     config = dict(config)
@@ -230,6 +285,8 @@ def build(config: dict[str, Any]) -> StaleBlocks:
             value = config.pop(key)
             # false switches the alert off
             kwargs[key] = None if value is False else _duration(value, key)
+    if "needs_you" in config:
+        kwargs["inbox"] = _inbox(config.pop("needs_you"))
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return StaleBlocks(**kwargs)

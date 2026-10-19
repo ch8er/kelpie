@@ -302,6 +302,40 @@ that came due during the outage is sent when it ends.
 A condition that can never be met (a PR closed without merging, a human task cancelled)
 alerts at once.
 
+**Blocks rule 13 lists go to rule 13.** A blocked task that rule 13 lists in a person's
+"needs you" digest gets no no-condition, overdue or dead-end alert from this rule: the
+person gets one message instead of two. Rule 13 lists an agent's block whose reason asks a
+person (`waiting_human: needs_input: CEO: …`), an agent task parked on a person's task they
+can do now, and a person's own blocked task with agent work behind it. This rule reads the
+farm with rule 13's whole `[engine.rules.needs_you]` section (`approval_reasons`,
+`condition_reasons`, which default to the `[[block_conditions]]` patterns, and
+`planned_labels`), so the two cannot disagree, and it leaves exactly what rule 13 lists, its
+waits aside. Everything else stays this rule's, so every block is announced by exactly one
+of the two:
+
+- a block rule 13 does not list: parked on a person's task the person cannot move yet (in
+  the backlog or triage, or behind agent work in progress), or a person's blocked task with
+  nothing behind it;
+- an agent's block with a dead end (the human task it waited on was cancelled: the alert
+  lists the tasks stuck behind it) or a condition Kelpie cannot see: rule 13 does not list
+  these;
+- a block whose reason matches a condition pattern (`needs_input: automerge PR #12`) or
+  that has an unmet linked condition other than a human task (also when it waits on a
+  person's task as well): it waits on that condition.
+
+A person's own listed task whose block can never clear (a dead end, a condition Kelpie
+cannot see) gets no alert here either: the digest's "Needed" line says it. A connector that
+stopped checking alerts whoever lists the task.
+
+Clearing a block once its conditions hold is unchanged. The hand-off applies only while
+rule 13 reaches people: it is loaded, and it is not in `observe` mode while this rule is in
+`suggest` or `act` (else this rule alerts on every block as before, so nothing goes silent).
+Kelpie decides that from the modes: `needs_you` is not a key to set here. A mistake in
+rule 13's section is reported as rule 13's. Kelpie logs a warning at startup when rule 13
+waits longer than this rule before it lists a block (`approval_wait_after` longer than
+`unlinked_alert_after`, or `human_wait_alert_after` longer than `max_block`): in between,
+neither rule announces it.
+
 ### 5. ping_pong
 
 After a number of review rounds, escalates the task with the history of return reasons.
@@ -542,7 +576,13 @@ Only agent tasks that wait on the human task itself add to its cost; work deeper
 chain counts in the number held. The alert is a long-lived state per person: announced
 when it opens, again when the list of tasks changes or at the escalation thresholds,
 resolved when empty. `escalate_to` names the person; delivery goes to the alert channels
-like every other alert. The daily report heads "Needs a human" with each open inbox, and
+like every other alert, as one digest ("Waiting for you: 2 tasks (oldest 46 h)") built from
+`items` (every item, at most 200, `items_total` counting them; the message shows 10 and
+counts the rest): per item its `task_id`, `title`, `needed` (an approval's block reason, or
+why a human task is blocked: for one that can never clear on its own, the dead end or the
+condition Kelpie cannot see, which `stale_blocks` then does not alert on; none when the
+title says it), `since` and `blocking` (the
+tasks waiting behind it). The daily report heads "Needs a human" with each open inbox, and
 counts the agent-hours of the agent tasks waiting on each person in its cost of chaos
 ("agents waiting on people"), from the count every alert reports (`waiting_agent_tasks`,
 re-sampled about hourly while the inbox stays open). Planned work behind the listed human
@@ -557,7 +597,7 @@ tasks ready) and escalates single human gates only with `escalate_human_gates = 
 | `human_wait_alert_after` | `"1h"` | duration, > 0 | A human task enters the inbox once agent work waiting on it has waited this long. |
 | `approval_wait_after` | `"30m"` | duration, > 0 | An agent waiting for a person's input or approval enters it after this long. |
 | `planned_labels` | `bottlenecks`' `planned_labels` and hold labels | list of labels | A task not started yet (backlog, ready) labelled with one of these (or whose linked PR is), or in a pre-work status (Hermes triage, scheduled), is not ready for work for its own reasons: it waits on no human task (no cost, not held), and a planned human task is in the inbox only for the tasks a condition parks on it. A blocked or waiting task was started: it waits on what it names (an approval, a human task), labels or not. The daily report's agent-hours waiting on people follow, since they come from this rule. Set it only to differ from rule 6: it replaces both inherited lists, hold labels included. |
-| `approval_reasons` | `["waiting_human", "needs_input", "approval"]` | list of prefixes | Block reasons that ask a person, matched as whole words at the start, case-insensitive. `waiting_human: transient` blocks are left out. |
+| `approval_reasons` | `["waiting_human", "needs_input", "approval"]` | list of prefixes | Block reasons that ask a person, matched as whole words at the start, case-insensitive. `waiting_human: transient` blocks are left out. `stale_blocks` reads this section, to leave the blocks this rule lists to it. |
 | `condition_reasons` | the `[[block_conditions]]` block patterns | list of regular expressions | A block whose reason matches one (searched, case-insensitive), or that has a linked condition other than a human task, waits on a condition, not on a person, whatever its kind: agents block with `needs_input` to get past Hermes' block loop guard while a PR merges. Tie the patterns to waiting wording (`\b(?:automerge\|merge of\|waiting for)\b[^\n]{0,80}?PR\s*#(?P<pr>\d+)`) rather than any PR mention: a real question that names a PR ("may I force-push PR #12?") would leave the inbox and reach only rule 4 (after `max_block`). Keep them simple (no nested quantifiers, no leading `.*`): they run on the first 2000 characters of every blocked task's reason each tick. |
 | `approvers` | `{}` | role → human owner id | Who answers an agent role's questions (the task's role, else its owner's role). |
 | `default_approver` | unset | human owner id | Otherwise this person. |

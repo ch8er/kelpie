@@ -1,7 +1,25 @@
+import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-from kelpie.core.model import Block, Condition, ConditionKind, Session, Snapshot, Status, Task
+import pytest
+
+from kelpie.core.model import (
+    Block,
+    Condition,
+    ConditionKind,
+    KelpieMark,
+    Owner,
+    OwnerKind,
+    Session,
+    Snapshot,
+    Status,
+    Task,
+)
 from kelpie.rules._tasks import (
+    approval_reasons_list,
+    asks_a_person,
+    condition_patterns,
     is_live,
     last_exit,
     last_seen,
@@ -73,3 +91,60 @@ def test_undeclared_exit() -> None:
     assert undeclared_exit(task, snap(task, ended)) is None
     task = t(Status.IN_PROGRESS, NOW - 4 * H)
     assert undeclared_exit(task, snap(task)) is None and last_exit(task, snap(task)) is None
+
+
+def test_asks_a_person() -> None:
+    """The one test rules 4 and 13 share for a block that asks a person (#169)."""
+    owners = (Owner("ceo", "owner", OwnerKind.HUMAN), Owner("agent-1", "developer"))
+    patterns = (re.compile(r"\bPR\s*#\d+", re.IGNORECASE),)
+
+    def asks(
+        reason: str,
+        *conditions: Condition,
+        owner: str | None = "agent-1",
+        kelpie: KelpieMark | None = None,
+    ) -> bool:
+        block = Block(reason, NOW - H, kelpie=kelpie)
+        task = Task("T-1", "t", Status.BLOCKED, NOW - H, owner_id=owner, block=block)
+        snap = Snapshot(now=NOW, tasks=(task,), owners=owners, conditions=conditions)
+        return asks_a_person(task, snap, condition_reasons=patterns)
+
+    assert asks("waiting_human: needs_input: CEO: enable R2")
+    assert asks("Needs_Input which certificate?") and asks("approval")
+    assert not asks("needs_input_x: no") and not asks("approved by CI")
+    assert not asks("waiting_human: transient: provider down")
+    assert not asks("needs_input: automerge PR #12")  # waits on a condition it names
+    assert not asks("waiting_human: vendor reply", owner="ceo")  # a person's own task
+    assert asks("waiting_human: vendor reply", owner="not-in-the-directory")
+    assert asks("waiting_human: vendor reply", owner=None)
+    # Linked conditions: an unmet one other than a human task is a wait, not a question.
+    pending = Condition("C-1", ConditionKind.PR_MERGED, "T-1", satisfied=False)
+    assert not asks("needs_input: merge first", pending)
+    assert asks("needs_input: merge first", replace(pending, satisfied=True))
+    person = Condition("C-2", ConditionKind.HUMAN_TASK, "T-1", {"task": "H-1"}, satisfied=False)
+    assert asks("waiting_human: H-1", person)
+    # A dead end or a condition Kelpie cannot see is rule 4's alert, not a question.
+    ended = replace(person, params={"task": "H-1", "terminal": True}, checked_at=NOW)
+    assert not asks("waiting_human: H-1", ended)
+
+    def named(cid: str, *conditions: Condition) -> bool:
+        task = Task("T-1", "t", Status.BLOCKED, NOW - H, block=Block("needs_input", NOW - H, cid))
+        snap = Snapshot(now=NOW, tasks=(task,), owners=owners, conditions=conditions)
+        return asks_a_person(task, snap)
+
+    assert not named("C-404") and named("C-2", person)
+    # A run Kelpie stopped waits for a person whatever its words; no block asks nothing.
+    assert asks("stopped", kelpie=KelpieMark.STOP)
+    bare = Task("T-2", "t", Status.BLOCKED, NOW - H)
+    assert not asks_a_person(bare, Snapshot(now=NOW, tasks=(bare,)))
+
+
+def test_reason_and_pattern_config() -> None:
+    assert approval_reasons_list([" Ask_Human "]) == ("ask_human",)
+    assert [p.pattern for p in condition_patterns([r"PR\s*#\d+"])] == [r"PR\s*#\d+"]
+    for bad in ([], ["", "x"], "needs_input", [1]):
+        with pytest.raises(ValueError, match="approval_reasons"):
+            approval_reasons_list(bad)
+    for bad in ("x", [""], ["("], [".*"]):
+        with pytest.raises(ValueError, match="condition_reasons"):
+            condition_patterns(bad)
