@@ -190,7 +190,7 @@ board and the database read-only and writes nothing.
 | Check | Passes when |
 | --- | --- |
 | config loads | The config parses and every configured rule is known. |
-| observe only | `dry_run = true` and every rule is in `observe`. Fails by design once you leave observe. |
+| rule modes | Lists each mode with its rules and whether `[engine.rules.<name>] mode` or `default_mode` put them there, e.g. `dry_run off; act: loop_breaker (per rule); suggest: needs_you (per rule); observe: 14 rules (default_mode)`. Passes when the rules run as the config says, a deliberate `suggest` or `act` included. WARN when `dry_run = true` holds back rules configured to suggest or act (nothing acts); when a rule in `act` cannot act on this farm, because no adapter or connector carries out its actions (they become alerts) or because the startup check refuses it (`kelpie serve` refuses to start once `dry_run` is off); when `dispatch_gate`, or `conflict_warning` with `serialize`, parks tasks in `act` but `wait_condition` is not in `act` (nothing wakes them, as `kelpie serve` warns at startup); when `dry_run = false` and rules are in `suggest` or `act` but there is no `[[alerts.channels]]` (their alerts, suggestions and action notices are only logged and dropped); or when `act` comes only from `default_mode`. Fails only when `kelpie serve` would refuse to start: `dry_run = false` and a rule in `act` that the startup check refuses. The fixes point to [`act-checklist.md`](act-checklist.md). |
 | kanban.db | The Hermes board is readable (skipped without `[adapters.hermes]`). |
 | hooks fire | The spool has a line from the last hour. |
 | OTLP spans arrive | A span arrived in the last hour (skipped if none ever did: OTLP is optional). |

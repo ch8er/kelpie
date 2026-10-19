@@ -141,7 +141,8 @@ What `kelpie doctor` checks for Claude Code:
   project settings show as missing.
 - **stop markers**: `stop_dir` is a plain directory Kelpie can write, or can be created.
 
-Plus the generic checks: config and rules load, dry-run on with every rule in observe, OTLP
+Plus the generic checks: config and rules load, each rule's mode is what the config says
+(all observe, dry-run on, after this quickstart), OTLP
 spans arrived in the last hour (SKIP if none ever did or no watched task is in progress; FAIL
 when spans stopped while a task is in progress), the disks are watched (FAIL without
 `[resources.prometheus]` and node_exporter on every host: install.md, Host resources), and

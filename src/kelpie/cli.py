@@ -72,7 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     doctor = sub.add_parser(
         "doctor",
-        help="check a first live run: config, observe mode, boards and task lists, hooks, spans, "
+        help="check a first live run: config, rule modes, boards and task lists, hooks, spans, "
         "git, stop markers",
     )
     doctor.add_argument(

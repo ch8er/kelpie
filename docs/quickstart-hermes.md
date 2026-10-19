@@ -112,7 +112,8 @@ uv run kelpie status               # rules, their mode, board readable, spool ag
 curl -s localhost:9464/metrics | grep -E '^kelpie_(dry_run|engine_ticks_total|actions_total|snapshot_spans)'
 ```
 
-`kelpie doctor` checks: config and rules load; dry-run on and every rule in observe; the board
+`kelpie doctor` checks: config and rules load; each rule's mode is what the config says
+(all observe, dry-run on, after this quickstart); the board
 is readable; the spool has a line from the last hour; spans arrived in the last hour (SKIP if
 none ever did: OTLP is optional); worktrees of live tasks are readable by git; block
 reasons that name a PR can be checked by `[[block_conditions]]` (a WARN, not a failure,

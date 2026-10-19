@@ -94,17 +94,23 @@ stops as ordinary blocks.
 
 - [ ] `uv run kelpie doctor` has no FAIL ("disk watched" needs node_exporter behind `[resources.prometheus]`), and every WARN and SKIP has a reason you understand
   (a "PR blocks have conditions" WARN means rules 2 and 4 treat those blocks as stuck), run while a
-  task is running so the hooks and spans checks count. Do this **before** you change any
-  mode: its "observe only" check FAILs by design once `dry_run` is off or a rule is not in
-  `observe`.
+  task is running so the hooks and spans checks count. Run it again after every mode
+  change: its "rule modes" line lists each mode with its rules (set per rule or from
+  `default_mode`) and passes when that is what you configured. It warns while `dry_run`
+  holds back a rule you put in `suggest` or `act`, for a rule in `act` that cannot act on
+  this farm (see What can act today), for parks nothing wakes (`dispatch_gate` or a
+  serializing `conflict_warning` in `act` without `wait_condition` in `act`), for rules in
+  `suggest` or `act` with no `[[alerts.channels]]`, and for `act` from `default_mode`; it fails
+  only when `kelpie serve` would refuse to start.
 - [ ] The ledger is healthy: `kelpie_ledger_up 1` on `/metrics`, and `[storage] path` points
   at a real file (not `:memory:`), so cooldowns and once-actions survive a restart.
 - [ ] You know the `dry_run` semantics: `dry_run = true` overrides every rule's mode, so
   nothing leaves Kelpie and actions are logged as `dry_run`. With `dry_run = false` each
   rule runs in its own mode. Keep it `true` while editing modes, and flip it last.
-- [ ] No alerter is wired yet. In `suggest` mode an alert or suggestion has nobody to go to:
-  the ledger records it as `dropped` and it shows in `kelpie_actions_total` and the logs. Do
-  not count on being paged; watch the metrics and the ledger.
+- [ ] An alert channel is configured (`[[alerts.channels]]`, docs/configuration.md) before
+  step 2. Without one there is no alerter: alerts and suggestions are recorded as `dropped`
+  in the ledger and show only in `kelpie_actions_total` and the logs, notices of actions
+  that were carried out are only logged, and `kelpie doctor` warns until a channel exists.
 - [ ] `[engine]` limits are what you want: `cooldown`, `retry_after`,
   `max_actions_per_task_per_hour`.
 - [ ] Run Kelpie as the user (and with the `HERMES_HOME`) that owns the board, so
