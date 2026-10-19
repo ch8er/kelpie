@@ -29,14 +29,29 @@ from kelpie.app import (
 log = logging.getLogger("kelpie.cli")
 
 
-_RELATIVE = re.compile(r"-\d+[dhms]\w*")
+_RELATIVE = re.compile(r"-\d+[dhms]\w*", re.IGNORECASE)
+_GLOBAL_VALUES = frozenset({"--config", "--log-level"})  # global options that take a value
 
 
 def _relative_at(argv: list[str]) -> list[str]:
-    """``--at -2h`` as ``--at=-2h``: argparse takes a value that starts with ``-`` for an
-    option."""
-    out: list[str] = []
+    """``kelpie fix ... --at -2h`` as ``--at=-2h``: argparse takes a value that starts with
+    ``-`` for an option. Only for ``fix``, and not after ``--``."""
+    command = None
+    skip = False
     for arg in argv:
+        if skip:
+            skip = False
+        elif arg in _GLOBAL_VALUES:
+            skip = True
+        elif not arg.startswith("-"):
+            command = arg
+            break
+    if command != "fix":
+        return argv
+    out: list[str] = []
+    for i, arg in enumerate(argv):
+        if arg == "--":
+            return out + argv[i:]
         if out and out[-1] == "--at" and _RELATIVE.fullmatch(arg):
             out[-1] = f"--at={arg}"
         else:

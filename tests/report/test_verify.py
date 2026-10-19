@@ -464,35 +464,6 @@ def test_kelpie_fix_list(
     assert "old" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize(
-    ("when", "expected"),
-    [
-        ("now", datetime(2026, 3, 1, 12, tzinfo=UTC)),
-        ("NOW", datetime(2026, 3, 1, 12, tzinfo=UTC)),
-        ("-30m", datetime(2026, 3, 1, 11, 30, tzinfo=UTC)),
-        ("-2h", datetime(2026, 3, 1, 10, tzinfo=UTC)),
-        ("-1d2h", datetime(2026, 2, 28, 10, tzinfo=UTC)),
-        ("2026-03-01T08:00:00+00:00", datetime(2026, 3, 1, 8, tzinfo=UTC)),
-        ("2026-03-01T17:00", datetime(2026, 3, 1, 8, tzinfo=UTC)),  # Tokyo, as typed
-    ],
-)
-def test_parse_when(when: str, expected: datetime) -> None:
-    from zoneinfo import ZoneInfo
-
-    from kelpie.core.serde import parse_when
-
-    now = datetime(2026, 3, 1, 12, tzinfo=UTC)
-    assert parse_when(when, now, ZoneInfo("Asia/Tokyo")) == expected
-
-
-@pytest.mark.parametrize("when", ["yesterday", "-0m", "-", "-2x", "+2h", "2h", ""])
-def test_parse_when_refuses(when: str) -> None:
-    from kelpie.core.serde import parse_when
-
-    with pytest.raises(ValueError, match="now"):
-        parse_when(when, datetime(2026, 3, 1, 12, tzinfo=UTC), UTC)
-
-
 def test_kelpie_fix_at_now_and_relative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -507,10 +478,34 @@ def test_kelpie_fix_at_now_and_relative(
     assert main([*args, "two", "--at", "-2h"]) == 0  # not taken for an option
     assert main([*args, "three", "--at=-1d2h", "--rule", "bottlenecks"]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert all(line.startswith("fix noted at ") and "+00:00: " in line for line in out), out
+    assert all(line.startswith("fix noted at ") and "+00:00 (" in line for line in out), out
     stamps = [datetime.fromisoformat(line.split()[3].rstrip(":")) for line in out]
     assert stamps[0] - stamps[1] == pytest.approx(timedelta(hours=2), abs=timedelta(minutes=1))
     assert stamps[0] - stamps[2] == pytest.approx(timedelta(hours=26), abs=timedelta(minutes=1))
     settings = load_settings(path)
     text, code = note_fix(settings, "x", when="2h")
     assert code == 2 and "--at: invalid time '2h'" in text
+    assert note_fix(settings, "x", when="")[1] == 2  # --at= is not "now"
+    text, code = note_fix(settings, "x", when="-800000d")
+    assert code == 2 and "out of range" in text
+    assert main([*args, "four", "--at", "-2H"]) == 0
+    assert "Asia/Tokyo)" in capsys.readouterr().out  # UTC, then the clock there
+    with pytest.raises(SystemExit):  # after --: a second note, refused by argparse
+        main([*args, "five", "--", "--at", "-2h"])
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["fix", "n", "--at", "-2h"], ["fix", "n", "--at=-2h"]),
+        (["--config", "fix", "fix", "--at", "-1D2h"], ["--config", "fix", "fix", "--at=-1D2h"]),
+        (["fix", "--", "--at", "-2h"], ["fix", "--", "--at", "-2h"]),
+        (["spool", "scrub", "--at", "-2h"], ["spool", "scrub", "--at", "-2h"]),
+        (["--config=x.toml", "fix", "--at", "now"], ["--config=x.toml", "fix", "--at", "now"]),
+        (["fix", "--at", "-2x"], ["fix", "--at", "-2x"]),
+    ],
+)
+def test_relative_at_is_joined_for_fix_only(argv: list[str], expected: list[str]) -> None:
+    from kelpie.cli import _relative_at
+
+    assert _relative_at(argv) == expected

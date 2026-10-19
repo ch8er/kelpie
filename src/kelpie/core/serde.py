@@ -6,7 +6,7 @@ import dataclasses
 import re
 import types
 from collections.abc import Mapping
-from datetime import datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from enum import Enum
 from functools import cache
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
@@ -44,31 +44,38 @@ def parse_datetime(value: str | datetime) -> datetime:
     return dt
 
 
-@cache
 def parse_when(value: str, now: datetime, tz: tzinfo) -> datetime:
-    """A point in time as a person types it: ``now``; ``-`` and a duration before ``now``
-    (``-30m``, ``-2h``, ``-1d2h``: the duration grammar of the config); or an ISO 8601
-    time, in ``tz`` when it has no offset. ValueError names the accepted forms."""
+    """A past point in time as a person types it: ``now``; ``-`` then a duration, that long
+    before ``now`` (``-30m``, ``-2h``, ``-1d2h``: whole numbers with ``d``, ``h``, ``m``,
+    ``s`` in that order, any case); or an ISO 8601 date or date and time, in ``tz`` when it
+    has no offset (a date is its midnight there; a wall time a DST change skips or repeats
+    resolves as Python does, to the first). ValueError names the accepted forms."""
     text = value.strip()
-    if text.lower() == "now":
-        return now
-    if text.startswith("-"):
-        try:
-            ago = parse_duration(text[1:])
-        except ValueError:
-            ago = None
-        if ago is None or ago <= timedelta(0):
-            raise ValueError(f"invalid relative time {value!r}: use now, -30m, -2h or -1d2h")
-        return now - ago
     try:
-        at = datetime.fromisoformat(text)
-    except ValueError:
-        raise ValueError(
-            f"invalid time {value!r}: use now, a relative time such as -2h, or an ISO time"
-        ) from None
-    return at if at.tzinfo is not None else at.replace(tzinfo=tz)
+        if text.lower() == "now":
+            return now
+        if text.startswith("-"):
+            try:
+                ago = parse_duration(text[1:].strip().lower())
+            except ValueError:
+                ago = None
+            if ago is None or ago <= timedelta(0):
+                raise ValueError(f"invalid relative time {value!r}: use now, -30m, -2h or -1d2h")
+            return now - ago
+        try:
+            at = datetime.fromisoformat(text)
+        except ValueError:
+            raise ValueError(
+                f"invalid time {value!r}: use now, a relative time such as -2h, or an ISO time"
+            ) from None
+        at = at if at.tzinfo is not None else at.replace(tzinfo=tz)
+        at.astimezone(UTC)  # out of range (year 1 with an offset) raises here, not later
+        return at
+    except OverflowError:
+        raise ValueError(f"time {value!r} is out of range") from None
 
 
+@cache
 def _hints(cls: type) -> dict[str, Any]:
     return get_type_hints(cls, vars(model))
 
