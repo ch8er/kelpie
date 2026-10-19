@@ -1,0 +1,7 @@
+🟡 <b>Review ping-pong on T-1201: 9 rounds (limit 3)</b>
+
+1. <b>Rework error handling in sync worker</b> — 7.1 h · <code>T-1201</code>
+   Needed: Stop the loop and decide: accept, rescope or reassign the task
+   <a href="https://board.example.org/tasks/T-1201">Open task</a>
+Why: Task T-1201 has been through 9 review rounds (limit 3); stop the loop and decide. Escalating to human-owner. Return reasons: 1. Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase» — the fix in cart/total.py rounds before the discount, so 19.99 * 3 comes out as 59.96 instead of 59.97; нужно пересчитать скидку до округления и добавить кейс в tests/test_cart.py, затем прогнать весь набор ещё раз. Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase» — the fix in cart/total.py rounds before the discount, so 19.99 * 3 comes out as 59.96 instead of 59.97; нужно пересчитать скидку до округления и добавить кейс в tests/test_cart.py, затем прогнать весь набор ещё раз. Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase» — the fix in cart/total.py rounds before the discount, so 19.99 * 3 comes out as 59.96 instead of 59.97; нужно пересчитать скидку до округления и добавить кейс в tests/test_cart.py, затем прогнать весь набор…
+Rule: <code>ping_pong</code>

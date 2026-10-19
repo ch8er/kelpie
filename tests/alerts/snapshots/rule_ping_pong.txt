@@ -1,0 +1,7 @@
+🟡 Review ping-pong on T-1201: 9 rounds (limit 3)
+
+1. Rework error handling in sync worker — 7.1 h · T-1201
+   Needed: Stop the loop and decide: accept, rescope or reassign the task
+   Open task: https://board.example.org/tasks/T-1201
+Why: Task T-1201 has been through 9 review rounds (limit 3); stop the loop and decide. Escalating to human-owner. Return reasons: 1. use typed errors [review]; 2. typed errors too verbose, use codes [review]; 3. codes lose context [review]; 4. missing retry test [review]; 5. retry test flaky [review]; 6. revert to typed errors [review]; 7. naming [review]; 8. log format [review]; 9. use codes after all [review].
+Rule: ping_pong

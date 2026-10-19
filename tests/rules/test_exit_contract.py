@@ -71,7 +71,12 @@ def test_declared_but_unapplied_status_alerts() -> None:
     snap = Snapshot(now=NOW, tasks=(task(),), sessions=(session(final_status=Status.DONE),))
     [action] = ExitContract().evaluate(snap)
     assert action.kind is ActionKind.ALERT and "did not apply" in action.reason
-    assert action.params == {"session_id": "S-1", "declared": "done"}
+    assert action.params == {
+        "session_id": "S-1",
+        "declared": "done",
+        "headline": "T-1 is still 'in_progress': the declared 'done' was not applied",
+        "needed": "Apply the declared status on the board",
+    }
     # Not before the grace period, and not when someone changed the task since.
     recent = session(ended=NOW - timedelta(minutes=5), final_status=Status.DONE)
     assert run(task(), recent) == []

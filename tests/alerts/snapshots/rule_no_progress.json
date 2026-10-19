@@ -1,0 +1,118 @@
+{
+  "text": "🟡 No progress on T-F201: 288,960 tokens in 2h\n\n1. Watch nightly import queue — 4.0 h · T-F201\n   Needed: Check whether the session is stuck before it spends more\n   Open task: https://board.example.org/tasks/T-F201\nWhy: Session S-F201 of task T-F201 spent 288,960 tokens in the last 2h with no progress: no status change, commit or artifact.\nRule: no_progress",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "No progress on T-F201: 288,960 tokens in 2h",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Watch nightly import queue",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 4.0 h · "
+            },
+            {
+              "type": "text",
+              "text": "T-F201",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Needed: "
+            },
+            {
+              "type": "text",
+              "text": "Check whether the session is stuck before it spends more"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/T-F201",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Session S-F201 of task T-F201 spent 288,960 tokens in the last 2h with no progress: no status change, commit or artifact."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "no_progress",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

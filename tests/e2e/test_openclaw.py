@@ -104,7 +104,7 @@ def test_runaway_loop_is_stopped_on_an_openclaw_session(farm: Farm, gateway: Gat
     kelpie.wait_ticks(3)  # a stopped session must not be stopped again
     farm.stop()
 
-    assert message.startswith("\U0001f534 Runaway run: ") and " · c1" in message
+    assert message.startswith("\U0001f534 Runaway run on c1: ") and " · c1" in message
     did = f"Kelpie did: Stopped run {LOOP}; its current run was aborted; {HELD}."
     assert message.splitlines()[-2] == did
     (abort,) = gateway.calls()

@@ -1,0 +1,126 @@
+{
+  "text": "🟡 Dead end in front of T-1171: T-9999 is not on the board (archived or out of reach)\n\n1. Reuse the auth client — 2.0 h · T-1171\n   Needed: Replace the blocker that can never clear\n   Blocking: 1 task · Open task: https://board.example.org/tasks/T-1171\nWhy: Blocker chain T-1172 -&gt; T-1171 -&gt; T-9999 ends in a dead end: T-9999 is not on the board (archived or out of reach) (T-1171 waiting on task_status condition wait:T-1171:T-9999). 1 task(s) wait behind T-1171: T-1172. Nothing will move them until a human replaces the blocker.\nRule: orphan_status",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Dead end in front of T-1171: T-9999 is not on the board (archived or out of reach)",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Reuse the auth client",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 2.0 h · "
+            },
+            {
+              "type": "text",
+              "text": "T-1171",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Needed: "
+            },
+            {
+              "type": "text",
+              "text": "Replace the blocker that can never clear"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Blocking: 1 task"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/T-1171",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Blocker chain T-1172 -> T-1171 -> T-9999 ends in a dead end: T-9999 is not on the board (archived or out of reach) (T-1171 waiting on task_status condition wait:T-1171:T-9999). 1 task(s) wait behind T-1171: T-1172. Nothing will move them until a human replaces the blocker."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "orphan_status",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

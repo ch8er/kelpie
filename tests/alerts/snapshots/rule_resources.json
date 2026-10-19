@@ -1,0 +1,62 @@
+{
+  "text": "🔴 LLM provider provider-main has no quota left: 2 agent tasks stuck\n\nLLM provider provider-main has no quota left until 2026-03-02T21:00:00+00:00 (in 3h). 2 agent task(s) that use it cannot make progress: T-601, T-602. Run fewer agents on it at once or move heavy work past the reset.\nRule: resources",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🔴 "
+            },
+            {
+              "type": "text",
+              "text": "LLM provider provider-main has no quota left: 2 agent tasks stuck",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "LLM provider provider-main has no quota left until 2026-03-02T21:00:00+00:00 (in 3h). 2 agent task(s) that use it cannot make progress: T-601, T-602. Run fewer agents on it at once or move heavy work past the reset."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "resources",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

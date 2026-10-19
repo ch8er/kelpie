@@ -72,6 +72,8 @@ from kelpie.core.model import (
 )
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params
+from kelpie.rules._alerts import count as counted
 from kelpie.rules._ci_outage import outages, passed_again
 
 NAME = "ci_economy"
@@ -202,6 +204,12 @@ class CiEconomy:
         for c, found in wasted.items():
             if found:
                 params[f"{c}_builds"] = [b.id for b in found[:_MAX_LISTED]]
+        params.update(
+            alert_params(
+                f"CI waste: {count} of {counted(len(recent), 'build')} burned {_minutes(minutes)} "
+                "for nothing"
+            )
+        )
         # Announced again each time the waste doubles: the key moves to the next level.
         level = int(math.log2(minutes / max(self.waste_min_minutes, 1.0)))
         starts = [b.started_at or b.finished_at for found in wasted.values() for b in found]
@@ -303,6 +311,9 @@ class CiEconomy:
                     "limit": limit,
                     "resets_at": r.resets_at.isoformat() if r.resets_at else None,
                     "blocked_tasks": blocked,
+                    **alert_params(
+                        f"CI minutes quota {r.name} is exhausted: builds will not start"
+                    ),
                 },
             )
         if burn <= 0:
@@ -327,6 +338,7 @@ class CiEconomy:
                 "burn_per_hour": round(burn, 2),
                 "runs_out_at": runs_out_at.isoformat(),
                 "resets_at": r.resets_at.isoformat() if r.resets_at else None,
+                **alert_params(f"CI minutes quota {r.name} runs out in about {_hours(left)}"),
             },
         )
 
@@ -352,6 +364,7 @@ class CiEconomy:
                 "burn_per_hour": round(burn, 2),
                 "projected": round(projected),
                 "resets_at": r.resets_at.isoformat() if r.resets_at else None,
+                **alert_params(f"CI would use more than quota {r.name} within {days:g} days"),
             },
         )
 

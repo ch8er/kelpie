@@ -1,0 +1,122 @@
+{
+  "text": "🔴 Runaway run on T-F101: 900 identical consecutive `heartbeat_check` calls\n\n1. Nightly maintenance heartbeat — 9.9 h · T-F101\n   Needed: Stop the run if it is still going, then check the task\n   Open task: https://board.example.org/tasks/T-F101\nWhy: Runaway run: session S-F101 (agent agent-ops-1, task T-F101) made 900 identical consecutive `heartbeat_check` calls (limit 8 within 10 minutes). About 72.0M tokens were spent since it began. Check the task before resuming it.\nKelpie did: Suggested: stop run S-F101 (not done, rule in suggest mode).\nRule: loop_breaker",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🔴 "
+            },
+            {
+              "type": "text",
+              "text": "Runaway run on T-F101: 900 identical consecutive `heartbeat_check` calls",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Nightly maintenance heartbeat",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 9.9 h · "
+            },
+            {
+              "type": "text",
+              "text": "T-F101",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Needed: "
+            },
+            {
+              "type": "text",
+              "text": "Stop the run if it is still going, then check the task"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/T-F101",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Runaway run: session S-F101 (agent agent-ops-1, task T-F101) made 900 identical consecutive `heartbeat_check` calls (limit 8 within 10 minutes). About 72.0M tokens were spent since it began. Check the task before resuming it."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Kelpie did: Suggested: stop run S-F101 (not done, rule in suggest mode)."
+            },
+            {
+              "type": "text",
+              "text": "\nRule: "
+            },
+            {
+              "type": "text",
+              "text": "loop_breaker",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

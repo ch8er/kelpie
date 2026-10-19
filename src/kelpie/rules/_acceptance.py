@@ -170,6 +170,13 @@ class Criterion:
             return True
         return None
 
+    def example_result(self) -> str | None:
+        """A result that answers this criterion after "<ref>: met, " ("20/20 passed" for
+        "20 runs in a row, 20 of 20"), for telling people how to report it; None when no
+        simple one does (it needs numbers of its own, such as a version)."""
+        tries = [f"{a}/{b} passed" for a, b in _RATIO.findall(self.text)[:1]] + ["passed"]
+        return next((t for t in tries if self.answered_by(f"{self.ref}: met, {t}")), None)
+
     def _vetoes(self, text: str) -> bool:
         """A failure, a partial or pending result, a run count other than its own, something
         still to do or a request, anywhere in ``text``, asides included."""

@@ -26,9 +26,8 @@ Kelpie demo: one working day on a simulated agent farm
 10:05  Kelpie notices (loop_breaker): identical consecutive calls, past the
        limit.
        ┌ alert, as Telegram shows it
-       │ 🔴 Runaway run: session hermes-run-4 (agent ops, task t_heartbeat)
-       │ made 10 identical consecutive `heartbeat_check` calls (limit 8 within
-       │ 10…
+       │ 🔴 Runaway run on t_heartbeat: 10 identical consecutive
+       │ `heartbeat_check` calls
        │ 
        │ 1. Nightly maintenance heartbeat · t_heartbeat
        │ Why: Runaway run: session hermes-run-4 (agent ops, task t_heartbeat)

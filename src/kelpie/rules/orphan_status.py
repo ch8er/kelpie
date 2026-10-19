@@ -85,8 +85,8 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from fnmatch import fnmatchcase
 from typing import Any
@@ -96,7 +96,8 @@ from kelpie.core.alerts import ANNOUNCES
 from kelpie.core.model import Condition, ConditionKind, Owner, OwnerKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._chains import NOT_FOUND, BlockerGraph
+from kelpie.rules._alerts import alert_params, count
+from kelpie.rules._chains import NOT_FOUND, BlockerGraph, behind_lookup
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     HANDOFF,
@@ -185,7 +186,10 @@ class OrphanStatus:
             actions.extend(self._dead_end_chains(snapshot))
         if self.max_recovery_depth is not None:
             actions.extend(self._recovery_loops(snapshot, self.max_recovery_depth))
-        return actions
+        # "Blocking" counts the tasks behind as rules 2, 4 and 13 do (their graph, their
+        # session staleness), not the open dependents that set the severity.
+        behind = behind_lookup(snapshot)
+        return [_with_blocking(a, behind) for a in actions]
 
     def _orphaned(self, task: Task, snapshot: Snapshot) -> bool | None:
         """None if the task is fine, else whether its owner is missing from the directory."""
@@ -249,6 +253,14 @@ class OrphanStatus:
                 "dependents": len(waiting),
                 "dependent_ids": waiting,
                 **({ANNOUNCES: f"reassign:{key}"} if candidate is not None else {}),
+                **alert_params(
+                    f"{task.id} is '{task.status}' and its {role} {responsible(task)} is gone"
+                    if gone
+                    else f"{task.id} is '{task.status}' with no owner",
+                    f"Let {candidate.id} take it, or pick another owner"
+                    if candidate is not None
+                    else "Pick an owner for the task",
+                ),
             },
         )
         if candidate is not None:
@@ -284,11 +296,15 @@ class OrphanStatus:
         ident: str | None = None,
         waiting: list[str] | None = None,
         stay: bool = True,
+        *,
+        headline: str,
+        needed: str,
         **params: Any,
     ) -> Action:
         """A lasting-state alert; severity by the open tasks behind ``task`` (``waiting``,
         else its open dependents). The state is keyed by ``ident`` (default the task id)
-        and, with ``stay``, the task's current status stay."""
+        and, with ``stay``, the task's current status stay. The alert's ``headline`` and
+        ``needed`` are the caller's (``blocking`` is :meth:`evaluate`'s)."""
         if waiting is None:
             waiting = _open_dependents(task.id, snapshot)
             reason = f"{reason} {len(waiting)} open task(s) depend on {task.id}."
@@ -305,7 +321,12 @@ class OrphanStatus:
             key=f"{key}:{severity}",
             state=f"{NAME}:{key}",
             since=since,
-            params={"pattern": pattern, "dependents": len(waiting), **params},
+            params={
+                "pattern": pattern,
+                "dependents": len(waiting),
+                **params,
+                **alert_params(headline, needed),
+            },
         )
 
     def _parent_left_open(self, task: Task, done: datetime, snapshot: Snapshot) -> Iterable[Action]:
@@ -339,6 +360,8 @@ class OrphanStatus:
                     "without merging, or reverted): their work has not landed. Redo or reopen "
                     "them; if they were replaced, a person decides whether to close it."
                 )
+                headline = f"Parent {task.id}: subtasks finished, but PRs are not merged"
+                needed = "Redo or reopen the unmerged PRs, or decide whether to close the parent"
             else:
                 pattern, unmerged = PARENT_UNVERIFIED, []
                 gap = (
@@ -347,6 +370,8 @@ class OrphanStatus:
                     else f"no merged PR for {_names(list(prs.uncovered))}"
                 )
                 why = f". Kelpie cannot confirm its work landed ({gap}): check its PRs."
+                headline = f"Parent {task.id}: subtasks finished, landing not confirmed"
+                needed = "Check the family's PRs, then close the parent or reopen work"
             yield self._stop_alert(
                 pattern,
                 task,
@@ -356,6 +381,8 @@ class OrphanStatus:
                 unmerged_prs=unmerged,
                 merged_prs=merged,
                 uncovered=list(prs.uncovered),
+                headline=headline,
+                needed=needed,
                 **common,
             )
             return
@@ -367,6 +394,8 @@ class OrphanStatus:
             since,
             snapshot,
             merged_prs=merged,
+            headline=f"Parent {task.id} left open: all subtasks finished, PRs merged",
+            needed="Close the parent task",
             **common,
             **{ANNOUNCES: close_key},
         )
@@ -417,6 +446,10 @@ class OrphanStatus:
             snapshot,
             waiting=waiting,
             waiting_tasks=waiting,
+            headline=(
+                f"{task.id} sits in '{task.status}' while {count(len(waiting), 'task', 'wait')}"
+            ),
+            needed="Triage it, start it, or drop the dependency",
         )
 
     def _unfollowed_run(self, task: Task, snapshot: Snapshot) -> Action | None:
@@ -443,6 +476,8 @@ class OrphanStatus:
             snapshot,
             session_id=end.session.id,
             declared=declared.value,
+            headline=f"Nobody acts on {task.id}: its run declared '{declared}'",
+            needed="Apply the declared status, or send the task back",
         )
 
     def _undriven_review(self, task: Task, snapshot: Snapshot) -> Action | None:
@@ -479,6 +514,8 @@ class OrphanStatus:
             quiet_since,
             snapshot,
             owner_id=owner.id,
+            headline=f"Nothing drives the review of {task.id}",
+            needed="Assign a reviewer, or move the task on",
         )
 
     def _unwoken_dependents(self, snapshot: Snapshot, after: timedelta) -> Iterable[Action]:
@@ -522,6 +559,8 @@ class OrphanStatus:
                 parent.status_since,
                 snapshot,
                 dependent_ids=waiting,
+                headline=f"{count(len(waiting), 'task')} still in backlog after {pid} finished",
+                needed="Move the waiting tasks to ready",
             )
 
     def _dead_end_chains(self, snapshot: Snapshot) -> Iterable[Action]:
@@ -561,6 +600,8 @@ class OrphanStatus:
                     dead_end=dead.ref,
                     chain=chain,
                     stuck_ids=stuck,
+                    headline=f"Dead end in front of {tid}: {dead.ref} {dead.why}",
+                    needed="Replace the blocker that can never clear",
                 )
 
     def _is_recovery(self, task: Task) -> bool:
@@ -651,7 +692,41 @@ class OrphanStatus:
                 origin=origin,
                 chain=chain,
                 cycle=cycle,
+                headline=(
+                    f"Recovery tasks recover each other in a cycle from {top.id}"
+                    if cycle
+                    else f"Recovery tasks {len(chain)} deep, never reaching {origin}"
+                ),
+                needed=f"Look at the original problem of {origin}",
             )
+
+
+# Alerts whose task holds nothing up itself: a finished parent whose dependents nobody woke,
+# the top of a recovery loop (what waits, waits for its origin).
+_NOT_BLOCKING = frozenset({"dependents-not-woken", "recovery-loop"})
+
+
+def _with_blocking(action: Action, behind: Callable[[str], list[str]]) -> Action:
+    """An alert about a task that holds others up, with how many tasks wait behind it. When
+    its open dependents all move on their own (in progress, in review), none waits on it
+    yet: the reason's count of them says so, so it reads as "Blocking: none" does."""
+    task_id = action.task_id
+    if (
+        action.kind is not ActionKind.ALERT
+        or task_id is None
+        or action.params.get("pattern") in _NOT_BLOCKING
+    ):
+        return action
+    blocking = len(behind(task_id))
+    reason, dependents = action.reason, action.params.get("dependents")
+    if blocking == 0 and isinstance(dependents, int) and dependents > 0:
+        for said in ("depend on it.", f"depend on {task_id}."):
+            sentence = f"{dependents} open task(s) {said}"
+            if sentence in reason:
+                yet = f"{sentence[:-1]} (none of them waiting on it yet)."
+                reason = reason.replace(sentence, yet, 1)
+                break
+    return replace(action, reason=reason, params={**action.params, "blocking": blocking})
 
 
 def _names_task(condition: Condition, task_id: str) -> bool:

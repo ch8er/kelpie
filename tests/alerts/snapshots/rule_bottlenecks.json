@@ -1,0 +1,62 @@
+{
+  "text": "🟡 Human tasks gate 28 agent tasks while 2 agents sit idle\n\n3 of 5 agent slot(s) running, agent-dev-4, agent-dev-5 idle with no ready work. Human tasks gate 28 agent task(s): T-1600 ('Store the products in the app store console', human-owner): 28 agent task(s). Kelpie does not change dependencies: is each link needed?\nRule: bottlenecks",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Human tasks gate 28 agent tasks while 2 agents sit idle",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "3 of 5 agent slot(s) running, agent-dev-4, agent-dev-5 idle with no ready work. Human tasks gate 28 agent task(s): T-1600 ('Store the products in the app store console', human-owner): 28 agent task(s). Kelpie does not change dependencies: is each link needed?"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "bottlenecks",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+🔴 <b>Runaway run on T-F101: 900 identical consecutive `heartbeat_check` calls</b>
+
+1. <b>Nightly maintenance heartbeat</b> — 9.9 h · <code>T-F101</code>
+   Needed: Stop the run if it is still going, then check the task
+   <a href="https://board.example.org/tasks/T-F101">Open task</a>
+Why: Runaway run: session S-F101 (agent agent-ops-1, task T-F101) made 900 identical consecutive `heartbeat_check` calls (limit 8 within 10 minutes). About 72.0M tokens were spent since it began. Check the task before resuming it.
+Kelpie did: Suggested: stop run S-F101 (not done, rule in suggest mode).
+Rule: <code>loop_breaker</code>

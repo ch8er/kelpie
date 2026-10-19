@@ -315,7 +315,12 @@ def test_rule_2_lists_the_stuck_tasks() -> None:
     assert alert.params["stuck_ids"] == ["W"] and "wait behind it" in alert.reason
     nothing = snap(task("F", Status.WAITING), task("W", Status.BACKLOG), deps=deps)
     [alert] = WaitCondition().evaluate(nothing)
-    assert alert.params == {"stuck_ids": ["W"]}
+    assert alert.params == {
+        "stuck_ids": ["W"],
+        "headline": "Nothing will wake F: no condition registered",
+        "needed": "Register a condition for the task, or move it on",
+        "blocking": 1,
+    }
 
 
 def test_chain_ignores_live_and_unchecked_links() -> None:

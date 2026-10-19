@@ -1,0 +1,7 @@
+🟡 <b>Dead end in front of T-1171: T-9999 is not on the board (archived or out of reach)</b>
+
+1. <b>Reuse the auth client</b> — 2.0 h · <code>T-1171</code>
+   Needed: Replace the blocker that can never clear
+   Blocking: 1 task · <a href="https://board.example.org/tasks/T-1171">Open task</a>
+Why: Blocker chain T-1172 -&gt; T-1171 -&gt; T-9999 ends in a dead end: T-9999 is not on the board (archived or out of reach) (T-1171 waiting on task_status condition wait:T-1171:T-9999). 1 task(s) wait behind T-1171: T-1172. Nothing will move them until a human replaces the blocker.
+Rule: <code>orphan_status</code>

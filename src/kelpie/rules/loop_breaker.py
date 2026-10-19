@@ -66,6 +66,7 @@ from kelpie.core.model import (
 from kelpie.core.serde import parse_duration
 from kelpie.core.spend import gap_causes
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params
 from kelpie.rules._calls import (
     PollPatterns,
     call_key,
@@ -175,6 +176,10 @@ class LoopBreaker:
                     "reported_usd": r.reported_usd,
                     "gap_usd": r.gap_usd,
                     "gap_ratio": r.gap_ratio,
+                    **alert_params(
+                        f"The {provider} bill and the traces disagree by "
+                        f"${abs(r.gap_usd):,.2f} for {r.day:%Y-%m-%d}"
+                    ),
                 },
             )
 
@@ -286,6 +291,10 @@ class LoopBreaker:
                     "trigger": trip.kind,
                     "tokens_since": tokens,
                     ANNOUNCES: f"stop:{session.id}",
+                    **alert_params(
+                        f"Runaway run on {session.task_id}: {trip.what}",
+                        "Stop the run if it is still going, then check the task",
+                    ),
                 },
             )
         yield Action(
@@ -320,6 +329,8 @@ class LoopBreaker:
         if b.scope is BudgetScope.AGENT:
             params["owner_id"] = b.subject
         base = f"{b.budget}:{b.subject}"
+        # A subscription's budget is estimated from the traces: its headline says so.
+        about, tag = ("about ", " (estimate)") if b.estimated else ("", "")
         if b.state is BudgetState.SOFT:
             yield Action(
                 ActionKind.ALERT,
@@ -331,7 +342,14 @@ class LoopBreaker:
                 severity=Severity.WARNING,
                 key=f"budget:{base}:soft",
                 state=f"{NAME}:budget:{base}",
-                params={**params, "runs_out_at": _iso(b.runs_out_at)},
+                params={
+                    **params,
+                    "runs_out_at": _iso(b.runs_out_at),
+                    **alert_params(
+                        f"Budget {b.budget} passed its soft threshold: {about}"
+                        f"{_amount(b.spent, b.unit)} of {_amount(b.soft, b.unit)}{tag}"
+                    ),
+                },
             )
         elif b.state is BudgetState.HARD:
             # A task or agent budget is that subject's own: stop its sessions. A day or
@@ -369,6 +387,11 @@ class LoopBreaker:
                     "runs_out_at": _iso(b.runs_out_at),
                     "session_ids": sorted(s.id for s in live),
                     ANNOUNCES: [f"stop:{s.id}:budget:{base}" for s in live],
+                    **alert_params(
+                        f"Budget {b.budget} passed its hard limit: {about}"
+                        f"{_amount(b.spent, b.unit)} of {_amount(b.hard, b.unit)}{tag}",
+                        "Raise the budget, or stop the task's work" if task_id else None,
+                    ),
                 },
             )
             for s in live:
@@ -397,7 +420,13 @@ class LoopBreaker:
                 severity=Severity.INFO,
                 key=f"forecast:{base}",
                 state=f"{NAME}:forecast:{base}",
-                params={**params, "runs_out_at": _iso(b.runs_out_at)},
+                params={
+                    **params,
+                    "runs_out_at": _iso(b.runs_out_at),
+                    **alert_params(
+                        f"Budget {b.budget} runs out {_in(b.runs_out_at - snapshot.now)}{tag}"
+                    ),
+                },
             )
         if (
             b.estimated
@@ -414,7 +443,14 @@ class LoopBreaker:
                 severity=Severity.INFO,
                 key=f"limit:{base}",
                 state=f"{NAME}:limit:{base}",
-                params={**params, "next_limit_at": _iso(b.next_limit_at)},
+                params={
+                    **params,
+                    "next_limit_at": _iso(b.next_limit_at),
+                    **alert_params(
+                        f"Provider limit expected {_in(b.next_limit_at - snapshot.now)} "
+                        f"for budget {b.budget}"
+                    ),
+                },
             )
 
 

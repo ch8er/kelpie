@@ -209,6 +209,7 @@ def test_a_test_that_sends_several_tasks_back_is_flaky() -> None:
         "finding": "flaky_test",
         "test": "test_login_timeout",
         "tasks": ["T-1", "T-2"],
+        "headline": "Flaky test test_login_timeout sent 2 tasks back",
     }
     assert "fails other tasks' work" in alert.reason and alert.state
 

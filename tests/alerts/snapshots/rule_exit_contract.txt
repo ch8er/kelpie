@@ -1,0 +1,7 @@
+🔴 Acceptance criterion AC-87d75a of T-1801 not shown as met
+
+1. APP-101 Fix flaky login test — 3.0 h · T-1801
+   Needed: Comment "AC-87d75a: met, <result>" (for example: 20/20 passed), or run a CI workflow named AC-87d75a that passes on the task's branch
+   Open task: https://board.example.org/tasks/T-1801
+Why: Task T-1801 ('APP-101 Fix flaky login test'): its PR example/app#501 is set to merge by itself, but nothing shows the acceptance criterion human-lead stated was met: "Before automerge: 20 runs in a row, 20 of 20." (AC-87d75a). Tell human-lead, reviewer: evidence is a comment that starts with "AC-87d75a: met" and gives the result (or a CI workflow named AC-87d75a that passed) before this lands.
+Rule: exit_contract

@@ -64,6 +64,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Session, Snapshot, SpanKind, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     Exit,
@@ -236,7 +237,16 @@ class Checkpoints:
             key=f"wip-decision:{session.id}",  # shared with the WIP commit: the first stands
             once=True,
             once_per_key=True,
-            params={"session_id": session.id, "branch": branch, "why": why},
+            params={
+                "session_id": session.id,
+                "branch": branch,
+                "why": why,
+                **alert_params(
+                    f"Uncommitted work left on {task.id}{f' ({branch})' if branch else ''}, "
+                    "not saved by Kelpie",
+                    "Commit or drop the changes in the session's worktree by hand",
+                ),
+            },
         )
 
     def _remind(self, task: Task, session: Session, snapshot: Snapshot) -> Iterable[Action]:
