@@ -376,9 +376,9 @@ def test_a_family_glob_does_not_claim_another_platforms_calls(
     path.write_text(CONFIG + '[spend.providers.anthropic]\nmodels = ["claude-*"]\n')
     (r,) = reconcile_spend(load_settings(path), store, [ReportedCost("anthropic", D2, 8.0)], NOW)
     assert r.estimated_usd == pytest.approx(8.0)  # neither the Bedrock nor the Vertex call
-    path.write_text(CONFIG + '[spend.providers.anthropic]\nmodels = ["*@*"]\n')
+    path.write_text(CONFIG + '[spend.providers.anthropic]\nmodels = ["*@*", "*.anthropic.*"]\n')
     (r,) = reconcile_spend(load_settings(path), store, [ReportedCost("anthropic", D2, 8.0)], NOW)
-    assert r.estimated_usd == pytest.approx(12.0)  # a pattern with the wrapping claims it
+    assert r.estimated_usd == pytest.approx(16.0)  # patterns naming the platform claim both
 
 
 def test_the_retention_bounds_the_days_on_its_own(tmp_path: Path, store: SpanStore) -> None:

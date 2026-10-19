@@ -843,7 +843,7 @@ the default's 1.25 × input.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `mode` | `"auto"` | `api`: pay per token, spend is dollars. `subscription`: a plan with a usage limit, spend is tokens and the share of the limit (dollars only as an estimate). `auto`: decided from the rest of the config, below. |
-| `models` | `[]` | Model names or globs that belong to this provider (on the id as written, or case-insensitively on its family id; for reconciling with a cost report, another platform's ids are claimed only by a pattern that carries the wrapping, such as `us.anthropic.*`, `*@*` or `openrouter/*`). Needed only for models the default table and the name rules below do not place. |
+| `models` | `[]` | Model names or globs that belong to this provider (on the id as written, or case-insensitively on its family id; for reconciling with a cost report, another platform's ids are claimed only by a pattern that names the platform, such as `*.anthropic.*`, `*@*` or `openrouter/*`). Needed only for models the default table and the name rules below do not place. |
 | `quotas` | `[]` | Names of `[connectors.llm_quotas]` probes that watch this provider's limits, so a subscription budget's `providers` (those names) can tell this provider's mode. |
 | `limit_tokens` | unset | Subscriptions: the tokens your plan allows per `limit_window`, as you know them; Kelpie never guesses a limit. |
 | `limit_window` | unset | Duration (`"5h"`, `"7d"`), together with `limit_tokens`. |
@@ -1249,8 +1249,8 @@ counted LLM calls of the provider and compares the sum with the bill:
 a failure, in 5 minutes). A call belongs to the day its span ended in. A call counts for
 the provider of its model ([[spend]](#spend)) unless another platform wraps the id
 (Bedrock, Vertex `@date`, a `vendor/` router such as OpenRouter): that platform bills it,
-not this cost report, unless a `[spend.providers.<name>] models` pattern that carries the
-wrapping matches the id as written (`us.anthropic.*` does; `claude-*` claims neither
+not this cost report, unless a `[spend.providers.<name>] models` pattern that names the
+platform matches the id as written (`*.anthropic.*` does; `claude-*` claims neither
 `us.anthropic.claude-...` nor `claude-...@date`). Calls without a known
 provider are reported as unknown tokens. Until a newer day of a provider settles (with
 `days = 1`, before 06:00 UTC), its last reconciled day stands; after a restart, the

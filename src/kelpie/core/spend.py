@@ -49,7 +49,7 @@ from typing import Any
 
 from kelpie.core.budgets import Budget, BudgetMode, BudgetScope, BudgetUnit
 from kelpie.core.model import Reconciliation, ReportedCost
-from kelpie.core.prices import PriceTable, canonical_model, platform_wrapped
+from kelpie.core.prices import PriceTable, canonical_model, model_id
 from kelpie.core.serde import parse_duration
 
 __all__ = [
@@ -136,17 +136,17 @@ class SpendConfig:
 
     def configured_provider(self, model: str | None, *, as_written: bool = False) -> str | None:
         """The ``[spend.providers.<name>]`` whose ``models`` match ``model``, if any.
-        ``as_written``: only patterns that carry a platform's wrapping themselves
-        (:func:`~kelpie.core.prices.platform_wrapped`: ``us.anthropic.*``, ``*@*``,
-        ``openrouter/*``), on the id as written; so ``claude-*`` claims neither
-        ``us.anthropic.claude-...`` nor Vertex's ``claude-...@date``."""
+        ``as_written``: only a pattern that matches the id as written and not the id
+        without its wrapping (:func:`~kelpie.core.prices.model_id`), i.e. one that names
+        the platform (``*.anthropic.*``, ``*@*``, ``openrouter/*``); so ``claude-*`` claims
+        neither ``us.anthropic.claude-...`` nor Vertex's ``claude-...@date``."""
         if not model:
             return None
         canonical = canonical_model(model)
         for p in self.settings.providers:
             for m in p.models:
                 if as_written:
-                    if platform_wrapped(m) and fnmatchcase(model, m):
+                    if fnmatchcase(model, m) and not fnmatchcase(model_id(model), m):
                         return p.name
                 elif fnmatchcase(model, m) or fnmatchcase(canonical, m.lower()):
                     return p.name
