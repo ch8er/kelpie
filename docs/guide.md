@@ -244,8 +244,11 @@ report; no LLM is involved.
   tasks spent the most task-hours waiting for conditions, against the agent-hours the
   role's agents had a session running, with a concrete suggestion. A task's wait counts
   under a hold (rule 6's hold labels), else the kind of the unmet condition it waits on (a
-  person's `human_task`, CI, merges, LLM quotas, other tasks, timers), else a person when
-  rule 13 listed it that day (an approval, parked on a human task), else unknown. The
+  person's `human_task`, CI, PRs to pass checks and merge, LLM quotas, other tasks,
+  timers; a red CI comes before the merge it holds up), else a person when rule 13 listed
+  it that day (an approval, parked on a human task), else unknown. While rule 9's CI outage
+  incident is open, the waits it explains (tasks it names, CI and merge waits in its
+  repositories) count under "a CI outage" for that time. The
   report makes no network calls: it runs the connector steps that read only the board
   (`task_status`, human tasks from block reasons), and a block reason a
   `[[block_conditions]]` pattern matches counts as a CI or merge wait by the pattern's kind,

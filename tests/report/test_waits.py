@@ -172,7 +172,8 @@ def test_what_a_task_waits_on_now_beats_rule_13() -> None:
 
 def test_waits_by_cause_per_role_and_the_biggest() -> None:
     roles = {
-        r.role: r for r in throughput(TASKS, REVIEWED, OWNERS, (), START, END, wait_cause=causes())
+        r.role: r
+        for r in throughput(TASKS, REVIEWED, OWNERS, (), START, END, wait_cause=causes().split)
     }
     rev, dev = roles["reviewer"], roles["developer"]
     assert rev.waits == {"ci": pytest.approx(64.0)}
@@ -198,7 +199,7 @@ def test_no_wait_no_headline() -> None:
     assert all(not r.waits for r in roles)
     assert biggest_wait(roles, TASKS, causes()) is None
     short = Task("S", "S", Status.WAITING, END - timedelta(hours=MIN_HOURS / 2), role="developer")
-    roles = throughput((short,), (), OWNERS, (), START, END, wait_cause=causes())
+    roles = throughput((short,), (), OWNERS, (), START, END, wait_cause=causes().split)
     assert biggest_wait(roles, (short,), causes()) is None
 
 
@@ -258,7 +259,7 @@ def test_only_the_day_s_ledger_counts() -> None:
 def test_waiting_for_a_review_is_no_work() -> None:
     in_review = Task("V", "V", Status.REVIEW, at(0), role="reviewer", owner_id="rev-1")
     tasks = (*TASKS, in_review)
-    roles = throughput(tasks, REVIEWED, OWNERS, (), START, END, wait_cause=causes())
+    roles = throughput(tasks, REVIEWED, OWNERS, (), START, END, wait_cause=causes().split)
     wait = biggest_wait(roles, tasks, causes())
     assert wait is not None and wait.work_hours == pytest.approx(2.0)
 
@@ -310,3 +311,66 @@ def test_a_declared_ci_wait_heads_the_report() -> None:
     empty = Block("CI of ", at(8))  # no PR named: no declared wait
     of = WaitCauses((), (), (), kinds)
     assert of(Task("E", "e", Status.BLOCKED, at(8), block=empty)) == UNKNOWN
+
+
+# --- CI outage (incident 20, track F's rule 9 incident) ---------------------------------
+
+
+def outage_state(key: str, since: datetime, last: datetime) -> Any:
+    from kelpie.core.actions import Severity
+    from kelpie.core.states import OpenState
+    from kelpie.report.store import StateRow
+
+    sid = f"ci_economy:outage:{key}"
+    return StateRow(OpenState(sid, "ci_economy", since, since, last, 0, Severity.WARNING, "s"))
+
+
+def outage_sample(when: datetime, **params: Any) -> LedgerEntry:
+    return replace(ledger("ci_economy", **params), at=when)
+
+
+def test_a_red_ci_comes_before_the_merge_it_holds_up() -> None:
+    t = Task("M1", "m", Status.WAITING, at(8))
+    both = (
+        Condition("ci", ConditionKind.CI_STATUS, "M1", {"repo": "x/y"}, registered_at=at(1)),
+        Condition("mg", ConditionKind.PR_MERGED, "M1", {"repo": "x/y"}, registered_at=at(2)),
+    )
+    assert WaitCauses(both, ())(t) == "ci"
+    green = (replace(both[0], satisfied=True), both[1])
+    assert WaitCauses(green, ())(t) == "merge"
+    from kelpie.report.waits import WAIT_CAUSES
+
+    assert "merges" not in WAIT_CAUSES["merge"]  # not "waiting for merges" while CI may be red
+
+
+def test_waits_inside_a_ci_outage_count_under_it() -> None:
+    from kelpie.report.waits import CI_OUTAGE, outages
+
+    state = outage_state("app-xcode", at(10), at(16)).state
+    samples = [
+        outage_sample(at(10), signature="build / xcodebuild", repos=["Example/App"], tasks=["N1"]),
+        outage_sample(at(11), signature="build / xcodebuild", repos=["example/app"], tasks=["N2"]),
+        outage_sample(at(12), signature="other", outage="another", tasks=["X1"]),  # not this one
+        outage_sample(at(20), signature="build / xcodebuild", tasks=["LATE"]),  # after it ended
+    ]
+    [o] = outages([state], samples)
+    assert o.repos == {"example/app"} and o.tasks == {"N1", "N2"}
+    assert o.signature == "build / xcodebuild"
+    of = WaitCauses((ci("R1"), ci("L1", repo="example/lib")), samples, (), (), [o])
+    r1 = waiting("R1", "reviewer")  # waits on CI in the outage's repository
+    assert of.split(r1, at(8), at(24)) == {CI_OUTAGE: pytest.approx(6), "ci": pytest.approx(10)}
+    named = waiting("N1", "developer")  # no condition, but the outage names it
+    assert of.split(named, at(12), at(14)) == {CI_OUTAGE: pytest.approx(2)}
+    other_repo = waiting("L1", "reviewer")
+    assert of.split(other_repo, at(10), at(16)) == {"ci": pytest.approx(6)}
+
+
+def test_the_report_headlines_a_ci_outage() -> None:
+    state = outage_state("app", at(2), at(20))
+    samples = (outage_sample(at(3), signature="build / xcodebuild", repos=["example/app"]),)
+    report = build_report(inputs(states=(state,), actions=samples), sections={})
+    wait = report.biggest_wait
+    assert wait is not None and wait.cause == "ci_outage" and wait.role == "reviewer"
+    assert wait.hours == pytest.approx(3 * 12)  # R1-R3 from 08:00 to 20:00 (R4's CI is green)
+    markdown = render_markdown(report)
+    assert "waiting for a CI outage" in markdown and "fix the CI outage first" in markdown

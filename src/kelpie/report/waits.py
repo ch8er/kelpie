@@ -7,15 +7,23 @@
 2. the kind of an unmet condition it waits on: ``people`` (``human_task``), ``ci``
    (``ci_status``), ``merge`` (``pr_merged``), ``quota`` (``quota_reset``), ``tasks``
    (``task_status``), ``timer`` (``time``), ``other`` (``custom``). The condition its block
-   names wins, then its unmet conditions; else a ``[[block_conditions]]`` pattern its
-   block reason matches (CI or a merge, by the pattern's kind: the report checks no PR);
+   names wins, then its unmet conditions (a red or pending CI before the merge it holds
+   up); else a ``[[block_conditions]]`` pattern its block reason matches (CI or a merge,
+   by the pattern's kind: the report checks no PR). A merge wait is "PRs to pass checks
+   and merge", never "merges": offline the report cannot tell a red CI from a slow merge;
 3. ``people``: a rule 13 alert of the day listed it as an approval or as parked on a
    person's human task;
 4. the kind of its last condition, met by now;
 5. else ``unknown``: the task waited without telling Kelpie what for.
 
-The board only says what a task waits for now (or last), so the cause is the task's latest
-known one and all its waiting time of the day counts under it. Pure and deterministic.
+**CI outage.** While rule 9's CI outage incident is open (a ``ci_economy:outage:*`` state),
+the waiting time it explains counts under ``ci_outage`` instead: tasks its alerts name
+(``params.tasks``), and tasks waiting on CI or a merge in a repository it covers
+(``params.repos``). Only the part of a wait inside the outage moves; the rest keeps the
+task's own cause.
+
+The board only says what a task waits for now (or last), so outside an outage the cause is
+the task's latest known one. Pure and deterministic.
 """
 
 from __future__ import annotations
@@ -28,6 +36,7 @@ from datetime import datetime
 
 from kelpie.core.ledger import LedgerEntry
 from kelpie.core.model import Condition, ConditionKind, Task
+from kelpie.core.states import OpenState
 from kelpie.report import farm, md
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.throughput import RoleThroughput
@@ -36,7 +45,8 @@ UNKNOWN = "unknown"
 # What a cause is called in "waiting for ...".
 WAIT_CAUSES: Mapping[str, str] = {
     "ci": "CI",
-    "merge": "merges",
+    "merge": "PRs to pass checks and merge",
+    "ci_outage": "a CI outage",
     "people": "people (approvals, human tasks)",
     "hold": "holds",
     "quota": "LLM quotas",
@@ -48,6 +58,8 @@ WAIT_CAUSES: Mapping[str, str] = {
 _SUGGESTIONS: Mapping[str, str] = {
     "ci": "add CI capacity where the tasks queue (another runner for that pipeline), run only "
     "the checks a change needs, or let fewer tasks of the role wait on CI at once",
+    "ci_outage": "fix the CI outage first (see its alert): no PR of the affected repositories "
+    "can go green until then, so more agent time on them is wasted",
     "quota": "spread the role over more providers or models, or raise the quota",
     "tasks": "unblock the tasks they depend on first, or drop the dependency",
     "timer": "shorten the scheduled waits",
@@ -80,6 +92,8 @@ _KINDS: Mapping[ConditionKind, str] = {
     ConditionKind.CUSTOM: "other",
 }
 MIN_HOURS = 1.0  # a smaller wait is no headline
+CI_OUTAGE = "ci_outage"
+OUTAGE_STATE = "ci_economy:outage:"
 MAX_REASON = 2000  # characters of a block reason matched, as the GitHub step does
 # "owner/name#12" or a pull request URL in a pattern's ``pr`` group: the repository
 _REPO_IN_REF = re.compile(r"([\w.-]+/[\w.-]+)(?:#|/pull/)\d+")
@@ -122,6 +136,47 @@ class BiggestWait:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class Outage:
+    """A CI outage, from rule 9's long-lived ``ci_economy:outage:*`` state: while it is open,
+    the waits it explains count under ``ci_outage`` instead of CI or merges."""
+
+    since: datetime
+    until: datetime  # its last_seen
+    repos: frozenset[str] = frozenset()  # lower-case owner/name
+    tasks: frozenset[str] = frozenset()
+    signature: str | None = None
+
+
+def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[Outage]:
+    """Rule 9's CI outages with what its alerts said about them: the repositories and the
+    tasks they explain, from every handling within the outage (opening, changes, hourly
+    repeats). An entry naming its outage (``params.outage``, the state key) counts only for
+    that one."""
+    found = [s for s in states if s.rule == "ci_economy" and s.id.startswith(OUTAGE_STATE)]
+    samples = [e for e in entries if e.rule == "ci_economy" and "signature" in e.params]
+    out = []
+    for s in found:
+        key = s.id[len(OUTAGE_STATE) :]
+        mine = [
+            e
+            for e in samples
+            if s.since <= e.at <= s.last_seen and e.params.get("outage", key) == key
+        ]
+        repos = {r.lower() for e in mine for r in _ids(e.params.get("repos"))}
+        tasks = {t for e in mine for t in _ids(e.params.get("tasks"))}
+        sig = next(
+            (
+                e.params["signature"]
+                for e in reversed(mine)
+                if isinstance(e.params.get("signature"), str)
+            ),
+            None,
+        )
+        out.append(Outage(s.since, s.last_seen, frozenset(repos), frozenset(tasks), sig))
+    return out
+
+
 class WaitCauses:
     """The cause of each task's wait (see the module docs). ``entries`` are the day's
     ledger entries: an older inbox may have been answered since."""
@@ -132,8 +187,10 @@ class WaitCauses:
         entries: Iterable[LedgerEntry],
         hold_labels: Collection[str] = (),
         block_kinds: Sequence[BlockKind] = (),
+        outages: Sequence[Outage] = (),
     ) -> None:
         self._labels = frozenset(hold_labels)
+        self._outages = tuple(outages)
         self._block_kinds = tuple(block_kinds)
         self._by_id: dict[str, Condition] = {}
         self._by_task: dict[str, list[Condition]] = {}
@@ -160,6 +217,39 @@ class WaitCauses:
             return "people"
         return _KINDS.get(found.kind, "other") if found is not None else UNKNOWN
 
+    def split(self, task: Task, a: datetime, b: datetime) -> dict[str, float]:
+        """Hours of the task's wait in ``[a, b)`` by cause: the part an open CI outage
+        explains counts under ``ci_outage``, the rest under the task's own cause."""
+        spans = sorted(
+            (max(a, o.since), min(b, o.until))
+            for o in self._outages
+            if o.since < b and o.until > a and self._explains(o, task)
+        )
+        covered, reach = 0.0, a
+        for lo, hi in spans:
+            lo = max(lo, reach)
+            if hi > lo:
+                covered += (hi - lo).total_seconds() / 3600
+                reach = hi
+        total = (b - a).total_seconds() / 3600
+        out: dict[str, float] = {}
+        if covered > 0:
+            out[CI_OUTAGE] = covered
+        if total - covered > 1e-9:
+            out[self(task)] = total - covered
+        return out
+
+    def _explains(self, outage: Outage, task: Task) -> bool:
+        """The outage names the task, or the task waits on CI or a merge in a repository
+        the outage covers."""
+        if task.id in outage.tasks:
+            return True
+        found = self.condition(task)
+        if found is None or found.kind not in (ConditionKind.CI_STATUS, ConditionKind.PR_MERGED):
+            return False
+        repo = found.params.get("repo")
+        return isinstance(repo, str) and repo.lower() in outage.repos
+
     def condition(self, task: Task) -> Condition | None:
         """The condition the task waits (or last waited) on."""
         if task.block is not None and task.block.condition_id in self._by_id:
@@ -171,6 +261,12 @@ class WaitCauses:
 
         last = max(mine, key=rank) if mine else None
         if last is not None and last.satisfied is not True:
+            if last.kind is ConditionKind.PR_MERGED:  # a red or pending CI comes first
+                ci = [
+                    c for c in mine if c.kind is ConditionKind.CI_STATUS and c.satisfied is not True
+                ]
+                if ci:
+                    return max(ci, key=rank)
             return last
         return self._declared(task) or last
 
@@ -209,7 +305,7 @@ def biggest_wait(
     hours = -neg
     waited = tuple(sorted(r.waited.get(cause, ())))
     repos: Counter[str] = Counter()
-    if cause in ("ci", "merge"):
+    if cause in ("ci", "merge", CI_OUTAGE):
         by_id = {t.id: t for t in tasks}
         for tid in waited:
             c = causes.condition(by_id[tid]) if tid in by_id else None

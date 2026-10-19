@@ -60,6 +60,8 @@ OWNERLESS_RULES = frozenset({"orphan_status"})
 WAITING_RULES = frozenset({"wait_condition", "stale_blocks"})
 _UNDECLARED = frozenset({Status.IN_PROGRESS, Status.READY, Status.BACKLOG})
 type _RoleOf = Callable[[Session], str | None]
+# A stretch of a task's waiting stage, split by cause: (task, from, to) -> {cause: hours}
+type WaitSplit = Callable[[Task, datetime, datetime], Mapping[str, float]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,11 +123,11 @@ def throughput(
     end: datetime,
     review_roles: Sequence[str] = ("reviewer",),
     session_roles: Mapping[str, str] | None = None,
-    wait_cause: Callable[[Task], str] | None = None,
+    wait_cause: WaitSplit | None = None,
 ) -> list[RoleThroughput]:
     """Throughput per role for the day ``[start, end)``, roles in name order.
     ``session_roles`` names the role of sessions whose owner is not in ``owners``;
-    ``wait_cause`` names what a task waited for (its ``waiting`` hours count under it)."""
+    ``wait_cause`` splits a stretch of a task's ``waiting`` stage by what it waited for."""
     hours = (end - start).total_seconds() / 3600
     roles_of_task = task_roles(tasks, owners)
     owner_roles = {o.id: o.role for o in owners}
@@ -152,14 +154,18 @@ def throughput(
         role = roles_of_task.get(task.id, UNKNOWN_ROLE)
         a = acc[role]
         mine = sorted(by_task.get(task.id, ()), key=lambda s: (s.started_at, s.id))
-        stages = _task_stages(task, mine, windows, start, end, review_roles, role_of_session)
+        waiting: list[tuple[datetime, datetime]] = []
+        stages = _task_stages(
+            task, mine, windows, start, end, review_roles, role_of_session, waiting
+        )
         done = task.status is Status.DONE and start <= task.status_since < end
         for stage, h in stages.items():
             a.stages[stage] += h
-        if wait_cause is not None and stages.get("waiting"):
-            cause = wait_cause(task)
-            a.waits[cause] += stages["waiting"]
-            a.waited[cause].add(task.id)
+        if wait_cause is not None:
+            for lo, hi in waiting:
+                for cause, h in wait_cause(task, lo, hi).items():
+                    a.waits[cause] += h
+                    a.waited[cause].add(task.id)
         if done:
             a.completed.append(task.id)
         if stages or done:
@@ -275,8 +281,10 @@ def _task_stages(
     end: datetime,
     review_roles: Sequence[str],
     role_of_session: _RoleOf,
+    waiting: list[tuple[datetime, datetime]] | None = None,
 ) -> dict[str, float]:
-    """Hours of the task per stage within ``[start, end)`` (see the module docs)."""
+    """Hours of the task per stage within ``[start, end)`` (see the module docs); the
+    stretches in the ``waiting`` stage are appended to ``waiting``."""
     if task.status.is_terminal and task.status_since < start:
         return {}
     points = {end, task.status_since}
@@ -293,6 +301,8 @@ def _task_stages(
         stage = _stage_at(task, sessions, windows, a, review_roles, role_of_session, end)
         if stage is not None:
             out[stage] += (b - a).total_seconds() / 3600
+            if stage == "waiting" and waiting is not None:
+                waiting.append((a, b))
     return dict(out)
 
 

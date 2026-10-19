@@ -46,7 +46,7 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         ctx.end,
         inputs.review_roles,
         ctx.roles,
-        wait_causes(inputs, ctx.start, ctx.end),  # as the report's biggest wait
+        wait_causes(inputs, ctx.start, ctx.end).split,  # as the report's biggest wait
     )
     if not roles:
         return None

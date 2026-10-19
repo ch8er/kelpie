@@ -119,7 +119,7 @@ from kelpie.report.verify import (
 )
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
 from kelpie.report.waits import UNKNOWN as UNKNOWN_WAIT
-from kelpie.report.waits import BiggestWait, BlockKind, WaitCauses, biggest_wait
+from kelpie.report.waits import BiggestWait, BlockKind, WaitCauses, biggest_wait, outages
 from kelpie.rules.orphan_status import OrphanStatus
 from kelpie.traces.outputs import (
     OutputGroup,
@@ -478,7 +478,8 @@ def wait_causes(inputs: ReportInputs, start: datetime, end: datetime) -> WaitCau
     """What each task of the board waited for (:mod:`kelpie.report.waits`), from the day's
     ledger entries (rule 13 re-records an open inbox about hourly)."""
     entries = [e for e in inputs.actions if start <= e.at < end]
-    return WaitCauses(inputs.conditions, entries, inputs.hold_labels, inputs.block_kinds)
+    found = outages([row.state for row in inputs.states], entries)
+    return WaitCauses(inputs.conditions, entries, inputs.hold_labels, inputs.block_kinds, found)
 
 
 def _biggest_wait(
@@ -494,7 +495,7 @@ def _biggest_wait(
         end,
         inputs.review_roles,
         roles,
-        causes,
+        causes.split,
     )
     return biggest_wait(per_role, inputs.tasks, causes, inputs.farm)
 
