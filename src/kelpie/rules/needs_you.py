@@ -27,10 +27,10 @@ own reasons (:func:`~kelpie.rules._tasks.planned`: not started yet, and in a pre
 status such as Hermes triage or scheduled, or labelled with one of ``planned_labels``, on
 the task or a linked PR; they default to rule 6's ``planned_labels`` and hold labels)
 waits on nothing it depends on: it is not behind a human task and adds no cost, and a
-planned human task is not in the inbox, as rule 6 reads it. A blocked or waiting task was
-started: it waits on what it names (an approval, a human task), labels or not. On a live
-farm a post-release task behind a person's planned task counted as 143 agent-hours of
-waiting on that person.
+planned human task is in the inbox only for the tasks a condition parks on it, as rule 6
+reads it. A blocked or waiting task was started: it waits on what it names (an approval, a
+human task), labels or not. On a live farm a post-release task behind a person's planned
+task counted as 143 agent-hours of waiting on that person.
 
 **Cost of delay** of an item: the agent-hours spent waiting on it so far, the sum over the
 agent tasks that wait on it directly of how long each has waited: a task parked on it since

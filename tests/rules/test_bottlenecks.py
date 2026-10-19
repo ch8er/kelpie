@@ -1379,13 +1379,19 @@ def test_planned_tasks_are_not_behind_a_human_task() -> None:
     assert human_gates(Snapshot(NOW, (human("H"), ready), HUMANS, deps), {"later"}) == []
 
 
-def test_a_planned_human_task_gates_nothing() -> None:
+def test_a_planned_human_task_gates_only_what_a_condition_parks_on_it() -> None:
     from dataclasses import replace
 
     gate = replace(human("H"), labels=("later",))
-    deps = (Dependency("A", "H"),)
-    assert human_gates(Snapshot(NOW, (gate, task("A")), HUMANS, deps), {"later"}) == []
-    assert human_gates(Snapshot(NOW, (gate, task("A")), HUMANS, deps))
+    deps = (Dependency("A", "H"), Dependency("B", "W"))
+    assert human_gates(Snapshot(NOW, (gate, task("A")), HUMANS, deps[:1]), {"later"}) == []
+    assert human_gates(Snapshot(NOW, (gate, task("A")), HUMANS, deps[:1]))
+    # A started task parked on it by a condition waits on it, and so does what depends on it.
+    parked = task("W", Status.WAITING)
+    cond = Condition("C1", ConditionKind.HUMAN_TASK, "W", {"task": "H"}, satisfied=False)
+    tasks = (gate, task("A"), parked, task("B"))
+    [g] = human_gates(Snapshot(NOW, tasks, HUMANS, deps, (cond,)), {"later"})
+    assert g.behind == ("B", "W")  # not A, which only depends on it
 
 
 def test_rule_6_reads_held_dependents_and_pr_labels_as_planned() -> None:

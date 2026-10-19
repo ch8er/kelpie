@@ -544,7 +544,7 @@ def hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
 
 def planned_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
     """What rule 6 reads as planned by label: its ``planned_labels`` and hold labels
-    (incident 20); rule 13 and the daily report read the same."""
+    (incident 20); rule 13 inherits the same unless it sets its own."""
     own = bottlenecks.get("planned_labels", [])
     found = [x for x in own if isinstance(x, str)] if isinstance(own, list) else []
     return sorted({*found, *hold_labels(bottlenecks)})

@@ -511,6 +511,11 @@ def test_a_planned_human_task_and_a_label_on_a_pr_read_as_rule_6_does() -> None:
     dependent = Task("A-1", "next", Status.BACKLOG, ago(hours=10))
     later = replace(human("H-1", ago(hours=150)), labels=("later",))
     assert run(snap([later, dependent], deps=deps), planned_labels=frozenset({"later"})) == []
+    # A task a condition parks on the planned human task still waits on it.
+    parked = blocked("A-2", ago(hours=5), "waiting_human: H-1", "C-2")
+    c = waits_on("C-2", "A-2", "H-1")
+    [item] = run(snap([later, parked], [c]), planned_labels=frozenset({"later"}))
+    assert item.params["human_tasks"] == ["H-1"] and item.params["waiting"] == ["A-2"]
     pr = PullRequest("org/repo", 12, "A-1: next", branch="a-1", labels=("hold",), task_ids=("A-1",))
     on_pr = replace(snap([human("H-1", ago(hours=150)), dependent], deps=deps), pull_requests=(pr,))
     assert run(on_pr, planned_labels=frozenset({"hold"})) == []

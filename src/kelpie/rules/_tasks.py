@@ -136,7 +136,7 @@ def planned(task: Task, labels: Collection[str] = ()) -> bool:
     blocked or waiting was started, and waits on what its block or conditions name, labels
     or not. Rules 6 and 13, and through rule 13 the daily report's agent-hours waiting on
     people, read it alike. A planned task does not wait on what it depends on, and a planned
-    human task gates nothing."""
+    human task gates only the tasks a condition parks on it."""
     if task.status not in _NOT_STARTED:
         return False  # blocked or waiting: it was started, and waits on what it names
     return task.prework or not frozenset(labels).isdisjoint(task.labels)

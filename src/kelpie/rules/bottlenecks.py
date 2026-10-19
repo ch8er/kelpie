@@ -52,7 +52,7 @@ spare. An alert lasts as long as spare capacity exists.
   pre-work status such as Hermes triage or scheduled, or labelled with one of
   ``planned_labels`` or a hold label) is not ready for work for its own reasons: it is not
   behind the human task, and neither is what waits on it; a planned human task gates
-  nothing. Rule 13 inherits the labels and reads PR labels alike.
+  only the tasks a condition parks on it. Rule 13 inherits the labels and reads PR labels alike.
 
 ``ready_is_queued`` (default off; for platforms that report the assignee of a task nobody has
 started as its owner; the Hermes adapter does not, since it sets the owner only while a run
@@ -375,16 +375,18 @@ def human_gates(snapshot: Snapshot, planned_labels: Collection[str] = ()) -> lis
     ``linked_conditions`` reads it) whose ``params.task`` names the human task, through any
     open task that is not planned (:func:`~kelpie.rules._tasks.planned`, with
     ``planned_labels``): a planned task does not wait on the human task, and neither does
-    what waits on it. A planned human task is no gate: it is not the person's to do yet.
-    Agent tasks are open tasks not owned by a human. Labels of linked PRs count when the
-    caller applied :func:`with_pr_labels` (both rule 6 and rule 13 do).
+    what waits on it. A planned human task gates only the tasks parked on it by a condition
+    (they were started and wait on it explicitly), not those that merely depend on it: it
+    is not the person's to do yet. Agent tasks are open tasks not owned by a human. Labels
+    of linked PRs count when the caller applied :func:`with_pr_labels` (both rules do).
     """
     humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
     by_id = {t.id: t for t in snapshot.tasks if not t.status.is_terminal}
-    gates = [t for t in by_id.values() if t.owner_id in humans and not planned(t, planned_labels)]
+    gates = [t for t in by_id.values() if t.owner_id in humans]
     if not gates:
         return []
     successors: dict[str, set[str]] = {}
+    parked: dict[str, set[str]] = {}  # human task -> tasks a condition parks on it
     for d in snapshot.dependencies:
         if d.task_id in by_id and d.depends_on in by_id:
             successors.setdefault(d.depends_on, set()).add(d.task_id)
@@ -400,12 +402,16 @@ def human_gates(snapshot: Snapshot, planned_labels: Collection[str] = ()) -> lis
                 and target in by_id
             ):
                 successors.setdefault(target, set()).add(t.id)
+                parked.setdefault(target, set()).add(t.id)
     open_deps = _open_dependencies(snapshot, set(by_id))
     later = {tid for tid, t in by_id.items() if planned(t, planned_labels)}
     result: list[HumanGate] = []
     for gate in gates:
         seen: set[str] = set()
         todo = [gate.id]
+        if gate.id in later:  # planned: only what a condition parks on it waits for it
+            seen = {t for t in parked.get(gate.id, ()) if t != gate.id}
+            todo = sorted(seen)
         while todo:
             for nxt in successors.get(todo.pop(), ()):
                 if nxt not in seen and nxt != gate.id and nxt not in later:
