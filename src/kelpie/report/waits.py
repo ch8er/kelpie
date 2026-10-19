@@ -16,11 +16,11 @@
 4. the kind of its last condition, met by now;
 5. else ``unknown``: the task waited without telling Kelpie what for.
 
-**CI outage.** While rule 9's CI outage incident is open (a ``ci_economy:outage:*`` state),
-the waiting time it explains counts under ``ci_outage`` instead: tasks its alerts name
-(``params.tasks``), and tasks waiting on CI or a merge in a repository it covers
-(``params.repos``). Only the part of a wait inside the outage moves; the rest keeps the
-task's own cause.
+**CI outage.** While rule 9's CI outage incident is open (:mod:`kelpie.core.incidents`), the
+waiting time it explains counts under ``ci_outage`` instead: tasks its alerts name
+(``tasks``), and tasks waiting on CI or a merge of a PR in its scope (``prs``) or of a
+repository it covers (``repos``). Only the part of a wait inside the outage moves; the rest
+keeps the task's own cause.
 
 The board only says what a task waits for now (or last), so outside an outage the cause is
 the task's latest known one. Pure and deterministic.
@@ -34,6 +34,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from kelpie.core.incidents import CiOutage, is_outage_state
 from kelpie.core.ledger import LedgerEntry
 from kelpie.core.model import Condition, ConditionKind, Task
 from kelpie.core.states import OpenState
@@ -93,7 +94,6 @@ _KINDS: Mapping[ConditionKind, str] = {
 }
 MIN_HOURS = 1.0  # a smaller wait is no headline
 CI_OUTAGE = "ci_outage"
-OUTAGE_STATE = "ci_economy:outage:"
 MAX_REASON = 2000  # characters of a block reason matched, as the GitHub step does
 # "owner/name#12" or a pull request URL in a pattern's ``pr`` group: the repository
 _REPO_IN_REF = re.compile(r"([\w.-]+/[\w.-]+)(?:#|/pull/)\d+")
@@ -138,42 +138,42 @@ class BiggestWait:
 
 @dataclass(frozen=True, slots=True)
 class Outage:
-    """A CI outage, from rule 9's long-lived ``ci_economy:outage:*`` state: while it is open,
-    the waits it explains count under ``ci_outage`` instead of CI or merges."""
+    """One occurrence of a CI outage (rule 9's state, :mod:`kelpie.core.incidents`), with
+    what its alerts said about it: while it is open, the waits it explains count under
+    ``ci_outage`` instead of CI or merges."""
 
     since: datetime
     until: datetime  # its last_seen
     repos: frozenset[str] = frozenset()  # lower-case owner/name
+    prs: frozenset[str] = frozenset()  # lower-case owner/name#N
     tasks: frozenset[str] = frozenset()
     signature: str | None = None
 
 
 def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[Outage]:
-    """Rule 9's CI outages with what its alerts said about them: the repositories and the
-    tasks they explain, from every handling within the outage (opening, changes, hourly
-    repeats). An entry naming its outage (``params.outage``, the state key) counts only for
-    that one."""
-    found = [s for s in states if s.rule == "ci_economy" and s.id.startswith(OUTAGE_STATE)]
-    samples = [e for e in entries if e.rule == "ci_economy" and "signature" in e.params]
+    """Rule 9's CI outages, each with the scope its alerts reported: every entry that names
+    the state (``params.state``) within that occurrence's time span (the same signature
+    failing again later reuses the state id). Entries are as of their time (written at most
+    hourly), so the repository clause in :meth:`WaitCauses.split` covers later joiners."""
+    found = [s for s in states if is_outage_state(s.id)]
+    samples = [
+        (e.at, o)
+        for e in entries
+        if e.rule == "ci_economy" and (o := CiOutage.from_params(e.params)) is not None
+    ]
     out = []
     for s in found:
-        key = s.id[len(OUTAGE_STATE) :]
-        mine = [
-            e
-            for e in samples
-            if s.since <= e.at <= s.last_seen and e.params.get("outage", key) == key
-        ]
-        repos = {r.lower() for e in mine for r in _ids(e.params.get("repos"))}
-        tasks = {t for e in mine for t in _ids(e.params.get("tasks"))}
-        sig = next(
-            (
-                e.params["signature"]
-                for e in reversed(mine)
-                if isinstance(e.params.get("signature"), str)
-            ),
-            None,
+        mine = [o for at, o in samples if o.state == s.id and s.since <= at <= s.last_seen]
+        out.append(
+            Outage(
+                since=s.since,
+                until=s.last_seen,
+                repos=frozenset(r.lower() for o in mine for r in o.repos),
+                prs=frozenset(p.lower() for o in mine for p in o.prs),
+                tasks=frozenset(t for o in mine for t in o.tasks),
+                signature=mine[-1].signature if mine else None,
+            )
         )
-        out.append(Outage(s.since, s.last_seen, frozenset(repos), frozenset(tasks), sig))
     return out
 
 
@@ -240,15 +240,17 @@ class WaitCauses:
         return out
 
     def _explains(self, outage: Outage, task: Task) -> bool:
-        """The outage names the task, or the task waits on CI or a merge in a repository
-        the outage covers."""
+        """The outage names the task, or the task waits on CI or a merge of a PR in its
+        scope or of a repository it covers."""
         if task.id in outage.tasks:
             return True
         found = self.condition(task)
         if found is None or found.kind not in (ConditionKind.CI_STATUS, ConditionKind.PR_MERGED):
             return False
-        repo = found.params.get("repo")
-        return isinstance(repo, str) and repo.lower() in outage.repos
+        repo, pr = found.params.get("repo"), found.params.get("pr")
+        if not isinstance(repo, str):
+            return False
+        return repo.lower() in outage.repos or f"{repo}#{pr}".lower() in outage.prs
 
     def condition(self, task: Task) -> Condition | None:
         """The condition the task waits (or last waited) on."""
@@ -281,7 +283,10 @@ class WaitCauses:
                 continue  # as the GitHub step: a match must name a PR
             ref = _REPO_IN_REF.search(m["pr"])
             repo = ref.group(1).lower() if ref else b.repo
-            params = {"repo": repo} if repo else {}
+            number = re.search(r"(\d+)\s*$", m["pr"])
+            params: dict[str, object] = {"repo": repo} if repo else {}
+            if number:
+                params["pr"] = int(number.group(1))
             return Condition(f"block:{task.id}:{b.kind}", b.kind, task.id, params)
         return None
 
