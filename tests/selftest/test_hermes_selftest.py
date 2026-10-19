@@ -76,7 +76,8 @@ def test_a_stop_passes_end_to_end(fake: Path, tmp_path: Path) -> None:
     ]
     stopped = next(line for line in lines if "rule 10 stopped" in line)
     assert "limit 8 within 10m" in stopped and "after SIGTERM" in stopped
-    assert any("| [CRITICAL] loop_breaker: alert t_1" in line for line in lines)
+    alert = [line for line in lines if line.startswith("      | ")]  # as Telegram shows it
+    assert any("Stopped run hermes-run-1" in line and "after SIGTERM" in line for line in alert)
     assert lines[-1] == "selftest stop: passed"
     assert [p for p in tmp_path.iterdir() if p.name.startswith("kelpie-selftest-")] == []
     # Kelpie's block ran against the throwaway home, never the user's.
