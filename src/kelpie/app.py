@@ -2098,13 +2098,25 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
             found[name] = ActBlocker(_no_cancel(settings), refused=has_hermes)
         elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
             found[name] = ActBlocker(_hermes_gap(name, platform), refused=True)
-        elif (
-            platform
-            and settings.hub is None
-            and not platform <= frozenset().union(*(_declared(a) for a in adapters))
-        ):
+        elif platform and settings.hub is None and _platform_lacks(adapters, platform):
             found[name] = ActBlocker(_platform_gap(adapters, platform), refused=False)
     return found
+
+
+def _platform_lacks(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) -> bool:
+    """Whether some of ``platform`` would turn into alerts on this farm, judged per adapter:
+    an adapter lacks the kinds its tasks can draw (all but its ``inapplicable``) that it does
+    not carry out. Another adapter carrying them out does not help its tasks. With no adapter
+    that carries out any of them, the rule cannot act at all."""
+    if not platform & frozenset().union(*(_declared(a) for a in adapters)):
+        return True
+    return any(_lacking(a, platform) for a in adapters)
+
+
+def _lacking(adapter: PlatformAdapter, platform: frozenset[ActionKind]) -> frozenset[ActionKind]:
+    inapplicable = getattr(adapter, "inapplicable", None)
+    out = frozenset(inapplicable) if isinstance(inapplicable, frozenset | set) else frozenset()
+    return platform - _declared(adapter) - out
 
 
 def _no_cancel(settings: Settings) -> str:
@@ -2127,17 +2139,38 @@ def _hermes_gap(rule: str, platform: frozenset[ActionKind]) -> str:
 
 
 def _platform_gap(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) -> str:
-    lacking = platform - frozenset().union(*(_declared(a) for a in adapters))
-    names = sorted({_PLATFORMS.get(a.name, a.name) for a in adapters})
-    if not names:
-        return f"no platform adapter is configured to {_verbs(lacking)}"
-    if lacking == {ActionKind.STOP} and (
-        off := sorted(_PLATFORMS.get(a.name, a.name) for a in adapters if _stop_off(a))
-    ):
-        return f"stop is turned off (stop_dir = false) for {' and '.join(off)}"
-    if len(names) == 1:
-        return f"{names[0]} can't {_verbs(lacking)} yet"
-    return f"neither {' nor '.join(names)} can {_verbs(lacking)} yet"
+    """What is missing, naming the adapters that lack it: the same kinds lacking from
+    several read "neither A nor B can ..."; different kinds are said per adapter."""
+    if not adapters:
+        return f"no platform adapter is configured to {_verbs(platform)}"
+    gaps: dict[frozenset[ActionKind], list[str]] = {}
+    for adapter in adapters:
+        lacking = _lacking(adapter, platform) or (
+            platform - _declared(adapter)  # the rule cannot act at all: say what each lacks
+            if not platform & frozenset().union(*(_declared(a) for a in adapters))
+            else frozenset()
+        )
+        if lacking:
+            name = _PLATFORMS.get(adapter.name, adapter.name)
+            names = gaps.setdefault(lacking, [])
+            if name not in names:
+                names.append(name)
+    said: list[str] = []
+    for lacking, names in gaps.items():
+        names.sort()
+        if lacking == {ActionKind.STOP} and (
+            off := sorted(
+                _PLATFORMS.get(a.name, a.name)
+                for a in adapters
+                if _stop_off(a) and _PLATFORMS.get(a.name, a.name) in names
+            )
+        ):
+            said.append(f"stop is turned off (stop_dir = false) for {' and '.join(off)}")
+        elif len(names) == 1:
+            said.append(f"{names[0]} can't {_verbs(lacking)} yet")
+        else:
+            said.append(f"neither {' nor '.join(names)} can {_verbs(lacking)} yet")
+    return "; ".join(sorted(said))
 
 
 # A platform adapter without an ``actions`` declaration carries out what its capability
