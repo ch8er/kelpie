@@ -190,6 +190,24 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   rich_text blocks, with the same escaping, size limits, de-duplication and retries as alerts;
   "Open report" and "and N more" follow `[alerts] language`, the report's own text stays
   English ([#169](https://github.com/ch8er/kelpie/issues/169)).
+- A block that asks a person (`waiting_human: needs_input: CEO: …`) reaches them once, in
+  rule 13's "Waiting for you" digest: rule 4 no longer sends its "no condition Kelpie can
+  check", overdue or dead-end alert for a task rule 13 lists, while rule 13 reaches people
+  (it is loaded and not in `observe` while rule 4 alerts). Rule 4 reads the farm with rule
+  13's settings and leaves it exactly what rule 13 lists, so each block is announced by one
+  of the two; agents' dead ends, conditions Kelpie cannot see, blocks rule 13 does not list
+  (parked on a person's task they cannot move yet) and blocks that wait on a condition
+  (`needs_input: automerge PR #12`) stay rule 4's. Each digest item carries its exact
+  `task_id`, `needed`, `since` and the number of tasks behind it (`blocking`), the totals
+  count the tasks behind an approval, and every item is sent (`items_total`). "Needed" keeps
+  the agent's whole first sentence (up to 140 characters, closing quotes included, a long
+  quoted ask cut inside and closed) instead of a clause, and is left out when it would only
+  repeat the title; for a person's own task whose block can never clear, it names the dead
+  end or the condition Kelpie cannot see, which rule 4 no longer alerts on separately
+  ([#169](https://github.com/ch8er/kelpie/issues/169)).
+- The daily report's "agents waiting on people" no longer counts an agent task that also
+  waits on a PR or CI first: rule 13 does not count it as waiting on the person's task,
+  nor in that person's cost of delay ([#169](https://github.com/ch8er/kelpie/issues/169)).
 
 #### Operations
 

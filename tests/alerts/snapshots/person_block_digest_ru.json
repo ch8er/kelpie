@@ -1,0 +1,175 @@
+{
+  "text": "🟡 Ждут вас: 2 задачи (самая давняя — 46 ч)\n\n1. Approve the store listing — 46 ч · t_e5f6a7b8\n   Блокирует: 2 задачи · Открыть задачу: https://board.example.org/tasks/t_e5f6a7b8\n2. Nightly backup to R2 — 44 ч · t_a1b2c3d4\n   Нужно: CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2 through the Cloudflare dashboard.»\n   Блокирует: ничего · Открыть задачу: https://board.example.org/tasks/t_a1b2c3d4\nПочему: Needs you (ceo): 2 item(s) hold 3 agent task(s), 90.0 agent-hours waited so far. By cost of delay: t_e5f6a7b8 ('Approve the store listing') holds 2 agent task(s) (t_e5f6a7b9, t_e5f6a7ba): 46.0 agent-hours; t_a1b2c3d4 ('Nightly backup to R2') waits for your input: 44.0 agent-hours.\nПравило: needs_you",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Ждут вас: 2 задачи (самая давняя — 46 ч)",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Approve the store listing",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 46 ч · "
+            },
+            {
+              "type": "text",
+              "text": "t_e5f6a7b8",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Блокирует: 2 задачи"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_e5f6a7b8",
+              "text": "Открыть задачу"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "2. "
+            },
+            {
+              "type": "text",
+              "text": "Nightly backup to R2",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 44 ч · "
+            },
+            {
+              "type": "text",
+              "text": "t_a1b2c3d4",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Нужно: "
+            },
+            {
+              "type": "text",
+              "text": "CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2 through the Cloudflare dashboard.»"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Блокирует: ничего"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_a1b2c3d4",
+              "text": "Открыть задачу"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Почему: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Needs you (ceo): 2 item(s) hold 3 agent task(s), 90.0 agent-hours waited so far. By cost of delay: t_e5f6a7b8 ('Approve the store listing') holds 2 agent task(s) (t_e5f6a7b9, t_e5f6a7ba): 46.0 agent-hours; t_a1b2c3d4 ('Nightly backup to R2') waits for your input: 44.0 agent-hours."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Правило: "
+            },
+            {
+              "type": "text",
+              "text": "needs_you",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

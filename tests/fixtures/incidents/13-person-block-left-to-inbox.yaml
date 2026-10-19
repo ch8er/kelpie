@@ -1,0 +1,116 @@
+id: "13-person-block-left-to-inbox"
+incident: 13
+title: "A block that asks a person is left to the needs-you inbox"
+description: >
+  From live alerts in suggest mode (#169): an agent blocked its task with a typed Hermes
+  block for a person ('waiting_human: needs_input: CEO: …'), and rule 4 alerted on it at
+  every escalation step as a block with "no condition Kelpie can check", next to rule 13's
+  inbox listing the same task. While rule 13 reaches people (needs_you, set by Kelpie),
+  rule 4 raises no alert on a block rule 13 lists as such a question: not the no-condition
+  one, and not the overdue one for a block parked on a person's task. A run Kelpie stopped
+  is rule 13's already. Blocks that wait on a condition (a reason naming a PR to merge, a
+  linked pr_merged condition) stay rule 4's and are alerted on as before.
+  13-person-block-in-inbox is the same farm seen by rule 13; needs_you here is its config,
+  as Kelpie hands it over.
+rule: stale_blocks
+config:
+  unlinked_alert_after: "4h"
+  max_block: "8h"
+  stale_evidence_after: "1h"
+  needs_you:
+    approval_wait_after: "30m"
+    human_wait_alert_after: "1h"
+    approvers: {developer: lead}
+    default_approver: ceo
+    critical_after_hours: 100
+    condition_reasons: ['\b(?:automerge|merge of)\b[^\n]{0,80}?PR\s*#(?P<pr>\d+)']
+snapshot:
+  now: "2026-03-04T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: lead, role: lead, kind: human}
+    - {id: agent-ops-1, role: ops}
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-rev-1, role: reviewer}
+  tasks:
+    # The live case: a typed Hermes block addressed to a person, with no condition.
+    - id: t_a1b2c3d4
+      title: "Nightly backup to R2"
+      status: blocked
+      status_since: "2026-03-02T14:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block:
+        reason: "waiting_human: needs_input: CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2 through the Cloudflare dashboard.» The job retried three times and stopped; enable R2 for the account, then rerun the job and unblock this task. Until then no backup is written and the retention check fails every night."
+        since: "2026-03-02T14:00:00+00:00"
+    # A person's task with agent work behind it: one agent task parked on it by a linked
+    # human_task condition (its reason asks a person too), and one more behind that.
+    - id: t_e5f6a7b8
+      title: "Approve the store listing"
+      status: ready
+      status_since: "2026-03-01T10:00:00+00:00"
+      role: owner
+      owner_id: ceo
+    - id: t_e5f6a7b9
+      title: "Publish release 2.4"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block:
+        reason: "waiting_human: store listing approval (t_e5f6a7b8)"
+        since: "2026-03-02T12:00:00+00:00"
+        condition_id: "human:t_e5f6a7b8"
+    - id: t_e5f6a7ba
+      title: "Announce release 2.4"
+      status: backlog
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+    # A run Kelpie stopped (verified marker): rule 13's already, routed to the lead.
+    - id: t_5709a001
+      title: "Nightly maintenance heartbeat"
+      status: blocked
+      status_since: "2026-03-04T05:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block:
+        reason: "waiting_human: needs_input: Stopped by Kelpie: Runaway run. The task stays blocked until a human resumes it."
+        since: "2026-03-04T05:00:00+00:00"
+        kelpie: stop
+    # Look-alikes that wait on a condition, not on a person: rule 4's.
+    - id: t_c0de0012
+      title: "Review settings sync"
+      status: blocked
+      status_since: "2026-03-04T04:00:00+00:00"
+      role: reviewer
+      owner_id: agent-rev-1
+      block: {reason: "needs_input: automerge PR #12", since: "2026-03-04T04:00:00+00:00"}
+    - id: t_c0de0013
+      title: "Review sign-in flow"
+      status: blocked
+      status_since: "2026-03-04T00:00:00+00:00"
+      role: reviewer
+      owner_id: agent-rev-1
+      block:
+        reason: "needs_input: merge first"
+        since: "2026-03-04T00:00:00+00:00"
+        condition_id: "pr:example/app#13"
+  dependencies:
+    - {task_id: t_e5f6a7ba, depends_on: t_e5f6a7b9}
+  conditions:
+    - {id: "human:t_e5f6a7b8", kind: human_task, task_id: t_e5f6a7b9, params: {task: t_e5f6a7b8}, satisfied: false, checked_at: "2026-03-04T09:58:00+00:00"}
+    - {id: "pr:example/app#13", kind: pr_merged, task_id: t_c0de0013, params: {repo: example/app, pr: 13}, satisfied: false, checked_at: "2026-03-04T09:58:00+00:00"}
+expected_actions:
+  - kind: alert
+    task_id: t_c0de0012
+    reason_contains: "has no condition Kelpie can check"
+  - kind: alert
+    task_id: t_c0de0013
+    reason_contains: "limit 8h"
+not_expected_actions:
+  - kind: alert
+    task_id: t_a1b2c3d4
+  - kind: alert
+    task_id: t_e5f6a7b9
+  - kind: alert
+    task_id: t_5709a001

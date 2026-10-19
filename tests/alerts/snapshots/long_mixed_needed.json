@@ -1,5 +1,5 @@
 {
-  "text": "🟡 Waiting for you: 1 task (oldest 44 h)\n\n1. Nightly backup of d1 — 44 h · t_6fb7a27a\n   Needed: CEO: backup-d1 на main (run 38992282776)\n   Blocking: none · Open task: https://board.example.org/tasks/t_6fb7a27a\nWhy: Task t_6fb7a27a has been blocked for 44h 21m on 'waiting_human: needs_input: CEO: backup-d1' and has no condition Kelpie can check, so nothing will clear it automatically.\nRule: needs_you",
+  "text": "🟡 Waiting for you: 1 task (oldest 44 h)\n\n1. Nightly backup of d1 — 44 h · t_6fb7a27a\n   Needed: CEO: backup-d1 на main (run 38992282776) — 403 10042 «Please enable R2 through the Cloudflare dashboard before the backup job can write…»\n   Blocking: none · Open task: https://board.example.org/tasks/t_6fb7a27a\nWhy: Task t_6fb7a27a has been blocked for 44h 21m on 'waiting_human: needs_input: CEO: backup-d1' and has no condition Kelpie can check, so nothing will clear it automatically.\nRule: needs_you",
   "mrkdwn": false,
   "blocks": [
     {
@@ -57,7 +57,7 @@
             },
             {
               "type": "text",
-              "text": "CEO: backup-d1 на main (run 38992282776)"
+              "text": "CEO: backup-d1 на main (run 38992282776) — 403 10042 «Please enable R2 through the Cloudflare dashboard before the backup job can write…»"
             },
             {
               "type": "text",

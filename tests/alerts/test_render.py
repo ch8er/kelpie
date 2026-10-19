@@ -332,9 +332,24 @@ def test_the_did_line_appears_only_when_kelpie_acted_or_would_act() -> None:
     assert with_text.splitlines()[-2:] == ["Kelpie did: Stopped run S-1.", "Rule: stale_blocks"]
 
 
-def test_needed_is_the_first_sentence_or_clause_within_140_characters() -> None:
+def test_needed_is_the_first_sentence_within_140_characters() -> None:
     assert note_text("Enable R2. Then rerun.") == "Enable R2."
-    assert note_text(LONG_NEEDED) == "CEO: backup-d1 на main (run 38992282776)"
+    # No cut at a clause (" — "): that would keep the context and drop the ask. A long
+    # sentence is cut at a word boundary; a quote opening early (the ask) is cut inside and
+    # closed, one opening late is left out.
+    assert note_text(LONG_NEEDED) == (
+        "CEO: backup-d1 на main (run 38992282776) — 403 10042 «Please enable R2 through the "
+        "Cloudflare dashboard before the backup job can write…»"
+    )
+    assert len(note_text(LONG_NEEDED)) <= 140
+    late = "x " * 60 + "«" + "quoted words " * 10 + "»"
+    assert "«" not in note_text(late) and note_text(late).endswith("…")
+    nested = "Reply: «he wrote “" + "very long words " * 12 + "” and left»"
+    assert note_text(nested).endswith("…”»")
+    live = "CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2.» Then rerun the job."
+    assert note_text(live) == "CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2.»"
+    assert note_text('He said "stop." Then go.') == 'He said "stop."'
+    assert note_text("Enable it (see the docs.) Then rerun.") == "Enable it (see the docs.)"
     assert note_text("waiting_human: Approve it") == "Approve it"
     assert note_text("note: keep this prefix") == "note: keep this prefix"
     cut = note_text("word " * 60)
@@ -442,6 +457,34 @@ def test_a_cut_headline_keeps_the_whole_reason_even_when_every_task_says_what_it
     assert f"Why: {long.strip()}" in render.plain(alert, EN).splitlines()
     whole = event(rule="custom", reason="Short. More.", items=(single(needed="Approve it."),))
     assert "Why:" not in render.plain(whole, EN)  # a whole sentence: "Needed" stands in
+
+
+def test_a_stop_inside_closing_quotes_ends_a_sentence_only_before_a_new_one() -> None:
+    def headline(reason: str) -> str:
+        return render.plain(event(rule="custom", reason=reason)).splitlines()[0]
+
+    region = (
+        "Task T-1 has been blocked for 5h on 'needs_input: which region?' and has no "
+        "condition Kelpie can check, so nothing will clear it automatically."
+    )
+    assert summary(region, 200)[0] == region  # one sentence, not split at the quote
+    make = 'Run S-1 of T-3 called "make test." 40 times in 10 minutes without progress.'
+    assert headline(make) == f"\U0001f7e1 {make}"
+    assert summary("He said 'no.' and left. Then more.") == (
+        "He said 'no.' and left.",
+        "Then more.",
+    )
+    assert note_text("«Please enable R2.» Then rerun.") == "«Please enable R2.»"
+    assert note_text('Run "stop." Then go.') == 'Run "stop."'
+    assert note_text("Enable it (see the docs.) Then rerun.") == "Enable it (see the docs.)"
+    assert note_text("Ask «部署吗?» 然后") == "Ask «部署吗?»"  # a letter without case
+    # a dash, an opening bracket or quote: the sentence goes on
+    for whole in (
+        "He said 'no.' — then left.",
+        "Blocked on 'waiting for the vendor.' (since Monday) and more.",
+        "Ask: 'deploy to EU?' 'or US?' then go.",
+    ):
+        assert summary(whole + " Next one.") == (whole, "Next one.")
 
 
 def test_a_cut_never_ends_inside_an_open_quote() -> None:

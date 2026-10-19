@@ -4,8 +4,19 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from kelpie.core.actions import ActionKind
-from kelpie.core.model import Block, Condition, ConditionKind, Snapshot, Status, Task
+from kelpie.core.model import (
+    Block,
+    Condition,
+    ConditionKind,
+    Dependency,
+    Owner,
+    OwnerKind,
+    Snapshot,
+    Status,
+    Task,
+)
 from kelpie.rules import REGISTRY
+from kelpie.rules.needs_you import NeedsYou, inbox_task_ids
 from kelpie.rules.stale_blocks import StaleBlocks, _human, build
 
 NOW = datetime(2026, 3, 2, 15, tzinfo=UTC)
@@ -185,6 +196,138 @@ def test_connector_that_stopped_checking_alerts_instead_of_unblocking() -> None:
     assert run(young, cond(checked=None), rule=rule) == []  # block younger than the threshold
 
 
+# --- blocks that ask a person are rule 13's (#169) -----------------------------------------
+
+INBOX = StaleBlocks(inbox=NeedsYou(), max_block=180 * M)
+OWNERS = (Owner("ceo", "owner", OwnerKind.HUMAN), Owner("agent-1", "developer"))
+
+
+def question(
+    cid: str | None = None,
+    reason: str = "waiting_human: needs_input: CEO: enable R2",
+    owner: str | None = "agent-1",
+) -> Task:
+    since = NOW - 300 * M
+    return Task("T-1", "t", Status.BLOCKED, since, owner_id=owner, block=Block(reason, since, cid))
+
+
+def person(satisfied: bool | None = False, **params: object) -> Condition:
+    return Condition(
+        "C-1",
+        ConditionKind.HUMAN_TASK,
+        params={"task": "H-1", **params},
+        satisfied=satisfied,
+        satisfied_at=NOW - 60 * M if satisfied else None,
+        checked_at=NOW - M,
+    )
+
+
+def human_task(status: Status = Status.READY, prework: bool = False) -> Task:
+    return Task("H-1", "Approve", status, NOW - 600 * M, owner_id="ceo", prework=prework)
+
+
+def on_farm(
+    *tasks: Task,
+    conditions: tuple[Condition, ...] = (),
+    deps: tuple[Dependency, ...] = (),
+    rule: StaleBlocks = INBOX,
+) -> list:
+    return list(rule.evaluate(Snapshot(NOW, tasks, OWNERS, deps, conditions)))
+
+
+def test_a_question_the_inbox_lists_raises_no_alert_of_rule_4s() -> None:
+    assert alerts(run(question())) == ["unlinked"]  # without rule 13 reaching people
+    assert run(question(), rule=INBOX) == []  # an approval in the inbox
+    # parked on a person's task they can do now: listed under it, so not overdue either
+    parked = (question("C-1"), human_task())
+    assert alerts(on_farm(*parked, conditions=(person(),))) == []
+    off = replace(INBOX, inbox=None)
+    assert alerts(on_farm(*parked, conditions=(person(),), rule=off)) == ["overdue"]
+
+
+@pytest.mark.parametrize("prework", [False, True])  # in the backlog, or in triage
+def test_a_question_the_inbox_does_not_list_keeps_rule_4s_alerts(prework: bool) -> None:
+    """Rule 13 lists nothing for a person's task they cannot move yet: rule 4 must alert."""
+    gate = human_task(Status.BACKLOG, prework)
+    assert alerts(on_farm(question("C-1"), gate, conditions=(person(),))) == ["overdue"]
+    # Linked by a dependency only, the reason naming the human task. In the backlog it holds
+    # the task, which no list shows: rule 4's no-condition alert. A task in triage holds
+    # nothing it merely depends on (incident 20), so the block is an approval in the inbox.
+    named = question(reason="waiting_human: need H-1 done")
+    found = on_farm(named, gate, deps=(Dependency("T-1", "H-1"),))
+    assert alerts(found) == ([] if prework else ["unlinked"])
+    snap = Snapshot(NOW, (named, gate), OWNERS, (Dependency("T-1", "H-1"),))
+    assert ("T-1" in inbox_task_ids(snap, NeedsYou())) is prework
+
+
+def test_behind_agent_work_the_inbox_lists_nothing_and_rule_4_alerts() -> None:
+    work = Task("A-1", "prep", Status.IN_PROGRESS, NOW - 60 * M, owner_id="agent-1")
+    deps = (Dependency("H-1", "A-1"),)
+    found = on_farm(question("C-1"), human_task(), work, conditions=(person(),), deps=deps)
+    assert alerts(found) == ["overdue"]
+
+
+def test_a_persons_own_blocked_task_in_their_digest_raises_no_alert_of_rule_4s() -> None:
+    """S9: an item of the digest, even with a dead end of its own; nothing behind it, no
+    digest, so rule 4 alerts."""
+    since = NOW - 300 * M
+    ended = person(terminal=True, status="cancelled")
+    mine = Task("H-1", "Sign", Status.BLOCKED, since, owner_id="ceo", block=Block("vendor", since))
+    linked = replace(mine, block=Block("vendor", since, "C-1"))
+    behind = Task("T-9", "next", Status.BACKLOG, since, owner_id="agent-1")
+    deps = (Dependency("T-9", "H-1"),)
+    assert alerts(on_farm(mine, behind, deps=deps)) == []
+    assert (
+        alerts(on_farm(linked, behind, conditions=(replace(ended, task_id="H-1"),), deps=deps))
+        == []
+    )
+    assert alerts(on_farm(mine)) == ["unlinked"]
+
+
+def test_a_broken_link_is_not_parked_on_a_persons_task() -> None:
+    """Linked by a dependency and naming the person's task, but its block names a
+    condition Kelpie cannot see: rule 4's alert, not an item under that task."""
+    broken = question("C-404", reason="waiting_human: need H-1 done")
+    found = on_farm(broken, human_task(), deps=(Dependency("T-1", "H-1"),))
+    assert len(found) == 1 and "cannot see" in found[0].reason
+
+
+def test_rule_13s_settings_decide_what_asks_a_person() -> None:
+    merge = question(reason="needs_input: automerge PR #12")
+    patterns = build({"needs_you": {"condition_reasons": [r"PR\s*#\d+"]}})
+    assert run(merge, rule=INBOX) == []  # no pattern: a question by its kind
+    assert alerts(run(merge, rule=patterns)) == ["unlinked"]
+    own = build({"needs_you": {"approval_reasons": ["ask_human"]}})
+    assert alerts(run(question(), rule=own)) == ["unlinked"]
+    assert run(question(reason="ask_human: which key?"), rule=own) == []
+    assert build({"needs_you": True}).inbox == NeedsYou()
+    assert build({"needs_you": False}).inbox is None
+
+
+def test_what_is_not_a_question_stays_rule_4s() -> None:
+    # A linked condition other than a human task, still unmet: a wait (overdue).
+    assert alerts(run(question("C-1"), cond(satisfied=False, at=None), rule=INBOX)) == ["overdue"]
+    # A person's own blocked task: rule 13 does not list it, so rule 4 still alerts.
+    assert alerts(on_farm(question(owner="ceo"))) == ["unlinked"]
+
+
+def test_what_rule_13_does_not_list_still_alerts_and_the_block_still_clears() -> None:
+    # The person's task it waited on was cancelled: a dead end, with what is stuck behind it
+    # (rule 3 leaves that to this alert; rule 13 does not list the block).
+    ended = person(terminal=True, status="cancelled")
+    [dead] = run(question("C-1"), ended, rule=INBOX)
+    assert dead.key.startswith("dead-end:") and "stuck_ids" in dead.params
+    # A condition reference Kelpie cannot see is broken, whoever the block asks.
+    [missing] = run(question("C-404"), rule=INBOX)
+    assert "cannot see" in missing.reason
+    # A connector that stopped checking the person's task.
+    stale = replace(person(), checked_at=NOW - 120 * M)
+    assert alerts(run(question("C-1"), stale, rule=INBOX)) == ["stale-evidence"]
+    # The person's task is done: the block is stale and is cleared as before.
+    [unblock] = run(question("C-1"), person(satisfied=True), rule=INBOX)
+    assert unblock.kind is ActionKind.UNBLOCK
+
+
 @pytest.mark.parametrize(
     ("minutes", "text"), [(0, "0m"), (45, "45m"), (180, "3h"), (185, "3h 05m"), (-5, "0m")]
 )
@@ -212,6 +355,10 @@ def test_build() -> None:
         {"max_block": True},
         {"max_condition_age": False},
         {"grace": "1m"},
+        {"needs_you": "yes"},
+        {"needs_you": {"approval_reasons": []}},
+        {"needs_you": {"condition_reasons": ["("]}},
+        {"approval_reasons": ["x"]},  # rule 13's, not a key of this rule
     ):
         with pytest.raises(ValueError):
             build(bad)

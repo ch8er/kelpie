@@ -28,6 +28,7 @@ from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.model import Snapshot
 from kelpie.metrics import Metrics
+from kelpie.rules import REGISTRY as RULES
 from kelpie.rules import PlannedRule, Priority
 from kelpie.rules.conflict_warning import ConflictWarning
 from kelpie.server import make_server, run
@@ -363,6 +364,64 @@ def test_needs_you_inherits_planned_and_hold_labels_from_bottlenecks() -> None:
     own = {"bottlenecks": six, "needs_you": {"planned_labels": ["later"]}}
     assert planned(own) == {"later"}  # its own list wins
     assert planned({"needs_you": {}}) == frozenset()
+
+
+def test_stale_blocks_reads_who_asks_a_person_from_needs_you() -> None:
+    """Rule 4 leaves the blocks rule 13 lists to it while rule 13 reaches people, reading
+    the farm with rule 13's whole config (#169)."""
+
+    def stale(rules: dict, registry: Any = RULES, **modes: Mode) -> Any:
+        loaded = load_rules(EngineConfig(rules=rules, modes=modes), registry)
+        return next(r for r in loaded.rules if r.name == "stale_blocks")
+
+    six = {"planned_labels": ["post-release"]}
+    inbox = {
+        "bottlenecks": six,
+        "needs_you": {"approval_reasons": ["ask_human"], "condition_reasons": ["PR #"]},
+    }
+    rule = stale(inbox).inbox
+    assert rule.approval_reasons == ("ask_human",)
+    assert [p.pattern for p in rule.condition_reasons] == ["PR #"]
+    assert rule.planned_labels == {"post-release"}  # inherited by rule 13, so by rule 4 too
+    assert stale({}).inbox.approval_reasons == ("waiting_human", "needs_input", "approval")
+    # Rule 13 must reach people at least as far as rule 4 does, else rule 4 keeps alerting.
+    suggest, observe, act = Mode.SUGGEST, Mode.OBSERVE, Mode.ACT
+    assert stale({}, stale_blocks=suggest, needs_you=suggest).inbox is not None
+    assert stale({}, stale_blocks=act, needs_you=suggest).inbox is not None
+    assert stale({}, stale_blocks=suggest, needs_you=observe).inbox is None
+    assert stale({}, stale_blocks=observe, needs_you=observe).inbox is not None  # no one hears
+    without = {k: v for k, v in RULES.items() if k != "needs_you"}
+    assert stale({}, without, stale_blocks=suggest).inbox is None
+    # The switch is derived, and rule 13's keys are not rule 4's.
+    with pytest.raises(ConfigError, match="set automatically from the rules' modes"):
+        stale({"stale_blocks": {"needs_you": False}})
+    with pytest.raises(ConfigError, match=r"stale_blocks.*unknown parameters"):
+        stale({"stale_blocks": {"approval_reasons": ["x"]}})
+    # A mistake in rule 13's section is reported as rule 13's, though rule 4 loads first.
+    with pytest.raises(ConfigError, match=r"^bad config for rule 'needs_you': approval_reasons"):
+        stale({"needs_you": {"approval_reasons": []}})
+
+
+def test_a_silent_gap_between_rule_13s_waits_and_rule_4s_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rules = {
+        "needs_you": {"approval_wait_after": "6h", "human_wait_alert_after": "10h"},
+        "stale_blocks": {"unlinked_alert_after": "4h", "max_block": "8h"},
+    }
+    with caplog.at_level("WARNING"):
+        load_rules(EngineConfig(rules=rules))
+    assert "needs_you.approval_wait_after (6:00:00) is longer than" in caplog.text
+    assert "stale_blocks.unlinked_alert_after (4:00:00)" in caplog.text
+    assert "for 2:00:00 in between" in caplog.text
+    assert "needs_you.human_wait_alert_after (10:00:00)" in caplog.text
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        load_rules(EngineConfig())
+        off = {**rules, "stale_blocks": {"unlinked_alert_after": False, "max_block": False}}
+        load_rules(EngineConfig(rules=off))
+        load_rules(EngineConfig(rules=rules, modes={"stale_blocks": Mode.SUGGEST}))
+    assert not caplog.records  # defaults fit; alerts off; no hand-off without rule 13
 
 
 def test_loop_breaker_inherits_poll_patterns_from_wait_condition(

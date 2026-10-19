@@ -685,9 +685,12 @@ def load_rules(
     rules: list[Rule] = []
     for name in (p.name for p in planned if p.name in registry):  # plan order
         try:
-            rules.append(registry[name](_rule_config(name, config)))
+            rules.append(registry[name](_rule_config(name, config, registry)))
+        except ConfigError:
+            raise  # names the rule it is about (needs_you, read for stale_blocks)
         except Exception as exc:
             raise ConfigError(f"bad config for rule {name!r}: {exc}") from exc
+    _warn_inbox_gaps(rules)
     statuses = [
         RuleStatus(
             name=p.name,
@@ -716,13 +719,19 @@ def _with_condition_reasons(
     return replace(engine, rules=rules)
 
 
-def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
+def _rule_config(
+    name: str, config: EngineConfig, registry: Mapping[str, RuleFactory] | None = None
+) -> dict[str, Any]:
     """A rule's config section. ``loop_breaker`` polls the same checks rule 2 coaches, so it
     inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own; ``orphan_status``
     inherits ``bottlenecks``' hold labels, ``needs_you`` its planned and hold labels as
     ``planned_labels`` (one definition of a planned wait), and ``return_causes``
-    ``conflict_warning``'s ``expected_shared`` the same way."""
+    ``conflict_warning``'s ``expected_shared`` the same way. ``stale_blocks`` always reads
+    ``needs_you``'s settings (see :func:`_stale_blocks_config`); ``registry`` holds the rules
+    being loaded (default: every registered one)."""
     section = dict(config.rules.get(name, {}))
+    if name == "stale_blocks":
+        return _stale_blocks_config(section, config, REGISTRY if registry is None else registry)
     if name == "needs_you" and "planned_labels" not in section:
         planned = planned_labels(config.rules.get("bottlenecks", {}))
         if planned:
@@ -753,6 +762,62 @@ def _rule_config(name: str, config: EngineConfig) -> dict[str, Any]:
             "matching only one of them are coached by rule 2 or stopped by rule 10 inconsistently"
         )
     return section
+
+
+def _stale_blocks_config(
+    section: dict[str, Any], config: EngineConfig, registry: Mapping[str, RuleFactory]
+) -> dict[str, Any]:
+    """Rule 4 leaves the blocks rule 13 lists as questions for a person to rule 13, while
+    rule 13 reaches people: it is loaded, and it is not in ``observe`` while rule 4 is not
+    (else rule 4's alerts would be the only ones a person gets). It then gets rule 13's
+    whole config section as ``needs_you`` (its reasons, the ``[[block_conditions]]``
+    patterns and planned labels included), so the two rules read the farm alike; else
+    ``needs_you = false``. Rule 13's section is checked here, so a mistake in it is reported
+    as rule 13's."""
+    if "needs_you" in section:
+        raise ValueError(
+            "needs_you is set automatically from the rules' modes (whether rule 13 reaches "
+            "people), not in [engine.rules.stale_blocks]"
+        )
+    active = "needs_you" in registry and (
+        config.mode_for("needs_you") is not Mode.OBSERVE
+        or config.mode_for("stale_blocks") is Mode.OBSERVE
+    )
+    if not active:
+        section["needs_you"] = False
+        return section
+    inbox = _rule_config("needs_you", config, registry)
+    try:
+        registry["needs_you"](dict(inbox))
+    except Exception as exc:
+        raise ConfigError(f"bad config for rule 'needs_you': {exc}") from exc
+    section["needs_you"] = inbox
+    return section
+
+
+def _warn_inbox_gaps(rules: Sequence[Rule]) -> None:
+    """A block rule 4 leaves to rule 13 is announced by neither until rule 13's own wait has
+    passed: say so when that is longer than rule 4's (the gap is silent)."""
+    four = next((r for r in rules if r.name == "stale_blocks"), None)
+    inbox = getattr(four, "inbox", None)
+    if four is None or inbox is None:
+        return
+    pairs = (
+        ("approval_wait_after", "unlinked_alert_after"),
+        ("human_wait_alert_after", "max_block"),
+    )
+    for thirteen, own in pairs:
+        theirs, mine = getattr(inbox, thirteen), getattr(four, own)
+        if mine is not None and theirs > mine:
+            log.warning(
+                "needs_you.%s (%s) is longer than stale_blocks.%s (%s): a block that asks a "
+                "person is announced by neither rule for %s in between",
+                thirteen,
+                theirs,
+                own,
+                mine,
+                theirs - mine,
+            )
 
 
 def hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:

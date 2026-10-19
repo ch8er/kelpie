@@ -68,7 +68,8 @@ SLACK_BLOCKS = 50  # Slack's limit of blocks in a message
 SLACK_TEXT = 4000  # the top-level fallback text
 INDENT = "   "
 _SPACE = re.compile(r"\s+")
-_SENTENCE = re.compile(r"[.!?…](?=\s|$)")
+# A sentence ends at . ! ? or …, with the closing quotes and brackets right after it.
+_SENTENCE = re.compile(r"[.!?…][\"'»”’)\]]*(?=\s|$)")  # noqa: RUF001 (closing quotes)
 _CLAUSE = re.compile("; | \u2014 | \u2013 ")
 # Quotes a cut must not end inside: opening -> closing.
 _QUOTES = {"'": "'", '"': '"', "«": "»", "“": "”", "\u2018": "\u2019", "„": "“"}
@@ -288,10 +289,7 @@ def _item(number: int, item: AlertItem, settings: RenderSettings) -> ItemView:
     title = _flat(defang(item.title)) if item.title else None
     blocking = None
     if item.blocking is not None:
-        if item.blocking_more:  # at least that many: "10+ tasks"
-            form = i18n.plural(lang, item.blocking)
-            count = i18n.text(lang, f"count.tasks.{form}", n=f"{item.blocking}+")
-        elif item.blocking == 0:
+        if item.blocking == 0:
             count = i18n.text(lang, "label.none")
         else:
             count = i18n.tasks(lang, item.blocking)
@@ -307,10 +305,20 @@ def _item(number: int, item: AlertItem, settings: RenderSettings) -> ItemView:
         shown_id=_cut_words(task_id, MAX_ID) or "?",
         title=_cut_words(title, MAX_TITLE) if title else None,
         age=i18n.age(lang, item.age) if item.age is not None and item.age >= MIN_AGE else None,
-        needed=note_text(defang(item.needed)) or None if item.needed else None,
+        needed=_needed(item, title),
         blocking=blocking,
         link=link,
     )
+
+
+def _needed(item: AlertItem, title: str | None) -> str | None:
+    """What is needed, unless it only repeats the task's title."""
+    if not item.needed:
+        return None
+    note = note_text(defang(item.needed))
+    if not note or (title is not None and note.casefold() == title.casefold()):
+        return None
+    return note
 
 
 def _did(event: AlertEvent, lang: str) -> str | None:
@@ -349,31 +357,53 @@ def _cut_words(text: str, limit: int) -> str:
     return head.rstrip(" ,;:\u2014\u2013-") + "…"
 
 
-def summary(text: str, limit: int = MAX_NOTE) -> tuple[str, str | None]:
-    """The first sentence of ``text`` (else its first clause, else a cut at a word boundary)
-    in at most ``limit`` characters, and the rest after a whole first sentence (None when the
-    short form is not a whole sentence, so the full text is still needed). A sentence, clause
-    or cut never ends inside an open quote ('…', "…", «…», “…”): a cut stops before it."""
+def summary(
+    text: str, limit: int = MAX_NOTE, *, clauses: bool = True, close_quotes: bool = False
+) -> tuple[str, str | None]:
+    """The first sentence of ``text`` (else, with ``clauses``, its first clause, else a cut
+    at a word boundary) in at most ``limit`` characters, and the rest after a whole first
+    sentence (None when the short form is not a whole sentence, so the full text is still
+    needed). A sentence ends with the closing quotes and brackets right after its stop, but
+    only where the text goes on with a new sentence (see :func:`_ends_sentence`). A
+    sentence, clause or cut never ends inside an open quote ('…', "…", «…», “…”): a cut
+    stops before it, or, with ``close_quotes``, closes it when the quote opens early enough
+    (:func:`_cut_outside_quotes`)."""
     text = _flat(text)
     if not text:
         return "", ""
-    ends = (m.end() for m in _SENTENCE.finditer(text) if _quote_open(text[: m.end()]) is None)
+    ends = (
+        m.end()
+        for m in _SENTENCE.finditer(text)
+        if _ends_sentence(text, m) and _quote_open(text[: m.end()]) is None
+    )
     sentence = text[: next(ends, len(text))]
     if len(sentence) <= limit:
         return sentence, text[len(sentence) :].strip()
-    for m in _CLAUSE.finditer(sentence):
+    for m in _CLAUSE.finditer(sentence) if clauses else ():
         if _quote_open(sentence[: m.start()]) is None:
             clause = sentence[: m.start()].rstrip(" ,:")
             if 15 <= len(clause) <= limit:
                 return clause, None
             break
-    return _cut_outside_quotes(sentence, limit), None
+    return _cut_outside_quotes(sentence, limit, close_quotes), None
 
 
-def _quote_open(text: str) -> int | None:
-    """Where the quote still open at the end of ``text`` starts, if one is. A straight
-    quote opens only at the start of a word and closes only at its end, so an apostrophe
-    (don't) is not a quote."""
+def _ends_sentence(text: str, m: re.Match[str]) -> bool:
+    """A stop followed by closing quotes or brackets ends the sentence only at the end of
+    the text or before a capital letter (or a letter without case: CJK and the like).
+    Before anything else (a lowercase word, a digit, a dash, an opening quote or bracket)
+    the sentence goes on: on 'needs_input: which region?' and has no condition…; called
+    "make test." 40 times; 'no.' — then left."""
+    if m.end() - m.start() == 1:
+        return True  # a bare stop
+    nxt = text[m.end() :].lstrip()[:1]
+    return not nxt or (nxt.isalpha() and not nxt.islower())
+
+
+def _open_quotes(text: str) -> list[tuple[str, int]]:
+    """The quotes still open at the end of ``text``, outermost first: (closer, start). A
+    straight quote opens only at the start of a word and closes only at its end, so an
+    apostrophe (don't) is not a quote."""
     stack: list[tuple[str, int]] = []
     for i, c in enumerate(text):
         before = text[i - 1] if i else " "
@@ -382,14 +412,32 @@ def _quote_open(text: str) -> int | None:
             stack.pop()
         elif c in _QUOTES and (c not in "'\"" or (not before.isalnum() and not after.isspace())):
             stack.append((_QUOTES[c], i))
-    return stack[0][1] if stack else None
+    return stack
 
 
-def _cut_outside_quotes(text: str, limit: int) -> str:
-    """``_cut_words``, moved back to before a quote the cut would end inside."""
+def _quote_open(text: str) -> int | None:
+    """Where the outermost quote still open at the end of ``text`` starts, if one is."""
+    opened = _open_quotes(text)
+    return opened[0][1] if opened else None
+
+
+QUOTE_ROOM = 30  # a quote opening this far before the limit is cut inside and closed
+
+
+def _cut_outside_quotes(text: str, limit: int, close: bool = False) -> str:
+    """``_cut_words``, never ending inside an open quote: the cut moves back to before it.
+    With ``close`` (the "Needed" line, where the quote is often the ask itself), a quote
+    that opens at least ``QUOTE_ROOM`` characters before the limit is cut inside at a word
+    boundary and closed instead ("«Please enable R2 through…»")."""
     short = _cut_words(text, limit)
-    start = _quote_open(short[:-1])  # the cut ends in "…"
-    head = text[:start].rstrip(" ,;:") if start is not None else ""
+    opened = _open_quotes(short[:-1])  # the cut ends in "…"
+    if not opened:
+        return short
+    start = opened[0][1]
+    if close and start <= limit - QUOTE_ROOM:
+        inner = _cut_words(text, limit - len(opened))
+        return inner + "".join(closer for closer, _ in reversed(_open_quotes(inner[:-1])))
+    head = text[:start].rstrip(" ,;:")
     return head + "…" if len(head) >= 20 else short
 
 
@@ -400,11 +448,12 @@ def _shortened(needed: str) -> bool:
 
 
 def note_text(text: str) -> str:
-    """The "Needed" line: the first sentence or clause, at most 140 characters, without a
-    block reason's machine prefixes (``waiting_human: needs_input:``)."""
+    """The "Needed" line: the first sentence, at most 140 characters (else cut at a word
+    boundary: a clause such as "CEO: backup-d1 (run 1001)" before " — " would drop the
+    actual ask), without a block reason's machine prefixes (``waiting_human: needs_input:``)."""
     flat = _flat(text)
     stripped = _PREFIX.sub("", flat)
-    return summary(stripped or flat, MAX_NOTE)[0]
+    return summary(stripped or flat, MAX_NOTE, clauses=False, close_quotes=True)[0]
 
 
 # --- renderers -----------------------------------------------------------------------------

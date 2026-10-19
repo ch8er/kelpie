@@ -79,7 +79,7 @@ class AlertItem:
     """One task an alert is about. ``title`` is the board's (None when the task is not on
     the board), ``age`` how long it has been in the situation (since ``since``), ``needed``
     what a human must do (a rule's or an agent's text, untrusted), ``blocking`` how many
-    tasks wait behind it (None: unknown; at least that many when ``blocking_more``)."""
+    tasks wait behind it (None: unknown)."""
 
     task_id: str
     title: str | None = None
@@ -87,17 +87,16 @@ class AlertItem:
     needed: str | None = None
     blocking: int | None = None
     since: datetime | None = None
-    blocking_more: bool = False  # ``blocking`` is a lower bound (a list that was capped)
 
     @property
-    def fingerprint(self) -> tuple[str, str | None, str | None, str | None, int | None, bool]:
+    def fingerprint(self) -> tuple[str, str | None, str | None, str | None, int | None]:
         """When it started, to the minute (else the age as worded), so the same item sent
         again a tick later is the same item."""
         if self.since is not None:
             start: str | None = self.since.replace(second=0, microsecond=0).isoformat()
         else:
             start = format_age(self.age) if self.age is not None else None
-        return (self.task_id, self.title, start, self.needed, self.blocking, self.blocking_more)
+        return (self.task_id, self.title, start, self.needed, self.blocking)
 
 
 @dataclass(frozen=True, slots=True)

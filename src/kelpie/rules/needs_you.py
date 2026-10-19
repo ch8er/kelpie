@@ -20,7 +20,20 @@ delay, so the human sees one list instead of scattered blocks:
   has a linked condition other than a human task (rule 4 owns it), or its reason matches
   ``condition_reasons`` (by default the ``[[block_conditions]]`` block patterns, such as
   ``needs_input: automerge PR #12``). On a live farm reviewers blocked with ``needs_input``
-  to get past Hermes' block loop guard while they waited for a merge.
+  to get past Hermes' block loop guard while they waited for a merge. Nor is a block
+  whose condition can never be met (the human task it waited on was cancelled) or that
+  names a condition Kelpie cannot see: rule 4 alerts on those, with what is stuck behind
+  them. The test is :func:`~kelpie.rules._tasks.asks_a_person`.
+
+**Rule 4 leaves what this rule lists to it.** While this rule reaches people, rule 4 gets
+its settings and leaves it every task :func:`inbox_task_ids` returns (what this rule lists,
+its time thresholds aside: the items, approvals and the person's own blocked tasks, and the
+agent tasks parked on a listed human task), with no no-condition, overdue or dead-end alert;
+every other block keeps rule 4's alerts. A block is announced by one of the two, never by
+both and never by neither: a task parked on a human task the person cannot move yet is
+listed here nowhere, so rule 4 alerts on it; one that waits on something else too (a PR),
+or that has a dead end or a condition Kelpie cannot see, is not parked here, so rule 4
+alerts on it. Only stale evidence (a connector that stopped checking) alerts either way.
 
 **Planned waits are not waiting** (incident 20). A task that is not ready for work for its
 own reasons (:func:`~kelpie.rules._tasks.planned`: not started yet, and in a pre-work
@@ -37,8 +50,9 @@ agent tasks that wait on it directly of how long each has waited: a task parked 
 it was parked, and a ready or backlog task that depends on it since its last status change
 (platforms keep dependents in the backlog until their parents finish). Parked on it: a
 condition names it (``human_task``, a dispatch gate's ``task_status``), or the task depends
-on it and nothing else visibly holds it (no other unmet condition; no block reason, one
-that names the human task, or one that asks a person). Everything else behind it (deeper
+on it and nothing else visibly holds it (no block reason, one that names the human task, or
+one that asks a person); either way no other unmet condition holds it, and none of its
+conditions is a dead end or one Kelpie cannot see. Everything else behind it (deeper
 in the chain, in progress, or parked for another reason such as CI) is held but waits on
 something else first: it counts in the number of agent tasks behind the item, not in its
 cost. Items are sorted by cost; so are the people, each waiting task counted once with its
@@ -56,6 +70,21 @@ planned agent task on each dependency path behind the listed human tasks (held t
 included: hold labels are planned labels), not what waits behind them, and nothing for a
 human task that is not in the inbox. Like ``waiting``, a task behind two people's tasks is
 in both escalations: sum across people by id.
+
+``items`` lists the person's items in order (all of them, at most 200; ``items_total``
+counts them), for the alert's digest ("Waiting for you: 2 tasks (oldest 46 h)", which shows
+10 and counts the rest) and the daily report: ``task_id``, ``title``, ``kind``
+(``human_task`` or ``approval``), ``needed`` (what the person is asked, in the agent's
+words: an approval's block reason, or why a human task is blocked or waiting; for a
+person's blocked task that can never clear on its own, why, in rule 4's words, since rule 4
+sends nothing on it: "the PR was closed without merging (pr:x): the block will never clear
+on its own", "the block names condition pr:gone, which Kelpie cannot see"; none for a
+human task that is just to do, whose title says it), ``since`` (when its longest wait
+began, ISO 8601), ``blocking`` (how many tasks wait behind it, all of them: the agent tasks
+behind a human task; for an approval, the tasks waiting on the blocked one, as rule 4's
+``stuck_ids`` counts them) and ``cost_hours``. The older keys stay as they are, since the
+ledger holds them and the report reads ``task``: ``task`` (the id again), ``behind`` (at
+most 10 of the tasks behind it; the approval itself for one) and ``waiting_minutes``.
 
 The state's key is the person's list of task ids, so any change to it, an item added or
 one done, is announced as "changed" with the new list; an emptied inbox resolves.
@@ -77,18 +106,19 @@ from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
-from kelpie.core.model import (
-    Condition,
-    ConditionKind,
-    KelpieMark,
-    OwnerKind,
-    Snapshot,
-    Status,
-    Task,
-)
+from kelpie.core.model import Condition, KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import labels_list
+from kelpie.rules._chains import behind_lookup
+from kelpie.rules._tasks import (
+    DEFAULT_APPROVAL_REASONS,
+    approval_reasons_list,
+    asks_a_person,
+    condition_patterns,
+    dead_end_text,
+    dead_ends,
+    labels_list,
+)
 from kelpie.rules.bottlenecks import (
     PLANNED_AGENT_TASKS,
     HumanGate,
@@ -103,11 +133,9 @@ NAME = "needs_you"
 # (Not ``PLANNED``: ``kelpie.rules.PLANNED`` is the list of planned rules.)
 PLANNED_TASKS = "planned"
 UNASSIGNED = "unassigned"
-DEFAULT_APPROVAL_REASONS = ("waiting_human", "needs_input", "approval")
-TRANSIENT = re.compile(r"waiting_human:\s*transient\b")
 _SHOWN = 5
+MAX_ITEMS = 200  # items sent per person (the alert shows 10 and counts the rest)
 _FROZEN = frozenset({Status.BLOCKED, Status.WAITING})
-MAX_REASON = 2000  # characters of a block reason searched, as [[block_conditions]] does
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +147,30 @@ class Item:
     cost_hours: float  # agent-hours waited, summed over its waiting agent tasks
     waits: Mapping[str, timedelta] = field(default_factory=dict)  # waiting task -> how long
     planned: tuple[str, ...] = ()  # planned agent tasks behind it, not waiting (incident 20)
+    held: tuple[str, ...] = ()  # an approval's: the tasks waiting behind it (rule 4's stuck_ids)
+    # A person's blocked task whose block can never clear on its own: what rule 4 would say
+    # (a dead end, a condition Kelpie cannot see), said here instead, once.
+    broken: str | None = None
+
+    @property
+    def blocking(self) -> int:
+        """How many tasks wait behind it, all of them (``behind`` is cut in params): the
+        agent tasks behind a human task; for an approval, the tasks that wait on the
+        blocked task, through dependencies and task waits."""
+        return len(self.held) if self.kind == "approval" else len(self.behind)
+
+    @property
+    def needed(self) -> str | None:
+        """What the person is asked, in the agent's own words: an approval's block reason,
+        or the reason a human task is blocked or waiting (the person chases that). For a
+        human task whose block can never clear on its own, why (``broken``: rule 4 leaves
+        it to this digest). None for a human task that is just to do: its title says it."""
+        if self.broken:
+            return self.broken
+        if self.kind == "approval" or self.task.status in _FROZEN:
+            reason = self.task.block.reason.strip() if self.task.block is not None else ""
+            return reason or None
+        return None
 
     def describe(self) -> str:
         hours = f"{self.cost_hours:.1f} agent-hours"
@@ -156,25 +208,35 @@ class NeedsYou:
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> list[Action]:
-        snapshot = with_pr_labels(snapshot, link_pull_requests(snapshot)[0])  # as rule 6
-        roles = {o.id: o.role for o in snapshot.owners}
-        inbox: dict[str, list[Item]] = {}
-        found, claimed = self._human_tasks(snapshot, human_gates(snapshot, self.planned_labels))
-        for item in found:
-            inbox.setdefault(item.task.owner_id or UNASSIGNED, []).append(item)
-        for item in self._approvals(snapshot, claimed):
-            inbox.setdefault(self._approver(item.task, roles) or UNASSIGNED, []).append(item)
+        inbox = self._inbox(snapshot, waited=True)
         ranked = sorted(inbox.items(), key=lambda kv: (-_total(kv[1]), kv[0]))
         return [self._escalate(person, items, snapshot.now) for person, items in ranked]
 
+    def _inbox(self, snapshot: Snapshot, *, waited: bool) -> dict[str, list[Item]]:
+        """Every person's items. ``waited``: only those past ``human_wait_alert_after`` and
+        ``approval_wait_after``; without it, everything the inbox lists once it has waited
+        long enough (:func:`inbox_task_ids`)."""
+        snapshot = with_pr_labels(snapshot, link_pull_requests(snapshot)[0])  # as rule 6
+        roles = {o.id: o.role for o in snapshot.owners}
+        inbox: dict[str, list[Item]] = {}
+        gates = human_gates(snapshot, self.planned_labels)
+        found, parked = self._human_tasks(snapshot, gates, waited)
+        for item in found:
+            inbox.setdefault(item.task.owner_id or UNASSIGNED, []).append(item)
+        for item in self._approvals(snapshot, parked, waited):
+            inbox.setdefault(self._approver(item.task, roles) or UNASSIGNED, []).append(item)
+        return inbox
+
     def _human_tasks(
-        self, snapshot: Snapshot, gates: list[HumanGate]
+        self, snapshot: Snapshot, gates: list[HumanGate], waited: bool = True
     ) -> tuple[list[Item], set[str]]:
         """Human tasks that are the person's to move now, whose agent work has waited long
-        enough: ready or in progress with nothing open before them (like rule 6), or
-        blocked or waiting themselves (the person chases what blocks them). Also the agent
-        tasks parked on a human task (:meth:`_parked_on`), listed or not yet: they are
-        that task's, not approvals of their own."""
+        enough (``waited``): ready or in progress with nothing open before them (like rule
+        6), or blocked or waiting themselves (the person chases what blocks them). Also the
+        agent tasks parked on a human task (:meth:`_parked_on`), whether it is listed or not
+        the person's to move yet: they are that task's, not approvals of their own. Parked
+        on one the person cannot move yet, a task is listed nowhere here (agent work comes
+        first), so rule 4 keeps its alerts on it (:func:`inbox_task_ids`)."""
         by_id = {t.id: t for t in snapshot.tasks}
         open_ids = {t.id for t in snapshot.tasks if not t.status.is_terminal}
         unmet = {
@@ -197,7 +259,7 @@ class NeedsYou:
                     by_id[tid], gate.task.id, direct[tid], unmet[tid], movable, snapshot
                 )
             }
-            claimed |= parked
+            claimed |= parked  # not approvals of their own, listed under it or not
             if not movable:
                 continue  # agent work comes first: not the person's bottleneck today
             waits = {
@@ -205,8 +267,10 @@ class NeedsYou:
                 for tid in gate.behind
                 if (w := _waiting(by_id[tid], snapshot.now, direct, parked)) is not None
             }
-            if not waits or max(waits.values()) < self.human_wait_alert_after:
-                continue  # only follow-up work behind it, or not long enough
+            if not waits:
+                continue  # only follow-up work behind it
+            if waited and max(waits.values()) < self.human_wait_alert_after:
+                continue  # not long enough
             cost = sum(w.total_seconds() for w in waits.values()) / 3600
             items.append(
                 Item(
@@ -217,6 +281,7 @@ class NeedsYou:
                     cost,
                     waits,
                     gate.planned,
+                    broken=_broken(gate.task, unmet.get(gate.task.id, ()), snapshot),
                 )
             )
         return items, claimed
@@ -232,54 +297,48 @@ class NeedsYou:
     ) -> bool:
         """Whether a parked agent task that waits directly on ``human_task`` is parked
         because of it: a condition names it; or, linked by a dependency only, nothing else
-        visibly holds it (no other ``unmet`` condition linked to it, and no block, or a
-        block reason that names the human task, or one that asks a person while the
-        person can act on the human task). A reason about something else (CI, a
-        provider) or an agent's own question behind a human task nobody can do yet is not
-        the human task's."""
+        visibly holds it (no block, or a block reason that names the human task, or one
+        that asks a person while the person can act on the human task). Either way no other
+        ``unmet`` condition holds it (it waits on that first: a PR, CI), and none of its
+        conditions is a dead end or one Kelpie cannot see (rule 4 alerts on those). A
+        reason about something else (CI, a provider) or an agent's own question behind a
+        human task nobody can do yet is not the human task's."""
+        if any(c.params.get("task") != human_task for c in unmet):
+            return False  # it waits on something else first
+        if task.block is not None:
+            missing = linked_conditions(task, snapshot)[1]
+            if missing is not None or dead_ends(unmet, task.block.since):
+                return False  # rule 4's dead end or broken link
         if how == "condition":
             return True
-        if unmet:
-            return False  # it waits on something else first
         if task.block is None:
             return True
         reason = task.block.reason
         if re.search(rf"(?<![\w-]){re.escape(human_task)}(?![\w-])", reason):
             return True
-        return movable and self._question_for_a_person(task, snapshot)
+        return movable and self._asks_a_person(task, snapshot)
 
-    def _question_for_a_person(self, task: Task, snapshot: Snapshot) -> bool:
-        """Whether the task's block asks a person for input or approval: its reason starts
-        with an approval reason, and it does not wait on a condition instead (a reason that
-        matches ``condition_reasons``, or an unmet linked condition other than a human
-        task; one that already holds is waited on no longer). A run Kelpie stopped always
-        waits for a person (``Block.kelpie``, verified by the adapter)."""
-        if task.block is not None and task.block.kelpie is KelpieMark.STOP:
-            return True
-        if task.block is None or not _asks_a_person(task.block.reason, self.approval_reasons):
-            return False
-        if any(p.search(task.block.reason[:MAX_REASON]) for p in self.condition_reasons):
-            return False
-        return not any(
-            c.kind is not ConditionKind.HUMAN_TASK and c.satisfied is not True
-            for c in linked_conditions(task, snapshot)[0]
-        )
+    def _asks_a_person(self, task: Task, snapshot: Snapshot) -> bool:
+        """:func:`~kelpie.rules._tasks.asks_a_person` with this rule's settings: the test
+        rule 4 runs too (with the same settings), to leave these blocks to this rule."""
+        return asks_a_person(task, snapshot, self.approval_reasons, self.condition_reasons)
 
-    def _approvals(self, snapshot: Snapshot, claimed: set[str]) -> list[Item]:
-        humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
+    def _approvals(self, snapshot: Snapshot, claimed: set[str], waited: bool = True) -> list[Item]:
         items = []
+        behind = behind_lookup(snapshot)
         for t in snapshot.tasks:
-            if t.status is not Status.BLOCKED or t.block is None or t.owner_id in humans:
+            if t.status is not Status.BLOCKED or t.block is None:
                 continue
             if t.id in claimed:
                 continue  # it waits on a human task directly: listed under that task
-            if not self._question_for_a_person(t, snapshot):
+            if not self._asks_a_person(t, snapshot):  # a person's own task is not one
                 continue
-            waited = snapshot.now - t.block.since
-            if waited < self.approval_wait_after:
+            age = max(snapshot.now - t.block.since, timedelta(0))
+            if waited and age < self.approval_wait_after:
                 continue
-            hours = waited.total_seconds() / 3600
-            items.append(Item("approval", t, (t.id,), waited, hours, {t.id: waited}))
+            hours = age.total_seconds() / 3600
+            held = tuple(behind(t.id))
+            items.append(Item("approval", t, (t.id,), age, hours, {t.id: age}, held=held))
         return items
 
     def _approver(self, task: Task, roles: Mapping[str, str]) -> str | None:
@@ -289,7 +348,8 @@ class NeedsYou:
     def _escalate(self, person: str, items: list[Item], now: datetime) -> Action:
         items = sorted(items, key=lambda i: (-i.cost_hours, i.task.id))
         total = _total(items)
-        blocked = sorted({tid for i in items for tid in i.behind})
+        # held: the tasks waiting on the person and those behind them, as the items count
+        blocked = sorted({tid for i in items for tid in (*i.behind, *i.held)})
         waiting = sorted({tid for i in items for tid in i.waits})
         planned = sorted({tid for i in items for tid in i.planned} - set(waiting))
         since = now - max(i.waiting for i in items)
@@ -319,19 +379,51 @@ class NeedsYou:
                 PLANNED_AGENT_TASKS: len(planned),
                 PLANNED_TASKS: planned[: _SHOWN * 4],
                 "cost_hours": round(total, 1),
+                # The alert's layout reads task_id, title, needed, since and blocking; the
+                # daily report reads task (and the ledger holds the rest as it always has).
+                "items_total": len(items),
                 "items": [
                     {
                         "kind": i.kind,
+                        "task_id": i.task.id,
                         "task": i.task.id,
                         "title": i.task.title,
+                        "needed": i.needed,
+                        "since": (now - i.waiting).isoformat(),
+                        "blocking": i.blocking,
                         "behind": list(i.behind[: _SHOWN * 2]),
                         "waiting_minutes": int(i.waiting.total_seconds() // 60),
                         "cost_hours": round(i.cost_hours, 1),
                     }
-                    for i in items[: _SHOWN * 2]
+                    for i in items[:MAX_ITEMS]
                 ],
             },
         )
+
+
+def inbox_task_ids(snapshot: Snapshot, settings: NeedsYou) -> frozenset[str]:
+    """The tasks the inbox lists, with ``settings``' reasons and labels and its time
+    thresholds ignored: its items (approvals and human tasks) and the tasks waiting on a
+    listed human task. Rule 4 leaves exactly these to this rule (with its own thresholds),
+    so every block reaches a person through one of the two rules and none through both.
+    Pure: the same code path as :meth:`NeedsYou.evaluate`."""
+    inbox = settings._inbox(snapshot, waited=False)
+    return frozenset(
+        tid for items in inbox.values() for i in items for tid in (i.task.id, *i.waits)
+    )
+
+
+def _broken(task: Task, unmet: Sequence[Condition], snapshot: Snapshot) -> str | None:
+    """Why a person's blocked task can never clear on its own, in rule 4's words: a
+    condition that can never be met, or one Kelpie cannot see. Rule 4 sends neither for a
+    task in the digest, so the digest says it."""
+    if task.block is None or task.status not in _FROZEN:
+        return None
+    missing = linked_conditions(task, snapshot)[1]
+    if missing is not None:
+        return f"the block names condition {missing}, which Kelpie cannot see"
+    ended = dead_ends(unmet, task.block.since)
+    return f"{dead_end_text(ended)}: the block will never clear on its own" if ended else None
 
 
 def _direct_waiters(
@@ -387,16 +479,6 @@ def _total(items: Sequence[Item]) -> float:
     return sum(w.total_seconds() for w in longest.values()) / 3600
 
 
-def _asks_a_person(reason: str, prefixes: Sequence[str]) -> bool:
-    """The block reason starts with one of ``prefixes`` as a whole word (``waiting_human:``,
-    ``needs_input ...``), not as part of a longer one (``approved``, ``needs_input_x``).
-    Hermes' ``transient`` blocks wait for the outside world, not for a person."""
-    text = reason.strip().lower()
-    if TRANSIENT.match(text):
-        return False
-    return any(re.match(rf"{re.escape(p)}(?![\w-])", text) for p in prefixes)
-
-
 def _stopped(task: Task) -> bool:
     return task.block is not None and task.block.kelpie is KelpieMark.STOP
 
@@ -419,14 +501,7 @@ def build(config: dict[str, Any]) -> NeedsYou:
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     if "approval_reasons" in config:
-        reasons = config.pop("approval_reasons")
-        if (
-            not isinstance(reasons, list)
-            or not reasons
-            or not all(isinstance(r, str) and r.strip() for r in reasons)
-        ):
-            raise ValueError("approval_reasons must be a non-empty list of strings")
-        kwargs["approval_reasons"] = tuple(r.strip().lower() for r in reasons)
+        kwargs["approval_reasons"] = approval_reasons_list(config.pop("approval_reasons"))
     if "approvers" in config:
         approvers = config.pop("approvers")
         if not isinstance(approvers, Mapping) or not all(
@@ -441,18 +516,7 @@ def build(config: dict[str, Any]) -> NeedsYou:
             raise ValueError("default_approver must be a human owner id")
         kwargs["default_approver"] = default.strip()
     if "condition_reasons" in config:
-        patterns = config.pop("condition_reasons")
-        if not isinstance(patterns, list) or not all(
-            isinstance(p, str) and p.strip() for p in patterns
-        ):
-            raise ValueError("condition_reasons must be a list of regular expressions")
-        try:
-            compiled = tuple(re.compile(p, re.IGNORECASE) for p in patterns)
-        except re.error as exc:
-            raise ValueError(f"condition_reasons: invalid pattern: {exc}") from exc
-        if any(p.search("") for p in compiled):
-            raise ValueError("condition_reasons: a pattern matches an empty reason (every block)")
-        kwargs["condition_reasons"] = compiled
+        kwargs["condition_reasons"] = condition_patterns(config.pop("condition_reasons"))
     if "planned_labels" in config:
         kwargs["planned_labels"] = frozenset(
             labels_list(config.pop("planned_labels"), "planned_labels")

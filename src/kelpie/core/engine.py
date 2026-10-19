@@ -746,12 +746,11 @@ def _headline(action: Action) -> str | None:
 
 def alert_items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
     """The tasks an alert is about: ``params.items`` (mappings with ``task_id`` and optional
-    ``title``, ``needed``, ``since`` and ``blocking``; malformed entries are skipped), else
-    the action's own task. ``task`` is accepted for ``task_id``, a ``behind`` list (the
-    tasks waiting on it; not for an approval, whose list is the task itself) for ``blocking``
-    and ``waiting_minutes`` for ``since``: the shape rule 13 already persists in the ledger.
-    Titles come from the entry, else the snapshot; ages are counted to ``snapshot.now``.
-    Pure, and never raises on a rule's params."""
+    ``title``, ``needed``, ``since`` and ``blocking``; other keys are the rule's own and are
+    ignored; malformed entries are skipped), else the action's own task. Titles come from
+    the entry, else the snapshot; ages are counted to ``snapshot.now``. Only the actions of
+    the current tick are rendered, never ledger rows. Pure, and never raises on a rule's
+    params."""
     raw = action.params.get("items")
     if isinstance(raw, list):
         items = tuple(i for e in raw if (i := _item(e, snapshot)) is not None)
@@ -775,24 +774,13 @@ def alert_items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
 
 
 def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
-    """One entry of ``params.items``, or None when it is malformed.
-
-    Temporary shim: besides the layout's own keys (``task_id``, ``title``, ``needed``,
-    ``since``, ``blocking``) this reads rule 13's legacy item shape, which the ledger already
-    holds and the daily report reads: ``task`` for the id, a ``behind`` list counted for
-    ``blocking`` (not for ``kind == "approval"``, whose list is the task itself; a list at
-    ``BEHIND_CAP`` is "at least"), and ``waiting_minutes`` for the age. It goes away in part 2
-    of #169, when rule 13 sends exact ``task_id``, ``blocking`` and ``since``."""
+    """One entry of ``params.items``, or None when it is malformed."""
     if not isinstance(entry, Mapping):
         return None
-    task_id = entry.get("task_id", entry.get("task"))
+    task_id = entry.get("task_id")
     needed, blocking, title = entry.get("needed"), entry.get("blocking"), entry.get("title")
     if not isinstance(task_id, str) or not task_id.strip():
         return None
-    behind, more = entry.get("behind"), False
-    # An approval's ``behind`` is the task itself, not tasks behind it.
-    if blocking is None and isinstance(behind, list) and entry.get("kind") != "approval":
-        blocking, more = len(behind), len(behind) >= BEHIND_CAP
     if title is not None and not isinstance(title, str):
         return None
     if needed is not None and not isinstance(needed, str):
@@ -802,27 +790,14 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
     ok, since = _since(entry.get("since"))
     if not ok:
         return None
-    age = _age(since, snapshot.now)
-    minutes = entry.get("waiting_minutes")  # how long the item has held its tasks (legacy)
-    if since is None and (whole := _count(minutes)) is not None:
-        # Whole minutes: a start computed from them would move a minute between ticks and
-        # change the fingerprint, so only the age is known (worded, it is stable).
-        age = timedelta(minutes=whole)
     return AlertItem(
         task_id,
         title.strip() if title and title.strip() else _title(task_id, snapshot),
-        age,
+        _age(since, snapshot.now),
         needed.strip() if needed and needed.strip() else None,
         _count(blocking),
         _start(since),
-        more,
     )
-
-
-# Rule 13 persists at most this many of the tasks behind an item (``params.items[].behind``,
-# ``_SHOWN * 2`` in rules/needs_you.py; a test pins the two together): a list that long
-# counts as "at least". Part of the temporary shim in ``_item``.
-BEHIND_CAP = 10
 
 
 def _since(value: object) -> tuple[bool, datetime | None]:

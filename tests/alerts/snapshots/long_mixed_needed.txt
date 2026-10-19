@@ -1,7 +1,7 @@
 🟡 Waiting for you: 1 task (oldest 44 h)
 
 1. Nightly backup of d1 — 44 h · t_6fb7a27a
-   Needed: CEO: backup-d1 на main (run 38992282776)
+   Needed: CEO: backup-d1 на main (run 38992282776) — 403 10042 «Please enable R2 through the Cloudflare dashboard before the backup job can write…»
    Blocking: none · Open task: https://board.example.org/tasks/t_6fb7a27a
 Why: Task t_6fb7a27a has been blocked for 44h 21m on 'waiting_human: needs_input: CEO: backup-d1' and has no condition Kelpie can check, so nothing will clear it automatically.
 Rule: needs_you

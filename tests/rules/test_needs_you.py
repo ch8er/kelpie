@@ -23,7 +23,7 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.rules import REGISTRY
-from kelpie.rules.needs_you import NeedsYou
+from kelpie.rules.needs_you import MAX_ITEMS, NeedsYou, inbox_task_ids
 
 NOW = datetime(2026, 3, 2, 15, tzinfo=UTC)
 OWNERS = (
@@ -220,11 +220,99 @@ def test_a_task_behind_a_human_task_is_not_also_an_approval() -> None:
     ]
 
 
-def test_a_dead_human_task_condition_still_reaches_a_person() -> None:
-    done = Condition("C-1", ConditionKind.HUMAN_TASK, "A-1", {"task": "H-gone"}, satisfied=None)
+def test_a_dead_human_task_condition_reaches_a_person_through_rule_4() -> None:
+    """The human task it waited on was cancelled: rule 4's dead-end alert (with what is
+    stuck behind it) tells the person, so the inbox does not list it a second time. A
+    condition the connector could not evaluate is still a question for a person."""
+    ended = Condition(
+        "C-1", ConditionKind.HUMAN_TASK, "A-1", {"task": "H-gone", "terminal": True},
+        satisfied=False, checked_at=ago(minutes=1),
+    )  # fmt: skip
     tasks = [blocked("A-1", ago(hours=2), "waiting_human: H-gone", "C-1")]
-    [action] = run(snap(tasks, [done]), default_approver="human-lead")
+    assert run(snap(tasks, [ended]), default_approver="human-lead") == []
+    dead = REGISTRY["stale_blocks"]({"needs_you": {"default_approver": "human-lead"}})
+    [alert] = dead.evaluate(snap(tasks, [ended]))
+    assert alert.key.startswith("dead-end:A-1")
+    unknown = replace(ended, params={"task": "H-gone"}, satisfied=None)
+    [action] = run(snap(tasks, [unknown]), default_approver="human-lead")
     assert action.params["approvals"] == ["A-1"]
+    # a block naming a condition Kelpie cannot see is rule 4's too
+    assert run(snap([blocked("A-2", ago(hours=2), "needs_input: x", "C-404")])) == []
+
+
+def test_items_carry_exact_fields_for_the_digest() -> None:
+    """``task_id``, ``needed``, ``since`` and an uncut ``blocking``; the older keys stay."""
+    chain = [blocked("A-0", ago(hours=5), "waiting_human: H-1", "C-0")] + [
+        Task(f"A-{n}", f"step {n}", Status.BACKLOG, ago(hours=5), role="developer")
+        for n in range(1, 12)
+    ]
+    deps = [Dependency(f"A-{n}", f"A-{n - 1}") for n in range(1, 12)]
+    stuck = Task(
+        "H-2", "Renew the signing certificate", Status.BLOCKED, ago(hours=4), role="owner",
+        owner_id="human-owner", block=Block("waiting for the vendor's invoice", ago(hours=4)),
+    )  # fmt: skip
+    tasks = [
+        human("H-1", ago(hours=6)),
+        stuck,
+        blocked("A-20", ago(hours=3), "waiting_human: H-2", "C-20"),
+        *chain,
+        blocked("Q-1", ago(hours=2), " needs_input: which certificate should I use? "),
+    ]
+    conds = [waits_on("C-0", "A-0", "H-1"), waits_on("C-20", "A-20", "H-2")]
+    [action] = run(snap(tasks, conds, deps), default_approver="human-owner")
+    items = {i["task_id"]: i for i in action.params["items"]}
+    gate, blocked_human, approval = items["H-1"], items["H-2"], items["Q-1"]
+    assert gate["blocking"] == 12 and len(gate["behind"]) == 10  # the list stays cut
+    assert gate["since"] == ago(hours=5).isoformat()
+    assert gate["needed"] is None  # just to do: its title says what
+    assert blocked_human["needed"] == "waiting for the vendor's invoice"  # what to chase
+    assert blocked_human["blocking"] == 1
+    assert approval["blocking"] == 0 and approval["behind"] == ["Q-1"]
+    assert approval["needed"] == "needs_input: which certificate should I use?"
+    assert approval["since"] == ago(hours=2).isoformat() and approval["kind"] == "approval"
+    # what the ledger holds and the daily report reads, unchanged
+    assert approval["task"] == "Q-1" and approval["waiting_minutes"] == 120
+    assert gate["title"] == "human H-1" and gate["cost_hours"] == 5.0
+
+
+def test_an_approvals_blocking_counts_the_tasks_waiting_behind_it() -> None:
+    """T-1 -> D-1 -> D-2: two tasks wait behind the question, as rule 4's stuck_ids."""
+    tasks = [
+        blocked("T-1", ago(hours=2), "needs_input: which region?"),
+        Task("D-1", "next", Status.BACKLOG, ago(hours=2), role="developer"),
+        Task("D-2", "after", Status.BACKLOG, ago(hours=2), role="developer"),
+    ]
+    deps = [Dependency("D-1", "T-1"), Dependency("D-2", "D-1")]
+    [action] = run(snap(tasks, deps=deps), default_approver="human-lead")
+    [item] = action.params["items"]
+    assert (item["task_id"], item["blocking"], item["behind"]) == ("T-1", 2, ["T-1"])
+    # the totals agree: the question and the two tasks behind it are held ...
+    assert action.params["blocked_agent_tasks"] == 3
+    assert "1 item(s) hold 3 agent task(s)" in action.reason
+    # ... but only the question waits on the person (the report's agent-hours)
+    assert action.params["waiting_agent_tasks"] == 1 and action.params["waiting"] == ["T-1"]
+
+
+def test_every_item_is_sent_for_the_digest_to_count() -> None:
+    tasks = [blocked(f"A-{n:02d}", ago(hours=1 + n), "needs_input") for n in range(14)]
+    [action] = run(snap(tasks), default_approver="human-lead")
+    assert action.params["items_total"] == 14 and len(action.params["items"]) == 14
+    many = [blocked(f"A-{n:03d}", ago(hours=1), "needs_input") for n in range(MAX_ITEMS + 5)]
+    [big] = run(snap(many), default_approver="human-lead")
+    assert big.params["items_total"] == MAX_ITEMS + 5 and len(big.params["items"]) == MAX_ITEMS
+
+
+def test_inbox_task_ids_is_what_the_inbox_lists_without_its_waits() -> None:
+    """Rule 4 leaves exactly these to rule 13; its own thresholds then apply."""
+    tasks = [
+        human("H-1", ago(hours=3)),
+        blocked("A-1", ago(minutes=5), "waiting_human: H-1", "C-1"),  # under H-1, not yet due
+        blocked("Q-1", ago(minutes=5), "needs_input: which key?"),  # approval, not yet due
+        blocked("B-1", ago(hours=5), "waiting for CI"),  # not a question
+    ]
+    farm = snap(tasks, [waits_on("C-1", "A-1", "H-1")])
+    assert run(farm) == []  # nothing has waited long enough to be announced
+    assert inbox_task_ids(farm, NeedsYou()) == {"H-1", "A-1", "Q-1"}  # items and waits
 
 
 def test_human_tasks_the_person_cannot_do_yet_are_left_out() -> None:

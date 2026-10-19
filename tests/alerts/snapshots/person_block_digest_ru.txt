@@ -1,0 +1,9 @@
+🟡 Ждут вас: 2 задачи (самая давняя — 46 ч)
+
+1. Approve the store listing — 46 ч · t_e5f6a7b8
+   Блокирует: 2 задачи · Открыть задачу: https://board.example.org/tasks/t_e5f6a7b8
+2. Nightly backup to R2 — 44 ч · t_a1b2c3d4
+   Нужно: CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2 through the Cloudflare dashboard.»
+   Блокирует: ничего · Открыть задачу: https://board.example.org/tasks/t_a1b2c3d4
+Почему: Needs you (ceo): 2 item(s) hold 3 agent task(s), 90.0 agent-hours waited so far. By cost of delay: t_e5f6a7b8 ('Approve the store listing') holds 2 agent task(s) (t_e5f6a7b9, t_e5f6a7ba): 46.0 agent-hours; t_a1b2c3d4 ('Nightly backup to R2') waits for your input: 44.0 agent-hours.
+Правило: needs_you
