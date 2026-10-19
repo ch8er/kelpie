@@ -69,7 +69,7 @@ class ReportSources:
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # rule -> what is missing
     farm: FarmFacts = UNKNOWN_FARM  # what the farm already has (from config)
     # Providers' bills against the estimate for UTC days ``since`` to ``until``
-    # (``kelpie.app.read_reconciliations``); None: no cost reports read.
+    # (``kelpie.app.read_reconciliations``); None: no cost reports configured.
     reconcile: Callable[[date, date], Sequence[Reconciliation] | str] | None = None
 
 
@@ -105,6 +105,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
     ).spans
     return ReportInputs(
         reconciliations=_bills(sources, end),
+        bill_day=_bill_day(sources, end),
         day=day,
         tz=tz,
         actions=actions,
@@ -139,8 +140,9 @@ def bill_days(end: datetime) -> tuple[date, date]:
     """The UTC day whose bills the report of a day ending at ``end`` shows: the one that
     ended 18 to 42 hours before (a bill settles hours after its day ends; the report runs
     just after ``end``). Consecutive reports show consecutive days: a report's day ends at
-    local midnight, and the 18-hour edge falls on a UTC midnight only for offset +6,
-    which no zone with daylight saving time crosses."""
+    local midnight, and the 18-hour edge falls on a UTC midnight only at offset +6, which
+    no zone's current rules move across; a zone whose offset does cross it shows one day
+    twice or skips one."""
     t = end.astimezone(UTC) - timedelta(hours=18)
     day = t.date() - timedelta(days=1)
     return day, day
@@ -150,6 +152,10 @@ def _bills(sources: ReportSources, end: datetime) -> Sequence[Reconciliation] | 
     if sources.reconcile is None:
         return ()
     return sources.reconcile(*bill_days(end))
+
+
+def _bill_day(sources: ReportSources, end: datetime) -> date | None:
+    return bill_days(end)[0] if sources.reconcile is not None else None
 
 
 def write(markdown: str, settings: ReportSettings, day: date) -> Path | None:

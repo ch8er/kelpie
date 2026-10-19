@@ -252,7 +252,8 @@ report; no LLM is involved.
   (plan tokens per task on a subscription-only farm).
 - **Bill check**: with `[connectors.cost_reports]`, each provider's cost report for one
   settled UTC day (the one that ended 18 to 42 hours before the report's day did, so
-  consecutive reports show consecutive days) against Kelpie's estimate from traces: both
+  consecutive reports show consecutive days; "no cost report reconciled" when there is
+  none yet) against Kelpie's estimate from traces: both
   figures, the gap and its share, and what the estimate leaves out (tokens of models
   without a price, and of calls with no known provider). A gap past `warn_gap` is marked
   large, with rule 10's likely causes for its sign. A bill that covers everything billed

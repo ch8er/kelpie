@@ -298,6 +298,7 @@ class ReportInputs:
     # for one settled UTC day: ``kelpie.report.run.bill_days``); a string says why they
     # cannot be read.
     reconciliations: Sequence[Reconciliation] | str = ()
+    bill_day: date | None = None  # the UTC day checked, when cost reports are configured
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +407,7 @@ class DailyReport:
     unpriced_models: tuple[tuple[str | None, int], ...] = ()  # None: no model
     reconciliations: tuple[Reconciliation, ...] = ()  # as in ReportInputs
     reconcile_error: str | None = None  # why the bills could not be read
+    bill_day: date | None = None  # as in ReportInputs
 
     @property
     def chaos_hours(self) -> float:
@@ -520,6 +522,7 @@ def build_report(
         reconcile_error=(
             inputs.reconciliations if isinstance(inputs.reconciliations, str) else None
         ),
+        bill_day=inputs.bill_day,
         act_blockers=inputs.act_blockers,
     )
 
@@ -1538,7 +1541,10 @@ def _bill_lines(report: DailyReport) -> list[str]:
     if report.reconcile_error is not None:
         return ["", f"**Bill check**: {md.text(report.reconcile_error)}."]
     if not report.reconciliations:
-        return []
+        if report.bill_day is None:
+            return []
+        # nothing stored for that day yet, or traces off or not held for the whole day
+        return ["", f"**Bill check**: no cost report reconciled for {report.bill_day} (UTC) yet."]
     out = [
         "",
         "**Bill check** (each provider's cost report against Kelpie's estimate from traces, "

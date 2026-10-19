@@ -64,7 +64,11 @@ def sources(settings: Settings) -> ReportSources:
             rule: b.reason for rule, b in act_blockers(settings, build_adapters(settings)).items()
         },
         farm=farm_facts(settings),
-        reconcile=lambda since, until: read_reconciliations(settings, since, until),
+        reconcile=(
+            (lambda since, until: read_reconciliations(settings, since, until))
+            if settings.cost_reports is not None
+            else None
+        ),
     )
 
 

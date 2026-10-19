@@ -207,8 +207,14 @@ def test_load_inputs_reads_the_bills_of_that_day(tmp_path: Path) -> None:
     )  # fmt: skip
     inputs = load_inputs(sources, DAY, Snapshot(now=START))
     assert asked == [(date(2026, 3, 1), date(2026, 3, 1))]
-    assert list(inputs.reconciliations) == [bill()]
+    assert list(inputs.reconciliations) == [bill()] and inputs.bill_day == date(2026, 3, 1)
     plain = ReportSources(
         tmp_path / "none.db", ReportSettings(), PRICES, OutputSettings(), False, {}
     )
-    assert load_inputs(plain, DAY, Snapshot(now=START)).reconciliations == ()
+    nothing = load_inputs(plain, DAY, Snapshot(now=START))
+    assert nothing.reconciliations == () and nothing.bill_day is None
+
+
+def test_configured_cost_reports_with_no_bill_yet_say_so() -> None:
+    text = markdown(reconciliations=(), bill_day=date(2026, 3, 1))
+    assert "**Bill check**: no cost report reconciled for 2026-03-01 (UTC) yet." in text

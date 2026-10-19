@@ -239,6 +239,7 @@ def test_sources_read_the_bills_through_the_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import kelpie.report.cli as report_cli
+    from kelpie.connectors.cost_reports import CostReportsSettings
 
     settings = load_settings(config(tmp_path))
     asked: list[tuple[Any, date, date]] = []
@@ -248,6 +249,8 @@ def test_sources_read_the_bills_through_the_app(
         return "no cost reports"
 
     monkeypatch.setattr(report_cli, "read_reconciliations", read)
+    assert sources(settings).reconcile is None  # no [connectors.cost_reports]
+    settings = replace(settings, cost_reports=CostReportsSettings())
     src = sources(settings)
     assert src.reconcile is not None
     assert src.reconcile(date(2026, 3, 1), date(2026, 3, 1)) == "no cost reports"
