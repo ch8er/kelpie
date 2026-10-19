@@ -22,6 +22,9 @@ class ActionKind(StrEnum):
     CLOSE = "close"
     STOP = "stop"
     CANCEL_BUILD = "cancel_build"
+    # Open a pull request with a better CI configuration for one pipeline (rule 9), by the
+    # CI connector that reported its builds.
+    PROPOSE_CI_CONFIG = "propose_ci_config"
     ESCALATE = "escalate"
     ALERT = "alert"
 

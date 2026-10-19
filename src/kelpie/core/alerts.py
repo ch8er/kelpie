@@ -217,6 +217,8 @@ def intent(action: Action) -> str:
             return f"stop run {_target(action, 'session_id', 'of ' + task)}"
         case ActionKind.CANCEL_BUILD:
             return f"cancel build {_target(action, 'build_id', 'of ' + task)}"
+        case ActionKind.PROPOSE_CI_CONFIG:
+            return f"open a pull request changing {_target(action, 'workflow', 'the CI config')}"
         case ActionKind.COMMENT:
             return f"comment on {task}"
         case ActionKind.WIP_COMMIT:
@@ -244,6 +246,9 @@ def _past(action: Action) -> str:
             return f"Closed {task} (moved it to done)"
         case ActionKind.STOP:
             return f"Stopped run {_target(action, 'session_id', 'of ' + task)}"
+        case ActionKind.PROPOSE_CI_CONFIG:
+            where = f"{_target(action, 'workflow', 'the CI config')}"
+            return f"Opened a draft pull request changing {where}"
         case ActionKind.CANCEL_BUILD:
             done = f"Cancelled build {_target(action, 'build_id', 'of ' + task)}"
             newer = action.params.get("superseded_by")

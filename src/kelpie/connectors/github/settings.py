@@ -28,6 +28,7 @@ from kelpie.connectors.github.client import (
     valid_token,
 )
 from kelpie.connectors.github.connector import GitHubConnector, valid_repo
+from kelpie.connectors.github.proposals import Proposer
 from kelpie.connectors.github.pulls import PullSettings, load_pulls
 from kelpie.core.serde import parse_duration
 
@@ -164,7 +165,27 @@ class GitHubSettings:
                 skus=self.ci.billing_skus,
                 budget=self.ci.tick_budget,
             )
-        return GitHubCI(connector.client, self.ci, cancel_client, billing)
+        proposer = None
+        propose_token = self.ci.propose_token(environ)
+        if propose_token is not None:
+            if propose_token == environ.get(self.token_env, "").strip():
+                log.warning(
+                    "[connectors.github.ci] $%s holds the same token as $%s: the token that "
+                    "reads everything could then change workflows; give it a token of its own",
+                    self.ci.propose_token_env,
+                    self.token_env,
+                )
+            proposer = Proposer(
+                GitHubClient(
+                    self.api_url,
+                    propose_token,
+                    timeout=self.timeout,
+                    cache_ttl=self.cache_ttl,
+                    clock=clock,
+                ),
+                self.ci.propose_repos,
+            )
+        return GitHubCI(connector.client, self.ci, cancel_client, billing, proposer)
 
 
 def load_github(section: Any) -> GitHubSettings:
