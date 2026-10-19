@@ -233,3 +233,22 @@ def test_sources_say_what_keeps_a_rule_from_acting(
     src = sources(load_settings(config(tmp_path, "[adapters.hermes]\n")))
     assert src.act_blockers["stale_blocks"] == "Hermes can't clear blocks yet"
     assert "loop_breaker" not in src.act_blockers
+
+
+def test_sources_read_the_bills_through_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.report.cli as report_cli
+
+    settings = load_settings(config(tmp_path))
+    asked: list[tuple[Any, date, date]] = []
+
+    def read(s: Any, since: date, until: date) -> str:
+        asked.append((s, since, until))
+        return "no cost reports"
+
+    monkeypatch.setattr(report_cli, "read_reconciliations", read)
+    src = sources(settings)
+    assert src.reconcile is not None
+    assert src.reconcile(date(2026, 3, 1), date(2026, 3, 1)) == "no cost reports"
+    assert asked == [(settings, date(2026, 3, 1), date(2026, 3, 1))]

@@ -137,10 +137,11 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
 
 def bill_days(end: datetime) -> tuple[date, date]:
     """The UTC day whose bills the report of a day ending at ``end`` shows: the one that
-    ended 12 to 36 hours before (a bill settles hours after its day ends, and the report
-    runs just after ``end``), so each UTC day is in one report, in any time zone (around
-    a DST change one may be shown twice or skipped)."""
-    t = end.astimezone(UTC) - timedelta(hours=12)
+    ended 18 to 42 hours before (a bill settles hours after its day ends; the report runs
+    just after ``end``). Consecutive reports show consecutive days: a report's day ends at
+    local midnight, and the 18-hour edge falls on a UTC midnight only for offset +6,
+    which no zone with daylight saving time crosses."""
+    t = end.astimezone(UTC) - timedelta(hours=18)
     day = t.date() - timedelta(days=1)
     return day, day
 

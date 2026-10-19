@@ -251,12 +251,12 @@ report; no LLM is involved.
 - **Cost per completed task**: the day's billed spend over the tasks that reached `done`
   (plan tokens per task on a subscription-only farm).
 - **Bill check**: with `[connectors.cost_reports]`, each provider's cost report for one
-  settled UTC day (the one that ended 12 to 36 hours before the report's day did, so each
-  is shown once) against Kelpie's estimate from traces: both figures, the gap and its
-  share, a warning when the gap is large (agents not sending traces, usage outside the
-  farm on the same key, prices out of date), and what the estimate leaves out: tokens of
-  models without a price, and of calls with no known provider. A bill that covers
-  everything billed that day (OpenAI's) is expected to be above the estimate.
+  settled UTC day (the one that ended 18 to 42 hours before the report's day did, so
+  consecutive reports show consecutive days) against Kelpie's estimate from traces: both
+  figures, the gap and its share, and what the estimate leaves out (tokens of models
+  without a price, and of calls with no known provider). A gap past `warn_gap` is marked
+  large, with rule 10's likely causes for its sign. A bill that covers everything billed
+  that day (OpenAI's) may be above the estimate by its non-token items.
 - **Biggest wait** (`kelpie.report.waits`), under the headline: the role and cause whose
   tasks spent the most task-hours waiting for conditions, against the agent-hours the
   role's agents had a session running, with a concrete suggestion. A task's wait counts

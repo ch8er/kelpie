@@ -156,8 +156,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   ([#182](https://github.com/ch8er/kelpie/pull/182), [#201](https://github.com/ch8er/kelpie/pull/201)).
 - Suggestions check what the farm already has (approvers, holds, block conditions, budgets,
   modes); merge automation is never advised ([#173](https://github.com/ch8er/kelpie/pull/173)).
-- Listed, never counted: cards stuck before work that block nothing, and agent tasks behind
-  work planned for later ([#156](https://github.com/ch8er/kelpie/pull/156), [#188](https://github.com/ch8er/kelpie/pull/188)).
+- Listed, never counted: cards stuck before work that block nothing, and agent tasks planned
+  for later behind a person's open inbox ([#156](https://github.com/ch8er/kelpie/pull/156), [#188](https://github.com/ch8er/kelpie/pull/188)).
 - Spend follows each provider's mode: dollars with an API key, tokens and the share of the
   plan's limit on a subscription; models without a price are named, and each provider's
   bill is checked against the estimate from traces ([#195](https://github.com/ch8er/kelpie/pull/195), [#209](https://github.com/ch8er/kelpie/pull/209)).

@@ -105,7 +105,7 @@ from kelpie.core.spans import (
     span_key,
     usage,
 )
-from kelpie.core.spend import SpendConfig, SpendMode
+from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
 from kelpie.report import farm, md
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
@@ -403,7 +403,7 @@ class DailyReport:
     planned: PlannedWaits | None = None  # behind work planned for later: never counted
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
     # models without a price (billed, not on a subscription), most tokens first
-    unpriced_models: tuple[tuple[str, int], ...] = ()
+    unpriced_models: tuple[tuple[str | None, int], ...] = ()  # None: no model
     reconciliations: tuple[Reconciliation, ...] = ()  # as in ReportInputs
     reconcile_error: str | None = None  # why the bills could not be read
 
@@ -745,16 +745,16 @@ class _Pricer:
                 total = total + Spend(tokens, usd, 0, unknown_usd=unknown)
         return total
 
-    def unpriced(self, rows: Iterable[TokenUsage]) -> tuple[tuple[str, int], ...]:
-        """The models of ``rows`` whose tokens :meth:`price` leaves unpriced, with their
-        tokens, most first."""
-        found: Counter[str] = Counter()
+    def unpriced(self, rows: Iterable[TokenUsage]) -> tuple[tuple[str | None, int], ...]:
+        """The models of ``rows`` whose tokens :meth:`price` leaves unpriced (None: calls
+        with no model), with their tokens, most first."""
+        found: Counter[str | None] = Counter()
         for row in rows:
             if self._mode(row.model)[1] is SpendMode.SUBSCRIPTION:
                 continue
             if self.prices.price_for(row.model, self.day) is None:
-                found[row.model or "(no model)"] += row.input_tokens + row.output_tokens
-        return tuple(sorted(found.items(), key=lambda m: (-m[1], m[0])))
+                found[row.model or None] += row.input_tokens + row.output_tokens
+        return tuple(sorted(found.items(), key=lambda m: (-m[1], m[0] or "")))
 
     def input_usd(self, tokens: int, model: str | None) -> float:
         if self._mode(model)[1] is SpendMode.SUBSCRIPTION:
@@ -1524,57 +1524,71 @@ def _unpriced(report: DailyReport) -> str:
     found = report.unpriced_models
     if not found:
         return ""
-    shown = ", ".join(f"{md.code(m)} {n:,}" for m, n in found[:_SHOWN_MODELS])
+    shown = ", ".join(
+        f"{md.code(m) if m is not None else 'calls with no model'} {n:,}"
+        for m, n in found[:_SHOWN_MODELS]
+    )
     more = f" and {len(found) - _SHOWN_MODELS} more" if len(found) > _SHOWN_MODELS else ""
     return f": {shown}{more}"
 
 
 def _bill_lines(report: DailyReport) -> list[str]:
-    """Each provider's cost report against the estimate from traces, per settled UTC day:
-    the gap, and what may explain it."""
+    """Each provider's cost report against the estimate from traces, for one settled UTC
+    day: the gap, and what may explain it (rule 10's causes, :func:`gap_causes`)."""
     if report.reconcile_error is not None:
-        return [
-            "",
-            f"**Bill check**: cannot read the cost reports ({md.text(report.reconcile_error)}).",
-        ]
+        return ["", f"**Bill check**: {md.text(report.reconcile_error)}."]
     if not report.reconciliations:
         return []
     out = [
         "",
         "**Bill check** (each provider's cost report against Kelpie's estimate from traces, "
-        "for the UTC day that ended 12 to 36 hours before this report's day did):",
+        "for the UTC day that ended 18 to 42 hours before this report's day did):",
         "",
     ]
     for r in report.reconciliations:
-        gap = abs(r.gap_usd)
-        if gap < 0.005:
-            side = "matches the bill"
-        else:
-            ratio = f" ({abs(r.gap_ratio):.0%})" if r.gap_ratio is not None else ""
-            side = f"${gap:,.2f}{ratio} {'below' if r.gap_usd < 0 else 'above'} the bill"
-        line = (
-            f"- {md.text(r.provider)}, {r.day.astimezone(UTC).date().isoformat()}: estimated "
-            f"${r.estimated_usd:,.2f}, billed ${r.reported_usd:,.2f}; the estimate {side}."
-        )
-        if r.large:
-            line += (
-                " **Large gap**: check for agents not sending traces, usage outside the farm "
-                "on the same key, and prices out of date."
-            )
-        if r.bill_scope == "total" and r.gap_usd < 0:
-            line += (
-                " The bill covers everything billed that day (web search and other tools "
-                "too), so an estimate below it is expected."
-            )
-        if r.unpriced_tokens:
-            line += f" {r.unpriced_tokens:,} tokens of models without a price are not estimated."
-        if r.unknown_tokens:
-            line += (
-                f" {r.unknown_tokens:,} tokens of calls with no known provider may belong to "
-                "this bill."
-            )
-        out.append(line)
+        out.append(_bill_line(r))
     return out
+
+
+def _bill_line(r: Reconciliation) -> str:
+    gap = abs(r.gap_usd)
+    if gap < 0.005:
+        side = "matches the bill"
+    else:
+        ratio = f" ({abs(r.gap_ratio):.0%})" if r.gap_ratio is not None else ""
+        side = f"${gap:,.2f}{ratio} {'below' if r.gap_usd < 0 else 'above'} the bill"
+    billed = (
+        f"a credit of ${-r.reported_usd:,.2f}"
+        if r.reported_usd < 0
+        else f"billed ${r.reported_usd:,.2f}"
+    )
+    line = (
+        f"- {md.text(r.provider)}, {r.day.astimezone(UTC).date().isoformat()}: estimated "
+        f"${r.estimated_usd:,.2f}, {billed}; the estimate {side}."
+    )
+    below = r.gap_usd < 0
+    if r.large:
+        line += f" **Large gap**: {gap_causes(r)}."
+        if r.bill_scope == "total" and below:
+            line += (
+                " Part of it may be expected: the bill covers everything billed that day; "
+                "if a gap like this is routine, raise `warn_gap` "
+                "([[connectors.cost_reports]])."
+            )
+        if below:
+            return line  # the causes name the unpriced and unknown tokens
+    elif r.bill_scope == "total" and below:
+        line += (
+            " The bill covers everything billed that day (web search and other tools too), "
+            "so part of the gap may be expected."
+        )
+    if r.unpriced_tokens:
+        line += f" {r.unpriced_tokens:,} tokens of models without a price are not estimated."
+    if r.unknown_tokens:
+        line += (
+            f" {r.unknown_tokens:,} tokens of calls with no known provider may belong to this bill."
+        )
+    return line
 
 
 def _usd(spend: Spend, report: DailyReport) -> str:

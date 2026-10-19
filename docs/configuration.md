@@ -911,8 +911,8 @@ model: prompt-length tiers (Claude Haiku 5.5 above 100k prompt tokens, Claude So
 and 4 above 200k, OpenAI above 272k, Gemini above 200k cost more; the base price is
 used), batch and flex discounts, priority and fast tiers, regional and US-only uplifts,
 and Gemini's cache storage fee. Budgets, `kelpie status` and `kelpie doctor` use the
-default table; the daily report still prices from `[prices]` only, until it follows each
-provider's spend mode.
+default table, and so does the daily report, which follows each provider's spend mode
+and names the models without a price.
 
 | Provider | Models | Source |
 | --- | --- | --- |
@@ -1284,6 +1284,7 @@ stored figures stand in until the report is read again.
 What the bill covers differs: Anthropic's figure is its token charges only, OpenAI's is
 the day's total (web search, tools and other items too), so an OpenAI estimate is
 expected to sit below its bill by those items; raise its `warn_gap` if they are routine.
+The daily report's "Bill check" shows the same comparison for one settled day.
 
 `/metrics` has `kelpie_cost_report_up` per provider once it was read, and, for the newest
 reconciled day of each provider, `kelpie_spend_reported_usd`, `kelpie_spend_estimated_usd`,
