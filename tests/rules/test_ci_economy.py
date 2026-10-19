@@ -381,3 +381,85 @@ def test_the_waste_summary_announces_the_cancels_of_its_tick() -> None:
     (alone,) = alerts(quiet)
     assert ANNOUNCES not in alone.params  # nothing to announce
     assert (alone.key, alone.state) == (waste.key, waste.state)  # same alert otherwise
+
+
+def test_the_summary_recommends_a_ci_configuration_change_per_pipeline() -> None:
+    """Roadmap, rule 9 extended: each suggested change with the minutes it would have
+    saved, per pipeline, in no CI's syntax."""
+    rule = CiEconomy(waste_min_minutes=0, docs_globs=("docs/*", "*.md"))
+    snap = Snapshot(
+        now=NOW,
+        builds=(
+            b("A-1", draft=True, minutes=8),
+            b("A-2", changed_paths=("README.md",), minutes=12),
+            b("A-3", changed_paths=("docs/x.md",), minutes=12),
+            b("A-4", commit_message="WIP: try", event="push", minutes=3),
+            b("W-1", workflow="nightly", draft=True, minutes=40),
+            b("R-1", repo="example/other", minutes=50, changed_paths=("src/a.py",)),  # real
+        ),
+    )
+    (summary,) = rule.evaluate(snap)
+    assert summary.params["pipelines"] == [
+        {
+            "repo": "example/repo",
+            "workflow": "nightly",
+            "source": "ci",
+            "minutes": 40.0,
+            "changes": [{"change": "skip_drafts", "minutes": 40.0, "builds": 1}],
+        },
+        {
+            "repo": "example/repo",
+            "workflow": "ci",
+            "source": "ci",
+            "minutes": 35.0,
+            "changes": [
+                {
+                    "change": "ignore_docs_paths",
+                    "minutes": 24.0,
+                    "builds": 2,
+                    "paths": ["docs/*", "*.md"],
+                },
+                {"change": "skip_drafts", "minutes": 8.0, "builds": 1},
+                {
+                    "change": "skip_wip",
+                    "minutes": 3.0,
+                    "builds": 1,
+                    "patterns": [p.pattern for p in rule.wip_patterns],
+                },
+            ],
+        },
+    ]
+    assert (
+        "A CI configuration would have saved it: skip draft pull requests (48 min); "
+        "skip changes that touch only docs (docs/*, *.md) (24 min); skip WIP commits (3 min)."
+    ) in summary.reason
+    assert "cancels superseded builds" not in summary.reason  # none were superseded
+
+
+def test_superseded_builds_recommend_cancelling_in_progress() -> None:
+    rule = CiEconomy(waste_min_minutes=0, cancel_superseded=False)
+    snap = Snapshot(
+        now=NOW,
+        builds=(
+            b(
+                "S-1",
+                superseded_by="S-2",
+                status=BuildStatus.CANCELLED,
+                minutes=6,
+                finished_at=NOW - H,
+            ),
+            b("S-2", started_at=NOW - 90 * M, changed_paths=("src/a.py",)),
+        ),
+    )
+    (summary,) = rule.evaluate(snap)
+    (pipeline,) = summary.params["pipelines"]
+    assert pipeline["changes"] == [{"change": "cancel_in_progress", "minutes": 6.0, "builds": 1}]
+    assert "cancel a running build when a newer commit is pushed (6 min)" in summary.reason
+    assert "rule 9 cancels superseded builds in act mode" in summary.reason
+
+
+def test_the_pipelines_listed_are_capped() -> None:
+    builds = tuple(b(f"P-{n}", workflow=f"w{n:02d}", draft=True, minutes=n + 1) for n in range(15))
+    (summary,) = CiEconomy(waste_min_minutes=0).evaluate(Snapshot(now=NOW, builds=builds))
+    listed = [p["workflow"] for p in summary.params["pipelines"]]
+    assert listed == [f"w{n:02d}" for n in range(14, 4, -1)]  # the ten with most to save

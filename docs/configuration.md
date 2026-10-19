@@ -445,6 +445,15 @@ forecasts the CI minutes quota, and reports a CI outage as one incident. Needs b
 Waste categories, each build counted once in this order: superseded, already verified
 commit, docs-only, draft, WIP commit.
 
+The waste summary also recommends the CI configuration change that would have saved each
+category's minutes, most first: cancel a running build when a newer commit is pushed
+(`cancel_in_progress`), skip builds of a commit that already passed (`skip_verified`), skip
+changes that touch only docs (`ignore_docs_paths`, with `docs_globs`), skip draft pull
+requests (`skip_drafts`), skip WIP commits (`skip_wip`, with `wip_patterns`). Its
+`params.pipelines` lists them per pipeline (repository and workflow, at most 10, the most
+minutes first), each change with its minutes and builds. The changes are named, not written
+in any CI's syntax.
+
 A CI outage (incident 20) is one `warning` "CI outage since <time>": the failing workflow,
 job and step, the repositories, runners and PRs it affects, and the tasks waiting on those
 PRs' CI or merge. Evidence that the environment broke, not each change: two repositories

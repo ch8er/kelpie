@@ -1,0 +1,74 @@
+id: "05-ci-config-advice"
+incident: 5
+title: "Wasted builds turned into the CI configuration changes that would have saved them"
+description: >
+  Two pipelines burned minutes for nothing: the test workflow ran for drafts and for a
+  README fix, and the nightly-style lint workflow ran again for a commit that had already
+  passed. A third pipeline only built real code changes. Rule 9 must recommend, per
+  pipeline, each configuration change with the minutes it would have saved, in no CI's
+  syntax, and leave the clean pipeline out.
+rule: ci_economy
+config:
+  waste_min_minutes: 20
+  docs_globs: ["docs/*", "*.md"]
+snapshot:
+  now: "2026-03-04T12:00:00+00:00"
+  builds:
+    - {id: G-1, source: ci, repo: example/app, workflow: .github/workflows/test.yml,
+       branch: task/T-531, sha: "1a1a1a1", event: pull_request, draft: true, status: success,
+       started_at: "2026-03-04T08:00:00+00:00", finished_at: "2026-03-04T08:14:00+00:00",
+       minutes: 14, changed_paths: [src/api.py]}
+    - {id: G-2, source: ci, repo: example/app, workflow: .github/workflows/test.yml,
+       branch: task/T-532, sha: "2b2b2b2", event: pull_request, draft: true, status: failure,
+       started_at: "2026-03-04T09:00:00+00:00", finished_at: "2026-03-04T09:11:00+00:00",
+       minutes: 11, changed_paths: [src/db.py]}
+    - {id: G-3, source: ci, repo: example/app, workflow: .github/workflows/test.yml,
+       branch: task/T-533, sha: "3c3c3c3", event: pull_request, status: success,
+       started_at: "2026-03-04T09:30:00+00:00", finished_at: "2026-03-04T09:39:00+00:00",
+       minutes: 9, changed_paths: [README.md]}
+    # L-1 passed for commit 4d4d4d4; L-2 ran the same pipeline for it again.
+    - {id: L-1, source: ci, repo: example/app, workflow: .github/workflows/lint.yml,
+       branch: task/T-534, sha: "4d4d4d4", event: pull_request, status: success,
+       started_at: "2026-03-04T10:00:00+00:00", finished_at: "2026-03-04T10:06:00+00:00",
+       minutes: 6, changed_paths: [src/api.py]}
+    - {id: L-2, source: ci, repo: example/app, workflow: .github/workflows/lint.yml,
+       branch: task/T-534, sha: "4d4d4d4", event: pull_request, status: success,
+       started_at: "2026-03-04T10:20:00+00:00", finished_at: "2026-03-04T10:26:00+00:00",
+       minutes: 6, changed_paths: [src/api.py]}
+    # Distractor: a pipeline that built only real code changes has nothing to change.
+    - {id: K-1, source: ci, repo: example/lib, workflow: .github/workflows/test.yml,
+       branch: task/T-535, sha: "5e5e5e5", event: pull_request, status: success,
+       started_at: "2026-03-04T11:00:00+00:00", finished_at: "2026-03-04T11:30:00+00:00",
+       minutes: 30, changed_paths: [src/core.py]}
+expected_actions:
+  - kind: alert
+    severity: info
+    reason_contains: "A CI configuration would have saved it: skip draft pull requests (25 min)"
+    params:
+      wasted_minutes: 40.0
+      pipelines:
+        - repo: example/app
+          workflow: .github/workflows/test.yml
+          source: ci
+          minutes: 34.0
+          changes:
+            - {change: skip_drafts, minutes: 25.0, builds: 2}
+            - {change: ignore_docs_paths, minutes: 9.0, builds: 1, paths: ["docs/*", "*.md"]}
+        - repo: example/app
+          workflow: .github/workflows/lint.yml
+          source: ci
+          minutes: 6.0
+          changes:
+            - {change: skip_verified, minutes: 6.0, builds: 1}
+not_expected_actions:
+  - kind: alert
+    severity: warning
+  - kind: cancel_build
+  - kind: alert
+    params:
+      pipelines:
+        - repo: example/lib
+          workflow: .github/workflows/test.yml
+          source: ci
+          minutes: 30.0
+          changes: []

@@ -19,12 +19,18 @@ connector's business.
      skip marker; a skipped build would not be here).
 
    Once the wasted minutes in the window reach ``waste_min_minutes``, one ``info`` alert
-   summarizes them per category. It is a lasting state keyed by the doubling level of the
-   wasted minutes: announced when it opens and again whenever the level changes, which
-   happens when the waste doubles and also when it halves as old builds leave the window
-   (a "Changed:" notice); resolved when the window no longer holds that much waste. Build
-   minutes are the connector's estimate (see its docs: billable job minutes where known,
-   otherwise wall-clock time), so treat the totals as an order of magnitude.
+   summarizes them per category and recommends the CI configuration change that would have
+   saved each category's minutes, most first: ``cancel_in_progress`` (superseded),
+   ``skip_verified`` (already verified), ``ignore_docs_paths`` (docs-only, with
+   ``docs_globs``), ``skip_drafts`` and ``skip_wip`` (with ``wip_patterns``). The changes
+   are named, never written in a CI's syntax (rendering them is the CI connector's
+   business); ``params.pipelines`` has them per pipeline (``repo`` and ``workflow``), the
+   pipeline with the most minutes to save first. It is a lasting state keyed by the doubling
+   level of the wasted minutes: announced when it opens and again whenever the level
+   changes, which happens when the waste doubles and also when it halves as old builds leave
+   the window (a "Changed:" notice); resolved when the window no longer holds that much
+   waste. Build minutes are the connector's estimate (see its docs: billable job minutes
+   where known, otherwise wall-clock time), so treat the totals as an order of magnitude.
 
 2. **Superseded builds still running** → ``cancel_build`` (``cancel_superseded``), only
    for builds the connector marked ``cancellable`` (within its cancel policy), routed to
@@ -88,6 +94,16 @@ _LABELS = {
 _MAX_LISTED = 20
 DEFAULT_DOCS_GLOBS = ("docs/*", "*.md", "*.rst")
 DEFAULT_WIP_PATTERNS = (r"^\s*\[?wip\b", r"^\s*(fixup|squash)!")
+# The configuration change that would have saved the minutes of each waste category, and
+# what it does, in no CI's syntax.
+CHANGES = {
+    "superseded": ("cancel_in_progress", "cancel a running build when a newer commit is pushed"),
+    "already_verified": ("skip_verified", "skip builds of a commit that already passed"),
+    "docs_only": ("ignore_docs_paths", "skip changes that touch only docs"),
+    "draft": ("skip_drafts", "skip draft pull requests"),
+    "wip": ("skip_wip", "skip WIP commits"),
+}
+_MAX_PIPELINES = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,11 +201,17 @@ class CiEconomy:
             if found
         ]
         hours = self.window.total_seconds() / 3600
+        advice = [
+            f"{CHANGES[c][1]}"
+            + (f" ({', '.join(self.docs_globs)})" if c == "docs_only" else "")
+            + f" ({_minutes(sum(b.minutes for b in found))})"
+            for c, found in _most_first(wasted)
+        ]
         reason = (
             f"CI waste in the last {hours:g}h: {count} of {len(recent)} builds burned "
             f"{_minutes(minutes)} of {_minutes(total)} for nothing — {'; '.join(parts)}. "
-            "Skip CI for drafts, WIP and docs-only changes, and cancel superseded builds "
-            "early (rule 9 does it in act mode)."
+            f"A CI configuration would have saved it: {'; '.join(advice)}"
+            + (" (rule 9 cancels superseded builds in act mode)." if wasted["superseded"] else ".")
         )
         params: dict[str, Any] = {
             "wasted_minutes": round(minutes, 1),
@@ -204,6 +226,7 @@ class CiEconomy:
         for c, found in wasted.items():
             if found:
                 params[f"{c}_builds"] = [b.id for b in found[:_MAX_LISTED]]
+        params["pipelines"] = self._pipelines(wasted)
         params.update(
             alert_params(
                 f"CI waste: {count} of {counted(len(recent), 'build')} burned {_minutes(minutes)} "
@@ -224,6 +247,41 @@ class CiEconomy:
             since=since,
             params=params,
         )
+
+    def _pipelines(self, wasted: dict[str, list[Build]]) -> list[dict[str, Any]]:
+        """Per pipeline, the configuration changes that would have saved its wasted minutes,
+        each with those minutes and builds; the pipeline with the most to save first."""
+        by_pipeline: dict[tuple[str | None, str | None], dict[str, list[Build]]] = {}
+        for category, found in wasted.items():
+            for b in found:
+                pipeline = by_pipeline.setdefault((b.repo, b.workflow), {})
+                pipeline.setdefault(category, []).append(b)
+        out: list[dict[str, Any]] = []
+        for (repo, workflow), categories in by_pipeline.items():
+            changes: list[dict[str, Any]] = []
+            for category, found in _most_first(categories):
+                change: dict[str, Any] = {
+                    "change": CHANGES[category][0],
+                    "minutes": round(float(sum(b.minutes for b in found)), 1),
+                    "builds": len(found),
+                }
+                if category == "docs_only":
+                    change["paths"] = list(self.docs_globs)
+                elif category == "wip":
+                    change["patterns"] = [p.pattern for p in self.wip_patterns]
+                changes.append(change)
+            sources = {b.source for found in categories.values() for b in found if b.source}
+            out.append(
+                {
+                    "repo": repo,
+                    "workflow": workflow,
+                    "source": next(iter(sources)) if len(sources) == 1 else None,
+                    "minutes": round(float(sum(c["minutes"] for c in changes)), 1),
+                    "changes": changes,
+                }
+            )
+        out.sort(key=lambda p: (-p["minutes"], str(p["repo"]), str(p["workflow"])))
+        return out[:_MAX_PIPELINES]
 
     # --- 2. cancel superseded builds ----------------------------------------------------
 
@@ -392,6 +450,14 @@ class _Index:
         passed = self._passed.get((build.repo, build.workflow, build.sha, build.event), [])
         started = build.started_at
         return any(at <= started and bid != build.id for at, bid in passed)
+
+
+def _most_first(wasted: dict[str, list[Build]]) -> list[tuple[str, list[Build]]]:
+    """The categories with builds, the most minutes first (ties by name)."""
+    return sorted(
+        ((c, found) for c, found in wasted.items() if found),
+        key=lambda item: (-sum(b.minutes for b in item[1]), item[0]),
+    )
 
 
 def _waiting_on_ci(snapshot: Snapshot) -> list[str]:
