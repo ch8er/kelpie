@@ -15,7 +15,7 @@ import time
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -54,7 +54,14 @@ from kelpie.core.conditions import check_task_status
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
-from kelpie.core.model import Owner, OwnerKind, ReportedCost, Snapshot, SpanKind
+from kelpie.core.model import (
+    Owner,
+    OwnerKind,
+    Reconciliation,
+    ReportedCost,
+    Snapshot,
+    SpanKind,
+)
 from kelpie.core.ports import (
     ActionConnector,
     CostReportReader,
@@ -71,7 +78,7 @@ from kelpie.core.prices import CHECKED, canonical_model
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
-from kelpie.core.spend import ProviderMode, SpendConfig, SpendSettings, load_spend
+from kelpie.core.spend import ProviderMode, SpendConfig, SpendSettings, load_spend, reconcile
 from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import (
     SchemaOutdated,
@@ -1254,7 +1261,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
     enrich, connectors = connector_steps(settings, metrics, clock)
-    enrich += cost_report_steps(settings)  # kelpie serve only: it reads with the admin key
+    costs = cost_report_steps(settings)  # kelpie serve only: it reads with the admin key
+    enrich += costs
     engine = Engine(
         loaded.rules,
         adapters=adapters,
@@ -1337,6 +1345,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         metrics.set_forward_destinations(d.name for d in destinations)
         ingest.on_accepted = forwarder.submit
         forwarder.start()
+    for _, step in costs:  # reconcile the bill with the spend in this span store
+        if isinstance(step, CostReportStep):
+            step.spans, step.metrics = span_store, metrics
     retention = SpanRetention(span_store, clock, traces.retention, traces.max_rows, metrics)
     window = SpanWindow(
         span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
@@ -1451,26 +1462,96 @@ def connector_steps(
     return steps + github_steps, connectors
 
 
+RECONCILE_EVERY = timedelta(hours=1)  # also when the reported figures change
+
+
 class CostReportStep:
     """Takes the providers' latest cost report figures (the reader keeps the interval and
-    reads in the background) and stores each provider's when they change, for the report
-    and reconciliation; the snapshot passes unchanged."""
+    reads in the background), stores each provider's when they change, and reconciles
+    them with the spend priced from traces for the same closed days (when there is a span
+    store): ``Snapshot.reconciliations``, and the ``kelpie_spend_*`` metrics."""
 
-    def __init__(self, source: CostReportReader, store: SqliteCostReports | None) -> None:
+    def __init__(
+        self,
+        source: CostReportReader,
+        store: SqliteCostReports | None,
+        settings: Settings | None = None,
+        spans: SpanStore | None = None,
+        metrics: Metrics | None = None,
+    ) -> None:
         self.source = source
         self.store = store
+        self.settings = settings
+        self.spans = spans
+        self.metrics = metrics
         self._stored: dict[str, tuple[ReportedCost, ...]] = {}
+        self._reconciled: tuple[Reconciliation, ...] = ()
+        self._reconciled_from: tuple[ReportedCost, ...] | None = None
+        self._reconciled_at: datetime | None = None
 
     def __call__(self, snapshot: Snapshot) -> Snapshot:
+        now = snapshot.now
+        costs = tuple(self.source.read(now))
         by_provider: dict[str, list[ReportedCost]] = {}
-        for c in self.source.read(snapshot.now):
+        for c in costs:
             by_provider.setdefault(c.provider, []).append(c)
         for provider, rows in by_provider.items():
-            costs = tuple(rows)
-            if self.store is not None and costs != self._stored.get(provider):
-                self.store.replace(costs, snapshot.now)
-                self._stored[provider] = costs
-        return snapshot
+            mine = tuple(rows)
+            if self.store is not None and mine != self._stored.get(provider):
+                self.store.replace(mine, now)
+                self._stored[provider] = mine
+        if self.spans is None or self.settings is None:
+            self._observe(())
+            return snapshot
+        stale = self._reconciled_at is None or now - self._reconciled_at >= RECONCILE_EVERY
+        if costs != self._reconciled_from or stale:
+            try:
+                self._reconciled = reconcile_spend(self.settings, self.spans, costs, now)
+            except Exception as exc:  # spans not readable: keep the last
+                log.error("cost reports: spend could not be reconciled: %s", exc)
+            else:
+                self._reconciled_from, self._reconciled_at = costs, now
+        self._observe(self._reconciled)
+        return replace(snapshot, reconciliations=self._reconciled)
+
+    def _observe(self, reconciled: Sequence[Reconciliation]) -> None:
+        if self.metrics is None:
+            return
+        statuses = getattr(self.source, "statuses", None)
+        up = {s.provider: bool(s.ok) for s in statuses()} if callable(statuses) else {}
+        self.metrics.set_cost_reports(up, reconciled)
+
+
+def reconcile_spend(
+    settings: Settings, spans: SpanStore, costs: Sequence[ReportedCost], now: datetime
+) -> tuple[Reconciliation, ...]:
+    """The closed UTC days ``costs`` cover that the span store still holds whole (within
+    the retention), priced from traces per provider and compared with the bill."""
+    spend = settings.spend
+    reports = settings.cost_reports
+    thresholds = reports.thresholds if reports is not None else {}
+    today = now.astimezone(UTC).date()
+    oldest = (now - settings.traces.retention).astimezone(UTC)
+    days = sorted({c.day for c in costs})
+    providers = {c.provider for c in costs}
+    estimated: dict[tuple[str, date], tuple[float, int]] = {}
+    for day in days:
+        start = datetime.combine(day, datetime.min.time(), UTC)
+        if day >= today or start < oldest:
+            continue  # not closed, or partly beyond the retention
+        sums = {p: [0.0, 0] for p in providers}
+        for row in spans.usage_between(start, start + timedelta(days=1)):
+            provider = spend.provider_for(row.model)
+            if provider not in sums:
+                continue
+            price = settings.budgets.prices.price_for(row.model, day)
+            if price is None:
+                sums[provider][1] += row.input_tokens + row.output_tokens
+            else:
+                sums[provider][0] += price.cost(row)
+        for provider, (usd, unpriced) in sums.items():
+            estimated[(provider, day)] = (usd, int(unpriced))
+    return reconcile(costs, estimated, thresholds)
 
 
 def cost_report_steps(settings: Settings) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
@@ -1489,7 +1570,7 @@ def cost_report_steps(settings: Settings) -> list[tuple[str, Callable[[Snapshot]
         store = SqliteCostReports(settings.db_path) if settings.db_path is not None else None
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open the cost report store {settings.db_path}: {exc}") from exc
-    return [("cost_reports", CostReportStep(source, store))]
+    return [("cost_reports", CostReportStep(source, store, settings))]
 
 
 def _github_steps(
@@ -1930,6 +2011,41 @@ def render_spend_modes(
         for b, n in settings.spend.unlinked()
     ]
     return lines
+
+
+def read_reconciliations(
+    settings: Settings, since: date, until: date, now: datetime | None = None
+) -> tuple[Reconciliation, ...] | str:
+    """The reconciliation of the stored cost report figures of days ``since`` to
+    ``until`` (inclusive) with the spend priced from the span store, both opened read-only
+    (for the daily report); a string says why they cannot be read. No database: none."""
+    db = settings.db_path
+    if settings.cost_reports is None or db is None or not db.exists():
+        return ()
+    try:
+        reports = SqliteCostReports(db, readonly=True)
+    except SchemaOutdated:
+        return "the database predates cost reports; run kelpie serve once to upgrade it"
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        return f"cannot open the cost reports in {db}: {exc}"
+    try:
+        costs = reports.read(since, until)
+    except (OSError, sqlite3.Error) as exc:
+        return f"cannot read the cost reports in {db}: {exc}"
+    finally:
+        reports.close()
+    if not costs or not settings.traces.enabled:
+        return ()
+    try:
+        spans = SqliteSpanStore(db, readonly=True)
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        return f"cannot open the span store {db}: {exc}"
+    try:
+        return reconcile_spend(settings, spans, costs, now or utc_now())
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        return f"cannot read the span store {db}: {exc}"
+    finally:
+        spans.close()
 
 
 def render_prices(settings: Settings, unpriced: Sequence[tuple[str, int]] | str = ()) -> list[str]:

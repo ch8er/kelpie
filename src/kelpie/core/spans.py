@@ -131,6 +131,11 @@ class SpanStore(Protocol):
         is within each window before ``now``: one result per window."""
         ...
 
+    def usage_between(self, start: datetime, end: datetime) -> tuple[TokenUsage, ...]:
+        """Counted tokens per (session, task, pricing model) of the spans whose last time
+        is in ``[start, end)``: a closed day, for reconciling it with the bill."""
+        ...
+
     def record_attribution(
         self,
         sessions: Iterable[tuple[str, str, str | None]],
@@ -378,6 +383,15 @@ class MemorySpanStore:
             mine = {span_key(s): (s, m) for s, m in found if last_at(s) >= cutoff}
             out.append(usage((s for s, _ in mine.values()), {k: m for k, (_, m) in mine.items()}))
         return out
+
+    def usage_between(self, start: datetime, end: datetime) -> tuple[TokenUsage, ...]:
+        with self._lock:
+            found = {
+                key: (span, model)
+                for key, model in self._counted.items()
+                if start <= last_at(span := self._spans[key][0]) < end
+            }
+        return usage((s for s, _ in found.values()), {k: m for k, (_, m) in found.items()})
 
     def record_attribution(
         self,

@@ -20,10 +20,11 @@ other things too.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
@@ -39,10 +40,22 @@ from kelpie.connectors.cost_reports.source import (
     ReportKind,
 )
 from kelpie.core.serde import parse_duration
+from kelpie.core.spend import GapThreshold
 
 SECTION = "[connectors.cost_reports]"
 PROVIDER_KEYS = frozenset(
-    {"kind", "admin_key_env", "api_url", "interval", "timeout", "days", "workspaces", "projects"}
+    {
+        "kind",
+        "admin_key_env",
+        "api_url",
+        "interval",
+        "timeout",
+        "days",
+        "workspaces",
+        "projects",
+        "warn_gap",
+        "warn_min_usd",
+    }
 )
 MIN_INTERVAL = timedelta(minutes=5)  # the APIs ask for at most about one poll a minute
 MAX_TIMEOUT = timedelta(seconds=60)
@@ -65,6 +78,7 @@ class CostReportSettings:
     timeout: timedelta = timedelta(seconds=DEFAULT_TIMEOUT)
     days: int = DEFAULT_DAYS
     scopes: tuple[str, ...] = ()  # workspace ids (anthropic) or project ids (openai)
+    gap: GapThreshold = field(default_factory=GapThreshold)  # when a day's gap warns
 
     def admin_key(self, environ: Mapping[str, str] = os.environ) -> str:
         """The key; raises ValueError naming the variable (never its value)."""
@@ -98,6 +112,10 @@ class CostReportsSettings:
     @property
     def providers(self) -> frozenset[str]:
         return frozenset(r.provider for r in self.reports)
+
+    @property
+    def thresholds(self) -> dict[str, GapThreshold]:
+        return {r.provider: r.gap for r in self.reports}
 
     def build(self, environ: Mapping[str, str] = os.environ) -> CostReportSource:
         return CostReportSource([r.build(environ) for r in self.reports])
@@ -156,7 +174,12 @@ def _report(name: Any, entry: Any) -> CostReportSettings:
         or not all(isinstance(s, str) and _SCOPE_ID.fullmatch(s) for s in scopes)
     ):
         raise ValueError(f"{where} {own} must be a list of ids (letters, digits, '_', '-')")
+    gap = GapThreshold(
+        ratio=_positive(entry, "warn_gap", GapThreshold().ratio, where),
+        min_usd=_positive(entry, "warn_min_usd", GapThreshold().min_usd, where, zero=True),
+    )
     return CostReportSettings(
+        gap=gap,
         provider=name,
         kind=kind,
         admin_key_env=env,
@@ -166,6 +189,16 @@ def _report(name: Any, entry: Any) -> CostReportSettings:
         days=days,
         scopes=tuple(scopes),
     )
+
+
+def _positive(
+    entry: Mapping[str, Any], key: str, default: float, where: str, *, zero: bool = False
+) -> float:
+    value = entry.get(key, default)
+    ok = isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+    if not ok or value < 0 or (value == 0 and not zero):
+        raise ValueError(f"{where} {key} must be a {'non-negative' if zero else 'positive'} number")
+    return float(value)
 
 
 def _duration(entry: Mapping[str, Any], key: str, default: timedelta, where: str) -> timedelta:

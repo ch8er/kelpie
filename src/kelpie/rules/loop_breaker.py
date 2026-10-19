@@ -15,7 +15,13 @@ checks, all ending in ``stop`` (carrying ``session_id``) plus an ``alert``:
   sessions, so it only alerts unless ``stop_on_shared_budgets`` is true. A budget that will
   run out within ``forecast_horizon`` (or a subscription's next provider limit) is an info
   alert. While ``budgets_ok`` is false the statuses are stale: nothing budget-related is
-  emitted.
+  emitted;
+- **the bill**: when a provider's cost report disagrees with the spend priced from traces
+  for its newest reconciled day (``Snapshot.reconciliations``, ``large`` past the
+  provider's ``warn_gap`` and ``warn_min_usd``), a warning: dollar budgets of that
+  provider are off by as much. Traces lower than the bill point at agents that do not
+  export spans or models without a price; higher, at prices above the bill (a missed
+  discount) or a call counted twice.
 
 Precedence with rule 2 (``wait_condition``): a run of identical calls that matches
 ``poll_patterns`` is polling, which rule 2 coaches with a ``comment`` once the same check
@@ -49,6 +55,7 @@ from kelpie.core.model import (
     BudgetState,
     BudgetStatus,
     BudgetUnit,
+    Reconciliation,
     Session,
     Snapshot,
     Span,
@@ -134,7 +141,51 @@ class LoopBreaker:
         if snapshot.budgets_ok:
             for status in snapshot.budgets:
                 actions.extend(self._budget(status, snapshot))
+        actions.extend(self._bill(snapshot))
         return actions
+
+    # --- the bill -----------------------------------------------------------------------
+
+    def _bill(self, snapshot: Snapshot) -> Iterable[Action]:
+        newest: dict[str, Reconciliation] = {}
+        for r in snapshot.reconciliations:
+            if r.provider not in newest or r.day > newest[r.provider].day:
+                newest[r.provider] = r
+        for provider, r in sorted(newest.items()):
+            if not r.large:
+                continue
+            share = f" ({r.gap_ratio:+.0%})" if r.gap_ratio is not None else ""
+            if r.gap_usd < 0:
+                cause = (
+                    "traces show less than was billed: agents that do not export spans, or "
+                    "models without a price"
+                )
+                if r.unpriced_tokens:
+                    cause += f" ({r.unpriced_tokens:,} tokens of them that day)"
+            else:
+                cause = (
+                    "traces show more than was billed: prices above the bill's (a discount, "
+                    "batch or a [prices] entry), or a call counted twice"
+                )
+            yield Action(
+                ActionKind.ALERT,
+                NAME,
+                f"Spend from traces and the {provider} bill disagree for {r.day:%Y-%m-%d}: "
+                f"${r.estimated_usd:,.2f} priced from traces, ${r.reported_usd:,.2f} in the "
+                f"cost report{share}; {cause}. Dollar budgets of {provider} are off by as "
+                "much.",
+                severity=Severity.WARNING,
+                key=f"bill:{provider}",
+                state=f"{NAME}:bill:{provider}",
+                params={
+                    "provider": provider,
+                    "day": r.day.date().isoformat(),
+                    "estimated_usd": r.estimated_usd,
+                    "reported_usd": r.reported_usd,
+                    "gap_usd": r.gap_usd,
+                    "gap_ratio": r.gap_ratio,
+                },
+            )
 
     # --- thresholds ---------------------------------------------------------------------
 

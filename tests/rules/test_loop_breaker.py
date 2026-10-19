@@ -550,3 +550,44 @@ def test_soft_to_hard_is_announced_again() -> None:
         engine.execute(list(rule.evaluate(shot)), shot)
     assert [sev for _, sev in alerter.sent] == [Severity.WARNING, Severity.CRITICAL]
     assert adapter.calls == [("stop", "S-1")]
+
+
+# --- the bill -------------------------------------------------------------------------------
+
+
+def _rec(provider: str, day: int, est: float, bill: float, large: bool, **kw: Any) -> Any:
+    from kelpie.core.model import Reconciliation
+
+    gap = est - bill
+    return Reconciliation(provider, datetime(2026, 3, day, tzinfo=UTC), est, bill, gap,
+                          gap / bill if bill else None, large, **kw)  # fmt: skip
+
+
+def test_the_bill_within_thresholds_says_nothing() -> None:
+    snap = Snapshot(now=NOW, reconciliations=(_rec("anthropic", 1, 82.1, 84.5, False),))
+    assert LoopBreaker().evaluate(snap) == []
+
+
+def test_traces_above_the_bill_name_other_causes() -> None:
+    snap = Snapshot(now=NOW, reconciliations=(_rec("openai", 1, 30.0, 10.0, True),))
+    (alert,) = LoopBreaker().evaluate(snap)
+    assert alert.severity is Severity.WARNING and "(+200%)" in alert.reason
+    assert "prices above the bill's" in alert.reason and alert.key == "bill:openai"
+
+
+def test_a_bill_of_zero_has_no_ratio() -> None:
+    snap = Snapshot(now=NOW, reconciliations=(_rec("openai", 1, 12.0, 0.0, True),))
+    (alert,) = LoopBreaker().evaluate(snap)
+    assert "%" not in alert.reason.split("cost report")[1].split(";")[0]
+    assert alert.params["gap_ratio"] is None
+
+
+def test_the_newest_day_decides_even_when_it_agrees() -> None:
+    snap = Snapshot(
+        now=NOW,
+        reconciliations=(
+            _rec("anthropic", 2, 84.0, 84.5, False),
+            _rec("anthropic", 1, 1.0, 50.0, True),
+        ),
+    )
+    assert LoopBreaker().evaluate(snap) == []

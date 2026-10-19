@@ -1,0 +1,30 @@
+id: "field-04-bill-disagrees"
+incident: null
+title: "The provider's bill and the spend priced from traces disagree"
+description: >
+  Field evidence (synthetic reconstruction). An API-key farm prices its spend from traces,
+  but one agent host stopped exporting spans: the dollar budgets look calm while the bill
+  keeps growing. The anthropic cost report for the newest closed day says $84.50 while the
+  traces priced only $41.20 (-51%): a warning names the gap and the likely causes. An
+  older day of anthropic with a gap is not alerted again (only the newest day counts). The
+  openai figures differ by 4%, under its thresholds, and are left alone. The reconciliation
+  is computed by the app (kelpie.app.reconcile_spend); the rule only reads it.
+rule: loop_breaker
+config: {}
+snapshot:
+  now: "2026-03-05T09:00:00+00:00"
+  reconciliations:
+    - {provider: anthropic, day: "2026-03-04T00:00:00+00:00", estimated_usd: 41.2, reported_usd: 84.5, gap_usd: -43.3, gap_ratio: -0.5124, large: true, unpriced_tokens: 120000}
+    - {provider: anthropic, day: "2026-03-03T00:00:00+00:00", estimated_usd: 30.0, reported_usd: 60.0, gap_usd: -30.0, gap_ratio: -0.5, large: true}
+    - {provider: openai, day: "2026-03-04T00:00:00+00:00", estimated_usd: 25.0, reported_usd: 26.0, gap_usd: -1.0, gap_ratio: -0.0385, large: false}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "agents that do not export spans"
+    params: {provider: anthropic, day: "2026-03-04", estimated_usd: 41.2, reported_usd: 84.5}
+not_expected_actions:
+  - kind: alert
+    params: {provider: openai}
+  - kind: alert
+    params: {provider: anthropic, day: "2026-03-03"}
+  - kind: stop

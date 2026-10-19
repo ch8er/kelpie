@@ -427,7 +427,9 @@ finish times.
 ### 10. loop_breaker
 
 Stops runaway runs from traces: identical consecutive tool calls, error streaks, and hard
-budgets. Info alert when a budget or a subscription limit is near.
+budgets. Info alert when a budget or a subscription limit is near. Warning when a
+provider's cost report and the spend priced from traces disagree for its newest closed day
+past `warn_gap` and `warn_min_usd` of [[connectors.cost_reports]](#connectorscost_reports).
 
 Thresholds (also allowed in `agents` and `roles` tables):
 
@@ -1225,6 +1227,8 @@ spend mode unless `mode` says otherwise. At most 10.
 | `timeout` | `"10s"` | Each request (> 0, <= 60s). |
 | `days` | `7` | Complete UTC days read each time (1 to 31); today is never read, its figure is not final. |
 | `workspaces` | all | `anthropic`: count only these workspace ids (the default workspace has none). |
+| `warn_gap` | `0.25` | Rule 10 warns when a day's estimate and bill differ by at least this share of the bill... |
+| `warn_min_usd` | `5` | ...and by at least this many dollars (either way). |
 | `projects` | all | `openai`: count only these project ids (sent as repeated `project_ids`; whether OpenAI filters by them reliably is not confirmed, so compare the figure with the dashboard once). |
 
 What is counted: Anthropic, token costs per model (`cost_type = "tokens"`; web search, code
@@ -1236,6 +1240,18 @@ slow provider never holds up a tick; all pages of one read share 60 seconds); fi
 stored in the Kelpie database (90 days) for the daily report. A report that cannot be read
 keeps its last figures and is tried again after 5 minutes; `kelpie doctor` reads one day
 of each to check the key.
+
+**Reconciliation.** For each closed UTC day a report covers and the span store still holds
+whole (within `[traces] retention`), Kelpie prices that day's counted LLM calls of the
+provider (by the provider of each model, see [[spend]](#spend)) and compares the sum with
+the bill: `Snapshot.reconciliations`, recomputed when the figures change and at least
+hourly. `/metrics` has, for the newest reconciled day of each provider,
+`kelpie_spend_reported_usd`, `kelpie_spend_estimated_usd`, `kelpie_spend_gap_ratio`
+((estimate - bill) / bill) and `kelpie_spend_reconciled_day_timestamp_seconds`, and
+`kelpie_cost_report_up` per provider. A gap past the thresholds is a rule 10 warning:
+traces below the bill point at agents that do not export spans or models without a price;
+above, at prices above the bill's (batch discounts, a `[prices]` entry) or a call counted
+twice. Kelpie needs traces enabled for this; without them figures are only stored.
 
 ## [alerts]
 

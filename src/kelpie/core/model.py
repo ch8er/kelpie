@@ -304,6 +304,24 @@ class ReportedCost:
 
 
 @dataclass(frozen=True, slots=True)
+class Reconciliation:
+    """One provider's day: what Kelpie priced from traces against what its cost report
+    says. ``day`` is the UTC midnight the day starts at. ``gap_usd`` is estimate minus
+    bill (negative: traces show less than was billed, e.g. agents not exporting);
+    ``gap_ratio`` is that over the bill (None when the bill is 0). ``large``: past the
+    provider's warning thresholds."""
+
+    provider: str
+    day: datetime
+    estimated_usd: float
+    reported_usd: float
+    gap_usd: float
+    gap_ratio: float | None = None
+    large: bool = False
+    unpriced_tokens: int = 0  # tokens of the day's models without a price (not estimated)
+
+
+@dataclass(frozen=True, slots=True)
 class SpanTotals:
     """Per-session aggregates over stored spans, so rules and the report can see tokens and
     call counts over a long window without loading every raw span.
@@ -582,6 +600,9 @@ class Snapshot:
     budgets_ok: bool = True
     limit_hits: tuple[LimitHit, ...] = ()  # observed provider limits (budgets forecast them)
     providers: tuple[ProviderStatus, ...] = ()  # LLM provider quota and auth probes
+    # Trace-based spend against providers' cost reports, per provider and closed UTC day
+    # ([connectors.cost_reports]); the newest day first.
+    reconciliations: tuple[Reconciliation, ...] = ()
     builds: tuple[Build, ...] = ()  # recent CI builds (CI connectors)
     pull_requests: tuple[PullRequest, ...] = ()  # open PRs (code-host connectors)
     # PRs closed (merged or not) within the connector's lookback.

@@ -42,23 +42,26 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from typing import Any
 
 from kelpie.core.budgets import Budget, BudgetMode, BudgetScope, BudgetUnit
+from kelpie.core.model import Reconciliation, ReportedCost
 from kelpie.core.prices import PriceTable, canonical_model
 from kelpie.core.serde import parse_duration
 
 __all__ = [
     "PROVIDER_PATTERNS",
+    "GapThreshold",
     "ProviderMode",
     "ProviderSpend",
     "SpendConfig",
     "SpendMode",
     "SpendSettings",
     "load_spend",
+    "reconcile",
 ]
 
 SPEND_KEYS = frozenset({"default_prices", "providers"})
@@ -269,3 +272,51 @@ def _load_provider(name: Any, data: Any) -> ProviderSpend:
         limit_tokens=limit,
         limit_window=window,
     )
+
+
+# --- reconciliation with the bill ---------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class GapThreshold:
+    """When a reconciled day is ``large``: the gap is at least ``ratio`` of the bill and
+    at least ``min_usd`` either way."""
+
+    ratio: float = 0.25
+    min_usd: float = 5.0
+
+
+def reconcile(
+    reported: Iterable[ReportedCost],
+    estimated: Mapping[tuple[str, date], tuple[float, int]],
+    thresholds: Mapping[str, GapThreshold] | None = None,
+) -> tuple[Reconciliation, ...]:
+    """Each (provider, day) a cost report covers that has an estimate: ``estimated`` maps
+    it to (USD priced from traces, tokens of models without a price). Newest day first,
+    then by provider."""
+    bills: dict[tuple[str, date], float] = {}
+    for c in reported:
+        bills[(c.provider, c.day)] = bills.get((c.provider, c.day), 0.0) + c.usd
+    out = []
+    for (provider, day), bill in bills.items():
+        if (provider, day) not in estimated:
+            continue
+        usd, unpriced = estimated[(provider, day)]
+        gap = usd - bill
+        ratio = gap / bill if bill > 0 else None
+        limit = (thresholds or {}).get(provider, GapThreshold())
+        large = abs(gap) >= limit.min_usd and (ratio is None or abs(ratio) >= limit.ratio)
+        start = datetime.combine(day, datetime.min.time(), UTC)
+        out.append(
+            Reconciliation(
+                provider,
+                start,
+                round(usd, 6),
+                round(bill, 6),
+                round(gap, 6),
+                ratio,
+                large,
+                unpriced,
+            )
+        )
+    return tuple(sorted(out, key=lambda r: (-r.day.timestamp(), r.provider)))
