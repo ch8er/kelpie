@@ -52,6 +52,15 @@ class Refused(Exception):
     """Hermes refuses the command (exit 1)."""
 
 
+def _author() -> str:
+    """Who Hermes signs a block's comment with (``hermes_cli.profiles.current_profile_name``):
+    ``$HERMES_PROFILE_NAME``, ``$HERMES_PROFILE``, else the profile of ``HERMES_HOME``."""
+    for name in ("HERMES_PROFILE_NAME", "HERMES_PROFILE"):
+        if value := os.environ.get(name, "").strip():
+            return value
+    return "default"
+
+
 def install(directory: Path, log: Path, clock: Path | None = None) -> Path:
     """Write an executable ``hermes`` launcher into ``directory`` that records its calls in
     ``log``; return its path. It runs this interpreter and imports this ``kelpie`` package,
@@ -116,7 +125,7 @@ def _block(args: Sequence[str]) -> None:
     try:
         conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
-            (task_id, "hermes-cli", f"BLOCKED: {reason}", now),
+            (task_id, _author(), f"BLOCKED: {reason}", now),
         )
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(

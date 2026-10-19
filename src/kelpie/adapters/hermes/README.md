@@ -24,6 +24,7 @@ cli = "hermes"                           # Hermes executable used by stop, park,
 cli_timeout = "10s"                      # limit for each command (at most 60s)
 end_worker = true                        # stop also ends the run's worker processes (below)
 worker_grace = "5s"                      # SIGTERM, then SIGKILL after this (at most 30s)
+author = "kelpie"                        # what Kelpie's comments, blocks, parks and wakes are signed with
 # wait_key = "/data/hermes-wait.key"     # signs Kelpie's parks and stops; default: next to the ledger
 human_owners = ["alice"]                 # assignees that are people, not agents (optional)
 
@@ -211,8 +212,15 @@ the ledger database, mode 0600), which signs stops too. Keep it with the ledger 
 data volume) and out of the agents' reach: losing it leaves Kelpie's parks unrecognised
 (logged; wake those tasks by hand) and its stops ordinary blocks, and an agent that can read
 it can forge parks and stops. A marker copied from an earlier park
-(it is visible in the `SCHEDULED:` comment) does not verify. Comments are written with
-`hermes kanban comment --author kelpie`. Every text Kelpie writes has GitHub PR URLs
+(it is visible in the `SCHEDULED:` comment) does not verify.
+
+Everything Kelpie writes on the board is signed `kelpie` (`author`): comments with
+`hermes kanban comment --author kelpie`, and the comments Hermes adds to a block, schedule or
+unblock (`BLOCKED: ...`, `SCHEDULED: ...`, `UNBLOCK: ...`), which have no `--author` option,
+through `HERMES_PROFILE_NAME=kelpie` in the command's environment (Hermes signs them with that
+before the profile Kelpie runs under, which would otherwise show as `default`). Kelpie skips
+comments with that author when it reads people's comments, so `author` must not be the name
+of a profile or a person on the board. Every text Kelpie writes has GitHub PR URLs
 rewritten to `owner/repo#N`: a PR URL in a comment holds a ready task back for 24 hours in
 Hermes.
 

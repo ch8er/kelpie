@@ -364,3 +364,9 @@ class Board:
             "SELECT body FROM task_comments WHERE task_id = ? ORDER BY id", (task_id,)
         )
         return [r["body"] for r in rows]
+
+    def comment_authors(self, task_id: str) -> list[str]:
+        rows = self._read(
+            "SELECT author FROM task_comments WHERE task_id = ? ORDER BY id", (task_id,)
+        )
+        return [r["author"] for r in rows]

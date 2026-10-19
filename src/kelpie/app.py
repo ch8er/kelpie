@@ -121,6 +121,12 @@ from kelpie.traces.store import OffenderWatch, SpanRetention, SpanWindow, merge_
 
 log = logging.getLogger(__name__)
 
+# [adapters.hermes] author: a name as Hermes writes profile names.
+_AUTHOR = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+# Names a Hermes home already writes comments as: the default profile, the CLI's fallback
+# author, and the names Hermes reserves for profiles.
+_RESERVED_AUTHORS = frozenset({"default", "user", "hermes", "test", "tmp", "root", "sudo"})
+
 DEFAULT_CONFIG = Path("kelpie.toml")
 DEFAULT_DB = Path("kelpie.db")
 
@@ -157,6 +163,7 @@ class HermesSettings:
     worker_grace: timedelta = timedelta(seconds=DEFAULT_GRACE)
     # Long tool runs and tool slots read from the host's processes ([adapters.hermes.tools])
     tools: ToolProcesses | None = None
+    author: str = AUTHOR  # the name Kelpie signs its blocks, parks, wakes and comments with
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -179,6 +186,7 @@ class HermesSettings:
             end_worker=self.end_worker,
             worker_grace=self.worker_grace.total_seconds(),
             tools=self.tools,
+            author=self.author,
         )
 
 
@@ -374,6 +382,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "end_worker",
         "worker_grace",
         "tools",
+        "author",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     paths: dict[str, Path | None] = {}
@@ -443,6 +452,19 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError(
             "[adapters.hermes] human_owners must be a list of distinct non-empty strings"
         )
+    author = section.get("author", AUTHOR)
+    if not isinstance(author, str) or not _AUTHOR.fullmatch(author):
+        raise ConfigError(
+            "[adapters.hermes] author must be 1-64 lowercase letters, digits, '-' or '_', "
+            "starting with a letter or digit"
+        )
+    if author in {h.strip().casefold() for h in humans}:
+        raise ConfigError(f"[adapters.hermes] author {author!r} is also in human_owners")
+    if author in _RESERVED_AUTHORS:
+        raise ConfigError(
+            f"[adapters.hermes] author {author!r} is a name Hermes itself uses (its default "
+            "profile or CLI author): Kelpie would hide those comments as its own"
+        )
     decisions = section.get("human_decisions", [])
     if not isinstance(decisions, list) or not all(
         isinstance(d, Mapping)
@@ -464,7 +486,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
     seen: set[str] = set()
     for d in decisions:
         relays = {r.strip().casefold() for r in d["relays"]}
-        if bad := sorted(relays & (people | {AUTHOR, "user"})):
+        if bad := sorted(relays & (people | {author, "user"})):
             raise ConfigError(
                 f"[[adapters.hermes.human_decisions]] relays {bad}: a relay is an agent "
                 "profile, not a human owner, Kelpie or Hermes' default CLI author (user)"
@@ -525,6 +547,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         end_worker,
         worker_grace,
         _hermes_tools(section.get("tools")),
+        author,
     )
 
 

@@ -96,10 +96,12 @@ from typing import Any
 
 from kelpie.adapters.hermes.stop import (
     BOARD_ENV,
+    DEFAULT_AUTHOR,
     ENV_DENIED,
     ENV_EXACT,
     ENV_PREFIXES,
     ERROR_TAIL,
+    PROFILE_ENV,
     RUN_ENV,
     TASK_ENV,
     HermesCliError,
@@ -109,7 +111,7 @@ from kelpie.core.model import Condition, ConditionKind
 
 log = logging.getLogger(__name__)
 
-AUTHOR = "kelpie"
+AUTHOR = DEFAULT_AUTHOR  # [adapters.hermes] author: the name Kelpie signs its writes with
 MAX_TEXT = 1000  # characters of the human-readable part of a reason or comment
 MAX_MARKER = 4000  # characters of the encoded conditions
 MIN_KEY = 16  # bytes
@@ -294,16 +296,22 @@ def decode_wait(
 
 
 def kanban_env(
-    base: Mapping[str, str], db_path: Path, task_id: str | None = None, rid: int | None = None
+    base: Mapping[str, str],
+    db_path: Path,
+    task_id: str | None = None,
+    rid: int | None = None,
+    author: str = AUTHOR,
 ) -> dict[str, str]:
-    """The CLI's environment: allow-listed variables and the board; the task and run only
-    when the command is pinned to a run (``unblock`` refuses to run with a task set)."""
+    """The CLI's environment: allow-listed variables, the board and the name Hermes signs
+    the command's comment with; the task and run only when the command is pinned to a run
+    (``unblock`` refuses to run with a task set)."""
     env = {
         k: v
         for k, v in base.items()
         if k not in ENV_DENIED and (k in ENV_EXACT or k.startswith(ENV_PREFIXES))
     }
     env[BOARD_ENV] = str(db_path)
+    env[PROFILE_ENV] = author
     if task_id is not None and rid is not None:
         env[TASK_ENV] = task_id
         env[RUN_ENV] = str(rid)
@@ -319,12 +327,13 @@ def run_kanban(
     task_id: str | None = None,
     rid: int | None = None,
     environ: Mapping[str, str] | None = None,
+    author: str = AUTHOR,
 ) -> None:
     """Run ``hermes kanban <args>``; raise :class:`HermesCliError` unless it exits 0."""
     exe = shutil.which(cli)
     if exe is None:
         raise HermesCliError(f"Hermes CLI not found: {cli!r} (set [adapters.hermes] cli)")
-    env = kanban_env(os.environ if environ is None else environ, db_path, task_id, rid)
+    env = kanban_env(os.environ if environ is None else environ, db_path, task_id, rid, author)
     what = " ".join(args[:1])
     try:
         proc = subprocess.Popen(
@@ -359,6 +368,6 @@ def unblock_args(task_id: str, reason: str) -> list[str]:
     return ["unblock", f"--reason={text}", "--", task_id]
 
 
-def comment_args(task_id: str, body: str) -> list[str]:
+def comment_args(task_id: str, body: str, author: str = AUTHOR) -> list[str]:
     text = clean_text(body, 4 * MAX_TEXT) or "(Kelpie: no text)"
-    return ["comment", "--author", AUTHOR, "--", task_id, text]
+    return ["comment", "--author", author, "--", task_id, text]

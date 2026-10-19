@@ -649,3 +649,19 @@ def test_hermes_worker_settings(tmp_path: Path) -> None:
                      ("worker_grace", '"soon"')):  # fmt: skip
         with pytest.raises(ConfigError, match=key):
             load_settings(write(tmp_path, f"[adapters.hermes]\n{key} = {bad}\n"))
+
+
+def test_hermes_author(tmp_path: Path) -> None:
+    (default,) = build_adapters(load_settings(write(tmp_path, "[adapters.hermes]\n")))
+    assert isinstance(default, HermesAdapter) and default.author == "kelpie"
+    (adapter,) = build_adapters(
+        load_settings(write(tmp_path, '[adapters.hermes]\nauthor = "ops-bot"\n'))
+    )
+    assert isinstance(adapter, HermesAdapter) and adapter.author == "ops-bot"
+    for bad in ('""', '"Kelpie"', '"-x"', '"a b"', "1", f'"{"a" * 65}"'):
+        with pytest.raises(ConfigError, match="author"):
+            load_settings(write(tmp_path, f"[adapters.hermes]\nauthor = {bad}\n"))
+    with pytest.raises(ConfigError, match="human_owners"):
+        load_settings(
+            write(tmp_path, '[adapters.hermes]\nauthor = "alice"\nhuman_owners = ["Alice"]\n')
+        )
