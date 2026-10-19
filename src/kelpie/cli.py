@@ -120,6 +120,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     demo.add_argument("--web", action="store_true", help="also open the day's report as a web page")
 
+    selftest = sub.add_parser(
+        "selftest", help="check an act-mode action end to end on a throwaway setup (no tokens)"
+    )
+    selftest_sub = selftest.add_subparsers(dest="selftest_command", required=True)
+    selftest_stop = selftest_sub.add_parser(
+        "stop",
+        help="rule 10 stops a runaway on a throwaway Hermes home and board, with a local mock "
+        "model; reports each step and cleans up",
+    )
+    selftest_stop.add_argument("--adapter", choices=["hermes"], default="hermes")
+    selftest_stop.add_argument(
+        "--keep", action="store_true", help="keep the throwaway directory (Hermes home, logs)"
+    )
+
     spool = sub.add_parser("spool", help="maintain the hooks spools on this host")
     spool_sub = spool.add_subparsers(dest="spool_command", required=True)
     scrub = spool_sub.add_parser(
@@ -203,6 +217,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return code
         if args.command == "spool":
             return _scrub(settings, args.paths, args.dry_run)
+        if args.command == "selftest":
+            from kelpie.selftest.hermes import run as run_selftest
+
+            return run_selftest(settings, lambda line: print(line, flush=True), keep=args.keep)
         if args.command == "agent":
             return _agent(settings)
         if args.command == "status":

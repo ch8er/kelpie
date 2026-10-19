@@ -471,6 +471,25 @@ def test_every_command_is_signed_with_the_author(board: Board, cli: tuple[str, P
     assert done[-1]["argv"][2:4] == ["--author", "ops-bot"]
 
 
+def test_commands_start_from_the_given_environment(board: Board, cli: tuple[str, Path]) -> None:
+    """``cli_environ`` (the self-test's throwaway home) replaces Kelpie's own environment as
+    the base of every command; the allow-list and the pinned variables still apply."""
+    exe, log = cli
+    board.task("t1", "ready", NOW - timedelta(hours=1), assignee="dev-1")
+    a = make(board, exe)
+    base = {"PATH": os.environ["PATH"], "HERMES_HOME": "/throwaway/home", "SECRET": "x"}
+    a.cli_environ = base
+    a.wait("t1", CONDS[:1], "conflict")
+    a.requeue("t1", "done")
+    a.comment("t1", "hello")
+    done = calls(log)
+    assert [c["argv"][1] for c in done] == ["schedule", "unblock", "comment"]
+    for call in done:
+        env = call["env"]
+        assert env["HERMES_HOME"] == "/throwaway/home" and "SECRET" not in env  # type: ignore[operator,index]
+        assert env["HERMES_KANBAN_DB"] == str(board.path)  # type: ignore[index]
+
+
 def test_park_survives_events_hermes_writes_afterwards(board: Board, cli: tuple[str, Path]) -> None:
     exe, _ = cli
     board.task("t1", "running", NOW - timedelta(hours=2), assignee="dev-1")
