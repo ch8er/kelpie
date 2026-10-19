@@ -1,4 +1,4 @@
-"""Issues as tasks, for any tracker (GitHub Issues now, Linear next).
+"""Issues as tasks, for any tracker (GitHub Issues, Linear).
 
 A tracker reader turns its issues into :class:`Item` (what an issue is, whatever the tracker)
 and :func:`map_items` turns items into Kelpie's tasks, owners and dependencies with a
@@ -24,13 +24,17 @@ open, a blocked label                  ``blocked`` (since the label was put on)
 open, a linked ready pull request      ``review`` (since the pull request was opened)
 open, a linked draft pull request, or  ``in_progress`` (since the agent was started:
 an agent or person holds it            assigned or labelled, else the pull request)
-open, a ready label, no open blocker   ``ready``
-off the boards
+open, started (a workflow state),     ``in_progress`` with nobody on it
+nobody holds it
+open, a ready label (or a ready        ``ready``
+workflow state), no open blocker off
+the boards
 open                                   ``backlog``
 =====================================  ===========================================
 
 Agents on these trackers are started by people, not by a dispatcher, so an issue nobody
-holds is ``backlog`` unless a ready label says it waits for an agent.
+holds is ``backlog`` unless a ready label (or a ready state the board names) says it waits
+for an agent.
 
 A pull request is linked to an issue when its description closes it (``Fixes #12``):
 GitHub's own link, which closes the issue on merge. Plain mentions never link (incident
@@ -112,6 +116,7 @@ class Board:
     label: str | None = None  # only issues with this label are tasks; None: every issue
     blocked_labels: tuple[str, ...] = DEFAULT_BLOCKED_LABELS
     ready_labels: tuple[str, ...] = ()  # an issue nobody holds with one is ready
+    ready_states: tuple[str, ...] = ()  # so is one in one of these workflow states (Linear)
     role: str = DEFAULT_ROLE  # the role of tasks no agent holds
     # Names of the agents Kelpie may hand its tasks to; empty: all of them. An agent's
     # account is that agent on every board.
@@ -163,6 +168,13 @@ class Item:
     events: tuple[Event, ...] | None = None
     blocked_by: tuple[str, ...] = ()  # ids of the open issues it is blocked by
     blockers_unknown: bool = False  # the tracker counts blockers it could not list
+    # A tracker with workflow states (Linear) says outright that an issue waits for someone
+    # (``queued``: a state the board names ready) or that work on it began (``started``,
+    # since ``started_at``); ``state`` is the state's name, for platform_status.
+    queued: bool = False
+    started: bool = False
+    started_at: datetime | None = None
+    state: str | None = None
     sub_items: tuple[str, ...] = ()
     open_sub_items: tuple[str, ...] = ()  # the sub-issues still open
     pulls: tuple[LinkedPull, ...] = ()
@@ -260,9 +272,14 @@ def _status(
         where = f"draft pull request #{pull.number}" if pull is not None else "assigned"
         return Status.IN_PROGRESS, since, None, f"open, {where}"
     since = _last(item, {"reopened", "unassigned", "unlabeled"}) or item.created_at
+    if item.started:  # the tracker says work began, and nobody holds it
+        started = item.started_at or since
+        return Status.IN_PROGRESS, started, None, f"open, {item.state or 'started'}, nobody on it"
     ready = _first_label(item, board.ready_labels)
+    if ready is None and item.queued:
+        ready = item.state or "queued"
     if ready is None:
-        return Status.BACKLOG, since, None, "open"
+        return Status.BACKLOG, since, None, f"open, {item.state}" if item.state else "open"
     elsewhere = [b for b in item.blocked_by if b not in known]
     if elsewhere:  # its dependency is not a task here, so no rule would hold it back
         return Status.BACKLOG, since, None, f"open, {ready}, blocked by {elsewhere[0]}"

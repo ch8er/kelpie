@@ -17,6 +17,10 @@ from typing import Any
 
 from kelpie.adapters.issues.adapter import IssuesAdapter
 from kelpie.adapters.issues.github import GitHubIssues
+from kelpie.adapters.issues.linear import DEFAULT_API_URL as LINEAR_API_URL
+from kelpie.adapters.issues.linear import DEFAULT_MAX_REQUESTS as LINEAR_MAX_REQUESTS
+from kelpie.adapters.issues.linear import DEFAULT_REFRESH as LINEAR_REFRESH
+from kelpie.adapters.issues.linear import LinearClient, LinearIssues
 from kelpie.adapters.issues.mapping import (
     DEFAULT_BLOCKED_LABELS,
     DEFAULT_ROLE,
@@ -56,6 +60,7 @@ DEFAULT_TICK_BUDGET = timedelta(seconds=15)
 MAX_REQUESTS = 5000
 MAX_LABEL = 50  # GitHub's limit on a label name
 MAX_AGENTS = 32
+MIN_LINEAR_REFRESH = timedelta(seconds=30)
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
 _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}(\[bot\])?")
@@ -127,20 +132,28 @@ def _labels(value: Any, where: str) -> tuple[str, ...]:
     return tuple(_label(v, where) for v in value)
 
 
-def _duration(section: Mapping[str, Any], key: str, default: timedelta) -> timedelta:
+def _duration(
+    section: Mapping[str, Any], key: str, default: timedelta, sect: str = SECTION
+) -> timedelta:
     if key not in section:
         return default
     try:
         value = parse_duration(section[key])
     except (ValueError, TypeError, AttributeError) as exc:
-        raise ValueError(f"{SECTION} {key}: {exc}") from exc
+        raise ValueError(f"{sect} {key}: {exc}") from exc
     if value <= timedelta(0):
-        raise ValueError(f"{SECTION} {key} must be positive")
+        raise ValueError(f"{sect} {key} must be positive")
     return value
 
 
-def _agent(name: str, section: Any) -> Agent:
-    where = f"{SECTION} agents.{name}"
+def _agent(
+    name: str,
+    section: Any,
+    sect: str = SECTION,
+    account: re.Pattern[str] = _LOGIN,
+    account_kind: str = "a GitHub login",
+) -> Agent:
+    where = f"{sect} agents.{name}"
     if not _NAME.fullmatch(name):
         raise ValueError(f"{where}: an agent name is 1-64 letters, digits, '.', '_' or '-'")
     if not isinstance(section, Mapping):
@@ -151,8 +164,8 @@ def _agent(name: str, section: Any) -> Agent:
     for key in ("assignee", "author"):
         if key in section:
             value = _string(section[key], f"{where} {key}", 60)
-            if not _LOGIN.fullmatch(value.removeprefix("@")):
-                raise ValueError(f"{where} {key} must be a GitHub login")
+            if not account.fullmatch(value.removeprefix("@")):
+                raise ValueError(f"{where} {key} must be {account_kind}")
             fields[key] = value.removeprefix("@")
     if "label" in section:
         fields["label"] = _label(section["label"], f"{where} label")
@@ -167,10 +180,15 @@ def _agent(name: str, section: Any) -> Agent:
 
 
 def _board(
-    repo: str, section: Mapping[str, Any], defaults: Board, agents: Mapping[str, Agent]
+    repo: str,
+    section: Mapping[str, Any],
+    defaults: Board,
+    agents: Mapping[str, Agent],
+    sect: str = SECTION,
+    keys: frozenset[str] = BOARD_KEYS,
 ) -> Board:
-    where = f"{SECTION} boards.{repo!r}"
-    if extra := set(section) - BOARD_KEYS:
+    where = f"{sect} boards.{repo!r}"
+    if extra := set(section) - keys:
         raise ValueError(f"unknown {where} keys: {sorted(extra)}")
     label = defaults.label
     if "label" in section:
@@ -192,12 +210,23 @@ def _board(
         ready_labels=_labels(section["ready_labels"], f"{where} ready_labels")
         if "ready_labels" in section
         else defaults.ready_labels,
+        ready_states=_states(section["ready_states"], f"{where} ready_states")
+        if "ready_states" in section
+        else defaults.ready_states,
         role=_string(section["role"], f"{where} role", 64) if "role" in section else defaults.role,
         agents=names,
     )
 
 
-def _check_agents(agents: Mapping[str, Agent], boards: Sequence[Board]) -> None:
+def _states(value: Any, where: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{where} must be a list of workflow state names")
+    return tuple(_string(v, where, 64) for v in value)
+
+
+def _check_agents(
+    agents: Mapping[str, Agent], boards: Sequence[Board], sect: str = SECTION
+) -> None:
     """Each account and label names one agent, and no agent's label means something else."""
     seen: dict[str, str] = {}
     for agent in agents.values():
@@ -214,14 +243,13 @@ def _check_agents(agents: Mapping[str, Agent], boards: Sequence[Board]) -> None:
         key = f"label {agent.label.casefold()}"
         if seen.setdefault(key, agent.name) != agent.name:
             raise ValueError(
-                f"{SECTION} agents.{agent.name} label {agent.label!r} is already agents."
-                f"{seen[key]}'s"
+                f"{sect} agents.{agent.name} label {agent.label!r} is already agents.{seen[key]}'s"
             )
         for board in boards:
             other = {board.label or "", *board.blocked_labels, *board.ready_labels}
             if agent.label.casefold() in {o.casefold() for o in other}:
                 raise ValueError(
-                    f"{SECTION} agents.{agent.name} label {agent.label!r} is also a board "
+                    f"{sect} agents.{agent.name} label {agent.label!r} is also a board "
                     f"label of {board.key} (label, blocked_labels or ready_labels)"
                 )
 
@@ -323,3 +351,177 @@ def load_github_issues(section: Any, github: GitHubSettings | None) -> GitHubIss
         tick_budget=_duration(section, "tick_budget", DEFAULT_TICK_BUDGET),
         enabled=enabled,
     )
+
+
+# --- [adapters.linear] ----------------------------------------------------------------------
+
+LINEAR_SECTION = "[adapters.linear]"
+LINEAR_NAME = "linear"
+LINEAR_TOKEN_ENV = "LINEAR_API_KEY"
+LINEAR_KEYS = frozenset(
+    {
+        *("enabled", "teams", "api_url", "token_env", "timeout", "refresh"),
+        *("lookback", "max_requests_per_tick", "pull_repos"),
+        *("label", "blocked_labels", "ready_labels", "ready_states", "role", "agents", "boards"),
+    }
+)
+LINEAR_BOARD_KEYS = BOARD_KEYS | {"ready_states"}
+_TEAM = re.compile(r"[A-Z][A-Z0-9_]{0,15}")
+_PULL_REPO = re.compile(r"(?:(?P<host>[a-z0-9.-]{1,255})/)?(?P<repo>[\w.-]{1,100}/[\w.-]{1,100})")
+MAX_PULL_REPOS = 100
+_DISPLAY_NAME = re.compile(r"[^\x00-\x1f\x7f@,]{1,64}")
+
+
+@dataclass(frozen=True, slots=True)
+class LinearSettings:
+    boards: tuple[Board, ...]
+    agents: Mapping[str, Agent] = field(default_factory=dict)
+    api_url: str = LINEAR_API_URL
+    token_env: str = LINEAR_TOKEN_ENV
+    timeout: timedelta = DEFAULT_TIMEOUT
+    refresh: timedelta = LINEAR_REFRESH
+    lookback: timedelta = DEFAULT_LOOKBACK
+    max_requests_per_tick: int = LINEAR_MAX_REQUESTS
+    pull_repos: frozenset[str] = frozenset()  # "host/owner/repo"; empty: github.com, any repo
+    enabled: bool = True
+
+    def token(self, environ: Mapping[str, str] = os.environ) -> str:
+        """The API key from ``$token_env`` (Linear has no anonymous access). Raises
+        ValueError, never showing the value."""
+        token = environ.get(self.token_env, "").strip()
+        if not token:
+            raise ValueError(f"{LINEAR_SECTION} token_env: ${self.token_env} is not set")
+        if not valid_token(token):
+            raise ValueError(f"{LINEAR_SECTION} ${self.token_env} contains characters not allowed")
+        return token
+
+    def build(self, environ: Mapping[str, str] = os.environ) -> IssuesAdapter:
+        client = LinearClient(self.api_url, self.token(environ), timeout=self.timeout)
+        reader = LinearIssues(
+            client,
+            self.boards,
+            self.lookback,
+            refresh=self.refresh,
+            max_requests=self.max_requests_per_tick,
+            pull_repos=self.pull_repos,
+            agents=self.agents,
+        )
+        return IssuesAdapter(reader, self.boards, self.agents, name=LINEAR_NAME, where=self.api_url)
+
+
+def load_linear(section: Any) -> LinearSettings:
+    """Parse ``[adapters.linear]``; raises ValueError naming the bad key."""
+    sect = LINEAR_SECTION
+    if not isinstance(section, Mapping):
+        raise ValueError(f"{sect} must be a table")
+    if extra := set(section) - LINEAR_KEYS:
+        raise ValueError(f"unknown {sect} keys: {sorted(extra)}")
+    enabled = section.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{sect} enabled must be true or false")
+    teams_value = section.get("teams")
+    if not isinstance(teams_value, list) or not teams_value:
+        raise ValueError(f"{sect} teams must be a non-empty list of team keys (ENG)")
+    teams: list[str] = []
+    for team in teams_value:
+        if not isinstance(team, str) or not _TEAM.fullmatch(team.strip().upper()):
+            raise ValueError(f"{sect} teams: {team!r} is not a team key")
+        if team.strip().upper() not in teams:
+            teams.append(team.strip().upper())
+    try:
+        api_url = check_api_url(section.get("api_url", LINEAR_API_URL))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{sect} api_url: {exc}") from exc
+    token_env = section.get("token_env", LINEAR_TOKEN_ENV)
+    if not isinstance(token_env, str) or not _ENV_NAME.fullmatch(token_env):
+        raise ValueError(f"{sect} token_env must be an environment variable name")
+    if api_url != LINEAR_API_URL and "token_env" not in section:
+        raise ValueError(f"{sect} token_env is required with a non-default api_url")
+    timeout = _duration(section, "timeout", DEFAULT_TIMEOUT, sect)
+    if timeout > MAX_TIMEOUT:
+        raise ValueError(f"{sect} timeout must be at most {MAX_TIMEOUT.seconds}s")
+    refresh = _duration(section, "refresh", LINEAR_REFRESH, sect)
+    if refresh < MIN_LINEAR_REFRESH:
+        raise ValueError(f"{sect} refresh must be at least {MIN_LINEAR_REFRESH.seconds}s")
+    max_requests = section.get("max_requests_per_tick", LINEAR_MAX_REQUESTS)
+    if (
+        not isinstance(max_requests, int)
+        or isinstance(max_requests, bool)
+        or not 0 <= max_requests <= MAX_REQUESTS
+    ):
+        raise ValueError(f"{sect} max_requests_per_tick must be 0 to {MAX_REQUESTS}")
+    agents_section = section.get("agents", {})
+    if not isinstance(agents_section, Mapping) or len(agents_section) > MAX_AGENTS:
+        raise ValueError(f"{sect} agents must be a table of at most {MAX_AGENTS} agents")
+    agents = {
+        name: _agent(name, value, sect, _DISPLAY_NAME, "a Linear display name")
+        for name, value in agents_section.items()
+    }
+    for agent in agents.values():
+        if agent.author is not None:
+            raise ValueError(
+                f"{sect} agents.{agent.name} author: Linear shows no pull request author; "
+                "name the agent's assignee or label"
+            )
+        # Names Kelpie never takes from Linear (they could pass for another's): refuse them
+        # here rather than have the agent silently never match.
+        name = agent.assignee or ""
+        if not name.isprintable() or name.casefold().endswith("[bot]"):
+            raise ValueError(
+                f"{sect} agents.{agent.name} assignee: a Linear display name, printable and "
+                "not ending in [bot]"
+            )
+    label = section.get("label")
+    defaults = Board(
+        key="",
+        label=None if label is None else _label(label, f"{sect} label"),
+        blocked_labels=_labels(section["blocked_labels"], f"{sect} blocked_labels")
+        if "blocked_labels" in section
+        else DEFAULT_BLOCKED_LABELS,
+        ready_labels=_labels(section["ready_labels"], f"{sect} ready_labels")
+        if "ready_labels" in section
+        else (),
+        ready_states=_states(section["ready_states"], f"{sect} ready_states")
+        if "ready_states" in section
+        else (),
+        role=_string(section.get("role", DEFAULT_ROLE), f"{sect} role", 64),
+    )
+    boards_section = section.get("boards", {})
+    if not isinstance(boards_section, Mapping):
+        raise ValueError(f"{sect} boards must be a table of team keys")
+    overrides: dict[str, Mapping[str, Any]] = {}
+    for team, value in boards_section.items():
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{sect} boards.{team!r} must be a table")
+        if team.upper() not in teams:
+            raise ValueError(f"{sect} boards.{team!r} is not in teams")
+        overrides[team.upper()] = value
+    boards = tuple(
+        _board(t, overrides.get(t, {}), defaults, agents, sect, LINEAR_BOARD_KEYS) for t in teams
+    )
+    _check_agents(agents, boards, sect)
+    return LinearSettings(
+        boards=boards,
+        agents=agents,
+        api_url=api_url,
+        token_env=token_env,
+        timeout=timeout,
+        refresh=refresh,
+        lookback=_duration(section, "lookback", DEFAULT_LOOKBACK, sect),
+        max_requests_per_tick=max_requests,
+        pull_repos=_pull_repos(section.get("pull_repos", []), f"{sect} pull_repos"),
+        enabled=enabled,
+    )
+
+
+def _pull_repos(value: Any, where: str) -> frozenset[str]:
+    """Repositories as ``owner/repo`` (on github.com) or ``host/owner/repo``."""
+    if not isinstance(value, list) or len(value) > MAX_PULL_REPOS:
+        raise ValueError(f"{where} must be a list of at most {MAX_PULL_REPOS} repositories")
+    repos: set[str] = set()
+    for entry in value:
+        match = _PULL_REPO.fullmatch(entry.strip().lower()) if isinstance(entry, str) else None
+        if match is None:
+            raise ValueError(f"{where}: {entry!r} is not owner/repo or host/owner/repo")
+        repos.add(f"{match['host'] or 'github.com'}/{match['repo']}")
+    return frozenset(repos)

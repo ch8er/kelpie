@@ -1019,6 +1019,13 @@ def run_checks(
         else:
             found = github_issues.skipped("adapter disabled")
         gi_checks = [Check(*c) for c in found]
+    lin = settings.linear
+    if lin is not None:  # only when configured
+        if lin.enabled:
+            found = github_issues.run_linear(lin, at, environ)
+        else:
+            found = github_issues.skipped_linear("adapter disabled")
+        gi_checks += [Check(*c) for c in found]
     total = None if not counts or None in counts else sum(c for c in counts if c is not None)
     exporters = [
         name

@@ -13,8 +13,14 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 
 from kelpie.adapters.issues.adapter import IssuesAdapter
-from kelpie.adapters.issues.config import SECTION, GitHubIssuesSettings
+from kelpie.adapters.issues.config import (
+    LINEAR_SECTION,
+    SECTION,
+    GitHubIssuesSettings,
+    LinearSettings,
+)
 from kelpie.adapters.issues.github import LABEL_PATH, GitHubIssues
+from kelpie.adapters.issues.linear import LinearIssues
 from kelpie.connectors.github.client import GitHubError
 
 CheckTuple = tuple[str, str, str, str]
@@ -143,12 +149,17 @@ def check_labels(reader: GitHubIssues, settings: GitHubIssuesSettings) -> CheckT
     return _check("PASS", LABELS, f"every label checked exists{skipped}")
 
 
-def check_read(adapter: IssuesAdapter, now: datetime) -> CheckTuple:
+def check_read(
+    adapter: IssuesAdapter,
+    now: datetime,
+    section: str = SECTION,
+    quickstart: str = QUICKSTART,
+) -> CheckTuple:
     try:
         snapshot = adapter.snapshot(now)
     except Exception as exc:  # the report must go on
         reason = getattr(exc, "public_reason", None) or type(exc).__name__
-        return _check("FAIL", READ, str(reason), f"see {QUICKSTART}")
+        return _check("FAIL", READ, str(reason), f"see {quickstart}")
     tasks = snapshot.tasks
     held = sum(1 for t in tasks if t.owner_id and not t.status.is_terminal)
     detail = f"{len(tasks)} tasks, {held} held by an agent or a person"
@@ -160,7 +171,7 @@ def check_read(adapter: IssuesAdapter, now: datetime) -> CheckTuple:
             "WARN",
             READ,
             f"{detail}; no agents configured, so every issue held is a person's",
-            f"add [{SECTION[1:-1]}.agents.<name>] ({QUICKSTART})",
+            f"add [{section[1:-1]}.agents.<name>] ({quickstart})",
         )
     return _check("PASS", READ, detail)
 
@@ -186,13 +197,89 @@ def run(
     ]
 
 
-def _guarded(name: str, check: Callable[[], CheckTuple]) -> CheckTuple:
+def _guarded(name: str, check: Callable[[], CheckTuple], docs: str = QUICKSTART) -> CheckTuple:
     """A check that cannot take ``kelpie doctor`` down: an unexpected error is a FAIL that
-    shows its type only."""
+    shows its type only (an IssuesError its public reason)."""
     try:
         return check()
     except Exception as exc:  # the report must go on
-        return _check("FAIL", name, f"the check failed: {type(exc).__name__}", f"see {QUICKSTART}")
+        reason = getattr(exc, "public_reason", None) or type(exc).__name__
+        return _check("FAIL", name, f"the check failed: {reason}", f"see {docs}")
+
+
+LINEAR_TOKEN, LINEAR_TEAMS = "linear token", "linear teams"
+LINEAR_NAMES, LINEAR_READ = "linear labels and agents", "linear read"
+LINEAR_CHECKS = (LINEAR_TOKEN, LINEAR_TEAMS, LINEAR_NAMES, LINEAR_READ)
+LINEAR_DOCS = "src/kelpie/adapters/issues/README.md (Linear)"
+
+
+def check_teams(reader: LinearIssues) -> CheckTuple:
+    """A misspelled team key is no error to Linear: it reads no issues."""
+    missing = reader.missing_teams()
+    if missing:
+        return _check(
+            "FAIL",
+            LINEAR_TEAMS,
+            f"Linear has no team {', '.join(missing)}, or the key cannot see it",
+            "fix teams: team keys are the prefix of issue ids (ENG in ENG-123)",
+        )
+    return _check("PASS", LINEAR_TEAMS, f"{len(reader.boards)} found")
+
+
+def check_names(reader: LinearIssues) -> CheckTuple:
+    labels, users = reader.missing_names()
+    states = reader.missing_states()
+    problems = [
+        *([f"labels not defined: {', '.join(labels)}"] if labels else []),
+        *([f"ready_states not defined: {', '.join(states)}"] if states else []),
+        *([f"agents' users not exactly one Linear user: {', '.join(users)}"] if users else []),
+    ]
+    if problems:
+        return _check(
+            "WARN",
+            LINEAR_NAMES,
+            "; ".join(problems),
+            "create them or fix the names: a label or user that does not exist never matches",
+        )
+    return _check("PASS", LINEAR_NAMES, "every label, state and agent named exists")
+
+
+def run_linear(
+    settings: LinearSettings, now: datetime, environ: Mapping[str, str] = os.environ
+) -> list[CheckTuple]:
+    """``[adapters.linear]``: the API key is set, the teams exist, the labels and agents the
+    config names exist, and one read of the teams' issues."""
+    try:
+        settings.token(environ)
+    except ValueError as exc:
+        token = _check("FAIL", LINEAR_TOKEN, str(exc), f"set ${settings.token_env} to an API key")
+        return [token, *skipped_linear("no API key")[1:]]
+    token = _check("PASS", LINEAR_TOKEN, f"read from ${settings.token_env}")
+    try:
+        adapter = settings.build(environ)
+    except Exception as exc:  # the report must go on
+        return [token, *skipped_linear(f"not built ({type(exc).__name__})")[1:]]
+    reader = adapter.tracker
+    if not isinstance(reader, LinearIssues):
+        return [token, *skipped_linear("not a Linear adapter")[1:]]
+    return [
+        token,
+        _guarded(LINEAR_TEAMS, lambda: check_teams(reader), LINEAR_DOCS),
+        _guarded(LINEAR_NAMES, lambda: check_names(reader), LINEAR_DOCS),
+        _guarded(
+            LINEAR_READ,
+            lambda: _renamed(LINEAR_READ, check_read(adapter, now, LINEAR_SECTION, LINEAR_DOCS)),
+            LINEAR_DOCS,
+        ),
+    ]
+
+
+def _renamed(name: str, check: CheckTuple) -> CheckTuple:
+    return (check[0], name, check[2], check[3])
+
+
+def skipped_linear(why: str) -> list[CheckTuple]:
+    return [_check("SKIP", name, why) for name in LINEAR_CHECKS]
 
 
 def skipped(why: str) -> list[CheckTuple]:

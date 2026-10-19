@@ -233,6 +233,9 @@ kelpie doctor
 
 Step by step: the
 [GitHub Issues quickstart](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-github-issues.md).
+Linear works the same way (`[adapters.linear]`, `teams = ["ENG"]`, an API key in
+`$LINEAR_API_KEY`; agents are the app users issues are delegated to):
+[configuration](https://github.com/ch8er/kelpie/blob/main/docs/configuration.md#adapterslinear).
 
 Other platforms: [CONTRIBUTING](https://github.com/ch8er/kelpie/blob/main/CONTRIBUTING.md)
 explains how to add an adapter.

@@ -150,6 +150,75 @@ The token needs Issues: write (and Pull requests: read) on the repositories. Use
 an account the agents' own triggers accept: a GitHub Actions `GITHUB_TOKEN` starts no
 workflow, so Kelpie could not restart an Action-based agent with it.
 
+## Linear
+
+`[adapters.linear]` (adapter name `linear`) reads a Linear workspace's teams through its
+GraphQL API (`linear.py`) and maps them with the same rules. What differs:
+
+- **Agents** integrated in Linear (Codex, Cursor, Copilot and others) are app users an issue is
+  delegated to; people are assigned. Both count as the issue's assignees, so an agent's
+  `assignee` is its app user's display name, and Kelpie delegates to an app user and assigns a
+  person when it starts one. Linear has one assignee and one delegate: Kelpie replaces only an
+  agent in either (handing the issue from one agent to another), never a person or an app
+  that is none of the agents (the action fails instead). An agent's `author` is refused
+  (Linear shows no pull request author); whether a `mention` in a comment made through the
+  API starts an agent is **unverified**.
+- **Workflow states**: an issue nobody holds is `ready` in a state the board names in
+  `ready_states` (`["Todo"]` on a team whose Todo column is the agents' queue), else
+  `backlog`, as on GitHub: people start these agents, so a person's Todo is not work for
+  idle agents. A started state with nobody on it is `in_progress` with no owner: rule 3
+  (`orphan_status`) may hand it to one of the board's agents when its `reassign` is on, so
+  give a team where people work too a `label` or a board `agents` list. Completed /
+  canceled / duplicate are `done` / `cancelled`.
+- **Dependencies** are `blocks` relations, **subtasks** sub-issues, **pull requests** the GitHub
+  pull requests Linear's GitHub integration attaches: attachments whose `sourceType` is
+  `github`, on github.com or, with `pull_repos`, only in those repositories. A link anyone
+  pastes does not count. The branch is not read (apps can write an attachment's metadata), so
+  Linear tasks link no CI builds by branch. `status` and `draft` come from that metadata too
+  (keys **unverified**): an app could hide a pull request or show it as a draft. Without
+  `pull_repos` any github.com repository the integration sees counts, and pull requests of two
+  repositories with the same number look alike: set `pull_repos` to the agents'
+  repositories.
+- **Who wrote the description**: the creator, if a member (not a guest or an app) and the
+  issue was not made through an integration (`botActor`), and only while the history shows no
+  description edit by a guest, an app (the agents among them), an actor Linear does not name
+  or an integration (a GitHub or Slack sync). A description changed since it was created is trusted only once
+  that history is read (within `max_requests_per_tick`), and not when it is longer than 50
+  entries (the history query is kept small: Linear counts each entry's label lists). Untrusted, it gives the task no acceptance criteria.
+- **Matching agents**: by display name, as on GitHub, and then by user id: an agent's name on
+  any user but the one Kelpie looked up for it is not the agent. A slot held under a name
+  Kelpie does not take (unprintable, with spaces around it, ending in `[bot]`, or an agent's
+  name on another user) is held by someone unknown (`@unknown`), never free; so is an agent's
+  own issue while its user cannot be looked up (the read reports it). Slots are compared by
+  user id when Kelpie writes: it never replaces anyone but an agent. The config
+  refuses agent names that could never match. Unassigning clears the slot that holds the
+  name; writes go to the UUID of the issue the action checked.
+- **Reading**: at most every `refresh` (2 minutes): GraphQL has no conditional requests, and
+  Linear meters an API key by requests and query complexity per hour. Every team's lists
+  first (pages of 25 issues, each query estimated well under Linear's 10,000-point limit;
+  the closed issues are the most recently updated page), then history within
+  `max_requests_per_tick`. A team that cannot be read is served from its last good read for
+  10 minutes, then left out, and the problem is reported. Reads stop while less than 100
+  requests or 50,000 complexity points are left of the hour (writes still go), until that
+  limit's reset or for 5 minutes, then ask Linear again; the refresh stretches so reads take
+  at most half the hour's complexity (Linear's `X-Complexity` and
+  `X-RateLimit-Complexity-Limit` headers; several large teams read less often), to 25 minutes
+  at most (under the 30-minute cooldown, so no rule acts twice on one stale read). A `RATELIMITED` answer, HTTP 429, or a limit used up backs off until that limit's
+  reset. A plain-http `api_url` (loopback, tests) never goes through a proxy.
+- **Writes**: `issueUpdate` with `addedLabelIds` / `removedLabelIds` changes only those labels
+  (no read-then-replace), `assigneeId` / `delegateId`, `stateId` to reopen (the team's first
+  Todo state, else its first Backlog state); `commentCreate`. Paced, capped and reserved per
+  action like GitHub's. Every id the writes may need (the team's blocked and agent labels,
+  the agents' users, the state to reopen to) is looked up when the action reserves its
+  writes, so no lookup fails between two writes: one Linear cannot answer now defers the
+  whole action. Ids are kept for an hour.
+- **`kelpie doctor`** checks the API key, that every team exists (a misspelled key reads no
+  issues and Linear says nothing), that the labels, `ready_states` and agents' users the
+  config names exist, and one read. An action starting or taking off an agent whose label or
+  user Linear lacks is refused before its first write. Labels are looked up in the issue's
+  team and the workspace: a blocked label from another team (a parent team's, on a
+  sub-team's issue) cannot be removed, and `unblock` fails without writing.
+
 ## Limits and unverified
 
 - **Unverified against live agents**: the assignee login a Copilot assignment shows

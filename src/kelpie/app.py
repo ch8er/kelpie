@@ -28,7 +28,12 @@ from kelpie.adapters.hermes.processes import (
 )
 from kelpie.adapters.hermes.processes import SlotPool, ToolProcesses
 from kelpie.adapters.hermes.worker import DEFAULT_GRACE
-from kelpie.adapters.issues.config import GitHubIssuesSettings, load_github_issues
+from kelpie.adapters.issues.config import (
+    GitHubIssuesSettings,
+    LinearSettings,
+    load_github_issues,
+    load_linear,
+)
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
@@ -180,6 +185,7 @@ class Settings:
     claude_code: ClaudeCodeSettings | None = None  # None: no [adapters.claude_code] section
     openclaw: OpenClawSettings | None = None  # None: no [adapters.openclaw] section
     github_issues: GitHubIssuesSettings | None = None  # None: no [adapters.github_issues]
+    linear: LinearSettings | None = None  # None: no [adapters.linear]
     db_path: Path | None = DEFAULT_DB  # None keeps the ledger in memory
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
@@ -285,6 +291,7 @@ def load_settings(path: Path | None) -> Settings:
         claude_code=_load_claude_code(data.get("adapters", {})),
         openclaw=_load_openclaw(data.get("adapters", {})),
         github_issues=_load_github_issues(data.get("adapters", {}), github),
+        linear=_load_linear(data.get("adapters", {})),
         db_path=db_path,
         source=path,
         traces=traces,
@@ -333,7 +340,7 @@ def _load_connectors(
 def _load_hermes(adapters: Any) -> HermesSettings | None:
     if not isinstance(adapters, Mapping):
         raise ConfigError("[adapters] must be a table")
-    if extra := set(adapters) - {"hermes", "claude_code", "openclaw", "github_issues"}:
+    if extra := set(adapters) - {"hermes", "claude_code", "openclaw", "github_issues", "linear"}:
         raise ConfigError(f"unknown [adapters] entries: {sorted(extra)}")
     if "hermes" not in adapters:
         return None
@@ -606,6 +613,15 @@ def _load_github_issues(
         return None
     try:
         return load_github_issues(adapters["github_issues"], github)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def _load_linear(adapters: Mapping[str, Any]) -> LinearSettings | None:
+    if "linear" not in adapters:
+        return None
+    try:
+        return load_linear(adapters["linear"])
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -963,11 +979,12 @@ def build_adapters(settings: Settings) -> list[PlatformAdapter]:
         adapters.append(settings.claude_code.build())
     if settings.openclaw is not None and settings.openclaw.enabled:
         adapters.append(settings.openclaw.build())
-    if settings.github_issues is not None and settings.github_issues.enabled:
-        try:
-            adapters.append(settings.github_issues.build())
-        except ValueError as exc:
-            raise ConfigError(str(exc)) from exc
+    for issues in (settings.github_issues, settings.linear):
+        if issues is not None and issues.enabled:
+            try:
+                adapters.append(issues.build())
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
     return adapters
 
 
@@ -1776,6 +1793,7 @@ _PLATFORMS = {
     "claude-code": "Claude Code",
     "openclaw": "OpenClaw",
     "github-issues": "GitHub Issues",
+    "linear": "Linear",
 }
 
 
