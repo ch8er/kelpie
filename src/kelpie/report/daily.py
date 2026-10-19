@@ -1354,6 +1354,8 @@ def _per_task_text(report: DailyReport) -> str:
         money = f"${per:,.2f}{_mark(report)}"
         both = f"{money} and {plan}" if plan else money
         return f" {n} tasks completed, {both} per completed task."
+    if plan:  # billed tokens all unpriced: the plan tokens still say something
+        return f" {n} tasks completed, {plan} per completed task."
     return f" {n} tasks completed."
 
 
@@ -1386,7 +1388,9 @@ def _plans(spend: Spend, report: DailyReport) -> str:
             parts.append(f"{provider}: {share:.0%} of one {_window(window)} limit")
         else:
             share = tokens / windows / limit_tokens if limit_tokens else 0.0
-            parts.append(f"{provider}: {share:.0%} of its {_window(window)} limit per window")
+            parts.append(
+                f"{provider}: on average {share:.0%} of its {_window(window)} limit per window"
+            )
     return f"{spend.plan_tokens:,} tokens on subscriptions ({'; '.join(parts)})"
 
 

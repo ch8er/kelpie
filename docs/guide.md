@@ -243,7 +243,7 @@ report; no LLM is involved.
   flagged, and by every session `exit_contract` requeued (a restart). Spend follows each
   provider's spend mode (`[spend]`): with an API key, dollars (`[prices]` over Kelpie's
   dated default price table); on a subscription, tokens and the share of the plan's limit
-  (`limit_tokens` per `limit_window`, else "limit not configured"), never dollars and never
+  (`limit_tokens` per `limit_window`, else "limit not configured"; for a window shorter than a day, the day's tokens spread over all its windows, so a farm that runs part of the day reads low), never dollars and never
   summed with them; a provider whose mode is not set shows dollars marked "(estimate, mode
   not set)".
 - **Cost per completed task**: the day's billed spend over the tasks that reached `done`

@@ -25,6 +25,7 @@ from kelpie.report.daily import (
 )
 from kelpie.report.sections import Spend
 from kelpie.report.sections.throughput import throughput_section
+from kelpie.report.sections.tokens_fit import _Prices, _saving
 from kelpie.report.store import StateRow
 
 DAY = date(2026, 3, 2)
@@ -33,6 +34,7 @@ PRICES = PriceTable(
     (
         ("claude-sonnet-x", Price(input=3.0, output=15.0, cached_input=0.3)),
         ("gpt-x", Price(input=2.0, output=8.0, cached_input=0.2)),
+        ("gpt-mini", Price(input=0.5, output=2.0, cached_input=0.05)),
     )
 )
 PLAN = ProviderSpend(
@@ -109,7 +111,7 @@ def test_short_windows_compare_the_average_window() -> None:
                            limit_window=timedelta(hours=5))  # fmt: skip
     # 1M tokens in a day of 4.8 five-hour windows: about 208k per window, 104% of 200k
     markdown = render_markdown(report(spend(hourly, API)))
-    assert "anthropic: 104% of its 5-hour limit per window" in markdown
+    assert "anthropic: on average 104% of its 5-hour limit per window" in markdown
 
 
 def test_no_limit_configured_says_so() -> None:
@@ -168,8 +170,6 @@ def test_spend_adds_plans_per_provider() -> None:
 
 
 def test_no_model_fit_saving_across_a_subscription() -> None:
-    from kelpie.report.sections.tokens_fit import _Prices, _saving
-
     class Ctx:
         def __init__(self) -> None:
             self.pricer = _Pricer(PRICES, spend(PLAN, API), DAY)
@@ -188,3 +188,19 @@ def test_no_model_fit_saving_across_a_subscription() -> None:
     role: Any = Role()  # a stand-in for a RoleModel
     assert _saving(role, "claude-sonnet-x", price) == 0.0
     assert _saving(role, "gpt-x", price) == 0.0  # same model: nothing saved
+    assert _saving(role, "gpt-mini", price) == pytest.approx(1.5)  # both billed: $2 → $0.5
+
+
+def test_the_root_cause_digest_follows_the_modes() -> None:
+    from kelpie.report.root_cause import digest
+
+    plans_only = digest(report(spend(PLAN), PLAN_ONLY)).data
+    assert plans_only["spend_usd"] is None and plans_only["plan_tokens"] == 1_000_000
+    billed = digest(report(spend(API), [])).data
+    assert billed["spend_usd"] == 0.0 and billed["plan_tokens"] == 0  # a quiet API day
+
+
+def test_unpriced_billed_tokens_still_show_plan_tokens_per_task() -> None:
+    spans = [*PLAN_ONLY, *calls("S-9", "T-2", "gpt-unknown-model")]
+    head = render_summary(report(spend(PLAN, API), spans))
+    assert "2 tasks completed, 500,000 plan tokens per completed task." in head
