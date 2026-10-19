@@ -129,7 +129,7 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   input on arrival, so a span with cache reads and no input carries no usage. Upgrading
   rebuilds the span store indexes (some seconds per million spans) and fills cache writes
   of stored OTLP spans; stored OpenClaw spans keep pricing writes at the input price until
-  they leave the retention.
+  they leave the retention ([#196](https://github.com/ch8er/kelpie/pull/196)).
 - Spend mode per provider (`[spend.providers]`): dollars for API keys, tokens and the share
   of a configured limit for subscriptions, decided from the config; `kelpie status` and
   `kelpie doctor` show each provider's mode and why ([#202](https://github.com/ch8er/kelpie/pull/202)).
