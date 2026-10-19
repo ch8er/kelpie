@@ -178,11 +178,14 @@ class SpendConfig:
         return own.limit_tokens, own.limit_window
 
     def unlinked(self) -> tuple[tuple[str, str], ...]:
-        """(budget, name) for each name a subscription budget's ``providers`` lists that is
-        neither a ``[spend.providers]`` name nor in one's ``quotas``: that budget sets no
-        provider's spend mode."""
+        """(budget, name) for each name a subscription budget's ``providers`` lists that no
+        provider answers to (:meth:`mode_for`'s test): not a ``[spend.providers]`` name,
+        not in one's ``quotas``, not a provider Kelpie knows (``anthropic``, ``openai``,
+        ``google``): that budget sets no provider's spend mode."""
         known = {p.name for p in self.settings.providers}
         known |= {q for p in self.settings.providers for q in p.quotas}
+        known |= {r.provider for r in self.prices.defaults}
+        known |= {provider for _, provider in PROVIDER_PATTERNS}
         return tuple(
             (b.name, name)
             for b in self.budgets

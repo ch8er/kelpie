@@ -122,6 +122,9 @@ def test_quota_names_link_a_subscription_budget_to_its_provider() -> None:
         "budget 'max' has mode = subscription and names it",
     )
     assert linked.unlinked() == ()
+    # a probe named after a provider Kelpie knows links by itself
+    named = config(None, [budget(name="max", mode="subscription", providers=["anthropic"])])
+    assert mode(named)[0] is SpendMode.SUBSCRIPTION and named.unlinked() == ()
 
 
 def test_only_a_farm_wide_usd_budget_hints_at_api() -> None:
