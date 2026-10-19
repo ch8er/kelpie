@@ -46,7 +46,9 @@ Mapping:
   other run that failed at once, and a false "quota exhausted" would send humans to the
   wrong place.
 
-The one write is ``cancel_build`` (``POST /repos/{repo}/actions/runs/{id}/cancel``):
+Two writes. ``propose_ci_config`` (off unless ``allow_propose``) opens a draft pull request
+changing a workflow file: see :mod:`kelpie.connectors.github.proposals`. And
+``cancel_build`` (``POST /repos/{repo}/actions/runs/{id}/cancel``):
 
 - it runs only through the engine, so the rule's mode and the global dry-run apply;
 - ``allow_cancel`` is off by default; without it the connector declares no action;
