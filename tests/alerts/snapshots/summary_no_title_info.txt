@@ -1,0 +1,9 @@
+🔵 Cost of chaos: 48.0 hours lost, $120.00 in 1,234,567 tokens burned + $120.00 in stuck hours. 5 tasks completed, $24.00 per completed task.
+
+Biggest wait: reviewer tasks spent 64.0 task-hours waiting for CI (4 tasks).
+Needs a human: 2 open condition(s).
+1. Cut the reviewer wait for CI
+2. Give the reviewer role a second slot
+3. Filter the output of `pytest -v`
+
+Open report: https://reports.example.org/kelpie/2026-03-02?view=full&lang=en

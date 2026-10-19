@@ -1,0 +1,60 @@
+{
+  "text": "Kelpie daily report 2026-03-02\n🟡 Cost of chaos: 48.0 hours lost, $120.00 in 1,234,567 tokens burned + $120.00 in stuck hours. 5 tasks completed, $24.00 per completed task.\n\nBiggest wait: reviewer tasks spent 64.0 task-hours waiting for CI (4 tasks).\nNeeds a human: 2 open condition(s).\n1. Cut the reviewer wait for CI\n2. Give the reviewer role a second slot\n3. Filter the output of `pytest -v`\n\nОткрыть отчёт: https://reports.example.org/kelpie/2026-03-02?view=full&amp;lang=en",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Kelpie daily report 2026-03-02\n"
+            },
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Cost of chaos: 48.0 hours lost, $120.00 in 1,234,567 tokens burned + $120.00 in stuck hours. 5 tasks completed, $24.00 per completed task.",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Biggest wait: reviewer tasks spent 64.0 task-hours waiting for CI (4 tasks).\nNeeds a human: 2 open condition(s).\n1. Cut the reviewer wait for CI\n2. Give the reviewer role a second slot\n3. Filter the output of `pytest -v`"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "link",
+              "url": "https://reports.example.org/kelpie/2026-03-02?view=full&lang=en",
+              "text": "Открыть отчёт"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

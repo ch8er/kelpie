@@ -94,7 +94,13 @@ def test_daily_report_is_written_and_sent(farm: Farm) -> None:
     # observe mode, adds its own observation today.
     found = re.search(r"Needs a human: (\d+) open condition\(s\)\.", summary)
     assert found and int(found[1]) >= 2
-    assert summary in farm.channels.slack_texts()  # [report] severity warning: Slack too
+    # The alert layout: the title, then the headline under the severity's icon, a blank line,
+    # one line per item. [report] severity is warning: Slack gets the same, in blocks.
+    title, headline, blank, *items = summary.splitlines()
+    assert headline.startswith("\U0001f7e1 Cost of chaos: ") and blank == ""
+    assert items[0].startswith("Needs a human: ") or items[0].startswith("Biggest wait: ")
+    assert "Open report" not in summary  # no setting holds the report's URL yet
+    assert "\n".join([title, headline, *items]) in farm.channels.slack_texts()
 
 
 def test_report_send_fails_loudly_when_a_channel_rejects_it(farm: Farm) -> None:

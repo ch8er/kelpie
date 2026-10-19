@@ -1,0 +1,27 @@
+{
+  "text": "🟡 Cost of chaos: 48.0 hours lost, $120.00 in 1,234,567 tokens burned + $120.00 in stuck hours. 5 tasks completed, $24.00 per completed task.",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Cost of chaos: 48.0 hours lost, $120.00 in 1,234,567 tokens burned + $120.00 in stuck hours. 5 tasks completed, $24.00 per completed task.",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

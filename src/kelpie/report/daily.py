@@ -1304,15 +1304,35 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_summary(report: DailyReport) -> str:
-    """A short plain-text summary for a chat channel (the full report is the Markdown)."""
-    lines = [f"Kelpie daily report {report.day.isoformat()}", _headline(report)]
+def summary_title(report: DailyReport) -> str:
+    """The first line of the chat summary: which day it is about."""
+    return f"Kelpie daily report {report.day.isoformat()}"
+
+
+def summary_items(report: DailyReport) -> tuple[str, list[str], str | None]:
+    """The chat summary as (headline, items, link): the headline is the report's, the items
+    its biggest wait, the open conditions and the numbered top recommendations, one line
+    each. The link is the full report's URL; no setting holds one yet (``[report] dir`` is a
+    directory on the Kelpie host), so it is None. A channel lays these out
+    (:meth:`kelpie.alerts.Delivery.send_summary`); :func:`render_summary` is the plain
+    text."""
+    items: list[str] = []
     if report.biggest_wait is not None:
-        lines.append(report.biggest_wait.headline())
+        items.append(report.biggest_wait.headline())
     if report.open_states:
-        lines.append(f"Needs a human: {len(report.open_states)} open condition(s).")
-    for i, a in enumerate(report.recommendations, 1):
-        lines.append(f"{i}. {a.title}")
+        items.append(f"Needs a human: {len(report.open_states)} open condition(s).")
+    items += [f"{i}. {a.title}" for i, a in enumerate(report.recommendations, 1)]
+    return _headline(report), items, None
+
+
+def render_summary(report: DailyReport) -> str:
+    """A short plain-text summary for a chat channel (the full report is the Markdown):
+    :func:`summary_title`, then the headline and items of :func:`summary_items`, a line
+    each, and the link, if there is one."""
+    headline, items, link = summary_items(report)
+    lines = [summary_title(report), headline, *items]
+    if link is not None:
+        lines.append(link)
     return "\n".join(lines)
 
 

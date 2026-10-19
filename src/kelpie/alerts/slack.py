@@ -17,8 +17,8 @@ top-level ``text`` fallback for notifications (``mrkdwn: false``, ``&``, ``<`` a
 escaped). Every dynamic value is cleaned and its @mentions broken, and sits in a text
 element, which Slack does not parse, so untrusted task text cannot become a mention
 (``<!channel>``, ``@here``), formatting or a link; links are built only from ``[alerts]
-task_url``. Free text (the daily report) is plain text with formatting off. Link unfurling
-is off.
+task_url``. The daily report's summary is laid out the same way (:mod:`kelpie.alerts.summary`);
+other free text is plain text with formatting off. Link unfurling is off.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from kelpie import net
-from kelpie.alerts import render
+from kelpie.alerts import render, summary
 from kelpie.alerts.delivery import PermanentError, TransientError
 from kelpie.alerts.render import DEFAULT_RENDERING, RenderSettings, defang
 from kelpie.alerts.render import slack_escape as escape
@@ -64,10 +64,13 @@ __all__ = ["escape"]
 
 def payload(message: AlertEvent, settings: RenderSettings = DEFAULT_RENDERING) -> dict[str, Any]:
     """The message fields of a webhook post: ``text`` and ``blocks`` for an alert
-    (:func:`kelpie.alerts.render.slack_payload`); free text as escaped plain text, with
+    (:func:`kelpie.alerts.render.slack_payload`); the daily report's summary the same way
+    (:func:`kelpie.alerts.summary.slack_payload`); free text as escaped plain text, with
     formatting off."""
     if message.text is not None:
         return {"text": escape(truncate(defang(message.text))), "mrkdwn": False}
+    if message.summary is not None:
+        return summary.slack_payload(message, settings)
     return render.slack_payload(message, settings)
 
 

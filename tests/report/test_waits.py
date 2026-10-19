@@ -26,7 +26,14 @@ from kelpie.core.model import (
     Status,
     Task,
 )
-from kelpie.report.daily import ReportInputs, build_report, render_markdown, render_summary
+from kelpie.report.daily import (
+    ReportInputs,
+    build_report,
+    render_markdown,
+    render_summary,
+    summary_items,
+    summary_title,
+)
 from kelpie.report.sections.throughput import throughput_section
 from kelpie.report.throughput import throughput
 from kelpie.report.waits import MIN_HOURS, UNKNOWN, WaitCauses, biggest_wait
@@ -228,6 +235,22 @@ def test_the_report_headlines_the_biggest_wait() -> None:
     assert "Cut the reviewer wait for CI" in titles
     assert "**Waiting for conditions, by cause**" in markdown
     assert "- developer: people (approvals, human tasks) 32.0 (2); holds 16.0 (1);" in markdown
+
+
+def test_the_summary_items_lead_with_the_biggest_wait() -> None:
+    built = build_report(inputs(), sections={"throughput": throughput_section})
+    assert built.biggest_wait is not None and built.open_states == ()
+    headline, items, _ = summary_items(built)
+    assert items[0] == built.biggest_wait.headline()
+    assert not any(i.startswith("Needs a human") for i in items)
+    # only the count of open conditions is used: the order is biggest wait, needs a human, top 3
+    report = replace(built, open_states=(None, None))  # type: ignore[arg-type]
+    headline, items, link = summary_items(report)
+    assert items[0] == report.biggest_wait.headline()
+    assert items[1] == "Needs a human: 2 open condition(s)."
+    assert items[2:] == [f"{i}. {a.title}" for i, a in enumerate(report.recommendations, 1)]
+    assert 0 < len(report.recommendations) <= 3 and link is None
+    assert render_summary(report) == "\n".join([summary_title(report), headline, *items])
 
 
 def test_an_unknown_biggest_wait_is_headlined_without_advice() -> None:

@@ -43,6 +43,7 @@ EN: dict[str, str] = {
     "label.more": "and {n} more",
     "label.kelpie_did": "Kelpie did",
     "label.rule": "Rule",
+    "label.open_report": "Open report",
     "count.tasks.one": "{n} task",
     "count.tasks.other": "{n} tasks",
     # units
@@ -87,6 +88,7 @@ RU: dict[str, str] = {
     "label.more": "и ещё {n}",
     "label.kelpie_did": "Kelpie сделал",
     "label.rule": "Правило",
+    "label.open_report": "Открыть отчёт",
     "count.tasks.one": "{n} задача",
     "count.tasks.few": "{n} задачи",
     "count.tasks.many": "{n} задач",

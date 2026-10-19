@@ -14,12 +14,16 @@ A channel is a small object (``name``, ``min_severity``, ``send(message)``). It 
 :class:`TransientError` (network, 429, 5xx: retried) or :class:`PermanentError` (bad token,
 unknown chat: not retried). Error details must never hold a secret; they are logged.
 
-Two entry points, both never blocking and never raising:
+Three entry points, all never blocking and never raising:
 
-- ``Delivery.send(text, severity, channels=None)`` is the public method for any producer
-  (the daily report): free text to the named channels, or, with ``channels`` None, to every
-  channel whose ``min_severity`` the severity reaches. Named channels are sent to regardless
-  of ``min_severity``; unknown names are logged and skipped.
+- ``Delivery.send(text, severity, channels=None)`` is the generic entry point for any
+  producer with free text: it goes as it is to the named channels, or, with ``channels``
+  None, to every channel whose ``min_severity`` the severity reaches. Named channels are sent
+  to regardless of ``min_severity``; unknown names are logged and skipped.
+- ``Delivery.send_summary(headline, items, severity, channels=None, link=None, title=None)``
+  is the daily report's entry point: its chat summary in the alert layout
+  (:mod:`kelpie.alerts.summary`), routed, de-duplicated, retried and closed exactly like
+  ``send``.
 - ``Delivery.alerter()`` returns the engine-facing ``Alerter`` port, a thin wrapper that
   takes the engine's :class:`~kelpie.core.alerts.AlertEvent` (rule, subject, reason,
   transition, what Kelpie did, all as fields) and routes it the same way.
@@ -43,7 +47,7 @@ from datetime import timedelta
 from typing import Protocol, runtime_checkable
 
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import AlertEvent, Did, Transition
+from kelpie.core.alerts import AlertEvent, Did, Summary, Transition
 from kelpie.core.ports import Alerter
 
 log = logging.getLogger(__name__)
@@ -52,6 +56,8 @@ DEFAULT_WINDOW = timedelta(minutes=10)
 DEFAULT_QUEUE_SIZE = 50
 DEFAULT_RETRY_HORIZON = timedelta(minutes=15)
 MAX_WAIT = 60.0  # longest backoff between two attempts (a server's retry_after may be longer)
+SUMMARY_RULE = "report"  # with SUMMARY_SUBJECT, how a report summary is de-duplicated
+SUMMARY_SUBJECT = "summary"
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
 
 
@@ -315,10 +321,34 @@ class Delivery:
         ]
 
     def send(self, text: str, severity: str, channels: Sequence[str] | None = None) -> None:
-        """Send free ``text`` (as it is, up to each channel's length limit)."""
+        """Send free ``text`` (as it is, up to each channel's length limit): the generic entry
+        point for anything that is not an alert or the report summary."""
         try:
             level = _severity(severity)
             message = AlertEvent("", "", text, level, Transition.NEW, Did.NOTIFIED, text=text)
+            self.deliver(message, channels)
+        except Exception:
+            log.exception("alert routing failed")
+
+    def send_summary(
+        self,
+        headline: str,
+        items: Sequence[str],
+        severity: str,
+        channels: Sequence[str] | None = None,
+        link: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        """Send a report summary: ``headline`` (bold, with the severity's icon), ``items`` as
+        lines under it and, with ``link``, an "Open report" link. ``title`` is a line above
+        the headline. Their text is passed through as it is (cleaned and escaped per
+        channel); the fixed words follow ``[alerts] language``."""
+        try:
+            level = _severity(severity)
+            body = Summary(tuple(items), link, title)
+            message = AlertEvent(
+                SUMMARY_RULE, SUMMARY_SUBJECT, headline, level, headline=headline, summary=body
+            )
             self.deliver(message, channels)
         except Exception:
             log.exception("alert routing failed")

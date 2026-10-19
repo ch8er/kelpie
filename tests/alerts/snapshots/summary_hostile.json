@@ -1,0 +1,60 @@
+{
+  "text": "Kelpie daily report &lt;2026-03-02&gt; ＠all\n🟡 &lt;b&gt;Cost&lt;/b&gt; *of* _chaos_ ~gone~ ```fence``` &amp; ＠everyone &lt;!channel&gt; payevil \"q\"\n\n&lt;script&gt;alert(1)&lt;/script&gt; *now* ＠here &amp;amp; &lt;http://evil|click&gt;\n1. Fix `&lt;code&gt;` x\n\nOpen report: https://reports.example.org/kelpie/2026-03-02?view=full&amp;lang=en",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Kelpie daily report <2026-03-02> ＠all\n"
+            },
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "<b>Cost</b> *of* _chaos_ ~gone~ ```fence``` & ＠everyone <!channel> payevil \"q\"",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "<script>alert(1)</script> *now* ＠here &amp; <http://evil|click>\n1. Fix `<code>` x"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "link",
+              "url": "https://reports.example.org/kelpie/2026-03-02?view=full&lang=en",
+              "text": "Open report"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
