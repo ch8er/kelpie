@@ -81,6 +81,7 @@ def farm_facts(settings: Settings) -> FarmFacts:
         hold_owners=bool(holds or bare) and not bare and all(h.get("owner") for h in holds),
         block_conditions=any("block" in p.applies_to for p in settings.block_conditions),
         budgets=bool(settings.budgets.budgets),
+        dry_run=settings.engine.dry_run,
     )
 
 

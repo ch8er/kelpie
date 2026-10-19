@@ -59,7 +59,7 @@ from __future__ import annotations
 import logging
 import urllib.parse
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import zip_longest
@@ -182,21 +182,27 @@ REMEDIES_WITHOUT_ACT: Mapping[str, str] = {
 }
 
 
-def remedy(rule: str, facts: FarmFacts, can_act: bool, acts: bool = False) -> str:
+def remedy(
+    rule: str,
+    facts: FarmFacts,
+    can_act: bool,
+    acts: bool = False,
+    roles: Collection[str] | None = None,
+) -> str:
     """What to do about a chaos cause, never advising what the farm already has
     (:mod:`kelpie.report.farm`): act mode where the rule cannot act (``can_act``) or
-    already acts (``acts``), or config it already has."""
+    already acts (``acts``), or config it already has. ``roles``: the farm's agent roles."""
     if rule == HOLDS:
         return farm.holds(facts)
     if rule == PEOPLE:
-        return farm.people(facts)
+        return farm.people(facts, roles)
     if rule == "stale_blocks":
         return farm.stale_blocks(facts, can_act)
     if rule == "loop_breaker":
+        if not can_act:  # in act mode or not, nothing stops the sessions here
+            return farm.runaway_by_hand(facts)
         if acts:
             return farm.runaway_acting(facts)
-        if not can_act:
-            return farm.runaway_by_hand(facts)
     if (acts or not can_act) and rule in REMEDIES_WITHOUT_ACT:
         return REMEDIES_WITHOUT_ACT[rule]
     return REMEDIES[rule]
@@ -411,7 +417,7 @@ def build_report(
         _session_models(spans, counted),
         [a for s in extra for a in s.advice],
         wait,
-        frozenset(f for g in groups for f in g.filters),
+        frozenset((f, g.platform) for g in groups for f in g.filters),
     )
     return DailyReport(
         day=inputs.day,
@@ -894,7 +900,7 @@ def _recommendations(
     models: Mapping[str, str | None],
     extra: Sequence[Advice] = (),
     wait: BiggestWait | None = None,
-    filters_in_use: frozenset[str] = frozenset(),
+    filters_in_use: frozenset[tuple[str, str | None]] = frozenset(),
 ) -> tuple[Advice, ...]:
     candidates: list[Advice] = list(extra)
     if wait is not None and wait.cause != UNKNOWN_WAIT:  # the headline covers that one
@@ -914,7 +920,8 @@ def _recommendations(
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
         role = f" ({md.text(group.role)})" if group.role else ""
-        in_use = rec.filter.name in filters_in_use  # other commands already run through it
+        # other commands of the same platform already run through it
+        in_use = (rec.filter.name, group.platform) in filters_in_use
         maybe = "" if rec.platform_known or in_use else " if RTK supports your agent platform"
         how = (
             f"route it through {rec.filter.name} like the farm's other commands that already run "
@@ -935,6 +942,7 @@ def _recommendations(
                 tasks=group.tasks,
             )
         )
+    roles = {o.role for o in inputs.owners if o.kind is OwnerKind.AGENT} or None
     acting: dict[str, FixLine] = {}
     for f in would_fix:  # most subjects first: describe a rule by its main action
         acting.setdefault(f.rule, f)
@@ -949,11 +957,13 @@ def _recommendations(
                 f"in {mode} mode it would have done {fix.kind} on {fix.count} "
                 f"subject(s); {line.cause} lasted {line.hours:.1f} condition-hours"
             )
+            if inputs.farm.dry_run:
+                detail += " (Kelpie runs in dry-run: set [engine] dry_run = false too)"
             tasks = fix.tasks or line.tasks
         else:
             title = f"Reduce {line.cause}"
-            detail = remedy(line.rule, inputs.farm, blocked is None, mode is Mode.ACT)
-            if blocked is not None and fix is not None and mode is not Mode.ACT:
+            detail = remedy(line.rule, inputs.farm, blocked is None, mode is Mode.ACT, roles)
+            if blocked is not None and fix is not None:
                 detail += f" (act mode is not available here: {md.text(blocked)})"
             tasks = line.tasks
         candidates.append(Advice(title, detail, line.spend.usd, line.hours, tasks))

@@ -60,7 +60,7 @@ def suggestion(cause: str, facts: FarmFacts, role: str | None = None) -> str:
     """What to do about a wait, never advising what the farm already has
     (:mod:`kelpie.report.farm`)."""
     if cause == "people":
-        return farm.people(facts, role)
+        return farm.people(facts, None if role is None else (role,))
     if cause == "hold":
         return farm.holds(facts)
     if cause == "merge":

@@ -9,6 +9,7 @@ instead. Facts come from config, read by ``kelpie report`` (:mod:`kelpie.report.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 
 
@@ -23,14 +24,17 @@ class FarmFacts:
     hold_owners: bool | None = None  # every hold label has an owner (rule 6 ``holds``)
     block_conditions: bool | None = None  # [[block_conditions]] match block reasons
     budgets: bool | None = None  # [[budgets]] cap spend
+    dry_run: bool | None = None  # [engine] dry_run: no rule acts, whatever its mode
 
 
 UNKNOWN_FARM = FarmFacts()  # a report built without the farm's config
 
 
-def people(facts: FarmFacts, role: str | None = None) -> str:
+def people(facts: FarmFacts, roles: Collection[str] | None = None) -> str:
+    """``roles``: the agent roles concerned (None: unknown, any of them)."""
     out = "answer the inboxes under Needs a human first and keep human tasks off the critical path"
-    if facts.approvers is False and (role is None or role not in facts.approver_roles):
+    uncovered = roles is None or any(r not in facts.approver_roles for r in roles)
+    if facts.approvers is False and uncovered:
         whose = "agent roles that have none" if facts.approver_roles else "agent roles"
         out += f"; name approvers for {whose} ([engine.rules.needs_you] approvers)"
     return out

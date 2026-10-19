@@ -61,9 +61,11 @@ def test_advice_to_configure_needs_the_farm_to_lack_it() -> None:
 
 def test_approvers_per_role() -> None:
     some = FarmFacts(approvers=False, approver_roles=frozenset({"developer"}))
-    assert "approvers" not in farm.people(some, "developer")
-    assert "agent roles that have none" in farm.people(some, "reviewer")
-    assert "agent roles that have none" in farm.people(some)  # the chaos line: no role
+    assert "approvers" not in farm.people(some, ("developer",))
+    assert "agent roles that have none" in farm.people(some, ("reviewer",))
+    assert "agent roles that have none" in farm.people(some)  # roles unknown
+    assert "approvers" not in remedy("needs_you", some, True, roles={"developer"})
+    assert "approvers" in remedy("needs_you", some, True, roles={"developer", "reviewer"})
 
 
 def test_a_rule_already_acting_is_not_told_to_act() -> None:
@@ -72,6 +74,8 @@ def test_a_rule_already_acting_is_not_told_to_act() -> None:
     assert "let orphan_status" not in remedy("orphan_status", HAVING, True, acts=True)
     assert "act mode" in remedy("loop_breaker", HAVING, True)  # observing: it may act
     assert remedy("loop_breaker", HAVING, False) == farm.runaway_by_hand(HAVING)
+    # in act mode but nothing here can stop a session: not "already stops"
+    assert remedy("loop_breaker", HAVING, False, acts=True) == farm.runaway_by_hand(HAVING)
     assert remedy("bottlenecks:hold", HAVING, True) == farm.holds(HAVING)
     assert remedy("needs_you", HAVING, True) == farm.people(HAVING)
 
@@ -83,7 +87,7 @@ def config(tmp_path: Path, text: str) -> FarmFacts:
 
 
 def test_the_report_reads_the_facts_from_config(tmp_path: Path) -> None:
-    assert config(tmp_path, "") == FarmFacts(False, frozenset(), False, False, False, False)
+    assert config(tmp_path, "") == FarmFacts(False, frozenset(), False, False, False, False, True)
     full = config(
         tmp_path,
         '[engine.rules.needs_you]\ndefault_approver = "person-a"\n'
@@ -93,7 +97,9 @@ def test_the_report_reads_the_facts_from_config(tmp_path: Path) -> None:
         '[connectors.github]\nrepos = ["example/app"]\n'
         '[[block_conditions]]\npattern = "merge of #(?P<pr>\\\\d+)"\nkind = "pr_merged"\n',
     )
-    assert full == FarmFacts(True, frozenset({"reviewer"}), True, False, True, True)
+    assert full == FarmFacts(True, frozenset({"reviewer"}), True, False, True, True, True)
+    live = config(tmp_path, "[engine]\ndry_run = false\n")
+    assert live.dry_run is False
 
 
 def test_holds_facts_are_per_label(tmp_path: Path) -> None:
@@ -162,5 +168,23 @@ def test_a_filter_the_farm_already_runs_is_not_installed_again() -> None:
         return a.detail
 
     assert "install RTK" in advice(frozenset())
-    assert "install RTK" not in advice(frozenset({"rtk"}))
-    assert "route it through rtk" in advice(frozenset({"rtk"}))
+    assert "route it through rtk" in advice(frozenset({("rtk", None)}))
+    assert "install RTK" in advice(frozenset({("rtk", "hermes")}))  # in use elsewhere only
+
+
+def test_dry_run_is_named_in_act_advice() -> None:
+    from kelpie.core.actions import ActionKind
+    from kelpie.report.daily import ChaosLine, FixLine, _Pricer
+    from kelpie.report.daily import _recommendations as recommend
+    from kelpie.report.sections import Spend
+
+    line = ChaosLine("loop_breaker", "runaway loops", 3.0, Spend(), ("T-1",))
+    fix = FixLine("loop_breaker", ActionKind.STOP, 1, ("T-1",))
+
+    def detail(facts: FarmFacts) -> str:
+        inputs = ReportInputs(day=date(2026, 3, 2), tz=UTC, farm=facts)
+        [a] = recommend(inputs, (line,), (fix,), (), _Pricer(inputs.prices), {})
+        return a.detail
+
+    assert "dry_run = false" in detail(FarmFacts(dry_run=True))
+    assert "dry_run" not in detail(FarmFacts(dry_run=False))
