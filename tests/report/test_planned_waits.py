@@ -136,3 +136,35 @@ def test_verify_and_cost_of_chaos_never_read_planned() -> None:
     state = opened(at(9), at(17)).state
     entries = [inbox(at(9), ["A-1"], [f"P-{i}" for i in range(10)])]
     assert state_hours(entries, state, at(9), at(17)) == pytest.approx(8.0)
+
+
+def test_rule_13_on_incident_20_feeds_the_report() -> None:
+    """The contract end to end: rule 13's escalation on the planned-wait fixture, as the
+    ledger stores it, gives a planned line and costs nothing for the planned tasks."""
+    from pathlib import Path
+
+    from kelpie.rules import REGISTRY
+    from tests.incidents import load
+
+    fixture = Path(__file__).parents[1] / "fixtures" / "incidents" / "20-planned-wait.yaml"
+    incident = load(fixture)
+    now = incident.snapshot.now
+    actions = [a for a in REGISTRY["needs_you"](incident.config).evaluate(incident.snapshot)]
+    rows, entries = [], []
+    for a in actions:
+        assert a.state is not None
+        since = a.since or now
+        rows.append(StateRow(OpenState(a.state, "needs_you", since, since, now, 0,
+                                       Severity.WARNING, "s")))  # fmt: skip
+        entries.append(LedgerEntry(at=since, fingerprint=a.key or "k", subject="s",
+                                   rule="needs_you", kind=a.kind, mode=Mode.ACT,
+                                   outcome=Outcome.ALERTED, reason=a.reason,
+                                   params=dict(a.params)))  # fmt: skip
+    day = now.astimezone(UTC).date()
+    r = build_report(ReportInputs(day=day, tz=UTC, hour_usd=20.0, states=tuple(rows),
+                                  actions=tuple(entries)), sections={})  # fmt: skip
+    planned_ids = {t for a in actions for t in a.params.get("planned", [])}
+    assert planned_ids  # the fixture puts planned work behind a person's inbox
+    assert r.planned is not None and set(r.planned.tasks) == planned_ids
+    counted = {t for c in r.chaos for t in c.tasks}
+    assert not counted & planned_ids  # never in the cost of chaos

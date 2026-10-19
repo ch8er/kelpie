@@ -133,6 +133,7 @@ from kelpie.report.waits import (
     outages,
 )
 from kelpie.report.waits import UNKNOWN as UNKNOWN_WAIT
+from kelpie.rules.needs_you import PLANNED, PLANNED_AGENT_TASKS
 from kelpie.rules.orphan_status import OrphanStatus
 from kelpie.traces.outputs import (
     OutputGroup,
@@ -839,7 +840,7 @@ def people_agent_hours(
     instead; they never count as hours lost."""
     person = state.id[len(PEOPLE_STATE) :]
     count_key, ids_key = (
-        ("planned_agent_tasks", "planned") if planned else ("waiting_agent_tasks", "waiting")
+        (PLANNED_AGENT_TASKS, PLANNED) if planned else ("waiting_agent_tasks", "waiting")
     )
 
     def sample(e: LedgerEntry) -> tuple[int, list[object]] | None:
