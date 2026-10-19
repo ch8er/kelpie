@@ -212,16 +212,19 @@ def test_the_resolved_notice_says_where_the_job_passed_again() -> None:
     rule = CiEconomy()
     [alert] = outages(BEFORE, RERUN, *THREE)
     assert alert.state is not None
-    later = Snapshot(now=NOW, builds=(BEFORE, red(1, 300), green(20)))
+    later = Snapshot(now=NOW, builds=(BEFORE, RERUN, *THREE, green(20)))
     assert rule.resolved(alert.state, later) == (
         "CI outage over: ci.yml > build passed again in example/app at 2026-03-02 08:40 UTC "
         "(B-0-20)."
     )
-    # Only a pass after the last failure, in its repositories, says it is over.
-    stale = Snapshot(now=NOW, builds=(BEFORE, red(1, 300), green(20, repo="example/other")))
+    # Only a pass in the outage's repositories says it is over.
+    stale = Snapshot(now=NOW, builds=(BEFORE, RERUN, *THREE, green(20, repo="example/other")))
     assert rule.resolved(alert.state, stale) is None
     assert rule.resolved(alert.state, Snapshot(now=NOW, builds=(green(20),))) is None  # gone
+    lone = Snapshot(now=NOW, builds=(BEFORE, red(1, 300), green(20)))
+    assert rule.resolved(alert.state, lone) is None  # not an outage in what is left in sight
     assert rule.resolved("ci_economy:waste", later) is None
+    assert CiEconomy(outage_min_prs=0).resolved(alert.state, later) is None
 
 
 def test_the_scope_is_the_outage_s_repositories_not_every_red_one() -> None:
@@ -251,20 +254,27 @@ def test_one_change_red_since_yesterday_does_not_move_the_start() -> None:
     assert alert.since == NOW - 300 * M
 
 
-def test_the_resolved_notice_looks_at_each_repository_s_own_last_failure() -> None:
+def test_the_resolved_notice_never_cites_another_repository_s_pass() -> None:
     rule = CiEconomy()
     [alert] = outages(BEFORE, RERUN, *THREE)
     assert alert.state is not None
-    # web failed last; the app passed after its own last failure: that pass is the news.
-    later = (red(1, 300), red(1, 60), red(7, 10, repo="example/web"), green(20))
-    notice = rule.resolved(alert.state, Snapshot(now=NOW, builds=later))
-    assert notice is not None and "in example/app at 2026-03-02 08:40 UTC" in notice
-    # A red-then-green in another repository the day before is not this outage's end.
-    yesterday = (red(8, 1400, repo="example/web"), green(1340, repo="example/web"))
-    notice = rule.resolved(
-        alert.state, Snapshot(now=NOW, builds=(*yesterday, *later[:2], later[3]))
-    )
-    assert notice is not None and "in example/app" in notice
+    # Another repository went red and green during the outage, on its own runner; the
+    # app stayed red until it passed at 08:40.
+    hosted = Job("build", FAILED, step="Select toolchain")
+    x_red, x_green = red(8, 110, repo="example/x", job=hosted), green(100, repo="example/x")
+    app = (red(1, 90), red(2, 80), green(20))
+    for earlier in ((), (red(8, 1400, repo="example/web"), green(1340, repo="example/web"))):
+        builds = (*earlier, BEFORE, RERUN, *THREE, x_red, x_green, *app)
+        notice = rule.resolved(alert.state, Snapshot(now=NOW, builds=builds))
+        assert notice is not None and "in example/app at 2026-03-02 08:40 UTC" in notice
+
+
+def test_a_re_run_pr_still_counts_toward_the_unsure_threshold() -> None:
+    """Six repositories red, two of them re-running a PR commit that passed: an outage."""
+    hosted = Job("build", FAILED, step="Select toolchain")
+    six = [red(n, 300 - 5 * n, repo=f"example/r{n}", job=hosted, sha=f"s{n}") for n in range(1, 7)]
+    passed = [green(400, repo=f"example/r{n}", branch=f"task/T-{n}", sha=f"s{n}") for n in (1, 2)]
+    assert outages(*passed, *six) != []
 
 
 def test_evidence_never_holds_back_what_opens_without_it() -> None:

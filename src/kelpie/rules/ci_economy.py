@@ -122,7 +122,9 @@ class CiEconomy:
 
     def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
         """An outage resolves when its job passes again: say where. None for the others."""
-        return passed_again(state_id, snapshot) if is_outage_state(state_id) else None
+        if not is_outage_state(state_id):
+            return None
+        return passed_again(state_id, snapshot, self.outage_min_prs, self.outage_window)
 
     def _recent(self, snapshot: Snapshot) -> list[Build]:
         since = snapshot.now - self.window

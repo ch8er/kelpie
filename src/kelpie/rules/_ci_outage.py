@@ -75,7 +75,6 @@ from kelpie.core.model import (
 
 MAX_LISTED = 10  # PRs and tasks named in the alert text
 UNSURE_FACTOR = 2  # change requests needed, in multiples of min_prs, without evidence
-_NOTICE_RUN = timedelta(hours=2)  # failures this close are one run, for the resolved notice
 _WAITING = frozenset({Status.BLOCKED, Status.WAITING})
 _PR_CONDITIONS = frozenset({ConditionKind.CI_STATUS, ConditionKind.PR_MERGED})
 
@@ -106,25 +105,30 @@ def outages(snapshot: Snapshot, rule: str, min_prs: int, window: timedelta) -> l
     return actions
 
 
-def passed_again(state_id: str, snapshot: Snapshot) -> str | None:
+def passed_again(state_id: str, snapshot: Snapshot, min_prs: int, window: timedelta) -> str | None:
     """For the "Resolved" notice: the first build that passed the outage's job again in one
-    of the repositories of its latest run of failures (those following each other within
-    two hours of the last one), after that repository's last failure; None when there is
-    none (the outage stopped being reported for another reason: the engine's general
-    notice says so)."""
+    of its repositories after that repository's last failure. The outage is found again as
+    :func:`outages` found it, on its latest run of failures (following each other within
+    ``window``) and the passes before that run. None when there is none: the outage stopped
+    being reported for another reason, and the engine's general notice says so."""
     found = next(
         (fs for sig, fs in _failures(snapshot).items() if outage_state_id(*sig) == state_id), []
     )
-    if not found:
+    if not found or min_prs <= 0:
         return None
+    sig = (found[0].build.workflow, found[0].job.name, found[0].job.step)
     times = sorted(f.at for f in found)
-    began = _began(times, times[-1], _NOTICE_RUN)
-    workflow, job = found[0].build.workflow, found[0].job.name
+    began = _began(times, times[-1], window)
     passes = _passes(snapshot)
+    before = {k: [(at, b) for at, b in v if at < began] for k, v in passes.items()}
+    opened = _opened(_active(found, before, sig), before, sig, min_prs, window)
+    if opened is None:
+        return None
     last: dict[str, datetime] = {}
     for f in found:
-        if f.at >= began:
+        if f.at >= began and _repo(f.build) in opened[1]:
             last[_repo(f.build)] = max(f.at, last.get(_repo(f.build), f.at))
+    workflow, job, _ = sig
     after = [
         (at, b.id, b)
         for repo, failed in last.items()
@@ -206,7 +210,7 @@ def _opened(
         tied = core | _runner_mates([f for f in failures if _repo(f.build) in core], active)
         if core and len({c for c in group if c[0] in tied} - evidence) >= min_prs:
             repos = tied
-        elif len(group - evidence) >= min_prs * UNSURE_FACTOR:
+        elif len(group) >= min_prs * UNSURE_FACTOR:
             repos = group_repos | tied  # evidence never holds back what opens without it
         else:
             continue
