@@ -91,6 +91,28 @@ one done, is announced as "changed" with the new list; an emptied inbox resolves
 ``escalate_to`` names the person in the alert and the report; delivery goes to the
 configured alert channels like every other alert (no per-person routing yet).
 
+**Snoozes** (issue #176, :mod:`kelpie.rules._snoozes`). An item whose task a person snoozed
+(``kelpie snooze``, a chat reply, or an ``until:`` marker where agents record people's
+decisions) leaves the escalation while the snooze holds: it is not in the state's key, the
+items, ``human_tasks``, ``approvals``, the counts, ``waiting`` or the cost, so the digest
+does not announce or escalate because of it, and a person whose items are all snoozed gets
+no escalation (their open state resolves, and the notice lists the snoozes). It is listed
+in ``snoozed`` instead (``task_id``, ``title``, ``kind``, ``since``, ``blocking``,
+``waiting``: the agent tasks parked on it as ``waiting`` counts them, at most 10, and
+``snooze``: ``state``, ``until``, ``reason``, ``by``, ``source``; at most 200;
+``snoozed_total`` counts them), which the alert shows as a footer ("Snoozed: <title> until
+<date> (<reason>, by <who>)", "from marker" for a marker). Setting a snooze changes the
+key, so the digest says "changed" once, with the item in the footer. The item comes back
+when its snooze expired (within the last 7 days: its ``snooze.state`` is ``expired``) or
+when more tasks are blocked behind its task than when it was snoozed (``grown``, with
+``grown``: how many more; a snooze that does not know that count, such as a marker, never
+comes back this way; the count is :func:`~kelpie.rules._snoozes.behind_count`, and growth
+``kelpie serve`` saw once is latched with the snooze). An item
+whose block can never clear (``broken``: a dead end, a condition Kelpie cannot see) is never
+held: that is news, said at once. A snooze is on the item's own task: the human task, or
+the blocked agent task of an approval; one on a task merely parked behind a human task
+holds nothing (``kelpie snooze`` warns, :func:`parked_on`).
+
 This rule owns escalating human work, per person. Rule 6 keeps the farm-level alert (free
 slots and only human tasks ready) and escalates single human gates only with
 ``escalate_human_gates = true``.
@@ -100,7 +122,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -110,6 +132,7 @@ from kelpie.core.model import Condition, KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._chains import behind_lookup
+from kelpie.rules._snoozes import SnoozeCheck, checker, describe
 from kelpie.rules._tasks import (
     DEFAULT_APPROVAL_REASONS,
     approval_reasons_list,
@@ -151,6 +174,8 @@ class Item:
     # A person's blocked task whose block can never clear on its own: what rule 4 would say
     # (a dead end, a condition Kelpie cannot see), said here instead, once.
     broken: str | None = None
+    # Its task's snooze: holding it (listed in the footer), or why it is back (#176).
+    snooze: SnoozeCheck | None = None
 
     @property
     def blocking(self) -> int:
@@ -208,9 +233,52 @@ class NeedsYou:
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> list[Action]:
-        inbox = self._inbox(snapshot, waited=True)
-        ranked = sorted(inbox.items(), key=lambda kv: (-_total(kv[1]), kv[0]))
-        return [self._escalate(person, items, snapshot.now) for person, items in ranked]
+        split = self._split(snapshot, self._inbox(snapshot, waited=True))
+        ranked = sorted(
+            ((person, live, held) for person, (live, held) in split.items() if live),
+            key=lambda x: (-_total(x[1]), x[0]),
+        )
+        return [self._escalate(person, live, snapshot.now, held) for person, live, held in ranked]
+
+    def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
+        """The resolve notice of a person whose items are all snoozed: what is snoozed, and
+        when it comes back. None otherwise: the engine's general notice."""
+        person = state_id.removeprefix(f"{NAME}:")
+        if person == state_id:
+            return None
+        inbox = self._split(snapshot, self._inbox(snapshot, waited=True))
+        live, held = inbox.get(person, ([], []))
+        if live or not held:
+            return None
+        who = "nobody assigned" if person == UNASSIGNED else person
+        listed = "; ".join(_snoozed_text(i) for i in held[:_SHOWN])
+        more = f"; and {len(held) - _SHOWN} more" if len(held) > _SHOWN else ""
+        return (
+            f"Everything waiting for {who} is snoozed: {listed}{more}. Kelpie alerts again "
+            "when a snooze ends or more work is blocked behind its task."
+        )
+
+    def _split(
+        self, snapshot: Snapshot, inbox: Mapping[str, list[Item]]
+    ) -> dict[str, tuple[list[Item], list[Item]]]:
+        """Every person's items, split into those to escalate (a snooze that expired or
+        whose work grew is marked on its item) and those a snooze holds (the footer). An
+        item whose block can never clear (``broken``) is never held: that is news, not a
+        reminder."""
+        snoozed = checker(snapshot)
+        out: dict[str, tuple[list[Item], list[Item]]] = {}
+        for person, items in inbox.items():
+            live: list[Item] = []
+            held: list[Item] = []
+            for item in items:
+                found = snoozed(item.task.id)
+                if found is not None and found.holds and item.broken:
+                    found = None  # a dead end on a snoozed task is said at once, unmarked
+                if found is not None:
+                    item = replace(item, snooze=found)
+                (held if found is not None and found.holds else live).append(item)
+            out[person] = (live, held)
+        return out
 
     def _inbox(self, snapshot: Snapshot, *, waited: bool) -> dict[str, list[Item]]:
         """Every person's items. ``waited``: only those past ``human_wait_alert_after`` and
@@ -345,8 +413,11 @@ class NeedsYou:
         role = task.role or (roles.get(task.owner_id) if task.owner_id else None)
         return (self.approvers.get(role) if role else None) or self.default_approver
 
-    def _escalate(self, person: str, items: list[Item], now: datetime) -> Action:
+    def _escalate(
+        self, person: str, items: list[Item], now: datetime, snoozed: Sequence[Item] = ()
+    ) -> Action:
         items = sorted(items, key=lambda i: (-i.cost_hours, i.task.id))
+        snoozed = sorted(snoozed, key=lambda i: (_until(i, now), i.task.id))
         total = _total(items)
         # held: the tasks waiting on the person and those behind them, as the items count
         blocked = sorted({tid for i in items for tid in (*i.behind, *i.held)})
@@ -354,14 +425,15 @@ class NeedsYou:
         planned = sorted({tid for i in items for tid in i.planned} - set(waiting))
         since = now - max(i.waiting for i in items)
         severity = Severity.CRITICAL if total >= self.critical_after_hours else Severity.WARNING
-        listed = "; ".join(i.describe() for i in items[:_SHOWN])
+        listed = "; ".join(_described(i) for i in items[:_SHOWN])
         more = f"; and {len(items) - _SHOWN} more" if len(items) > _SHOWN else ""
         who = "Nobody is assigned to approve these" if person == UNASSIGNED else person
+        aside = f" Snoozed, not counted: {len(snoozed)} item(s)." if snoozed else ""
         return Action(
             ActionKind.ESCALATE,
             NAME,
             f"Needs you ({who}): {len(items)} item(s) hold {len(blocked)} agent task(s), "
-            f"{total:.1f} agent-hours waited so far. By cost of delay: {listed}{more}.",
+            f"{total:.1f} agent-hours waited so far. By cost of delay: {listed}{more}.{aside}",
             severity=severity,
             key=f"{NAME}:{person}:{','.join(sorted(i.task.id for i in items))}",
             state=f"{NAME}:{person}",
@@ -394,11 +466,53 @@ class NeedsYou:
                         "behind": list(i.behind[: _SHOWN * 2]),
                         "waiting_minutes": int(i.waiting.total_seconds() // 60),
                         "cost_hours": round(i.cost_hours, 1),
+                        **({"snooze": i.snooze.params()} if i.snooze is not None else {}),
                     }
                     for i in items[:MAX_ITEMS]
                 ],
+                # Items a snooze holds: out of everything above, listed in the footer (#176)
+                "snoozed_total": len(snoozed),
+                "snoozed": [
+                    {
+                        "kind": i.kind,
+                        "task_id": i.task.id,
+                        "title": i.task.title,
+                        "since": (now - i.waiting).isoformat(),
+                        "blocking": i.blocking,
+                        # the agent tasks parked on it, as ``waiting`` counts them (the report
+                        # reads them as waiting on purpose)
+                        "waiting": sorted(i.waits)[: _SHOWN * 2],
+                        "snooze": i.snooze.params(),
+                    }
+                    for i in snoozed[:MAX_ITEMS]
+                    if i.snooze is not None
+                ],
             },
         )
+
+
+def _described(item: Item) -> str:
+    """An item for the reason, with why it is back when its snooze no longer holds it."""
+    return item.describe() + (f" ({item.snooze.text()})" if item.snooze is not None else "")
+
+
+def _snoozed_text(item: Item) -> str:
+    return describe(item.snooze.snooze, item.task.title) if item.snooze else item.task.id
+
+
+def _until(item: Item, now: datetime) -> datetime:
+    return item.snooze.snooze.until if item.snooze is not None else now
+
+
+def parked_on(snapshot: Snapshot, settings: NeedsYou, task_id: str) -> tuple[str, ...]:
+    """The human tasks the inbox lists ``task_id`` under, when the task is only parked
+    behind them and is not an item itself (time thresholds ignored); else empty. A snooze
+    on such a task holds nothing: ``kelpie snooze`` says to snooze the human task."""
+    inbox = settings._inbox(snapshot, waited=False)
+    items = [i for found in inbox.values() for i in found]
+    if any(i.task.id == task_id for i in items):
+        return ()
+    return tuple(sorted({i.task.id for i in items if task_id in i.waits}))
 
 
 def inbox_task_ids(snapshot: Snapshot, settings: NeedsYou) -> frozenset[str]:

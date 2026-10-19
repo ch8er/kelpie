@@ -1,0 +1,197 @@
+{
+  "text": "🟡 Ждут вас: 2 задачи (самая давняя — 24 ч)\n\n1. Enable R2 for backups — 24 ч · t_r2a1b2c3\n   Нужно: CEO: enable R2 in the Cloudflare dashboard\n   Отсрочка действовала по 2026-10-25 включительно\n   Блокирует: ничего · Открыть задачу: https://board.example.org/tasks/t_r2a1b2c3\n2. Sign the vendor contract — 6,0 ч · H-1\n   После отсрочки заблокированы ещё 2 задачи (по 2026-11-01 включительно)\n   Блокирует: 3 задачи · Открыть задачу: https://board.example.org/tasks/H-1\nОтложено: Manual QA pass before release по 2026-11-01 включительно (after the freeze, кто отложил: ceo) · t_qa4d5e6f\nОтложено: Approve the data export до 2026-11-03 09:00 UTC (по маркеру) · t_dx0e1f2a\nПочему: Needs you (ceo): 2 item(s) hold 3 agent task(s), 30.0 agent-hours waited so far. Snoozed, not counted: 2 item(s).\nПравило: needs_you",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Ждут вас: 2 задачи (самая давняя — 24 ч)",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Enable R2 for backups",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 24 ч · "
+            },
+            {
+              "type": "text",
+              "text": "t_r2a1b2c3",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Нужно: "
+            },
+            {
+              "type": "text",
+              "text": "CEO: enable R2 in the Cloudflare dashboard"
+            },
+            {
+              "type": "text",
+              "text": "\n   Отсрочка действовала по 2026-10-25 включительно"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Блокирует: ничего"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_r2a1b2c3",
+              "text": "Открыть задачу"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "2. "
+            },
+            {
+              "type": "text",
+              "text": "Sign the vendor contract",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 6,0 ч · "
+            },
+            {
+              "type": "text",
+              "text": "H-1",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   После отсрочки заблокированы ещё 2 задачи (по 2026-11-01 включительно)"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Блокирует: 3 задачи"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/H-1",
+              "text": "Открыть задачу"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Отложено: Manual QA pass before release по 2026-11-01 включительно (after the freeze, кто отложил: ceo) · t_qa4d5e6f\nОтложено: Approve the data export до 2026-11-03 09:00 UTC (по маркеру) · t_dx0e1f2a"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Почему: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Needs you (ceo): 2 item(s) hold 3 agent task(s), 30.0 agent-hours waited so far. Snoozed, not counted: 2 item(s)."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Правило: "
+            },
+            {
+              "type": "text",
+              "text": "needs_you",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

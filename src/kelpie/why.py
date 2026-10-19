@@ -81,6 +81,7 @@ from kelpie.core.snooze import format_when, snooze_json
 from kelpie.core.spans import SpanStore
 from kelpie.core.states import OpenState
 from kelpie.core.storage import (
+    SNOOZES_SINCE,
     SchemaOutdated,
     SqliteSpanStore,
     ledger_entry,
@@ -274,7 +275,7 @@ def read_snoozes(db: Path | None, now: datetime, problems: list[str]) -> dict[st
     if db is None or not db.exists():
         return {}
     try:
-        conn = open_readonly(db, 5000)
+        conn = open_readonly(db, 5000, SNOOZES_SINCE)  # an older schema with snoozes too
     except (SchemaOutdated, RuntimeError, sqlite3.Error) as exc:
         problems.append(f"snoozes left out: {exc}")
         return {}
@@ -765,6 +766,14 @@ def _snooze(s: Snooze, now: datetime, tz: tzinfo = UTC) -> str:
         parts.append(f"by {s.by}")
     if s.source != "cli":
         parts.append(f"from {s.source}")
+    if s.active(now) and s.source != "marker":
+        if s.grown_at is not None:
+            parts.append(
+                f"{s.grown_by or 0} more task(s) blocked since {format_when(s.grown_at, tz)}: "
+                "it holds nothing now"
+            )
+        elif s.behind_at_snooze is None:
+            parts.append("baseline pending: growth is checked once kelpie serve counts it")
     detail = f" ({', '.join(parts)})" if parts else ""
     when = format_when(s.until, tz)
     if s.active(now):

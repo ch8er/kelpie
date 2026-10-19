@@ -1,0 +1,53 @@
+id: "13-snoozed-item-dead-end"
+incident: 13
+title: "A snoozed item whose block can never clear is back in the digest at once"
+description: >
+  The CEO snoozed their own blocked task (merge the vendor fix) until the release: it
+  waited for the vendor's PR, and an agent task waits behind it. Then the vendor closed the
+  PR without merging. The block can never clear on its own, which is news, not a reminder:
+  the item leaves the footer and the digest says why in its "Needed" line (rule 4 leaves
+  the task to the digest, so it is said exactly once). The distractor is the CEO's other
+  snoozed task, which is healthy and stays in the footer.
+rule: needs_you
+config:
+  human_wait_alert_after: "1h"
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - id: H-1
+      title: "Merge the vendor fix"
+      status: blocked
+      status_since: "2026-10-17T10:00:00+00:00"
+      role: owner
+      owner_id: ceo
+      block: {reason: "waiting for the vendor PR", since: "2026-10-17T10:00:00+00:00", condition_id: "pr:x"}
+    - {id: A-1, title: "Integrate the vendor fix", status: backlog, status_since: "2026-10-17T10:00:00+00:00", role: developer}
+    - {id: H-2, title: "Sign the vendor contract", status: ready, status_since: "2026-10-17T10:00:00+00:00", role: owner, owner_id: ceo}
+    - id: A-2
+      title: "Vendor billing sync"
+      status: blocked
+      status_since: "2026-10-17T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: H-2", since: "2026-10-17T10:00:00+00:00", condition_id: C-2}
+  dependencies:
+    - {task_id: A-1, depends_on: H-1}
+  conditions:
+    - {id: "pr:x", kind: pr_merged, task_id: H-1, params: {pr: 9, terminal: true}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00"}
+    - {id: C-2, kind: human_task, task_id: A-2, params: {task: H-2}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00"}
+  snoozes:
+    H-1: {task_id: H-1, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo,
+          created_at: "2026-10-18T09:00:00+00:00", source: cli, behind_at_snooze: 1}
+    H-2: {task_id: H-2, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo,
+          created_at: "2026-10-18T09:00:00+00:00", source: cli, behind_at_snooze: 1}
+expected_actions:
+  - kind: escalate
+    params: {escalate_to: ceo, human_tasks: [H-1], snoozed_total: 1}
+not_expected_actions:
+  - kind: escalate
+    params: {human_tasks: [H-1, H-2]}
+  - kind: escalate
+    params: {human_tasks: []}

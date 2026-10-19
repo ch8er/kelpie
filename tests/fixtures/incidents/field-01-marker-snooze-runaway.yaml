@@ -1,0 +1,75 @@
+id: "field-01-marker-snooze-runaway"
+incident: null
+title: "A marker snooze never holds an agent-health alert"
+description: >
+  An agent recorded a person's decision in its block reason with an until: marker (the
+  CEO deferred the R2 question to the release), and the snapshot holds the marker snooze.
+  But the agent's session did not stop: it kept polling the same status check, an
+  identical call every 40 seconds. A snooze holds only the repeat human-wait reminders of
+  rules 13 and 4; a runaway run is agent health, so loop_breaker stops it and alerts as it
+  would without the snooze. The distractor is a second marker-snoozed task whose session
+  is idle and healthy.
+rule: loop_breaker
+config:
+  identical_calls: 8
+  identical_window: "10m"
+  consecutive_errors: 5
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: agent-ops-1, role: ops}
+    - {id: agent-ops-2, role: ops}
+  tasks:
+    - id: t_r2a1b2c3
+      title: "Enable R2 for backups"
+      status: blocked
+      status_since: "2026-10-19T09:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block:
+        reason: "waiting_human: CEO decided: enable R2 after the release until:2026-10-25"
+        since: "2026-10-19T09:00:00+00:00"
+    - id: t_qa4d5e6f
+      title: "Manual QA pass"
+      status: blocked
+      status_since: "2026-10-19T09:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-2
+      block:
+        reason: "waiting_human: CEO decided: QA after the freeze until:2026-10-25"
+        since: "2026-10-19T09:00:00+00:00"
+  sessions:
+    - {id: S-1, task_id: t_r2a1b2c3, owner_id: agent-ops-1, started_at: "2026-10-19T09:00:00+00:00", last_heartbeat: "2026-10-19T09:59:40+00:00"}
+    - {id: S-2, task_id: t_qa4d5e6f, owner_id: agent-ops-2, started_at: "2026-10-19T09:00:00+00:00", last_heartbeat: "2026-10-19T09:59:00+00:00"}
+  spans:
+    - trace_id: TR-1
+      span_id: POLL-1
+      name: "execute_tool status_check"
+      kind: tool
+      tool: status_check
+      args_hash: "st-r2"
+      start: "2026-10-19T09:50:00+00:00"
+      end: "2026-10-19T09:50:01+00:00"
+      task_id: t_r2a1b2c3
+      session_id: S-1
+      outcome: ok
+      repeat: {count: 14, every: "40s"}
+    - {trace_id: TR-2, span_id: Q-1, name: "execute_tool read", kind: tool, tool: read, args_hash: "q1", start: "2026-10-19T09:05:00+00:00", end: "2026-10-19T09:05:01+00:00", task_id: t_qa4d5e6f, session_id: S-2, outcome: ok}
+    - {trace_id: TR-2, span_id: Q-2, name: "execute_tool edit", kind: tool, tool: edit, args_hash: "q2", start: "2026-10-19T09:06:00+00:00", end: "2026-10-19T09:06:01+00:00", task_id: t_qa4d5e6f, session_id: S-2, outcome: ok}
+  snoozes:
+    t_r2a1b2c3: {task_id: t_r2a1b2c3, until: "2026-10-26T00:00:00+00:00", reason: null, by: null, created_at: "2026-10-19T09:00:00+00:00", source: marker}
+    t_qa4d5e6f: {task_id: t_qa4d5e6f, until: "2026-10-26T00:00:00+00:00", reason: null, by: null, created_at: "2026-10-19T09:00:00+00:00", source: marker}
+expected_actions:
+  - kind: stop
+    task_id: t_r2a1b2c3
+    reason_contains: "identical"
+    params: {session_id: S-1}
+  - kind: alert
+    task_id: t_r2a1b2c3
+    severity: critical
+    params: {session_id: S-1, trigger: identical_calls}
+not_expected_actions:
+  - kind: stop
+    task_id: t_qa4d5e6f
+  - kind: alert
+    task_id: t_qa4d5e6f

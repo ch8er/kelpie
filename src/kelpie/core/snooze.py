@@ -177,6 +177,18 @@ def format_when(at: datetime, tz: tzinfo = UTC) -> str:
     return f"{local:%Y-%m-%d %H:%M %Z} ({utc})"
 
 
+def snooze_end(at: datetime, tz: tzinfo = UTC) -> tuple[str, bool]:
+    """How a snooze's end reads to a person (alerts, the daily report), and whether it is a
+    whole day: at midnight in ``tz`` it is the last day it covered, as ``--until
+    2026-10-25`` takes a date (``("2026-10-25", True)``: through that day); else the time to
+    the minute, with the zone (``("2026-10-25 09:00 UTC", False)``)."""
+    local = at.astimezone(tz)
+    if (local.hour, local.minute, local.second, local.microsecond) == (0, 0, 0, 0):
+        return (local.date() - timedelta(days=1)).isoformat(), True
+    zone = "UTC" if local.utcoffset() == timedelta(0) else local.tzname() or local.strftime("%z")
+    return f"{local:%Y-%m-%d %H:%M} {zone}", False
+
+
 def snooze_json(s: Snooze, now: datetime, tz: tzinfo = UTC) -> dict[str, Any]:
     """A snooze as ``--json`` shows it (``kelpie why``, ``kelpie snoozes``)."""
     return {
@@ -189,6 +201,8 @@ def snooze_json(s: Snooze, now: datetime, tz: tzinfo = UTC) -> dict[str, Any]:
         "source": s.source,
         "created_at": s.created_at.isoformat(),
         "behind_at_snooze": s.behind_at_snooze,
+        "grown_at": None if s.grown_at is None else s.grown_at.isoformat(),
+        "grown_by": s.grown_by,
     }
 
 

@@ -13,12 +13,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from kelpie.core.ledger import LedgerEntry
-from kelpie.core.model import Span
+from kelpie.core.model import Snooze, Span
 from kelpie.core.spans import Attribution
 from kelpie.core.states import OpenState
 
 # The ledger's and state store's own row mappings, so the two cannot drift apart.
-from kelpie.core.storage import SCHEMA_VERSION, SchemaOutdated, SqliteSpanStore, _entry, _state
+from kelpie.core.storage import (
+    SCHEMA_VERSION,
+    SchemaOutdated,
+    SqliteSpanStore,
+    _entry,
+    _state,
+    read_snoozes,
+)
 from kelpie.report.fixes import FixEvent, read_fixes
 
 
@@ -88,6 +95,10 @@ class ReportStore:
 
     def fixes(self, start: datetime, end: datetime) -> list[FixEvent]:
         return read_fixes(self._db, start, end)
+
+    def snoozes(self, after: datetime) -> list[Snooze]:
+        """Stored snoozes that ended after ``after`` (#176)."""
+        return read_snoozes(self._db, after)
 
     def attribution(self) -> Attribution:
         return self._span_store().attribution()

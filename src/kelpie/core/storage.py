@@ -202,8 +202,22 @@ CREATE TABLE snoozes (
 CREATE INDEX snoozes_until ON snoozes (until_at);
 """
 
+# A snooze's latched growth (#176): when kelpie serve first saw more work behind its task
+# than its baseline, and how much more. Written once, like the baseline. The baselines
+# stored before were counted by ``kelpie snooze`` on its offline board, without the
+# connectors' conditions: too low, they would latch false growth on the first tick, so
+# they are dropped and serve counts them again at its first complete tick.
+_V9 = """
+ALTER TABLE snoozes ADD COLUMN grown_at TEXT;
+ALTER TABLE snoozes ADD COLUMN grown_by INTEGER;
+UPDATE snoozes SET behind_at_snooze = NULL WHERE source <> 'marker';
+"""
+SNOOZES_SINCE = 8  # the first schema with snoozes: read-only readers accept it (no growth)
+
 # version -> script that upgrades from version - 1. Append, never edit a released one.
-MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8}
+MIGRATIONS: dict[int, str] = {
+    1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9,
+}  # fmt: skip
 SCHEMA_VERSION = max(MIGRATIONS)
 
 _COLUMNS = (
@@ -393,13 +407,39 @@ class SqliteLedgerStore:
             _ts(snooze.created_at),
             snooze.source,
             snooze.behind_at_snooze,
+            None if snooze.grown_at is None else _ts(snooze.grown_at),
+            snooze.grown_by,
         )
         self._write(
             lambda db: db.execute(
-                f"INSERT OR REPLACE INTO snoozes ({_SNOOZE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT OR REPLACE INTO snoozes ({_SNOOZE_COLUMNS})"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 values,
             )
         )
+
+    def set_snooze_baseline(self, snooze: Snooze, behind: int) -> bool:
+        """Record how much work was behind a stored snooze's task when ``kelpie serve`` first
+        saw it (``behind_at_snooze``), once: only on that same snooze (task and creation
+        time) while it has none, so a snooze replaced meanwhile keeps its own. False when
+        nothing was written."""
+        sql = (
+            "UPDATE snoozes SET behind_at_snooze = ? WHERE task_id = ? AND created_at = ?"
+            " AND behind_at_snooze IS NULL"
+        )
+        args = (behind, snooze.task_id, _ts(snooze.created_at))
+        return self._write(lambda db: db.execute(sql, args)).rowcount > 0
+
+    def set_snooze_growth(self, snooze: Snooze, at: datetime, grown_by: int) -> bool:
+        """Latch a stored snooze's growth (``grown_at``, ``grown_by``), once, on that same
+        snooze (task and creation time): later counts never undo it. False when nothing was
+        written."""
+        sql = (
+            "UPDATE snoozes SET grown_at = ?, grown_by = ? WHERE task_id = ? AND created_at = ?"
+            " AND grown_at IS NULL"
+        )
+        args = (_ts(at), grown_by, snooze.task_id, _ts(snooze.created_at))
+        return self._write(lambda db: db.execute(sql, args)).rowcount > 0
 
     def delete_snooze(self, task_id: str) -> bool:
         """Remove the task's snooze; False when it had none."""
@@ -422,10 +462,23 @@ class SqliteLedgerStore:
         return self._write(lambda db: db.execute(sql, (_ts(now - PRUNE_AFTER),))).rowcount
 
 
-_SNOOZE_COLUMNS = "task_id, until_at, reason, snoozed_by, created_at, source, behind_at_snooze"
+_SNOOZE_COLUMNS = (
+    "task_id, until_at, reason, snoozed_by, created_at, source, behind_at_snooze, grown_at,"
+    " grown_by"
+)
 
 
 def snooze_row(r: sqlite3.Row) -> Snooze:
+    # Schema 8, read only: as the v9 upgrade will make it (no offline baseline, no growth).
+    if "grown_at" not in r.keys():  # noqa: SIM118 (a Row iterates its values, not its keys)
+        return Snooze(
+            task_id=r["task_id"],
+            until=datetime.fromisoformat(r["until_at"]),
+            reason=r["reason"],
+            by=r["snoozed_by"],
+            created_at=datetime.fromisoformat(r["created_at"]),
+            source=cast(SnoozeSource, r["source"]),
+        )
     return Snooze(
         task_id=r["task_id"],
         until=datetime.fromisoformat(r["until_at"]),
@@ -434,13 +487,17 @@ def snooze_row(r: sqlite3.Row) -> Snooze:
         created_at=datetime.fromisoformat(r["created_at"]),
         source=cast(SnoozeSource, r["source"]),
         behind_at_snooze=r["behind_at_snooze"],
+        grown_at=None if r["grown_at"] is None else datetime.fromisoformat(r["grown_at"]),
+        grown_by=r["grown_by"],
     )
 
 
 def read_snoozes(db: sqlite3.Connection, after: datetime | None = None) -> list[Snooze]:
     """Stored snoozes ending after ``after`` (None: all), soonest first; works on a
     read-only connection (:func:`open_readonly`, ``kelpie why``)."""
-    sql = f"SELECT {_SNOOZE_COLUMNS} FROM snoozes"
+    have = {row[1] for row in db.execute("PRAGMA table_info(snoozes)")}
+    columns = ", ".join(c.strip() for c in _SNOOZE_COLUMNS.split(",") if c.strip() in have)
+    sql = f"SELECT {columns} FROM snoozes"
     args: tuple[object, ...] = ()
     if after is not None:
         sql += " WHERE until_at > ?"
@@ -571,13 +628,18 @@ def _span(r: sqlite3.Row) -> Span:
     )
 
 
-def open_readonly(path: Path | str, busy_timeout_ms: int) -> sqlite3.Connection:
-    """A connection that never writes, not even a migration (``kelpie status``)."""
+def open_readonly(
+    path: Path | str, busy_timeout_ms: int, oldest: int | None = None
+) -> sqlite3.Connection:
+    """A connection that never writes, not even a migration (``kelpie status``). ``oldest``:
+    an older schema it may also read (the snooze readers accept :data:`SNOOZES_SINCE`)."""
     db = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     version = db.execute("PRAGMA user_version").fetchone()[0]
-    if version != SCHEMA_VERSION:
+    if version != SCHEMA_VERSION and not (
+        oldest is not None and oldest <= version < SCHEMA_VERSION
+    ):
         db.close()
         if version < SCHEMA_VERSION:
             raise SchemaOutdated(

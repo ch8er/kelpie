@@ -1,0 +1,70 @@
+id: "13-marker-snooze-agent-wait"
+incident: 13
+title: "A marker snooze holds only a wait on a person"
+description: >
+  An until: marker is an agent's words, trusted only as a record of a person's decision.
+  Two agents wrote one on waits of their own: one waits for CI on its PR, the other parked
+  itself because its tests were flaky. Neither waits on a person, so rule 4 keeps their
+  overdue and no-condition alerts, marker or not. The distractors are marker snoozes on
+  real human waits: a block that asks the CEO, and a block that waits only on a person's
+  human task. Rule 4 holds their reminders.
+rule: stale_blocks
+config:
+  needs_you: false
+  unlinked_alert_after: "4h"
+  max_block: "8h"
+snapshot:
+  now: "2026-10-19T20:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - id: T-1
+      title: "Ship the release notes"
+      status: blocked
+      status_since: "2026-10-19T08:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting for CI on PR #12 until:2026-11-15", since: "2026-10-19T08:00:00+00:00", condition_id: "pr:12"}
+    - id: T-2
+      title: "Fix the login test"
+      status: blocked
+      status_since: "2026-10-19T08:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "tests flaky, parking this until:2026-11-15", since: "2026-10-19T08:00:00+00:00"}
+    - id: T-3
+      title: "Enable R2 for backups"
+      status: blocked
+      status_since: "2026-10-19T08:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: needs_input: CEO decided: after the release until:2026-11-15", since: "2026-10-19T08:00:00+00:00"}
+    - {id: H-9, title: "Sign the vendor contract", status: ready, status_since: "2026-10-19T08:00:00+00:00", role: owner, owner_id: ceo}
+    - id: T-4
+      title: "Integrate the vendor API"
+      status: blocked
+      status_since: "2026-10-19T08:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting for the contract until:2026-11-15", since: "2026-10-19T08:00:00+00:00", condition_id: C-4}
+  conditions:
+    - {id: "pr:12", kind: pr_merged, task_id: T-1, params: {pr: 12}, satisfied: false, checked_at: "2026-10-19T19:58:00+00:00"}
+    - {id: C-4, kind: human_task, task_id: T-4, params: {task: H-9}, satisfied: false, checked_at: "2026-10-19T19:58:00+00:00"}
+  snoozes:
+    T-1: {task_id: T-1, until: "2026-11-16T00:00:00+00:00", reason: null, by: null, created_at: "2026-10-19T08:00:00+00:00", source: marker}
+    T-2: {task_id: T-2, until: "2026-11-16T00:00:00+00:00", reason: null, by: null, created_at: "2026-10-19T08:00:00+00:00", source: marker}
+    T-3: {task_id: T-3, until: "2026-11-16T00:00:00+00:00", reason: null, by: null, created_at: "2026-10-19T08:00:00+00:00", source: marker}
+    T-4: {task_id: T-4, until: "2026-11-16T00:00:00+00:00", reason: null, by: null, created_at: "2026-10-19T08:00:00+00:00", source: marker}
+expected_actions:
+  - kind: alert
+    task_id: T-1
+    reason_contains: "limit 8h"
+  - kind: alert
+    task_id: T-2
+    reason_contains: "has no condition Kelpie can check"
+not_expected_actions:
+  - kind: alert
+    task_id: T-3
+  - kind: alert
+    task_id: T-4

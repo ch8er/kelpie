@@ -17,7 +17,7 @@ from typing import Protocol
 
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.model import Reconciliation, Snapshot
+from kelpie.core.model import Reconciliation, Snapshot, Snooze
 from kelpie.core.spend import SpendConfig
 from kelpie.report.config import ReportSettings
 from kelpie.report.daily import (
@@ -91,6 +91,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         day_before - sources.report.verify_window,
     ) - timedelta(hours=1)
     actions, states, spans, fixes, attribution = [], [], [], [], None
+    snoozes: list[Snooze] = []
     if sources.db_path is not None and sources.db_path.exists():
         with ReportStore(sources.db_path) as store:
             actions = store.actions(history, end)
@@ -98,6 +99,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
             spans = store.spans(history, end)
             fixes = store.fixes(day_before, end)
             attribution = store.attribution()
+            snoozes = store.snoozes(start)
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same
     # call reported both ways is kept once.
     merged = merge_hook_spans(
@@ -133,6 +135,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         stuck_check=sources.stuck_check,
         act_blockers=sources.act_blockers,
         farm=sources.farm,
+        snoozes=snoozes,
     )
 
 

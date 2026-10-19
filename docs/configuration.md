@@ -651,6 +651,49 @@ agents record people's decisions, as with `[[adapters.hermes.human_decisions]]`.
 snooze is weaker than a person's: rules may only hold repeat human-wait alerts on it, never
 agent-health alerts, and list it as "from marker".
 
+**What a snooze changes.** Only the repeat reminders of a human wait, in three rules:
+
+- `needs_you` (rule 13): a snoozed item leaves the person's digest (its counts, cost and
+  `waiting`) and is listed in the digest's footer instead: "Snoozed: <title> through
+  2026-10-25 (<reason>, by <who>)", "(from marker)" for a marker. Setting the snooze changes
+  the digest once ("changed"); while it holds, it causes no announcement or escalation, and
+  a person whose items are all snoozed gets no digest. An item whose block can never clear
+  (a dead end, a condition Kelpie cannot see) is never held: that is news.
+- `stale_blocks` (rule 4): no no-condition and no overdue alert on a snoozed block. Its
+  dead-end, unseen-condition and stale-evidence alerts still fire: those are facts, not
+  reminders. A marker holds only a block that waits on a person (it asks one, or waits
+  only on human tasks), never an agent's own wait on CI or its own parking.
+- `wait_condition` (rule 2): no overdue alert on a waiting task whose only unmet
+  conditions are human tasks a snooze holds; a dead end still alerts.
+
+Agent-health rules (`loop_breaker`, `no_progress`, `exit_contract`, `orphan_status`, ...)
+never honour a snooze. A snoozed task alerts again when its snooze ends ("Snooze ran
+through 2026-10-25", for the 7 days an expired snooze is kept) or when more tasks are
+blocked behind it than when it was snoozed ("2 more tasks blocked since the snooze").
+That count is of the open tasks behind the task through dependencies and task conditions,
+whatever their status. `kelpie serve` records it at the first complete tick after the
+snooze: every local adapter and connector read fine, and the task's own part of the farm
+is observed (an offline agent holds up only its own tasks). Until then growth is not
+checked (`kelpie why` shows "baseline pending"; after an hour Kelpie logs it once). Growth
+is latched: the first time serve counts more, it stores when and how much more with the
+snooze, and the task stays back in the digest until the snooze is replaced or expires,
+even if the count drops again. A marker never has a baseline, so it never comes back this
+way. One known case: a waiter linked only by a condition its block reason attaches counts
+only while it is blocked, so a baseline taken while it is briefly unblocked is one short
+and its next block brings the task back once. Snoozes are stored in schema 9 of
+`kelpie.db`; `kelpie serve` upgrades to it and drops the baselines `kelpie snooze` stored
+before (counted offline), so it counts them again. `kelpie snoozes` and `kelpie why` read
+schema 8 as it is. Snooze the
+task rule 13 lists (the human task, or the blocked task that asks); `kelpie snooze` warns
+when a task is only parked behind a human task, since that snooze holds nothing. Alerts
+show a snooze's end in `[report] timezone`: one ending at midnight as the last day it
+covered, as `--until` takes a date. In the daily report a people or unknown wait that a
+snooze holds (the task's own, or that of a task it waits on: any snoozed task it depends
+on, or a human task an unmet condition names), while rule 13 does not list the task as
+live, is its own wait cause, "snoozed (deliberate)": listed apart ("Snoozed: X task-hours
+of N task(s) waiting on purpose, through … at the latest"), never the biggest wait and
+never in the cost of chaos. A CI, merge, outage or hold wait stays what it is.
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `max_days` | `90` | How far ahead `kelpie snooze --until` may reach, 1 to 365 days. A bare date is counted by date: the date exactly `max_days` after today is the last one allowed. A later one is refused (exit 2), and the message names the last date or time allowed. |

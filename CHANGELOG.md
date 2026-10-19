@@ -237,8 +237,21 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   any agent can write it), an `until:YYYY-MM-DD` marker in a block reason records one from
   the board, ending at most `marker_max_days` (30) after the block was set. Snoozes are
   stored in `kelpie.db` (schema 8), put into every snapshot and shown by `kelpie why`;
-  `kelpie doctor` counts the markers it cannot honour on every local board. No rule acts on
-  them yet.
+  `kelpie doctor` counts the markers it cannot honour on every local board.
+- Snoozes, part 2 ([#176](https://github.com/ch8er/kelpie/issues/176)): while a task is
+  snoozed there are no repeat reminders for its wait. `needs_you` leaves a snoozed item out
+  of the person's digest (its state key, counts and cost) and lists it in a footer,
+  "Snoozed: <title> through <date> (<reason>, by <who>)" in English and Russian; a digest
+  of only snoozed items does not open, and a snoozed item whose block can never clear comes
+  back at once. `stale_blocks` holds its no-condition and overdue alerts on a snoozed
+  block, and `wait_condition` its overdue alert on a wait for a snoozed human task; dead
+  ends, unseen conditions and stale evidence still alert. The task alerts again when the
+  snooze expires ("Snooze ran through <date>") or more work is blocked behind it ("2 more
+  tasks blocked since the snooze"), counted against a baseline `kelpie serve` records at
+  the first complete tick after the snooze and latched once seen (`kelpie.db` schema 9). Marker snoozes hold only waits on a person, never an
+  agent-health alert, and are listed "from marker". `kelpie snooze` warns when the task is
+  only parked behind a human task. In the daily report snoozed waits are their own wait
+  cause, listed apart and never the biggest wait or in the cost of chaos.
 - `kelpie report` prints the daily report as Markdown, and `--send` posts the summary to the
   alert channels ([#47](https://github.com/ch8er/kelpie/pull/47), [#52](https://github.com/ch8er/kelpie/pull/52)).
 - Prometheus metrics for the engine, adapters, connectors, traces and budgets, and a

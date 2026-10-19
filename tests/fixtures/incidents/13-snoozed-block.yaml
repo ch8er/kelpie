@@ -1,0 +1,105 @@
+id: "13-snoozed-block"
+incident: 13
+title: "A snoozed block gets no reminders, but its facts still alert"
+description: >
+  Without the needs-you inbox rule 4 alerts on every block it cannot clear. A person
+  snoozed four of them until the release. The no-condition reminder on the R2 question
+  and the overdue reminder on the merge wait are held: the person knows. The marker
+  snooze an agent wrote into a block reason holds its no-condition reminder the same way.
+  Facts are not reminders: a block whose PR was closed without merging (a dead end) and a
+  block whose condition the connector stopped checking still alert, snoozed or not. A
+  block whose snooze expired two days ago alerts again and says so; an unsnoozed block
+  alerts as before.
+rule: stale_blocks
+config:
+  needs_you: false
+  unlinked_alert_after: "4h"
+  max_block: "8h"
+  stale_evidence_after: "1h"
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: agent-ops-1, role: ops}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - id: t_r2a1b2c3
+      title: "Enable R2 for backups"
+      status: blocked
+      status_since: "2026-10-17T14:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block: {reason: "waiting_human: needs_input: CEO: enable R2", since: "2026-10-17T14:00:00+00:00"}
+    - id: T-2
+      title: "Ship the release notes"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting for merge of #12", since: "2026-10-18T09:00:00+00:00", condition_id: C-2}
+    - id: T-3
+      title: "Manual QA pass"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting_human: CEO decided: QA after the freeze until:2026-10-24", since: "2026-10-18T09:00:00+00:00"}
+    - id: T-4
+      title: "Merge the payment fix"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting for merge of #14", since: "2026-10-18T09:00:00+00:00", condition_id: C-4}
+    - id: T-5
+      title: "Bump the SDK"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting for CI on #15", since: "2026-10-18T09:00:00+00:00", condition_id: C-5}
+    - id: T-6
+      title: "Rotate the backup key"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block: {reason: "needs_input: which key store?", since: "2026-10-18T09:00:00+00:00"}
+    - id: T-7
+      title: "Move the docs site"
+      status: blocked
+      status_since: "2026-10-18T09:00:00+00:00"
+      role: ops
+      owner_id: agent-ops-1
+      block: {reason: "needs_input: which host?", since: "2026-10-18T09:00:00+00:00"}
+  conditions:
+    - {id: C-2, kind: pr_merged, task_id: T-2, params: {pr: "12"}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00"}
+    - {id: C-4, kind: pr_merged, task_id: T-4, params: {pr: "14", terminal: true}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00"}
+    - {id: C-5, kind: ci_status, task_id: T-5, params: {pr: "15"}, satisfied: false, checked_at: "2026-10-18T10:00:00+00:00"}
+  snoozes:
+    t_r2a1b2c3: {task_id: t_r2a1b2c3, until: "2026-10-26T00:00:00+00:00", reason: "deferred to the release", by: ceo, created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 0}
+    T-2: {task_id: T-2, until: "2026-10-26T00:00:00+00:00", reason: "merges after the release", by: ceo, created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 0}
+    T-3: {task_id: T-3, until: "2026-10-25T00:00:00+00:00", reason: null, by: null, created_at: "2026-10-18T09:00:00+00:00", source: marker}
+    T-4: {task_id: T-4, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo, created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 0}
+    T-5: {task_id: T-5, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo, created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 0}
+    T-6: {task_id: T-6, until: "2026-10-17T00:00:00+00:00", reason: "decide on Friday", by: ceo, created_at: "2026-10-16T12:00:00+00:00", source: cli, behind_at_snooze: 0}
+expected_actions:
+  - kind: alert
+    task_id: T-4
+    reason_contains: "will never clear on its own"
+  - kind: alert
+    task_id: T-5
+    reason_contains: "is the connector running?"
+  - kind: alert
+    task_id: T-6
+    reason_contains: "Its snooze expired at 2026-10-17T00:00:00+00:00"
+    params: {snooze: {state: expired, until: "2026-10-17T00:00:00+00:00", reason: "decide on Friday", by: ceo, source: cli}}
+  - kind: alert
+    task_id: T-7
+    reason_contains: "has no condition Kelpie can check"
+not_expected_actions:
+  - kind: alert
+    task_id: t_r2a1b2c3
+  - kind: alert
+    task_id: T-2
+  - kind: alert
+    task_id: T-3

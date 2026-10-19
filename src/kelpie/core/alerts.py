@@ -12,7 +12,8 @@ and for every channel.
 
 An event can also carry a ``headline`` (a rule's own one-line summary) and ``items``: the
 tasks it is about (:class:`AlertItem`), with their title, age, what is needed and how many
-tasks wait behind each. The engine fills them from the action and the tick's snapshot;
+tasks wait behind each, and ``snoozed``: the tasks a person snoozed, listed in a footer
+(:class:`SnoozeNote`). The engine fills them from the action and the tick's snapshot;
 channels lay them out (:mod:`kelpie.alerts.render`). A report summary is an event with a
 ``headline`` and a :class:`Summary` (its lines and a link to the full report) instead of
 tasks (:mod:`kelpie.alerts.summary`).
@@ -74,12 +75,36 @@ def lead_in(transition: Transition, age: timedelta | None = None) -> str:
             return ""
 
 
+class SnoozeState(StrEnum):
+    """How a person's snooze bears on an alert's task (issue #176)."""
+
+    HELD = "snoozed"  # active: the task leaves the alert, listed in its footer
+    EXPIRED = "expired"  # its date passed (within the last 7 days): the task is back
+    GROWN = "grown"  # more work is blocked behind it than when it was snoozed: back
+
+
+@dataclass(frozen=True, slots=True)
+class SnoozeNote:
+    """A snooze on an alert's task, as a channel shows it: ``until`` when it ends (or
+    ended), ``reason`` and ``by`` as the person gave them (untrusted text), ``marker``
+    when an ``until:`` marker in the block reason set it (always shown as "from marker"),
+    ``grown`` how many more tasks are blocked behind the task than when it was snoozed."""
+
+    state: SnoozeState
+    until: datetime
+    reason: str | None = None
+    by: str | None = None
+    marker: bool = False
+    grown: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class AlertItem:
     """One task an alert is about. ``title`` is the board's (None when the task is not on
     the board), ``age`` how long it has been in the situation (since ``since``), ``needed``
     what a human must do (a rule's or an agent's text, untrusted), ``blocking`` how many
-    tasks wait behind it (None: unknown)."""
+    tasks wait behind it (None: unknown), ``snooze`` the task's snooze when it bears on the
+    alert (held, or back because it expired or the work behind it grew)."""
 
     task_id: str
     title: str | None = None
@@ -87,16 +112,17 @@ class AlertItem:
     needed: str | None = None
     blocking: int | None = None
     since: datetime | None = None
+    snooze: SnoozeNote | None = None
 
     @property
-    def fingerprint(self) -> tuple[str, str | None, str | None, str | None, int | None]:
+    def fingerprint(self) -> tuple[object, ...]:
         """When it started, to the minute (else the age as worded), so the same item sent
         again a tick later is the same item."""
         if self.since is not None:
             start: str | None = self.since.replace(second=0, microsecond=0).isoformat()
         else:
             start = format_age(self.age) if self.age is not None else None
-        return (self.task_id, self.title, start, self.needed, self.blocking)
+        return (self.task_id, self.title, start, self.needed, self.blocking, self.snooze)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +146,8 @@ class AlertEvent:
     identifies the alert for de-duplication. ``age`` is how long a lasting condition has been
     open, for the transitions ``ESCALATED`` and ``RESOLVED``. ``headline`` is the rule's own
     one-line summary, if it gave one (else a channel words one); ``items`` are the tasks the
-    alert is about, in the rule's order.
+    alert is about, in the rule's order; ``snoozed`` the tasks a person snoozed, which the
+    alert leaves out and lists in a footer.
     """
 
     rule: str
@@ -135,6 +162,10 @@ class AlertEvent:
     headline: str | None = None
     items: tuple[AlertItem, ...] = ()
     summary: Summary | None = None  # a report summary: laid out by kelpie.alerts.summary
+    # Tasks a person snoozed, left out of the alert and listed in its footer (#176), and
+    # how many there are in all (None: as many as listed)
+    snoozed: tuple[AlertItem, ...] = ()
+    snoozed_total: int | None = None
 
     @property
     def fingerprint(self) -> tuple[object, ...]:
@@ -152,6 +183,8 @@ class AlertEvent:
             self.did_text,
             self.headline,
             self.summary,
+            tuple(item.fingerprint for item in self.snoozed),
+            self.snoozed_total,
             tuple(item.fingerprint for item in self.items),
         )
 

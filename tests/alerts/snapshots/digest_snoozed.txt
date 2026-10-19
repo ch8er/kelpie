@@ -1,0 +1,13 @@
+🟡 Waiting for you: 2 tasks (oldest 24 h)
+
+1. Enable R2 for backups — 24 h · t_r2a1b2c3
+   Needed: CEO: enable R2 in the Cloudflare dashboard
+   Snooze ran through 2026-10-25
+   Blocking: none · Open task: https://board.example.org/tasks/t_r2a1b2c3
+2. Sign the vendor contract — 6.0 h · H-1
+   2 more tasks blocked since the snooze (through 2026-11-01)
+   Blocking: 3 tasks · Open task: https://board.example.org/tasks/H-1
+Snoozed: Manual QA pass before release through 2026-11-01 (after the freeze, by ceo) · t_qa4d5e6f
+Snoozed: Approve the data export until 2026-11-03 09:00 UTC (from marker) · t_dx0e1f2a
+Why: Needs you (ceo): 2 item(s) hold 3 agent task(s), 30.0 agent-hours waited so far. Snoozed, not counted: 2 item(s).
+Rule: needs_you

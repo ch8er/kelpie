@@ -6,7 +6,7 @@ import logging
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import (
@@ -14,6 +14,8 @@ from kelpie.core.alerts import (
     AlertEvent,
     AlertItem,
     Did,
+    SnoozeNote,
+    SnoozeState,
     done_line,
     failed_line,
     failure_reason,
@@ -678,6 +680,8 @@ class Engine:
                 age=None if note is None else note.age,
                 headline=_headline(action),
                 items=alert_items(action, snapshot, effects_done=effects_done),
+                snoozed=snoozed_items(action, snapshot),
+                snoozed_total=_count(action.params.get("snoozed_total")),
             )
         )
         return True
@@ -756,8 +760,10 @@ def alert_items(
     action: Action, snapshot: Snapshot, *, effects_done: bool = False
 ) -> tuple[AlertItem, ...]:
     """The tasks an alert is about: ``params.items`` (mappings with ``task_id`` and optional
-    ``title``, ``needed``, ``since`` and ``blocking``; other keys are the rule's own and are
-    ignored; malformed entries are skipped), else the action's own task. Titles come from
+    ``title``, ``needed``, ``since``, ``blocking`` and ``snooze``; other keys are the rule's
+    own and are ignored; malformed entries are skipped), else the action's own task (with
+    ``params.snooze``). A ``snooze`` is a mapping (:func:`_snooze_note`); a malformed one is
+    dropped, the item kept. Titles come from
     the entry, else the snapshot; ages are counted to ``snapshot.now``. Only the actions of
     the current tick are rendered, never ledger rows. With ``effects_done`` (the alert
     announces effects Kelpie carried out: a stop, a close) no item says what is needed: the
@@ -786,7 +792,49 @@ def _items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
             needed.strip() if isinstance(needed, str) and needed.strip() else None,
             _count(action.params.get("blocking")),
             _start(since),
+            _snooze_note(action.params.get("snooze")),
         ),
+    )
+
+
+def snoozed_items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
+    """The tasks a person snoozed that an alert leaves out and lists in its footer:
+    ``params.snoozed``, entries like ``params.items``' that carry a ``snooze`` (others are
+    skipped). Pure, and never raises on a rule's params."""
+    raw = action.params.get("snoozed")
+    if not isinstance(raw, list):
+        return ()
+    found = (_item(e, snapshot) for e in raw)
+    return tuple(i for i in found if i is not None and i.snooze is not None)
+
+
+def _snooze_note(value: object) -> SnoozeNote | None:
+    """A ``snooze`` mapping (``state``: snoozed, expired or grown; ``until``: ISO 8601 with
+    an offset; optional ``reason``, ``by``, ``source`` and ``grown``), or None when it is
+    absent or malformed."""
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        state = SnoozeState(value.get("state"))
+    except ValueError:
+        return None
+    ok, until = _since(value.get("until"))
+    reason, by, grown = value.get("reason"), value.get("by"), value.get("grown", 0)
+    if not ok or until is None or _count(grown) is None:
+        return None
+    try:
+        until.astimezone(UTC)  # out of range (year 9999 with an offset): nothing to show
+    except OverflowError:
+        return None
+    if not all(v is None or isinstance(v, str) for v in (reason, by)):
+        return None
+    return SnoozeNote(
+        state,
+        until,
+        (reason.strip() or None) if reason else None,
+        (by.strip() or None) if by else None,
+        value.get("source") == "marker",
+        _count(grown) or 0,
     )
 
 
@@ -814,6 +862,7 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
         needed.strip() if needed and needed.strip() else None,
         _count(blocking),
         _start(since),
+        _snooze_note(entry.get("snooze")),
     )
 
 

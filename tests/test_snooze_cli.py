@@ -76,9 +76,11 @@ def settings() -> Settings:
     return load_settings(find_config(None))
 
 
-def test_snooze_stores_reports_and_counts_the_work_behind(
+def test_snooze_stores_and_reports_leaving_the_baseline_to_serve(
     farm: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The work behind the task is not counted offline (the board here has no connectors'
+    conditions): kelpie serve records it on its first tick (#176)."""
     code = main(["snooze", "t_blocked", "--until", "3d", "--reason", "release", "--by", "ceo"])
     out, err = capsys.readouterr()
     assert code == 0 and err == ""
@@ -88,12 +90,10 @@ def test_snooze_stores_reports_and_counts_the_work_behind(
         "release",
         "ceo",
         "cli",
-        1,
+        None,
     )
     assert (s.until, s.created_at) == (NOW + timedelta(days=3), NOW)
-    assert out == (
-        "snoozed: t_blocked until 2026-10-22 12:00 UTC (release; by ceo; 1 task(s) behind it)\n"
-    )
+    assert out == "snoozed: t_blocked until 2026-10-22 12:00 UTC (release; by ceo)\n"
 
 
 def test_a_bare_date_means_through_that_day_and_replaces(
@@ -342,6 +342,8 @@ def test_snoozes_lists_active_and_with_all_the_expired(
         "source": "cli",
         "created_at": NOW.isoformat(),
         "behind_at_snooze": None,
+        "grown_at": None,
+        "grown_by": None,
     }
     assert (farm / "kelpie.db").stat().st_mtime_ns == before  # read-only
 

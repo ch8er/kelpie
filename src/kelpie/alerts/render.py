@@ -10,6 +10,7 @@ Block Kit.
        Needed: <first sentence or clause, at most 140 characters>
        Blocking: none · Open task
     2. …
+    Snoozed: <title> until 2026-10-25 (<reason>, by <who>) · t_c3f82477
     Why: <the reason, without the sentence the headline already quotes>
     Kelpie did: …
     Rule: stale_blocks
@@ -29,6 +30,16 @@ added to the text (no zero-width characters): ids, commands and URLs copy as the
 Links are built only from the configured ``task_url`` (http(s), validated at load) with
 the task id URL-quoted.
 
+**Snoozes** (#176). Tasks a person snoozed that the alert leaves out
+(``AlertEvent.snoozed``) are listed in a footer under the tasks, one line each (at most
+:data:`MAX_SNOOZED`, the rest counted); a task back from a snooze (expired, or more work
+blocked behind it) is marked under its item. A snooze's end is shown in
+``RenderSettings.tz`` (``[report] timezone``): one that ends at midnight there as the last
+day it covered ("through 2026-10-25", "Snooze ran through 2026-10-25"), the way ``kelpie
+snooze --until 2026-10-25`` takes a date; else to the minute, with the zone ("until
+2026-10-25 09:00 UTC"). "and N more snoozed" counts from ``AlertEvent.snoozed_total``. A
+marker snooze always says "from marker".
+
 The renderers return what a channel sends, not just a string: :func:`telegram_payload` the
 ``sendMessage`` fields (``text``, ``parse_mode``), :func:`slack_payload` the plain ``text``
 fallback and the ``blocks`` list, one block per item, so per-item controls can be added
@@ -42,12 +53,13 @@ import re
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 from kelpie.alerts import i18n
-from kelpie.core.alerts import AlertEvent, AlertItem, Did, Transition
+from kelpie.core.alerts import AlertEvent, AlertItem, Did, SnoozeNote, SnoozeState, Transition
+from kelpie.core.snooze import snooze_end
 
 MAX_TEXT = 4096  # Telegram's limit, in UTF-16 units
 AT_SIGN = "\uff20"  # fullwidth commercial at: shown like "@", never a mention
@@ -63,6 +75,8 @@ MAX_REASON = 1000  # characters of the reason shown
 MAX_DID = 1500
 MAX_URL = 600
 MAX_RULE = 64
+MAX_SNOOZED = 5  # snoozed tasks listed in the footer; the rest are counted
+MAX_BY = 60  # characters of who set a snooze
 OWN_RULE = "kelpie"  # the engine's own notices: no "Rule:" line
 SLACK_BLOCK = 3000  # characters of text in one Slack block, kept below Slack's limits
 SLACK_BLOCKS = 50  # Slack's limit of blocks in a message
@@ -99,10 +113,12 @@ def utf16_len(text: str) -> int:
 
 @dataclass(frozen=True, slots=True)
 class RenderSettings:
-    """``[alerts] language`` and ``[alerts] task_url`` (a link template with ``{id}``)."""
+    """``[alerts] language`` and ``[alerts] task_url`` (a link template with ``{id}``);
+    ``tz`` is ``[report] timezone``, where a snooze's end is shown."""
 
     language: str = i18n.DEFAULT
     task_url: str | None = None
+    tz: tzinfo = UTC
 
 
 DEFAULT_RENDERING = RenderSettings()
@@ -174,6 +190,7 @@ class ItemView:
     needed: str | None  # the first sentence or clause of what is needed
     blocking: str | None  # "Blocking: none"
     link: Link | None
+    snooze: str | None = None  # back from a snooze: "Snooze expired 2026-10-25"
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +204,23 @@ class Layout:
     did: str | None  # "Kelpie did: …"
     rule: str | None = None  # the rule that raised it, so a human knows which one to tune
     language: str = i18n.DEFAULT
+    snoozed: tuple[str, ...] = ()  # the footer: one line per snoozed task (#176)
+    snoozed_hidden: int = 0  # snoozed tasks not listed ("and 2 more snoozed")
+
+    @property
+    def snoozed_label(self) -> str:
+        return i18n.text(self.language, "label.snoozed")
+
+    @property
+    def snoozed_more(self) -> str | None:
+        if not self.snoozed_hidden:
+            return None
+        return i18n.text(self.language, "label.snoozed_more", n=self.snoozed_hidden)
+
+    def footer(self) -> list[str]:
+        """The footer's lines, unescaped: "Snoozed: …" per task, then the count of the rest."""
+        lines = [f"{self.snoozed_label}: {line}" for line in self.snoozed]
+        return lines + ([more] if (more := self.snoozed_more) else [])
 
     @property
     def more(self) -> str | None:
@@ -230,6 +264,7 @@ def layout(event: AlertEvent, settings: RenderSettings = DEFAULT_RENDERING) -> L
     body = _cut_words(rest, MAX_REASON) if rest and not replaced else None
     items = tuple(_item(n, item, settings) for n, item in enumerate(event.items[:MAX_ITEMS], 1))
     rule = _cut_words(_flat(defang(event.rule)), MAX_RULE)
+    snoozed = tuple(_snoozed(i, settings) for i in event.snoozed[:MAX_SNOOZED])
     return Layout(
         icon=_icon(event),
         headline=headline,
@@ -240,6 +275,8 @@ def layout(event: AlertEvent, settings: RenderSettings = DEFAULT_RENDERING) -> L
         did=_did(event, lang),
         rule=rule if rule and event.rule != OWN_RULE else None,
         language=lang,
+        snoozed=snoozed,
+        snoozed_hidden=max(event.snoozed_total or 0, len(event.snoozed)) - len(snoozed),
     )
 
 
@@ -311,7 +348,60 @@ def _item(number: int, item: AlertItem, settings: RenderSettings) -> ItemView:
         needed=_needed(item, title),
         blocking=blocking,
         link=link,
+        snooze=_snooze_mark(item.snooze, settings),
     )
+
+
+def snooze_when(at: datetime, tz: tzinfo = UTC) -> str:
+    """A snooze's end as a person set it (:func:`kelpie.core.snooze.snooze_end`): at
+    midnight in ``tz``, the last day it covered; else to the minute, with the zone."""
+    return snooze_end(at, tz)[0]
+
+
+def _snooze_span(lang: str, at: datetime, tz: tzinfo, key: str = "snooze") -> str:
+    """ "through 2026-10-25" for a whole day, "until 2026-10-25 09:00 UTC" otherwise (with
+    ``key`` ``snooze.expired``: "Snooze ran through …", "Snooze ended …")."""
+    when, through_day = snooze_end(at, tz)
+    return i18n.text(lang, f"{key}.{'through' if through_day else 'until'}", when=when)
+
+
+def _snooze_details(note: SnoozeNote, lang: str) -> str:
+    """ " (reason, by who)", " (from marker)", or nothing."""
+    if note.marker:
+        parts = [i18n.text(lang, "snooze.from_marker")]
+    else:
+        reason = note_text(defang(note.reason)) if note.reason else ""
+        who = one_line(note.by, MAX_BY) if note.by else ""
+        parts = [reason] if reason else []
+        parts += [i18n.text(lang, "snooze.by", who=who)] if who else []
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _snoozed(item: AlertItem, settings: RenderSettings) -> str:
+    """A footer line, without its label: "<title> until 2026-10-25 (<reason>, by <who>) ·
+    <id>"."""
+    assert item.snooze is not None  # the engine keeps only entries with a snooze
+    lang = settings.language
+    title = _cut_words(_flat(defang(item.title)), MAX_TITLE) if item.title else ""
+    shown = _cut_words(_flat(defang(item.task_id)), MAX_ID) or "?"
+    until = _snooze_span(lang, item.snooze.until, settings.tz)
+    details = _snooze_details(item.snooze, lang)
+    return f"{title} {until}{details} · {shown}" if title else f"{shown} {until}{details}"
+
+
+def _snooze_mark(note: SnoozeNote | None, settings: RenderSettings) -> str | None:
+    """Why a snoozed task is back: its snooze expired, or more work is blocked behind it."""
+    if note is None or note.state is SnoozeState.HELD:
+        return None
+    lang = settings.language
+    if note.state is SnoozeState.EXPIRED:
+        mark = _snooze_span(lang, note.until, settings.tz, "snooze.expired")
+    else:
+        grown = i18n.text(lang, f"snooze.grown.{i18n.plural(lang, note.grown)}", n=note.grown)
+        mark = f"{grown[0].upper()}{grown[1:]} ({_snooze_span(lang, note.until, settings.tz)})"
+    if note.marker:
+        mark += f" ({i18n.text(lang, 'snooze.from_marker')})"
+    return mark
 
 
 def _needed(item: AlertItem, title: str | None) -> str | None:
@@ -503,6 +593,7 @@ SLACK_PLAIN = Style(
 # Output budgets per field (after escaping), so that the headline, one item and the did
 # line always fit a message together; the rest of the room goes to the body or more items.
 _BUDGET = {"headline": 400, "title": 400, "id": 200, "note": 500, "did": 1600}
+_BUDGET["snooze"] = 300  # a footer line or the mark on a task back from a snooze
 MIN_BODY = 300  # a list gives up its last tasks before the reason gets less room than this
 
 
@@ -544,6 +635,8 @@ def _item_lines(item: ItemView, style: Style, needed_label: str) -> list[str]:
     if item.needed:
         note = fit(item.needed, _BUDGET["note"], style)
         lines.append(f"{INDENT}{style.esc(needed_label)}: {note}")
+    if item.snooze:
+        lines.append(f"{INDENT}{fit(item.snooze, _BUDGET['snooze'], style)}")
     parts = [style.esc(item.blocking)] if item.blocking else []
     if item.link is not None:
         parts.append(style.link(style.esc(item.link.label), item.link.url))
@@ -587,6 +680,7 @@ def _text(view: Layout, style: Style, limit: int) -> tuple[str, bool]:
         lines += _item_lines(item, style, view.needed_label)
     if view.more:
         lines.append(style.esc(view.more))
+    lines += [fit(line, _BUDGET["snooze"], style) for line in view.footer()]
     tail = _tail(view, style)
     roomy = True
     if view.body:
@@ -642,6 +736,8 @@ def _item_elements(item: ItemView, needed_label: str) -> list[dict[str, Any]]:
             out.append(el(f" — {item.age}"))
     if item.needed:
         out += [el(f"\n{INDENT}{needed_label}: "), el(item.needed)]
+    if item.snooze:
+        out.append(el(f"\n{INDENT}{item.snooze}"))
     if item.blocking or item.link is not None:
         out.append(el(f"\n{INDENT}"))
         if item.blocking:
@@ -666,6 +762,8 @@ def slack_blocks(view: Layout) -> list[dict[str, Any]]:
     blocks += [rich(_item_elements(i, view.needed_label)) for i in view.items]
     if view.more:
         blocks.append(rich([el(view.more)]))
+    if footer := view.footer():
+        blocks.append(rich([el("\n".join(line[: _BUDGET["snooze"]] for line in footer))]))
     if view.body:
         label = [el(f"{view.body_label}: ", bold=True)] if view.body_label else []
         blocks.append(rich([*label, el(view.body[:SLACK_BLOCK])]))
