@@ -98,8 +98,10 @@ stops as ordinary blocks.
   change: its "rule modes" line lists each mode with its rules (set per rule or from
   `default_mode`) and passes when that is what you configured. It warns while `dry_run`
   holds back a rule you put in `suggest` or `act`, for a rule in `act` that cannot act on
-  this farm (see What can act today) and for `act` from `default_mode`; it fails only when
-  `kelpie serve` would refuse to start.
+  this farm (see What can act today), for parks nothing wakes (`dispatch_gate` or a
+  serializing `conflict_warning` in `act` without `wait_condition` in `act`), for alerts and
+  suggestions with no `[[alerts.channels]]`, and for `act` from `default_mode`; it fails
+  only when `kelpie serve` would refuse to start.
 - [ ] The ledger is healthy: `kelpie_ledger_up 1` on `/metrics`, and `[storage] path` points
   at a real file (not `:memory:`), so cooldowns and once-actions survive a restart.
 - [ ] You know the `dry_run` semantics: `dry_run = true` overrides every rule's mode, so

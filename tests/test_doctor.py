@@ -132,18 +132,28 @@ def test_rule_modes_on_the_defaults_list_observe_from_default_mode(farm: Farm) -
     assert check.detail.endswith(" rules (default_mode)")
 
 
+# A channel for alerts and suggestions; its token is only read when kelpie serve starts.
+ALERTS = (
+    '[[alerts.channels]]\ntype = "telegram"\ntoken_env = "KELPIE_TEST_BOT"\nchat_id = "-100777"\n'
+)
+HUB = (  # its agents' adapters are known only once they report
+    '[hub]\nlisten = "127.0.0.1:9465"\nallow_plain_http = true\n'
+    '[[hub.agents]]\nname = "laptop"\ntoken_env = "KELPIE_TEST_AGENT_TOKEN"\n'
+)
+
+
 @pytest.mark.parametrize(
     ("extra", "listed"),
     [
         (  # what the live farm runs: a stop and a suggestion, chosen per rule
             '[engine]\ndry_run = false\n[engine.rules.loop_breaker]\nmode = "act"\n'
-            '[engine.rules.needs_you]\nmode = "suggest"\n',
+            '[engine.rules.needs_you]\nmode = "suggest"\n' + ALERTS,
             "dry_run off; act: loop_breaker (per rule); suggest: needs_you (per rule); observe: ",
         ),
         ("[engine]\ndry_run = false\n", "dry_run off; observe: "),
         (  # suggest for every rule sends alerts, never changes the board: deliberate enough
             '[engine]\ndry_run = false\ndefault_mode = "suggest"\n'
-            '[engine.rules.resources]\nmode = "observe"\n',
+            '[engine.rules.resources]\nmode = "observe"\n' + ALERTS,
             "observe: resources (per rule)",
         ),
     ],
@@ -207,6 +217,67 @@ def test_act_that_kelpie_serve_refuses_fails_and_only_warns_under_dry_run(farm: 
     check = farm.checks()["rule modes"]
     assert check.status == "WARN"
     assert "kelpie serve refuses it once dry_run is off" in check.detail
+
+
+def test_act_from_default_mode_that_serve_refuses_fails_with_a_default_mode_fix(
+    farm: Farm,
+) -> None:
+    farm.extra = '[engine]\ndry_run = false\ndefault_mode = "act"\n'
+    check = farm.checks()["rule modes"]
+    assert check.status == "FAIL"
+    assert "kelpie serve refuses to start" in check.detail
+    assert " more" in check.detail.rsplit(";", 1)[1]  # the refused rules are cut short
+    assert check.fix.startswith('set default_mode = "observe" (')
+    assert "[engine.rules.<name>]" not in check.fix
+
+
+def test_a_refused_rule_set_per_rule_beside_act_by_default_gets_both_fixes(farm: Farm) -> None:
+    farm.extra = '[engine]\ndry_run = false\ndefault_mode = "act"\n'
+    farm.extra += '[engine.rules.exit_contract]\nmode = "act"\n'
+    fix = farm.checks()["rule modes"].fix
+    assert 'set default_mode = "observe" and set mode = "suggest" or "observe"' in fix
+    assert "for exit_contract" in fix
+
+
+@pytest.mark.parametrize(
+    ("extra", "needle"),
+    [
+        ('[engine.rules.dispatch_gate]\nmode = "act"\n', "rule 'dispatch_gate' parks ready"),
+        (
+            '[engine.rules.conflict_warning]\nmode = "act"\nserialize = true\n',
+            "rule 'conflict_warning' serializes tasks",
+        ),
+    ],
+)
+def test_parks_that_nothing_wakes_warn(farm: Farm, extra: str, needle: str) -> None:
+    farm.extra = "[engine]\ndry_run = false\n" + extra
+    check = farm.checks()["rule modes"]
+    assert check.status == "WARN"
+    assert needle in check.detail and "parked tasks are not woken" in check.detail
+    assert "[engine.rules.wait_condition]" in check.fix
+    farm.extra += '[engine.rules.wait_condition]\nmode = "act"\n'  # rule 2 wakes them
+    assert farm.checks()["rule modes"].status == "PASS"
+
+
+def test_suggestions_without_an_alert_channel_warn(farm: Farm) -> None:
+    farm.extra = '[engine]\ndry_run = false\n[engine.rules.needs_you]\nmode = "suggest"\n'
+    check = farm.checks()["rule modes"]
+    assert check.status == "WARN"
+    assert "no [[alerts.channels]]: the alerts and suggestions of needs_you" in check.detail
+    assert "[[alerts.channels]]" in check.fix
+    farm.extra += ALERTS
+    assert farm.checks()["rule modes"].status == "PASS"
+
+
+def test_a_hub_does_not_judge_what_its_agents_carry_out(tmp_path: Path) -> None:
+    path = tmp_path / "kelpie.toml"  # no local adapter: on a farm this would be a gap
+    path.write_text('[engine]\ndry_run = false\n[engine.rules.orphan_status]\nmode = "act"\n')
+    alone = {c.name: c for c in run_checks(path, environ={})}["rule modes"]
+    assert alone.status == "WARN" and "orphan_status (no platform adapter" in alone.detail
+    path.write_text(path.read_text() + HUB)
+    check = {c.name: c for c in run_checks(path, environ={})}["rule modes"]
+    assert check.status == "PASS", check.detail
+    assert "act: orphan_status (per rule)" in check.detail
 
 
 def test_cli_exits_0_on_a_rule_modes_warning(
