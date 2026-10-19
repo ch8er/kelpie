@@ -434,14 +434,14 @@ def _workspace(row: sqlite3.Row) -> Path | None:
 
 @dataclass(frozen=True, slots=True)
 class HumanDecision:
-    """A person's decision an agent records on the board: a comment or description by one of
-    ``relays`` (profiles, case-insensitive) that opens with ``marker`` and a separator
-    (a colon, a hyphen, an en or em dash; case-insensitive, Unicode-normalized, past
-    invisible characters and markdown emphasis: "Решение CEO: ...", "**Решение CEO**:
-    ...") is the person's word, all of it, and is written by ``person`` when it is set.
-    "Жду решение CEO", "Решение CEO пока не принято", a quote or the marker further on
-    are the agent's own words. Letters typed in another script (Cyrillic look-alikes of
-    "CEO") are another marker."""
+    """A person's decision an agent records on the board: a comment or description by one
+    of ``relays`` (profiles, case-insensitive) that opens with ``marker`` and a separator on
+    its line (a colon, a hyphen before no word, an en or em dash), case-insensitive,
+    Unicode-normalized, past invisible characters and markdown emphasis ("Решение CEO: ...",
+    "**Решение CEO**: ..."), is the person's word, all of it, and is written by ``person``
+    when it is set. "Жду решение CEO", "Решение CEO пока не принято", a quote or the marker
+    further on are the agent's own words. Letters typed in another script (Cyrillic
+    look-alikes of "CEO") are another marker."""
 
     marker: str
     relays: frozenset[str]
