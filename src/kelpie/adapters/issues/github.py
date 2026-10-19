@@ -107,7 +107,7 @@ _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?")
 _BRANCH = re.compile(r"[\w./-]{1,255}")
 
 
-_LABEL_PATH = re.compile(r"(?!\.\.?$)[A-Za-z0-9_-][A-Za-z0-9._-]{0,49}")
+LABEL_PATH = re.compile(r"(?!\.\.?$)[A-Za-z0-9_-][A-Za-z0-9._-]{0,49}")
 _ID = re.compile(r"(?P<repo>[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100})#(?P<number>[1-9][0-9]{0,8})")
 
 
@@ -512,7 +512,7 @@ class GitHubIssues:
         present = [label for label in current if label.casefold() in drop]
         if not present:
             return
-        if all(_LABEL_PATH.fullmatch(label) for label in present):
+        if all(LABEL_PATH.fullmatch(label) for label in present):
             for label in present:
                 path = f"/repos/{repo}/issues/{number}/labels/{label}"
                 self._send("DELETE", repo, path, None, gone_ok=True)

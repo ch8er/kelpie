@@ -206,6 +206,29 @@ kelpie doctor
 Stopping runaway loops (OpenClaw has no loop guard by default): the
 [OpenClaw quickstart](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-openclaw.md).
 
+### GitHub Issues (Copilot coding agent, Codex cloud, the Claude Code Action, OpenHands)
+
+For agents that take an issue and return a pull request, the issues are the task queue:
+
+```toml
+# kelpie.toml
+[adapters.github_issues]
+repos = ["your-org/your-repo"]
+token_env = "KELPIE_ISSUES_TOKEN"   # Issues, Pull requests: read; Issues: write only to act
+label = "agent"
+
+[adapters.github_issues.agents.copilot]
+assignee = "Copilot"
+```
+
+```bash
+kelpie serve
+kelpie doctor
+```
+
+Step by step: the
+[GitHub Issues quickstart](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-github-issues.md).
+
 Other platforms: [CONTRIBUTING](https://github.com/ch8er/kelpie/blob/main/CONTRIBUTING.md)
 explains how to add an adapter.
 
@@ -270,7 +293,7 @@ The incidents behind each rule, the design and the daily report in full:
 - [Install and run](https://github.com/ch8er/kelpie/blob/main/docs/install.md): uv, Docker, `kelpie doctor`, ports, tokens, data
 - [Several machines](https://github.com/ch8er/kelpie/blob/main/docs/deploy.md): `kelpie agent` on each, a central `kelpie serve` (laptop + cloud VM, two VMs)
 - [Configuration reference](https://github.com/ch8er/kelpie/blob/main/docs/configuration.md): every section, rule and threshold
-- Quickstarts: [Hermes](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md), [Claude Code](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md), [OpenClaw](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-openclaw.md);
+- Quickstarts: [Hermes](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md), [Claude Code](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md), [OpenClaw](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-openclaw.md), [GitHub Issues](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-github-issues.md);
   the [observe-to-act checklist](https://github.com/ch8er/kelpie/blob/main/docs/act-checklist.md)
 - [Privacy](https://github.com/ch8er/kelpie/blob/main/docs/privacy.md): what Kelpie stores from traces and hooks, and how to keep less
 - [Extending Kelpie](https://github.com/ch8er/kelpie/blob/main/docs/extending.md): rules, adapters, connectors, report sections

@@ -24,6 +24,7 @@ from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.claude_code.adapter import ClaudeCodeAdapter
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
 from kelpie.adapters.hermes.git_state import read_git_state
+from kelpie.adapters.issues import doctor as github_issues
 from kelpie.adapters.openclaw import doctor as openclaw
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
 from kelpie.app import (
@@ -900,6 +901,14 @@ def run_checks(
             else openclaw.skipped("adapter disabled")
         )
         oc_checks = [Check(*c) for c in found]
+    gi = settings.github_issues
+    gi_checks: list[Check] = []
+    if gi is not None:  # only when configured
+        if gi.enabled:
+            found = github_issues.run(gi, at, environ)
+        else:
+            found = github_issues.skipped("adapter disabled")
+        gi_checks = [Check(*c) for c in found]
     total = None if not counts or None in counts else sum(c for c in counts if c is not None)
     exporters = [
         name
@@ -918,6 +927,7 @@ def run_checks(
     )
     checks += cc_checks
     checks += oc_checks
+    checks += gi_checks
     checks += check_github(settings, environ)
     checks.append(check_resources_watched(settings, loaded, environ))
     checks.append(check_process_counts(settings, loaded, environ))
