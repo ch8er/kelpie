@@ -16,29 +16,38 @@ from dataclasses import dataclass
 class FarmFacts:
     """None: not known."""
 
-    approvers: bool | None = None  # rule 13 routes agents' questions to named people
-    hold_expiry: bool | None = None  # holds have an owner and an expiry (rule 6)
-    block_conditions: bool | None = None  # [[block_conditions]] tie block reasons to PRs
+    # rule 13 routes every agent role's questions to a person (``default_approver``)
+    approvers: bool | None = None
+    approver_roles: frozenset[str] = frozenset()  # roles with their own approver
+    hold_expiry: bool | None = None  # every hold label expires (rule 6)
+    hold_owners: bool | None = None  # every hold label has an owner (rule 6 ``holds``)
+    block_conditions: bool | None = None  # [[block_conditions]] match block reasons
     budgets: bool | None = None  # [[budgets]] cap spend
 
 
 UNKNOWN_FARM = FarmFacts()  # a report built without the farm's config
 
 
-def people(facts: FarmFacts) -> str:
+def people(facts: FarmFacts, role: str | None = None) -> str:
     out = "answer the inboxes under Needs a human first and keep human tasks off the critical path"
-    if facts.approvers is False:
-        out += "; name approvers for agent roles ([engine.rules.needs_you] approvers)"
+    if facts.approvers is False and (role is None or role not in facts.approver_roles):
+        whose = "agent roles that have none" if facts.approver_roles else "agent roles"
+        out += f"; name approvers for {whose} ([engine.rules.needs_you] approvers)"
     return out
 
 
 def holds(facts: FarmFacts) -> str:
-    if facts.hold_expiry is False:
+    missing = [
+        what
+        for what, known in (("an owner", facts.hold_owners), ("an expiry", facts.hold_expiry))
+        if known is False
+    ]
+    if missing:
         return (
-            "give every hold an owner and an expiry ([engine.rules.bottlenecks] holds), "
+            f"give every hold {' and '.join(missing)} ([engine.rules.bottlenecks] holds), "
             "and lift a hold when its reason is gone"
         )
-    return "lift a hold when its reason is gone; its owner is alerted when it expires"
+    return "lift a hold when its reason is gone"
 
 
 def merges() -> str:
@@ -61,7 +70,7 @@ def unregistered_waits(facts: FarmFacts) -> str:
 
 
 def stale_blocks(facts: FarmFacts, can_act: bool) -> str:
-    then = "clear blocks" if can_act else "alert"
+    then = "clear blocks" if can_act else "tell"
     if facts.block_conditions is False:
         return (
             "attach conditions to block reasons ([[block_conditions]]) so Kelpie can "
@@ -76,7 +85,15 @@ def stale_blocks(facts: FarmFacts, can_act: bool) -> str:
 
 
 def runaway_by_hand(facts: FarmFacts) -> str:
-    out = "stop runaway sessions by hand when Kelpie alerts on them"
+    out = "stop runaway sessions by hand when Kelpie reports them"
+    if facts.budgets is False:
+        out += ", and cap spend with [[budgets]]"
+    return out
+
+
+def runaway_acting(facts: FarmFacts) -> str:
+    """loop_breaker already acts: tune it rather than turn it on."""
+    out = "loop_breaker already stops runaway sessions: lower its thresholds for the roles here"
     if facts.budgets is False:
         out += ", and cap spend with [[budgets]]"
     return out

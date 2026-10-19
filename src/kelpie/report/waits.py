@@ -56,11 +56,11 @@ _SUGGESTIONS: Mapping[str, str] = {
 }
 
 
-def suggestion(cause: str, facts: FarmFacts) -> str:
+def suggestion(cause: str, facts: FarmFacts, role: str | None = None) -> str:
     """What to do about a wait, never advising what the farm already has
     (:mod:`kelpie.report.farm`)."""
     if cause == "people":
-        return farm.people(facts)
+        return farm.people(facts, role)
     if cause == "hold":
         return farm.holds(facts)
     if cause == "merge":
@@ -110,7 +110,7 @@ class BiggestWait:
 
     @property
     def suggestion(self) -> str:
-        return suggestion(self.cause, self.facts)
+        return suggestion(self.cause, self.facts, self.role)
 
     def headline(self) -> str:
         """One line of Markdown-safe text."""

@@ -182,18 +182,22 @@ REMEDIES_WITHOUT_ACT: Mapping[str, str] = {
 }
 
 
-def remedy(rule: str, facts: FarmFacts, can_act: bool) -> str:
+def remedy(rule: str, facts: FarmFacts, can_act: bool, acts: bool = False) -> str:
     """What to do about a chaos cause, never advising what the farm already has
-    (:mod:`kelpie.report.farm`) or act mode where the rule cannot act."""
+    (:mod:`kelpie.report.farm`): act mode where the rule cannot act (``can_act``) or
+    already acts (``acts``), or config it already has."""
     if rule == HOLDS:
         return farm.holds(facts)
     if rule == PEOPLE:
         return farm.people(facts)
     if rule == "stale_blocks":
         return farm.stale_blocks(facts, can_act)
-    if rule == "loop_breaker" and not can_act:
-        return farm.runaway_by_hand(facts)
-    if not can_act and rule in REMEDIES_WITHOUT_ACT:
+    if rule == "loop_breaker":
+        if acts:
+            return farm.runaway_acting(facts)
+        if not can_act:
+            return farm.runaway_by_hand(facts)
+    if (acts or not can_act) and rule in REMEDIES_WITHOUT_ACT:
         return REMEDIES_WITHOUT_ACT[rule]
     return REMEDIES[rule]
 
@@ -407,6 +411,7 @@ def build_report(
         _session_models(spans, counted),
         [a for s in extra for a in s.advice],
         wait,
+        frozenset(f for g in groups for f in g.filters),
     )
     return DailyReport(
         day=inputs.day,
@@ -889,6 +894,7 @@ def _recommendations(
     models: Mapping[str, str | None],
     extra: Sequence[Advice] = (),
     wait: BiggestWait | None = None,
+    filters_in_use: frozenset[str] = frozenset(),
 ) -> tuple[Advice, ...]:
     candidates: list[Advice] = list(extra)
     if wait is not None and wait.cause != UNKNOWN_WAIT:  # the headline covers that one
@@ -908,13 +914,20 @@ def _recommendations(
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
         role = f" ({md.text(group.role)})" if group.role else ""
-        maybe = "" if rec.platform_known else " if RTK supports your agent platform"
+        in_use = rec.filter.name in filters_in_use  # other commands already run through it
+        maybe = "" if rec.platform_known or in_use else " if RTK supports your agent platform"
+        how = (
+            f"route it through {rec.filter.name} like the farm's other commands that already run "
+            "through it"
+            if in_use
+            else rec.filter.how
+        )
         candidates.append(
             Advice(
                 title=f"Filter {md.code(group.key)} output{role} with {rec.filter.name}{maybe}",
                 detail=(
                     f"{group.calls} calls put {group.tokens:,} tokens into the context, "
-                    f"{round(group.mean):,} per call; {rec.filter.how}. Expected saving: about "
+                    f"{round(group.mean):,} per call; {how}. Expected saving: about "
                     f"{rec.saved_tokens:,} tokens a day (assumed {rec.filter.reduction:.0%}; "
                     "verified before/after once it is in place)"
                 ),
@@ -939,7 +952,7 @@ def _recommendations(
             tasks = fix.tasks or line.tasks
         else:
             title = f"Reduce {line.cause}"
-            detail = remedy(line.rule, inputs.farm, blocked is None)
+            detail = remedy(line.rule, inputs.farm, blocked is None, mode is Mode.ACT)
             if blocked is not None and fix is not None and mode is not Mode.ACT:
                 detail += f" (act mode is not available here: {md.text(blocked)})"
             tasks = line.tasks

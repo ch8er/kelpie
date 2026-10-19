@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 
@@ -67,11 +67,19 @@ def farm_facts(settings: Settings) -> FarmFacts:
     """What the farm already has, from its config: the report never advises it."""
     rules = settings.engine.rules
     needs_you = rules.get("needs_you", {})
+    approvers = needs_you.get("approvers")
     bottlenecks = rules.get("bottlenecks", {})
+    holds = [h for h in bottlenecks.get("holds", []) if isinstance(h, Mapping)]
+    held = {h.get("label") for h in holds}
+    labels = bottlenecks.get("hold_labels", [])
+    bare = {x for x in labels if isinstance(x, str)} - held if isinstance(labels, list) else set()
     return FarmFacts(
-        approvers=bool(needs_you.get("approvers") or needs_you.get("default_approver")),
-        hold_expiry=bool(bottlenecks.get("holds") or bottlenecks.get("hold_expiry")),
-        block_conditions=bool(settings.block_conditions),
+        approvers=bool(needs_you.get("default_approver")),
+        approver_roles=frozenset(approvers) if isinstance(approvers, Mapping) else frozenset(),
+        # holds entries expire (their own or the 4h default); bare labels only with hold_expiry
+        hold_expiry=bool(holds or bare) and (not bare or "hold_expiry" in bottlenecks),
+        hold_owners=bool(holds or bare) and not bare and all(h.get("owner") for h in holds),
+        block_conditions=any("block" in p.applies_to for p in settings.block_conditions),
         budgets=bool(settings.budgets.budgets),
     )
 
