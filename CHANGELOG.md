@@ -262,6 +262,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   agent-health alert, and are listed "from marker". `kelpie snooze` warns when the task is
   only parked behind a human task. In the daily report snoozed waits are their own wait
   cause, listed apart and never the biggest wait or in the cost of chaos.
+- `kelpie selftest stop --adapter hermes` runs rule 10's stop end to end on a throwaway Hermes
+  home and board, with a local mock model (zero tokens), and reports each step (#175).
 - `kelpie report` prints the daily report as Markdown, and `--send` posts the summary to the
   alert channels ([#47](https://github.com/ch8er/kelpie/pull/47), [#52](https://github.com/ch8er/kelpie/pull/52)).
 - Prometheus metrics for the engine, adapters, connectors, traces and budgets, and a
