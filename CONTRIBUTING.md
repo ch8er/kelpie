@@ -224,9 +224,9 @@ An adapter carries out what the platform allows and refuses the rest.
   both adapters do; `kelpie agent` offers only those, and the in-process executor runs no
   other kind either (a `wake` is not a `requeue` on an adapter that leaves `wake` out).
   Kinds its tasks can never draw go in `inapplicable` (the issues adapter: `stop`,
-  `wip_commit`, `wake`; it has no sessions, worktrees or parked tasks). The act checklist
-  and `kelpie status` judge each rule per adapter: another adapter carrying out an action
-  does not cover this adapter's tasks.
+  `wip_commit`, `wake`; it has no sessions, worktrees or parked tasks). `kelpie doctor` and
+  the daily report judge each rule per adapter (`act_gaps` in `src/kelpie/app.py`): another
+  adapter carrying out an action does not cover this adapter's tasks, which get alerts.
 - `stop(session_id, reason)` may return a few words on what the stop means on the platform,
   returns `ActionResult.NOTHING_TO_DO` when the session had already ended, and may raise an
   error with a `public_reason` (the only part of it a chat message shows). Hermes goes

@@ -309,6 +309,8 @@ class ReportInputs:
     stuck_check: StuckCheck | None = None
     # Rules that cannot act on this farm, with what is missing (``kelpie.app.act_blockers``).
     act_blockers: Mapping[str, str] = field(default_factory=dict)
+    # Rules that act here, but not on every adapter's tasks (``kelpie.app.act_gaps``).
+    act_gaps: Mapping[str, str] = field(default_factory=dict)
     farm: FarmFacts = UNKNOWN_FARM  # what the farm already has: advice never repeats it
     # Providers' bills against the estimate from traces (``kelpie.app.read_reconciliations``,
     # for one settled UTC day: ``kelpie.report.run.bill_days``); a string says why they
@@ -439,6 +441,7 @@ class DailyReport:
     planned: PlannedWaits | None = None  # behind work planned for later: never counted
     snoozed: SnoozedWaits | None = None  # deliberate waits a person snoozed: never chaos
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
+    act_gaps: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
     # models without a price (billed, not on a subscription), most tokens first
     unpriced_models: tuple[tuple[str | None, int], ...] = ()  # None: no model
     reconciliations: tuple[Reconciliation, ...] = ()  # as in ReportInputs
@@ -561,6 +564,7 @@ def build_report(
         ),
         bill_day=inputs.bill_day,
         act_blockers=inputs.act_blockers,
+        act_gaps=inputs.act_gaps,
     )
 
 
@@ -1233,6 +1237,8 @@ def _recommendations(
             )
             if inputs.farm.dry_run:
                 detail += " (Kelpie runs in dry-run: no rule acts until [engine] dry_run = false)"
+            if where := inputs.act_gaps.get(line.rule):
+                detail += f" (on some tasks it would alert instead: {md.text(where)})"
             tasks = fix.tasks or line.tasks
         else:
             title = f"Reduce {line.cause}"
@@ -1373,7 +1379,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     lines += _fix_lines(report.fixed, tasks) or ["Nothing this day."]
     if report.would_fix:
         lines += ["", "Would have done in act mode (observe, suggest or dry-run):", ""]
-        lines += _fix_lines(report.would_fix, tasks, report.act_blockers)
+        lines += _fix_lines(report.would_fix, tasks, report.act_blockers, report.act_gaps)
     lines += ["", "## Needs a human", ""]
     needs = _needs_lines(report, tasks)
     lines += needs or ["Nothing open."]
@@ -1708,15 +1714,21 @@ def _usd(spend: Spend, report: DailyReport) -> str:
 
 
 def _fix_lines(
-    lines: Sequence[FixLine], tasks: _TaskLinks, blockers: Mapping[str, str] | None = None
+    lines: Sequence[FixLine],
+    tasks: _TaskLinks,
+    blockers: Mapping[str, str] | None = None,
+    gaps: Mapping[str, str] | None = None,
 ) -> list[str]:
     """One line per rule and action; with ``blockers``, a rule that cannot act on this farm
-    says what is missing."""
+    says what is missing; with ``gaps``, one that acts on only some adapters' tasks says
+    where its actions would be alerts."""
     out = []
     for f in lines:
         text = f"- `{f.rule}`: {f.kind} x{f.count} {tasks(f.tasks)}".rstrip()
         if blockers and (why := blockers.get(f.rule)):
             text += f" (act mode is not available here: {md.text(why)})"
+        elif gaps and (where := gaps.get(f.rule)):
+            text += f" (on some tasks act mode would alert instead: {md.text(where)})"
         out.append(text)
     return out
 

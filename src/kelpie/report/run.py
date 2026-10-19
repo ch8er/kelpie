@@ -67,6 +67,7 @@ class ReportSources:
     block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]], matched offline
     stuck_check: StuckCheck | None = None  # rule 3's, as configured (None: its defaults)
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # rule -> what is missing
+    act_gaps: Mapping[str, str] = field(default_factory=dict)  # rule -> where it only alerts
     farm: FarmFacts = UNKNOWN_FARM  # what the farm already has (from config)
     # Providers' bills against the estimate for UTC days ``since`` to ``until``
     # (``kelpie.app.read_reconciliations``); None: no cost reports configured.
@@ -134,6 +135,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         dependencies=board.dependencies,
         stuck_check=sources.stuck_check,
         act_blockers=sources.act_blockers,
+        act_gaps=sources.act_gaps,
         farm=sources.farm,
         snoozes=snoozes,
     )

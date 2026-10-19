@@ -600,7 +600,7 @@ def test_a_rule_kelpie_can_act_with_passes_the_startup_check(tmp_path: Path, far
 
 
 def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
-    from kelpie.app import act_blockers
+    from kelpie.app import act_blockers, act_gaps
 
     hermes = load_settings(write(tmp_path, FARMS["hermes"]))
     found = {r: b.reason for r, b in act_blockers(hermes, build_adapters(hermes)).items()}
@@ -619,20 +619,30 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     found = {r: b.reason for r, b in act_blockers(both, build_adapters(both)).items()}
     assert found["stale_blocks"] == "neither Claude Code nor OpenClaw can clear blocks yet"
     assert "loop_breaker" not in found  # OpenClaw stops runs (SupportsStop, no declaration)
-    # Judged per adapter: GitHub Issues requeueing its own tasks does not let rule 1 act on
-    # Claude Code's; stop is out of reach for issue tasks, which have no sessions.
+    # Judged per adapter: GitHub Issues requeueing its own tasks does not requeue Claude
+    # Code's; such a rule can act here, but on some tasks its actions become alerts.
     issues = load_settings(write(tmp_path, FARMS["github issues"]))
     found = {r: b.reason for r, b in act_blockers(issues, build_adapters(issues)).items()}
     assert "exit_contract" not in found and "stale_blocks" not in found
-    assert found["loop_breaker"] == "GitHub Issues can't stop runs yet"  # nothing stops
+    assert found["loop_breaker"] == (
+        "no adapter here can stop runs: GitHub Issues tasks never need it"
+    )
+    assert act_gaps(issues, build_adapters(issues)) == {}
     mixed = load_settings(write(tmp_path, FARMS["claude code and github issues"]))
     found = {r: b.reason for r, b in act_blockers(mixed, build_adapters(mixed)).items()}
-    assert found["exit_contract"] == "Claude Code can't comment on tasks or requeue tasks yet"
-    assert found["stale_blocks"] == "Claude Code can't clear blocks yet"
-    assert found["dispatch_gate"] == (
-        "Claude Code can't park tasks or wake tasks yet; GitHub Issues can't park tasks yet"
-    )
+    assert "exit_contract" not in found and "stale_blocks" not in found
     assert "loop_breaker" not in found  # Claude Code stops; issue tasks have no runs
+    gaps = act_gaps(mixed, build_adapters(mixed))
+    assert gaps["exit_contract"] == "Claude Code can't comment on tasks or requeue tasks yet"
+    assert gaps["stale_blocks"] == "Claude Code can't clear blocks yet"
+    assert "dispatch_gate" not in gaps  # nothing parks here at all: a blocker, not a gap
+    assert found["dispatch_gate"] == (
+        "neither Claude Code nor GitHub Issues can park tasks or wake tasks yet"
+    )
+    hermes_cc = load_settings(write(tmp_path, FARMS["hermes and claude code"]))
+    gaps = act_gaps(hermes_cc, build_adapters(hermes_cc))
+    assert gaps["dispatch_gate"] == "Claude Code can't park tasks or wake tasks yet"
+    assert gaps["wait_condition"] == "Claude Code can't comment on tasks or wake tasks yet"
     none = load_settings(write(tmp_path, ""))
     found = {r: b.reason for r, b in act_blockers(none, build_adapters(none)).items()}
     assert found["loop_breaker"] == "no platform adapter is configured to stop runs"

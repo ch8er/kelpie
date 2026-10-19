@@ -43,6 +43,11 @@ class PlatformAdapter(Protocol):
     alive, never as dead or abandoned, until Kelpie wakes them.
 
     An action the platform does not allow raises :class:`UnsupportedAction`.
+
+    Optional class attributes (read with :func:`declared_actions` and
+    :func:`inapplicable_actions`): ``actions``, the action kinds the adapter carries out (it
+    is sent no other); ``inapplicable``, kinds its tasks can never draw (no sessions to
+    stop, no parked task to wake), so a rule's gap there is not judged a gap.
     """
 
     name: str
@@ -118,6 +123,18 @@ class SupportsClose(Protocol):
     """Optional capability: move a task to done (a parent whose subtasks are finished)."""
 
     def close(self, task_id: str, reason: str) -> None: ...
+
+
+def declared_actions(adapter: object) -> frozenset[ActionKind] | None:
+    """The action kinds ``adapter`` declares in ``actions``; None when it declares none."""
+    actions = getattr(adapter, "actions", None)
+    return frozenset(actions) if isinstance(actions, frozenset | set) else None
+
+
+def inapplicable_actions(adapter: object) -> frozenset[ActionKind]:
+    """The action kinds ``adapter``'s tasks can never draw (its ``inapplicable``)."""
+    kinds = getattr(adapter, "inapplicable", None)
+    return frozenset(kinds) if isinstance(kinds, frozenset | set) else frozenset()
 
 
 @runtime_checkable

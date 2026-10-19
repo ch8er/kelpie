@@ -378,7 +378,7 @@ def test_the_engine_routes_reassign_here(gh: FakeGitHub, pacing: Pacing) -> None
     assert ("POST", f"{ISSUE}/labels", {"labels": ["fix-me"]}) in writes(gh)
 
 
-def test_the_engine_runs_no_action_kind_the_adapter_leaves_out(
+def test_the_executor_runs_no_action_kind_the_adapter_leaves_out(
     gh: FakeGitHub, pacing: Pacing
 ) -> None:
     # Copilot holds it: a wake run as a requeue would restart it.
