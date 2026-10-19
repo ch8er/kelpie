@@ -3,7 +3,8 @@ stay out of the cost of chaos, its dollars and the headline, and are listed apar
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -12,7 +13,13 @@ from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome
 from kelpie.core.states import OpenState
-from kelpie.report.daily import ReportInputs, build_report, render_markdown, render_summary
+from kelpie.report.daily import (
+    DailyReport,
+    ReportInputs,
+    build_report,
+    render_markdown,
+    render_summary,
+)
 from kelpie.report.store import StateRow
 
 DAY = date(2026, 3, 2)
@@ -44,7 +51,7 @@ def opened(since: datetime, last: datetime) -> StateRow:
     return StateRow(state)
 
 
-def report(**kw: Any) -> Any:
+def report(**kw: Any) -> DailyReport:
     return build_report(ReportInputs(day=DAY, tz=UTC, hour_usd=20.0, **kw), sections={})
 
 
@@ -62,6 +69,7 @@ def test_planned_waits_are_listed_never_counted() -> None:
     assert r.planned.tasks == tuple(behind)
     markdown = render_markdown(r)
     assert "**Planned waits**: 144.0 agent-hours" in markdown and "not counted" in markdown
+    assert "`P-00`" in markdown
     assert "Cost of chaos: 8.0 hours lost" in markdown
     assert "Planned" not in render_summary(r) and "144" not in render_summary(r)
 
@@ -75,3 +83,56 @@ def test_only_planned_work_behind_an_inbox_costs_nothing() -> None:
     r = report(states=(opened(at(9), at(13)),), actions=(inbox(at(9), [], ["P-1", "P-2"]),))
     assert r.chaos == () and r.chaos_usd == 0
     assert r.planned is not None and r.planned.agent_hours == pytest.approx(8.0)
+
+
+def test_inboxes_add_up_and_notices_or_old_episodes_do_not() -> None:
+    other = StateRow(
+        OpenState("needs_you:unassigned", "needs_you", at(10), at(10), at(12), 0,
+                  Severity.WARNING, "s")
+    )  # fmt: skip
+    unassigned = inbox(at(10), [], ["Q-1"])
+    unassigned = replace(unassigned, params={**unassigned.params, "escalate_to": None})
+    notice = LedgerEntry(
+        at=at(11), fingerprint="g", subject="s", rule="needs_you", kind=ActionKind.ALERT,
+        mode=Mode.ACT, outcome=Outcome.ALERTED, reason="resolved",
+        params={"state": "needs_you:person-b"},
+    )  # fmt: skip
+    earlier = inbox(at(8), [], ["OLD-1", "OLD-2", "OLD-3"])  # before this episode opened
+    r = report(
+        states=(opened(at(9), at(11)), other),
+        actions=(earlier, inbox(at(9), ["A-1"], ["P-1"]), unassigned, notice),
+    )
+    assert r.planned is not None
+    assert r.planned.agent_hours == pytest.approx(1 * 2 + 1 * 2)  # person-a 09-11, unassigned
+    assert r.planned.tasks == ("P-1", "Q-1")
+    assert r.chaos_hours == pytest.approx(2.0)  # A-1 only
+    assert r.biggest_wait is None  # planned tasks never wait
+
+
+def test_a_count_without_ids_and_task_links() -> None:
+    entry = inbox(at(9), [])
+    entry = replace(entry, params={**entry.params, "planned_agent_tasks": 2})
+    r = report(states=(opened(at(9), at(10)),), actions=(entry,))
+    markdown = render_markdown(r)
+    assert r.planned is not None and r.planned.tasks == ()
+    assert "ids per alert)\n" in markdown + "\n" and "alert):" not in markdown
+    linked = report(states=(opened(at(9), at(10)),), actions=(inbox(at(9), [], ["P-1"]),))
+    assert "[P-1](https://board.example/t/P-1)" in render_markdown(
+        linked, "https://board.example/t/{id}"
+    )
+
+
+def test_an_inbox_outside_the_day_counts_nothing() -> None:
+    gone = StateRow(
+        OpenState("needs_you:person-a", "needs_you", at(1) - timedelta(days=2),
+                  at(1) - timedelta(days=2), at(1) - timedelta(days=1), 0, Severity.WARNING, "s")
+    )  # fmt: skip
+    assert report(states=(gone,), actions=(inbox(at(9), [], ["P-1"]),)).planned is None
+
+
+def test_verify_and_cost_of_chaos_never_read_planned() -> None:
+    from kelpie.report.daily import state_hours
+
+    state = opened(at(9), at(17)).state
+    entries = [inbox(at(9), ["A-1"], [f"P-{i}" for i in range(10)])]
+    assert state_hours(entries, state, at(9), at(17)) == pytest.approx(8.0)

@@ -35,6 +35,10 @@ no bill: dollars are an estimate and marked so.
 **Cost per completed task.** The day's priced spend divided by the tasks that reached
 ``done`` during the day, as the board reports them now.
 
+**Planned waits.** Agent tasks planned for later (rule 13's ``planned``, behind a person's
+open inbox) are listed under "Planned waits" in agent-hours and never counted: they have not
+started, so they do not wait.
+
 **Fixed by Kelpie.** Ledger entries of the day that an executor carried out, per rule and
 action; entries logged in observe mode or dry-run, or suggested, are listed as what Kelpie
 *would* have done in act mode. **Needs a human.** Long-lived states still open at the end
@@ -292,8 +296,9 @@ class OutageLine:
 
 @dataclass(frozen=True, slots=True)
 class PlannedWaits:
-    """Agent tasks behind work planned for later (rule 13's ``planned``): not waiting, so
-    listed and never counted as hours lost."""
+    """Agent tasks planned for later behind a person's open inbox (rule 13's ``planned``):
+    not waiting, so listed and never counted as hours lost. Planned work behind a human task
+    rule 13 does not escalate (nothing real waits on it) is not seen here."""
 
     agent_hours: float
     tasks: tuple[str, ...]
@@ -1159,11 +1164,13 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
         if len(report.stuck_idle) > _SHOWN_STUCK:
             lines.append(f"- and {len(report.stuck_idle) - _SHOWN_STUCK} more")
     if report.planned is not None:
+        listed = f": {tasks(report.planned.tasks)}" if report.planned.tasks else ""
         lines += [
             "",
-            f"**Planned waits**: {report.planned.agent_hours:.1f} agent-hours of tasks behind "
-            "work planned for later (not started yet, so not waiting; not counted in the hours "
-            f"lost): {tasks(report.planned.tasks)}",
+            f"**Planned waits**: {report.planned.agent_hours:.1f} agent-hours of agent tasks "
+            "planned for later (not started: a pre-work status or a planned label) behind a "
+            "person's open inbox; not waiting, so not counted in the hours lost (rule 13 lists "
+            f"at most 20 ids per alert){listed}",
         ]
     lines += ["", "## Spend", ""]
     note = " (as the board reports them now; adapters only look back so far)"
