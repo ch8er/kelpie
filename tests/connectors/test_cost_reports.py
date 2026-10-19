@@ -266,6 +266,12 @@ def test_openai_other_currencies_are_refused() -> None:
         ({"data": [{"starting_at": "yesterday", "results": []}]}, 200, "malformed"),
         ({"data": [{"starting_at": "2026-10-17T00:00:00Z", "results": "x"}]}, 200, "malformed"),
         ({"data": ["x"]}, 200, "malformed"),
+        ({"data": [anthropic_bucket(D1, tokens("m", 10**400))]}, 200, "malformed"),
+        ({"data": [anthropic_bucket(D1, tokens("m", "1e13"))]}, 200, "malformed"),
+        ({"data": [anthropic_bucket(D1, tokens("m", "5", currency="EUR"))]}, 200, "currency"),
+        ({"data": [], "has_more": True}, 200, "malformed"),  # more pages, no token
+        ({"data": [], "has_more": True, "next_page": 7}, 200, "malformed"),
+        (b"[" * 100_000, 200, "malformed"),  # too deep for the JSON parser
         (net.RequestError("timeout", "timed out"), 200, "timeout"),
     ],
 )
@@ -288,7 +294,7 @@ def test_source_reads_once_per_interval_and_keeps_the_last_reading(
     good = {"data": [anthropic_bucket(D2, tokens("m", "100"))], "has_more": False}
     fake = Fake(good, good, net.RequestError("connection", "connection failed (OSError)"), good)
     clock = [0.0]
-    source = CostReportSource([config(days=1)], fake, monotonic=lambda: clock[0])
+    source = CostReportSource([config(days=1)], fake, monotonic=lambda: clock[0], background=False)
     assert source.read(NOW) == (ReportedCost("p", D2, 0.0), ReportedCost("p", D2, 1.0, "m"))
     assert source.statuses()[0].ok is True and source.statuses()[0].fetched_at == NOW
     clock[0] = 60
@@ -304,7 +310,10 @@ def test_source_reads_once_per_interval_and_keeps_the_last_reading(
     status = source.statuses()[0]
     assert (status.ok, status.error, status.fetched_at) == (False, "connection", NOW)
     assert "cost report of p not read" in caplog.text and KEY not in caplog.text
-    clock[0] = 10800
+    clock[0] = 7200 + 200
+    source.read(NOW)
+    assert len(fake.calls) == 3  # a failure is retried after 5 minutes, not an hour
+    clock[0] = 7200 + 300
     source.read(NOW)
     assert source.statuses()[0].ok is True
 
@@ -316,7 +325,7 @@ def test_a_bug_in_parsing_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> Non
         raise KeyError("boom")
 
     monkeypatch.setattr(source_module, "fetch", broken)
-    source = CostReportSource([config()], Fake({}))
+    source = CostReportSource([config()], Fake({}), background=False)
     assert source.read(NOW) == () and source.statuses()[0].error == "error"
 
 
@@ -357,3 +366,69 @@ def test_store_replaces_the_days_a_reading_covers(tmp_path: Path) -> None:
     readonly = SqliteCostReports(db, readonly=True)
     assert len(readonly.read(date(2000, 1, 1))) == 1
     readonly.close()
+
+
+def test_credits_are_counted() -> None:
+    fake = Fake({"data": [anthropic_bucket(D1, tokens("m", "500"), tokens("m", "-200"))]})
+    assert fetch(config(days=2), NOW, fake)[-1] == ReportedCost("p", D1, 3.0, "m")
+
+
+@pytest.mark.parametrize(
+    "token", ["../x", "&starting_at=2000-01-01T00:00:00Z", "https://evil.test/", "a b#c"]
+)
+def test_a_page_token_stays_inside_the_query(token: str) -> None:
+    fake = Fake({"data": [], "has_more": True, "next_page": token}, {"data": [], "has_more": False})
+    fetch(config(), NOW, fake)
+    url, path, _ = fake.calls[1]
+    assert url == "https://api.example.test"
+    assert urlsplit(path).path == "/v1/organizations/cost_report"
+    assert [v for k, v in fake.query(1) if k == "page"] == [token]
+    assert [v for k, v in fake.query(1) if k == "starting_at"] == ["2026-10-12T00:00:00Z"]
+
+
+def test_api_url_path_is_a_prefix() -> None:
+    fake = Fake({"data": []})
+    fetch(replace(config(), api_url="https://gw.example.test/anthropic/"), NOW, fake)
+    url, path, _ = fake.calls[0]
+    assert url == "https://gw.example.test/anthropic/"
+    assert path.startswith("/anthropic/v1/organizations/cost_report?")
+
+
+def test_all_pages_share_one_deadline() -> None:
+    clock = [0.0]
+    timeouts: list[float] = []
+
+    class Slow(Fake):
+        def __call__(self, url: str, path: str, headers: Mapping[str, str], timeout: float,
+                     max_bytes: int = 0, read_body: bool = True, proxy: bool = False) -> net.Response:  # fmt: skip
+            timeouts.append(timeout)
+            clock[0] += 25  # each page takes 25 s
+            return super().__call__(url, path, headers, timeout)
+
+    slow = Slow({"data": [], "has_more": True, "next_page": "more"})
+    with pytest.raises(ReportError) as exc:
+        fetch(replace(config(), timeout=30.0), NOW, slow, lambda: clock[0])
+    assert exc.value.cause == "timeout"
+    assert timeouts == [30.0, 30.0, 10.0]  # the last page gets what is left of 60 s
+
+
+def test_reads_run_in_the_background() -> None:
+    import threading
+
+    release = threading.Event()
+    good = {"data": [anthropic_bucket(D2, tokens("m", "100"))], "has_more": False}
+
+    class Blocking(Fake):
+        def __call__(self, *args: Any, **kw: Any) -> net.Response:
+            release.wait(5)
+            return super().__call__(*args, **kw)
+
+    source = CostReportSource([config(days=1)], Blocking(good))
+    assert source.read(NOW) == ()  # the first read is still running: nothing yet
+    assert source.read(NOW) == ()  # not started twice
+    release.set()
+    for _ in range(200):
+        if source.read(NOW):
+            break
+        threading.Event().wait(0.01)
+    assert source.read(NOW)[-1] == ReportedCost("p", D2, 1.0, "m")

@@ -100,7 +100,7 @@ def test_the_step_stores_new_readings_only(tmp_path: Path) -> None:
 
     report = CostReportConfig("anthropic", ReportKind.ANTHROPIC, "https://api.test", "k", days=1)
     store = SqliteCostReports(tmp_path / "k.db")
-    step = CostReportStep(CostReportSource([report], get), store)
+    step = CostReportStep(CostReportSource([report], get, background=False), store)
     snap = Snapshot(now=NOW)
     assert step(snap) is snap
     assert store.read(date(2026, 1, 1)) == (ReportedCost("anthropic", date(2026, 10, 18), 0.0),)
@@ -108,13 +108,32 @@ def test_the_step_stores_new_readings_only(tmp_path: Path) -> None:
     assert len(calls) == 1  # not due again yet
 
 
-def test_connector_steps_need_the_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = replace(load_settings(write(tmp_path, CONFIG)), db_path=tmp_path / "k.db")
+def test_only_serve_reads_cost_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """kelpie why --refresh (connector_steps) never opens the database or uses the key."""
+    db = tmp_path / "k.db"
+    settings = replace(load_settings(write(tmp_path, CONFIG)), db_path=db)
     monkeypatch.delenv("KELPIE_TEST_ADMIN_KEY", raising=False)
-    with pytest.raises(ConfigError, match="is not set"):
-        connector_steps(settings, Metrics(), lambda: NOW)
-    monkeypatch.setenv("KELPIE_TEST_ADMIN_KEY", "sk-ant-admin01-x")
     steps, _ = connector_steps(settings, Metrics(), lambda: NOW)
-    assert "cost_reports" in [name for name, _ in steps]
-    offline, _ = connector_steps(settings, Metrics(), lambda: NOW, network=False)
-    assert "cost_reports" not in [name for name, _ in offline]
+    assert "cost_reports" not in [name for name, _ in steps] and not db.exists()
+    with pytest.raises(ConfigError, match="is not set"):
+        cost_report_steps(settings)
+    monkeypatch.setenv("KELPIE_TEST_ADMIN_KEY", "sk-ant-admin01-x")
+    assert [name for name, _ in cost_report_steps(settings)] == ["cost_reports"]
+
+
+def test_the_step_stores_only_providers_that_changed(tmp_path: Path) -> None:
+    class Reader:
+        costs: tuple[ReportedCost, ...] = ()
+
+        def read(self, now: datetime) -> tuple[ReportedCost, ...]:
+            return self.costs
+
+    reader = Reader()
+    store = SqliteCostReports(tmp_path / "k.db")
+    step = CostReportStep(reader, store)
+    a = ReportedCost("a", date(2026, 10, 18), 1.0)
+    reader.costs = (a,)
+    step(Snapshot(now=NOW))
+    reader.costs = (a, ReportedCost("b", date(2026, 10, 18), 2.0))
+    step(Snapshot(now=NOW))
+    assert len(store.read(date(2026, 1, 1))) == 2

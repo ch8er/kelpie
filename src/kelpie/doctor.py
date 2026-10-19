@@ -432,7 +432,9 @@ def check_cost_reports(
             continue
         try:
             costs = fetch(config, now, http_get)
-        except ReportError as exc:
+        except Exception as exc:  # a malformed answer must not crash doctor
+            if not isinstance(exc, ReportError):
+                exc = ReportError("error", f"unexpected {type(exc).__name__}")
             fix = {
                 "auth": f"${r.admin_key_env} must be an admin key with read access to costs",
                 "rate_limited": "try again in a minute",

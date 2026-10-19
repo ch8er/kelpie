@@ -32,7 +32,7 @@ from kelpie.adapters.issues.config import GitHubIssuesSettings, load_github_issu
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
-from kelpie.connectors.cost_reports import CostReportSource, CostReportsSettings, load_cost_reports
+from kelpie.connectors.cost_reports import CostReportsSettings, load_cost_reports
 from kelpie.connectors.github import (
     BlockConditionPattern,
     ConditionSync,
@@ -57,6 +57,7 @@ from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
 from kelpie.core.model import Owner, OwnerKind, ReportedCost, Snapshot, SpanKind
 from kelpie.core.ports import (
     ActionConnector,
+    CostReportReader,
     PlatformAdapter,
     ProviderReader,
     ResourceReader,
@@ -184,7 +185,8 @@ class Settings:
     @property
     def spend(self) -> SpendConfig:
         """``[spend]`` with what decides each provider's spend mode (budgets, prices)."""
-        return SpendConfig(self.spend_settings, self.budgets.prices, self.budgets.budgets)
+        reports = self.cost_reports.providers if self.cost_reports is not None else frozenset()
+        return SpendConfig(self.spend_settings, self.budgets.prices, self.budgets.budgets, reports)
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -253,8 +255,6 @@ def load_settings(path: Path | None) -> Settings:
     if budgets.budgets and not traces.enabled:
         raise ConfigError("[[budgets]] read spend from traces: they need [traces] enabled")
     github, block_conditions, human_tasks, llm_quotas, cost_reports = _load_connectors(data)
-    if cost_reports is not None:
-        spend = replace(spend, cost_reports=cost_reports.providers)
     try:
         report = load_report(data.get("report"))
         alerts = load_alerts(data.get("alerts"), report.task_url)
@@ -1254,6 +1254,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
     enrich, connectors = connector_steps(settings, metrics, clock)
+    enrich += cost_report_steps(settings)  # kelpie serve only: it reads with the admin key
     engine = Engine(
         loaded.rules,
         adapters=adapters,
@@ -1447,27 +1448,32 @@ def connector_steps(
     if not network:
         return steps, []
     github_steps, connectors = _github_steps(settings, metrics, clock)
-    return steps + github_steps + _cost_report_steps(settings), connectors
+    return steps + github_steps, connectors
 
 
 class CostReportStep:
-    """Reads the providers' cost reports that are due (the source keeps the interval) and
-    stores new figures for the report and reconciliation; the snapshot passes unchanged."""
+    """Takes the providers' latest cost report figures (the reader keeps the interval and
+    reads in the background) and stores each provider's when they change, for the report
+    and reconciliation; the snapshot passes unchanged."""
 
-    def __init__(self, source: CostReportSource, store: SqliteCostReports | None) -> None:
+    def __init__(self, source: CostReportReader, store: SqliteCostReports | None) -> None:
         self.source = source
         self.store = store
-        self._stored: tuple[ReportedCost, ...] = ()
+        self._stored: dict[str, tuple[ReportedCost, ...]] = {}
 
     def __call__(self, snapshot: Snapshot) -> Snapshot:
-        costs = tuple(self.source.read(snapshot.now))
-        if self.store is not None and costs != self._stored:
-            self.store.replace(costs, snapshot.now)
-            self._stored = costs
+        by_provider: dict[str, list[ReportedCost]] = {}
+        for c in self.source.read(snapshot.now):
+            by_provider.setdefault(c.provider, []).append(c)
+        for provider, rows in by_provider.items():
+            costs = tuple(rows)
+            if self.store is not None and costs != self._stored.get(provider):
+                self.store.replace(costs, snapshot.now)
+                self._stored[provider] = costs
         return snapshot
 
 
-def _cost_report_steps(settings: Settings) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+def cost_report_steps(settings: Settings) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
     reports = settings.cost_reports
     if reports is None:
         return []
@@ -2086,7 +2092,8 @@ def _cost_reports_status(settings: Settings) -> str:
         try:
             r.admin_key()
         except ValueError as exc:
-            return f"NOT ready: {exc}"
+            parts.append(f"{r.provider} NOT ready: {exc}")
+            continue
         parts.append(
             f"{r.provider} ({r.kind} {r.api_url}, every {_span(r.interval)}, last {r.days} days)"
         )
