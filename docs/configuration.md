@@ -541,9 +541,10 @@ resolved when empty. `escalate_to` names the person; delivery goes to the alert 
 like every other alert. The daily report heads "Needs a human" with each open inbox, and
 counts the agent-hours of the agent tasks waiting on each person in its cost of chaos
 ("agents waiting on people"), from the count every alert reports (`waiting_agent_tasks`,
-re-sampled about hourly while the inbox stays open). Planned work behind the person's human
-tasks (incident 20) is apart and never counted there: `planned_agent_tasks` and `planned`
-(task ids; rule 6's human-gate alerts carry `planned_agent_tasks` too). This
+re-sampled about hourly while the inbox stays open). Planned work behind the listed human
+tasks (incident 20) is apart and not counted there: `planned_agent_tasks` and `planned` (the
+first planned agent task on each dependency path, held ones included; at most 20 ids).
+Rule 6's human-gate alerts carry `planned_agent_tasks` too. This
 rule owns escalating human work; rule 6 keeps the farm-level alert (free slots, only human
 tasks ready) and escalates single human gates only with `escalate_human_gates = true`.
 

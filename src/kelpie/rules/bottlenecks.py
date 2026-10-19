@@ -385,6 +385,8 @@ def human_gates(snapshot: Snapshot, planned_labels: Collection[str] = ()) -> lis
     (they were started and wait on it explicitly), not those that merely depend on it: it
     is not the person's to do yet. Agent tasks are open tasks not owned by a human. Labels
     of linked PRs count when the caller applied :func:`with_pr_labels` (both rules do).
+    ``HumanGate.planned`` lists the planned agent tasks where the walk stopped (the first
+    planned task on each path).
     """
     humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
     by_id = {t.id: t for t in snapshot.tasks if not t.status.is_terminal}

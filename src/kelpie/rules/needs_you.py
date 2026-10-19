@@ -50,9 +50,12 @@ again when the list changes or at the escalation thresholds, resolved when it is
 Severity is ``critical`` once the person's total cost reaches ``critical_after_hours``
 (24), else ``warning``. Every escalation also carries ``waiting_agent_tasks``, how many agent
 tasks wait on the person right now, and ``waiting``, their ids (at most 20): the daily
-report integrates the count over the day as agent-hours waiting on people. Planned work
-behind the person's human tasks (incident 20) is apart: ``planned_agent_tasks`` and
-``planned`` (at most 20 ids), which the report shows uncounted.
+report integrates the count over the day as agent-hours waiting on people. Planned work is
+apart (incident 20): ``planned_agent_tasks`` and ``planned`` (at most 20 ids) name the first
+planned agent task on each dependency path behind the listed human tasks (held tasks
+included: hold labels are planned labels), not what waits behind them, and nothing for a
+human task that is not in the inbox. Like ``waiting``, a task behind two people's tasks is
+in both escalations: sum across people by id.
 
 The state's key is the person's list of task ids, so any change to it, an item added or
 one done, is announced as "changed" with the new list; an emptied inbox resolves.
@@ -95,9 +98,10 @@ from kelpie.rules.bottlenecks import (
 )
 
 NAME = "needs_you"
-# Params every escalation carries for planned work behind the person's human tasks
-# (incident 20): not waiting on them, so outside ``waiting``. The daily report imports these.
-PLANNED = "planned"
+# Params every escalation carries for planned work behind the person's listed human tasks
+# (incident 20): not waiting on them, so outside ``waiting``; for the daily report to import.
+# (Not ``PLANNED``: ``kelpie.rules.PLANNED`` is the list of planned rules.)
+PLANNED_TASKS = "planned"
 UNASSIGNED = "unassigned"
 DEFAULT_APPROVAL_REASONS = ("waiting_human", "needs_input", "approval")
 TRANSIENT = re.compile(r"waiting_human:\s*transient\b")
@@ -313,7 +317,7 @@ class NeedsYou:
                 "waiting": waiting[: _SHOWN * 4],
                 # planned work behind the person's tasks: not waiting, reported apart
                 PLANNED_AGENT_TASKS: len(planned),
-                PLANNED: planned[: _SHOWN * 4],
+                PLANNED_TASKS: planned[: _SHOWN * 4],
                 "cost_hours": round(total, 1),
                 "items": [
                     {

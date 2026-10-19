@@ -1417,3 +1417,15 @@ def test_build_planned_labels() -> None:
     assert build({"planned_labels": ["later"]}).planned_labels == {"later"}
     with pytest.raises(ValueError, match="planned_labels must be a list"):
         build({"planned_labels": "later"})
+
+
+def test_a_gate_escalation_counts_its_planned_work() -> None:
+    from dataclasses import replace
+
+    planned = replace(task("P"), prework=True)
+    tasks = (human("H"), task("A", estimate=H), task("B"), task("C"), planned)
+    deps = (*chain("H", "A", "B", "C"), Dependency("P", "H"))
+    escalations = [
+        a for a in run(Snapshot(NOW, tasks, HUMANS, deps), GATES) if a.kind is ActionKind.ESCALATE
+    ]
+    assert [e.params["planned_agent_tasks"] for e in escalations] == [1]
