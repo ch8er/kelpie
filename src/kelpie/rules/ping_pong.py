@@ -23,6 +23,7 @@ from typing import Any
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import OwnerKind, Return, Snapshot, Task
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params, count
 
 NAME = "ping_pong"
 
@@ -99,6 +100,11 @@ class PingPong:
                     {"at": r.at.isoformat(), "reason": r.reason, "category": r.category}
                     for r in reviews
                 ],
+                **alert_params(
+                    f"Review ping-pong on {task.id}: {count(rounds, 'round')} (limit "
+                    f"{self.max_review_rounds})",
+                    "Stop the loop and decide: accept, rescope or reassign the task",
+                ),
             },
         )
 

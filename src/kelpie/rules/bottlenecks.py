@@ -110,6 +110,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import ConditionKind, OwnerKind, PullRequest, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._tasks import (
     is_live,
     labels_list,
@@ -555,6 +556,10 @@ class Bottlenecks:
                     "idle_roles": idle_roles,
                     "idle_agents": idle_agents,
                     "recommendation": "parallelize",
+                    **alert_params(
+                        f"{count(len(idle_agents), 'idle agent')} while the work is one chain "
+                        f"of {path.length} tasks"
+                    ),
                 },
             )
         ]
@@ -600,6 +605,11 @@ class Bottlenecks:
                         "idle_roles": helpers,
                         "idle_agents": idle_agents,
                         "recommendation": "prioritize" if full else "rebalance",
+                        **alert_params(
+                            f"Role '{role}' is the bottleneck: "
+                            f"{count(len(load.queue), 'task')} queued, "
+                            f"{count(len(idle_agents), 'agent')} of other roles idle"
+                        ),
                     },
                 )
             )
@@ -733,6 +743,17 @@ class Bottlenecks:
                         if self.ready_is_queued or stuck
                         else {}
                     ),
+                    **alert_params(
+                        f"{count(len(idle), 'agent')} idle while "
+                        + (
+                            f"{count(len(work), 'queued task')} and "
+                            f"{count(len(prs), 'mergeable PR')} wait"
+                            if work and prs
+                            else count(len(work), "queued task", "wait")
+                            if work
+                            else count(len(prs), "mergeable PR", "wait")
+                        )
+                    ),
                 },
             )
         ]
@@ -824,6 +845,9 @@ class Bottlenecks:
                         "expires_after_minutes": int(expiry.total_seconds() // 60),
                         "idle_agents": idle,
                         "idle_agent_minutes": idle_minutes,
+                        **alert_params(
+                            f"Hold '{label}' looks forgotten: nothing moved for {_human(age)}"
+                        ),
                     },
                 )
             )
@@ -896,6 +920,10 @@ class Bottlenecks:
                     PLANNED_AGENT_TASKS: len({t for g in gates for t in g.planned}),
                     "ready_human_tasks": ready_human,
                     "recommendation": "unblock_human_tasks",
+                    **alert_params(
+                        f"Human tasks gate {count(len(behind), 'agent task')} while "
+                        f"{count(len(idle), 'agent', 'sit')} idle"
+                    ),
                 },
             )
         ]
@@ -929,6 +957,11 @@ class Bottlenecks:
                         "blocked_tasks": list(gate.behind[: _SHOWN * 2]),
                         "agent_hours": hours,
                         PLANNED_AGENT_TASKS: len(gate.planned),
+                        **alert_params(
+                            f"Human task {t.id} gates {count(len(gate.behind), 'agent task')}",
+                            "Do it first, or remove the link if the agent work does not need it",
+                            len(gate.behind),
+                        ),
                     },
                 )
             )

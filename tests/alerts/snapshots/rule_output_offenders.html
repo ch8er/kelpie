@@ -1,0 +1,4 @@
+🟡 <b>`tool:read_file` floods the ops context: 6,100 tokens per call</b>
+
+Whoever owns the ops instructions: `tool:read_file` floods the ops context, 6,100 tokens per call on average over 9 calls, above the threshold on 3 days. Add to the ops instructions: read a line range or search the file instead of returning it whole. Estimated saving: about 27,450 tokens; the daily report checks it before/after.
+Rule: <code>output_offenders</code>

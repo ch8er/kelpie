@@ -1,0 +1,4 @@
+🔴 LLM provider provider-main has no quota left: 2 agent tasks stuck
+
+LLM provider provider-main has no quota left until 2026-03-02T21:00:00+00:00 (in 3h). 2 agent task(s) that use it cannot make progress: T-601, T-602. Run fewer agents on it at once or move heavy work past the reset.
+Rule: resources

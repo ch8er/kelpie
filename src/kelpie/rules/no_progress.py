@@ -42,6 +42,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Session, Snapshot
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params
 from kelpie.rules._tokens import span_index, tokens_since
 
 NAME = "no_progress"
@@ -91,6 +92,10 @@ class NoProgress:
                 "tokens": tokens,
                 "window": window,
                 "recommendations": list(RECOMMENDATIONS),
+                **alert_params(
+                    f"No progress on {session.task_id}: {tokens:,} tokens in {window}",
+                    "Check whether the session is stuck before it spends more",
+                ),
             },
             key=f"{NAME}:{session.id}:{stalled_since.isoformat()}",
             state=f"{NAME}:{session.id}",

@@ -208,6 +208,17 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - The daily report's "agents waiting on people" no longer counts an agent task that also
   waits on a PR or CI first: rule 13 does not count it as waiting on the person's task,
   nor in that person's cost of delay ([#169](https://github.com/ch8er/kelpie/issues/169)).
+- Each rule's alert opens with a short line of its own ("Runaway run on t_loop: 12 identical
+  consecutive `heartbeat_check` calls") instead of the reason's first sentence, cut at 140
+  characters and repeated in "Why"; an alert about one task adds what a person should do
+  ("Needed: Stop the run if it is still going, then check the task"; left out once Kelpie
+  did it in act mode) and, where the rule knows it, how many tasks wait behind it
+  ("Blocking: 2 tasks", counted as rules 2, 4 and 13 count them). A headline longer than
+  100 characters is cut at a word, never inside a quote. The reason stays whole under it as
+  "Why", also when a task link is set, and is unchanged in the ledger and the report. These
+  lines are the rule's English: `[alerts] language` translates Kelpie's fixed words only.
+  Every rule but `stale_blocks` and `needs_you` so far
+  ([#169](https://github.com/ch8er/kelpie/issues/169)).
 
 #### Operations
 

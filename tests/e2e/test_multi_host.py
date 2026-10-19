@@ -71,7 +71,7 @@ def test_an_action_is_routed_to_the_host_that_owns_the_task(hosts: MultiHostFarm
 
     wait_for("the stop", lambda: laptop.board.get("t_loop").status == "blocked", timeout=30)
     message = hosts.wait_message("loop_breaker", "laptop:t_loop")
-    assert message.startswith("\U0001f534 Runaway run: ")
+    assert message.startswith("\U0001f534 Runaway run on laptop:t_loop: ")
     assert " · laptop:t_loop" in message
     assert f"Stopped run laptop:hermes-run-{loop}" in message
     kelpie.wait_ticks(3)  # a stopped run is not stopped again; the healthy one never is

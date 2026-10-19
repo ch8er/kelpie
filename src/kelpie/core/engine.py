@@ -577,7 +577,13 @@ class Engine:
             if any(not executed for k in keys for _, executed, _, _ in self._held.get(k, ())):
                 # It carries a failure: that needs a human, whatever the alert's severity.
                 action = replace(action, severity=_higher(action.severity, _NEEDS_HUMAN))
-            if not self._alert(action, snapshot, did=" ".join(lines) or None):
+            # Done only when every announced effect was carried out: one with nothing held
+            # (deferred, failed with retries left, suppressed) is still to do.
+            done = bool(keys) and all(
+                (held := self._held.get(k)) and all(kind is Did.DONE for _, _, kind, _ in held)
+                for k in keys
+            )
+            if not self._alert(action, snapshot, did=" ".join(lines) or None, effects_done=done):
                 return Outcome.DROPPED
             self._told.update(k for k in keys if k in self._lines)
             return Outcome.ALERTED
@@ -643,11 +649,13 @@ class Engine:
         executed: bool = True,
         kind: Did | None = None,
         did: str | None = None,
+        effects_done: bool = False,
     ) -> bool:
         """Send ``action`` to a human. Return False if there is no alerter to send it to.
         ``kind`` is what Kelpie did when that is more than telling a human (suggested, done,
         failed); an action that was not executed counts as ``Did.NOT_EXECUTED`` unless it
-        failed."""
+        failed. ``effects_done``: the effects the alert announces were all carried out, so
+        it asks nobody to do them (see :func:`alert_items`)."""
         if self.alerter is None:
             log.warning("no alerter configured; dropped: %s", action)
             return False
@@ -669,7 +677,7 @@ class Engine:
                 did_text=did,
                 age=None if note is None else note.age,
                 headline=_headline(action),
-                items=alert_items(action, snapshot),
+                items=alert_items(action, snapshot, effects_done=effects_done),
             )
         )
         return True
@@ -744,13 +752,22 @@ def _headline(action: Action) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def alert_items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
+def alert_items(
+    action: Action, snapshot: Snapshot, *, effects_done: bool = False
+) -> tuple[AlertItem, ...]:
     """The tasks an alert is about: ``params.items`` (mappings with ``task_id`` and optional
     ``title``, ``needed``, ``since`` and ``blocking``; other keys are the rule's own and are
     ignored; malformed entries are skipped), else the action's own task. Titles come from
     the entry, else the snapshot; ages are counted to ``snapshot.now``. Only the actions of
-    the current tick are rendered, never ledger rows. Pure, and never raises on a rule's
-    params."""
+    the current tick are rendered, never ledger rows. With ``effects_done`` (the alert
+    announces effects Kelpie carried out: a stop, a close) no item says what is needed: the
+    rule's ask is what Kelpie already did; a suggested, failed or not executed effect keeps
+    it. Pure, and never raises on a rule's params."""
+    items = _items(action, snapshot)
+    return tuple(replace(i, needed=None) for i in items) if effects_done else items
+
+
+def _items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
     raw = action.params.get("items")
     if isinstance(raw, list):
         items = tuple(i for e in raw if (i := _item(e, snapshot)) is not None)

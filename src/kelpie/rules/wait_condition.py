@@ -34,6 +34,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params
 from kelpie.rules._calls import (
     CallKey,
     call_key,
@@ -111,7 +112,21 @@ class WaitCondition:
                 key=f"no-condition:{task.id}:{since}",
                 state=f"{NAME}:{task.id}:{since}",
                 since=task.status_since,
-                params={"stuck_ids": stuck},
+                params={
+                    "stuck_ids": stuck,
+                    **alert_params(
+                        f"Nothing will wake {task.id}: "
+                        + (
+                            f"its condition {missing} is not visible"
+                            if missing
+                            else "no condition registered"
+                        ),
+                        "Fix the condition the task points at, or move the task on"
+                        if missing
+                        else "Register a condition for the task, or move it on",
+                        len(stuck),
+                    ),
+                },
                 about_wait=not missing,  # unexplained, not broken: a CI outage may explain it
             )
             return
@@ -128,7 +143,20 @@ class WaitCondition:
                 key=f"dead-end:{task.id}:{since}",
                 state=f"{NAME}:{task.id}:{since}",
                 since=task.status_since,
-                params={"ended_conditions": [c.id for c in ended], "stuck_ids": stuck},
+                params={
+                    "ended_conditions": [c.id for c in ended],
+                    "stuck_ids": stuck,
+                    **alert_params(
+                        f"Nothing will wake {task.id}: "
+                        + (
+                            f"its condition {ended[0].id} can never be met"
+                            if len(ended) == 1
+                            else f"{len(ended)} of its conditions can never be met"
+                        ),
+                        "Replace the condition, or move the task on",
+                        len(stuck),
+                    ),
+                },
             )
             return
         if all(
@@ -157,7 +185,15 @@ class WaitCondition:
                 key=f"overdue:{task.id}:{since}",
                 state=f"{NAME}:{task.id}:{since}",
                 since=task.status_since,
-                params={"pending_conditions": [c.id for c in pending]},
+                params={
+                    "pending_conditions": [c.id for c in pending],
+                    **alert_params(
+                        f"{task.id} has waited {_hours(waited)} for its condition"
+                        + ("s" if len(pending) > 1 else ""),
+                        "Check why the condition has not cleared",
+                        len(behind(task.id)),
+                    ),
+                },
                 about_wait=True,  # a CI outage that explains the wait folds it
             )
 

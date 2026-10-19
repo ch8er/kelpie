@@ -326,6 +326,9 @@ def test_overloaded_role_with_idle_roles_elsewhere_alerts() -> None:
         "idle_roles": ["developer"],
         "idle_agents": ["dev-1", "dev-2"],
         "recommendation": "rebalance",
+        "headline": (
+            "Role 'reviewer' is the bottleneck: 3 tasks queued, 2 agents of other roles idle"
+        ),
     }
     assert "'reviewer' is the bottleneck" in action.reason and "rebalanc" in action.reason
     assert action.state == action.key == "bottlenecks:overloaded:reviewer"
@@ -595,6 +598,7 @@ def test_idle_agents_with_old_ready_work_alert_dispatch() -> None:
         "ready_count": 2,
         "oldest_wait_minutes": 45,
         "likely_cause": "dispatch",
+        "headline": "1 agent idle while 2 queued tasks wait",
     }
     assert "dispatcher" in action.reason
 
@@ -690,6 +694,7 @@ def test_hold_past_its_expiry_alerts_with_owner_and_idle_cost() -> None:
         "expires_after_minutes": 120,
         "idle_agents": ["d1", "d2"],
         "idle_agent_minutes": 60 + 30,  # d1 idle since the expiry, d2 since its session ended
+        "headline": "Hold 'merge-hold' looks forgotten: nothing moved for 3h",
     }
     assert "Owner: lead." in action.reason and "past its expected 2h" in action.reason
     assert "Meanwhile 2 agent(s) sit idle (d1, d2)" in action.reason
@@ -784,6 +789,9 @@ def test_gate_with_enough_work_behind_is_escalated_to_its_owner() -> None:
         "blocked_tasks": ["A", "B", "C"],
         "agent_hours": 1.5,
         "planned_agent_tasks": 0,
+        "headline": "Human task H gates 3 agent tasks",
+        "needed": "Do it first, or remove the link if the agent work does not need it",
+        "blocking": 3,
     }
     assert "does not change dependencies" in esc.reason and "1h 30m of agent work" in esc.reason
     rule = Bottlenecks(human_gate_min_tasks=4, escalate_human_gates=True)
@@ -837,6 +845,7 @@ def test_idle_agents_and_only_human_tasks_ready_alert() -> None:
         "planned_agent_tasks": 0,
         "ready_human_tasks": ["H", "LONE"],
         "recommendation": "unblock_human_tasks",
+        "headline": "Human tasks gate 2 agent tasks while 2 agents sit idle",
     }
     assert "2 of 4 agent slot(s) running" in alert.reason
 

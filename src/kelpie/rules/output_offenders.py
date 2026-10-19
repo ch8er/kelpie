@@ -31,6 +31,7 @@ from typing import Any
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import OutputOffender, Snapshot
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params
 
 NAME = "output_offenders"
 SAFE_NAME = re.compile(r"[\w.:/+-]{1,64}", re.ASCII)
@@ -75,6 +76,15 @@ class OutputOffenders:
                 "mean_tokens": o.mean_tokens,
                 "saved_tokens": o.saved_tokens,
                 "tasks": list(o.tasks[:10]),
+                # An alert's layout; a comment on the task is the reason alone.
+                **(
+                    {}
+                    if task
+                    else alert_params(
+                        f"`{command}` floods the {role} context: "
+                        f"{o.mean_tokens:,.0f} tokens per call"
+                    )
+                ),
             },
         )
 

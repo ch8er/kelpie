@@ -1,0 +1,62 @@
+{
+  "text": "🟡 Flaky test LoginTests.testSessionTimeout sent 2 tasks back\n\nTest LoginTests.testSessionTimeout sent 2 different tasks back in the last 24h (T-1821, T-1822): it fails other tasks' work, not only its own. Fix or quarantine it before more PRs are returned for it.\nRule: return_causes",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Flaky test LoginTests.testSessionTimeout sent 2 tasks back",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Test LoginTests.testSessionTimeout sent 2 different tasks back in the last 24h (T-1821, T-1822): it fails other tasks' work, not only its own. Fix or quarantine it before more PRs are returned for it."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "return_causes",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

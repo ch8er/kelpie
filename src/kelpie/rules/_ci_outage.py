@@ -72,6 +72,7 @@ from kelpie.core.model import (
     Status,
     Task,
 )
+from kelpie.rules._alerts import alert_params, count
 
 MAX_LISTED = 10  # PRs and tasks named in the alert text
 UNSURE_FACTOR = 2  # change requests needed, in multiples of min_prs, without evidence
@@ -302,7 +303,12 @@ def _alert(
         key=state,
         state=state,
         since=since,
-        params=outage.to_params(),
+        params={
+            **outage.to_params(),
+            **alert_params(
+                f"CI outage at {outage.signature}: {count(len(changes), 'change')} failing"
+            ),
+        },
     )
 
 

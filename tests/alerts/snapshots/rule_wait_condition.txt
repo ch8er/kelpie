@@ -1,0 +1,7 @@
+🟡 Nothing will wake T-1014: no condition registered
+
+1. Update changelog — 1.0 h · T-1014
+   Needed: Register a condition for the task, or move it on
+   Blocking: none · Open task: https://board.example.org/tasks/T-1014
+Why: Task T-1014 is waiting without any registered condition, so nothing will ever wake it.
+Rule: wait_condition

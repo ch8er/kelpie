@@ -70,6 +70,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import OwnerKind, Resource, ResourceKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._tasks import responsible
 
 NAME = "resources"
@@ -256,6 +257,7 @@ class Resources:
                 "resource": r.name,
                 "kind": "disk_full",
                 **_forecast_params(c),
+                **alert_params(f"Disk {r.name} fills up in about {_hours(c.hours)}"),
             },
         )
 
@@ -367,6 +369,7 @@ class Resources:
                 "unit": r.unit,
                 "threshold": limit,
                 **(_forecast_params(forecast) if forecast is not None else {}),
+                **alert_params(_headline(f)),
             },
         )
 
@@ -440,6 +443,10 @@ class Resources:
                 "running_heavy": running,
                 "queued_heavy": queued,
                 "worst_resource": worst.resource.name,
+                **alert_params(
+                    f"Host {host} overloaded: {count(len(running), 'heavy task')} at once "
+                    f"(limit {limit})"
+                ),
             },
         )
 
@@ -464,6 +471,10 @@ class Resources:
                 "running_heavy": running,
                 "queued_heavy": queued,
                 "overloaded_hosts": loaded,
+                **alert_params(
+                    f"{count(len(running), 'heavy task')} at once while "
+                    f"{count(len(loaded), 'host', 'are')} overloaded"
+                ),
             },
         )
 
@@ -585,6 +596,16 @@ class Resources:
             + (" or move heavy work past the reset." if exhausted or low else ".")
         )
         state = f"{NAME}:llm_quota:{q.name}"
+        if exhausted:
+            stuck = f": {count(len(blocked), 'agent task')} stuck" if blocked else ""
+            headline = f"LLM provider {q.name} has no quota left{stuck}"
+        elif low and share is not None:
+            headline = f"LLM provider {q.name} has {_pct(share)} of its quota left"
+        else:
+            headline = (
+                f"LLM provider {q.name} hit its limit {q.events + q.seen} times in "
+                f"{_duration(self.rate_limit_window)}"
+            )
         return Action(
             ActionKind.ALERT,
             NAME,
@@ -601,6 +622,7 @@ class Resources:
                 "exhausted": exhausted,
                 "limit_hits": q.events + q.seen,
                 "blocked_tasks": blocked,
+                **alert_params(headline),
             },
         )
 
@@ -613,18 +635,21 @@ class Resources:
                 f"LLM provider {c.name} rejected its key (expired or revoked): agent sessions "
                 "that use it fail at startup until someone renews the key."
             )
+            headline = f"LLM provider {c.name} rejected its key"
         elif c.expires_at is not None and c.expires_at <= now:
             severity = Severity.CRITICAL
             reason = (
                 f"Credential {c.name}{where} expired {_duration(now - c.expires_at)} ago: "
                 "new agent sessions that use it fail at startup until someone signs in again."
             )
+            headline = f"Credential {c.name}{where} expired"
         elif c.expires_at is not None and c.expires_at - now <= self.auth_expiry_warning:
             severity = Severity.WARNING
             reason = (
                 f"Credential {c.name}{where} expires in {_duration(c.expires_at - now)} "
                 f"({c.expires_at.isoformat()}); renew it before agent sessions start failing."
             )
+            headline = f"Credential {c.name}{where} expires in {_duration(c.expires_at - now)}"
         else:
             return None
         blocked = self._users(c.name, snapshot) if severity is Severity.CRITICAL else []
@@ -644,6 +669,7 @@ class Resources:
                 "rejected": c.rejected,
                 "expires_at": c.expires_at.isoformat() if c.expires_at else None,
                 "blocked_tasks": blocked,
+                **alert_params(headline),
             },
         )
 
@@ -740,6 +766,16 @@ def _describe(f: Finding) -> str:
             return f"{host} runs {_pct(f.utilization)} of its process limit{amount}"
         case _:
             return f"{r.kind} {r.name} is at {_pct(f.utilization)}"
+
+
+def _headline(f: Finding) -> str:
+    """A reading as a headline: "Memory on host-a at 93%", "Disk host-a:/ at 91%"."""
+    r = f.resource
+    level = (
+        f"{f.utilization:.1f}x its cores" if r.kind is ResourceKind.LOAD else _pct(f.utilization)
+    )
+    subject = _subject(r.kind, r.name)
+    return f"{subject[:1].upper()}{subject[1:]} at {level}"
 
 
 def _subject(kind: ResourceKind, name: str) -> str:

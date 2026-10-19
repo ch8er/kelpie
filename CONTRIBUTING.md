@@ -51,6 +51,12 @@ These are non-negotiable; reviews will block on them.
    defaults, not module globals.
 2. Emit `Action`s from `kelpie.core.actions` with a human-readable `reason`. The reason
    ends up in task comments, alerts and the daily report, so say what happened and why.
+   An alert or escalation also gets its message's own lines in its params,
+   `**alert_params(headline, needed, blocking)` from `kelpie.rules._alerts`: a short
+   headline (passed whole: the renderer cuts it), and for an alert about one task what a
+   person should do (worded so it holds whether or not Kelpie acted; the engine drops it
+   once Kelpie carried out what the alert announces) and how many tasks wait behind it,
+   counted with `kelpie.rules._chains.behind_lookup` as rules 2, 4 and 13 do.
 3. Add fixtures to `tests/fixtures/incidents/`, named after the incident they reproduce,
    e.g. `02-exit-without-status.yaml`. A fixture is a snapshot (loaded with
    `kelpie.core.serde.snapshot_from_dict`; datetimes must be timezone-aware, durations

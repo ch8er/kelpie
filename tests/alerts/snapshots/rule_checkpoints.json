@@ -1,0 +1,118 @@
+{
+  "text": "🟡 Uncommitted work left on T-1502 (app/APP-092), not saved by Kelpie\n\n1. APP-092 Login polish — 20 min · T-1502\n   Needed: Commit or drop the changes in the session's worktree by hand\n   Open task: https://board.example.org/tasks/T-1502\nWhy: Session S-1502 of agent-dev-3 on task T-1502 ('APP-092 Login polish') ended with uncommitted changes on app/APP-092, and Kelpie did not save them as a WIP commit: app/APP-092 has an open PR, example/app#402. They are only in that session's worktree: commit or drop them by hand.\nRule: checkpoints",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Uncommitted work left on T-1502 (app/APP-092), not saved by Kelpie",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "APP-092 Login polish",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 20 min · "
+            },
+            {
+              "type": "text",
+              "text": "T-1502",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Needed: "
+            },
+            {
+              "type": "text",
+              "text": "Commit or drop the changes in the session's worktree by hand"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/T-1502",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Session S-1502 of agent-dev-3 on task T-1502 ('APP-092 Login polish') ended with uncommitted changes on app/APP-092, and Kelpie did not save them as a WIP commit: app/APP-092 has an open PR, example/app#402. They are only in that session's worktree: commit or drop them by hand."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "checkpoints",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

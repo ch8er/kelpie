@@ -1,0 +1,7 @@
+🟡 Uncommitted work left on T-1502 (app/APP-092), not saved by Kelpie
+
+1. APP-092 Login polish — 20 min · T-1502
+   Needed: Commit or drop the changes in the session's worktree by hand
+   Open task: https://board.example.org/tasks/T-1502
+Why: Session S-1502 of agent-dev-3 on task T-1502 ('APP-092 Login polish') ended with uncommitted changes on app/APP-092, and Kelpie did not save them as a WIP commit: app/APP-092 has an open PR, example/app#402. They are only in that session's worktree: commit or drop them by hand.
+Rule: checkpoints

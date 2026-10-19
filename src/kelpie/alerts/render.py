@@ -17,8 +17,9 @@ Block Kit.
 The headline is the rule's own (``params.headline``), the catalog's line for a digest, or
 else the reason's first sentence. The reason is never dropped: it stands under the headline
 (labelled "Why" under a list of tasks), up to 1000 characters, unless every task says what
-it needs. The fixed words come from :mod:`kelpie.alerts.i18n`; everything else (titles, ids,
-what is needed, the reason) is the rules' and agents' text, untrusted. The layout holds it
+it needs under a headline that is not the rule's own. The fixed words come from
+:mod:`kelpie.alerts.i18n`; everything else (titles, ids, what is needed, the reason) is the
+rules' and agents' text, untrusted. The layout holds it
 cleaned (no control or invisible format characters, @mentions broken, see :func:`defang`)
 but not escaped: each renderer escapes every dynamic value for its own format and cuts
 text before escaping it, so a cut never lands inside an entity or a tag. Telegram gets
@@ -55,7 +56,7 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 MIN_AGE = timedelta(minutes=1)  # an item younger than this shows no age ("0 min" is noise)
 MAX_ITEMS = 10  # items shown; the rest are counted ("and 3 more")
 MAX_NOTE = 140  # characters of "Needed" and of a headline taken from the reason
-MAX_HEADLINE = 200
+MAX_HEADLINE = 100  # a rule's own headline (kelpie.rules._alerts)
 MAX_TITLE = 120
 MAX_ID = 100
 MAX_REASON = 1000  # characters of the reason shown
@@ -218,9 +219,11 @@ def layout(event: AlertEvent, settings: RenderSettings = DEFAULT_RENDERING) -> L
         rest = reason if left is None else left  # a cut headline: the whole reason is needed
     # What is needed stands in for the reason only when every task says what it needs, in
     # full, the task link leads to the rest, and the headline is not a cut of the reason.
+    # Under a rule's own headline the reason is the rule's account, which no task holds.
     replaced = (
         bool(event.items)
         and not cut
+        and not (event.headline and _flat(defang(event.headline)))
         and settings.task_url is not None
         and all(i.needed and not _shortened(i.needed) for i in event.items)
     )
@@ -267,7 +270,7 @@ def _headline(event: AlertEvent, lang: str) -> str | None:
     (suggested, done, failed) say what was done in the reason's own words."""
     own = _flat(defang(event.headline)) if event.headline else ""
     if own:  # made only of invisible characters, it is no headline
-        return _cut_words(own, MAX_HEADLINE)
+        return _cut_outside_quotes(own, MAX_HEADLINE)
     key = f"headline.{event.rule}"
     digest = len(event.items) > 1 or (bool(event.items) and i18n.has(lang, f"{key}.digest"))
     if not (event.did is Did.NOTIFIED and event.rule and digest and i18n.has(lang, key)):
@@ -425,20 +428,23 @@ QUOTE_ROOM = 30  # a quote opening this far before the limit is cut inside and c
 
 
 def _cut_outside_quotes(text: str, limit: int, close: bool = False) -> str:
-    """``_cut_words``, never ending inside an open quote: the cut moves back to before it.
-    With ``close`` (the "Needed" line, where the quote is often the ask itself), a quote
-    that opens at least ``QUOTE_ROOM`` characters before the limit is cut inside at a word
-    boundary and closed instead ("«Please enable R2 through…»")."""
+    """``_cut_words``, never ending inside an open quote: the cut moves back to before it,
+    unless that would leave less than 20 characters. With ``close`` (the "Needed" line,
+    where the quote is often the ask itself), a quote that opens at least ``QUOTE_ROOM``
+    characters before the limit is cut inside at a word boundary and closed instead
+    ("«Please enable R2 through…»"), as is one that opens too early to cut before."""
+    if len(text) <= limit:
+        return text
     short = _cut_words(text, limit)
     opened = _open_quotes(short[:-1])  # the cut ends in "…"
     if not opened:
         return short
     start = opened[0][1]
-    if close and start <= limit - QUOTE_ROOM:
+    head = text[:start].rstrip(" ,;:")
+    if (close and start <= limit - QUOTE_ROOM) or len(head) < 20:
         inner = _cut_words(text, limit - len(opened))
         return inner + "".join(closer for closer, _ in reversed(_open_quotes(inner[:-1])))
-    head = text[:start].rstrip(" ,;:")
-    return head + "…" if len(head) >= 20 else short
+    return head + "…"
 
 
 def _shortened(needed: str) -> bool:

@@ -67,6 +67,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Return, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params, count
 
 NAME = "return_causes"
 CONFLICT = "merge_conflict"
@@ -251,7 +252,12 @@ class ReturnCauses:
             severity=Severity.WARNING,
             key=f"{NAME}:flaky:{test}",
             state=f"{NAME}:flaky:{test}",
-            params={"finding": "flaky_test", "test": test, "tasks": tasks},
+            params={
+                "finding": "flaky_test",
+                "test": test,
+                "tasks": tasks,
+                **alert_params(f"Flaky test {test} sent {count(len(tasks), 'task')} back"),
+            },
         )
 
     def _causes(
@@ -366,6 +372,10 @@ class ReturnCauses:
                 "conflicts": conflicts,
                 "shares": shares,
                 "window_minutes": int(self.window.total_seconds() // 60),
+                **alert_params(
+                    f"Merge conflicts concentrate on {hot[0]}"
+                    + (f" and {count(len(hot) - 1, 'more file')}" if len(hot) > 1 else "")
+                ),
             },
         )
 
@@ -397,6 +407,10 @@ class ReturnCauses:
                 "returns": total,
                 "shares": shares,
                 "window_minutes": int(self.window.total_seconds() // 60),
+                **alert_params(
+                    f"Top cause of task returns: {_label(cause)} "
+                    f"({round(100 * n / total)}% of {total})"
+                ),
             },
         )
 

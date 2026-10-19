@@ -1,0 +1,62 @@
+{
+  "text": "🟡 CI outage at .github/workflows/ci.yml &gt; build &gt; Select toolchain: 5 changes failing\n\nCI outage since 2026-03-02 01:43 UTC: 5 change(s) in example/mobile fail at .github/workflows/ci.yml &gt; build &gt; Select toolchain on mac-runner-1, macOS, self-hosted, and nothing has passed that job since: example/mobile#21, example/mobile#22, example/mobile#23, example/mobile#24. The cause is shared, not each change's own: the CI (toolchain, runner, service) or the base they build on. Check one failing log and fix it there. 3 task(s) wait on it: T-201, T-202, T-210.\nRule: ci_economy",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "CI outage at .github/workflows/ci.yml > build > Select toolchain: 5 changes failing",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "CI outage since 2026-03-02 01:43 UTC: 5 change(s) in example/mobile fail at .github/workflows/ci.yml > build > Select toolchain on mac-runner-1, macOS, self-hosted, and nothing has passed that job since: example/mobile#21, example/mobile#22, example/mobile#23, example/mobile#24. The cause is shared, not each change's own: the CI (toolchain, runner, service) or the base they build on. Check one failing log and fix it there. 3 task(s) wait on it: T-201, T-202, T-210."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "ci_economy",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

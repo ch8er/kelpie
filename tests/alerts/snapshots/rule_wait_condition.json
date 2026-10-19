@@ -1,0 +1,126 @@
+{
+  "text": "🟡 Nothing will wake T-1014: no condition registered\n\n1. Update changelog — 1.0 h · T-1014\n   Needed: Register a condition for the task, or move it on\n   Blocking: none · Open task: https://board.example.org/tasks/T-1014\nWhy: Task T-1014 is waiting without any registered condition, so nothing will ever wake it.\nRule: wait_condition",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Nothing will wake T-1014: no condition registered",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Update changelog",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 1.0 h · "
+            },
+            {
+              "type": "text",
+              "text": "T-1014",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Needed: "
+            },
+            {
+              "type": "text",
+              "text": "Register a condition for the task, or move it on"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Blocking: none"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/T-1014",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Task T-1014 is waiting without any registered condition, so nothing will ever wake it."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "wait_condition",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

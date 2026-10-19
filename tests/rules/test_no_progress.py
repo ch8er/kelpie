@@ -72,6 +72,8 @@ def test_alert_carries_tokens_window_and_recommendations() -> None:
             "cheaper_maintenance_model",
             "bounded_session_handoff",
         ],
+        "headline": "No progress on T-1: 1,000 tokens in 1h",
+        "needed": "Check whether the session is stuck before it spends more",
     }
 
 

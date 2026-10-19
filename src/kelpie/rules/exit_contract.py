@@ -79,6 +79,7 @@ from kelpie.core.model import (
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._acceptance import ANNOUNCEMENT, Criterion, unanswered
+from kelpie.rules._alerts import alert_params
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     Exit,
@@ -219,7 +220,20 @@ class ExitContract:
                 severity=Severity.WARNING,
                 key=key,
                 once=True,  # about one completion: not a lasting state that "resolves"
-                params=params,
+                params={
+                    **params,
+                    **alert_params(
+                        f"{task.id} moved to done without evidence: missing "
+                        + ", ".join(e.name for e in missing)
+                        if need_all
+                        else f"{task.id} moved to done without evidence: one of "
+                        + ", ".join(e.name for e in self.done_evidence)
+                        + " is enough",
+                        "Add the missing evidence, or reopen the task"
+                        if need_all
+                        else "Add any one of the listed evidence, or reopen the task",
+                    ),
+                },
             )
             return
         yield Action(
@@ -293,7 +307,7 @@ class ExitContract:
                 f"Task {task.id} ('{task.title}'): {how}, but nothing shows the acceptance "
                 f'criterion {c.asked_by} stated was met: "{c.text}" ({c.ref}). Tell '
                 f'{", ".join(notify)}: evidence is a comment that starts with "{c.ref}: met" '
-                f"and gives the result (or a CI job named {c.ref} that passed)"
+                f"and gives the result (or a CI workflow named {c.ref} that passed)"
                 f"{' before this lands' if at == snapshot.now else ''}.",
                 task_id=task.id,
                 severity=Severity.CRITICAL if merges else Severity.WARNING,
@@ -309,6 +323,10 @@ class ExitContract:
                     "asked_at": c.at.isoformat(),
                     "notify": notify,
                     "landing": how,
+                    **alert_params(
+                        f"Acceptance criterion {c.ref} of {task.id} not shown as met",
+                        _how_to_answer(c),
+                    ),
                 },
             )
 
@@ -381,7 +399,15 @@ class ExitContract:
             key=f"unapplied:{end.session.id}",
             state=f"{NAME}:unapplied:{end.session.id}",
             since=end.at,
-            params={"session_id": end.session.id, "declared": str(declared)},
+            params={
+                "session_id": end.session.id,
+                "declared": str(declared),
+                **alert_params(
+                    f"{task.id} is still '{task.status}': the declared '{declared}' "
+                    "was not applied",
+                    "Apply the declared status on the board",
+                ),
+            },
         )
 
     def _requeue_exit(self, task: Task, end: Exit) -> Action:
@@ -434,6 +460,19 @@ class ExitContract:
             head == r or head.startswith(f"{r}:") or head.startswith(f"{r} ")
             for r in (a.strip().lower() for a in self.allowed_block_reasons)
         )
+
+
+def _how_to_answer(c: Criterion) -> str:
+    """What answers criterion ``c`` (``kelpie.rules._acceptance``): a comment that names its
+    reference with a verdict and the result, or a passing CI build of the task's branch
+    whose workflow is named after it. The example result is one ``c`` accepts, else none
+    is given."""
+    example = c.example_result()
+    shown = f" (for example: {example})" if example else ""
+    return (
+        f'Comment "{c.ref}: met, <result>"{shown}, or run a CI workflow named {c.ref} '
+        "that passes on the task's branch"
+    )
 
 
 def _hours(d: timedelta) -> str:
