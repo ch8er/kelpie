@@ -187,6 +187,8 @@ class LoopBreaker:
         if not days:
             return f"the {provider} bill is no longer reconciled with the traces."
         r = max(days, key=lambda d: d.day)
+        if r.reported_usd < 0:
+            return f"the {provider} bill for {r.day:%Y-%m-%d} is a credit (${r.reported_usd:,.2f})."
         return (
             f"the {provider} bill and the spend from traces agree within the thresholds for "
             f"{r.day:%Y-%m-%d}: ${r.estimated_usd:,.2f} priced from traces, "
@@ -550,7 +552,7 @@ def _causes(r: Reconciliation) -> str:
         if r.unpriced_tokens:
             causes.insert(0, f"models without a price ({r.unpriced_tokens:,} tokens that day)")
         if r.unknown_tokens:
-            causes.append(f"calls without a known model ({r.unknown_tokens:,} tokens)")
+            causes.append(f"calls whose provider is not known ({r.unknown_tokens:,} tokens)")
         if r.bill_scope == "total":
             causes.insert(0, "non-token items the bill includes (web search, tools, storage)")
         return "traces show less than was billed: " + ", ".join(causes)

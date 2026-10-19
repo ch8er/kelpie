@@ -1501,6 +1501,7 @@ class CostReportStep:
         self._reconciled_from: tuple[ReportedCost, ...] | None = None
         self._next_at: datetime | None = None  # when to reconcile again, figures unchanged
         self._failing = False
+        self._seed: tuple[ReportedCost, ...] | None = None  # stored figures, until read
 
     def __call__(self, snapshot: Snapshot) -> Snapshot:
         now = snapshot.now
@@ -1516,10 +1517,12 @@ class CostReportStep:
         if self.spans is None or self.settings is None:
             self._observe(())
             return snapshot
+        read = {c.provider for c in costs}
+        costs += tuple(c for c in self._stored_figures(now) if c.provider not in read)
         due = self._next_at is None or now >= self._next_at
         if due or (costs != self._reconciled_from and not self._failing):
             try:
-                self._reconciled = reconcile_spend(self.settings, self.spans, costs, now)
+                fresh = reconcile_spend(self.settings, self.spans, costs, now)
             except Exception as exc:  # spans not readable: keep the last, retry later
                 if not self._failing:
                     log.error("cost reports: spend could not be reconciled: %s", exc)
@@ -1529,9 +1532,39 @@ class CostReportStep:
                 if self._failing:
                     log.info("cost reports: spend reconciled again")
                 self._failing = False
+                self._reconciled = self._keep_last(fresh)
                 self._reconciled_from, self._next_at = costs, now + RECONCILE_EVERY
         self._observe(self._reconciled)
         return replace(snapshot, reconciliations=self._reconciled)
+
+    def _keep_last(self, fresh: tuple[Reconciliation, ...]) -> tuple[Reconciliation, ...]:
+        """``fresh``, plus the last days of configured providers it has none of (no day
+        of theirs settled yet, e.g. ``days = 1`` before 06:00 UTC): a standing warning
+        is not resolved and raised again for that."""
+        reports = self.settings.cost_reports if self.settings is not None else None
+        configured = reports.providers if reports is not None else frozenset()
+        have = {r.provider for r in fresh}
+        kept = tuple(
+            r for r in self._reconciled if r.provider in configured and r.provider not in have
+        )
+        return tuple(sorted(fresh + kept, key=lambda r: (-r.day.timestamp(), r.provider)))
+
+    def _stored_figures(self, now: datetime) -> tuple[ReportedCost, ...]:
+        """The figures stored by an earlier run (read once), for the providers the reader
+        has none of yet: after a restart, a provider that cannot be read keeps its days."""
+        if self._seed is None:
+            self._seed = ()
+            reports = self.settings.cost_reports if self.settings is not None else None
+            if self.store is not None and reports is not None:
+                days = max(r.days for r in reports.reports)
+                since = now.astimezone(UTC).date() - timedelta(days=days + 1)
+                try:
+                    stored = self.store.read(since)
+                except (OSError, sqlite3.Error) as exc:
+                    log.warning("cost reports: stored figures not readable: %s", exc)
+                else:
+                    self._seed = tuple(c for c in stored if c.provider in reports.providers)
+        return self._seed
 
     def _observe(self, reconciled: Sequence[Reconciliation]) -> None:
         if self.metrics is None:
@@ -1549,10 +1582,12 @@ def reconcile_spend(
     holds whole (within the retention, and not older than its oldest span), priced from
     traces per provider and compared with the bill.
 
-    A call counts for the provider ``[spend.providers.<name>] models`` puts it under,
-    else the one its model belongs to unless another platform wraps the id (Bedrock,
-    Vertex, a ``vendor/`` router): that platform bills it, not the provider's cost report.
-    Calls without a known provider are counted as ``unknown_tokens`` of every provider."""
+    A call counts for the provider its model belongs to (:meth:`SpendConfig.provider_for`)
+    unless another platform wraps the id (Bedrock, Vertex, a ``vendor/`` router): that
+    platform bills it, not the provider's cost report, unless a ``[spend.providers.<name>]
+    models`` pattern matches the id as written. Calls without a known provider are counted
+    as ``unknown_tokens`` of every provider. Each run prices every covered day again (one
+    range scan per day, up to ``days`` of the report)."""
     spend = settings.spend
     reports = settings.cost_reports
     thresholds = reports.thresholds if reports is not None else {}
@@ -1573,13 +1608,13 @@ def reconcile_spend(
         unknown = 0
         for row in spans.usage_between(start, end):
             tokens = row.input_tokens + row.output_tokens
-            provider = spend.configured_provider(row.model)
-            if provider is None and row.model and not platform_wrapped(row.model):
-                provider = spend.provider_for(row.model)
-            if provider is None:
-                if not row.model or spend.provider_for(row.model) is None:
-                    unknown += tokens  # could be any provider's
-                continue  # or another platform's
+            if row.model and platform_wrapped(row.model):
+                provider = spend.configured_provider(row.model, as_written=True)
+                if provider is None:
+                    continue  # another platform's
+            elif (provider := spend.provider_for(row.model)) is None:
+                unknown += tokens  # could be any provider's
+                continue
             if provider not in usd:
                 continue
             price = settings.budgets.prices.price_for(row.model, day)

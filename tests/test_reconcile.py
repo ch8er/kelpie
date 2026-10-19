@@ -366,3 +366,62 @@ def test_bad_thresholds(extra: str, message: str) -> None:
 def test_thresholds_default() -> None:
     loaded = load_cost_reports({"a": {"kind": "openai", "admin_key_env": "K"}})
     assert loaded is not None and loaded.thresholds == {"a": GapThreshold(0.25, 5.0)}
+
+
+def test_a_family_glob_does_not_claim_another_platforms_calls(
+    tmp_path: Path, store: SpanStore
+) -> None:
+    path = tmp_path / "kelpie.toml"
+    path.write_text(CONFIG + '[spend.providers.anthropic]\nmodels = ["claude-*"]\n')
+    (r,) = reconcile_spend(load_settings(path), store, [ReportedCost("anthropic", D2, 8.0)], NOW)
+    assert r.estimated_usd == pytest.approx(8.0)  # not the Bedrock call
+
+
+def test_the_retention_bounds_the_days_on_its_own(tmp_path: Path, store: SpanStore) -> None:
+    settings = settings_for(tmp_path)
+    settings = replace(settings, traces=replace(settings.traces, retention=timedelta(days=2)))
+    store.append_spans([chat("old", "gpt-5.5", 1, NOW - timedelta(days=40))], NOW)
+    costs = [ReportedCost("anthropic", D1, 4.0), ReportedCost("anthropic", D2, 8.0)]
+    assert [r.day.date() for r in reconcile_spend(settings, store, costs, NOW)] == [D2]
+
+
+def test_a_provider_keeps_its_last_day_until_a_newer_one_settles(tmp_path: Path) -> None:
+    store = MemorySpanStore()
+    store.append_spans(
+        [chat("z", "gpt-5.5", 1, noon(D0)), chat("a", "claude-opus-5-5", 1_000_000, noon(D2))],
+        NOW,
+    )
+    reader = Reader((ReportedCost("anthropic", D2, 40.0),))  # days = 1
+    step = CostReportStep(reader, None, settings_for(tmp_path), store)
+    (first,) = step(Snapshot(now=NOW)).reconciliations
+    assert first.large
+    today = NOW.date()
+    reader.costs = (ReportedCost("anthropic", today, 1.0),)
+    early = datetime.combine(today + timedelta(days=1), datetime.min.time(), UTC)
+    early += timedelta(hours=3)
+    assert step(Snapshot(now=early)).reconciliations == (first,)  # today has not settled
+    (settled,) = step(Snapshot(now=early + timedelta(hours=4))).reconciliations
+    assert settled.day.date() == today
+
+
+def test_after_a_restart_the_stored_figures_stand_in(tmp_path: Path) -> None:
+    db = tmp_path / "kelpie.db"
+    store = MemorySpanStore()
+    store.append_spans(
+        [chat("z", "gpt-5.5", 1, noon(D0)), chat("a", "claude-opus-5-5", 1_000_000, noon(D2))],
+        NOW,
+    )
+    reports = SqliteCostReports(db)
+    reports.replace([ReportedCost("anthropic", D2, 40.0), ReportedCost("elsewhere", D2, 1.0)], NOW)
+    step = CostReportStep(Reader((), ok=None), reports, settings_for(tmp_path), store)
+    (r,) = step(Snapshot(now=NOW)).reconciliations  # not read yet: the stored figure
+    assert (r.provider, r.reported_usd, r.large) == ("anthropic", 40.0, True)
+    reports.close()
+
+
+def test_spend_gauges_show_without_an_up_gauge(tmp_path: Path) -> None:
+    metrics = Metrics()
+    metrics.set_cost_reports({}, [Reconciliation("p", noon(D2), 1.0, 2.0, -1.0, -0.5)])
+    text = metrics.render()
+    assert 'kelpie_spend_reported_usd{provider="p"} 2.000000' in text
+    assert "kelpie_cost_report_up" not in text

@@ -603,7 +603,7 @@ def test_a_bill_of_everything_names_non_token_items_first() -> None:
     (alert,) = LoopBreaker().evaluate(snap)
     causes = alert.reason.split("traces show less than was billed: ")[1]
     assert causes.startswith("non-token items the bill includes")
-    assert "calls without a known model (900 tokens)" in causes
+    assert "calls whose provider is not known (900 tokens)" in causes
     assert "off by as much" not in alert.reason
 
 
@@ -616,3 +616,9 @@ def test_a_resolved_bill_says_what_the_newest_day_shows() -> None:
     gone = rule.resolved("loop_breaker:bill:anthropic", Snapshot(now=NOW))
     assert gone == "the anthropic bill is no longer reconciled with the traces."
     assert rule.resolved("loop_breaker:budget:x", calm) is None
+
+
+def test_a_resolved_bill_that_is_a_credit_says_so() -> None:
+    credit = Snapshot(now=NOW, reconciliations=(_rec("anthropic", 2, 5.0, -20.0, False),))
+    text = LoopBreaker().resolved("loop_breaker:bill:anthropic", credit)
+    assert text == "the anthropic bill for 2026-03-02 is a credit ($-20.00)."

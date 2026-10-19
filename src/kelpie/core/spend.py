@@ -134,14 +134,17 @@ class SpendConfig:
     def _own(self, name: str | None) -> ProviderSpend | None:
         return next((p for p in self.settings.providers if p.name == name), None)
 
-    def configured_provider(self, model: str | None) -> str | None:
-        """The ``[spend.providers.<name>]`` whose ``models`` match ``model``, if any."""
+    def configured_provider(self, model: str | None, *, as_written: bool = False) -> str | None:
+        """The ``[spend.providers.<name>]`` whose ``models`` match ``model``, if any;
+        ``as_written``: only on the id as written, not its canonical id (so ``claude-*``
+        does not claim ``us.anthropic.claude-...``)."""
         if not model:
             return None
         canonical = canonical_model(model)
         for p in self.settings.providers:
-            if any(fnmatchcase(model, m) or fnmatchcase(canonical, m.lower()) for m in p.models):
-                return p.name
+            for m in p.models:
+                if fnmatchcase(model, m) or (not as_written and fnmatchcase(canonical, m.lower())):
+                    return p.name
         return None
 
     def provider_for(self, model: str | None) -> str | None:

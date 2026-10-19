@@ -637,7 +637,7 @@ class Metrics:
                 self._render_forward(metric)
             if self.budgets_enabled:
                 self._render_budgets(metric)
-            if self.cost_reports:
+            if self.cost_reports or self.reconciled:
                 self._render_cost_reports(metric)
             if self.resources_enabled:
                 self._render_resources(metric)
@@ -833,15 +833,16 @@ class Metrics:
             )
 
     def _render_cost_reports(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
-        metric(
-            "kelpie_cost_report_up",
-            "gauge",
-            "1 when the provider's last cost report read worked, else 0.",
-            [
-                f"kelpie_cost_report_up{_labels(provider=p)} {int(ok)}"
-                for p, ok in sorted(self.cost_reports.items())
-            ],
-        )
+        if self.cost_reports:
+            metric(
+                "kelpie_cost_report_up",
+                "gauge",
+                "1 when the provider's last cost report read worked, else 0.",
+                [
+                    f"kelpie_cost_report_up{_labels(provider=p)} {int(ok)}"
+                    for p, ok in sorted(self.cost_reports.items())
+                ],
+            )
         if not self.reconciled:
             return
         rows = [(r, _labels(provider=r.provider)) for _, r in sorted(self.reconciled.items())]
@@ -861,7 +862,7 @@ class Metrics:
             "kelpie_spend_gap_ratio",
             "gauge",
             "(estimate - bill) / bill for that day: negative when traces show less than was "
-            "billed; absent when the bill is 0.",
+            "billed; absent when the bill is 0 or a credit.",
             [
                 f"kelpie_spend_gap_ratio{lbl} {r.gap_ratio:.6f}"
                 for r, lbl in rows
