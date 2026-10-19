@@ -1,0 +1,63 @@
+id: "07-returns-through-review"
+incident: 7
+title: "Every return goes through review: report causes, not the stage"
+description: >
+  From a live review: on a Hermes farm every return is a reviewer's changes requested,
+  filed under the stage "review", and the rule kept reporting that 95 to 100% of returns
+  were "review". It now reads what sent each task back: a merge conflict, a failing test
+  (named, or CI's wording), or else what the reviewer found. Here a flaky test sent two
+  tasks back (its own alert), two returns were red CI, one a conflict, and six review
+  findings: more than half, but every return went through review, so that is how the farm
+  works and no dominant-cause alert says so.
+rule: return_causes
+config:
+  min_returns: 5
+snapshot:
+  now: "2026-05-11T18:00:00+00:00"
+  tasks:
+    - id: t_7301
+      title: "Profile screen"
+      status: done
+      status_since: "2026-05-11T17:00:00+00:00"
+      role: developer
+      returns:
+        - {at: "2026-05-11T09:00:00+00:00", reason: "ProfileTests.testAvatarUpload failed on CI", category: review}
+        - {at: "2026-05-11T11:00:00+00:00", reason: "Please move the formatting into the view model", category: review}
+    - id: t_7302
+      title: "Avatar cache"
+      status: done
+      status_since: "2026-05-11T17:00:00+00:00"
+      role: developer
+      returns:
+        - {at: "2026-05-11T10:00:00+00:00", reason: "ProfileTests.testAvatarUpload timed out again", category: review}
+        - {at: "2026-05-11T12:00:00+00:00", reason: "Name the cache keys after the user id, not the index", category: review}
+    - id: t_7303
+      title: "Settings sync"
+      status: review
+      status_since: "2026-05-11T16:00:00+00:00"
+      role: developer
+      returns:
+        - {at: "2026-05-11T09:30:00+00:00", reason: "CI is red: lint and unit tests", category: review}
+        - {at: "2026-05-11T13:00:00+00:00", reason: "Merge conflict in src/settings/store.py", category: review}
+        - {at: "2026-05-11T15:00:00+00:00", reason: "Add an empty-state screen", category: review}
+    - id: t_7304
+      title: "Export to CSV"
+      status: done
+      status_since: "2026-05-11T17:30:00+00:00"
+      role: developer
+      returns:
+        - {at: "2026-05-11T10:30:00+00:00", reason: "build failed after the rebase", category: review}
+        - {at: "2026-05-11T14:00:00+00:00", reason: "Escape commas in the title column", category: review}
+        - {at: "2026-05-11T16:00:00+00:00", reason: "Changes requested", category: review}
+        - {at: "2026-05-11T16:30:00+00:00", reason: "no failing tests now, but split the exporter in two", category: review}
+expected_actions:
+  - kind: alert
+    params:
+      finding: flaky_test
+      test: ProfileTests.testAvatarUpload
+      tasks: [t_7301, t_7302]
+not_expected_actions:
+  - kind: alert
+    params: {finding: dominant_cause}
+  - kind: alert
+    params: {finding: hot_files}

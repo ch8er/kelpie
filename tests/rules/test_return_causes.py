@@ -59,7 +59,7 @@ def test_dominant_conflicts_on_a_hot_file_alert_and_warn_live_tasks() -> None:
 def test_the_reason_beats_the_category() -> None:
     rule = ReturnCauses()
     assert rule.cause(ret("merge conflict in a.py", category="review")) == "merge_conflict"
-    assert rule.cause(ret("needs tests", category="review")) == "review"
+    assert rule.cause(ret("needs tests", category="review")) == "review_findings"
     assert rule.cause(ret("needs tests")) == "other"
 
 
@@ -96,7 +96,9 @@ def test_conflicts_spread_over_many_files_only_report_the_shares() -> None:
 def test_another_dominant_cause_is_reported() -> None:
     reviews = tuple(task(f"T{i}", ret("needs tests", category="review")) for i in range(5))
     [alert] = run(*reviews, task("X", ret("why not")))
-    assert alert.params["dominant_cause"] == "review" and alert.params["shares"]["review"] == 0.83
+    assert alert.params["dominant_cause"] == "review_findings"
+    assert alert.params["shares"]["review_findings"] == 0.83
+    assert "(by cause: review findings 83%, other 17%)" in alert.reason
     others = tuple(task(f"T{i}", ret("no idea")) for i in range(6))
     assert run(*others) == []  # "other" is no finding
 
@@ -328,3 +330,51 @@ def test_only_the_names_a_clause_says_failed() -> None:
         "test_login",
         "test_logout",
     }
+
+
+# --- causes, not the stage (live review: "95-100% from review") -------------------------
+
+
+@pytest.mark.parametrize(
+    ("reason", "cause"),
+    [
+        ("CI is red on the PR", "failing_tests"),
+        ("unit tests failed after the rebase", "failing_tests"),
+        ("FAILED tests/test_api.py::test_create - KeyError", "failing_tests"),
+        ("3 failed, 120 passed", "failing_tests"),
+        ("test_login_timeout fails on iOS 17", "failing_tests"),
+        ("build still failing", "failing_tests"),
+        ("no failing tests, but the naming is off", "review_findings"),
+        ("all checks green; please split the view model", "review_findings"),
+        ("0 failed, 12 passed; add a test for the empty case", "review_findings"),
+        ("Merge conflict in src/app/routes.py", "merge_conflict"),
+        ("changes requested", "review_findings"),
+    ],
+)
+def test_a_review_return_is_classified_by_what_sent_it_back(reason: str, cause: str) -> None:
+    assert ReturnCauses().cause(ret(reason, category="review")) == cause
+
+
+def test_review_findings_are_not_dominant_when_every_return_went_through_review() -> None:
+    reviews = [task(f"T{i}", ret("please rename the helper", category="review")) for i in range(9)]
+    reviews.append(task("T9", ret("CI is red", category="review")))
+    assert run(*reviews) == []  # 90% review findings: how a review farm works
+    # A cause behind most of them is still reported, with the shares by cause.
+    red = [task(f"R{i}", ret("tests failed on CI", category="review")) for i in range(6)]
+    [alert] = run(*red, *reviews[:4])
+    assert alert.params["dominant_cause"] == "failing_tests"
+    assert alert.params["shares"] == {"failing_tests": 0.6, "review_findings": 0.4}
+    assert "by cause: failing tests 60%, review findings 40%" in alert.reason
+    # Returns of another path too: review findings dominating says something.
+    [alert] = run(*reviews, task("C", ret("lint", category="ci")))
+    assert alert.params["dominant_cause"] == "review_findings"
+
+
+def test_stage_categories_are_config() -> None:
+    rule = build({"stage_categories": ["qa"]})
+    assert rule.cause(ret("looks off", category="qa")) == "qa_findings"
+    assert rule.cause(ret("looks off", category="review")) == "review"
+    with pytest.raises(ValueError, match="stage_categories must be a list"):
+        build({"stage_categories": "review"})
+    with pytest.raises(ValueError, match="stage_categories must be a list"):
+        build({"stage_categories": [" "]})

@@ -5,15 +5,20 @@
 and every merge undid someone's work. This rule groups the returns of the last ``window``
 (24h) by cause and turns a dominant cause into a recommendation.
 
-**Causes.** The first of ``cause_patterns`` (category -> regular expressions,
-case-insensitive; trusted config, run on the first 1000 characters of each reason) that
-matches a return's reason (``Task.returns``) names its cause, else the
-category its platform gave it (Hermes: ``review`` for changes requested or a reopened
-review), else ``other``. By default only
-``merge_conflict`` is recognised, in git's wording ("merge conflict in", "CONFLICT
-(content)", "conflicts with main"): review prose such as "this conflicts with the design"
-is not a conflict. The share of each cause is computed over every return in the window, of finished
-tasks too.
+**Causes.** What sent a task back, not the stage it went through: the first of
+``cause_patterns`` (category -> regular expressions, case-insensitive; trusted config, run
+on the first 1000 characters of each reason) that matches a return's reason
+(``Task.returns``) names its cause; else ``failing_tests`` when it names a test as failing
+(``test_names``, below); else, for a return its platform files under a stage
+(``stage_categories``: ``review``, which is every Hermes return, changes requested or a
+reopened review), what was found there (``review_findings``); else the category its
+platform gave it, else ``other``. By default ``cause_patterns`` recognise
+``merge_conflict`` in git's wording ("merge conflict in", "CONFLICT (content)", "conflicts
+with main"; review prose such as "this conflicts with the design" is not a conflict) and
+``failing_tests`` in CI's ("tests failed", "CI is red", "build failed", "3 failed"; not "no
+failing tests"). The share of each cause is computed over every return in the window, of
+finished tasks too. On a live farm every return went through review, and the rule kept
+reporting that 95 to 100% of them were "review".
 
 **Hot files.** The files a conflict names: paths in its reason, matched to the task's files
 (``Task.files``; a bare file name is resolved to the one file of that name any task
@@ -31,7 +36,9 @@ once per task and set of files.
 
 **Otherwise**, a cause behind at least ``dominant_ratio`` (0.5) of the returns (``other``
 excepted), such as conflicts spread over many files, gets one informational lasting alert
-with the shares: there is no file to act on.
+with the shares by cause: there is no file to act on. Review findings are not reported as
+dominant when every return of the window went through review: that is how the farm works,
+not a cause to act on.
 
 **Flaky tests** (incident 18). A test named as failing (``test_names``: patterns with a named
 group ``test``; by default pytest's ``test_...`` and XCTest's ``SomeTests.testSomething``;
@@ -62,6 +69,8 @@ NAME = "return_causes"
 CONFLICT = "merge_conflict"
 OTHER = "other"
 FLAKY = "flaky_test"
+FAILING = "failing_tests"
+DEFAULT_STAGES = ("review",)  # platform categories that name where a return happened
 _FAILED = re.compile(
     r"\b(?:(?i:fail\w*|flak\w*|timed? ?out|red|errored|broke\w*)|[A-Z]\w*Error)\b"
 )  # an exception name ("AssertionError") is case-sensitive: "no error" is none
@@ -95,6 +104,14 @@ DEFAULT_CAUSES: Mapping[str, tuple[str, ...]] = {
         r"\bconflicts? with (?:origin/)?(?:main|master|the base branch)\b",
         r"\b(?:rebase|merge) (?:failed|stopped)\b.*\bconflict",
     ),
+    FAILING: (
+        r"(?<!\bno )(?<!\bzero )\b(?:unit |ui |integration |e2e )?(?:tests?|specs?|checks?|CI|"
+        r"build|pipeline)\s+(?:(?:is|are|was|were|still|keeps?|now)\s+)*(?:fail\w*|red|broken)\b",
+        r"(?<!\bno )(?<!\bzero )(?<!\bwithout )\bfailing (?:unit |ui |integration )?"
+        r"(?:tests?|specs?|checks?|CI|build)\b",
+        r"\bFAILED\s+\S+::",  # pytest's summary line
+        r"(?<![\w.])[1-9]\d* (?:tests? )?failed\b",  # "3 failed", "2 tests failed"
+    ),
 }
 MAX_REASON = 1000  # characters of a return reason searched
 _SHOWN = 5
@@ -120,6 +137,7 @@ class ReturnCauses:
         default_factory=lambda: tuple(re.compile(p) for p in DEFAULT_TEST_NAMES)
     )
     flaky_min_tasks: int = 2
+    stage_categories: tuple[str, ...] = DEFAULT_STAGES
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -137,13 +155,15 @@ class ReturnCauses:
         causes = Counter(
             FLAKY if self._tests(r) & flaky.keys() else self.cause(r) for _, r in returns
         )
-        return found + list(self._causes(snapshot, returns, causes))
+        staged = {r.category for _, r in returns}
+        through = staged.pop() if len(staged) == 1 else None  # every return, one stage
+        return found + list(self._causes(snapshot, returns, causes, through))
 
     def _tests(self, r: Return) -> set[str]:
         """Tests the return says failed: a name next to failure wording ("failed", "flaky",
         "timed out", "red"), not a file path (``tests/test_models.py`` in a conflict), and
         never in a merge conflict's reason."""
-        if self.cause(r) == CONFLICT:
+        if self._matched(r) == CONFLICT:
             return set()
         reason = r.reason[:MAX_REASON].replace("\r\n", "\n")
         found = set()
@@ -188,7 +208,11 @@ class ReturnCauses:
         )
 
     def _causes(
-        self, snapshot: Snapshot, returns: Sequence[tuple[Task, Return]], causes: Counter[str]
+        self,
+        snapshot: Snapshot,
+        returns: Sequence[tuple[Task, Return]],
+        causes: Counter[str],
+        through: str | None = None,
     ) -> Sequence[Action]:
         conflicts = [(task, r) for task, r in returns if self.cause(r) == CONFLICT]
         if len(conflicts) / len(returns) >= self.conflict_ratio_threshold:
@@ -204,16 +228,31 @@ class ReturnCauses:
         cause, n = max(causes.items(), key=lambda c: (c[1], c[0]))
         if cause in (OTHER, FLAKY) or n / len(returns) < self.dominant_ratio:
             return []  # flaky tests have alerts of their own
+        if through is not None and cause == _findings(through):
+            return []  # every return went through this stage: how the farm works, no cause
         return [self._dominant(cause, n, causes, len(returns))]
 
     def cause(self, r: Return) -> str:
-        """What the reason says first (a review that bounced a task for a merge conflict
-        is a conflict), then the platform's category."""
+        """What sent the task back: what the reason says first (a review that bounced a
+        task for a merge conflict is a conflict, one for a failing test a failing test),
+        then what was found at the stage it names (``review_findings``), then the
+        platform's category."""
+        found = self._matched(r)
+        if found is not None:
+            return found
+        if self._tests(r):
+            return FAILING
+        if r.category in self.stage_categories:
+            return _findings(r.category)
+        return r.category or OTHER
+
+    def _matched(self, r: Return) -> str | None:
+        """The first ``cause_patterns`` category whose pattern matches the reason."""
         reason = r.reason[:MAX_REASON]
         for category, patterns in self.cause_patterns:
             if any(p.search(reason) for p in patterns):
                 return category
-        return r.category or OTHER
+        return None
 
     def _shared(self, path: str) -> bool:
         return any(fnmatchcase(path, p) for p in self.expected_shared)
@@ -283,6 +322,10 @@ class ReturnCauses:
     def _dominant(self, cause: str, n: int, causes: Counter[str], total: int) -> Action:
         """One cause behind most returns, with no file to act on: report the shares."""
         shares = {c: round(m / total, 2) for c, m in sorted(causes.items())}
+        by_cause = ", ".join(
+            f"{c.replace('_', ' ')} {round(100 * m / total)}%"
+            for c, m in sorted(causes.items(), key=lambda c: (-c[1], c[0]))
+        )
         advice = (
             "They are spread over many files, so no file needs an owner: keep tasks small "
             "and rebase them early."
@@ -294,7 +337,7 @@ class ReturnCauses:
             NAME,
             f"{n} of {total} task returns in the last {_span(self.window)} "
             f"({round(100 * n / total)}%) "
-            f"were '{cause}'. {advice}",
+            f"were '{cause}' (by cause: {by_cause}). {advice}",
             severity=Severity.INFO,
             key=f"{NAME}:dominant:{cause}",
             state=f"{NAME}:dominant:{cause}",
@@ -320,6 +363,11 @@ class ReturnCauses:
             once=True,
             params={"hot_files": files},
         )
+
+
+def _findings(stage: str) -> str:
+    """The cause of a return at ``stage`` that names nothing else: what was found there."""
+    return f"{stage}_findings"
 
 
 def _names_index(tasks: Sequence[Task]) -> dict[str, set[str]]:
@@ -409,6 +457,13 @@ def build(config: dict[str, Any]) -> ReturnCauses:
         if any("test" not in p.groupindex for p in compiled):
             raise ValueError("test_names: every pattern needs a named group 'test'")
         kwargs["test_names"] = compiled
+    if "stage_categories" in config:
+        stages = config.pop("stage_categories")
+        if not isinstance(stages, list | tuple) or not all(
+            isinstance(s, str) and s.strip() for s in stages
+        ):
+            raise ValueError("stage_categories must be a list of platform categories")
+        kwargs["stage_categories"] = tuple(s.strip() for s in stages)
     if "cause_patterns" in config:
         raw = config.pop("cause_patterns")
         if not isinstance(raw, Mapping) or not all(
