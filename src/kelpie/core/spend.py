@@ -49,7 +49,7 @@ from typing import Any
 
 from kelpie.core.budgets import Budget, BudgetMode, BudgetScope, BudgetUnit
 from kelpie.core.model import Reconciliation, ReportedCost
-from kelpie.core.prices import PriceTable, canonical_model
+from kelpie.core.prices import PriceTable, canonical_model, platform_wrapped
 from kelpie.core.serde import parse_duration
 
 __all__ = [
@@ -135,15 +135,20 @@ class SpendConfig:
         return next((p for p in self.settings.providers if p.name == name), None)
 
     def configured_provider(self, model: str | None, *, as_written: bool = False) -> str | None:
-        """The ``[spend.providers.<name>]`` whose ``models`` match ``model``, if any;
-        ``as_written``: only on the id as written, not its canonical id (so ``claude-*``
-        does not claim ``us.anthropic.claude-...``)."""
+        """The ``[spend.providers.<name>]`` whose ``models`` match ``model``, if any.
+        ``as_written``: only patterns that carry a platform's wrapping themselves
+        (:func:`~kelpie.core.prices.platform_wrapped`: ``us.anthropic.*``, ``*@*``,
+        ``openrouter/*``), on the id as written; so ``claude-*`` claims neither
+        ``us.anthropic.claude-...`` nor Vertex's ``claude-...@date``."""
         if not model:
             return None
         canonical = canonical_model(model)
         for p in self.settings.providers:
             for m in p.models:
-                if fnmatchcase(model, m) or (not as_written and fnmatchcase(canonical, m.lower())):
+                if as_written:
+                    if platform_wrapped(m) and fnmatchcase(model, m):
+                        return p.name
+                elif fnmatchcase(model, m) or fnmatchcase(canonical, m.lower()):
                     return p.name
         return None
 
@@ -302,7 +307,7 @@ class GapThreshold:
 @dataclass(frozen=True, slots=True)
 class Estimate:
     """A provider's day priced from traces: USD, and the tokens left out of it (models
-    without a price, calls whose model is not known)."""
+    without a price, calls whose provider is not known)."""
 
     usd: float = 0.0
     unpriced_tokens: int = 0

@@ -188,7 +188,8 @@ class LoopBreaker:
             return f"the {provider} bill is no longer reconciled with the traces."
         r = max(days, key=lambda d: d.day)
         if r.reported_usd < 0:
-            return f"the {provider} bill for {r.day:%Y-%m-%d} is a credit (${r.reported_usd:,.2f})."
+            credit = f"${abs(r.reported_usd):,.2f}"
+            return f"the {provider} bill for {r.day:%Y-%m-%d} is a credit of {credit}."
         return (
             f"the {provider} bill and the spend from traces agree within the thresholds for "
             f"{r.day:%Y-%m-%d}: ${r.estimated_usd:,.2f} priced from traces, "

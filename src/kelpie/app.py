@@ -1517,7 +1517,9 @@ class CostReportStep:
         if self.spans is None or self.settings is None:
             self._observe(())
             return snapshot
+        statuses = getattr(self.source, "statuses", None)
         read = {c.provider for c in costs}
+        read |= {s.provider for s in (statuses() if callable(statuses) else ()) if s.ok}
         costs += tuple(c for c in self._stored_figures(now) if c.provider not in read)
         due = self._next_at is None or now >= self._next_at
         if due or (costs != self._reconciled_from and not self._failing):
@@ -1532,26 +1534,34 @@ class CostReportStep:
                 if self._failing:
                     log.info("cost reports: spend reconciled again")
                 self._failing = False
-                self._reconciled = self._keep_last(fresh)
+                self._reconciled = self._keep_last(fresh, now)
                 self._reconciled_from, self._next_at = costs, now + RECONCILE_EVERY
         self._observe(self._reconciled)
         return replace(snapshot, reconciliations=self._reconciled)
 
-    def _keep_last(self, fresh: tuple[Reconciliation, ...]) -> tuple[Reconciliation, ...]:
-        """``fresh``, plus the last days of configured providers it has none of (no day
-        of theirs settled yet, e.g. ``days = 1`` before 06:00 UTC): a standing warning
-        is not resolved and raised again for that."""
+    def _keep_last(
+        self, fresh: tuple[Reconciliation, ...], now: datetime
+    ) -> tuple[Reconciliation, ...]:
+        """``fresh``, plus the last days of providers it has none of while those days are
+        still within the provider's ``days`` (no newer day settled yet, e.g. ``days = 1``
+        before 06:00 UTC): a standing warning is not resolved and raised again for that.
+        Older ones go (reads failing for days, an emptied span store)."""
         reports = self.settings.cost_reports if self.settings is not None else None
-        configured = reports.providers if reports is not None else frozenset()
+        days = {r.provider: r.days for r in reports.reports} if reports is not None else {}
+        today = now.astimezone(UTC).date()
         have = {r.provider for r in fresh}
         kept = tuple(
-            r for r in self._reconciled if r.provider in configured and r.provider not in have
+            r
+            for r in self._reconciled
+            if r.provider not in have
+            and r.provider in days
+            and r.day.date() >= today - timedelta(days=days[r.provider] + 1)
         )
         return tuple(sorted(fresh + kept, key=lambda r: (-r.day.timestamp(), r.provider)))
 
     def _stored_figures(self, now: datetime) -> tuple[ReportedCost, ...]:
         """The figures stored by an earlier run (read once), for the providers the reader
-        has none of yet: after a restart, a provider that cannot be read keeps its days."""
+        has not read yet: after a restart, a provider that cannot be read keeps its days."""
         if self._seed is None:
             self._seed = ()
             reports = self.settings.cost_reports if self.settings is not None else None

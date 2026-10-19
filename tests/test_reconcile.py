@@ -69,6 +69,7 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> SpanStore:
             chat("e", "claude-unknown-9", 700, noon(D2)),  # anthropic, no price
             chat("g", "us.anthropic.claude-opus-5-5-v1:0", 1_000_000, noon(D2)),  # Bedrock's
             chat("h", "openrouter/gpt-5.5", 1_000_000, noon(D2)),  # a router's
+            chat("v", "claude-opus-5-5@20261001", 1_000_000, noon(D2)),  # Vertex's
             chat("f", "claude-opus-5-5", 1_000_000, NOW - timedelta(hours=1)),  # today
         ],
         NOW,
@@ -79,7 +80,7 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> SpanStore:
 def test_usage_between_is_one_closed_day(store: SpanStore) -> None:
     start = datetime.combine(D2, datetime.min.time(), UTC)
     rows = store.usage_between(start, start + timedelta(days=1))
-    assert sorted(r.input_tokens for r in rows) == [500, 700] + [1_000_000] * 3 + [2_000_000]
+    assert sorted(r.input_tokens for r in rows) == [500, 700] + [1_000_000] * 4 + [2_000_000]
     assert store.usage_between(start, start) == ()
     assert store.oldest_at() == noon(D0) + timedelta(seconds=2)
 
@@ -374,7 +375,10 @@ def test_a_family_glob_does_not_claim_another_platforms_calls(
     path = tmp_path / "kelpie.toml"
     path.write_text(CONFIG + '[spend.providers.anthropic]\nmodels = ["claude-*"]\n')
     (r,) = reconcile_spend(load_settings(path), store, [ReportedCost("anthropic", D2, 8.0)], NOW)
-    assert r.estimated_usd == pytest.approx(8.0)  # not the Bedrock call
+    assert r.estimated_usd == pytest.approx(8.0)  # neither the Bedrock nor the Vertex call
+    path.write_text(CONFIG + '[spend.providers.anthropic]\nmodels = ["*@*"]\n')
+    (r,) = reconcile_spend(load_settings(path), store, [ReportedCost("anthropic", D2, 8.0)], NOW)
+    assert r.estimated_usd == pytest.approx(12.0)  # a pattern with the wrapping claims it
 
 
 def test_the_retention_bounds_the_days_on_its_own(tmp_path: Path, store: SpanStore) -> None:
@@ -404,6 +408,20 @@ def test_a_provider_keeps_its_last_day_until_a_newer_one_settles(tmp_path: Path)
     assert settled.day.date() == today
 
 
+def test_a_kept_day_goes_once_it_is_older_than_the_report_reads(tmp_path: Path) -> None:
+    store = MemorySpanStore()
+    store.append_spans(
+        [chat("z", "gpt-5.5", 1, noon(D0)), chat("a", "claude-opus-5-5", 1_000_000, noon(D2))],
+        NOW,
+    )
+    reader = Reader((ReportedCost("anthropic", D2, 40.0),))
+    step = CostReportStep(reader, None, settings_for(tmp_path), store)
+    assert step(Snapshot(now=NOW)).reconciliations
+    reader.costs = ()  # nothing new settles: reads failing, or no buckets
+    assert step(Snapshot(now=NOW + timedelta(days=7))).reconciliations  # within days = 7
+    assert step(Snapshot(now=NOW + timedelta(days=9))).reconciliations == ()
+
+
 def test_after_a_restart_the_stored_figures_stand_in(tmp_path: Path) -> None:
     db = tmp_path / "kelpie.db"
     store = MemorySpanStore()
@@ -413,9 +431,30 @@ def test_after_a_restart_the_stored_figures_stand_in(tmp_path: Path) -> None:
     )
     reports = SqliteCostReports(db)
     reports.replace([ReportedCost("anthropic", D2, 40.0), ReportedCost("elsewhere", D2, 1.0)], NOW)
-    step = CostReportStep(Reader((), ok=None), reports, settings_for(tmp_path), store)
+    written: list[tuple[ReportedCost, ...]] = []
+
+    class Spy:
+        def replace(self, costs: Any, fetched_at: datetime) -> None:
+            written.append(tuple(costs))
+            reports.replace(costs, fetched_at)
+
+        def read(self, since: date, until: date | None = None) -> Any:
+            return reports.read(since, until)
+
+    reader = Reader((), ok=None)
+    step = CostReportStep(reader, Spy(), settings_for(tmp_path), store)  # type: ignore[arg-type]
     (r,) = step(Snapshot(now=NOW)).reconciliations  # not read yet: the stored figure
     assert (r.provider, r.reported_usd, r.large) == ("anthropic", 40.0, True)
+    assert written == []  # stored figures are not written back
+    reader.ok = False  # a failed read: they still stand in
+    later = NOW + RECONCILE_EVERY
+    assert step(Snapshot(now=later)).reconciliations[0].reported_usd == 40.0
+    reader.costs, reader.ok = (ReportedCost("anthropic", D2, 4.0),), True
+    (r,) = step(Snapshot(now=later + timedelta(minutes=1))).reconciliations
+    assert r.reported_usd == 4.0 and not r.large  # the reading replaces them
+    assert written == [(ReportedCost("anthropic", D2, 4.0),)]
+    reader.costs = ()  # read, but no rows: the stored figures no longer stand in
+    assert step(Snapshot(now=later + 2 * RECONCILE_EVERY)).reconciliations[0].reported_usd == 4.0
     reports.close()
 
 

@@ -621,4 +621,4 @@ def test_a_resolved_bill_says_what_the_newest_day_shows() -> None:
 def test_a_resolved_bill_that_is_a_credit_says_so() -> None:
     credit = Snapshot(now=NOW, reconciliations=(_rec("anthropic", 2, 5.0, -20.0, False),))
     text = LoopBreaker().resolved("loop_breaker:bill:anthropic", credit)
-    assert text == "the anthropic bill for 2026-03-02 is a credit ($-20.00)."
+    assert text == "the anthropic bill for 2026-03-02 is a credit of $20.00."
