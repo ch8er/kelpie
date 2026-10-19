@@ -431,6 +431,7 @@ class Build:
     branch: str | None = None
     sha: str | None = None
     event: str | None = None
+    pr: int | None = None  # the number of the change request it builds, when the CI says
     draft: bool = False
     commit_message: str | None = None
     changed_paths: tuple[str, ...] | None = None

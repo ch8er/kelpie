@@ -690,3 +690,11 @@ def test_load_ci_defaults_and_values() -> None:
 def test_load_ci_errors(section: Any, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         load_ci(section, [REPO])
+
+
+def test_a_build_names_the_pull_request_it_builds() -> None:
+    with serve() as gh:
+        runs_page(gh, [pr_run(1, 5, 7, "feature"), run(2, 4)])
+        gh.reply(f"/repos/{REPO}/pulls/7", {"number": 7, "draft": False, "head": {"sha": "x"}})
+        by_id = {b.id: b for b in ci(gh)(Snapshot(now=NOW)).builds}
+        assert by_id[f"{REPO}:1"].pr == 7 and by_id[f"{REPO}:2"].pr is None

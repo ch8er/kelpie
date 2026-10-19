@@ -42,8 +42,10 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   heavy tasks per host under pressure, and watches LLM provider quotas and key health
   ([#32](https://github.com/ch8er/kelpie/pull/32), [#35](https://github.com/ch8er/kelpie/pull/35)).
 - `ci_economy` (rule 9): classifies wasted CI builds (superseded, already verified,
-  docs-only, draft, WIP), cancels superseded runs, and forecasts the CI minutes quota
-  ([#41](https://github.com/ch8er/kelpie/pull/41), [#107](https://github.com/ch8er/kelpie/pull/107)).
+  docs-only, draft, WIP), cancels superseded runs, forecasts the CI minutes quota, and
+  reports a CI outage (many change requests failing at the same job and step) as one
+  incident with its scope and the tasks it explains, instead of one alert per blocked task
+  ([#41](https://github.com/ch8er/kelpie/pull/41), [#107](https://github.com/ch8er/kelpie/pull/107), [#178](https://github.com/ch8er/kelpie/pull/178)).
 - `loop_breaker` (rule 10): stops a run that repeats identical tool calls, hits an error
   streak or exceeds a hard budget ([#33](https://github.com/ch8er/kelpie/pull/33)).
 - `no_progress` (rule 11): alerts when a session spends many tokens with no status change,

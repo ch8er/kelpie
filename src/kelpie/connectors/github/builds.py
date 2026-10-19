@@ -592,6 +592,7 @@ class GitHubCI:
             branch=_str(run.get("head_branch")),
             sha=sha,
             event=_str(run.get("event")),
+            pr=_pr_number(run),
             draft=draft,
             commit_message=_first_line(message),
             changed_paths=paths,
@@ -651,9 +652,7 @@ class GitHubCI:
     def _pull_info(
         self, repo: str, run: Mapping[str, Any], sha: str | None, tick: _Tick
     ) -> tuple[bool, tuple[str, ...] | None]:
-        number = next(
-            (n for e in _list(run.get("pull_requests")) if (n := _id(e.get("number")))), None
-        )
+        number = _pr_number(run)
         if number is None:
             return False, None
         if (repo, number) not in tick.pulls:
@@ -784,6 +783,11 @@ def next_reset(now: datetime, day: int) -> datetime:
         return candidate
     year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
     return candidate.replace(year=year, month=month)
+
+
+def _pr_number(run: Mapping[str, Any]) -> int | None:
+    """The pull request a run builds: the first GitHub lists (same-repository PRs only)."""
+    return next((n for e in _list(run.get("pull_requests")) if (n := _id(e.get("number")))), None)
 
 
 def _job(job: Mapping[str, Any]) -> Job | None:

@@ -1,0 +1,124 @@
+id: "20-ci-outage"
+incident: 20
+title: "A broken toolchain on the CI runner turns every PR red: one outage, not one alert per task"
+description: >
+  The toolchain on the farm's macOS runner broke at night. From then on every mobile build
+  failed at the same step of the same job, the nightly re-run of a commit that had passed
+  included, and the tasks sat blocked on CI or on a merge that could not happen. Kelpie
+  raised one alert per blocked task and the report blamed waiting for merges. Rule 9 must
+  see the correlated failures as one CI outage, with its start, scope and the tasks it
+  explains, while another repository's build passing the same workflow and job name on
+  another runner fixes nothing here, and a single PR red for its own reasons stays that
+  PR's business.
+rule: ci_economy
+config:
+  outage_min_prs: 3
+  outage_window: "2h"
+snapshot:
+  now: "2026-03-02T09:00:00+00:00"
+  tasks:
+    - id: T-201
+      title: "Settings screen"
+      status: blocked
+      status_since: "2026-03-02T02:10:00+00:00"
+      owner_id: agent-dev-1
+      block: {reason: "waiting for CI on example/mobile#21", since: "2026-03-02T02:10:00+00:00", condition_id: C-201}
+    - {id: T-202, title: "Login flow", status: waiting, status_since: "2026-03-02T02:40:00+00:00", owner_id: agent-dev-2}
+    - {id: T-203, title: "Push notifications", status: in_progress, status_since: "2026-03-02T08:30:00+00:00", owner_id: agent-dev-3}
+    # Its PR is red too, but it waits for a person's answer: the outage does not explain that.
+    - id: T-204
+      title: "Offline mode"
+      status: blocked
+      status_since: "2026-03-01T18:00:00+00:00"
+      owner_id: agent-dev-5
+      block: {reason: "needs_input: which sync strategy?", since: "2026-03-01T18:00:00+00:00", condition_id: C-204}
+    # The reviewer waits for #21 to merge, which cannot happen while its CI is red.
+    - id: T-210
+      title: "Review: settings screen"
+      status: blocked
+      status_since: "2026-03-02T03:00:00+00:00"
+      owner_id: reviewer-1
+      block: {reason: "needs_input: merge example/mobile#21", since: "2026-03-02T03:00:00+00:00", condition_id: C-210}
+    # Red for its own reasons, in another repository: not part of the outage.
+    - id: T-301
+      title: "Search page"
+      status: blocked
+      status_since: "2026-03-02T06:00:00+00:00"
+      owner_id: agent-dev-4
+      block: {reason: "waiting for CI on example/web#5", since: "2026-03-02T06:00:00+00:00", condition_id: C-301}
+  conditions:
+    - {id: C-201, kind: ci_status, task_id: T-201, params: {repo: example/mobile, pr: 21}, satisfied: false}
+    - {id: C-202, kind: ci_status, task_id: T-202, params: {repo: example/mobile, pr: 22}, satisfied: false}
+    - {id: C-204, kind: human_task, task_id: T-204, params: {task: H-1}, satisfied: false}
+    - {id: C-210, kind: pr_merged, task_id: T-210, params: {repo: example/mobile, pr: 21}, satisfied: false}
+    - {id: C-301, kind: ci_status, task_id: T-301, params: {repo: example/web, pr: 5}, satisfied: false}
+  pull_requests:
+    - {repo: example/mobile, number: 21, title: "T-201 settings screen", branch: "task/T-201", task_ids: [T-201]}
+    - {repo: example/mobile, number: 22, title: "T-202 login flow", branch: "task/T-202", task_ids: [T-202]}
+    - {repo: example/mobile, number: 23, title: "T-203 push notifications", branch: "task/T-203", task_ids: [T-203]}
+    - {repo: example/mobile, number: 24, title: "T-204 offline mode", branch: "task/T-204", task_ids: [T-204]}
+    - {repo: example/web, number: 5, title: "T-301 search page", branch: "task/T-301", task_ids: [T-301]}
+  pull_requests_complete: true
+  builds:
+    # The last time the mobile job passed: commit 1000000 on main, before the runner broke.
+    - {id: B-100, source: ci, repo: example/mobile, workflow: .github/workflows/ci.yml, branch: main, sha: "1000000",
+       event: push, status: success, started_at: "2026-03-02T01:00:00+00:00", finished_at: "2026-03-02T01:20:00+00:00",
+       minutes: 20, jobs: [{name: build, conclusion: success}]}
+    # From 01:41 every mobile build fails at the same step on the same runner.
+    - {id: B-101, source: ci, repo: example/mobile, workflow: .github/workflows/ci.yml, branch: task/T-201,
+       sha: "1010000", event: pull_request, pr: 21, status: failure, started_at: "2026-03-02T01:41:00+00:00",
+       finished_at: "2026-03-02T01:43:00+00:00", minutes: 2,
+       jobs: [{name: build, conclusion: failure, step: "Select toolchain", runner: mac-runner-1, labels: [self-hosted, macOS]},
+              {name: lint, conclusion: success}]}
+    # The nightly re-run of main's last green commit fails too: the code did not change.
+    - {id: B-105, source: ci, repo: example/mobile, workflow: .github/workflows/ci.yml, branch: main, sha: "1000000",
+       event: schedule, status: failure, started_at: "2026-03-02T02:00:00+00:00", finished_at: "2026-03-02T02:02:00+00:00",
+       minutes: 2,
+       jobs: [{name: build, conclusion: failure, step: "Select toolchain", runner: mac-runner-1, labels: [self-hosted, macOS]}]}
+    - {id: B-102, source: ci, repo: example/mobile, workflow: .github/workflows/ci.yml, branch: task/T-202,
+       sha: "1020000", event: pull_request, pr: 22, status: failure, started_at: "2026-03-02T02:30:00+00:00",
+       finished_at: "2026-03-02T02:32:00+00:00", minutes: 2,
+       jobs: [{name: build, conclusion: failure, step: "Select toolchain", runner: mac-runner-1, labels: [self-hosted, macOS]}]}
+    - {id: B-103, source: ci, repo: example/mobile, workflow: .github/workflows/ci.yml, branch: task/T-203,
+       sha: "1030000", event: pull_request, pr: 23, status: failure, started_at: "2026-03-02T03:05:00+00:00",
+       finished_at: "2026-03-02T03:07:00+00:00", minutes: 2,
+       jobs: [{name: build, conclusion: failure, step: "Select toolchain", runner: mac-runner-1, labels: [self-hosted, macOS]}]}
+    - {id: B-106, source: ci, repo: example/mobile, workflow: .github/workflows/ci.yml, branch: task/T-204,
+       sha: "1060000", event: pull_request, pr: 24, status: failure, started_at: "2026-03-02T04:00:00+00:00",
+       finished_at: "2026-03-02T04:02:00+00:00", minutes: 2,
+       jobs: [{name: build, conclusion: failure, step: "Select toolchain", runner: mac-runner-1, labels: [self-hosted, macOS]}]}
+    # A retry of #21 hours later: still red the same way.
+    - {id: B-104, source: ci, repo: example/mobile, workflow: .github/workflows/ci.yml, branch: task/T-201,
+       sha: "1040000", event: pull_request, pr: 21, status: failure, started_at: "2026-03-02T08:00:00+00:00",
+       finished_at: "2026-03-02T08:02:00+00:00", minutes: 2,
+       jobs: [{name: build, conclusion: failure, step: "Select toolchain", runner: mac-runner-1, labels: [self-hosted, macOS]}]}
+    # The web repository uses the same workflow file and job name on a Linux runner. Its
+    # main passes them all along, which fixes nothing on the macOS runner.
+    - {id: B-200, source: ci, repo: example/web, workflow: .github/workflows/ci.yml, branch: main, sha: "2000000",
+       event: push, status: success, started_at: "2026-03-02T05:00:00+00:00", finished_at: "2026-03-02T05:10:00+00:00",
+       minutes: 10, jobs: [{name: build, conclusion: success}]}
+    # Negative case: one web PR red at its tests; the job passes on main after it.
+    - {id: B-201, source: ci, repo: example/web, workflow: .github/workflows/ci.yml, branch: task/T-301,
+       sha: "2010000", event: pull_request, pr: 5, status: failure, started_at: "2026-03-02T05:50:00+00:00",
+       finished_at: "2026-03-02T06:00:00+00:00", minutes: 10,
+       jobs: [{name: build, conclusion: failure, step: "Run tests", runner: linux-1}]}
+    - {id: B-202, source: ci, repo: example/web, workflow: .github/workflows/ci.yml, branch: main, sha: "2020000",
+       event: push, status: success, started_at: "2026-03-02T07:00:00+00:00", finished_at: "2026-03-02T07:10:00+00:00",
+       minutes: 10, jobs: [{name: build, conclusion: success}]}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "CI outage since 2026-03-02 01:43 UTC: 5 change(s) in example/mobile fail at .github/workflows/ci.yml > build > Select toolchain on mac-runner-1, macOS, self-hosted"
+    params:
+      signature: ".github/workflows/ci.yml > build > Select toolchain"
+      repos: [example/mobile]
+      workflows: [.github/workflows/ci.yml]
+      prs: ["example/mobile#21", "example/mobile#22", "example/mobile#23", "example/mobile#24"]
+      tasks: [T-201, T-202, T-210]
+      runners: [mac-runner-1, macOS, self-hosted]
+not_expected_actions:
+  # The single red web PR is not an outage.
+  - kind: alert
+    params: {step: "Run tests"}
+  - kind: alert
+    reason_contains: "example/web"
