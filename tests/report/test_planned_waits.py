@@ -172,7 +172,7 @@ def test_rule_13_on_incident_20_feeds_the_report() -> None:
     assert not counted & planned_ids  # never in the cost of chaos
 
 
-def test_held_tasks_are_not_listed_twice() -> None:
+def test_held_tasks_are_listed_and_marked() -> None:
     from kelpie.core.model import Status, Task
 
     held = Task("P-1", "p", Status.READY, at(1), labels=("freeze",))
@@ -182,5 +182,7 @@ def test_held_tasks_are_not_listed_twice() -> None:
         tasks=(held,),
         hold_labels=("freeze",),
     )
-    assert r.planned is not None and r.planned.tasks == ("P-2",)
-    assert r.planned.agent_hours == pytest.approx(2 * 2)  # rule 13's count, as reported
+    assert r.planned is not None and r.planned.tasks == ("P-1", "P-2")
+    assert r.planned.held == ("P-1",)
+    assert r.planned.agent_hours == pytest.approx(2 * 2)  # rule 13's count: both tasks
+    assert "(held: `P-1`)" in render_markdown(r)

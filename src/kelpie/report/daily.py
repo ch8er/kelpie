@@ -303,6 +303,7 @@ class PlannedWaits:
 
     agent_hours: float
     tasks: tuple[str, ...]
+    held: tuple[str, ...] = ()  # those of ``tasks`` under a hold label on the board
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,7 +495,8 @@ def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> Plan
     """The agent-hours of planned agent tasks behind people's open inboxes over the day, from
     rule 13 (counted like the people line, :func:`people_agent_hours`: per person, so a task
     behind two people's human tasks counts for each, as in rule 13's counts). Held tasks are
-    planned to rule 13 too, but the hold line already names them: they are not listed."""
+    planned to rule 13 too (hold labels are planned labels): they are listed like the others,
+    marked as held where the board shows the hold label."""
     hours, tasks = 0.0, set()
     for row in inputs.states:
         state = row.state
@@ -507,7 +509,8 @@ def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> Plan
         hours += h
         tasks.update(ids)
     held = {t.id for t in inputs.tasks if set(t.labels) & set(inputs.hold_labels)}
-    return PlannedWaits(hours, tuple(sorted(tasks - held))) if hours > 0 else None
+    listed = tuple(sorted(tasks))
+    return PlannedWaits(hours, listed, tuple(t for t in listed if t in held)) if hours > 0 else None
 
 
 def _stuck_idle(inputs: ReportInputs, start: datetime, end: datetime) -> tuple[StuckCard, ...]:
@@ -1169,6 +1172,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             lines.append(f"- and {len(report.stuck_idle) - _SHOWN_STUCK} more")
     if report.planned is not None:
         listed = f": {tasks(report.planned.tasks)}" if report.planned.tasks else ""
+        if report.planned.held:
+            listed += f" (held: {tasks(report.planned.held)})"
         lines += [
             "",
             f"**Planned waits**: {report.planned.agent_hours:.1f} agent-hours of agent tasks "
