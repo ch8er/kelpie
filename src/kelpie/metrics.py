@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
 from kelpie import __version__
-from kelpie.core.model import ResourceKind, Session, Snapshot, Status
+from kelpie.core.model import Reconciliation, ResourceKind, Session, Snapshot, Status
 from kelpie.core.stages import STAGES, UNKNOWN_ROLE, live_stage, rework_role, task_roles
 from kelpie.rules._tasks import is_live
 from kelpie.rules.bottlenecks import RoleLoad, role_loads
@@ -114,6 +114,9 @@ class Metrics:
         self.snapshot_hook_merged = 0
         self.budgets_enabled = False
         self.budgets: tuple[BudgetStatus, ...] = ()
+        # Providers' cost reports: up per provider, and the newest reconciled day of each.
+        self.cost_reports: dict[str, bool] = {}
+        self.reconciled: dict[str, Reconciliation] = {}
         self.budgets_at: datetime | None = None
         self.budgets_unattributed: dict[str, int] = {}
         self.budgets_stale_now = False
@@ -201,6 +204,18 @@ class Metrics:
             self.budgets, self.budgets_at = _bounded(result.statuses), now
             self.budgets_unattributed = dict(result.unattributed)
             self.budgets_stale_now = False
+
+    def set_cost_reports(
+        self, up: Mapping[str, bool], reconciliations: Iterable[Reconciliation]
+    ) -> None:
+        """Each provider's last read (True: read) and its newest reconciled day."""
+        newest: dict[str, Reconciliation] = {}
+        for r in reconciliations:
+            if r.provider not in newest or r.day > newest[r.provider].day:
+                newest[r.provider] = r
+        with self._lock:
+            self.cost_reports = dict(up)
+            self.reconciled = newest
 
     def budgets_stale(self) -> None:
         """Spend could not be read this tick: the last values stay, marked stale."""
@@ -622,6 +637,8 @@ class Metrics:
                 self._render_forward(metric)
             if self.budgets_enabled:
                 self._render_budgets(metric)
+            if self.cost_reports or self.reconciled:
+                self._render_cost_reports(metric)
             if self.resources_enabled:
                 self._render_resources(metric)
             if self.providers:
@@ -814,6 +831,53 @@ class Metrics:
                     for d, c in sorted(self.forward.items())
                 ],
             )
+
+    def _render_cost_reports(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        if self.cost_reports:
+            metric(
+                "kelpie_cost_report_up",
+                "gauge",
+                "1 when the provider's last cost report read worked, else 0.",
+                [
+                    f"kelpie_cost_report_up{_labels(provider=p)} {int(ok)}"
+                    for p, ok in sorted(self.cost_reports.items())
+                ],
+            )
+        if not self.reconciled:
+            return
+        rows = [(r, _labels(provider=r.provider)) for _, r in sorted(self.reconciled.items())]
+        metric(
+            "kelpie_spend_reported_usd",
+            "gauge",
+            "What the provider's cost report says was spent on its newest reconciled UTC day.",
+            [f"kelpie_spend_reported_usd{lbl} {r.reported_usd:.6f}" for r, lbl in rows],
+        )
+        metric(
+            "kelpie_spend_estimated_usd",
+            "gauge",
+            "What Kelpie priced from traces for the same provider and day.",
+            [f"kelpie_spend_estimated_usd{lbl} {r.estimated_usd:.6f}" for r, lbl in rows],
+        )
+        metric(
+            "kelpie_spend_gap_ratio",
+            "gauge",
+            "(estimate - bill) / bill for that day: negative when traces show less than was "
+            "billed; absent when the bill is 0 or a credit.",
+            [
+                f"kelpie_spend_gap_ratio{lbl} {r.gap_ratio:.6f}"
+                for r, lbl in rows
+                if r.gap_ratio is not None
+            ],
+        )
+        metric(
+            "kelpie_spend_reconciled_day_timestamp_seconds",
+            "gauge",
+            "Start (UTC midnight) of the newest day reconciled for the provider.",
+            [
+                f"kelpie_spend_reconciled_day_timestamp_seconds{lbl} {int(r.day.timestamp())}"
+                for r, lbl in rows
+            ],
+        )
 
     def _render_budgets(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
         rows = [

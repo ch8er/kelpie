@@ -480,9 +480,11 @@ dollars, and the trace-based estimate is never checked against the real bill.
 **Acceptance criteria**
 - [ ] A default price table shipped with Kelpie for popular Anthropic, OpenAI and Google models (input, output, cache read/write), with the date it was checked; config overrides any entry; unknown models are listed in doctor and the report instead of silently costing $0
 - [ ] Reconciliation: when an admin key for a provider's cost/usage report API is configured, Kelpie compares its daily trace-based estimate with the provider's figure and shows the discrepancy in the report and on /metrics; large gaps raise a warning (missing traces, wrong prices)
-- [ ] Auto mode per provider: API key → dollars, budgets in dollars; subscription → share of the limit and time to the limit, no dollars; doctor and `kelpie status` show which mode each provider is in and why
+- [x] Auto mode per provider: API key → dollars, budgets in dollars; subscription → share of the limit and time to the limit, no dollars; doctor and `kelpie status` show which mode each provider is in and why
 - [ ] The report's cost-of-chaos and cost-per-task lines follow the mode (no empty dollars on subscriptions)
-- [ ] Fixtures/tests for both modes; the provider APIs only behind fakes in tests
+- [x] Fixtures/tests for both modes; the provider APIs only behind fakes in tests
+
+Done in #184, #196, #202, #204, #205: the price table, cache writes, spend modes, cost reports and reconciliation, with doctor, `kelpie status` and `/metrics`. Still open: the report side of items 1, 2 and 4 (track C: unknown models, the discrepancy and the mode-dependent cost lines in the daily report).
 
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules

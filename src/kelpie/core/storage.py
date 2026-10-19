@@ -682,6 +682,18 @@ class SqliteSpanStore:
             out.append(tuple(sorted(rows, key=_usage_key)))
         return out
 
+    def usage_between(self, start: datetime, end: datetime) -> tuple[TokenUsage, ...]:
+        """A range scan on ``spans_counted`` (time first)."""
+        sql = (
+            "SELECT session_id, task_id, price_model, COUNT(*), SUM(input_tokens),"
+            " SUM(output_tokens), SUM(cached_tokens), SUM(cache_write_tokens)"
+            " FROM spans INDEXED BY spans_counted"
+            " WHERE counted = 1 AND last_at >= ? AND last_at < ?"
+            " GROUP BY session_id, task_id, price_model"
+        )
+        rows = [TokenUsage(*r) for r in self._read(sql, (_ts(start), _ts(end)))]
+        return tuple(sorted(rows, key=_usage_key))
+
     def record_attribution(
         self,
         sessions: Iterable[tuple[str, str, str | None]],
@@ -782,6 +794,10 @@ class SqliteSpanStore:
             if n:
                 self.epoch += 1  # after the commit: a reload must not see the rows again
             return n
+
+    def oldest_at(self) -> datetime | None:
+        rows = self._read("SELECT MIN(last_at) FROM spans INDEXED BY spans_last", ())
+        return datetime.fromisoformat(rows[0][0]) if rows and rows[0][0] is not None else None
 
     def count(self) -> int:
         return self._rows  # an int read is atomic; never waits for a write batch

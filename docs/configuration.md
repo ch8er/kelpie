@@ -427,7 +427,9 @@ finish times.
 ### 10. loop_breaker
 
 Stops runaway runs from traces: identical consecutive tool calls, error streaks, and hard
-budgets. Info alert when a budget or a subscription limit is near.
+budgets. Info alert when a budget or a subscription limit is near. Warning when a
+provider's cost report and the spend priced from traces disagree for its newest closed day
+past `warn_gap` and `warn_min_usd` of [[connectors.cost_reports]](#connectorscost_reports).
 
 Thresholds (also allowed in `agents` and `roles` tables):
 
@@ -841,7 +843,7 @@ the default's 1.25 × input.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `mode` | `"auto"` | `api`: pay per token, spend is dollars. `subscription`: a plan with a usage limit, spend is tokens and the share of the limit (dollars only as an estimate). `auto`: decided from the rest of the config, below. |
-| `models` | `[]` | Model names or globs that belong to this provider (on the id as written, or case-insensitively on its family id). Needed only for models the default table and the name rules below do not place. |
+| `models` | `[]` | Model names or globs that belong to this provider (on the id as written, or case-insensitively on its family id; for reconciling with a cost report, another platform's ids are claimed only by a pattern that names the platform, such as `*.anthropic.*`, `*@*` or `openrouter/*`). Needed only for models the default table and the name rules below do not place. |
 | `quotas` | `[]` | Names of `[connectors.llm_quotas]` probes that watch this provider's limits, so a subscription budget's `providers` (those names) can tell this provider's mode. |
 | `limit_tokens` | unset | Subscriptions: the tokens your plan allows per `limit_window`, as you know them; Kelpie never guesses a limit. |
 | `limit_window` | unset | Duration (`"5h"`, `"7d"`), together with `limit_tokens`. |
@@ -1226,6 +1228,8 @@ spend mode unless `mode` says otherwise. At most 10.
 | `days` | `7` | Complete UTC days read each time (1 to 31); today is never read, its figure is not final. |
 | `workspaces` | all | `anthropic`: count only these workspace ids (the default workspace has none). |
 | `projects` | all | `openai`: count only these project ids (sent as repeated `project_ids`; whether OpenAI filters by them reliably is not confirmed, so compare the figure with the dashboard once). |
+| `warn_gap` | `0.25` | Rule 10 warns when a day's estimate and bill differ by at least this share of the bill... |
+| `warn_min_usd` | `5` | ...and by at least this many dollars (either way). |
 
 What is counted: Anthropic, token costs per model (`cost_type = "tokens"`; web search, code
 execution and session costs are left out). OpenAI, the day's total over all line items
@@ -1236,6 +1240,35 @@ slow provider never holds up a tick; all pages of one read share 60 seconds); fi
 stored in the Kelpie database (90 days) for the daily report. A report that cannot be read
 keeps its last figures and is tried again after 5 minutes; `kelpie doctor` reads one day
 of each to check the key.
+
+**Reconciliation.** For each UTC day a report covers that ended at least 6 hours ago
+(late spans and the providers' own figures settle) and that the span store holds whole
+(within `[traces] retention` and not before its oldest span), Kelpie prices that day's
+counted LLM calls of the provider and compares the sum with the bill:
+`Snapshot.reconciliations`, recomputed when the figures change and at least hourly (after
+a failure, in 5 minutes). A call belongs to the day its span ended in. A call counts for
+the provider of its model ([[spend]](#spend)) unless another platform wraps the id
+(Bedrock, Vertex `@date`, a `vendor/` router such as OpenRouter): that platform bills it,
+not this cost report, unless a `[spend.providers.<name>] models` pattern that names the
+platform matches the id as written (`*.anthropic.*` does; `claude-*` claims neither
+`us.anthropic.claude-...` nor `claude-...@date`). Calls without a known
+provider are reported as unknown tokens. Until a newer day of a provider settles (with
+`days = 1`, before 06:00 UTC), its last reconciled day stands; after a restart, the
+stored figures stand in until the report is read again.
+
+What the bill covers differs: Anthropic's figure is its token charges only, OpenAI's is
+the day's total (web search, tools and other items too), so an OpenAI estimate is
+expected to sit below its bill by those items; raise its `warn_gap` if they are routine.
+
+`/metrics` has `kelpie_cost_report_up` per provider once it was read, and, for the newest
+reconciled day of each provider, `kelpie_spend_reported_usd`, `kelpie_spend_estimated_usd`,
+`kelpie_spend_gap_ratio` ((estimate - bill) / bill, absent when the bill is 0 or a credit)
+and `kelpie_spend_reconciled_day_timestamp_seconds`. A gap past the thresholds (never a day
+billed as a credit) is a rule 10 warning naming the likely causes: traces below the bill
+point at agents that do not export spans, other users of the same key, models without a
+price or the bill's non-token items; above, at prices above the bill's (batch discounts,
+credits, a `[prices]` entry) or another platform's calls counted under the provider's
+`models`. Kelpie needs traces enabled for this; without them figures are only stored.
 
 ## [alerts]
 
