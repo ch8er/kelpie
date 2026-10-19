@@ -17,6 +17,7 @@ import pytest
 from kelpie.adapters.hermes.worker import PROC
 from kelpie.app import HermesSettings, Settings
 from kelpie.cli import main
+from kelpie.core.config import EngineConfig
 from kelpie.selftest import hermes as selftest
 from kelpie.selftest.hermes import hermes_env
 
@@ -132,10 +133,10 @@ def test_hermes_gets_no_provider_keys_nor_the_users_home(tmp_path: Path) -> None
         "ANTHROPIC_API_KEY": "secret",
         "OPENAI_BASE_URL": "https://api.example.com",
     }
-    env = hermes_env(base, tmp_path / "home", tmp_path / "spool.jsonl")
+    env = hermes_env(base, tmp_path / "home", tmp_path / "spool.jsonl", tmp_path / "user")
     assert env == {
         "PATH": "/bin",
-        "HOME": "/home/u",
+        "HOME": str(tmp_path / "user"),
         "LANG": "C",
         "HERMES_HOME": str(tmp_path / "home"),
         "KELPIE_HERMES_SPOOL": str(tmp_path / "spool.jsonl"),
@@ -145,6 +146,85 @@ def test_hermes_gets_no_provider_keys_nor_the_users_home(tmp_path: Path) -> None
 def test_the_cli_runs_it(fake: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     config = tmp_path / "kelpie.toml"
     config.write_text(f'[adapters.hermes]\ncli = "{fake}"\n')
+    before = dict(os.environ)
     assert main(["--config", str(config), "selftest", "stop", "--adapter", "hermes"]) == 0
     assert capsys.readouterr().out.rstrip().endswith("selftest stop: passed")
-    assert os.environ.get("HERMES_HOME") != str(tmp_path)  # restored
+    assert dict(os.environ) == before  # Kelpie's own environment is never changed
+
+
+def leftovers(tmp_path: Path) -> list[int]:
+    """Processes still running with a throwaway home under ``tmp_path``."""
+    needle = f"HERMES_HOME={tmp_path}".encode()
+    found = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            try:
+                env = (entry / "environ").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if any(v.startswith(needle) for v in env):
+                found.append(int(entry.name))
+    return found
+
+
+@pytest.mark.parametrize("mode", ["silent", "silent deaf"])
+def test_a_runaway_rule_10_never_sees_is_cleaned_up(
+    fake: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Rule 10 never fires (no tool call reaches Kelpie): the self-test fails, and the runaway
+    it started is ended anyway, with SIGKILL when it ignores SIGTERM."""
+    (fake.parent / "mode").write_text(mode)
+    monkeypatch.setattr(selftest, "STOP_TIMEOUT", 3.0)
+    code, lines = run(fake)
+    assert code == 1
+    assert any(line.startswith("FAIL  selftest: rule 10 did not stop run 1") for line in lines)
+    assert ("      cleanup: some processes of the throwaway home needed SIGKILL" in lines) == (
+        "deaf" in mode
+    )
+    assert leftovers(tmp_path) == []
+    assert [p for p in tmp_path.iterdir() if p.name.startswith("kelpie-selftest-")] == []
+
+
+def test_keep_keeps_the_directory(fake: Path, tmp_path: Path) -> None:
+    lines: list[str] = []
+    assert selftest.run(settings(fake), lines.append, keep=True) == 0
+    (kept,) = [p for p in tmp_path.iterdir() if p.name.startswith("kelpie-selftest-")]
+    assert any(str(kept) in line for line in lines) and (kept / "home").is_dir()
+    assert leftovers(tmp_path) == []
+
+
+def test_not_in_hermes_s6_container(fake: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(selftest, "s6_container", lambda: True)
+    code, lines = run(fake)
+    assert code == 1 and lines[0].startswith("FAIL  host: this is Hermes' s6 container")
+
+
+def test_s6_detection(tmp_path: Path) -> None:
+    (tmp_path / "1").mkdir()
+    (tmp_path / "1" / "comm").write_text("s6-svscan\n")
+    assert not selftest.s6_container(tmp_path, tmp_path / "no-basedir")
+    (tmp_path / "basedir").mkdir()
+    assert selftest.s6_container(tmp_path, tmp_path / "basedir")
+    (tmp_path / "1" / "comm").write_text("systemd\n")
+    assert not selftest.s6_container(tmp_path, tmp_path / "basedir")
+
+
+def test_a_rule_config_that_does_not_load_fails_first(fake: Path, tmp_path: Path) -> None:
+    lines: list[str] = []
+    broken = Settings(
+        db_path=None,
+        hermes=HermesSettings(cli=str(fake)),
+        engine=EngineConfig(rules={"loop_breaker": {"identical_calls": "many"}}),
+    )
+    assert selftest.run(broken, lines.append) == 1
+    assert lines[0].startswith("FAIL  rule 10: its configuration does not load")
+    assert [p for p in tmp_path.iterdir() if p.name.startswith("kelpie-selftest-")] == []
+
+
+def test_json_after_other_output() -> None:
+    cli = selftest.Hermes("/bin/sh", {}, Path("/"))
+    cli.run = lambda *a, **kw: 'warning {not json}\n[1]\n{"id": "t_1"}\n'  # type: ignore[method-assign]
+    assert cli.json("x") == {"id": "t_1"}
+    cli.run = lambda *a, **kw: "nothing"  # type: ignore[method-assign]
+    with pytest.raises(selftest.Failed, match="no JSON object"):
+        cli.json("x")

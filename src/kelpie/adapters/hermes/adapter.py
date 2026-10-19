@@ -584,6 +584,8 @@ class HermesAdapter:
     # The name Kelpie signs its blocks, parks, wakes and comments with (and skips when it
     # reads comments back): not a profile or a person on the board.
     author: str = AUTHOR
+    # The environment Hermes commands start from (allow-listed, see stop.py); None: Kelpie's.
+    cli_environ: Mapping[str, str] | None = None
     # Assignees that are people, not agents (Hermes lowercases profile names).
     human_owners: Collection[str] = ()
     # A comment by one of an entry's relays that opens with its marker records its person's
@@ -1363,6 +1365,7 @@ class HermesAdapter:
                 stop_comment(task_id, reason, key=self._stop_key(), now=self.clock()),
                 timeout=self.cli_timeout,
                 author=self.author,
+                environ=self.cli_environ,
             )
         except HermesCliError as exc:
             # The run may have ended on its own between our read and the command.
@@ -1473,6 +1476,7 @@ class HermesAdapter:
                 task_id=task_id if pin is not None else None,
                 rid=pin,
                 author=self.author,
+                environ=self.cli_environ,
             )
         except HermesCliError as exc:
             raise HermesError(str(exc)) from exc
@@ -1494,6 +1498,7 @@ class HermesAdapter:
                 unblock_args(task_id, "Kelpie could not record its park; woken again"),
                 timeout=self.cli_timeout,
                 author=self.author,
+                environ=self.cli_environ,
             )
         except HermesCliError as exc:
             raise HermesError(
@@ -1541,6 +1546,7 @@ class HermesAdapter:
                 unblock_args(task_id, reason),
                 timeout=self.cli_timeout,
                 author=self.author,
+                environ=self.cli_environ,
             )
         except HermesCliError as exc:
             if (after := self._task_state(task_id)) is not None and after.status != "scheduled":
@@ -1559,6 +1565,7 @@ class HermesAdapter:
                 comment_args(task_id, body, self.author),
                 timeout=self.cli_timeout,
                 author=self.author,
+                environ=self.cli_environ,
             )
         except HermesCliError as exc:
             raise HermesError(str(exc)) from exc

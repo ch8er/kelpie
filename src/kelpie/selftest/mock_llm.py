@@ -95,8 +95,11 @@ def _handler(llm: MockLLM) -> type[BaseHTTPRequestHandler]:
             if not self.path.split("?")[0].endswith("/chat/completions"):
                 self._json({"error": {"message": "not found"}}, 404)
                 return
-            if not 0 < length <= MAX_BODY:
-                self._json({"error": {"message": "bad request size"}}, 413)
+            if length <= 0:
+                self._json({"error": {"message": "Content-Length required"}}, 411)
+                return
+            if length > MAX_BODY:
+                self._json({"error": {"message": "request too large"}}, 413)
                 return
             try:
                 request = json.loads(self.rfile.read(length))

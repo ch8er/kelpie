@@ -36,7 +36,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -46,8 +46,9 @@ from kelpie.adapters.hermes import adapter as hermes_adapter
 from kelpie.adapters.hermes.adapter import HermesAdapter
 from kelpie.adapters.hermes.stop import ENV_EXACT, ENV_PREFIXES
 from kelpie.adapters.hermes.worker import PROC, read_proc, run_worker
+from kelpie.adapters.hermes.worker import end as end_processes
 from kelpie.alerts.telegram import format_message
-from kelpie.app import HermesSettings, Settings, load_rules
+from kelpie.app import ConfigError, HermesSettings, Settings, load_rules
 from kelpie.core.actions import ActionKind
 from kelpie.core.alerts import AlertEvent, format_age
 from kelpie.core.config import EngineConfig, Mode
@@ -108,16 +109,18 @@ class CaptureAlerts:
         self.events.append(event)
 
 
-def hermes_env(base: Mapping[str, str], home: Path, spool: Path) -> dict[str, str]:
+def hermes_env(base: Mapping[str, str], home: Path, spool: Path, user: Path) -> dict[str, str]:
     """Hermes' environment: the allow-list Kelpie gives its CLI, minus every ``HERMES_*`` of
-    the user's own (their home, profile, board), plus the throwaway home and spool. No
-    provider keys, so no call can reach a real model."""
+    the user's own (their home, profile, board), plus the throwaway home and spool, and a
+    throwaway ``HOME`` (``user``): no provider key in the environment and no credential file
+    of the user's (``~/.codex``, ``~/.config/gh``, ...) for Hermes to discover."""
     env = {
         k: v
         for k, v in base.items()
         if (k in ENV_EXACT or k.startswith(ENV_PREFIXES)) and not k.startswith("HERMES_")
     }
     env["HERMES_HOME"] = str(home)
+    env["HOME"] = str(user)
     env["KELPIE_HERMES_SPOOL"] = str(spool)
     return env
 
@@ -132,6 +135,7 @@ model:
   api_key: kelpie-selftest-no-key
   context_length: 131072
   streaming: false
+fallback_providers: []
 kanban:
   dispatch_in_gateway: false
 plugins:
@@ -188,26 +192,40 @@ class Hermes:
             raise Failed(f"hermes {' '.join(args[:3])} failed (exit {proc.returncode}): {tail}")
         return proc.stdout
 
-    def json(self, *args: str) -> Any:
+    def json(self, *args: str) -> dict[str, Any]:
+        """The first JSON object in the command's output (Hermes may print lines before it)."""
         out = self.run(*args)
-        try:
-            return json.loads(out[out.index("{") :])
-        except ValueError as exc:
-            raise Failed(f"hermes {' '.join(args[:4])} printed no JSON: {out[-200:]!r}") from exc
+        decoder = json.JSONDecoder()
+        at = out.find("{")
+        while at != -1:
+            try:
+                value, _ = decoder.raw_decode(out, at)
+            except ValueError:
+                at = out.find("{", at + 1)
+                continue
+            if isinstance(value, dict):
+                return value
+            at = out.find("{", at + 1)
+        raise Failed(f"hermes {' '.join(args[:4])} printed no JSON object: {out[-200:]!r}")
 
 
-@contextlib.contextmanager
-def _environ(name: str, value: str) -> Iterator[None]:
-    """Kelpie's own Hermes commands (the block) read ``HERMES_HOME`` from its environment."""
-    old = os.environ.get(name)
-    os.environ[name] = value
+def s6_container(proc: Path = PROC, run: Path = Path("/run/s6/basedir")) -> bool:
+    """Is this Hermes' s6 container (s6-svscan as pid 1)? There Hermes sends ``gateway`` and
+    profile commands to the container's supervisor whatever ``HERMES_HOME`` says, so a
+    throwaway home is not throwaway (as ``hermes_cli.service_manager._s6_running``)."""
     try:
-        yield
-    finally:
-        if old is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = old
+        comm = (proc / "1" / "comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return comm == "s6-svscan" and run.is_dir()
+
+
+class _Interrupted(BaseException):
+    """SIGTERM while the self-test runs: unwind through the cleanup, then exit."""
+
+
+def _on_sigterm(signum: int, frame: object) -> None:
+    raise _Interrupted
 
 
 def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -> int:
@@ -221,18 +239,46 @@ def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -
             f"{hermes.cli!r} not found\nset [adapters.hermes] cli, or run on the Hermes host",
         )
         return 1
-    tmp = Path(tempfile.mkdtemp(prefix="kelpie-selftest-"))
-    home, spool = tmp / "home", tmp / "spool.jsonl"
-    home.mkdir(mode=0o700)
-    cli = Hermes(exe, hermes_env(os.environ, home, spool), tmp)
+    if s6_container():
+        report.fail(
+            "host",
+            "this is Hermes' s6 container: Hermes would act on the container's gateway, not on "
+            "a throwaway one\nrun the self-test on a host (or VM) with Hermes installed",
+        )
+        return 1
+    if not (PROC / "self" / "stat").exists():
+        report.fail("host", "no /proc: Kelpie cannot end Hermes workers on this system")
+        return 1
     try:
-        with MockLLM(COMMAND) as llm, _environ("HERMES_HOME", str(home)):
-            _steps(report, cli, hermes, settings, llm, home, spool, tmp)
-    except Failed as exc:
-        what, _, fix = str(exc).partition("\n")
-        report.fail("selftest", f"{what}\n{fix}" if fix else what)
+        rule = _rule(settings)
+    except (ConfigError, ValueError, TypeError) as exc:
+        report.fail("rule 10", f"its configuration does not load: {exc}")
+        return 1
+    try:
+        previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    except ValueError:  # not the main thread
+        previous = None
+    tmp = Path(tempfile.mkdtemp(prefix="kelpie-selftest-")).resolve()
+    try:
+        home, spool = tmp / "home", tmp / "spool.jsonl"
+        home.mkdir(mode=0o700)
+        (tmp / "user").mkdir(mode=0o700)
+        cli = Hermes(exe, hermes_env(os.environ, home, spool, tmp / "user"), tmp)
+        with MockLLM(COMMAND) as llm:
+            try:
+                _steps(report, cli, hermes, rule, llm, home, spool, tmp)
+            except Failed as exc:
+                what, _, fix = str(exc).partition("\n")
+                report.fail("selftest", f"{what}\n{fix}" if fix else what)
+            except Exception as exc:
+                report.fail("selftest", f"unexpected {type(exc).__name__}: {exc}")
+            finally:
+                _cleanup(report, home)  # while the mock still answers: no fallback hunting
+    except _Interrupted:
+        report.fail("selftest", "interrupted (SIGTERM); cleaned up")
     finally:
-        _cleanup(report, cli, home)
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
         if keep:
             report.note(f"kept {tmp} (Hermes home, spool, logs under home/logs)")
         else:
@@ -249,7 +295,7 @@ def _steps(
     report: Report,
     cli: Hermes,
     hermes: HermesSettings,
-    settings: Settings,
+    rule: tuple[Rule, str],
     llm: MockLLM,
     home: Path,
     spool: Path,
@@ -297,7 +343,7 @@ def _steps(
         f"run {rid}: submitter pid {recorded.submitter}, agent pid {recorded.agent}",
     )
 
-    rule, thresholds = _rule(settings)
+    loop_breaker, thresholds = rule
     key = tmp / "wait.key"  # signs this stop only; tmp is private (mkdtemp: 0700)
     key.write_bytes(secrets.token_bytes(32))
     key.chmod(0o600)
@@ -309,9 +355,10 @@ def _steps(
         enabled=True,
         wait_key=key,
     ).build()
+    adapter.cli_environ = cli.env  # the block runs against the throwaway home too
     alerts = CaptureAlerts()
     engine = Engine(
-        [rule],
+        [loop_breaker],
         adapters=[adapter],
         alerter=alerts,
         config=EngineConfig(dry_run=False, modes={RULE: Mode.ACT}),
@@ -393,7 +440,7 @@ def _wait_bound(db: Path, task: str) -> tuple[int, Any]:
     )
 
 
-def _rule(settings: Settings) -> tuple[Rule, str]:
+def _rule(settings: Settings) -> tuple[Rule, str]:  # raises ConfigError
     """Rule 10 as the user's config sets it up, whatever its mode there."""
     loaded = load_rules(settings.engine)
     rule = next((r for r in loaded.rules if r.name == RULE), None)
@@ -469,28 +516,27 @@ def _check_quiet(report: Report, llm: MockLLM, stopped_at: float) -> None:
     else:
         report.ok(
             "no model calls after the stop",
-            f"{after} calls in all, every one to the local mock (0 real tokens)",
+            f"{after} model calls, all answered by the local mock",
         )
 
 
-def _cleanup(report: Report, cli: Hermes, home: Path) -> None:
-    """Stop the throwaway home's gateway, then end anything still running with that
-    ``HERMES_HOME`` (only processes this self-test started can carry it)."""
-    with contextlib.suppress(Failed):
-        cli.run("gateway", "stop", timeout=60)
-    left = _processes_of(home)
-    for pid in left:
-        with contextlib.suppress(OSError):
-            os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + 5
-    while left and time.monotonic() < deadline:
-        time.sleep(0.1)
-        left = [p for p in left if (q := read_proc(p)) is not None and q.state not in "ZXx"]
-    for pid in left:
-        with contextlib.suppress(OSError):
-            os.kill(pid, signal.SIGKILL)
-    if left:
-        report.note(f"cleanup: SIGKILLed {len(left)} leftover process(es) of the throwaway home")
+def _cleanup(report: Report, home: Path) -> None:
+    """End every process still running with the throwaway ``HERMES_HOME`` (only processes this
+    self-test started carry it): the gateway Hermes started for it, a runaway left by a failed
+    step. SIGTERM, then SIGKILL, each re-checked against the process's start time (a pid
+    reused meanwhile is never signalled); again until none is left, for children started in
+    between. No ``hermes gateway stop``: under a service manager it may reach a real gateway."""
+    killed = 0
+    for _ in range(3):
+        left = [p for pid in _processes_of(home) if (p := read_proc(pid)) is not None]
+        if not left:
+            break
+        ended = end_processes(left, grace=5.0)
+        killed += len(left) if ended.killed else 0
+    if killed:
+        report.note("cleanup: some processes of the throwaway home needed SIGKILL")
+    if left := _processes_of(home):
+        report.fail("cleanup", f"processes of the throwaway home still running: pid {left}")
 
 
 def _processes_of(home: Path) -> list[int]:

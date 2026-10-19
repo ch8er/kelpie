@@ -10,7 +10,8 @@ and heartbeats. ``kanban block`` is the simulator's (:mod:`kelpie.sim.hermes_cli
 A file ``mode`` next to the executable (its directory is ``BIN_DIR``) changes the behaviour:
 ``nonspawnable`` (dispatch skips the task), ``crash`` (the run ends crashed before an agent
 takes it), ``author`` (blocks are signed ``default``, as a Hermes that ignores
-``HERMES_PROFILE_NAME``), ``deaf`` (the worker and its tool command ignore SIGTERM).
+``HERMES_PROFILE_NAME``), ``deaf`` (the worker and its tool command ignore SIGTERM),
+``silent`` (no tool call reaches the spool: rule 10 never fires). Several words combine.
 """
 
 from __future__ import annotations
@@ -37,11 +38,11 @@ MODE_FILE = Path(BIN_DIR) / "mode"
 DEAF = "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
 
 
-def mode() -> str:
+def mode() -> set[str]:
     try:
-        return MODE_FILE.read_text().strip()
+        return set(MODE_FILE.read_text().split())
     except OSError:
-        return ""
+        return set()
 
 
 def db_of(board: str) -> Path:
@@ -59,7 +60,7 @@ def option(args: list[str], name: str) -> str | None:
 
 
 def spawn(code: str) -> subprocess.Popen[bytes]:
-    prefix = DEAF if mode() == "deaf" else ""
+    prefix = DEAF if "deaf" in mode() else ""
     return subprocess.Popen(
         [sys.executable, "-c", prefix + code],
         start_new_session=True,
@@ -85,7 +86,7 @@ def dispatch(board: str) -> int:
     if row is None:
         print(json.dumps(out))
         return 0
-    if mode() == "nonspawnable":
+    if "nonspawnable" in mode():
         out["skipped_nonspawnable"].append(row["id"])
         print(json.dumps(out))
         return 0
@@ -102,7 +103,7 @@ def dispatch(board: str) -> int:
         " last_heartbeat_at = ? WHERE id = ?",
         (rid, now, now, task),
     )
-    if mode() == "crash":  # the worker died before an agent took the run
+    if "crash" in mode():  # the worker died before an agent took the run
         conn.execute("UPDATE task_runs SET status = 'crashed', error = 'boom' WHERE id = ?", (rid,))
         out["spawned"].append({"task_id": task, "assignee": profile})
         print(json.dumps(out))
@@ -157,8 +158,9 @@ def agent(board: str, task: str, rid: int, base_url: str) -> None:
             "outcome": "ok",
             "duration_ms": 10,
         }
-        with spool.open("a") as fh:
-            fh.write(json.dumps(line) + "\n")
+        if "silent" not in mode():  # silent: Kelpie's plugin is not loaded
+            with spool.open("a") as fh:
+                fh.write(json.dumps(line) + "\n")
         conn.execute("UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?", (int(now), task))
         conn.execute("UPDATE task_runs SET last_heartbeat_at = ? WHERE id = ?", (int(now), rid))
         time.sleep(0.1)
@@ -170,8 +172,6 @@ def main(argv: list[str]) -> int:
         return 0
     if argv[:2] == ["profile", "create"]:
         (HOME / "profiles" / argv[-1]).mkdir(parents=True)
-        return 0
-    if argv[:2] == ["gateway", "stop"]:
         return 0
     if argv[:3] == ["kanban", "boards", "create"]:
         db = db_of(argv[3])
@@ -192,7 +192,7 @@ def main(argv: list[str]) -> int:
         if verb == "dispatch":
             return dispatch(board)
     if argv[:2] == ["kanban", "block"]:
-        if mode() == "author":
+        if "author" in mode():
             os.environ["HERMES_PROFILE_NAME"] = "default"
         return hermes_cli.main(argv)
     print(f"fake hermes: unsupported {argv}", file=sys.stderr)

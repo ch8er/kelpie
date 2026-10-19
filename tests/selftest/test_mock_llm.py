@@ -64,5 +64,6 @@ def test_models_and_nothing_else() -> None:
         assert info.value.code == 404
         assert post(f"{llm.base_url}/chat/completions", b"not json")[0] == 400
         assert post(f"{llm.base_url}/chat/completions", b"[]")[0] == 400
+        assert post(f"{llm.base_url}/chat/completions", b"")[0] == 411
         assert llm.calls == 0
     assert llm.base_url.startswith("http://127.0.0.1:")

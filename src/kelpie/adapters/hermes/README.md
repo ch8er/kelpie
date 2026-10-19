@@ -199,7 +199,10 @@ re-queued. The CLI contract was read from the Hermes sources (`hermes_cli/kanban
 
 ### Self-test: `kelpie selftest stop --adapter hermes`
 
-Before rule 10 runs in `act`, run it on the Hermes host, as the user Kelpie runs as:
+Before rule 10 runs in `act`, run it on the Hermes host, as the user Kelpie runs as (Linux:
+it needs `/proc`; not inside Hermes' own Docker image, where Hermes hands gateway and profile
+commands to the container's s6 supervisor whatever `HERMES_HOME` says, so the self-test
+refuses to run there):
 
 ```bash
 kelpie selftest stop --adapter hermes     # about a minute; --keep keeps the directory
@@ -209,15 +212,18 @@ It never touches your Hermes home: everything happens in a new temporary `HERMES
 a dummy profile (`kelpie-selftest`, in `kanban.dispatch_profiles` there), a throwaway board and
 Kelpie's hooks plugin. The profile's model is a local OpenAI-compatible mock that always asks
 for the same `terminal` call, so the run is a runaway and **no real tokens are spent**: Hermes
-gets no provider key from Kelpie's environment and the profile's only model is the mock.
+gets no provider key from Kelpie's environment, a throwaway `HOME` (no credential files of
+yours to discover), no fallback providers, and the profile's only model is the mock.
 Hermes' own loop guard is off in that profile, so the loop runs until something stops it. Then
 rule 10 runs in `act`, with your `[engine.rules.loop_breaker]` thresholds and your
 `[adapters.hermes]` (`cli`, `cli_timeout`, `end_worker`, `worker_grace`, `author`), and the
 self-test checks, one line each: the task was dispatched, its agent started, rule 10 stopped the
 run, the task is blocked for a human, the block is signed by Kelpie, the worker processes are
 gone and the model gets no further calls. It prints the alert as Telegram would show it (nothing
-is sent), stops the throwaway gateway, ends anything still running in that home, deletes it,
-and exits 0 only if every step passed.
+is sent), ends every process still running with that `HERMES_HOME` (the gateway Hermes
+started for it, a runaway left by a failed step; never `hermes gateway stop`, which a service
+manager could route to a real gateway), deletes the directory, and exits 0 only if every step
+passed. SIGTERM to the self-test cleans up the same way.
 
 What it does not cover: your real home's configuration (its `kanban.dispatch_profiles`, the
 plugin in your profiles, your gateway), and whether rule 10's thresholds fit your farm. The
