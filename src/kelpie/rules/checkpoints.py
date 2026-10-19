@@ -7,10 +7,12 @@ them, and the next session starts from zero. This rule keeps work recoverable:
   commit is older than ``commit_every`` (default 30m; per role with
   ``commit_every_by_role``, e.g. reviewers commit rarely), or that has more than
   ``max_changed_files`` (default 20) changed files, gets a comment asking it to commit. Not
-  while a long tool call is in progress (a build, a simulator run: ``Session.running_tool``
-  with its start, or an open TOOL span of the session) that started at least
-  ``tool_long_after`` (5m) and less than ``tool_grace`` (2h) ago. No adapter reports a
-  running tool call yet; open TOOL spans come only from exporters that send unfinished spans;
+  while a long tool run is in progress: ``Session.running_tool`` with its start (the Hermes
+  adapter reads a build or simulator process in the task's workspace from the host,
+  ``[adapters.hermes.tools]``), less than ``tool_grace`` (2h) ago, or an open TOOL span of
+  the session that started at least ``tool_long_after`` (5m) and less than ``tool_grace``
+  ago (spans are every call, so a short one holds nothing; open TOOL spans come only from
+  exporters that send unfinished spans);
 - **WIP commit**: when the task's last session is over (ended, or silent past
   ``session_stale_after``) and no other session is live on it, a dirty worktree gets a
   ``wip_commit`` to the task branch with the session's progress note. WIP commits must not
@@ -139,20 +141,26 @@ class Checkpoints:
         return dict(self.commit_every_by_role).get(role or "", self.commit_every)
 
     def _tool_running(self, session: Session, snapshot: Snapshot) -> str | None:
-        """The long tool call in progress in ``session`` that holds its reminder, if any: it
-        started at least ``tool_long_after`` ago and less than ``tool_grace`` ago. A call
-        with no start time, or one that starts in the future, holds nothing."""
-        calls = [
-            (s.start, s.tool or s.name)
-            for s in snapshot.spans_for_session(session.id)
-            if s.kind is SpanKind.TOOL and s.end is None
-        ]
-        if session.running_tool and session.running_tool_since is not None:
-            calls.append((session.running_tool_since, session.running_tool))
+        """The long tool run in progress in ``session`` that holds its reminder, if any:
+        the adapter's ``running_tool`` (a build or simulator process, long by what it is)
+        that started less than ``tool_grace`` ago, or an open TOOL span that started at
+        least ``tool_long_after`` and less than ``tool_grace`` ago. One with no start time,
+        or one that starts in the future, holds nothing."""
         now = snapshot.now
         held = [
-            (at, name) for at, name in calls if self.tool_long_after <= now - at < self.tool_grace
+            (s.start, s.tool or s.name)
+            for s in snapshot.spans_for_session(session.id)
+            if s.kind is SpanKind.TOOL
+            and s.end is None
+            and self.tool_long_after <= now - s.start < self.tool_grace
         ]
+        since = session.running_tool_since
+        if (
+            session.running_tool
+            and since is not None
+            and timedelta(0) <= now - since < self.tool_grace
+        ):
+            held.append((since, session.running_tool))
         return max(held)[1] if held else None
 
     @staticmethod

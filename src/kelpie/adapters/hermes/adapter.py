@@ -132,6 +132,7 @@ from kelpie.adapters.hermes.park import (
     schedule_args,
     unblock_args,
 )
+from kelpie.adapters.hermes.processes import HostTools, ToolProcesses, read_host, resolve
 from kelpie.adapters.hermes.stop import (
     CLI_TIMEOUT,
     DEFAULT_CLI,
@@ -158,6 +159,8 @@ from kelpie.core.model import (
     KelpieMark,
     Owner,
     OwnerKind,
+    Resource,
+    ResourceKind,
     Return,
     Session,
     Snapshot,
@@ -191,6 +194,7 @@ WORKSPACE_KINDS = ("worktree",)
 GIT_WORKERS = 4  # workspaces read in parallel
 GIT_BUDGET_FACTOR = 2  # all git calls of one snapshot end within this many git_timeouts
 GIT_BACKOFF = timedelta(minutes=5)  # a workspace whose git timed out is skipped this long
+HOST_READ_KEPT = timedelta(minutes=5)  # a failed read of tool runs reuses the last good one
 
 NOT_IMPLEMENTED = (
     "this Hermes action is not implemented yet (only stop is); "
@@ -582,6 +586,9 @@ class HermesAdapter:
     # A comment by one of an entry's relays that opens with its marker records its person's
     # decision ("Решение CEO: ..."); see HumanDecision.
     human_decisions: Sequence[HumanDecision] = ()
+    # Long tool runs (a build, a simulator) and tool slots read from the host's processes
+    # ([adapters.hermes.tools]); None: not read.
+    tools: ToolProcesses | None = None
     prework_statuses: Collection[str] = DEFAULT_PREWORK
     # Profile -> role (Hermes lowercases profiles). Others: the profile without a trailing
     # "-<number>" (dev-1 -> dev), else the profile itself.
@@ -596,6 +603,11 @@ class HermesAdapter:
     # workspace -> snapshot time until which it is not read (its git timed out)
     _git_backoff: dict[Path, datetime] = field(
         default_factory=dict, init=False, repr=False, compare=False
+    )
+    # the last good read of the host's tool runs and slots, with its time: one failed read
+    # (a slow lsof under a build) must not drop running_tool and remind mid-build
+    _host_seen: tuple[datetime, HostTools] | None = field(
+        default=None, init=False, repr=False, compare=False
     )
     wait_key: Path = DEFAULT_WAIT_KEY  # signs park and stop markers (park.py, stop.py)
     # When a marker is issued: Hermes records the park or stop on its own clock, and the two
@@ -723,6 +735,9 @@ class HermesAdapter:
         if self.git_state:  # outside the read transaction: git may be slow
             sessions, states = self._with_git_state(sessions, tasks, rows, now)
             tasks = tuple(_with_files(t, states.get(t.id)) for t in tasks)
+        slots: tuple[Resource, ...] = ()
+        if self.tools is not None:
+            sessions, slots = self._with_tools(self.tools, sessions, tasks, rows, now)
         owners = tuple(
             Owner(
                 id=p,
@@ -739,7 +754,71 @@ class HermesAdapter:
             conditions=waits,
             sessions=tuple(replace(s, source=self.name) for s in sessions),
             spans=spans,
+            resources=slots,
         )
+
+    def _with_tools(
+        self,
+        tools: ToolProcesses,
+        sessions: tuple[Session, ...],
+        tasks: Sequence[Task],
+        rows: Mapping[str, sqlite3.Row],
+        now: datetime,
+    ) -> tuple[tuple[Session, ...], tuple[Resource, ...]]:
+        """The long tool run of each unfinished task, on its live session (rule 9 holds its
+        commit reminders meanwhile), and the use of each slot pool (see processes.py). A
+        workspace path several tasks share belongs to none of them (as for git state). A
+        failed read reuses the last good one for ``HOST_READ_KEPT``."""
+        open_ids = {t.id for t in tasks if not t.status.is_terminal}
+        users: dict[str, list[str]] = {}
+        for t in sorted(open_ids):
+            if (path := _workspace(rows[t])) is not None:
+                users.setdefault(resolve(path), []).append(t)
+        for path, found in users.items():
+            if len(found) > 1:
+                warn_once(
+                    (path, "shared-tools"),
+                    "hermes: workspace %s is used by tasks %s; its tool runs belong to none",
+                    path,
+                    ", ".join(found),
+                )
+        # A shared path maps to no task, so a shorter enclosing workspace cannot claim it.
+        workspaces = {path: found[0] if len(found) == 1 else None for path, found in users.items()}
+        shared = {t for found in users.values() if len(found) > 1 for t in found}
+        mine = open_ids - shared
+        host = read_host(tools, now, mine, workspaces)
+        read_at = now
+        if host is not None:
+            self._host_seen = (now, host)
+        elif self._host_seen is not None and now - self._host_seen[0] <= HOST_READ_KEPT:
+            read_at, host = self._host_seen
+            host = replace(host, runs={t: r for t, r in host.runs.items() if t in mine})
+        else:
+            return sessions, ()
+        live: dict[str, Session] = {}
+        for s in sessions:  # the task's latest open run
+            if s.ended_at is None:
+                live[s.task_id] = s
+        busy = {live[tid].id: run for tid, run in host.runs.items() if tid in live}
+        sessions = tuple(
+            replace(s, running_tool=busy[s.id].tool, running_tool_since=busy[s.id].since)
+            if s.id in busy
+            else s
+            for s in sessions
+        )
+        slots = tuple(
+            Resource(
+                f"{pool}:{holder}",
+                ResourceKind.SLOTS,
+                used=float(n),
+                limit=float(use.total),
+                unit="slots",
+                at=read_at,
+            )
+            for pool, use in sorted(host.pools.items())
+            for holder, n in (("agent", use.agent), ("ci", use.ci))
+        )
+        return sessions, slots
 
     @property
     def _park_window(self) -> timedelta:

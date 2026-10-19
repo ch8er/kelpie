@@ -151,3 +151,22 @@ def test_pre_work_series_are_capped_and_unknown_statuses_named() -> None:
     assert 'kelpie_prework_tasks{platform_status="s00"} 1' in text
     unnamed = Task("C-x", "t", Status.BACKLOG, NOW, prework=True)  # the adapter said nothing
     assert 'kelpie_prework_tasks{platform_status="unknown"} 1' in render(unnamed)
+
+
+def test_tool_slots_by_pool_and_holder() -> None:
+    from kelpie.core.model import Resource, ResourceKind
+
+    def slot(name: str, used: float) -> Resource:
+        return Resource(name, ResourceKind.SLOTS, used=used, limit=4.0, unit="slots", at=NOW)
+
+    readings = (slot("sim:agent", 1), slot("sim:ci", 2))
+    metrics = Metrics()
+    loop = ControlLoop(Engine([]), lambda: Snapshot(now=NOW, resources=readings), metrics)
+    loop.tick_once()
+    text = metrics.render()
+    assert 'kelpie_tool_slots{pool="sim"} 4' in text
+    assert 'kelpie_tool_slots_held{pool="sim",holder="agent"} 1' in text
+    assert 'kelpie_tool_slots_held{pool="sim",holder="ci"} 2' in text
+    empty = Metrics()
+    ControlLoop(Engine([]), lambda: Snapshot(now=NOW), empty).tick_once()
+    assert "kelpie_tool_slots" not in empty.render()  # no pools: no series

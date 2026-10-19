@@ -454,6 +454,18 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # reviewer-bot = "reviewer"
 # merger = "reviewer"
 #
+# Long tool runs and simulator slots, from the host's processes (ps, lsof): a task is busy
+# while one of names runs in its workspace, so rule 9 holds its commit reminders; slot
+# pools are exported as kelpie_tool_slots{pool} and kelpie_tool_slots_held{pool,holder}.
+# [adapters.hermes.tools]
+# names = ["xcodebuild", "ios_sim.sh"]   # required: no tool is built in
+# workspace_patterns = [".worktrees/{task}", "workspaces/{task}"]  # besides Hermes' own path
+# timeout = "5s"                   # per ps or lsof call
+# [[adapters.hermes.tools.slots]]
+# name = "sim"
+# paths = ["~/sim-slots/*.lock"]   # empty lock files taken with lockf -s -t 0
+# size = 4                         # the pool's slots (lockf without -k deletes idle files)
+#
 # Recommended on Hermes. A valid Hermes claim counts as a heartbeat, but Hermes tolerates
 # heartbeats up to an hour old, while Kelpie's default is 30 minutes:
 #

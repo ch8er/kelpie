@@ -162,6 +162,50 @@ def test_hermes_human_decisions_trust(tmp_path: Path, entries: list[str], messag
         load_settings(path)
 
 
+def test_hermes_tools(tmp_path: Path) -> None:
+    from kelpie.adapters.hermes.processes import SlotPool, ToolProcesses
+
+    assert load_settings(write(tmp_path, "[adapters.hermes]\n")).hermes.tools is None  # type: ignore[union-attr]
+    path = write(
+        tmp_path,
+        "[adapters.hermes.tools]\n"
+        'names = ["xcodebuild"]\ntimeout = "3s"\n'
+        "[[adapters.hermes.tools.slots]]\n"
+        'name = "sim"\npaths = ["~/slots/sim-*.lock"]\nsize = 4\n',
+    )
+    settings = load_settings(path)
+    assert settings.hermes is not None
+    assert settings.hermes.tools == ToolProcesses(
+        names=("xcodebuild",), slots=(SlotPool("sim", ("~/slots/sim-*.lock",), 4),), timeout=3.0
+    )
+    (adapter,) = build_adapters(settings)
+    assert isinstance(adapter, HermesAdapter) and adapter.tools == settings.hermes.tools
+    with pytest.raises(ConfigError, match="names must be a non-empty list"):
+        load_settings(write(tmp_path, "[adapters.hermes.tools]\n"))  # no tool is built in
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "names = []",
+        'names = "xcodebuild"',
+        'names = ["/usr/bin/xcodebuild"]',
+        'names = ["x"]\nworkspace_patterns = [".worktrees/"]',
+        'names = ["x"]\ntimeout = "2m"',
+        'names = ["x"]\ncolor = 1',
+        'names = ["x"]\n[[adapters.hermes.tools.slots]]\nname = "a b"\npaths = ["x"]',
+        'names = ["x"]\n[[adapters.hermes.tools.slots]]\nname = "a"\npaths = []',
+        'names = ["x"]\n[[adapters.hermes.tools.slots]]\nname = "a"\npaths = ["x"]\nsize = 0',
+        'names = ["x"]\nworkspace_patterns = ["~/w/{task}"]',
+        'names = ["x"]\n[[adapters.hermes.tools.slots]]\nname = "a"\npaths = ["x"]\n'
+        '[[adapters.hermes.tools.slots]]\nname = "a"\npaths = ["y"]',
+    ],
+)
+def test_hermes_tools_rejected(tmp_path: Path, body: str) -> None:
+    with pytest.raises(ConfigError, match="tools"):
+        load_settings(write(tmp_path, f"[adapters.hermes.tools]\n{body}\n"))
+
+
 def test_hermes_disabled_builds_no_adapter(tmp_path: Path) -> None:
     settings = load_settings(write(tmp_path, "[adapters.hermes]\nenabled = false\n"))
     assert settings.hermes is not None and build_adapters(settings) == []

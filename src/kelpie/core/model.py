@@ -176,6 +176,9 @@ class ResourceKind(StrEnum):
     LLM_QUOTA = "llm_quota"
     CI_MINUTES = "ci_minutes"
     AUTH = "auth"
+    # Tool slots of a pool (simulators) in use: ``name`` "<pool>:<holder>" (agent, ci),
+    # ``used`` of ``limit`` slots. For the metrics; no rule reads them.
+    SLOTS = "slots"
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,8 +244,9 @@ class Session:
     summary: str | None = None  # the agent's own progress note, if it left one
     artifacts: tuple[Artifact, ...] = ()
     source: str | None = None  # name of the platform adapter that reported the session
-    # A tool call in progress (a build, a simulator run), if the adapter knows: its name and
-    # when it started. Open TOOL spans of the session say the same.
+    # A long tool run in progress (a build, a simulator run), if the adapter knows: its name
+    # and when it started. Only a long run: rule 9 holds commit reminders from its start
+    # (an adapter must not set it for every call; open TOOL spans are every call).
     running_tool: str | None = None
     running_tool_since: datetime | None = None
 

@@ -85,6 +85,18 @@ the relays count: any agent can write the words, and a person's comment states a
 criteria that rule 1 holds a task to and confirms them, so list only an agent you trust to
 relay the person's decisions faithfully.
 
+**Long tool runs and simulator slots** (`[adapters.hermes.tools]`, optional). An agent
+running `xcodebuild` or `ios_sim.sh` from its task worktree is busy: with the section set,
+Kelpie reads the host's processes (`ps`, then `lsof` for working directories) and marks the
+task's live session `running_tool` from the tool's start, so rule 9 does not ask it to
+commit meanwhile. A tool belongs to a task when it or an ancestor works in the task's
+workspace (the path Hermes records, or `workspace_patterns` such as `.worktrees/{task}`). Slot pools
+(`[[adapters.hermes.tools.slots]]`, lock files held with `lockf -s -t 0`) are counted by
+holder, agent or CI (whatever does not work in a task workspace), as
+`kelpie_tool_slots_held{pool,holder}`. Kelpie never takes a slot's lock: it only sees who
+has the file open. This needs Kelpie on the Hermes host as the agents' user; process names
+and paths are config (`docs/configuration.md`); `names` has no default.
+
 Kelpie must run on a host that can read `db_path` (the Hermes host, or a mounted copy).
 SQLite WAL needs the `-shm` file next to the database to be readable.
 

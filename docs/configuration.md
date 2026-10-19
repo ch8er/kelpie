@@ -197,8 +197,8 @@ The resume note goes out with the commit and says where the changes are if it fa
 | `commit_every` | `"30m"` | duration, > 0 | Remind a live session with uncommitted changes when its last commit (or its start) is older than this. |
 | `commit_every_by_role` | `{}` | table of role = duration | `commit_every` by role, e.g. `{ reviewer = "2h" }`: the task's role, or its owner's when the task has none. |
 | `max_changed_files` | `20` | count, >= 1 | ...or when it has more changed files than this. |
-| `tool_grace` | `"2h"` | duration, > 0 | No reminder while a long tool call is in progress (a build, a simulator run: `Session.running_tool` with its start, or an open TOOL span), up to this long after it started. No adapter reports running tool calls yet. |
-| `tool_long_after` | `"5m"` | duration, > 0 | ...once the call has run this long: short calls do not hold reminders. |
+| `tool_grace` | `"2h"` | duration, > 0 | No reminder while a long tool run is in progress, up to this long after it started: `Session.running_tool` with its start (Hermes: a build or simulator process in the task's workspace, [adapters.hermes.tools](#adaptershermestools)), or an open TOOL span. |
+| `tool_long_after` | `"5m"` | duration, > 0 | An open TOOL span holds reminders once it has run this long: short calls do not. An adapter's `running_tool` holds from its start (it is long by what it is). |
 | `wip_ci` | `"skip_ci"` | `skip_ci` \| `draft_pr` | How the WIP commit avoids CI: `[skip ci]` in the message, or a push to a draft PR. Never onto an open PR (drafts included, so with `draft_pr` the draft of a first WIP commit refuses the next ones), nor onto a branch whose PR closed after the session started: none whose head is the session's or task's branch or that belongs to the task, and not without a known branch. A person gets an alert about the uncommitted changes instead. |
 | `wip_pr_margin` | `"1m"` | duration, > 0, < `act_within` | A WIP commit waits until `[connectors.github.pulls]` read the open PRs in full at least this long after the exit (an agent's last act may be opening a PR); until then nothing is said, not even the resume note. A PR someone else opens between that scan and the commit (up to `poll_interval`) is not seen. |
 | `wip_without_pr_check` | `false` | bool | WIP commits without that wait, for a farm whose task branches never carry PRs. Without it and without `[connectors.github.pulls]`, there are no WIP commits (warned at startup). A fork's PR, or one in a repository not in `[connectors.github] repos`, is not seen. |
@@ -600,6 +600,43 @@ The Hermes platform adapter. Absent: no platform, and snapshots hold no tasks. D
 | `prework_statuses` | `["triage", "scheduled"]` | list of `triage`, `scheduled` | Hermes statuses before any work starts: rule 3 alerts when a card sits there past `prework_after` with tasks depending on it. Kelpie's own parks in `scheduled` are `waiting`, not pre-work. |
 | `human_owners` | `[]` | list of names | Assignees that are people, not agents; case-insensitive. Their tasks get a human owner, which `[connectors.human_tasks]` needs. Also changes `ping_pong`'s default escalation target and who `bottlenecks` and `orphan_status` count as agents. A person stays a person when another adapter lists the same name, in any case (e.g. a Claude Code task-list owner), and never counts as an idle agent. Comment and description authors with these names are people too (rule 1's acceptance criteria). |
 | `human_decisions` | `[]` | array of tables: `marker`, `relays`, optional `person` | A person's decisions an agent records (`[[adapters.hermes.human_decisions]]`, e.g. `marker = "решение CEO"`, `relays = ["partner"]`, `person = "ceo"`): a comment, or a task description, by one of `relays` (profiles, case-insensitive) that opens with `marker` and a separator on its line (`:`, `-` before no word, an en or em dash; case-insensitive, past invisible characters and markdown emphasis: "Решение CEO: ...") is a person's, all of it, written by `person` (one of `human_owners`; else the relay). "Жду решение CEO", a quote or the marker further on are the agent's own words. Rule 1 then reads its acceptance criteria and verdicts as that person's; relayed comments are kept apart from people's own, so they never push those out. Relays are required, and may not be human owners, `kelpie` or `user` (Hermes' default CLI author), nor appear in two entries; `kelpie status` lists them: any agent can write the words. On a multi-host farm set it where the Hermes adapter runs (the `kelpie agent` host). |
+
+### [adapters.hermes.tools]
+
+Long tool runs and tool slots, read from the Hermes host's process table with `ps` and
+`lsof` (Kelpie runs there as the agents' user). Absent: not read. A task's live session is
+busy (`Session.running_tool`, from the process's start) while a process named in `names`
+is alive and it or one of its ancestors works in the task's workspace: the path Hermes
+records for the task (the longest that holds it; a path several tasks share belongs to
+none), or a directory matching `workspace_patterns`. Rule 9 holds its commit reminders
+meanwhile (up to its `tool_grace`; an orphaned tool of an earlier run still in the workspace
+counts too). `{task}` and Hermes' paths name unfinished tasks that do not share their
+workspace. A command line is matched by the base names of its executable and, for an
+interpreter (a shell, `env`, `python3` or a versioned Python, `node`, `xcrun` ...; an option's value such as `--sdk iphonesimulator` is taken for the script), of its script (the first next
+word that is no option: `bash -x ios_sim.sh`; not `vim ios_sim.sh`) and never kept. A
+failed read (a timeout, an error, more output than 4 MB) reuses the last good one for 5
+minutes, so a slow `lsof` under a build does not remind mid-build; each cause is warned
+once.
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `names` | *required* | list of process base names | Tool processes that keep a task busy, e.g. `["xcodebuild", "ios_sim.sh"]`. No tool is built in. |
+| `workspace_patterns` | `[]` | list of paths with `{task}` once | Directories of a task's workspace besides Hermes' own path, as path components; `{task}` is a task id on the board, e.g. `[".worktrees/{task}", "workspaces/{task}"]`; not `~` paths. A path several tasks share in Hermes is still searched with these. |
+| `timeout` | `"5s"` | duration, > 0 and <= 30s | Limit for each `ps` or `lsof` call; all calls of one snapshot within three of them. |
+
+`[[adapters.hermes.tools.slots]]` entries, pools of tool slots (simulators): empty lock
+files held with `lockf -s -t 0 <slot> <command>` by agents and CI runners alike. A slot is
+held while a process has its file open (Kelpie never takes a lock to probe one: a probe
+would make a real `lockf -t 0` fail); its holder is an agent's when the holder or an
+ancestor works in a task workspace (of an unfinished task), else CI's. Exported as `kelpie_tool_slots{pool}` and
+`kelpie_tool_slots_held{pool,holder}` (`agent`, `ci`). A `kelpie agent` host does not send
+them to the hub (only the board travels): read them where serve runs the adapter.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | *required* | The pool's name (letters, digits, `.`, `_`, `-`), unique. |
+| `paths` | *required* | Glob patterns of its lock files (`~` expanded; relative ones resolve against Kelpie's working directory), e.g. `["~/sim-slots/slot-*.lock"]`. |
+| `size` | the files that exist | How many slots the pool has (a count, > 0). Set it unless the lock files are created once and kept (`lockf -k`): BSD `lockf` without `-k` deletes a slot's file when its command ends, so counting files would count only the held ones. |
 
 ## [adapters.claude_code]
 
