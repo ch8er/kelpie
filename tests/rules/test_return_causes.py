@@ -368,6 +368,20 @@ def test_only_the_names_a_clause_says_failed() -> None:
         ("CI checks are red", "failing_tests"),
         ("the build is broken on main", "failing_tests"),
         ("Fixed the typo, but tests still fail", "failing_tests"),
+        # second review: a request to fix, a fix of something else, an opener, a count
+        ("CI is red, please fix", "failing_tests"),
+        ("Tests failed - please fix before merge", "failing_tests"),
+        ("Unit tests are failing, needs a fix", "failing_tests"),
+        ("The build is broken: fix the import", "failing_tests"),
+        ("tests still failing after your fix", "failing_tests"),
+        ("CI is red, not fixed yet", "failing_tests"),
+        ("unit tests failed even though I fixed the timeout", "failing_tests"),
+        ("Not ready: unit tests failed", "failing_tests"),
+        ("Not approved, CI is red", "failing_tests"),
+        ("PR #12 failed to merge, retry", "review_findings"),
+        ("Step 2 failed: lint", "review_findings"),
+        ("Please add a failing test that reproduces the bug", "review_findings"),
+        ("Test red banner on the login screen", "review_findings"),
     ],
 )
 def test_a_review_return_is_classified_by_what_sent_it_back(reason: str, cause: str) -> None:
@@ -422,3 +436,14 @@ def test_several_stages_and_a_conflict_category() -> None:
     # A platform-filed conflict names no failing test.
     conflict = ret("test_login conflicts", category="merge_conflict")
     assert ReturnCauses().cause(conflict) == "merge_conflict"
+
+
+def test_ci_wording_is_linear_on_long_reasons() -> None:
+    import time
+
+    from kelpie.rules.return_causes import _ci_failed
+
+    for reason in ("tests " + "keep " * 200 + "x", "CI " + "is " * 300, "no " * 400 + "tests"):
+        started = time.perf_counter()
+        _ci_failed(reason[:1000])
+        assert time.perf_counter() - started < 0.1, reason[:20]

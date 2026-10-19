@@ -111,22 +111,34 @@ DEFAULT_CAUSES: Mapping[str, tuple[str, ...]] = {
 # CI's wording for failing tests, when no test is named ("tests failed", "CI is red", "the
 # build failed", "3 failed", pytest's "FAILED x::y"); a clause at a time, see _ci_failed.
 _CI_FAILED = re.compile(
-    r"\b(?:(?:unit|ui|integration|e2e|snapshot)\s+)?(?:tests?|specs?|CI|pipeline|"
-    r"(?:CI|status|required)\s+checks?)\s+(?:(?:is|are|was|were|still|keeps?|keep|now|all)\s+)*"
+    # Each repeated word matches one way and at most three times: no backtracking blow-up.
+    r"\b(?:(?:unit|ui|integration|e2e|snapshot)\s+)?(?:tests?|specs?)"
+    r"\s+(?:(?:is|are|was|were|still|keeps?|now|all)\s+){0,3}"
+    r"(?:fail(?:ed|ing|s)?|broken)\b(?!\s+to\b)"
+    r"|\b(?:CI|pipeline|(?:CI|status|required)\s+checks?)"
+    r"\s+(?:(?:is|are|was|were|still|keeps?|now|all)\s+){0,3}"
     r"(?:fail(?:ed|ing|s)?|red|broken)\b(?!\s+to\b)"
-    r"|\bbuild\s+(?:(?:is|was|still|now)\s+)*(?:failed|failing|red|broken|broke)\b(?!\s+to\b)"
+    r"|\bbuild\s+(?:(?:is|was|still|now)\s+){0,3}(?:failed|failing|red|broken|broke)\b(?!\s+to\b)"
     r"|\bfailing\s+(?:(?:unit|ui|integration|e2e)\s+)?(?:tests?|specs?|CI|builds?|checks?)\b"
     r"|\bFAILED\s+\S+::"
-    r"|(?<![\w.])[1-9]\d*\s+(?:tests?\s+)?failed\b",
+    r"|(?<![\w.#])(?<!step )(?<!stage )(?<!job )[1-9]\d*\s+(?:tests?\s+)?failed\b(?!\s+to\b)",
     re.IGNORECASE,
 )
-# Words shortly before it that say none failed: "no unit tests failed", "none of the tests".
+# Right before it, in its own phrase (no ":" or "," between): the words that say none
+# failed ("no unit tests failed", "none of the tests", "0 tests failed", "not failing
+# tests") or that ask for one ("add a failing test").
 _NONE_BEFORE = re.compile(
-    r"\b(?:no|not|never|none|zero|0|without|nothing)\b(?:\W+\w+){0,3}\W*$", re.IGNORECASE
+    r"(?:^|[^\w])(?:no|not|never|none\s+of\s+the|zero|0|without)\s+(?:\w+\s+)?$"
+    r"|\b(?:add|adding|write|writing)\s+(?:an?\s+|the\s+|some\s+)?$",
+    re.IGNORECASE,
 )
-# A clause that says it was fixed: "Fixed failing tests", "CI was red, now green".
-_NOW_FIXED = re.compile(
-    r"\b(?:fix(?:ed|es)?|resolved|now\s+(?:green|passing|passes|pass)|(?:green|passing)\s+now)\b",
+# A resolution of the failure itself: "Fixed failing tests" (before it, not negated), "the
+# failing test is now fixed", "CI was red, now green" (after it). Not "please fix", "needs
+# a fix" or "even though I fixed the timeout".
+_FIXED_BEFORE = re.compile(r"\b(?:fixed|resolved)\b", re.IGNORECASE)
+_FIXED_AFTER = re.compile(
+    r"\b(?:(?:is|are|was|were)\s+(?:now\s+)?(?:fixed|resolved)"
+    r"|now\s+(?:fixed|resolved|green|passing|passes|pass))\b",
     re.IGNORECASE,
 )
 MAX_REASON = 1000  # characters of a return reason searched
@@ -165,12 +177,16 @@ class ReturnCauses:
             for r in task.returns
             if since <= r.at <= snapshot.now
         ]
-        named = [self._tests(r) for _, r in returns]  # once per return: they are long
+        matched = [self._matched(r) for _, r in returns]  # once per return: they are long
+        named = [self._tests(r, m) for (_, r), m in zip(returns, matched, strict=True)]
         flaky = self._flaky(returns, named)
         found = [self._flaky_alert(test, tasks) for test, tasks in sorted(flaky.items())]
         if len(returns) < self.min_returns:
             return found
-        of = [self._cause(r, tests) for (_, r), tests in zip(returns, named, strict=True)]
+        of = [
+            self._cause(r, tests, m)
+            for (_, r), tests, m in zip(returns, named, matched, strict=True)
+        ]
         causes = Counter(
             FLAKY if tests & flaky.keys() else cause for tests, cause in zip(named, of, strict=True)
         )
@@ -179,11 +195,12 @@ class ReturnCauses:
         conflicts = [tr for tr, cause in zip(returns, of, strict=True) if cause == CONFLICT]
         return found + list(self._causes(snapshot, returns, conflicts, causes, staged))
 
-    def _tests(self, r: Return) -> set[str]:
+    def _tests(self, r: Return, matched: str | bool | None = False) -> set[str]:
         """Tests the return says failed: a name next to failure wording ("failed", "flaky",
         "timed out", "red"), not a file path (``tests/test_models.py`` in a conflict), and
         never in a merge conflict's reason."""
-        if self._matched(r) == CONFLICT or r.category == CONFLICT:
+        found = self._matched(r) if matched is False else matched
+        if found == CONFLICT or r.category == CONFLICT:
             return set()
         reason = r.reason[:MAX_REASON].replace("\r\n", "\n")
         found = set()
@@ -259,10 +276,10 @@ class ReturnCauses:
         task for a merge conflict is a conflict, one for a failing test a failing test),
         then what was found at the stage it names (``review_findings``), then the
         platform's category."""
-        return self._cause(r, self._tests(r))
-
-    def _cause(self, r: Return, tests: set[str]) -> str:
         found = self._matched(r)
+        return self._cause(r, self._tests(r, found), found)
+
+    def _cause(self, r: Return, tests: set[str], found: str | None) -> str:
         if found is not None:
             return found  # merge_conflict and the configured categories, in that order
         if tests or (self.ci_wording and _ci_failed(r.reason[:MAX_REASON])):
@@ -400,11 +417,16 @@ def _ci_failed(reason: str) -> bool:
     tests failed", "0 tests failed") or that it was fixed ("Fixed failing tests", "CI was
     red, now green")."""
     for clause in _CLAUSE_END.split(reason.replace("\r\n", "\n")):
-        if _NOW_FIXED.search(clause):
-            continue
         for m in _CI_FAILED.finditer(clause):
-            if not _NONE_BEFORE.search(clause[max(0, m.start() - 40) : m.start()]):
-                return True
+            before = clause[: m.start()]
+            phrase = re.split(r"[:,]", before)[-1][-40:]
+            if _NONE_BEFORE.search(phrase) or _FIXED_AFTER.search(clause, m.end()):
+                continue
+            if any(
+                not _NEGATED.search(before[: f.start()]) for f in _FIXED_BEFORE.finditer(before)
+            ):
+                continue  # "Fixed failing tests"; not "not fixed yet: tests failed"
+            return True
     return False
 
 
