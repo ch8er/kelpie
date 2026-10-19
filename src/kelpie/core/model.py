@@ -337,9 +337,9 @@ class BudgetStatus:
     has, None when nothing is being spent. ``estimated`` is set in subscription mode,
     where there is no bill and the spend is priced from traces; ``next_limit_at`` is then
     the forecast next provider limit from observed limit hits (None without enough of
-    them). ``cost_unknown_tokens`` are tokens of models with no price in ``[prices]``: a
-    ``usd`` budget leaves them out of ``spent``. ``session_ids`` are the sessions that
-    spent within the window."""
+    them). ``cost_unknown_tokens`` are tokens of models with no price (neither in
+    ``[prices]`` nor in the default table): a ``usd`` budget leaves them out of ``spent``.
+    ``session_ids`` are the sessions that spent within the window."""
 
     budget: str
     scope: BudgetScope

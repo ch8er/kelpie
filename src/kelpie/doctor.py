@@ -212,6 +212,8 @@ def check_prices(settings: Settings, now: datetime) -> Check:
         return _skip(name, "[traces] disabled")
     if settings.db_path is None:
         return _skip(name, "storage is in memory; nothing to read from outside")
+    if not settings.db_path.exists():
+        return _skip(name, f"no span store yet at {settings.db_path}")
     found = read_unpriced(settings, now)
     if isinstance(found, str):
         return _skip(name, found)
@@ -222,7 +224,7 @@ def check_prices(settings: Settings, now: datetime) -> Check:
     first = found[0][0]
     return _warn(
         name,
-        f"spend on these models in the last {window} counts $0: {named}",
+        f"no price for these models in the last {window}, so their cost is unknown: {named}",
         f'add [prices."{first}"] input = <USD/1M>, output = <USD/1M> (cached_input optional)',
     )
 

@@ -845,8 +845,8 @@ class Metrics:
         metric(
             "kelpie_budget_cost_unknown_tokens",
             "gauge",
-            "Tokens in the budget's window from models with no price in [prices]: counted "
-            "in token budgets, left out of usd spend.",
+            "Tokens in the budget's window from models with no price (in [prices] or the "
+            "default table): counted in token budgets, left out of usd spend.",
             [
                 f"kelpie_budget_cost_unknown_tokens"
                 f"{_labels(budget=b.budget, subject=b.subject)} {b.cost_unknown_tokens}"

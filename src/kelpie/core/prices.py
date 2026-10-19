@@ -8,29 +8,46 @@ day in :data:`CHECKED`; :data:`SOURCES` names the pages. Prices change: a ``[pri
 entry overrides any default, ``[spend] default_prices = false`` turns the table off, and a
 model the table does not know is reported (``kelpie doctor``, ``kelpie status``, the daily
 report) instead of silently costing $0. An announced change (an introductory price that
-ends) is a second row with ``since``. What the table does not model, so an estimate can
+ends) is a second row with ``since``. A row prices every snapshot of its model (dated
+ids) at the model's current price. What the table does not model, so an estimate can
 differ from the bill: prompt-length tiers (Claude Haiku 5.5 over 100k prompt tokens,
-OpenAI over 272k, Gemini over 200k are dearer; the base tier is used), 1-hour cache writes
-(priced as 5-minute ones), batch and flex discounts, priority and fast tiers, regional or
-US-only uplifts, and the storage fee of explicit Gemini caches.
+Claude Sonnet 4.5 and 4 over 200k, OpenAI over 272k, Gemini over 200k are dearer; the
+base tier is used), 1-hour cache writes (priced as 5-minute ones), batch and flex
+discounts, priority and fast tiers, regional or US-only uplifts, and the storage fee of
+explicit Gemini caches.
 
-**Matching** (:meth:`PriceTable.price_for`): a ``[prices]`` entry named exactly as the
-span's model or as its canonical id wins, then the first ``[prices]`` glob in config order
-that matches either, then the default table on the canonical id. The canonical id
-(:func:`canonical_model`) is lower case, without a date suffix, ``-latest``, a Claude Code
-``[1m]`` tag, a ``vendor/`` or ``models/`` prefix, Bedrock's ``anthropic.`` and region
-prefixes and ``-v1:0`` suffix, and Vertex's ``@date``. So ``claude-haiku-4-5-20251001``,
+**Model ids.** :func:`model_id` is the id without what a platform wraps around it: lower
+case, without a Claude Code ``[1m]`` tag, a ``vendor/`` or ``models/`` prefix (OpenRouter,
+Gemini), Bedrock's ``anthropic.`` and region prefixes with their ``-v1:0`` suffix, or
+Vertex's ``@date``; dotted Claude versions become dashed (OpenRouter's
+``claude-sonnet-4.5``). :func:`canonical_model` also drops a date or ``-latest`` suffix: it
+names the model family. So ``claude-haiku-4-5-20251001``,
 ``us.anthropic.claude-haiku-4-5-20251001-v1:0`` and ``claude-haiku-4-5@20251001`` all
-find ``claude-haiku-4-5``.
+belong to ``claude-haiku-4-5``.
+
+**Matching** (:meth:`PriceTable.price_for`), first match wins. Anything an earlier Kelpie
+matched still matches the same entry:
+
+1. a ``[prices]`` entry named exactly as the span's model;
+2. the first ``[prices]`` glob, in config order, that matches the model as written;
+3. a ``[prices]`` entry with the same :func:`model_id` (the same snapshot on another
+   platform: ``[prices."claude-haiku-4-5-20251001"]`` prices the Bedrock id of it);
+4. a ``[prices]`` entry without a date that names the model's family
+   (``[prices."claude-haiku-4-5"]`` prices every snapshot; a dated entry never prices
+   another snapshot);
+5. the first ``[prices]`` glob that matches the :func:`model_id`, then the canonical id
+   (case-insensitive);
+6. the default table, by family.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import date
 from fnmatch import fnmatchcase
+from functools import lru_cache
 
 from kelpie.core.spans import TokenUsage
 
@@ -43,6 +60,7 @@ __all__ = [
     "Price",
     "PriceTable",
     "canonical_model",
+    "model_id",
 ]
 
 PER_TOKENS = 1_000_000  # prices are USD per this many tokens
@@ -133,21 +151,32 @@ DEFAULT_PRICES: tuple[DefaultPrice, ...] = (
 )
 
 _TAG = re.compile(r"\[[^\]]*\]$")  # claude-opus-4-6[1m]
-_BEDROCK_SUFFIX = re.compile(r"(?:-v\d+)?:\d+$")  # ...-v1:0
 _BEDROCK_PREFIX = re.compile(r"^(?:[a-z]{2,6}\.)?anthropic\.")  # us.anthropic., anthropic.
+_BEDROCK_SUFFIX = re.compile(r"(?:-v\d+)?:\d+$")  # ...-v1:0
+_CLAUDE_DOT = re.compile(r"(?<=\d)\.(?=\d)")  # claude-sonnet-4.5 (OpenRouter)
 _VERSION = re.compile(r"-(?:latest|\d{8}|\d{4}-\d{2}-\d{2})$")
 
 
-def canonical_model(model: str) -> str:
-    """The id a model is priced by: ``us.anthropic.claude-haiku-4-5-20251001-v1:0`` and
-    ``models/gemini-3.8-flash`` become ``claude-haiku-4-5`` and ``gemini-3.8-flash``."""
+@lru_cache(maxsize=4096)
+def model_id(model: str) -> str:
+    """The model's id without platform wrapping (module docstring), date kept:
+    ``us.anthropic.claude-haiku-4-5-20251001-v1:0`` is ``claude-haiku-4-5-20251001``."""
     s = model.strip().lower()[:MAX_MODEL]
     s = _TAG.sub("", s)
     s = s.split("@", 1)[0]
-    s = _BEDROCK_SUFFIX.sub("", s)
     s = s.rsplit("/", 1)[-1]
-    s = _BEDROCK_PREFIX.sub("", s)
-    return _VERSION.sub("", s)
+    if _BEDROCK_PREFIX.match(s):
+        s = _BEDROCK_SUFFIX.sub("", _BEDROCK_PREFIX.sub("", s))
+    if s.startswith("claude-"):
+        s = _CLAUDE_DOT.sub("-", s)
+    return s
+
+
+@lru_cache(maxsize=4096)
+def canonical_model(model: str) -> str:
+    """The model family a price applies to: :func:`model_id` without a date or
+    ``-latest`` suffix (``claude-haiku-4-5``, ``gpt-5.4-mini``, ``gemini-3.8-flash``)."""
+    return _VERSION.sub("", model_id(model))
 
 
 def _is_glob(pattern: str) -> bool:
@@ -159,9 +188,7 @@ def _exact(entries: tuple[tuple[str, Price], ...], model: str) -> Price | None:
 
 
 def _glob(entries: tuple[tuple[str, Price], ...], model: str) -> Price | None:
-    return next(
-        (p for pattern, p in entries if _is_glob(pattern) and fnmatchcase(model, pattern)), None
-    )
+    return next((price for pattern, price in entries if fnmatchcase(model, pattern)), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +198,32 @@ class PriceTable:
 
     entries: tuple[tuple[str, Price], ...] = ()
     defaults: tuple[DefaultPrice, ...] = ()
+    # Derived once (lookups run per usage row): exact entries by model id, family entries
+    # (no date) by canonical id, globs as written and lower-cased, default rows by family.
+    _globs: tuple[tuple[str, Price], ...] = field(init=False, repr=False, compare=False)
+    _by_id: tuple[tuple[str, Price], ...] = field(init=False, repr=False, compare=False)
+    _family: tuple[tuple[str, Price], ...] = field(init=False, repr=False, compare=False)
+    _lower_globs: tuple[tuple[str, Price], ...] = field(init=False, repr=False, compare=False)
+    _rows: Mapping[str, tuple[DefaultPrice, ...]] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        exact = [(p, v) for p, v in self.entries if not _is_glob(p)]
+        globs = tuple((p, v) for p, v in self.entries if _is_glob(p))
+        rows: dict[str, list[DefaultPrice]] = {}
+        for r in self.defaults:
+            for name in (r.model, *r.aliases):
+                rows.setdefault(name, []).append(r)
+        derived = {
+            "_globs": globs,
+            "_by_id": tuple((model_id(p), v) for p, v in exact),
+            "_family": tuple(
+                (model_id(p), v) for p, v in exact if model_id(p) == canonical_model(p)
+            ),
+            "_lower_globs": tuple((p.lower(), v) for p, v in globs),
+            "_rows": {k: tuple(v) for k, v in rows.items()},
+        }
+        for name, value in derived.items():
+            object.__setattr__(self, name, value)
 
     def price_for(self, model: str | None, on: date | None = None) -> Price | None:
         """The price of ``model`` on day ``on`` (None: the day the defaults were
@@ -184,19 +237,25 @@ class PriceTable:
 
     def configured_price(self, model: str, *, globs: bool = True) -> Price | None:
         """The ``[prices]`` entry for ``model``, if any (the default table aside);
-        ``globs=False``: only an entry that names the model."""
+        ``globs=False``: only an entry that names the model or its family."""
         if not self.entries:
             return None
-        canonical = canonical_model(model)
-        exact = tuple((canonical_model(p), v) for p, v in self.entries if not _is_glob(p))
-        found = _exact(self.entries, model) or _exact(exact, canonical)
+        found = _exact(self.entries, model)
         if found is None and globs:
-            found = _glob(self.entries, model) or _glob(self.entries, canonical)
+            found = _glob(self._globs, model)
+        if found is None:
+            found = _exact(self._by_id, model_id(model)) or _exact(
+                self._family, canonical_model(model)
+            )
+        if found is None and globs:
+            found = _glob(self._lower_globs, model_id(model)) or _glob(
+                self._lower_globs, canonical_model(model)
+            )
         return found
 
     def named_price(self, model: str | None, on: date | None = None) -> Price | None:
         """Like :meth:`price_for` without ``[prices]`` globs: a price set for this very
-        model, in ``[prices]`` or the default table."""
+        model or its family, in ``[prices]`` or the default table."""
         if not model or _is_glob(model):
             return None
         found = self.configured_price(model, globs=False)
@@ -205,28 +264,19 @@ class PriceTable:
         return found
 
     def default_for(self, model: str, on: date | None = None) -> DefaultPrice | None:
-        """The default-table row that prices ``model`` on ``on``, if any."""
-        if not self.defaults:
-            return None
-        canonical = canonical_model(model)
+        """The default-table row that prices ``model`` on ``on`` (None: the day the table
+        was checked), if any."""
+        rows = self._rows.get(canonical_model(model), ())
         day = on or CHECKED
-        rows = [
-            r
-            for r in self.defaults
-            if (r.model == canonical or canonical in r.aliases)
-            and (r.since is None or r.since <= day)
-        ]
-        return max(rows, key=lambda r: r.since or date.min) if rows else None
+        current = [r for r in rows if r.since is None or r.since <= day]
+        return max(current, key=lambda r: r.since or date.min) if current else None
 
     def provider_for(self, model: str | None) -> str | None:
         """The provider the default table knows ``model`` under, if any."""
         if not model:
             return None
-        canonical = canonical_model(model)
-        return next(
-            (r.provider for r in self.defaults if r.model == canonical or canonical in r.aliases),
-            None,
-        )
+        rows = self._rows.get(canonical_model(model), ())
+        return rows[0].provider if rows else None
 
     def unpriced(self, models: Iterable[str | None]) -> tuple[str, ...]:
         """Those of ``models`` nothing prices, sorted and without repeats."""

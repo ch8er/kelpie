@@ -699,12 +699,20 @@ Spend is priced from traces, so budgets need `[traces]` enabled.
 | `min_limit_window` | `"10m"` | duration, > 0 | `subscription` only: ignore limit hits whose limit refills sooner than this. |
 
 `[prices."<model or glob>"]`, US dollars per 1 million tokens. They override Kelpie's
-default table (see [[spend]](#spend)). An entry named exactly as the model wins, then the
-first matching glob in config order, then the default table. A model is also matched by its
-canonical id: lower case, without a date suffix (`-20251001`, `-2026-03-17`), `-latest`,
-a Claude Code `[1m]` tag, a `vendor/` or `models/` prefix, Bedrock's `anthropic.` and
-region prefixes and `-v1:0` suffix, or Vertex's `@20251001`. So
-`[prices."claude-haiku-4-5"]` also prices `us.anthropic.claude-haiku-4-5-20251001-v1:0`.
+default table (see [[spend]](#spend)). The first match wins:
+
+1. an entry named exactly as the span's model;
+2. the first glob, in config order, matching the model as written;
+3. an entry for the same model snapshot as written by another platform: lower case,
+   without a Claude Code `[1m]` tag, a `vendor/` or `models/` prefix (OpenRouter,
+   Gemini), Bedrock's `anthropic.` and region prefixes and `-v1:0` suffix, or Vertex's
+   `@20251001`, with dotted Claude versions read as dashed (`claude-sonnet-4.5`);
+4. an entry without a date for the model's family: `[prices."claude-haiku-4-5"]` prices
+   `claude-haiku-4-5-20251001` and `us.anthropic.claude-haiku-4-5-20251001-v1:0`, while a
+   dated entry such as `[prices."gpt-4o-2024-08-06"]` prices only that snapshot;
+5. the first glob matching the normalized id or the family (case-insensitive);
+6. the default table, by family.
+
 Tokens of a model without a price still count for `tokens` budgets; their cost is unknown
 and left out of `usd` budgets, and `kelpie status` and `kelpie doctor` name such models.
 
@@ -722,14 +730,18 @@ and left out of `usd` budgets, and `kelpie status` and `kelpie doctor` name such
 
 **The default table** (`kelpie.core.prices`) holds the standard API prices of popular
 Anthropic, OpenAI and Google models, as their pricing pages showed them on the date
-`kelpie status` prints ("checked ..."). Each row has input, output, cache read and, for
-Anthropic models, 5-minute cache write prices; an announced price change (an introductory
-price that ends) applies from its day. Prices change after Kelpie is released: check the
-rows you rely on against the provider's page, and add `[prices]` entries where they differ.
-The estimate leaves out what the table does not model: prompt-length tiers (Claude Haiku
-5.5 above 100k prompt tokens, OpenAI above 272k, Gemini above 200k cost more; the base
-price is used), 1-hour cache writes (priced as 5-minute ones), batch and flex discounts,
-priority and fast tiers, regional and US-only uplifts, and Gemini's cache storage fee.
+`kelpie status` prints ("checked ..."). Each row has input, output and cache read prices,
+and Anthropic rows the 5-minute cache write price, which is not used yet: cache writes are
+priced at the input price for now. An announced price change (an introductory price that
+ends) applies from its day, and a row prices every snapshot of its model. Prices change
+after Kelpie is released: check the rows you rely on against the provider's page, and add
+`[prices]` entries where they differ. The estimate leaves out what the table does not
+model: prompt-length tiers (Claude Haiku 5.5 above 100k prompt tokens, Claude Sonnet 4.5
+and 4 above 200k, OpenAI above 272k, Gemini above 200k cost more; the base price is
+used), batch and flex discounts, priority and fast tiers, regional and US-only uplifts,
+and Gemini's cache storage fee. Budgets, `kelpie status` and `kelpie doctor` use the
+default table; the daily report still prices from `[prices]` only, until it follows each
+provider's spend mode.
 
 | Provider | Models | Source |
 | --- | --- | --- |

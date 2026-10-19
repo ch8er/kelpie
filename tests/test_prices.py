@@ -13,6 +13,7 @@ from kelpie.core.prices import (
     Price,
     PriceTable,
     canonical_model,
+    model_id,
 )
 from kelpie.core.spans import TokenUsage
 from kelpie.traces.fit import cheaper_model
@@ -76,17 +77,54 @@ def test_announced_changes_apply_from_their_day() -> None:
 
 def test_config_overrides_the_defaults() -> None:
     mine = Price(1, 2, 0.5)
-    glob = Price(9, 9, 9)
-    table = PriceTable((("claude-opus-5-5", mine), ("claude-*", glob)), DEFAULT_PRICES)
+    table = PriceTable((("claude-opus-5-5", mine),), DEFAULT_PRICES)
     assert table.price_for("claude-opus-5-5") == mine
-    assert table.price_for("claude-opus-5-5-20260401") == mine  # canonical exact entry
-    assert table.price_for("claude-haiku-4-5") == glob  # a config glob beats the default
+    assert table.price_for("claude-opus-5-5-20260401") == mine  # its family
+    assert table.price_for("us.anthropic.claude-opus-5-5-v1:0") == mine
     assert table.price_for("gpt-5") == Price(1.25, 10, 0.125)  # untouched default
     assert table.configured() == PriceTable(table.entries)
     assert table.configured().price_for("gpt-5") is None
-    # an exact config name still wins over an earlier glob, as before
-    ordered = PriceTable((("claude-*", glob), ("claude-opus-5-5", mine)))
-    assert ordered.price_for("claude-opus-5-5") == mine
+
+
+A, B, C = Price(1, 2, 0.1), Price(3, 4, 0.3), Price(5, 6, 0.5)
+
+
+def test_what_matched_before_still_matches_the_same_entry() -> None:
+    """Exact name, then a glob on the id as written (as before normalization existed);
+    only then the normalized matches."""
+    table = PriceTable((("claude-sonnet-4-5", A), ("us.anthropic.*", B)))
+    assert table.price_for("claude-sonnet-4-5") == A
+    assert table.price_for("us.anthropic.claude-sonnet-4-5-20250929-v1:0") == B  # the glob
+    assert table.price_for("anthropic.claude-sonnet-4-5-20250929-v1:0") == A  # normalized
+    ordered = PriceTable((("claude-*", B), ("claude-opus-5-5", A)))
+    assert ordered.price_for("claude-opus-5-5") == A  # an exact name beats an earlier glob
+    assert ordered.price_for("claude-opus-5-5-20260401") == B  # the glob matches as written
+
+
+def test_a_dated_entry_prices_only_its_own_snapshot() -> None:
+    table = PriceTable((("gpt-4o-2024-08-06", A),))
+    assert table.price_for("gpt-4o-2024-08-06") == A
+    assert table.price_for("openai/gpt-4o-2024-08-06") == A  # same snapshot, wrapped
+    assert table.price_for("gpt-4o-2024-05-13") is None  # another snapshot
+    assert table.price_for("gpt-4o") is None
+    family = PriceTable((("claude-haiku-4-5-20251001", A), ("claude-haiku-4-5", B)))
+    assert family.price_for("us.anthropic.claude-haiku-4-5-20251001-v1:0") == A
+    assert family.price_for("claude-haiku-4-5-20260101") == B  # the undated family entry
+
+
+def test_globs_on_normalized_ids_ignore_case() -> None:
+    table = PriceTable((("Claude-Haiku-*", A), ("gemini-*", C)))
+    assert table.price_for("us.anthropic.claude-haiku-4-5-20251001-v1:0") == A
+    assert table.price_for("models/gemini-3.8-flash") == C
+    assert table.price_for("Claude-Haiku-4-5") == A  # as written
+
+
+def test_ids_that_only_look_wrapped_are_left_alone() -> None:
+    assert model_id("qwen3:32") == "qwen3:32"  # a Bedrock suffix only after anthropic.
+    assert model_id("us-gov.anthropic.claude-haiku-4-5") != "claude-haiku-4-5"
+    assert canonical_model("anthropic/claude-sonnet-4.5") == "claude-sonnet-4-5"
+    assert canonical_model("anthropic/claude-3.5-haiku") == "claude-3-5-haiku"
+    assert canonical_model("gpt-5.4-mini") == "gpt-5.4-mini"  # dots kept outside Claude
 
 
 def test_provider_for() -> None:

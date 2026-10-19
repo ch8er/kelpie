@@ -466,9 +466,7 @@ def test_status_and_doctor_name_models_without_a_price(tmp_path: Path) -> None:
     text = render_status(settings, load_rules(settings.engine), unpriced=(("unpriced", 110_000),))
     assert "prices:   2 [prices] entries, default table of " in text
     assert "checked 2026-10-19" in text
-    assert (
-        "warning: models without a price (their spend counts $0): unpriced (110,000 tokens)" in text
-    )
+    assert "warning: models without a price (their cost is unknown): unpriced (110,000" in text
     check = check_prices(settings, NOW)
     assert check.status == "WARN" and "unpriced (110,000 tokens)" in check.detail
     assert '[prices."unpriced"]' in check.fix
@@ -484,14 +482,26 @@ def test_status_and_doctor_name_models_without_a_price(tmp_path: Path) -> None:
     # without the default table the Claude model has no price either
     off = load_settings(write(tmp_path, "[spend]\ndefault_prices = false\n" + CONFIG))
     off = replace(off, db_path=db)
-    assert [m for m, _ in read_unpriced(off, NOW)] == ["unpriced", "claude-haiku-4-5-20251001"]
+    assert [m for m, _ in read_unpriced(off, NOW)] == ["unpriced", "claude-haiku-4-5"]  # family
     assert "default table off ([spend] default_prices = false)" in render_status(
         off, load_rules(off.engine)
     )
     # nothing to read
     assert read_unpriced(replace(settings, db_path=tmp_path / "none.db"), NOW) == ()
+    assert check_prices(replace(settings, db_path=tmp_path / "none.db"), NOW).status == "SKIP"
     assert check_prices(replace(settings, db_path=None), NOW).status == "SKIP"
+    assert check_prices(replace(settings, db_path=tmp_path), NOW).status == "SKIP"  # unreadable
     assert "cannot open" in str(read_unpriced(replace(settings, db_path=tmp_path), NOW))
     assert "cannot be listed: x" in render_status(
         settings, load_rules(settings.engine), unpriced="x"
     )
+
+
+def test_unpriced_models_on_an_old_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "old.db"
+    db = sqlite3.connect(db_path)
+    db.executescript("".join(storage.MIGRATIONS[v] for v in (1, 2, 3)) + "PRAGMA user_version = 3;")
+    db.close()
+    settings = replace(load_settings(write(tmp_path, CONFIG)), db_path=db_path)
+    assert "predates budgets" in str(read_unpriced(settings, NOW))
+    assert check_prices(settings, NOW).status == "SKIP"

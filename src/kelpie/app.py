@@ -58,7 +58,7 @@ from kelpie.core.ports import (
     SupportsStop,
     SupportsWait,
 )
-from kelpie.core.prices import CHECKED
+from kelpie.core.prices import CHECKED, canonical_model
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
@@ -1589,9 +1589,10 @@ UNPRICED_WINDOW = timedelta(days=7)  # how far back models without a price are l
 def read_unpriced(
     settings: Settings, now: datetime | None = None
 ) -> tuple[tuple[str, int], ...] | str:
-    """Models the span store saw in the last :data:`UNPRICED_WINDOW` (at most the span
-    retention) that nothing in the price table prices, with their tokens, most first; a
-    string says why the store cannot be read. No database or traces off: none."""
+    """Model families (:func:`kelpie.core.prices.canonical_model`) the span store saw in
+    the last :data:`UNPRICED_WINDOW` (at most the span retention) that nothing in the
+    price table prices, with their tokens, most first; a string says why the store cannot
+    be read. No database or traces off: none."""
     db = settings.db_path
     if not settings.traces.enabled or db is None or not db.exists():
         return ()
@@ -1610,10 +1611,16 @@ def read_unpriced(
     finally:
         store.close()
     prices = settings.budgets.prices
+    priced: dict[str, bool] = {}
     found: dict[str, int] = {}
     for row in rows:
-        if row.model and prices.price_for(row.model, at.date()) is None:
-            found[row.model] = found.get(row.model, 0) + row.input_tokens + row.output_tokens
+        if not row.model:
+            continue
+        if row.model not in priced:
+            priced[row.model] = prices.price_for(row.model, at.date()) is not None
+        if not priced[row.model]:
+            family = canonical_model(row.model)
+            found[family] = found.get(family, 0) + row.input_tokens + row.output_tokens
     return tuple(sorted(found.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
@@ -1633,7 +1640,7 @@ def render_prices(settings: Settings, unpriced: Sequence[tuple[str, int]] | str 
         named = ", ".join(f"{m} ({t:,} tokens)" for m, t in unpriced[:10])
         more = f" and {len(unpriced) - 10} more" if len(unpriced) > 10 else ""
         lines.append(
-            f"warning: models without a price (their spend counts $0): {named}{more};"
+            f"warning: models without a price (their cost is unknown): {named}{more};"
             ' add [prices."<model>"] input, output'
         )
     return lines

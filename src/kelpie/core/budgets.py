@@ -318,13 +318,10 @@ class BudgetEvaluation:
     """:func:`evaluate`'s result: ``statuses`` go into ``Snapshot.budgets``;
     ``unattributed`` is, per budget, the tokens in its window whose subject is unknown
     (a session no adapter ever reported an owner for, a span with no task, a task whose
-    labels were never seen), so they could not be charged to any subject. ``unpriced``:
-    the models nothing in the price table prices, with their tokens in the longest window
-    a budget looks at (counted in token budgets, $0 in usd budgets)."""
+    labels were never seen), so they could not be charged to any subject."""
 
     statuses: tuple[BudgetStatus, ...] = ()
     unattributed: Mapping[str, int] = field(default_factory=dict)
-    unpriced: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -382,7 +379,7 @@ def evaluate(
             spend = window.get(subject) or _Spend()
             burned = recent[subject].spent if subject in recent else 0.0
             out.append(_status(budget, subject, spend, burned, snapshot))
-    return BudgetEvaluation(tuple(out), unattributed, _unpriced(config, usage, prices))
+    return BudgetEvaluation(tuple(out), unattributed)
 
 
 @dataclass(slots=True)
@@ -397,19 +394,6 @@ class _DayPrices:
         if model not in self.found:
             self.found[model] = self.table.price_for(model, self.day)
         return self.found[model]
-
-
-def _unpriced(
-    config: BudgetConfig, usage: Mapping[timedelta, Sequence[TokenUsage]], prices: _DayPrices
-) -> dict[str, int]:
-    windows = [w for w in config.windows if w in usage]
-    if not windows:
-        return {}
-    out: dict[str, int] = {}
-    for row in usage[max(windows)]:
-        if row.model and prices.price_for(row.model) is None:
-            out[row.model] = out.get(row.model, 0) + row.input_tokens + row.output_tokens
-    return dict(sorted(out.items()))
 
 
 def _status(

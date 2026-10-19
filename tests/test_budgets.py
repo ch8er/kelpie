@@ -439,18 +439,6 @@ def test_snapshot_fixtures_can_carry_budget_state() -> None:
     assert snap.limit_hits[0].limit == "5h"
 
 
-def test_evaluation_names_the_models_without_a_price() -> None:
-    config = load(budget(), budget(name="t", unit="tokens", window="2d"))
-    usage = {
-        timedelta(days=1): ROWS[:2],
-        timedelta(days=2): (*ROWS, row("run-1", "T-1", 7, model="other")),
-        H: (),
-    }
-    assert evaluate(config, usage, snapshot()).unpriced == {"other": 7, "unpriced": 110_000}
-    assert evaluate(config, {}, snapshot()).unpriced == {}
-    assert evaluate(load(), {}, snapshot()).unpriced == {}  # no budgets: nothing looked at
-
-
 def test_evaluation_prices_from_the_default_table_by_day() -> None:
     """No [prices]: the default table prices usd budgets, as of the snapshot's day."""
     config = load(budget(), prices=None)
