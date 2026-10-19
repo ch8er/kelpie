@@ -432,7 +432,7 @@ def test_summary_is_sent_and_markdown_written(db: Path, tmp_path: Path) -> None:
 def test_the_plain_summary_is_the_title_the_headline_and_the_items(db: Path) -> None:
     report, markdown = generate(sources(db), DAY, BOARD)
     headline, items, link = summary_items(report)
-    assert link is None  # no setting holds the full report's URL yet
+    assert link is None  # no [report] url
     assert headline in markdown  # the report's own headline, not a second wording
     assert render_summary(report) == "\n".join([summary_title(report), headline, *items])
     assert summary_title(report) == "Kelpie daily report 2026-03-02"
@@ -494,6 +494,14 @@ def test_report_config() -> None:
         {"timezone": ""},
         {"dir": ""},
         {"task_url": "https://no-placeholder"},
+        {"url": "https://reports.example.org/latest.md"},  # no {date}
+        {"url": "file:///srv/reports/kelpie-report-{date}.md"},  # not http(s)
+        {"url": "https://{date}.reports.example.org/"},  # {date} in the host
+        {"url": 3},
+        {"url": ""},
+        {"url": "https://reports.example.org/{date}/{id}.md"},  # another placeholder
+        {"url": "https://reports.example.org/{{date}}.md"},
+        {"url": "https://reports.example.org/" + "a" * 566 + "{date}"},  # 600, 604 once filled
         {"hour_usd": 0},
         {"hour_usd": True},
         {"hour_usd": float("inf")},
@@ -955,3 +963,25 @@ def test_act_mode_is_recommended_only_where_the_farm_can_act() -> None:
         "- `stale_blocks`: unblock x1 `T-1` (act mode is not available here: Hermes can't "
         "clear blocks yet)" in markdown
     )
+
+
+def test_the_summary_links_the_full_report_with_report_url(db: Path) -> None:
+    url = "https://reports.example.org/kelpie/kelpie-report-{date}.md"
+    settings = load_report({"url": url})
+    assert settings.url == url
+    report, _ = generate(sources(db), DAY, BOARD)
+    link = "https://reports.example.org/kelpie/kelpie-report-2026-03-02.md"
+    assert summary_items(report, settings.url)[2] == link
+    assert render_summary(report, settings.url).endswith("\n" + link)
+    sender = FakeSender()
+    send(report, settings, sender)
+    [(text, _, _)] = sender.sent
+    assert text.endswith(link) and text == render_summary(report, settings.url)
+
+
+def test_every_date_placeholder_is_filled(db: Path) -> None:
+    settings = load_report({"url": "https://reports.example.org/{date}/report.md?day={date}"})
+    report, _ = generate(sources(db), DAY, BOARD)
+    link = summary_items(report, settings.url)[2]
+    assert link == "https://reports.example.org/2026-03-02/report.md?day=2026-03-02"
+    assert load_report({}).url is None

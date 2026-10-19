@@ -158,13 +158,20 @@ def plain_http_url(url: object) -> str | None:
 
 def check_task_url(value: object, where: str = "[alerts] task_url") -> str:
     """A link template: an http(s) URL containing ``{id}``; a ``ValueError`` names the key."""
-    if not isinstance(value, str) or "{id}" not in value:
-        raise ValueError(f"{where} must be a string containing {{id}}")
-    problem = "plain" if len(value) > MAX_URL else _url_problem(value.replace("{id}", "x"))
+    return check_url_template(value, "{id}", where)
+
+
+def check_url_template(value: object, placeholder: str, where: str) -> str:
+    """A link template: an http(s) URL containing ``placeholder`` (e.g. ``{id}``) outside
+    its host; a ``ValueError`` names the key."""
+    if not isinstance(value, str) or placeholder not in value:
+        raise ValueError(f"{where} must be a string containing {placeholder}")
+    filled = value.replace(placeholder, "x")
+    problem = "plain" if len(value) > MAX_URL else _url_problem(filled)
     if problem is not None:
         raise ValueError(f"{where} {_URL_PROBLEMS[problem]}")
-    if "{id}" in urlsplit(value).netloc:
-        raise ValueError(f"{where}: {{id}} belongs in the path or query, not the host")
+    if placeholder in urlsplit(value).netloc:
+        raise ValueError(f"{where}: {placeholder} belongs in the path or query, not the host")
     return value
 
 

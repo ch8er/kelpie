@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from kelpie.alerts.render import check_url_template, plain_http_url
 from kelpie.core.serde import parse_duration
 from kelpie.report.verify import DEFAULT_MIN_SAMPLE, DEFAULT_REVIEW_ROLES, DEFAULT_WINDOW
 
@@ -20,6 +21,7 @@ KEYS = frozenset(
         "timezone",
         "dir",
         "task_url",
+        "url",
         "hour_usd",
         "channels",
         "severity",
@@ -38,8 +40,10 @@ SEVERITIES = ("info", "warning", "critical")
 class ReportSettings:
     """``timezone``: where a day starts and ends. ``dir``: where ``kelpie report`` writes
     ``kelpie-report-<date>.md`` (None: stdout only). ``task_url``: a link template with
-    ``{id}`` for task ids. ``hour_usd``: what an hour of stuck work costs (e.g. an agent
-    slot), to put chaos hours into dollars; None leaves hours as hours. ``channels``: the
+    ``{id}`` for task ids. ``url``: where the full report of a day can be read, an http(s)
+    template with ``{date}`` (YYYY-MM-DD), linked from the chat summary (None: no link).
+    ``hour_usd``: what an hour of stuck work costs (e.g. an agent slot), to put chaos hours
+    into dollars; None leaves hours as hours. ``channels``: the
     ``[[alerts.channels]]`` that get the summary (None: all), sent at ``severity``.
     Before/after of fixes: ``verify_window`` on each side, review time from the sessions of
     ``review_roles``, and fewer than ``min_sample`` observations on a side is a small
@@ -52,6 +56,7 @@ class ReportSettings:
     timezone: str = "UTC"
     dir: Path | None = None
     task_url: str | None = None
+    url: str | None = None  # the full report's address, with {date}: the summary's link
     hour_usd: float | None = None
     channels: tuple[str, ...] | None = None
     severity: str = "warning"
@@ -88,6 +93,12 @@ def load_report(section: Any) -> ReportSettings:
     url = section.get("task_url")
     if url is not None and (not isinstance(url, str) or "{id}" not in url):
         raise ValueError("[report] task_url must be a string containing {id}")
+    report_url = section.get("url")
+    if report_url is not None:
+        check_url_template(report_url, "{date}", "[report] url")
+        # the link is the filled-in address, which a date makes longer than the template
+        if plain_http_url(report_url.replace("{date}", "2026-01-01")) is None:
+            raise ValueError("[report] url is too long once a date fills {date}")
     hour = section.get("hour_usd")
     if hour is not None and (
         isinstance(hour, bool)
@@ -138,6 +149,7 @@ def load_report(section: Any) -> ReportSettings:
         timezone=tz.strip(),
         dir=None if out_dir is None else Path(out_dir.strip()).expanduser(),
         task_url=url,
+        url=report_url,
         hour_usd=None if hour is None else float(hour),
         channels=None if channels is None else tuple(c.strip() for c in channels),
         severity=severity,

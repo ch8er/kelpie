@@ -172,7 +172,7 @@ def write(markdown: str, settings: ReportSettings, day: date) -> Path | None:
 
 
 def send(report: DailyReport, settings: ReportSettings, sender: Sender) -> None:
-    headline, items, link = summary_items(report)
+    headline, items, link = summary_items(report, settings.url)
     sender.send_summary(
         headline, items, settings.severity, settings.channels, link, summary_title(report)
     )

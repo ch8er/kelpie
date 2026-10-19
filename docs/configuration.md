@@ -1417,8 +1417,8 @@ Real-time alerts. None are sent without a channel. Rule alerts are not sent whil
 whatever the modes. An alert goes to every channel whose `min_severity` it reaches. The
 summary is laid out like an alert: the report's title, its headline in bold under the
 severity's icon (`[report] severity`), one line each for the biggest wait, the open conditions
-and the top recommendations, and an "Open report" link when the report has an address (none
-is configurable yet). `language` translates only "Open report" and "and N more"; the
+and the top recommendations, and an "Open report" link when `[report] url` gives the
+report's address. `language` translates only "Open report" and "and N more"; the
 report's own text stays English.
 
 | Key | Default | Unit | Meaning |
@@ -1475,6 +1475,7 @@ once a day when `at` is set.
 | `timezone` | `"UTC"` | IANA name | Where a day starts and ends. |
 | `dir` | unset | path | Writes `kelpie-report-<date>.md` there. Unset: stdout only. |
 | `task_url` | unset | string with `{id}` | Links task ids in the Markdown. |
+| `url` | unset | http(s) URL with `{date}` | Where the full report of a day can be read (e.g. where `dir` is served); the chat summary links it as "Open report", with the day (YYYY-MM-DD) in `{date}`, which must not be in the host. Unset: no link. |
 | `hour_usd` | unset | dollars, > 0 | What an hour lost costs: a stuck task-hour, or an agent-hour idle behind a hold or waiting on a person. Unset: hours stay hours. |
 | `channels` | all | list of channel names | `[[alerts.channels]]` that get the summary with `--send`. |
 | `severity` | `"warning"` | `info` \| `warning` \| `critical` | Severity of the summary; channels filter by `min_severity`. |
