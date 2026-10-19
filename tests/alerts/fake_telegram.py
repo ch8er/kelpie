@@ -100,6 +100,12 @@ class FakeTelegram:
         self.notify()
         return int(update["update_id"])
 
+    @contextmanager
+    def batch(self) -> Iterator[None]:
+        """Updates queued inside reach the poller in one ``getUpdates`` answer."""
+        with self._ready:  # re-entrant: push takes it again
+            yield
+
     def sent(self) -> list[tuple[int, dict[str, Any]]]:
         """(message id, body) of every message sent, in order (bot mode)."""
         with self._ready:

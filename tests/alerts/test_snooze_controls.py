@@ -173,9 +173,12 @@ def test_the_engine_reads_the_target_from_params() -> None:
             {"task_id": "H-3", "snooze_task": " "},
             {"task_id": "H-4", "snooze_task": "x" * 201},
             {"task_id": "H-5"},
+            # an agent's condition could name these: they would reach logs and buttons
+            {"task_id": "H-6", "snooze_task": "H-6\nINFO forged log line"},
+            {"task_id": "H-7", "snooze_task": "H-7‮"},
         ]},
     )  # fmt: skip
-    assert [i.snooze_task for i in alert_items(digest, board)] == ["H-1", None, None, None, None]
+    assert [i.snooze_task for i in alert_items(digest, board)] == ["H-1"] + [None] * 6
     one = Action(
         ActionKind.ALERT, "wait_condition", "Overdue.", task_id="W-1",
         params={"snooze_task": "H-9"},

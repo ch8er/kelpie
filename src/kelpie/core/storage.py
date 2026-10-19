@@ -386,8 +386,11 @@ class SqliteLedgerStore:
         """Store a snooze set from a chat (#176) and the ledger entry that records it, in one
         transaction: both or neither. Unless the task has a snooze from another source
         (``kelpie snooze``) that still holds at ``snooze.created_at`` (not expired, not
-        grown) and ends later: then nothing is written and that snooze is returned."""
+        grown) and ends later: then nothing is written and that snooze is returned. The
+        write lock is taken before the read (``BEGIN IMMEDIATE``), so a ``kelpie snooze``
+        from another process cannot land between the check and the write."""
         with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
             row = self._db.execute(
                 f"SELECT {_SNOOZE_COLUMNS} FROM snoozes WHERE task_id = ?", (snooze.task_id,)
             ).fetchone()

@@ -764,10 +764,12 @@ def telegram_payload(
 @dataclass(frozen=True, slots=True)
 class SnoozeTarget:
     """A shown item a person may snooze from the chat: its number in the message and the
-    task the snooze is for (raw id)."""
+    task the snooze is for (raw id). ``named``: that task is not the item's own (rule 2
+    snoozes the human task a wait is on), so the button names it."""
 
     number: int
     task_id: str
+    named: bool = False
 
 
 def telegram_message(
@@ -784,25 +786,30 @@ def telegram_message(
     if event.transition is Transition.RESOLVED:
         return fields, ()
     targets = tuple(
-        SnoozeTarget(i.number, i.snooze_task) for i in shown.items if i.snooze_task is not None
+        SnoozeTarget(i.number, i.snooze_task, i.snooze_task != i.task_id)
+        for i in shown.items
+        if i.snooze_task is not None
     )
     return fields, targets
 
 
 MAX_BUTTON = 64  # characters of a button's label (Telegram shows short ones best)
+MAX_BUTTON_TASK = 24  # characters of a task id a button names
 
 
 def keyboard(
     rows: Sequence[tuple[SnoozeTarget, Sequence[tuple[int, str]]]], language: str = i18n.DEFAULT
 ) -> dict[str, Any]:
     """An ``inline_keyboard``: one row per target, a button per (days, callback data). The
-    first button names the item ("1. Snooze 1d"), the others only the days ("3d")."""
+    first button names the item ("1. Snooze 1d"), and the task when the snooze is for
+    another than the item's ("1. Snooze H-1 1d"); the others only the days ("3d")."""
     out: list[list[dict[str, str]]] = []
     for target, buttons in rows:
         row = []
+        task = one_line(target.task_id, MAX_BUTTON_TASK)
         for n, (days, data) in enumerate(buttons):
-            key = "button.snooze" if n == 0 else "button.days"
-            label = i18n.text(language, key, n=target.number, days=days)[:MAX_BUTTON]
+            key = "button.days" if n else "button.snooze.task" if target.named else "button.snooze"
+            label = i18n.text(language, key, n=target.number, days=days, task=task)[:MAX_BUTTON]
             row.append({"text": label, "callback_data": data})
         if row:
             out.append(row)

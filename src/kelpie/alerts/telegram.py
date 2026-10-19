@@ -53,7 +53,7 @@ from kelpie.alerts.render import (
     utf16_len,
 )
 from kelpie.core.actions import Severity
-from kelpie.core.alerts import AlertEvent
+from kelpie.core.alerts import AlertEvent, Transition
 from kelpie.core.serde import parse_duration
 
 __all__ = ["AT_SIGN", "MAX_TEXT", "clean", "defang", "utf16_len"]
@@ -427,7 +427,7 @@ class TelegramChannel:
             response = self._post(plain, message, markup)
         self._check(response)
         if self._buttons is not None:
-            self._delivered(message, ids, response)
+            self._delivered(message, ids, response, markup)
 
     def _keyboard(
         self, message: AlertEvent, targets: tuple[SnoozeTarget, ...]
@@ -443,13 +443,28 @@ class TelegramChannel:
             )
             return None, []
 
-    def _delivered(self, message: AlertEvent, ids: list[int], response: net.Response) -> None:
+    def expire(self, message: AlertEvent) -> None:
+        """An alert resolved that this channel does not show (below ``min_severity``): its
+        buttons stop working and are removed (best effort), as a shown resolve would do."""
+        if self._buttons is not None and message.transition is Transition.RESOLVED:
+            self._delivered(message, [], None, None)
+
+    def _delivered(
+        self,
+        message: AlertEvent,
+        ids: list[int],
+        response: net.Response | None,
+        markup: Mapping[str, Any] | None,
+    ) -> None:
         """Record the message as its alert's latest, with its buttons or without (a press
-        on an older message, or on another message, is refused), and remove the buttons of
-        the message it replaces (best effort)."""
+        on an older message, or on another message, is refused), and Kelpie's copy of it
+        (Telegram's answer and the keyboard sent), and remove the buttons of the message it
+        replaces (best effort). ``response`` None: nothing was sent."""
         assert self._buttons is not None
         try:
-            previous = self._buttons.delivered(message, ids, _message_id(response))
+            sent = None if response is None else _sent(response)
+            message_id = None if sent is None else _int_id(sent.get("message_id"))
+            previous = self._buttons.delivered(message, ids, message_id, sent, markup)
         except Exception as exc:
             log.error(
                 "alert channel %s: delivered message not recorded for its snooze buttons: %s",
@@ -528,14 +543,17 @@ class TelegramChannel:
         return _error_info(body, self._token)
 
 
-def _message_id(response: net.Response) -> int | None:
-    """The id of the message ``sendMessage`` sent, or None when the answer does not say."""
+def _sent(response: net.Response) -> dict[str, Any] | None:
+    """The message ``sendMessage`` answered with (its ``result``), or None."""
     try:
         result = json.loads(response.body).get("result")
     except (ValueError, AttributeError):
         return None
-    message_id = result.get("message_id") if isinstance(result, dict) else None
-    return message_id if isinstance(message_id, int) and not isinstance(message_id, bool) else None
+    return result if isinstance(result, dict) else None
+
+
+def _int_id(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _seconds(value: Any) -> float | None:

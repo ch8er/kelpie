@@ -1523,7 +1523,8 @@ A person can snooze a wait from the alert that reminds them of it, without a ter
 would quiet: each item of rule 13's digest (not one whose block can never clear), rule 4's
 no-condition and overdue alerts (not a dead end, a condition Kelpie cannot see or stale
 evidence), and rule 2's overdue alert on a wait for one person's human task (the button
-snoozes the human task). Never on agent-health alerts, and never on a "resolved" message.
+snoozes the human task, and says so: "1. Snooze H-7 1d"). Never on agent-health alerts, and
+never on a "resolved" message.
 
 - **Slack** gets no buttons. Under each such item it shows the command that does it, as
   plain text on its own line so it copies cleanly: `kelpie snooze T-101 --until
@@ -1535,7 +1536,10 @@ snoozes the human task). Never on agent-health alerts, and never on a "resolved"
   1d", "3d", "7d". A press snoozes that task from now for that many days (stored like
   `kelpie snooze`, "from chat"), answers with a short toast and edits the alert: a line
   "✅ 1. Snoozed T-101 until 2026-10-22 14:05 UTC by Alice" is added at the end and that
-  item's buttons go. The next digest lists the task in its footer. A press never shortens
+  item's buttons go (when the line would not fit Telegram's 4096 characters, the buttons go
+  and the line is sent as a reply to the alert). The next digest lists the task in its
+  footer. A button that has expired answers so, with the `kelpie snooze` command that still
+  works, and that message's buttons are taken off. A press never shortens
   a snooze set with `kelpie snooze` that ends later: it is refused (`already_snoozed`) and
   the toast says until when the task is already snoozed.
 
@@ -1574,7 +1578,8 @@ thing and refuse everything else.
   `not_callback`. A press from someone not in `allowed_user_ids` or from another chat gets
   no answer at all, and neither does a malformed one or a user's 11th press within a
   minute. A refused press of an allowed person in the chat is answered "Not allowed." and
-  nothing more (or, for `already_snoozed`, until when the task is snoozed).
+  nothing more (for `already_snoozed`, until when the task is snoozed; for `expired_ref`,
+  that the button has expired).
 - *What a button carries*: no task text, only a signed reference,
   `s<days>.<record id>.<MAC>` (at most 41 bytes; Telegram allows 64). The record, kept by
   Kelpie, names the alert, the task, the item, when it was issued and the message it went
@@ -1585,8 +1590,10 @@ thing and refuse everything else.
 - *Expiry*: a reference is good for 24 hours (the longest escalation step), and only while
   it is on the latest message of its alert in that chat. Every message of the alert counts,
   with buttons or without: the next escalation step, a changed digest, a digest with
-  nothing left to snooze or the "resolved" message makes the older message's buttons
-  expire (`expired_ref`), and Kelpie removes them from that message (best effort). Each
+  nothing left to snooze or the alert resolving makes the older message's buttons expire
+  (`expired_ref`), and Kelpie removes them from that message (best effort). An alert that
+  resolves expires its buttons also when the channel does not show the "resolved" message
+  (it is `info`, below the default `min_severity`). Each
   reference is used once (`used_ref`): it is claimed before the snooze is written, and
   given back only when the write fails.
 - *Replay*: Kelpie stores the `getUpdates` offset and moves it past an update before acting
@@ -1594,20 +1601,26 @@ thing and refuse everything else.
   updates Kelpie drops as malformed, so none comes back.
 - *Where the key lives*: in the button store, `kelpie.buttons.db` beside `[storage] path`
   (for `/var/lib/kelpie/kelpie.db`: `/var/lib/kelpie/kelpie.buttons.db`), created with mode
-  `0600` (tightened if it was readable by others), never opened through a symlink (Kelpie
-  refuses to start when the file SQLite opened is not the one it checked), apart from
-  `kelpie.db`, which other commands read and people share to debug. It also holds the
-  update offset, the references (pruned 7 days after issue) and each alert's latest message
-  id. The key is never logged and never in config. Delete the file to rotate the key: every
+  `0600` (tightened if it was readable by others), owned by Kelpie's user, never opened
+  through a symlink (Kelpie refuses to start when another user owns the file, or when the
+  file SQLite opened is not the one it checked, and warns when the directory is writable by
+  others), apart from `kelpie.db`, which other commands read and people share to debug. It
+  also holds the update offset, the references (pruned 7 days after issue), each alert's
+  latest message id and Kelpie's copy of the messages with buttons (their text as Telegram
+  answered it, which the acknowledgements edit). The key is never logged and never in config. Delete the file to rotate the key: every
   button already sent then stops working.
 - *Every press is recorded*: the snooze (`kelpie snoozes`, "from chat", with the person's
   name) and a ledger entry (kind `snooze`, rule `chat`, outcome `executed`, executor the
   channel; who, with their user id, what and until when; `kelpie why <task>` lists it),
-  written in one transaction: there is no chat snooze without its entry.
+  written in one transaction that takes the write lock before it reads, so a `kelpie
+  snooze` from another process cannot slip in between: there is no chat snooze without its
+  entry.
 - *Untrusted text*: the person's name is shown cleaned, without invisible characters and
   with `@` broken, set as code so that Telegram turns nothing in it into a link, and the
   acknowledgement is plain text with the message's own formatting entities, never parsed
-  as HTML. Every Bot API call goes through Kelpie's HTTP helper to the configured `api_url`
+  as HTML. It is built from Kelpie's copy of the message, never from the copy a press
+  carries, so presses close together keep every acknowledgement. A task id with a control
+  or invisible character gets no button. Every Bot API call goes through Kelpie's HTTP helper to the configured `api_url`
   only (no redirects, bounded answers), with the token never logged.
 - *Never in the control loop*: the poller runs in its own thread, waits at least a second
   between two polls, backs off exponentially on errors (up to 5 minutes, longer when

@@ -15,14 +15,14 @@ import stat
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from kelpie.alerts import Delivery, buttons
+from kelpie.alerts import Delivery, buttons, render
 from kelpie.alerts.buttons import (
     REF_TTL,
     AlreadySnoozed,
@@ -38,11 +38,15 @@ from kelpie.alerts.buttons import (
 from kelpie.alerts.config import load_alerts
 from kelpie.alerts.render import AT_SIGN, MAX_TEXT, SnoozeTarget, utf16_len
 from kelpie.alerts.telegram import TelegramChannel, load_telegram
-from kelpie.core.actions import Severity
+from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import AlertEvent, AlertItem, Transition
+from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.engine import Engine
+from kelpie.core.model import Snapshot
 from kelpie.core.snooze import CHAT_DAYS
 from kelpie.metrics import Metrics
 from tests.alerts.fake_telegram import FakeTelegram, fake_telegram
+from tests.fakes import FakeAdapter
 
 TOKEN = "123456:ABCdef_SECRET-token-0123456789abc"
 ENV = "KELPIE_TEST_TELEGRAM_TOKEN"
@@ -188,6 +192,7 @@ def _rig(
     allowed: tuple[int, ...] = (ALICE,),
     prepare: Callable[[ButtonPoller], None] | None = None,
     min_interval: float = 0.0,
+    min_severity: str | None = None,  # None: the channel's default (warning)
 ) -> Rig:
     store = ButtonStore(tmp_path / "kelpie.buttons.db")
     sink, clock, metrics = Sink(), Clock(), SignalingMetrics(fake)
@@ -195,13 +200,13 @@ def _rig(
     control = ChatControl(
         store, sink, clock, metrics, poll_timeout=0, backoff=0.01, min_interval=min_interval
     )
-    settings = load_telegram(
-        {
-            "type": "telegram", "token_env": ENV, "chat_id": CHAT, "api_url": fake.url,
-            "buttons": True, "allowed_user_ids": list(allowed),
-        },
-        "test",
-    )  # fmt: skip
+    entry: dict[str, Any] = {
+        "type": "telegram", "token_env": ENV, "chat_id": CHAT, "api_url": fake.url,
+        "buttons": True, "allowed_user_ids": list(allowed),
+    }  # fmt: skip
+    if min_severity is not None:
+        entry["min_severity"] = min_severity
+    settings = load_telegram(entry, "test")
     channel, poller = settings.build_with_buttons(control, {ENV: TOKEN})
     if prepare is not None:
         prepare(poller)  # before the delivery starts it
@@ -330,6 +335,54 @@ def test_the_store_refuses_a_file_swapped_before_sqlite_opens_it(
         ButtonStore(path)
 
 
+def test_the_store_refuses_a_file_swapped_back_after_sqlite_opened_another(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The path is checked again, and so is the file SQLite really has open: a swap that is
+    undone once SQLite opened the other file is caught by the second check."""
+    path = tmp_path / "kelpie.buttons.db"
+    aside, elsewhere = tmp_path / "aside.db", tmp_path / "elsewhere.db"
+    elsewhere.write_bytes(b"")
+    connect = sqlite3.connect
+
+    def swap_open_swap_back(database: str, **kw: Any) -> sqlite3.Connection:
+        path.rename(aside)
+        path.symlink_to(elsewhere)
+        db = connect(database, **kw)
+        db.execute("PRAGMA schema_version").fetchone()  # SQLite opens elsewhere.db
+        path.unlink()
+        aside.rename(path)  # the checked file is back at the path
+        return db
+
+    monkeypatch.setattr(buttons.sqlite3, "connect", swap_open_swap_back)
+    with pytest.raises(ValueError, match="changed while it was opened"):
+        ButtonStore(path)
+
+
+def test_the_store_refuses_a_file_of_another_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "kelpie.buttons.db"
+    path.write_bytes(b"")
+    owner = os.stat(path).st_uid
+    monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+    with pytest.raises(ValueError, match="belongs to another user"):
+        ButtonStore(path)
+
+
+def test_the_store_warns_about_a_directory_others_can_write(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    ButtonStore(shared / "kelpie.buttons.db").close()
+    assert "its directory is writable by others" in caplog.text
+    caplog.clear()
+    ButtonStore(tmp_path / "kelpie.buttons.db").close()
+    assert "writable by others" not in caplog.text
+
+
 def test_the_store_tightens_a_readable_file(tmp_path: Path) -> None:
     path = tmp_path / "kelpie.buttons.db"
     path.write_bytes(b"")
@@ -362,6 +415,28 @@ def test_snoozable_items_get_three_buttons_each(rig: Rig) -> None:
             assert len(data.encode()) <= 64
             assert parse_callback(data, rig.store.key(), CHAT) is not None
             assert data.startswith(f"s{days}.")
+
+
+@pytest.mark.parametrize(
+    ("language", "label"),
+    [("en", "1. Snooze H-1 1d"), ("ru", "1. Отложить H-1 на 1 д")],
+)
+def test_a_button_names_the_task_when_it_snoozes_another_than_the_item(
+    language: str, label: str
+) -> None:
+    """Rule 2's overdue wait W-1 is snoozed through the human task H-1 it waits on."""
+    event = AlertEvent(
+        "wait_condition", "alert W-1", "W-1 has waited 30h.", Severity.WARNING, at=NOW,
+        items=(AlertItem("W-1", "Deploy", snooze_task="H-1"),),
+    )  # fmt: skip
+    _, (target,) = render.telegram_message(
+        event, replace(render.DEFAULT_RENDERING, language=language)
+    )
+    assert target == SnoozeTarget(1, "H-1", named=True)
+    (row,) = render.keyboard([(target, [(1, "a"), (3, "b")])], language)["inline_keyboard"]
+    assert row[0]["text"] == label and row[1]["text"] in {"3d", "3 д"}
+    (plain,) = render.keyboard([(SnoozeTarget(1, "W-1"), [(1, "a")])], language)["inline_keyboard"]
+    assert "W-1" not in plain[0]["text"]  # the item's own task: the number says which
 
 
 def test_no_buttons_without_a_snoozable_item_or_on_a_resolved_alert(rig: Rig) -> None:
@@ -410,7 +485,8 @@ def test_a_press_snoozes_answers_and_edits_the_alert(rig: Rig) -> None:
     assert rig.sink.presses == [Press("telegram", "T-2", 3, ALICE, "Alice")]
     assert rig.answers() == ["Snoozed T-2 until 2026-10-22 10:00 UTC"]
     (edit,) = rig.fake.calls("editMessageText")
-    assert edit["chat_id"] == int(CHAT) and edit["message_id"] == message_id
+    # the configured chat, never an id read from the update
+    assert edit["chat_id"] == CHAT and edit["message_id"] == message_id
     assert edit["text"].endswith("\n✅ 2. Snoozed T-2 until 2026-10-22 10:00 UTC by Alice")
     assert "parse_mode" not in edit  # literal text: the person's name is never parsed
     assert _name_entity(edit) == "Alice"
@@ -423,16 +499,31 @@ def test_a_press_snoozes_answers_and_edits_the_alert(rig: Rig) -> None:
     assert TOKEN not in rendered
 
 
-def test_the_edit_keeps_the_messages_own_formatting(rig: Rig) -> None:
-    message_id, body = rig.send(digest("T-1"))
-    data = body["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+def _answer_sends_with(rig: Rig, text: str, entities: list[dict[str, Any]]) -> None:
+    """Make the fake answer ``sendMessage`` with ``text`` and ``entities``, as Telegram
+    answers with the message it parsed."""
+    send = rig.fake.routes["sendMessage"]
+
+    def answer(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        status, reply = send(body)
+        return status, {**reply, "result": {**reply["result"], "text": text, "entities": entities}}
+
+    rig.fake.routes["sendMessage"] = answer
+
+
+def test_the_edit_is_built_from_kelpies_copy_with_its_formatting(rig: Rig) -> None:
     entities = [
         {"type": "bold", "offset": 2, "length": 5},
         {"type": "text_link", "offset": 10, "length": 4, "url": "https://board.example.org/t/1"},
         {"type": "text_link", "offset": 20, "length": 4, "url": "javascript:alert(1)"},
         {"type": "custom_emoji", "offset": 0, "length": 1, "custom_emoji_id": "1"},
     ]
-    rig.raw_press(message_id, {**body, "text": "x" * 40, "entities": entities}, data)
+    _answer_sends_with(rig, "x" * 40, entities)
+    message_id, body = rig.send(digest("T-1"))
+    data = body["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    # the copy a press carries is not used: Kelpie edits what Telegram answered it with
+    echoed = {**body, "text": "forged", "entities": [{"type": "bold", "offset": 0, "length": 6}]}
+    rig.raw_press(message_id, echoed, data)
     (edit,) = rig.fake.calls("editMessageText")
     # the same entities back (the line is added at the end), only the kinds alerts use and
     # only safe links, then the person's name as code
@@ -443,13 +534,35 @@ def test_the_edit_keeps_the_messages_own_formatting(rig: Rig) -> None:
     assert "reply_markup" not in edit  # the only item's buttons are gone
 
 
-def test_a_message_at_the_limit_only_loses_the_buttons(rig: Rig) -> None:
-    message_id, body = rig.send(digest("T-1"))
-    data = body["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
-    rig.raw_press(message_id, {**body, "text": "x" * (MAX_TEXT - 10)}, data)
+def test_two_quick_presses_on_one_message_keep_both_acknowledgements(rig: Rig) -> None:
+    message_id, body = rig.send(digest("T-1", "T-2"))
+    rows = body["reply_markup"]["inline_keyboard"]
+    before = rig.handled()
+    with rig.fake.batch():  # one getUpdates answer: both carry the message before any edit
+        rig.fake.press(message_id, body, rows[0][0]["callback_data"], ALICE, CHAT)
+        rig.fake.press(message_id, body, rows[1][2]["callback_data"], ALICE, CHAT)
+    rig.wait(lambda: rig.handled() == before + 2)
+    assert [p.task_id for p in rig.sink.presses] == ["T-1", "T-2"]
+    first, last = rig.fake.calls("editMessageText")
+    assert "reply_markup" in first and "reply_markup" not in last  # no used button is back
+    lines = last["text"].splitlines()[-2:]
+    assert lines[0].startswith("✅ 1. Snoozed T-1 until 2026-10-20") and lines[0].endswith("Alice")
+    assert lines[1].startswith("✅ 2. Snoozed T-2 until 2026-10-26") and lines[1].endswith("Alice")
+    assert [e["type"] for e in last["entities"]][-2:] == ["code", "code"]
+
+
+@pytest.mark.parametrize("text", ["x" * (MAX_TEXT - 10), ""], ids=["at-the-limit", "no-text"])
+def test_an_acknowledgement_that_does_not_fit_is_a_reply(rig: Rig, text: str) -> None:
+    _answer_sends_with(rig, text, [])
+    sent = rig.send(digest("T-1"))
+    rig.press(sent)
     assert rig.fake.calls("editMessageText") == []
     (edit,) = rig.fake.calls("editMessageReplyMarkup")
-    assert edit["reply_markup"] == {"inline_keyboard": []}
+    assert edit == {"chat_id": CHAT, "message_id": sent[0], "reply_markup": {"inline_keyboard": []}}
+    reply = rig.fake.sent()[-1][1]
+    assert reply["text"].startswith("✅ 1. Snoozed T-1 until ") and reply["text"].endswith("Alice")
+    assert reply["reply_parameters"]["message_id"] == sent[0] and reply["chat_id"] == CHAT
+    assert _name_entity(reply) == "Alice"
 
 
 def test_a_hostile_name_is_cleaned_and_never_mentions(rig: Rig) -> None:
@@ -522,12 +635,27 @@ def test_a_reference_from_another_message_is_refused(rig: Rig) -> None:
     assert rig.rejected() == {"bad_ref": 1}
 
 
-def test_an_old_reference_expires(rig: Rig) -> None:
+def test_an_old_reference_expires_says_so_and_loses_its_buttons(rig: Rig) -> None:
     sent = rig.send(digest("T-1"))
     rig.clock.now = NOW + REF_TTL + timedelta(seconds=1)
     rig.press(sent)
-    assert rig.sink.presses == [] and rig.answers() == ["Not allowed."]
-    assert rig.rejected() == {"expired_ref": 1}
+    assert rig.sink.presses == [] and rig.rejected() == {"expired_ref": 1}
+    assert rig.answers() == [
+        "This button has expired. To snooze T-1: kelpie snooze T-1 --until 2026-10-23"
+    ]
+    (strip,) = rig.fake.calls("editMessageReplyMarkup")  # none of its buttons works now
+    assert strip == {
+        "chat_id": CHAT,
+        "message_id": sent[0],
+        "reply_markup": {"inline_keyboard": []},
+    }
+
+
+def test_an_expired_button_of_a_task_id_unfit_for_a_shell_names_no_command(rig: Rig) -> None:
+    sent = rig.send(digest("-rf"))
+    rig.clock.now = NOW + REF_TTL + timedelta(seconds=1)
+    rig.press(sent)
+    assert rig.answers() == ["This button has expired."]
 
 
 def test_the_next_escalation_step_expires_the_older_buttons(rig: Rig) -> None:
@@ -541,7 +669,7 @@ def test_the_next_escalation_step_expires_the_older_buttons(rig: Rig) -> None:
     rig.press(other)
     assert [p.task_id for p in rig.sink.presses] == ["T-1", "T-1"]
     # the older message lost its buttons when the newer one went out
-    (strip,) = rig.fake.calls("editMessageReplyMarkup")
+    strip, *_ = rig.fake.calls("editMessageReplyMarkup")
     assert strip == {
         "chat_id": CHAT,
         "message_id": first[0],
@@ -549,25 +677,67 @@ def test_the_next_escalation_step_expires_the_older_buttons(rig: Rig) -> None:
     }
 
 
-@pytest.mark.parametrize(
-    "newer",
-    [
-        digest("T-1", transition=Transition.RESOLVED),  # resolved: never has buttons
-        digest("T-2", snoozable=False),  # a digest with nothing to snooze
-    ],
-    ids=["resolved", "no-targets"],
-)
-def test_a_newer_message_without_buttons_expires_the_older_ones(
-    rig: Rig, newer: AlertEvent
-) -> None:
+def test_a_digest_with_nothing_to_snooze_expires_the_older_buttons(rig: Rig) -> None:
     first = rig.send(digest("T-1"))
     rig.clock.now = NOW + timedelta(hours=1)
-    _, body = rig.send(newer)
+    _, body = rig.send(digest("T-2", snoozable=False))
     assert "reply_markup" not in body
+    strip, *_ = rig.fake.calls("editMessageReplyMarkup")  # taken off at once
+    assert strip["message_id"] == first[0] and strip["reply_markup"] == {"inline_keyboard": []}
     rig.press(first)
     assert rig.sink.presses == [] and rig.rejected() == {"expired_ref": 1}
-    (strip,) = rig.fake.calls("editMessageReplyMarkup")  # and they are taken off
-    assert strip["message_id"] == first[0] and strip["reply_markup"] == {"inline_keyboard": []}
+
+
+class Stuck:
+    """A rule that reports a block (rule 4's way: one task, ``snooze_task`` in params)
+    while ``on``."""
+
+    name = "stale_blocks"
+
+    def __init__(self) -> None:
+        self.on = True
+
+    def evaluate(self, snapshot: Snapshot) -> list[Action]:
+        if not self.on:
+            return []
+        return [
+            Action(
+                ActionKind.ALERT, self.name, "T-1 has been blocked for 10h.", task_id="T-1",
+                key="unlinked:T-1", severity=Severity.WARNING, state="stale_blocks:T-1:x",
+                since=NOW, params={"snooze_task": "T-1"},
+            )
+        ]  # fmt: skip
+
+
+@pytest.mark.parametrize("shown", [False, True], ids=["default-severity", "info-shown"])
+def test_a_resolved_alert_expires_its_buttons_whether_or_not_the_chat_shows_it(
+    tmp_path: Path, shown: bool
+) -> None:
+    """The real engine resolves the state: its notice is ``info``, below a Telegram
+    channel's default ``min_severity``, and still the buttons stop and go."""
+    with fake_telegram() as fake:
+        fake.bot()
+        rig = _rig(fake, tmp_path, min_severity="info" if shown else None)
+        rule = Stuck()
+        engine = Engine([rule], adapters=[FakeAdapter()], alerter=rig.delivery.alerter(),
+                        config=EngineConfig(dry_run=False, default_mode=Mode.ACT))  # type: ignore[list-item]  # fmt: skip
+        try:
+            engine.tick(lambda: Snapshot(now=NOW))
+            rig.wait(lambda: rig.metrics.alerts_sent["telegram"] == 1)
+            first = rig.fake.sent()[-1]
+            assert first[1]["reply_markup"]["inline_keyboard"]  # rule 4's alert has buttons
+            rule.on = False
+            rig.clock.now = NOW + timedelta(hours=1)
+            engine.tick(lambda: Snapshot(now=NOW + timedelta(hours=1)))  # resolved
+            rig.wait(lambda: rig.fake.calls("editMessageReplyMarkup"))
+            (strip,) = rig.fake.calls("editMessageReplyMarkup")
+            assert strip["message_id"] == first[0]
+            assert strip["reply_markup"] == {"inline_keyboard": []}
+            assert len(rig.fake.sent()) == (2 if shown else 1)  # the notice only where shown
+            rig.press(first)
+            assert rig.sink.presses == [] and rig.rejected() == {"expired_ref": 1}
+        finally:
+            rig.delivery.close(1.0)
 
 
 def test_removing_older_buttons_is_best_effort(rig: Rig) -> None:
@@ -576,7 +746,7 @@ def test_removing_older_buttons_is_best_effort(rig: Rig) -> None:
         {"ok": False, "description": "Bad Request: message is not modified"},
     )
     first = rig.send(digest("T-1"))
-    rig.send(digest("T-1", transition=Transition.RESOLVED))  # delivered all the same
+    rig.send(digest("T-2", snoozable=False))  # delivered all the same
     rig.press(first)
     assert rig.rejected() == {"expired_ref": 1}
     assert rig.metrics.alerts_sent["telegram"] == 2
@@ -611,6 +781,20 @@ def test_a_reference_is_claimed_before_the_snooze_is_written(
     assert rig.sink.presses == []  # no claim, no snooze
     assert rig.answers() == ["Could not snooze; see the Kelpie log."]
     assert rig.metrics.chat_actions[("telegram", "failed")] == 1
+
+
+def test_a_failed_acknowledgement_leaves_the_snooze_counted(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = rig.send(digest("T-1"))
+
+    def broken(*args: object) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(rig.store, "shown", broken)
+    rig.press(sent)
+    assert len(rig.sink.presses) == 1
+    assert rig.metrics.chat_actions[("telegram", "snoozed")] == 1  # written: that is what counts
 
 
 def test_a_longer_snooze_from_another_source_is_kept(rig: Rig) -> None:

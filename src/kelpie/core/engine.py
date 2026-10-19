@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -690,10 +691,19 @@ class Engine:
                 snoozed=snoozed_items(action, snapshot),
                 snoozed_total=_count(action.params.get("snoozed_total")),
                 at=snapshot.now,
-                state=action.state,
+                state=action.state if action.state is not None else _resolved_state(action),
             )
         )
         return True
+
+
+def _resolved_state(action: Action) -> str | None:
+    """The state a resolve notice closes (:meth:`Engine._resolve_gone` names it in
+    ``params["state"]``, never in ``Action.state``, which would keep it open), so its event
+    names the same long-lived state as the alerts it ends. None for any other action."""
+    state = action.params.get("state")
+    is_notice = (action.key or "").startswith("resolved:")
+    return state if is_notice and isinstance(state, str) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -878,11 +888,16 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
 
 
 MAX_TASK_REF = 200  # characters of a ``snooze_task``; a longer one is dropped
+_UNPRINTABLE = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})  # never in a task id
 
 
 def _task_ref(value: object) -> str | None:
-    """A task id a rule names (``snooze_task``), or None when it is absent or malformed."""
+    """A task id a rule names (``snooze_task``), or None when it is absent or malformed: too
+    long, or with a control or format character (it may come from a condition an agent
+    registered, and ends up in logs and chat buttons)."""
     if not isinstance(value, str) or not value.strip() or len(value) > MAX_TASK_REF:
+        return None
+    if any(unicodedata.category(ch) in _UNPRINTABLE for ch in value):
         return None
     return value.strip()
 

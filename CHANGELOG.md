@@ -300,8 +300,12 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   alert ("Snoozed until … by …", that item's buttons removed). A press never shortens a
   longer `kelpie snooze`: it is refused and says until when. A button carries only a short
   HMAC-signed reference (key generated on first use in `kelpie.buttons.db`, 0600) that
-  expires after 24 hours or at the alert's next message (any, "resolved" included, whose
-  arrival also removes the older buttons), and is used once. Presses are read with
+  expires after 24 hours or at the alert's next message (any, also when the alert resolves
+  unseen below the channel's `min_severity`; the older buttons are then removed), and is
+  used once; an expired button says so, with the `kelpie snooze` command that still works.
+  A button that snoozes another task than its item's (rule 2: the human task) names it.
+  Acknowledgements are built from Kelpie's copy of the message, so quick presses keep each
+  other's lines; one that does not fit is a reply. Presses are read with
   `getUpdates` long polling in their own thread (offset persisted, at least a second
   between polls, back-off, shutdown deadline); anything else is ignored and counted in
   `kelpie_chat_rejected_total{reason}`, and strangers and other chats get no answer.

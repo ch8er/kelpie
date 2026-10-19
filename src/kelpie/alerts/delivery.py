@@ -33,6 +33,11 @@ snooze buttons, :mod:`kelpie.alerts.buttons`) has a poller, started with the wor
 stopped first on ``close``, under the same deadline: told to stop before the queues are
 flushed, joined after, and abandoned if still inside a request then.
 
+**Expiry** (:class:`Expiring`): such a channel also hears of every alert that resolves,
+even when it does not show it (a resolve notice is ``info``, below most channels'
+``min_severity``): its worker calls ``expire`` instead of ``send``, in order with the alerts
+queued before, so the buttons of a resolved alert stop working although no message says so.
+
 The engine already de-duplicates through the action ledger and state transitions; the
 window here is a cheap safety net. An alert is a duplicate only when the last alert sent to
 that channel for the same (rule, subject) is identical, so open, resolved, open again within
@@ -48,6 +53,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol, runtime_checkable
 
@@ -90,6 +96,21 @@ class Channel(Protocol):
     min_severity: Severity
 
     def send(self, message: AlertEvent) -> None: ...
+
+
+@runtime_checkable
+class Expiring(Protocol):
+    """A channel whose messages carry controls that must stop working when their alert
+    resolves (Telegram's snooze buttons): ``expire`` is told of a resolve it does not send."""
+
+    def expire(self, message: AlertEvent) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _Expire:
+    """A queued request to expire ``message``'s alert on the channel, not to send it."""
+
+    message: AlertEvent
 
 
 class Poller(Protocol):
@@ -137,7 +158,7 @@ class _Worker:
         self.backoff = backoff
         self.horizon = horizon
         self.lost = lost  # called for an alert that will never be delivered
-        self.queue: queue.Queue[AlertEvent] = queue.Queue(queue_size)
+        self.queue: queue.Queue[AlertEvent | _Expire] = queue.Queue(queue_size)
         self.stopping = threading.Event()
         self.deadline = float("inf")
         self.blocked_until = 0.0  # flood control: no send before this (monotonic) time
@@ -153,7 +174,7 @@ class _Worker:
         )
         self.thread.start()
 
-    def offer(self, message: AlertEvent) -> str | None:
+    def offer(self, message: AlertEvent | _Expire) -> str | None:
         """None when queued, else why not: ``queue_full`` or ``shutdown``."""
         with self._lock:
             if self.closed:
@@ -191,6 +212,12 @@ class _Worker:
                     self._drain()
                     return
                 continue
+            if isinstance(message, _Expire):
+                self._expire(message.message)
+                if self._expired():
+                    self._drain()
+                    return
+                continue
             with self._lock:
                 if self.abandoned:  # close gave up between get() and here
                     held = message
@@ -215,6 +242,8 @@ class _Worker:
                 message = self.queue.get_nowait()
             except queue.Empty:
                 break
+            if isinstance(message, _Expire):
+                continue  # nothing was to be sent
             dropped += 1
             self.lost(message)
             _notify(self.observer, "alert_dropped", self.channel.name, "shutdown")
@@ -223,6 +252,19 @@ class _Worker:
                 "alert channel %s: %d queued alert(s) dropped at shutdown",
                 self.channel.name,
                 dropped,
+            )
+
+    def _expire(self, message: AlertEvent) -> None:
+        """Tell the channel an alert it does not show has resolved; never raises."""
+        if self.abandoned or not isinstance(self.channel, Expiring):
+            return
+        try:
+            self.channel.expire(message)
+        except Exception as exc:  # a channel bug must not kill the worker
+            log.error(
+                "alert channel %s: could not expire a resolved alert: %s",
+                self.channel.name,
+                type(exc).__name__,
             )
 
     def _settle(self) -> bool:
@@ -386,8 +428,22 @@ class Delivery:
             if names is None:
                 if _RANK[message.severity] >= _RANK[worker.channel.min_severity]:
                     self._route(worker, message)
+                elif message.transition is Transition.RESOLVED:
+                    self._expire(worker, message)
             elif worker.channel.name in names:
                 self._route(worker, message)
+
+    def _expire(self, worker: _Worker, message: AlertEvent) -> None:
+        """A resolve the channel does not show: let an :class:`Expiring` channel expire the
+        alert's controls, in order with what is queued before it (never blocking)."""
+        if self._closed or not isinstance(worker.channel, Expiring):
+            return
+        if (why := worker.offer(_Expire(message))) is not None:
+            log.warning(
+                "alert channel %s: a resolved alert could not be expired (%s)",
+                worker.channel.name,
+                why,
+            )
 
     def _route(self, worker: _Worker, message: AlertEvent) -> None:
         name = worker.channel.name

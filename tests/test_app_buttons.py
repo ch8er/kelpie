@@ -78,7 +78,13 @@ def test_a_chat_snooze_and_its_ledger_entry_are_written_together(
     store = SqliteLedgerStore(tmp_path / "kelpie.db")
     try:
         record, entry = chat_snooze("T-1", 3, "Alice", ALICE, "telegram", NOW, SnoozeSettings())
+        statements: list[str] = []
+        store._db.set_trace_callback(statements.append)
         assert store.put_chat_snooze(record, entry) is None
+        store._db.set_trace_callback(None)
+        # the write lock before the read: another process's kelpie snooze waits, it cannot
+        # land between the check and the write
+        assert statements[0] == "BEGIN IMMEDIATE" and statements[1].startswith("SELECT")
         assert [s.task_id for s in store.snoozes()] == ["T-1"]
         assert [e.task_id for e in store.since(NOW - timedelta(days=1))] == ["T-1"]
 

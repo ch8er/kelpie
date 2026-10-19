@@ -24,8 +24,10 @@ or another message), ``expired_ref``, ``used_ref``, ``already_snoozed``, ``rate_
 ``malformed`` and ``not_callback`` (any other update type, which Telegram should not even
 send: ``allowed_updates`` asks for callback queries only). A press from someone not
 allowed, from another chat, malformed or rate limited gets no answer at all; a refused
-press of an allowed person in the chat gets the same neutral toast, "Not allowed." (or,
-for ``already_snoozed``, until when the task is snoozed): the answer never says why.
+press of an allowed person in the chat gets the same neutral toast, "Not allowed." (for
+``already_snoozed``, until when the task is snoozed; for ``expired_ref``, that the button
+has expired and the ``kelpie snooze`` command that still works, and that message's buttons
+are taken off).
 
 **The reference.** ``callback_data`` never carries task text, only a short signed
 reference to a record Kelpie keeps (``refs``: the channel, chat, alert, task, item number,
@@ -43,9 +45,12 @@ logged). It is compared with :func:`hmac.compare_digest`. Record ids are never r
 after it was issued, and only while it is on the latest message of its alert in that chat:
 every message the channel delivers is recorded as its alert's latest (with buttons or
 without: a "resolved" message, a digest with nothing to snooze), so any newer message of
-the same alert makes the older buttons expire. The channel then also removes the older
-message's buttons (``editMessageReplyMarkup``, best effort). An alert is its long-lived
-state (``AlertEvent.state``, the same across escalation steps), else its rule and subject.
+the same alert makes the older buttons expire. A resolve the channel does not show (it is
+``info``, below the default ``min_severity``) expires them too (the delivery layer hands it
+to :meth:`~kelpie.alerts.telegram.TelegramChannel.expire`). The channel then also removes
+the older message's buttons (``editMessageReplyMarkup``, best effort). An alert is its
+long-lived state (``AlertEvent.state``, the same across escalation steps and on the resolve
+notice), else its rule and subject.
 A reference is used once: it is claimed atomically before the snooze is written, and the
 claim is released when the write fails.
 
@@ -55,19 +60,24 @@ once, also across restarts. An update below the stored offset is skipped, and th
 moves past every update Telegram returned, including those dropped as malformed.
 
 **The store** is a small SQLite file next to Kelpie's database
-(:func:`button_store_path`, ``kelpie.buttons.db`` beside ``kelpie.db``), created ``0600``
-and never through a symlink (the file SQLite opened must be the one checked, or the store
-refuses to open): the HMAC key, the update offset, the references and each alert's latest
-message. Kept apart from ``kelpie.db``, which other commands read and people share to
-debug.
+(:func:`button_store_path`, ``kelpie.buttons.db`` beside ``kelpie.db``), created ``0600``,
+owned by Kelpie's user and never through a symlink (the file SQLite opened must be the one
+checked, or the store refuses to open; a directory others can write is warned about): the
+HMAC key, the update offset, the references, each alert's latest message and Kelpie's copy
+of each message with buttons. Kept apart from ``kelpie.db``, which other commands read and
+people share to debug.
 
 **The acknowledgement.** After a press the poller answers the callback (a short toast) and
-edits the alert: the message as Telegram holds it, with the same entities (so no markup is
-parsed), plus a line "✅ 1. Snoozed T-101 until 2026-10-22 14:05 UTC by Alice", and the
-pressed item's buttons removed. The person's name is untrusted text: it is cleaned and its
-``@`` broken (:func:`kelpie.alerts.render.one_line`), set in a ``code`` entity (so Telegram
-links nothing in it) and, being plain text with explicit entities, never parsed as HTML. A
-message that would grow past Telegram's limit only loses the buttons.
+edits the alert in the configured chat, from Kelpie's own copy of the message (the text and
+entities Telegram answered ``sendMessage`` with, then as Kelpie last edited it; never the
+copy the press carries, which predates the edits of presses taken just before): the same
+entities (so no markup is parsed), every acknowledgement line so far plus "✅ 1. Snoozed
+T-101 until 2026-10-22 14:05 UTC by Alice", and the keyboard Kelpie sent without the
+buttons of any reference used on that message. The person's name is untrusted text: it is
+cleaned and its ``@`` broken (:func:`kelpie.alerts.render.one_line`), set in a ``code``
+entity (so Telegram links nothing in it) and, being plain text with explicit entities, never
+parsed as HTML. When the line would not fit Telegram's limit (or the message has no text),
+the buttons go and the line is sent as a reply to the message.
 
 **The poller** runs in its own thread, never in the engine's tick: a poll that returns
 early is followed by a pause (:data:`MIN_POLL_INTERVAL` from its start), errors back off
@@ -81,6 +91,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -238,7 +249,29 @@ CREATE TABLE IF NOT EXISTS latest (
     sent_at    TEXT NOT NULL,
     PRIMARY KEY (channel, chat_id, alert)
 );
+CREATE TABLE IF NOT EXISTS messages (
+    channel    TEXT NOT NULL,
+    chat_id    TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    entities   TEXT NOT NULL,
+    markup     TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (channel, chat_id, message_id)
+);
 """
+
+
+@dataclass(frozen=True, slots=True)
+class Shown:
+    """Kelpie's copy of a message with buttons, as it stands: the text and entities
+    Telegram answered ``sendMessage`` (or Kelpie's last edit) with, and the keyboard sent."""
+
+    text: str
+    entities: list[dict[str, Any]]
+    markup: dict[str, Any]
+
+
 _KEY = "hmac_key"
 
 
@@ -250,19 +283,33 @@ def _ts(at: datetime) -> str:
 
 def _private_file(path: Path) -> tuple[int, int]:
     """Create ``path`` with mode 0600 (or tighten it), never through a symlink; its
-    ``(st_dev, st_ino)``. ValueError when it is not a regular file."""
+    ``(st_dev, st_ino)``. ValueError when it is not a regular file or another user owns it;
+    a warning when its directory is writable by others (they could replace it)."""
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise ValueError(f"{path} is not a regular file")
+        if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+            raise ValueError(f"{path} belongs to another user (uid {st.st_uid})")
         if st.st_mode & 0o077:
             os.fchmod(fd, 0o600)
             log.warning("button store %s was readable by others; set to 0600", path)
-        return st.st_dev, st.st_ino
+        identity = st.st_dev, st.st_ino
     finally:
         os.close(fd)
+    try:
+        parent = os.stat(path.parent)
+    except OSError:
+        return identity
+    if parent.st_mode & 0o022:
+        log.warning(
+            "button store %s: its directory is writable by others, who could replace the "
+            "file; keep it in a directory only Kelpie's user can write",
+            path,
+        )
+    return identity
 
 
 def _same_file(path: Path, identity: tuple[int, int]) -> bool:
@@ -274,6 +321,26 @@ def _same_file(path: Path, identity: tuple[int, int]) -> bool:
     return stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == identity
 
 
+def _held_open(identity: tuple[int, int]) -> bool | None:
+    """Whether one of this process's open descriptors is the file with ``identity`` (the
+    one SQLite opened, once it has read the database: :func:`_private_file` closed its own),
+    read from ``/proc/self/fd`` or ``/dev/fd``; None where neither can be listed."""
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            try:
+                st = os.fstat(int(name))
+            except (OSError, ValueError):
+                continue  # the listing's own descriptor, closed by now
+            if (st.st_dev, st.st_ino) == identity:
+                return True
+        return False
+    return None
+
+
 class ButtonStore:
     """The HMAC key, the update offsets, the references and each alert's latest message,
     in one SQLite file (or in memory with ``":memory:"``). Thread-safe: the alert worker
@@ -283,10 +350,13 @@ class ButtonStore:
         identity = None if str(path) == ":memory:" else _private_file(Path(path))
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(path), check_same_thread=False)
-        if identity is not None and not _same_file(Path(path), identity):
-            # Swapped between the check and the open (a symlink, another file): fail closed.
-            self._db.close()
-            raise ValueError(f"{path} changed while it was opened")
+        if identity is not None:
+            self._db.execute("PRAGMA schema_version").fetchone()  # SQLite opens the file now
+            if not _same_file(Path(path), identity) or _held_open(identity) is False:
+                # Swapped between the check and the open (a symlink, another file): the
+                # file SQLite has open is not the one checked. Fail closed.
+                self._db.close()
+                raise ValueError(f"{path} changed while it was opened")
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA busy_timeout = 5000")
         with self._db:
@@ -343,6 +413,7 @@ class ButtonStore:
         ids = []
         with self._lock, self._db:
             self._db.execute("DELETE FROM refs WHERE issued_at < ?", (_ts(at - PRUNE_AFTER),))
+            self._db.execute("DELETE FROM messages WHERE updated_at < ?", (_ts(at - PRUNE_AFTER),))
             for t in targets:
                 cur = self._db.execute(
                     "INSERT INTO refs (channel, chat_id, alert, task_id, item, issued_at)"
@@ -360,13 +431,17 @@ class ButtonStore:
         ids: Sequence[int],
         message_id: int | None,
         at: datetime,
+        shown: Shown | None = None,
     ) -> int | None:
         """A message of ``alert`` went out (``at``), with the references ``ids`` (or none):
         bind them to it and record it as the alert's latest message in that chat, which
-        expires the buttons of every older one. ``message_id`` None (Telegram did not say)
-        expires them too. Returns the previous latest message when it carried buttons, so
-        the caller may remove them."""
+        expires the buttons of every older one, and keep Kelpie's copy of it (``shown``),
+        which the acknowledgements edit. ``message_id`` None (Telegram did not say, or
+        nothing was sent: the alert resolved unseen) expires them too. Returns the previous
+        latest message when it carried buttons, so the caller may remove them."""
         key = (channel, chat_id, alert)
+        if message_id is not None and ids and shown is not None:
+            self.set_shown(channel, chat_id, message_id, shown, at)
         with self._lock, self._db:
             self._db.execute("DELETE FROM latest WHERE sent_at < ?", (_ts(at - PRUNE_AFTER),))
             row = self._db.execute(
@@ -421,6 +496,54 @@ class ButtonStore:
             row["message_id"],
             None if row["used_at"] is None else datetime.fromisoformat(row["used_at"]),
         )
+
+    def used_on(self, channel: str, chat_id: str, message_id: int) -> set[int]:
+        """The references of a message that were used (pressed and written)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id FROM refs WHERE channel = ? AND chat_id = ? AND message_id = ?"
+                " AND used_at IS NOT NULL",
+                (channel, chat_id, message_id),
+            ).fetchall()
+        return {int(r["id"]) for r in rows}
+
+    def shown(self, channel: str, chat_id: str, message_id: int) -> Shown | None:
+        """Kelpie's copy of a message with buttons, or None when it has none."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT text, entities, markup FROM messages WHERE channel = ? AND chat_id = ?"
+                " AND message_id = ?",
+                (channel, chat_id, message_id),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            entities, markup = json.loads(row["entities"]), json.loads(row["markup"])
+        except ValueError:
+            return None
+        if not isinstance(entities, list) or not isinstance(markup, dict):
+            return None
+        return Shown(row["text"], entities, markup)
+
+    def set_shown(
+        self, channel: str, chat_id: str, message_id: int, shown: Shown, at: datetime
+    ) -> None:
+        """Record Kelpie's copy of a message (sent, or as Kelpie last edited it)."""
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO messages"
+                " (channel, chat_id, message_id, text, entities, markup, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    channel,
+                    chat_id,
+                    message_id,
+                    shown.text,
+                    json.dumps(shown.entities),
+                    json.dumps(shown.markup),
+                    _ts(at),
+                ),
+            )
 
     def use(self, ref_id: int, at: datetime) -> bool:
         """Claim a reference (mark it used ``at``), atomically; False when it already was
@@ -477,12 +600,27 @@ class Buttons:
         return render.keyboard(rows, self.language), ids
 
     def delivered(
-        self, event: AlertEvent, ids: Sequence[int], message_id: int | None
+        self,
+        event: AlertEvent,
+        ids: Sequence[int],
+        message_id: int | None,
+        sent: Mapping[str, Any] | None = None,
+        markup: Mapping[str, Any] | None = None,
     ) -> int | None:
         """Record a delivered message of ``event`` (every one, with buttons or without) as
-        its alert's latest; returns the previous one when its buttons should be removed."""
+        its alert's latest, with Kelpie's copy of it (``sent``: the message Telegram
+        answered with; ``markup``: the keyboard sent); returns the previous one when its
+        buttons should be removed."""
+        shown = None
+        if sent is not None and markup is not None:
+            text = sent.get("text")
+            shown = Shown(
+                text if isinstance(text, str) else "",
+                _entities(sent.get("entities")),
+                dict(markup),
+            )
         return self.store.delivered(
-            self.channel, self.chat_id, alert_key(event), ids, message_id, self.clock()
+            self.channel, self.chat_id, alert_key(event), ids, message_id, self.clock(), shown
         )
 
 
@@ -583,10 +721,13 @@ class _RateLimit:
 
 
 class _Rejected(Exception):
-    def __init__(self, reason: str, answer: bool = True) -> None:
+    """A refused press: why, whether to answer it, and (expired) the genuine reference."""
+
+    def __init__(self, reason: str, answer: bool = True, ref: Ref | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
         self.answer = answer
+        self.ref = ref
 
 
 def _int(value: object) -> int | None:
@@ -738,14 +879,46 @@ class ButtonPoller:
             return
         query_id = query.get("id")
         try:
-            press, ref, message = self._check(query)
+            press, ref = self._check(query)
         except _Rejected as exc:
-            self._reject(exc.reason, query_id if exc.answer else None)
+            if exc.reason == "expired_ref" and exc.ref is not None:
+                self._expired(query_id, exc.ref)
+            else:
+                self._reject(exc.reason, query_id if exc.answer else None)
             return
-        self._snooze(query_id, press, ref, message)
+        self._snooze(query_id, press, ref)
 
-    def _check(self, query: Mapping[str, Any]) -> tuple[Press, Ref, Mapping[str, Any]]:
-        """The press, its reference and its message, or :class:`_Rejected` with why."""
+    def _expired(self, query_id: object, ref: Ref) -> None:
+        """A genuine button that has expired (too old, or its alert moved on): say so, with
+        the command that still works, and take that message's buttons off (best effort):
+        none of them works any more."""
+        now = self.control.clock()
+        task = one_line(ref.task_id, MAX_ID)
+        command = render.snooze_command(ref.task_id, now, self.rendering)
+        lang = self.rendering.language
+        if command is None:
+            text = i18n.text(lang, "chat.expired")
+        else:
+            text = i18n.text(lang, "chat.expired.command", task=task, command=command)
+        if ref.message_id is not None:
+            body = {
+                "chat_id": self.chat_id,
+                "message_id": ref.message_id,
+                "reply_markup": {"inline_keyboard": []},
+            }
+            self._call("editMessageReplyMarkup", body)
+        self._reject("expired_ref", query_id, text)  # answered, then counted once handled
+
+    def _call(self, method: str, body: Mapping[str, Any]) -> Any:
+        """A Bot API call whose failure is only counted and logged (None then)."""
+        try:
+            return self.api.call(method, body)
+        except ApiError as exc:
+            self._api_error(method, exc)
+            return None
+
+    def _check(self, query: Mapping[str, Any]) -> tuple[Press, Ref]:
+        """The press and its reference, or :class:`_Rejected` with why."""
         sender = query.get("from")
         user_id = _int(sender.get("id")) if isinstance(sender, Mapping) else None
         if user_id is None or not isinstance(query.get("id"), str):
@@ -773,14 +946,14 @@ class ButtonPoller:
             raise _Rejected("bad_ref")  # not the message it went out in (or none known)
         now = self.control.clock()
         if not ref.issued_at <= now + timedelta(minutes=5) or now - ref.issued_at > REF_TTL:
-            raise _Rejected("expired_ref")
+            raise _Rejected("expired_ref", ref=ref)
         if not self.store.is_latest(ref):
-            raise _Rejected("expired_ref")  # a newer message of its alert went out
+            raise _Rejected("expired_ref", ref=ref)  # its alert moved on, or resolved
         if ref.used_at is not None:
             raise _Rejected("used_ref")
         assert isinstance(sender, Mapping)  # its id was read above
         name = _name(sender) or f"user {user_id}"
-        return Press(self.channel, ref.task_id, days, user_id, name), ref, message
+        return Press(self.channel, ref.task_id, days, user_id, name), ref
 
     def _our_chat(self, chat: Mapping[str, Any]) -> bool:
         chat_id = _int(chat.get("id"))
@@ -793,7 +966,7 @@ class ButtonPoller:
             and f"@{username}".casefold() == self.chat_id.casefold()
         )
 
-    def _snooze(self, query_id: object, press: Press, ref: Ref, message: Mapping[str, Any]) -> None:
+    def _snooze(self, query_id: object, press: Press, ref: Ref) -> None:
         now = self.control.clock()
         lang = self.rendering.language
         task = one_line(press.task_id, MAX_ID)
@@ -811,7 +984,7 @@ class ButtonPoller:
             self._release(ref, now)
             log.info(
                 "telegram button: %s is already snoozed until %s; press of user id %d refused",
-                press.task_id,
+                task,
                 exc.until.isoformat(),
                 press.user_id,
             )
@@ -826,12 +999,15 @@ class ButtonPoller:
         log.info(
             "telegram button: user id %d snoozed %s until %s",
             press.user_id,
-            press.task_id,
+            task,
             until.isoformat(),
         )
         span = render.snooze_span(lang, until, self.rendering.tz)
-        self._answer(query_id, i18n.text(lang, "chat.toast", task=task, span=span))
-        self._edit(message, ref, task, span, press.name)
+        try:  # the snooze is written: an acknowledgement that fails changes nothing about it
+            self._answer(query_id, i18n.text(lang, "chat.toast", task=task, span=span))
+            self._acknowledge(ref, task, span, press.name)
+        except Exception as exc:
+            log.error("telegram button: acknowledgement failed: %s", type(exc).__name__)
         self._notify("chat_action", self.channel, "snoozed")  # counted once fully handled
 
     def _release(self, ref: Ref, at: datetime) -> None:
@@ -847,7 +1023,7 @@ class ButtonPoller:
     def _failed(self, query_id: object, press: Press, exc: Exception) -> None:
         log.error(
             "telegram button: snoozing %s for user id %d failed: %s",
-            press.task_id,
+            one_line(press.task_id, MAX_ID),
             press.user_id,
             type(exc).__name__,
         )
@@ -863,38 +1039,52 @@ class ButtonPoller:
         except ApiError as exc:
             self._api_error("answerCallbackQuery", exc)
 
-    def _edit(self, message: Mapping[str, Any], ref: Ref, task: str, span: str, who: str) -> None:
-        """The alert, acknowledged: a line added under its text (same entities, nothing
-        parsed; the person's name in a ``code`` entity, so nothing in it becomes a link) and
-        the pressed item's buttons gone. Too long a message only loses them."""
-        chat = message["chat"]
-        target = {"chat_id": chat["id"], "message_id": message.get("message_id")}
-        markup = _remaining(message.get("reply_markup"), ref.id)
-        text = message.get("text")
+    def _acknowledge(self, ref: Ref, task: str, span: str, who: str) -> None:
+        """The alert, acknowledged, built from Kelpie's own copy of the message (never from
+        the copy a press carries, which predates the edits of presses taken just before):
+        its text with every acknowledgement so far plus this one, the same entities (nothing
+        parsed; the person's name in a ``code`` entity, so nothing in it becomes a link),
+        and the keyboard without the buttons of any reference used on it. When the line
+        does not fit (or there is no text), the buttons go and the line is sent as a reply
+        to the message."""
+        assert ref.message_id is not None  # a press is only taken on its bound message
+        message_id = ref.message_id
         lang = self.rendering.language
-        before, _, after = i18n.text(
-            lang, "chat.snoozed", task=task, span=span, who="\0"
-        ).partition("\0")
-        head = f"{text}\n✅ {ref.item}. {before}" if isinstance(text, str) else ""
-        full = f"{head}{who}{after}"
-        if isinstance(text, str) and text and utf16_len(full) <= MAX_TEXT:
-            body: dict[str, Any] = {
-                **target,
-                "text": full,
-                "link_preview_options": {"is_disabled": True},
-            }
-            name = {"type": "code", "offset": utf16_len(head), "length": utf16_len(who)}
-            body["entities"] = [*_entities(message.get("entities")), name]
-            if markup["inline_keyboard"]:
-                body["reply_markup"] = markup
-            method = "editMessageText"
-        else:
-            body = {**target, "reply_markup": markup}
-            method = "editMessageReplyMarkup"
-        try:
-            self.api.call(method, body)
-        except ApiError as exc:
-            self._api_error(method, exc)
+        line = i18n.text(lang, "chat.snoozed", task=task, span=span, who="\0")
+        before, _, after = f"✅ {ref.item}. {line}".partition("\0")
+        target = {"chat_id": self.chat_id, "message_id": message_id}
+        shown = self.store.shown(self.channel, self.chat_id, message_id)
+        used = self.store.used_on(self.channel, self.chat_id, message_id)
+        markup = _remaining(None if shown is None else shown.markup, used)
+        if shown is not None and shown.text:
+            head = f"{shown.text}\n{before}"
+            full = f"{head}{who}{after}"
+            if utf16_len(full) <= MAX_TEXT:
+                name = {"type": "code", "offset": utf16_len(head), "length": utf16_len(who)}
+                edited = Shown(full, [*shown.entities, name], shown.markup)
+                body: dict[str, Any] = {
+                    **target,
+                    "text": full,
+                    "entities": edited.entities,
+                    "link_preview_options": {"is_disabled": True},
+                }
+                if markup["inline_keyboard"]:
+                    body["reply_markup"] = markup
+                if self._call("editMessageText", body) is not None:
+                    now = self.control.clock()
+                    self.store.set_shown(self.channel, self.chat_id, message_id, edited, now)
+                    return
+        self._call("editMessageReplyMarkup", {**target, "reply_markup": markup})
+        name = {"type": "code", "offset": utf16_len(before), "length": utf16_len(who)}
+        reply = {
+            "chat_id": self.chat_id,
+            "text": f"{before}{who}{after}",
+            "entities": [name],
+            "reply_parameters": {"message_id": message_id, "allow_sending_without_reply": True},
+            "link_preview_options": {"is_disabled": True},
+            "disable_notification": True,
+        }
+        self._call("sendMessage", reply)
 
     # --- counting --------------------------------------------------------------------------
 
@@ -932,9 +1122,9 @@ def _name(sender: Mapping[str, Any]) -> str:
     return one_line(name, MAX_NAME) if name else ""
 
 
-def _remaining(markup: object, ref_id: int) -> dict[str, Any]:
-    """The message's keyboard without the buttons of reference ``ref_id``; only buttons
-    that look like Kelpie's are kept."""
+def _remaining(markup: object, used: set[int]) -> dict[str, Any]:
+    """The keyboard Kelpie sent without the buttons of the references in ``used``; only
+    buttons that look like Kelpie's are kept."""
     rows = markup.get("inline_keyboard") if isinstance(markup, Mapping) else None
     out: list[list[dict[str, str]]] = []
     for row in rows if isinstance(rows, list) else ():
@@ -944,7 +1134,7 @@ def _remaining(markup: object, ref_id: int) -> dict[str, Any]:
                 continue
             data, label = button.get("callback_data"), button.get("text")
             found = _ref_id(data)
-            if found is None or found == ref_id or not isinstance(label, str):
+            if found is None or found in used or not isinstance(label, str):
                 continue
             kept.append({"text": label[:MAX_BUTTON], "callback_data": str(data)})
         if kept:
