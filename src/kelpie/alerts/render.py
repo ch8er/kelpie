@@ -51,7 +51,7 @@ them, :func:`keyboard`); Slack shows, under the item, the command that does it, 
 text so it copies cleanly: ``kelpie snooze <task> --until <date>``, the date
 :data:`SLACK_SNOOZE_DAYS` days after the alert's day in ``RenderSettings.tz`` (through that
 day). A task id that is not a plain token gets no command line: it would have to be pasted
-into a shell.
+into a shell. Nor does one that starts with ``-``: the command would read it as an option.
 """
 
 from __future__ import annotations
@@ -101,8 +101,9 @@ _QUOTES = {"'": "'", '"': '"', "«": "»", "“": "”", "\u2018": "\u2019", "�
 _PREFIX = re.compile(r"^(?:[a-z][a-z0-9]*_[a-z0-9_]*:\s*)+")
 _URL_BAD = re.compile(r"[\s<>\"'|\\`{}^]")
 SLACK_SNOOZE_DAYS = 3  # the date the Slack snooze command proposes, after the alert's day
-# A task id that may stand in a command a person pastes into a shell (quoted, too).
-_COMMAND_ID = re.compile(r"[A-Za-z0-9._:/#+=,%~-]{1,100}")
+# A task id that may stand in a command a person pastes into a shell (quoted, too); never
+# with a leading "-", which the command would read as an option.
+_COMMAND_ID = re.compile(r"[A-Za-z0-9._:/#+=,%~][A-Za-z0-9._:/#+=,%~-]{0,99}")
 
 
 def clean(text: str) -> str:
@@ -382,7 +383,8 @@ def _item(number: int, item: AlertItem, settings: RenderSettings) -> ItemView:
 def snooze_command(task_id: str | None, at: datetime, settings: RenderSettings) -> str | None:
     """``kelpie snooze <task> --until <date>``: the date :data:`SLACK_SNOOZE_DAYS` days after
     ``at``'s day in ``settings.tz`` (a bare date: through that day). None without a task, or
-    for an id that is not a plain token (it would be pasted into a shell)."""
+    for an id that is not a plain token (it would be pasted into a shell) or starts with
+    ``-`` (read as an option)."""
     if task_id is None or not _COMMAND_ID.fullmatch(task_id):
         return None
     day = at.astimezone(settings.tz).date() + timedelta(days=SLACK_SNOOZE_DAYS)

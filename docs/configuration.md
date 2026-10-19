@@ -1529,13 +1529,20 @@ snoozes the human task). Never on agent-health alerts, and never on a "resolved"
   plain text on its own line so it copies cleanly: `kelpie snooze T-101 --until
   2026-10-22`, a date 3 days after the alert's day in `[report] timezone` (through that day;
   edit it before you run it). A task id that is not a plain token (letters, digits and
-  `._:/#+=,%~-`) gets no line: it would have to be pasted into a shell. Ids with `#` or `~`
-  are shell-quoted.
+  `._:/#+=,%~-`), or that starts with `-` (the command would read it as an option), gets no
+  line: it would have to be pasted into a shell. Ids with `#` or `~` are shell-quoted.
 - **Telegram**, with `buttons = true`, puts three buttons under each such item: "1. Snooze
   1d", "3d", "7d". A press snoozes that task from now for that many days (stored like
   `kelpie snooze`, "from chat"), answers with a short toast and edits the alert: a line
   "✅ 1. Snoozed T-101 until 2026-10-22 14:05 UTC by Alice" is added at the end and that
-  item's buttons go. The next digest lists the task in its footer.
+  item's buttons go. The next digest lists the task in its footer. A press never shortens
+  a snooze set with `kelpie snooze` that ends later: it is refused (`already_snoozed`) and
+  the toast says until when the task is already snoozed.
+
+Like `kelpie snooze`, a press stores its snooze even under the global dry-run (`dry_run =
+true`, the default): a snooze changes nothing on the farm, it only quiets alerts. Its ledger
+entry then says so (`dry_run: true` in its parameters, and "Stored under the global
+dry-run" in its reason).
 
 ```toml
 [[alerts.channels]]
@@ -1563,9 +1570,11 @@ thing and refuse everything else.
   **and** the message is in the configured `chat_id`. A user id is a number Telegram
   assigns; a name or `@username` is never trusted. Everything else is ignored and counted
   in `kelpie_chat_rejected_total{reason}`: `unknown_user`, `wrong_chat`, `bad_ref`,
-  `expired_ref`, `used_ref`, `rate_limited`, `malformed`, `not_callback`. A refused press is
-  answered "Not allowed." and nothing more, so the answer never tells a stranger why. More
-  than 10 presses by one user within a minute are dropped without an answer.
+  `expired_ref`, `used_ref`, `already_snoozed`, `rate_limited`, `malformed`,
+  `not_callback`. A press from someone not in `allowed_user_ids` or from another chat gets
+  no answer at all, and neither does a malformed one or a user's 11th press within a
+  minute. A refused press of an allowed person in the chat is answered "Not allowed." and
+  nothing more (or, for `already_snoozed`, until when the task is snoozed).
 - *What a button carries*: no task text, only a signed reference,
   `s<days>.<record id>.<MAC>` (at most 41 bytes; Telegram allows 64). The record, kept by
   Kelpie, names the alert, the task, the item, when it was issued and the message it went
@@ -1574,31 +1583,37 @@ thing and refuse everything else.
   Record ids are never reused. A forged, truncated or edited reference, or one from another
   chat or another message, is `bad_ref`.
 - *Expiry*: a reference is good for 24 hours (the longest escalation step), and only while
-  it is on the latest message of its alert in that chat: the next escalation step or a
-  changed digest makes the older message's buttons expire (`expired_ref`). Each reference
-  is used once (`used_ref`).
+  it is on the latest message of its alert in that chat. Every message of the alert counts,
+  with buttons or without: the next escalation step, a changed digest, a digest with
+  nothing left to snooze or the "resolved" message makes the older message's buttons
+  expire (`expired_ref`), and Kelpie removes them from that message (best effort). Each
+  reference is used once (`used_ref`): it is claimed before the snooze is written, and
+  given back only when the write fails.
 - *Replay*: Kelpie stores the `getUpdates` offset and moves it past an update before acting
-  on it, so a press is taken at most once, also across restarts.
+  on it, so a press is taken at most once, also across restarts. The offset also moves past
+  updates Kelpie drops as malformed, so none comes back.
 - *Where the key lives*: in the button store, `kelpie.buttons.db` beside `[storage] path`
   (for `/var/lib/kelpie/kelpie.db`: `/var/lib/kelpie/kelpie.buttons.db`), created with mode
-  `0600` (tightened if it was readable by others), never opened through a symlink, apart
-  from `kelpie.db`, which other commands read and people share to debug. It also holds the
-  update offset and the references (pruned 7 days after issue). The key is never logged
-  and never in config. Delete the file to rotate the key: every button already sent then
-  stops working.
+  `0600` (tightened if it was readable by others), never opened through a symlink (Kelpie
+  refuses to start when the file SQLite opened is not the one it checked), apart from
+  `kelpie.db`, which other commands read and people share to debug. It also holds the
+  update offset, the references (pruned 7 days after issue) and each alert's latest message
+  id. The key is never logged and never in config. Delete the file to rotate the key: every
+  button already sent then stops working.
 - *Every press is recorded*: the snooze (`kelpie snoozes`, "from chat", with the person's
   name) and a ledger entry (kind `snooze`, rule `chat`, outcome `executed`, executor the
-  channel; who, with their user id, what and until when; `kelpie why <task>` lists it).
+  channel; who, with their user id, what and until when; `kelpie why <task>` lists it),
+  written in one transaction: there is no chat snooze without its entry.
 - *Untrusted text*: the person's name is shown cleaned, without invisible characters and
-  with `@` broken, and the acknowledgement is plain text with the message's own formatting
-  entities, never parsed as HTML. Every Bot API call goes through Kelpie's HTTP helper to
-  the configured `api_url` only (no redirects, bounded answers), with the token never
-  logged.
-- *Never in the control loop*: the poller runs in its own thread, backs off exponentially
-  on errors (up to 5 minutes, longer when Telegram says so;
-  `kelpie_chat_api_errors_total{call,cause}`), and stops with Kelpie under the alert
-  delivery's shutdown deadline. Presses are counted in `kelpie_chat_actions_total{outcome}`
-  (`snoozed`, `rejected`, `failed`).
+  with `@` broken, set as code so that Telegram turns nothing in it into a link, and the
+  acknowledgement is plain text with the message's own formatting entities, never parsed
+  as HTML. Every Bot API call goes through Kelpie's HTTP helper to the configured `api_url`
+  only (no redirects, bounded answers), with the token never logged.
+- *Never in the control loop*: the poller runs in its own thread, waits at least a second
+  between two polls, backs off exponentially on errors (up to 5 minutes, longer when
+  Telegram says so; `kelpie_chat_api_errors_total{call,cause}`), and stops with Kelpie
+  under the alert delivery's shutdown deadline. Presses are counted in
+  `kelpie_chat_actions_total{outcome}` (`snoozed`, `rejected`, `failed`).
 
 ## [report]
 

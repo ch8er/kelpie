@@ -32,6 +32,8 @@ class FakeTelegram:
         self.next_update_id = 500
         self.messages: list[tuple[int, dict[str, Any]]] = []  # (message id, body) sent
         self._ready = threading.Condition()
+        # Notified after every request is answered and every update queued (see wait_for).
+        self.changed = threading.Condition()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.server.daemon_threads = True
         self.server.block_on_close = False
@@ -46,6 +48,18 @@ class FakeTelegram:
     def calls(self, method: str) -> list[dict[str, Any]]:
         """The bodies of the calls of ``method``, in order."""
         return [body for path, _, body in list(self.requests) if path.endswith(f"/{method}")]
+
+    def notify(self) -> None:
+        """Wake :meth:`wait_for` (also for changes outside the fake, such as metrics)."""
+        with self.changed:
+            self.changed.notify_all()
+
+    def wait_for(self, predicate: Callable[[], object], timeout: float = 30.0) -> None:
+        """Wait until ``predicate`` holds, checked whenever something changed; the timeout
+        only guards against a hang."""
+        with self.changed:
+            if not self.changed.wait_for(predicate, timeout):
+                raise AssertionError("timed out")
 
     # --- bot mode ------------------------------------------------------------------------
 
@@ -83,7 +97,8 @@ class FakeTelegram:
             update = {"update_id": self.next_update_id, **update}
             self.updates.append(update)
             self._ready.notify_all()
-            return int(update["update_id"])
+        self.notify()
+        return int(update["update_id"])
 
     def sent(self) -> list[tuple[int, dict[str, Any]]]:
         """(message id, body) of every message sent, in order (bot mode)."""
@@ -127,6 +142,7 @@ class FakeTelegram:
                 raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 body = json.loads(raw or b"{}")
                 outer.requests.append((self.path, dict(self.headers), body))
+                outer.notify()
                 if outer.redirect_to:
                     self.send_response(307)
                     self.send_header("Location", outer.redirect_to + self.path)
@@ -144,6 +160,7 @@ class FakeTelegram:
                 self.end_headers()
                 with contextlib.suppress(OSError):
                     self.wfile.write(data)
+                outer.notify()
 
             def log_message(self, *args: object) -> None:
                 pass

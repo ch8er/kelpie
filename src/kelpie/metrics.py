@@ -804,7 +804,8 @@ class Metrics:
             "kelpie_chat_rejected_total",
             "counter",
             "Button presses and updates ignored, by channel and reason (unknown_user, "
-            "wrong_chat, bad_ref, expired_ref, used_ref, rate_limited, malformed, not_callback).",
+            "wrong_chat, bad_ref, expired_ref, used_ref, already_snoozed, rate_limited, malformed,"
+            " not_callback).",
             [
                 f"kelpie_chat_rejected_total{_labels(channel=n, reason=r)} {v}"
                 for (n, r), v in sorted(self.chat_rejections.items())

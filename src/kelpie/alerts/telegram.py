@@ -17,9 +17,12 @@ does).
 **Snooze buttons** (#176, off by default). With ``buttons = true`` and an
 ``allowed_user_ids`` list, an item a snooze would quiet gets "Snooze 1d / 3d / 7d" buttons
 (an inline keyboard with signed references, :mod:`kelpie.alerts.buttons`), and a poller
-takes the presses (``getUpdates`` long polling, never a webhook). Every Bot API call, sends,
-polls, answers and edits alike, goes through :mod:`kelpie.net` to the configured origin
-only, with size bounds, the token in the path and never in a log (:class:`BotApi`).
+takes the presses (``getUpdates`` long polling, never a webhook). Every message the channel
+delivers, with buttons or without, is recorded as its alert's latest, which expires the
+buttons of the older messages; their keyboards are then removed, best effort. Every Bot
+API call, sends, polls, answers and edits alike, goes through :mod:`kelpie.net` to the
+configured origin only, with size bounds, the token in the path and never in a log
+(:class:`BotApi`).
 """
 
 from __future__ import annotations
@@ -82,6 +85,7 @@ _KEYS = {
 _BAD_ENTITIES = "can't parse entities"
 MAX_ALLOWED_USERS = 100
 MAX_USER_ID = 2**63 - 1
+STRIP_TIMEOUT = 5.0  # seconds for removing an older message's buttons (best effort)
 # The Bot API methods Kelpie calls; nothing else is ever put into a request path.
 METHODS = frozenset(
     {
@@ -422,8 +426,8 @@ class TelegramChannel:
                 markup, ids = self._keyboard(message, again)  # the plain text shows others
             response = self._post(plain, message, markup)
         self._check(response)
-        if ids:
-            self._bind(ids, response)
+        if self._buttons is not None:
+            self._delivered(message, ids, response)
 
     def _keyboard(
         self, message: AlertEvent, targets: tuple[SnoozeTarget, ...]
@@ -439,20 +443,35 @@ class TelegramChannel:
             )
             return None, []
 
-    def _bind(self, ids: list[int], response: net.Response) -> None:
-        """Record the message the buttons went out in (a press from another is refused)."""
+    def _delivered(self, message: AlertEvent, ids: list[int], response: net.Response) -> None:
+        """Record the message as its alert's latest, with its buttons or without (a press
+        on an older message, or on another message, is refused), and remove the buttons of
+        the message it replaces (best effort)."""
         assert self._buttons is not None
         try:
-            result = json.loads(response.body).get("result") or {}
-            message_id = result.get("message_id")
-            if isinstance(message_id, int) and not isinstance(message_id, bool):
-                self._buttons.bind(ids, message_id)
+            previous = self._buttons.delivered(message, ids, _message_id(response))
         except Exception as exc:
-            log.warning(
-                "alert channel %s: snooze buttons not bound to their message: %s",
+            log.error(
+                "alert channel %s: delivered message not recorded for its snooze buttons: %s",
                 self.name,
                 type(exc).__name__,
             )
+            return
+        if previous is not None:
+            self._strip(previous)
+
+    def _strip(self, message_id: int) -> None:
+        """Remove the snooze buttons of an older message of the alert (they have expired)."""
+        body = {
+            "chat_id": self._settings.chat_id,
+            "message_id": message_id,
+            "reply_markup": {"inline_keyboard": []},
+        }
+        timeout = min(self._settings.timeout.total_seconds(), STRIP_TIMEOUT)
+        try:
+            TelegramApi(self._settings, self._token).call("editMessageReplyMarkup", body, timeout)
+        except ApiError as exc:  # gone, already without buttons, too old to edit: harmless
+            log.info("alert channel %s: older buttons not removed: %s", self.name, exc)
 
     def _post(
         self,
@@ -507,6 +526,16 @@ class TelegramChannel:
     def _error_info(self, body: bytes) -> tuple[str, float | None]:
         """Telegram's error description (redacted, short) and ``retry_after``."""
         return _error_info(body, self._token)
+
+
+def _message_id(response: net.Response) -> int | None:
+    """The id of the message ``sendMessage`` sent, or None when the answer does not say."""
+    try:
+        result = json.loads(response.body).get("result")
+    except (ValueError, AttributeError):
+        return None
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    return message_id if isinstance(message_id, int) and not isinstance(message_id, bool) else None
 
 
 def _seconds(value: Any) -> float | None:

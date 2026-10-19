@@ -3,6 +3,7 @@ config, startup refusals, ``kelpie status`` and ``kelpie doctor``."""
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,10 +13,12 @@ import pytest
 from kelpie.alerts.config import load_alerts
 from kelpie.alerts.telegram import load_telegram
 from kelpie.app import ConfigError, build_app, load_rules, load_settings, render_status
+from kelpie.core import storage
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.alerts import AlertEvent, AlertItem
 from kelpie.core.config import Mode
 from kelpie.core.ledger import Outcome
+from kelpie.core.model import Snooze
 from kelpie.core.snooze import CHAT_MAX_DAYS, SnoozeSettings, chat_snooze
 from kelpie.core.storage import SqliteLedgerStore
 from kelpie.doctor import check_chat_buttons
@@ -62,8 +65,63 @@ def test_the_press_is_a_chat_snooze_with_a_ledger_entry() -> None:
         "source": "chat",
     }
     assert "Alice (user id 4242) snoozed T-1 until 2026-10-22" in entry.reason
+    assert "dry-run" not in entry.reason
     nameless = chat_snooze("T-1", 1, "  ", ALICE, "telegram", NOW, SnoozeSettings())[0]
     assert nameless.by == "user 4242"
+    dry = chat_snooze("T-1", 1, "A", ALICE, "telegram", NOW, SnoozeSettings(), dry_run=True)[1]
+    assert dry.params["dry_run"] is True and "Stored under the global dry-run" in dry.reason
+
+
+def test_a_chat_snooze_and_its_ledger_entry_are_written_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqliteLedgerStore(tmp_path / "kelpie.db")
+    try:
+        record, entry = chat_snooze("T-1", 3, "Alice", ALICE, "telegram", NOW, SnoozeSettings())
+        assert store.put_chat_snooze(record, entry) is None
+        assert [s.task_id for s in store.snoozes()] == ["T-1"]
+        assert [e.task_id for e in store.since(NOW - timedelta(days=1))] == ["T-1"]
+
+        def broken(db: object, entry: object) -> None:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(storage, "_insert_entry", broken)
+        again, entry2 = chat_snooze("T-2", 1, "Alice", ALICE, "telegram", NOW, SnoozeSettings())
+        with pytest.raises(sqlite3.OperationalError):
+            store.put_chat_snooze(again, entry2)
+        assert [s.task_id for s in store.snoozes()] == ["T-1"]  # no snooze without its entry
+    finally:
+        store.close()
+
+
+def test_a_chat_snooze_never_cuts_a_longer_snooze_from_another_source(tmp_path: Path) -> None:
+    store = SqliteLedgerStore(tmp_path / "kelpie.db")
+
+    def operator(until: datetime, **kw: object) -> Snooze:
+        return Snooze("T-1", until, "after the release", "ops", NOW - timedelta(hours=1), **kw)  # type: ignore[arg-type]
+
+    def press(days: int = 3) -> Snooze | None:
+        record, entry = chat_snooze("T-1", days, "Alice", ALICE, "telegram", NOW, SnoozeSettings())
+        return store.put_chat_snooze(record, entry)
+
+    try:
+        longer = operator(NOW + timedelta(days=30))
+        store.put_snooze(longer)
+        held = press()
+        assert held is not None and held.until == longer.until and held.source == "cli"
+        assert store.snoozes()[0].source == "cli" and store.since(NOW - timedelta(days=1)) == []
+        for replaceable in (
+            operator(NOW + timedelta(days=1)),  # ends sooner than the press would
+            operator(NOW - timedelta(minutes=1)),  # expired
+            operator(NOW + timedelta(days=30), grown_at=NOW, grown_by=2),  # holds nothing
+        ):
+            store.put_snooze(replaceable)
+            assert press() is None
+            assert store.snoozes()[0].source == "chat"
+        assert press(1) is None  # a chat snooze replaces a chat snooze, longer or not
+        assert store.snoozes()[0].until == NOW + timedelta(days=1)
+    finally:
+        store.close()
 
 
 # --- config --------------------------------------------------------------------------------
@@ -117,7 +175,7 @@ allowed_user_ids = {ids}
     return path
 
 
-def wait(cond: object, timeout: float = 5.0) -> None:
+def wait(cond: object, timeout: float = 30.0) -> None:  # the timeout only guards a hang
     end = time.monotonic() + timeout
     while not cond():  # type: ignore[operator]
         assert time.monotonic() < end, "timed out"
@@ -149,15 +207,26 @@ def test_a_press_writes_the_snooze_and_the_ledger(
                     state="needs_you:ceo",
                 )
             )
-            wait(lambda: fake.sent())
+            wait(lambda: app.metrics.alerts_sent["telegram"])
             message_id, body = fake.sent()[0]
             data = body["reply_markup"]["inline_keyboard"][0][2]["callback_data"]  # 7d
+            # An operator's longer snooze is kept: the press is refused and says until when.
+            operator = SqliteLedgerStore(tmp_path / "kelpie.db")
+            operator.put_snooze(Snooze("H-1", NOW + timedelta(days=30), None, "ops", NOW))
             fake.press(message_id, body, data, ALICE, CHAT, last_name="Smith")
-            wait(lambda: fake.calls("editMessageText"))
+            wait(lambda: fake.calls("answerCallbackQuery"))
+            assert fake.calls("answerCallbackQuery")[0]["text"] == (
+                "H-1 is already snoozed until 2026-11-18 10:00 UTC"
+            )
+            assert operator.delete_snooze("H-1")
+            operator.close()
+            fake.press(message_id, body, data, ALICE, CHAT, last_name="Smith")  # given back
+            wait(lambda: app.metrics.chat_actions[("telegram", "snoozed")])  # fully handled
             rendered = app.metrics.render()
         finally:
             app.close()
     assert 'kelpie_chat_actions_total{channel="telegram",outcome="snoozed"} 1' in rendered
+    assert 'kelpie_chat_rejected_total{channel="telegram",reason="already_snoozed"} 1' in rendered
     store = SqliteLedgerStore(tmp_path / "kelpie.db")
     try:
         (snooze,) = store.snoozes()
@@ -166,6 +235,7 @@ def test_a_press_writes_the_snooze_and_the_ledger(
         (press,) = [e for e in store.since(NOW - timedelta(days=1)) if e.kind is ActionKind.SNOOZE]
         assert press.params["user_id"] == ALICE and press.params["by"] == "Alice Smith"
         assert press.task_id == "H-1" and press.executor == "telegram"
+        assert press.params["dry_run"] is True  # stored under the global dry-run, and says so
     finally:
         store.close()
 

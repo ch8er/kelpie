@@ -1,10 +1,16 @@
 """Snooze buttons on Telegram alerts and the poller that takes the presses (#176), against a
 local fake of the Bot API: who may press, the signed references, expiry, replay, the
-acknowledgement, back-off and shutdown."""
+acknowledgement, back-off and shutdown.
+
+Waits are on events (a request answered, an update queued, a metric counted), never on
+wall time: a timeout only guards against a hang. The poller's pauses go through its
+``sleep``, which a test replaces to see them without waiting."""
 
 from __future__ import annotations
 
 import os
+import re
+import sqlite3
 import stat
 import threading
 import time
@@ -16,9 +22,10 @@ from typing import Any
 
 import pytest
 
-from kelpie.alerts import Delivery
+from kelpie.alerts import Delivery, buttons
 from kelpie.alerts.buttons import (
     REF_TTL,
+    AlreadySnoozed,
     ButtonPoller,
     ButtonStore,
     ChatControl,
@@ -29,7 +36,7 @@ from kelpie.alerts.buttons import (
     parse_callback,
 )
 from kelpie.alerts.config import load_alerts
-from kelpie.alerts.render import AT_SIGN, MAX_TEXT, SnoozeTarget
+from kelpie.alerts.render import AT_SIGN, MAX_TEXT, SnoozeTarget, utf16_len
 from kelpie.alerts.telegram import TelegramChannel, load_telegram
 from kelpie.core.actions import Severity
 from kelpie.core.alerts import AlertEvent, AlertItem, Transition
@@ -58,30 +65,55 @@ class Clock:
 class Sink:
     presses: list[Press] = field(default_factory=list)
     fail: bool = False
+    held_until: datetime | None = None  # a longer snooze from another source
 
     def __call__(self, press: Press, now: datetime) -> datetime:
         if self.fail:
             raise RuntimeError("disk full")
+        if self.held_until is not None:
+            raise AlreadySnoozed(self.held_until)
         self.presses.append(press)
         return now + timedelta(days=press.days)
 
 
-def digest(*tasks: str, state: str = "needs_you:ceo", **kw: Any) -> AlertEvent:
+class SignalingMetrics(Metrics):
+    """Metrics that wake the fake's waiters whenever a press or a send is counted."""
+
+    def __init__(self, fake: FakeTelegram) -> None:
+        super().__init__()
+        self.fake = fake
+
+    def chat_action(self, channel: str, outcome: str) -> None:
+        super().chat_action(channel, outcome)
+        self.fake.notify()
+
+    def chat_rejected(self, channel: str, reason: str) -> None:
+        super().chat_rejected(channel, reason)
+        self.fake.notify()
+
+    def chat_api_error(self, channel: str, call: str, cause: str) -> None:
+        super().chat_api_error(channel, call, cause)
+        self.fake.notify()
+
+    def alert_sent(self, channel: str) -> None:
+        super().alert_sent(channel)
+        self.fake.notify()
+
+
+def digest(
+    *tasks: str, state: str = "needs_you:ceo", snoozable: bool = True, **kw: Any
+) -> AlertEvent:
     items = tuple(
-        AlertItem(t, f"Decide on {t}", timedelta(hours=5), "Pick one", 2, snooze_task=t)
+        AlertItem(
+            t, f"Decide on {t}", timedelta(hours=5), "Pick one", 2,
+            snooze_task=t if snoozable else None,
+        )
         for t in tasks
-    )
+    )  # fmt: skip
     return AlertEvent(
         "needs_you", "escalate", "Needs you (ceo).", Severity.WARNING,
         items=items, at=NOW, state=state, **kw,
     )  # fmt: skip
-
-
-def wait(cond: Callable[[], object], timeout: float = 5.0) -> None:
-    end = time.monotonic() + timeout
-    while not cond():
-        assert time.monotonic() < end, "timed out"
-        time.sleep(0.01)
 
 
 @dataclass
@@ -94,10 +126,14 @@ class Rig:
     delivery: Delivery
     poller: ButtonPoller
 
+    def wait(self, cond: Callable[[], object]) -> None:
+        self.fake.wait_for(cond)
+
     def send(self, event: AlertEvent) -> tuple[int, dict[str, Any]]:
-        before = len(self.fake.sent())
+        """Deliver ``event`` and wait until the channel is done with it (sent and recorded)."""
+        before = sum(self.metrics.alerts_sent.values())
         self.delivery.deliver(event)
-        wait(lambda: len(self.fake.sent()) > before)
+        self.wait(lambda: sum(self.metrics.alerts_sent.values()) > before)
         return self.fake.sent()[-1]
 
     def press(
@@ -118,7 +154,13 @@ class Rig:
     ) -> None:
         before = self.handled()
         self.fake.press(message_id, body, data, user, chat, **sender)
-        wait(lambda: self.handled() > before)
+        self.wait(lambda: self.handled() > before)
+
+    def push(self, update: dict[str, Any]) -> None:
+        """Queue a raw update and wait until the poller has counted it."""
+        before = self.handled()
+        self.fake.push(update)
+        self.wait(lambda: self.handled() > before)
 
     def handled(self) -> int:
         return sum(self.metrics.chat_actions.values())
@@ -140,11 +182,19 @@ def rig(tmp_path: Path) -> Iterator[Rig]:
             built.delivery.close(1.0)
 
 
-def _rig(fake: FakeTelegram, tmp_path: Path, allowed: tuple[int, ...] = (ALICE,)) -> Rig:
+def _rig(
+    fake: FakeTelegram,
+    tmp_path: Path,
+    allowed: tuple[int, ...] = (ALICE,),
+    prepare: Callable[[ButtonPoller], None] | None = None,
+    min_interval: float = 0.0,
+) -> Rig:
     store = ButtonStore(tmp_path / "kelpie.buttons.db")
-    sink, clock, metrics = Sink(), Clock(), Metrics()
+    sink, clock, metrics = Sink(), Clock(), SignalingMetrics(fake)
     metrics.set_chat_channels(["telegram"])
-    control = ChatControl(store, sink, clock, metrics, poll_timeout=0, backoff=0.01)
+    control = ChatControl(
+        store, sink, clock, metrics, poll_timeout=0, backoff=0.01, min_interval=min_interval
+    )
     settings = load_telegram(
         {
             "type": "telegram", "token_env": ENV, "chat_id": CHAT, "api_url": fake.url,
@@ -153,8 +203,34 @@ def _rig(fake: FakeTelegram, tmp_path: Path, allowed: tuple[int, ...] = (ALICE,)
         "test",
     )  # fmt: skip
     channel, poller = settings.build_with_buttons(control, {ENV: TOKEN})
+    if prepare is not None:
+        prepare(poller)  # before the delivery starts it
     delivery = Delivery([channel], metrics, pollers=[poller])
     return Rig(fake, store, sink, clock, metrics, delivery, poller)
+
+
+class Pauses:
+    """A poller's ``sleep`` that records each pause and returns at once; after ``until``
+    pauses it sets ``done`` and then really waits (until the poller is told to stop)."""
+
+    def __init__(self, until: int) -> None:
+        self.until = until
+        self.seen: list[float] = []
+        self.done = threading.Event()
+        self.poller: ButtonPoller | None = None
+
+    def install(self, poller: ButtonPoller) -> None:
+        self.poller = poller
+        poller.sleep = self
+
+    def __call__(self, seconds: float) -> object:
+        assert self.poller is not None
+        if self.done.is_set():
+            return self.poller._stopping.wait(seconds)
+        self.seen.append(seconds)
+        if len(self.seen) >= self.until:
+            self.done.set()
+        return False
 
 
 # --- the reference -------------------------------------------------------------------------
@@ -178,11 +254,25 @@ def test_the_reference_is_short_signed_and_carries_no_task_text() -> None:
         lambda d: d.replace(".1f.", ".01f."),  # a leading zero: not the canonical form
         lambda d: "u" + d[1:],  # another action: there is none
         lambda d: d + " ",
+        lambda d: d + "\n",
         lambda d: None,
     ],
 )
 def test_a_forged_or_truncated_reference_is_refused(mangle: Callable[[str], Any]) -> None:
     assert parse_callback(mangle(callback_data(KEY, CHAT, 3, 0x1F)), KEY, CHAT) is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        None, 1, b"s1.1.AAAAAAAAAAAAAAAAAAAAAA", "s1.1.AAAAAAAAAAAAAAAAAAAAAA", "x" * 10000,
+        f"s{chr(0x661)}.1.AAAAAAAAAAAAAAAAAAAAAA", "s1.1.AAAAAAAAAAAAAAAAAAAAAA.", "s1..AAAA",
+        "s1.0.AAAAAAAAAAAAAAAAAAAAAA", "s1.fffffffffffffff.AAAAAAAAAAAAAAAAAAAAAA",
+        "s9.1.AAAAAAAAAAAAAAAAAAAAAA", "\ud800", f"s1.{chr(0xFF11)}.AAAAAAAAAAAAAAAAAAAAAA",
+    ],
+)  # fmt: skip
+def test_parsing_any_callback_data_never_raises(data: Any) -> None:
+    assert parse_callback(data, KEY, CHAT) is None
 
 
 def test_a_reference_is_bound_to_its_chat_and_key() -> None:
@@ -222,6 +312,24 @@ def test_the_store_refuses_a_symlink(tmp_path: Path) -> None:
         ButtonStore(link)
 
 
+def test_the_store_refuses_a_file_swapped_before_sqlite_opens_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "kelpie.buttons.db"
+    elsewhere = tmp_path / "elsewhere.db"
+    elsewhere.write_bytes(b"")
+    connect = sqlite3.connect
+
+    def swap_then_connect(database: str, **kw: Any) -> sqlite3.Connection:
+        path.unlink()  # checked, then replaced by a symlink before SQLite opens the path
+        path.symlink_to(elsewhere)
+        return connect(database, **kw)
+
+    monkeypatch.setattr(buttons.sqlite3, "connect", swap_then_connect)
+    with pytest.raises(ValueError, match="changed while it was opened"):
+        ButtonStore(path)
+
+
 def test_the_store_tightens_a_readable_file(tmp_path: Path) -> None:
     path = tmp_path / "kelpie.buttons.db"
     path.write_bytes(b"")
@@ -248,7 +356,10 @@ def test_snoozable_items_get_three_buttons_each(rig: Rig) -> None:
     for row in rows:
         for days, button in zip(CHAT_DAYS, row, strict=True):
             data = button["callback_data"]
-            assert "T-" not in data and len(data.encode()) <= 64
+            # no task text: the MAC is random base64url and may hold any letters, the rest
+            # is the action, the days and the record id
+            assert re.fullmatch(r"s[137]\.[1-9a-f][0-9a-f]*\.[A-Za-z0-9_-]{22}", data)
+            assert len(data.encode()) <= 64
             assert parse_callback(data, rig.store.key(), CHAT) is not None
             assert data.startswith(f"s{days}.")
 
@@ -284,6 +395,14 @@ def test_buttons_are_off_by_default_and_without_the_poller(tmp_path: Path) -> No
 # --- presses -------------------------------------------------------------------------------
 
 
+def _name_entity(edit: dict[str, Any]) -> str:
+    """The text the acknowledgement's ``code`` entity covers (offsets in UTF-16 units)."""
+    (code,) = [e for e in edit["entities"] if e["type"] == "code"]
+    units = edit["text"].encode("utf-16-le")
+    start, end = 2 * code["offset"], 2 * (code["offset"] + code["length"])
+    return units[start:end].decode("utf-16-le")
+
+
 def test_a_press_snoozes_answers_and_edits_the_alert(rig: Rig) -> None:
     sent = rig.send(digest("T-1", "T-2"))
     message_id, body = sent
@@ -294,6 +413,7 @@ def test_a_press_snoozes_answers_and_edits_the_alert(rig: Rig) -> None:
     assert edit["chat_id"] == int(CHAT) and edit["message_id"] == message_id
     assert edit["text"].endswith("\n✅ 2. Snoozed T-2 until 2026-10-22 10:00 UTC by Alice")
     assert "parse_mode" not in edit  # literal text: the person's name is never parsed
+    assert _name_entity(edit) == "Alice"
     rows = edit["reply_markup"]["inline_keyboard"]
     assert [[b["text"] for b in row] for row in rows] == [["1. Snooze 1d", "3d", "7d"]]
     assert rows == body["reply_markup"]["inline_keyboard"][:1]
@@ -315,8 +435,9 @@ def test_the_edit_keeps_the_messages_own_formatting(rig: Rig) -> None:
     rig.raw_press(message_id, {**body, "text": "x" * 40, "entities": entities}, data)
     (edit,) = rig.fake.calls("editMessageText")
     # the same entities back (the line is added at the end), only the kinds alerts use and
-    # only safe links
-    assert edit["entities"] == entities[:2]
+    # only safe links, then the person's name as code
+    assert edit["entities"][:-1] == entities[:2]
+    assert edit["entities"][-1]["type"] == "code" and _name_entity(edit) == "Alice"
     assert edit["text"].startswith("x" * 40 + "\n✅ 1. Snoozed T-1 until ")
     assert edit["link_preview_options"] == {"is_disabled": True}
     assert "reply_markup" not in edit  # the only item's buttons are gone
@@ -341,19 +462,45 @@ def test_a_hostile_name_is_cleaned_and_never_mentions(rig: Rig) -> None:
     assert rig.sink.presses[0].name == f"<b>{AT_SIGN}everyone</b> x"
 
 
-def test_a_stranger_is_refused_without_saying_why(rig: Rig) -> None:
+def test_a_url_like_name_is_code_so_telegram_links_nothing(rig: Rig) -> None:
+    sent = rig.send(digest("T-1"))
+    rig.press(sent, first_name="evil.example.org/login", last_name="😀")
+    (edit,) = rig.fake.calls("editMessageText")
+    assert edit["text"].endswith(" by evil.example.org/login 😀")
+    name = _name_entity(edit)  # UTF-16 offsets: the emoji counts twice
+    assert name == "evil.example.org/login 😀"
+    assert utf16_len(name) == len(name) + 1
+
+
+def test_a_stranger_is_refused_without_an_answer(rig: Rig) -> None:
     sent = rig.send(digest("T-1"))
     rig.press(sent, user=MALLORY)
-    assert rig.sink.presses == [] and rig.answers() == ["Not allowed."]
+    assert rig.sink.presses == [] and rig.answers() == []  # counted, never answered
     assert rig.rejected() == {"unknown_user": 1}
     assert rig.fake.calls("editMessageText") == []
 
 
-def test_a_press_from_another_chat_is_refused(rig: Rig) -> None:
+def test_a_press_from_another_chat_is_refused_without_an_answer(rig: Rig) -> None:
     sent = rig.send(digest("T-1"))
     rig.press(sent, chat=-100999)
-    assert rig.sink.presses == [] and rig.answers() == ["Not allowed."]
+    assert rig.sink.presses == [] and rig.answers() == []
     assert rig.rejected() == {"wrong_chat": 1}
+
+
+def test_a_press_without_its_message_or_chat_is_refused(rig: Rig) -> None:
+    message_id, body = rig.send(digest("T-1"))
+    data = body["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    sender = {"id": ALICE, "first_name": "Alice"}
+    inline = {"id": "q1", "from": sender, "inline_message_id": "abc", "data": data}
+    rig.push({"callback_query": inline})  # an inline message: no chat to check
+    as_text = {"message_id": message_id, "chat": {"id": CHAT}}  # the id as a string
+    rig.push({"callback_query": {"id": "q2", "from": sender, "message": as_text, "data": data}})
+    ours = {"message_id": message_id, "chat": {"id": int(CHAT)}}
+    rig.push({"callback_query": {"id": "q3", "from": {"id": True}, "message": ours,
+                                 "data": data}})  # fmt: skip
+    rig.push({"callback_query": {"id": "q4", "from": sender, "message": ours, "data": data + "\n"}})
+    assert rig.rejected() == {"wrong_chat": 2, "malformed": 1, "bad_ref": 1}
+    assert rig.sink.presses == [] and rig.answers() == ["Not allowed."]  # only q4's
 
 
 @pytest.mark.parametrize(
@@ -393,6 +540,55 @@ def test_the_next_escalation_step_expires_the_older_buttons(rig: Rig) -> None:
     rig.press(second)
     rig.press(other)
     assert [p.task_id for p in rig.sink.presses] == ["T-1", "T-1"]
+    # the older message lost its buttons when the newer one went out
+    (strip,) = rig.fake.calls("editMessageReplyMarkup")
+    assert strip == {
+        "chat_id": CHAT,
+        "message_id": first[0],
+        "reply_markup": {"inline_keyboard": []},
+    }
+
+
+@pytest.mark.parametrize(
+    "newer",
+    [
+        digest("T-1", transition=Transition.RESOLVED),  # resolved: never has buttons
+        digest("T-2", snoozable=False),  # a digest with nothing to snooze
+    ],
+    ids=["resolved", "no-targets"],
+)
+def test_a_newer_message_without_buttons_expires_the_older_ones(
+    rig: Rig, newer: AlertEvent
+) -> None:
+    first = rig.send(digest("T-1"))
+    rig.clock.now = NOW + timedelta(hours=1)
+    _, body = rig.send(newer)
+    assert "reply_markup" not in body
+    rig.press(first)
+    assert rig.sink.presses == [] and rig.rejected() == {"expired_ref": 1}
+    (strip,) = rig.fake.calls("editMessageReplyMarkup")  # and they are taken off
+    assert strip["message_id"] == first[0] and strip["reply_markup"] == {"inline_keyboard": []}
+
+
+def test_removing_older_buttons_is_best_effort(rig: Rig) -> None:
+    rig.fake.routes["editMessageReplyMarkup"] = lambda body: (
+        400,
+        {"ok": False, "description": "Bad Request: message is not modified"},
+    )
+    first = rig.send(digest("T-1"))
+    rig.send(digest("T-1", transition=Transition.RESOLVED))  # delivered all the same
+    rig.press(first)
+    assert rig.rejected() == {"expired_ref": 1}
+    assert rig.metrics.alerts_sent["telegram"] == 2
+
+
+def test_a_message_without_an_id_expires_the_older_buttons(rig: Rig) -> None:
+    first = rig.send(digest("T-1"))
+    rig.fake.routes["sendMessage"] = lambda body: (200, {"ok": True, "result": {}})
+    rig.delivery.deliver(digest("T-1", transition=Transition.ESCALATED))
+    rig.wait(lambda: rig.metrics.alerts_sent["telegram"] == 2)
+    rig.press(first)
+    assert rig.rejected() == {"expired_ref": 1}
 
 
 def test_a_reference_is_used_once(rig: Rig) -> None:
@@ -402,13 +598,40 @@ def test_a_reference_is_used_once(rig: Rig) -> None:
     assert len(rig.sink.presses) == 1 and rig.rejected() == {"used_ref": 1}
 
 
+def test_a_reference_is_claimed_before_the_snooze_is_written(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = rig.send(digest("T-1"))
+
+    def locked(ref_id: int, at: datetime) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(rig.store, "use", locked)
+    rig.press(sent)
+    assert rig.sink.presses == []  # no claim, no snooze
+    assert rig.answers() == ["Could not snooze; see the Kelpie log."]
+    assert rig.metrics.chat_actions[("telegram", "failed")] == 1
+
+
+def test_a_longer_snooze_from_another_source_is_kept(rig: Rig) -> None:
+    sent = rig.send(digest("T-1"))
+    rig.sink.held_until = NOW + timedelta(days=30)  # an operator's kelpie snooze
+    rig.press(sent)
+    assert rig.sink.presses == [] and rig.rejected() == {"already_snoozed": 1}
+    assert rig.answers() == ["T-1 is already snoozed until 2026-11-18 10:00 UTC"]
+    assert rig.fake.calls("editMessageText") == []
+    rig.sink.held_until = None
+    rig.press(sent)  # the reference was given back
+    assert len(rig.sink.presses) == 1
+
+
 def test_presses_are_rate_limited_per_user(rig: Rig) -> None:
     sent = rig.send(digest("T-1"))
     for _ in range(10):
         rig.press(sent, user=MALLORY)
     rig.press(sent, user=MALLORY)
     assert rig.rejected() == {"unknown_user": 10, "rate_limited": 1}
-    assert len(rig.answers()) == 10  # a rate-limited press gets no answer at all
+    assert rig.answers() == []
     rig.press(sent)  # another person is not held back
     assert len(rig.sink.presses) == 1
 
@@ -425,13 +648,30 @@ def test_a_failed_write_is_said_and_counted(rig: Rig) -> None:
 
 
 def test_other_updates_are_ignored_and_counted(rig: Rig) -> None:
-    rig.fake.push({"message": {"message_id": 1, "chat": {"id": int(CHAT)}, "text": "/start"}})
-    wait(lambda: rig.rejected().get("not_callback"))
-    rig.fake.push({"callback_query": {"id": "q", "from": {"id": "4242"}, "data": "x"}})
-    wait(lambda: rig.rejected().get("malformed"))
-    assert rig.sink.presses == [] and rig.answers() == ["Not allowed."]
+    rig.push({"message": {"message_id": 1, "chat": {"id": int(CHAT)}, "text": "/start"}})
+    rig.push({"callback_query": {"id": "q", "from": {"id": "4242"}, "data": "x"}})
+    assert rig.rejected() == {"not_callback": 1, "malformed": 1}
+    assert rig.sink.presses == [] and rig.answers() == []
     (first, *_) = rig.fake.calls("getUpdates")
     assert first["allowed_updates"] == ["callback_query"]
+
+
+def test_the_offset_moves_past_updates_nobody_can_take(tmp_path: Path) -> None:
+    with fake_telegram() as fake:
+        fake.bot()
+        answers = [[{"update_id": 0, "callback_query": {}}, "junk", 42]]
+
+        def odd(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            return 200, {"ok": True, "result": answers.pop() if answers else []}
+
+        fake.routes["getUpdates"] = odd
+        rig = _rig(fake, tmp_path)
+        try:
+            rig.wait(lambda: len(fake.calls("getUpdates")) >= 2)
+        finally:
+            rig.delivery.close(1.0)
+        assert rig.rejected() == {"malformed": 3}
+        assert fake.calls("getUpdates")[1]["offset"] == 1  # update 0 is not asked for again
 
 
 def test_a_restart_does_not_replay_a_press(tmp_path: Path) -> None:
@@ -449,16 +689,16 @@ def test_a_restart_does_not_replay_a_press(tmp_path: Path) -> None:
         replays = [[update], [update]]  # a server that sends the press again anyway
 
         def replay(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-            time.sleep(0.01)
             return 200, {"ok": True, "result": replays.pop() if replays else []}
 
         fake.routes["getUpdates"] = replay
+        before = len(fake.calls("getUpdates"))
         again = _rig(fake, tmp_path)
         try:
-            wait(lambda: not replays)
-            time.sleep(0.1)
+            # two polls answered with the replay, then one more: both were handled by then
+            again.wait(lambda: len(fake.calls("getUpdates")) >= before + 3)
             assert again.sink.presses == [] and again.handled() == 0
-            assert all(b["offset"] == taken + 1 for b in fake.calls("getUpdates")[-2:])
+            assert all(b["offset"] == taken + 1 for b in fake.calls("getUpdates")[before:])
         finally:
             again.delivery.close(1.0)
         assert len(rig.sink.presses) == 1
@@ -471,15 +711,32 @@ def test_the_poller_backs_off_on_errors(tmp_path: Path) -> None:
     with fake_telegram() as fake:
         fake.bot()
         fake.routes["getUpdates"] = lambda body: (502, {"ok": False, "description": "bad gw"})
-        rig = _rig(fake, tmp_path)
+        pauses = Pauses(until=6)
+        rig = _rig(fake, tmp_path, prepare=pauses.install)
         try:
-            wait(lambda: len(fake.calls("getUpdates")) >= 5, timeout=10)
+            assert pauses.done.wait(30)
         finally:
             rig.delivery.close(1.0)
-        calls = rig.metrics.chat_api_errors[("telegram", "getUpdates", "server_error")]
-        assert calls >= 5
-        # 10, 20, 40, 80 ms...: far fewer calls than a busy loop would make
-        assert len(fake.calls("getUpdates")) < 15
+        assert pauses.seen == [0.01, 0.02, 0.04, 0.08, 0.16, 0.32]  # doubles, from backoff
+        assert rig.metrics.chat_api_errors[("telegram", "getUpdates", "server_error")] >= 6
+
+
+def test_a_poll_that_returns_early_is_followed_by_a_pause(tmp_path: Path) -> None:
+    with fake_telegram() as fake:
+        fake.bot()
+        fake.routes["getUpdates"] = lambda body: (200, {"ok": True, "result": []})
+        pauses = Pauses(until=3)
+
+        def prepare(poller: ButtonPoller) -> None:
+            pauses.install(poller)
+            poller.monotonic = lambda: 100.0  # every poll took no time at all
+
+        rig = _rig(fake, tmp_path, prepare=prepare, min_interval=1.0)
+        try:
+            assert pauses.done.wait(30)
+        finally:
+            rig.delivery.close(1.0)
+        assert pauses.seen == [1.0, 1.0, 1.0]
 
 
 def test_close_holds_its_deadline_while_a_long_poll_is_open(tmp_path: Path) -> None:
@@ -493,14 +750,17 @@ def test_close_holds_its_deadline_while_a_long_poll_is_open(tmp_path: Path) -> N
 
         fake.routes["getUpdates"] = hang
         rig = _rig(fake, tmp_path)
-        wait(lambda: fake.calls("getUpdates"))
+        fake.wait_for(lambda: fake.requests)
         started = time.monotonic()
         rig.delivery.close(0.3)
         assert time.monotonic() - started < 1.5
         assert rig.poller.abandoned
         release.set()
-        time.sleep(0.2)
-        assert rig.handled() == 0  # a late answer is ignored
+        thread = rig.poller._thread
+        assert thread is not None
+        thread.join(30)  # the late answer has been read by now
+        assert not thread.is_alive() and len(fake.calls("getUpdates")) == 1
+        assert rig.handled() == 0  # ...and ignored
 
 
 def test_the_api_never_logs_the_token(rig: Rig, caplog: pytest.LogCaptureFixture) -> None:
@@ -508,7 +768,7 @@ def test_the_api_never_logs_the_token(rig: Rig, caplog: pytest.LogCaptureFixture
         400,
         {"ok": False, "description": f"bad request for bot{TOKEN}"},
     )
-    sent = rig.send(digest("T-1"))
-    rig.press(sent, user=MALLORY)
-    wait(lambda: rig.metrics.chat_api_errors)
+    message_id, body = rig.send(digest("T-1"))
+    rig.raw_press(message_id, body, "s1.1.AAAAAAAAAAAAAAAAAAAAAA")  # refused, answered
+    rig.wait(lambda: rig.metrics.chat_api_errors)
     assert TOKEN not in caplog.text and "<redacted>" in caplog.text

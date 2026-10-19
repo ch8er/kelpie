@@ -119,7 +119,19 @@ def test_the_command_date_is_the_alerts_day_in_the_report_time_zone() -> None:
 
 @pytest.mark.parametrize(
     "task_id",
-    ["T-1; rm -rf ~", "$(curl evil)", "T 1", "a`b`", "x\ny", "@here", "é", "a" * 101, "it's"],
+    [
+        "T-1; rm -rf ~",
+        "$(curl evil)",
+        "T 1",
+        "a`b`",
+        "x\ny",
+        "@here",
+        "é",
+        "a" * 101,
+        "it's",
+        "--help",
+        "-rf",
+    ],
 )
 def test_an_id_that_is_not_a_plain_token_gets_no_command(task_id: str) -> None:
     assert snooze_command(task_id, AT, EN) is None

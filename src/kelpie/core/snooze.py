@@ -331,6 +331,7 @@ def chat_snooze(
     channel: str,
     now: datetime,
     settings: SnoozeSettings,
+    dry_run: bool = False,
 ) -> tuple[Snooze, LedgerEntry]:
     """The snooze a chat button sets and the ledger entry that records the press: who
     (``by``, the person's chat name, and ``user_id``), what (the task) and until when.
@@ -339,7 +340,9 @@ def chat_snooze(
     replacing the old one) with ``source="chat"``, so ``kelpie serve`` records its growth
     baseline as for any stored snooze and it ends early when more work is blocked behind
     the task. The entry (kind ``snooze``, rule ``chat``, outcome ``executed``) counts
-    against no task's rate limit: its subject is the channel."""
+    against no task's rate limit: its subject is the channel. A person's snooze is stored
+    under the global dry-run too, as ``kelpie snooze``'s is (it only quiets alerts); with
+    ``dry_run`` the entry says so (``params["dry_run"]`` and its reason)."""
     if days not in CHAT_DAYS:
         raise ValueError(f"a chat snooze is one of {CHAT_DAYS} days, got {days!r}")
     task_id = task_id.strip()
@@ -358,6 +361,13 @@ def chat_snooze(
         "channel": channel,
         "source": "chat",
     }
+    reason = (
+        f"{who} (user id {user_id}) snoozed {task_id} until {until.isoformat()} "
+        f"from {channel} ({days}d button)."
+    )
+    if dry_run:
+        params["dry_run"] = True
+        reason += " Stored under the global dry-run, as kelpie snooze is: it only quiets alerts."
     raw = to_json(["chat_snooze", channel, task_id, user_id, now.isoformat()])
     entry = LedgerEntry(
         at=now,
@@ -367,10 +377,7 @@ def chat_snooze(
         kind=ActionKind.SNOOZE,
         mode=Mode.ACT,
         outcome=Outcome.EXECUTED,
-        reason=(
-            f"{who} (user id {user_id}) snoozed {task_id} until {until.isoformat()} "
-            f"from {channel} ({days}d button)."
-        ),
+        reason=reason,
         task_id=task_id,
         executor=channel,
         params=params,

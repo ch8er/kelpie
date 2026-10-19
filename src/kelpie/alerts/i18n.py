@@ -66,6 +66,7 @@ EN: dict[str, str] = {
     "chat.snoozed": "Snoozed {task} {span} by {who}",
     "chat.toast": "Snoozed {task} {span}",
     "chat.not_allowed": "Not allowed.",
+    "chat.already": "{task} is already snoozed {span}",
     "chat.failed": "Could not snooze; see the Kelpie log.",
     # what Kelpie did, when the engine sent no line of its own (never for "notified")
     "did.suggested": "nothing, mode suggest. A human decides.",
@@ -131,6 +132,7 @@ RU: dict[str, str] = {
     "chat.snoozed": "Отложено: {task} {span}, кто отложил: {who}",
     "chat.toast": "Отложено: {task} {span}",
     "chat.not_allowed": "Нет доступа.",
+    "chat.already": "Задача {task} уже отложена {span}",
     "chat.failed": "Не удалось отложить, подробности в журнале Kelpie.",  # noqa: RUF001
     "did.suggested": "ничего, режим suggest. Решает человек.",
     "did.failed": "попытался, но не вышло. Нужен человек.",

@@ -296,24 +296,7 @@ class SqliteLedgerStore:
             return fn(self._db)
 
     def append(self, entry: LedgerEntry) -> None:
-        values = (
-            _ts(entry.at),
-            entry.fingerprint,
-            entry.subject,
-            entry.rule,
-            entry.kind,
-            entry.mode,
-            entry.outcome,
-            entry.reason,
-            entry.task_id,
-            entry.executor,
-            to_json(entry.params),
-            entry.suppressed,
-            entry.suppression,
-            entry.detail,
-        )
-        sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * len(values))})"
-        self._write(lambda db: db.execute(sql, values))
+        self._write(lambda db: _insert_entry(db, entry))
 
     def by_fingerprint(self, fingerprint: str, after: datetime) -> Sequence[LedgerEntry]:
         sql = f"SELECT {_COLUMNS} FROM actions WHERE fingerprint = ? AND at > ? ORDER BY at, id"
@@ -397,26 +380,29 @@ class SqliteLedgerStore:
 
     def put_snooze(self, snooze: Snooze) -> None:
         """Store ``snooze``, replacing the task's previous one. Markers are never stored."""
-        if snooze.source == "marker":
-            raise ValueError("snooze markers are read from the board, not stored")
-        values = (
-            snooze.task_id,
-            _ts(snooze.until),
-            None if snooze.reason is None else snooze.reason.strip()[:MAX_REASON] or None,
-            None if snooze.by is None else snooze.by.strip()[:MAX_BY] or None,
-            _ts(snooze.created_at),
-            snooze.source,
-            snooze.behind_at_snooze,
-            None if snooze.grown_at is None else _ts(snooze.grown_at),
-            snooze.grown_by,
-        )
-        self._write(
-            lambda db: db.execute(
-                f"INSERT OR REPLACE INTO snoozes ({_SNOOZE_COLUMNS})"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                values,
-            )
-        )
+        self._write(lambda db: _insert_snooze(db, snooze))
+
+    def put_chat_snooze(self, snooze: Snooze, entry: LedgerEntry) -> Snooze | None:
+        """Store a snooze set from a chat (#176) and the ledger entry that records it, in one
+        transaction: both or neither. Unless the task has a snooze from another source
+        (``kelpie snooze``) that still holds at ``snooze.created_at`` (not expired, not
+        grown) and ends later: then nothing is written and that snooze is returned."""
+        with self._lock, self._db:
+            row = self._db.execute(
+                f"SELECT {_SNOOZE_COLUMNS} FROM snoozes WHERE task_id = ?", (snooze.task_id,)
+            ).fetchone()
+            if row is not None:
+                held = snooze_row(row)
+                if (
+                    held.source != snooze.source
+                    and held.grown_at is None
+                    and held.until > snooze.created_at
+                    and held.until > snooze.until
+                ):
+                    return held
+            _insert_snooze(self._db, snooze)
+            _insert_entry(self._db, entry)
+        return None
 
     def set_snooze_baseline(self, snooze: Snooze, behind: int) -> bool:
         """Record how much work was behind a stored snooze's task when ``kelpie serve`` first
@@ -466,6 +452,49 @@ _SNOOZE_COLUMNS = (
     "task_id, until_at, reason, snoozed_by, created_at, source, behind_at_snooze, grown_at,"
     " grown_by"
 )
+
+
+def _insert_snooze(db: sqlite3.Connection, snooze: Snooze) -> sqlite3.Cursor:
+    """Store ``snooze``, replacing the task's previous one. Markers are never stored."""
+    if snooze.source == "marker":
+        raise ValueError("snooze markers are read from the board, not stored")
+    values = (
+        snooze.task_id,
+        _ts(snooze.until),
+        None if snooze.reason is None else snooze.reason.strip()[:MAX_REASON] or None,
+        None if snooze.by is None else snooze.by.strip()[:MAX_BY] or None,
+        _ts(snooze.created_at),
+        snooze.source,
+        snooze.behind_at_snooze,
+        None if snooze.grown_at is None else _ts(snooze.grown_at),
+        snooze.grown_by,
+    )
+    return db.execute(
+        f"INSERT OR REPLACE INTO snoozes ({_SNOOZE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        values,
+    )
+
+
+def _insert_entry(db: sqlite3.Connection, entry: LedgerEntry) -> sqlite3.Cursor:
+    """Append ``entry`` to the action ledger."""
+    values = (
+        _ts(entry.at),
+        entry.fingerprint,
+        entry.subject,
+        entry.rule,
+        entry.kind,
+        entry.mode,
+        entry.outcome,
+        entry.reason,
+        entry.task_id,
+        entry.executor,
+        to_json(entry.params),
+        entry.suppressed,
+        entry.suppression,
+        entry.detail,
+    )
+    sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * len(values))})"
+    return db.execute(sql, values)
 
 
 def snooze_row(r: sqlite3.Row) -> Snooze:

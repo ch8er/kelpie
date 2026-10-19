@@ -294,13 +294,17 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   alerts, rule 2's overdue wait on one human task; never agent-health alerts). Telegram,
   with `buttons = true` and `allowed_user_ids` (off by default), shows "Snooze 1d / 3d / 7d"
   buttons there: a press from an allowed user in the configured chat snoozes the task
-  (`source = "chat"`, at most 7 days), records the press in the ledger (kind `snooze`: who,
-  with their user id, what, until), answers with a toast and edits the alert ("Snoozed
-  until … by …", that item's buttons removed). A button carries only a short HMAC-signed
-  reference (key generated on first use in `kelpie.buttons.db`, 0600) that expires after 24
-  hours or at the alert's next message, and is used once. Presses are read with
-  `getUpdates` long polling in their own thread (offset persisted, back-off, shutdown
-  deadline); anything else is ignored and counted in `kelpie_chat_rejected_total{reason}`.
+  (`source = "chat"`, at most 7 days; stored under the global dry-run too, like `kelpie
+  snooze`), records the press in the ledger in the same transaction (kind `snooze`: who,
+  with their user id, what, until; it notes a dry-run), answers with a toast and edits the
+  alert ("Snoozed until … by …", that item's buttons removed). A press never shortens a
+  longer `kelpie snooze`: it is refused and says until when. A button carries only a short
+  HMAC-signed reference (key generated on first use in `kelpie.buttons.db`, 0600) that
+  expires after 24 hours or at the alert's next message (any, "resolved" included, whose
+  arrival also removes the older buttons), and is used once. Presses are read with
+  `getUpdates` long polling in their own thread (offset persisted, at least a second
+  between polls, back-off, shutdown deadline); anything else is ignored and counted in
+  `kelpie_chat_rejected_total{reason}`, and strangers and other chats get no answer.
   `kelpie doctor` fails on an empty allow-list, a missing database or a bot with a webhook.
 - `kelpie report` prints the daily report as Markdown, and `--send` posts the summary to the
   alert channels ([#47](https://github.com/ch8er/kelpie/pull/47), [#52](https://github.com/ch8er/kelpie/pull/52)).

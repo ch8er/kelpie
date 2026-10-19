@@ -36,7 +36,13 @@ from kelpie.adapters.issues.config import (
 )
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
-from kelpie.alerts.buttons import ButtonStore, ChatControl, Press, button_store_path
+from kelpie.alerts.buttons import (
+    AlreadySnoozed,
+    ButtonStore,
+    ChatControl,
+    Press,
+    button_store_path,
+)
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
 from kelpie.connectors.cost_reports import CostReportsSettings, load_cost_reports
@@ -1807,6 +1813,8 @@ def _chat_control(
     except (OSError, sqlite3.Error, ValueError) as exc:
         raise ConfigError(f"cannot open the button store {path}: {exc}") from exc
 
+    sqlite_store = store
+
     def snooze(press: Press, now: datetime) -> datetime:
         record, entry = chat_snooze(
             press.task_id,
@@ -1816,9 +1824,11 @@ def _chat_control(
             press.channel,
             now,
             settings.snooze,
+            dry_run=settings.engine.dry_run,
         )
-        store.put_snooze(record)
-        store.append(entry)
+        # The snooze and its ledger entry in one transaction: no chat snooze without one.
+        if (held := sqlite_store.put_chat_snooze(record, entry)) is not None:
+            raise AlreadySnoozed(held.until)
         return record.until
 
     metrics.set_chat_channels(c.name for c in channels)
