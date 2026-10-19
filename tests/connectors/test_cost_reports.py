@@ -260,7 +260,6 @@ def test_openai_other_currencies_are_refused() -> None:
         ({}, 500, "http"),
         (b"not json", 200, "malformed"),
         ({"data": "x"}, 200, "malformed"),
-        ({"data": [anthropic_bucket(D1, tokens("m", "-5"))]}, 200, "malformed"),
         ({"data": [anthropic_bucket(D1, tokens("m", "nan"))]}, 200, "malformed"),
         ({"data": [anthropic_bucket(D1, tokens("m", True))]}, 200, "malformed"),
         ({"data": [{"starting_at": "yesterday", "results": []}]}, 200, "malformed"),
@@ -399,11 +398,10 @@ def test_all_pages_share_one_deadline() -> None:
     timeouts: list[float] = []
 
     class Slow(Fake):
-        def __call__(self, url: str, path: str, headers: Mapping[str, str], timeout: float,
-                     max_bytes: int = 0, read_body: bool = True, proxy: bool = False) -> net.Response:  # fmt: skip
-            timeouts.append(timeout)
+        def __call__(self, *args: Any, **kw: Any) -> net.Response:
+            timeouts.append(args[3])
             clock[0] += 25  # each page takes 25 s
-            return super().__call__(url, path, headers, timeout)
+            return super().__call__(*args, **kw)
 
     slow = Slow({"data": [], "has_more": True, "next_page": "more"})
     with pytest.raises(ReportError) as exc:

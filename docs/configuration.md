@@ -853,12 +853,14 @@ default table knows it under, then its name: `claude-*` is `anthropic`, `gpt-*`,
 **`auto` mode** reads nothing but the config, so every command gives the same answer;
 first match wins:
 
-1. a `[[budgets]]` entry with `mode = "subscription"` whose `providers` name the provider or
+1. the provider has a [[connectors.cost_reports]](#connectorscost_reports) table (an
+   admin key: there is a bill): `api`;
+2. a `[[budgets]]` entry with `mode = "subscription"` whose `providers` name the provider or
    one of its `quotas`, or that names no providers (it covers them all): `subscription`;
-2. `limit_tokens` is set: `subscription`;
-3. a `day` budget (the whole farm) in `usd` with mode `api`, the budget default: `api`
+3. `limit_tokens` is set: `subscription`;
+4. a `day` budget (the whole farm) in `usd` with mode `api`, the budget default: `api`
    (weak evidence: set `mode` to be sure);
-4. otherwise `unknown`: `kelpie doctor` warns and says what to set.
+5. otherwise `unknown`: `kelpie doctor` warns and says what to set.
 
 A model whose provider nothing tells is `subscription` only under a subscription budget
 that names no providers (it covers them all); otherwise `unknown`.
@@ -1218,19 +1220,22 @@ spend mode unless `mode` says otherwise. At most 10.
 | --- | --- | --- |
 | `kind` | *required* | `anthropic` (`GET /v1/organizations/cost_report`) or `openai` (`GET /v1/organization/costs`). |
 | `admin_key_env` | *required* | Variable holding an admin key with read access to costs: Anthropic's Admin API key (`sk-ant-admin...`), OpenAI's admin key. Never the agents' key. Must be set when `kelpie serve` starts. |
-| `api_url` | the provider's API | https URL; plain http only to loopback. No credentials, query or fragment. |
+| `api_url` | the provider's API | https URL; plain http only to loopback. No credentials, query or fragment. A path is a prefix (a gateway): requests go to `<path>/v1/...`. |
 | `interval` | `"1h"` | Read at most this often (>= 5m); the reports fill in within minutes. |
 | `timeout` | `"10s"` | Each request (> 0, <= 60s). |
 | `days` | `7` | Complete UTC days read each time (1 to 31); today is never read, its figure is not final. |
 | `workspaces` | all | `anthropic`: count only these workspace ids (the default workspace has none). |
-| `projects` | all | `openai`: count only these project ids. |
+| `projects` | all | `openai`: count only these project ids (sent as repeated `project_ids`; whether OpenAI filters by them reliably is not confirmed, so compare the figure with the dashboard once). |
 
 What is counted: Anthropic, token costs per model (`cost_type = "tokens"`; web search, code
 execution and session costs are left out). OpenAI, the day's total over all line items
 (images, audio, fine-tuning and storage included): use `projects` to keep it to the farm's
-keys. Priority Tier usage is not in Anthropic's cost report. Figures are stored in the
-Kelpie database (90 days) for the daily report. A report that cannot be read keeps its
-last figures; `kelpie doctor` reads one day of each to check the key.
+keys. Credits and adjustments (negative items) are counted. Priority Tier usage is not in
+Anthropic's cost report. Only `kelpie serve` reads the reports, on a background thread (a
+slow provider never holds up a tick; all pages of one read share 60 seconds); figures are
+stored in the Kelpie database (90 days) for the daily report. A report that cannot be read
+keeps its last figures and is tried again after 5 minutes; `kelpie doctor` reads one day
+of each to check the key.
 
 ## [alerts]
 

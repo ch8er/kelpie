@@ -15,6 +15,7 @@ from kelpie.app import (
     ConfigError,
     CostReportStep,
     connector_steps,
+    cost_report_steps,
     load_rules,
     load_settings,
     render_status,
@@ -59,7 +60,7 @@ def test_status_says_whether_the_key_is_there(
     settings = load_settings(write(tmp_path, CONFIG))
     monkeypatch.delenv("KELPIE_TEST_ADMIN_KEY", raising=False)
     text = render_status(settings, load_rules(settings.engine))
-    assert "cost reports: NOT ready: [connectors.cost_reports.anthropic]: " in text
+    assert "cost reports: anthropic NOT ready: [connectors.cost_reports.anthropic]: " in text
     monkeypatch.setenv("KELPIE_TEST_ADMIN_KEY", "sk-ant-admin01-x")
     text = render_status(settings, load_rules(settings.engine))
     assert "cost reports: anthropic (anthropic https://api.anthropic.com, every 1h, last 7" in text

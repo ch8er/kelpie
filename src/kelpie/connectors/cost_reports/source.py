@@ -18,9 +18,9 @@ under ``api_url``'s own path (a gateway prefix).
 A read that fails (unreachable, timeout, 4xx/5xx, a redirect, an oversized or malformed
 answer, a currency other than USD) keeps the last good reading and is retried after
 :data:`RETRY_AFTER`; one warning is logged per provider and cause until it answers again.
-Amounts may be negative (credits, adjustments). The key goes only to ``api_url``'s origin (:mod:`kelpie.net`: no
-redirects, one deadline; an environment https proxy only as a CONNECT tunnel) and is never
-logged nor part of any repr or error message.
+Amounts may be negative (credits, adjustments). The key goes only to ``api_url``'s origin
+(:mod:`kelpie.net`: no redirects, one deadline; an environment https proxy only as a
+CONNECT tunnel) and is never logged nor part of any repr or error message.
 """
 
 from __future__ import annotations
