@@ -112,7 +112,8 @@ class Return:
 @dataclass(frozen=True, slots=True)
 class Comment:
     """A comment on a task. ``human`` is set by the adapter when a person wrote it (one of
-    its human owners), not an agent or Kelpie."""
+    its human owners, or a person's decision a trusted agent recorded), not an agent or
+    Kelpie."""
 
     author: str
     text: str

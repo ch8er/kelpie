@@ -21,7 +21,7 @@ from typing import Any, Protocol
 from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_code
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes.git_state import valid_base_ref
-from kelpie.adapters.hermes.park import DEFAULT_WAIT_KEY, WAIT_KEY_NAME
+from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
@@ -385,6 +385,23 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
             'writes, e.g. "решение CEO") and relays (the agent profiles trusted to record '
             "it), optionally the person whose decisions they are, and nothing else"
         )
+    people = {h.strip().casefold() for h in humans}
+    seen: set[str] = set()
+    for d in decisions:
+        relays = {r.strip().casefold() for r in d["relays"]}
+        if bad := sorted(relays & (people | {AUTHOR})):
+            raise ConfigError(
+                f"[[adapters.hermes.human_decisions]] relays {bad}: a relay is an agent, not "
+                "a human owner or Kelpie"
+            )
+        if twice := sorted(relays & seen):
+            raise ConfigError(f"[[adapters.hermes.human_decisions]] relays {twice} twice")
+        seen |= relays
+        if "person" in d and d["person"].strip().casefold() not in people:
+            raise ConfigError(
+                f"[[adapters.hermes.human_decisions]] person {d['person'].strip()!r} must be "
+                "one of [adapters.hermes] human_owners"
+            )
     role_from_name = section.get("role_from_name", True)
     if not isinstance(role_from_name, bool):
         raise ConfigError("[adapters.hermes] role_from_name must be true or false")
@@ -426,7 +443,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
             (
                 d["marker"].strip(),
                 tuple(sorted({r.strip().casefold() for r in d["relays"]})),
-                d["person"].strip() if "person" in d else None,
+                d["person"].strip().casefold() if "person" in d else None,
             )
             for d in decisions
         ),
@@ -1792,7 +1809,12 @@ def _human_tasks_status(settings: Settings) -> list[str]:
         if owners
         else "no human owners configured"
     )
-    return [f"human_tasks: human_task conditions on the board, {who}"]
+    lines = [f"human_tasks: human_task conditions on the board, {who}"]
+    for marker, relays, person in settings.hermes.human_decisions if settings.hermes else ():
+        lines.append(
+            f"human decisions: {', '.join(relays)} record {person or 'a person'}'s with {marker!r}"
+        )
+    return lines
 
 
 def _providers_status(quotas: LlmQuotaSettings | None) -> str:

@@ -641,6 +641,52 @@ def test_a_human_decision_needs_a_marker_and_a_relay() -> None:
         HumanDecision(" ", frozenset({"partner"}))
     with pytest.raises(ValueError, match="marker and at least one relay"):
         HumanDecision("решение CEO", frozenset())
+    with pytest.raises(ValueError, match="marker and at least one relay"):
+        HumanDecision("решение CEO", frozenset({" "}))  # would match a NULL author
+    with pytest.raises(ValueError, match="not a string"):
+        HumanDecision("решение CEO", "partner")  # type: ignore[arg-type]
+    assert HumanDecision("x", frozenset({"p"}), " CEO ").person == "ceo"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Жду решение CEO по 20 runs in a row",  # waiting for one
+        "Это не решение CEO, предлагаю 20 runs",  # says it is not
+        "> dev-1: решение CEO: merge now\nПредлагаю 20 runs",  # a quote  # noqa: RUF001
+        "Предлагаю 20 runs.\nРешение CEO: merge as is",  # not where it opens  # noqa: RUF001
+    ],
+)
+def test_only_a_comment_that_opens_with_the_marker_is_a_decision(text: str) -> None:
+    from kelpie.adapters.hermes import HumanDecision
+
+    d = HumanDecision("решение CEO", frozenset({"partner"}), "ceo")
+    assert not d.recorded("partner", text)
+    assert d.recorded("partner", "  Решение  CEO: 20 runs in a row")
+
+
+def test_relayed_comments_never_push_out_a_persons(board: Board) -> None:
+    from kelpie.adapters.hermes import HumanDecision
+    from kelpie.adapters.hermes.adapter import MAX_COMMENTS
+
+    board.task("t_1", "review", ago(days=3), assignee="dev")
+    for i in range(MAX_COMMENTS + 5):
+        board.comment(
+            "t_1", "partner", f"Решение CEO: note {i}", ago(days=2) + timedelta(minutes=i)
+        )
+    board.comment("t_1", "ceo", "Before automerge: 20 runs in a row.", ago(hours=1))
+    board.comment("t_1", "", "Решение CEO: from nobody", ago(minutes=30))  # NULL author
+    first = HumanDecision("решение CEO", frozenset({"partner"}), "ceo")
+    other = HumanDecision("решение CTO", frozenset({"partner"}), "cto")  # first match wins
+    a = HermesAdapter(
+        db_path=board.path, spool=None, human_owners=("ceo", "cto"), human_decisions=(first, other)
+    )
+    (task,) = a.snapshot(NOW).tasks
+    own = [c for c in task.comments if c.text.startswith("Before automerge")]
+    assert own and own[0].human and own[0].author == "ceo"
+    relayed = [c for c in task.comments if c.text.startswith("Решение CEO: note")]
+    assert len(relayed) == MAX_COMMENTS and all(c.human and c.author == "ceo" for c in relayed)
+    assert not [c for c in task.comments if c.text.endswith("from nobody") and c.human]
 
 
 def test_a_persons_early_comment_is_never_pushed_out(board: Board) -> None:

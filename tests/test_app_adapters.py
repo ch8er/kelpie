@@ -142,6 +142,25 @@ def test_hermes_human_decisions_rejected(tmp_path: Path, entry: str) -> None:
         load_settings(path)
 
 
+@pytest.mark.parametrize(
+    ("entries", "message"),
+    [
+        (['relays = ["ceo"]'], "not a human owner or Kelpie"),
+        (['relays = ["kelpie"]'], "not a human owner or Kelpie"),
+        (['relays = ["partner"]', 'relays = ["Partner"]'], "twice"),
+        (['relays = ["partner"]\nperson = "cfo"'], "must be one of"),
+    ],
+)
+def test_hermes_human_decisions_trust(tmp_path: Path, entries: list[str], message: str) -> None:
+    body = "".join(
+        f'[[adapters.hermes.human_decisions]]\nmarker = "решение {i}"\n{e}\n'
+        for i, e in enumerate(entries)
+    )
+    path = write(tmp_path, f'[adapters.hermes]\nhuman_owners = ["CEO"]\n{body}')
+    with pytest.raises(ConfigError, match=message):
+        load_settings(path)
+
+
 def test_hermes_disabled_builds_no_adapter(tmp_path: Path) -> None:
     settings = load_settings(write(tmp_path, "[adapters.hermes]\nenabled = false\n"))
     assert settings.hermes is not None and build_adapters(settings) == []

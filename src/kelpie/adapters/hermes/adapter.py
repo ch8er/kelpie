@@ -434,9 +434,10 @@ def _workspace(row: sqlite3.Row) -> Path | None:
 @dataclass(frozen=True, slots=True)
 class HumanDecision:
     """A person's decision an agent records on the board: a comment or description by one
-    of ``relays`` (profiles, case-insensitive) that carries ``marker`` (a phrase,
-    case-insensitive, not inside a longer word) is the person's word, not the agent's, and
-    is written by ``person`` when it is set."""
+    of ``relays`` (profiles, case-insensitive) that opens with ``marker`` (a phrase,
+    case-insensitive, not inside a longer word: "Решение CEO: ...") is the person's word,
+    not the agent's, and is written by ``person`` when it is set. Only an opening marker:
+    "Жду решение CEO", a quote or a negation further on are the agent's own words."""
 
     marker: str
     relays: frozenset[str]
@@ -444,16 +445,21 @@ class HumanDecision:
     _pattern: re.Pattern[str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not self.marker.strip() or not self.relays:
+        if isinstance(self.relays, str):
+            raise ValueError("relays must be a collection of profile names, not a string")
+        relays = frozenset(r.strip().casefold() for r in self.relays)
+        if not self.marker.strip() or not relays or "" in relays:
             raise ValueError("a human decision needs a marker and at least one relay")
         object.__setattr__(self, "marker", self.marker.strip())
-        object.__setattr__(self, "relays", frozenset(r.strip().casefold() for r in self.relays))
+        object.__setattr__(self, "relays", relays)
+        if self.person is not None:
+            object.__setattr__(self, "person", self.person.strip().casefold() or None)
         phrase = r"\s+".join(re.escape(w) for w in self.marker.split())
-        object.__setattr__(self, "_pattern", re.compile(rf"(?<!\w){phrase}(?!\w)", re.I))
+        object.__setattr__(self, "_pattern", re.compile(rf"\s*{phrase}(?!\w)", re.I))
 
     def recorded(self, author: str, text: str) -> bool:
-        """``author`` (casefolded) relays it and ``text`` carries the marker."""
-        return author in self.relays and bool(self._pattern.search(text))
+        """``author`` (casefolded) relays it and ``text`` opens with the marker."""
+        return author in self.relays and bool(self._pattern.match(text))
 
 
 def _author(row: sqlite3.Row) -> str | None:
@@ -896,6 +902,7 @@ class HermesAdapter:
                 warn_once(("comments", type(exc).__name__), "hermes: comments not read: %s", exc)
             return {}
         people: dict[str, list[Comment]] = {}
+        relayed: dict[str, list[Comment]] = {}  # kept apart: they never push out people's
         others: dict[str, list[Comment]] = {}
         for r in rows:
             at = _utc(r["created_at"])
@@ -908,15 +915,22 @@ class HermesAdapter:
             author = str(r["author"] or "").strip()
             if not text or author == AUTHOR:
                 continue
-            human = self._human(author)
-            if not human and (relayed := self._decision(author, text)) is not None:
-                author, human = relayed, True  # a person's decision an agent recorded
-            (people if human else others).setdefault(r["task_id"], []).append(
-                Comment(author, text, at, human)
+            if self._human(author):
+                bucket = people
+            elif (person := self._decision(author, text)) is not None:
+                author, bucket = person, relayed  # a person's decision an agent recorded
+            else:
+                bucket = others
+            bucket.setdefault(r["task_id"], []).append(
+                Comment(author, text, at, bucket is not others)
             )
         found: dict[str, tuple[Comment, ...]] = {}
-        for task_id in people.keys() | others.keys():
-            kept = people.get(task_id, [])[:MAX_COMMENTS] + others.get(task_id, [])[-MAX_COMMENTS:]
+        for task_id in people.keys() | relayed.keys() | others.keys():
+            kept = (
+                people.get(task_id, [])[:MAX_COMMENTS]
+                + relayed.get(task_id, [])[:MAX_COMMENTS]
+                + others.get(task_id, [])[-MAX_COMMENTS:]
+            )
             found[task_id] = tuple(sorted(kept, key=lambda c: c.at))
         return found
 

@@ -74,8 +74,11 @@ relays = ["partner"]
 person = "ceo"
 ```
 
-The marker is matched case-insensitively as a whole phrase, anywhere in the text. Only the
-relays count: any agent can write the words, and a person's comment states acceptance
+The text must open with the marker ("Решение CEO: ..."), matched case-insensitively as a
+whole phrase: "Жду решение CEO", a quote or the marker further on are the agent's own
+words. `person` must be one of `human_owners`. Relayed comments are kept apart from
+people's own (up to 50 each), so a busy relay never pushes out what a person wrote. Only
+the relays count: any agent can write the words, and a person's comment states acceptance
 criteria that rule 1 holds a task to and confirms them, so list only an agent you trust to
 relay the person's decisions faithfully.
 
@@ -239,7 +242,7 @@ mode `0600`. Hooks never raise and do no network I/O.
 | `status` in `prework_statuses` (triage, scheduled) | `prework`: rule 3 alerts on a card held there past `prework_after` with dependents and never counts it as a dependent the platform failed to promote; `kelpie why` says what would act on it, `kelpie_prework_*` counts such cards |
 | `changes_requested` (reason), `review_reopened` events | `returns` (category `review`), over the task's whole history: rule 4 (`ping_pong`) counts review rounds from them, `return_causes` their causes |
 | a `status` move out of done (not to archived) after `completed` or a move to done | `reopened_at`: rule 1's reopened-after-done rate |
-| `task_comments` (2000 characters each: up to 50 by people, the last 50 of the others, none of Kelpie's own); `tasks.created_by`, `tasks.created_at` | `comments`, a person's when the author is one of `human_owners` or a `human_decisions` relay writing its marker; `body_author` when a person created the task; `created_at`: rule 1 reads people's acceptance criteria from them (also on done tasks, which keep their `body` now) |
+| `task_comments` (2000 characters each: up to 50 by people, the last 50 of the others, none of Kelpie's own); `tasks.created_by`, `tasks.created_at` | `comments`, a person's when the author is one of `human_owners` or a `human_decisions` relay writing its marker; `body_author` when a person created the task, or a relay with a description that opens with its marker; `created_at`: rule 1 reads people's acceptance criteria from them (also on done tasks, which keep their `body` now) |
 | `completed` / `review_requested` events' `artifacts` (with their run); `task_attachments` uploaded by a run's profile | artifacts of that run (an attachment: the uploader's latest run on the task that started before the upload; a person's upload or one before any run is no run's): rule 1's evidence for "done" |
 | `task_events`, latest status-changing event | `status_since` (non-status events such as `heartbeat`, `commented`, `claim_extended` are ignored) |
 | `task_links` (parent, child) | `Dependency(child, depends_on=parent)` (links to archived parents dropped) |
