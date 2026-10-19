@@ -198,6 +198,11 @@ def check_rule_modes(
         )
     problems: list[str] = []
     fixes: list[str] = []
+    if refused:  # dry_run on: lifting it alone would stop kelpie serve from starting
+        fixes.append(
+            f"{_back_out(refused, engine)} before dry_run goes off "
+            f"({CHECKLIST}, What can act today)"
+        )
     if engine.dry_run and (acting or suggesting):
         held = " and ".join(
             f"{_names(rules)} in {mode}"
@@ -225,23 +230,27 @@ def check_rule_modes(
             ]
         )
         problems.append(f"in act but cannot act on this farm: {why}")
-        fixes.append(
-            "use suggest for those rules, or configure what they need "
-            f"({CHECKLIST}, What can act today)"
-        )
+        if len(refused) < len(blocked):
+            fixes.append(
+                "use suggest for those rules, or configure what they need "
+                f"({CHECKLIST}, What can act today)"
+            )
+    # A parking rule that cannot act here parks nothing; "cannot act" already says so.
     if unwoken := [
-        *dispatch_gate_warnings(engine),
-        *serialize_warnings(engine, loaded.rules),
+        *(dispatch_gate_warnings(engine) if "dispatch_gate" not in blocked else []),
+        *(serialize_warnings(engine, loaded.rules) if "conflict_warning" not in blocked else []),
     ]:
         problems += unwoken
         fixes.append(
             'set mode = "act" in [engine.rules.wait_condition] so parked tasks are woken, or '
             f"take the parking rule out of act ({CHECKLIST}, What can act today)"
         )
-    alerting = suggesting + [r for r, b in blocked.items() if not b.refused]
+    # Without a channel there is no alerter: act rules lose their alerts and the notices of
+    # what they did, too (refused rules already FAIL while dry_run is off).
+    alerting = suggesting + acting
     if not engine.dry_run and alerting and not settings.alerts.channels:
         problems.append(
-            "no [[alerts.channels]]: the alerts and suggestions of "
+            "no [[alerts.channels]]: the alerts, suggestions and action notices of "
             f"{_names(alerting)} are only logged and dropped"
         )
         fixes.append("add an [[alerts.channels]] entry (docs/configuration.md, [alerts])")

@@ -15,7 +15,7 @@ import pytest
 
 from kelpie.cli import main
 from kelpie.core.storage import SqliteSpanStore
-from kelpie.doctor import Check, run_checks
+from kelpie.doctor import SHOWN_RULES, Check, run_checks
 from kelpie.resources.prometheus import PrometheusConfig
 from tests.adapters.kanban import Board
 from tests.resources.fake_prometheus import FakeProm, fake_prometheus, vector
@@ -182,7 +182,22 @@ def test_act_on_a_farm_that_cannot_carry_it_out_warns(tmp_path: Path) -> None:
         check.detail
     )
     assert "its actions become alerts" in check.detail
-    assert "docs/act-checklist.md" in check.fix
+    assert "no [[alerts.channels]]: the alerts, suggestions and action notices of ci_economy" in (
+        check.detail
+    )
+    assert "docs/act-checklist.md" in check.fix and "[[alerts.channels]]" in check.fix
+
+
+def test_act_that_can_act_without_an_alert_channel_warns(tmp_path: Path) -> None:
+    """No channel, no alerter: an act rule loses its alerts and the notices of its actions."""
+    path = tmp_path / "kelpie.toml"  # rule 7 only alerts: nothing is missing to act
+    path.write_text('[engine]\ndry_run = false\n[engine.rules.resources]\nmode = "act"\n')
+    check = {c.name: c for c in run_checks(path, environ={})}["rule modes"]
+    assert check.status == "WARN"
+    assert "cannot act" not in check.detail
+    assert "action notices of resources are only logged and dropped" in check.detail
+    path.write_text(path.read_text() + ALERTS)
+    assert {c.name: c for c in run_checks(path, environ={})}["rule modes"].status == "PASS"
 
 
 def test_dry_run_with_rules_configured_to_act_warns_that_nothing_acts(farm: Farm) -> None:
@@ -217,6 +232,9 @@ def test_act_that_kelpie_serve_refuses_fails_and_only_warns_under_dry_run(farm: 
     check = farm.checks()["rule modes"]
     assert check.status == "WARN"
     assert "kelpie serve refuses it once dry_run is off" in check.detail
+    # Lifting dry_run first would lead straight into the FAIL: take the rule out of act first.
+    assert check.fix.startswith('set mode = "suggest" or "observe" in [engine.rules.<name>]')
+    assert check.fix.index("before dry_run goes off") < check.fix.index("set dry_run = false")
 
 
 def test_act_from_default_mode_that_serve_refuses_fails_with_a_default_mode_fix(
@@ -255,15 +273,45 @@ def test_parks_that_nothing_wakes_warn(farm: Farm, extra: str, needle: str) -> N
     assert check.status == "WARN"
     assert needle in check.detail and "parked tasks are not woken" in check.detail
     assert "[engine.rules.wait_condition]" in check.fix
-    farm.extra += '[engine.rules.wait_condition]\nmode = "act"\n'  # rule 2 wakes them
+    farm.extra += '[engine.rules.wait_condition]\nmode = "act"\n' + ALERTS  # rule 2 wakes them
     assert farm.checks()["rule modes"].status == "PASS"
+
+
+def test_a_parking_rule_that_cannot_act_is_not_also_said_to_strand_parks(tmp_path: Path) -> None:
+    path = tmp_path / "kelpie.toml"  # no platform adapter: the gate parks nothing
+    path.write_text('[engine]\ndry_run = false\n[engine.rules.dispatch_gate]\nmode = "act"\n')
+    detail = {c.name: c for c in run_checks(path, environ={})}["rule modes"].detail
+    assert "cannot act on this farm: dispatch_gate" in detail
+    assert "parked tasks are not woken" not in detail
+
+
+RULES = [
+    "exit_contract",
+    "wait_condition",
+    "orphan_status",
+    "stale_blocks",
+    "ping_pong",
+    "bottlenecks",
+]
+
+
+@pytest.mark.parametrize("n", [SHOWN_RULES, SHOWN_RULES + 1])
+def test_rule_names_are_counted_past_shown_rules(farm: Farm, n: int) -> None:
+    assert len(RULES) > SHOWN_RULES
+    farm.extra = "".join(f'[engine.rules.{r}]\nmode = "observe"\n' for r in RULES[:n])
+    detail = farm.checks()["rule modes"].detail
+    listed = ", ".join(RULES[:n]) if n <= SHOWN_RULES else f"{n} rules"
+    assert f"observe: {listed} (per rule), " in detail
+    assert " more (default_mode)" in detail
 
 
 def test_suggestions_without_an_alert_channel_warn(farm: Farm) -> None:
     farm.extra = '[engine]\ndry_run = false\n[engine.rules.needs_you]\nmode = "suggest"\n'
     check = farm.checks()["rule modes"]
     assert check.status == "WARN"
-    assert "no [[alerts.channels]]: the alerts and suggestions of needs_you" in check.detail
+    assert "no [[alerts.channels]]: the alerts, suggestions and action notices of needs_you" in (
+        check.detail
+    )
     assert "[[alerts.channels]]" in check.fix
     farm.extra += ALERTS
     assert farm.checks()["rule modes"].status == "PASS"
@@ -274,7 +322,7 @@ def test_a_hub_does_not_judge_what_its_agents_carry_out(tmp_path: Path) -> None:
     path.write_text('[engine]\ndry_run = false\n[engine.rules.orphan_status]\nmode = "act"\n')
     alone = {c.name: c for c in run_checks(path, environ={})}["rule modes"]
     assert alone.status == "WARN" and "orphan_status (no platform adapter" in alone.detail
-    path.write_text(path.read_text() + HUB)
+    path.write_text(path.read_text() + HUB + ALERTS)
     check = {c.name: c for c in run_checks(path, environ={})}["rule modes"]
     assert check.status == "PASS", check.detail
     assert "act: orphan_status (per rule)" in check.detail
