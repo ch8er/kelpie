@@ -331,3 +331,41 @@ def test_a_condition_naming_another_repository_is_not_the_own_pr_s() -> None:
         BEFORE, RERUN, *THREE, tasks=tasks, conditions=(lib, same), pull_requests=pulls
     )
     assert CiOutage.from_params(alert.params).tasks == ("T-2",)  # type: ignore[union-attr]
+
+
+def test_with_the_engine_the_outage_is_one_alert_for_its_tasks() -> None:
+    """Incident 20 end to end: rule 9 and the per-task rules on the fixture's farm, through
+    the engine. One outage alert; the blocks and waits it explains are folded under it; the
+    unrelated web task still gets its own alert."""
+    from pathlib import Path
+
+    from kelpie.core.config import EngineConfig, Mode
+    from kelpie.core.engine import Engine
+    from kelpie.core.incidents import FOLDED_UNDER
+    from kelpie.core.ledger import Outcome, Suppression
+    from kelpie.rules import REGISTRY
+    from tests.fakes import FakeAdapter, FakeAlerter
+    from tests.incidents import load
+
+    fixture = Path(__file__).parents[1] / "fixtures/incidents/20-ci-outage.yaml"
+    snapshot = load(fixture).snapshot
+    rules = [
+        REGISTRY["ci_economy"]({"outage_min_prs": 3, "outage_window": "2h"}),
+        REGISTRY["stale_blocks"]({"unlinked_alert_after": "1h", "max_block": "2h"}),
+        REGISTRY["wait_condition"]({"max_wait": "2h"}),
+    ]
+    alerter = FakeAlerter()
+    config = EngineConfig(dry_run=False, default_mode=Mode.SUGGEST)
+    engine = Engine(rules, adapters=[FakeAdapter()], alerter=alerter, config=config)  # type: ignore[arg-type]
+    done = engine.tick(lambda: snapshot)
+    [outage] = [d for d in done if is_outage_state(d.action.state or "")]
+    assert outage.outcome is Outcome.ALERTED
+    folded = {d.action.task_id for d in done if d.suppression is Suppression.INCIDENT}
+    assert folded == {"T-201", "T-202", "T-210"}
+    assert all(
+        d.action.params[FOLDED_UNDER] == outage.action.state
+        for d in done
+        if d.suppression is Suppression.INCIDENT
+    )
+    alerted = {d.action.task_id for d in done if d.outcome is Outcome.ALERTED}
+    assert {"T-301", "T-204"} <= alerted and not alerted & folded  # T-204 asks a person

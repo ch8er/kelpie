@@ -47,11 +47,11 @@ snapshot:
       owner_id: agent-dev-4
       block: {reason: "waiting for CI on example/web#5", since: "2026-03-02T06:00:00+00:00", condition_id: C-301}
   conditions:
-    - {id: C-201, kind: ci_status, task_id: T-201, params: {repo: example/mobile, pr: 21}, satisfied: false}
-    - {id: C-202, kind: ci_status, task_id: T-202, params: {repo: example/mobile, pr: 22}, satisfied: false}
-    - {id: C-204, kind: human_task, task_id: T-204, params: {task: H-1}, satisfied: false}
-    - {id: C-210, kind: pr_merged, task_id: T-210, params: {repo: example/mobile, pr: 21}, satisfied: false}
-    - {id: C-301, kind: ci_status, task_id: T-301, params: {repo: example/web, pr: 5}, satisfied: false}
+    - {id: C-201, kind: ci_status, task_id: T-201, params: {repo: example/mobile, pr: 21}, satisfied: false, checked_at: "2026-03-02T08:58:00+00:00"}
+    - {id: C-202, kind: ci_status, task_id: T-202, params: {repo: example/mobile, pr: 22}, satisfied: false, checked_at: "2026-03-02T08:58:00+00:00"}
+    - {id: C-204, kind: human_task, task_id: T-204, params: {task: H-1}, satisfied: false, checked_at: "2026-03-02T08:58:00+00:00"}
+    - {id: C-210, kind: pr_merged, task_id: T-210, params: {repo: example/mobile, pr: 21}, satisfied: false, checked_at: "2026-03-02T08:58:00+00:00"}
+    - {id: C-301, kind: ci_status, task_id: T-301, params: {repo: example/web, pr: 5}, satisfied: false, checked_at: "2026-03-02T08:58:00+00:00"}
   pull_requests:
     - {repo: example/mobile, number: 21, title: "T-201 settings screen", branch: "task/T-201", task_ids: [T-201]}
     - {repo: example/mobile, number: 22, title: "T-202 login flow", branch: "task/T-202", task_ids: [T-202]}
