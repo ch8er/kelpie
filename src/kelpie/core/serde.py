@@ -69,7 +69,8 @@ def parse_when(value: str, now: datetime, tz: tzinfo) -> datetime:
                 f"invalid time {value!r}: use now, a relative time such as -2h, or an ISO time"
             ) from None
         at = at if at.tzinfo is not None else at.replace(tzinfo=tz)
-        at.astimezone(UTC)  # out of range (year 1 with an offset) raises here, not later
+        at.astimezone(UTC)  # out of range (year 1 with an offset) raises here, not later,
+        at.astimezone(tz)  # in UTC or where it is shown
         return at
     except OverflowError:
         raise ValueError(f"time {value!r} is out of range") from None

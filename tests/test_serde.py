@@ -78,12 +78,21 @@ def test_parse_when_refuses(when: str) -> None:
         parse_when(when, WHEN_NOW, UTC)
 
 
-@pytest.mark.parametrize("when", ["-800000d", "-99999999999d", "0001-01-01T00:00"])
-def test_parse_when_out_of_range(when: str) -> None:
+@pytest.mark.parametrize(
+    ("when", "zone"),
+    [
+        ("-800000d", "Asia/Tokyo"),
+        ("-99999999999d", "Asia/Tokyo"),
+        ("0001-01-01T00:00", "Asia/Tokyo"),  # out of range in UTC
+        ("0001-01-01T00:00Z", "America/New_York"),  # ...or in [report] timezone
+        ("9999-12-31T23:59Z", "Asia/Tokyo"),
+    ],
+)
+def test_parse_when_out_of_range(when: str, zone: str) -> None:
     from zoneinfo import ZoneInfo
 
     with pytest.raises(ValueError, match="out of range"):
-        parse_when(when, WHEN_NOW, ZoneInfo("Asia/Tokyo"))
+        parse_when(when, WHEN_NOW, ZoneInfo(zone))
 
 
 def test_parse_when_dst_wall_times_resolve_to_the_first() -> None:
