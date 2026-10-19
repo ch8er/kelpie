@@ -1,0 +1,62 @@
+id: "13-wait-in-inbox"
+incident: 13
+title: "The wait rule 2 leaves to the inbox is in the person's digest"
+description: >
+  The farm of 13-wait-left-to-inbox seen by rule 13: one escalate to the CEO with H-1, and
+  W-1 (parked on it by a human_task condition for 30h) and W-7 (2h) waiting on it. W-3 also
+  waits for a PR, so the inbox does not count it as waiting on the person (it is held behind
+  H-1, not waiting for it); a wait on a task in triage (W-2), a dead end (W-4), a task
+  waiting on nothing (W-5) and an unseen condition (W-6) are in no digest: rule 2 alerts on
+  them. So W-1 reaches the person through rule 13 alone.
+rule: needs_you
+config:
+  approval_wait_after: "30m"
+  human_wait_alert_after: "1h"
+  default_approver: ceo
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # The person can do H-1 now (ready, nothing open before it): the inbox lists it.
+    - {id: H-1, title: "Sign the vendor contract", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    # Still in triage: only a person moves it out of there, so the inbox lists nothing under it.
+    - {id: H-2, title: "Pick the price tier", status: backlog, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo, prework: true}
+    - {id: H-3, title: "Approve the listing", status: cancelled, status_since: "2026-10-18T09:00:00+00:00", role: owner, owner_id: ceo}
+    # W-1: parked on H-1 by a human_task condition for 30h, past max_wait.
+    - {id: W-1, title: "Integrate the vendor API", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-2: the same wait, but on a task the person cannot move yet.
+    - {id: W-2, title: "Set the prices", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-3: waits on H-1 and on a PR: it waits on the PR first, so the inbox does not list it.
+    - {id: W-3, title: "Vendor webhooks", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-4: its human task was cancelled: nothing will ever wake it.
+    - {id: W-4, title: "Publish the listing", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-5: waiting on nothing at all.
+    - {id: W-5, title: "Update the docs", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - id: W-6
+      title: "Rotate the keys"
+      status: waiting
+      status_since: "2026-10-18T04:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting for C-6", since: "2026-10-18T04:00:00+00:00", condition_id: C-6}
+    # Look-alike: parked on H-1 for 2h, well within max_wait.
+    - {id: W-7, title: "Vendor onboarding", status: waiting, status_since: "2026-10-19T08:00:00+00:00", role: developer, owner_id: agent-dev-1}
+  conditions:
+    - {id: C-1, kind: human_task, task_id: W-1, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-2, kind: human_task, task_id: W-2, params: {task: H-2}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-3a, kind: human_task, task_id: W-3, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-3b, kind: pr_merged, task_id: W-3, params: {pr: 7}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-4, kind: human_task, task_id: W-4, params: {task: H-3, terminal: true}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-7, kind: human_task, task_id: W-7, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-19T08:00:00+00:00"}
+expected_actions:
+  - kind: escalate
+    params:
+      escalate_to: ceo
+      human_tasks: [H-1]
+      waiting: [W-1, W-7]
+not_expected_actions:
+  # the triage task is not the person's to move yet: nothing is listed under it
+  - {kind: escalate, params: {human_tasks: [H-2]}}
+  - {kind: escalate, params: {escalate_to: agent-dev-1}}

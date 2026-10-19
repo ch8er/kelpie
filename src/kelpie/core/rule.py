@@ -22,7 +22,10 @@ class Rule(Protocol):
     one of its states now that it stopped reporting it ("disk h:/ is 80% full (400 of
     500 GB), under its threshold and not filling."), for the "Resolved" notice. Pure like
     ``evaluate``. Without it, or when it returns None, the notice names the task and quotes
-    what is no longer reported, as the past ('no longer reported: "T-1 has no owner"')."""
+    what is no longer reported, as the past ('no longer reported: "T-1 has no owner"').
+    A hook that also takes ``last_key`` (``resolved(state_id, snapshot, last_key=None)``) is
+    given the key of the alert that last announced the state, for a rule whose state is
+    described by several kinds of alert."""
 
     name: str
 

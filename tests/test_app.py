@@ -3,7 +3,7 @@ import threading
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -400,6 +400,69 @@ def test_stale_blocks_reads_who_asks_a_person_from_needs_you() -> None:
     # A mistake in rule 13's section is reported as rule 13's, though rule 4 loads first.
     with pytest.raises(ConfigError, match=r"^bad config for rule 'needs_you': approval_reasons"):
         stale({"needs_you": {"approval_reasons": []}})
+
+
+def test_wait_condition_reads_which_waits_are_listed_from_needs_you() -> None:
+    """Rule 2 leaves the waits rule 13 lists to it while rule 13 reaches people, reading the
+    farm with rule 13's whole config, as rule 4 does (#213)."""
+
+    def load(rules: dict, registry: Any = RULES, **modes: Mode) -> dict[str, Any]:
+        loaded = load_rules(EngineConfig(rules=rules, modes=modes), registry)
+        return {r.name: r for r in loaded.rules}
+
+    inbox = {
+        "bottlenecks": {"planned_labels": ["post-release"]},
+        "needs_you": {"human_wait_alert_after": "2h", "condition_reasons": ["PR #"]},
+    }
+    rules = load(inbox)
+    rule = rules["wait_condition"].inbox
+    assert rule.human_wait_alert_after == timedelta(hours=2)
+    assert [p.pattern for p in rule.condition_reasons] == ["PR #"]
+    assert rule.planned_labels == {"post-release"}  # inherited by rule 13, so by rule 2 too
+    assert rule == rules["stale_blocks"].inbox  # rules 2 and 4 read the farm alike
+    # the same switch as rule 4's: rule 13 must reach people at least as far as rule 2 does
+    suggest, observe, act = Mode.SUGGEST, Mode.OBSERVE, Mode.ACT
+
+    def reaches(registry: Any = RULES, **modes: Mode) -> bool:
+        return load({}, registry, **modes)["wait_condition"].inbox is not None
+
+    assert reaches(wait_condition=suggest, needs_you=suggest)
+    assert reaches(wait_condition=act, needs_you=suggest)  # rule 2 wakes tasks in act mode
+    assert not reaches(wait_condition=suggest, needs_you=observe)
+    assert reaches(wait_condition=observe, needs_you=observe)  # no one hears
+    without = {k: v for k, v in RULES.items() if k != "needs_you"}
+    assert not reaches(without, wait_condition=suggest)
+    with pytest.raises(ConfigError, match=r"set automatically.*engine\.rules\.wait_condition"):
+        load({"wait_condition": {"needs_you": False}})
+    with pytest.raises(ConfigError, match=r"wait_condition.*unknown parameters"):
+        load({"wait_condition": {"approval_reasons": ["x"]}})
+    # A mistake in rule 13's section is reported as rule 13's, though rule 2 loads first.
+    with pytest.raises(ConfigError, match=r"^bad config for rule 'needs_you': approval_reasons"):
+        load({"needs_you": {"approval_reasons": []}})
+
+
+def test_a_silent_gap_before_rule_13_lists_a_wait_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rules = {
+        "needs_you": {"human_wait_alert_after": "30h"},
+        "wait_condition": {"max_wait": "24h"},
+        "stale_blocks": {"unlinked_alert_after": False, "max_block": False},  # not under test
+    }
+    with caplog.at_level("WARNING"):
+        load_rules(EngineConfig(rules=rules))
+    assert "needs_you.human_wait_alert_after (1 day, 6:00:00) is longer than" in caplog.text
+    assert "wait_condition.max_wait (1 day, 0:00:00)" in caplog.text
+    assert "a wait on a person's task is announced by neither rule for 6:00:00" in caplog.text
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        modes = {"wait_condition": Mode.SUGGEST}
+        load_rules(EngineConfig(rules=rules, modes=modes))
+    assert not caplog.records  # rule 13 in observe while rule 2 is not: no hand-off
+    with caplog.at_level("WARNING"):
+        load_rules(EngineConfig())
+        load_rules(EngineConfig(rules={"needs_you": {"human_wait_alert_after": "2h"}}))
+    assert not caplog.records  # defaults fit
 
 
 def test_a_silent_gap_between_rule_13s_waits_and_rule_4s_is_logged(

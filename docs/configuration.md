@@ -248,6 +248,28 @@ cannot see is not.
 | `poll_error_streak` | `5` | count, >= 1 | Comment when the same polled check failed this many times in a row. |
 | `session_stale_after` | `"30m"` | duration, > 0 | See [live session](#rules). |
 
+**Waits rule 13 lists go to rule 13.** A waiting task that rule 13 lists in a person's
+"needs you" digest, parked on a task the person can do now by a `human_task` condition with
+no other unmet condition, gets no overdue alert from this rule: the person gets one message
+instead of two, as for blocks (rule 4, above). This rule reads the farm with rule 13's whole
+`[engine.rules.needs_you]` section and leaves exactly what rule 13 lists, its time
+thresholds aside. Under the hand-off rule 13's snooze handling decides what the person
+hears: a snoozed human task is in the digest's footer, and one whose snooze ended or whose
+work grew is back in the digest. A listed wait whose conditions Kelpie cannot check (never
+checked, last checked longer ago than `max_condition_age`, or the connector reports an error) keeps this rule's overdue alert, worded as a
+connector problem ("C-1 was not checked on this pass: is the connector
+running?"), snoozed or not: the digest cannot say what Kelpie does not know. Everything else
+stays this rule's: a wait on a task the person cannot move yet (in the backlog or triage),
+one that also waits for a PR or CI, a dead end (the human task was cancelled), a condition
+Kelpie cannot see, a task waiting on nothing, and the wake. When a wait moves to the digest
+while its alert is open, the "Resolved" notice says it is in the person's digest now (rule 4
+does the same for a block). The hand-off applies only while rule 13 reaches people: it is loaded, and it is not in
+`observe` mode while this rule is in `suggest` or `act` (else this rule alerts as before).
+Kelpie decides that from the modes: `needs_you` is not a key to set here, and a mistake in
+rule 13's section is reported as rule 13's. Kelpie logs a warning at startup when rule 13
+waits longer than this rule before it lists a wait (`human_wait_alert_after` longer than
+`max_wait`): the wait is then announced by neither rule in between.
+
 ### 3. orphan_status
 
 A task sits in a status that needs an owner, has none, and no live session works on it.
@@ -664,7 +686,12 @@ agent-health alerts, and list it as "from marker".
   reminders. A marker holds only a block that waits on a person (it asks one, or waits
   only on human tasks), never an agent's own wait on CI or its own parking.
 - `wait_condition` (rule 2): no overdue alert on a waiting task whose only unmet
-  conditions are human tasks a snooze holds; a dead end still alerts.
+  conditions are human tasks a snooze holds; a dead end still alerts. A wait Kelpie cannot
+  check (a condition never checked or not checked within `max_condition_age`, or one the connector reports an error for) is never
+  held: it keeps alerting. While rule 13 reaches people, a wait it lists is left to it, and
+  rule 13's snooze handling decides what the person hears (see
+  [2. wait_condition](#2-wait_condition)); a wait Kelpie cannot check keeps rule 2's alert
+  then too.
 
 Agent-health rules (`loop_breaker`, `no_progress`, `exit_contract`, `orphan_status`, ...)
 never honour a snooze. A snoozed task alerts again when its snooze ends ("Snooze ran

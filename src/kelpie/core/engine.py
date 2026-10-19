@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -458,7 +459,13 @@ class Engine:
         hook = getattr(self._by_name.get(state.rule), "resolved", None)
         if callable(hook):
             try:
-                text = hook(state.id, snapshot)
+                # a hook that takes ``last_key`` also learns which alert last announced it
+                wants_key = "last_key" in inspect.signature(hook).parameters
+                text = (
+                    hook(state.id, snapshot, last_key=state.key)
+                    if wants_key
+                    else hook(state.id, snapshot)
+                )
             except Exception:
                 log.exception("rule %s failed to describe resolved state %s", state.rule, state.id)
                 text = None
