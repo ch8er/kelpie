@@ -145,8 +145,9 @@ def test_hermes_human_decisions_rejected(tmp_path: Path, entry: str) -> None:
 @pytest.mark.parametrize(
     ("entries", "message"),
     [
-        (['relays = ["ceo"]'], "not a human owner or Kelpie"),
-        (['relays = ["kelpie"]'], "not a human owner or Kelpie"),
+        (['relays = ["ceo"]'], "a relay is an agent profile"),
+        (['relays = ["kelpie"]'], "a relay is an agent profile"),
+        (['relays = ["User"]'], "a relay is an agent profile"),
         (['relays = ["partner"]', 'relays = ["Partner"]'], "twice"),
         (['relays = ["partner"]\nperson = "cfo"'], "must be one of"),
     ],

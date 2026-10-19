@@ -32,8 +32,8 @@ references in it link nothing (incident 17). ``comments`` are ``task_comments`` 
 by ``human_owners``, and the last ones of the others; Kelpie's own left out), and
 ``body_author`` is ``tasks.created_by`` when that is a person: rule 1 reads acceptance
 criteria from them. A person's decision recorded by an agent counts as the person's too: a
-comment (or description) by one of a ``human_decisions`` entry's ``relays`` that carries
-its ``marker`` (on a live farm a partner agent records the CEO's decisions with the note
+comment (or description) by one of a ``human_decisions`` entry's ``relays`` that opens
+with its ``marker`` (on a live farm a partner agent records the CEO's decisions with the note
 "решение CEO"), written by the entry's ``person`` when it names one (the CEO, so rule 1
 asks them), else by the relay. Only the configured relays: any agent can write the words.
 ``assignee`` is the assignee profile and ``role`` its role: on Hermes an assignee only
@@ -103,6 +103,7 @@ import logging
 import re
 import sqlite3
 import time
+import unicodedata
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -433,11 +434,14 @@ def _workspace(row: sqlite3.Row) -> Path | None:
 
 @dataclass(frozen=True, slots=True)
 class HumanDecision:
-    """A person's decision an agent records on the board: a comment or description by one
-    of ``relays`` (profiles, case-insensitive) that opens with ``marker`` (a phrase,
-    case-insensitive, not inside a longer word: "Решение CEO: ...") is the person's word,
-    not the agent's, and is written by ``person`` when it is set. Only an opening marker:
-    "Жду решение CEO", a quote or a negation further on are the agent's own words."""
+    """A person's decision an agent records on the board: a comment or description by one of
+    ``relays`` (profiles, case-insensitive) that opens with ``marker`` and a separator
+    (a colon, a hyphen, an en or em dash; case-insensitive, Unicode-normalized, past
+    invisible characters and markdown emphasis: "Решение CEO: ...", "**Решение CEO**:
+    ...") is the person's word, all of it, and is written by ``person`` when it is set.
+    "Жду решение CEO", "Решение CEO пока не принято", a quote or the marker further on
+    are the agent's own words. Letters typed in another script (Cyrillic look-alikes of
+    "CEO") are another marker."""
 
     marker: str
     relays: frozenset[str]
@@ -455,11 +459,18 @@ class HumanDecision:
         if self.person is not None:
             object.__setattr__(self, "person", self.person.strip().casefold() or None)
         phrase = r"\s+".join(re.escape(w) for w in self.marker.split())
-        object.__setattr__(self, "_pattern", re.compile(rf"\s*{phrase}(?!\w)", re.I))
+        phrase = unicodedata.normalize("NFKC", phrase)
+        object.__setattr__(
+            self, "_pattern", re.compile(rf"[\s*_#]*{phrase}[*_]*\s*[:\-\u2013\u2014]", re.I)
+        )
 
     def recorded(self, author: str, text: str) -> bool:
         """``author`` (casefolded) relays it and ``text`` opens with the marker."""
-        return author in self.relays and bool(self._pattern.match(text))
+        if author not in self.relays:
+            return False
+        plain = unicodedata.normalize("NFKC", text[:500])
+        plain = "".join(c for c in plain if unicodedata.category(c) != "Cf")  # BOM, ZWSP
+        return bool(self._pattern.match(plain))
 
 
 def _author(row: sqlite3.Row) -> str | None:
@@ -560,8 +571,8 @@ class HermesAdapter:
     cli_timeout: float = CLI_TIMEOUT  # seconds; a stop runs inside the control loop tick
     # Assignees that are people, not agents (Hermes lowercases profile names).
     human_owners: Collection[str] = ()
-    # (marker, relays): a comment by one of ``relays`` that carries ``marker`` records a
-    # person's decision ("решение CEO"); see HumanDecision.
+    # A comment by one of an entry's relays that opens with its marker records its person's
+    # decision ("Решение CEO: ..."); see HumanDecision.
     human_decisions: Sequence[HumanDecision] = ()
     prework_statuses: Collection[str] = DEFAULT_PREWORK
     # Profile -> role (Hermes lowercases profiles). Others: the profile without a trailing
@@ -888,9 +899,11 @@ class HermesAdapter:
 
     def _comments(self, conn: _Connection, ids: set[str]) -> dict[str, tuple[Comment, ...]]:
         """Comments of the tasks on the board, oldest first: every person's (up to
-        ``MAX_COMMENTS``, so an early criterion is never pushed out) and the last
-        ``MAX_COMMENTS`` of the others. Kelpie's own are left out. None on a board without
-        ``task_comments``; a board that cannot be read now gives none, with a warning."""
+        ``MAX_COMMENTS``, so an early criterion is never pushed out), as many decisions
+        relays recorded for a person (``human_decisions``, kept apart so they never push out
+        a person's own) and the last ``MAX_COMMENTS`` of the others. Kelpie's own are left
+        out. None on a board without ``task_comments``; a board that cannot be read now
+        gives none, with a warning."""
         try:
             rows = conn.execute(
                 "SELECT c.task_id, c.author, c.body, c.created_at FROM task_comments c"

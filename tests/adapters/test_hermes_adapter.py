@@ -665,6 +665,27 @@ def test_only_a_comment_that_opens_with_the_marker_is_a_decision(text: str) -> N
     assert d.recorded("partner", "  Решение  CEO: 20 runs in a row")
 
 
+@pytest.mark.parametrize(
+    ("text", "recorded"),
+    [
+        ("\ufeffРешение CEO: 20 runs", True),  # a BOM  # noqa: RUF001
+        ("\u200bРешение CEO: 20 runs", True),  # a zero-width space  # noqa: RUF001
+        ("**Решение CEO**: 20 runs", True),
+        ("## Решение CEO: 20 runs", True),
+        ("Решение CEO — 20 runs", True),
+        ("Решение ＣＥＯ: 20 runs", True),  # full-width, NFKC  # noqa: RUF001
+        ("Решение CEO пока не принято. Предлагаю 20 runs", False),  # no separator
+        ("Решение CEO? Жду", False),
+        ("> Решение CEO: 20 runs", False),  # a quote
+    ],
+)
+def test_the_marker_opens_the_text_with_a_separator(text: str, recorded: bool) -> None:
+    from kelpie.adapters.hermes import HumanDecision
+
+    d = HumanDecision("решение CEO", frozenset({"partner"}), "ceo")
+    assert d.recorded("partner", text) is recorded
+
+
 def test_relayed_comments_never_push_out_a_persons(board: Board) -> None:
     from kelpie.adapters.hermes import HumanDecision
     from kelpie.adapters.hermes.adapter import MAX_COMMENTS
@@ -675,7 +696,7 @@ def test_relayed_comments_never_push_out_a_persons(board: Board) -> None:
             "t_1", "partner", f"Решение CEO: note {i}", ago(days=2) + timedelta(minutes=i)
         )
     board.comment("t_1", "ceo", "Before automerge: 20 runs in a row.", ago(hours=1))
-    board.comment("t_1", "", "Решение CEO: from nobody", ago(minutes=30))  # NULL author
+    board.comment("t_1", "", "Решение CEO: from nobody", ago(minutes=30))  # no author
     first = HumanDecision("решение CEO", frozenset({"partner"}), "ceo")
     other = HumanDecision("решение CTO", frozenset({"partner"}), "cto")  # first match wins
     a = HermesAdapter(

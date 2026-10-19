@@ -74,8 +74,9 @@ relays = ["partner"]
 person = "ceo"
 ```
 
-The text must open with the marker ("Решение CEO: ..."), matched case-insensitively as a
-whole phrase: "Жду решение CEO", a quote or the marker further on are the agent's own
+The text must open with the marker and a separator (`:`, `-`, an en or em dash: "Решение
+CEO: ..."), matched case-insensitively past invisible characters and markdown emphasis, and
+all of the text is then the person's: "Жду решение CEO", a quote or the marker further on are the agent's own
 words. `person` must be one of `human_owners`. Relayed comments are kept apart from
 people's own (up to 50 each), so a busy relay never pushes out what a person wrote. Only
 the relays count: any agent can write the words, and a person's comment states acceptance

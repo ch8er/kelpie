@@ -389,10 +389,10 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
     seen: set[str] = set()
     for d in decisions:
         relays = {r.strip().casefold() for r in d["relays"]}
-        if bad := sorted(relays & (people | {AUTHOR})):
+        if bad := sorted(relays & (people | {AUTHOR, "user"})):
             raise ConfigError(
-                f"[[adapters.hermes.human_decisions]] relays {bad}: a relay is an agent, not "
-                "a human owner or Kelpie"
+                f"[[adapters.hermes.human_decisions]] relays {bad}: a relay is an agent "
+                "profile, not a human owner, Kelpie or Hermes' default CLI author (user)"
             )
         if twice := sorted(relays & seen):
             raise ConfigError(f"[[adapters.hermes.human_decisions]] relays {twice} twice")
@@ -1809,12 +1809,19 @@ def _human_tasks_status(settings: Settings) -> list[str]:
         if owners
         else "no human owners configured"
     )
-    lines = [f"human_tasks: human_task conditions on the board, {who}"]
-    for marker, relays, person in settings.hermes.human_decisions if settings.hermes else ():
-        lines.append(
-            f"human decisions: {', '.join(relays)} record {person or 'a person'}'s with {marker!r}"
-        )
-    return lines
+    return [f"human_tasks: human_task conditions on the board, {who}"]
+
+
+def _human_decisions_status(settings: Settings) -> list[str]:
+    """Who may record a person's decisions on the Hermes board: a trust setting."""
+    hermes = settings.hermes
+    if hermes is None or not hermes.enabled:
+        return []
+    return [
+        f"human decisions: {', '.join(relays)} may record {person or 'a person'}'s, "
+        f"opening with {marker!r}"
+        for marker, relays, person in hermes.human_decisions
+    ]
 
 
 def _providers_status(quotas: LlmQuotaSettings | None) -> str:
@@ -1862,6 +1869,7 @@ def render_status(
         f"resources: {_resources_status(settings.resources)}",
         *_github_status(settings),
         *_human_tasks_status(settings),
+        *_human_decisions_status(settings),
         f"providers: {_providers_status(settings.llm_quotas)}",
         *_alerts_status(settings.alerts),
         "",
