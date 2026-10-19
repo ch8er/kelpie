@@ -267,7 +267,11 @@ report; no LLM is involved.
   the farm's adapters can carry out, so `kelpie serve` starts with the advice applied; for
   the others the report says what is missing, such as "Hermes can't clear blocks yet", here
   and under "Would have done in act mode"), and fixed remedies for the largest causes,
-  ranked by dollars (hours count when `hour_usd` is set).
+  ranked by dollars (hours count when `hour_usd` is set). Remedies and the biggest wait's
+  suggestion check what the farm already has (`kelpie.report.farm`, from config: approvers,
+  hold expiries, `[[block_conditions]]`, budgets) and advise configuring something only
+  when it is missing; merge automation is never advised, since the report cannot see
+  whether PRs already merge automatically.
 - **Token optimization** (from traces, `kelpie.traces.tokens`): prompt-cache hit rate per
   role and model with the steps where the cache breaks, expires or covers only a fixed
   prefix; context growth per step with runaway sessions (grew past 100k tokens without

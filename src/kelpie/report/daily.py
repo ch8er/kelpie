@@ -92,7 +92,8 @@ from kelpie.core.spans import (
     usage,
 )
 from kelpie.core.states import OpenState
-from kelpie.report import md
+from kelpie.report import farm, md
+from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.fixes import FixEvent
 from kelpie.report.sections import (
     SECTIONS,
@@ -164,17 +165,10 @@ CHAOS_CAUSES: Mapping[str, str] = {
 REMEDIES: Mapping[str, str] = {
     "orphan_status": "give ownerless statuses an owner: route them to a role or let "
     "orphan_status reassign them",
-    "stale_blocks": "attach conditions to block reasons ([[block_conditions]]) so Kelpie "
-    "can clear blocks when their cause is fixed",
     "wait_condition": "check the conditions agents wait for: a connector that stopped "
     "checking or a limit that is too short",
     "exit_contract": "make agents set a final status before they exit (role instructions)",
     "ping_pong": "escalate review ping-pong earlier or tighten the acceptance criteria",
-    HOLDS: "give every hold an owner and an expiry ([engine.rules.bottlenecks] holds), and "
-    "lift a hold when its reason is gone",
-    PEOPLE: "answer the inboxes under Needs a human first, name approvers for "
-    "agent roles ([engine.rules.needs_you] approvers), and keep human tasks off the "
-    "critical path",
     PREWORK: "move cards out of triage or scheduled when other tasks depend on them, or "
     "drop the dependency",
     "bottlenecks": "rebalance roles and move human tasks off the critical path",
@@ -185,11 +179,25 @@ REMEDIES: Mapping[str, str] = {
 # The remedy where the rule cannot act on this farm: never advise switching act mode on.
 REMEDIES_WITHOUT_ACT: Mapping[str, str] = {
     "orphan_status": "give ownerless statuses an owner: route them to a role",
-    "stale_blocks": "attach conditions to block reasons ([[block_conditions]]) so Kelpie "
-    "alerts when a block's cause is fixed",
-    "loop_breaker": "stop runaway sessions by hand when Kelpie alerts on them, and cap "
-    "spend with [[budgets]]",
 }
+
+
+def remedy(rule: str, facts: FarmFacts, can_act: bool) -> str:
+    """What to do about a chaos cause, never advising what the farm already has
+    (:mod:`kelpie.report.farm`) or act mode where the rule cannot act."""
+    if rule == HOLDS:
+        return farm.holds(facts)
+    if rule == PEOPLE:
+        return farm.people(facts)
+    if rule == "stale_blocks":
+        return farm.stale_blocks(facts, can_act)
+    if rule == "loop_breaker" and not can_act:
+        return farm.runaway_by_hand(facts)
+    if not can_act and rule in REMEDIES_WITHOUT_ACT:
+        return REMEDIES_WITHOUT_ACT[rule]
+    return REMEDIES[rule]
+
+
 # States whose id ends with the session they are about.
 SESSION_STATES = ("no_progress:", "loop_breaker:identical_calls:", "loop_breaker:error_streak:")
 FIX_KINDS = frozenset(
@@ -246,6 +254,7 @@ class ReportInputs:
     stuck_check: StuckCheck | None = None
     # Rules that cannot act on this farm, with what is missing (``kelpie.app.act_blockers``).
     act_blockers: Mapping[str, str] = field(default_factory=dict)
+    farm: FarmFacts = UNKNOWN_FARM  # what the farm already has: advice never repeats it
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,7 +485,7 @@ def _biggest_wait(
         roles,
         causes,
     )
-    return biggest_wait(per_role, inputs.tasks, causes)
+    return biggest_wait(per_role, inputs.tasks, causes, inputs.farm)
 
 
 def _roles(inputs: ReportInputs, end: datetime) -> dict[str, str]:
@@ -930,11 +939,9 @@ def _recommendations(
             tasks = fix.tasks or line.tasks
         else:
             title = f"Reduce {line.cause}"
-            detail = REMEDIES[line.rule]
-            if blocked is not None:
-                detail = REMEDIES_WITHOUT_ACT.get(line.rule, detail)
-                if fix is not None and mode is not Mode.ACT:
-                    detail += f" (act mode is not available here: {md.text(blocked)})"
+            detail = remedy(line.rule, inputs.farm, blocked is None)
+            if blocked is not None and fix is not None and mode is not Mode.ACT:
+                detail += f" (act mode is not available here: {md.text(blocked)})"
             tasks = line.tasks
         candidates.append(Advice(title, detail, line.spend.usd, line.hours, tasks))
     return tuple(_top(candidates, inputs.hour_usd))

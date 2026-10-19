@@ -24,6 +24,7 @@ from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import Snapshot
 from kelpie.metrics import Metrics
 from kelpie.report.daily import StuckCheck, day_bounds
+from kelpie.report.farm import FarmFacts
 from kelpie.report.fixes import MANUAL, FixEvent, FixStore
 from kelpie.report.run import ReportSources, Sender, default_day, generate, send, write
 from kelpie.report.schedule import ReportScheduler, RunLog
@@ -58,6 +59,20 @@ def sources(settings: Settings) -> ReportSources:
         act_blockers={
             rule: b.reason for rule, b in act_blockers(settings, build_adapters(settings)).items()
         },
+        farm=farm_facts(settings),
+    )
+
+
+def farm_facts(settings: Settings) -> FarmFacts:
+    """What the farm already has, from its config: the report never advises it."""
+    rules = settings.engine.rules
+    needs_you = rules.get("needs_you", {})
+    bottlenecks = rules.get("bottlenecks", {})
+    return FarmFacts(
+        approvers=bool(needs_you.get("approvers") or needs_you.get("default_approver")),
+        hold_expiry=bool(bottlenecks.get("holds") or bottlenecks.get("hold_expiry")),
+        block_conditions=bool(settings.block_conditions),
+        budgets=bool(settings.budgets.budgets),
     )
 
 
