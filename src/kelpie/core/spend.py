@@ -22,6 +22,9 @@ from the config alone, so every command that reads modes gives the same answer o
    API, as weak evidence;
 6. otherwise unknown, and ``kelpie doctor`` says how to set it.
 
+A model of no known provider (``mode_for(None)``) is subscription only under a subscription
+budget that names no providers; otherwise unknown.
+
 **Provider of a model** (:meth:`SpendConfig.provider_for`): the first
 ``[spend.providers.<name>] models`` pattern (a name or a glob, on the model id as written
 or, case-insensitively, its canonical id) that matches, then the provider the default
@@ -141,7 +144,11 @@ class SpendConfig:
 
     def mode_for(self, provider: str | None) -> ProviderMode:
         """The spend mode of ``provider`` and why (module docstring, first match wins)."""
-        if provider is None:
+        if provider is None:  # only a budget that covers every provider tells
+            for b in self.budgets:
+                if b.mode is BudgetMode.SUBSCRIPTION and b.providers is None:
+                    reason = f"budget {b.name!r} has mode = subscription and covers every provider"
+                    return ProviderMode(None, SpendMode.SUBSCRIPTION, reason)
             return ProviderMode(None, SpendMode.UNKNOWN, "the model's provider is not known")
         where = f"[spend.providers.{provider}]"
         own = self._own(provider)

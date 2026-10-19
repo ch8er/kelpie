@@ -180,3 +180,11 @@ def test_modes_lists_configured_providers_first() -> None:
         None,
     ]
     assert spend.mode_for_model("gpt-5").mode is SpendMode.API
+
+
+def test_a_budget_over_every_provider_covers_models_of_no_known_provider() -> None:
+    every = config(None, [budget(mode="subscription")])
+    found = every.mode_for(None)
+    assert found.mode is SpendMode.SUBSCRIPTION and "covers every provider" in found.reason
+    named = config(None, [budget(mode="subscription", providers=["claude-max"])])
+    assert named.mode_for(None).mode is SpendMode.UNKNOWN  # names a provider, not this one

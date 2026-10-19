@@ -859,6 +859,9 @@ first match wins:
    (weak evidence: set `mode` to be sure);
 4. otherwise `unknown`: `kelpie doctor` warns and says what to set.
 
+A model whose provider nothing tells is `subscription` only under a subscription budget
+that names no providers (it covers them all); otherwise `unknown`.
+
 A subscription budget whose `providers` names a probe that no `quotas` lists sets no
 provider's mode; `kelpie serve` logs it and `kelpie doctor` warns.
 
