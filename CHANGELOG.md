@@ -185,8 +185,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   own words come in English or Russian (`[alerts] language`) ([#169](https://github.com/ch8er/kelpie/issues/169)).
 - The daily report's chat summary uses the same layout: its title, the headline in bold under
   the severity's icon, the biggest wait, the open conditions and the top recommendations as
-  lines, and an "Open report" link when the report has an address (no setting provides one
-  yet, so the link is not shown). Telegram gets HTML, Slack
+  lines, and an "Open report" link when `[report] url` gives the report's address (a
+  template with `{date}`). Telegram gets HTML, Slack
   rich_text blocks, with the same escaping, size limits, de-duplication and retries as alerts;
   "Open report" and "and N more" follow `[alerts] language`, the report's own text stays
   English ([#169](https://github.com/ch8er/kelpie/issues/169)).

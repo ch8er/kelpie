@@ -1418,11 +1418,11 @@ def summary_title(report: DailyReport) -> str:
     return f"Kelpie daily report {report.day.isoformat()}"
 
 
-def summary_items(report: DailyReport) -> tuple[str, list[str], str | None]:
+def summary_items(report: DailyReport, url: str | None = None) -> tuple[str, list[str], str | None]:
     """The chat summary as (headline, items, link): the headline is the report's, the items
     its biggest wait, the open conditions and the numbered top recommendations, one line
-    each. The link is the full report's URL; no setting holds one yet (``[report] dir`` is a
-    directory on the Kelpie host), so it is None. A channel lays these out
+    each. The link is the full report's address: ``url`` (``[report] url``) with the day
+    for ``{date}``; None without one. A channel lays these out
     (:meth:`kelpie.alerts.Delivery.send_summary`); :func:`render_summary` is the plain
     text."""
     items: list[str] = []
@@ -1431,14 +1431,15 @@ def summary_items(report: DailyReport) -> tuple[str, list[str], str | None]:
     if report.open_states:
         items.append(f"Needs a human: {len(report.open_states)} open condition(s).")
     items += [f"{i}. {a.title}" for i, a in enumerate(report.recommendations, 1)]
-    return _headline(report), items, None
+    link = url.replace("{date}", report.day.isoformat()) if url is not None else None
+    return _headline(report), items, link
 
 
-def render_summary(report: DailyReport) -> str:
+def render_summary(report: DailyReport, url: str | None = None) -> str:
     """A short plain-text summary for a chat channel (the full report is the Markdown):
     :func:`summary_title`, then the headline and items of :func:`summary_items`, a line
     each, and the link, if there is one."""
-    headline, items, link = summary_items(report)
+    headline, items, link = summary_items(report, url)
     lines = [summary_title(report), headline, *items]
     if link is not None:
         lines.append(link)
