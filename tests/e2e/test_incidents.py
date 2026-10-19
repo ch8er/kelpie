@@ -166,7 +166,8 @@ def test_incident_15_waiting_for_merge_block_clears_once_merged(farm: Farm) -> N
     text = farm.wait_message("stale_blocks", "Suggested: clear the block on t_merged")
     assert "pr_merged" in text
     dead = farm.wait_message("stale_blocks", "t_closed")
-    assert "never clear on its own" in dead
+    assert "never clear on its own" in dead  # the reason, as "Why"
+    assert "Block on t_closed can never clear: PR #59 closed without merging" in dead
     settle(farm)
     assert farm.messages("t_open") == []  # still in the merge queue: waiting, not dead
     assert farm.messages("exit_contract") == []
@@ -408,7 +409,8 @@ def test_a_block_that_asks_a_person_is_left_to_the_inbox(farm: Farm) -> None:
 
     digest = farm.wait_message("Rule: needs_you", "t_r2")
     assert "Waiting for you: 1 task" in digest and question in digest
-    farm.wait_message("Rule: stale_blocks", "t_vague", "no condition Kelpie can check")
+    vague = farm.wait_message("Rule: stale_blocks", "t_vague", "no condition Kelpie can check")
+    assert "t_vague blocked 5h with nothing Kelpie can check" in vague  # the rule's headline
     settle(farm)
     assert farm.messages("Rule: stale_blocks", "t_r2") == []
     board_unchanged(farm, before)

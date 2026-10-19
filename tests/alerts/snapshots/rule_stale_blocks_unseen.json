@@ -1,0 +1,126 @@
+{
+  "text": "🟡 T-181 blocked 5h on a condition Kelpie cannot see: C-gone\n\n1. Review: tighten the upload limits — 5.0 h · T-181\n   Needed: Fix the condition the block points at, or clear the block\n   Blocking: 1 task · Open task: https://board.example.org/tasks/T-181\nWhy: Task T-181 has been blocked for 5h on 'waiting for CI on the release branch' and names condition C-gone, which Kelpie cannot see, so nothing will clear it automatically. 1 task(s) wait behind it: T-183.\nRule: stale_blocks",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "T-181 blocked 5h on a condition Kelpie cannot see: C-gone",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Review: tighten the upload limits",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 5.0 h · "
+            },
+            {
+              "type": "text",
+              "text": "T-181",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Needed: "
+            },
+            {
+              "type": "text",
+              "text": "Fix the condition the block points at, or clear the block"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Blocking: 1 task"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/T-181",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Task T-181 has been blocked for 5h on 'waiting for CI on the release branch' and names condition C-gone, which Kelpie cannot see, so nothing will clear it automatically. 1 task(s) wait behind it: T-183."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "stale_blocks",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -75,6 +75,11 @@ notice says the block is snoozed.
 The dead-end and no-condition alerts list the tasks stuck behind the blocked one
 (``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
 does not raise a second alert for the same dead end.
+
+Each alert kind has its own headline and, where there is a concrete ask, ``needed``
+(:func:`kelpie.rules._alerts.alert_params`): the block's reason is never in them (it stays the
+alert's "Why"). ``blocking`` is the number of tasks behind the blocked one in the graph the
+rules share (``behind_lookup``), which is also ``params.stuck_ids`` where an alert has it.
 """
 
 from __future__ import annotations
@@ -89,6 +94,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Condition, ConditionKind, KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import needs_you, register
+from kelpie.rules._alerts import alert_params
 from kelpie.rules._chains import behind_lookup, behind_text
 from kelpie.rules._snoozes import SnoozeCheck, checker, describe
 from kelpie.rules._tasks import (
@@ -172,7 +178,20 @@ class StaleBlocks:
                     f"'{block.reason}' and {what}, so nothing will clear it automatically."
                     + behind_text(stuck)
                     + _back(snooze),
-                    {"stuck_ids": stuck, **_snooze_params(snooze)},
+                    {
+                        "stuck_ids": stuck,
+                        **_snooze_params(snooze),
+                        **alert_params(
+                            f"{task.id} blocked {_short(age)} on a condition Kelpie "
+                            f"cannot see: {missing}"
+                            if missing
+                            else f"{task.id} blocked {_short(age)} with nothing Kelpie can check",
+                            "Fix the condition the block points at, or clear the block"
+                            if missing
+                            else "Clear the block, or register a condition Kelpie can check",
+                            len(stuck),
+                        ),
+                    },
                     about_wait=not missing,  # a reference Kelpie cannot see is broken
                 )
             return
@@ -191,12 +210,24 @@ class StaleBlocks:
             )
         ):
             names = ", ".join(c.id for c in stale)
+            kinds = _unique(c.kind for c in stale)
+            unchecked = [snapshot.now - c.checked_at for c in stale if c.checked_at is not None]
             yield self._alert(
                 task,
                 "stale-evidence",
                 f"Task {task.id} has been blocked for {_human(age)}, but "
                 f"condition(s) {names} have not been checked for over "
                 f"{_human(self.stale_evidence_after)}: is the connector running?",
+                alert_params(
+                    f"Evidence for {task.id}'s block is stale: {', '.join(kinds)} "
+                    + (
+                        f"not checked for {_short(min(unchecked))}"
+                        if unchecked
+                        else "never checked"
+                    ),
+                    _check_connectors(kinds),
+                    len(behind(task.id)),
+                ),
             )
             return
         ended = dead_ends(conditions, block.since)
@@ -209,20 +240,39 @@ class StaleBlocks:
                 "dead-end",
                 f"Task {task.id} is blocked on '{block.reason}', but {dead_end_text(ended)}: "
                 "the block will never clear on its own." + behind_text(stuck),
-                {"stuck_ids": stuck},
+                {
+                    "stuck_ids": stuck,
+                    **alert_params(
+                        f"Block on {task.id} can never clear: {_ended(ended)}",
+                        "Replace the blocker that can never clear",
+                        len(stuck),
+                    ),
+                },
             )
             return
         if not all(c.satisfied for c in conditions):
             if theirs or held:
                 return  # rule 13 lists it (it waits on a human task), or it is snoozed
             if self.max_block is not None and age >= self.max_block:
-                pending = ", ".join(f"{c.id} ({c.kind})" for c in conditions if not c.satisfied)
+                unmet = [c for c in conditions if not c.satisfied]
+                pending = ", ".join(f"{c.id} ({c.kind})" for c in unmet)
                 yield self._alert(
                     task,
                     "overdue",
                     f"Task {task.id} has been blocked for {_human(age)} "
                     f"(limit {_human(self.max_block)}) waiting for {pending}." + _back(snooze),
-                    _snooze_params(snooze),
+                    {
+                        **_snooze_params(snooze),
+                        **alert_params(
+                            f"{task.id} blocked {_short(age)}, past the "
+                            f"{_human(self.max_block)} limit: waiting for "
+                            + ", ".join(_unique(c.kind for c in unmet)),
+                            "Check why the condition has not cleared, or clear the block"
+                            if len(unmet) == 1
+                            else "Check why the conditions have not cleared, or clear the block",
+                            len(behind(task.id)),
+                        ),
+                    },
                 )
             return
         if not all(fresh(c, block.since, snapshot.now, self.max_condition_age) for c in conditions):
@@ -333,6 +383,48 @@ def _human(d: timedelta) -> str:
     if hours and minutes:
         return f"{hours}h {minutes:02d}m"
     return f"{hours}h" if hours else f"{minutes}m"
+
+
+def _short(d: timedelta) -> str:
+    """A span for a headline, rounded down: ``44h``, ``45m``."""
+    minutes = max(0, int(d.total_seconds() // 60))
+    return f"{minutes // 60}h" if minutes >= 60 else f"{minutes}m"
+
+
+def _unique(values: Iterable[Any]) -> list[str]:
+    return list(dict.fromkeys(str(v) for v in values))
+
+
+def _check_connectors(kinds: Sequence[str]) -> str:
+    """The ask for stale evidence, by condition kind: which connector checks a kind is the
+    deployment's business (a rule cannot know); the doctor lists the connectors."""
+    names = kinds[0] if len(kinds) == 1 else f"{', '.join(kinds[:-1])} and {kinds[-1]}"
+    return (
+        f"Check that whatever checks {names} conditions is running "
+        "(kelpie doctor shows the connectors)"
+    )
+
+
+def _ended(ended: Sequence[Condition]) -> str:
+    """What ended wrong, for a headline: ``PR #12 closed without merging``."""
+    first = _ended_one(ended[0])
+    return first if len(ended) == 1 else f"{first} and {len(ended) - 1} more"
+
+
+def _ended_one(c: Condition) -> str:
+    if c.kind is ConditionKind.PR_MERGED:
+        pr = c.params.get("pr")
+        valid = (isinstance(pr, int) and not isinstance(pr, bool) and pr > 0) or (
+            isinstance(pr, str) and pr.isascii() and pr.isdigit()
+        )
+        return f"PR #{pr} closed without merging" if valid else "its PR closed without merging"
+    ref = c.params.get("task")
+    if c.kind in (ConditionKind.HUMAN_TASK, ConditionKind.TASK_STATUS) and isinstance(ref, str):
+        human = c.kind is ConditionKind.HUMAN_TASK
+        status = c.params.get("status" if human else "observed_status")
+        what = f"{'human task' if human else 'task'} {ref}"
+        return f"{what} ended as {status}" if isinstance(status, str) else f"{what} ended"
+    return f"{c.kind} condition {c.id} can no longer be met"
 
 
 def _duration(value: Any, name: str, allow_zero: bool = False) -> timedelta:

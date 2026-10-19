@@ -1,0 +1,7 @@
+🟡 Evidence for T-112's block is stale: ci_status not checked for 3h
+
+1. Rename config keys — 4.0 h · T-112
+   Needed: Check that whatever checks ci_status conditions is running (kelpie doctor shows the connectors)
+   Blocking: none · Open task: https://board.example.org/tasks/T-112
+Why: Task T-112 has been blocked for 4h, but condition(s) C-112 have not been checked for over 1h: is the connector running?
+Rule: stale_blocks

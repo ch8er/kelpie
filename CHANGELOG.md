@@ -217,7 +217,17 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   100 characters is cut at a word, never inside a quote. The reason stays whole under it as
   "Why", also when a task link is set, and is unchanged in the ledger and the report. These
   lines are the rule's English: `[alerts] language` translates Kelpie's fixed words only.
-  Every rule but `stale_blocks` and `needs_you` so far
+  Every rule but `needs_you`, whose digest has lines of its own
+  ([#169](https://github.com/ch8er/kelpie/issues/169)).
+- Rule 4 (`stale_blocks`) words each of its alerts: "T-1 blocked 44h with nothing Kelpie can
+  check" (needed: "Clear the block, or register a condition Kelpie can check"), "T-1 blocked
+  5h on a condition Kelpie cannot see: C-9", "T-1 blocked 9h, past the 8h limit: waiting
+  for pr_merged", "Block on T-1 can never clear: PR #12 closed without merging" (needed:
+  "Replace the blocker that can never clear") and "Evidence for T-1's block is stale:
+  human_task not checked for 2h" (needed: "Check that whatever checks human_task conditions is running (kelpie doctor shows
+  the connectors)", worded by condition kind because a rule cannot know connector names),
+  each with the number of tasks waiting behind the block. The block's own text is not in them;
+  it stays in "Why", and the reasons are unchanged
   ([#169](https://github.com/ch8er/kelpie/issues/169)).
 
 #### Operations

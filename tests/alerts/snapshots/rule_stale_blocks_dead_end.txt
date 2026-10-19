@@ -1,0 +1,7 @@
+🟡 Block on T-1051 can never clear: PR #127 closed without merging
+
+1. Review: drop legacy exporter — 1.0 h · T-1051
+   Needed: Replace the blocker that can never clear
+   Blocking: none · Open task: https://board.example.org/tasks/T-1051
+Why: Task T-1051 is blocked on 'waiting for CI/merge of #127', but the PR was closed without merging (block:T-1051:pr_merged:example/repo#127): the block will never clear on its own.
+Rule: stale_blocks

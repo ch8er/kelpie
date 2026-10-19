@@ -1,0 +1,126 @@
+{
+  "text": "🟡 Block on T-1051 can never clear: PR #127 closed without merging\n\n1. Review: drop legacy exporter — 1.0 h · T-1051\n   Needed: Replace the blocker that can never clear\n   Blocking: none · Open task: https://board.example.org/tasks/T-1051\nWhy: Task T-1051 is blocked on 'waiting for CI/merge of #127', but the PR was closed without merging (block:T-1051:pr_merged:example/repo#127): the block will never clear on its own.\nRule: stale_blocks",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Block on T-1051 can never clear: PR #127 closed without merging",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Review: drop legacy exporter",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 1.0 h · "
+            },
+            {
+              "type": "text",
+              "text": "T-1051",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Needed: "
+            },
+            {
+              "type": "text",
+              "text": "Replace the blocker that can never clear"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Blocking: none"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/T-1051",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Task T-1051 is blocked on 'waiting for CI/merge of #127', but the PR was closed without merging (block:T-1051:pr_merged:example/repo#127): the block will never clear on its own."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "stale_blocks",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

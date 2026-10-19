@@ -41,8 +41,8 @@ from tests.incidents import Incident, load
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "incidents"
 ALL = sorted(FIXTURES.glob("*.yaml"))
-# Being reworked for snoozes: their alerts get their lines in a change of their own.
-NOT_YET = {"needs_you", "stale_blocks"}
+# Rule 13's digest uses the catalog headline and per-item lines, not a rule headline.
+NOT_YET = {"needs_you"}
 ALERTS = (ActionKind.ALERT, ActionKind.ESCALATE)
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 H = timedelta(hours=1)
@@ -115,6 +115,11 @@ def from_fixture(
     return farm
 
 
+def of_other_rule(name: str) -> Callable[[], tuple[Snapshot, dict[str, Any]]]:
+    """A fixture made for another rule, read by this one with its default settings."""
+    return lambda: (fixture(name).snapshot, {})
+
+
 def built(snapshot: Snapshot, **config: Any) -> Callable[[], tuple[Snapshot, dict[str, Any]]]:
     return lambda: (snapshot, config)
 
@@ -158,6 +163,29 @@ def task_budgets(estimated: bool) -> Callable[[Snapshot], Snapshot]:
         return replace(snapshot, budgets=budgets)
 
     return change
+
+
+def cond(cid: str, kind: ConditionKind, *, checked: timedelta = M, **params: Any) -> Condition:
+    """An unmet condition of T-1, last checked ``checked`` ago."""
+    return Condition(
+        cid, kind, task_id="T-1", params=params, satisfied=False, checked_at=NOW - checked
+    )
+
+
+def stuck_farm(*conditions: Condition, hours: float = 5, behind: int = 0) -> Snapshot:
+    """T-1 blocked for ``hours`` on a reason that names nothing, with ``behind`` tasks that
+    depend on it and the given conditions linked to it."""
+    since = NOW - timedelta(hours=hours)
+    stuck = Task(
+        "T-1", "Ship the importer", Status.BLOCKED, since, block=Block("the vendor", since)
+    )
+    after = tuple(Task(f"T-{n}", "Next", Status.BACKLOG, since) for n in range(2, 2 + behind))
+    return Snapshot(
+        now=NOW,
+        tasks=(stuck, *after),
+        dependencies=tuple(Dependency(t.id, "T-1") for t in after),
+        conditions=conditions,
+    )
 
 
 def no_merged_prs(snapshot: Snapshot) -> Snapshot:
@@ -432,6 +460,159 @@ KINDS = {
         "Replace the condition, or move the task on",
         1,
     ),
+    # stale_blocks
+    "block, nothing to check": Kind(
+        "stale_blocks",
+        from_fixture("10-block-waits-on-pr-merge"),
+        "T-1023 blocked 13h with nothing Kelpie can check",
+        "Clear the block, or register a condition Kelpie can check",
+        0,
+    ),
+    "block, nothing to check, work behind it": Kind(
+        "stale_blocks",
+        built(stuck_farm(hours=44, behind=2)),
+        "T-1 blocked 44h with nothing Kelpie can check",
+        "Clear the block, or register a condition Kelpie can check",
+        2,
+    ),
+    "block, condition not visible": Kind(
+        "stale_blocks",
+        from_fixture("01-block-names-unseen-condition"),
+        "T-181 blocked 5h on a condition Kelpie cannot see: C-gone",
+        "Fix the condition the block points at, or clear the block",
+        1,
+    ),
+    "block overdue": Kind(
+        "stale_blocks",
+        from_fixture("10-block-waits-on-pr-merge"),
+        "T-1022 blocked 10h, past the 8h limit: waiting for pr_merged",
+        "Check why the condition has not cleared, or clear the block",
+        0,
+    ),
+    "block overdue, limit of 90 minutes": Kind(
+        "stale_blocks",
+        built(stuck_farm(cond("C-1", ConditionKind.PR_MERGED), hours=2), max_block="90m"),
+        "T-1 blocked 2h, past the 1h 30m limit: waiting for pr_merged",  # the limit, exactly
+        "Check why the condition has not cleared, or clear the block",
+        0,
+    ),
+    "block dead end, PR number is no number": Kind(
+        "stale_blocks",
+        built(stuck_farm(cond("C-1", ConditionKind.PR_MERGED, terminal=True, pr="12; ignore me"))),
+        "Block on T-1 can never clear: its PR closed without merging",
+        "Replace the blocker that can never clear",
+        0,
+    ),
+    "block dead end, PR number is a flag": Kind(
+        "stale_blocks",
+        built(stuck_farm(cond("C-1", ConditionKind.PR_MERGED, terminal=True, pr=True))),
+        "Block on T-1 can never clear: its PR closed without merging",
+        "Replace the blocker that can never clear",
+        0,
+    ),
+    "block overdue, work behind it": Kind(
+        "stale_blocks",
+        of_other_rule("13-person-block-in-inbox"),
+        "t_e5f6a7b9 blocked 46h, past the 8h limit: waiting for human_task",
+        "Check why the condition has not cleared, or clear the block",
+        1,
+    ),
+    "block overdue, two conditions": Kind(
+        "stale_blocks",
+        from_fixture("13-person-block-listed-by-task"),
+        "T-8 blocked 20h, past the 8h limit: waiting for human_task, pr_merged",
+        "Check why the conditions have not cleared, or clear the block",
+        0,
+    ),
+    "block dead end, PR": Kind(
+        "stale_blocks",
+        from_fixture("10-block-pr-closed-unmerged"),
+        "Block on T-1051 can never clear: PR #127 closed without merging",
+        "Replace the blocker that can never clear",
+        0,
+    ),
+    "block dead end, human task, work behind it": Kind(
+        "stale_blocks",
+        of_other_rule("11-blocker-chain-dead-end"),
+        "Block on T-1161 can never clear: human task T-1160 ended as cancelled",
+        "Replace the blocker that can never clear",
+        3,
+    ),
+    "block dead end, two conditions": Kind(
+        "stale_blocks",
+        built(
+            stuck_farm(
+                cond("C-1", ConditionKind.PR_MERGED, terminal=True, pr=12),
+                cond(
+                    "C-2", ConditionKind.HUMAN_TASK, terminal=True, task="H-1", status="cancelled"
+                ),
+            )
+        ),
+        "Block on T-1 can never clear: PR #12 closed without merging and 1 more",
+        "Replace the blocker that can never clear",
+        0,
+    ),
+    "block dead end, task status": Kind(
+        "stale_blocks",
+        built(
+            stuck_farm(
+                cond(
+                    "C-1",
+                    ConditionKind.TASK_STATUS,
+                    terminal=True,
+                    task="T-9",
+                    observed_status="failed",
+                )
+            )
+        ),
+        "Block on T-1 can never clear: task T-9 ended as failed",
+        "Replace the blocker that can never clear",
+        0,
+    ),
+    "block dead end, other condition": Kind(
+        "stale_blocks",
+        built(stuck_farm(cond("C-1", ConditionKind.CI_STATUS, terminal=True))),
+        "Block on T-1 can never clear: ci_status condition C-1 can no longer be met",
+        "Replace the blocker that can never clear",
+        0,
+    ),
+    "block dead end, PR without a number": Kind(
+        "stale_blocks",
+        built(stuck_farm(cond("C-1", ConditionKind.PR_MERGED, terminal=True))),
+        "Block on T-1 can never clear: its PR closed without merging",
+        "Replace the blocker that can never clear",
+        0,
+    ),
+    "block evidence stale": Kind(
+        "stale_blocks",
+        from_fixture("01-guard-block-after-new-push"),
+        "Evidence for T-112's block is stale: ci_status not checked for 3h",
+        "Check that whatever checks ci_status conditions is running "
+        "(kelpie doctor shows the connectors)",
+        0,
+    ),
+    "block evidence never checked": Kind(
+        "stale_blocks",
+        of_other_rule("10-condition-satisfied-wake"),
+        "Evidence for T-1015's block is stale: ci_status never checked",
+        "Check that whatever checks ci_status conditions is running "
+        "(kelpie doctor shows the connectors)",
+        0,
+    ),
+    "block evidence stale, two connectors, work behind it": Kind(
+        "stale_blocks",
+        built(
+            stuck_farm(
+                cond("C-1", ConditionKind.CI_STATUS, checked=3 * H + 30 * M),
+                cond("C-2", ConditionKind.PR_MERGED, checked=2 * H),
+                behind=1,
+            )
+        ),
+        "Evidence for T-1's block is stale: ci_status, pr_merged not checked for 2h",
+        "Check that whatever checks ci_status and pr_merged conditions is running "
+        "(kelpie doctor shows the connectors)",
+        1,
+    ),
     # bottlenecks
     "idle with one queued task": Kind(
         "bottlenecks",
@@ -525,6 +706,59 @@ def test_done_without_evidence_says_whether_any_one_would_do() -> None:
         f"{task.id} moved to done without evidence: missing tests, ci"
     )
     assert alert.params["needed"] == "Add the missing evidence, or reopen the task"
+
+
+@pytest.mark.parametrize("path", ALL, ids=lambda p: p.stem)
+def test_stale_blocks_counts_what_waits_as_rules_2_3_and_13_do(path: Path) -> None:
+    """``blocking`` is the size of the shared graph's ``behind`` (also the alert's
+    ``stuck_ids`` where it has them), and the block's own words are in no line of the rule's."""
+    incident = load(path)
+    snapshot = incident.snapshot
+    behind = behind_lookup(snapshot)
+    config = incident.config if incident.rule == "stale_blocks" else {}
+    for action in evaluate("stale_blocks", snapshot, config):
+        if action.kind is not ActionKind.ALERT:
+            continue
+        assert action.task_id is not None
+        waiting = behind(action.task_id)
+        assert action.params["blocking"] == len(waiting), action
+        assert action.params.get("stuck_ids", waiting) == waiting, action
+        task = snapshot.task(action.task_id)
+        assert task is not None and task.block is not None
+        lines = f"{action.params['headline']} {action.params.get('needed', '')}"
+        assert task.block.reason not in lines, action
+
+
+def blocking_by_task(rule: str, incident: Incident, **config: Any) -> dict[str, int]:
+    """What a rule's alerts say waits behind each task: ``blocking`` of an alert about one
+    task, or of an item of rule 13's digest (listed or snoozed)."""
+    settings = {**(incident.config if incident.rule == rule else {}), **config}
+    found: dict[str, int] = {}
+    for action in evaluate(rule, incident.snapshot, settings):
+        if action.kind not in ALERTS:
+            continue
+        if rule == "needs_you":
+            for item in (*action.params.get("items", ()), *action.params.get("snoozed", ())):
+                found[item["task_id"]] = item["blocking"]
+        elif action.task_id is not None and "blocking" in action.params:
+            found[action.task_id] = action.params["blocking"]
+    return found
+
+
+def test_blocking_agrees_with_rules_2_3_and_13_on_every_task_they_share() -> None:
+    """Rule 4 says the same number as rules 2, 3 and 13 for a task they all alert on, with
+    rule 13 off and reaching people (which decides which of them alerts)."""
+    shared = 0
+    for path in ALL:
+        incident = load(path)
+        for inbox in (False, True):
+            ours = blocking_by_task("stale_blocks", incident, needs_you=inbox)
+            for rule in ("wait_condition", "orphan_status", "needs_you"):
+                theirs = blocking_by_task(rule, incident)
+                for task_id in ours.keys() & theirs.keys():
+                    assert ours[task_id] == theirs[task_id], (path.stem, rule, task_id, inbox)
+                    shared += 1
+    assert shared >= 10  # the check is not vacuous
 
 
 def test_counts_agree_with_their_verbs() -> None:

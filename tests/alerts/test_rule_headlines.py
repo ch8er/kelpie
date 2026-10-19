@@ -44,8 +44,14 @@ CASES = {
     "rule_resources": ("06-provider-quota-exhausted", "no quota left"),
     "rule_return_causes": ("18-flaky-test-returns", "Flaky test"),
     "rule_bottlenecks": ("16-human-task-gates-chain", "Human tasks gate"),
+    # rule 4, one golden per alert kind
+    "rule_stale_blocks_unlinked": ("10-block-waits-on-pr-merge", "nothing Kelpie can check"),
+    "rule_stale_blocks_unseen": ("01-block-names-unseen-condition", "cannot see"),
+    "rule_stale_blocks_overdue": ("10-block-waits-on-pr-merge", "past the 8h limit"),
+    "rule_stale_blocks_dead_end": ("10-block-pr-closed-unmerged", "can never clear"),
+    "rule_stale_blocks_stale_evidence": ("01-guard-block-after-new-push", "is stale"),
 }
-RUSSIAN = ("rule_wait_condition", "rule_orphan_status")
+RUSSIAN = ("rule_wait_condition", "rule_orphan_status", "rule_stale_blocks_unseen")
 
 # A review return as agents write it on a mixed farm: long, half Russian, with a quote.
 MIXED = (
@@ -127,6 +133,31 @@ def test_a_long_mixed_language_reason_stays_under_a_short_headline() -> None:
     why = next(line for line in lines if line.startswith("Why: "))
     assert why.endswith("…") and len(why) <= len("Why: ") + render.MAX_REASON
     assert "«тест test_checkout_total падает на CI после rebase»" in why
+
+
+def test_rule_4_keeps_a_long_mixed_language_block_reason_out_of_its_lines() -> None:
+    """A block that stays rule 4's (an agent's, with nothing to check) quotes the agent's long
+    half-Russian words in "Why", cut at its limit; the headline and "Needed" are the rule's."""
+    incident = load(FIXTURES / "10-block-waits-on-pr-merge.yaml")
+    snapshot = incident.snapshot
+    tasks = tuple(
+        replace(t, block=replace(t.block, reason=MIXED * 2)) if t.id == "T-1023" and t.block else t
+        for t in snapshot.tasks
+    )
+    (event,) = [
+        e
+        for e in alerts(incident, replace(snapshot, tasks=tasks))
+        if "nothing Kelpie can check" in (e.headline or "")
+    ]
+    assert len(event.reason) > render.MAX_REASON
+    text = check("rule_stale_blocks_mixed", event)
+    lines = text.splitlines()
+    assert lines[0] == "\U0001f7e1 T-1023 blocked 13h with nothing Kelpie can check"
+    assert "Needed: Clear the block, or register a condition Kelpie can check" in text
+    why = next(line for line in lines if line.startswith("Why: "))
+    assert why.endswith("…") and len(why) <= len("Why: ") + render.MAX_REASON
+    assert "«тест test_checkout_total падает на CI после rebase»" in why
+    assert "тест" not in lines[0]
 
 
 def test_a_rules_headline_keeps_the_reason_under_a_task_that_says_what_it_needs() -> None:

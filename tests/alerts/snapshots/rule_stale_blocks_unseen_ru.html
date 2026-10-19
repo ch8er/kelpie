@@ -1,0 +1,7 @@
+🟡 <b>T-181 blocked 5h on a condition Kelpie cannot see: C-gone</b>
+
+1. <b>Review: tighten the upload limits</b> — 5,0 ч · <code>T-181</code>
+   Нужно: Fix the condition the block points at, or clear the block
+   Блокирует: 1 задача · <a href="https://board.example.org/tasks/T-181">Открыть задачу</a>
+Почему: Task T-181 has been blocked for 5h on &#x27;waiting for CI on the release branch&#x27; and names condition C-gone, which Kelpie cannot see, so nothing will clear it automatically. 1 task(s) wait behind it: T-183.
+Правило: <code>stale_blocks</code>
