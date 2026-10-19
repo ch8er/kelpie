@@ -958,7 +958,7 @@ def _recommendations(
                 f"subject(s); {line.cause} lasted {line.hours:.1f} condition-hours"
             )
             if inputs.farm.dry_run:
-                detail += " (Kelpie runs in dry-run: set [engine] dry_run = false too)"
+                detail += " (Kelpie runs in dry-run: no rule acts until [engine] dry_run = false)"
             tasks = fix.tasks or line.tasks
         else:
             title = f"Reduce {line.cause}"
