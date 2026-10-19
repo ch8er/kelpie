@@ -163,6 +163,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   bill is checked against the estimate from traces ([#195](https://github.com/ch8er/kelpie/pull/195), [#209](https://github.com/ch8er/kelpie/pull/209)).
 - Before/after verification of fixes recorded with `kelpie fix`, and `kelpie fix --list`
   ([#54](https://github.com/ch8er/kelpie/pull/54), [#57](https://github.com/ch8er/kelpie/pull/57)).
+- `kelpie fix --at` takes `now` and times before now (`-30m`, `-2h`, `-1d2h`) as well as
+  ISO times, and the confirmation gives the recorded time in UTC.
 - Farm throughput per role, live gauges and Grafana panels; rework counted for the role that
   redid the work, not the reviewer ([#78](https://github.com/ch8er/kelpie/pull/78), [#116](https://github.com/ch8er/kelpie/pull/116)).
 - A sections extension point with per-section settings, and token sections that read them

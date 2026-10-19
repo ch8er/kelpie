@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -26,6 +27,21 @@ from kelpie.app import (
 )
 
 log = logging.getLogger("kelpie.cli")
+
+
+_RELATIVE = re.compile(r"-\d+[dhms]\w*")
+
+
+def _relative_at(argv: list[str]) -> list[str]:
+    """``--at -2h`` as ``--at=-2h``: argparse takes a value that starts with ``-`` for an
+    option."""
+    out: list[str] = []
+    for arg in argv:
+        if out and out[-1] == "--at" and _RELATIVE.fullmatch(arg):
+            out[-1] = f"--at={arg}"
+        else:
+            out.append(arg)
+    return out
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -54,7 +70,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     fix.add_argument("--role", help="the role it applies to")
     fix.add_argument(
-        "--at", help="when (ISO time; without an offset in [report] timezone; default: now)"
+        "--at",
+        help="when: now (the default), a time before now such as -30m, -2h or -1d2h, or an "
+        "ISO time (without an offset: in [report] timezone)",
     )
     fix.add_argument(
         "--list", action="store_true", help="list the fixes recorded in the last --days instead"
@@ -147,7 +165,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     scrub.add_argument("--dry-run", action="store_true", help="count, change nothing")
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_relative_at(sys.argv[1:] if argv is None else list(argv)))
     logging.basicConfig(
         level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )

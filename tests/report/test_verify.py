@@ -462,3 +462,55 @@ def test_kelpie_fix_list(
         assert exc.value.code == 2 and why in capsys.readouterr().err
     assert main([*args, "--list", "--days", "3650"]) == 0
     assert "old" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("when", "expected"),
+    [
+        ("now", datetime(2026, 3, 1, 12, tzinfo=UTC)),
+        ("NOW", datetime(2026, 3, 1, 12, tzinfo=UTC)),
+        ("-30m", datetime(2026, 3, 1, 11, 30, tzinfo=UTC)),
+        ("-2h", datetime(2026, 3, 1, 10, tzinfo=UTC)),
+        ("-1d2h", datetime(2026, 2, 28, 10, tzinfo=UTC)),
+        ("2026-03-01T08:00:00+00:00", datetime(2026, 3, 1, 8, tzinfo=UTC)),
+        ("2026-03-01T17:00", datetime(2026, 3, 1, 8, tzinfo=UTC)),  # Tokyo, as typed
+    ],
+)
+def test_parse_when(when: str, expected: datetime) -> None:
+    from zoneinfo import ZoneInfo
+
+    from kelpie.core.serde import parse_when
+
+    now = datetime(2026, 3, 1, 12, tzinfo=UTC)
+    assert parse_when(when, now, ZoneInfo("Asia/Tokyo")) == expected
+
+
+@pytest.mark.parametrize("when", ["yesterday", "-0m", "-", "-2x", "+2h", "2h", ""])
+def test_parse_when_refuses(when: str) -> None:
+    from kelpie.core.serde import parse_when
+
+    with pytest.raises(ValueError, match="now"):
+        parse_when(when, datetime(2026, 3, 1, 12, tzinfo=UTC), UTC)
+
+
+def test_kelpie_fix_at_now_and_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n[report]\ntimezone = "Asia/Tokyo"\n'
+    )
+    SqliteLedgerStore(tmp_path / "kelpie.db").close()
+    args = ["--config", str(path), "fix"]
+    assert main([*args, "one", "--at", "now"]) == 0
+    assert main([*args, "two", "--at", "-2h"]) == 0  # not taken for an option
+    assert main([*args, "three", "--at=-1d2h", "--rule", "bottlenecks"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert all(line.startswith("fix noted at ") and "+00:00: " in line for line in out), out
+    stamps = [datetime.fromisoformat(line.split()[3].rstrip(":")) for line in out]
+    assert stamps[0] - stamps[1] == pytest.approx(timedelta(hours=2), abs=timedelta(minutes=1))
+    assert stamps[0] - stamps[2] == pytest.approx(timedelta(hours=26), abs=timedelta(minutes=1))
+    settings = load_settings(path)
+    text, code = note_fix(settings, "x", when="2h")
+    assert code == 2 and "--at: invalid time '2h'" in text
