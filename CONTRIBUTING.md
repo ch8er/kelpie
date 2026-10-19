@@ -271,6 +271,10 @@ An adapter carries out what the platform allows and refuses the rest.
   platform files, so an adapter does not add fixtures there. When the platform shows a
   failure that no existing fixture covers, add a fixture for the rule that should catch it
   ([format](tests/fixtures/incidents/README.md)).
+- No test writes outside its temporary directories: `HOME` is a temporary directory for
+  the whole run, and a test that writes `./kelpie.db` (the default storage path) fails.
+  A test that loads settings from a config without `[storage] path` takes the `tmp_db`
+  fixture (`tests/conftest.py`), which points `KELPIE_DB` at a temporary database.
 - All data is synthetic: no personal data, real hostnames, repo names, tokens or paths of a
   real farm. Use `T-101`, `agent-dev-1`, `host-a`, `example/repo`, `example.org`.
 
