@@ -88,17 +88,11 @@ class Proposer:
     def _propose(
         self, repo: str, path: str, stem: str, changes: Sequence[Any], reason: str
     ) -> ActionResult:
-        info = self.client.get(f"/repos/{repo}", fresh=True).body
-        default = info.get("default_branch") if isinstance(info, Mapping) else None
-        if not isinstance(default, str) or not default:
-            raise GitHubError("bad_response", f"{repo}: no default branch")
+        default = default_branch(self.client, repo)
         branch = f"{BRANCH_PREFIX}{stem}"
         if self._proposed(repo, branch):
             return ActionResult.NOTHING_TO_DO
-        file = self.client.get(
-            f"/repos/{repo}/contents/{quote(path)}", {"ref": default}, fresh=True
-        ).body
-        text, blob = _decode(file)
+        text, blob = read_workflow(self.client, repo, path, default)
         try:
             rendered = render(text, [c for c in changes if isinstance(c, Mapping)])
         except WorkflowError as exc:
@@ -181,6 +175,20 @@ def body(
         lines += ["", f"**Check before merging:** {DOCS_WARNING}"]
     lines += ["", "Review the workflow before marking this ready; Kelpie never merges it."]
     return "\n".join(lines)
+
+
+def default_branch(client: GitHubClient, repo: str) -> str:
+    info = client.get(f"/repos/{repo}", fresh=True).body
+    default = info.get("default_branch") if isinstance(info, Mapping) else None
+    if not isinstance(default, str) or not default:
+        raise GitHubError("bad_response", f"{repo}: no default branch")
+    return default
+
+
+def read_workflow(client: GitHubClient, repo: str, path: str, ref: str) -> tuple[str, str]:
+    """The workflow file at ``ref``, and its blob sha."""
+    file = client.get(f"/repos/{repo}/contents/{quote(path)}", {"ref": ref}, fresh=True).body
+    return _decode(file)
 
 
 def _decode(file: Any) -> tuple[str, str]:
