@@ -279,8 +279,8 @@ class ReportInputs:
 @dataclass(frozen=True, slots=True)
 class OutageLine:
     """A CI outage of the day (rule 9), for the report: what failed, since when (it may have
-    begun on an earlier day), until when, and how many PRs it held and alerts were folded
-    under it that day (both a lower bound)."""
+    begun on an earlier day), until when, the PRs in its scope that day and the alerts
+    folded under it that day (a lower bound; :func:`kelpie.report.waits.outage_day`)."""
 
     signature: str
     since: datetime
@@ -537,12 +537,12 @@ def _outage_lines(
 ) -> tuple[OutageLine, ...]:
     closed = {(row.state.id, row.state.since): row.closed_at for row in inputs.states}
     entries = [e for e in inputs.actions if e.at < end]
-    out = []
+    out: list[OutageLine] = []
     for o in sorted(found, key=lambda o: (o.since, o.state)):
         if o.since >= end or o.until <= start:
             continue
         closed_at = closed.get((o.state, o.since))
-        prs, folded = outage_day(o, entries, start, end)
+        prs, folded = outage_day(o, entries, start, end, closed_at)
         out.append(
             OutageLine(
                 o.signature or o.state,

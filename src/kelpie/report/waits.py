@@ -182,28 +182,34 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
 
 
 def outage_day(
-    outage: Outage, entries: Iterable[LedgerEntry], start: datetime, end: datetime
+    outage: Outage,
+    entries: Iterable[LedgerEntry],
+    start: datetime,
+    end: datetime,
+    closed_at: datetime | None = None,
 ) -> tuple[int, int]:
-    """The PRs an outage held and the alerts folded under it between ``start`` and ``end``
-    (both a lower bound): the PRs of its samples in that span, and of the last one before
-    it (its scope as the span began); folded alerts with an entry in that span (one when a
-    fold starts, then at most one an hour: alerts, not entries, are counted)."""
+    """The PRs an outage held and the alerts folded under it between ``start`` and ``end``:
+    the PRs in its scope during that span, from its samples in it and the last one before
+    it (its scope as the span began; samples are hourly, so a PR that went green just
+    before may count); and the alerts folded under it with an entry in that span until
+    it closed (``closed_at``; the engine keeps folding for a while after its last
+    sighting), counted once each (one entry when a fold starts, then at most one an hour),
+    a lower bound."""
     a, b = max(outage.since, start), min(outage.until, end)
+    folds_until = end if closed_at is None else min(closed_at, end)
     prs: set[str] = set()
     before: CiOutage | None = None
-    folded = set()
+    folded: set[tuple[str, str]] = set()
     for e in sorted(entries, key=lambda e: e.at):
-        if not outage.since <= e.at <= b:
-            continue
         if e.rule == "ci_economy" and (o := CiOutage.from_params(e.params)) is not None:
-            if o.state != outage.state:
+            if o.state != outage.state or not outage.since <= e.at <= b:
                 continue
             if e.at < a:
                 before = o
             else:
                 prs.update(p.lower() for p in o.prs)
         elif (
-            e.at >= a
+            a <= e.at <= folds_until
             and e.suppression is Suppression.INCIDENT
             and e.params.get(FOLDED_UNDER) == outage.state
         ):

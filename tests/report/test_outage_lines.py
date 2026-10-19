@@ -111,3 +111,11 @@ def test_an_outage_outside_the_day_is_not_listed() -> None:
 def test_no_outage_no_list() -> None:
     report = build_report(inputs(), sections={})
     assert report.outages == () and "CI outages" not in render_markdown(report)
+
+
+def test_folds_after_the_last_sighting_count_until_the_outage_closes() -> None:
+    # not seen after 10:00, closed at 11:00: the engine kept folding meanwhile
+    state = closed(outage_state(SID, at(2), at(10)), at(11))
+    entries = (outage_sample(at(3)), folded(4, "a"), folded(10.25, "b"), folded(11.5, "late"))
+    report = build_report(inputs(states=(state,), actions=entries), sections={})
+    assert [o.folded for o in report.outages] == [2]
