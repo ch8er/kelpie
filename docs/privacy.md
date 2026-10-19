@@ -15,6 +15,7 @@ keep less. It describes the code as it is; the files named below are the referen
 | OpenClaw hook records | session id, session key (the part naming a chat peer or group replaced by a keyed hash), agent id, run id, session end reasons, the session id a session resumed or was replaced by; tool name, call id, hash of arguments, a redacted command, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
 | OpenClaw Workboard cards | card id, board, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, session key (reduced like the hook's) and run id, block reason (500 characters); every comment (2000 characters) and attempt error of the cards read is in memory for the tick, only the latest since a block is kept | claim tokens, attachments, proof, worker logs | read in place, not copied | |
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
+| Provider cost reports (optional) | per provider and UTC day: the token cost per model (Anthropic) or the day's total (OpenAI), in USD | workspaces, projects, API keys, users, line items | `kelpie.db`, table `cost_reports` | 90 days |
 | Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
 | Daily reports | the report as Markdown | | `[report] dir` | not pruned |
@@ -326,6 +327,7 @@ configured.
 | --- | --- |
 | Spans | Deleted once older than `[traces] retention` (default 7 days) and beyond `max_rows` (oldest first), checked about once an hour. Spans that end before the retention are rejected on arrival. |
 | Session owners, task labels | Deleted with the same retention. |
+| Cost reports | Days older than 90 days are deleted at each read. |
 | Ledger, alert states, fixes | Kept until you delete the database. |
 | Spool | Rotated at the size limit; one backup. |
 | Reports | Kept in `[report] dir` until you delete them. |

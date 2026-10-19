@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from kelpie import net
 from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.claude_code.adapter import ClaudeCodeAdapter
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
@@ -44,6 +45,7 @@ from kelpie.app import (
     unknown_provider_models,
     utc_now,
 )
+from kelpie.connectors.cost_reports.source import HttpGet, ReportError, fetch
 from kelpie.connectors.github.blocks import MAX_REASON
 from kelpie.connectors.github.client import GitHubError
 from kelpie.connectors.github.connector import (
@@ -408,6 +410,41 @@ def check_spend_modes(settings: Settings, now: datetime) -> Check:
         fixes.append(f'add quotas = ["{quota}"] to that provider\'s [spend.providers.<name>]')
     detail = "; ".join(parts) + "; the report cannot tell dollars from estimates"
     return _warn(name, detail, "; ".join(fixes))
+
+
+def check_cost_reports(
+    settings: Settings,
+    now: datetime,
+    environ: Mapping[str, str] = os.environ,
+    http_get: HttpGet = net.get,
+) -> list[Check]:
+    """Each configured cost report answers to its admin key (one read of the last day)."""
+    reports = settings.cost_reports
+    if reports is None:
+        return []
+    out = []
+    for r in reports.reports:
+        name = f"cost report {r.provider}"
+        try:
+            config = replace(r.build(environ), days=1)
+        except ValueError as exc:
+            out.append(_fail(name, str(exc), f"export {r.admin_key_env}=<admin key>"))
+            continue
+        try:
+            costs = fetch(config, now, http_get)
+        except Exception as exc:  # a malformed answer must not crash doctor
+            if not isinstance(exc, ReportError):
+                exc = ReportError("error", f"unexpected {type(exc).__name__}")
+            fix = {
+                "auth": f"${r.admin_key_env} must be an admin key with read access to costs",
+                "rate_limited": "try again in a minute",
+            }.get(exc.cause, f"check api_url ({r.api_url}) and the network")
+            out.append(_fail(name, f"not read: {exc}", fix))
+            continue
+        total = sum(c.usd for c in costs)
+        day = costs[0].day.isoformat() if costs else "the last day"
+        out.append(_pass(name, f"read: ${total:,.2f} on {day}"))
+    return out
 
 
 def _named(ids: list[str]) -> str:
@@ -994,6 +1031,7 @@ def run_checks(
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
     checks.append(check_prices(settings, at))
     checks.append(check_spend_modes(settings, at))
+    checks += check_cost_reports(settings, at, environ)
     checks.append(_skip("worktrees readable", why) if adapter is None else check_worktrees(adapter))
     pr_blocks = "PR blocks have conditions"
     checks.append(

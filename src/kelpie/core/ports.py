@@ -13,6 +13,7 @@ from kelpie.core.model import (
     ConditionKind,
     LimitHit,
     ProviderStatus,
+    ReportedCost,
     Resource,
     Session,
     Snapshot,
@@ -183,6 +184,18 @@ class ProviderReader(Protocol):
     """
 
     def read(self, now: datetime) -> tuple[Sequence[ProviderStatus], Sequence[LimitHit]]: ...
+
+
+@runtime_checkable
+class CostReportReader(Protocol):
+    """Reads what providers' cost reports say was spent per UTC day (the bill), for
+    reconciling the spend Kelpie estimates from traces.
+
+    Must not raise: a report that cannot be read keeps its last good figures, or none.
+    The caller owns the clock.
+    """
+
+    def read(self, now: datetime) -> Sequence[ReportedCost]: ...
 
 
 @runtime_checkable

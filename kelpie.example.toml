@@ -338,6 +338,19 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # [spend.providers.openai]
 # mode = "api"
 #
+# Providers' cost reports, read with a separate admin key (never the agents' key), to
+# check the spend Kelpie prices from traces against the bill.
+#
+# [connectors.cost_reports.anthropic]
+# kind = "anthropic"
+# admin_key_env = "KELPIE_ANTHROPIC_ADMIN_KEY"
+# workspaces = ["wrkspc_..."]        # only the farm's workspaces, if the org runs more
+#
+# [connectors.cost_reports.openai]
+# kind = "openai"
+# admin_key_env = "KELPIE_OPENAI_ADMIN_KEY"
+# projects = ["proj_..."]
+#
 # [spend.providers.gateway]
 # mode = "api"
 # models = ["llama-*", "mistral-*"]   # models the default table and name rules miss

@@ -7,7 +7,7 @@ read-only input; they never mutate it and never perform I/O.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -289,6 +289,18 @@ class Span:
     @property
     def duration(self) -> timedelta | None:
         return None if self.end is None else self.end - self.start
+
+
+@dataclass(frozen=True, slots=True)
+class ReportedCost:
+    """What a provider's cost report says was spent on one UTC day, in USD: per model
+    where the report tells, else (``model`` None) the rest of the day's figure. A day the
+    report covers has at least one row (0.0 when nothing was spent)."""
+
+    provider: str
+    day: date
+    usd: float
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

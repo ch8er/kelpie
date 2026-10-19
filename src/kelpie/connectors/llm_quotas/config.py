@@ -17,7 +17,6 @@ tick may take together.
 
 from __future__ import annotations
 
-import ipaddress
 import os
 import re
 from collections.abc import Mapping
@@ -164,15 +163,6 @@ def load_llm_quotas(section: Any) -> LlmQuotaSettings | None:
     return LlmQuotaSettings(providers, budget)
 
 
-def _loopback(host: str) -> bool:
-    if host.lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 def _provider(entry: Any, index: int) -> ProviderSettings:
     if not isinstance(entry, Mapping):
         raise ValueError(f"{SECTION} providers[{index}] must be a table")
@@ -189,7 +179,7 @@ def _provider(entry: Any, index: int) -> ProviderSettings:
         kind = ProbeKind(entry.get("kind"))
     except ValueError:
         raise ValueError(f"{where} kind must be one of {[str(k) for k in ProbeKind]}") from None
-    api_url = _api_url(entry.get("api_url"), where)
+    api_url = net.check_api_url(entry.get("api_url"), where)
     path = entry.get("path")
     if (
         not isinstance(path, str)
@@ -238,26 +228,6 @@ def _provider(entry: Any, index: int) -> ProviderSettings:
         interval=interval,
         timeout=timeout,
     )
-
-
-def _api_url(value: Any, where: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{where} api_url is required")
-    url = value.strip()
-    parts = urlsplit(url)
-    try:
-        port = parts.port
-    except ValueError:
-        raise ValueError(f"{where} api_url has an invalid port") from None
-    if parts.scheme not in ("http", "https") or not parts.hostname or port == 0:
-        raise ValueError(f"{where} api_url must be an https URL with a host")
-    if parts.username is not None or parts.password is not None:
-        raise ValueError(f"{where} api_url must not contain credentials; use token_env")
-    if parts.query or parts.fragment or _CONTROL.search(url):
-        raise ValueError(f"{where} api_url must not contain a query, fragment or spaces")
-    if parts.scheme == "http" and not _loopback(parts.hostname):
-        raise ValueError(f"{where} api_url must use https (plain http only to loopback)")
-    return url
 
 
 def _headers(value: Any, auth_header: str, where: str) -> dict[str, str]:
