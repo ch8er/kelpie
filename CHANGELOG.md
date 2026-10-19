@@ -130,6 +130,13 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   rebuilds the span store indexes (some seconds per million spans) and fills cache writes
   of stored OTLP spans; stored OpenClaw spans keep pricing writes at the input price until
   they leave the retention.
+- Spend mode per provider (`[spend.providers]`): dollars for API keys, tokens and the share
+  of a configured limit for subscriptions, decided from the config; `kelpie status` and
+  `kelpie doctor` show each provider's mode and why.
+- Providers' cost reports read with an admin key (`[connectors.cost_reports]`: Anthropic
+  token costs per model, OpenAI daily totals), stored for the report, and reconciled with
+  the spend priced from traces per closed day: on `/metrics` and as a rule 10 warning when
+  they disagree.
 
 #### Token optimization
 
