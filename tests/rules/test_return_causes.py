@@ -98,7 +98,7 @@ def test_another_dominant_cause_is_reported() -> None:
     [alert] = run(*reviews, task("X", ret("why not")))
     assert alert.params["dominant_cause"] == "review_findings"
     assert alert.params["shares"]["review_findings"] == 0.83
-    assert "(by cause: review findings 83%, other 17%)" in alert.reason
+    assert "were review findings (by cause: review findings 83%, other 17%)" in alert.reason
     others = tuple(task(f"T{i}", ret("no idea")) for i in range(6))
     assert run(*others) == []  # "other" is no finding
 
@@ -349,6 +349,25 @@ def test_only_the_names_a_clause_says_failed() -> None:
         ("0 failed, 12 passed; add a test for the empty case", "review_findings"),
         ("Merge conflict in src/app/routes.py", "merge_conflict"),
         ("changes requested", "review_findings"),
+        # none failed, or it was fixed (review of #174)
+        ("0 tests failed, 12 passed", "review_findings"),
+        ("0 checks failed", "review_findings"),
+        ("no unit tests failed", "review_findings"),
+        ("none of the tests failed", "review_findings"),
+        ("not failing tests, just naming", "review_findings"),
+        ("no  failing tests", "review_findings"),
+        ("Fixed failing tests, but rename the helper", "review_findings"),
+        ("the failing test is now fixed", "review_findings"),
+        ("tests were failing before, now fixed", "review_findings"),
+        ("CI was red earlier, now green", "review_findings"),
+        # prose about the code under review
+        ("handle the case where the build fails", "review_findings"),
+        ("the spec failed to describe X", "review_findings"),
+        ("health check failed in prod code", "review_findings"),
+        # still failing
+        ("CI checks are red", "failing_tests"),
+        ("the build is broken on main", "failing_tests"),
+        ("Fixed the typo, but tests still fail", "failing_tests"),
     ],
 )
 def test_a_review_return_is_classified_by_what_sent_it_back(reason: str, cause: str) -> None:
@@ -378,3 +397,28 @@ def test_stage_categories_are_config() -> None:
         build({"stage_categories": "review"})
     with pytest.raises(ValueError, match="stage_categories must be a list"):
         build({"stage_categories": [" "]})
+
+
+def test_configured_categories_come_before_ci_wording() -> None:
+    rule = build({"cause_patterns": {"infra": ["runner (?:lost|offline)", "no space left"]}})
+    assert rule.cause(ret("CI is red: runner lost", category="review")) == "infra"
+    assert rule.cause(ret("build failed: no space left on device", category="review")) == "infra"
+    assert rule.cause(ret("tests failed", category="review")) == "failing_tests"
+
+
+def test_ci_wording_can_be_off_and_named_tests_still_count() -> None:
+    rule = build({"ci_wording": False})
+    assert rule.cause(ret("CI is red", category="review")) == "review_findings"
+    assert rule.cause(ret("test_login failed", category="review")) == "failing_tests"
+    with pytest.raises(ValueError, match="ci_wording"):
+        build({"ci_wording": "no"})
+
+
+def test_several_stages_and_a_conflict_category() -> None:
+    rule = ReturnCauses(stage_categories=("review", "qa"))
+    staged = [task(f"T{i}", ret("rename it", category="review")) for i in range(4)]
+    staged += [task(f"Q{i}", ret("looks off", category="qa")) for i in range(3)]
+    assert run(*staged, rule=rule) == []  # every return through a stage
+    # A platform-filed conflict names no failing test.
+    conflict = ret("test_login conflicts", category="merge_conflict")
+    assert ReturnCauses().cause(conflict) == "merge_conflict"

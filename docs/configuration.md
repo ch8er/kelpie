@@ -489,8 +489,10 @@ back (a merge conflict, a failing or flaky test, else what review found:
 files keep coming up in them, Kelpie raises one alert with the hot files and a
 recommendation, and comments on in-progress tasks that touch them. Otherwise a dominant
 cause gets an informational alert with the shares by cause; review findings are not
-reported as dominant when every return of the window went through review (a Hermes farm's
-normal state).
+reported as dominant when every return of the window was filed under a stage (a Hermes
+farm's normal state). Order: `merge_conflict`, then `cause_patterns` categories, then a
+failing test (named, or CI's wording), then `<stage>_findings`, then the platform's
+category.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
@@ -502,8 +504,9 @@ normal state).
 | `expected_shared` | `conflict_warning`'s | list of globs | Files many tasks are meant to edit: never hot. |
 | `test_names` | pytest `test_...`, XCTest `SomeTests.testSomething` | list of regexes with a named group `test` | Test names in return reasons (incident 18). |
 | `flaky_min_tasks` | `2` | count, >= 2 | A test named in the returns of this many different tasks in the window is flaky: its returns count as `flaky_test`, and it gets an alert of its own with the tasks it sent back (no `min_returns` needed). |
-| `cause_patterns` | `merge_conflict` and `failing_tests` patterns | table of category -> regexes | Classify a return by its reason (case-insensitive), before test names and the platform's category. Entries replace the default of the same category. |
-| `stage_categories` | `["review"]` | list of platform categories | Categories that name where a return happened, not why: a return filed under one whose reason names no conflict or failing test counts as `<stage>_findings` (`review_findings`). |
+| `cause_patterns` | `merge_conflict` patterns | table of category -> regexes | Classify a return by its reason (case-insensitive), after `merge_conflict` and before failing tests and the platform's category. An entry named `merge_conflict` replaces the default. |
+| `ci_wording` | `true` | bool | CI's wording ("tests failed", "CI is red", "the build failed", "3 failed") counts as `failing_tests` when no test is named; not in a clause that says none failed or that it was fixed. `false`: only named tests (`test_names`). |
+| `stage_categories` | `["review"]` | list of platform categories | Categories that name where a return happened, not why: a return filed under one whose reason names no conflict or failing test counts as `<stage>_findings` (`review_findings`). `[]`: the platform's category as the cause, as before. |
 
 ### dispatch_gate
 

@@ -112,6 +112,8 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # expected_shared = []      # default: conflict_warning's
 # flaky_min_tasks = 2       # a test named in this many tasks' returns is flaky
 # test_names = ['\b(?P<test>test_\w+)', '\b(?P<test>[A-Z]\w*Tests?[./]test\w+)']
+# stage_categories = ["review"]  # categories that name where a return happened, not why
+# ci_wording = true         # "tests failed", "CI is red" count as failing tests
 # [engine.rules.return_causes.cause_patterns]
 # infra = ['runner (?:lost|offline)', 'no space left']  # classify returns by their reason
 #
