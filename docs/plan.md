@@ -96,6 +96,7 @@ Spend becomes a metric Kelpie watches, not a number someone checks in a billing 
 - **Burn-rate forecast:** "at the current rate the budget runs out at <time>"; with a subscription, "time to the next limit".
 - **Spend sources:** traces (tokens × a price table in config); Claude Code's own OpenTelemetry cost and token metrics, which arrive through OTLP ingest; provider usage and cost APIs where they exist (API keys), read by the provider quota connector.
 - **Subscription mode:** there is no bill, so Kelpie estimates spend from traces, counts limit hits and forecasts the time to the limit. Scheduling heavy tasks for when the limit is free is P1.
+- **API-key farms:** a default dated price table for popular models (overridable), reconciliation of the trace-based estimate with the provider's cost report where an admin key is available, and automatic choice between dollars (API key) and limit share (subscription) per provider.
 - **Report:** cost per completed task and cost of chaos in dollars, next to hours.
 - **Dogfooding:** Kelpie's own development in Claude Code is the first user of spend reporting.
 
