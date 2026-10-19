@@ -115,6 +115,7 @@ _KINDS: Mapping[ConditionKind, str] = {
     ConditionKind.CUSTOM: "other",
 }
 MIN_HOURS = 1.0  # a smaller wait is no headline
+MAX_NAME = 80  # characters of a role or repository named in the biggest wait's line
 CI_OUTAGE = "ci_outage"
 SNOOZED = "snoozed"  # waits a person snoozed: deliberate, never the biggest wait
 MAX_REASON = 2000  # characters of a block reason matched, as the GitHub step does
@@ -150,13 +151,19 @@ class BiggestWait:
         return suggestion(self.cause, self.facts, self.role)
 
     def headline(self) -> str:
-        """One line of Markdown-safe text."""
-        where = f", mostly on {md.code(self.repo)}" if self.repo else ""
+        """One line of Markdown-safe text. The role and repository are cut to
+        :data:`MAX_NAME` characters, so the suggestion at the end survives a chat line's cut
+        (:data:`kelpie.alerts.summary.MAX_LINE`) even with names from a misconfigured board."""
+        where = f", mostly on {md.code(_short(self.repo))}" if self.repo else ""
         return (
-            f"Biggest wait: {md.text(self.role)} tasks spent {self.hours:.1f} task-hours "
+            f"Biggest wait: {md.text(_short(self.role))} tasks spent {self.hours:.1f} task-hours "
             f"waiting for {self.label} ({len(self.tasks)} task(s){where}), against "
             f"{self.work_hours:.1f} agent-hours of work. Suggestion: {self.suggestion}."
         )
+
+
+def _short(name: str) -> str:
+    return name if len(name) <= MAX_NAME else name[: MAX_NAME - 1] + "…"
 
 
 @dataclass(frozen=True, slots=True)

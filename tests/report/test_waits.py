@@ -470,3 +470,16 @@ def test_block_reason_prs_ending_in_punctuation() -> None:
     task = Task("B", "b", Status.BLOCKED, at(8), block=Block("waiting for CI of #12).", at(8)))
     found = WaitCauses((), (), (), kinds).condition(task)
     assert found is not None and found.params == {"repo": "x/y", "pr": 12}
+
+
+def test_long_names_never_push_the_suggestion_out_of_a_chat_line() -> None:
+    from kelpie.alerts.summary import MAX_LINE
+    from kelpie.report.waits import MAX_NAME, BiggestWait
+
+    role, repo = "r" * 700, "example/" + "a" * 700
+    line = BiggestWait(role, "ci", 12.0, 3.0, ("T-1",), repo).headline()
+    assert len(line) < MAX_LINE
+    assert line.rstrip(".").endswith(BiggestWait(role, "ci", 1, 1, ()).suggestion)
+    assert "r" * (MAX_NAME - 1) + "…" in line and "r" * MAX_NAME not in line
+    short = BiggestWait("reviewer", "ci", 12.0, 3.0, ("T-1",), "example/app").headline()
+    assert "reviewer tasks" in short and "`example/app`" in short  # short names untouched
