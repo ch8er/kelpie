@@ -9,23 +9,25 @@ Pure: config and lookups, no I/O and no clock.
 so spend is dollars; on a subscription there is no bill, only a usage limit, so spend is
 tokens and the share of that limit, and dollars would only estimate what the same tokens
 would have cost. ``[spend.providers.<name>] mode`` sets it; ``auto`` (the default) decides
-from the config alone, so ``kelpie serve``, ``kelpie status`` and the offline report agree
+from the config alone, so every command that reads modes gives the same answer offline
 (:meth:`SpendConfig.mode_for`). First match wins:
 
 1. ``mode = "api"`` or ``"subscription"`` in ``[spend.providers.<name>]``;
 2. a provider cost report configured for it (an admin key: there is a bill to read): API;
-3. a ``[[budgets]]`` entry with ``mode = "subscription"`` whose ``providers`` name it, or
-   that names no providers (it covers them all): subscription;
+3. a ``[[budgets]]`` entry with ``mode = "subscription"`` whose ``providers`` (names of
+   ``[connectors.llm_quotas]`` probes) name the provider itself or one of its ``quotas``,
+   or that names no providers (it covers them all): subscription;
 4. ``limit_tokens`` set for it (a usage limit to measure against): subscription;
-5. a ``[[budgets]]`` entry in ``usd`` with ``mode = "api"`` (spend counted as a bill): API;
+5. a ``day`` budget (the whole farm) in ``usd`` with mode ``api`` (the budget default):
+   API, as weak evidence;
 6. otherwise unknown, and ``kelpie doctor`` says how to set it.
 
 **Provider of a model** (:meth:`SpendConfig.provider_for`): the first
 ``[spend.providers.<name>] models`` pattern (a name or a glob, on the model id as written
 or, case-insensitively, its canonical id) that matches, then the provider the default
 price table knows the model under, then the provider its name gives away
-(:data:`PROVIDER_PATTERNS`: ``claude-*`` is Anthropic, ``gpt-*`` and ``o<digit>*``
-OpenAI, ``gemini-*`` Google); else none.
+(:data:`PROVIDER_PATTERNS`: ``claude-*`` is Anthropic, ``gpt-*``, ``chatgpt-*``,
+``codex-*`` and ``o<digit>*`` OpenAI, ``gemini-*`` Google); else none.
 
 **Limit share** (:meth:`SpendConfig.limit_for`): ``limit_tokens`` per ``limit_window``
 (``"5h"``, ``"7d"``) as the user knows them for their plan. Providers describe
@@ -34,6 +36,7 @@ subscription limits as usage windows, not token counts, so Kelpie never guesses 
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -41,7 +44,7 @@ from enum import StrEnum
 from fnmatch import fnmatchcase
 from typing import Any
 
-from kelpie.core.budgets import Budget, BudgetMode, BudgetUnit
+from kelpie.core.budgets import Budget, BudgetMode, BudgetScope, BudgetUnit
 from kelpie.core.prices import PriceTable, canonical_model
 from kelpie.core.serde import parse_duration
 
@@ -56,7 +59,9 @@ __all__ = [
 ]
 
 SPEND_KEYS = frozenset({"default_prices", "providers"})
-PROVIDER_KEYS = frozenset({"mode", "models", "limit_tokens", "limit_window"})
+PROVIDER_KEYS = frozenset({"mode", "models", "quotas", "limit_tokens", "limit_window"})
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}")  # a bare TOML key
+_QUOTA_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")  # as [connectors.llm_quotas]
 SETTINGS = ("auto", "api", "subscription")  # [spend.providers.<name>] mode
 # Canonical model ids (kelpie.core.prices.canonical_model) whose provider the name tells.
 PROVIDER_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -82,6 +87,7 @@ class ProviderSpend:
     name: str
     mode: str = "auto"  # one of SETTINGS
     models: tuple[str, ...] = ()
+    quotas: tuple[str, ...] = ()  # [connectors.llm_quotas] probes of this provider
     limit_tokens: int | None = None
     limit_window: timedelta | None = None
 
@@ -143,9 +149,10 @@ class SpendConfig:
             return ProviderMode(provider, SpendMode(own.mode), f"mode set in {where}")
         if provider in self.cost_reports:
             return ProviderMode(provider, SpendMode.API, "its cost report is configured")
+        names = {provider, *(own.quotas if own is not None else ())}
         for b in self.budgets:
             if b.mode is BudgetMode.SUBSCRIPTION and (
-                b.providers is None or provider in b.providers
+                b.providers is None or names & set(b.providers)
             ):
                 whom = "names it" if b.providers is not None else "covers every provider"
                 reason = f"budget {b.name!r} has mode = subscription and {whom}"
@@ -153,8 +160,8 @@ class SpendConfig:
         if own is not None and own.limit_tokens is not None:
             return ProviderMode(provider, SpendMode.SUBSCRIPTION, f"limit_tokens set in {where}")
         for b in self.budgets:
-            if b.mode is BudgetMode.API and b.unit is BudgetUnit.USD:
-                reason = f"budget {b.name!r} counts usd as a bill (mode = api)"
+            if b.mode is BudgetMode.API and b.unit is BudgetUnit.USD and b.scope is BudgetScope.DAY:
+                reason = f"day budget {b.name!r} counts the farm's spend in usd, budget mode api"
                 return ProviderMode(provider, SpendMode.API, reason)
         reason = f'nothing in the config tells; set {where} mode = "api" or "subscription"'
         return ProviderMode(provider, SpendMode.UNKNOWN, reason)
@@ -169,6 +176,20 @@ class SpendConfig:
         if own is None or own.limit_tokens is None or own.limit_window is None:
             return None
         return own.limit_tokens, own.limit_window
+
+    def unlinked(self) -> tuple[tuple[str, str], ...]:
+        """(budget, name) for each name a subscription budget's ``providers`` lists that is
+        neither a ``[spend.providers]`` name nor in one's ``quotas``: that budget sets no
+        provider's spend mode."""
+        known = {p.name for p in self.settings.providers}
+        known |= {q for p in self.settings.providers for q in p.quotas}
+        return tuple(
+            (b.name, name)
+            for b in self.budgets
+            if b.mode is BudgetMode.SUBSCRIPTION
+            for name in b.providers or ()
+            if name not in known
+        )
 
     def modes(self, providers: Iterable[str | None] = ()) -> tuple[ProviderMode, ...]:
         """The modes of the configured providers, then of ``providers`` (e.g. those seen
@@ -197,8 +218,8 @@ def load_spend(data: Any) -> SpendSettings:
 
 
 def _load_provider(name: Any, data: Any) -> ProviderSpend:
-    if not isinstance(name, str) or not name.strip() or name != name.strip():
-        raise ValueError("[spend.providers] names must be non-empty, without outer spaces")
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
+        raise ValueError("[spend.providers] names must be 1-63 letters, digits, '_' or '-'")
     where = f"[spend.providers.{name}]"
     if not isinstance(data, Mapping):
         raise ValueError(f"{where} must be a table")
@@ -210,6 +231,11 @@ def _load_provider(name: Any, data: Any) -> ProviderSpend:
     models = data.get("models", [])
     if not isinstance(models, list) or not all(isinstance(m, str) and m.strip() for m in models):
         raise ValueError(f"{where} models must be a list of model names or globs")
+    quotas = data.get("quotas", [])
+    if not isinstance(quotas, list) or not all(
+        isinstance(q, str) and _QUOTA_NAME.fullmatch(q) for q in quotas
+    ):
+        raise ValueError(f"{where} quotas must be a list of [connectors.llm_quotas] names")
     limit = data.get("limit_tokens")
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
         raise ValueError(f"{where} limit_tokens must be a positive whole number")
@@ -229,6 +255,7 @@ def _load_provider(name: Any, data: Any) -> ProviderSpend:
         name=name,
         mode=mode,
         models=tuple(m.strip() for m in models),
+        quotas=tuple(quotas),
         limit_tokens=limit,
         limit_window=window,
     )

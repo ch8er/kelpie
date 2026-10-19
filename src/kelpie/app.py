@@ -69,7 +69,7 @@ from kelpie.core.prices import CHECKED, canonical_model
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
-from kelpie.core.spend import ProviderMode, SpendConfig, load_spend
+from kelpie.core.spend import ProviderMode, SpendConfig, SpendSettings, load_spend
 from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
@@ -163,7 +163,7 @@ class Settings:
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)  # [[budgets]], [prices]
-    spend: SpendConfig = field(default_factory=SpendConfig)  # [spend], with what decides modes
+    spend_settings: SpendSettings = field(default_factory=SpendSettings)  # [spend]
     resources: ResourceSettings = field(default_factory=ResourceSettings)
     github: GitHubSettings | None = None  # None: no [connectors.github] section
     block_conditions: tuple[BlockConditionPattern, ...] = ()
@@ -173,6 +173,11 @@ class Settings:
     report: ReportSettings = field(default_factory=ReportSettings)  # [report]
     agent: AgentSettings | None = None  # [agent]: this host runs ``kelpie agent``
     hub: HubSettings | None = None  # [hub]: ``kelpie serve`` takes reports from agents
+
+    @property
+    def spend(self) -> SpendConfig:
+        """``[spend]`` with what decides each provider's spend mode (budgets, prices)."""
+        return SpendConfig(self.spend_settings, self.budgets.prices, self.budgets.budgets)
 
 
 def find_config(explicit: str | None) -> Path | None:
@@ -238,7 +243,6 @@ def load_settings(path: Path | None) -> Settings:
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    spend = SpendConfig(spend_settings, budgets.prices, budgets.budgets)
     if budgets.budgets and not traces.enabled:
         raise ConfigError("[[budgets]] read spend from traces: they need [traces] enabled")
     github, block_conditions, human_tasks, llm_quotas = _load_connectors(data)
@@ -262,7 +266,7 @@ def load_settings(path: Path | None) -> Settings:
         source=path,
         traces=traces,
         budgets=budgets,
-        spend=spend,
+        spend_settings=spend_settings,
         resources=resources,
         llm_quotas=llm_quotas,
         alerts=alerts,
@@ -1195,6 +1199,11 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         *billing_interval_warnings(loaded.rules, settings),
         *provider_interval_warnings(loaded.rules, settings.llm_quotas),
         *budget_provider_warnings(settings.budgets, settings.llm_quotas),
+        *(
+            f"subscription budget {b!r} names {n!r}, which no [spend.providers.<name>] quotas"
+            " lists: it sets no provider's spend mode"
+            for b, n in settings.spend.unlinked()
+        ),
     ]:
         log.warning(warning)
     try:
@@ -1845,19 +1854,27 @@ def render_spend_modes(
 ) -> list[str]:
     """The ``spend modes:`` block of ``kelpie status``: each provider's mode and why."""
     rows = spend_modes(settings, models)
-    if not rows:
+    if not rows and not settings.spend.unlinked():
         return []
     lines = ["", "spend modes:"]
     for mode, tokens in rows:
-        used = f", {tokens:,} tokens in the last {_span(UNPRICED_WINDOW)}" if tokens else ""
+        window = _span(min(UNPRICED_WINDOW, settings.traces.retention))
+        used = f", {tokens:,} tokens in the last {window}" if tokens else ""
         if mode.provider is None:
-            names = ", ".join(unknown_provider_models(settings, models)[:10])
-            lines.append(f"  (no provider known): {names}{used}; add them to")
-            lines.append("    [spend.providers.<name>] models to give them a spend mode")
+            loose = unknown_provider_models(settings, models)
+            more = f" and {len(loose) - 10} more" if len(loose) > 10 else ""
+            lines.append(f"  (no provider known): {', '.join(loose[:10])}{more}{used}; add them")
+            lines.append("    to [spend.providers.<name>] models to give them a spend mode")
             continue
         limit = settings.spend.limit_for(mode.provider)
         share = f", limit {limit[0]:,} tokens per {_span(limit[1])}" if limit else ""
-        lines.append(f"  {mode.provider}: {mode.mode}{share}{used} ({mode.reason})")
+        lines.append(f"  {mode.provider}: {mode.mode}{share}{used}")
+        lines.append(f"    why: {mode.reason}")
+    lines += [
+        f"  warning: subscription budget {b!r} names {n!r}, which no [spend.providers.<name>]"
+        " quotas lists: it sets no provider's spend mode"
+        for b, n in settings.spend.unlinked()
+    ]
     return lines
 
 

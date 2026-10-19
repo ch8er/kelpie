@@ -37,7 +37,11 @@ def test_defaults() -> None:
         ({"x": 1}, "unknown [spend] keys: ['x']"),
         ({"default_prices": "yes"}, "default_prices must be true or false"),
         ({"providers": []}, "[spend.providers] must be a table"),
-        ({"providers": {" a": {}}}, "names must be non-empty"),
+        ({"providers": {" a": {}}}, "names must be 1-63"),
+        ({"providers": {"my gw": {}}}, "names must be 1-63"),
+        ({"providers": {"a.b": {}}}, "names must be 1-63"),
+        ({"providers": {"a": {"quotas": "claude-max"}}}, "quotas must be a list"),
+        ({"providers": {"a": {"quotas": ["a b"]}}}, "quotas must be a list"),
         ({"providers": {"a": 1}}, "[spend.providers.a] must be a table"),
         ({"providers": {"a": {"plan": 1}}}, "unknown [spend.providers.a] keys: ['plan']"),
         ({"providers": {"a": {"mode": "free"}}}, 'mode must be "auto", "api" or "subscription"'),
@@ -99,7 +103,39 @@ def test_a_subscription_budget_means_subscription() -> None:
     named = config(None, [budget(), budget(name="s", mode="subscription", providers=["openai"])])
     assert mode(named, "openai")[0] is SpendMode.SUBSCRIPTION
     assert "budget 's' has mode = subscription and names it" in mode(named, "openai")[1]
-    assert mode(named)[0] is SpendMode.API  # the usd api budget, for the others
+    assert mode(named)[0] is SpendMode.API  # the usd api day budget, for the others
+
+
+def test_quota_names_link_a_subscription_budget_to_its_provider() -> None:
+    """Budget providers are [connectors.llm_quotas] names: claude-max is not anthropic
+    unless [spend.providers.anthropic] quotas says so."""
+    budgets = [
+        budget(name="max", mode="subscription", providers=["claude-max"]),
+        budget(name="proj", scope="project", match="WEB-*"),  # usd, mode api by default
+    ]
+    unlinked = config(None, budgets)
+    assert mode(unlinked)[0] is SpendMode.UNKNOWN  # neither the quota nor the project tells
+    assert unlinked.unlinked() == (("max", "claude-max"),)
+    linked = config({"providers": {"anthropic": {"quotas": ["claude-max"]}}}, budgets)
+    assert mode(linked) == (
+        SpendMode.SUBSCRIPTION,
+        "budget 'max' has mode = subscription and names it",
+    )
+    assert linked.unlinked() == ()
+
+
+def test_only_a_farm_wide_usd_budget_hints_at_api() -> None:
+    scoped = config(None, [budget(scope="agent", match="dev-*")])
+    assert mode(scoped)[0] is SpendMode.UNKNOWN
+    (reason,) = [mode(config(None, [budget()]))[1]]
+    assert reason == "day budget 'b' counts the farm's spend in usd, budget mode api"
+
+
+def test_without_the_default_table_names_still_tell_the_provider() -> None:
+    loaded = load_budgets(None, None, WEEK, default_prices=False)
+    spend = SpendConfig(load_spend(None), loaded.prices, loaded.budgets)
+    assert spend.provider_for("claude-haiku-4-5") == "anthropic"
+    assert spend.provider_for("gpt-5") == "openai"
     every = config(None, [budget(mode="subscription")])
     assert mode(every) == (
         SpendMode.SUBSCRIPTION,

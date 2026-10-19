@@ -331,7 +331,8 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #
 # [spend.providers.anthropic]
 # mode = "subscription"
-# limit_tokens = 40000000   # what your plan allows per limit_window, if you know it
+# quotas = ["provider-main"]  # its [connectors.llm_quotas] probes, for subscription budgets
+# limit_tokens = <tokens>     # what your plan allows per limit_window, if you know it
 # limit_window = "7d"
 #
 # [spend.providers.openai]

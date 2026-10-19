@@ -378,29 +378,36 @@ def check_spend_modes(settings: Settings, now: datetime) -> Check:
     dollars for API keys, tokens and limit share for subscriptions."""
     name = "providers have a spend mode"
     db = settings.db_path
-    seen = read_models(settings, now) if db is not None and db.exists() else ()
+    seen: tuple[tuple[str, int], ...] | str = ()
+    if settings.traces.enabled and db is not None and db.exists():
+        seen = read_models(settings, now)
     if isinstance(seen, str):
-        seen = ()
+        return _skip(name, seen)
     rows = spend_modes(settings, seen)
-    if not rows:
-        return _skip(name, "no provider configured or seen in the spans yet")
-    unknown = [m for m, _ in rows if m.mode is SpendMode.UNKNOWN]
-    if not unknown:
-        return _pass(name, "; ".join(f"{m.provider}: {m.mode} ({m.reason})" for m, _ in rows))
-    named = [m.provider for m in unknown if m.provider is not None]
+    unlinked = settings.spend.unlinked()
+    if not rows and not unlinked:
+        why = "" if settings.traces.enabled else " ([traces] disabled)"
+        return _skip(name, f"no provider configured or seen in the spans yet{why}")
+    unknown = [m.provider for m, _ in rows if m.mode is SpendMode.UNKNOWN and m.provider]
     loose = unknown_provider_models(settings, seen)
-    parts = []
-    if named:
-        parts.append(f"no spend mode for {', '.join(named)}")
+    if not unknown and not loose and not unlinked:
+        return _pass(name, ", ".join(f"{m.provider}: {m.mode}" for m, _ in rows))
+    parts, fixes = [], []
+    if unknown:
+        parts.append(f"no spend mode for {', '.join(unknown)}")
+        fixes.append(
+            f'set [spend.providers.{unknown[0]}] mode = "api" (pay per token: dollars) or '
+            '"subscription" (a plan with a usage limit: tokens and limit share)'
+        )
     if loose:
         parts.append(f"no provider known for the models {_named(list(loose))}")
-    fix = (
-        f'set [spend.providers.{named[0]}] mode = "api" (pay per token: dollars) or '
-        '"subscription" (a plan with a usage limit: tokens and limit share)'
-        if named
-        else f'name the provider: [spend.providers.<name>] models = ["{loose[0]}"]'
-    )
-    return _warn(name, "; ".join(parts) + "; the report cannot tell dollars from estimates", fix)
+        fixes.append(f'name the provider: [spend.providers.<name>] models = ["{loose[0]}"]')
+    if unlinked:
+        budget, quota = unlinked[0]
+        parts.append(f"subscription budget {budget!r} names {quota!r}, linked to no provider")
+        fixes.append(f'add quotas = ["{quota}"] to that provider\'s [spend.providers.<name>]')
+    detail = "; ".join(parts) + "; the report cannot tell dollars from estimates"
+    return _warn(name, detail, "; ".join(fixes))
 
 
 def _named(ids: list[str]) -> str:
