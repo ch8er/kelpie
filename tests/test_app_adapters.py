@@ -624,9 +624,7 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     issues = load_settings(write(tmp_path, FARMS["github issues"]))
     found = {r: b.reason for r, b in act_blockers(issues, build_adapters(issues)).items()}
     assert "exit_contract" not in found and "stale_blocks" not in found
-    assert found["loop_breaker"] == (
-        "no adapter here can stop runs: GitHub Issues tasks never need it"
-    )
+    assert found["loop_breaker"] == "GitHub Issues tasks never need to stop runs"
     assert act_gaps(issues, build_adapters(issues)) == {}
     mixed = load_settings(write(tmp_path, FARMS["claude code and github issues"]))
     found = {r: b.reason for r, b in act_blockers(mixed, build_adapters(mixed)).items()}
@@ -643,6 +641,11 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     gaps = act_gaps(hermes_cc, build_adapters(hermes_cc))
     assert gaps["dispatch_gate"] == "Claude Code can't park tasks or wake tasks yet"
     assert gaps["wait_condition"] == "Claude Code can't comment on tasks or wake tasks yet"
+    off = load_settings(
+        write(tmp_path, "[adapters.claude_code]\nstop_dir = false\n[adapters.openclaw]\n")
+    )
+    gaps = act_gaps(off, build_adapters(off))
+    assert gaps["loop_breaker"] == "stop is turned off (stop_dir = false) for Claude Code"
     none = load_settings(write(tmp_path, ""))
     found = {r: b.reason for r, b in act_blockers(none, build_adapters(none)).items()}
     assert found["loop_breaker"] == "no platform adapter is configured to stop runs"

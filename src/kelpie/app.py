@@ -2143,7 +2143,14 @@ def _gaps(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) 
         if not names:
             continue
         names.sort()
-        if len(names) == 1:
+        off = sorted(
+            _PLATFORMS.get(a.name, a.name)
+            for a in adapters
+            if _stop_off(a) and _PLATFORMS.get(a.name, a.name) in names
+        )
+        if lacking == {ActionKind.STOP} and off:
+            said.append(f"stop is turned off (stop_dir = false) for {' and '.join(off)}")
+        elif len(names) == 1:
             said.append(f"{names[0]} can't {_verbs(lacking)} yet")
         else:
             said.append(f"neither {' nor '.join(names)} can {_verbs(lacking)} yet")
@@ -2180,7 +2187,7 @@ def _platform_gap(adapters: Sequence[PlatformAdapter], platform: frozenset[Actio
         return f"stop is turned off (stop_dir = false) for {' and '.join(off)}"
     if all(lacking <= inapplicable_actions(a) for a in adapters):
         # Nothing to do, not something missing: e.g. issue tasks have no runs to stop.
-        return f"no adapter here can {_verbs(lacking)}: {' and '.join(names)} tasks never need it"
+        return f"{' and '.join(names)} tasks never need to {_verbs(lacking)}"
     if len(names) == 1:
         return f"{names[0]} can't {_verbs(lacking)} yet"
     return f"neither {' nor '.join(names)} can {_verbs(lacking)} yet"
