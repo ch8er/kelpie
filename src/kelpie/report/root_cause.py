@@ -107,7 +107,10 @@ def digest(report: DailyReport) -> Digest:
     data: dict[str, Any] = {
         "day": report.day.isoformat(),
         "completed_tasks": len(report.completed),
-        "spend_usd": _num(report.spend.usd) if report.priced else None,
+        "spend_usd": _num(report.spend.usd)
+        if report.priced and report.spend.billed_tokens
+        else None,
+        "plan_tokens": report.spend.plan_tokens,  # tokens on subscriptions: never dollars
         "hours_lost": [
             {
                 "rule": _name(c.rule),

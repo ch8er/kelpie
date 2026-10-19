@@ -4,25 +4,44 @@ key dollars, never summed; a provider whose mode is not set shows dollars as an 
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 import pytest
 
+from kelpie.core.actions import Severity
 from kelpie.core.budgets import Price, PriceTable
-from kelpie.core.model import Session, Status, Task
+from kelpie.core.model import Session, Span, SpanKind, Status, Task
+from kelpie.core.spans import TokenUsage
 from kelpie.core.spend import ProviderSpend, SpendConfig, SpendSettings
-from kelpie.report.daily import ReportInputs, build_report, render_markdown, render_summary
+from kelpie.core.states import OpenState
+from kelpie.report.daily import (
+    DailyReport,
+    ReportInputs,
+    _Pricer,
+    build_report,
+    render_markdown,
+    render_summary,
+)
+from kelpie.report.sections import Spend
 from kelpie.report.sections.throughput import throughput_section
-from tests.report.test_daily import DAY, llm
+from kelpie.report.store import StateRow
 
+DAY = date(2026, 3, 2)
 START = datetime(2026, 3, 2, 8, tzinfo=UTC)
-EVERY = timedelta(minutes=10)
 PRICES = PriceTable(
     (
         ("claude-sonnet-x", Price(input=3.0, output=15.0, cached_input=0.3)),
         ("gpt-x", Price(input=2.0, output=8.0, cached_input=0.2)),
-        ("model-house", Price(input=1.0, output=1.0, cached_input=0.1)),
     )
+)
+PLAN = ProviderSpend(
+    "anthropic", mode="subscription", limit_tokens=10_000_000, limit_window=timedelta(days=7)
+)
+API = ProviderSpend("openai", mode="api")
+DONE = (
+    Task("T-1", "t", Status.DONE, START + timedelta(hours=3)),
+    Task("T-2", "t", Status.DONE, START + timedelta(hours=3)),
 )
 
 
@@ -30,22 +49,34 @@ def spend(*providers: ProviderSpend) -> SpendConfig:
     return SpendConfig(settings=SpendSettings(providers=providers), prices=PRICES)
 
 
-PLAN = ProviderSpend("anthropic", mode="subscription", limit_tokens=10_000_000,
-                     limit_window=timedelta(days=7))  # fmt: skip
-API = ProviderSpend("openai", mode="api")
-SPANS = [
-    *llm("S-1", "T-1", START, 10, EVERY, (90_000, 10_000, 0), model="claude-sonnet-x"),
-    *llm("S-2", "T-2", START, 10, EVERY, (90_000, 10_000, 0), model="gpt-x"),
-]
-DONE = (
-    Task("T-1", "t", Status.DONE, START + timedelta(hours=3)),
-    Task("T-2", "t", Status.DONE, START + timedelta(hours=3)),
-)
+def calls(session: str, task: str, model: str, n: int = 10) -> list[Span]:
+    """``n`` model calls of 90k input and 10k output tokens, ten minutes apart."""
+    return [
+        Span(
+            trace_id=f"tr-{session}",
+            span_id=f"{session}-{i}",
+            name="chat",
+            kind=SpanKind.LLM,
+            start=START + i * timedelta(minutes=10),
+            end=START + i * timedelta(minutes=10) + timedelta(seconds=4),
+            task_id=task,
+            session_id=session,
+            model=model,
+            input_tokens=90_000,
+            output_tokens=10_000,
+        )
+        for i in range(n)
+    ]
 
 
-def report(config: SpendConfig | None, spans: list = SPANS, **kw: object):  # type: ignore[no-untyped-def]
-    inputs = ReportInputs(day=DAY, tz=UTC, spans=spans, prices=PRICES, spend=config,
-                          tasks=DONE, **kw)  # type: ignore[arg-type]  # fmt: skip
+MIXED = [*calls("S-1", "T-1", "claude-sonnet-x"), *calls("S-2", "T-2", "gpt-x")]
+PLAN_ONLY = calls("S-1", "T-1", "claude-sonnet-x")
+
+
+def report(config: SpendConfig | None, spans: list[Span] = MIXED, **kw: Any) -> DailyReport:
+    inputs = ReportInputs(
+        day=DAY, tz=UTC, spans=spans, prices=PRICES, spend=config, tasks=DONE, **kw
+    )
     return build_report(inputs, sections={"throughput": throughput_section})
 
 
@@ -56,18 +87,29 @@ def test_a_subscription_is_tokens_and_limit_share_an_api_key_is_dollars() -> Non
     assert r.limits == {"anthropic": (10_000_000, timedelta(days=7))}
     markdown = render_markdown(r)
     assert "1,000,000 billed tokens, $2.60" in markdown
-    assert "1,000,000 tokens on subscriptions (anthropic: 10% of its 7-day limit)" in markdown
-    assert "$1.30 per completed task" in markdown  # dollars over completed tasks, API only
+    assert "1,000,000 tokens on subscriptions (anthropic: 10% of one 7-day limit)" in markdown
+    # per completed task: dollars over the tasks, and plan tokens beside them, never summed
+    assert "$1.30 and 500,000 plan tokens per completed task" in markdown
+    assert "$1.30 and 500,000 plan tokens" in markdown.split("## Farm throughput")[1]
 
 
 def test_a_subscription_only_farm_shows_no_dollars() -> None:
-    plan_only = [s for s in SPANS if s.model == "claude-sonnet-x"]
-    r = report(spend(PLAN), plan_only)
+    r = report(spend(PLAN), PLAN_ONLY)
     head = render_summary(r)
-    assert "$" not in head.split("tasks completed")[1]  # no dollars per task
-    assert "500,000 plan tokens per completed task" in head
+    assert "$" not in head
+    assert "0 tokens burned" in head and "500,000 plan tokens per completed task" in head
     markdown = render_markdown(r)
+    assert "## Spend\n\n1,000,000 tokens on subscriptions (anthropic:" in markdown
+    assert "0 billed tokens" not in markdown
     assert "| 500,000 plan tokens |" in markdown  # throughput: cost per completed task
+
+
+def test_short_windows_compare_the_average_window() -> None:
+    hourly = ProviderSpend("anthropic", mode="subscription", limit_tokens=200_000,
+                           limit_window=timedelta(hours=5))  # fmt: skip
+    # 1M tokens in a day of 4.8 five-hour windows: about 208k per window, 104% of 200k
+    markdown = render_markdown(report(spend(hourly, API)))
+    assert "anthropic: 104% of its 5-hour limit per window" in markdown
 
 
 def test_no_limit_configured_says_so() -> None:
@@ -75,11 +117,11 @@ def test_no_limit_configured_says_so() -> None:
     assert "anthropic: limit not configured" in render_markdown(r)
 
 
-def test_a_provider_without_a_mode_is_an_estimate() -> None:
-    r = report(spend())  # nothing tells: unknown, priced as an estimate
+def test_a_provider_without_a_mode_is_marked_everywhere() -> None:
+    r = report(spend(PLAN))  # gpt-x: its provider's mode is not set
     markdown = render_markdown(r)
-    assert r.spend.unknown_usd == pytest.approx(r.spend.usd) and r.spend.plan_tokens == 0
-    assert "(estimate, mode not set)" in markdown
+    assert r.spend.usd > 0 and r.spend.unknown_usd == pytest.approx(r.spend.usd)
+    assert markdown.count("(estimate, mode not set)") >= 3  # headline, spend line, throughput
 
 
 def test_without_spend_config_the_report_is_unchanged() -> None:
@@ -88,16 +130,61 @@ def test_without_spend_config_the_report_is_unchanged() -> None:
     assert "mode not set" not in legacy
 
 
-def test_chaos_on_a_subscription_is_burned_tokens_not_dollars() -> None:
-    from kelpie.core.actions import Severity
-    from kelpie.core.states import OpenState
-    from kelpie.report.store import StateRow
-
+def test_chaos_on_a_subscription_is_tokens_never_dollars() -> None:
     sid = "no_progress:S-1"
     row = StateRow(OpenState(sid, "no_progress", START, START, START + timedelta(hours=2), 0,
                              Severity.WARNING, "s", "T-1"))  # fmt: skip
     sessions = (Session("S-1", "T-1", "dev-1", START, START + timedelta(hours=2)),)
     r = report(spend(PLAN, API), states=(row,), sessions=sessions)
+    [line] = r.chaos
+    assert line.spend.usd == 0 and line.spend.plan_tokens > 0 and r.chaos_usd == 0
     head = render_summary(r)
-    assert "tokens on subscriptions (anthropic: " in head and "burned" in head
-    assert r.chaos_spend.usd == 0 and r.chaos_spend.plan_tokens > 0
+    assert "; 1,000,000 tokens on subscriptions (anthropic: 10% of one 7-day limit) burned" in head
+    markdown = render_markdown(r)
+    assert "| 0 + 1,000,000 plan | - |" in markdown  # the table never prices plan tokens
+    assert all(a.usd == 0 for a in r.recommendations)
+
+
+def test_unpriced_billed_tokens_are_not_priced() -> None:
+    r = report(spend(API), calls("S-9", "T-1", "gpt-unknown-model"))
+    assert r.spend.unpriced_tokens == r.spend.billed_tokens and not r.priced
+
+
+def test_the_pricer_never_prices_a_plan() -> None:
+    pricer = _Pricer(PRICES, spend(PLAN, API), DAY)
+    assert pricer.input_usd(1_000_000, "claude-sonnet-x") == 0.0
+    assert pricer.input_usd(1_000_000, "gpt-x") == pytest.approx(2.0)
+    rows = [TokenUsage("S", "T", "claude-sonnet-x", calls=1, input_tokens=1_000, output_tokens=10)]
+    assert pricer.price(rows * 2).plans == (("anthropic", 2_020),)
+
+
+def test_spend_adds_plans_per_provider() -> None:
+    a = Spend(10, 1.0, 0, 5, (("anthropic", 5),), 0.5)
+    b = Spend(7, 0.0, 0, 7, (("anthropic", 3), ("google", 4)))
+    total = a + b
+    assert total.plans == (("anthropic", 8), ("google", 4))
+    assert (total.tokens, total.plan_tokens, total.billed_tokens) == (17, 12, 5)
+    assert (total.usd, total.unknown_usd) == (1.0, 0.5)
+
+
+def test_no_model_fit_saving_across_a_subscription() -> None:
+    from kelpie.report.sections.tokens_fit import _Prices, _saving
+
+    class Ctx:
+        def __init__(self) -> None:
+            self.pricer = _Pricer(PRICES, spend(PLAN, API), DAY)
+
+        def price(self, rows: Any) -> Spend:
+            return self.pricer.price(rows)
+
+    class Role:
+        def __init__(self) -> None:
+            self.usage = [TokenUsage("S", "T", "gpt-x", calls=1, input_tokens=1_000_000)]
+
+        def on(self, model: str) -> list[TokenUsage]:
+            return [TokenUsage("S", "T", model, calls=1, input_tokens=1_000_000)]
+
+    price = _Prices(Ctx(), {})  # type: ignore[arg-type]
+    role: Any = Role()  # a stand-in for a RoleModel
+    assert _saving(role, "claude-sonnet-x", price) == 0.0
+    assert _saving(role, "gpt-x", price) == 0.0  # same model: nothing saved
