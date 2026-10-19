@@ -150,7 +150,6 @@ class Outage:
     tasks: frozenset[str] = frozenset()
     state: str = ""
     signature: str | None = None  # how people read it, e.g. "ci.yml > build > Select toolchain"
-    folded: int = 0  # other rules' alerts held back under it (a lower bound, core.incidents)
 
 
 def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[Outage]:
@@ -168,14 +167,6 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
     out = []
     for s in found:
         mine = [o for at, o in samples if o.state == s.id and s.since <= at <= s.last_seen]
-        # each folded alert is stored once, then at most once an hour: count alerts, not rows
-        folded = {
-            (e.rule, e.fingerprint)
-            for e in entries
-            if e.suppression is Suppression.INCIDENT
-            and e.params.get(FOLDED_UNDER) == s.id
-            and s.since <= e.at <= s.last_seen
-        }
         out.append(
             Outage(
                 since=s.since,
@@ -185,10 +176,41 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
                 tasks=frozenset(t for o in mine for t in o.tasks),
                 state=s.id,
                 signature=mine[-1].signature if mine else None,
-                folded=len(folded),
             )
         )
     return out
+
+
+def outage_day(
+    outage: Outage, entries: Iterable[LedgerEntry], start: datetime, end: datetime
+) -> tuple[int, int]:
+    """The PRs an outage held and the alerts folded under it between ``start`` and ``end``
+    (both a lower bound): the PRs of its samples in that span, and of the last one before
+    it (its scope as the span began); folded alerts with an entry in that span (one when a
+    fold starts, then at most one an hour: alerts, not entries, are counted)."""
+    a, b = max(outage.since, start), min(outage.until, end)
+    prs: set[str] = set()
+    before: CiOutage | None = None
+    folded = set()
+    for e in sorted(entries, key=lambda e: e.at):
+        if not outage.since <= e.at <= b:
+            continue
+        if e.rule == "ci_economy" and (o := CiOutage.from_params(e.params)) is not None:
+            if o.state != outage.state:
+                continue
+            if e.at < a:
+                before = o
+            else:
+                prs.update(p.lower() for p in o.prs)
+        elif (
+            e.at >= a
+            and e.suppression is Suppression.INCIDENT
+            and e.params.get(FOLDED_UNDER) == outage.state
+        ):
+            folded.add((e.rule, e.fingerprint))
+    if before is not None:
+        prs.update(p.lower() for p in before.prs)
+    return len(prs), len(folded)
 
 
 class WaitCauses:
@@ -205,7 +227,6 @@ class WaitCauses:
     ) -> None:
         self._labels = frozenset(hold_labels)
         self._outages = tuple(outages)
-        self.outages = self._outages
         self._block_kinds = tuple(block_kinds)
         self._by_id: dict[str, Condition] = {}
         self._by_task: dict[str, list[Condition]] = {}
@@ -221,6 +242,10 @@ class WaitCauses:
             if e.rule == "needs_you" and "escalate_to" in e.params:
                 self._people.update(_ids(e.params.get("approvals")))
                 self._people.update(_ids(e.params.get("waiting")))
+
+    @property
+    def outages(self) -> tuple[Outage, ...]:
+        return self._outages
 
     def __call__(self, task: Task) -> str:
         if self._labels.intersection(task.labels):
