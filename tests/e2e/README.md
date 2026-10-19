@@ -18,6 +18,10 @@ a Workboard database, a spool written through the real Kelpie hook script, and a
 plugin (`index.js`) is then run against the stop markers Kelpie wrote; without Node that check
 is skipped locally and fails on CI.
 
+`test_github_issues.py` runs a farm of issue agents only: the fake GitHub holds issues
+(labels, assignees, comments, events) and takes the issues adapter's writes; rule 1 announces
+a person's acceptance criterion on the issue an agent works on.
+
 `test_multi_host.py` runs one farm on two simulated machines instead (`tests/sim/hosts.py`):
 each has its own board, spool, fake CLI and a real `kelpie agent`, reporting to a central
 `kelpie serve` with a hub.

@@ -646,7 +646,8 @@ GitHub Issues as the task queue, for agents that take issues and return pull req
 (quoting rule reasons) are as public as the repository.
 Where to reach GitHub defaults to [[connectors.github]](#connectorsgithub); the adapter
 makes its own client from it (its own cache and per-tick budget). The status and owner
-rules: the [issues adapter README](../src/kelpie/adapters/issues/README.md).
+rules: the [issues adapter README](../src/kelpie/adapters/issues/README.md); first run:
+[quickstart](quickstart-github-issues.md).
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |

@@ -9,7 +9,8 @@ Hermes, no tokens):
 - :mod:`kelpie.sim.spool`: tool calls and session ends written through the real Hermes
   plugin (:mod:`kelpie.adapters.hermes.plugin`);
 - :mod:`kelpie.sim.github`: a stateful GitHub REST API (pull requests, commit statuses,
-  Actions runs and their cancel endpoint);
+  Actions runs and their cancel endpoint; issues with their labels, assignees, comments and
+  the issues adapter's writes);
 - :mod:`kelpie.sim.toml`: writes the generated config.
 
 Nothing in Kelpie's control loop imports this package (an import-linter contract).

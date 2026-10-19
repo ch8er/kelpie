@@ -3,6 +3,7 @@
 For farms whose task queue is an issue tracker rather than a platform's own board: one adapter
 covers every agent that takes an issue and returns a pull request. Adapter name
 `github-issues`, section [`[adapters.github_issues]`](../../../../docs/configuration.md#adaptersgithub_issues).
+First live run, step by step: [docs/quickstart-github-issues.md](../../../../docs/quickstart-github-issues.md).
 
 | Agent | Started by | Seen on the issue as |
 | --- | --- | --- |
