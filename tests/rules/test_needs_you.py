@@ -473,3 +473,45 @@ def test_a_dependent_waiting_on_a_merge_is_not_parked_on_the_human_task() -> Non
     named = blocked("A-1", ago(hours=2), reason="needs_input: waiting for H-1 (see PR #12)")
     [item] = run(snap([gate, named], deps=deps), condition_reasons=patterns)
     assert item.params["human_tasks"] == ["H-1"]
+
+
+# --- planned waits are not waiting (incident 20) ----------------------------------------
+
+
+def test_a_planned_dependent_is_not_waiting_on_the_human_task() -> None:
+    gate = human("H-1", ago(hours=150))
+    later = Task("A-1", "after release", Status.BACKLOG, ago(hours=143), prework=True)
+    behind_later = Task("A-2", "follow-up", Status.BACKLOG, ago(hours=143))
+    labelled = Task("A-3", "retro", Status.BACKLOG, ago(hours=143), labels=("post-release",))
+    deps = [Dependency("A-1", "H-1"), Dependency("A-2", "A-1"), Dependency("A-3", "H-1")]
+    tasks = [gate, later, behind_later, labelled]
+    assert run(snap(tasks, deps=deps), planned_labels=frozenset({"post-release"})) == []
+    # Without the label, the labelled one waits: 143 agent-hours.
+    [item] = run(snap(tasks, deps=deps))
+    assert item.params["waiting"] == ["A-3"] and item.params["cost_hours"] == 143.0
+
+
+def test_a_planned_task_blocked_on_a_human_task_is_no_approval_either() -> None:
+    gate = human("H-1", ago(hours=3))
+    asks = replace(blocked("A-1", ago(hours=2), "waiting_human: H-1", "C-1"), labels=("later",))
+    c = waits_on("C-1", "A-1", "H-1")
+    assert run(snap([gate, asks], [c]), planned_labels=frozenset({"later"})) == []
+    [item] = run(snap([gate, asks], [c]))
+    assert item.params["human_tasks"] == ["H-1"]
+
+
+def test_a_run_kelpie_stopped_needs_a_person_even_when_planned() -> None:
+    stopped = blocked("A-1", ago(hours=2), "kelpie: stopped a runaway loop")
+    stopped = replace(
+        stopped, labels=("later",), block=replace(stopped.block, kelpie=KelpieMark.STOP)
+    )
+    [item] = run(snap([stopped]), planned_labels=frozenset({"later"}))
+    assert item.params["approvals"] == ["A-1"]
+
+
+@pytest.mark.parametrize("value", ["later", [""], [1]])
+def test_planned_labels_are_validated(value: object) -> None:
+    with pytest.raises(ValueError, match="planned_labels must be a list"):
+        REGISTRY["needs_you"]({"planned_labels": value})
+    with pytest.raises(ValueError, match="planned_labels must be a list"):
+        REGISTRY["bottlenecks"]({"planned_labels": value})

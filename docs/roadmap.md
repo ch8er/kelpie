@@ -449,9 +449,9 @@ Live case: a post-release task depending on a planned human task counted as 143 
 of waiting on a person.
 
 **Acceptance criteria**
-- [ ] A dependent task that is not ready for work for its own reasons (backlog, scheduled for later, a milestone or label marking it as later — config) does not count as waiting on its blocker
-- [ ] Rule 13, rule 6 and the report use the same definition
-- [ ] Fixtures: new `20-planned-wait.yaml`
+- [x] A dependent task that is not ready for work for its own reasons (backlog, scheduled for later, a milestone or label marking it as later — config) does not count as waiting on its blocker
+- [x] Rule 13, rule 6 and the report use the same definition
+- [x] Fixtures: new `20-planned-wait.yaml`
 
 ### core: budgets and spend for API-key farms — default prices, provider reconciliation, auto mode
 labels: P0, week-3, area:core

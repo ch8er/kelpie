@@ -48,7 +48,10 @@ spare. An alert lasts as long as spare capacity exists.
   and the estimated agent hours. Kelpie never removes or rewrites a dependency: it shows
   its cost and asks whether the link is needed. Human tasks with nothing behind them are
   not flagged, a human task parked by a hold is not escalated, and a chain with agent work
-  behind a human task gets no parallelization advice.
+  behind a human task gets no parallelization advice. A planned task (incident 20: in a
+  pre-work status such as Hermes triage or scheduled, or labelled with one of
+  ``planned_labels`` or a hold label) is not ready for work for its own reasons: it is not
+  behind the human task, and neither is what waits on it. Rule 13 inherits the labels.
 
 ``ready_is_queued`` (default off; for platforms that report the assignee of a task nobody has
 started as its owner; the Hermes adapter does not, since it sets the owner only while a run
@@ -106,7 +109,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import ConditionKind, OwnerKind, PullRequest, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
-from kelpie.rules._tasks import is_live, last_seen, linked_conditions, responsible
+from kelpie.rules._tasks import is_live, last_seen, linked_conditions, planned, responsible
 
 NAME = "bottlenecks"
 
@@ -356,13 +359,15 @@ class HumanGate:
     actionable: bool  # the human can do it now: ready or in progress, nothing open before it
 
 
-def human_gates(snapshot: Snapshot) -> list[HumanGate]:
+def human_gates(snapshot: Snapshot, planned_labels: Collection[str] = ()) -> list[HumanGate]:
     """Open human-owned tasks with agent work behind them, the most work first.
 
     Behind means reachable through dependencies (``depends_on`` -> ``task_id``) or an unmet
     ``human_task`` condition of a blocked or waiting task's current wait (as
     ``linked_conditions`` reads it) whose ``params.task`` names the human task, through any
-    open task. Agent tasks are open tasks not owned by a human.
+    open task that is not planned (:func:`~kelpie.rules._tasks.planned`, with
+    ``planned_labels``): a planned task does not wait on the human task, and neither does
+    what waits on it. Agent tasks are open tasks not owned by a human.
     """
     humans = {o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN}
     by_id = {t.id: t for t in snapshot.tasks if not t.status.is_terminal}
@@ -386,13 +391,14 @@ def human_gates(snapshot: Snapshot) -> list[HumanGate]:
             ):
                 successors.setdefault(target, set()).add(t.id)
     open_deps = _open_dependencies(snapshot, set(by_id))
+    later = {tid for tid, t in by_id.items() if planned(t, planned_labels)}
     result: list[HumanGate] = []
     for gate in gates:
         seen: set[str] = set()
         todo = [gate.id]
         while todo:
             for nxt in successors.get(todo.pop(), ()):
-                if nxt not in seen and nxt != gate.id:
+                if nxt not in seen and nxt != gate.id and nxt not in later:
                     seen.add(nxt)
                     todo.append(nxt)
         behind = sorted(tid for tid in seen if by_id[tid].owner_id not in humans)
@@ -416,6 +422,9 @@ class Bottlenecks:
     min_idle_time: timedelta = timedelta(minutes=30)
     hold_labels: frozenset[str] = frozenset()
     holds: tuple[Hold, ...] = ()
+    # Labels (or milestones as labels) marking a task as later: it does not wait on a human
+    # task it depends on (incident 20). Held and pre-work tasks are planned too.
+    planned_labels: frozenset[str] = frozenset()
     # Expected length of a hold without its own ``expires_after``. None: 4h for ``holds``
     # entries, no expiry for bare ``hold_labels`` (they park tasks on purpose).
     hold_expiry: timedelta | None = None
@@ -446,7 +455,7 @@ class Bottlenecks:
         now = snapshot.now
         gates = [
             g
-            for g in human_gates(snapshot)
+            for g in human_gates(snapshot, self.planned_labels | held)
             if g.actionable
             and now - g.task.status_since >= self.human_gate_after
             and not held.intersection(g.task.labels)  # parked on purpose
@@ -896,6 +905,13 @@ class Bottlenecks:
         return actions
 
 
+def labels_list(value: Any, name: str) -> list[str]:
+    """A config list of non-empty labels."""
+    if not isinstance(value, list | tuple) or not all(isinstance(x, str) and x for x in value):
+        raise ValueError(f"{name} must be a list of non-empty strings")
+    return list(value)
+
+
 def _who_could_take(
     work: Sequence[Task],
     idle_roles: dict[str, tuple[str, ...]],
@@ -1020,6 +1036,10 @@ def build(config: dict[str, Any]) -> Bottlenecks:
         ):
             raise ValueError("hold_labels must be a list of non-empty strings")
         kwargs["hold_labels"] = frozenset(labels)
+    if "planned_labels" in config:
+        kwargs["planned_labels"] = frozenset(
+            labels_list(config.pop("planned_labels"), "planned_labels")
+        )
     if "holds" in config:
         raw = config.pop("holds")
         if not isinstance(raw, list | tuple):

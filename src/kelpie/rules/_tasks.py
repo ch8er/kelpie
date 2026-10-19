@@ -4,7 +4,7 @@ which conditions belong to a task right now, and is anyone still working on it."
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -120,6 +120,20 @@ def family_prs(task: Task, snapshot: Snapshot) -> FamilyPRs:
 
 def _by_ref(prs: dict[tuple[str, int], PullRequest]) -> tuple[PullRequest, ...]:
     return tuple(prs[k] for k in sorted(prs))
+
+
+def planned(task: Task, labels: Collection[str] = ()) -> bool:
+    """Whether a task is not ready for work for reasons of its own, so it does not wait on
+    what it depends on (incident 20: a post-release task behind a person's planned task
+    counted as 143 agent-hours of waiting on that person).
+
+    It is in a pre-work status only a person moves it out of (``Task.prework``: Hermes
+    triage, or scheduled for later; the adapter's config), or it carries one of ``labels``
+    (a milestone or label that marks it as later, or a hold: rule 6's ``planned_labels``
+    and hold labels). A plain backlog task is not planned: platforms keep dependents there
+    until their parents finish (Hermes todo). Rules 6 and 13, and through rule 13 the daily
+    report's agent-hours waiting on people, read it alike."""
+    return task.prework or not frozenset(labels).isdisjoint(task.labels)
 
 
 def responsible(task: Task) -> str | None:
