@@ -3,8 +3,7 @@ incident: 5
 title: "Wasted builds turned into the CI configuration changes that would have saved them"
 description: >
   Two pipelines burned minutes for nothing: the test workflow ran for drafts and for a
-  README fix, and the nightly-style lint workflow ran again for a commit that had already
-  passed. A third pipeline only built real code changes. Rule 9 must recommend, per
+  README fix, and the lint workflow ran again for a commit that had already passed. A third pipeline only built real code changes. Rule 9 must recommend, per
   pipeline, each configuration change with the minutes it would have saved, in no CI's
   syntax, and leave the clean pipeline out.
 rule: ci_economy
@@ -43,7 +42,7 @@ snapshot:
 expected_actions:
   - kind: alert
     severity: info
-    reason_contains: "A CI configuration would have saved it: skip draft pull requests (25 min)"
+    reason_contains: "A CI configuration would have saved 40 min: skip draft change requests (drafts 2, 25 min)"
     params:
       wasted_minutes: 40.0
       pipelines:
@@ -61,14 +60,13 @@ expected_actions:
           changes:
             - {change: skip_verified, minutes: 6.0, builds: 1}
 not_expected_actions:
+  # The clean pipeline's 30 minutes counted as waste, or as a third pipeline.
   - kind: alert
-    severity: warning
-  - kind: cancel_build
+    params: {wasted_minutes: 70.0}
   - kind: alert
-    params:
-      pipelines:
-        - repo: example/lib
-          workflow: .github/workflows/test.yml
-          source: ci
-          minutes: 30.0
-          changes: []
+    params: {pipelines_total: 3}
+  # Nothing was superseded: no cancel advice, no claim that rule 9 cancels.
+  - kind: alert
+    reason_contains: "cancel a running build"
+  - kind: alert
+    reason_contains: "Rule 9 cancels"

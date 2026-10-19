@@ -896,9 +896,11 @@ better CI configuration (skip drafts, path filters for docs-only changes, cancel
 progress on new pushes, skip already verified commits).
 
 **Acceptance criteria**
-- [ ] Recommendation lists each suggested change with the minutes it would have saved
+- [x] Recommendation lists each suggested change with the minutes it would have saved
 - [ ] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff)
-- [ ] No CI-specific syntax in `kelpie.rules`
+- [x] No CI-specific syntax in `kelpie.rules`
+
+The recommendation is in #227 (the waste summary and its `params.pipelines`); rendering and opening the PR are the next step.
 
 ### rules: return_causes — root causes of task returns (incident 7)
 labels: P1, area:rules

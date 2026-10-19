@@ -425,13 +425,16 @@ def test_the_summary_recommends_a_ci_configuration_change_per_pipeline() -> None
                     "minutes": 3.0,
                     "builds": 1,
                     "patterns": [p.pattern for p in rule.wip_patterns],
+                    "case_insensitive": True,
                 },
             ],
         },
     ]
+    assert summary.params["pipelines_total"] == 2
     assert (
-        "A CI configuration would have saved it: skip draft pull requests (48 min); "
-        "skip changes that touch only docs (docs/*, *.md) (24 min); skip WIP commits (3 min)."
+        "A CI configuration would have saved 75 min: skip draft change requests (drafts 2, "
+        "48 min); skip changes that touch only docs (docs-only changes 2, 24 min); skip WIP "
+        "commits (WIP commits 1, 3 min)."
     ) in summary.reason
     assert "cancels superseded builds" not in summary.reason  # none were superseded
 
@@ -453,9 +456,28 @@ def test_superseded_builds_recommend_cancelling_in_progress() -> None:
     )
     (summary,) = rule.evaluate(snap)
     (pipeline,) = summary.params["pipelines"]
-    assert pipeline["changes"] == [{"change": "cancel_in_progress", "minutes": 6.0, "builds": 1}]
-    assert "cancel a running build when a newer commit is pushed (6 min)" in summary.reason
-    assert "rule 9 cancels superseded builds in act mode" in summary.reason
+    # S-2 started halfway through S-1's hour: cancelling then would have saved half of it.
+    assert pipeline["changes"] == [{"change": "cancel_in_progress", "minutes": 3.0, "builds": 1}]
+    assert (
+        "cancel a running build when a newer commit is pushed (superseded by a newer build 1, "
+        "3 min of 6 min)"
+    ) in summary.reason
+    assert "Rule 9 cancels" not in summary.reason  # cancel_superseded is off
+    (summary,) = [
+        a
+        for a in replace(rule, cancel_superseded=True).evaluate(snap)
+        if a.kind is ActionKind.ALERT
+    ]
+    assert summary.reason.endswith("Rule 9 cancels superseded builds in act mode.")
+
+
+def test_pipelines_of_two_ci_sources_stay_apart() -> None:
+    snap = Snapshot(
+        now=NOW,
+        builds=(b("A-1", draft=True), b("B-1", source="other-ci", draft=True, sha="x")),
+    )
+    (summary,) = CiEconomy(waste_min_minutes=0).evaluate(snap)
+    assert sorted(p["source"] for p in summary.params["pipelines"]) == ["ci", "other-ci"]
 
 
 def test_the_pipelines_listed_are_capped() -> None:
