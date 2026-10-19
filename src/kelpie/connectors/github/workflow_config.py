@@ -58,6 +58,8 @@ DRAFTS_WARNING = (
 NOT_DRAFT = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
 PR_EVENTS = ("opened", "synchronize", "reopened", "ready_for_review")
 PR_TYPES = f"[{', '.join(PR_EVENTS)}]"
+# The pull request actions that bring a new head commit: only their runs supersede.
+_COMMIT_ACTIONS = '["opened","synchronize","reopened"]'
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,99}")
 _GLOB = re.compile(r"[A-Za-z0-9._/*?\[\]{}!-]{1,200}")
 _KEY = r"(?P<key>\"[^\"\n]{1,100}\"|'[^'\n]{1,100}'|[A-Za-z_][\w.-]*)"
@@ -91,10 +93,20 @@ class WorkflowError(ValueError):
 
 
 def concurrency(default: str) -> str:
-    """The ``concurrency`` block for a repository whose default branch is ``default``."""
+    """The ``concurrency`` block for a repository whose default branch is ``default``.
+
+    One group per workflow file (``workflow_ref``, not ``name:``, which two files may share)
+    and per pull request or branch, so a newer commit cancels the running build. Only runs
+    for a commit share it: a pull request's ``opened``, ``synchronize`` and ``reopened``
+    runs, and pushes to branches other than the default. Every other run (a label, an edit,
+    ``ready_for_review``, the default branch, manual and scheduled runs) has a group of its
+    own and neither cancels nor is cancelled: a ``labeled`` run whose jobs skip could
+    otherwise cancel the commit's real run and report the required check as passed."""
     group = (
-        "${{ github.workflow }}-${{ github.event_name }}-${{ "
-        "(github.event_name == 'pull_request' && github.event.pull_request.number) || "
+        "${{ github.workflow_ref }}-${{ github.event_name }}-${{ "
+        "(github.event_name == 'pull_request' && "
+        f"contains(fromJSON('{_COMMIT_ACTIONS}'), github.event.action) && "
+        "github.event.pull_request.number) || "
         f"(github.event_name == 'push' && github.ref != 'refs/heads/{default}' && github.ref)"
         " || github.run_id }}"
     )

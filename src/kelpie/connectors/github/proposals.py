@@ -10,23 +10,27 @@ writing anything.
 
 Steps, each re-checked against GitHub (no cache):
 
-1. the repository is in ``propose_repos`` and the workflow is a file under
-   ``.github/workflows/`` whose name is also a safe branch name (``Build.workflow`` from the
-   run list, never a path the rule made up);
-2. an open pull request from Kelpie's branch for this file (``kelpie/ci-config/<file>``)
-   means it was proposed already: nothing to do;
+1. a pipeline with no file under ``.github/workflows/`` (CodeQL default setup, a dynamic
+   workflow) has nothing to propose; otherwise the repository is in ``propose_repos`` and
+   the workflow is a file there with an ASCII name (``Build.workflow`` from the run list,
+   never a path the rule made up);
+2. an open pull request from Kelpie's branch for this file (``kelpie/ci-config/<file>``,
+   dots in the stem made dashes) means it was proposed already: nothing to do;
 3. the file on the default branch is read and the changes are rendered for that branch
    (:mod:`kelpie.connectors.github.workflow_config`); nothing to render is nothing to do.
-   The commit and the description are made before anything is written;
+   A closed, unmerged pull request from that branch that proposed the same changes (the
+   description's hidden mark) means a human turned them down: nothing to do. The commit
+   and the description are made before anything is written;
 4. the branch is created from the default branch's head, the file is committed on it with
    the read file's blob sha (GitHub refuses the commit if the file changed meanwhile), and a
    draft pull request is opened. It lists each change with the minutes it would have saved,
    the changes left out and why, and what to check before merging. When anything fails
    after the branch was made, the branch is deleted again, but only while it still points
-   at Kelpie's own work. A branch of that name that already exists: from a proposal a human
-   closed, nothing to do (Kelpie does not push to it again); left half-made by an earlier
-   attempt (at the default head, or holding exactly this change), Kelpie carries on from
-   there; anything else is someone else's branch and refuses.
+   at Kelpie's own work. A branch of that name that already exists: the head of an earlier
+   proposal of Kelpie's, merged or closed, is deleted and made afresh; left half-made by an
+   earlier attempt (at the default head, or one commit to this file holding exactly this
+   change), Kelpie carries on from there; anything else is someone else's branch and
+   refuses.
 
 Answers that retrying will not change refuse (a human is told): no access (403, or an
 organization policy), the file or repository gone (404), a request GitHub rejects (422,
@@ -56,10 +60,16 @@ from kelpie.core.actions import Action, ActionKind, ActionResult
 
 log = logging.getLogger(__name__)
 
-# A workflow file Kelpie edits: under .github/workflows/, a name that is a safe ref component
-# too (ASCII, no "..", no ".lock"), as the branch is named after it.
-WORKFLOW_PATH = re.compile(r"\.github/workflows/(?P<file>[A-Za-z0-9][A-Za-z0-9_-]{0,99}\.ya?ml)")
+# A workflow file Kelpie edits: under .github/workflows/, an ASCII name; its branch is named
+# after it with the stem's dots made dashes (a ref component allows no "..", no ".lock").
+WORKFLOW_DIR = ".github/workflows/"
+WORKFLOW_PATH = re.compile(
+    r"\.github/workflows/(?P<file>(?P<stem>[A-Za-z0-9][A-Za-z0-9._-]{0,99})\.(?P<ext>ya?ml))"
+)
 BRANCH_PREFIX = "kelpie/ci-config/"
+# In every description Kelpie writes, naming the changes it proposes: a closed pull request
+# with the same mark was turned down, and one with any mark was Kelpie's.
+MARKER = "<!-- kelpie-ci-config:"
 _LABELS = {
     "cancel_in_progress": "Cancel a running build when a newer commit is pushed",
     "ignore_docs_paths": "Skip changes that touch only docs",
@@ -80,6 +90,11 @@ class Proposer:
     repos: tuple[str, ...]  # propose_repos
 
     def execute(self, action: Action) -> ActionResult:
+        workflow = action.params.get("workflow")
+        if isinstance(workflow, str) and not workflow.startswith(WORKFLOW_DIR):
+            # A pipeline with no file to edit (CodeQL default setup, a dynamic workflow).
+            log.info("ci-config: %r is no workflow file; nothing to propose", workflow)
+            return ActionResult.NOTHING_TO_DO
         target = _target(action, self.repos)
         if target is None:
             return ActionResult.REFUSED
@@ -95,9 +110,10 @@ class Proposer:
     def _propose(
         self, repo: str, path: str, file: str, changes: list[Mapping[str, Any]]
     ) -> ActionResult:
-        default = default_branch(self.client, repo)
-        branch = f"{BRANCH_PREFIX}{file}"
-        if self._proposed(repo, branch):
+        default, owner = repository(self.client, repo)
+        branch = branch_for(file)
+        head_filter = f"{owner}:{branch}"  # the owner as GitHub spells it
+        if self._open(repo, head_filter):
             return ActionResult.NOTHING_TO_DO
         text, blob = read_workflow(self.client, repo, path, default)
         try:
@@ -107,6 +123,11 @@ class Proposer:
             return ActionResult.REFUSED
         if not rendered.applied:
             return ActionResult.NOTHING_TO_DO
+        closed = self._closed(repo, head_filter)
+        mark = marker(rendered.applied)
+        if any(not pr.get("merged_at") and mark in str(pr.get("body") or "") for pr in closed):
+            log.info("ci-config: %s %s: these changes were turned down before", repo, path)
+            return ActionResult.NOTHING_TO_DO
         # Everything the writes need, before the first write.
         content = base64.b64encode(rendered.text.encode()).decode()
         description = body(path, changes, rendered.applied, rendered.left_out)
@@ -115,27 +136,31 @@ class Proposer:
         if not isinstance(sha, str):
             raise GitHubError("bad_response", f"{repo}: no head of {default}")
         state: str | None = "empty"
+        made_here = True  # only a branch this attempt made is ever taken back
         try:
-            self.client.send(
-                "POST", f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha}
-            )
-            left = None
+            self._branch(repo, branch, sha)
         except GitHubError as exc:
             left = self._branch_sha(repo, branch) if exc.status == 422 else None
             if left is None:
                 raise  # a 422 without such a branch: refused (an invalid name, a rule)
-            if self._closed_before(repo, branch):
-                return ActionResult.NOTHING_TO_DO  # a human closed this proposal: no again
-            state = self._left_by_kelpie(repo, path, branch, default, rendered.text)
-            if state is None:
-                log.warning(
-                    "ci-config: %s: branch %s exists without a proposal; Kelpie leaves it alone",
-                    repo,
-                    branch,
-                )
-                return ActionResult.REFUSED  # someone else's branch
-        # The branch may be deleted only while it points at Kelpie's own work.
-        ours = {sha} if left is None else {left}
+            if any(_head(pr) == left and MARKER in str(pr.get("body") or "") for pr in closed):
+                # The branch of an earlier proposal, merged or turned down for other
+                # changes: it is done with (GitHub can restore it from that pull request).
+                if not self._delete(repo, head_filter, branch, {left}):
+                    return ActionResult.REFUSED
+                self._branch(repo, branch, sha)
+            else:
+                state = self._left_by_kelpie(repo, path, branch, default, rendered.text)
+                if state is None:
+                    log.warning(
+                        "ci-config: %s: branch %s exists without a proposal; Kelpie leaves "
+                        "it alone",
+                        repo,
+                        branch,
+                    )
+                    return ActionResult.REFUSED  # someone else's branch
+                made_here = False  # carried on from: never deleted by this attempt
+        ours = {sha}  # the branch may be deleted only while it points at this attempt's work
         try:
             if state == "empty":
                 commit = self.client.send(
@@ -163,19 +188,38 @@ class Proposer:
                     "body": description,
                 },
             )
-        except Exception:
-            # No half-made proposal: the branch Kelpie just made goes, so a later attempt
-            # starts over; only while it still points at Kelpie's own work.
-            self._take_back(repo, branch, ours)
+        except Exception as exc:
+            if (
+                isinstance(exc, GitHubError)
+                and exc.status == 422
+                and self._open_now(repo, head_filter)
+            ):
+                return ActionResult.NOTHING_TO_DO  # opened meanwhile (another Kelpie, a human)
+            if made_here:
+                # No half-made proposal: the branch this attempt made goes, so a later
+                # attempt starts over.
+                self._delete(repo, head_filter, branch, ours)
             raise
         return ActionResult.DONE
 
-    def _proposed(self, repo: str, branch: str) -> bool:
-        owner = repo.split("/", 1)[0]
-        open_ = self.client.get(
-            f"/repos/{repo}/pulls", {"head": f"{owner}:{branch}", "state": "open"}, fresh=True
+    def _branch(self, repo: str, branch: str, sha: str) -> None:
+        self.client.send(
+            "POST", f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha}
+        )
+
+    def _open(self, repo: str, head_filter: str) -> bool:
+        found = self.client.get(
+            f"/repos/{repo}/pulls", {"head": head_filter, "state": "open"}, fresh=True
         ).body
-        return isinstance(open_, list) and bool(open_)
+        return isinstance(found, list) and bool(found)
+
+    def _open_now(self, repo: str, head_filter: str) -> bool | None:
+        """Whether a pull request from the branch is open; None when GitHub cannot say."""
+        try:
+            return self._open(repo, head_filter)
+        except GitHubError as exc:
+            log.warning("ci-config: %s: open pull requests unknown: %s", repo, exc)
+            return None
 
     def _branch_sha(self, repo: str, branch: str) -> str | None:
         try:
@@ -187,12 +231,12 @@ class Proposer:
         sha = (ref.body.get("object") or {}).get("sha") if isinstance(ref.body, Mapping) else None
         return sha if isinstance(sha, str) else ""
 
-    def _closed_before(self, repo: str, branch: str) -> bool:
-        owner = repo.split("/", 1)[0]
+    def _closed(self, repo: str, head_filter: str) -> list[Mapping[str, Any]]:
+        """Closed pull requests from Kelpie's branch for this file, merged ones too."""
         closed = self.client.get(
-            f"/repos/{repo}/pulls", {"head": f"{owner}:{branch}", "state": "closed"}, fresh=True
+            f"/repos/{repo}/pulls", {"head": head_filter, "state": "closed"}, fresh=True
         ).body
-        return isinstance(closed, list) and bool(closed)
+        return [pr for pr in closed if isinstance(pr, Mapping)] if isinstance(closed, list) else []
 
     def _left_by_kelpie(
         self, repo: str, path: str, branch: str, default: str, text: str
@@ -215,14 +259,21 @@ class Proposer:
         there, _ = read_workflow(self.client, repo, path, branch)
         return "made" if there == text else None
 
-    def _take_back(self, repo: str, branch: str, ours: set[str]) -> None:
+    def _delete(self, repo: str, head_filter: str, branch: str, ours: set[str]) -> bool:
+        """Delete Kelpie's branch while it still points at ``ours`` and no pull request from
+        it is open (deleting it would close that pull request). Whether it is gone."""
         try:
+            if self._open_now(repo, head_filter) is not False:
+                log.warning("ci-config: %s: branch %s may head a pull request; kept", repo, branch)
+                return False
             if self._branch_sha(repo, branch) not in ours:
                 log.warning("ci-config: %s: branch %s moved on; left as it is", repo, branch)
-                return
+                return False
             self.client.send("DELETE", f"/repos/{repo}/git/refs/heads/{quote(branch)}")
+            return True
         except GitHubError as exc:
             log.warning("ci-config: %s: branch %s left behind: %s", repo, branch, exc)
+            return False
 
 
 def preview(client: GitHubClient, action: Action) -> str:
@@ -233,7 +284,7 @@ def preview(client: GitHubClient, action: Action) -> str:
         return "(not a workflow file Kelpie edits)"
     repo, path, _, changes = target
     try:
-        default = default_branch(client, repo)
+        default, _ = repository(client, repo)
         before, _ = read_workflow(client, repo, path, default)
         rendered = render(before, changes, default)
     except (GitHubError, WorkflowError) as exc:
@@ -297,7 +348,27 @@ def body(
     if "skip_drafts" in applied:
         lines += ["", f"**Check before merging:** {DRAFTS_WARNING}"]
     lines += ["", "Review the workflow before marking this ready; Kelpie never merges it."]
+    lines += ["", marker(applied)]
     return "\n".join(lines)
+
+
+def marker(applied: Sequence[str]) -> str:
+    """The hidden line naming the changes a description proposes."""
+    return f"{MARKER} {','.join(sorted(applied))} -->"
+
+
+def branch_for(file: str) -> str:
+    """Kelpie's branch for the workflow file ``file`` (a :data:`WORKFLOW_PATH` file name)."""
+    match = WORKFLOW_PATH.fullmatch(WORKFLOW_DIR + file)
+    if match is None:
+        raise ValueError(f"not a workflow file name: {file!r}")
+    return f"{BRANCH_PREFIX}{match['stem'].replace('.', '-')}.{match['ext']}"
+
+
+def _head(pr: Mapping[str, Any]) -> str | None:
+    head = pr.get("head")
+    sha = head.get("sha") if isinstance(head, Mapping) else None
+    return sha if isinstance(sha, str) else None
 
 
 def _number(value: Any) -> float:
@@ -306,12 +377,16 @@ def _number(value: Any) -> float:
     return max(0.0, min(float(value), 1e9))
 
 
-def default_branch(client: GitHubClient, repo: str) -> str:
+def repository(client: GitHubClient, repo: str) -> tuple[str, str]:
+    """The repository's default branch, and its owner's login as GitHub spells it."""
     info = client.get(f"/repos/{repo}", fresh=True).body
-    default = info.get("default_branch") if isinstance(info, Mapping) else None
+    info = info if isinstance(info, Mapping) else {}
+    default = info.get("default_branch")
+    owner = info.get("owner")
+    login = owner.get("login") if isinstance(owner, Mapping) else None
     if not isinstance(default, str) or not default:
         raise GitHubError("bad_response", f"{repo}: no default branch")
-    return default
+    return default, login if isinstance(login, str) and login else repo.split("/", 1)[0]
 
 
 def read_workflow(client: GitHubClient, repo: str, path: str, ref: str) -> tuple[str, str]:

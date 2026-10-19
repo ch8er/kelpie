@@ -114,6 +114,7 @@ class GitHubSettings:
         clock: Callable[[], datetime],
         environ: Mapping[str, str] = os.environ,
         observer: GitHubObserver | None = None,
+        other_tokens: tuple[str, ...] = (),
     ) -> GitHubCI | None:
         """The CI source sharing ``connector``'s client; None when not configured. With
         ``cancel_token_env`` the cancel request alone goes through a second client that
@@ -170,7 +171,12 @@ class GitHubSettings:
         if propose_token is not None:
             others = {
                 name: environ.get(name, "").strip()
-                for name in (self.token_env, self.ci.cancel_token_env, self.ci.billing_token_env)
+                for name in (
+                    self.token_env,
+                    self.ci.cancel_token_env,
+                    self.ci.billing_token_env,
+                    *other_tokens,  # other GitHub clients' tokens (the issues adapter's)
+                )
                 if name is not None
             }
             if same := [name for name, value in others.items() if value == propose_token]:

@@ -1259,7 +1259,7 @@ GitHub Actions runs for rule 9, and its two opt-in writes: `cancel_build` and
 | `billing_skus` | `["actions_linux", "actions_windows", "actions_macos"]` | non-empty list | SKUs that draw on `included_minutes`; any case, spaces or hyphens read as `_`. |
 | `allow_propose` | `false` | bool | Allow `propose_ci_config`: rule 9's changes for a workflow, opened as a draft pull request. Needs `propose_repos` and `propose_token_env`. |
 | `propose_repos` | `[]` | list | Required with `allow_propose`; among `repos`. |
-| `propose_token_env` | unset | variable name | A token of its own (not `token_env`, `cancel_token_env` or `billing_token_env`, by name or by value) with Contents, Pull requests and Workflows: write on `propose_repos`, used only to open the pull request. |
+| `propose_token_env` | unset | variable name | A token of its own (not `token_env`, `cancel_token_env`, `billing_token_env` or `[adapters.github_issues] token_env`, by name or by value) with Contents, Pull requests and Workflows: write on `propose_repos`, used only to open the pull request. |
 
 **Proposed workflow changes** (`propose_ci_config`). Off unless both `ci_economy`
 `propose_config` and `allow_propose` are set. For a pipeline that wasted at least
@@ -1267,32 +1267,46 @@ GitHub Actions runs for rule 9, and its two opt-in writes: `cancel_build` and
 `waste_min_minutes`), Kelpie reads the workflow file from the default branch and writes in
 the changes it can place safely:
 
-- a `concurrency` group with `cancel-in-progress: true`, one group per pull request and per
-  branch, so a newer push cancels the running build. Pushes to the default branch, manual
-  and scheduled runs and other events each get a group of their own and are never
-  cancelled;
+- a `concurrency` group with `cancel-in-progress: true`, one group per workflow file and per
+  pull request or branch, so a newer commit cancels the running build. Only runs for a
+  commit share it: a pull request's `opened`, `synchronize` and `reopened` runs, and pushes
+  to branches other than the default. Every other run (a label, an edit,
+  `ready_for_review`, pushes to the default branch, manual and scheduled runs) has a group
+  of its own and neither cancels nor is cancelled, so a run whose jobs skip can never cancel
+  the commit's real run and leave a required check reported as passed;
 - `paths-ignore` for the docs globs on `push` and `pull_request`;
-- a draft condition on jobs, with `ready_for_review` among the pull request types; only
-  when no job has an `if` of its own.
+- a draft condition on each job without an `if` of its own, with `ready_for_review` among the
+  pull request types. A job with its own condition keeps it, and still runs for drafts.
 
-It commits them on `kelpie/ci-config/<workflow file>` and opens a **draft** pull request
-listing each change with the minutes it would have saved, what it left out and why (WIP
-commits and already verified commits are never rendered: GitHub Actions has no setting for
-them), and what to check before merging: a `paths-ignore` filter leaves a required check
-pending on docs-only pull requests, and a skipped draft run counts as passed for a required
-check, so a pull request marked ready (by auto-merge or an agent) could merge before its
-real run. The description holds Kelpie's own words and the rule's numbers only, never text
-from the workflow file. Kelpie never merges it.
+It commits them on `kelpie/ci-config/<workflow file>` (dots in the file's stem become
+dashes) and opens a **draft** pull request listing each change with the minutes it would
+have saved, what it left out and why (WIP commits and already verified commits are never
+rendered: GitHub Actions has no setting for them), and what to check before merging: a
+`paths-ignore` filter leaves a required check pending on docs-only pull requests, and a
+skipped draft run counts as passed for a required check, so a pull request marked ready (by
+auto-merge or an agent) could merge before its real run. The description holds Kelpie's own
+words and the rule's numbers only, never text from the workflow file, and a hidden line
+naming the changes. Kelpie never merges it. A pipeline with no file under
+`.github/workflows/` (CodeQL default setup, a dynamic workflow) has nothing to propose.
 
-Nothing twice: an open pull request from that branch means it was proposed already. A
-branch of that name with a closed pull request means a human turned it down: Kelpie does not
-propose for that file again until the branch is deleted. A branch Kelpie could not take back
-after a failure (for example while rate limited) is carried on from on the next attempt
-when it is still at the default branch's head, or one commit ahead holding exactly this
-change to this file only; any other branch of that name is someone else's, and Kelpie
-refuses (a human is told). The rule emits a proposal once per `[engine] once_window` for the
-same changes. `kelpie ci-config` prints the same changes as a diff and writes nothing; it
-needs only the read token, with `Contents: read` on the repositories.
+Nothing twice:
+
+- An open pull request from that branch means it was proposed already.
+- A closed, unmerged pull request that proposed the same changes means a human turned them
+  down, whether or not its branch was deleted: Kelpie does not propose them again. Other
+  changes for the same file are proposed.
+- The branch of an earlier proposal, merged or closed, is deleted and made afresh (GitHub
+  can restore it from that pull request).
+- A branch Kelpie could not take back after a failure (for example while rate limited) is
+  carried on from when it is still at the default branch's head, or one commit ahead
+  holding exactly this change to this file only.
+- Any other branch of that name is someone else's, and Kelpie refuses (a human is told).
+
+Kelpie deletes only a branch it made in the same attempt, still at its own commit, and never
+one a pull request is open from (deleting it would close that pull request). The rule emits
+a proposal once per `[engine] once_window` for the same changes. `kelpie ci-config` prints
+the same changes as a diff and writes nothing; it needs only the read token, with
+`Contents: read` on the repositories.
 
 **Minutes used.** With `billing_user` or `billing_org`, Kelpie reads GitHub's billing usage
 report (`/users/{user}/settings/billing/usage` or `/organizations/{org}/...`, the enhanced
@@ -1673,8 +1687,9 @@ Kelpie refuses to start when:
   or both are set; `billing_token_env` names `token_env`'s or `cancel_token_env`'s variable,
   or its variable is missing or malformed; `billing_skus` is empty.
 - `allow_propose` is set without `propose_repos` or `propose_token_env`; `propose_token_env`
-  names `token_env`'s, `cancel_token_env`'s or `billing_token_env`'s variable, or its
-  variable is missing or malformed, or holds the same token as one of those.
+  names `token_env`'s, `cancel_token_env`'s, `billing_token_env`'s or
+  `[adapters.github_issues] token_env`'s variable, or its variable is missing or malformed,
+  or holds the same token as one of those.
 - The [exposure check](install.md#otlp-token-and-the-exposure-check) fails.
 
 Kelpie logs a warning when:

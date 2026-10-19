@@ -51,6 +51,7 @@ def test_all_three_changes_on_a_typical_workflow() -> None:
     data = yaml.safe_load(out.text)
     assert data["concurrency"]["cancel-in-progress"] is True
     group = data["concurrency"]["group"]
+    assert group.startswith("${{ github.workflow_ref }}-")  # the file, not its name:
     assert "github.ref != 'refs/heads/main'" in group and group.endswith("|| github.run_id }}")
     assert on(out.text)["push"] == {"branches": ["main"], "paths-ignore": ["docs/**", "**.md"]}
     assert on(out.text)["pull_request"] == {
@@ -205,3 +206,20 @@ def test_nothing_from_outside_is_written_unchecked() -> None:
     assert dict(render(TYPICAL, [bad], "main").left_out) == {
         "ignore_docs_paths": "a docs path has characters Kelpie does not write into a workflow"
     }
+
+
+def test_only_runs_for_a_new_commit_share_a_concurrency_group() -> None:
+    # A labeled run whose jobs skip must not cancel the commit's real run: GitHub would
+    # report the skipped required check as passed.
+    text = TYPICAL.replace(
+        "  pull_request:\n",
+        "  pull_request:\n    types: [opened, synchronize, reopened, labeled]\n",
+    )
+    out = render(text, [CANCEL], "main")
+    assert out.applied == ("cancel_in_progress",)
+    group = yaml.safe_load(out.text)["concurrency"]["group"]
+    assert (
+        "github.event_name == 'pull_request' && "
+        """contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) && """
+        "github.event.pull_request.number"
+    ) in group

@@ -14,7 +14,7 @@ import yaml
 
 from kelpie.connectors.github.builds import SOURCE
 from kelpie.connectors.github.client import GitHubClient, GitHubError
-from kelpie.connectors.github.proposals import Proposer, preview
+from kelpie.connectors.github.proposals import Proposer, branch_for, marker, preview
 from kelpie.connectors.github.workflow_config import render
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from tests.connectors.fake_github import TOKEN, FakeGitHub, serve
@@ -27,6 +27,7 @@ OPEN = f"/repos/{REPO}/pulls?" + urlencode({"head": f"example:{BRANCH}", "state"
 CLOSED = f"/repos/{REPO}/pulls?" + urlencode({"head": f"example:{BRANCH}", "state": "closed"})
 REF = f"/repos/{REPO}/git/ref/heads/{BRANCH}"
 COMMIT = "e" * 40  # the commit Kelpie makes on its branch
+APPLIED = ["ignore_docs_paths", "skip_drafts"]  # what TYPICAL takes of CHANGES
 CHANGES = [
     {"change": "skip_drafts", "minutes": 25.0, "builds": 2},
     {"change": "ignore_docs_paths", "minutes": 9.0, "builds": 1, "paths": ["docs/*", "*.md"]},
@@ -39,6 +40,7 @@ def gh() -> Iterator[FakeGitHub]:
     with serve() as fake:
         fake.reply(f"/repos/{REPO}", {"default_branch": "main"})
         fake.reply(OPEN, [])
+        fake.reply(CLOSED, [])
         content = base64.b64encode(TYPICAL.encode()).decode()
         fake.reply(
             f"/repos/{REPO}/contents/{PATH}?ref=main",
@@ -97,11 +99,76 @@ def test_an_open_proposal_or_a_branch_left_from_one_is_not_proposed_again(
     assert proposer(gh).execute(action()) is ActionResult.NOTHING_TO_DO
     assert writes(gh) == []
     gh.reply(OPEN, [])
-    gh.reply(f"POST /repos/{REPO}/git/refs", {"message": "Reference already exists"}, 422)
-    gh.reply(REF, {"object": {"sha": "d" * 40}})
-    gh.reply(CLOSED, [{"number": 3}])
+    turned_down = {"number": 3, "merged_at": None, "body": f"...\n{marker(APPLIED)}"}
+    gh.reply(CLOSED, [turned_down])
     assert proposer(gh).execute(action()) is ActionResult.NOTHING_TO_DO  # a human closed it
-    assert [w[0] for w in writes(gh)] == ["POST"]  # the branch, refused; nothing more
+    assert writes(gh) == []  # whether or not its branch is still there
+
+
+def test_other_changes_than_those_turned_down_are_proposed(gh: FakeGitHub) -> None:
+    earlier = {"number": 3, "merged_at": None, "body": marker(["skip_drafts"])}
+    gh.reply(CLOSED, [earlier])
+    assert proposer(gh).execute(action()) is ActionResult.DONE
+
+
+@pytest.mark.parametrize("merged_at", ["2026-03-01T00:00:00Z", None])
+def test_the_branch_of_an_earlier_proposal_is_made_afresh(
+    gh: FakeGitHub, merged_at: str | None
+) -> None:
+    earlier = {
+        "number": 3,
+        "merged_at": merged_at,
+        "head": {"sha": "d" * 40},
+        "body": marker(["cancel_in_progress"]),
+    }
+    gh.reply(CLOSED, [earlier])
+    gh.replies(
+        f"POST /repos/{REPO}/git/refs",
+        ({"message": "Reference already exists"}, 422),
+        ({"ref": f"refs/heads/{BRANCH}"}, 201),
+    )
+    gh.reply(REF, {"object": {"sha": "d" * 40}})  # still at that proposal's head
+    assert proposer(gh).execute(action()) is ActionResult.DONE
+    assert [w[0] for w in writes(gh)] == ["POST", "DELETE", "POST", "PUT", "POST"]
+
+
+def test_a_branch_heading_an_open_pull_request_is_never_deleted(gh: FakeGitHub) -> None:
+    # A pull request from the branch appears after the first look (a second Kelpie, a
+    # human): GitHub answers the new one with 422, and deleting would close the open one.
+    gh.replies(OPEN, ([], 200), ([{"number": 9}], 200))
+    gh.reply(f"POST /repos/{REPO}/pulls", {"message": "A pull request already exists"}, 422)
+    gh.reply(REF, {"object": {"sha": COMMIT}})
+    assert proposer(gh).execute(action()) is ActionResult.NOTHING_TO_DO
+    assert "DELETE" not in [w[0] for w in writes(gh)]
+
+
+def test_a_branch_carried_on_from_is_not_deleted_when_the_pull_request_fails(
+    gh: FakeGitHub,
+) -> None:
+    left_behind(gh, 1, [PATH], render(TYPICAL, CHANGES, "main").text)
+    gh.reply(f"POST /repos/{REPO}/pulls", {"message": "Validation Failed"}, 422)
+    assert proposer(gh).execute(action()) is ActionResult.REFUSED
+    assert "DELETE" not in [w[0] for w in writes(gh)]
+
+
+def test_the_head_filter_uses_the_owner_as_github_spells_it(gh: FakeGitHub) -> None:
+    gh.reply(f"/repos/{REPO}", {"default_branch": "main", "owner": {"login": "Example"}})
+    mixed = f"/repos/{REPO}/pulls?" + urlencode({"head": f"Example:{BRANCH}", "state": "open"})
+    gh.reply(mixed, [{"number": 9}])
+    assert proposer(gh).execute(action()) is ActionResult.NOTHING_TO_DO
+    assert writes(gh) == []
+
+
+def test_a_pipeline_with_no_workflow_file_has_nothing_to_propose(gh: FakeGitHub) -> None:
+    codeql = action(workflow="dynamic/github-code-scanning/codeql")
+    assert proposer(gh).execute(codeql) is ActionResult.NOTHING_TO_DO
+    assert gh.requests == []
+
+
+def test_dots_in_a_file_name_become_dashes_in_the_branch() -> None:
+    assert branch_for("ci.linux.yml") == "kelpie/ci-config/ci-linux.yml"
+    assert branch_for("x.lock.yaml") == "kelpie/ci-config/x-lock.yaml"
+    assert branch_for("a..b.yml") == "kelpie/ci-config/a--b.yml"
 
 
 def test_a_branch_github_will_not_create_is_refused_not_taken_for_a_proposal(
@@ -165,11 +232,10 @@ def test_nothing_to_render_is_nothing_to_do(gh: FakeGitHub) -> None:
     "params",
     [
         {"repo": "example/other"},  # not in propose_repos
-        {"workflow": "scripts/deploy.sh"},  # not a workflow file
         {"workflow": ".github/workflows/../../evil.yml"},
-        {"workflow": ".github/workflows/a..b.yml"},  # not a safe branch name
-        {"workflow": ".github/workflows/x.lock.yml"},
-        {"workflow": "dynamic/github-code-scanning/codeql"},
+        {"workflow": ".github/workflows/deploy.sh"},
+        {"workflow": ".github/workflows/sub/ci.yml"},
+        {"workflow": ".github/workflows/ci\u0430.yml"},  # not ASCII
         {"changes": "skip_drafts"},
     ],
 )

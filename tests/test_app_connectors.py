@@ -411,3 +411,26 @@ def test_pull_requests_step_off_unless_configured(
                 ),
             )
         )
+
+
+ISSUES_PROPOSING = (
+    '[connectors.github]\nrepos = ["example/repo"]\napi_url = "http://127.0.0.1:9"\n'
+    'token_env = "GH_READ"\n[connectors.github.ci]\nallow_propose = true\n'
+    'propose_repos = ["example/repo"]\npropose_token_env = "GH_PROPOSE"\n'
+    '[adapters.github_issues]\ntoken_env = "{issues}"\n'
+    '[adapters.github_issues.agents.copilot]\nassignee = "Copilot"\n'
+)
+
+
+def test_the_propose_token_is_not_the_issues_adapters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GH_READ", TOKEN)
+    monkeypatch.setenv("GH_PROPOSE", "ghp_SyntheticProposeToken123456789")
+    same_name = ISSUES_PROPOSING.replace("{issues}", "GH_PROPOSE")
+    with pytest.raises(ConfigError, match=r"must not be \[adapters.github_issues\] token_env"):
+        load_settings(write(tmp_path, same_name))
+    monkeypatch.setenv("GH_ISSUES", "ghp_SyntheticProposeToken123456789")  # the same value
+    settings = load_settings(write(tmp_path, ISSUES_PROPOSING.replace("{issues}", "GH_ISSUES")))
+    with pytest.raises(ConfigError, match=r"holds the same token as \$GH_ISSUES"):
+        build_app(settings)

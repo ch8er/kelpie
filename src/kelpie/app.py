@@ -297,7 +297,7 @@ def load_settings(path: Path | None) -> Settings:
         snooze = load_snooze(data.get("snooze"), report.tz)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    return Settings(
+    settings = Settings(
         github=github,
         human_tasks=human_tasks,
         block_conditions=block_conditions,
@@ -321,6 +321,21 @@ def load_settings(path: Path | None) -> Settings:
         hub=hub,
         snooze=snooze,
     )
+    _check_propose_token(settings)
+    return settings
+
+
+def _check_propose_token(settings: Settings) -> None:
+    """The propose token is not the issues adapter's: that adapter writes on every tick."""
+    ci = settings.github.ci if settings.github is not None else None
+    issues = settings.github_issues
+    if ci is None or ci.propose_token_env is None or issues is None or not issues.enabled:
+        return
+    if ci.propose_token_env == issues.token_env:
+        raise ConfigError(
+            "[connectors.github.ci] propose_token_env must not be [adapters.github_issues] "
+            "token_env: proposals need a token of their own"
+        )
 
 
 def _load_connectors(
@@ -1971,8 +1986,10 @@ def _github_steps(
         max_requests=github.max_requests_per_tick,
         tick_budget=github.tick_budget,
     )
+    issues = settings.github_issues
+    others = (issues.token_env,) if issues is not None and issues.enabled else ()
     try:
-        ci = github.build_ci(connector, clock)
+        ci = github.build_ci(connector, clock, other_tokens=others)
     except ValueError as exc:
         raise ConfigError(str(exc)) from None
     steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = [("github", step)]
