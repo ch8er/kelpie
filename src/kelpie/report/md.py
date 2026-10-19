@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 
 MAX_NAME = 80  # characters of a name shown as code or as link text
 PLACEHOLDER = "(empty)"
@@ -52,6 +53,36 @@ def link_text(value: str) -> str:
     if len(flat) > MAX_NAME:
         flat = flat[: MAX_NAME - 3] + "..."
     return text(flat) or PLACEHOLDER
+
+
+def short_text(value: str, limit: int = MAX_NAME) -> str:
+    """:func:`text`, cut so the escaped result is at most ``limit`` characters (escapes
+    such as ``&amp;`` count): for a name inside a line that a channel may cut."""
+    return _capped(text, value, limit)
+
+
+def short_code(value: str, limit: int = MAX_NAME) -> str:
+    """:func:`code`, cut so the whole span, fences included, is at most ``limit``
+    characters."""
+    return _capped(code, value, limit)
+
+
+def _capped(render: Callable[[str], str], value: str, limit: int) -> str:
+    """``render(value)``, or the rendering of its longest prefix plus ``...`` that fits:
+    cut before rendering, so no escape or fence is split (a rendering only grows with its
+    input)."""
+    flat = _flat(value)
+    out = render(flat)
+    if len(out) <= limit:
+        return out
+    lo, hi = 0, len(flat)  # the longest prefix length that fits is in [lo, hi)
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if len(render(flat[:mid].rstrip() + "...")) <= limit:
+            lo = mid
+        else:
+            hi = mid
+    return render(flat[:lo].rstrip() + "...")
 
 
 def _escape_pipes(value: str) -> str:
