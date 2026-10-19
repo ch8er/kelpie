@@ -274,6 +274,40 @@ def test_ci_economy_may_act_with_only_hermes_when_cancel_is_allowed(
         build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=read_only))
 
 
+def test_ci_economy_may_act_with_only_hermes_when_proposals_are_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kelpie.core.actions import ActionKind
+
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    monkeypatch.setenv("KELPIE_GH_PROPOSE", "ghp_SyntheticProposeToken123456789")
+    hermes = HermesSettings(db_path=tmp_path / "kanban.db")
+    engine = EngineConfig.from_mapping({"dry_run": False, "rules": {"ci_economy": {"mode": "act"}}})
+    github = load_settings(write(tmp_path, CI_CONFIG)).github
+    assert github is not None and github.ci is not None
+    proposing = replace(
+        github,
+        ci=replace(
+            github.ci,
+            allow_cancel=False,
+            cancel_repos=(),
+            allow_propose=True,
+            propose_repos=("example/repo",),
+            propose_token_env="KELPIE_GH_PROPOSE",
+        ),
+    )
+    app = build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=proposing))
+    try:
+        ci = app.engine.executors["github"].connector  # type: ignore[attr-defined]
+        assert ci.actions == {ActionKind.PROPOSE_CI_CONFIG}
+        assert ci.proposer.client is not ci.client  # a token of its own
+    finally:
+        app.close()
+    monkeypatch.delenv("KELPIE_GH_PROPOSE")
+    with pytest.raises(ConfigError, match="KELPIE_GH_PROPOSE"):
+        build_app(Settings(engine=engine, db_path=None, hermes=hermes, github=proposing))
+
+
 def test_cancel_token_env_must_be_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
     monkeypatch.delenv("KELPIE_GH_CANCEL", raising=False)

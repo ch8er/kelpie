@@ -2056,6 +2056,7 @@ _VERBS: dict[ActionKind, str] = {
     ActionKind.COMMENT: "comment on tasks",
     ActionKind.STOP: "stop runs",
     ActionKind.CANCEL_BUILD: "cancel builds",
+    ActionKind.PROPOSE_CI_CONFIG: "propose CI changes",
 }
 _PLATFORMS = {
     "hermes": "Hermes",
@@ -2083,19 +2084,28 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
 
     On Hermes only the rules in :data:`HERMES_ACT_RULES` act (stop, park, wake of a parked
     task, comment), and ``ci_economy`` through the CI connector when ``[connectors.github.ci]
-    allow_cancel`` is set. On a hub, what its agents' adapters carry out is known only once
-    they report, so a platform gap is not judged there."""
+    allow_cancel`` or ``allow_propose`` is set. On a hub, what its agents' adapters carry out
+    is known only once they report, so a platform gap is not judged there."""
     ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
-    cancel = ci is not None and ci.enabled and ci.allow_cancel
+    ci_on = ci is not None and ci.enabled
+    allowed = frozenset(
+        k
+        for k, on in (
+            (ActionKind.CANCEL_BUILD, ci_on and ci is not None and ci.allow_cancel),
+            (ActionKind.PROPOSE_CI_CONFIG, ci_on and ci is not None and ci.allow_propose),
+        )
+        if on
+    )
     has_hermes = any(isinstance(a, hermes.HermesAdapter) for a in adapters)
     found: dict[str, ActBlocker] = {}
     for planned in PLANNED:
         name, effects = planned.name, planned.effects
         if name not in REGISTRY:
             continue
-        platform = effects - {ActionKind.CANCEL_BUILD}
-        if ActionKind.CANCEL_BUILD in effects and not cancel:
-            found[name] = ActBlocker(_no_cancel(settings), refused=has_hermes)
+        platform = effects - CI_WRITES
+        # A rule with CI writes acts when the CI connector allows at least one of them.
+        if effects & CI_WRITES and not effects & allowed:
+            found[name] = ActBlocker(_no_ci_writes(settings), refused=has_hermes)
         elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
             found[name] = ActBlocker(_hermes_gap(name, platform), refused=True)
         elif (
@@ -2107,13 +2117,18 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
     return found
 
 
-def _no_cancel(settings: Settings) -> str:
+# The CI connector's writes (rule 9), allowed by its own settings, not by a platform adapter.
+CI_WRITES = frozenset({ActionKind.CANCEL_BUILD, ActionKind.PROPOSE_CI_CONFIG})
+
+
+def _no_ci_writes(settings: Settings) -> str:
     github = settings.github if settings.github is not None and settings.github.enabled else None
+    what = "Kelpie cancels no builds and proposes no CI changes"
     if github is not None and github.ci is not None and github.ci.enabled:
-        return "Kelpie cancels no builds: [connectors.github.ci] allow_cancel is off"
+        return f"{what}: [connectors.github.ci] allow_cancel and allow_propose are off"
     if github is not None:
-        return "Kelpie cancels no builds: [connectors.github.ci] is not configured"
-    return "Kelpie cancels no builds: no CI connector is configured ([connectors.github.ci])"
+        return f"{what}: [connectors.github.ci] is not configured"
+    return f"{what}: no CI connector is configured ([connectors.github.ci])"
 
 
 def _hermes_gap(rule: str, platform: frozenset[ActionKind]) -> str:

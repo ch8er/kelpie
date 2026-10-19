@@ -1645,7 +1645,7 @@ Kelpie refuses to start when:
   `repos`.
 - `ci_economy` `window` is longer than `[connectors.github.ci] window`.
 - A Hermes adapter is enabled, `dry_run = false`, and a rule other than `loop_breaker`
-  (and `ci_economy` with `allow_cancel`) is in `act`.
+  (and `ci_economy` with `allow_cancel` or `allow_propose`) is in `act`.
 - A variable named by an explicit `token_env`, `webhook_env`, `headers_env` or
   `cancel_token_env` is missing or malformed.
 - `billing_user` or `billing_org` is set without `billing_token_env` or `included_minutes`,
