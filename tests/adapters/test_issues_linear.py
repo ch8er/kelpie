@@ -1099,13 +1099,14 @@ def test_a_teams_read_waits_for_room_for_its_requests_too(lin: FakeLinear) -> No
     assert "KelpieIssues" not in lin.ops()[count:]  # 100 kept + 2 the last read took > 101
 
 
-def test_an_action_whose_lookups_fail_keeps_the_agents_known(lin: FakeLinear) -> None:
+@pytest.mark.parametrize("broken", ["KelpieUsers", "KelpieLabels"])
+def test_an_action_whose_lookups_fail_keeps_the_agents_known(lin: FakeLinear, broken: str) -> None:
     lin.issue("ENG-2", "x", ago(days=1), state_type="started", delegate="Codex")
     a = adapter(lin)
     assert tasks(a)["ENG-2"].owner_id == "codex"
     reader = a.tracker
     reader._looked_up = NOW - timedelta(hours=2)  # type: ignore[attr-defined]
-    lin.broken_ops = {"KelpieUsers"}  # the hourly lookup fails, in the action and after
+    lin.broken_ops = {broken, "KelpieUsers"}  # the action's lookups fail; the hourly one too
     with pytest.raises(IssuesError):
         a.requeue("ENG-2", "quiet")
     assert "KelpieUpdate" not in lin.ops()
