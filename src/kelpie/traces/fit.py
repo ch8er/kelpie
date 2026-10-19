@@ -315,18 +315,18 @@ def tool_tokens(found: Iterable[Read]) -> dict[str, float]:
 
 
 def cheaper_model(prices: PriceTable, model: str | None, candidates: Collection[str]) -> str | None:
-    """The cheapest of ``candidates`` (models the farm runs, or allowed ones) named exactly
-    in ``prices`` that is cheaper than ``model`` on both input and output; None when there
-    is none or ``model`` has no price."""
+    """The cheapest of ``candidates`` (models the farm runs, or allowed ones) with a price
+    of their own (a ``[prices]`` entry naming them or the default table, not a glob) that
+    is cheaper than ``model`` on both input and output; None when there is none or
+    ``model`` has no price."""
     current = prices.price_for(model)
     if current is None:
         return None
     found = [
         (p.input + p.output, name)
-        for name, p in prices.entries
-        if name in candidates
-        and not any(c in name for c in "*?[")  # exact names only
-        and name != model
+        for name in candidates
+        if name != model
+        and (p := prices.named_price(name)) is not None
         and p.input < current.input
         and p.output <= current.output
     ]

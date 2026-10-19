@@ -118,6 +118,10 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - `[[budgets]]` per day, task, agent or project, in USD or tokens, for API or subscription
   use, with soft and hard limits and a forecast of when a limit will be reached; `[prices]`
   per model. Nested LLM spans are counted once ([#29](https://github.com/ch8er/kelpie/pull/29)).
+- A dated default price table for popular Anthropic, OpenAI and Google models under
+  `[prices]` (`[spend] default_prices`), so `usd` budgets work without a price list; model
+  ids are matched across platforms (Bedrock, Vertex, OpenRouter, dated snapshots), and
+  `kelpie status` and `kelpie doctor` name the models that have no price ([#184](https://github.com/ch8er/kelpie/pull/184)).
 
 #### Token optimization
 

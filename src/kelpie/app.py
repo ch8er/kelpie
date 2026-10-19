@@ -58,9 +58,11 @@ from kelpie.core.ports import (
     SupportsStop,
     SupportsWait,
 )
+from kelpie.core.prices import CHECKED, canonical_model
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import MemorySpanStore, SpanStore
+from kelpie.core.spend import SpendSettings, load_spend
 from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import SchemaOutdated, SqliteLedgerStore, SqliteSpanStore
 from kelpie.metrics import Metrics
@@ -139,6 +141,7 @@ class Settings:
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)  # [[budgets]], [prices]
+    spend: SpendSettings = field(default_factory=SpendSettings)  # [spend]
     resources: ResourceSettings = field(default_factory=ResourceSettings)
     github: GitHubSettings | None = None  # None: no [connectors.github] section
     block_conditions: tuple[BlockConditionPattern, ...] = ()
@@ -174,6 +177,7 @@ def load_settings(path: Path | None) -> Settings:
         "traces",
         "budgets",
         "prices",
+        "spend",
         "resources",
         "connectors",
         "block_conditions",
@@ -203,7 +207,13 @@ def load_settings(path: Path | None) -> Settings:
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     try:
-        budgets = load_budgets(data.get("budgets"), data.get("prices"), traces.retention)
+        spend = load_spend(data.get("spend"))
+        budgets = load_budgets(
+            data.get("budgets"),
+            data.get("prices"),
+            traces.retention,
+            default_prices=spend.default_prices,
+        )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     if budgets.budgets and not traces.enabled:
@@ -228,6 +238,7 @@ def load_settings(path: Path | None) -> Settings:
         source=path,
         traces=traces,
         budgets=budgets,
+        spend=spend,
         resources=resources,
         llm_quotas=llm_quotas,
         alerts=alerts,
@@ -1572,6 +1583,69 @@ def read_budgets(
             close()
 
 
+UNPRICED_WINDOW = timedelta(days=7)  # how far back models without a price are looked for
+
+
+def read_unpriced(
+    settings: Settings, now: datetime | None = None
+) -> tuple[tuple[str, int], ...] | str:
+    """Model families (:func:`kelpie.core.prices.canonical_model`) the span store saw in
+    the last :data:`UNPRICED_WINDOW` (at most the span retention) that nothing in the
+    price table prices, with their tokens, most first; a string says why the store cannot
+    be read. No database or traces off: none."""
+    db = settings.db_path
+    if not settings.traces.enabled or db is None or not db.exists():
+        return ()
+    at = now or utc_now()
+    window = min(UNPRICED_WINDOW, settings.traces.retention)
+    try:
+        store = SqliteSpanStore(db, readonly=True)
+    except SchemaOutdated:
+        return "the database predates budgets; run kelpie serve once to upgrade it"
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        return f"cannot open the span store {db}: {exc}"
+    try:
+        (rows,) = store.usage_since(at, [window])
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        return f"cannot read the span store {db}: {exc}"
+    finally:
+        store.close()
+    prices = settings.budgets.prices
+    priced: dict[str, bool] = {}
+    found: dict[str, int] = {}
+    for row in rows:
+        if not row.model:
+            continue
+        if row.model not in priced:
+            priced[row.model] = prices.price_for(row.model, at.date()) is not None
+        if not priced[row.model]:
+            family = canonical_model(row.model)
+            found[family] = found.get(family, 0) + row.input_tokens + row.output_tokens
+    return tuple(sorted(found.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def render_prices(settings: Settings, unpriced: Sequence[tuple[str, int]] | str = ()) -> list[str]:
+    """The ``prices:`` line of ``kelpie status`` and the models without a price."""
+    table = settings.budgets.prices
+    parts = [f"{len(table.entries)} [prices] entries"] if table.entries else []
+    if table.defaults:
+        models = len({r.model for r in table.defaults})
+        parts.append(f"default table of {models} models, checked {CHECKED:%Y-%m-%d}")
+    else:
+        parts.append("default table off ([spend] default_prices = false)")
+    lines = [f"prices:   {', '.join(parts)}"]
+    if isinstance(unpriced, str):
+        lines.append(f"warning: models without a price cannot be listed: {unpriced}")
+    elif unpriced:
+        named = ", ".join(f"{m} ({t:,} tokens)" for m, t in unpriced[:10])
+        more = f" and {len(unpriced) - 10} more" if len(unpriced) > 10 else ""
+        lines.append(
+            f"warning: models without a price (their cost is unknown): {named}{more};"
+            ' add [prices."<model>"] input, output'
+        )
+    return lines
+
+
 def _amount(value: float, unit: BudgetUnit) -> str:
     return f"{value:,.2f}" if unit is BudgetUnit.USD else f"{value:,.0f}"
 
@@ -1720,6 +1794,7 @@ def render_status(
     adapters: Sequence[PlatformAdapter] = (),
     budgets: Sequence[BudgetStatus] | str = (),
     now: datetime | None = None,
+    unpriced: Sequence[tuple[str, int]] | str = (),
 ) -> str:
     """Human-readable view of what ``kelpie serve`` would load with these settings."""
     engine = settings.engine
@@ -1729,6 +1804,7 @@ def render_status(
         f"interval: {engine.interval}",
         f"ledger:   {settings.db_path or '(in memory)'}",
         f"traces:   {_traces_status(settings.traces)}",
+        *render_prices(settings, unpriced),
         f"resources: {_resources_status(settings.resources)}",
         *_github_status(settings),
         *_human_tasks_status(settings),

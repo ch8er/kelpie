@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from itertools import pairwise
@@ -39,6 +39,7 @@ from kelpie.core.model import (
     LimitHit,
     Snapshot,
 )
+from kelpie.core.prices import DEFAULT_PRICES, Price, PriceTable
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import Attribution, TokenUsage
 
@@ -69,7 +70,6 @@ DEFAULT_BURN_WINDOW = timedelta(hours=1)
 DEFAULT_MIN_LIMIT_WINDOW = timedelta(minutes=10)
 ZERO = timedelta(0)
 MAX_FORECAST = timedelta(days=3650)  # a forecast further out than this is no forecast
-PER_TOKENS = 1_000_000  # prices are USD per this many tokens
 BUDGET_KEYS = frozenset(
     {
         "name",
@@ -88,13 +88,13 @@ BUDGET_KEYS = frozenset(
 PRICE_KEYS = frozenset({"input", "output", "cached_input"})
 
 
+def _is_glob(pattern: str) -> bool:
+    return any(c in pattern for c in "*?[")
+
+
 class BudgetMode(StrEnum):
     API = "api"  # pay per token: spend is the bill, priced from traces
     SUBSCRIPTION = "subscription"  # no bill: spend is an estimate; limits matter
-
-
-def _is_glob(pattern: str) -> bool:
-    return any(c in pattern for c in "*?[")
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,43 +150,6 @@ class Budget:
 
 
 @dataclass(frozen=True, slots=True)
-class Price:
-    """USD per 1M tokens. Cached input tokens are part of ``input_tokens`` and priced at
-    ``cached_input`` instead of ``input``."""
-
-    input: float
-    output: float
-    cached_input: float
-
-    def cost(self, usage: TokenUsage) -> float:
-        cached = min(usage.cached_tokens, usage.input_tokens)
-        return (
-            (usage.input_tokens - cached) * self.input
-            + cached * self.cached_input
-            + usage.output_tokens * self.output
-        ) / PER_TOKENS
-
-
-@dataclass(frozen=True, slots=True)
-class PriceTable:
-    """``[prices]``: model name or glob -> :class:`Price`. An exact name wins; otherwise
-    the first glob that matches, in config order. No match: the cost is unknown."""
-
-    entries: tuple[tuple[str, Price], ...] = ()
-
-    def price_for(self, model: str | None) -> Price | None:
-        if not model:
-            return None
-        for pattern, price in self.entries:
-            if pattern == model:
-                return price
-        for pattern, price in self.entries:
-            if _is_glob(pattern) and fnmatchcase(model, pattern):
-                return price
-        return None
-
-
-@dataclass(frozen=True, slots=True)
 class BudgetConfig:
     budgets: tuple[Budget, ...] = ()
     prices: PriceTable = field(default_factory=PriceTable)
@@ -200,13 +163,17 @@ class BudgetConfig:
 # --- config ------------------------------------------------------------------------------
 
 
-def load_budgets(budgets: Any, prices: Any, retention: timedelta) -> BudgetConfig:
+def load_budgets(
+    budgets: Any, prices: Any, retention: timedelta, *, default_prices: bool = True
+) -> BudgetConfig:
     """Parse ``[[budgets]]`` and ``[prices]``; raises ValueError on anything unexpected.
 
     ``retention`` is the span retention: a window longer than it would silently count less
     than it says, so it is refused, and it is the default window of task budgets.
+    ``default_prices``: put Kelpie's default table (:mod:`kelpie.core.prices`) under the
+    ``[prices]`` entries.
     """
-    table = _load_prices(prices)
+    table = _load_prices(prices, DEFAULT_PRICES if default_prices else ())
     if budgets is None:
         budgets = []
     if not isinstance(budgets, list) or not all(isinstance(b, Mapping) for b in budgets):
@@ -215,14 +182,15 @@ def load_budgets(budgets: Any, prices: Any, retention: timedelta) -> BudgetConfi
     names = [b.name for b in loaded]
     if dupes := sorted({n for n in names if names.count(n) > 1}):
         raise ValueError(f"[[budgets]] names must be unique: {dupes}")
-    if not table.entries and (usd := [b.name for b in loaded if b.unit is BudgetUnit.USD]):
-        raise ValueError(f"budgets in usd need a [prices] table: {usd}")
+    usd = [b.name for b in loaded if b.unit is BudgetUnit.USD]
+    if usd and not table.entries and not table.defaults:
+        raise ValueError(f"budgets in usd need prices ([prices], or the default table): {usd}")
     return BudgetConfig(loaded, table)
 
 
-def _load_prices(data: Any) -> PriceTable:
+def _load_prices(data: Any, defaults: tuple[Any, ...] = ()) -> PriceTable:
     if data is None:
-        return PriceTable()
+        return PriceTable((), defaults)
     if not isinstance(data, Mapping):
         raise ValueError("[prices] must be a table of models")
     entries: list[tuple[str, Price]] = []
@@ -240,7 +208,7 @@ def _load_prices(data: Any) -> PriceTable:
         values = {k: _number(section[k], f"{where} {k}", allow_zero=True) for k in section}
         cached = values.get("cached_input", values["input"])
         entries.append((model, Price(values["input"], values["output"], cached)))
-    return PriceTable(tuple(entries))
+    return PriceTable(tuple(entries), defaults)
 
 
 def _number(value: Any, what: str, *, allow_zero: bool = False) -> float:
@@ -401,9 +369,10 @@ def evaluate(
     known = _Known.of(snapshot, attribution)
     out: list[BudgetStatus] = []
     unattributed: dict[str, int] = {}
+    prices = _DayPrices(config.prices, snapshot.now.date())
     for budget in config.budgets:
-        window, lost = _spend(budget, config.prices, usage.get(budget.window, ()), known)
-        recent, _ = _spend(budget, config.prices, usage.get(budget.burn_window, ()), known)
+        window, lost = _spend(budget, prices, usage.get(budget.window, ()), known)
+        recent, _ = _spend(budget, prices, usage.get(budget.burn_window, ()), known)
         if budget.scope is not BudgetScope.DAY:
             unattributed[budget.name] = lost
         for subject in sorted(set(window) | set(budget.fixed_subjects())):
@@ -411,6 +380,20 @@ def evaluate(
             burned = recent[subject].spent if subject in recent else 0.0
             out.append(_status(budget, subject, spend, burned, snapshot))
     return BudgetEvaluation(tuple(out), unattributed)
+
+
+@dataclass(slots=True)
+class _DayPrices:
+    """The price table on one day, each model looked up once."""
+
+    table: PriceTable
+    day: date
+    found: dict[str | None, Price | None] = field(default_factory=dict)
+
+    def price_for(self, model: str | None) -> Price | None:
+        if model not in self.found:
+            self.found[model] = self.table.price_for(model, self.day)
+        return self.found[model]
 
 
 def _status(
@@ -443,7 +426,7 @@ def _status(
 
 
 def _spend(
-    budget: Budget, prices: PriceTable, rows: Iterable[TokenUsage], known: _Known
+    budget: Budget, prices: _DayPrices, rows: Iterable[TokenUsage], known: _Known
 ) -> tuple[dict[str, _Spend], int]:
     """Spend per subject, and the tokens whose subject is unknown."""
     acc: dict[str, _Spend] = {}

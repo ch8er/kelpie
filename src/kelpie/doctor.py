@@ -24,7 +24,16 @@ from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
 from kelpie.adapters.hermes.git_state import read_git_state
 from kelpie.adapters.openclaw import doctor as openclaw
-from kelpie.app import ConfigError, LoadedRules, Settings, load_rules, load_settings, utc_now
+from kelpie.app import (
+    UNPRICED_WINDOW,
+    ConfigError,
+    LoadedRules,
+    Settings,
+    load_rules,
+    load_settings,
+    read_unpriced,
+    utc_now,
+)
 from kelpie.connectors.github.blocks import MAX_REASON
 from kelpie.connectors.github.client import GitHubError
 from kelpie.connectors.github.connector import (
@@ -194,6 +203,30 @@ def check_spans(
     if age > FRESH:  # spans used to arrive and stopped
         return _quiet_or_fail(name, f"newest span is {format_age(age)} old ({path})", fix, running)
     return _pass(name, f"newest span {format_age(age)} old ({path})")
+
+
+def check_prices(settings: Settings, now: datetime) -> Check:
+    """Every model the span store saw lately has a price (a model without one costs $0)."""
+    name = "models have prices"
+    if not settings.traces.enabled:
+        return _skip(name, "[traces] disabled")
+    if settings.db_path is None:
+        return _skip(name, "storage is in memory; nothing to read from outside")
+    if not settings.db_path.exists():
+        return _skip(name, f"no span store yet at {settings.db_path}")
+    found = read_unpriced(settings, now)
+    if isinstance(found, str):
+        return _skip(name, found)
+    window = format_age(min(UNPRICED_WINDOW, settings.traces.retention))
+    if not found:
+        return _pass(name, f"no model without a price in the last {window}")
+    named = _named([f"{m} ({t:,} tokens)" for m, t in found])
+    first = found[0][0]
+    return _warn(
+        name,
+        f"no price for these models in the last {window}, so their cost is unknown: {named}",
+        f'add [prices."{first}"] input = <USD/1M>, output = <USD/1M> (cached_input optional)',
+    )
 
 
 def _named(ids: list[str]) -> str:
@@ -729,6 +762,7 @@ def run_checks(
         if on
     ]
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
+    checks.append(check_prices(settings, at))
     checks.append(_skip("worktrees readable", why) if adapter is None else check_worktrees(adapter))
     pr_blocks = "PR blocks have conditions"
     checks.append(
