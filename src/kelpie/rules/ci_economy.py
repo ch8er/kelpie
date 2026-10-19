@@ -346,8 +346,8 @@ class CiEconomy:
                 Action(
                     ActionKind.PROPOSE_CI_CONFIG,
                     NAME,
-                    f"{workflow} in {repo} burned {_minutes(p['minutes'])} for nothing in the "
-                    f"last {hours:g}h. A better configuration: {what}.",
+                    f"A better CI configuration for {workflow} in {repo} would have saved "
+                    f"{_minutes(p['minutes'])} in the last {hours:g}h: {what}.",
                     executor=source,
                     key=f"{NAME}:propose:{repo}:{workflow}:{'+'.join(sorted(names))}",
                     once=True,

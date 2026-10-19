@@ -529,7 +529,10 @@ def test_a_pipeline_with_enough_waste_gets_a_proposal_for_its_connector() -> Non
         "minutes": 35.0,
         "changes": [{"change": "skip_drafts", "minutes": 35.0, "builds": 2}],
     }
-    assert "A better configuration: skip draft pull requests (35 min)." in proposal.reason
+    assert proposal.reason == (
+        "A better CI configuration for ci in example/repo would have saved 35 min in the "
+        "last 24h: skip draft change requests (35 min)."
+    )
     off = CiEconomy(waste_min_minutes=0, propose_min_minutes=30, propose_config=False)
     assert not [a for a in off.evaluate(snap) if a.kind is ActionKind.PROPOSE_CI_CONFIG]
 
