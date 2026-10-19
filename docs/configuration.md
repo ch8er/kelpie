@@ -1417,8 +1417,8 @@ Real-time alerts. None are sent without a channel. Rule alerts are not sent whil
 whatever the modes. An alert goes to every channel whose `min_severity` it reaches. The
 summary is laid out like an alert: the report's title, its headline in bold under the
 severity's icon (`[report] severity`), one line each for the biggest wait, the open conditions
-and the top recommendations, and an "Open report" link when the report has an address (none
-is configurable yet). `language` translates only "Open report" and "and N more"; the
+and the top recommendations, and an "Open report" link when `[report] url` gives the
+report's address. `language` translates only "Open report" and "and N more"; the
 report's own text stays English.
 
 | Key | Default | Unit | Meaning |

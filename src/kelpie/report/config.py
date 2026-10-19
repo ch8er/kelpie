@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from kelpie.alerts.render import check_url_template
+from kelpie.alerts.render import check_url_template, plain_http_url
 from kelpie.core.serde import parse_duration
 from kelpie.report.verify import DEFAULT_MIN_SAMPLE, DEFAULT_REVIEW_ROLES, DEFAULT_WINDOW
 
@@ -96,6 +96,9 @@ def load_report(section: Any) -> ReportSettings:
     report_url = section.get("url")
     if report_url is not None:
         check_url_template(report_url, "{date}", "[report] url")
+        # the link is the filled-in address, which a date makes longer than the template
+        if plain_http_url(report_url.replace("{date}", "2026-01-01")) is None:
+            raise ValueError("[report] url is too long once a date fills {date}")
     hour = section.get("hour_usd")
     if hour is not None and (
         isinstance(hour, bool)

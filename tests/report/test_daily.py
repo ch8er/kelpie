@@ -498,6 +498,10 @@ def test_report_config() -> None:
         {"url": "file:///srv/reports/kelpie-report-{date}.md"},  # not http(s)
         {"url": "https://{date}.reports.example.org/"},  # {date} in the host
         {"url": 3},
+        {"url": ""},
+        {"url": "https://reports.example.org/{date}/{id}.md"},  # another placeholder
+        {"url": "https://reports.example.org/{{date}}.md"},
+        {"url": "https://reports.example.org/" + "a" * 566 + "{date}"},  # 600, 604 once filled
         {"hour_usd": 0},
         {"hour_usd": True},
         {"hour_usd": float("inf")},
@@ -973,3 +977,11 @@ def test_the_summary_links_the_full_report_with_report_url(db: Path) -> None:
     send(report, settings, sender)
     [(text, _, _)] = sender.sent
     assert text.endswith(link) and text == render_summary(report, settings.url)
+
+
+def test_every_date_placeholder_is_filled(db: Path) -> None:
+    settings = load_report({"url": "https://reports.example.org/{date}/report.md?day={date}"})
+    report, _ = generate(sources(db), DAY, BOARD)
+    link = summary_items(report, settings.url)[2]
+    assert link == "https://reports.example.org/2026-03-02/report.md?day=2026-03-02"
+    assert load_report({}).url is None
