@@ -363,6 +363,12 @@ Alerts still waiting when Kelpie shuts down during a chat outage are counted as
 `kelpie_alerts_dropped_total{reason="shutdown"}`, not as failed, so `KelpieAlertDeliveryFailed`
 does not fire for them.
 
+Items a snooze would quiet can be snoozed from the alert: Slack shows the `kelpie snooze`
+command under each, and Telegram, with `buttons = true`, shows "Snooze 1d / 3d / 7d" buttons
+that only the people in `allowed_user_ids` can use ([configuration.md, "Snoozing from the
+alert"](configuration.md#snoozing-from-the-alert), with the security model). Presses are
+counted in `kelpie_chat_actions_total{outcome}` and `kelpie_chat_rejected_total{reason}`.
+
 ```toml
 [[alerts.channels]]
 type = "telegram"

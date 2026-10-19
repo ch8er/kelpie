@@ -16,6 +16,8 @@
     timeout = "10s"
     min_severity = "warning"              # info | warning | critical
     format = "html"                       # html | plain
+    buttons = false                       # snooze buttons on the alerts a snooze quiets
+    allowed_user_ids = []                 # Telegram user ids that may press them
 
     [[alerts.channels]]
     type = "slack"
@@ -38,11 +40,13 @@ from datetime import UTC, timedelta, tzinfo
 from typing import Any
 
 from kelpie.alerts import i18n, slack, telegram
+from kelpie.alerts.buttons import ButtonPoller, ChatControl
 from kelpie.alerts.delivery import (
     DEFAULT_QUEUE_SIZE,
     DEFAULT_RETRY_HORIZON,
     DEFAULT_WINDOW,
     AlertObserver,
+    Channel,
     Delivery,
 )
 from kelpie.alerts.render import DEFAULT_RENDERING, RenderSettings, check_task_url
@@ -68,16 +72,39 @@ class AlertSettings:
     rendering: RenderSettings = DEFAULT_RENDERING  # language and task_url
     links_note: str | None = None  # why alerts carry no task links, when config says one
 
+    @property
+    def button_channels(self) -> tuple[TelegramSettings, ...]:
+        """The Telegram channels with snooze buttons on (at most one)."""
+        return tuple(c for c in self.channels if isinstance(c, TelegramSettings) and c.buttons)
+
     def build(
-        self, observer: AlertObserver | None = None, environ: Mapping[str, str] = os.environ
+        self,
+        observer: AlertObserver | None = None,
+        environ: Mapping[str, str] = os.environ,
+        control: ChatControl | None = None,
     ) -> Delivery | None:
         """The delivery layer, or None without channels. ``ValueError`` (naming the
-        variable, never its value) when a secret is missing or malformed."""
+        variable, never its value) when a secret is missing or malformed. ``control``
+        (``kelpie serve`` only) gives a channel with ``buttons = true`` its snooze buttons
+        and the poller that takes them; without it the channel sends plain alerts."""
         if not self.channels:
             return None
-        built = [c.build(environ, self.rendering) for c in self.channels]
+        built: list[Channel] = []
+        pollers: list[ButtonPoller] = []
+        for c in self.channels:
+            if control is not None and isinstance(c, TelegramSettings) and c.buttons:
+                channel, poller = c.build_with_buttons(control, environ, self.rendering)
+                built.append(channel)
+                pollers.append(poller)
+            else:
+                built.append(c.build(environ, self.rendering))
         return Delivery(
-            built, observer, self.dedup_window, self.queue_size, retry_horizon=self.retry_horizon
+            built,
+            observer,
+            self.dedup_window,
+            self.queue_size,
+            retry_horizon=self.retry_horizon,
+            pollers=pollers,
         )
 
     def problems(self, environ: Mapping[str, str] = os.environ) -> list[str]:
@@ -162,4 +189,9 @@ def _channels(entries: Any) -> tuple[ChannelSettings, ...]:
     names = [c.name for c in channels]
     if len(set(names)) != len(names):
         raise ValueError(f"{SECTION} channel names must be unique (set name = ...)")
+    buttons = [c.name for c in channels if isinstance(c, TelegramSettings) and c.buttons]
+    if len(buttons) > 1:  # one poller per bot: two would take each other's updates
+        raise ValueError(
+            f"{SECTION} buttons = true on more than one Telegram channel ({', '.join(buttons)})"
+        )
     return tuple(channels)

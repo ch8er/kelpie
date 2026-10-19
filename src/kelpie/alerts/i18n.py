@@ -60,6 +60,13 @@ EN: dict[str, str] = {
     "snooze.expired.until": "Snooze ended {when}",
     "snooze.grown.one": "{n} more task blocked since the snooze",
     "snooze.grown.other": "{n} more tasks blocked since the snooze",
+    # snoozing from the alert (#176): Telegram buttons and what a press answers
+    "button.snooze": "{n}. Snooze {days}d",
+    "button.days": "{days}d",
+    "chat.snoozed": "Snoozed {task} {span} by {who}",
+    "chat.toast": "Snoozed {task} {span}",
+    "chat.not_allowed": "Not allowed.",
+    "chat.failed": "Could not snooze; see the Kelpie log.",
     # what Kelpie did, when the engine sent no line of its own (never for "notified")
     "did.suggested": "nothing, mode suggest. A human decides.",
     "did.failed": "tried, and it failed. Needs a human.",
@@ -119,6 +126,12 @@ RU: dict[str, str] = {
     "snooze.grown.few": "после отсрочки заблокированы ещё {n} задачи",
     "snooze.grown.many": "после отсрочки заблокировано ещё {n} задач",
     "snooze.grown.other": "после отсрочки заблокированы ещё {n} задачи",
+    "button.snooze": "{n}. Отложить на {days} д",
+    "button.days": "{days} д",
+    "chat.snoozed": "Отложено: {task} {span}, кто отложил: {who}",
+    "chat.toast": "Отложено: {task} {span}",
+    "chat.not_allowed": "Нет доступа.",
+    "chat.failed": "Не удалось отложить, подробности в журнале Kelpie.",  # noqa: RUF001
     "did.suggested": "ничего, режим suggest. Решает человек.",
     "did.failed": "попытался, но не вышло. Нужен человек.",
     "did.not_executed": "ничего: это некому выполнить. Нужен человек.",

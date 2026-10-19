@@ -24,6 +24,9 @@ class ActionKind(StrEnum):
     CANCEL_BUILD = "cancel_build"
     ESCALATE = "escalate"
     ALERT = "alert"
+    # A person snoozed a task from a chat button (#176). Ledger only: recorded with the
+    # press (who, what, until); no rule emits it and no executor carries it out.
+    SNOOZE = "snooze"
 
 
 class ActionResult(StrEnum):

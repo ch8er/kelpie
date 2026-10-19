@@ -181,6 +181,8 @@ class StaleBlocks:
                     {
                         "stuck_ids": stuck,
                         **_snooze_params(snooze),
+                        # a snooze holds it unless the condition is one Kelpie cannot see
+                        **({} if missing else {"snooze_task": task.id}),
                         **alert_params(
                             f"{task.id} blocked {_short(age)} on a condition Kelpie "
                             f"cannot see: {missing}"
@@ -263,6 +265,7 @@ class StaleBlocks:
                     f"(limit {_human(self.max_block)}) waiting for {pending}." + _back(snooze),
                     {
                         **_snooze_params(snooze),
+                        "snooze_task": task.id,  # a snooze holds it (#176)
                         **alert_params(
                             f"{task.id} blocked {_short(age)}, past the "
                             f"{_human(self.max_block)} limit: waiting for "

@@ -288,6 +288,20 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - `kelpie selftest stop --adapter hermes` runs rule 10's stop end to end on a throwaway Hermes
   home and board, with a local mock model (zero tokens), and reports each step
   ([#190](https://github.com/ch8er/kelpie/pull/190)).
+- Snoozes, part 3 ([#176](https://github.com/ch8er/kelpie/issues/176)): snooze from the
+  alert itself. Slack shows a ready-to-copy `kelpie snooze <task> --until <date>` line under
+  each item a snooze would quiet (rule 13's digest items, rule 4's no-condition and overdue
+  alerts, rule 2's overdue wait on one human task; never agent-health alerts). Telegram,
+  with `buttons = true` and `allowed_user_ids` (off by default), shows "Snooze 1d / 3d / 7d"
+  buttons there: a press from an allowed user in the configured chat snoozes the task
+  (`source = "chat"`, at most 7 days), records the press in the ledger (kind `snooze`: who,
+  with their user id, what, until), answers with a toast and edits the alert ("Snoozed
+  until … by …", that item's buttons removed). A button carries only a short HMAC-signed
+  reference (key generated on first use in `kelpie.buttons.db`, 0600) that expires after 24
+  hours or at the alert's next message, and is used once. Presses are read with
+  `getUpdates` long polling in their own thread (offset persisted, back-off, shutdown
+  deadline); anything else is ignored and counted in `kelpie_chat_rejected_total{reason}`.
+  `kelpie doctor` fails on an empty allow-list, a missing database or a bot with a webhook.
 - `kelpie report` prints the daily report as Markdown, and `--send` posts the summary to the
   alert channels ([#47](https://github.com/ch8er/kelpie/pull/47), [#52](https://github.com/ch8er/kelpie/pull/52)).
 - Prometheus metrics for the engine, adapters, connectors, traces and budgets, and a

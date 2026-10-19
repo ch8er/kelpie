@@ -719,6 +719,11 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # #                                    # cannot parse it)
 # # name = "telegram"                  # only needed with two telegram channels
 # # api_url = "https://api.telegram.org"  # e.g. a local Bot API server (http only on loopback)
+# # Snooze buttons (1d, 3d, 7d) on the items a snooze would quiet; presses are read with
+# # getUpdates long polling (use a bot dedicated to Kelpie, without a webhook). Only these
+# # Telegram user ids, in this chat, may press them. Needs [storage] path.
+# # buttons = true
+# # allowed_user_ids = [123456789]
 #
 # [[alerts.channels]]
 # type = "slack"

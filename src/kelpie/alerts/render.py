@@ -42,16 +42,25 @@ marker snooze always says "from marker".
 
 The renderers return what a channel sends, not just a string: :func:`telegram_payload` the
 ``sendMessage`` fields (``text``, ``parse_mode``), :func:`slack_payload` the plain ``text``
-fallback and the ``blocks`` list, one block per item, so per-item controls can be added
-next to an item later.
+fallback and the ``blocks`` list, one block per item.
+
+**Snoozing from the alert** (#176). An item a snooze would hold names the task to snooze
+(``AlertItem.snooze_task``, set by rules 13, 4 and 2). Telegram offers buttons for it
+(:func:`telegram_message` returns the shown items' targets; the channel signs and attaches
+them, :func:`keyboard`); Slack shows, under the item, the command that does it, as plain
+text so it copies cleanly: ``kelpie snooze <task> --until <date>``, the date
+:data:`SLACK_SNOOZE_DAYS` days after the alert's day in ``RenderSettings.tz`` (through that
+day). A task id that is not a plain token gets no command line: it would have to be pasted
+into a shell.
 """
 
 from __future__ import annotations
 
 import html
 import re
+import shlex
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
@@ -91,6 +100,9 @@ _QUOTES = {"'": "'", '"': '"', "«": "»", "“": "”", "\u2018": "\u2019", "�
 # Machine prefixes of a block reason ("waiting_human: needs_input: "): kinds, not words.
 _PREFIX = re.compile(r"^(?:[a-z][a-z0-9]*_[a-z0-9_]*:\s*)+")
 _URL_BAD = re.compile(r"[\s<>\"'|\\`{}^]")
+SLACK_SNOOZE_DAYS = 3  # the date the Slack snooze command proposes, after the alert's day
+# A task id that may stand in a command a person pastes into a shell (quoted, too).
+_COMMAND_ID = re.compile(r"[A-Za-z0-9._:/#+=,%~-]{1,100}")
 
 
 def clean(text: str) -> str:
@@ -198,6 +210,8 @@ class ItemView:
     blocking: str | None  # "Blocking: none"
     link: Link | None
     snooze: str | None = None  # back from a snooze: "Snooze expired 2026-10-25"
+    snooze_task: str | None = None  # the task a snooze from the chat would set (raw id)
+    command: str | None = None  # Slack: "kelpie snooze <task> --until <date>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +286,11 @@ def layout(event: AlertEvent, settings: RenderSettings = DEFAULT_RENDERING) -> L
     items = tuple(_item(n, item, settings) for n, item in enumerate(event.items[:MAX_ITEMS], 1))
     rule = _cut_words(_flat(defang(event.rule)), MAX_RULE)
     snoozed = tuple(_snoozed(i, settings) for i in event.snoozed[:MAX_SNOOZED])
+    if event.at is not None and event.transition is not Transition.RESOLVED:
+        at = event.at
+        items = tuple(
+            replace(i, command=snooze_command(i.snooze_task, at, settings)) for i in items
+        )
     return Layout(
         icon=_icon(event),
         headline=headline,
@@ -356,7 +375,18 @@ def _item(number: int, item: AlertItem, settings: RenderSettings) -> ItemView:
         blocking=blocking,
         link=link,
         snooze=_snooze_mark(item.snooze, settings),
+        snooze_task=item.snooze_task,
     )
+
+
+def snooze_command(task_id: str | None, at: datetime, settings: RenderSettings) -> str | None:
+    """``kelpie snooze <task> --until <date>``: the date :data:`SLACK_SNOOZE_DAYS` days after
+    ``at``'s day in ``settings.tz`` (a bare date: through that day). None without a task, or
+    for an id that is not a plain token (it would be pasted into a shell)."""
+    if task_id is None or not _COMMAND_ID.fullmatch(task_id):
+        return None
+    day = at.astimezone(settings.tz).date() + timedelta(days=SLACK_SNOOZE_DAYS)
+    return f"kelpie snooze {shlex.quote(task_id)} --until {day.isoformat()}"
 
 
 def snooze_when(at: datetime, tz: tzinfo = UTC) -> str:
@@ -370,6 +400,11 @@ def _snooze_span(lang: str, at: datetime, tz: tzinfo, key: str = "snooze") -> st
     ``key`` ``snooze.expired``: "Snooze ran through …", "Snooze ended …")."""
     when, through_day = snooze_end(at, tz)
     return i18n.text(lang, f"{key}.{'through' if through_day else 'until'}", when=when)
+
+
+def snooze_span(lang: str, at: datetime, tz: tzinfo = UTC) -> str:
+    """ "through 2026-10-25" or "until 2026-10-25 09:00 UTC", as alerts word a snooze's end."""
+    return _snooze_span(lang, at, tz)
 
 
 def _snooze_details(note: SnoozeNote, lang: str) -> str:
@@ -569,6 +604,7 @@ class Style:
     code: Callable[[str], str]
     link: Callable[[str, str], str]  # (escaped label, raw url)
     measure: Callable[[str], int]
+    commands: bool = False  # show an item's snooze command (Slack)
 
 
 def _same(text: str) -> str:
@@ -594,7 +630,7 @@ TELEGRAM_HTML = Style(
 )
 # Slack's fallback text: plain (sent with ``mrkdwn: false``), only Slack's required escaping.
 SLACK_PLAIN = Style(
-    slack_escape, _same, _same, lambda label, url: f"{label}: {slack_escape(url)}", len
+    slack_escape, _same, _same, lambda label, url: f"{label}: {slack_escape(url)}", len, True
 )
 
 # Output budgets per field (after escaping), so that the headline, one item and the did
@@ -649,6 +685,8 @@ def _item_lines(item: ItemView, style: Style, needed_label: str) -> list[str]:
         parts.append(style.link(style.esc(item.link.label), item.link.url))
     if parts:
         lines.append(INDENT + " · ".join(parts))
+    if style.commands and item.command:
+        lines.append(INDENT + style.esc(item.command))
     return lines
 
 
@@ -672,11 +710,16 @@ def text(view: Layout, style: Style = PLAIN, limit: int = MAX_TEXT) -> str:
     """The layout as one text in ``style``, at most ``limit`` units. The reason yields the
     room the other parts take; tasks that would leave it less than ``MIN_BODY`` (or that do
     not fit at all) are counted in "and N more", the first one last."""
+    return fitted(view, style, limit)[0]
+
+
+def fitted(view: Layout, style: Style = PLAIN, limit: int = MAX_TEXT) -> tuple[str, Layout]:
+    """:func:`text`, and the layout it shows (the items that fit)."""
     while True:
         out, roomy = _text(view, style, limit)
         fits = style.measure(out) <= limit
         if not view.items or (fits and (roomy or len(view.items) == 1)):
-            return out
+            return out, view
         view = view.without_last_item()
 
 
@@ -713,9 +756,55 @@ def telegram_payload(
 ) -> dict[str, Any]:
     """The message fields of a ``sendMessage`` request (the channel adds the chat and the
     delivery options)."""
+    return telegram_message(event, settings, html_format=html_format)[0]
+
+
+@dataclass(frozen=True, slots=True)
+class SnoozeTarget:
+    """A shown item a person may snooze from the chat: its number in the message and the
+    task the snooze is for (raw id)."""
+
+    number: int
+    task_id: str
+
+
+def telegram_message(
+    event: AlertEvent, settings: RenderSettings = DEFAULT_RENDERING, *, html_format: bool = True
+) -> tuple[dict[str, Any], tuple[SnoozeTarget, ...]]:
+    """:func:`telegram_payload`, and the items it shows that a snooze would quiet (none in
+    a resolved alert): the channel puts snooze buttons on those (:func:`keyboard`)."""
+    view = layout(event, settings)
+    style = TELEGRAM_HTML if html_format else PLAIN
+    out, shown = fitted(view, style)
+    fields: dict[str, Any] = {"text": out}
     if html_format:
-        return {"text": telegram_html(event, settings), "parse_mode": "HTML"}
-    return {"text": plain(event, settings)}
+        fields["parse_mode"] = "HTML"
+    if event.transition is Transition.RESOLVED:
+        return fields, ()
+    targets = tuple(
+        SnoozeTarget(i.number, i.snooze_task) for i in shown.items if i.snooze_task is not None
+    )
+    return fields, targets
+
+
+MAX_BUTTON = 64  # characters of a button's label (Telegram shows short ones best)
+
+
+def keyboard(
+    rows: Sequence[tuple[SnoozeTarget, Sequence[tuple[int, str]]]], language: str = i18n.DEFAULT
+) -> dict[str, Any]:
+    """An ``inline_keyboard``: one row per target, a button per (days, callback data). The
+    first button names the item ("1. Snooze 1d"), the others only the days ("3d")."""
+    out: list[list[dict[str, str]]] = []
+    for target, buttons in rows:
+        row = []
+        for n, (days, data) in enumerate(buttons):
+            key = "button.snooze" if n == 0 else "button.days"
+            label = i18n.text(language, key, n=target.number, days=days)[:MAX_BUTTON]
+            row.append({"text": label, "callback_data": data})
+        if row:
+            out.append(row)
+    return {"inline_keyboard": out}
 
 
 def el(text: str, **style: bool) -> dict[str, Any]:
@@ -753,6 +842,8 @@ def _item_elements(item: ItemView, needed_label: str) -> list[dict[str, Any]]:
             if item.blocking:
                 out.append(el(" · "))
             out.append({"type": "link", "url": item.link.url, "text": item.link.label})
+    if item.command:  # plain text on a line of its own: it copies as it is
+        out += [el(f"\n{INDENT}"), el(item.command)]
     return out
 
 

@@ -22,7 +22,7 @@ tasks (:mod:`kelpie.alerts.summary`).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 
@@ -104,7 +104,10 @@ class AlertItem:
     the board), ``age`` how long it has been in the situation (since ``since``), ``needed``
     what a human must do (a rule's or an agent's text, untrusted), ``blocking`` how many
     tasks wait behind it (None: unknown), ``snooze`` the task's snooze when it bears on the
-    alert (held, or back because it expired or the work behind it grew)."""
+    alert (held, or back because it expired or the work behind it grew). ``snooze_task`` is
+    the task a person may snooze to quiet this item (the item's own, or the human task it
+    waits on), set by a rule only where a snooze would hold the alert: chat channels offer
+    a snooze for it (#176). It names no new alert, so it is not part of the fingerprint."""
 
     task_id: str
     title: str | None = None
@@ -113,6 +116,7 @@ class AlertItem:
     blocking: int | None = None
     since: datetime | None = None
     snooze: SnoozeNote | None = None
+    snooze_task: str | None = field(default=None, compare=False)
 
     @property
     def fingerprint(self) -> tuple[object, ...]:
@@ -147,7 +151,9 @@ class AlertEvent:
     open, for the transitions ``ESCALATED`` and ``RESOLVED``. ``headline`` is the rule's own
     one-line summary, if it gave one (else a channel words one); ``items`` are the tasks the
     alert is about, in the rule's order; ``snoozed`` the tasks a person snoozed, which the
-    alert leaves out and lists in a footer.
+    alert leaves out and lists in a footer. ``at`` is the tick that raised it (a channel
+    words dates relative to it) and ``state`` the long-lived state it reports on, if any
+    (the same across its escalation steps); neither is part of the fingerprint.
     """
 
     rule: str
@@ -166,6 +172,9 @@ class AlertEvent:
     # how many there are in all (None: as many as listed)
     snoozed: tuple[AlertItem, ...] = ()
     snoozed_total: int | None = None
+    # Metadata, not what the alert says: left out of equality and of the fingerprint.
+    at: datetime | None = field(default=None, compare=False)
+    state: str | None = field(default=None, compare=False)
 
     @property
     def fingerprint(self) -> tuple[object, ...]:

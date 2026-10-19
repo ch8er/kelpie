@@ -36,6 +36,7 @@ from kelpie.adapters.issues.config import (
 )
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
+from kelpie.alerts.buttons import ButtonStore, ChatControl, Press, button_store_path
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
 from kelpie.connectors.cost_reports import CostReportsSettings, load_cost_reports
@@ -84,7 +85,13 @@ from kelpie.core.ports import (
 from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
-from kelpie.core.snooze import MarkerProblem, SnoozeSettings, load_snooze, with_snoozes
+from kelpie.core.snooze import (
+    MarkerProblem,
+    SnoozeSettings,
+    chat_snooze,
+    load_snooze,
+    with_snoozes,
+)
 from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.spend import (
     Estimate,
@@ -1621,7 +1628,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             loop,
             metrics,
             store,
-            alerts=_start_alerts(settings, engine, metrics),
+            alerts=_start_alerts(settings, engine, metrics, store, clock),
         )
         return _with_hub(app, hub)
     span_store = _open_span_store(settings.db_path)
@@ -1694,7 +1701,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         snoozes=snooze_reader(settings, store),
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
-    alerts = _start_alerts(settings, engine, metrics)
+    alerts = _start_alerts(settings, engine, metrics, store, clock)
     if hub is not None:
         # A span whose ids no agent token vouches for could be forged into any host's
         # namespace: with a hub, spans come only through the agents.
@@ -1759,16 +1766,63 @@ def _with_hub(app: App, hub: Hub | None, traces: TraceIngest | None = None) -> A
     return app
 
 
-def _start_alerts(settings: Settings, engine: Engine, metrics: Metrics) -> Delivery | None:
-    """Start the alert channels (their worker threads) and give the engine its alerter. Done
-    last in ``build_app``, so a startup error before this point leaves no thread behind."""
+def _start_alerts(
+    settings: Settings,
+    engine: Engine,
+    metrics: Metrics,
+    store: LedgerStore,
+    clock: Callable[[], datetime],
+) -> Delivery | None:
+    """Start the alert channels (their worker threads, and the snooze button poller of a
+    Telegram channel with ``buttons = true``) and give the engine its alerter. Done last in
+    ``build_app``, so a startup error before this point leaves no thread behind."""
+    control = _chat_control(settings, store, metrics, clock)
     try:
-        alerts = settings.alerts.build(metrics)
+        alerts = settings.alerts.build(metrics, control=control)
     except ValueError as exc:
+        if control is not None:
+            control.store.close()
         raise ConfigError(str(exc)) from exc
     if alerts is not None:
         engine.alerter = alerts.alerter()
     return alerts
+
+
+def _chat_control(
+    settings: Settings, store: LedgerStore, metrics: Metrics, clock: Callable[[], datetime]
+) -> ChatControl | None:
+    """What snooze buttons need (#176): their store beside the database, and the callback
+    that writes a press's snooze and its ledger entry to Kelpie's store. None when no
+    channel has buttons."""
+    channels = settings.alerts.button_channels
+    if not channels:
+        return None
+    if settings.db_path is None or not isinstance(store, SqliteLedgerStore):
+        raise ConfigError(
+            '[alerts] snooze buttons need a database: set [storage] path (not ":memory:")'
+        )
+    path = button_store_path(settings.db_path)
+    try:
+        buttons = ButtonStore(path)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        raise ConfigError(f"cannot open the button store {path}: {exc}") from exc
+
+    def snooze(press: Press, now: datetime) -> datetime:
+        record, entry = chat_snooze(
+            press.task_id,
+            press.days,
+            press.name,
+            press.user_id,
+            press.channel,
+            now,
+            settings.snooze,
+        )
+        store.put_snooze(record)
+        store.append(entry)
+        return record.until
+
+    metrics.set_chat_channels(c.name for c in channels)
+    return ChatControl(buttons, snooze, clock, metrics)
 
 
 def connector_steps(

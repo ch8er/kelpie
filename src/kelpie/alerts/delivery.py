@@ -28,6 +28,11 @@ Three entry points, all never blocking and never raising:
   takes the engine's :class:`~kelpie.core.alerts.AlertEvent` (rule, subject, reason,
   transition, what Kelpie did, all as fields) and routes it the same way.
 
+**Pollers** (:class:`Poller`): a channel that takes input back from the chat (Telegram's
+snooze buttons, :mod:`kelpie.alerts.buttons`) has a poller, started with the workers and
+stopped first on ``close``, under the same deadline: told to stop before the queues are
+flushed, joined after, and abandoned if still inside a request then.
+
 The engine already de-duplicates through the action ledger and state transitions; the
 window here is a cheap safety net. An alert is a duplicate only when the last alert sent to
 that channel for the same (rule, subject) is identical, so open, resolved, open again within
@@ -85,6 +90,18 @@ class Channel(Protocol):
     min_severity: Severity
 
     def send(self, message: AlertEvent) -> None: ...
+
+
+class Poller(Protocol):
+    """A background reader of a channel's chat (see :class:`kelpie.alerts.buttons.ButtonPoller`)."""
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def join(self, deadline: float) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class AlertObserver(Protocol):
@@ -299,8 +316,10 @@ class Delivery:
         backoff: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
         retry_horizon: timedelta = DEFAULT_RETRY_HORIZON,
+        pollers: Sequence[Poller] = (),
     ) -> None:
         self.channels = tuple(channels)
+        self.pollers = tuple(pollers)
         self.observer = observer
         self.window = window.total_seconds()
         self.clock = clock
@@ -319,6 +338,8 @@ class Delivery:
             )
             for c in self.channels
         ]
+        for poller in self.pollers:
+            poller.start()
 
     def send(self, text: str, severity: str, channels: Sequence[str] | None = None) -> None:
         """Send free ``text`` (as it is, up to each channel's length limit): the generic entry
@@ -413,6 +434,8 @@ class Delivery:
         and counts."""
         deadline = time.monotonic() + max(timeout, 0.0)
         self._closed = True
+        for poller in self.pollers:  # no new press from now on
+            poller.stop()
         for worker in self._workers:
             worker.stop(deadline)
         for worker in self._workers:
@@ -420,6 +443,12 @@ class Delivery:
         for worker in self._workers:
             if worker.thread.is_alive():
                 worker.abandon()
+        for poller in self.pollers:
+            poller.join(deadline)
+            try:
+                poller.close()
+            except Exception:
+                log.exception("alert poller failed to close")
 
 
 class _EngineAlerter:

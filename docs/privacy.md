@@ -16,9 +16,10 @@ keep less. It describes the code as it is; the files named below are the referen
 | OpenClaw Workboard cards | card id, board, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, session key (reduced like the hook's) and run id, block reason (500 characters); every comment (2000 characters) and attempt error of the cards read is in memory for the tick, only the latest since a block is kept | claim tokens, attachments, proof, worker logs | read in place, not copied | |
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
 | Provider cost reports (optional) | per provider and UTC day: the token cost per model (Anthropic) or the day's total (OpenAI), in USD | workspaces, projects, API keys, users, line items | `kelpie.db`, table `cost_reports` | 90 days |
-| Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
+| Action ledger, alert states | each action Kelpie proposed or took, with its reason text; each snooze button press with the person's Telegram user id and name | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
-| Snoozes | task id, until, the reason (500 characters) and who set it (`--by`, default the OS user name; 100 characters) of `kelpie snooze` | | `kelpie.db`, table `snoozes` | 30 days after it expires |
+| Snoozes | task id, until, the reason (500 characters) and who set it (`--by`, default the OS user name; 100 characters) of `kelpie snooze`; for a Telegram button press, the person's Telegram name (40 characters) | | `kelpie.db`, table `snoozes` | 30 days after it expires |
+| Snooze buttons (optional) | the HMAC key, the Telegram update offset, and per button reference the alert, the task id, the item number, the message id and when it was issued and used | message text, user names, user ids | `kelpie.buttons.db` beside `kelpie.db` (mode 0600) | references 7 days after issue; the key and offset until the file is deleted |
 | Daily reports | the report as Markdown | | `[report] dir` | not pruned |
 | LLM root-cause section (optional) | the report's aggregates, sent to the configured model (tasks and people as pseudonyms) | titles, task ids, block reasons, alert texts, commands, tool output, fix notes, roles, names | the provider (or `base_url`) | the provider's terms |
 | Forwarded traces | nothing; requests pass through memory | | queue in memory | until sent or dropped |
@@ -289,6 +290,16 @@ quote parts of it (see the next section).
 - **Recorded fixes** (`kelpie fix`) keep the note you type.
 - **Snoozes** (`kelpie snooze`) keep the reason you type and who set it (`--by`, by default
   the OS user name), until 30 days after they expire.
+- **Snooze buttons** (`buttons = true` on a Telegram channel, off by default). A press
+  stores a snooze whose "by" is the person's Telegram name (first and last name, else the
+  username; cleaned, at most 40 characters), and a ledger entry with that name and their
+  Telegram **user id**, the task and until when. The ledger is not pruned, so these user
+  ids stay in `kelpie.db` until you delete the rows. Presses that are refused are counted
+  in metrics by reason only; Kelpie's log names the reason, and the user id of a press it
+  took (snoozed, or failed to write). The button store (`kelpie.buttons.db`) holds no names or user ids, only what a
+  button refers to; the message text is never stored (the acknowledgement edits the
+  message as Telegram returns it with the press). Telegram keeps the messages, the presses
+  and the edits under its own terms.
 
 ## LLM root-cause section
 

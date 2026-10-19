@@ -26,6 +26,7 @@ marker".
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -33,6 +34,9 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from types import MappingProxyType
 from typing import Any
 
+from kelpie.core.actions import ActionKind
+from kelpie.core.config import Mode
+from kelpie.core.ledger import LedgerEntry, Outcome, to_json
 from kelpie.core.model import Snapshot, Snooze, Task
 from kelpie.core.serde import parse_duration
 
@@ -310,3 +314,65 @@ def with_snoozes(
     kept = snapshot.now - EXPIRED_KEPT
     merged = {**markers, **{k: s for k, s in stored.items() if s.until > kept}}
     return replace(snapshot, snoozes=MappingProxyType(merged)), problems
+
+
+# --- a snooze from a chat button (#176) ------------------------------------------------------
+
+CHAT_DAYS = (1, 3, 7)  # the buttons a chat offers
+CHAT_MAX_DAYS = 7  # the longest snooze a chat button can set, whatever [snooze] max_days says
+CHAT_RULE = "chat"  # the ledger's rule for a press: a person acted, no rule did
+
+
+def chat_snooze(
+    task_id: str,
+    days: int,
+    by: str,
+    user_id: int,
+    channel: str,
+    now: datetime,
+    settings: SnoozeSettings,
+) -> tuple[Snooze, LedgerEntry]:
+    """The snooze a chat button sets and the ledger entry that records the press: who
+    (``by``, the person's chat name, and ``user_id``), what (the task) and until when.
+    ``days`` is one of :data:`CHAT_DAYS`, capped at :data:`CHAT_MAX_DAYS` and ``[snooze]
+    max_days``; the snooze runs from ``now``. Stored like ``kelpie snooze``'s (one per task,
+    replacing the old one) with ``source="chat"``, so ``kelpie serve`` records its growth
+    baseline as for any stored snooze and it ends early when more work is blocked behind
+    the task. The entry (kind ``snooze``, rule ``chat``, outcome ``executed``) counts
+    against no task's rate limit: its subject is the channel."""
+    if days not in CHAT_DAYS:
+        raise ValueError(f"a chat snooze is one of {CHAT_DAYS} days, got {days!r}")
+    task_id = task_id.strip()
+    if not task_id:
+        raise ValueError("the task id is empty")
+    until = now + timedelta(days=min(days, CHAT_MAX_DAYS, settings.max_days))
+    who = by.strip()[:MAX_BY] or f"user {user_id}"
+    snooze = Snooze(
+        task_id=task_id, until=until, reason=None, by=who, created_at=now, source="chat"
+    )
+    params = {
+        "until": until.isoformat(),
+        "days": days,
+        "by": who,
+        "user_id": user_id,
+        "channel": channel,
+        "source": "chat",
+    }
+    raw = to_json(["chat_snooze", channel, task_id, user_id, now.isoformat()])
+    entry = LedgerEntry(
+        at=now,
+        fingerprint=hashlib.sha256(raw.encode()).hexdigest()[:32],
+        subject=f"chat:{channel}",
+        rule=CHAT_RULE,
+        kind=ActionKind.SNOOZE,
+        mode=Mode.ACT,
+        outcome=Outcome.EXECUTED,
+        reason=(
+            f"{who} (user id {user_id}) snoozed {task_id} until {until.isoformat()} "
+            f"from {channel} ({days}d button)."
+        ),
+        task_id=task_id,
+        executor=channel,
+        params=params,
+    )
+    return snooze, entry
