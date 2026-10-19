@@ -3,9 +3,15 @@ task (``snooze_task``) exactly where a snooze on it would hold the alert, and no
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 
-from kelpie.core.model import Condition, ConditionKind, Status, Task
+import pytest
+
+from kelpie.core.model import Condition, ConditionKind, Snooze, Status, Task
+from kelpie.rules._tasks import DEFAULT_MAX_CONDITION_AGE
 from kelpie.rules.needs_you import build as build_needs_you
 from kelpie.rules.stale_blocks import StaleBlocks
 from kelpie.rules.wait_condition import WaitCondition
@@ -65,3 +71,31 @@ def test_rule_2_offers_a_snooze_on_the_one_human_task_it_waits_for() -> None:
     for conditions in ([person, other], [person, ci], [ci]):
         found = rule.evaluate(snap([h, waiting("W-1", NOW - 30 * H)], conditions=conditions))
         assert found and all("snooze_task" not in a.params for a in found)
+
+
+@pytest.mark.parametrize(
+    ("satisfied", "params", "checked_at"),
+    [
+        (None, {"task": "H-1", "error": "not_found"}, NOW),  # Kelpie cannot see the task
+        (None, {"task": "H-1", "error": "not_human_task"}, NOW),
+        (False, {"task": "H-1", "error": "not_human_task"}, NOW),
+        (None, {"task": "H-1"}, NOW),  # not checked yet
+        # stale evidence: last checked longer ago than max_condition_age
+        (False, {"task": "H-1"}, NOW - DEFAULT_MAX_CONDITION_AGE - timedelta(minutes=1)),
+    ],
+    ids=["not-found", "not-human-task", "unmet-with-error", "unchecked", "stale"],
+)
+def test_rule_2_offers_no_snooze_where_a_snooze_would_hold_nothing(
+    satisfied: bool | None, params: dict[str, str], checked_at: datetime
+) -> None:
+    rule = WaitCondition()
+    h = Task("H-1", "sign", Status.READY, NOW - 40 * H, role="owner", owner_id="ceo")
+    unknown = Condition(
+        "C-1", ConditionKind.HUMAN_TASK, "W-1", params, satisfied, checked_at=checked_at
+    )
+    board = snap([h, waiting("W-1", NOW - 30 * H)], conditions=[unknown])
+    (overdue,) = rule.evaluate(board)
+    assert "snooze_task" not in overdue.params
+    # ...and indeed a snooze on that task would not hold the alert
+    held = Snooze("H-1", NOW + 72 * H, None, "Alice", NOW, source="chat")
+    assert rule.evaluate(replace(board, snoozes=MappingProxyType({"H-1": held})))
