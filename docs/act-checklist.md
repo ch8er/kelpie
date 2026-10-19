@@ -9,8 +9,9 @@ against a live farm.
 
 A rule goes to `act` only when it has been **in `observe` on the farm for at least 24 h, and
 longer until it has at least 10 triggers**, and **at least 90 % of all its triggers in that
-window are true positives**, as **reviewed by a person**. The gate is per rule and per farm,
-and it needs step 1's preconditions (a real `[storage] path`: the triggers are read from the
+window are true positives**, as **reviewed by a person** (rule 10 on Hermes: [a self-test and
+72 h without a false positive](#rare-safety-rules-rule-10-on-hermes) instead). The gate is per
+rule and per farm, and it needs step 1's preconditions (a real `[storage] path`: the triggers are read from the
 ledger). A live 24 h review found a rule that would have proposed closing parent tasks whose
 PRs had not merged; only reading every trigger catches that.
 
@@ -56,6 +57,27 @@ WHERE rule = 'loop_breaker' AND mode = 'observe' AND outcome IN ('observed', 'dr
                AND a.at >= s.opened_at AND a.at <= COALESCE(s.closed_at, a.at))))
 GROUP BY fingerprint ORDER BY first;
 ```
+
+### Rare safety rules: rule 10 on Hermes
+
+`loop_breaker` (rule 10) exists for incidents that are rare on a healthy farm: a run looping or
+failing in a row, a hard budget. Ten triggers may never come, and waiting for them keeps the
+farm unprotected. On Hermes, for this rule, **two things replace "at least 10 triggers" and the
+90 % rate**:
+
+- [ ] **A passed self-test** on the host Kelpie acts from, as the user it runs as:
+  `kelpie selftest stop --adapter hermes` exits 0 (every line `PASS`). It runs rule 10 in
+  `act` against a throwaway Hermes home and board with a local mock model (no real tokens; see
+  the [Hermes adapter](../src/kelpie/adapters/hermes/README.md#self-test-kelpie-selftest-stop---adapter-hermes)),
+  with your Kelpie version, `[adapters.hermes]` and `loop_breaker` thresholds. Run it again
+  after any upgrade of Kelpie or Hermes and any change to those sections.
+- [ ] **At least 72 h in `observe` with zero false positives**: every trigger in the window
+  reviewed by a person (any number of them, none is fine), and not one false positive. One
+  false positive, destructive or not, means tuning the rule and starting the 72 h again.
+
+The rest of the gate stands: the window restarts after a change to the rule, and the review
+is written down, with the self-test's output attached. Other rules, and rule 10 on Claude Code
+and OpenClaw (no self-test yet), keep the gate above.
 
 The evidence for a trigger is its ledger `reason` and `params`. `kelpie why <task>` shows the
 task as it is now and its recent ledger entries, not the board as the rule saw it; a
@@ -145,14 +167,31 @@ mode = "suggest"
 
 ## 3. Test one stop on a test board
 
+- [ ] Run `kelpie selftest stop --adapter hermes` on the Hermes host, as Kelpie's user. It
+  needs no setup and leaves nothing behind (a throwaway Hermes home, profile and board, a local
+  mock model); every line must be `PASS`. A `FAIL` line comes with a `fix:` line.
+
+The self-test does not use your Hermes home. To also test a stop there (your gateway, your
+`config.yaml`, the plugin in your profiles), do it on a test board:
+
+- [ ] **Back up first**: the home's `config.yaml` (and the profile's, if you change it), and
+  the board you will use: `sqlite3 kanban.db ".backup kanban.db.bak"` (or copy the file
+  while no dispatcher or gateway is running).
 - [ ] Use a board that holds nothing important (named boards live in
-  `~/.hermes/kanban/boards/<slug>/kanban.db`; point `db_path` at it).
+  `~/.hermes/kanban/boards/<slug>/kanban.db`; point `db_path` at it), and a dummy profile for
+  the looping task (`hermes profile create --no-alias <name>`).
+- [ ] If the home's `config.yaml` has `kanban.dispatch_profiles` (an allow-list of the
+  profiles Hermes may spawn), **add the dummy profile to it** for the test: otherwise
+  `hermes kanban dispatch` lists the task under `skipped_nonspawnable` and nothing runs.
+  **Remove it again afterwards**, with the dummy profile (`hermes profile delete <name>`).
+  An absent `dispatch_profiles` allows every profile; an empty list allows none.
 - [ ] Set `mode = "act"` for `loop_breaker` only and lower its thresholds enough to trip on a
   task you start on purpose (for example a task that repeats one tool call).
 - [ ] Expect: the task moves `running` to `blocked` with kind `needs_input`, a
-  `BLOCKED: Stopped by Kelpie: ...` comment names the reason, and the ledger shows
-  `executed`. A task that was re-claimed in between is not blocked; the stop fails and is
-  recorded as `failed`.
+  `BLOCKED: Stopped by Kelpie: ...` comment signed `kelpie` names the reason, the alert ends
+  "its worker ended N.Ns after SIGTERM" (the worker's processes are gone: `ps`), and the
+  ledger shows `executed` (`kelpie why <task>` shows the same line). A task that was
+  re-claimed in between is not blocked; the stop fails and is recorded as `failed`.
 - [ ] Undo it with `hermes kanban unblock <task>`.
 - [ ] Only then point `db_path` at the real board.
 
