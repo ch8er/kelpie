@@ -1043,9 +1043,11 @@ and the daily report's act advice. And `PlatformExecutor` routes `wake` to
 purpose, yet a wake on one of its tasks would restart the agent.
 
 **Acceptance criteria**
-- [ ] `kelpie doctor` and the daily report judge each rule's actions per adapter whose tasks it can target, telling "acts on some adapters' tasks" from "cannot act here"
-- [ ] `PlatformExecutor` does not run an action kind an adapter's declared `actions` leaves out (the engine alerts instead)
-- [ ] Tests on a two-adapter farm
+- [x] `kelpie doctor` and the daily report judge each rule's actions per adapter whose tasks it can target, telling "acts on some adapters' tasks" from "cannot act here"
+- [x] `PlatformExecutor` does not run an action kind an adapter's declared `actions` leaves out (the engine alerts instead)
+- [x] Tests on a two-adapter farm
+
+Done in #219: `act_gaps` beside `act_blockers`, adapters' optional `inapplicable` kinds, and `declared_actions` in `kelpie.core.ports`.
 
 ### project: issue agents and Linear verified against live setups
 labels: P1, area:project
