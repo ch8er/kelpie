@@ -438,10 +438,10 @@ Live case: the farm's Xcode broke for ~12 h; every iOS PR stayed red. Kelpie ale
 blocked task and the report blamed "waiting for merges".
 
 **Acceptance criteria**
-- [ ] Correlated failures: N or more PRs (config) failing within a window on the same job/step or the same error signature → one `alert` "CI outage since <time>" with scope (repos, workflows, runners), the shared signature and the PRs affected; resolve when runs go green again
+- [x] Correlated failures: N or more PRs (config) failing within a window on the same job/step or the same error signature → one `alert` "CI outage since <time>" with scope (repos, workflows, runners), the shared signature and the PRs affected; resolve when runs go green again
 - [ ] While an outage is open, per-task block and wait alerts that it explains are folded under it (no separate alerts); the report attributes their waiting time to "CI outage"
-- [ ] The error signature comes from the Actions runs/jobs API the connector already reads (job and step names, conclusion); no log scraping in the first version
-- [ ] Fixtures: new `20-ci-outage.yaml` (synthetic), with an unrelated single red PR as the negative case
+- [x] The error signature comes from the Actions runs/jobs API the connector already reads (job and step names, conclusion); no log scraping in the first version
+- [x] Fixtures: new `20-ci-outage.yaml` (synthetic), with an unrelated single red PR as the negative case
 
 ### rules: needs_you and bottlenecks — planned waits are not waiting (incident 20)
 labels: P0, week-3, area:rules

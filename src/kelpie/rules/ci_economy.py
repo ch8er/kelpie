@@ -37,6 +37,14 @@ connector's business.
    ``forecast_horizon`` and before the quota resets → ``warning``. With only the quota
    known (no usage reading), a burn that would exceed it over ``quota_period`` →
    ``warning``. Readings older than ``max_reading_age`` are ignored.
+
+4. **CI outage** (incident 20): some ``outage_window`` holds failures of ``outage_min_prs``
+   or more change requests at the same workflow, job and step, each still active (nothing
+   passed that job in its repository since), with evidence that the environment broke
+   (twice as many without it) → one ``warning`` "CI outage since ..." with its scope
+   (repositories, workflows, runners, PRs) and the tasks it explains, open until a build
+   passes that job again. See :mod:`kelpie.rules._ci_outage`; the params are the contract
+   in :mod:`kelpie.core.incidents`. ``outage_min_prs = 0`` turns it off.
 """
 
 from __future__ import annotations
@@ -52,6 +60,7 @@ from typing import Any, ClassVar
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import ANNOUNCES
 from kelpie.core.conditions import linked_conditions
+from kelpie.core.incidents import is_outage_state
 from kelpie.core.model import (
     Build,
     BuildStatus,
@@ -63,6 +72,7 @@ from kelpie.core.model import (
 )
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._ci_outage import outages, passed_again
 
 NAME = "ci_economy"
 CATEGORIES = ("superseded", "already_verified", "docs_only", "draft", "wip")
@@ -92,6 +102,8 @@ class CiEconomy:
     forecast_horizon: timedelta = timedelta(days=7)
     quota_period: timedelta = timedelta(days=30)
     max_reading_age: timedelta = timedelta(hours=1)
+    outage_min_prs: int = 3
+    outage_window: timedelta = timedelta(hours=2)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -105,7 +117,14 @@ class CiEconomy:
                 waste = replace(waste, params={**waste.params, ANNOUNCES: keys})
             actions.append(waste)
         actions.extend(self._quota(recent, snapshot))
+        actions.extend(outages(snapshot, NAME, self.outage_min_prs, self.outage_window))
         return actions
+
+    def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
+        """An outage resolves when its job passes again: say where. None for the others."""
+        if not is_outage_state(state_id):
+            return None
+        return passed_again(state_id, snapshot, self.outage_min_prs, self.outage_window)
 
     def _recent(self, snapshot: Snapshot) -> list[Build]:
         since = snapshot.now - self.window
@@ -414,7 +433,7 @@ def _number(value: Any, name: str, *, top: float | None = None, zero: bool = Fal
 def build(config: dict[str, Any]) -> CiEconomy:
     config = dict(config)
     kwargs: dict[str, Any] = {}
-    for key in ("window", "forecast_horizon", "quota_period", "max_reading_age"):
+    for key in ("window", "forecast_horizon", "quota_period", "max_reading_age", "outage_window"):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     if "docs_globs" in config:
@@ -429,6 +448,13 @@ def build(config: dict[str, Any]) -> CiEconomy:
         kwargs["waste_min_minutes"] = _number(
             config.pop("waste_min_minutes"), "waste_min_minutes", zero=True
         )
+    if "outage_min_prs" in config:
+        value = config.pop("outage_min_prs")
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1000:
+            raise ValueError("outage_min_prs must be a whole number from 0 (off) to 1000")
+        if value == 1:
+            raise ValueError("outage_min_prs must be at least 2: one red PR is not an outage")
+        kwargs["outage_min_prs"] = value
     if "quota_critical" in config:
         kwargs["quota_critical"] = _number(config.pop("quota_critical"), "quota_critical", top=1)
     if "cancel_superseded" in config:

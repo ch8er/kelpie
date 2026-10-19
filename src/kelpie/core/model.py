@@ -391,8 +391,8 @@ class Job:
     """One job of a finished CI build. ``conclusion`` is how it ended, mapped by the
     connector like ``Build.status``. ``step`` is the first named step that did not succeed in
     a job that did not succeed, when the CI names one. ``runner`` is the machine a job that
-    did not succeed ran on and ``labels`` the runner labels it asked for (e.g.
-    ``self-hosted``, an OS)."""
+    did not succeed ran on (None for a CI's shared hosted pool, whose names do not identify a
+    machine) and ``labels`` the runner labels it asked for (e.g. ``self-hosted``, an OS)."""
 
     name: str
     conclusion: BuildStatus
@@ -431,6 +431,7 @@ class Build:
     branch: str | None = None
     sha: str | None = None
     event: str | None = None
+    pr: int | None = None  # the number of the change request it builds, when the CI says
     draft: bool = False
     commit_message: str | None = None
     changed_paths: tuple[str, ...] | None = None
