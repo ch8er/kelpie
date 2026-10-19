@@ -453,6 +453,19 @@ of waiting on a person.
 - [ ] Rule 13, rule 6 and the report use the same definition
 - [ ] Fixtures: new `20-planned-wait.yaml`
 
+### core: budgets and spend for API-key farms — default prices, provider reconciliation, auto mode
+labels: P0, week-3, area:core
+On a subscription, wasted tokens cost limit and time; with API keys they cost money directly.
+Today prices come only from the user's config, so a farm on API keys sees tokens without
+dollars, and the trace-based estimate is never checked against the real bill.
+
+**Acceptance criteria**
+- [ ] A default price table shipped with Kelpie for popular Anthropic, OpenAI and Google models (input, output, cache read/write), with the date it was checked; config overrides any entry; unknown models are listed in doctor and the report instead of silently costing $0
+- [ ] Reconciliation: when an admin key for a provider's cost/usage report API is configured, Kelpie compares its daily trace-based estimate with the provider's figure and shows the discrepancy in the report and on /metrics; large gaps raise a warning (missing traces, wrong prices)
+- [ ] Auto mode per provider: API key → dollars, budgets in dollars; subscription → share of the limit and time to the limit, no dollars; doctor and `kelpie status` show which mode each provider is in and why
+- [ ] The report's cost-of-chaos and cost-per-task lines follow the mode (no empty dollars on subscriptions)
+- [ ] Fixtures/tests for both modes; the provider APIs only behind fakes in tests
+
 ### rules: loop_breaker — identical calls, error streaks and token budget (rule 10, field evidence)
 labels: P0, week-2, area:rules
 Field evidence: a heartbeat/maintenance loop repeated the same tool call about 900 times
