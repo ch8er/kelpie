@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 
@@ -24,6 +24,7 @@ from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import Snapshot
 from kelpie.metrics import Metrics
 from kelpie.report.daily import StuckCheck, day_bounds
+from kelpie.report.farm import FarmFacts
 from kelpie.report.fixes import MANUAL, FixEvent, FixStore
 from kelpie.report.run import ReportSources, Sender, default_day, generate, send, write
 from kelpie.report.schedule import ReportScheduler, RunLog
@@ -58,6 +59,29 @@ def sources(settings: Settings) -> ReportSources:
         act_blockers={
             rule: b.reason for rule, b in act_blockers(settings, build_adapters(settings)).items()
         },
+        farm=farm_facts(settings),
+    )
+
+
+def farm_facts(settings: Settings) -> FarmFacts:
+    """What the farm already has, from its config: the report never advises it."""
+    rules = settings.engine.rules
+    needs_you = rules.get("needs_you", {})
+    approvers = needs_you.get("approvers")
+    bottlenecks = rules.get("bottlenecks", {})
+    holds = [h for h in bottlenecks.get("holds", []) if isinstance(h, Mapping)]
+    held = {h.get("label") for h in holds}
+    labels = bottlenecks.get("hold_labels", [])
+    bare = {x for x in labels if isinstance(x, str)} - held if isinstance(labels, list) else set()
+    return FarmFacts(
+        approvers=bool(needs_you.get("default_approver")),
+        approver_roles=frozenset(approvers) if isinstance(approvers, Mapping) else frozenset(),
+        # holds entries expire (their own or the 4h default); bare labels only with hold_expiry
+        hold_expiry=bool(holds or bare) and (not bare or "hold_expiry" in bottlenecks),
+        hold_owners=bool(holds or bare) and not bare and all(h.get("owner") for h in holds),
+        block_conditions=any("block" in p.applies_to for p in settings.block_conditions),
+        budgets=bool(settings.budgets.budgets),
+        dry_run=settings.engine.dry_run,
     )
 
 

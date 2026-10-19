@@ -28,6 +28,7 @@ from kelpie.report.daily import (
     render_markdown,
     render_summary,
 )
+from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.root_cause import Llm, with_root_cause
 from kelpie.report.store import ReportStore
 from kelpie.report.waits import BlockKind
@@ -55,6 +56,7 @@ class ReportSources:
     block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]], matched offline
     stuck_check: StuckCheck | None = None  # rule 3's, as configured (None: its defaults)
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # rule -> what is missing
+    farm: FarmFacts = UNKNOWN_FARM  # what the farm already has (from config)
 
 
 def default_day(now: datetime, settings: ReportSettings) -> date:
@@ -113,6 +115,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         dependencies=board.dependencies,
         stuck_check=sources.stuck_check,
         act_blockers=sources.act_blockers,
+        farm=sources.farm,
     )
 
 

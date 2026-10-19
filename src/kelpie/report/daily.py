@@ -59,7 +59,7 @@ from __future__ import annotations
 import logging
 import urllib.parse
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from itertools import zip_longest
@@ -92,7 +92,8 @@ from kelpie.core.spans import (
     usage,
 )
 from kelpie.core.states import OpenState
-from kelpie.report import md
+from kelpie.report import farm, md
+from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.fixes import FixEvent
 from kelpie.report.sections import (
     SECTIONS,
@@ -164,17 +165,10 @@ CHAOS_CAUSES: Mapping[str, str] = {
 REMEDIES: Mapping[str, str] = {
     "orphan_status": "give ownerless statuses an owner: route them to a role or let "
     "orphan_status reassign them",
-    "stale_blocks": "attach conditions to block reasons ([[block_conditions]]) so Kelpie "
-    "can clear blocks when their cause is fixed",
     "wait_condition": "check the conditions agents wait for: a connector that stopped "
     "checking or a limit that is too short",
     "exit_contract": "make agents set a final status before they exit (role instructions)",
     "ping_pong": "escalate review ping-pong earlier or tighten the acceptance criteria",
-    HOLDS: "give every hold an owner and an expiry ([engine.rules.bottlenecks] holds), and "
-    "lift a hold when its reason is gone",
-    PEOPLE: "answer the inboxes under Needs a human first, name approvers for "
-    "agent roles ([engine.rules.needs_you] approvers), and keep human tasks off the "
-    "critical path",
     PREWORK: "move cards out of triage or scheduled when other tasks depend on them, or "
     "drop the dependency",
     "bottlenecks": "rebalance roles and move human tasks off the critical path",
@@ -185,11 +179,35 @@ REMEDIES: Mapping[str, str] = {
 # The remedy where the rule cannot act on this farm: never advise switching act mode on.
 REMEDIES_WITHOUT_ACT: Mapping[str, str] = {
     "orphan_status": "give ownerless statuses an owner: route them to a role",
-    "stale_blocks": "attach conditions to block reasons ([[block_conditions]]) so Kelpie "
-    "alerts when a block's cause is fixed",
-    "loop_breaker": "stop runaway sessions by hand when Kelpie alerts on them, and cap "
-    "spend with [[budgets]]",
 }
+
+
+def remedy(
+    rule: str,
+    facts: FarmFacts,
+    can_act: bool,
+    acts: bool = False,
+    roles: Collection[str] | None = None,
+) -> str:
+    """What to do about a chaos cause, never advising what the farm already has
+    (:mod:`kelpie.report.farm`): act mode where the rule cannot act (``can_act``) or
+    already acts (``acts``), or config it already has. ``roles``: the farm's agent roles."""
+    if rule == HOLDS:
+        return farm.holds(facts)
+    if rule == PEOPLE:
+        return farm.people(facts, roles)
+    if rule == "stale_blocks":
+        return farm.stale_blocks(facts, can_act)
+    if rule == "loop_breaker":
+        if not can_act:  # in act mode or not, nothing stops the sessions here
+            return farm.runaway_by_hand(facts)
+        if acts:
+            return farm.runaway_acting(facts)
+    if (acts or not can_act) and rule in REMEDIES_WITHOUT_ACT:
+        return REMEDIES_WITHOUT_ACT[rule]
+    return REMEDIES[rule]
+
+
 # States whose id ends with the session they are about.
 SESSION_STATES = ("no_progress:", "loop_breaker:identical_calls:", "loop_breaker:error_streak:")
 FIX_KINDS = frozenset(
@@ -246,6 +264,7 @@ class ReportInputs:
     stuck_check: StuckCheck | None = None
     # Rules that cannot act on this farm, with what is missing (``kelpie.app.act_blockers``).
     act_blockers: Mapping[str, str] = field(default_factory=dict)
+    farm: FarmFacts = UNKNOWN_FARM  # what the farm already has: advice never repeats it
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,6 +417,7 @@ def build_report(
         _session_models(spans, counted),
         [a for s in extra for a in s.advice],
         wait,
+        frozenset((f, g.platform) for g in groups for f in g.filters),
     )
     return DailyReport(
         day=inputs.day,
@@ -476,7 +496,7 @@ def _biggest_wait(
         roles,
         causes,
     )
-    return biggest_wait(per_role, inputs.tasks, causes)
+    return biggest_wait(per_role, inputs.tasks, causes, inputs.farm)
 
 
 def _roles(inputs: ReportInputs, end: datetime) -> dict[str, str]:
@@ -880,6 +900,7 @@ def _recommendations(
     models: Mapping[str, str | None],
     extra: Sequence[Advice] = (),
     wait: BiggestWait | None = None,
+    filters_in_use: frozenset[tuple[str, str | None]] = frozenset(),
 ) -> tuple[Advice, ...]:
     candidates: list[Advice] = list(extra)
     if wait is not None and wait.cause != UNKNOWN_WAIT:  # the headline covers that one
@@ -899,13 +920,21 @@ def _recommendations(
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
         role = f" ({md.text(group.role)})" if group.role else ""
-        maybe = "" if rec.platform_known else " if RTK supports your agent platform"
+        # other commands of the same platform already run through it
+        in_use = (rec.filter.name, group.platform) in filters_in_use
+        maybe = "" if rec.platform_known or in_use else " if RTK supports your agent platform"
+        how = (
+            f"route it through {rec.filter.name} like the farm's other commands that already run "
+            "through it"
+            if in_use
+            else rec.filter.how
+        )
         candidates.append(
             Advice(
                 title=f"Filter {md.code(group.key)} output{role} with {rec.filter.name}{maybe}",
                 detail=(
                     f"{group.calls} calls put {group.tokens:,} tokens into the context, "
-                    f"{round(group.mean):,} per call; {rec.filter.how}. Expected saving: about "
+                    f"{round(group.mean):,} per call; {how}. Expected saving: about "
                     f"{rec.saved_tokens:,} tokens a day (assumed {rec.filter.reduction:.0%}; "
                     "verified before/after once it is in place)"
                 ),
@@ -913,6 +942,7 @@ def _recommendations(
                 tasks=group.tasks,
             )
         )
+    roles = {o.role for o in inputs.owners if o.kind is OwnerKind.AGENT} or None
     acting: dict[str, FixLine] = {}
     for f in would_fix:  # most subjects first: describe a rule by its main action
         acting.setdefault(f.rule, f)
@@ -927,14 +957,14 @@ def _recommendations(
                 f"in {mode} mode it would have done {fix.kind} on {fix.count} "
                 f"subject(s); {line.cause} lasted {line.hours:.1f} condition-hours"
             )
+            if inputs.farm.dry_run:
+                detail += " (Kelpie runs in dry-run: no rule acts until [engine] dry_run = false)"
             tasks = fix.tasks or line.tasks
         else:
             title = f"Reduce {line.cause}"
-            detail = REMEDIES[line.rule]
-            if blocked is not None:
-                detail = REMEDIES_WITHOUT_ACT.get(line.rule, detail)
-                if fix is not None and mode is not Mode.ACT:
-                    detail += f" (act mode is not available here: {md.text(blocked)})"
+            detail = remedy(line.rule, inputs.farm, blocked is None, mode is Mode.ACT, roles)
+            if blocked is not None and fix is not None:
+                detail += f" (act mode is not available here: {md.text(blocked)})"
             tasks = line.tasks
         candidates.append(Advice(title, detail, line.spend.usd, line.hours, tasks))
     return tuple(_top(candidates, inputs.hour_usd))

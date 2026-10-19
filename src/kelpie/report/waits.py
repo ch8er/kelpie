@@ -28,7 +28,8 @@ from datetime import datetime
 
 from kelpie.core.ledger import LedgerEntry
 from kelpie.core.model import Condition, ConditionKind, Task
-from kelpie.report import md
+from kelpie.report import farm, md
+from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.throughput import RoleThroughput
 
 UNKNOWN = "unknown"
@@ -44,22 +45,31 @@ WAIT_CAUSES: Mapping[str, str] = {
     "other": "custom conditions",
     UNKNOWN: "an unknown cause (no condition registered)",
 }
-SUGGESTIONS: Mapping[str, str] = {
+_SUGGESTIONS: Mapping[str, str] = {
     "ci": "add CI capacity where the tasks queue (another runner for that pipeline), run only "
     "the checks a change needs, or let fewer tasks of the role wait on CI at once",
-    "merge": "merge sooner: auto-merge once checks and approvals are in, or batch merges",
-    "people": "answer the inboxes under Needs a human first, name approvers for agent roles "
-    "([engine.rules.needs_you] approvers), and keep human tasks off the critical path",
-    "hold": "give every hold an owner and an expiry ([engine.rules.bottlenecks] holds), and "
-    "lift a hold when its reason is gone",
     "quota": "spread the role over more providers or models, or raise the quota",
     "tasks": "unblock the tasks they depend on first, or drop the dependency",
     "timer": "shorten the scheduled waits",
     "other": "check what the custom conditions wait for and whether a connector can resolve "
     "them sooner",
-    UNKNOWN: "have agents register a condition when they wait (ci_status, human_task, ...), "
-    "so Kelpie can tell what they wait for and wake them when it holds",
 }
+
+
+def suggestion(cause: str, facts: FarmFacts, role: str | None = None) -> str:
+    """What to do about a wait, never advising what the farm already has
+    (:mod:`kelpie.report.farm`)."""
+    if cause == "people":
+        return farm.people(facts, None if role is None else (role,))
+    if cause == "hold":
+        return farm.holds(facts)
+    if cause == "merge":
+        return farm.merges()
+    if cause == UNKNOWN:
+        return farm.unregistered_waits(facts)
+    return _SUGGESTIONS[cause]
+
+
 _KINDS: Mapping[ConditionKind, str] = {
     ConditionKind.HUMAN_TASK: "people",
     ConditionKind.CI_STATUS: "ci",
@@ -92,6 +102,7 @@ class BiggestWait:
     work_hours: float  # agent-hours the role's agents had a session running, for scale
     tasks: tuple[str, ...]
     repo: str | None = None  # for CI and merges: the repository most of them waited on
+    facts: FarmFacts = UNKNOWN_FARM
 
     @property
     def label(self) -> str:
@@ -99,7 +110,7 @@ class BiggestWait:
 
     @property
     def suggestion(self) -> str:
-        return SUGGESTIONS[self.cause]
+        return suggestion(self.cause, self.facts, self.role)
 
     def headline(self) -> str:
         """One line of Markdown-safe text."""
@@ -180,7 +191,10 @@ class WaitCauses:
 
 
 def biggest_wait(
-    roles: Sequence[RoleThroughput], tasks: Sequence[Task], causes: WaitCauses
+    roles: Sequence[RoleThroughput],
+    tasks: Sequence[Task],
+    causes: WaitCauses,
+    facts: FarmFacts = UNKNOWN_FARM,
 ) -> BiggestWait | None:
     """The role and cause with the most waiting task-hours (at least :data:`MIN_HOURS`)."""
     found = [
@@ -203,7 +217,7 @@ def biggest_wait(
             if isinstance(repo, str) and repo:
                 repos[repo] += 1
     repo = min(repos, key=lambda x: (-repos[x], x)) if repos else None
-    return BiggestWait(role, cause, hours, r.busy_hours, waited, repo)
+    return BiggestWait(role, cause, hours, r.busy_hours, waited, repo, facts)
 
 
 def _list(value: object) -> list[object]:
