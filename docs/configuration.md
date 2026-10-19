@@ -23,7 +23,7 @@ configure what exists.
   [dispatch_gate](#dispatch_gate)
 - [[storage]](#storage)
 - [[adapters.hermes]](#adaptershermes), [[adapters.claude_code]](#adaptersclaude_code),
-  [[adapters.openclaw]](#adaptersopenclaw)
+  [[adapters.openclaw]](#adaptersopenclaw), [[adapters.github_issues]](#adaptersgithub_issues)
 - [[traces]](#traces), [[[traces.forward]]](#tracesforward),
   [[traces.outputs]](#tracesoutputs)
 - [[[budgets]] and [prices]](#budgets-and-prices), [[spend]](#spend)
@@ -635,6 +635,33 @@ OpenClaw's Workboard plugin as tasks, and stop markers the plugin enforces. Abse
 | `stop_ttl` | `"24h"` | duration, > 0 | How long a stop marker holds; must match the plugin's `stopTtl`. |
 | `cli_timeout` | `"20s"` | duration, > 0 and <= 60s | Limit for the abort of one stop (up to two commands: by session key, then by run id), plus up to 2 seconds to reap a command that timed out; it runs inside the tick. |
 | `token_spans` | `true` | bool | LLM spans with each run's tokens from the plugin (it needs conversation access). Set `false` if OpenClaw's `diagnostics-otel` also sends its token spans to Kelpie: the daily report would count a run twice. |
+| `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
+
+## [adapters.github_issues]
+
+GitHub Issues as the task queue, for agents that take issues and return pull requests
+(Copilot coding agent, Codex cloud, the Claude Code GitHub Action, OpenHands). Adapter name
+`github-issues`; task ids are `owner/repo#12`. Reads only, for now: actions become alerts.
+Where to reach GitHub defaults to [[connectors.github]](#connectorsgithub); the adapter
+makes its own client from it (its own cache and per-tick budget). The status and owner
+rules: the [issues adapter README](../src/kelpie/adapters/issues/README.md).
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `repos` | `[connectors.github]` `repos` | list of `owner/name` | The repositories whose issues are tasks (one board each). Required without `[connectors.github]`. |
+| `api_url` | `[connectors.github]` `api_url`, else `"https://api.github.com"` | URL | GitHub's API (https, or http on loopback). |
+| `token_env` | `[connectors.github]` `token_env`, else `"GITHUB_TOKEN"` | variable name | The token: read access to issues and pull requests (metadata). Set explicitly (here or in the connector), it must be set. Unset: anonymous, 60 requests an hour. Required here when `api_url` differs from the one the inherited token is for. |
+| `timeout` | `[connectors.github]` `timeout`, else `"10s"` | duration, <= 60s | One request. |
+| `cache_ttl` | `[connectors.github]` `cache_ttl`, else `"60s"` | duration, >= 30s | How long an answer is reused before it is asked again (conditionally). |
+| `lookback` | `"7d"` | duration, > 0 | Closed issues updated within this are read (done and cancelled tasks; one page of 50). |
+| `max_requests_per_tick` | `60` | count, 1–5000 | Requests per tick for per-issue details (events, blockers, sub-issues); the rest use what was read before. The lists are always read first, bounded by their page caps (up to 21 requests per repository; unchanged pages are answered `304 Not Modified`, free against the rate limit). |
+| `tick_budget` | `"15s"` | duration, > 0 | Wall-clock time per tick for the per-issue details (the lists are bounded by their page caps and `timeout`). |
+| `label` | none | label | Only issues with this label are tasks. None: every issue. On a public repository, set one only maintainers apply: otherwise anyone who opens issues fills the task list (500 open issues per repository are read). |
+| `blocked_labels` | `["blocked"]` | list of labels | An open issue with one is `blocked`, since the label was put on. |
+| `ready_labels` | `[]` | list of labels | An open issue nobody holds with one is `ready` (waiting for an agent); without one it is `backlog`. People start these agents, not a dispatcher, so only a label says an issue waits for one. |
+| `role` | `"issue-agent"` | string | The role of tasks no agent holds, and the agents' default. Distinct from other adapters' roles, so rule 3 never proposes an issue agent for another platform's task (or the reverse) unless you give them the same role. |
+| `agents.<name>` | none | table | An agent that works issues; `<name>` is its owner id in Kelpie. Keys: `assignee` (the login it is assigned as, e.g. `Copilot`), `label` (the label that starts it, e.g. `fix-me`), `author` (the login its pull requests come from, e.g. `copilot-swe-agent[bot]`), `mention` (the comment text that starts it, e.g. `@codex`; used by actions later), `role` (default `"issue-agent"`). One of `assignee`, `label` or `author` is required. An account or label names one agent, and an agent's label cannot also be a board's `label`, blocked or ready label. |
+| `boards.<owner/name>` | the keys above | table | Per repository: `label` (`false`: every issue), `blocked_labels`, `ready_labels`, `role`, and `agents` (the agent names Kelpie may hand its tasks to; default all). |
 | `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
 
 ## [traces]
