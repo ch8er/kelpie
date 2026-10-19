@@ -35,7 +35,14 @@ from kelpie.adapters.hermes.stop import (
     stop_comment,
     verify_stop,
 )
-from kelpie.adapters.hermes.worker import fingerprint, instantiation_epoch, read_proc
+from kelpie.adapters.hermes.worker import (
+    Plan,
+    Proc,
+    RunWorker,
+    fingerprint,
+    instantiation_epoch,
+    read_proc,
+)
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
@@ -467,7 +474,31 @@ def test_a_failure_ending_the_worker_does_not_fail_the_stop(
     done = make(board, exe).stop(f"hermes-run-{rid}", "loop")
     assert task_state(board) == "blocked"
     assert isinstance(done, str) and done.endswith(
-        "Kelpie did not end its worker (ending it failed: PermissionError)"
+        "Kelpie did not end its worker (checking it failed: PermissionError)"
+    )
+
+
+def test_a_failure_after_the_signals_says_so(
+    board: Board, fake_cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exe, _ = fake_cli
+    adapter = make(board, exe)
+    plan = Plan(procs=[Proc(4321, 1, "S", 5, 0)])
+    monkeypatch.setattr(adapter_module, "run_worker", lambda conn, rid: RunWorker(1, "", 2, "", ""))
+    monkeypatch.setattr(adapter_module, "worker_targets", lambda recorded: plan)
+
+    def broken(*args: object) -> object:
+        raise OSError("EINVAL")
+
+    monkeypatch.setattr(adapter_module, "end_workers", broken)
+    assert adapter._end_worker(1) == "ending its worker failed partway (OSError); see Kelpie's log"
+
+    def deep(conn: object, rid: int) -> None:
+        raise RecursionError
+
+    monkeypatch.setattr(adapter_module, "run_worker", deep)
+    assert adapter._end_worker(1).endswith(
+        "(Kelpie could not read the run's worker from the board)"
     )
 
 

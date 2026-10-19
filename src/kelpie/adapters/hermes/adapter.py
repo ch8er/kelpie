@@ -1299,21 +1299,25 @@ class HermesAdapter:
         try:
             with self._connect() as conn:
                 recorded = run_worker(conn, rid)
-        except (HermesError, sqlite3.Error) as exc:
-            log.warning("cannot read the worker of run %s: %s", rid, exc)
+        except Exception as exc:  # the board is written by agents: anything may be in it
+            log.warning("cannot read the worker of run %s: %r", rid, exc)
             return Ended(refused="Kelpie could not read the run's worker from the board").describe()
         if recorded is None:
             return Ended(refused=OLD_BOARD).describe()
         try:
             plan = worker_targets(recorded)
-            if plan.refused is not None or not plan.procs:
-                log.info("run %s: worker not signalled: %s", rid, plan.outcome().describe())
-                return plan.outcome().describe()
+        except Exception as exc:
+            log.exception("run %s: checking its worker failed", rid)
+            return Ended(refused=f"checking it failed: {type(exc).__name__}").describe()
+        if plan.refused is not None or not plan.procs:
+            log.info("run %s: worker not signalled: %s", rid, plan.outcome().describe())
+            return plan.outcome().describe()
+        try:
             result = end_workers(plan.procs, self.worker_grace)
-            result.unchecked = plan.unchecked
-        except Exception as exc:  # the stop itself succeeded; say what is left
+        except Exception as exc:  # signals may already have gone out
             log.exception("run %s: ending its worker failed", rid)
-            return Ended(refused=f"ending it failed: {type(exc).__name__}").describe()
+            return f"ending its worker failed partway ({type(exc).__name__}); see Kelpie's log"
+        result.unchecked = plan.unchecked
         pids = [p.pid for p in plan.procs]
         log.info("run %s: worker processes %s: %s", rid, pids, result.describe())
         return result.describe()

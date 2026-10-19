@@ -218,10 +218,18 @@ def test_another_users_worker_is_refused_not_gone(spawn: Spawn) -> None:
 
 def test_kelpie_inside_the_run_refuses_everything(spawn: Spawn) -> None:
     """Ending the submitter would make the agent exit, and the agent is Kelpie's ancestor."""
-    submitter = spawn()
-    plan = targets(recorded(submitter.pid, os.getppid()))
-    assert plan.procs == [] and plan.refused == "Kelpie itself runs inside the run's worker"
-    assert alive(submitter.pid)
+    other = spawn()
+    for worker_ in (recorded(other.pid, os.getppid()), recorded(os.getppid(), other.pid)):
+        plan = targets(worker_)
+        assert plan.procs == [] and plan.refused == "Kelpie itself runs inside the run's worker"
+    assert alive(other.pid)
+
+
+def test_a_stale_pid_now_kelpies_is_just_gone() -> None:
+    """The recorded pid now belongs to Kelpie's parent, with another start time."""
+    epoch = instantiation_epoch()
+    plan = targets(recorded(os.getppid(), prints={os.getppid(): f"{epoch}|1"}))
+    assert (plan.procs, plan.refused) == ([], None)
 
 
 def test_without_proc_nothing_is_signalled(spawn: Spawn, tmp_path: Path) -> None:
@@ -230,12 +238,108 @@ def test_without_proc_nothing_is_signalled(spawn: Spawn, tmp_path: Path) -> None
     assert plan.refused == "processes cannot be verified on this system"
 
 
-def fake_proc(tmp_path: Path, mountinfo: str) -> Path:
+# /proc/<pid>/stat: pid, comm, state (field 3), ppid (4), ..., starttime (22).
+STAT = "{pid} (x) S {ppid} " + "0 " * 17 + "{start} 0 0\n"
+
+
+def fake_proc(tmp_path: Path, mountinfo: str, *, boot: str | None = "b", pid1: bool = True) -> Path:
     proc = tmp_path / "proc"
     (proc / "self").mkdir(parents=True)
-    (proc / "self" / "stat").write_text("1 (x) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0\n")
+    (proc / "self" / "stat").write_text(STAT.format(pid=9, ppid=1, start=1))
     (proc / "self" / "mountinfo").write_text(mountinfo)
+    if boot is not None:
+        (proc / "sys" / "kernel" / "random").mkdir(parents=True)
+        (proc / "sys" / "kernel" / "random" / "boot_id").write_text(boot + "\n")
+    if pid1:
+        (proc / "1").mkdir()
+        (proc / "1" / "stat").write_text(STAT.format(pid=1, ppid=0, start=1))
     return proc
+
+
+def fake_process(proc: Path, pid: int, ppid: int, start: int) -> None:
+    (proc / str(pid)).mkdir()
+    (proc / str(pid) / "stat").write_text(STAT.format(pid=pid, ppid=ppid, start=start))
+
+
+@pytest.mark.parametrize(
+    ("options", "hidden"),
+    [("rw,hidepid=2", True), ("rw,hidepid=1", True), ("rw,hidepid=ptraceable", True),
+     ("rw,hidepid=0", False), ("rw,hidepid=off", False), ("rw", False)],
+)  # fmt: skip
+def test_hidepid_options(tmp_path: Path, options: str, hidden: bool) -> None:
+    proc = fake_proc(
+        tmp_path,
+        "21 1 0:5 / /dev rw shared:2 - devtmpfs dev rw\n"
+        "no separator here\n"
+        f"22 1 0:21 / /proc rw,nosuid shared:12 master:1 - proc proc {options}\n",
+    )
+    assert worker._hidepid(proc) is hidden
+
+
+@pytest.mark.parametrize(("boot", "pid1"), [(None, True), ("b", False), (None, False)])
+def test_without_boot_id_or_pid_1_nothing_is_proven(
+    tmp_path: Path, boot: str | None, pid1: bool
+) -> None:
+    proc = fake_proc(tmp_path, "", boot=boot, pid1=pid1)
+    fake_process(proc, 4321, 1, 5)
+    plan = targets(RunWorker(4321, "b:1|5", None, None, f"{HOST}:1"), proc=proc, uid=os.getuid())
+    assert plan.refused == "Kelpie cannot read this system's boot id or pid 1 start time"
+
+
+def test_a_fingerprint_with_an_empty_part_is_another_namespace(tmp_path: Path) -> None:
+    proc = fake_proc(tmp_path, "")
+    fake_process(proc, 4321, 1, 5)
+    plan = targets(RunWorker(4321, "b:|5", None, None, f"{HOST}:1"), proc=proc, uid=os.getuid())
+    assert plan.refused is not None and "PID namespace" in plan.refused
+
+
+@pytest.mark.parametrize("value", ["b:1|²", "b:1|", "b:1|-"])
+def test_odd_start_times_are_unchecked(tmp_path: Path, value: str) -> None:
+    proc = fake_proc(tmp_path, "")
+    fake_process(proc, 4321, 1, 5)
+    plan = targets(RunWorker(4321, value, None, None, f"{HOST}:1"), proc=proc, uid=os.getuid())
+    assert plan.refused == "Hermes recorded no fingerprint Kelpie can check"
+
+
+def test_a_child_whose_pid_changes_between_the_reads_brings_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between the two reads of /proc the agent's child 50 exits and a stranger takes pid 50:
+    neither the stranger nor its child 60 are the run's."""
+    proc = fake_proc(tmp_path, "")
+    fake_process(proc, 40, 1, 5)  # the agent
+    fake_process(proc, 50, 40, 6)  # its tool command
+    fake_process(proc, 60, 50, 7)
+    fake_process(proc, 70, 40, 8)  # another tool command, there in both reads
+    real = worker.children
+    reads = iter([0, 1])
+
+    def children(proc_: Path = PROC) -> dict[int, list[Proc]]:
+        if next(reads) == 1:  # the second read: 50 is a stranger now
+            (proc / "50" / "stat").write_text(STAT.format(pid=50, ppid=1, start=99))
+        return real(proc_)
+
+    monkeypatch.setattr(worker, "children", children)
+    plan = targets(RunWorker(None, None, 40, "b:1|5", f"{HOST}:1"), proc=proc, uid=os.getuid())
+    assert sorted(p.pid for p in plan.procs) == [40, 70]
+
+
+def test_the_agent_gone_during_the_reads_brings_no_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc = fake_proc(tmp_path, "")
+    fake_process(proc, 40, 1, 5)
+    fake_process(proc, 50, 40, 6)
+    real = worker.children
+
+    def children(proc_: Path = PROC) -> dict[int, list[Proc]]:
+        found = real(proc_)
+        (proc / "40" / "stat").write_text(STAT.format(pid=40, ppid=1, start=77))  # reused
+        return found
+
+    monkeypatch.setattr(worker, "children", children)
+    plan = targets(RunWorker(None, None, 40, "b:1|5", f"{HOST}:1"), proc=proc, uid=os.getuid())
+    assert [p.pid for p in plan.procs] == [40]
 
 
 def test_a_hidden_or_unreadable_process_is_refused_not_gone(tmp_path: Path) -> None:
@@ -320,7 +424,25 @@ def test_run_worker_reads_the_submitter_and_the_bound_agent(tmp_path: Path) -> N
     assert run_worker(conn, 7) == RunWorker(100, "e|5", None, None, "h:1")
     bound(conn, "not json")
     assert run_worker(conn, 7) == RunWorker(100, "e|5", None, None, "h:1")
-    assert run_worker(conn, 99) is None
+    assert run_worker(conn, 99) == RunWorker(None, None, None, None, None)  # not on the board
+    bound(conn, '{"pid": true, "claim_lock": "h:1", "started_at": "e|6"}')
+    assert run_worker(conn, 7) == RunWorker(100, "e|5", None, None, "h:1")  # a bool is no pid
+    bound(conn, "[" * 100_000 + "]" * 100_000)  # deeper than json can go
+    assert run_worker(conn, 7) == RunWorker(100, "e|5", None, None, "h:1")
+
+
+def test_errors_other_than_an_older_schema_propagate(tmp_path: Path) -> None:
+    conn = board(tmp_path)
+    conn.execute("DROP TABLE task_events")
+    with pytest.raises(sqlite3.OperationalError):  # "no such table" for events is not old
+        run_worker(conn, 7)
+
+    class Locked:
+        def execute(self, *args: object) -> object:
+            raise sqlite3.OperationalError("database is locked")
+
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        run_worker(Locked(), 7)
 
 
 def test_an_older_board_without_worker_columns_records_nothing(tmp_path: Path) -> None:

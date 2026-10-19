@@ -106,7 +106,7 @@ STOP_DONE = "task {task} is blocked for a human (hermes kanban unblock {task}); 
 # TERMINAL_WORKER_REAP_GRACE_SECONDS, see above).
 WORKER_LEFT = (
     "its worker is left to Hermes' dispatcher, which reaps it on a tick at least 2 minutes "
-    "after the block (end_worker = false)"
+    "after the block if it can verify it (end_worker = false)"
 )
 
 

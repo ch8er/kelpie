@@ -195,6 +195,10 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   with a single deadline, no redirects and a response size cap ([#35](https://github.com/ch8er/kelpie/pull/35)).
 - Data from agents is decoded strictly, and an agent only runs the action kinds its
   adapters declare ([#124](https://github.com/ch8er/kelpie/pull/124)).
+- A Hermes stop also ends the stopped run's worker processes (submitter, agent and the
+  agent's tool commands) once their pid and start time match what Hermes recorded, instead of
+  leaving them to Hermes' reaper for two minutes or more; the alert and `kelpie why` say what
+  happened, or why Kelpie did not signal them ([#186](https://github.com/ch8er/kelpie/pull/186)).
 
 ### Fixed
 

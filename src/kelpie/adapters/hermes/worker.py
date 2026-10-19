@@ -43,8 +43,11 @@ How: SIGTERM to all of them, then, for those still running after the grace perio
 through a pidfd where the kernel has one (a pid cannot be recycled under it). Kelpie never
 writes ``kanban.db``: Hermes' reaper later finds the processes gone and tidies the run row.
 
-Without ``/proc`` (macOS) nothing is signalled; the outcome says so and Hermes' reaper ends the
-worker as before.
+Without ``/proc`` (macOS) nothing is signalled and the outcome says so; Hermes' reaper may
+still end the submitter later, when it can verify it.
+
+A descendant of the agent is ended whatever it is: if a tool command started a Hermes client
+that started a gateway for another profile (``hermes -p other chat``), that gateway goes too.
 """
 
 from __future__ import annotations
@@ -195,8 +198,8 @@ class RunWorker:
 
 
 def run_worker(conn: Any, run_id: int) -> RunWorker | None:
-    """The run's recorded processes; None on a board without these columns (older Hermes) or
-    without the run. Other database errors propagate."""
+    """The run's recorded processes (all ``None`` when the run is not on the board); None on
+    a board without these columns (older Hermes). Other database errors propagate."""
     try:
         row = conn.execute(
             "SELECT worker_pid, worker_started_at, claim_lock FROM task_runs WHERE id = ?",
@@ -207,27 +210,28 @@ def run_worker(conn: Any, run_id: int) -> RunWorker | None:
             return None
         raise
     if row is None:
-        return None
+        return RunWorker(None, None, None, None, None)
     pid, started, lock = row[0], row[1], row[2]
     agent = agent_print = None
-    with contextlib.suppress(sqlite3.Error):
-        bound = conn.execute(
-            "SELECT payload FROM task_events WHERE run_id = ? AND kind = 'worker_bound'"
-            " ORDER BY id DESC LIMIT 1",
-            (run_id,),
-        ).fetchone()
-        payload = _json(bound[0]) if bound is not None else {}
-        if payload.get("claim_lock") == lock and isinstance(payload.get("pid"), int):
-            agent, agent_print = payload["pid"], _text(payload.get("started_at"))
-    return RunWorker(
-        pid if isinstance(pid, int) else None, _text(started), agent, agent_print, _text(lock)
-    )
+    bound = conn.execute(
+        "SELECT payload FROM task_events WHERE run_id = ? AND kind = 'worker_bound'"
+        " ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    payload = _json(bound[0]) if bound is not None else {}
+    if payload.get("claim_lock") == lock and _pid(payload.get("pid")) is not None:
+        agent, agent_print = payload["pid"], _text(payload.get("started_at"))
+    return RunWorker(_pid(pid), _text(started), agent, agent_print, _text(lock))
+
+
+def _pid(value: object) -> int | None:
+    return value if type(value) is int else None  # not a bool
 
 
 def _json(raw: object) -> dict[str, object]:
     try:
         value = json.loads(raw) if isinstance(raw, str) else None
-    except ValueError:
+    except (ValueError, RecursionError):  # the board is written by agents
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -253,6 +257,9 @@ def targets(
         return Plan(refused="the run was claimed on another host")
     uid = os.getuid() if uid is None else uid
     epoch = instantiation_epoch(proc)
+    boot, _, pid1 = epoch.partition(":")
+    if not boot or not pid1:  # Hermes' fingerprint needs both; without them, nothing is proven
+        return Plan(refused="Kelpie cannot read this system's boot id or pid 1 start time")
     mine = ancestors(os.getpid(), proc)
     plan = Plan()
     agent: Proc | None = None
@@ -260,9 +267,9 @@ def targets(
                           (worker.agent, worker.agent_print)):  # fmt: skip
         if pid is None:
             continue
-        if pid in mine:
-            return Plan(refused="Kelpie itself runs inside the run's worker")
         found, why = _verify(pid, recorded, proc, uid, epoch)
+        if found is not None and found.pid in mine:
+            return Plan(refused="Kelpie itself runs inside the run's worker")
         if why == _UNCHECKED:
             plan.unchecked.append(pid)
         elif why is not None:
@@ -299,14 +306,17 @@ def _verify(
     if p.state in _DEAD:
         return None, None
     rec_epoch, _, rec_start = (recorded or "").rpartition("|")
-    if recorded is None or recorded == UNVERIFIED or not rec_epoch or not rec_start.isdigit():
+    if recorded is None or recorded == UNVERIFIED or not rec_epoch:
+        return None, _UNCHECKED
+    try:
+        started = int(rec_start)
+    except ValueError:
         return None, _UNCHECKED
     if rec_epoch != epoch:
-        same_boot = rec_epoch.split(":")[0] == epoch.split(":")[0] != ""
-        if same_boot:  # same kernel boot, another pid 1: another PID namespace
+        if rec_epoch.split(":")[0] == epoch.split(":")[0]:  # same boot, another pid 1
             return None, "Hermes runs in another PID namespace than Kelpie (a container?)"
         return None, None  # recorded before a reboot: that process is gone
-    if p.start != int(rec_start):
+    if p.start != started:
         return None, None  # the pid now belongs to another process: the worker is gone
     if p.uid != uid:
         return None, f"the worker runs as another user (uid {p.uid}) than Kelpie"
@@ -314,16 +324,21 @@ def _verify(
 
 
 def _descendants(agent: Proc, proc: Path, uid: int, mine: set[int], seen: set[int]) -> list[Proc]:
-    """The agent's process tree below it, read while the agent is still that process."""
-    by_parent = children(proc)
+    """The agent's process tree below it. ``/proc`` is read twice and a process counts only
+    if both reads show it with the same start time and parent, and the agent is still the
+    verified process after them: a pid reused between the reads (a child gone, a stranger in
+    its place) does not bring the stranger's children along."""
+    first = children(proc)
+    second = {(c.pid, c.start, c.ppid) for kids in children(proc).values() for c in kids}
     if not _same(agent, proc):
         return []  # the agent went (and its pid may be reused) while the tree was read
     found: list[Proc] = []
     queue = [agent]
     while queue:
-        for child in by_parent.get(queue.pop().pid, ()):
+        for child in first.get(queue.pop().pid, ()):
             fresh = child.pid not in seen and child.pid not in mine
-            if fresh and child.uid == uid and child.state not in _DEAD:
+            stable = (child.pid, child.start, child.ppid) in second
+            if fresh and stable and child.uid == uid and child.state not in _DEAD:
                 seen.add(child.pid)
                 found.append(child)
                 queue.append(child)
@@ -331,7 +346,9 @@ def _descendants(agent: Proc, proc: Path, uid: int, mine: set[int], seen: set[in
 
 
 def _hidepid(proc: Path) -> bool:
-    """Is ``/proc`` mounted with ``hidepid`` (other users' processes invisible)?"""
+    """Is ``/proc`` mounted with ``hidepid`` (other users' processes invisible)? Any proc mount
+    with it counts, and a process exempt from it (root, the ``gid=`` group) is not told apart:
+    both err toward refusing, never toward signalling."""
     try:
         lines = (proc / "self" / "mountinfo").read_text(encoding="utf-8").splitlines()
     except OSError:

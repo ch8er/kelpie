@@ -152,9 +152,13 @@ proof of identity Hermes' reaper uses:
   host", "Kelpie did not end its worker (<why>)", or "its worker did not end even after
   SIGKILL (pid ...)". A failure while ending the worker never fails the stop: the task is
   blocked either way.
-- **Time.** Ending the worker takes up to `worker_grace` + 2 s on top of the block
-  (`cli_timeout`), inside the tick. In multi-host mode keep `cli_timeout` + `worker_grace` +
-  2 s below `[hub] action_timeout` (defaults: 10 + 5 + 2 = 17 s of 30 s).
+- **Time.** Ending the worker takes up to about `worker_grace` + 2 s on top of the block
+  (`cli_timeout`), inside the tick, plus waits on a busy board. In multi-host mode keep
+  `cli_timeout` + `worker_grace` + 2 s well below `[hub] action_timeout` (defaults: 10 + 5 + 2 =
+  17 s of 30 s).
+- **Tool commands.** Every descendant of the agent is ended, whatever it is: a tool command
+  that started a Hermes client, which started a gateway for another profile, takes that
+  gateway down with it.
 - **Trust.** Kelpie trusts the board's records, as Hermes' reaper does. Anyone who can write
   `kanban.db` (the agents, as the same user) could record another process of that user as a
   run's agent and have Kelpie end it and its process tree; Hermes' reaper signals the recorded
