@@ -1015,3 +1015,74 @@ def test_a_teams_read_waits_until_the_hour_has_room_for_it_and_the_reserve(
     a.snapshot(NOW + timedelta(minutes=3))
     assert "KelpieIssues" not in lin.ops()[count:]  # 50,000 kept + 10,000 last read > 59,000
     assert "kept for writes" in (a.tracker.problem or "")  # type: ignore[attr-defined]
+
+
+def test_history_read_while_the_agents_were_unknown_is_named_once_they_are(
+    lin: FakeLinear,
+) -> None:
+    lin.issue(
+        "ENG-2",
+        "x",
+        ago(days=2),
+        state_type="started",
+        delegate="Codex",
+        labels=["a"],
+        updated=ago(minutes=5),
+        history=[
+            {
+                "createdAt": iso(ago(hours=1)),
+                "toDelegate": {"id": "user-codex", "displayName": "Codex", "app": True},
+            }
+        ],
+    )
+    lin.broken_ops = {"KelpieUsers"}  # the agents' users cannot be looked up yet
+    a = adapter(lin)
+    assert tasks(a)["ENG-2"].owner_id == UNKNOWN
+    lin.broken_ops = set()
+    t = {x.id: x for x in a.snapshot(NOW + timedelta(minutes=3)).tasks}  # history cached
+    assert (t["ENG-2"].owner_id, t["ENG-2"].status_since) == ("codex", ago(hours=1))
+
+
+def test_history_names_users_as_the_slots_do(lin: FakeLinear) -> None:
+    lin.issue(
+        "ENG-1",
+        "x",
+        ago(days=2),
+        labels=["a"],
+        history=[
+            {
+                "createdAt": iso(ago(hours=3)),
+                "toDelegate": {"id": "user-x", "displayName": "Helper", "app": False},
+            },
+            {
+                "createdAt": iso(ago(hours=2)),
+                "toAssignee": {"id": "user-y", "displayName": "codex[bot]", "app": False},
+            },
+            {
+                "createdAt": iso(ago(hours=1)),
+                "toAssignee": {"id": "user-dana", "displayName": "dana", "app": False},
+            },
+        ],
+    )
+    (item,) = adapter(lin).tracker.read(NOW)  # type: ignore[attr-defined]
+    assert [(e.kind, e.name) for e in item.events] == [
+        ("assigned", UNKNOWN),  # a delegate that is no app user
+        ("assigned", UNKNOWN),  # a name Kelpie does not take
+        ("assigned", "dana"),
+    ]
+
+
+def test_a_large_team_is_not_starved_by_its_own_last_read(lin: FakeLinear) -> None:
+    lin.issue("ENG-1", "x", ago(days=1))
+    a = adapter(lin)
+    reader = a.tracker
+    a.snapshot(NOW)
+    reader._team_cost["ENG"] = (210_000, 21)  # type: ignore[attr-defined]
+    lin.headers = {
+        "X-RateLimit-Complexity-Remaining": "250000",  # a fresh hour of 300,000
+        "X-RateLimit-Complexity-Limit": "300000",
+    }
+    a.comment("ENG-1", "x")
+    count = len(lin.requests)
+    a.snapshot(NOW + timedelta(minutes=3))
+    assert "KelpieIssues" in lin.ops()[count:]  # 50,000 + at most 150,000 <= 250,000

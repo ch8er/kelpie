@@ -1,4 +1,4 @@
-# Issues adapter (GitHub Issues; Linear next)
+# Issues adapter (GitHub Issues, Linear)
 
 For farms whose task queue is an issue tracker rather than a platform's own board: one adapter
 covers every agent that takes an issue and returns a pull request. Adapter name
@@ -201,8 +201,8 @@ GraphQL API (`linear.py`) and maps them with the same rules. What differs:
   the closed issues are the most recently updated page), then history within
   `max_requests_per_tick`. A team that cannot be read is served from its last good read for
   10 minutes, then left out, and the problem is reported. Reads stop while less than 100
-  requests or 50,000 complexity points (plus what a team's last read cost, before that team's
-  read) are left of the hour (writes still go), until that
+  requests or 50,000 complexity points (plus what a team's last whole read took, before that
+  team's read, at most half the hour's limit) are left of the hour (writes still go), until that
   limit's reset or for 5 minutes, then ask Linear again; the refresh stretches so reads take
   at most half the hour's complexity (Linear's `X-Complexity` and
   `X-RateLimit-Complexity-Limit` headers; several large teams read less often), to 25 minutes
