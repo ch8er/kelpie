@@ -27,7 +27,8 @@ from kelpie.report.daily import (
     build_report,
     day_bounds,
     render_markdown,
-    render_summary,
+    summary_items,
+    summary_title,
 )
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.root_cause import Llm, with_root_cause
@@ -40,7 +41,15 @@ from kelpie.traces.outputs import OutputSettings
 class Sender(Protocol):
     """What the report needs of :class:`kelpie.alerts.Delivery`."""
 
-    def send(self, text: str, severity: str, channels: Sequence[str] | None = None) -> None: ...
+    def send_summary(
+        self,
+        headline: str,
+        items: Sequence[str],
+        severity: str,
+        channels: Sequence[str] | None = None,
+        link: str | None = None,
+        title: str | None = None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +142,10 @@ def write(markdown: str, settings: ReportSettings, day: date) -> Path | None:
 
 
 def send(report: DailyReport, settings: ReportSettings, sender: Sender) -> None:
-    sender.send(render_summary(report), settings.severity, settings.channels)
+    headline, items, link = summary_items(report)
+    sender.send_summary(
+        headline, items, settings.severity, settings.channels, link, summary_title(report)
+    )
 
 
 def generate(

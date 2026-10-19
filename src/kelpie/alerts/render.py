@@ -106,21 +106,45 @@ class RenderSettings:
 DEFAULT_RENDERING = RenderSettings()
 
 
+_URL_PROBLEMS = {
+    "plain": "must be a plain URL (no spaces, quotes, <, >, | or braces)",
+    "invalid": "is not a valid URL",
+    "scheme": "must be an http(s) URL",
+    "credentials": "must not carry credentials",
+}
+
+
+def _url_problem(url: str) -> str | None:
+    """Why ``url`` is not a plain http(s) address (a key of ``_URL_PROBLEMS``), else None."""
+    if _URL_BAD.search(url):
+        return "plain"
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "invalid"
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "scheme"
+    if parts.username or parts.password:
+        return "credentials"
+    return None
+
+
+def plain_http_url(url: object) -> str | None:
+    """``url`` if it is a plain http(s) address: no spaces, quotes, brackets or credentials,
+    a host, at most ``MAX_URL`` characters; else None. The one check behind every link
+    Kelpie puts into a chat message."""
+    if not isinstance(url, str) or not 0 < len(url) <= MAX_URL or _url_problem(url):
+        return None
+    return url
+
+
 def check_task_url(value: object, where: str = "[alerts] task_url") -> str:
     """A link template: an http(s) URL containing ``{id}``; a ``ValueError`` names the key."""
     if not isinstance(value, str) or "{id}" not in value:
         raise ValueError(f"{where} must be a string containing {{id}}")
-    probe = value.replace("{id}", "x")
-    if len(value) > MAX_URL or _URL_BAD.search(probe):
-        raise ValueError(f"{where} must be a plain URL (no spaces, quotes, <, >, | or braces)")
-    try:
-        parts = urlsplit(probe)
-    except ValueError:
-        raise ValueError(f"{where} is not a valid URL") from None
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise ValueError(f"{where} must be an http(s) URL")
-    if parts.username or parts.password:
-        raise ValueError(f"{where} must not carry credentials")
+    problem = "plain" if len(value) > MAX_URL else _url_problem(value.replace("{id}", "x"))
+    if problem is not None:
+        raise ValueError(f"{where} {_URL_PROBLEMS[problem]}")
     if "{id}" in urlsplit(value).netloc:
         raise ValueError(f"{where}: {{id}} belongs in the path or query, not the host")
     return value
@@ -304,6 +328,12 @@ def _did(event: AlertEvent, lang: str) -> str | None:
 # --- short text ----------------------------------------------------------------------------
 
 
+def one_line(text: str, limit: int) -> str:
+    """Untrusted ``text`` as one clean line: no control or invisible characters, @mentions
+    broken (:func:`defang`), whitespace collapsed, cut at a word boundary to ``limit``."""
+    return _cut_words(_flat(defang(text)), limit)
+
+
 def _flat(text: str) -> str:
     return _SPACE.sub(" ", clean(text)).strip()
 
@@ -381,7 +411,7 @@ def note_text(text: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class _Style:
+class Style:
     esc: Callable[[str], str]
     bold: Callable[[str], str]
     code: Callable[[str], str]
@@ -402,8 +432,8 @@ def slack_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-PLAIN = _Style(_same, _same, _same, lambda label, url: f"{label}: {url}", utf16_len)
-TELEGRAM_HTML = _Style(
+PLAIN = Style(_same, _same, _same, lambda label, url: f"{label}: {url}", utf16_len)
+TELEGRAM_HTML = Style(
     _html,
     lambda t: f"<b>{t}</b>",
     lambda t: f"<code>{t}</code>",
@@ -411,7 +441,7 @@ TELEGRAM_HTML = _Style(
     utf16_len,
 )
 # Slack's fallback text: plain (sent with ``mrkdwn: false``), only Slack's required escaping.
-SLACK_PLAIN = _Style(
+SLACK_PLAIN = Style(
     slack_escape, _same, _same, lambda label, url: f"{label}: {slack_escape(url)}", len
 )
 
@@ -421,7 +451,7 @@ _BUDGET = {"headline": 400, "title": 400, "id": 200, "note": 500, "did": 1600}
 MIN_BODY = 300  # a list gives up its last tasks before the reason gets less room than this
 
 
-def fit(text: str, limit: int, style: _Style) -> str:
+def fit(text: str, limit: int, style: Style) -> str:
     """``text`` escaped for ``style`` in at most ``limit`` units; cut (with "…") before
     escaping, so the cut never splits an entity."""
     out = style.esc(text)
@@ -441,14 +471,14 @@ def fit(text: str, limit: int, style: _Style) -> str:
     return style.esc(head.rstrip()) + "…"
 
 
-def _head_line(view: Layout, style: _Style) -> str:
+def _head_line(view: Layout, style: Style) -> str:
     line = f"{view.icon} {style.bold(fit(view.headline, _BUDGET['headline'], style))}"
     if view.transition:
         line += f" · {style.esc(view.transition)}"
     return line
 
 
-def _item_lines(item: ItemView, style: _Style, needed_label: str) -> list[str]:
+def _item_lines(item: ItemView, style: Style, needed_label: str) -> list[str]:
     shown = style.code(fit(item.shown_id, _BUDGET["id"], style))
     if item.title:
         first = f"{item.number}. {style.bold(fit(item.title, _BUDGET['title'], style))}"
@@ -467,7 +497,7 @@ def _item_lines(item: ItemView, style: _Style, needed_label: str) -> list[str]:
     return lines
 
 
-def _tail(view: Layout, style: _Style) -> list[str]:
+def _tail(view: Layout, style: Style) -> list[str]:
     """What Kelpie did, and the rule."""
     lines = [fit(view.did, _BUDGET["did"], style)] if view.did else []
     if view.rule:
@@ -476,14 +506,14 @@ def _tail(view: Layout, style: _Style) -> list[str]:
     return lines
 
 
-def _body(view: Layout, style: _Style, room: int) -> str:
+def _body(view: Layout, style: Style, room: int) -> str:
     """The reason in ``room`` units, labelled under a list of tasks."""
     assert view.body is not None
     label = f"{style.esc(view.body_label)}: " if view.body_label else ""
     return label + fit(view.body, max(room - style.measure(label), 1), style)
 
 
-def text(view: Layout, style: _Style = PLAIN, limit: int = MAX_TEXT) -> str:
+def text(view: Layout, style: Style = PLAIN, limit: int = MAX_TEXT) -> str:
     """The layout as one text in ``style``, at most ``limit`` units. The reason yields the
     room the other parts take; tasks that would leave it less than ``MIN_BODY`` (or that do
     not fit at all) are counted in "and N more", the first one last."""
@@ -495,7 +525,7 @@ def text(view: Layout, style: _Style = PLAIN, limit: int = MAX_TEXT) -> str:
         view = view.without_last_item()
 
 
-def _text(view: Layout, style: _Style, limit: int) -> tuple[str, bool]:
+def _text(view: Layout, style: Style, limit: int) -> tuple[str, bool]:
     """The text, and whether the reason (if any) got the room it needs."""
     lines = [_head_line(view, style), ""]
     for item in view.items:
@@ -532,7 +562,7 @@ def telegram_payload(
     return {"text": plain(event, settings)}
 
 
-def _el(text: str, **style: bool) -> dict[str, Any]:
+def el(text: str, **style: bool) -> dict[str, Any]:
     """A rich_text text element: Slack shows its text as it is."""
     element: dict[str, Any] = {"type": "text", "text": text}
     if style:
@@ -540,30 +570,30 @@ def _el(text: str, **style: bool) -> dict[str, Any]:
     return element
 
 
-def _rich(elements: list[dict[str, Any]]) -> dict[str, Any]:
+def rich(elements: list[dict[str, Any]]) -> dict[str, Any]:
     """One rich_text block; an empty text element is never sent (Slack refuses it)."""
     kept = [e for e in elements if e["type"] != "text" or e["text"]]
     return {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": kept}]}
 
 
 def _item_elements(item: ItemView, needed_label: str) -> list[dict[str, Any]]:
-    out = [_el(f"{item.number}. ")]
+    out = [el(f"{item.number}. ")]
     if item.title:
-        out += [_el(item.title, bold=True), _el(f" — {item.age} · " if item.age else " · ")]
-        out.append(_el(item.shown_id, code=True))
+        out += [el(item.title, bold=True), el(f" — {item.age} · " if item.age else " · ")]
+        out.append(el(item.shown_id, code=True))
     else:
-        out.append(_el(item.shown_id, code=True))
+        out.append(el(item.shown_id, code=True))
         if item.age:
-            out.append(_el(f" — {item.age}"))
+            out.append(el(f" — {item.age}"))
     if item.needed:
-        out += [_el(f"\n{INDENT}{needed_label}: "), _el(item.needed)]
+        out += [el(f"\n{INDENT}{needed_label}: "), el(item.needed)]
     if item.blocking or item.link is not None:
-        out.append(_el(f"\n{INDENT}"))
+        out.append(el(f"\n{INDENT}"))
         if item.blocking:
-            out.append(_el(item.blocking))
+            out.append(el(item.blocking))
         if item.link is not None:
             if item.blocking:
-                out.append(_el(" · "))
+                out.append(el(" · "))
             out.append({"type": "link", "url": item.link.url, "text": item.link.label})
     return out
 
@@ -574,24 +604,24 @@ def slack_blocks(view: Layout) -> list[dict[str, Any]]:
     emphasis is a style (bold headline and titles, code for ids and the rule). The layout
     already capped every field, so a block stays below ``SLACK_BLOCK`` characters and a
     message below ``SLACK_BLOCKS`` blocks."""
-    head = [_el(f"{view.icon} "), _el(view.headline, bold=True)]
+    head = [el(f"{view.icon} "), el(view.headline, bold=True)]
     if view.transition:
-        head.append(_el(f" · {view.transition}"))
-    blocks = [_rich(head)]
-    blocks += [_rich(_item_elements(i, view.needed_label)) for i in view.items]
+        head.append(el(f" · {view.transition}"))
+    blocks = [rich(head)]
+    blocks += [rich(_item_elements(i, view.needed_label)) for i in view.items]
     if view.more:
-        blocks.append(_rich([_el(view.more)]))
+        blocks.append(rich([el(view.more)]))
     if view.body:
-        label = [_el(f"{view.body_label}: ", bold=True)] if view.body_label else []
-        blocks.append(_rich([*label, _el(view.body[:SLACK_BLOCK])]))
+        label = [el(f"{view.body_label}: ", bold=True)] if view.body_label else []
+        blocks.append(rich([*label, el(view.body[:SLACK_BLOCK])]))
     tail: list[dict[str, Any]] = []
     if view.did:
-        tail.append(_el(view.did))
+        tail.append(el(view.did))
     if view.rule:
         label = i18n.text(view.language, "label.rule")
-        tail += [_el(f"{chr(10) if tail else ''}{label}: "), _el(view.rule, code=True)]
+        tail += [el(f"{chr(10) if tail else ''}{label}: "), el(view.rule, code=True)]
     if tail:
-        blocks.append(_rich(tail))
+        blocks.append(rich(tail))
     blocks = [b for b in blocks if b["elements"][0]["elements"]]
     return blocks[:SLACK_BLOCKS]
 

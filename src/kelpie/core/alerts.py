@@ -13,7 +13,9 @@ and for every channel.
 An event can also carry a ``headline`` (a rule's own one-line summary) and ``items``: the
 tasks it is about (:class:`AlertItem`), with their title, age, what is needed and how many
 tasks wait behind each. The engine fills them from the action and the tick's snapshot;
-channels lay them out (:mod:`kelpie.alerts.render`).
+channels lay them out (:mod:`kelpie.alerts.render`). A report summary is an event with a
+``headline`` and a :class:`Summary` (its lines and a link to the full report) instead of
+tasks (:mod:`kelpie.alerts.summary`).
 """
 
 from __future__ import annotations
@@ -99,6 +101,17 @@ class AlertItem:
 
 
 @dataclass(frozen=True, slots=True)
+class Summary:
+    """The body of a report summary: ``lines`` under the event's ``headline``, an optional
+    ``title`` line above it (e.g. which day it is about) and ``link``, the full report's URL.
+    All of it is the report's own text, untrusted for a chat."""
+
+    lines: tuple[str, ...]
+    link: str | None = None
+    title: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AlertEvent:
     """An alert as the engine hands it over and as a channel sees it.
 
@@ -122,6 +135,7 @@ class AlertEvent:
     text: str | None = None  # free text (e.g. a report): sent as is, without the alert layout
     headline: str | None = None
     items: tuple[AlertItem, ...] = ()
+    summary: Summary | None = None  # a report summary: laid out by kelpie.alerts.summary
 
     @property
     def fingerprint(self) -> tuple[object, ...]:
@@ -138,6 +152,7 @@ class AlertEvent:
             self.did,
             self.did_text,
             self.headline,
+            self.summary,
             tuple(item.fingerprint for item in self.items),
         )
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import tomllib
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -14,7 +15,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from kelpie.alerts import Delivery, summary
 from kelpie.core.actions import ActionKind, Severity
+from kelpie.core.alerts import AlertEvent
 from kelpie.core.budgets import Price, PriceTable
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
@@ -29,6 +32,8 @@ from kelpie.report.daily import (
     render_markdown,
     render_summary,
     session_of,
+    summary_items,
+    summary_title,
 )
 from kelpie.report.run import ReportSources, default_day, generate, load_inputs, send, write
 from kelpie.report.store import ReportStore, StateRow
@@ -395,8 +400,18 @@ class FakeSender:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str, Any]] = []
 
-    def send(self, text: str, severity: str, channels: Any = None) -> None:
-        self.sent.append((text, severity, channels))
+    def send_summary(
+        self,
+        headline: str,
+        items: Sequence[str],
+        severity: str,
+        channels: Any = None,
+        link: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        """Records the summary as its plain text (title, headline, items, link)."""
+        lines = [title or "", headline, *items, *([link] if link else [])]
+        self.sent.append(("\n".join(lines), severity, channels))
 
 
 def test_summary_is_sent_and_markdown_written(db: Path, tmp_path: Path) -> None:
@@ -411,6 +426,45 @@ def test_summary_is_sent_and_markdown_written(db: Path, tmp_path: Path) -> None:
     [(text, severity, channels)] = sender.sent
     assert severity == "info" and channels == ("ops",) and len(text) < 4000
     assert text.startswith("Kelpie daily report 2026-03-02") and "1. Reduce" in text
+    assert text == render_summary(report)  # the same lines the plain-text form has
+
+
+def test_the_plain_summary_is_the_title_the_headline_and_the_items(db: Path) -> None:
+    report, markdown = generate(sources(db), DAY, BOARD)
+    headline, items, link = summary_items(report)
+    assert link is None  # no setting holds the full report's URL yet
+    assert headline in markdown  # the report's own headline, not a second wording
+    assert render_summary(report) == "\n".join([summary_title(report), headline, *items])
+    assert summary_title(report) == "Kelpie daily report 2026-03-02"
+    assert report.recommendations and len(report.recommendations) <= 3
+    assert items[-len(report.recommendations) :] == [
+        f"{i}. {a.title}" for i, a in enumerate(report.recommendations, 1)
+    ]
+    needs = f"Needs a human: {len(report.open_states)} open condition(s)."
+    assert (needs in items) is bool(report.open_states)
+
+
+class Recorder:
+    name = "chat"
+    min_severity = Severity.INFO
+
+    def __init__(self) -> None:
+        self.messages: list[AlertEvent] = []
+
+    def send(self, message: AlertEvent) -> None:
+        self.messages.append(message)
+
+
+def test_the_chat_summary_through_delivery_says_what_the_plain_summary_says(db: Path) -> None:
+    report, _ = generate(sources(db), DAY, BOARD)
+    chat = Recorder()
+    delivery = Delivery([chat])
+    send(report, ReportSettings(severity="info"), delivery)
+    delivery.close()
+    [message] = chat.messages
+    title, headline, *items = render_summary(report).splitlines()
+    # the alert layout adds the severity's icon and a blank line under the headline
+    assert summary.plain(message).splitlines() == [title, f"\U0001f535 {headline}", "", *items]
 
 
 def test_report_config() -> None:

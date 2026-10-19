@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from time import monotonic, sleep
@@ -112,8 +113,18 @@ class FakeSender:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str, Any]] = []
 
-    def send(self, text: str, severity: str, channels: Any = None) -> None:
-        self.sent.append((text, severity, channels))
+    def send_summary(
+        self,
+        headline: str,
+        items: Sequence[str],
+        severity: str,
+        channels: Any = None,
+        link: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        """Records the summary as its plain text (title, headline, items, link)."""
+        lines = [title or "", headline, *items, *([link] if link else [])]
+        self.sent.append(("\n".join(lines), severity, channels))
 
 
 def test_scheduled_run_writes_and_sends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

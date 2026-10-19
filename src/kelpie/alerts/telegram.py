@@ -9,7 +9,8 @@ own error text that is logged goes through :func:`redact` first.
 Alerts are sent as HTML (``parse_mode=HTML``, laid out by :mod:`kelpie.alerts.render`,
 which escapes every dynamic value), or as plain text with ``format = "plain"``. Should
 Telegram still refuse the HTML ("can't parse entities"), the message is sent once more as
-plain text. Free text (the daily report) is plain text, as it is. Link previews are off.
+plain text. Free text is plain text, as it is; the daily report's summary is laid out like an alert
+(:mod:`kelpie.alerts.summary`). Link previews are off.
 The text is cut to Telegram's 4096-character limit (counted in UTF-16 units, as Telegram
 does).
 """
@@ -28,7 +29,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from kelpie import net
-from kelpie.alerts import render
+from kelpie.alerts import render, summary
 from kelpie.alerts.delivery import PermanentError, TransientError
 from kelpie.alerts.render import (
     AT_SIGN,
@@ -85,6 +86,8 @@ def format_message(message: AlertEvent, settings: RenderSettings = DEFAULT_RENDE
     sent as it is."""
     if message.text is not None:
         return truncate(defang(message.text))
+    if message.summary is not None:
+        return summary.plain(message, settings)
     return render.plain(message, settings)
 
 
@@ -94,6 +97,8 @@ def payload(
     """The message fields of ``sendMessage``: ``text`` and, for HTML, ``parse_mode``."""
     if message.text is not None:
         return {"text": truncate(defang(message.text))}
+    if message.summary is not None:
+        return summary.telegram_payload(message, settings, html_format=fmt == "html")
     return render.telegram_payload(message, settings, html_format=fmt == "html")
 
 
