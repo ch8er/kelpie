@@ -163,8 +163,24 @@ def test_rule_13_on_incident_20_feeds_the_report() -> None:
     day = now.astimezone(UTC).date()
     r = build_report(ReportInputs(day=day, tz=UTC, hour_usd=20.0, states=tuple(rows),
                                   actions=tuple(entries)), sections={})  # fmt: skip
-    planned_ids = {t for a in actions for t in a.params.get("planned", [])}
+    from kelpie.rules.needs_you import PLANNED_TASKS
+
+    planned_ids = {t for a in actions for t in a.params.get(PLANNED_TASKS, [])}
     assert planned_ids  # the fixture puts planned work behind a person's inbox
     assert r.planned is not None and set(r.planned.tasks) == planned_ids
     counted = {t for c in r.chaos for t in c.tasks}
     assert not counted & planned_ids  # never in the cost of chaos
+
+
+def test_held_tasks_are_not_listed_twice() -> None:
+    from kelpie.core.model import Status, Task
+
+    held = Task("P-1", "p", Status.READY, at(1), labels=("freeze",))
+    r = report(
+        states=(opened(at(9), at(11)),),
+        actions=(inbox(at(9), ["A-1"], ["P-1", "P-2"]),),
+        tasks=(held,),
+        hold_labels=("freeze",),
+    )
+    assert r.planned is not None and r.planned.tasks == ("P-2",)
+    assert r.planned.agent_hours == pytest.approx(2 * 2)  # rule 13's count, as reported

@@ -133,7 +133,7 @@ from kelpie.report.waits import (
     outages,
 )
 from kelpie.report.waits import UNKNOWN as UNKNOWN_WAIT
-from kelpie.rules.needs_you import PLANNED, PLANNED_AGENT_TASKS
+from kelpie.rules.needs_you import PLANNED_AGENT_TASKS, PLANNED_TASKS
 from kelpie.rules.orphan_status import OrphanStatus
 from kelpie.traces.outputs import (
     OutputGroup,
@@ -491,8 +491,10 @@ def build_report(
 
 
 def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> PlannedWaits | None:
-    """The agent-hours of tasks behind planned work over the day, from rule 13's inboxes
-    (counted like the people line, :func:`people_agent_hours`)."""
+    """The agent-hours of planned agent tasks behind people's open inboxes over the day, from
+    rule 13 (counted like the people line, :func:`people_agent_hours`: per person, so a task
+    behind two people's human tasks counts for each, as in rule 13's counts). Held tasks are
+    planned to rule 13 too, but the hold line already names them: they are not listed."""
     hours, tasks = 0.0, set()
     for row in inputs.states:
         state = row.state
@@ -504,7 +506,8 @@ def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> Plan
         h, ids = people_agent_hours(inputs.actions, state, a, b, planned=True)
         hours += h
         tasks.update(ids)
-    return PlannedWaits(hours, tuple(sorted(tasks))) if hours > 0 else None
+    held = {t.id for t in inputs.tasks if set(t.labels) & set(inputs.hold_labels)}
+    return PlannedWaits(hours, tuple(sorted(tasks - held))) if hours > 0 else None
 
 
 def _stuck_idle(inputs: ReportInputs, start: datetime, end: datetime) -> tuple[StuckCard, ...]:
@@ -840,7 +843,7 @@ def people_agent_hours(
     instead; they never count as hours lost."""
     person = state.id[len(PEOPLE_STATE) :]
     count_key, ids_key = (
-        (PLANNED_AGENT_TASKS, PLANNED) if planned else ("waiting_agent_tasks", "waiting")
+        (PLANNED_AGENT_TASKS, PLANNED_TASKS) if planned else ("waiting_agent_tasks", "waiting")
     )
 
     def sample(e: LedgerEntry) -> tuple[int, list[object]] | None:
