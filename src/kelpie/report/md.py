@@ -55,26 +55,27 @@ def link_text(value: str) -> str:
     return text(flat) or PLACEHOLDER
 
 
-def short_text(value: str, limit: int = MAX_NAME) -> str:
-    """:func:`text`, cut so the escaped result is at most ``limit`` characters (escapes
-    such as ``&amp;`` count): for a name inside a line that a channel may cut."""
-    return _capped(text, value, limit)
+def short_text(value: str) -> str:
+    """:func:`text`, cut so the escaped result is at most :data:`MAX_NAME` characters
+    (escapes such as ``&amp;`` count): for a name inside a line a channel may cut."""
+    return _capped(text, value, MAX_NAME)
 
 
-def short_code(value: str, limit: int = MAX_NAME) -> str:
-    """:func:`code`, cut so the whole span, fences included, is at most ``limit``
-    characters."""
-    return _capped(code, value, limit)
+def short_code(value: str) -> str:
+    """:func:`code`, cut so the whole span is at most :data:`MAX_NAME` characters plus a
+    one-character fence on each side, as :func:`code` gives a plain name; a name of
+    backticks, whose fence grows with it, is cut shorter."""
+    return _capped(code, value, MAX_NAME + 2)
 
 
 def _capped(render: Callable[[str], str], value: str, limit: int) -> str:
-    """``render(value)``, or the rendering of its longest prefix plus ``...`` that fits:
-    cut before rendering, so no escape or fence is split (a rendering only grows with its
-    input)."""
-    flat = _flat(value)
-    out = render(flat)
+    """``render(value)``, or the rendering of its longest prefix plus ``...`` that fits
+    ``limit`` (at least 5, room for a fenced ``...``): cut before rendering, so no escape or
+    fence is split (a rendering only grows with its input)."""
+    out = render(value)  # the raw value: an empty or blank name keeps its placeholder
     if len(out) <= limit:
         return out
+    flat = _flat(value)
     lo, hi = 0, len(flat)  # the longest prefix length that fits is in [lo, hi)
     while lo + 1 < hi:
         mid = (lo + hi) // 2
