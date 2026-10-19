@@ -111,6 +111,8 @@ class Story:
             block_conditions=BLOCK_CONDITIONS,
             report={"timezone": "UTC", "hour_usd": 2.5, "dir": str(self.farm.root / "reports")},
             prices=PRICES,
+            # the farm pays its synthetic model per token: dollars, not a plan's limit
+            spend={"providers": {"synthetic": {"mode": "api", "models": [MODEL]}}},
         )
 
     def intro(self) -> None:

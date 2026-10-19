@@ -28,10 +28,14 @@ def _per_task(spend: Spend, completed: int) -> str:
         return "*none done*"
     if not spend.tokens:
         return "*no spend*"
-    if spend.unpriced_tokens == spend.tokens:
-        return "*unpriced*"
+    plan = f"{spend.plan_tokens // completed:,} plan tokens" if spend.plan_tokens else ""
+    if spend.plan_tokens and not spend.billed_tokens:
+        return plan  # a subscription: no dollars
+    if spend.unpriced_tokens == spend.billed_tokens:
+        return "*unpriced*" + (f" and {plan}" if plan else "")
     out = f"${spend.usd / completed:,.2f}"
-    return out + (f" +{spend.unpriced_tokens:,} unpriced" if spend.unpriced_tokens else "")
+    out += f" +{spend.unpriced_tokens:,} unpriced" if spend.unpriced_tokens else ""
+    return out + (f" and {plan}" if plan else "")
 
 
 @register_section("throughput")
@@ -57,7 +61,9 @@ def throughput_section(ctx: SectionContext) -> Section | None:
             ctx.roles.get(row.session_id) if row.session_id else None
         )
         spent[role or UNKNOWN_ROLE].append(row)
-    est = " (estimate)" if inputs.estimated else ""
+    est = " (estimate)" if inputs.estimated and inputs.spend is None else ""
+    if ctx.spend.unknown_usd > 0:
+        est += " (estimate, mode not set)"
     lines = [
         "Per role, for the day. Utilization: agent-hours with a session running over agents "
         "x hours (the live `kelpie_role_agents_with_work` counts agents with any open task "
@@ -97,7 +103,8 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         "reviews) over the tasks it completed, so it is noisy with one or two completions. "
         "*none done*: no task completed; *no spend*: no model calls linked to the role; "
         "*unpriced*: only models without a price in [prices]; `+N unpriced`: tokens left out "
-        "of the dollars.",
+        "of the dollars; `N plan tokens`: tokens of providers on a subscription per completed "
+        "task, never dollars.",
     ]
     others = sorted(r for r in spent if r not in listed)
     if others:

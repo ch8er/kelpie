@@ -237,7 +237,12 @@ class _Fit:
 
 
 def _saving(r: RoleModel, cheaper: str, price: _Prices) -> float:
-    return max(price.usd(r.usage) - price.usd(r.on(cheaper)), 0.0)
+    """Dollars saved by the switch; none unless both models are billed (a subscription's
+    tokens are not dollars: pricing that side at $0 would advertise the whole bill)."""
+    now, then = price.ctx.price(r.usage), price.ctx.price(r.on(cheaper))
+    if now.plan_tokens or then.plan_tokens:
+        return 0.0
+    return max(now.usd - then.usd, 0.0)
 
 
 def _fit_lines(fit: _Fit, price: _Prices) -> list[str]:

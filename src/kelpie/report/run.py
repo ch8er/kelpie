@@ -18,6 +18,7 @@ from typing import Protocol
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
 from kelpie.core.model import Snapshot
+from kelpie.core.spend import SpendConfig
 from kelpie.report.config import ReportSettings
 from kelpie.report.daily import (
     DailyReport,
@@ -52,6 +53,7 @@ class ReportSources:
     outputs: OutputSettings
     estimated: bool  # a subscription-mode budget: dollars are estimates
     modes: Mapping[str, Mode]
+    spend: SpendConfig | None = None  # [spend]: each provider's spend mode
     hold_labels: tuple[str, ...] = ()  # rule 6's hold labels (bottlenecks)
     block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]], matched offline
     stuck_check: StuckCheck | None = None  # rule 3's, as configured (None: its defaults)
@@ -99,6 +101,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         owners=board.owners,
         sessions=board.sessions,
         prices=sources.prices,
+        spend=sources.spend,
         estimated=sources.estimated,
         outputs=sources.outputs,
         attribution=attribution,

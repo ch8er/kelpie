@@ -48,17 +48,37 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class Spend:
-    """Tokens and their price; ``unpriced_tokens`` are of models without a price."""
+    """Tokens and their price; ``unpriced_tokens`` are of models without a price.
+
+    Spend follows each provider's spend mode (:mod:`kelpie.core.spend`): tokens of a
+    provider on a subscription are never dollars, they are counted in ``plan_tokens`` and
+    per provider in ``plans`` (the report shows them against the plan's limit); ``usd`` is
+    the bill of API providers, and ``unknown_usd`` the part of it whose provider's mode is
+    not set (shown as an estimate)."""
 
     tokens: int = 0
     usd: float = 0.0
     unpriced_tokens: int = 0
+    plan_tokens: int = 0
+    plans: tuple[tuple[str, int], ...] = ()  # (provider, tokens), by provider
+    unknown_usd: float = 0.0
+
+    @property
+    def billed_tokens(self) -> int:
+        """Tokens that are dollars (or would be, priced): not on a subscription."""
+        return self.tokens - self.plan_tokens
 
     def __add__(self, other: Spend) -> Spend:
+        plans = dict(self.plans)
+        for provider, tokens in other.plans:
+            plans[provider] = plans.get(provider, 0) + tokens
         return Spend(
             self.tokens + other.tokens,
             self.usd + other.usd,
             self.unpriced_tokens + other.unpriced_tokens,
+            self.plan_tokens + other.plan_tokens,
+            tuple(sorted(plans.items())),
+            self.unknown_usd + other.unknown_usd,
         )
 
 
