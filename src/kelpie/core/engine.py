@@ -94,6 +94,7 @@ class Engine:
     state_store: StateStore = field(default_factory=MemoryStateStore)
     fallback: bool = True  # route to the only platform adapter when nothing else says where
     _by_name: dict[str, Rule] = field(init=False, default_factory=dict)
+    _detail: str | None = field(init=False, default=None)  # of the action being handled
     ledger: ActionLedger = field(init=False)
     states: StateTracker = field(init=False)
     _evaluated: set[str] | None = field(init=False, default=None)
@@ -333,6 +334,7 @@ class Engine:
                 self._notice(why, action)
             dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, why, first)
         else:
+            self._detail = None
             try:
                 outcome = self._handle(action, mode, snapshot)
             except Deferred as exc:
@@ -345,6 +347,7 @@ class Engine:
                     self._lines.setdefault(action.key, []).append(line)
                 return Dispatched(action, mode, Outcome.DEFERRED)  # not an attempt
             except Exception as exc:
+                self._detail = failure_reason(exc)
                 log.warning("action failed: %s: %r", action, exc)
                 log.debug("traceback of failed action: %s", action, exc_info=True)
                 outcome = Outcome.FAILED
@@ -354,7 +357,7 @@ class Engine:
                         self._safe_alert(action, executed=False, kind=Did.FAILED, did=did)
                     else:
                         self._effect_message(action, executed=False, kind=Did.FAILED, did=did)
-            dispatched = Dispatched(action, mode, outcome)
+            dispatched = Dispatched(action, mode, outcome, detail=self._detail)
         self._record(dispatched, snapshot.now)
         return dispatched
 
@@ -606,8 +609,9 @@ class Engine:
             log.info("%s: nothing to do for %s", executor.name, action)
             return result
         elif result is True or (result and not isinstance(result, Outcome)):
+            detail = result if isinstance(result, str) else None
+            self._detail = detail
             if action.kind not in _QUIET_WHEN_DONE:
-                detail = result if isinstance(result, str) else None
                 try:  # it is done: a message that cannot be sent must not undo that
                     self._effect_message(action, kind=Did.DONE, did=done_line(action, detail))
                 except Exception:

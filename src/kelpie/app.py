@@ -22,6 +22,7 @@ from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_c
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes.git_state import valid_base_ref
 from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME
+from kelpie.adapters.hermes.worker import DEFAULT_GRACE
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
@@ -115,6 +116,9 @@ class HermesSettings:
     # A person's decisions agents record: (marker, relay profiles, person or None),
     # [[adapters.hermes.human_decisions]]
     human_decisions: tuple[tuple[str, tuple[str, ...], str | None], ...] = ()
+    # After a stop, end the run's worker processes at once; SIGKILL after ``worker_grace``.
+    end_worker: bool = True
+    worker_grace: timedelta = timedelta(seconds=DEFAULT_GRACE)
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -134,6 +138,8 @@ class HermesSettings:
             role_from_name=self.role_from_name,
             wait_key=self.wait_key or DEFAULT_WAIT_KEY,
             prework_statuses=self.prework_statuses,
+            end_worker=self.end_worker,
+            worker_grace=self.worker_grace.total_seconds(),
         )
 
 
@@ -308,6 +314,8 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "role_from_name",
         "prework_statuses",
         "wait_key",
+        "end_worker",
+        "worker_grace",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     paths: dict[str, Path | None] = {}
@@ -359,6 +367,15 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         raise ConfigError(f"[adapters.hermes] cli_timeout: {exc}") from exc
     if not timedelta(0) < cli_timeout <= timedelta(minutes=1):
         raise ConfigError("[adapters.hermes] cli_timeout must be positive and at most 60s")
+    end_worker = section.get("end_worker", True)
+    if not isinstance(end_worker, bool):
+        raise ConfigError("[adapters.hermes] end_worker must be true or false")
+    try:
+        worker_grace = parse_duration(section.get("worker_grace", f"{DEFAULT_GRACE:g}s"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ConfigError(f"[adapters.hermes] worker_grace: {exc}") from exc
+    if not timedelta(0) < worker_grace <= timedelta(seconds=30):
+        raise ConfigError("[adapters.hermes] worker_grace must be positive and at most 30s")
     humans = section.get("human_owners", [])
     if (
         not isinstance(humans, list)
@@ -447,6 +464,8 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
             )
             for d in decisions
         ),
+        end_worker,
+        worker_grace,
     )
 
 

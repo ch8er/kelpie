@@ -102,6 +102,9 @@ class Dispatched:
     outcome: Outcome
     suppression: Suppression | None = None
     first_suppression: bool = False  # first rate-limit hit for this subject this hour
+    # What the executor reported it did (e.g. "worker ended 0.4s after SIGTERM"), or the
+    # public reason of a failure; recorded with the entry.
+    detail: str | None = None
 
 
 def canonical(value: Any) -> Any:
@@ -153,6 +156,7 @@ class LedgerEntry:
     params: dict[str, Any] = field(default_factory=dict)
     suppressed: int = 0  # later repeats held back by the ledger (count only, not reasons)
     suppression: Suppression | None = None  # set on entries stored as SUPPRESSED
+    detail: str | None = None  # what the executor reported, or why it failed (Dispatched)
 
     @classmethod
     def of(cls, dispatched: Dispatched, at: datetime) -> LedgerEntry:
@@ -170,6 +174,7 @@ class LedgerEntry:
             executor=a.executor,
             params=canonical(a.params),
             suppression=dispatched.suppression,
+            detail=dispatched.detail,
         )
 
 

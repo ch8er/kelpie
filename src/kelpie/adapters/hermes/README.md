@@ -22,6 +22,8 @@ git_state = true                         # read git state of live task workspace
 git_timeout = "5s"                       # limit for each git call; 2x per snapshot in total
 cli = "hermes"                           # Hermes executable used by stop, park, wake, comment
 cli_timeout = "10s"                      # limit for each command (at most 60s)
+end_worker = true                        # stop also ends the run's worker processes (below)
+worker_grace = "5s"                      # SIGTERM, then SIGKILL after this (at most 30s)
 # wait_key = "/data/hermes-wait.key"     # signs Kelpie's parks and stops; default: next to the ledger
 human_owners = ["alice"]                 # assignees that are people, not agents (optional)
 
@@ -118,19 +120,60 @@ human, never re-queued by Hermes itself), releases the claim, ends the run and a
 as a `BLOCKED:` comment that also says how to resume. A human resumes the task with
 `hermes kanban unblock <task>`.
 
-The worker process is not signalled by `block`. Hermes' dispatcher reaps a worker that
-outlived its closed run on a later tick (`reap_terminal_workers`, after a 120 s grace period)
-and signals it only when the run's recorded start fingerprint (`worker_started_at`) still
-matches, so a reused pid is never touched. Kelpie never signals a process itself. If no Hermes
-dispatcher is running, the task is still blocked and not re-queued, but the worker process
-lives until it exits by itself.
+`block` does not signal the worker process. Hermes' dispatcher reaps a worker that outlived
+its closed run only on a later tick (`reap_terminal_workers`, after a 120 s grace period), and
+never when no dispatcher runs; meanwhile the worker keeps calling its model. So after a
+successful block Kelpie ends the run's worker itself (`end_worker`, on by default), with the
+proof of identity Hermes' reaper uses:
 
-So on Hermes `stop` means "block the task now, reap the worker after about two minutes, and
-never without a dispatcher". A budget hard-stop (`[[budgets]]`) therefore ends the *task* at once
-but the spend of a still-running worker only when the dispatcher reaps it.
+- **Which processes.** The run's submitter (`task_runs.worker_pid`, the process the dispatcher
+  spawned), the run's agent (the pid of the run's `worker_bound` event: the process the
+  profile's gateway started for this run, recorded with the run's claim lock), and every
+  descendant of the agent (tool commands start their own sessions and would outlive it).
+  Nothing else: not the submitter's children (a submitter starts the profile's gateway when
+  none runs, and that gateway serves the profile's other runs).
+- **Proof.** Each recorded pid must still carry the start fingerprint Hermes recorded for it
+  (`"<boot_id>:<pid 1 start>|<process start>"`, computed the same way from `/proc`): a reused
+  pid or a reboot never matches. The run's claim lock must name this host, every process must
+  belong to the user Kelpie runs as, and Kelpie never signals itself or its ancestors (when
+  Kelpie runs inside the run's worker, nothing is signalled). A process recorded without a
+  fingerprint (older Hermes, or `unverified`) is not signalled. Right before each signal the
+  process's start time is checked again, through a pidfd where the kernel has one (within one
+  boot and PID namespace, the same start time on the same pid is the same process).
+- **Gone or not Kelpie's to end.** A worker counts as gone only when Kelpie can tell: no such
+  pid, a dead one, another start time, another boot. When it cannot tell or may not signal it,
+  nothing is signalled and the alert says why: the worker runs as another user, Hermes runs in
+  another PID namespace (Kelpie in a container of its own), `/proc` hides other users'
+  processes (`hidepid`) or cannot be read.
+- **How.** SIGTERM to all of them, SIGKILL to those still running after `worker_grace`
+  (default 5 s). Kelpie never writes `kanban.db`: the reaper later finds the processes gone.
+- **What it says.** The alert and the ledger (`kelpie why`) carry what actually happened: "its
+  worker ended 0.4s after SIGTERM", "no worker process of the run was still running on this
+  host", "Kelpie did not end its worker (<why>)", or "its worker did not end even after
+  SIGKILL (pid ...)". A failure while ending the worker never fails the stop: the task is
+  blocked either way.
+- **Time.** Ending the worker takes up to about `worker_grace` + 2 s on top of the block
+  (`cli_timeout`), inside the tick, plus waits on a busy board. In multi-host mode keep
+  `cli_timeout` + `worker_grace` + 2 s well below `[hub] action_timeout` (defaults: 10 + 5 + 2 =
+  17 s of 30 s).
+- **Tool commands.** Every descendant of the agent is ended, whatever it is: a tool command
+  that started a Hermes client, which started a gateway for another profile, takes that
+  gateway down with it.
+- **Trust.** Kelpie trusts the board's records, as Hermes' reaper does. Anyone who can write
+  `kanban.db` (the agents, as the same user) could record another process of that user as a
+  run's agent and have Kelpie end it and its process tree; Hermes' reaper signals the recorded
+  pid only. Nothing beyond what that user can do anyway, but with `end_worker` the board is
+  trusted to name processes, so keep it writable by Hermes' user only.
+
+Without `/proc` (macOS) nothing is signalled and the stop says so. With `end_worker = false` a
+stop is "block the task now, reap the worker after about two minutes, and never without a
+dispatcher", as before; a budget hard-stop (`[[budgets]]`) then ends the *task* at once but the
+spend of a still-running worker only when the dispatcher reaps it. In multi-host mode the
+worker is ended by the `kelpie agent` on the host that claimed the run.
 
 Why not `hermes kanban reclaim`: it terminates the worker but puts the task back in the queue,
 where the dispatcher can respawn it before a second command blocks it. `archive` is terminal.
+Hermes has no command that ends a worker and leaves the task blocked.
 
 `stop` is idempotent: a run that has already ended, or is no longer the task's current run,
 is left alone (no command is run). It fails, and the engine logs it, when the id is not a

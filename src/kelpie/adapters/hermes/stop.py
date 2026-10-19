@@ -2,7 +2,8 @@
 
 Mechanism. Kelpie asks Hermes to do it, through the supported operator command
 ``hermes kanban block <task> --kind needs_input "<reason>"``. Kelpie itself never writes
-``kanban.db`` and never signals a process. In one transaction Hermes' ``block_task``:
+``kanban.db``; the only processes it signals are the stopped run's own worker (below). In one
+transaction Hermes' ``block_task``:
 
 - moves the task ``running`` -> ``blocked`` (kind ``needs_input``, which Hermes parks for a
   human and never re-queues by itself, so the task is not picked up again until a human
@@ -21,8 +22,8 @@ worker lives until it exits by itself; the task is still blocked and not re-queu
 
 Rejected alternatives: ``hermes kanban reclaim`` terminates the worker but returns the task to
 the queue, where the dispatcher can respawn it before a second command blocks it;
-``hermes kanban archive`` terminates the worker but is terminal; signalling the recorded pid
-from Kelpie would duplicate Hermes' fingerprint checks and could hit a stranger.
+``hermes kanban archive`` terminates the worker but is terminal. Hermes has no command that
+only ends a worker, so worker.py repeats the reaper's fingerprint checks.
 
 The block is signed. Its reason ends with a marker, ``[kelpie-stop:v1:<issued>:<nonce>.<mac>]``:
 HMAC-SHA256 over a domain string, the task, the time of issue and a nonce, keyed by
@@ -44,9 +45,11 @@ watches. The environment is an allow-list (:data:`ENV_EXACT`, ``LC_*``, ``XDG_*`
 except the board-selecting variables), so Kelpie's own credentials never reach the CLI.
 On timeout the whole process group is killed.
 
-On Hermes a stop is therefore "block the task now, reap the worker later": the worker lives
-until the dispatcher's next reaping tick after the 120 s grace period, and never when no
-dispatcher runs. Anything that must end spend at once (a hard budget) is delayed by that.
+Then the worker: by default (``[adapters.hermes] end_worker``) Kelpie ends it right after the
+block, with the same proof of identity Hermes' reaper uses (see worker.py), and says what
+happened ("its worker ended 0.4s after SIGTERM"). With ``end_worker = false`` the stop is
+"block the task now, reap the worker later": the worker lives until the dispatcher's next
+reaping tick after the 120 s grace period, and never when no dispatcher runs.
 """
 
 from __future__ import annotations
@@ -96,11 +99,14 @@ _STOP_MARKER = re.compile(
 )
 _ANY_STOP_MARKER = re.compile(r"\[?kelpie-stop", re.IGNORECASE)
 STOP_SKEW = timedelta(seconds=5)  # between Kelpie's clock and the time Hermes records
-# What a done stop means on Hermes, for the human reading "Stopped run <id>; ..." (the reap
-# grace is TERMINAL_WORKER_REAP_GRACE_SECONDS, see above).
-STOP_DONE = (
-    "task {task} is blocked for a human (hermes kanban unblock {task}); Hermes' dispatcher "
-    "ends the worker within about 2 minutes"
+# What a done stop means on Hermes, for the human reading "Stopped run <id>; ...", followed by
+# what became of the worker (kelpie.adapters.hermes.worker).
+STOP_DONE = "task {task} is blocked for a human (hermes kanban unblock {task}); {worker}"
+# With [adapters.hermes] end_worker = false (the reap grace is
+# TERMINAL_WORKER_REAP_GRACE_SECONDS, see above).
+WORKER_LEFT = (
+    "its worker is left to Hermes' dispatcher, which reaps it on a tick at least 2 minutes "
+    "after the block if it can verify it (end_worker = false)"
 )
 
 

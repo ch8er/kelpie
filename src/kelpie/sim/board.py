@@ -63,7 +63,10 @@ CREATE TABLE task_runs (
     ended_at INTEGER,
     outcome TEXT,
     summary TEXT,
-    error TEXT
+    error TEXT,
+    claim_lock TEXT,
+    worker_pid INTEGER,
+    worker_started_at INTEGER
 );
 CREATE TABLE task_comments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -257,6 +260,31 @@ class Board:
             claim_expires=claim_expires,
         )
         return rid
+
+    def bind_worker(
+        self,
+        run_id: int,
+        at: datetime,
+        *,
+        claim_lock: str,
+        submitter: tuple[int, str | None] | None = None,
+        agent: tuple[int, str | None] | None = None,
+    ) -> None:
+        """Record a run's worker processes as Hermes does: the spawned submitter's
+        ``(pid, fingerprint)`` on the run row, the agent's in a ``worker_bound`` event."""
+        pid, started = submitter if submitter is not None else (None, None)
+        with connect(self.path) as conn:
+            conn.execute(
+                "UPDATE task_runs SET claim_lock = ?, worker_pid = ?, worker_started_at = ?"
+                " WHERE id = ?",
+                (claim_lock, pid, started, run_id),
+            )
+            task_id = conn.execute(
+                "SELECT task_id FROM task_runs WHERE id = ?", (run_id,)
+            ).fetchone()[0]
+        if agent is not None:
+            payload = {"pid": agent[0], "claim_lock": claim_lock, "started_at": agent[1]}
+            self.event(task_id, "worker_bound", at, payload, run_id=run_id)
 
     def end_run(self, run_id: int, at: datetime, outcome: str | None = None) -> None:
         """A run ends (``outcome`` None: the worker went away without declaring one)."""

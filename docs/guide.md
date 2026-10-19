@@ -321,7 +321,7 @@ The last line of every alert says what Kelpie itself did, worded by the engine f
 rule's mode and the actual outcome, never by the rule: "Suggested: clear the block on T-1
 (not done, rule in suggest mode)." in suggest mode; in act mode, once done, the past tense with
 the executor's specifics ("Stopped run hermes-run-7; task T-1 is blocked for a human (hermes
-kanban unblock T-1); Hermes' dispatcher ends the worker within about 2 minutes."), or "Failed:
+kanban unblock T-1); its worker ended 0.4s after SIGTERM."), or "Failed:
 could not ...: <reason>, needs a human." (the reason only when the error marks it safe to show;
 otherwise its type, details in Kelpie's log). An alert that a rule raises together with an effect
 (rule 10's runaway alert with its stop, rule 3's orphan alert with its reassignment) carries the

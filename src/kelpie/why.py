@@ -697,6 +697,8 @@ def render(ex: Explanation) -> str:
     lines.append("Ledger (latest first)")
     for e in ex.entries:
         lines.append(f"  {_when(e.at)} {e.rule} {e.kind} {e.mode} {e.outcome}: {e.reason}")
+        if e.detail:
+            lines.append(f"    -> {e.detail}")
     if not ex.entries:
         lines.append("  none")
     lines += [f"note: {p}" for p in ex.problems]
@@ -891,6 +893,7 @@ def as_json(ex: Explanation) -> dict[str, Any]:
                 "mode": e.mode.value,
                 "outcome": e.outcome.value,
                 "reason": e.reason,
+                "detail": e.detail,
             }
             for e in ex.entries
         ],
