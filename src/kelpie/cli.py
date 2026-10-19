@@ -20,6 +20,7 @@ from kelpie.app import (
     load_rules,
     load_settings,
     read_budgets,
+    read_unpriced,
     render_status,
 )
 
@@ -172,7 +173,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             rules = load_rules(settings.engine)
             adapters = build_adapters(settings)
             budgets = read_budgets(settings, adapters)
-            sys.stdout.write(render_status(settings, rules, adapters, budgets))
+            unpriced = read_unpriced(settings)
+            sys.stdout.write(render_status(settings, rules, adapters, budgets, unpriced=unpriced))
             return 0
         load_rules(settings.engine)  # rule errors first: they are the likelier mistake
         check_exposure(settings, args.host)

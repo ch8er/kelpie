@@ -23,6 +23,7 @@ from kelpie.core.budgets import (
     threshold_forecast,
 )
 from kelpie.core.model import Session, Snapshot, Status, Task
+from kelpie.core.prices import DEFAULT_PRICES
 from kelpie.core.serde import snapshot_from_dict
 from kelpie.core.spans import Attribution, TokenUsage
 
@@ -44,7 +45,8 @@ def load(*budgets: dict[str, Any], prices: Any = PRICES) -> BudgetConfig:
 
 
 def test_defaults_and_full_budget() -> None:
-    assert load_budgets(None, None, WEEK) == BudgetConfig()
+    assert load_budgets(None, None, WEEK, default_prices=False) == BudgetConfig()
+    assert load_budgets(None, None, WEEK).prices == PriceTable((), DEFAULT_PRICES)
     config = load(
         budget(),
         budget(name="t", scope="task", unit="tokens", soft=1000, hard=None),
@@ -103,7 +105,6 @@ def test_defaults_and_full_budget() -> None:
         ([budget(hard="10")], PRICES, "hard must be a number"),
         ([budget(hard=float("inf"))], PRICES, "hard must be a number"),
         ([budget(), budget()], PRICES, "names must be unique: ['b']"),
-        ([budget()], None, "budgets in usd need a [prices] table: ['b']"),
         ([], ["model-a"], "[prices] must be a table of models"),
         ([], {"model-a": 3}, "must be a table with input"),
         ([], {"model-a": {"input": 1}}, "needs output"),
@@ -117,6 +118,14 @@ def test_bad_config_is_refused(budgets: Any, prices: Any, message: str) -> None:
     with pytest.raises(ValueError) as exc:
         load_budgets(budgets, prices, WEEK)
     assert message in str(exc.value)
+
+
+def test_usd_budgets_need_some_prices() -> None:
+    """The default table prices usd budgets; without it they need [prices]."""
+    (b,) = load_budgets([budget()], None, WEEK).budgets
+    assert b.unit is BudgetUnit.USD
+    with pytest.raises(ValueError, match=r"budgets in usd need prices .*\['b'\]"):
+        load_budgets([budget()], None, WEEK, default_prices=False)
 
 
 def test_token_budgets_need_no_prices() -> None:
@@ -428,3 +437,26 @@ def test_snapshot_fixtures_can_carry_budget_state() -> None:
     assert status.state is BudgetState.HARD and status.window == 24 * H
     assert status.session_ids == ("run-1",)
     assert snap.limit_hits[0].limit == "5h"
+
+
+def test_evaluation_names_the_models_without_a_price() -> None:
+    config = load(budget(), budget(name="t", unit="tokens", window="2d"))
+    usage = {
+        timedelta(days=1): ROWS[:2],
+        timedelta(days=2): (*ROWS, row("run-1", "T-1", 7, model="other")),
+        H: (),
+    }
+    assert evaluate(config, usage, snapshot()).unpriced == {"other": 7, "unpriced": 110_000}
+    assert evaluate(config, {}, snapshot()).unpriced == {}
+    assert evaluate(load(), {}, snapshot()).unpriced == {}  # no budgets: nothing looked at
+
+
+def test_evaluation_prices_from_the_default_table_by_day() -> None:
+    """No [prices]: the default table prices usd budgets, as of the snapshot's day."""
+    config = load(budget(), prices=None)
+    usage = {w: (row("run-1", "T-1", 1_000_000, model="gemini-4-argon"),) for w in config.windows}
+    (before,) = evaluate(config, usage, snapshot()).statuses
+    assert before.spent == pytest.approx(2 + 0.1 * 10) and before.cost_unknown_tokens == 0
+    late = Snapshot(now=datetime(2026, 12, 2, tzinfo=UTC))
+    (after,) = evaluate(config, usage, late).statuses
+    assert after.spent == pytest.approx(4 + 0.1 * 20)

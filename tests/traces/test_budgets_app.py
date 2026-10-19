@@ -21,6 +21,7 @@ from kelpie.app import (
     load_settings,
     merged_snapshot,
     read_budgets,
+    read_unpriced,
     render_status,
 )
 from kelpie.cli import main
@@ -35,6 +36,7 @@ from kelpie.core.budgets import (
 from kelpie.core.model import LimitHit, Session, Snapshot, Span, SpanKind
 from kelpie.core.spans import MemorySpanStore, SpanStore, TokenUsage
 from kelpie.core.storage import SqliteSpanStore
+from kelpie.doctor import check_prices
 from kelpie.metrics import Metrics
 from kelpie.traces.store import SpanWindow
 from tests.fakes import FakeAdapter
@@ -156,7 +158,13 @@ def test_budgets_config_is_loaded(tmp_path: Path) -> None:
         ("[budget]\nname = 'x'\n", "unknown config sections: ['budget']"),
         (CONFIG + "\n[traces]\nenabled = false\n", "need [traces] enabled"),
         (CONFIG + "\n[traces]\nretention = '12h'\ntotals_window = '12h'\n", "retention"),
-        ("[[budgets]]\nname = 'x'\nscope = 'day'\nunit = 'usd'\nhard = 1\n", "need a [prices]"),
+        (
+            "[spend]\ndefault_prices = false\n[[budgets]]\nname = 'x'\nscope = 'day'\n"
+            "unit = 'usd'\nhard = 1\n",
+            "need prices",
+        ),
+        ("[spend]\ndefault_prices = 1\n", "default_prices must be true or false"),
+        ("[spend]\nprices = 1\n", "unknown [spend] keys: ['prices']"),
         (CONFIG.replace('unit = "tokens"', 'unit = "tokens"\ncolor = 1'), "keys: ['color']"),
         ("[prices]\nm = 1\n", "must be a table with input"),
     ],
@@ -443,3 +451,47 @@ def test_task_series_are_bounded() -> None:
     assert len(spent) == 20 + 1 + 30  # top 20 tasks, the one past a threshold, all agents
     assert 'subject="T-29"' in text and 'subject="T-09"' not in text
     assert 'subject="T-hot"' in text and 'subject="agent-00"' in text
+
+
+def test_status_and_doctor_name_models_without_a_price(tmp_path: Path) -> None:
+    db = tmp_path / "kelpie.db"
+    store = SqliteSpanStore(db)
+    store.append_spans(
+        [*SPANS, chat("cc", None, 5_000, trace="d" * 32, model="claude-haiku-4-5-20251001")],
+        NOW,
+    )
+    store.close()
+    settings = replace(load_settings(write(tmp_path, CONFIG)), db_path=db)
+    assert read_unpriced(settings, NOW) == (("unpriced", 110_000),)  # haiku: default table
+    text = render_status(settings, load_rules(settings.engine), unpriced=(("unpriced", 110_000),))
+    assert "prices:   2 [prices] entries, default table of " in text
+    assert "checked 2026-10-19" in text
+    assert (
+        "warning: models without a price (their spend counts $0): unpriced (110,000 tokens)" in text
+    )
+    check = check_prices(settings, NOW)
+    assert check.status == "WARN" and "unpriced (110,000 tokens)" in check.detail
+    assert '[prices."unpriced"]' in check.fix
+    # priced in config: nothing to warn about
+    priced = replace(
+        settings,
+        budgets=load_settings(
+            write(tmp_path, CONFIG + '\n[prices."unpriced"]\ninput = 1\noutput = 2\n')
+        ).budgets,
+    )
+    assert read_unpriced(priced, NOW) == ()
+    assert check_prices(priced, NOW).status == "PASS"
+    # without the default table the Claude model has no price either
+    off = load_settings(write(tmp_path, "[spend]\ndefault_prices = false\n" + CONFIG))
+    off = replace(off, db_path=db)
+    assert [m for m, _ in read_unpriced(off, NOW)] == ["unpriced", "claude-haiku-4-5-20251001"]
+    assert "default table off ([spend] default_prices = false)" in render_status(
+        off, load_rules(off.engine)
+    )
+    # nothing to read
+    assert read_unpriced(replace(settings, db_path=tmp_path / "none.db"), NOW) == ()
+    assert check_prices(replace(settings, db_path=None), NOW).status == "SKIP"
+    assert "cannot open" in str(read_unpriced(replace(settings, db_path=tmp_path), NOW))
+    assert "cannot be listed: x" in render_status(
+        settings, load_rules(settings.engine), unpriced="x"
+    )

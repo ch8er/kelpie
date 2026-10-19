@@ -26,7 +26,7 @@ configure what exists.
   [[adapters.openclaw]](#adaptersopenclaw)
 - [[traces]](#traces), [[[traces.forward]]](#tracesforward),
   [[traces.outputs]](#tracesoutputs)
-- [[[budgets]] and [prices]](#budgets-and-prices)
+- [[[budgets]] and [prices]](#budgets-and-prices), [[spend]](#spend)
 - [[resources.prometheus]](#resourcesprometheus)
 - [[connectors.github]](#connectorsgithub), [[connectors.github.ci]](#connectorsgithubci),
   [[connectors.github.pulls]](#connectorsgithubpulls), [[[block_conditions]]](#block_conditions)
@@ -43,7 +43,7 @@ configure what exists.
   else defaults only. Read once at startup. `--config` goes before the command:
   `kelpie --config kelpie.toml status`.
 - **Top-level sections:** `engine`, `storage`, `adapters`, `traces`, `budgets`, `prices`,
-  `resources`, `connectors`, `block_conditions`, `alerts`, `report`. Anything else stops
+  `spend`, `resources`, `connectors`, `block_conditions`, `alerts`, `report`. Anything else stops
   Kelpie at startup.
 - **Unknown keys** in any table stop Kelpie at startup with the key named. Rule names are
   checked against the plan's rule list (`kelpie.rules.PLANNED`).
@@ -688,7 +688,7 @@ Spend is priced from traces, so budgets need `[traces]` enabled.
 | --- | --- | --- | --- |
 | `name` | *required* | string | Unique. |
 | `scope` | *required* | `day` \| `agent` \| `task` \| `project` | `day`: the whole farm. `agent`: the session's owner. `task`: the span's task. `project`: tasks matched by `match`. |
-| `unit` | *required* | `usd` \| `tokens` | `usd` needs a `[prices]` table. |
+| `unit` | *required* | `usd` \| `tokens` | `usd` needs prices: the default table, or `[prices]` when it is off. |
 | `soft` | unset | number, > 0 | Alert at this spend. |
 | `hard` | unset | number, > `soft` | Stop the run at this spend (act mode, through `loop_breaker`): `agent` and `task` budgets; `day` and `project` budgets only alert unless `loop_breaker` has `stop_on_shared_budgets = true`. At least one of `soft` and `hard` is required. |
 | `match` | unset | string | `project`: `label:<name>` or a task id glob (*required*); all matching tasks share one budget. `agent`/`task`: limits the budget to the owners or tasks it names (an id or a glob); each matching agent or task still has its own budget, so `match = "agent-*"`, `hard = 50` is $50 per agent, not in total. Without it every agent or task has one. Not allowed for `day`. |
@@ -698,15 +698,44 @@ Spend is priced from traces, so budgets need `[traces]` enabled.
 | `providers` | all | list of provider names | `subscription` only: the limits whose hits drive the forecast (names from `[connectors.llm_quotas]`). |
 | `min_limit_window` | `"10m"` | duration, > 0 | `subscription` only: ignore limit hits whose limit refills sooner than this. |
 
-`[prices."<model or glob>"]`, US dollars per 1 million tokens. An exact model name wins;
-otherwise the first matching glob in config order. Tokens of a model without a price still
-count for `tokens` budgets; their cost is unknown and left out of `usd` budgets.
+`[prices."<model or glob>"]`, US dollars per 1 million tokens. They override Kelpie's
+default table (see [[spend]](#spend)). An entry named exactly as the model wins, then the
+first matching glob in config order, then the default table. A model is also matched by its
+canonical id: lower case, without a date suffix (`-20251001`, `-2026-03-17`), `-latest`,
+a Claude Code `[1m]` tag, a `vendor/` or `models/` prefix, Bedrock's `anthropic.` and
+region prefixes and `-v1:0` suffix, or Vertex's `@20251001`. So
+`[prices."claude-haiku-4-5"]` also prices `us.anthropic.claude-haiku-4-5-20251001-v1:0`.
+Tokens of a model without a price still count for `tokens` budgets; their cost is unknown
+and left out of `usd` budgets, and `kelpie status` and `kelpie doctor` name such models.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `input` | *required* | Input tokens (cached tokens excluded). |
 | `output` | *required* | Output tokens. |
 | `cached_input` | `input` | Cached input tokens. |
+
+## [spend]
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `default_prices` | `true` | Price models from Kelpie's default table when `[prices]` has no entry for them. `false`: only `[prices]`. |
+
+**The default table** (`kelpie.core.prices`) holds the standard API prices of popular
+Anthropic, OpenAI and Google models, as their pricing pages showed them on the date
+`kelpie status` prints ("checked ..."). Each row has input, output, cache read and, for
+Anthropic models, 5-minute cache write prices; an announced price change (an introductory
+price that ends) applies from its day. Prices change after Kelpie is released: check the
+rows you rely on against the provider's page, and add `[prices]` entries where they differ.
+The estimate leaves out what the table does not model: prompt-length tiers (Claude Haiku
+5.5 above 100k prompt tokens, OpenAI above 272k, Gemini above 200k cost more; the base
+price is used), 1-hour cache writes (priced as 5-minute ones), batch and flex discounts,
+priority and fast tiers, regional and US-only uplifts, and Gemini's cache storage fee.
+
+| Provider | Models | Source |
+| --- | --- | --- |
+| Anthropic | Claude Fable 5.1 / 5, Mythos 5.1 / 5, Opus 5.5, 5, 4.8, 4.7, 4.6, 4.5, 4.1, 4, Sonnet 5.5, 5, 4.6, 4.5, 4, Haiku 5.5, 4.5, 3.5 | [platform.claude.com pricing](https://platform.claude.com/docs/en/about-claude/pricing) |
+| OpenAI | GPT-5.5, GPT-5.4, GPT-5.4 mini, GPT-5 | [developers.openai.com pricing](https://developers.openai.com/api/docs/pricing) |
+| Google | Gemini 4 Argon, Gemini 3.8 Flash, Gemini 3 Flash Preview | [ai.google.dev pricing](https://ai.google.dev/gemini-api/docs/pricing) |
 
 ## [resources.prometheus]
 
@@ -1185,7 +1214,8 @@ as `kelpie_adapter_errors_total{adapter="<agent>/<adapter>"}`.
 Kelpie refuses to start when:
 
 - `[[budgets]]` exist but `[traces] enabled = false`; a budget `window` exceeds
-  `[traces] retention`; a `usd` budget exists without `[prices]`.
+  `[traces] retention`; a `usd` budget exists without `[prices]` while
+  `[spend] default_prices = false`.
 - `[traces] retention` is shorter than `window` or `totals_window`, or, with
   `[traces.outputs]`, shorter than `repeat_days` or twice its `window`.
 - `[[traces.forward]]` exists with `[traces] enabled = false`.

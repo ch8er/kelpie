@@ -309,13 +309,18 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # unit = "tokens"
 # hard = 20000000
 #
-# USD per 1M tokens, per model name or glob (exact names first, then globs in order).
-# Models without a price: tokens still count, their cost is unknown (not guessed).
+# USD per 1M tokens, per model name or glob (exact names first, then globs in order),
+# over Kelpie's dated default table of Anthropic, OpenAI and Google prices (kelpie status
+# shows the date it was checked). Models without a price: tokens still count, their cost
+# is unknown (not guessed); kelpie status and kelpie doctor name them.
 #
 # [prices."model-a"]
 # input = 3
 # output = 15
 # cached_input = 0.3        # default: the input price
+#
+# [spend]
+# default_prices = true     # false: only [prices]
 
 # Host metrics from node_exporter through the Prometheus HTTP API. Off unless this table
 # exists. Kelpie runs fixed instant queries (GET /api/v1/query) and keeps only the hosts
