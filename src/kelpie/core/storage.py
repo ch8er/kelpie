@@ -139,13 +139,18 @@ CREATE TABLE span_task_labels (
 CREATE INDEX span_task_labels_seen ON span_task_labels (seen_at);
 """
 
+# What an executor reported it did, or why it failed (Dispatched.detail).
+_V5 = """
+ALTER TABLE actions ADD COLUMN detail TEXT;
+"""
+
 # version -> script that upgrades from version - 1. Append, never edit a released one.
-MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4}
+MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 _COLUMNS = (
     "at, fingerprint, subject, rule, kind, mode, outcome, reason, task_id, executor,"
-    " params, suppressed, suppression"
+    " params, suppressed, suppression, detail"
 )
 
 
@@ -171,6 +176,7 @@ def ledger_entry(row: sqlite3.Row) -> LedgerEntry:
         params=json.loads(row["params"]),
         suppressed=row["suppressed"],
         suppression=Suppression(row["suppression"]) if row["suppression"] else None,
+        detail=row["detail"],
     )
 
 
@@ -232,6 +238,7 @@ class SqliteLedgerStore:
             to_json(entry.params),
             entry.suppressed,
             entry.suppression,
+            entry.detail,
         )
         sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * len(values))})"
         self._write(lambda db: db.execute(sql, values))
