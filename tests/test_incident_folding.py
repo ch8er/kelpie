@@ -12,6 +12,7 @@ from kelpie.core.engine import Engine
 from kelpie.core.incidents import FOLDED_UNDER, CiOutage, outage_signature, outage_state_id
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
 from kelpie.core.model import Snapshot
+from kelpie.core.states import MemoryStateStore
 from tests.fakes import FakeAdapter, FakeAlerter
 
 T0 = datetime(2026, 3, 2, 10, tzinfo=UTC)
@@ -85,10 +86,9 @@ def test_wait_alerts_the_outage_explains_are_folded_under_it() -> None:
     # Still held back an hour later, and recorded again: the report sees it over time.
     assert tick(engine, T0 + 2 * H)["T-1"] is Outcome.SUPPRESSED
     assert [e.params[FOLDED_UNDER] for e in entries(engine, "T-1")] == [STATE, STATE]
-    # The outage is over and T-1 is still blocked: once its state resolves, T-1 is announced.
+    # The outage is over (not seen for resolve_after) and T-1 is still blocked: announced.
     ci.actions = []
-    assert tick(engine, T0 + 3 * H)["T-1"] is Outcome.SUPPRESSED  # the outage resolves now
-    assert tick(engine, T0 + 3 * H + M)["T-1"] is Outcome.ALERTED
+    assert tick(engine, T0 + 3 * H)["T-1"] is Outcome.ALERTED
 
 
 def test_folding_holds_while_the_outage_state_is_open_through_a_missed_tick() -> None:
@@ -206,3 +206,39 @@ def test_dry_run_folds_what_live_mode_would() -> None:
     engine, ci, blocks, _ = farm(quiet_ci)
     ci.actions, blocks.actions = [outage_alert(("T-1",))], [wait_alert("T-1")]
     assert tick(engine, T0)["T-1"] is Outcome.DRY_RUN  # live, people would get T-1's alert
+
+
+def test_folding_through_missed_ticks_ends_after_resolve_after() -> None:
+    """A rule 9 that keeps failing must not hold the per-task alerts back for ever."""
+    engine, ci, blocks, _ = farm()
+    ci.actions, blocks.actions = [outage_alert(("T-1",))], [wait_alert("T-1")]
+    tick(engine, T0)
+    ci.actions = []
+    assert tick(engine, T0 + 5 * M)["T-1"] is Outcome.SUPPRESSED  # a flicker: still folded
+    assert tick(engine, T0 + 10 * M)["T-1"] is Outcome.ALERTED  # resolve_after passed
+
+
+def test_a_failed_escalation_of_a_known_outage_keeps_folding() -> None:
+    ci, blocks = Emit("ci_economy"), Emit("stale_blocks")
+    alerter = FailingFor("nobody")
+    engine = Engine([ci, blocks], adapters=[FakeAdapter()], alerter=alerter, config=LIVE)  # type: ignore[list-item]
+    ci.actions, blocks.actions = [outage_alert(("T-1",))], [wait_alert("T-1")]
+    assert tick(engine, T0)["T-1"] is Outcome.SUPPRESSED
+    alerter.rule = "ci_economy"  # the 4h escalation of the outage fails to go out
+    outcomes = tick(engine, T0 + 4 * H)
+    assert outcomes["ci_economy"] is not Outcome.ALERTED
+    assert outcomes["T-1"] is Outcome.SUPPRESSED  # people know of the outage already
+
+
+def test_a_state_store_error_stops_folding_under_an_unreported_outage() -> None:
+    engine, ci, blocks, _ = farm()
+    ci.actions, blocks.actions = [outage_alert(("T-1",))], [wait_alert("T-1")]
+    tick(engine, T0)
+    ci.actions = []
+
+    class Broken(MemoryStateStore):
+        def get_state(self, state_id: str) -> None:
+            raise OSError("disk")
+
+    engine.states.store = Broken(states=dict(engine.states.store.states))  # type: ignore[attr-defined]
+    assert tick(engine, T0 + M)["T-1"] is not Outcome.SUPPRESSED

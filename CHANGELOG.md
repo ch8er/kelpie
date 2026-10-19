@@ -69,6 +69,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - An action ledger in SQLite with deduplication and rate limiting ([#5](https://github.com/ch8er/kelpie/pull/5)).
 - Transition-based alerts for long-lived states: announced when they open, change or
   resolve, not on every tick ([#12](https://github.com/ch8er/kelpie/pull/12)).
+- While a CI outage is open (rule 9), the alerts it explains (blocks and waits that last
+  too long or name no condition, on its PRs) are folded under its one alert and recorded
+  for the report, not sent one per task ([#183](https://github.com/ch8er/kelpie/pull/183)).
 - An action that a platform cannot perform becomes an alert for a human instead of an error
   ([#66](https://github.com/ch8er/kelpie/pull/66)).
 

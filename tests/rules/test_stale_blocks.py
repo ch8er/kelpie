@@ -161,6 +161,7 @@ def test_unlinked_and_missing_condition_blocks_alert_after_threshold() -> None:
     assert run(blocked(None, since=NOW - 119 * M), rule=rule) == []
     [alert] = run(blocked("C-404"), rule=rule)
     assert "C-404" in alert.reason and "cannot see" in alert.reason
+    assert not alert.about_wait  # a reference Kelpie cannot see is broken, not long
     assert run(blocked(None), rule=StaleBlocks(unlinked_alert_after=None)) == []
 
 

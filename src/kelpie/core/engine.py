@@ -190,7 +190,9 @@ class Engine:
             for k in _announces(a):
                 known = self._announcer_severity.get(k, Severity.INFO)
                 self._announcer_severity[k] = _higher(known, a.severity)
-        self._keep_open_incidents({a.state for a in ordered if _incident(a) is not None})
+        self._keep_open_incidents(
+            {a.state for a in ordered if _incident(a) is not None}, snapshot.now
+        )
         try:
             for action in ordered:
                 under = self._folded_under(action)
@@ -214,39 +216,51 @@ class Engine:
 
     # --- incidents ----------------------------------------------------------------------
 
-    def _keep_open_incidents(self, reported: set[str | None]) -> None:
-        """Forget incidents whose state closed. One still open but not reported this tick (its
-        rule failed, or its detection flickered within ``resolve_after``) keeps folding what
-        it folded last."""
+    def _keep_open_incidents(self, reported: set[str | None], now: datetime) -> None:
+        """Forget incidents whose state closed. One not reported this tick (its rule failed,
+        or its detection flickered) keeps folding what it folded last, but only within
+        ``resolve_after`` of its last sighting: a rule that keeps failing must not hold
+        alerts back for ever. Kept in memory only: after a restart an outage folds again
+        once its rule reports it."""
         for state_id in list(self._incidents):
             if state_id in reported:
                 continue
             try:
-                still_open = self.states.store.get_state(state_id) is not None
+                state = self.states.store.get_state(state_id)
             except Exception:
                 log.exception("state store unavailable; not folding under %s", state_id)
-                still_open = False
-            if not still_open:
+                state = None
+            if state is None or now - state.last_seen >= self.states.resolve_after:
                 del self._incidents[state_id]
 
     def _note_incident(self, action: Action, outage: CiOutage, dispatched: Dispatched) -> None:
-        """Remember what an incident alert folds, by whether people got it. Under dry-run,
-        what live mode would do (the rules' configured modes)."""
+        """Remember what an incident alert folds, by whether people got it: delivered now, or
+        announced live before (its state is committed only once handled live, so a failed
+        escalation of an outage people already know of keeps folding; a failed first
+        announcement folds nothing). Under dry-run, what live mode would do (the rules'
+        configured modes)."""
         if self.config.dry_run:
             reaches = self.config.mode_for(action.rule) is not Mode.OBSERVE
             logged = not reaches
         else:
+            known = self._safe_get_state(outage.state)
             reaches = dispatched.outcome is Outcome.ALERTED or (
-                dispatched.outcome is Outcome.SUPPRESSED
-                and dispatched.suppression is Suppression.STATE_OPEN
+                known is not None and known.mode is not Mode.OBSERVE
             )
             logged = dispatched.outcome is Outcome.OBSERVED
         if reaches or logged:
             self._incidents[outage.state] = _Incident(
                 frozenset(outage.tasks), action.severity, reaches
             )
-        else:  # held back or not delivered: people have nothing in place of what it folds
+        else:  # never got to people: they have nothing in place of what it would fold
             self._incidents.pop(outage.state, None)
+
+    def _safe_get_state(self, state_id: str) -> OpenState | None:
+        try:
+            return self.states.store.get_state(state_id)
+        except Exception:
+            log.exception("state store unavailable")
+            return None
 
     def _folded_under(self, action: Action) -> str | None:
         """The incident this alert is folded under, if any: an alert about a task's wait

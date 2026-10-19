@@ -101,6 +101,7 @@ class StaleBlocks:
                     f"'{block.reason}' and {what}, so nothing will clear it automatically."
                     + behind_text(stuck),
                     {"stuck_ids": stuck},
+                    about_wait=not missing,  # a reference Kelpie cannot see is broken
                 )
             return
         stale = [
@@ -170,7 +171,13 @@ class StaleBlocks:
         )
 
     def _alert(
-        self, task: Task, kind: str, reason: str, params: dict[str, Any] | None = None
+        self,
+        task: Task,
+        kind: str,
+        reason: str,
+        params: dict[str, Any] | None = None,
+        *,
+        about_wait: bool = False,
     ) -> Action:
         block = task.block
         assert block is not None
@@ -186,7 +193,7 @@ class StaleBlocks:
             since=block.since,
             params=params or {},
             # Long or unexplained, not broken: a CI outage that explains the block folds it.
-            about_wait=kind in {"overdue", "unlinked"},
+            about_wait=about_wait or kind == "overdue",
         )
 
 

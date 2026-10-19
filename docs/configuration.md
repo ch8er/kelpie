@@ -231,8 +231,9 @@ on `/metrics` (`kelpie_role_reopened_after_done_ratio`) and in the daily report.
 Wakes a waiting task when every condition of its current wait holds on fresh evidence;
 alerts when a wait can never be met, runs past `max_wait`, or has no condition; comments on
 sessions that poll a known check instead of registering a condition and exiting. A wait
-past `max_wait` that an open CI outage explains (rule 9) is folded under the outage's
-alert instead of being sent.
+past `max_wait`, or one with no condition, that an open CI outage explains (rule 9) is
+folded under the outage's alert instead of being sent; a dead end or a condition Kelpie
+cannot see is not.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
@@ -284,8 +285,8 @@ Clears a block when every linked condition holds on fresh evidence. Alerts on bl
 cannot clear. A block Kelpie set itself (a run rule 10 stopped, recognised by its signed
 marker) is not one of them: it waits for a human, so rule 13 lists it instead. While a CI
 outage that explains the block is open (rule 9), its overdue and no-condition alerts are
-folded under the outage's one alert instead of being sent; dead ends and stale evidence are
-not. A block first seen during the outage is announced if it outlives it; an escalation
+folded under the outage's one alert instead of being sent; dead ends, stale evidence and
+a condition Kelpie cannot see are not. A block first seen during the outage is announced if it outlives it; an escalation
 that came due during the outage is sent when it ends.
 
 | Key | Default | Unit | Meaning |
