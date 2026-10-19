@@ -9,6 +9,9 @@ what fixed it.
 pip install kelpie-sre && kelpie demo
 ```
 
+> **Pre-release.** Kelpie is not on PyPI yet; the first alpha (0.1.0a1) follows a security
+> audit. Until then install from source: `pip install git+https://github.com/ch8er/kelpie`.
+
 `kelpie demo` runs a simulated farm on your machine and shows Kelpie finding and fixing its
 problems. No farm, accounts or keys needed; Python 3.12 or newer. It replays a working day
 of real farm incidents on a simulated Hermes board, offline, then prints that day's report

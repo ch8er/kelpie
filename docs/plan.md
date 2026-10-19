@@ -1,6 +1,6 @@
 # Kelpie: what we build and the plan
 
-As of 2026-10-15 (field evidence from other farms; budgets and spend; work continues on the subscription after the credit). This file is the single source of truth for scope and order of work. It replaces the short plan given in the first session message.
+This file is the single source of truth for Kelpie's scope, priorities and order of work. Requirements come from incidents on a real agent farm (named here only by what happened, never by project) and from field evidence on other farms.
 
 ## Summary
 
@@ -163,26 +163,13 @@ Metrics: tasks per hour per role, task time by stage (queue, review, waiting for
 
 Nous may close stale task claims in Hermes itself ([issue #22926](https://github.com/NousResearch/hermes-agent/issues/22926)), and Anthropic already covers visibility for Claude Code. Kelpie's value is therefore in logic over the task graph and automatic repair, not in a basic watchdog timer.
 
-## Budget: $250 of cloud session credit, then the subscription
+## How Kelpie is built
 
-The credit goes to building Kelpie in Claude Code cloud sessions: it is spent first, does not count against subscription limits, and expires on November 5 ([docs](https://code.claude.com/docs/en/claude-code-on-the-web)). Week 1 was done by Oct 15 for $112 against $100 planned; the overrun went mostly into review passes that found real security blockers. Budget is no longer the constraint — scope is. Once the credit is spent, development continues on the subscription until the open core is complete.
-
-| Phase | What we build | Paid from |
-| --- | --- | --- |
-| Week 1 (done Oct 15) | Engine safety (A–D), core, traces and checkpoints, Hermes adapter, rules 1–4 | credit, $112 |
-| Week 2 | Rules 5–7, 9–11, budgets and spend, resource reading via Prometheus, condition connectors, live run on our farm | credit |
-| Week 3 | "Cost of chaos" report with dollars, basic token optimization, throughput metrics, documentation | credit, then subscription |
-| After the credit | The rest of the open core, in this order: stop patterns and `kelpie why`, rule 13, evidence for "done", full token optimization, Claude Code adapter, return causes, LLM root-cause section | subscription |
-| Paid tier | Not planned: Kelpie stays free and open source for now | — |
-
-On the subscription, development sessions share limits with any farm that runs on the same subscription: run them when the farm is idle, or use a separate account.
-
-- **Repository:** `CLAUDE.md` with the architecture (core and adapters) and coding rules; roles in `.claude/agents/`.
-- **Environment:** the setup script installs dependencies in under about 5 minutes; fixtures are synthetic versions of the real farm incidents.
-- **One task — one branch, one PR.** The plan lives in the repo.
-- **Verification:** ruff, import-linter and pytest in CI on every PR; a clean-context reviewer agent runs before a PR is opened.
-- **Economy:** routine work on a smaller model, the core and "wait for condition" on the top model; no more than 2–3 parallel sessions; no waiting inside a session; WIP pushes go to draft PRs, which do not trigger CI.
-- **No:** Projects and Routines are not covered by the credit ([source](https://pasqualepillitteri.it/news/17932/claude-code-sessioni-cloud-credito-250-dollari)).
+- **Repository:** `CLAUDE.md` holds the architecture (core and adapters) and coding invariants; roles live in `.claude/agents/`.
+- **One task — one branch, one PR.** The plan and the backlog (`docs/roadmap.md`) live in the repo.
+- **Verification:** ruff, import-linter and pytest on every PR, an end-to-end job on a simulated farm, and a clean-context reviewer agent before a PR is opened; changes that touch secrets get two review passes.
+- **Live validation:** every rule runs in `observe` on a real farm first, then `suggest`, and reaches `act` only through the gate in `docs/act-checklist.md`.
+- **Kelpie is free and open source.** There is no paid tier.
 
 ## Out of scope
 
@@ -197,7 +184,7 @@ To keep the scope focused, Kelpie does not build what already exists or is not n
 | Kelpie as an LLM agent | Control is rules and code; LLM only for root-cause analysis |
 | Hosting, SOC 2, enterprise sales, paid tier, paid audits | Kelpie is free and open source for now |
 
-## Three-week plan
+## Plan and status
 
 Three weeks, three steps: the core with traces and the first adapter, the full rule set, then the report with optimization and publication.
 
@@ -221,7 +208,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Condition connectors: GitHub and CI, LLM provider quotas, human tasks
 - [ ] Run on our own farm and record every rule trigger
 
-**Week 3, Oct 29 – Nov 4** (the credit expires on Nov 5)
+**Week 3, Oct 29 – Nov 4**
 
 - [ ] Daily "cost of chaos" report with dollars, cost per completed task, and before/after verification of fixes
 - [ ] Token savings that act: rule 12 (conflict warning), dispatch gate, huge tool outputs
@@ -233,4 +220,4 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Documentation and publication of the open core
 - [ ] 10 conversations with farm owners
 
-Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1 item (the rules backlog, `kelpie why`, the Claude Code adapter, return causes, the LLM root-cause section, the naming check) follows weeks 2–3 on the subscription, in the order given in the budget table.
+Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1 item (the rules backlog, `kelpie why`, the Claude Code adapter, return causes, the LLM root-cause section, the naming check) follows weeks 2–3, in the order of the backlog in `docs/roadmap.md`.
