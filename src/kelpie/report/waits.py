@@ -7,10 +7,11 @@
 2. the kind of an unmet condition it waits on: ``people`` (``human_task``), ``ci``
    (``ci_status``), ``merge`` (``pr_merged``), ``quota`` (``quota_reset``), ``tasks``
    (``task_status``), ``timer`` (``time``), ``other`` (``custom``). The condition its block
-   names wins, then its unmet conditions (a red or pending CI before the merge it holds
-   up); else a ``[[block_conditions]]`` pattern its block reason matches (CI or a merge,
-   by the pattern's kind: the report checks no PR). A merge wait is "PRs to pass checks
-   and merge", never "merges": offline the report cannot tell a red CI from a slow merge;
+   names wins, then its unmet conditions (a CI found red comes before the merge of the
+   same PR it holds up; an unchecked CI is not known red, so the merge stays); else a
+   ``[[block_conditions]]`` pattern its block reason matches (CI or a merge, by the
+   pattern's kind: the report checks no PR). A merge wait is "PRs to pass checks and
+   merge", never "merges": offline the report cannot tell a red CI from a slow merge;
 3. ``people``: a rule 13 alert of the day listed it as an approval or as parked on a
    person's human task;
 4. the kind of its last condition, met by now;
@@ -147,7 +148,6 @@ class Outage:
     repos: frozenset[str] = frozenset()  # lower-case owner/name
     prs: frozenset[str] = frozenset()  # lower-case owner/name#N
     tasks: frozenset[str] = frozenset()
-    signature: str | None = None
 
 
 def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[Outage]:
@@ -171,7 +171,6 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
                 repos=frozenset(r.lower() for o in mine for r in o.repos),
                 prs=frozenset(p.lower() for o in mine for p in o.prs),
                 tasks=frozenset(t for o in mine for t in o.tasks),
-                signature=mine[-1].signature if mine else None,
             )
         )
     return out
@@ -219,7 +218,11 @@ class WaitCauses:
 
     def split(self, task: Task, a: datetime, b: datetime) -> dict[str, float]:
         """Hours of the task's wait in ``[a, b)`` by cause: the part an open CI outage
-        explains counts under ``ci_outage``, the rest under the task's own cause."""
+        explains counts under ``ci_outage``, the rest under the task's own cause. A hold is
+        deliberate: a held task's wait stays the hold's, outage or not."""
+        total = (b - a).total_seconds() / 3600
+        if self._labels.intersection(task.labels):
+            return {"hold": total}
         spans = sorted(
             (max(a, o.since), min(b, o.until))
             for o in self._outages
@@ -231,7 +234,6 @@ class WaitCauses:
             if hi > lo:
                 covered += (hi - lo).total_seconds() / 3600
                 reach = hi
-        total = (b - a).total_seconds() / 3600
         out: dict[str, float] = {}
         if covered > 0:
             out[CI_OUTAGE] = covered
@@ -263,12 +265,17 @@ class WaitCauses:
 
         last = max(mine, key=rank) if mine else None
         if last is not None and last.satisfied is not True:
-            if last.kind is ConditionKind.PR_MERGED:  # a red or pending CI comes first
-                ci = [
-                    c for c in mine if c.kind is ConditionKind.CI_STATUS and c.satisfied is not True
+            if last.kind is ConditionKind.PR_MERGED:  # a red CI of that PR comes first
+                ref = (last.params.get("repo"), last.params.get("pr"))
+                red = [
+                    c
+                    for c in mine
+                    if c.kind is ConditionKind.CI_STATUS
+                    and c.satisfied is False
+                    and (c.params.get("repo"), c.params.get("pr")) == ref
                 ]
-                if ci:
-                    return max(ci, key=rank)
+                if red:
+                    return max(red, key=rank)
             return last
         return self._declared(task) or last
 
@@ -283,7 +290,7 @@ class WaitCauses:
                 continue  # as the GitHub step: a match must name a PR
             ref = _REPO_IN_REF.search(m["pr"])
             repo = ref.group(1).lower() if ref else b.repo
-            number = re.search(r"(\d+)\s*$", m["pr"])
+            number = re.search(r"(\d+)$", m["pr"].strip().rstrip(".,;:)]"))
             params: dict[str, object] = {"repo": repo} if repo else {}
             if number:
                 params["pr"] = int(number.group(1))

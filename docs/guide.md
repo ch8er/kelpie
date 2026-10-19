@@ -248,7 +248,7 @@ report; no LLM is involved.
   timers; a red CI comes before the merge it holds up), else a person when rule 13 listed
   it that day (an approval, parked on a human task), else unknown. While rule 9's CI outage
   incident is open, the waits it explains (tasks it names, CI and merge waits in its
-  repositories) count under "a CI outage" for that time. The
+  repositories) count under "a shared CI failure" for that time (a held task's wait stays the hold's). The
   report makes no network calls: it runs the connector steps that read only the board
   (`task_status`, human tasks from block reasons), and a block reason a
   `[[block_conditions]]` pattern matches counts as a CI or merge wait by the pattern's kind,

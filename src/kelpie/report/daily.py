@@ -478,7 +478,9 @@ def wait_causes(inputs: ReportInputs, start: datetime, end: datetime) -> WaitCau
     """What each task of the board waited for (:mod:`kelpie.report.waits`), from the day's
     ledger entries (rule 13 re-records an open inbox about hourly)."""
     entries = [e for e in inputs.actions if start <= e.at < end]
-    found = outages([row.state for row in inputs.states], entries)
+    # Rule 9 writes an outage's scope at most hourly: an outage open since yesterday may
+    # have its only sample before midnight, so read every entry loaded before the end.
+    found = outages([row.state for row in inputs.states], [e for e in inputs.actions if e.at < end])
     return WaitCauses(inputs.conditions, entries, inputs.hold_labels, inputs.block_kinds, found)
 
 

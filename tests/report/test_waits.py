@@ -337,10 +337,16 @@ def outage_sample(when: datetime, state: str = SID, **scope: Any) -> LedgerEntry
 def test_a_red_ci_comes_before_the_merge_it_holds_up() -> None:
     t = Task("M1", "m", Status.WAITING, at(8))
     both = (
-        Condition("ci", ConditionKind.CI_STATUS, "M1", {"repo": "x/y"}, registered_at=at(1)),
-        Condition("mg", ConditionKind.PR_MERGED, "M1", {"repo": "x/y"}, registered_at=at(2)),
-    )
-    assert WaitCauses(both, ())(t) == "ci"
+        Condition("ci", ConditionKind.CI_STATUS, "M1", {"repo": "x/y", "pr": 4},
+                  registered_at=at(1), satisfied=False),
+        Condition("mg", ConditionKind.PR_MERGED, "M1", {"repo": "x/y", "pr": 4},
+                  registered_at=at(2)),
+    )  # fmt: skip
+    assert WaitCauses(both, ())(t) == "ci"  # found red: CI
+    unchecked = (replace(both[0], satisfied=None), both[1])
+    assert WaitCauses(unchecked, ())(t) == "merge"  # not known red
+    other_pr = (replace(both[0], params={"repo": "x/y", "pr": 5}), both[1])
+    assert WaitCauses(other_pr, ())(t) == "merge"  # another PR's CI
     green = (replace(both[0], satisfied=True), both[1])
     assert WaitCauses(green, ())(t) == "merge"
     from kelpie.report.waits import WAIT_CAUSES
@@ -362,7 +368,6 @@ def test_waits_inside_a_ci_outage_count_under_it() -> None:
     ]
     [o] = outages([state], samples)
     assert o.repos == {"example/app"} and o.tasks == {"N1", "N2"} and o.prs == {"example/lib#7"}
-    assert o.signature == "ci.yml > build > Select toolchain"
     of = WaitCauses((ci("R1"), ci("L1", repo="example/lib"), ci("L2", repo="example/lib")),
                     samples, (), (), [o])  # fmt: skip
     r1 = waiting("R1", "reviewer")  # waits on CI in the outage's repository
@@ -385,3 +390,58 @@ def test_the_report_headlines_a_ci_outage() -> None:
     assert wait.hours == pytest.approx(3 * 12)  # R1-R3 from 08:00 to 20:00 (R4's CI is green)
     markdown = render_markdown(report)
     assert "waiting for a shared CI failure" in markdown and "fix the shared failure" in markdown
+
+
+def test_overlapping_outages_count_each_hour_once() -> None:
+    from kelpie.report.waits import CI_OUTAGE, Outage
+
+    repos = frozenset({"example/app"})
+    spans = [(at(2), at(10)), (at(4), at(6)), (at(5), at(12)), (at(-5), at(1))]
+    of = WaitCauses((ci("R1"),), (), (), (), [Outage(a, b, repos) for a, b in spans])
+    split = of.split(waiting("R1", "reviewer"), at(0), at(24))
+    assert split == {CI_OUTAGE: pytest.approx(1 + 10), "ci": pytest.approx(13)}
+    late = WaitCauses((ci("R1"),), (), (), (), [Outage(at(20), at(30), repos)])
+    assert late.split(waiting("R1", "reviewer"), at(18), at(24)) == {
+        CI_OUTAGE: pytest.approx(4),
+        "ci": pytest.approx(2),
+    }
+
+
+def test_a_held_task_waits_for_its_hold_during_an_outage() -> None:
+    from kelpie.report.waits import Outage
+
+    o = Outage(at(0), at(24), frozenset({"example/app"}), tasks=frozenset({"R1"}))
+    of = WaitCauses((ci("R1"),), (), ("freeze",), (), [o])
+    held = waiting("R1", "reviewer", labels=("freeze",))
+    assert of.split(held, at(8), at(12)) == {"hold": pytest.approx(4)}
+
+
+def test_an_outage_open_since_yesterday_keeps_its_scope_after_midnight() -> None:
+    # opened 22:00 the day before, its only sample at 23:40, last seen 00:30
+    state = outage_state(SID, at(-2), at(0.5))
+    before = outage_sample(at(-0.33), repos=("example/app",))
+    lone = (waiting("R1", "reviewer"),)
+    report = build_report(
+        inputs(tasks=lone, sessions=(), conditions=(ci("R1"),), states=(state,), actions=(before,)),
+        sections={},
+    )
+    assert report.biggest_wait is not None and report.biggest_wait.cause == "ci"
+    from kelpie.report.daily import wait_causes
+    from kelpie.report.waits import CI_OUTAGE
+
+    causes = wait_causes(inputs(states=(state,), actions=(before,)), at(0), at(24))
+    assert causes.split(lone[0], at(0), at(1)) == {
+        CI_OUTAGE: pytest.approx(0.5),
+        "ci": pytest.approx(0.5),
+    }
+
+
+def test_block_reason_prs_ending_in_punctuation() -> None:
+    import re
+
+    from kelpie.report.waits import BlockKind
+
+    kinds = (BlockKind(re.compile(r"CI of (?P<pr>\S+)", re.I), ConditionKind.CI_STATUS, "x/y"),)
+    task = Task("B", "b", Status.BLOCKED, at(8), block=Block("waiting for CI of #12).", at(8)))
+    found = WaitCauses((), (), (), kinds).condition(task)
+    assert found is not None and found.params == {"repo": "x/y", "pr": 12}

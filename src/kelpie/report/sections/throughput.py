@@ -139,6 +139,7 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         "first pickup is left out (a lower bound); the board only looks back so far "
         "(Hermes `lookback`), and a session with no end or heartbeat counts until midnight. "
         "A task's waiting time counts under what it waits (or last waited) for now: a hold "
-        "label, a person (rule 13), else the kind of its condition.",
+        "label, a person (rule 13), else the kind of its condition; the part inside an open "
+        "CI outage (rule 9) counts under the outage.",
     ]
     return Section(TITLE, tuple(lines))
