@@ -5,10 +5,11 @@ from __future__ import annotations
 import dataclasses
 import re
 import types
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from enum import Enum
 from functools import cache
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from kelpie.core import model
 from kelpie.core.model import Snapshot
@@ -58,6 +59,12 @@ def _convert(tp: Any, value: Any) -> Any:
     if origin is tuple:
         (item_tp, _) = get_args(tp)
         return tuple(_convert(item_tp, v) for v in value)
+    if origin is Mapping:  # Snapshot.snoozes: by task id
+        return types.MappingProxyType(_keyed(get_args(tp)[1], value))
+    if origin is Literal:
+        if value not in get_args(tp):
+            raise ValueError(f"must be one of {list(get_args(tp))}, got {value!r}")
+        return value
     if origin is dict or tp is Any:
         return value
     if tp is datetime:
@@ -69,6 +76,22 @@ def _convert(tp: Any, value: Any) -> Any:
     if dataclasses.is_dataclass(tp):
         return from_dict(tp, value)
     return value
+
+
+def _keyed(value_tp: Any, value: Any) -> dict[str, Any]:
+    """A mapping of model objects keyed by their ``task_id`` (``Snapshot.snoozes``): every
+    entry a mapping itself, and its key the object's own ``task_id``."""
+    if not isinstance(value, dict):
+        raise ValueError(f"must be a mapping by task id, got {type(value).__name__}")
+    out: dict[str, Any] = {}
+    for key, raw in value.items():
+        if not isinstance(raw, dict):
+            raise ValueError(f"{key}: must be a mapping, got {type(raw).__name__}")
+        item = _convert(value_tp, raw)
+        if getattr(item, "task_id", key) != key:
+            raise ValueError(f"{key}: task_id is {item.task_id!r}, not the key")
+        out[key] = item
+    return out
 
 
 def from_dict[T](cls: type[T], data: dict[str, Any]) -> T:

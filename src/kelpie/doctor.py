@@ -63,8 +63,10 @@ from kelpie.connectors.github.connector import (
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import Status
 from kelpie.core.ports import PlatformAdapter
+from kelpie.core.snooze import marker_snooze
 from kelpie.core.spend import SpendMode
 from kelpie.resources.prometheus import PrometheusClient, QueryError
+from kelpie.snooze import local_board
 
 FRESH = timedelta(hours=1)  # newest spool line or span must be younger than this
 MAX_WORKTREES = 20  # git is asked about at most this many workspaces
@@ -535,6 +537,39 @@ def check_pr_blocks(settings: Settings, adapter: HermesAdapter, now: datetime) -
             "for bare #N, and list every repository agents push to",
         )
     return _pass(name, f"{found}; every one names a PR [[block_conditions]] can check")
+
+
+def check_snooze_markers(settings: Settings, now: datetime) -> Check:
+    """``until:`` markers in block reasons that ``kelpie serve`` ignores: not a valid date,
+    or ending more than ``[snooze] marker_max_days`` after the block was set. Serve logs each
+    once; here they are counted on every local board (the issue trackers, GitHub issues and
+    Linear, read over the network, are left out), so a typo does not leave a deliberate
+    wait alerting unnoticed."""
+    name = "snooze markers parse"
+    if not settings.snooze.marker:
+        return _skip(name, "[snooze] marker = false (markers are off)")
+    board = local_board(settings, now)
+    if isinstance(board, str):
+        return _skip(name, board)
+    bad: dict[str, list[str]] = {}
+    found = 0
+    for task in board.tasks:
+        snooze, problems = marker_snooze(task, now, settings.snooze)
+        found += snooze is not None
+        for p in problems:
+            bad.setdefault(task.id, []).append(f"{p.token}: {p.why}")
+    if not bad:
+        return _pass(name, f"{found} block reason(s) carry a valid until: marker")
+    named = sorted(bad, key=_natural)
+    first = named[0]
+    return _warn(
+        name,
+        f"{sum(len(v) for v in bad.values())} marker(s) ignored in {len(named)} block "
+        f"reason(s) ({_named(named)}); {first}: {bad[first][0]}",
+        "write until:YYYY-MM-DD (through that day) or until:YYYY-MM-DDTHH:MM, in [report] "
+        "timezone unless an offset follows, at most [snooze] marker_max_days after the block; "
+        "or snooze the task with kelpie snooze",
+    )
 
 
 def _names_a_pr(reason: str) -> bool:
@@ -1044,6 +1079,7 @@ def run_checks(
     checks.append(
         _skip(pr_blocks, why) if adapter is None else check_pr_blocks(settings, adapter, at)
     )
+    checks.append(check_snooze_markers(settings, at))
     checks += cc_checks
     checks += oc_checks
     checks += gi_checks

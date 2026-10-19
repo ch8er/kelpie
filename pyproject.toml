@@ -98,6 +98,7 @@ source_modules = [
     "kelpie.remote",
     "kelpie.doctor",
     "kelpie.why",
+    "kelpie.snooze",
 ]
 forbidden_modules = ["kelpie.sim", "kelpie.demo"]
 

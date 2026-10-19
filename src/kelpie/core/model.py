@@ -6,10 +6,12 @@ read-only input; they never mutate it and never perform I/O.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Literal
 
 
 class Status(StrEnum):
@@ -583,6 +585,35 @@ class OutputOffender:
     recent_tasks: tuple[str, ...] = ()  # tasks of its unfiltered calls, the latest first
 
 
+# Where a snooze came from: ``kelpie snooze`` (cli), a reply to an alert (chat), or an
+# ``until:`` marker in the block reason (marker; read from the board, never stored).
+SnoozeSource = Literal["cli", "chat", "marker"]
+
+
+@dataclass(frozen=True, slots=True)
+class Snooze:
+    """A person acknowledged that a task waits on purpose until ``until`` (a deliberate
+    wait: a decision deferred to a release, a manual pass planned for a date). Rules may
+    hold repeat alerts on it while it is active, list it, and alert again once it expires
+    or the work behind it grows past ``behind_at_snooze`` (tasks waiting behind it when it
+    was set; None when unknown). One per task: a new one replaces the old."""
+
+    task_id: str
+    until: datetime
+    reason: str | None
+    by: str | None
+    created_at: datetime
+    source: SnoozeSource = "cli"
+    behind_at_snooze: int | None = None
+
+    def active(self, now: datetime) -> bool:
+        return now < self.until
+
+
+def _no_snoozes() -> Mapping[str, Snooze]:
+    return MappingProxyType({})
+
+
 @dataclass(frozen=True, slots=True)
 class Snapshot:
     """Everything a rule may look at, captured at ``now``."""
@@ -635,6 +666,11 @@ class Snapshot:
     # opens it on, so a reading near the threshold does not flap (hysteresis). Observe-mode
     # states count too: observe shadows what act would do.
     open_states: tuple[str, ...] = ()
+    # Snoozes by task id, filled when the snapshot is assembled on the server (never from an
+    # agent's board): the stored ones (``kelpie snooze``, chat) and ``until:`` markers in
+    # block reasons, a stored one winning over a marker. Active ones and those that expired
+    # within the last 7 days; :func:`active_snooze` tells them apart.
+    snoozes: Mapping[str, Snooze] = field(default_factory=_no_snoozes)
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -670,3 +706,9 @@ class Snapshot:
             index = {k: tuple(v) for k, v in grouped.items()}
             object.__setattr__(self, "_spans_by_session", index)
         return index.get(session_id, ())
+
+
+def active_snooze(snapshot: Snapshot, task_id: str) -> Snooze | None:
+    """The task's snooze while it is active (``snapshot.now`` before its ``until``)."""
+    snooze = snapshot.snoozes.get(task_id)
+    return snooze if snooze is not None and snooze.active(snapshot.now) else None

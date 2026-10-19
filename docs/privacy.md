@@ -18,6 +18,7 @@ keep less. It describes the code as it is; the files named below are the referen
 | Provider cost reports (optional) | per provider and UTC day: the token cost per model (Anthropic) or the day's total (OpenAI), in USD | workspaces, projects, API keys, users, line items | `kelpie.db`, table `cost_reports` | 90 days |
 | Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
+| Snoozes | task id, until, the reason (500 characters) and who set it (`--by`, default the OS user name; 100 characters) of `kelpie snooze` | | `kelpie.db`, table `snoozes` | 30 days after it expires |
 | Daily reports | the report as Markdown | | `[report] dir` | not pruned |
 | LLM root-cause section (optional) | the report's aggregates, sent to the configured model (tasks and people as pseudonyms) | titles, task ids, block reasons, alert texts, commands, tool output, fix notes, roles, names | the provider (or `base_url`) | the provider's terms |
 | Forwarded traces | nothing; requests pass through memory | | queue in memory | until sent or dropped |
@@ -286,6 +287,8 @@ quote parts of it (see the next section).
   and token counts. Written to `[report] dir` when set; with `--send` a short summary goes to
   the alert channels.
 - **Recorded fixes** (`kelpie fix`) keep the note you type.
+- **Snoozes** (`kelpie snooze`) keep the reason you type and who set it (`--by`, by default
+  the OS user name), until 30 days after they expire.
 
 ## LLM root-cause section
 

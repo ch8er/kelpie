@@ -34,6 +34,7 @@ from kelpie.adapters.issues.config import (
     load_github_issues,
     load_linear,
 )
+from kelpie.adapters.openclaw.adapter import OpenClawAdapter
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
@@ -65,6 +66,7 @@ from kelpie.core.model import (
     Reconciliation,
     ReportedCost,
     Snapshot,
+    Snooze,
     SpanKind,
 )
 from kelpie.core.ports import (
@@ -82,6 +84,7 @@ from kelpie.core.ports import (
 from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
+from kelpie.core.snooze import MarkerProblem, SnoozeSettings, load_snooze, with_snoozes
 from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.spend import (
     Estimate,
@@ -201,6 +204,7 @@ class Settings:
     report: ReportSettings = field(default_factory=ReportSettings)  # [report]
     agent: AgentSettings | None = None  # [agent]: this host runs ``kelpie agent``
     hub: HubSettings | None = None  # [hub]: ``kelpie serve`` takes reports from agents
+    snooze: SnoozeSettings = field(default_factory=SnoozeSettings)  # [snooze]
 
     @property
     def spend(self) -> SpendConfig:
@@ -241,6 +245,7 @@ def load_settings(path: Path | None) -> Settings:
         "report",
         "agent",
         "hub",
+        "snooze",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -280,6 +285,7 @@ def load_settings(path: Path | None) -> Settings:
         alerts = load_alerts(data.get("alerts"), report.task_url)
         agent = load_agent(data.get("agent"))
         hub = load_hub(data.get("hub"))
+        snooze = load_snooze(data.get("snooze"), report.tz)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     return Settings(
@@ -304,6 +310,7 @@ def load_settings(path: Path | None) -> Settings:
         report=report,
         agent=agent,
         hub=hub,
+        snooze=snooze,
     )
 
 
@@ -795,6 +802,7 @@ def merged_snapshot(
     providers: ProviderReader | None = None,
     offenders: OffenderWatch | None = None,
     remote: Callable[[datetime], Snapshot] | None = None,
+    snoozes: SnoozeReader | None = None,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
 
@@ -819,7 +827,9 @@ def merged_snapshot(
     tick goes on without them. With ``providers``, LLM provider statuses and limit hits are
     added (before budgets, which forecast from the hits), under the same rule. With
     ``offenders``, repeated huge-output offenders (rule ``output_offenders``) are added,
-    recomputed hourly from the span store; a failed read is logged and counted.
+    recomputed hourly from the span store; a failed read is logged and counted. With
+    ``snoozes``, ``Snapshot.snoozes`` is filled on the merged board (the agents' boards
+    included: an agent never sends snoozes), from the store and the block reasons' markers.
     """
     last = _LastBudgets()
 
@@ -871,6 +881,8 @@ def merged_snapshot(
             except Exception as exc:
                 log.error("connector %s failed to update the snapshot: %s", name, exc)
                 metrics.connector_failed(name)
+        if snoozes is not None:
+            merged = snoozes.apply(merged)
         if spans is not None:
             try:
                 stored, totals = spans.spans(now), spans.totals(now)
@@ -916,6 +928,64 @@ def merged_snapshot(
         return merged
 
     return source
+
+
+@dataclass(slots=True)
+class SnoozeReader:
+    """Fills ``Snapshot.snoozes`` on a tick: the snoozes ``stored`` gives for ``now`` (the
+    database; None: markers only) and the ``until:`` markers in block reasons (with
+    ``[snooze] marker``). A store that fails to read is logged once until it reads again,
+    and the tick goes on with the last snoozes it read (an expired one still drops out); an
+    ignored marker is logged once per task and token. ``prune``, when set, deletes
+    long-expired snoozes at most every ``prune_every``; a failed prune is logged and does not
+    keep the snoozes from being read. No metric counts these failures: the span store's and
+    the connectors' counters are theirs, and a snooze read is one query on the ledger's own
+    connection."""
+
+    settings: SnoozeSettings
+    stored: Callable[[datetime], Mapping[str, Snooze]] | None = None
+    prune: Callable[[datetime], int] | None = None
+    prune_every: timedelta = timedelta(hours=1)
+    _pruned_at: datetime | None = field(default=None, init=False)
+    _warned: set[tuple[str, str]] = field(default_factory=set, init=False)
+    _last: Mapping[str, Snooze] = field(default_factory=dict, init=False)
+    _failing: bool = field(default=False, init=False)
+
+    def apply(self, snapshot: Snapshot) -> Snapshot:
+        now = snapshot.now
+        if self.stored is not None:
+            if self.prune is not None and (
+                self._pruned_at is None or now - self._pruned_at >= self.prune_every
+            ):
+                self._pruned_at = now
+                try:
+                    self.prune(now)
+                except Exception as exc:
+                    log.error("snooze store failed to prune: %s", exc)
+            try:
+                self._last = self.stored(now)
+            except Exception as exc:
+                if not self._failing:
+                    log.error("snooze store failed to read, keeping the last snoozes: %s", exc)
+                self._failing = True
+            else:
+                self._failing = False
+        merged, problems = with_snoozes(snapshot, self._last, self.settings)
+        self._warn(problems)
+        return merged
+
+    def _warn(self, problems: Sequence[MarkerProblem]) -> None:
+        for p in problems:
+            if (p.task_id, p.token) not in self._warned:
+                self._warned.add((p.task_id, p.token))
+                log.warning("task %s: snooze marker %r ignored: %s", p.task_id, p.token, p.why)
+
+
+def snooze_reader(settings: Settings, store: LedgerStore) -> SnoozeReader:
+    """The snooze reader of ``kelpie serve``: stored snoozes when the ledger is SQLite."""
+    if isinstance(store, SqliteLedgerStore):
+        return SnoozeReader(settings.snooze, store.load_snoozes, store.prune_snoozes)
+    return SnoozeReader(settings.snooze)
 
 
 @dataclass(slots=True)
@@ -986,6 +1056,16 @@ def build_adapters(settings: Settings) -> list[PlatformAdapter]:
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
     return adapters
+
+
+def board_only(adapter: PlatformAdapter) -> PlatformAdapter:
+    """``adapter`` reading its board alone: tasks, blocks and dependencies, without the
+    spool, git or process checks a tick also runs (``kelpie snooze``, ``kelpie doctor``)."""
+    if isinstance(adapter, hermes.HermesAdapter):
+        return replace(adapter, git_state=False, spool=None, tools=None)
+    if isinstance(adapter, OpenClawAdapter):
+        return replace(adapter, spool=None)
+    return adapter
 
 
 @dataclass(slots=True)
@@ -1326,6 +1406,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             enrich=enrich,
             providers=quotas,
             remote=remote,
+            snoozes=snooze_reader(settings, store),
         )
         loop = ControlLoop(engine, source, metrics)
         app = App(
@@ -1387,6 +1468,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         providers=quotas,
         offenders=OffenderWatch(span_store, traces.outputs, settings.report.tz),
         remote=remote,
+        snoozes=snooze_reader(settings, store),
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     alerts = _start_alerts(settings, engine, metrics)

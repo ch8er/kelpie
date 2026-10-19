@@ -140,6 +140,7 @@ SIMULATOR_FREE = (
     "remote",
     "doctor.py",
     "why.py",
+    "snooze.py",
     "cli.py",  # the demo command imports it lazily, inside the command
 )
 

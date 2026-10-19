@@ -1,4 +1,4 @@
-"""SQLite persistence: the action ledger, long-lived alert states and trace spans.
+"""SQLite persistence: the action ledger, long-lived alert states, snoozes and trace spans.
 
 The database runs in WAL mode so readers (``kelpie status``, the report) do not block the
 control loop. The ledger store shares one connection across threads behind a lock. Each
@@ -19,12 +19,13 @@ import threading
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
-from kelpie.core.model import ReportedCost, Span, SpanKind, SpanTotals
+from kelpie.core.model import ReportedCost, Snooze, SnoozeSource, Span, SpanKind, SpanTotals
+from kelpie.core.snooze import EXPIRED_KEPT, MAX_BY, MAX_REASON, PRUNE_AFTER
 from kelpie.core.spans import (
     MAX_LINK_DEPTH,
     Attribution,
@@ -186,8 +187,23 @@ CREATE TABLE cost_reports (
 );
 """
 
+# Snoozes (``kelpie snooze``, chat replies): one per task, a new one replaces the old.
+# Markers in block reasons are read from the board and never stored here.
+_V8 = """
+CREATE TABLE snoozes (
+    task_id          TEXT PRIMARY KEY,
+    until_at         TEXT NOT NULL,
+    reason           TEXT,
+    snoozed_by       TEXT,
+    created_at       TEXT NOT NULL,
+    source           TEXT NOT NULL,
+    behind_at_snooze INTEGER
+);
+CREATE INDEX snoozes_until ON snoozes (until_at);
+"""
+
 # version -> script that upgrades from version - 1. Append, never edit a released one.
-MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7}
+MIGRATIONS: dict[int, str] = {1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8}
 SCHEMA_VERSION = max(MIGRATIONS)
 
 _COLUMNS = (
@@ -362,6 +378,80 @@ class SqliteLedgerStore:
                 (_ts(at), state_id),
             )
         )
+
+    # --- snoozes (kelpie snooze, chat) ---------------------------------------------------
+
+    def put_snooze(self, snooze: Snooze) -> None:
+        """Store ``snooze``, replacing the task's previous one. Markers are never stored."""
+        if snooze.source == "marker":
+            raise ValueError("snooze markers are read from the board, not stored")
+        values = (
+            snooze.task_id,
+            _ts(snooze.until),
+            None if snooze.reason is None else snooze.reason.strip()[:MAX_REASON] or None,
+            None if snooze.by is None else snooze.by.strip()[:MAX_BY] or None,
+            _ts(snooze.created_at),
+            snooze.source,
+            snooze.behind_at_snooze,
+        )
+        self._write(
+            lambda db: db.execute(
+                f"INSERT OR REPLACE INTO snoozes ({_SNOOZE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+        )
+
+    def delete_snooze(self, task_id: str) -> bool:
+        """Remove the task's snooze; False when it had none."""
+        sql = "DELETE FROM snoozes WHERE task_id = ?"
+        return self._write(lambda db: db.execute(sql, (task_id,))).rowcount > 0
+
+    def snoozes(self, after: datetime | None = None) -> list[Snooze]:
+        """Stored snoozes whose ``until`` is after ``after`` (None: all), soonest first."""
+        with self._lock:
+            return read_snoozes(self._db, after)
+
+    def load_snoozes(self, now: datetime) -> dict[str, Snooze]:
+        """What a snapshot holds: active snoozes and those expired within ``EXPIRED_KEPT``."""
+        with self._lock:
+            return load_snoozes(self._db, now)
+
+    def prune_snoozes(self, now: datetime) -> int:
+        """Delete snoozes that expired more than ``PRUNE_AFTER`` before ``now``."""
+        sql = "DELETE FROM snoozes WHERE until_at < ?"
+        return self._write(lambda db: db.execute(sql, (_ts(now - PRUNE_AFTER),))).rowcount
+
+
+_SNOOZE_COLUMNS = "task_id, until_at, reason, snoozed_by, created_at, source, behind_at_snooze"
+
+
+def snooze_row(r: sqlite3.Row) -> Snooze:
+    return Snooze(
+        task_id=r["task_id"],
+        until=datetime.fromisoformat(r["until_at"]),
+        reason=r["reason"],
+        by=r["snoozed_by"],
+        created_at=datetime.fromisoformat(r["created_at"]),
+        source=cast(SnoozeSource, r["source"]),
+        behind_at_snooze=r["behind_at_snooze"],
+    )
+
+
+def read_snoozes(db: sqlite3.Connection, after: datetime | None = None) -> list[Snooze]:
+    """Stored snoozes ending after ``after`` (None: all), soonest first; works on a
+    read-only connection (:func:`open_readonly`, ``kelpie why``)."""
+    sql = f"SELECT {_SNOOZE_COLUMNS} FROM snoozes"
+    args: tuple[object, ...] = ()
+    if after is not None:
+        sql += " WHERE until_at > ?"
+        args = (_ts(after),)
+    rows = db.execute(sql + " ORDER BY until_at, task_id", args).fetchall()
+    return [snooze_row(r) for r in rows]
+
+
+def load_snoozes(db: sqlite3.Connection, now: datetime) -> dict[str, Snooze]:
+    """The stored snoozes a snapshot at ``now`` holds, by task id."""
+    return {s.task_id: s for s in read_snoozes(db, now - EXPIRED_KEPT)}
 
 
 def open_state(r: sqlite3.Row) -> OpenState:

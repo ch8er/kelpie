@@ -84,6 +84,24 @@ def test_snapshot_round_trip() -> None:
     assert decode_snapshot(encode_snapshot(snapshot)) == snapshot
 
 
+def test_an_agent_cannot_send_snoozes() -> None:
+    """Snoozes are the server's (its store and its reading of block reasons)."""
+    plain = encode_snapshot(board())
+    entry = {
+        "task_id": "T-1",
+        "until": "2026-03-09T00:00:00+00:00",
+        "reason": None,
+        "by": None,
+        "created_at": "2026-03-02T00:00:00+00:00",
+    }
+    with pytest.raises(ProtocolError, match=r"not accepted from an agent.*snoozes"):
+        decode_snapshot({**plain, "snoozes": {"T-1": entry}})
+    with pytest.raises(ProtocolError, match="snoozes"):
+        decode_snapshot({**plain, "snoozes": {}})
+    snoozed = replace(board(), snoozes={"T-1": None})  # type: ignore[dict-item]
+    assert "snoozes" not in encode_snapshot(snoozed)  # never sent either
+
+
 @pytest.mark.parametrize("path", incidents.all_paths(), ids=lambda p: p.stem)
 def test_fixture_boards_round_trip(path) -> None:
     snapshot = incidents.load(path).snapshot
