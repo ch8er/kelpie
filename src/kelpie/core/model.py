@@ -387,6 +387,24 @@ class BuildStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class Job:
+    """One job of a finished CI build. ``conclusion`` is the CI's word for how it ended
+    (``success``, ``failure``, ``timed_out``, ``cancelled``, ``skipped``...). ``step`` is the
+    first step that did not succeed, when the CI names one. ``runner`` is the machine the
+    job ran on and ``labels`` the runner labels it asked for (e.g. ``self-hosted``, an OS)."""
+
+    name: str
+    conclusion: str
+    step: str | None = None
+    runner: str | None = None
+    labels: tuple[str, ...] = ()
+
+    @property
+    def failed(self) -> bool:
+        return self.conclusion in {"failure", "timed_out"}
+
+
+@dataclass(frozen=True, slots=True)
 class Build:
     """One CI build (a pipeline run for one commit), as a CI connector reports it.
 
@@ -399,7 +417,9 @@ class Build:
     where the CI reports them). ``superseded_by`` is the id of a newer build of the same
     pipeline and branch that started after this one. ``cancellable`` is set by the
     connector: the build is superseded, still active, and within what the connector is
-    configured to cancel; rules only ask to cancel such builds.
+    configured to cancel; rules only ask to cancel such builds. ``jobs`` are the build's
+    jobs once it finished, as the CI reported them; None when the connector did not read
+    them (an active build, a partial job list, or no request budget left).
     """
 
     id: str
@@ -418,6 +438,7 @@ class Build:
     minutes: float = 0.0
     superseded_by: str | None = None
     cancellable: bool = False
+    jobs: tuple[Job, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -317,11 +317,52 @@ def test_minutes_from_jobs_are_read_once() -> None:
         assert gh.paths().count(jobs) == 1
 
 
+def test_a_finished_build_says_which_job_and_step_failed_and_where() -> None:
+    """Rule 9 tells a CI outage from a broken PR by the failing job, step and runner."""
+    with serve() as gh:
+        runs_page(gh, [run(1, 30, status="completed", conclusion="failure"), run(2, 1)])
+        start = iso(NOW - timedelta(minutes=30))
+        steps = [
+            {"name": "Checkout", "conclusion": "success"},
+            {"name": "Select toolchain", "conclusion": "failure"},
+            {"name": "Build", "conclusion": "skipped"},
+        ]
+        failed = {
+            "name": "build-ios",
+            "conclusion": "failure",
+            "started_at": start,
+            "completed_at": start,
+            "steps": steps,
+            "runner_name": "mac-runner-1",
+            "labels": ["self-hosted", "macOS", 7, ""],
+        }
+        passed = {"name": "lint", "conclusion": "success", "steps": "not a list"}
+        jobs = {"total_count": 3, "jobs": [failed, passed, {"name": "no conclusion"}]}
+        gh.reply(f"{RUNS}/1/attempts/1/jobs?per_page=100", jobs)
+        done, active = sorted(ci(gh)(Snapshot(now=NOW)).builds, key=lambda b: b.id)
+        broken, lint = done.jobs or ()
+        assert (broken.name, broken.step, broken.runner) == (
+            "build-ios",
+            "Select toolchain",
+            "mac-runner-1",
+        )
+        assert broken.labels == ("self-hosted", "macOS") and broken.failed
+        assert (lint.name, lint.step, lint.runner, lint.labels, lint.failed) == (
+            "lint",
+            None,
+            None,
+            (),
+            False,
+        )
+        assert active.jobs is None  # an active run's jobs are not read
+
+
 def test_partial_job_list_falls_back_to_wall_clock() -> None:
     with serve() as gh:
         runs_page(gh, [run(1, 30, status="completed", conclusion="success")])
         gh.reply(f"{RUNS}/1/attempts/1/jobs?per_page=100", {"total_count": 200, "jobs": []})
-        assert ci(gh)(Snapshot(now=NOW)).builds[0].minutes == 5.0
+        [build] = ci(gh)(Snapshot(now=NOW)).builds
+        assert build.minutes == 5.0 and build.jobs is None
 
 
 def test_draft_and_changed_paths_from_the_pull_request() -> None:

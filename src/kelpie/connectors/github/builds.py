@@ -24,6 +24,10 @@ Mapping:
   not fit in the budget, the wall-clock time of the run, which overstates parallel jobs
   and understates matrix fan-out; a run list served from the cache because GitHub could
   not be asked is never extrapolated to now;
+- ``jobs``: from the same job list, read once per finished run attempt: each job's name and
+  conclusion, its first step that did not succeed, the runner it ran on and the labels it
+  asked for (rule 9 tells a CI outage from a broken PR by them). None while the run is
+  active, when the list is partial or when the scan's budget for job lists is spent;
 - ``superseded_by``: a newer run of the same workflow, branch, head repository and event,
   and for ``pull_request`` runs the same PR number and base branch, was created after it.
   Only ``push`` and ``pull_request`` runs are marked (never deploys, schedules or manual
@@ -84,7 +88,7 @@ from kelpie.connectors.github import billing as usage
 from kelpie.connectors.github.client import GitHubClient, GitHubError, valid_token
 from kelpie.connectors.github.connector import valid_repo
 from kelpie.core.actions import Action, ActionKind, ActionResult
-from kelpie.core.model import Build, BuildStatus, Resource, ResourceKind, Snapshot
+from kelpie.core.model import Build, BuildStatus, Job, Resource, ResourceKind, Snapshot
 from kelpie.core.serde import parse_datetime, parse_duration
 
 log = logging.getLogger(__name__)
@@ -103,6 +107,9 @@ DEFAULT_POLL = timedelta(minutes=2)
 DEFAULT_RATE_RESERVE = 1000
 MAX_RESERVE_SHARE = 0.2  # of X-RateLimit-Limit: a small limit is not all reserve
 DEFAULT_BRANCH_TTL = timedelta(hours=1)
+_FAILED = frozenset({"failure", "timed_out", "cancelled"})
+MAX_NAME = 200  # characters kept of a job, step, runner or label name
+MAX_LABELS = 10
 MAX_JOB_LOOKUPS = 10  # per scan; the rest use wall-clock minutes until a later scan
 MAX_REMEMBERED = 4096  # run minutes and PR files kept across scans
 MAX_MESSAGE = 200  # characters of a commit message's first line
@@ -379,7 +386,8 @@ class GitHubCI:
         self._rotation = 0
         self._targets: dict[str, _Target] = {}
         self._cancelled: OrderedDict[str, None] = OrderedDict()
-        self._minutes: OrderedDict[tuple[str, int], float] = OrderedDict()
+        # Minutes and jobs per run attempt: a finished attempt does not change.
+        self._jobs: OrderedDict[tuple[str, int], tuple[float, tuple[Job, ...]]] = OrderedDict()
         self._files: OrderedDict[tuple[str, int, str], tuple[str, ...] | None] = OrderedDict()
         self._branches: dict[str, tuple[str, datetime]] = {}  # repo -> default branch, when
         self._failing: set[str] = set()  # repos whose run list failed (logged once)
@@ -574,6 +582,7 @@ class GitHubCI:
         # A stale run list says nothing about now: an active run is measured to its last
         # known update, never extrapolated.
         end = finished or (now if scan.current else updated or started)
+        minutes, jobs = self._run_jobs(scan.repo, run_id, run, status, started, end, tick)
         return Build(
             id=_build_id(scan.repo, run_id),
             source=SOURCE,
@@ -588,10 +597,11 @@ class GitHubCI:
             status=status,
             started_at=started,
             finished_at=finished,
-            minutes=self._run_minutes(scan.repo, run_id, run, status, started, end, tick),
+            minutes=minutes,
+            jobs=jobs,
         )
 
-    def _run_minutes(
+    def _run_jobs(
         self,
         repo: str,
         run_id: int,
@@ -600,19 +610,20 @@ class GitHubCI:
         started: datetime | None,
         end: datetime | None,
         tick: _Tick,
-    ) -> float:
+    ) -> tuple[float, tuple[Job, ...] | None]:
+        """The run's minutes and, once it finished, its jobs (None when not read)."""
         if status in {BuildStatus.QUEUED, BuildStatus.SKIPPED} or started is None or end is None:
-            return 0.0
+            return 0.0, None
         wall = round(max(0.0, (end - started).total_seconds() / 60), 1)
         if status.is_active or status is BuildStatus.UNKNOWN:
-            return wall
+            return wall, None
         attempt = _attempt(run)
         key = (f"{repo}:{run_id}", attempt)
-        if key in self._minutes:
-            self._minutes.move_to_end(key)
-            return self._minutes[key]
+        if key in self._jobs:
+            self._jobs.move_to_end(key)
+            return self._jobs[key]
         if tick.jobs_left <= 0:
-            return wall
+            return wall, None
         tick.jobs_left -= 1
         try:
             path = f"/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs"
@@ -620,18 +631,19 @@ class GitHubCI:
         except GitHubError as exc:
             if exc.kind == "budget":
                 tick.jobs_left = 0
-            return wall
-        jobs = _list(body.get("jobs"))
+            return wall, None
+        listed = _list(body.get("jobs"))
         total = body.get("total_count")
-        if isinstance(total, int) and total > len(jobs):
-            return wall  # not every job visible: the wall clock is the estimate
+        if isinstance(total, int) and total > len(listed):
+            return wall, None  # not every job visible: the wall clock is the estimate
         billed = 0
-        for job in jobs:
+        for job in listed:
             begun, done = _time(job.get("started_at")), _time(job.get("completed_at"))
             if begun and done and job.get("conclusion") != "skipped":
                 billed += max(1, math.ceil((done - begun).total_seconds() / 60))
-        _remember(self._minutes, key, float(billed))
-        return float(billed)
+        found = (float(billed), tuple(j for job in listed if (j := _job(job)) is not None))
+        _remember(self._jobs, key, found)
+        return found
 
     def _pull_info(
         self, repo: str, run: Mapping[str, Any], sha: str | None, tick: _Tick
@@ -769,6 +781,23 @@ def next_reset(now: datetime, day: int) -> datetime:
         return candidate
     year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
     return candidate.replace(year=year, month=month)
+
+
+def _job(job: Mapping[str, Any]) -> Job | None:
+    """A job of the jobs list; its failing step is the first step that did not succeed."""
+    name, conclusion = _str(job.get("name")), _str(job.get("conclusion"))
+    if name is None or conclusion is None:
+        return None
+    steps = (_str(s.get("name")) for s in _list(job.get("steps")) if s.get("conclusion") in _FAILED)
+    step, runner = next(steps, None), _str(job.get("runner_name"))
+    labels = job.get("labels") if isinstance(job.get("labels"), list) else []
+    return Job(
+        name=name[:MAX_NAME],
+        conclusion=conclusion,
+        step=step[:MAX_NAME] if step else None,
+        runner=runner[:MAX_NAME] if runner else None,
+        labels=tuple(x[:MAX_NAME] for x in labels if isinstance(x, str) and x)[:MAX_LABELS],
+    )
 
 
 def _build_id(repo: str, run_id: int) -> str:
