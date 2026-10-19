@@ -315,7 +315,9 @@ class CiEconomy:
                     "changes": changes,
                 }
             )
-        out.sort(key=lambda p: (-p["minutes"], str(p["repo"]), str(p["workflow"])))
+        out.sort(
+            key=lambda p: (-p["minutes"], str(p["repo"]), str(p["workflow"]), str(p["source"]))
+        )
         return out[:_MAX_PIPELINES], len(out)
 
     # --- 2. cancel superseded builds ----------------------------------------------------

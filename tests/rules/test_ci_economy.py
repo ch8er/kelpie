@@ -22,7 +22,7 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.rules import REGISTRY
-from kelpie.rules.ci_economy import CiEconomy, build
+from kelpie.rules.ci_economy import CiEconomy, _Index, build
 from tests.fakes import FakeAlerter, FakeCI
 
 NOW = datetime(2026, 3, 3, 12, tzinfo=UTC)
@@ -485,3 +485,24 @@ def test_the_pipelines_listed_are_capped() -> None:
     (summary,) = CiEconomy(waste_min_minutes=0).evaluate(Snapshot(now=NOW, builds=builds))
     listed = [p["workflow"] for p in summary.params["pipelines"]]
     assert listed == [f"w{n:02d}" for n in range(14, 4, -1)]  # the ten with most to save
+
+
+def test_a_superseded_build_whose_successor_is_unknown_counts_whole_and_a_zero_run_nothing() -> (
+    None
+):
+    rule = CiEconomy(waste_min_minutes=0, cancel_superseded=False)
+    gone = b(
+        "S-1", superseded_by="S-9", status=BuildStatus.RUNNING, minutes=7, finished_at=None
+    )  # S-9 is not in the snapshot: at most all of it
+    instant = b(
+        "Z-1",
+        superseded_by="Z-2",
+        status=BuildStatus.CANCELLED,
+        minutes=4,
+        started_at=NOW - H,
+        finished_at=NOW - H,
+    )
+    newer = b("Z-2", started_at=NOW - 2 * H, changed_paths=("src/a.py",))
+    (summary,) = rule.evaluate(Snapshot(now=NOW, builds=(gone,)))
+    assert summary.params["pipelines"][0]["changes"][0]["minutes"] == 7.0
+    assert rule._saved("superseded", [instant], _Index((instant, newer)), NOW) == 0.0
