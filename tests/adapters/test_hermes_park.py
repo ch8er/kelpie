@@ -310,7 +310,7 @@ def test_too_many_conditions_are_refused() -> None:
 
 def test_unblock_env_never_carries_a_task() -> None:
     env = kanban_env({"HERMES_KANBAN_TASK": "x", "PATH": "/bin", "SECRET": "s"}, Path("/db"))
-    assert env == {"PATH": "/bin", "HERMES_KANBAN_DB": "/db"}
+    assert env == {"PATH": "/bin", "HERMES_KANBAN_DB": "/db", "HERMES_PROFILE_NAME": "kelpie"}
     pinned = kanban_env({}, Path("/db"), "t1", 5)
     assert pinned["HERMES_KANBAN_TASK"] == "t1" and pinned["HERMES_KANBAN_RUN_ID"] == "5"
 
@@ -452,6 +452,25 @@ def test_comment_is_authored_by_kelpie_without_pr_urls(board: Board, cli: tuple[
         make(board, exe).comment("t1", "x")
 
 
+def test_every_command_is_signed_with_the_author(board: Board, cli: tuple[str, Path]) -> None:
+    """Hermes signs a schedule's or unblock's comment with $HERMES_PROFILE_NAME, never with
+    the profile Kelpie's environment names."""
+    exe, log = cli
+    board.task("t1", "ready", NOW - timedelta(hours=1), assignee="dev-1")
+    key = board.path.parent / "wait.key"
+    a = HermesAdapter(
+        db_path=board.path, spool=None, git_state=False, cli=exe, wait_key=key, author="ops-bot"
+    )
+    a.snapshot(datetime.now(UTC))
+    a.wait("t1", CONDS[:1], "conflict")
+    a.requeue("t1", "done")
+    a.comment("t1", "hello")
+    done = calls(log)
+    assert [c["argv"][1] for c in done] == ["schedule", "unblock", "comment"]
+    assert {c["env"]["HERMES_PROFILE_NAME"] for c in done} == {"ops-bot"}  # type: ignore[index]
+    assert done[-1]["argv"][2:4] == ["--author", "ops-bot"]
+
+
 def test_park_survives_events_hermes_writes_afterwards(board: Board, cli: tuple[str, Path]) -> None:
     exe, _ = cli
     board.task("t1", "running", NOW - timedelta(hours=2), assignee="dev-1")
@@ -568,6 +587,7 @@ def test_a_park_that_cannot_be_read_back_is_undone(board: Board, cli: tuple[str,
     with pytest.raises(HermesError, match="not parked"):
         a.wait("t1", CONDS, "r")
     assert [c["argv"][1] for c in calls(log)] == ["schedule", "unblock"]  # type: ignore[index]
+    assert {c["env"]["HERMES_PROFILE_NAME"] for c in calls(log)} == {"kelpie"}  # type: ignore[index]
     assert status(board) == "ready"
 
 

@@ -581,6 +581,9 @@ class HermesAdapter:
     # to Hermes' reaper; ``worker_grace`` seconds between SIGTERM and SIGKILL.
     end_worker: bool = True
     worker_grace: float = DEFAULT_GRACE
+    # The name Kelpie signs its blocks, parks, wakes and comments with (and skips when it
+    # reads comments back): not a profile or a person on the board.
+    author: str = AUTHOR
     # Assignees that are people, not agents (Hermes lowercases profile names).
     human_owners: Collection[str] = ()
     # A comment by one of an entry's relays that opens with its marker records its person's
@@ -1013,7 +1016,7 @@ class HermesAdapter:
                 raw = raw.decode("utf-8", errors="replace")
             text = raw.strip()[:MAX_COMMENT] if isinstance(raw, str) else ""
             author = str(r["author"] or "").strip()
-            if not text or author == AUTHOR:
+            if not text or author == self.author:
                 continue
             if self._human(author):
                 bucket = people
@@ -1359,6 +1362,7 @@ class HermesAdapter:
                 rid,
                 stop_comment(task_id, reason, key=self._stop_key(), now=self.clock()),
                 timeout=self.cli_timeout,
+                author=self.author,
             )
         except HermesCliError as exc:
             # The run may have ended on its own between our read and the command.
@@ -1468,6 +1472,7 @@ class HermesAdapter:
                 timeout=self.cli_timeout,
                 task_id=task_id if pin is not None else None,
                 rid=pin,
+                author=self.author,
             )
         except HermesCliError as exc:
             raise HermesError(str(exc)) from exc
@@ -1488,6 +1493,7 @@ class HermesAdapter:
                 self.db_path,
                 unblock_args(task_id, "Kelpie could not record its park; woken again"),
                 timeout=self.cli_timeout,
+                author=self.author,
             )
         except HermesCliError as exc:
             raise HermesError(
@@ -1530,7 +1536,11 @@ class HermesAdapter:
             )
         try:
             run_kanban(
-                self.cli, self.db_path, unblock_args(task_id, reason), timeout=self.cli_timeout
+                self.cli,
+                self.db_path,
+                unblock_args(task_id, reason),
+                timeout=self.cli_timeout,
+                author=self.author,
             )
         except HermesCliError as exc:
             if (after := self._task_state(task_id)) is not None and after.status != "scheduled":
@@ -1544,7 +1554,11 @@ class HermesAdapter:
         """``hermes kanban comment --author kelpie``; PR URLs are rewritten (park.py)."""
         try:
             run_kanban(
-                self.cli, self.db_path, comment_args(task_id, body), timeout=self.cli_timeout
+                self.cli,
+                self.db_path,
+                comment_args(task_id, body, self.author),
+                timeout=self.cli_timeout,
+                author=self.author,
             )
         except HermesCliError as exc:
             raise HermesError(str(exc)) from exc

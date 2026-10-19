@@ -784,6 +784,14 @@ def test_relayed_comments_never_push_out_a_persons(board: Board) -> None:
     assert not [c for c in task.comments if c.text.endswith("from nobody") and c.human]
 
 
+def test_comments_signed_with_the_configured_author_are_kelpies(board: Board) -> None:
+    board.task("t_1", "review", ago(days=1), assignee="dev")
+    board.comment("t_1", "ops-bot", "BLOCKED: Stopped by Kelpie", ago(hours=1))
+    board.comment("t_1", "kelpie", "a profile named kelpie", ago(minutes=30))
+    (task,) = HermesAdapter(db_path=board.path, spool=None, author="ops-bot").snapshot(NOW).tasks
+    assert [c.author for c in task.comments] == ["kelpie"]
+
+
 def test_a_persons_early_comment_is_never_pushed_out(board: Board) -> None:
     from kelpie.adapters.hermes.adapter import MAX_COMMENTS
 

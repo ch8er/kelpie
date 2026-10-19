@@ -75,6 +75,10 @@ ERROR_TAIL = 300
 BOARD_ENV = "HERMES_KANBAN_DB"
 TASK_ENV = "HERMES_KANBAN_TASK"
 RUN_ENV = "HERMES_KANBAN_RUN_ID"
+# Hermes signs the comment of a block, schedule or unblock with the profile name it
+# reads from here first (hermes_cli.profiles.current_profile_name); ``comment`` takes --author.
+PROFILE_ENV = "HERMES_PROFILE_NAME"
+DEFAULT_AUTHOR = "kelpie"
 # The CLI gets only this much of Kelpie's environment, so Kelpie's own tokens never reach it.
 ENV_EXACT = frozenset({"PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "VIRTUAL_ENV"})
 ENV_PREFIXES = ("LC_", "XDG_", "HERMES_")
@@ -85,6 +89,8 @@ ENV_DENIED = frozenset(
         "HERMES_KANBAN_BOARD",
         "HERMES_KANBAN_HOME",
         "HERMES_DELEGATED_CHILD_CONTEXT",
+        "HERMES_PROFILE",
+        PROFILE_ENV,
         BOARD_ENV,
         TASK_ENV,
         RUN_ENV,
@@ -188,8 +194,11 @@ def _stop_mac(key: bytes, task_id: str, issued: str, nonce: str) -> str:
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
-def cli_env(base: Mapping[str, str], db_path: Path, task_id: str, rid: int) -> dict[str, str]:
-    """The environment of the command: allow-listed variables, the board and the run."""
+def cli_env(
+    base: Mapping[str, str], db_path: Path, task_id: str, rid: int, author: str = DEFAULT_AUTHOR
+) -> dict[str, str]:
+    """The environment of the command: allow-listed variables, the board, the run and the
+    name the block is signed with."""
     env = {
         k: v
         for k, v in base.items()
@@ -198,6 +207,7 @@ def cli_env(base: Mapping[str, str], db_path: Path, task_id: str, rid: int) -> d
     env[BOARD_ENV] = str(db_path)
     env[TASK_ENV] = task_id
     env[RUN_ENV] = str(rid)
+    env[PROFILE_ENV] = author
     return env
 
 
@@ -214,8 +224,9 @@ def block_task(
     *,
     timeout: float = CLI_TIMEOUT,
     environ: Mapping[str, str] | None = None,
+    author: str = DEFAULT_AUTHOR,
 ) -> None:
-    """Run ``hermes kanban block`` for run ``rid`` of ``task_id``.
+    """Run ``hermes kanban block`` for run ``rid`` of ``task_id``, signed ``author``.
 
     Raises :class:`HermesCliError` unless it succeeds (also when the run is no longer the
     task's current run).
@@ -226,7 +237,7 @@ def block_task(
             f"Hermes CLI not found: {cli!r} (set [adapters.hermes] cli)",
             "the Hermes CLI was not found (set [adapters.hermes] cli)",
         )
-    env = cli_env(os.environ if environ is None else environ, db_path, task_id, rid)
+    env = cli_env(os.environ if environ is None else environ, db_path, task_id, rid, author)
     try:
         proc = subprocess.Popen(
             block_command(exe, task_id, comment),

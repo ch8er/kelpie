@@ -169,6 +169,17 @@ def test_stop_blocks_the_task_through_the_cli(board: Board, fake_cli: tuple[str,
     assert env["HERMES_KANBAN_DB"] == str(board.path)  # type: ignore[index]
     # Pinned to exactly this task and run (Hermes then guards on current_run_id).
     assert env["HERMES_KANBAN_TASK"] == "t1" and env["HERMES_KANBAN_RUN_ID"] == str(rid)  # type: ignore[index]
+    assert env["HERMES_PROFILE_NAME"] == "kelpie"  # type: ignore[index]  # the block's author
+
+
+def test_stop_signs_the_block_with_the_configured_author(
+    board: Board, fake_cli: tuple[str, Path]
+) -> None:
+    exe, log = fake_cli
+    rid = running(board)
+    make(board, exe, author="ops-bot").stop(f"hermes-run-{rid}", "loop")
+    (call,) = calls(log)
+    assert call["env"]["HERMES_PROFILE_NAME"] == "ops-bot"  # type: ignore[index]
 
 
 def test_stop_is_idempotent(board: Board, fake_cli: tuple[str, Path]) -> None:
@@ -284,6 +295,7 @@ def test_env_is_an_allow_list_with_board_and_run_pinned(tmp_path: Path) -> None:
         "VIRTUAL_ENV": "/venv",
         "HERMES_HOME": "/profile",
         "HERMES_PROFILE": "coder",
+        "HERMES_PROFILE_NAME": "coder",  # a worker's: never Kelpie's signature
         "HERMES_KANBAN_TASK": "t9",
         "HERMES_KANBAN_RUN_ID": "7",
         "HERMES_KANBAN_DB": "/elsewhere/kanban.db",
@@ -306,11 +318,12 @@ def test_env_is_an_allow_list_with_board_and_run_pinned(tmp_path: Path) -> None:
         "XDG_CONFIG_HOME": "/cfg",
         "VIRTUAL_ENV": "/venv",
         "HERMES_HOME": "/profile",
-        "HERMES_PROFILE": "coder",
         "HERMES_KANBAN_DB": str(tmp_path / "kanban.db"),
         "HERMES_KANBAN_TASK": "t1",
         "HERMES_KANBAN_RUN_ID": "5",
+        "HERMES_PROFILE_NAME": "kelpie",  # Hermes signs the block with it, not "coder"
     }
+    assert cli_env(base, tmp_path / "k.db", "t1", 5, "ops-bot")["HERMES_PROFILE_NAME"] == "ops-bot"
 
 
 def test_kelpie_credentials_do_not_reach_the_cli(

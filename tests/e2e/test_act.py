@@ -105,6 +105,7 @@ def test_runaway_loop_is_stopped_through_the_hermes_cli(farm: Farm) -> None:
         assert (row.status, row.block_kind, row.current_run_id) == ("blocked", "needs_input", None)
         assert farm.board.get_run(rid).outcome == "blocked"
         assert farm.board.comments(task_id)[0].startswith("BLOCKED: Stopped by Kelpie")
+        assert farm.board.comment_authors(task_id) == ["kelpie"]  # not the profile Kelpie runs as
     assert farm.board.get("t_ok").status == "running"
     assert farm.messages("t_ok") == []
     # The task id reaches Slack byte for byte, as a code element a person can copy.
