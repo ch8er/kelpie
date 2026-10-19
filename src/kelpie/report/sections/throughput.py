@@ -28,10 +28,13 @@ def _per_task(spend: Spend, completed: int) -> str:
         return "*none done*"
     if not spend.tokens:
         return "*no spend*"
-    if spend.unpriced_tokens == spend.tokens:
+    if spend.plan_tokens and not spend.billed_tokens:
+        return f"{spend.tokens // completed:,} plan tokens"  # a subscription: no dollars
+    if spend.unpriced_tokens == spend.billed_tokens:
         return "*unpriced*"
     out = f"${spend.usd / completed:,.2f}"
-    return out + (f" +{spend.unpriced_tokens:,} unpriced" if spend.unpriced_tokens else "")
+    out += f" +{spend.unpriced_tokens:,} unpriced" if spend.unpriced_tokens else ""
+    return out + (f" +{spend.plan_tokens:,} plan tokens" if spend.plan_tokens else "")
 
 
 @register_section("throughput")

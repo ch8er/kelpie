@@ -28,12 +28,18 @@ and every session that ``exit_contract`` requeued (it ended without a status, so
 is redone: a restart; a requeue that found nothing to do is not one). Each model call is
 burned at most once: by the first state that covers it (in :data:`CHAOS_CAUSES` order),
 else by a restart, so the chaos never exceeds the day's spend; nested instrumentations are
-not double counted either (:mod:`kelpie.core.spans`). Tokens are priced by ``[prices]``;
-tokens of models without a price are reported as unpriced. In subscription mode there is
-no bill: dollars are an estimate and marked so.
+not double counted either (:mod:`kelpie.core.spans`). Spend follows each provider's spend
+mode (``[spend]``, :mod:`kelpie.core.spend`): with an API key, tokens are dollars, priced by
+``[prices]`` over Kelpie's dated default table for the report's day (a model without a
+price is reported as unpriced); on a subscription there is no bill, so tokens stay tokens
+and are shown as a share of the plan's limit (``limit_tokens`` per ``limit_window``, or
+"limit not configured"), never summed with dollars; a provider whose mode is not set is
+priced and marked "(estimate, mode not set)". Without ``[spend]`` (an older caller) every
+model is billed and subscription budgets mark the dollars as an estimate.
 
-**Cost per completed task.** The day's priced spend divided by the tasks that reached
-``done`` during the day, as the board reports them now.
+**Cost per completed task.** The day's billed spend divided by the tasks that reached
+``done`` during the day, as the board reports them now; on a subscription-only farm, plan
+tokens per completed task.
 
 **Planned waits.** Agent tasks planned for later (rule 13's ``planned``, behind a person's
 open inbox) are listed under "Planned waits" in agent-hours and never counted: they have not
@@ -95,6 +101,7 @@ from kelpie.core.spans import (
     span_key,
     usage,
 )
+from kelpie.core.spend import SpendConfig, SpendMode
 from kelpie.core.states import OpenState
 from kelpie.report import farm, md
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
@@ -260,6 +267,9 @@ class ReportInputs:
     owners: Sequence[Owner] = ()
     sessions: Sequence[Session] = ()
     prices: PriceTable = field(default_factory=PriceTable)
+    # [spend]: each provider's spend mode (dollars, or tokens against a plan's limit). None:
+    # every model is billed and ``estimated`` marks subscription dollars, as before modes.
+    spend: SpendConfig | None = None
     estimated: bool = False  # subscription mode: dollars are an estimate
     outputs: OutputSettings = field(default_factory=OutputSettings)
     attribution: Attribution | None = None
@@ -368,6 +378,9 @@ class DailyReport:
     recommendations: tuple[Advice, ...]
     estimated: bool = False
     priced: bool = True  # False: no [prices] table, dollars unknown
+    # (limit tokens, window) of the providers on a subscription: plan tokens are shown as a
+    # share of it; a provider missing here has no limit configured
+    limits: Mapping[str, tuple[int, timedelta]] = field(default_factory=dict)
     hour_usd: float | None = None
     tz: tzinfo = UTC  # times are shown in the report's time zone
     verifications: tuple[Verification, ...] = ()  # fixes of the day and the day before
@@ -421,7 +434,7 @@ def build_report(
     spans = [s for s in inputs.spans if start <= last_at(s) < end]
     index = {span_key(s): s for s in inputs.spans}
     counted = counted_llm(index, spans)
-    pricer = _Pricer(inputs.prices)
+    pricer = _Pricer(inputs.prices, inputs.spend, inputs.day)
     spend = pricer.price(usage(spans, counted))
     actions = [e for e in inputs.actions if start <= e.at < end]
     chaos = _chaos(inputs, actions, spans, counted, pricer, start, end)
@@ -476,8 +489,9 @@ def build_report(
         offenders=tuple(r for r in filters if r.repeated),
         outputs=tuple(groups[:5]),
         recommendations=advice,
-        estimated=inputs.estimated,
-        priced=bool(inputs.prices.entries),
+        estimated=inputs.estimated if inputs.spend is None else False,
+        priced=_priced(inputs, spend),
+        limits=_limits(inputs.spend, spend),
         hour_usd=inputs.hour_usd,
         tz=inputs.tz,
         verifications=_verifications(inputs, index, start, end),
@@ -652,23 +666,62 @@ def _verifications(
     return tuple(verify(e, evidence) for e in events)
 
 
+def _priced(inputs: ReportInputs, spend: Spend) -> bool:
+    """Whether dollars mean anything: before spend modes, a [prices] table; with them, the
+    billed tokens are not all unpriced (default prices included)."""
+    if inputs.spend is None:
+        return bool(inputs.prices.entries)
+    return not spend.billed_tokens or spend.unpriced_tokens < spend.billed_tokens
+
+
+def _limits(config: SpendConfig | None, spend: Spend) -> dict[str, tuple[int, timedelta]]:
+    out = {}
+    for provider, _ in spend.plans:
+        found = config.limit_for(provider) if config is not None else None
+        if found is not None:
+            out[provider] = found
+    return out
+
+
 class _Pricer:
-    def __init__(self, prices: PriceTable) -> None:
+    """Prices token usage by each provider's spend mode (``spend``; None: every model is
+    billed, as before spend modes): a subscription's tokens are never dollars."""
+
+    def __init__(
+        self, prices: PriceTable, spend: SpendConfig | None = None, day: date | None = None
+    ) -> None:
         self.prices = prices
+        self.spend = spend
+        self.day = day
+
+    def _mode(self, model: str | None) -> tuple[str | None, SpendMode]:
+        if self.spend is None:
+            return None, SpendMode.API
+        provider = self.spend.provider_for(model)
+        return provider, self.spend.mode_for(provider).mode
 
     def price(self, rows: Iterable[TokenUsage]) -> Spend:
         total = Spend()
         for row in rows:
             tokens = row.input_tokens + row.output_tokens
-            found = self.prices.price_for(row.model)
+            provider, mode = self._mode(row.model)
+            if mode is SpendMode.SUBSCRIPTION:
+                plans = ((provider or "unknown", tokens),)
+                total = total + Spend(tokens, 0.0, 0, tokens, plans)
+                continue
+            found = self.prices.price_for(row.model, self.day)
             if found is None:
                 total = total + Spend(tokens, 0.0, tokens)
             else:
-                total = total + Spend(tokens, found.cost(row), 0)
+                usd = found.cost(row)
+                unknown = usd if mode is SpendMode.UNKNOWN else 0.0
+                total = total + Spend(tokens, usd, 0, unknown_usd=unknown)
         return total
 
     def input_usd(self, tokens: int, model: str | None) -> float:
-        found = self.prices.price_for(model)
+        if self._mode(model)[1] is SpendMode.SUBSCRIPTION:
+            return 0.0  # a plan's tokens cost limit, not dollars
+        found = self.prices.price_for(model, self.day)
         return 0.0 if found is None else tokens * found.input / 1_000_000
 
 
@@ -1183,9 +1236,14 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
         ]
     lines += ["", "## Spend", ""]
     note = " (as the board reports them now; adapters only look back so far)"
+    spent = f"{report.spend.tokens:,} tokens, {_usd(report.spend, report)}{est}"
+    if report.spend.plan_tokens:
+        spent = f"{report.spend.billed_tokens:,} billed tokens, {_usd(report.spend, report)}{est}"
+        spent += f"{_unknown_mode(report.spend)}; {_plans(report.spend, report)}"
+    else:
+        spent += _unknown_mode(report.spend)
     lines.append(
-        f"{report.spend.tokens:,} tokens, {_usd(report.spend, report)}{est}; "
-        f"{len(report.completed)} tasks completed{note}"
+        f"{spent}; {len(report.completed)} tasks completed{note}"
         + (f": {tasks(report.completed)}." if report.completed else ".")
     )
     if report.spend.unpriced_tokens:
@@ -1254,21 +1312,58 @@ def _headline(report: DailyReport) -> str:
     burned = report.chaos_spend
     chaos = f"Cost of chaos: {report.chaos_hours:.1f} hours lost"
     parts = []
-    if report.priced:
-        parts.append(f"${burned.usd:,.2f}{est} in {burned.tokens:,} tokens burned")
+    mark = est + _unknown_mode(burned)
+    if burned.plan_tokens and not burned.billed_tokens:
+        pass  # a farm on subscriptions only: no dollars to burn
+    elif report.priced:
+        parts.append(f"${burned.usd:,.2f}{mark} in {burned.billed_tokens:,} tokens burned")
     else:
-        parts.append(f"{burned.tokens:,} tokens burned")
+        parts.append(f"{burned.billed_tokens:,} tokens burned")
+    if burned.plan_tokens:
+        parts.append(f"{_plans(burned, report)} burned")
     if report.hour_usd is not None:
         parts.append(f"${report.chaos_hours * report.hour_usd:,.2f} in stuck hours")
     chaos += ", " + " + ".join(parts) + "."
     if report.priced and report.spend.unpriced_tokens:
         chaos += f" {report.spend.unpriced_tokens:,} tokens of unpriced models not in dollars."
     per = report.per_completed_task
-    if per is not None and report.priced:
-        done = f" {len(report.completed)} tasks completed, ${per:,.2f}{est} per completed task."
+    n = len(report.completed)
+    spend = report.spend
+    if n and spend.plan_tokens and not spend.billed_tokens:
+        done = f" {n} tasks completed, {spend.tokens // n:,} plan tokens per completed task."
+    elif per is not None and report.priced:
+        mark = est + _unknown_mode(spend)
+        done = f" {n} tasks completed, ${per:,.2f}{mark} per completed task."
     else:
-        done = f" {len(report.completed)} tasks completed."
+        done = f" {n} tasks completed."
     return chaos + done
+
+
+def _unknown_mode(spend: Spend) -> str:
+    """The mark on dollars whose provider's spend mode is not set (kelpie doctor tells)."""
+    return " (estimate, mode not set)" if spend.unknown_usd > 0 else ""
+
+
+def _plans(spend: Spend, report: DailyReport) -> str:
+    """Tokens on subscriptions against each plan's limit: never dollars, never a made-up
+    share (no limit configured: said so)."""
+    parts = []
+    for provider, tokens in spend.plans:
+        limit = report.limits.get(provider)
+        if limit is None:
+            parts.append(f"{md.text(provider)}: limit not configured")
+        else:
+            limit_tokens, window = limit
+            share = tokens / limit_tokens if limit_tokens else 0.0
+            parts.append(f"{md.text(provider)}: {share:.0%} of its {_window(window)} limit")
+    return f"{spend.plan_tokens:,} tokens on subscriptions ({'; '.join(parts)})"
+
+
+def _window(window: timedelta) -> str:
+    hours = window.total_seconds() / 3600
+    if hours >= 24 and hours % 24 == 0:
+        return f"{int(hours // 24)}-day"
+    return f"{hours:g}-hour"
 
 
 def _local(at: datetime, report: DailyReport) -> str:
@@ -1331,6 +1426,8 @@ def _change(m: Metric) -> str:
 
 
 def _usd(spend: Spend, report: DailyReport) -> str:
+    if spend.plan_tokens and not spend.billed_tokens:
+        return "-"  # a subscription's tokens: no dollars
     return f"${spend.usd:,.2f}" if report.priced else "n/a"
 
 

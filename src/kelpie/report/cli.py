@@ -44,9 +44,10 @@ def sources(settings: Settings) -> ReportSources:
     return ReportSources(
         db_path=settings.db_path,
         report=settings.report,
-        # [prices] only for now: with the default table every model would show dollars,
-        # also on subscriptions, until the report follows each provider's spend mode.
-        prices=settings.budgets.prices.configured(),
+        # [prices] over the default table; each provider's spend mode decides dollars or
+        # tokens against its plan's limit
+        prices=settings.budgets.prices,
+        spend=settings.spend,
         outputs=settings.traces.outputs,
         estimated=any(b.mode is BudgetMode.SUBSCRIPTION for b in settings.budgets.budgets),
         modes=modes,

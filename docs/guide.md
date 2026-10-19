@@ -240,9 +240,14 @@ report; no LLM is involved.
   Humans (owners of kind `human`) never count as idle agents. `[report] hour_usd` prices
   them all.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
-  flagged, and by every session `exit_contract` requeued (a restart), priced with
-  `[prices]`. In subscription mode the dollars are marked as an estimate.
-- **Cost per completed task**: the day's priced spend over the tasks that reached `done`.
+  flagged, and by every session `exit_contract` requeued (a restart). Spend follows each
+  provider's spend mode (`[spend]`): with an API key, dollars (`[prices]` over Kelpie's
+  dated default price table); on a subscription, tokens and the share of the plan's limit
+  (`limit_tokens` per `limit_window`, else "limit not configured"), never dollars and never
+  summed with them; a provider whose mode is not set shows dollars marked "(estimate, mode
+  not set)".
+- **Cost per completed task**: the day's billed spend over the tasks that reached `done`
+  (plan tokens per task on a subscription-only farm).
 - **Biggest wait** (`kelpie.report.waits`), under the headline: the role and cause whose
   tasks spent the most task-hours waiting for conditions, against the agent-hours the
   role's agents had a session running, with a concrete suggestion. A task's wait counts
