@@ -326,7 +326,7 @@ def test_a_folder_of_another_user_is_refused(
     folder.mkdir(mode=0o700)
     me = folder.stat().st_uid
     monkeypatch.setattr(os, "geteuid", lambda: me + 1)  # root too: never in another's folder
-    with pytest.raises(TokenFileError, match="run as that user"):
+    with pytest.raises(TokenFileError, match=r"run as that user|not by this user"):
         rotate(folder / "traces.env", NAME, timedelta(hours=2), NOW, tokens(OLD))
     assert not (folder / "traces.env").exists()
 
@@ -480,7 +480,7 @@ def test_another_users_file_is_refused(tmp_path: Path, monkeypatch: pytest.Monke
     rotate(path, NAME, timedelta(hours=2), NOW, tokens(OLD))
     me = path.stat().st_uid
     monkeypatch.setattr(os, "geteuid", lambda: me + 1)  # someone who is not root
-    with pytest.raises(TokenFileError, match="run as that user"):
+    with pytest.raises(TokenFileError, match=r"run as that user|not by this user"):
         rotate(path, NAME, timedelta(hours=2), NOW, tokens(NEW))
 
 
