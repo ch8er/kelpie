@@ -1,0 +1,64 @@
+id: "05-ci-config-proposal"
+incident: 5
+title: "A pipeline that wasted enough minutes gets its CI configuration change proposed"
+description: >
+  The test workflow ran for draft change requests and for a README fix: 34 minutes its
+  configuration would have saved. With proposals on, rule 9 must hand that pipeline's
+  changes to the CI connector that reported its builds, in no CI's syntax. The lint
+  workflow wasted too little to be worth a pull request, and a pipeline whose builds came
+  from no known connector has no one to write the change: neither gets a proposal.
+rule: ci_economy
+config:
+  waste_min_minutes: 20
+  docs_globs: ["docs/*", "*.md"]
+  propose_config: true
+  propose_min_minutes: 30
+snapshot:
+  now: "2026-03-04T12:00:00+00:00"
+  builds:
+    - {id: G-1, source: ci, repo: example/app, workflow: .github/workflows/test.yml,
+       branch: task/T-541, sha: "1a1a1a1", event: pull_request, draft: true, status: success,
+       started_at: "2026-03-04T08:00:00+00:00", finished_at: "2026-03-04T08:14:00+00:00",
+       minutes: 14, changed_paths: [src/api.py]}
+    - {id: G-2, source: ci, repo: example/app, workflow: .github/workflows/test.yml,
+       branch: task/T-542, sha: "2b2b2b2", event: pull_request, draft: true, status: failure,
+       started_at: "2026-03-04T09:00:00+00:00", finished_at: "2026-03-04T09:11:00+00:00",
+       minutes: 11, changed_paths: [src/db.py]}
+    - {id: G-3, source: ci, repo: example/app, workflow: .github/workflows/test.yml,
+       branch: task/T-543, sha: "3c3c3c3", event: pull_request, status: success,
+       started_at: "2026-03-04T09:30:00+00:00", finished_at: "2026-03-04T09:39:00+00:00",
+       minutes: 9, changed_paths: [README.md]}
+    # Distractor: 6 wasted minutes, under propose_min_minutes.
+    - {id: L-1, source: ci, repo: example/app, workflow: .github/workflows/lint.yml,
+       branch: task/T-544, sha: "4d4d4d4", event: pull_request, status: success,
+       started_at: "2026-03-04T10:00:00+00:00", finished_at: "2026-03-04T10:06:00+00:00",
+       minutes: 6, changed_paths: [src/api.py]}
+    - {id: L-2, source: ci, repo: example/app, workflow: .github/workflows/lint.yml,
+       branch: task/T-544, sha: "4d4d4d4", event: pull_request, status: success,
+       started_at: "2026-03-04T10:20:00+00:00", finished_at: "2026-03-04T10:26:00+00:00",
+       minutes: 6, changed_paths: [src/api.py]}
+    # Distractor: 40 wasted minutes, but no connector reported them.
+    - {id: X-1, repo: example/lib, workflow: build, branch: task/T-545, sha: "5e5e5e5",
+       event: pull_request, draft: true, status: success,
+       started_at: "2026-03-04T11:00:00+00:00", finished_at: "2026-03-04T11:40:00+00:00",
+       minutes: 40, changed_paths: [src/core.py]}
+expected_actions:
+  - kind: propose_ci_config
+    executor: ci
+    reason_contains: >-
+      A better CI configuration for .github/workflows/test.yml in example/app would have
+      saved 34 min
+    params:
+      repo: example/app
+      workflow: .github/workflows/test.yml
+      minutes: 34.0
+      changes:
+        - {change: skip_drafts, minutes: 25.0, builds: 2}
+        - {change: ignore_docs_paths, minutes: 9.0, builds: 1, paths: ["docs/*", "*.md"]}
+not_expected_actions:
+  # The lint pipeline is under propose_min_minutes.
+  - kind: propose_ci_config
+    params: {workflow: .github/workflows/lint.yml}
+  # No connector reported the build pipeline: nobody could open the change.
+  - kind: propose_ci_config
+    params: {repo: example/lib}

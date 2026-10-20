@@ -46,7 +46,9 @@ Mapping:
   other run that failed at once, and a false "quota exhausted" would send humans to the
   wrong place.
 
-The one write is ``cancel_build`` (``POST /repos/{repo}/actions/runs/{id}/cancel``):
+Two writes. ``propose_ci_config`` (off unless ``allow_propose``) opens a draft pull request
+changing a workflow file: see :mod:`kelpie.connectors.github.proposals`. And
+``cancel_build`` (``POST /repos/{repo}/actions/runs/{id}/cancel``):
 
 - it runs only through the engine, so the rule's mode and the global dry-run apply;
 - ``allow_cancel`` is off by default; without it the connector declares no action;
@@ -88,6 +90,7 @@ from typing import Any
 from kelpie.connectors.github import billing as usage
 from kelpie.connectors.github.client import GitHubClient, GitHubError, valid_token
 from kelpie.connectors.github.connector import valid_repo
+from kelpie.connectors.github.proposals import Proposer
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.model import Build, BuildStatus, Job, Resource, ResourceKind, Snapshot
 from kelpie.core.serde import parse_datetime, parse_duration
@@ -159,6 +162,9 @@ _KEYS = {
     "billing_token_env",
     "billing_interval",
     "billing_skus",
+    "allow_propose",
+    "propose_repos",
+    "propose_token_env",
 }
 
 
@@ -188,6 +194,29 @@ class CiSettings:
     billing_token_env: str | None = None
     billing_interval: timedelta = usage.DEFAULT_INTERVAL
     billing_skus: tuple[str, ...] = usage.DEFAULT_SKUS
+    # propose_ci_config (kelpie.connectors.github.proposals): off unless allowed, for these
+    # repositories only, with a token of its own.
+    allow_propose: bool = False
+    propose_repos: tuple[str, ...] = ()
+    propose_token_env: str | None = None
+
+    def propose_token(self, environ: Mapping[str, str] = os.environ) -> str | None:
+        """The token that opens pull requests, from ``$propose_token_env``; None when
+        ``allow_propose`` is off. Raises ValueError when it is unset or not usable in a
+        header. The message never contains the value."""
+        if not self.allow_propose or self.propose_token_env is None:
+            return None
+        token = environ.get(self.propose_token_env, "").strip()
+        if not token:
+            raise ValueError(
+                f"[connectors.github.ci] propose_token_env: ${self.propose_token_env} is not set"
+            )
+        if not valid_token(token):
+            raise ValueError(
+                f"[connectors.github.ci] ${self.propose_token_env} contains characters not "
+                "allowed in an HTTP header"
+            )
+        return token
 
     def cancel_token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The cancel-only token from ``$cancel_token_env``; None when not configured.
@@ -267,17 +296,34 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
         isinstance(included, bool) or not isinstance(included, int | float) or included <= 0
     ):
         raise ValueError(f"{where} included_minutes must be a positive number")
-    token_env = section.get("cancel_token_env")
-    if token_env is not None and (
-        not isinstance(token_env, str) or not _ENV_NAME.fullmatch(token_env)
+    cancel_env = section.get("cancel_token_env")
+    if cancel_env is not None and (
+        not isinstance(cancel_env, str) or not _ENV_NAME.fullmatch(cancel_env)
     ):
         raise ValueError(f"{where} cancel_token_env must be an environment variable name")
     account, organization, billing_env, billing_interval = _billing(section, included, where)
-    if billing_env is not None and billing_env == token_env:
+    if billing_env is not None and billing_env == cancel_env:
         raise ValueError(f"{where} billing_token_env must not be cancel_token_env: one token each")
     skus = _strings(section, "billing_skus", where) if "billing_skus" in section else None
     if skus == ():
         raise ValueError(f"{where} billing_skus must not be empty (leave it out for the default)")
+    allow_propose = _bool(section, "allow_propose", False, where)
+    propose_repos = _repos(section.get("propose_repos", []), set(repos), f"{where} propose_repos")
+    propose_env = section.get("propose_token_env")
+    if propose_env is not None and (
+        not isinstance(propose_env, str) or not _ENV_NAME.fullmatch(propose_env)
+    ):
+        raise ValueError(f"{where} propose_token_env must be an environment variable name")
+    if allow_propose and (not propose_repos or propose_env is None):
+        raise ValueError(
+            f"{where} allow_propose needs propose_repos (an allow-list) and propose_token_env "
+            "(a token of its own with Contents, Pull requests and Workflows: write)"
+        )
+    if propose_env is not None and propose_env in (cancel_env, billing_env):
+        raise ValueError(
+            f"{where} propose_token_env must be a token of its own, not cancel_token_env's "
+            "or billing_token_env's"
+        )
     reserve = section.get("rate_reserve", DEFAULT_RATE_RESERVE)
     if isinstance(reserve, bool) or not isinstance(reserve, int) or not 0 <= reserve <= 4000:
         raise ValueError(f"{where} rate_reserve must be an integer from 0 to 4000")
@@ -298,12 +344,15 @@ def load_ci(section: Any, github_repos: Collection[str]) -> CiSettings:
         cancel_repos=cancel_repos,
         cancel_workflows=_strings(section, "cancel_workflows", where),
         cancel_branches=_strings(section, "cancel_branches", where),
-        cancel_token_env=token_env,
+        cancel_token_env=cancel_env,
         billing_account=account,
         billing_organization=organization,
         billing_token_env=billing_env,
         billing_interval=billing_interval,
         billing_skus=usage.DEFAULT_SKUS if skus is None else tuple(usage.sku_name(s) for s in skus),
+        allow_propose=allow_propose,
+        propose_repos=propose_repos,
+        propose_token_env=propose_env,
     )
 
 
@@ -375,13 +424,18 @@ class GitHubCI:
         settings: CiSettings,
         cancel_client: GitHubClient | None = None,
         billing: usage.CiBilling | None = None,
+        proposer: Proposer | None = None,
     ) -> None:
         self.client = client
         self.settings = settings
         self.cancel_client = cancel_client or client
         self.billing = billing
-        self.actions = (
-            frozenset({ActionKind.CANCEL_BUILD}) if settings.allow_cancel else frozenset()
+        self.proposer = proposer
+        self.actions = frozenset(
+            {
+                *([ActionKind.CANCEL_BUILD] if settings.allow_cancel else []),
+                *([ActionKind.PROPOSE_CI_CONFIG] if proposer is not None else []),
+            }
         )
         self._builds: tuple[Build, ...] = ()
         self._scanned_at: datetime | None = None
@@ -708,7 +762,10 @@ class GitHubCI:
     def execute(self, action: Action) -> ActionResult:
         """Cancel a superseded run; see the module docs for every guard.
 
-        Raises :class:`GitHubError` on a transient failure, so the engine retries later."""
+        Raises :class:`GitHubError` on a transient failure, so the engine retries later.
+        ``propose_ci_config`` goes to the :class:`Proposer`, when one is configured."""
+        if action.kind is ActionKind.PROPOSE_CI_CONFIG:
+            return ActionResult.REFUSED if self.proposer is None else self.proposer.execute(action)
         if action.kind is not ActionKind.CANCEL_BUILD or not self.settings.allow_cancel:
             return ActionResult.REFUSED
         build_id = action.params.get("build_id")

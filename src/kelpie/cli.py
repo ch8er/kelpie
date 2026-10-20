@@ -71,6 +71,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="also read network connectors (GitHub) as a tick would; default: offline",
     )
+    sub.add_parser(
+        "ci-config",
+        help="rule 9's CI configuration proposals as diffs (reads GitHub; writes nothing)",
+    )
     snooze = sub.add_parser(
         "snooze", help="acknowledge a deliberate wait on a task until a date (stored)"
     )
@@ -198,6 +202,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             out, err, code = run_why(
                 settings, args.task, args.json, max(0, args.entries), refresh=args.refresh
             )
+            sys.stdout.write(out)
+            sys.stderr.write(err)
+            return code
+        if args.command == "ci-config":
+            from kelpie.ci_config import run as run_ci_config
+
+            out, err, code = run_ci_config(settings)
             sys.stdout.write(out)
             sys.stderr.write(err)
             return code

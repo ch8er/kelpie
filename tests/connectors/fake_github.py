@@ -34,7 +34,7 @@ class FakeGitHub:
     route is keyed ``"<METHOD> <path>"`` (``"POST /repos/..."``)."""
 
     def __init__(self) -> None:
-        self.routes: dict[str, Reply] = {}
+        self.routes: dict[str, Reply | list[Reply]] = {}
         self.requests: list[Seen] = []
         self.url = ""
 
@@ -42,6 +42,10 @@ class FakeGitHub:
         self.routes[path] = Reply(
             status, body, {k.replace("_", "-"): v for k, v in headers.items()}
         )
+
+    def replies(self, path: str, *answers: tuple[Any, int]) -> None:
+        """Answer ``path`` with ``(body, status)`` in turn; the last one from then on."""
+        self.routes[path] = [Reply(status, body) for body, status in answers]
 
     def pull(self, repo: str, number: int, **fields: Any) -> None:
         body = {"number": number, "state": "open", "merged": False, "merged_at": None}
@@ -135,6 +139,8 @@ def _handler(fake: FakeGitHub) -> type[BaseHTTPRequestHandler]:
         def _answer(self, method: str, route: str, body: Any = None) -> None:
             fake.requests.append(Seen(self.path, self.headers, method, body))
             reply = fake.routes.get(route, Reply(404, {"message": "Not Found"}))
+            if isinstance(reply, list):
+                reply = reply.pop(0) if len(reply) > 1 else reply[0]
             body = reply.body
             raw = body if isinstance(body, bytes) else json.dumps(body).encode()
             payload = b"" if body is None else raw

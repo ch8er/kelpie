@@ -603,7 +603,8 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     assert found["orphan_status"] == "Hermes can't close tasks or reassign tasks yet"
     assert found["exit_contract"] == "Hermes requeues only tasks Kelpie parked"
     assert found["ci_economy"] == (
-        "Kelpie cancels no builds: no CI connector is configured ([connectors.github.ci])"
+        "Kelpie cancels no builds and proposes no CI changes: no CI connector is configured "
+        "([connectors.github.ci])"
     )
     assert "loop_breaker" not in found and "dispatch_gate" not in found
     claude = load_settings(write(tmp_path, FARMS["claude code"]))
@@ -630,11 +631,16 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     ci = '[connectors.github]\nrepos = ["example/repo"]\n'
     for extra, reason in (
         (ci, "[connectors.github.ci] is not configured"),
-        (ci + "[connectors.github.ci]\n", "[connectors.github.ci] allow_cancel is off"),
+        (
+            ci + "[connectors.github.ci]\n",
+            "[connectors.github.ci] allow_cancel and allow_propose are off",
+        ),
     ):
         builds = load_settings(write(tmp_path, FARMS["hermes"] + extra))
         found = {r: b.reason for r, b in act_blockers(builds, build_adapters(builds)).items()}
-        assert found["ci_economy"] == f"Kelpie cancels no builds: {reason}"
+        assert found["ci_economy"] == (
+            f"Kelpie cancels no builds and proposes no CI changes: {reason}"
+        )
 
 
 def test_hermes_worker_settings(tmp_path: Path) -> None:

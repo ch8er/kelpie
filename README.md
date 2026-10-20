@@ -108,7 +108,8 @@ now computes that before/after for every fix it knows about.
 ## Quickstart
 
 Every quickstart starts read-only (dry-run, `observe`). `kelpie doctor` checks the setup and
-prints a fix under each failure; `kelpie why <task>` explains why one task is not moving.
+prints a fix under each failure; `kelpie why <task>` explains why one task is not moving;
+`kelpie ci-config` shows, as a diff, the workflow changes rule 9 would propose.
 
 ### Hermes
 
