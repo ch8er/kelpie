@@ -102,6 +102,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "models have prices": "PASS",
         "providers have a spend mode": "SKIP",
         "worktrees readable": "SKIP",
+        "stop ends workers": "PASS",
         "PR blocks have conditions": "PASS",
         "snooze markers parse": "SKIP",
         "disk watched": "PASS",
@@ -124,7 +125,7 @@ def test_bad_config_is_one_failure(tmp_path: Path) -> None:
 def test_no_hermes_section_skips_the_board_checks() -> None:
     checks = {c.name: c.status for c in run_checks(None, environ={})}
     assert checks["kanban.db"] == checks["hooks fire"] == checks["worktrees readable"] == "SKIP"
-    assert checks["PR blocks have conditions"] == "SKIP"
+    assert checks["PR blocks have conditions"] == checks["stop ends workers"] == "SKIP"
     assert checks["rule modes"] == "PASS"
 
 
@@ -758,3 +759,21 @@ def test_process_counts_skip_without_a_mac_or_an_answer(farm: Farm) -> None:
     farm.prom.status = 200
     farm.resources = ""
     assert farm.checks()["process counts fresh"].status == "SKIP"
+
+
+def test_stop_ends_workers_names_the_backend_or_why_not(tmp_path: Path) -> None:
+    from kelpie.adapters.hermes import HermesAdapter
+    from kelpie.adapters.hermes.proctable import Libproc, Procfs, host_table
+    from kelpie.doctor import check_worker_stop
+
+    adapter = HermesAdapter(db_path=tmp_path / "kanban.db", spool=None)
+    linux = check_worker_stop(adapter, Procfs())
+    assert (linux.status, linux.name) == ("PASS", "stop ends workers")
+    assert linux.detail.startswith("via Linux /proc;")
+    nolib = check_worker_stop(adapter, Libproc(error="libproc cannot be loaded (x)"))
+    assert nolib.status == "WARN" and nolib.detail.startswith("libproc cannot be loaded (x):")
+    other = check_worker_stop(adapter, host_table("win32"))
+    assert other.status == "WARN" and "on Linux or macOS" in other.fix
+    adapter.end_worker = False
+    off = check_worker_stop(adapter, Procfs())
+    assert off.status == "WARN" and off.fix == "set [adapters.hermes] end_worker = true"

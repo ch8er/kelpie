@@ -205,10 +205,10 @@ re-queued. The CLI contract was read from the Hermes sources (`hermes_cli/kanban
 
 ### Self-test: `kelpie selftest stop --adapter hermes`
 
-Before rule 10 runs in `act`, run it on the Hermes host, as the user Kelpie runs as (Linux:
-it needs `/proc`; not inside Hermes' own Docker image, where Hermes hands gateway and profile
-commands to the container's s6 supervisor whatever `HERMES_HOME` says, so the self-test
-refuses to run there):
+Before rule 10 runs in `act`, run it on the Hermes host, as the user Kelpie runs as (Linux or
+macOS; not inside Hermes' own Docker image, where Hermes hands gateway and profile commands to
+the container's s6 supervisor whatever `HERMES_HOME` says, so the self-test refuses to run
+there):
 
 ```bash
 kelpie selftest stop --adapter hermes     # about a minute; --keep keeps the directory

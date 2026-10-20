@@ -288,6 +288,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - `kelpie selftest stop --adapter hermes` runs rule 10's stop end to end on a throwaway Hermes
   home and board, with a local mock model (zero tokens), and reports each step
   ([#190](https://github.com/ch8er/kelpie/pull/190)).
+  It runs on macOS too, and `kelpie doctor` says how this host ends a stopped run's worker
+  ([#231](https://github.com/ch8er/kelpie/issues/231)).
 - Snoozes, part 3 ([#176](https://github.com/ch8er/kelpie/issues/176)): snooze from the
   alert itself. Slack shows a ready-to-copy `kelpie snooze <task> --until <date>` line under
   each item a snooze would quiet (rule 13's digest items, rule 4's no-condition and overdue

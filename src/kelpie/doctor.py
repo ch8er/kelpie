@@ -25,6 +25,7 @@ from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.claude_code.adapter import ClaudeCodeAdapter
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
 from kelpie.adapters.hermes.git_state import read_git_state
+from kelpie.adapters.hermes.proctable import ProcessTable, host_table
 from kelpie.adapters.issues import doctor as github_issues
 from kelpie.adapters.openclaw import doctor as openclaw
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
@@ -661,6 +662,31 @@ def _natural(text: str) -> list[object]:
     return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text)]
 
 
+WORKERS = "stop ends workers"
+
+
+def check_worker_stop(adapter: HermesAdapter, table: ProcessTable | None = None) -> Check:
+    """Can a stop end the run's worker on this host (adapters/hermes/worker.py)?"""
+    if not adapter.end_worker:
+        return _warn(
+            WORKERS,
+            "end_worker = false: a stopped run's worker is left to Hermes' reaper (2 minutes "
+            "or more, never without a dispatcher)",
+            "set [adapters.hermes] end_worker = true",
+        )
+    table = host_table() if table is None else table
+    if (why := table.unavailable()) is not None:
+        return _warn(
+            WORKERS,
+            f"{why}: a stop blocks the task but leaves its worker to Hermes' reaper",
+            "run Kelpie (or its kelpie agent) on the Hermes host, on Linux or macOS",
+        )
+    return _pass(
+        WORKERS,
+        f"via {table.name}; check it end to end with kelpie selftest stop --adapter hermes",
+    )
+
+
 def check_worktrees(adapter: HermesAdapter) -> Check:
     name = "worktrees readable"
     if not adapter.git_state:
@@ -1225,6 +1251,7 @@ def run_checks(
     checks.append(check_spend_modes(settings, at))
     checks += check_cost_reports(settings, at, environ)
     checks.append(_skip("worktrees readable", why) if adapter is None else check_worktrees(adapter))
+    checks.append(_skip(WORKERS, why) if adapter is None else check_worker_stop(adapter))
     pr_blocks = "PR blocks have conditions"
     checks.append(
         _skip(pr_blocks, why) if adapter is None else check_pr_blocks(settings, adapter, at)

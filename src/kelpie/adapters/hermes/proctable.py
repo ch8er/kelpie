@@ -24,6 +24,7 @@ import contextlib
 import ctypes
 import ctypes.util
 import errno
+import os
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -99,6 +100,15 @@ class ProcessTable(Protocol):
 
     def fingerprint(self, p: Proc, epoch: str) -> str:
         """Hermes' fingerprint of ``p`` on this system."""
+        ...
+
+    def environ(self, pid: int) -> list[bytes] | None:
+        """The process's environment as ``NAME=value`` entries (this user's processes only),
+        or None when it cannot be read."""
+        ...
+
+    def cwd(self, pid: int) -> Path | None:
+        """The process's working directory, or None when it cannot be read."""
         ...
 
 
@@ -192,6 +202,18 @@ class Procfs:
 
     def fingerprint(self, p: Proc, epoch: str) -> str:
         return fingerprint(p, epoch)
+
+    def environ(self, pid: int) -> list[bytes] | None:
+        try:
+            return (self.root / str(pid) / "environ").read_bytes().split(b"\0")
+        except OSError:
+            return None
+
+    def cwd(self, pid: int) -> Path | None:
+        try:
+            return Path(os.readlink(self.root / str(pid) / "cwd"))
+        except OSError:
+            return None
 
     def hidepid(self) -> bool:
         """Is ``/proc`` mounted with ``hidepid`` (other users' processes invisible)? Any proc
@@ -346,6 +368,48 @@ class Libproc:
     def fingerprint(self, p: Proc, epoch: str) -> str:
         return f"{epoch}|{p.start}"
 
+    def environ(self, pid: int) -> list[bytes] | None:
+        if self._lib is None:
+            return None
+        raw = self._lib.procargs(pid)
+        return None if raw is None else procargs_environ(raw)
+
+    def cwd(self, pid: int) -> Path | None:
+        if self._lib is None:
+            return None
+        buf = ctypes.create_string_buffer(VNODEPATHINFO_SIZE)
+        got = self._lib.proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, buf, VNODEPATHINFO_SIZE)
+        if got != VNODEPATHINFO_SIZE:
+            return None
+        raw = buf.raw[CDIR_PATH_OFFSET : CDIR_PATH_OFFSET + MAXPATHLEN].split(b"\0", 1)[0]
+        return Path(os.fsdecode(raw)) if raw else None
+
+
+# struct proc_vnodepathinfo: pvi_cdir then pvi_rdir, each a struct vnode_info_path, a 152-byte
+# struct vnode_info followed by vip_path[MAXPATHLEN] (sys/proc_info.h).
+PROC_PIDVNODEPATHINFO = 9
+MAXPATHLEN = 1024
+CDIR_PATH_OFFSET = 152
+VNODEPATHINFO_SIZE = 2 * (152 + MAXPATHLEN)
+
+
+def procargs_environ(raw: bytes) -> list[bytes]:
+    """The environment from ``sysctl KERN_PROCARGS2``'s answer: ``int argc``, the executable
+    path, NUL padding, ``argc`` arguments, then ``NAME=value`` entries up to an empty one."""
+    if len(raw) < 4:
+        return []
+    argc = int.from_bytes(raw[:4], sys.byteorder, signed=True)
+    rest = raw[4:]
+    _, _, rest = rest.partition(b"\0")  # the executable path
+    rest = rest.lstrip(b"\0")  # its padding
+    parts = rest.split(b"\0")
+    env = []
+    for item in parts[max(argc, 0) :]:
+        if not item:
+            break
+        env.append(item)
+    return env
+
 
 class _CLibproc:
     """The real ``libproc`` through ctypes."""
@@ -380,6 +444,20 @@ class _CLibproc:
             ctypes.c_size_t,
         ]
         self._sysctl.restype = ctypes.c_int
+
+    def procargs(self, pid: int) -> bytes | None:
+        """``sysctl {CTL_KERN, KERN_PROCARGS2, pid}``: this user's processes only."""
+        argmax = ctypes.c_int(0)
+        size = ctypes.c_size_t(ctypes.sizeof(argmax))
+        mib = (ctypes.c_int * 2)(1, 8)  # CTL_KERN, KERN_ARGMAX
+        if self._sysctl(mib, 2, ctypes.byref(argmax), ctypes.byref(size), None, 0) != 0:
+            return None
+        buf = ctypes.create_string_buffer(max(argmax.value, 4096))
+        size = ctypes.c_size_t(len(buf))
+        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+        if self._sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+            return None
+        return buf.raw[: size.value]
 
     @staticmethod
     def errno() -> int:
@@ -445,6 +523,12 @@ class _Unsupported:
 
     def fingerprint(self, p: Proc, epoch: str) -> str:
         return ""
+
+    def environ(self, pid: int) -> list[bytes] | None:
+        return None
+
+    def cwd(self, pid: int) -> Path | None:
+        return None
 
 
 def host_table(platform: str | None = None) -> ProcessTable:

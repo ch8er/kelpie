@@ -46,7 +46,7 @@ from typing import Any
 from kelpie.adapters.hermes import adapter as hermes_adapter
 from kelpie.adapters.hermes.adapter import HermesAdapter
 from kelpie.adapters.hermes.stop import ENV_EXACT, ENV_PREFIXES
-from kelpie.adapters.hermes.worker import PROC, Proc, Procfs, _same, read_proc, run_worker
+from kelpie.adapters.hermes.worker import PROC, Proc, _same, host_table, run_worker
 from kelpie.adapters.hermes.worker import end as end_processes
 from kelpie.alerts.telegram import format_message
 from kelpie.app import ConfigError, HermesSettings, Settings, load_rules
@@ -274,8 +274,8 @@ def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -
             "a throwaway one\nrun the self-test on a host (or VM) with Hermes installed",
         )
         return 1
-    if not (PROC / "self" / "stat").exists():
-        report.fail("host", "no /proc: Kelpie cannot end Hermes workers on this system")
+    if (why := host_table().unavailable()) is not None:
+        report.fail("host", f"{why}: Kelpie cannot end Hermes workers on this system")
         return 1
     try:
         rule = _rule(settings)
@@ -528,7 +528,8 @@ def _check_board(report: Report, db: Path, task: str, adapter: HermesAdapter) ->
 
 def _check_processes(report: Report, recorded: Any, end_worker: bool) -> None:
     pids = [p for p in (recorded.submitter, recorded.agent) if p is not None]
-    alive = [p for p in pids if (q := read_proc(p)) is not None and q.state not in "ZXx"]
+    table = host_table()
+    alive = [p for p in pids if (q := table.read(p)) is not None and q.state not in "ZXx"]
     if alive:
         fix = (
             "set [adapters.hermes] end_worker = true"
@@ -575,24 +576,20 @@ def _cleanup(report: Report, tmp: Path) -> None:
 
 
 def _processes_of(tmp: Path) -> list[Proc]:
-    """Processes of this user whose ``HERMES_HOME`` is in ``tmp`` or that work in it. The start
-    time is read before and after the environment, so a pid reused in between never counts."""
+    """Processes of this user whose ``HERMES_HOME`` is in ``tmp`` or that work in it (Linux:
+    ``/proc``; macOS: ``KERN_PROCARGS2`` and libproc). The start time is read before and after
+    the environment, so a pid reused in between never counts."""
+    table = host_table()
     home = f"HERMES_HOME={tmp}".encode()
     found: list[Proc] = []
     me = os.getpid()
-    with contextlib.suppress(OSError):
-        for entry in PROC.iterdir():
-            if not entry.name.isdigit() or int(entry.name) == me:
-                continue
-            before = read_proc(int(entry.name))
-            if before is None:
-                continue
-            with contextlib.suppress(OSError):
-                env = (entry / "environ").read_bytes().split(b"\0")
-                ours = any(v == home or v.startswith(home + b"/") for v in env)
-                if not ours:
-                    cwd = Path(os.readlink(entry / "cwd"))
-                    ours = cwd == tmp or tmp in cwd.parents
-                if ours and _same(before, Procfs()):
-                    found.append(before)
+    for pid in table.pids():
+        if pid == me or (before := table.read(pid)) is None:
+            continue
+        env = table.environ(pid) or []
+        ours = any(v == home or v.startswith(home + b"/") for v in env)
+        if not ours and (cwd := table.cwd(pid)) is not None:
+            ours = cwd == tmp or tmp in cwd.parents
+        if ours and _same(before, table):
+            found.append(before)
     return found
