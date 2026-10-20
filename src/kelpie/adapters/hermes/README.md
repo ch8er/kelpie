@@ -233,6 +233,9 @@ started for it, a runaway left by a failed step; never `hermes gateway stop`, wh
 manager could route to a real gateway), deletes the directory, and exits 0 only if every step
 passed. SIGTERM to the self-test cleans up the same way.
 
+`kelpie doctor` shows the same in one line, without running anything: "stop ends workers: via
+Linux /proc" (or "via macOS libproc"), or a WARN with the reason when this host cannot.
+
 What it does not cover: your real home's configuration (its `kanban.dispatch_profiles`, the
 plugin in your profiles, your gateway), and whether rule 10's thresholds fit your farm. The
 [act checklist](../../../../docs/act-checklist.md) covers those.

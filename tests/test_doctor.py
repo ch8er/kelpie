@@ -774,6 +774,12 @@ def test_stop_ends_workers_names_the_backend_or_why_not(tmp_path: Path) -> None:
     assert nolib.status == "WARN" and nolib.detail.startswith("libproc cannot be loaded (x):")
     other = check_worker_stop(adapter, host_table("win32"))
     assert other.status == "WARN" and "on Linux or macOS" in other.fix
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self" / "stat").write_text("1 (x) S 0\n")
+    (proc / "self" / "mountinfo").write_text("22 1 0:21 / /proc rw - proc proc rw,hidepid=2\n")
+    hidden = check_worker_stop(adapter, Procfs(proc))
+    assert hidden.status == "WARN" and "hidepid" in hidden.detail
     adapter.end_worker = False
     off = check_worker_stop(adapter, Procfs())
     assert off.status == "WARN" and off.fix == "set [adapters.hermes] end_worker = true"

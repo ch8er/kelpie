@@ -29,7 +29,7 @@ from kelpie.adapters.hermes.proctable import (
     Procfs,
     birth,
     host_table,
-    procargs_environ,
+    procargs_strings,
 )
 from kelpie.adapters.hermes.worker import RunWorker, end, targets
 
@@ -329,12 +329,34 @@ def test_environment_and_working_directory() -> None:
     lib.args[40] = procargs([b"python", b"-m", b"agent.managed_worker"], [b"HOME=/h", b"A=1"])
     lib.cwds[40] = b"/tmp/kelpie-selftest-x/home/profiles/p/workspace"
     table = Libproc(lib)
-    assert table.environ(40) == [b"HOME=/h", b"A=1"]
+    assert table.environ(40) == [b"python", b"-m", b"agent.managed_worker", b"HOME=/h", b"A=1"]
     assert table.environ(50) is None  # another user's, or gone: sysctl refuses
     assert str(table.cwd(40)) == "/tmp/kelpie-selftest-x/home/profiles/p/workspace"
     assert table.cwd(50) is None
-    assert procargs_environ(b"") == [] and procargs_environ(procargs([], [])) == []
-    assert procargs_environ(procargs([b"a"], [b"X=1"], exe=b"")) == [b"X=1"]
+    assert procargs_strings(b"") == [] and procargs_strings(procargs([], [])) == []
+    assert procargs_strings(procargs([b"a"], [b"X=1"], exe=b"")) == [b"a", b"X=1"]
+
+
+def retitled(argv: list[bytes], title: bytes, env: list[bytes]) -> bytes:
+    """``procargs`` of a process that renamed itself: setproctitle overwrote the argument area
+    with the title and NULs (SPT_NOENV: the environment untouched)."""
+    area = b"".join(a + b"\0" for a in argv)
+    over = (title + b"\0").ljust(len(area), b"\0")[: len(area)]
+    raw = procargs(argv, env)
+    return raw.replace(area, over, 1)
+
+
+def test_environment_of_a_retitled_process() -> None:
+    """Hermes renames its processes: the cleanup must still read their HERMES_HOME."""
+    argv = [b"python3", b"-m", b"hermes_cli.main", b"gateway", b"run"]
+    env = [b"HERMES_HOME=/private/var/folders/x/kelpie-selftest-1/home", b"PATH=/bin"]
+    home = env[0]
+    for raw in (
+        procargs(argv, env),
+        retitled(argv, b"hermes gateway", env),
+        retitled(argv, b"t" * (sum(len(a) + 1 for a in argv) - 1), env),  # the title fills it
+    ):
+        assert home in procargs_strings(raw)
 
 
 # --- real processes on macOS --------------------------------------------------------------
@@ -363,7 +385,7 @@ def test_real_libproc_reads_processes(sleeper: subprocess.Popen[bytes]) -> None:
     assert table.read(99999999) is None and table.missing(99999999) is None
     assert table.parent(os.getpid()) == os.getppid() and table.parent(1) == 0
     env = table.environ(sleeper.pid)
-    assert env is not None and any(v.startswith(b"PATH=") for v in env)
+    assert env is not None and f"PATH={os.environ['PATH']}".encode() in env
     assert table.cwd(sleeper.pid) == Path(os.getcwd()).resolve()
 
 

@@ -103,8 +103,9 @@ class ProcessTable(Protocol):
         ...
 
     def environ(self, pid: int) -> list[bytes] | None:
-        """The process's environment as ``NAME=value`` entries (this user's processes only),
-        or None when it cannot be read."""
+        """``NAME=value`` entries of the process's environment (this user's processes only), or
+        None when it cannot be read. On macOS the list also holds the process's arguments and
+        the kernel's strings: look an entry up, do not enumerate the environment from it."""
         ...
 
     def cwd(self, pid: int) -> Path | None:
@@ -372,7 +373,7 @@ class Libproc:
         if self._lib is None:
             return None
         raw = self._lib.procargs(pid)
-        return None if raw is None else procargs_environ(raw)
+        return None if raw is None else procargs_strings(raw)
 
     def cwd(self, pid: int) -> Path | None:
         if self._lib is None:
@@ -393,22 +394,18 @@ CDIR_PATH_OFFSET = 152
 VNODEPATHINFO_SIZE = 2 * (152 + MAXPATHLEN)
 
 
-def procargs_environ(raw: bytes) -> list[bytes]:
-    """The environment from ``sysctl KERN_PROCARGS2``'s answer: ``int argc``, the executable
-    path, NUL padding, ``argc`` arguments, then ``NAME=value`` entries up to an empty one."""
+def procargs_strings(raw: bytes) -> list[bytes]:
+    """The strings of ``sysctl KERN_PROCARGS2``'s answer after the executable path (``int argc``,
+    the path, NUL padding, then the arguments, the environment and the kernel's own strings).
+
+    Where the arguments end is not knowable for every process: one that renamed itself
+    (setproctitle, as Hermes does) overwrote its argument area with the title and NULs, so
+    counting ``argc`` strings can run into the environment. All the strings are returned;
+    callers look for a ``NAME=value`` entry, they do not list the environment."""
     if len(raw) < 4:
         return []
-    argc = int.from_bytes(raw[:4], sys.byteorder, signed=True)
-    rest = raw[4:]
-    _, _, rest = rest.partition(b"\0")  # the executable path
-    rest = rest.lstrip(b"\0")  # its padding
-    parts = rest.split(b"\0")
-    env = []
-    for item in parts[max(argc, 0) :]:
-        if not item:
-            break
-        env.append(item)
-    return env
+    _, _, rest = raw[4:].partition(b"\0")  # past argc and the executable path
+    return [item for item in rest.split(b"\0") if item]
 
 
 class _CLibproc:
@@ -434,6 +431,8 @@ class _CLibproc:
         self.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self.proc_listallpids.restype = ctypes.c_int
         libc = ctypes.CDLL(None, use_errno=True)
+        self._argmax: int | None = None
+        self._buf = ctypes.create_string_buffer(0)
         self._sysctl = libc.sysctl
         self._sysctl.argtypes = [
             ctypes.POINTER(ctypes.c_int),
@@ -447,17 +446,19 @@ class _CLibproc:
 
     def procargs(self, pid: int) -> bytes | None:
         """``sysctl {CTL_KERN, KERN_PROCARGS2, pid}``: this user's processes only."""
-        argmax = ctypes.c_int(0)
-        size = ctypes.c_size_t(ctypes.sizeof(argmax))
-        mib = (ctypes.c_int * 2)(1, 8)  # CTL_KERN, KERN_ARGMAX
-        if self._sysctl(mib, 2, ctypes.byref(argmax), ctypes.byref(size), None, 0) != 0:
-            return None
-        buf = ctypes.create_string_buffer(max(argmax.value, 4096))
-        size = ctypes.c_size_t(len(buf))
+        if self._argmax is None:
+            argmax = ctypes.c_int(0)
+            size = ctypes.c_size_t(ctypes.sizeof(argmax))
+            mib = (ctypes.c_int * 2)(1, 8)  # CTL_KERN, KERN_ARGMAX
+            if self._sysctl(mib, 2, ctypes.byref(argmax), ctypes.byref(size), None, 0) != 0:
+                return None
+            self._argmax = max(argmax.value, 4096)
+            self._buf = ctypes.create_string_buffer(self._argmax)  # reused: ARG_MAX is 1 MiB
+        size = ctypes.c_size_t(self._argmax)
         mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
-        if self._sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        if self._sysctl(mib, 3, self._buf, ctypes.byref(size), None, 0) != 0:
             return None
-        return buf.raw[: size.value]
+        return ctypes.string_at(self._buf, size.value)
 
     @staticmethod
     def errno() -> int:

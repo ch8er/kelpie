@@ -25,7 +25,7 @@ from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.claude_code.adapter import ClaudeCodeAdapter
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
 from kelpie.adapters.hermes.git_state import read_git_state
-from kelpie.adapters.hermes.proctable import ProcessTable, host_table
+from kelpie.adapters.hermes.proctable import ProcessTable, Procfs, host_table
 from kelpie.adapters.issues import doctor as github_issues
 from kelpie.adapters.openclaw import doctor as openclaw
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
@@ -680,6 +680,13 @@ def check_worker_stop(adapter: HermesAdapter, table: ProcessTable | None = None)
             WORKERS,
             f"{why}: a stop blocks the task but leaves its worker to Hermes' reaper",
             "run Kelpie (or its kelpie agent) on the Hermes host, on Linux or macOS",
+        )
+    if isinstance(table, Procfs) and table.hidepid():
+        return _warn(
+            WORKERS,
+            f"via {table.name}, but /proc hides other users' processes (hidepid): Kelpie cannot "
+            "tell a worker that ended from another user's, and leaves both to Hermes' reaper",
+            "mount /proc without hidepid for Kelpie's user (or add it to the gid= group)",
         )
     return _pass(
         WORKERS,
