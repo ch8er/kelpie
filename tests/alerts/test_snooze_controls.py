@@ -179,6 +179,15 @@ def test_the_engine_reads_the_target_from_params() -> None:
         ]},
     )  # fmt: skip
     assert [i.snooze_task for i in alert_items(digest, board)] == ["H-1"] + [None] * 6
+    kept = Action(
+        ActionKind.ESCALATE, "needs_you", "Needs you.",
+        params={"items": [
+            {"task_id": "H-1", "snooze_task": " H-1\n"},  # stripped first, then checked
+            {"task_id": "H-2", "snooze_task": "H-͸"},  # unassigned (a newer emoji): fine
+            {"task_id": "H-3", "snooze_task": "\U0001fae8"},
+        ]},
+    )  # fmt: skip
+    assert [i.snooze_task for i in alert_items(kept, board)] == ["H-1", "H-͸", "\U0001fae8"]
     one = Action(
         ActionKind.ALERT, "wait_condition", "Overdue.", task_id="W-1",
         params={"snooze_task": "H-9"},

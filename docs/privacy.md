@@ -300,8 +300,11 @@ quote parts of it (see the next section).
   refers to and a copy of each alert message with buttons, as Kelpie sent it and then
   with the acknowledgement lines it added (these name the person who pressed, as the chat
   shows them), because each acknowledgement edits Kelpie's own copy rather than the one a
-  press carries; the copies go 7 days after their last edit. Telegram keeps the messages,
-  the presses and the edits under its own terms.
+  press carries. `kelpie serve` deletes references, copies and latest-message records 7
+  days after they were issued, last edited or sent: when it starts, every hour while it
+  runs, and whenever an alert goes out. After you turn the buttons off, nothing reads
+  `kelpie.buttons.db` any more: delete it (with `kelpie serve` stopped). Telegram keeps the
+  messages, the presses and the edits under its own terms.
 
 ## LLM root-cause section
 

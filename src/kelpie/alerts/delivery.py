@@ -33,10 +33,15 @@ snooze buttons, :mod:`kelpie.alerts.buttons`) has a poller, started with the wor
 stopped first on ``close``, under the same deadline: told to stop before the queues are
 flushed, joined after, and abandoned if still inside a request then.
 
-**Expiry** (:class:`Expiring`): such a channel also hears of every alert that resolves,
-even when it does not show it (a resolve notice is ``info``, below most channels'
-``min_severity``): its worker calls ``expire`` instead of ``send``, in order with the alerts
-queued before, so the buttons of a resolved alert stop working although no message says so.
+**Expiry** (:class:`Expiring`): a channel that says so (``expiring``: Telegram with snooze
+buttons) also hears of every alert that resolves, even when it does not show it (a resolve
+notice is ``info``, below most channels' ``min_severity``): its worker calls ``expire``
+instead of ``send``, in order with the alerts queued before, so the buttons of a resolved
+alert stop working although no message says so. The local part of an expiry is never lost:
+a resolve that cannot be queued (queue full, a duplicate) is expired at once with
+``remote=False`` (the channel's own store only, no request), and so is an expiry still
+queued at shutdown or taken while the channel is under flood control. After ``close``
+nothing is expired: no press is taken any more.
 
 The engine already de-duplicates through the action ledger and state transitions; the
 window here is a cheap safety net. An alert is a duplicate only when the last alert sent to
@@ -100,10 +105,37 @@ class Channel(Protocol):
 
 @runtime_checkable
 class Expiring(Protocol):
-    """A channel whose messages carry controls that must stop working when their alert
-    resolves (Telegram's snooze buttons): ``expire`` is told of a resolve it does not send."""
+    """A channel whose messages may carry controls that must stop working when their alert
+    resolves (Telegram's snooze buttons). ``expiring``: it has such controls now. ``expire``
+    is told of a resolve it does not send; with ``remote=False`` it only records it locally
+    (no request to the chat service), which must be cheap and never block for long."""
 
-    def expire(self, message: AlertEvent) -> None: ...
+    @property
+    def expiring(self) -> bool: ...
+
+    def expire(self, message: AlertEvent, remote: bool = True) -> None: ...
+
+
+def _expiring(channel: Channel) -> Expiring | None:
+    """``channel`` as an :class:`Expiring` one when it has controls to expire, else None."""
+    if isinstance(channel, Expiring) and channel.expiring:
+        return channel
+    return None
+
+
+def _expire_now(channel: Channel, message: AlertEvent) -> None:
+    """Record a resolve in the channel's own store at once (no request); never raises."""
+    target = _expiring(channel)
+    if target is None or message.transition is not Transition.RESOLVED:
+        return
+    try:
+        target.expire(message, remote=False)
+    except Exception as exc:
+        log.error(
+            "alert channel %s: could not expire a resolved alert: %s",
+            channel.name,
+            type(exc).__name__,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +245,8 @@ class _Worker:
                     return
                 continue
             if isinstance(message, _Expire):
-                self._expire(message.message)
+                # under flood control the chat waits: only the local part, no request
+                self._expire(message.message, remote=time.monotonic() >= self.blocked_until)
                 if self._expired():
                     self._drain()
                     return
@@ -236,14 +269,16 @@ class _Worker:
         """Nothing more is queued from now on; count what is queued as dropped."""
         with self._lock:
             self.closed = True
-        dropped = 0
+        dropped = expired = 0
         while True:
             try:
                 message = self.queue.get_nowait()
             except queue.Empty:
                 break
             if isinstance(message, _Expire):
-                continue  # nothing was to be sent
+                _expire_now(self.channel, message.message)  # the local part, no request
+                expired += 1
+                continue
             dropped += 1
             self.lost(message)
             _notify(self.observer, "alert_dropped", self.channel.name, "shutdown")
@@ -253,13 +288,20 @@ class _Worker:
                 self.channel.name,
                 dropped,
             )
+        if expired:
+            log.info(
+                "alert channel %s: %d resolved alert(s) expired locally at shutdown",
+                self.channel.name,
+                expired,
+            )
 
-    def _expire(self, message: AlertEvent) -> None:
+    def _expire(self, message: AlertEvent, remote: bool) -> None:
         """Tell the channel an alert it does not show has resolved; never raises."""
-        if self.abandoned or not isinstance(self.channel, Expiring):
+        target = _expiring(self.channel)
+        if self.abandoned or target is None:
             return
         try:
-            self.channel.expire(message)
+            target.expire(message, remote=remote)
         except Exception as exc:  # a channel bug must not kill the worker
             log.error(
                 "alert channel %s: could not expire a resolved alert: %s",
@@ -435,25 +477,32 @@ class Delivery:
 
     def _expire(self, worker: _Worker, message: AlertEvent) -> None:
         """A resolve the channel does not show: let an :class:`Expiring` channel expire the
-        alert's controls, in order with what is queued before it (never blocking)."""
-        if self._closed or not isinstance(worker.channel, Expiring):
+        alert's controls, in order with what is queued before it (never blocking). When it
+        cannot be queued, the local part is done at once. After ``close`` nothing is done:
+        the channel's store may be closed, and no press is taken any more."""
+        if self._closed or _expiring(worker.channel) is None:
             return
         if (why := worker.offer(_Expire(message))) is not None:
-            log.warning(
-                "alert channel %s: a resolved alert could not be expired (%s)",
+            log.info(
+                "alert channel %s: a resolved alert expired locally only (%s)",
                 worker.channel.name,
                 why,
             )
+            _expire_now(worker.channel, message)
 
     def _route(self, worker: _Worker, message: AlertEvent) -> None:
         name = worker.channel.name
         if self._closed:  # after close nothing is delivered; say so instead of losing it
             self._dropped(name, "shutdown")
-        elif self._duplicate(name, message):
+            return  # nor expired: the channel's store may be closed
+        if self._duplicate(name, message):
             self._dropped(name, "duplicate")
         elif (why := worker.offer(message)) is not None:
             self._lost(name, message)
             self._dropped(name, why)
+        else:
+            return
+        _expire_now(worker.channel, message)  # a resolve not sent still ends its controls
 
     def _duplicate(self, channel: str, message: AlertEvent) -> bool:
         now = self.clock()

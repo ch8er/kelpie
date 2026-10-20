@@ -408,7 +408,15 @@ class TelegramChannel:
     def __repr__(self) -> str:
         return f"TelegramChannel(name={self.name!r}, chat_id={self._settings.chat_id!r})"
 
+    @property
+    def expiring(self) -> bool:
+        """Whether its messages carry snooze buttons that a resolve must end."""
+        return self._buttons is not None
+
     def send(self, message: AlertEvent) -> None:
+        if self._buttons is not None and message.transition is Transition.RESOLVED:
+            # Before posting: the alert's buttons end even when the notice cannot be sent.
+            self._delivered(message, [], None, None)
         fields, targets = message_fields(message, self._rendering, self._settings.format)
         markup, ids = self._keyboard(message, targets)
         response = self._post(fields, message, markup)
@@ -443,11 +451,13 @@ class TelegramChannel:
             )
             return None, []
 
-    def expire(self, message: AlertEvent) -> None:
-        """An alert resolved that this channel does not show (below ``min_severity``): its
-        buttons stop working and are removed (best effort), as a shown resolve would do."""
+    def expire(self, message: AlertEvent, remote: bool = True) -> None:
+        """An alert resolved that this channel does not show (below ``min_severity``, or
+        not sent at all): its buttons stop working and, with ``remote``, are removed from the
+        chat (best effort), as a shown resolve would do. Without it only the button store is
+        written (a local SQLite write, no request)."""
         if self._buttons is not None and message.transition is Transition.RESOLVED:
-            self._delivered(message, [], None, None)
+            self._delivered(message, [], None, None, strip=remote)
 
     def _delivered(
         self,
@@ -455,11 +465,12 @@ class TelegramChannel:
         ids: list[int],
         response: net.Response | None,
         markup: Mapping[str, Any] | None,
+        strip: bool = True,
     ) -> None:
         """Record the message as its alert's latest, with its buttons or without (a press
         on an older message, or on another message, is refused), and Kelpie's copy of it
         (Telegram's answer and the keyboard sent), and remove the buttons of the message it
-        replaces (best effort). ``response`` None: nothing was sent."""
+        replaces (best effort, with ``strip``). ``response`` None: nothing was sent."""
         assert self._buttons is not None
         try:
             sent = None if response is None else _sent(response)
@@ -472,7 +483,7 @@ class TelegramChannel:
                 type(exc).__name__,
             )
             return
-        if previous is not None:
+        if previous is not None and strip:
             self._strip(previous)
 
     def _strip(self, message_id: int) -> None:

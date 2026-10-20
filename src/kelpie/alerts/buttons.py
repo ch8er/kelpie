@@ -125,6 +125,7 @@ log = logging.getLogger(__name__)
 
 REF_TTL = timedelta(hours=24)  # a reference's life: the longest escalation step (4h, 12h, 24h)
 PRUNE_AFTER = timedelta(days=7)  # references kept after issue (expired ones say so till then)
+PRUNE_EVERY = 3600.0  # seconds between two prunes by the poller
 RATE_LIMIT = 10  # presses one user may make...
 RATE_WINDOW = 60.0  # ...within this many seconds; more are dropped without an answer
 POLL_TIMEOUT = 25  # seconds Telegram holds a getUpdates open
@@ -400,6 +401,23 @@ class ButtonStore:
                 (f"offset:{channel}", str(offset)),
             )
 
+    def prune(self, at: datetime) -> int:
+        """Delete references, latest-message records and message copies older than
+        :data:`PRUNE_AFTER` at ``at`` (issued, sent or last edited); how many rows went."""
+        with self._lock, self._db:
+            return self._prune(at)
+
+    def _prune(self, at: datetime) -> int:
+        cutoff = _ts(at - PRUNE_AFTER)
+        return sum(
+            self._db.execute(sql, (cutoff,)).rowcount
+            for sql in (
+                "DELETE FROM refs WHERE issued_at < ?",
+                "DELETE FROM latest WHERE sent_at < ?",
+                "DELETE FROM messages WHERE updated_at < ?",
+            )
+        )
+
     def issue(
         self,
         channel: str,
@@ -408,12 +426,11 @@ class ButtonStore:
         targets: Sequence[SnoozeTarget],
         at: datetime,
     ) -> list[int]:
-        """Store a reference per target (issued ``at``) and return their ids; references
-        issued more than :data:`PRUNE_AFTER` ago are deleted."""
+        """Store a reference per target (issued ``at``) and return their ids; what is older
+        than :data:`PRUNE_AFTER` is deleted (:meth:`prune`)."""
         ids = []
         with self._lock, self._db:
-            self._db.execute("DELETE FROM refs WHERE issued_at < ?", (_ts(at - PRUNE_AFTER),))
-            self._db.execute("DELETE FROM messages WHERE updated_at < ?", (_ts(at - PRUNE_AFTER),))
+            self._prune(at)
             for t in targets:
                 cur = self._db.execute(
                     "INSERT INTO refs (channel, chat_id, alert, task_id, item, issued_at)"
@@ -443,7 +460,7 @@ class ButtonStore:
         if message_id is not None and ids and shown is not None:
             self.set_shown(channel, chat_id, message_id, shown, at)
         with self._lock, self._db:
-            self._db.execute("DELETE FROM latest WHERE sent_at < ?", (_ts(at - PRUNE_AFTER),))
+            self._prune(at)
             row = self._db.execute(
                 "SELECT message_id FROM latest WHERE channel = ? AND chat_id = ? AND alert = ?",
                 key,
@@ -768,6 +785,7 @@ class ButtonPoller:
         self.sleep: Callable[[float], object] = self._stopping.wait
         self._thread: threading.Thread | None = None
         self.abandoned = False
+        self._next_prune: float | None = None  # monotonic; None: at the first loop
 
     def __repr__(self) -> str:
         return f"ButtonPoller(channel={self.channel!r}, chat_id={self.chat_id!r})"
@@ -800,10 +818,24 @@ class ButtonPoller:
     def close(self) -> None:
         self.store.close()
 
+    def _prune(self) -> None:
+        """Delete what the store keeps past :data:`PRUNE_AFTER`: at start, then every
+        :data:`PRUNE_EVERY` seconds, so nothing outlives it even while no alert goes out."""
+        self._next_prune = self.monotonic() + PRUNE_EVERY
+        try:
+            gone = self.store.prune(self.control.clock())
+        except Exception as exc:
+            log.error("button store: pruning failed: %s", type(exc).__name__)
+            return
+        if gone:
+            log.info("button store: %d old row(s) pruned", gone)
+
     def _run(self) -> None:
         failures = 0
         while not self._stopping.is_set():
             started = self.monotonic()
+            if self._next_prune is None or started >= self._next_prune:
+                self._prune()
             try:
                 updates, dropped, highest = self._fetch()
                 failures = 0
@@ -900,13 +932,13 @@ class ButtonPoller:
             text = i18n.text(lang, "chat.expired")
         else:
             text = i18n.text(lang, "chat.expired.command", task=task, command=command)
-        if ref.message_id is not None:
-            body = {
-                "chat_id": self.chat_id,
-                "message_id": ref.message_id,
-                "reply_markup": {"inline_keyboard": []},
-            }
-            self._call("editMessageReplyMarkup", body)
+        assert ref.message_id is not None  # expiry is checked after the message is matched
+        body = {
+            "chat_id": self.chat_id,
+            "message_id": ref.message_id,
+            "reply_markup": {"inline_keyboard": []},
+        }
+        self._call("editMessageReplyMarkup", body)
         self._reject("expired_ref", query_id, text)  # answered, then counted once handled
 
     def _call(self, method: str, body: Mapping[str, Any]) -> Any:
@@ -1056,6 +1088,8 @@ class ButtonPoller:
         shown = self.store.shown(self.channel, self.chat_id, message_id)
         used = self.store.used_on(self.channel, self.chat_id, message_id)
         markup = _remaining(None if shown is None else shown.markup, used)
+        if not self.store.is_latest(ref):  # a newer message went out meanwhile: none left
+            markup = {"inline_keyboard": []}
         if shown is not None and shown.text:
             head = f"{shown.text}\n{before}"
             full = f"{head}{who}{after}"

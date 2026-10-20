@@ -438,7 +438,7 @@ class Engine:
         for state in gone:
             now_true = self._resolved_text(state, snapshot)
             age = snapshot.now - state.since
-            note = _StateNote(AlertTransition.RESOLVED, age, now_true)
+            note = _StateNote(AlertTransition.RESOLVED, age, now_true, closes=state.id)
             notice = Action(
                 ActionKind.ALERT,
                 state.rule,
@@ -691,19 +691,11 @@ class Engine:
                 snoozed=snoozed_items(action, snapshot),
                 snoozed_total=_count(action.params.get("snoozed_total")),
                 at=snapshot.now,
-                state=action.state if action.state is not None else _resolved_state(action),
+                # a resolve notice names the state it closes (its Action.state stays None)
+                state=action.state if note is None or note.closes is None else note.closes,
             )
         )
         return True
-
-
-def _resolved_state(action: Action) -> str | None:
-    """The state a resolve notice closes (:meth:`Engine._resolve_gone` names it in
-    ``params["state"]``, never in ``Action.state``, which would keep it open), so its event
-    names the same long-lived state as the alerts it ends. None for any other action."""
-    state = action.params.get("state")
-    is_notice = (action.key or "").startswith("resolved:")
-    return state if is_notice and isinstance(state, str) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,6 +705,9 @@ class _StateNote:
     transition: AlertTransition
     age: timedelta | None  # how long the condition has been open (escalated, resolved)
     reason: str  # the rule's own reason, without the wording of the transition
+    # a resolve notice: the state it closes, which its event names (never Action.state,
+    # which would keep the state open)
+    closes: str | None = None
 
 
 _TRANSITIONS = {
@@ -888,18 +883,21 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
 
 
 MAX_TASK_REF = 200  # characters of a ``snooze_task``; a longer one is dropped
-_UNPRINTABLE = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})  # never in a task id
+_UNPRINTABLE = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})  # never in a task id
 
 
 def _task_ref(value: object) -> str | None:
     """A task id a rule names (``snooze_task``), or None when it is absent or malformed: too
     long, or with a control or format character (it may come from a condition an agent
     registered, and ends up in logs and chat buttons)."""
-    if not isinstance(value, str) or not value.strip() or len(value) > MAX_TASK_REF:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > MAX_TASK_REF:
         return None
     if any(unicodedata.category(ch) in _UNPRINTABLE for ch in value):
         return None
-    return value.strip()
+    return value
 
 
 def _since(value: object) -> tuple[bool, datetime | None]:

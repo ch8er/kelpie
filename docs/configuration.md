@@ -1593,9 +1593,10 @@ thing and refuse everything else.
   nothing left to snooze or the alert resolving makes the older message's buttons expire
   (`expired_ref`), and Kelpie removes them from that message (best effort). An alert that
   resolves expires its buttons also when the channel does not show the "resolved" message
-  (it is `info`, below the default `min_severity`). Each
-  reference is used once (`used_ref`): it is claimed before the snooze is written, and
-  given back only when the write fails.
+  (it is `info`, below the default `min_severity`), when that message cannot be sent, or
+  when the alert queue is full; then only the removal from the chat may be skipped (also
+  while Telegram asks Kelpie to slow down). Each reference is used once (`used_ref`): it is
+  claimed before the snooze is written, and given back only when the write fails.
 - *Replay*: Kelpie stores the `getUpdates` offset and moves it past an update before acting
   on it, so a press is taken at most once, also across restarts. The offset also moves past
   updates Kelpie drops as malformed, so none comes back.

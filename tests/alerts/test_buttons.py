@@ -55,6 +55,7 @@ ALICE = 4242
 MALLORY = 666
 NOW = datetime(2026, 10, 19, 10, 0, tzinfo=UTC)
 KEY = bytes(range(32))
+WAIT = 30.0  # only guards against a hang
 
 
 @dataclass
@@ -97,6 +98,10 @@ class SignalingMetrics(Metrics):
 
     def chat_api_error(self, channel: str, call: str, cause: str) -> None:
         super().chat_api_error(channel, call, cause)
+        self.fake.notify()
+
+    def alert_failed(self, channel: str, cause: str) -> None:
+        super().alert_failed(channel, cause)
         self.fake.notify()
 
     def alert_sent(self, channel: str) -> None:
@@ -729,13 +734,192 @@ def test_a_resolved_alert_expires_its_buttons_whether_or_not_the_chat_shows_it(
             rule.on = False
             rig.clock.now = NOW + timedelta(hours=1)
             engine.tick(lambda: Snapshot(now=NOW + timedelta(hours=1)))  # resolved
-            rig.wait(lambda: rig.fake.calls("editMessageReplyMarkup"))
+            done = 2 if shown else 1  # alerts sent once the resolve is handled
+            rig.wait(
+                lambda: (
+                    rig.fake.calls("editMessageReplyMarkup")
+                    and rig.metrics.alerts_sent["telegram"] == done
+                )
+            )
             (strip,) = rig.fake.calls("editMessageReplyMarkup")
             assert strip["message_id"] == first[0]
             assert strip["reply_markup"] == {"inline_keyboard": []}
             assert len(rig.fake.sent()) == (2 if shown else 1)  # the notice only where shown
             rig.press(first)
             assert rig.sink.presses == [] and rig.rejected() == {"expired_ref": 1}
+        finally:
+            rig.delivery.close(1.0)
+
+
+def resolve_notice() -> AlertEvent:
+    """A resolve as the engine sends it: ``info``, no items, the state it closes."""
+    return replace(digest("T-1"), transition=Transition.RESOLVED, items=(), severity=Severity.INFO)
+
+
+def test_a_resolve_whose_notice_fails_still_expires_the_buttons(tmp_path: Path) -> None:
+    with fake_telegram() as fake:
+        fake.bot()
+        rig = _rig(fake, tmp_path, min_severity="info")
+        try:
+            first = rig.send(digest("T-1"))
+            rig.clock.now = NOW + timedelta(hours=1)
+            send = fake.routes["sendMessage"]
+            fake.routes["sendMessage"] = lambda body: (
+                400,
+                {"ok": False, "description": "Bad Request: chat not found"},
+            )
+            rig.delivery.deliver(resolve_notice())
+            rig.wait(lambda: rig.metrics.alerts_failed)  # the notice never arrived...
+            fake.routes["sendMessage"] = send
+            rig.press(first)
+            assert rig.sink.presses == [] and rig.rejected() == {"expired_ref": 1}  # ...still
+        finally:
+            rig.delivery.close(1.0)
+
+
+def test_a_resolve_that_cannot_be_queued_still_expires_the_buttons(rig: Rig) -> None:
+    first = rig.send(digest("T-1"))
+    rig.clock.now = NOW + timedelta(hours=1)
+    (worker,) = rig.delivery._workers
+    worker.offer = lambda message: "queue_full"  # type: ignore[method-assign]
+    rig.delivery.deliver(resolve_notice())  # done in the caller, in the store only
+    del worker.offer
+    rig.press(first)
+    assert rig.sink.presses == [] and rig.rejected() == {"expired_ref": 1}
+
+
+def test_a_channel_without_buttons_queues_nothing_for_a_resolve(tmp_path: Path) -> None:
+    with fake_telegram() as fake:
+        fake.bot()
+        entry = {"type": "telegram", "token_env": ENV, "chat_id": CHAT, "api_url": fake.url}
+        channel = load_telegram(entry, "t").build({ENV: TOKEN})
+        assert not channel.expiring
+        delivery = Delivery([channel])
+        (worker,) = delivery._workers
+        worker.offer = lambda message: pytest.fail("queued")  # type: ignore[method-assign]
+        delivery.deliver(resolve_notice())  # info, below warning: nothing at all
+        del worker.offer
+        delivery.close(1.0)
+
+
+def test_an_acknowledgement_on_a_message_superseded_meanwhile_leaves_no_buttons(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = rig.send(digest("T-1", "T-2"))
+    answers = iter([True, False])  # latest when checked, superseded when acknowledged
+    monkeypatch.setattr(rig.store, "is_latest", lambda ref: next(answers))
+    rig.press(sent)
+    (edit,) = rig.fake.calls("editMessageText")
+    assert "reply_markup" not in edit  # T-2's buttons are not put back on an old message
+    assert edit["text"].splitlines()[-1].startswith("✅ 1. Snoozed T-1")
+
+
+def test_an_edit_that_fails_falls_back_to_a_reply(rig: Rig) -> None:
+    rig.fake.routes["editMessageText"] = lambda body: (
+        400,
+        {"ok": False, "description": "Bad Request: message to edit not found"},
+    )
+    sent = rig.send(digest("T-1", "T-2"))
+    rig.press(sent)
+    (strip,) = rig.fake.calls("editMessageReplyMarkup")
+    assert [[b["text"] for b in row] for row in strip["reply_markup"]["inline_keyboard"]] == [
+        ["2. Snooze 1d", "3d", "7d"]
+    ]
+    reply = rig.fake.sent()[-1][1]
+    assert reply["text"].startswith("✅ 1. Snoozed T-1") and "reply_parameters" in reply
+    rig.press(sent, row=1)  # Kelpie's copy was not changed by the failed edit
+    assert len(rig.sink.presses) == 2
+
+
+@pytest.mark.parametrize("release", ["raises", "not-claimed"])
+def test_a_reference_that_cannot_be_given_back_is_logged(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, release: str
+) -> None:
+    sent = rig.send(digest("T-1"))
+    rig.sink.fail = True
+
+    def give_back(ref_id: int, at: datetime) -> bool:
+        if release == "raises":
+            raise sqlite3.OperationalError("database is locked")
+        return False
+
+    monkeypatch.setattr(rig.store, "release", give_back)
+    rig.press(sent)
+    assert rig.answers() == ["Could not snooze; see the Kelpie log."]
+    expected = "not released" if release == "raises" else "was not claimed any more"
+    assert expected in caplog.text
+
+
+def test_a_store_failure_in_the_poll_loop_backs_off_and_goes_on(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    offset = rig.store.offset
+    failures = iter([True])
+
+    def flaky(channel: str) -> int:
+        if next(failures, False):
+            raise sqlite3.OperationalError("disk I/O error")
+        return offset(channel)
+
+    monkeypatch.setattr(rig.store, "offset", flaky)
+    rig.wait(lambda: rig.metrics.chat_api_errors[("telegram", "poller", "error")])
+    sent = rig.send(digest("T-1"))
+    rig.press(sent)  # still taking presses
+    assert len(rig.sink.presses) == 1
+
+
+def _old_rows(path: Path) -> ButtonStore:
+    """A store with a reference, a latest message and a message copy from 8 days ago."""
+    store = ButtonStore(path)
+    long_ago = NOW - timedelta(days=8)
+    (ref,) = store.issue("telegram", CHAT, "a", [SnoozeTarget(1, "T-1")], long_ago)
+    shown = buttons.Shown("text", [], {"inline_keyboard": []})
+    store.delivered("telegram", CHAT, "a", [ref], 7, long_ago, shown)
+    return store
+
+
+def _rows(store: ButtonStore) -> dict[str, int]:
+    return {
+        table: store._db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("refs", "latest", "messages")
+    }
+
+
+def test_the_store_prunes_what_is_older_than_a_week(tmp_path: Path) -> None:
+    store = _old_rows(tmp_path / "kelpie.buttons.db")
+    try:
+        assert _rows(store) == {"refs": 1, "latest": 1, "messages": 1}
+        assert store.prune(NOW - timedelta(days=2)) == 0  # 6 days old: kept
+        assert store.prune(NOW) == 3
+        assert _rows(store) == {"refs": 0, "latest": 0, "messages": 0}
+    finally:
+        store.close()
+
+
+def test_the_poller_prunes_at_start_and_then_every_hour(tmp_path: Path) -> None:
+    _old_rows(tmp_path / "kelpie.buttons.db").close()
+    pruned = threading.Event()
+    calls: list[datetime] = []
+    ticks = iter(range(0, 10**9, int(buttons.PRUNE_EVERY)))  # an hour per loop
+
+    def prepare(poller: ButtonPoller) -> None:
+        prune = poller.store.prune
+
+        def counted(at: datetime) -> int:
+            calls.append(at)
+            if len(calls) >= 2:
+                pruned.set()
+            return prune(at)
+
+        poller.store.prune = counted  # type: ignore[method-assign]
+        poller.monotonic = lambda: float(next(ticks))
+
+    with fake_telegram() as fake:
+        fake.bot()
+        rig = _rig(fake, tmp_path, prepare=prepare)
+        try:
+            assert pruned.wait(WAIT)
+            assert _rows(rig.store) == {"refs": 0, "latest": 0, "messages": 0}
         finally:
             rig.delivery.close(1.0)
 
