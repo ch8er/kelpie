@@ -1278,8 +1278,8 @@ the changes it can place safely:
 - a draft condition on each job without an `if` of its own, with `ready_for_review` among the
   pull request types. A job with its own condition keeps it, and still runs for drafts.
 
-It commits them on `kelpie/ci-config/<workflow file>` (dots in the file's stem become
-dashes) and opens a **draft** pull request listing each change with the minutes it would
+It commits them on `kelpie/ci-config/<workflow file>` (a file name with `..` is not
+edited) and opens a **draft** pull request listing each change with the minutes it would
 have saved, what it left out and why (WIP commits and already verified commits are never
 rendered: GitHub Actions has no setting for them), and what to check before merging: a
 `paths-ignore` filter leaves a required check pending on docs-only pull requests, and a
@@ -1292,14 +1292,16 @@ naming the changes. Kelpie never merges it. A pipeline with no file under
 Nothing twice:
 
 - An open pull request from that branch means it was proposed already.
-- A closed, unmerged pull request that proposed the same changes means a human turned them
-  down, whether or not its branch was deleted: Kelpie does not propose them again. Other
-  changes for the same file are proposed.
+- A change a closed proposal named is never proposed again for that file, alone or with
+  others, whether or not the branch was deleted: closed without merging, a human turned it
+  down ("turned down in #n" in later proposals); merged, it is in the file, or a human undid
+  it since ("merged in #n and undone since"). Other changes for the file are proposed.
 - The branch of an earlier proposal, merged or closed, is deleted and made afresh (GitHub
   can restore it from that pull request).
 - A branch Kelpie could not take back after a failure (for example while rate limited) is
-  carried on from when it is still at the default branch's head, or one commit ahead
-  holding exactly this change to this file only.
+  carried on from when it has no commit of its own (fast-forwarded to the default branch's
+  head if it fell behind), or one commit ahead holding exactly this change to this file
+  only.
 - Any other branch of that name is someone else's, and Kelpie refuses (a human is told).
 
 Kelpie deletes only a branch it made in the same attempt, still at its own commit, and never

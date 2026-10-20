@@ -12,15 +12,16 @@ Steps, each re-checked against GitHub (no cache):
 
 1. a pipeline with no file under ``.github/workflows/`` (CodeQL default setup, a dynamic
    workflow) has nothing to propose; otherwise the repository is in ``propose_repos`` and
-   the workflow is a file there with an ASCII name (``Build.workflow`` from the run list,
-   never a path the rule made up);
-2. an open pull request from Kelpie's branch for this file (``kelpie/ci-config/<file>``,
-   dots in the stem made dashes) means it was proposed already: nothing to do;
+   the workflow is a file there with an ASCII name without ``..`` (``Build.workflow`` from
+   the run list, never a path the rule made up);
+2. an open pull request from Kelpie's branch for this file (``kelpie/ci-config/<file>``)
+   means it was proposed already: nothing to do;
 3. the file on the default branch is read and the changes are rendered for that branch
    (:mod:`kelpie.connectors.github.workflow_config`); nothing to render is nothing to do.
-   A closed, unmerged pull request from that branch that proposed the same changes (the
-   description's hidden mark) means a human turned them down: nothing to do. The commit
-   and the description are made before anything is written;
+   A change a closed pull request from that branch named (the description's hidden mark)
+   is left out: unmerged, a human turned it down; merged, it is in the file, or a human
+   undid it. Nothing left is nothing to do. The commit and the description are made
+   before anything is written;
 4. the branch is created from the default branch's head, the file is committed on it with
    the read file's blob sha (GitHub refuses the commit if the file changed meanwhile), and a
    draft pull request is opened. It lists each change with the minutes it would have saved,
@@ -28,9 +29,9 @@ Steps, each re-checked against GitHub (no cache):
    after the branch was made, the branch is deleted again, but only while it still points
    at Kelpie's own work. A branch of that name that already exists: the head of an earlier
    proposal of Kelpie's, merged or closed, is deleted and made afresh; left half-made by an
-   earlier attempt (at the default head, or one commit to this file holding exactly this
-   change), Kelpie carries on from there; anything else is someone else's branch and
-   refuses.
+   earlier attempt (no commit of its own, fast-forwarded when behind; or one commit to this
+   file holding exactly this change), Kelpie carries on from there; anything else is
+   someone else's branch and refuses.
 
 Answers that retrying will not change refuse (a human is told): no access (403, or an
 organization policy), the file or repository gone (404), a request GitHub rejects (422,
@@ -60,11 +61,11 @@ from kelpie.core.actions import Action, ActionKind, ActionResult
 
 log = logging.getLogger(__name__)
 
-# A workflow file Kelpie edits: under .github/workflows/, an ASCII name; its branch is named
-# after it with the stem's dots made dashes (a ref component allows no "..", no ".lock").
+# A workflow file Kelpie edits: under .github/workflows/, an ASCII name without ".." (it
+# names the branch too, and a ref allows no ".."; ending in .yml, it never ends in ".lock").
 WORKFLOW_DIR = ".github/workflows/"
 WORKFLOW_PATH = re.compile(
-    r"\.github/workflows/(?P<file>(?P<stem>[A-Za-z0-9][A-Za-z0-9._-]{0,99})\.(?P<ext>ya?ml))"
+    r"\.github/workflows/(?P<file>(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.ya?ml)"
 )
 BRANCH_PREFIX = "kelpie/ci-config/"
 # In every description Kelpie writes, naming the changes it proposes: a closed pull request
@@ -115,22 +116,36 @@ class Proposer:
         head_filter = f"{owner}:{branch}"  # the owner as GitHub spells it
         if self._open(repo, head_filter):
             return ActionResult.NOTHING_TO_DO
+        closed = self._closed(repo, head_filter)
+        # A change a closed proposal of Kelpie's named is never proposed again for this
+        # file, alone or with others: closed unmerged, a human turned it down; merged, it
+        # is in the file (rendering leaves it out), unless a human undid it since.
+        turned = {
+            name: (pr.get("number"), bool(pr.get("merged_at")))
+            for pr in closed
+            for name in proposed_in(str(pr.get("body") or ""))
+        }
         text, blob = read_workflow(self.client, repo, path, default)
         try:
-            rendered = render(text, changes, default)
+            rendered = render(text, [c for c in changes if c.get("change") not in turned], default)
         except WorkflowError as exc:
             log.warning("ci-config: %s %s: %s", repo, path, exc)
             return ActionResult.REFUSED
         if not rendered.applied:
+            if turned:
+                log.info("ci-config: %s %s: what is left was turned down before", repo, path)
             return ActionResult.NOTHING_TO_DO
-        closed = self._closed(repo, head_filter)
-        mark = marker(rendered.applied)
-        if any(not pr.get("merged_at") and mark in str(pr.get("body") or "") for pr in closed):
-            log.info("ci-config: %s %s: these changes were turned down before", repo, path)
-            return ActionResult.NOTHING_TO_DO
+        left_out = (
+            *rendered.left_out,
+            *(
+                (name, _turned_down(*turned[name]))
+                for name in (c.get("change") for c in changes)
+                if isinstance(name, str) and name in turned
+            ),
+        )
         # Everything the writes need, before the first write.
         content = base64.b64encode(rendered.text.encode()).decode()
-        description = body(path, changes, rendered.applied, rendered.left_out)
+        description = body(path, changes, rendered.applied, left_out)
         head = self.client.get(f"/repos/{repo}/git/ref/heads/{quote(default)}", fresh=True)
         sha = (head.body.get("object") or {}).get("sha") if isinstance(head.body, Mapping) else None
         if not isinstance(sha, str):
@@ -150,7 +165,7 @@ class Proposer:
                     return ActionResult.REFUSED
                 self._branch(repo, branch, sha)
             else:
-                state = self._left_by_kelpie(repo, path, branch, default, rendered.text)
+                state = self._left_by_kelpie(repo, path, branch, default, sha, rendered.text)
                 if state is None:
                     log.warning(
                         "ci-config: %s: branch %s exists without a proposal; Kelpie leaves "
@@ -239,11 +254,12 @@ class Proposer:
         return [pr for pr in closed if isinstance(pr, Mapping)] if isinstance(closed, list) else []
 
     def _left_by_kelpie(
-        self, repo: str, path: str, branch: str, default: str, text: str
+        self, repo: str, path: str, branch: str, default: str, head: str, text: str
     ) -> str | None:
         """What an earlier attempt left half-made on the branch (it could not be deleted,
-        e.g. while rate limited): ``"empty"`` (no commit of its own yet), ``"made"`` (one
-        commit, to this file only, holding exactly this change), or None (someone else's)."""
+        e.g. while rate limited): ``"empty"`` (no commit of its own yet; moved up to the
+        default branch's ``head`` when it fell behind), ``"made"`` (one commit, to this file
+        only, holding exactly this change), or None (someone else's)."""
         diff = self.client.get(
             f"/repos/{repo}/compare/{quote(default)}...{quote(branch)}", fresh=True
         ).body
@@ -251,6 +267,15 @@ class Proposer:
             return None
         ahead, files = diff.get("ahead_by"), diff.get("files")
         if ahead == 0:
+            behind = diff.get("behind_by")
+            if isinstance(behind, int) and behind > 0:
+                # No commit of its own: a fast-forward loses nothing (GitHub refuses
+                # anything else without force).
+                self.client.send(
+                    "PATCH",
+                    f"/repos/{repo}/git/refs/heads/{quote(branch)}",
+                    {"sha": head, "force": False},
+                )
             return "empty"
         if ahead != 1 or not isinstance(files, list) or len(files) != 1:
             return None
@@ -357,12 +382,29 @@ def marker(applied: Sequence[str]) -> str:
     return f"{MARKER} {','.join(sorted(applied))} -->"
 
 
+_MARKED = re.compile(re.escape(MARKER) + r" (?P<names>[a-z_,]{1,200}) -->")
+
+
+def proposed_in(description: str) -> set[str]:
+    """The changes a description of Kelpie's proposed (its :func:`marker`)."""
+    return {
+        name
+        for found in _MARKED.finditer(description)
+        for name in found["names"].split(",")
+        if name in _LABELS
+    }
+
+
+def _turned_down(number: Any, merged: bool) -> str:
+    n = number if isinstance(number, int) and not isinstance(number, bool) else 0
+    return f"merged in #{n} and undone since" if merged else f"turned down in #{n}"
+
+
 def branch_for(file: str) -> str:
     """Kelpie's branch for the workflow file ``file`` (a :data:`WORKFLOW_PATH` file name)."""
-    match = WORKFLOW_PATH.fullmatch(WORKFLOW_DIR + file)
-    if match is None:
+    if WORKFLOW_PATH.fullmatch(WORKFLOW_DIR + file) is None:
         raise ValueError(f"not a workflow file name: {file!r}")
-    return f"{BRANCH_PREFIX}{match['stem'].replace('.', '-')}.{match['ext']}"
+    return f"{BRANCH_PREFIX}{file}"
 
 
 def _head(pr: Mapping[str, Any]) -> str | None:

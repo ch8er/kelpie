@@ -105,10 +105,34 @@ def test_an_open_proposal_or_a_branch_left_from_one_is_not_proposed_again(
     assert writes(gh) == []  # whether or not its branch is still there
 
 
-def test_other_changes_than_those_turned_down_are_proposed(gh: FakeGitHub) -> None:
-    earlier = {"number": 3, "merged_at": None, "body": marker(["skip_drafts"])}
+def test_a_change_turned_down_is_left_out_of_later_proposals(gh: FakeGitHub) -> None:
+    earlier = {"number": 3, "merged_at": None, "body": marker(["skip_drafts", "skip_wip"])}
     gh.reply(CLOSED, [earlier])
     assert proposer(gh).execute(action()) is ActionResult.DONE
+    (put,) = [w for w in writes(gh) if w[0] == "PUT"]
+    workflow = yaml.safe_load(base64.b64decode(put[2]["content"]).decode())
+    assert "if" not in workflow["jobs"]["test"]  # no draft condition
+    assert workflow[True]["pull_request"]["paths-ignore"] == ["docs/**", "**.md"]
+    (pr,) = [w for w in writes(gh) if w[1] == f"/repos/{REPO}/pulls"]
+    assert "- Skip draft pull requests: turned down in #3." in pr[2]["body"]
+    assert pr[2]["body"].endswith(marker(["ignore_docs_paths"]))
+
+
+def test_nothing_is_proposed_when_all_that_is_left_was_turned_down(gh: FakeGitHub) -> None:
+    every = marker(["cancel_in_progress", "ignore_docs_paths", "skip_drafts"])
+    gh.reply(CLOSED, [{"number": 3, "merged_at": None, "body": f"edited by a human\n{every}"}])
+    only = [{"change": "skip_drafts", "minutes": 25.0, "builds": 2}]
+    assert proposer(gh).execute(action(changes=only)) is ActionResult.NOTHING_TO_DO
+    assert writes(gh) == []
+
+
+def test_a_merged_change_undone_since_is_not_proposed_again(gh: FakeGitHub) -> None:
+    merged = {"number": 3, "merged_at": "2026-03-01T00:00:00Z", "body": marker(["skip_drafts"])}
+    gh.reply(CLOSED, [merged])  # yet the file on main has no draft condition: reverted
+    assert proposer(gh).execute(action()) is ActionResult.DONE
+    (pr,) = [w for w in writes(gh) if w[1] == f"/repos/{REPO}/pulls"]
+    assert "- Skip draft pull requests: merged in #3 and undone since." in pr[2]["body"]
+    assert pr[2]["body"].endswith(marker(["ignore_docs_paths"]))
 
 
 @pytest.mark.parametrize("merged_at", ["2026-03-01T00:00:00Z", None])
@@ -165,10 +189,11 @@ def test_a_pipeline_with_no_workflow_file_has_nothing_to_propose(gh: FakeGitHub)
     assert gh.requests == []
 
 
-def test_dots_in_a_file_name_become_dashes_in_the_branch() -> None:
-    assert branch_for("ci.linux.yml") == "kelpie/ci-config/ci-linux.yml"
-    assert branch_for("x.lock.yaml") == "kelpie/ci-config/x-lock.yaml"
-    assert branch_for("a..b.yml") == "kelpie/ci-config/a--b.yml"
+def test_each_workflow_file_has_a_branch_of_its_own() -> None:
+    assert branch_for("ci.linux.yml") != branch_for("ci-linux.yml")
+    assert branch_for("x.lock.yaml") == "kelpie/ci-config/x.lock.yaml"  # a valid ref
+    with pytest.raises(ValueError):
+        branch_for("a..b.yml")  # a ref allows no ".."
 
 
 def test_a_branch_github_will_not_create_is_refused_not_taken_for_a_proposal(
@@ -178,14 +203,14 @@ def test_a_branch_github_will_not_create_is_refused_not_taken_for_a_proposal(
     assert proposer(gh).execute(action()) is ActionResult.REFUSED  # no such branch exists
 
 
-def left_behind(gh: FakeGitHub, ahead: int, files: list[str], text: str) -> None:
+def left_behind(gh: FakeGitHub, ahead: int, files: list[str], text: str, behind: int = 0) -> None:
     """The branch an attempt could not take back (e.g. while rate limited)."""
     gh.reply(f"POST /repos/{REPO}/git/refs", {"message": "Reference already exists"}, 422)
     gh.reply(REF, {"object": {"sha": COMMIT}})
     gh.reply(CLOSED, [])
     gh.reply(
         f"/repos/{REPO}/compare/main...{BRANCH}",
-        {"ahead_by": ahead, "files": [{"filename": f} for f in files]},
+        {"ahead_by": ahead, "behind_by": behind, "files": [{"filename": f} for f in files]},
     )
     gh.reply(
         f"/repos/{REPO}/contents/{PATH}?" + urlencode({"ref": BRANCH}),
@@ -204,6 +229,17 @@ def test_a_proposal_left_half_made_is_carried_on(gh: FakeGitHub) -> None:
     left_behind(gh, 0, [], TYPICAL)  # made, but nothing committed on it yet
     assert proposer(gh).execute(action()) is ActionResult.DONE
     assert [w[0] for w in writes(gh)] == ["POST", "PUT", "POST"]
+    gh.requests.clear()
+    left_behind(gh, 0, [], TYPICAL, behind=2)  # and the default branch moved on since
+    gh.reply(f"PATCH /repos/{REPO}/git/refs/heads/{BRANCH}", {"object": {"sha": "c" * 40}})
+    assert proposer(gh).execute(action()) is ActionResult.DONE
+    patch = writes(gh)[1]
+    assert patch == (
+        "PATCH",
+        f"/repos/{REPO}/git/refs/heads/{BRANCH}",
+        {"sha": "c" * 40, "force": False},  # a fast-forward to the head the file was read at
+    )
+    assert [w[0] for w in writes(gh)] == ["POST", "PATCH", "PUT", "POST"]
 
 
 @pytest.mark.parametrize(
@@ -235,6 +271,7 @@ def test_nothing_to_render_is_nothing_to_do(gh: FakeGitHub) -> None:
         {"workflow": ".github/workflows/../../evil.yml"},
         {"workflow": ".github/workflows/deploy.sh"},
         {"workflow": ".github/workflows/sub/ci.yml"},
+        {"workflow": ".github/workflows/a..b.yml"},  # not a branch name
         {"workflow": ".github/workflows/ci\u0430.yml"},  # not ASCII
         {"changes": "skip_drafts"},
     ],
