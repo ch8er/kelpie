@@ -34,6 +34,7 @@ from typing import Protocol
 from kelpie.core.model import Span
 from kelpie.core.spans import SpanStore
 from kelpie.traces import otlp
+from kelpie.traces.auth import TokenCheck, TokenFile
 from kelpie.traces.semconv import MappingOptions, map_spans
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,10 @@ class IngestObserver(Protocol):
 
     def spans_rejected(self, reason: str, count: int) -> None: ...
 
+    def traces_grace_request(self) -> None:
+        """A request authenticated by a rotated-out token within its grace period."""
+        ...
+
 
 class Headers(Protocol):
     def get(self, name: str, default: str | None = None) -> str | None: ...
@@ -76,7 +81,8 @@ class TraceIngest:
     store: SpanStore
     clock: Callable[[], datetime]
     observer: IngestObserver | None = None
-    token: str | None = None  # bearer token; None accepts unauthenticated requests
+    token: str | None = field(default=None, repr=False)  # bearer token; None: no auth
+    tokens: TokenFile | None = None  # [traces] token_file: replaces ``token`` when set
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES
     options: MappingOptions = field(default_factory=MappingOptions)
     max_concurrent: int = DEFAULT_MAX_CONCURRENT
@@ -106,6 +112,17 @@ class TraceIngest:
             self.observer.traces_request(reply.status)
         return reply
 
+    def _authorized(self, header: str | None) -> bool:
+        if self.tokens is None:
+            return self.token is None or _authorized(header, self.token)
+        credentials = _credentials(header)
+        verdict = TokenCheck.INVALID if credentials is None else self.tokens.check(credentials)
+        if verdict is TokenCheck.GRACE and self.observer is not None:
+            grace = getattr(self.observer, "traces_grace_request", None)
+            if callable(grace):
+                grace()
+        return verdict is not TokenCheck.INVALID
+
     def _handle(
         self,
         headers: Headers,
@@ -128,11 +145,7 @@ class TraceIngest:
         if length > self.max_body_bytes:
             message = f"body over {self.max_body_bytes} bytes"
             return _error(413, encoding, otlp.RESOURCE_EXHAUSTED, message)
-        if (
-            not authenticated
-            and self.token is not None
-            and not _authorized(headers.get("Authorization"), self.token)
-        ):
+        if not authenticated and not self._authorized(headers.get("Authorization")):
             return _error(401, encoding, otlp.UNAUTHENTICATED, "missing or invalid bearer token")
         if media not in (otlp.JSON, otlp.PROTOBUF):
             message = f"unsupported content type {media!r}; use {otlp.PROTOBUF} or {otlp.JSON}"
@@ -227,11 +240,14 @@ def _plausible(span: otlp.RawSpan, now: datetime, max_age: timedelta) -> bool:
     return span.start_ns <= latest and span.end_ns <= latest and last >= oldest
 
 
-def _authorized(header: str | None, token: str) -> bool:
+def _credentials(header: str | None) -> str | None:
     scheme, _, credentials = (header or "").strip().partition(" ")
-    if scheme.lower() != "bearer":
-        return False
-    return hmac.compare_digest(credentials.strip().encode(), token.encode())
+    return credentials.strip() if scheme.lower() == "bearer" else None
+
+
+def _authorized(header: str | None, token: str) -> bool:
+    credentials = _credentials(header)
+    return credentials is not None and hmac.compare_digest(credentials.encode(), token.encode())
 
 
 class _TooLarge(ValueError):

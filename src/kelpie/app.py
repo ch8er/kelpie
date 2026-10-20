@@ -113,6 +113,7 @@ from kelpie.rules.ci_economy import CiEconomy
 from kelpie.rules.conflict_warning import ConflictWarning
 from kelpie.rules.no_progress import NoProgress
 from kelpie.rules.resources import Resources
+from kelpie.traces.auth import TokenFile, TokenFileError, loose_mode
 from kelpie.traces.config import TraceSettings, load_traces
 from kelpie.traces.forward import Forwarder
 from kelpie.traces.hooks import merge_hook_spans
@@ -1540,7 +1541,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
     traces = settings.traces
     try:
-        token = traces.token()
+        # With [hub] this port takes no spans: its token (or token file) is not needed.
+        token = traces.token() if settings.hub is None else None
         destinations = [f.destination() for f in traces.forward] if traces.enabled else []
         prometheus = settings.resources.prometheus
         reader = prometheus.build() if prometheus is not None else None
@@ -1630,11 +1632,29 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "OTLP ingest on /v1/traces accepts spans without a token; set $%s",
             traces.token_env,
         )
+    tokens = None
+    if traces.token_file is not None and settings.hub is None:
+        try:
+            tokens = TokenFile(
+                traces.token_file,
+                traces.token_env,
+                clock,
+                on_error=lambda why: log.error("[traces] token_file %s", why),
+            )
+        except TokenFileError as exc:
+            raise ConfigError(f"[traces] token_file {exc}") from None
+        if loose_mode(traces.token_file):
+            log.warning(
+                "[traces] token_file %s can be read by others than its owner: chmod 600 it",
+                traces.token_file,
+            )
+        metrics.token_file = tokens.status
     ingest = TraceIngest(
         store=span_store,
         clock=clock,
         observer=metrics,
         token=token,
+        tokens=tokens,
         max_body_bytes=traces.max_body_bytes,
         options=traces.options,
         max_concurrent=traces.max_concurrent_requests,
@@ -2235,16 +2255,21 @@ def _dry_run_status(settings: Settings) -> str:
     return "on (nothing leaves Kelpie)"
 
 
-def _traces_status(traces: TraceSettings) -> str:
+def _traces_status(traces: TraceSettings, hub: bool = False) -> str:
     if not traces.enabled:
         return "disabled"
+    if hub:
+        return "POST /v1/traces off on this port: agents relay spans to the hub"
     try:
         token = traces.token()
     except ValueError as exc:
         return f"NOT ready: {exc}"
-    auth = (
-        f"bearer token from ${traces.token_env}" if token else f"open (${traces.token_env} unset)"
-    )
+    if traces.token_file is not None:
+        auth = f"bearer token from {traces.token_file} (rotatable, grace {traces.token_grace})"
+    elif token:
+        auth = f"bearer token from ${traces.token_env}"
+    else:
+        auth = f"open (${traces.token_env} unset)"
     forward = "".join(f", forward to {f.name} ({f.display_endpoint})" for f in traces.forward)
     return f"POST /v1/traces, {auth}, window {traces.window}, retention {traces.retention}{forward}"
 
@@ -2647,7 +2672,7 @@ def render_status(
         f"dry-run:  {_dry_run_status(settings)}",
         f"interval: {engine.interval}",
         f"ledger:   {settings.db_path or '(in memory)'}",
-        f"traces:   {_traces_status(settings.traces)}",
+        f"traces:   {_traces_status(settings.traces, settings.hub is not None)}",
         *render_prices(settings, unpriced),
         f"resources: {_resources_status(settings.resources)}",
         *_github_status(settings),

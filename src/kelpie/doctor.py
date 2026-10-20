@@ -67,6 +67,7 @@ from kelpie.core.snooze import marker_snooze
 from kelpie.core.spend import SpendMode
 from kelpie.resources.prometheus import PrometheusClient, QueryError
 from kelpie.snooze import local_board
+from kelpie.traces.auth import loose_mode, token_copies, trust_problem
 
 FRESH = timedelta(hours=1)  # newest spool line or span must be younger than this
 MAX_WORKTREES = 20  # git is asked about at most this many workspaces
@@ -323,6 +324,78 @@ def _newest_span(path: Path) -> str | None:
         conn.close()
 
 
+TOKEN_CHECK = "traces token kept private"
+
+
+def check_traces_token(settings: Settings, environ: Mapping[str, str]) -> Check:
+    """The traces ingest token is in no backup and no file others can read: the token
+    file (mode 600), the Hermes home (``hermes_otel.yaml`` of every profile) and
+    ``~/.claude`` are scanned for it, and for backups with a ``<token_env>=`` line (an older
+    token is known only by its hash). Paths only, never the token. With ``[hub]`` this
+    port takes no spans."""
+    traces = settings.traces
+    if not traces.enabled:
+        return _skip(TOKEN_CHECK, "[traces] disabled")
+    if settings.hub is not None:
+        return _skip(TOKEN_CHECK, "[hub] is set: agents send spans with their own tokens")
+    try:
+        token = traces.token(environ)
+    except ValueError as exc:
+        return _fail(TOKEN_CHECK, str(exc), "fix [traces] token_env or token_file")
+    if token is None:
+        return _skip(TOKEN_CHECK, f"no token (${traces.token_env} unset)")
+    problems: list[str] = []
+    fixes: list[str] = []
+    roots: list[Path] = []
+    if traces.token_file is not None:
+        roots.append(traces.token_file.parent)
+        try:
+            if (why := trust_problem(traces.token_file)) is not None:
+                problems.append(f"kelpie serve will not trust it: {why}")
+                fixes.append("fix the owner or mode")
+            elif loose_mode(traces.token_file):
+                problems.append(f"{traces.token_file} can be read by others")
+                fixes.append(f"chmod 600 {traces.token_file}")
+        except OSError as exc:
+            problems.append(f"cannot check {traces.token_file} ({exc.strerror})")
+            fixes.append("run doctor as the user kelpie serve runs as")
+    home = Path(environ.get("HOME") or Path.home())
+    hermes = settings.hermes
+    roots += [hermes.db_path.expanduser().parent] if hermes is not None else []
+    roots += [home / ".hermes", home / ".claude"]
+    roots = list(dict.fromkeys(r for r in roots if r.is_dir()))
+    marker = f"{traces.token_env}="
+    skip = traces.token_file.absolute() if traces.token_file is not None else None
+    copies, limit = token_copies(token, roots, skip=skip, marker=marker)
+    backups = [c.path for c in copies if c.backup and not c.marker]
+    older = [c.path for c in copies if c.marker]
+    loose = [c.path for c in copies if c.loose and not c.backup]
+    if backups:
+        problems.append(f"{len(backups)} backup file(s) hold it: {_paths(backups)}")
+        fixes.append("delete the backups (they keep the token after a rotation)")
+    if older:
+        problems.append(
+            f"{len(older)} backup file(s) have a {marker} line (maybe an older token): "
+            f"{_paths(older)}"
+        )
+        fixes.append("delete them")
+    if loose:
+        problems.append(f"{len(loose)} file(s) others may read hold it: {_paths(loose)}")
+        fixes.append("chmod 600 them, or read the token from the token file instead")
+    if problems:
+        fixes.append("then `kelpie traces rotate-token` if it may have leaked")
+        return _warn(TOKEN_CHECK, "; ".join(problems), "; ".join(fixes))
+    inline = [c.path for c in copies if not c.marker]
+    where = f"; also in {_paths(inline)} (a rotation must update them)" if inline else ""
+    more = f" ({limit})" if limit else ""
+    return _pass(TOKEN_CHECK, f"no backup or readable copy in {len(roots)} folder(s){more}{where}")
+
+
+def _paths(paths: list[Path], limit: int = 5) -> str:
+    shown = ", ".join(str(p) for p in paths[:limit])
+    return shown + (f" and {len(paths) - limit} more" if len(paths) > limit else "")
+
+
 def check_spans(
     settings: Settings,
     now: datetime,
@@ -335,10 +408,16 @@ def check_spans(
     path = settings.db_path
     if path is None:
         return _skip(name, "storage is in memory; nothing to read from outside")
+    traces = settings.traces
+    token = (
+        f"${traces.token_env} from {traces.token_file}"
+        if traces.token_file is not None
+        else f"${traces.token_env}"
+    )
     fix = (
         f"check the exporter ({exporter}): endpoint http://<kelpie>:9464/v1/traces, "
-        f"Authorization bearer token = ${settings.traces.token_env}; run doctor with the same "
-        "KELPIE_DB as kelpie serve"
+        f"Authorization bearer token = {token}; run doctor with the same KELPIE_DB as "
+        "kelpie serve"
     )
     try:
         newest = _newest_span(path)
@@ -1071,6 +1150,7 @@ def run_checks(
         if on
     ]
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
+    checks.append(check_traces_token(settings, environ))
     checks.append(check_prices(settings, at))
     checks.append(check_spend_modes(settings, at))
     checks += check_cost_reports(settings, at, environ)
