@@ -145,19 +145,25 @@ proof of identity Hermes' reaper uses:
   descendant of the agent (tool commands start their own sessions and would outlive it).
   Nothing else: not the submitter's children (a submitter starts the profile's gateway when
   none runs, and that gateway serves the profile's other runs).
-- **Proof.** Each recorded pid must still carry the start fingerprint Hermes recorded for it
-  (`"<boot_id>:<pid 1 start>|<process start>"`, computed the same way from `/proc`): a reused
-  pid or a reboot never matches. The run's claim lock must name this host, every process must
+- **Proof.** Each recorded pid must still carry the start fingerprint Hermes recorded for it,
+  computed the same way: on Linux `"<boot_id>:<pid 1 start>|<process start>"` from `/proc`; on
+  macOS `"|<process start>"`, the kernel's start in centiseconds, read with libproc (as Hermes
+  reads it through psutil; a macOS Hermes without psutil records `unverified`). A reused pid or
+  a reboot never matches. The run's claim lock must name this host, every process must
   belong to the user Kelpie runs as, and Kelpie never signals itself or its ancestors (when
   Kelpie runs inside the run's worker, nothing is signalled). A process recorded without a
   fingerprint (older Hermes, or `unverified`) is not signalled. Right before each signal the
   process's start time is checked again, through a pidfd where the kernel has one (within one
-  boot and PID namespace, the same start time on the same pid is the same process).
+  boot and PID namespace, the same start time on the same pid is the same process). macOS has
+  no pidfd: a pid that is another process by the time of the signal is skipped, and the alert
+  names it.
 - **Gone or not Kelpie's to end.** A worker counts as gone only when Kelpie can tell: no such
-  pid, a dead one, another start time, another boot. When it cannot tell or may not signal it,
-  nothing is signalled and the alert says why: the worker runs as another user, Hermes runs in
-  another PID namespace (Kelpie in a container of its own), `/proc` hides other users'
-  processes (`hidepid`) or cannot be read.
+  pid, a dead one, another start time (Linux), another boot. When it cannot tell or may not
+  signal it, nothing is signalled and the alert says why: the worker runs as another user,
+  Hermes runs in another PID namespace (Kelpie in a container of its own), `/proc` hides other
+  users' processes (`hidepid`) or a process cannot be read. On macOS another start time is not
+  "gone" either: a Hermes whose psutil predates the unadjusted start read recorded a start
+  shifted by the last clock step, so Kelpie cannot tell a reused pid from its worker.
 - **How.** SIGTERM to all of them, SIGKILL to those still running after `worker_grace`
   (default 5 s). Kelpie never writes `kanban.db`: the reaper later finds the processes gone.
 - **What it says.** The alert and the ledger (`kelpie why`) carry what actually happened: "its
@@ -178,7 +184,8 @@ proof of identity Hermes' reaper uses:
   pid only. Nothing beyond what that user can do anyway, but with `end_worker` the board is
   trusted to name processes, so keep it writable by Hermes' user only.
 
-Without `/proc` (macOS) nothing is signalled and the stop says so. With `end_worker = false` a
+On a system with neither `/proc` nor libproc nothing is signalled and the stop says so. With
+`end_worker = false` a
 stop is "block the task now, reap the worker after about two minutes, and never without a
 dispatcher", as before; a budget hard-stop (`[[budgets]]`) then ends the *task* at once but the
 spend of a still-running worker only when the dispatcher reaps it. In multi-host mode the

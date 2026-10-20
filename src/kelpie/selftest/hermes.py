@@ -46,7 +46,7 @@ from typing import Any
 from kelpie.adapters.hermes import adapter as hermes_adapter
 from kelpie.adapters.hermes.adapter import HermesAdapter
 from kelpie.adapters.hermes.stop import ENV_EXACT, ENV_PREFIXES
-from kelpie.adapters.hermes.worker import PROC, Proc, _same, read_proc, run_worker
+from kelpie.adapters.hermes.worker import PROC, Proc, Procfs, _same, read_proc, run_worker
 from kelpie.adapters.hermes.worker import end as end_processes
 from kelpie.alerts.telegram import format_message
 from kelpie.app import ConfigError, HermesSettings, Settings, load_rules
@@ -593,6 +593,6 @@ def _processes_of(tmp: Path) -> list[Proc]:
                 if not ours:
                     cwd = Path(os.readlink(entry / "cwd"))
                     ours = cwd == tmp or tmp in cwd.parents
-                if ours and _same(before, PROC):
+                if ours and _same(before, Procfs()):
                     found.append(before)
     return found

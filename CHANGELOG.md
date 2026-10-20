@@ -343,6 +343,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   agent's tool commands) once their pid and start time match what Hermes recorded, instead of
   leaving them to Hermes' reaper for two minutes or more; the alert and `kelpie why` say what
   happened, or why Kelpie did not signal them ([#186](https://github.com/ch8er/kelpie/pull/186)).
+- On macOS too: Kelpie reads the worker's identity with libproc, as Hermes fingerprints it there,
+  and checks it again right before each signal (macOS has no pidfd)
+  ([#231](https://github.com/ch8er/kelpie/issues/231)).
 
 ### Fixed
 
