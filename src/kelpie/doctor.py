@@ -28,6 +28,8 @@ from kelpie.adapters.hermes.git_state import read_git_state
 from kelpie.adapters.issues import doctor as github_issues
 from kelpie.adapters.openclaw import doctor as openclaw
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
+from kelpie.alerts.buttons import ApiError
+from kelpie.alerts.telegram import TelegramApi, TelegramSettings
 from kelpie.app import (
     UNPRICED_WINDOW,
     ConfigError,
@@ -882,6 +884,74 @@ def check_prometheus(url: str | None, environ: Mapping[str, str]) -> Check:
     return _fail(name, f"{base}/-/ready: {problem}", fix)
 
 
+def check_chat_buttons(
+    settings: Settings,
+    environ: Mapping[str, str],
+    api: Callable[[TelegramSettings, str], TelegramApi] = TelegramApi,
+) -> list[Check]:
+    """Snooze buttons (#176), per Telegram channel with ``buttons = true``: someone may press
+    them (``allowed_user_ids``), there is a database for the snoozes, and the bot has no
+    webhook (``getWebhookInfo``): Telegram refuses ``getUpdates`` while one is set, and the
+    presses would go to whoever runs it. Empty when no channel has buttons."""
+    checks: list[Check] = []
+    for channel in settings.alerts.button_channels:
+        name = f"snooze buttons {channel.name}"
+        if not channel.allowed_user_ids:
+            checks.append(
+                _fail(
+                    name,
+                    "buttons = true but allowed_user_ids is empty: kelpie serve will not start",
+                    "list the Telegram user ids that may snooze in allowed_user_ids "
+                    "(a person can learn theirs from @userinfobot), or set buttons = false",
+                )
+            )
+            continue
+        if settings.db_path is None:
+            checks.append(
+                _fail(
+                    name,
+                    "buttons need a database, and [storage] path is :memory:",
+                    "set [storage] path to a file on a persistent volume",
+                )
+            )
+            continue
+        try:
+            token = channel.token(environ)
+        except ValueError as exc:
+            checks.append(_fail(name, str(exc), f"export ${channel.token_env} before doctor"))
+            continue
+        try:
+            info = api(channel, token).call("getWebhookInfo", {})
+        except ApiError as exc:
+            checks.append(
+                _fail(
+                    name,
+                    f"Telegram did not answer getWebhookInfo ({exc.cause})",
+                    "check the network, the proxy, api_url and the bot token",
+                )
+            )
+            continue
+        if not isinstance(info, Mapping):
+            checks.append(
+                _fail(name, "getWebhookInfo answered something unexpected", "check api_url")
+            )
+        elif info.get("url"):
+            checks.append(
+                _fail(
+                    name,
+                    "the bot has a webhook set: Telegram refuses getUpdates while one is, so "
+                    "no press would reach Kelpie",
+                    "use a bot dedicated to Kelpie, or delete the webhook (deleteWebhook)",
+                )
+            )
+        else:
+            people = len(channel.allowed_user_ids)
+            checks.append(
+                _pass(name, f"no webhook; {people} user(s) may snooze in chat {channel.chat_id}")
+            )
+    return checks
+
+
 def check_github(settings: Settings, environ: Mapping[str, str]) -> list[Check]:
     """Per repository: which source CI is read from (check-runs and statuses, or the
     commit's Actions runs where those are refused) and the permission a 403 names. Probes
@@ -1164,6 +1234,7 @@ def run_checks(
     checks += oc_checks
     checks += gi_checks
     checks += check_github(settings, environ)
+    checks += check_chat_buttons(settings, environ)
     checks.append(check_resources_watched(settings, loaded, environ))
     checks.append(check_process_counts(settings, loaded, environ))
     checks.append(check_prometheus(prometheus, environ))

@@ -470,6 +470,8 @@ class NeedsYou:
                         "waiting_minutes": int(i.waiting.total_seconds() // 60),
                         "cost_hours": round(i.cost_hours, 1),
                         **({"snooze": i.snooze.params()} if i.snooze is not None else {}),
+                        # what a chat snooze button would hold (#176): not a broken block
+                        **({} if i.broken else {"snooze_task": i.task.id}),
                     }
                     for i in items[:MAX_ITEMS]
                 ],

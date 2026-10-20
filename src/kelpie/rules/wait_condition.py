@@ -277,7 +277,7 @@ class WaitCondition:
                 unchecked = [c for c in pending if not known(c)]
                 if not unchecked:
                     return
-            yield self._overdue(task, snapshot, behind, pending, unchecked)
+            yield self._overdue(task, snapshot, behind, pending, unchecked, known)
 
     def _overdue(
         self,
@@ -286,6 +286,7 @@ class WaitCondition:
         behind: Callable[[str], list[str]],
         pending: Sequence[Condition],
         unchecked: Sequence[Condition],
+        known: Callable[[Condition], bool],
     ) -> Action:
         waited = snapshot.now - task.status_since
         since = task.status_since.isoformat()
@@ -298,7 +299,10 @@ class WaitCondition:
             f"for {what}."
         )
         needed = "Check why the condition has not cleared"
-        params: dict[str, Any] = {"pending_conditions": [c.id for c in pending]}
+        params: dict[str, Any] = {
+            "pending_conditions": [c.id for c in pending],
+            **_snooze_target(pending, known),
+        }
         if unchecked:
             # A wait the person's digest lists, but Kelpie cannot check: say what is wrong
             # with the checking, which only an operator can fix.
@@ -428,6 +432,25 @@ def _snoozed_people(
         if found is None or not found.holds:
             return False
     return bool(pending)
+
+
+def _snooze_target(
+    pending: Sequence[Condition], known: Callable[[Condition], bool]
+) -> dict[str, Any]:
+    """``snooze_task`` for an overdue wait on one person's human task (#176), only where a
+    snooze on that task would hold this alert: every pending condition a ``human_task`` one
+    on that same task and known unmet (``known``: :func:`_known_unmet`, exactly what
+    :func:`_snoozed_people` requires). Nothing for any other wait: a snooze would hold
+    nothing there, so a chat offers none."""
+    refs: set[object] = set()
+    for c in pending:
+        ref = c.params.get("task")
+        holdable = c.kind is ConditionKind.HUMAN_TASK and isinstance(ref, str) and known(c)
+        refs.add(ref if holdable else None)
+    if len(refs) != 1:
+        return {}
+    (ref,) = refs
+    return {"snooze_task": ref} if ref else {}
 
 
 def _hours(d: timedelta) -> str:
