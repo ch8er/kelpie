@@ -84,6 +84,14 @@ class FakeLib:
     def errno(self) -> int:
         return self.last_errno
 
+    def set_errno(self, value: int) -> None:
+        self.last_errno = value
+
+    def ppid(self, pid: int) -> int | None:
+        """sysctl KERN_PROC_PID: every process, also those proc_pidinfo refuses."""
+        p = self.procs.get(pid)
+        return None if p is None else p.ppid
+
 
 T0 = (1792372019, 283603)  # a start: 2026-10-19T...
 
@@ -137,6 +145,37 @@ def test_missing_tells_gone_from_unreadable() -> None:
     table = Libproc(lib)
     assert table.missing(99) is None  # ESRCH: gone
     assert table.missing(80) == "Kelpie cannot read process 80 (EPERM)"
+
+
+def test_short_read_and_huge_pid_are_not_gone() -> None:
+    lib = fake_farm()
+    table = Libproc(lib)
+    real = lib.proc_pidinfo
+    lib.proc_pidinfo = lambda pid, flavor, arg, buf, size: 8  # type: ignore[method-assign,assignment]
+    assert table.read(40) is None
+    assert table.missing(40) == "Kelpie cannot read process 40 (EIO)"
+    lib.proc_pidinfo = real  # type: ignore[method-assign]
+    # A board pid ctypes would truncate to another process's is no process at all.
+    big = 2**32 + 40
+    assert table.read(big) is None and table.missing(big) is None and table.parent(big) is None
+
+
+def test_a_process_readable_again_is_not_called_gone() -> None:
+    lib = fake_farm()
+    table = Libproc(lib)
+    assert table.missing(40) == "process 40 changed while Kelpie read it"
+
+
+def test_parent_of_another_users_process() -> None:
+    """libproc refuses another user's process (EPERM), sysctl still gives its parent: Kelpie's
+    own ancestors are known past a root-owned ``login`` or ``sudo``."""
+    lib = fake_farm()
+    lib.procs[90] = FakeProc(40, (1792372020, 0), uid=0)  # sudo, under the run's agent
+    lib.procs[91] = FakeProc(90, (1792372021, 0))  # kelpie, under sudo
+    lib.denied.add(90)
+    table = Libproc(lib)
+    assert table.read(90) is None and table.parent(90) == 40
+    assert worker.ancestors(91, table) == {91, 90, 40, 20, 1}
 
 
 def test_the_runs_worker_and_the_agents_tree() -> None:
@@ -219,6 +258,31 @@ def test_a_pid_reused_before_the_signal_is_not_signalled(monkeypatch: pytest.Mon
     )
 
 
+def test_kelpie_under_the_agent_through_a_root_process_signals_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lib = fake_farm()
+    lib.procs[90] = FakeProc(40, (1792372020, 0), uid=0)
+    lib.procs[91] = FakeProc(90, (1792372021, 0))
+    lib.denied.add(90)
+    monkeypatch.setattr(worker.os, "getpid", lambda: 91)
+    plan = targets(RunWorker(30, stamp(lib, 30), 40, stamp(lib, 40), LOCK), Libproc(lib), uid=ME)
+    assert plan.procs == [] and plan.refused == "Kelpie itself runs inside the run's worker"
+
+
+def test_a_process_unreadable_after_the_signal_is_not_counted_as_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that exec'd a setuid program (EPERM) may still run: it is a survivor."""
+    lib = fake_farm()
+    table = Libproc(lib)
+    plan = targets(RunWorker(30, stamp(lib, 30), None, None, LOCK), table, uid=ME)
+    monkeypatch.setattr(worker.os, "kill", lambda pid, sig: lib.denied.add(pid))
+    ticks = iter(range(1000))
+    result = end(plan.procs, grace=1, table=table, clock=lambda: next(ticks), sleep=lambda s: None)
+    assert result.killed and result.ended == 0 and result.survivors == [30]
+
+
 def test_unavailable_libproc_signals_nothing() -> None:
     table = Libproc(error="libproc cannot be loaded (dlopen failed)")
     plan = targets(RunWorker(30, "|5", None, None, LOCK), table, uid=ME)
@@ -260,6 +324,7 @@ def test_real_libproc_reads_processes(sleeper: subprocess.Popen[bytes]) -> None:
     assert abs(child.start / 100 - time.time()) < 60  # centiseconds since the epoch
     assert sleeper.pid in set(table.pids())
     assert table.read(99999999) is None and table.missing(99999999) is None
+    assert table.parent(os.getpid()) == os.getppid() and table.parent(1) == 0
 
 
 @darwin

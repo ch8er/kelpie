@@ -34,7 +34,10 @@ What makes a process safe to signal:
   one of the run's processes is, nothing is signalled), and is not a zombie;
 - a descendant is read while the agent is still the verified process;
 - right before each signal the process still has the start time it was verified with
-  (within one boot and PID namespace, that is the same process).
+  (within one boot and PID namespace, that is the same process). On Linux the pidfd makes
+  that check and the signal one; on macOS (no pidfd) the check narrows the window to the
+  moment between the read and ``kill``, where the pid would have to be freed, reaped and
+  handed out again (as for Hermes' own reaper and psutil).
 
 A process is "gone" only when Kelpie can tell (no such pid, dead, another start time on Linux,
 another boot). When it cannot see or may not signal one (another user, another PID namespace,
@@ -64,36 +67,19 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from kelpie.adapters.hermes.proctable import (
-    DEAD,
-    GONE,
-    PROC,
-    SAME,
-    UNCHECKED,
-    Proc,
-    ProcessTable,
-    Procfs,
-    fingerprint,
-    host_table,
-    instantiation_epoch,
-    read_proc,
-)
-
-__all__ = [
-    "PROC",
-    "Proc",
-    "Procfs",
-    "fingerprint",
-    "host_table",
-    "instantiation_epoch",
-    "read_proc",
-]
+from kelpie.adapters.hermes.proctable import DEAD, GONE, SAME, UNCHECKED, ProcessTable
+from kelpie.adapters.hermes.proctable import PROC as PROC
+from kelpie.adapters.hermes.proctable import Proc as Proc
+from kelpie.adapters.hermes.proctable import Procfs as Procfs
+from kelpie.adapters.hermes.proctable import fingerprint as fingerprint
+from kelpie.adapters.hermes.proctable import host_table as host_table
+from kelpie.adapters.hermes.proctable import instantiation_epoch as instantiation_epoch
+from kelpie.adapters.hermes.proctable import read_proc as read_proc
 
 DEFAULT_GRACE = 5.0  # seconds between SIGTERM and SIGKILL
 KILL_WAIT = 2.0  # seconds to wait for the processes to go after SIGKILL
 POLL = 0.05
 UNVERIFIED = "unverified"  # Hermes' marker for a spawn whose fingerprint it could not read
-_DEAD = DEAD
 NO_WORKER = "the board records no worker process for the run"
 OLD_BOARD = "this Hermes records no worker processes on the board"
 
@@ -102,8 +88,8 @@ OLD_BOARD = "this Hermes records no worker processes on the board"
 class Ended:
     """What ending a run's worker came to, worded for the human told about the stop."""
 
-    found: int = 0  # processes Kelpie identified and signalled
-    ended: int = 0  # of those, gone in the end
+    found: int = 0  # processes Kelpie identified as the run's
+    ended: int = 0  # of those, gone in the end (a reused pid counts: the process went)
     killed: bool = False  # SIGKILL was needed
     seconds: float = 0.0  # from the first SIGTERM until the last one went
     refused: str | None = None  # why nothing was signalled (cannot verify, not this host)
@@ -157,14 +143,14 @@ def children(table: ProcessTable) -> dict[int, list[Proc]]:
 
 
 def ancestors(pid: int, table: ProcessTable) -> set[int]:
-    """``pid`` and every process above it."""
+    """``pid`` and every process above it (also another user's: ``parent`` reads them all)."""
     seen: set[int] = set()
     while pid > 0 and pid not in seen:
         seen.add(pid)
-        p = table.read(pid)
-        if p is None:
+        parent = table.parent(pid)
+        if parent is None:
             break
-        pid = p.ppid
+        pid = parent
     return seen
 
 
@@ -257,7 +243,7 @@ def targets(
         found, why = _verify(pid, recorded, table, uid, epoch)
         if found is not None and found.pid in mine:
             return Plan(refused="Kelpie itself runs inside the run's worker")
-        if why == _UNCHECKED:
+        if why == UNCHECKED:
             plan.unchecked.append(pid)
         elif why is not None:
             return Plan(refused=why)
@@ -272,9 +258,6 @@ def targets(
     return plan
 
 
-_UNCHECKED = UNCHECKED
-
-
 def _verify(
     pid: int, recorded: str | None, table: ProcessTable, uid: int, epoch: str
 ) -> tuple[Proc | None, str | None]:
@@ -285,15 +268,15 @@ def _verify(
     p = table.read(pid)
     if p is None:
         return None, table.missing(pid)  # None: no such process, gone
-    if p.state in _DEAD:
+    if p.state in DEAD:
         return None, None
     if recorded is None or recorded == UNVERIFIED or "|" not in recorded:
-        return None, _UNCHECKED
+        return None, UNCHECKED
     rec_epoch, _, rec_start = recorded.rpartition("|")
     try:
         started = int(rec_start)
     except ValueError:
-        return None, _UNCHECKED
+        return None, UNCHECKED
     match = table.epoch_matches(rec_epoch, epoch)
     if match == GONE:
         return None, None
@@ -323,7 +306,7 @@ def _descendants(
         for child in first.get(queue.pop().pid, ()):
             fresh = child.pid not in seen and child.pid not in mine
             stable = (child.pid, child.start, child.ppid) in second
-            if fresh and stable and child.uid == uid and child.state not in _DEAD:
+            if fresh and stable and child.uid == uid and child.state not in DEAD:
                 seen.add(child.pid)
                 found.append(child)
                 queue.append(child)
@@ -335,18 +318,27 @@ def _descendants(
 
 def _same(p: Proc, table: ProcessTable) -> bool:
     now = table.read(p.pid)
-    return now is not None and now.start == p.start and now.state not in _DEAD
+    return now is not None and now.start == p.start and now.state not in DEAD
 
 
 def _reused(p: Proc, table: ProcessTable) -> bool:
     """Is ``p``'s pid now another live process (another start time)?"""
     now = table.read(p.pid)
-    return now is not None and now.start != p.start and now.state not in _DEAD
+    return now is not None and now.start != p.start and now.state not in DEAD
+
+
+def _alive(p: Proc, table: ProcessTable) -> bool:
+    """Might ``p`` still be running? Yes while it reads the same; also while it cannot be read
+    at all (macOS: a process that became unreadable is not counted as ended)."""
+    now = table.read(p.pid)
+    if now is None:
+        return table.missing(p.pid) is not None
+    return now.start == p.start and now.state not in DEAD
 
 
 def _signal(p: Proc, sig: int, table: ProcessTable) -> bool:
-    """Send ``sig`` to ``p`` only while it is still that process; False when it was not sent
-    because the pid is another process now."""
+    """Send ``sig`` to ``p`` only while it is still that process. False only when the pid is
+    another process now (not signalled); True when it was signalled, or already gone."""
     pidfd = None
     if table.pinned:
         with contextlib.suppress(OSError, AttributeError):
@@ -402,8 +394,8 @@ def _wait(
     clock: Callable[[], float],
     sleep: Callable[[float], None],
 ) -> list[Proc]:
-    left = [p for p in procs if _same(p, table)]
+    left = [p for p in procs if _alive(p, table)]
     while left and clock() < deadline:
         sleep(POLL)
-        left = [p for p in left if _same(p, table)]
+        left = [p for p in left if _alive(p, table)]
     return left

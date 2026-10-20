@@ -28,7 +28,7 @@ import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 PROC = Path("/proc")
 DEAD = frozenset({"Z", "X", "x"})  # zombie or dead: never signalled, counted as gone
@@ -52,8 +52,15 @@ class Proc:
 
 
 class ProcessTable(Protocol):
-    name: str  # for people: "Linux /proc", "macOS libproc"
-    pinned: bool  # signals go through a pidfd (a pid cannot be recycled under it)
+    @property
+    def name(self) -> str:
+        """For people: "Linux /proc", "macOS libproc"."""
+        ...
+
+    @property
+    def pinned(self) -> bool:
+        """Signals go through a pidfd (a pid cannot be recycled under it)."""
+        ...
 
     def unavailable(self) -> str | None:
         """Why processes cannot be verified here at all, or None."""
@@ -70,6 +77,11 @@ class ProcessTable(Protocol):
 
     def pids(self) -> Iterable[int]:
         """Every pid on the system."""
+        ...
+
+    def parent(self, pid: int) -> int | None:
+        """The parent pid of any process, also one :meth:`read` may not read (another
+        user's), or None when it is gone."""
         ...
 
     def epoch(self) -> tuple[str, str | None]:
@@ -132,8 +144,8 @@ class Procfs:
     """Linux: ``/proc`` (``root`` for tests)."""
 
     root: Path = PROC
-    name: str = "Linux /proc"
-    pinned: bool = True
+    name: ClassVar[str] = "Linux /proc"
+    pinned: ClassVar[bool] = True
 
     def unavailable(self) -> str | None:
         if not (self.root / "self" / "stat").exists():
@@ -154,6 +166,10 @@ class Procfs:
         with contextlib.suppress(OSError):
             return [int(e.name) for e in self.root.iterdir() if e.name.isdigit()]
         return []
+
+    def parent(self, pid: int) -> int | None:
+        p = self.read(pid)
+        return None if p is None else p.ppid
 
     def epoch(self) -> tuple[str, str | None]:
         epoch = instantiation_epoch(self.root)
@@ -199,6 +215,7 @@ class Procfs:
 
 PROC_PIDTBSDINFO = 3
 MAXCOMLEN = 16
+PID_MAX = 2**31 - 1  # pid_t; macOS hands out pids up to 99999
 SZOMB = 5  # pbi_status of a zombie (sys/proc.h)
 
 
@@ -242,8 +259,8 @@ class Libproc:
     ``proc_listallpids`` that behave like the C functions, and ``errno()`` for the last
     error)."""
 
-    name = "macOS libproc"
-    pinned = False  # no pidfd: the start time is read again right before each signal
+    name: ClassVar[str] = "macOS libproc"
+    pinned: ClassVar[bool] = False  # no pidfd: the start time is read again before each signal
 
     def __init__(self, lib: Any | None = None, error: str | None = None) -> None:
         self._lib = lib
@@ -254,7 +271,7 @@ class Libproc:
         """The system's libproc, or a table that says why it is unavailable."""
         try:
             lib = _CLibproc()
-        except OSError as exc:
+        except (OSError, AttributeError) as exc:  # no library, or a missing symbol
             return cls(error=f"libproc cannot be loaded ({exc})")
         return cls(lib)
 
@@ -263,13 +280,22 @@ class Libproc:
             return self._error or "libproc cannot be loaded"
         return None
 
-    def read(self, pid: int) -> Proc | None:
-        if self._lib is None or pid <= 0:
-            return None
+    def _bsdinfo(self, pid: int) -> tuple[ProcBsdInfo | None, int]:
+        """``proc_pidinfo(PROC_PIDTBSDINFO)``: the info, or None and the errno."""
         info = ProcBsdInfo()
         size = ctypes.sizeof(info)
+        if self._lib is None or not 0 < pid <= PID_MAX:  # ctypes would truncate a larger int
+            return None, errno.ESRCH
+        self._lib.set_errno(0)
         got = self._lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info), size)
-        if got != size:
+        if got == size:
+            return info, 0
+        err = self._lib.errno() if got == 0 else errno.EIO  # a short read sets no errno
+        return None, err
+
+    def read(self, pid: int) -> Proc | None:
+        info, _ = self._bsdinfo(pid)
+        if info is None:
             return None
         state = "Z" if info.pbi_status == SZOMB else "R"
         start = birth(info.pbi_start_tvsec, info.pbi_start_tvusec)
@@ -278,15 +304,20 @@ class Libproc:
     def missing(self, pid: int) -> str | None:
         if self._lib is None:
             return self.unavailable()
-        info = ProcBsdInfo()
-        size = ctypes.sizeof(info)
-        got = self._lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info), size)
-        if got == size:
-            return None  # readable again: whatever it is now, the next read decides
-        err = self._lib.errno()
-        if err == errno.ESRCH or (got == 0 and err == 0):
-            return None  # no such process
+        info, err = self._bsdinfo(pid)
+        if info is None and err == errno.ESRCH:
+            return None  # no such process (or a zombie: libproc does not show them)
+        if info is not None:  # readable now: it was not a moment ago, so Kelpie cannot tell
+            return f"process {pid} changed while Kelpie read it"
         return f"Kelpie cannot read process {pid} ({errno.errorcode.get(err, err)})"
+
+    def parent(self, pid: int) -> int | None:
+        p = self.read(pid)
+        if p is not None:
+            return p.ppid
+        if self._lib is None or not 0 < pid <= PID_MAX:
+            return None
+        return self._lib.ppid(pid)  # another user's: sysctl reads every process
 
     def pids(self) -> Iterable[int]:
         if self._lib is None:
@@ -320,8 +351,12 @@ class _CLibproc:
     """The real ``libproc`` through ctypes."""
 
     def __init__(self) -> None:
-        path = ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib"
-        lib = ctypes.CDLL(path, use_errno=True)
+        try:
+            path = ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib"
+            lib = ctypes.CDLL(path, use_errno=True)
+            lib.proc_pidinfo  # noqa: B018 (a missing symbol raises here)
+        except (OSError, AttributeError):
+            lib = ctypes.CDLL(None, use_errno=True)  # libSystem exports proc_* too
         self.proc_pidinfo = lib.proc_pidinfo
         self.proc_pidinfo.argtypes = [
             ctypes.c_int,
@@ -334,10 +369,42 @@ class _CLibproc:
         self.proc_listallpids = lib.proc_listallpids
         self.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self.proc_listallpids.restype = ctypes.c_int
+        libc = ctypes.CDLL(None, use_errno=True)
+        self._sysctl = libc.sysctl
+        self._sysctl.argtypes = [
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+        ]
+        self._sysctl.restype = ctypes.c_int
 
     @staticmethod
     def errno() -> int:
         return ctypes.get_errno()
+
+    @staticmethod
+    def set_errno(value: int) -> None:
+        ctypes.set_errno(value)
+
+    def ppid(self, pid: int) -> int | None:
+        """``sysctl {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid}``: ``kinfo_proc.kp_eproc.e_ppid``,
+        readable for every process (as psutil reads it)."""
+        buf = ctypes.create_string_buffer(KINFO_PROC_SIZE)
+        size = ctypes.c_size_t(KINFO_PROC_SIZE)
+        mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID
+        if self._sysctl(mib, 4, buf, ctypes.byref(size), None, 0) != 0:
+            return None
+        if size.value != KINFO_PROC_SIZE:
+            return None  # 0: no such process
+        return int.from_bytes(buf.raw[E_PPID_OFFSET : E_PPID_OFFSET + 4], sys.byteorder)
+
+
+# struct kinfo_proc on 64-bit macOS: extern_proc (296 bytes) then eproc, e_ppid at 264 in it.
+KINFO_PROC_SIZE = 648
+E_PPID_OFFSET = 560
 
 
 # --- the host's table -----------------------------------------------------------------------
@@ -363,6 +430,9 @@ class _Unsupported:
 
     def pids(self) -> Iterable[int]:
         return []
+
+    def parent(self, pid: int) -> int | None:
+        return None
 
     def epoch(self) -> tuple[str, str | None]:
         return "", self._why

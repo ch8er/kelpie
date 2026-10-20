@@ -185,11 +185,10 @@ proof of identity Hermes' reaper uses:
   trusted to name processes, so keep it writable by Hermes' user only.
 
 On a system with neither `/proc` nor libproc nothing is signalled and the stop says so. With
-`end_worker = false` a
-stop is "block the task now, reap the worker after about two minutes, and never without a
-dispatcher", as before; a budget hard-stop (`[[budgets]]`) then ends the *task* at once but the
-spend of a still-running worker only when the dispatcher reaps it. In multi-host mode the
-worker is ended by the `kelpie agent` on the host that claimed the run.
+`end_worker = false` a stop is "block the task now, reap the worker after about two minutes,
+and never without a dispatcher", as before; a budget hard-stop (`[[budgets]]`) then ends the
+*task* at once but the spend of a still-running worker only when the dispatcher reaps it. In
+multi-host mode the worker is ended by the `kelpie agent` on the host that claimed the run.
 
 Why not `hermes kanban reclaim`: it terminates the worker but puts the task back in the queue,
 where the dispatcher can respawn it before a second command blocks it. `archive` is terminal.
