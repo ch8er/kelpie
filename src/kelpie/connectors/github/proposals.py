@@ -127,6 +127,10 @@ class Proposer:
         }
         text, blob = read_workflow(self.client, repo, path, default)
         try:
+            # Every change first, for why each turned-down one is out: one that would apply
+            # again was turned down (or its merge undone); otherwise render's own reason
+            # holds (a merged change still in the file: "sets concurrency already").
+            whole = dict(render(text, changes, default).left_out) if turned else {}
             rendered = render(text, [c for c in changes if c.get("change") not in turned], default)
         except WorkflowError as exc:
             log.warning("ci-config: %s %s: %s", repo, path, exc)
@@ -138,7 +142,7 @@ class Proposer:
         left_out = (
             *rendered.left_out,
             *(
-                (name, _turned_down(*turned[name]))
+                (name, whole.get(name) or _turned_down(*turned[name]))
                 for name in (c.get("change") for c in changes)
                 if isinstance(name, str) and name in turned
             ),

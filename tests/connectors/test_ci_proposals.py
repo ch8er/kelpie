@@ -135,6 +135,21 @@ def test_a_merged_change_undone_since_is_not_proposed_again(gh: FakeGitHub) -> N
     assert pr[2]["body"].endswith(marker(["ignore_docs_paths"]))
 
 
+def test_a_merged_change_still_in_the_file_is_not_called_undone(gh: FakeGitHub) -> None:
+    merged = {"number": 3, "merged_at": "2026-03-01T00:00:00Z"}
+    gh.reply(CLOSED, [{**merged, "body": marker(["cancel_in_progress"])}])
+    text = TYPICAL.replace("on:\n", "concurrency: ci\non:\n", 1)
+    gh.reply(
+        f"/repos/{REPO}/contents/{PATH}?ref=main",
+        {"encoding": "base64", "content": base64.b64encode(text.encode()).decode(), "sha": "b"},
+    )
+    cancel = {"change": "cancel_in_progress", "minutes": 30.0, "builds": 3}
+    assert proposer(gh).execute(action(changes=[cancel, *CHANGES])) is ActionResult.DONE
+    (pr,) = [w for w in writes(gh) if w[1] == f"/repos/{REPO}/pulls"]
+    assert "the workflow sets concurrency already" in pr[2]["body"]
+    assert "undone since" not in pr[2]["body"]
+
+
 @pytest.mark.parametrize("merged_at", ["2026-03-01T00:00:00Z", None])
 def test_the_branch_of_an_earlier_proposal_is_made_afresh(
     gh: FakeGitHub, merged_at: str | None
