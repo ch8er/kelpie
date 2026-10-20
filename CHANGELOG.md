@@ -111,6 +111,11 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - Spans built from adapter hooks when a platform emits none, merged with OTLP spans so
   nothing is counted twice ([#17](https://github.com/ch8er/kelpie/pull/17), [#20](https://github.com/ch8er/kelpie/pull/20)).
 - Optional forwarding of accepted traces to Langfuse, Phoenix or Datadog ([#18](https://github.com/ch8er/kelpie/pull/18)).
+- The traces ingest token can be rotated without dropping spans: `[traces] token_file`
+  (an env file Kelpie reads again when it changes) and `kelpie traces rotate-token`, which
+  writes a new token, keeps the old one valid for `token_grace` (as a hash only) and prints
+  no token; grace use is on `/metrics`, and `kelpie doctor` warns about backups and readable
+  files that hold the token ([#236](https://github.com/ch8er/kelpie/pull/236), [docs/security.md](docs/security.md#traces-token)).
 - Message content, tool arguments and tool results are not stored. Commands are reduced by
   an allowlist redaction shared by OTLP ingest and both hooks, and `kelpie spool scrub`
   re-redacts older spool files ([#101](https://github.com/ch8er/kelpie/pull/101)).

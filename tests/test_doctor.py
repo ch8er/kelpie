@@ -98,6 +98,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "kanban.db": "PASS",
         "hooks fire": "PASS",
         "OTLP spans arrive": "PASS",
+        "traces token kept private": "SKIP",
         "models have prices": "PASS",
         "providers have a spend mode": "SKIP",
         "worktrees readable": "SKIP",

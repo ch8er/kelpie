@@ -104,6 +104,9 @@ class Metrics:
         self.rules: list[tuple[str, str, bool]] = []  # (name, mode, implemented)
         self.traces_enabled = False
         self.traces_requests: Counter[str] = Counter()
+        self.traces_grace_requests = 0  # authenticated by a rotated-out token
+        # [traces] token_file in use: (its last read worked, previous tokens accepted)
+        self.token_file: Callable[[], tuple[bool, int]] | None = None
         self.spans_received_total: Counter[str] = Counter()
         self.spans_rejected_total: Counter[str] = Counter()
         self.span_rows: Callable[[], int] | None = None  # the span store's count
@@ -167,6 +170,10 @@ class Metrics:
     def traces_request(self, code: int) -> None:
         with self._lock:
             self.traces_requests[str(code)] += 1
+
+    def traces_grace_request(self) -> None:
+        with self._lock:
+            self.traces_grace_requests += 1
 
     def spans_received(self, kind: str, count: int) -> None:
         with self._lock:
@@ -1028,6 +1035,31 @@ class Metrics:
                 for c, n in sorted(self.traces_requests.items())
             ],
         )
+        if self.token_file is not None:
+            try:
+                ok, grace = self.token_file()
+            except Exception:
+                ok, grace = False, 0
+            metric(
+                "kelpie_traces_token_file_ok",
+                "gauge",
+                "1 when the last read of [traces] token_file worked; 0: Kelpie keeps the "
+                "tokens it read before (a rotation or revocation has not taken effect).",
+                [f"kelpie_traces_token_file_ok {int(ok)}"],
+            )
+            metric(
+                "kelpie_traces_grace_tokens",
+                "gauge",
+                "Rotated-out traces tokens still accepted ([traces] token_grace).",
+                [f"kelpie_traces_grace_tokens {grace}"],
+            )
+            metric(
+                "kelpie_traces_grace_requests_total",
+                "counter",
+                "OTLP requests authenticated by a rotated-out token within its grace period: "
+                "agents not yet on the new token.",
+                [f"kelpie_traces_grace_requests_total {self.traces_grace_requests}"],
+            )
         metric(
             "kelpie_spans_received_total",
             "counter",

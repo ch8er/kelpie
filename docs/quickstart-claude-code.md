@@ -100,7 +100,9 @@ export KELPIE_TRACES_TOKEN=$(openssl rand -hex 24)
 uv run kelpie serve        # 127.0.0.1:9464; POST /v1/traces, /metrics, /healthz
 ```
 
-and in the sessions' environment (span export is a beta feature of Claude Code):
+(or keep it in `[traces] token_file`, which `kelpie traces rotate-token` can rotate without
+a restart: [security.md](security.md#traces-token)) and in the sessions' environment (span
+export is a beta feature of Claude Code):
 
 ```bash
 export CLAUDE_CODE_ENABLE_TELEMETRY=1

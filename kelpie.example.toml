@@ -240,6 +240,10 @@ enabled = true
 # token_env = "KELPIE_TRACES_TOKEN"  # env var with the bearer token exporters must send.
 #   Default: used when set, else the endpoint is open (a warning is logged). Uncommented,
 #   the variable must be set or Kelpie refuses to start.
+# token_file = "~/.config/kelpie/traces.env"  # an env file (mode 600) holding
+#   KELPIE_TRACES_TOKEN=...: read instead of the environment, again when it changes.
+#   `kelpie traces rotate-token` creates it and rotates the token without a restart.
+# token_grace = "2h"      # how long a rotated-out token stays valid (0s to 7d)
 window = "30m"            # stored spans each control-loop tick sees (rules look back
                           # about 10 minutes)
 totals_window = "24h"     # per-session totals (calls, errors, tokens) in each tick

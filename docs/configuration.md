@@ -884,7 +884,9 @@ What is kept from each span: [privacy.md](privacy.md).
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `true` | bool | `false`: no ingest, no span store, no budgets. |
-| `token_env` | `"KELPIE_TRACES_TOKEN"` | variable name | Bearer token exporters must send. Used when the variable is set. Written here, the variable must be set or Kelpie refuses to start. |
+| `token_env` | `"KELPIE_TRACES_TOKEN"` | variable name | Bearer token exporters must send. Used when the variable is set. Written here, the variable must be set or Kelpie refuses to start. With `token_file`: the variable name inside that file. |
+| `token_file` | none | path | An env file holding `<token_env>=<token>`, read instead of the environment and read again when it changes, so the token can be rotated without a restart (below). It must exist, hold the token and be a regular file of the user `kelpie serve` runs as (not a symlink), or Kelpie refuses to start; `kelpie traces rotate-token` creates it. A relative path is taken from the working directory, like `[storage] path`. Not read with `[hub]` (that port takes no spans). |
+| `token_grace` | `"2h"` | duration, 0 to 7d | How long `kelpie traces rotate-token` keeps the replaced token valid. 0: it accepts no previous token at all. |
 | `allow_unauthenticated` | `false` | bool | Accept spans without a token on a non-loopback address. See [install.md](install.md#otlp-token-and-the-exposure-check). |
 | `window` | `"30m"` | duration, > 0 | Stored spans each tick sees. |
 | `totals_window` | `"24h"` | duration, > 0 | Per-session totals (calls, errors, tokens) in each tick. |
@@ -896,6 +898,25 @@ What is kept from each span: [privacy.md](privacy.md).
 | `task_attribute` | `"kelpie.task_id"` | attribute name | Span or resource attribute naming the task. |
 | `session_attribute` | `"kelpie.session_id"` | attribute name | Attribute naming the session; else `gen_ai.conversation.id`, else `session.id`. |
 | `commands` | `true` | bool | Keep a grouping prefix of shell commands on tool spans (`kelpie.tool.command_prefix`). `false`: drop it. |
+
+**Rotating the token.** With `token_file` set, `kelpie traces rotate-token [--grace 2h]`
+writes a new token to the file (mode 600, replaced atomically under a lock; other lines
+are kept, commented-out copies of the token lines are dropped; a missing folder is
+created with mode 700) and keeps the token it replaces valid for the grace period, so sessions that
+started with it keep reporting. `--grace 0s` accepts no previous token at all, revoking
+those of earlier rotations too. The replaced token is kept only as a SHA-256 hash with its expiry, on the
+line `<token_env>_GRACE`. It prints no token, only what it did and how many previous
+tokens are still accepted. It runs only as the user who owns the file's folder and
+refuses a symlink, a file of another user and a folder others may write to.
+`kelpie serve` reads the file again within a second, and only trusts a regular file of
+its own user (or root) that others may not write, in a folder others may not write;
+otherwise it keeps the tokens it read before and `kelpie_traces_token_file_ok` is 0.
+`/metrics` has `kelpie_traces_grace_tokens` (previous tokens still accepted) and
+`kelpie_traces_grace_requests_total` (requests that used one: agents not on the new token
+yet). `kelpie doctor` warns when the token is in a backup (`*.bak*`, `*~`, `*.orig`,
+`*.old`) or a file others can read under the token file's folder, the Hermes home or
+`~/.claude`, and lists the other files that hold a copy. See
+[security.md](security.md#traces-token).
 
 ### [[traces.forward]]
 
