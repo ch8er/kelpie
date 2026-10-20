@@ -160,7 +160,9 @@ curl -s localhost:9464/metrics | grep -E '^kelpie_(dry_run|engine_ticks_total|ac
 `kelpie doctor` checks: config and rules load; each rule's mode is what the config says
 (all observe, dry-run on, after this quickstart); the board
 is readable; the spool has a line from the last hour; spans arrived in the last hour (SKIP if
-none ever did: OTLP is optional); worktrees of live tasks are readable by git; block
+none ever did: OTLP is optional); worktrees of live tasks are readable by git; a stop can
+end the stopped run's worker on this host (`/proc` on Linux, libproc on macOS; a WARN when
+neither, or with `end_worker = false`); block
 reasons that name a PR can be checked by `[[block_conditions]]` (a WARN, not a failure,
 when not: those blocks would look stuck); Prometheus
 answers (`--prometheus URL` or `KELPIE_PROMETHEUS_URL`, otherwise `localhost:9090` is tried

@@ -14,18 +14,22 @@ import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
 from kelpie.adapters.hermes import worker
 from kelpie.adapters.hermes.proctable import (
+    PROC_PIDVNODEPATHINFO,
     SZOMB,
+    VNODEPATHINFO_SIZE,
     Libproc,
     Proc,
     ProcBsdInfo,
     Procfs,
     birth,
     host_table,
+    procargs_strings,
 )
 from kelpie.adapters.hermes.worker import RunWorker, end, targets
 
@@ -53,8 +57,22 @@ class FakeLib:
     last_errno: int = 0
     reads: int = 0
 
+    cwds: dict[int, bytes] = field(default_factory=dict)
+    args: dict[int, bytes] = field(default_factory=dict)
+
+    def procargs(self, pid: int) -> bytes | None:
+        return self.args.get(pid)
+
     def proc_pidinfo(self, pid: int, flavor: int, arg: int, buf: object, size: int) -> int:
         self.reads += 1
+        if flavor == PROC_PIDVNODEPATHINFO:
+            assert size == VNODEPATHINFO_SIZE == 2352
+            if pid not in self.cwds:
+                self.last_errno = errno.ESRCH
+                return 0
+            path = self.cwds[pid]
+            ctypes.memmove(ctypes.addressof(buf) + 152, path + b"\0", len(path) + 1)  # type: ignore[call-overload]
+            return size
         assert flavor == 3 and size == ctypes.sizeof(ProcBsdInfo) == 136
         if pid in self.denied:
             self.last_errno = errno.EPERM
@@ -300,6 +318,47 @@ def test_host_table() -> None:
     assert targets(RunWorker(30, "|5", None, None, LOCK), other).refused == other.unavailable()
 
 
+def procargs(argv: list[bytes], env: list[bytes], exe: bytes = b"/usr/bin/python3") -> bytes:
+    """What ``sysctl KERN_PROCARGS2`` returns: argc, the executable, padding, argv, env."""
+    body = exe + b"\0" * 5 + b"".join(a + b"\0" for a in argv) + b"".join(e + b"\0" for e in env)
+    return len(argv).to_bytes(4, sys.byteorder) + body + b"\0" * 16
+
+
+def test_environment_and_working_directory() -> None:
+    lib = fake_farm()
+    lib.args[40] = procargs([b"python", b"-m", b"agent.managed_worker"], [b"HOME=/h", b"A=1"])
+    lib.cwds[40] = b"/tmp/kelpie-selftest-x/home/profiles/p/workspace"
+    table = Libproc(lib)
+    assert table.environ(40) == [b"python", b"-m", b"agent.managed_worker", b"HOME=/h", b"A=1"]
+    assert table.environ(50) is None  # another user's, or gone: sysctl refuses
+    assert str(table.cwd(40)) == "/tmp/kelpie-selftest-x/home/profiles/p/workspace"
+    assert table.cwd(50) is None
+    assert procargs_strings(b"") == [] and procargs_strings(procargs([], [])) == []
+    assert procargs_strings(procargs([b"a"], [b"X=1"], exe=b"")) == [b"a", b"X=1"]
+
+
+def retitled(argv: list[bytes], title: bytes, env: list[bytes]) -> bytes:
+    """``procargs`` of a process that renamed itself: setproctitle overwrote the argument area
+    with the title and NULs (SPT_NOENV: the environment untouched)."""
+    area = b"".join(a + b"\0" for a in argv)
+    over = (title + b"\0").ljust(len(area), b"\0")[: len(area)]
+    raw = procargs(argv, env)
+    return raw.replace(area, over, 1)
+
+
+def test_environment_of_a_retitled_process() -> None:
+    """Hermes renames its processes: the cleanup must still read their HERMES_HOME."""
+    argv = [b"python3", b"-m", b"hermes_cli.main", b"gateway", b"run"]
+    env = [b"HERMES_HOME=/private/var/folders/x/kelpie-selftest-1/home", b"PATH=/bin"]
+    home = env[0]
+    for raw in (
+        procargs(argv, env),
+        retitled(argv, b"hermes gateway", env),
+        retitled(argv, b"t" * (sum(len(a) + 1 for a in argv) - 1), env),  # the title fills it
+    ):
+        assert home in procargs_strings(raw)
+
+
 # --- real processes on macOS --------------------------------------------------------------
 
 darwin = pytest.mark.skipif(sys.platform != "darwin", reason="macOS libproc")
@@ -325,6 +384,9 @@ def test_real_libproc_reads_processes(sleeper: subprocess.Popen[bytes]) -> None:
     assert sleeper.pid in set(table.pids())
     assert table.read(99999999) is None and table.missing(99999999) is None
     assert table.parent(os.getpid()) == os.getppid() and table.parent(1) == 0
+    env = table.environ(sleeper.pid)
+    assert env is not None and f"PATH={os.environ['PATH']}".encode() in env
+    assert table.cwd(sleeper.pid) == Path(os.getcwd()).resolve()
 
 
 @darwin
