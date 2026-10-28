@@ -763,6 +763,7 @@ def _verifications(
         min_sample=inputs.min_sample,
         review_roles=inputs.review_roles,
         known_from=reach,
+        owners=inputs.owners,
     )
     return verify_all(events, evidence, since)
 

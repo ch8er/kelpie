@@ -7,26 +7,28 @@ changed (read from the action ledger: the mode of a rule's ledger entries switch
 observe to act, or dry-run turned off), or an output filter that appeared in traces
 (:func:`kelpie.traces.outputs.filter_introductions`).
 
-Each fix is measured over ``window`` before it and the same length after it (shorter when
-the report ends sooner): hours lost per day (chaos states counted exactly like the report's
-cost of chaos, condition-hours and for forgotten holds idle agent-hours; only the fix's
-rule when it names one), tokens per day (the fix's
-role when it names one), returns per day, review time
-(mean session length of ``review_roles``), sessions that failed or ended without a final
-status, and for a command fix the output tokens per call of that command. A side with fewer
-than ``min_sample`` observations, or an after-window shorter than a quarter of the window,
-is a small sample, labelled *direction only*: it shows a direction, not a result. Metrics
-with no data on either side are left out.
+Each fix is measured over ``window`` before it and the same length after it (shorter
+when the report ends sooner): hours lost per day (chaos states counted exactly like the
+report's cost of chaos, condition-hours and for forgotten holds idle agent-hours; only
+the fix's rule when it names one), tokens per day (the fix's role when it names one),
+returns per day, review time (mean session length of ``review_roles``), sessions that
+failed or ended without a final status, tasks done per hour while agent work was
+available (hours with an empty ready queue and nothing under way are left out, with how
+many there were; stages as in :mod:`kelpie.report.throughput`), and for a command fix
+the output tokens per call of that command. A side with fewer than ``min_sample``
+observations, or an after-window shorter than a quarter of the window, is a small
+sample, labelled *direction only*: it shows a direction, not a result. Metrics with no
+data on either side are left out.
 
 What the report cannot separate, it does not credit (#193):
 
 - **Overlapping fixes.** A fix less than ``window`` after another joins its group
-  (:func:`overlapping`): the group is measured once, from ``window`` before its first fix
-  to ``window`` after its last, over the rule and role its fixes share (else all), and
-  credited to none of them alone. Only what one fix alone can explain is shown per fix:
-  its role's tokens, failures (and review time for a review role) when no other fix of
-  the group touches that role or the whole farm, and its command's output per call when
-  no other fix names the same command for the same role. Fixes are read from
+  (:func:`overlapping`): the group is measured once, from ``window`` before its first
+  fix to ``window`` after its last, over the rule and role its fixes share (else all),
+  and credited to none of them alone. Only what one fix alone can explain is shown per
+  fix: its role's tokens and failures (and review time for a review role) when no other
+  fix of the group touches that role or the whole farm, and its command's output per
+  call when no other fix names the same command for the same role. Fixes are read from
   ``Evidence.known_from`` on: a group that starts less than a window after it says an
   older fix may belong to it (``Verification.truncated``), and its before-window starts
   at ``known_from`` at the earliest (a side under a quarter of the window is *direction
@@ -51,12 +53,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from kelpie.core.ledger import LedgerEntry, Outcome
-from kelpie.core.model import Session, Span, Status, Task
+from kelpie.core.model import Owner, OwnerKind, Session, Span, Status, Task
 from kelpie.core.spans import SpanKey, last_at, span_key
 from kelpie.core.states import OpenState
 from kelpie.report import md
 from kelpie.report.fixes import CONFIG, FILTER, MODE, FixEvent
 from kelpie.report.store import StateRow
+from kelpie.report.throughput import stage_spans, state_windows, union_hours
 from kelpie.traces.outputs import Call, OutputSettings, filter_introductions
 
 DEFAULT_WINDOW = timedelta(days=1)
@@ -159,6 +162,7 @@ class Evidence:
     calls: Sequence[Call] = ()
     window: timedelta = DEFAULT_WINDOW
     min_sample: int = DEFAULT_MIN_SAMPLE
+    owners: Sequence[Owner] = ()  # people's tasks are not agent work (throughput)
     # The earliest moment the loaded fixes, spans and states cover (None: unknown). A group
     # that starts less than a window after it may have lost an older fix to the cut.
     known_from: datetime | None = None
@@ -239,6 +243,7 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
         _returns(ev, before, after, short),
         _review_time(ev, scope, before, after),
         _failures(ev, scope, before, after),
+        _done_per_work_hour(ev, scope, before, after, short),
     ]
     own: list[Credited] = []
     shared: set[tuple[str, str | None]] = set()
@@ -519,3 +524,83 @@ def _failures(ev: Evidence, event: FixEvent, b: Window, a: Window) -> Metric:
         na,
         small,
     )
+
+
+# Ready work, work under way, or work nobody owns (still work the farm should have done).
+WORK_STAGES = frozenset({"queue", "working", "review", "ownerless"})
+
+
+def _done_per_work_hour(
+    ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool
+) -> Metric | None:
+    """Tasks done per hour while agent work was available: some agent task (not a
+    person's) of the fix's role (all agent tasks without one) was ready, being worked on, in
+    review or ownerless. Hours with nothing to do are left out: an idle farm is not a
+    slower one, nor a farm that ran out of work. A task counts under its role as the board
+    reports it now (a task in review may carry the reviewer's role by then, as in
+    :mod:`kelpie.report.throughput`). Work hours are a lower bound for done tasks (queue
+    time before their first session is not known), so a side with under a quarter of the
+    window of work is *direction only*. Never credited to one fix of a group: a task gets
+    done through several roles. None without board tasks; no row when nothing was done on
+    either side (a stalled farm shows in hours lost instead)."""
+    if not ev.tasks:
+        return None
+    people = {o.id for o in ev.owners if o.kind is OwnerKind.HUMAN}
+    owner_role = {o.id: o.role for o in ev.owners}
+    roles = ev.roles or {}
+    by_task: dict[str, list[Session]] = {}
+    for s in ev.sessions:
+        by_task.setdefault(s.task_id, []).append(s)
+    windows = state_windows(r.state for r in ev.states)
+
+    def role_of_session(s: Session) -> str | None:
+        # Only to tell review sessions from work (both count as work here); unlike
+        # throughput(), no fallback to the task's role is needed for that.
+        return owner_role.get(s.owner_id) or roles.get(s.id)
+
+    def task_role(t: Task) -> str | None:
+        return t.role or (owner_role.get(t.owner_id) if t.owner_id else None)
+
+    mine = [
+        t
+        for t in ev.tasks
+        if t.owner_id not in people
+        and (t.assignee is None or t.assignee not in people)
+        and (event.role is None or task_role(t) == event.role)
+    ]
+
+    def side(w: Window) -> tuple[float, float, int]:
+        busy: list[tuple[datetime, datetime]] = []
+        for t in mine:
+            own = sorted(by_task.get(t.id, ()), key=lambda s: (s.started_at, s.id))
+            for stage, lo, hi in stage_spans(
+                t, own, windows, w[0], w[1], ev.review_roles, role_of_session
+            ):
+                if stage in WORK_STAGES:
+                    busy.append((lo, hi))
+        done = sum(1 for t in mine if t.status is Status.DONE and w[0] <= t.status_since < w[1])
+        hours = union_hours(busy)
+        return hours, (w[1] - w[0]).total_seconds() / 3600, done
+
+    (hb, wb, nb), (ha, wa, na) = side(b), side(a)
+    if not (hb or ha or nb or na):
+        return None
+    who = f" ({md.text(event.role)})" if event.role else ""
+    return Metric(
+        f"tasks done per hour with work available{who} "
+        f"({_h(hb)} of {_h(wb)}h -> {_h(ha)} of {_h(wa)}h with work)",
+        "/h",
+        nb / hb if hb else None,
+        na / ha if ha else None,
+        nb,
+        na,
+        short or min(nb, na) < ev.min_sample or min(hb, ha) < ev.window / HOUR / 4,
+        lower_is_better=False,
+    )
+
+
+HOUR = timedelta(hours=1)
+
+
+def _h(hours: float) -> str:
+    return f"{hours:.0f}" if hours >= 10 else f"{hours:.1f}"

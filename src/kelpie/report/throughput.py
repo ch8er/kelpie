@@ -143,11 +143,7 @@ def throughput(
     by_task: dict[str, list[Session]] = defaultdict(list)
     for s in sessions:
         by_task[s.task_id].append(s)
-    windows: dict[tuple[str, str], list[tuple[datetime, datetime]]] = defaultdict(list)
-    for state in states:
-        if state.task_id and (state.rule in OWNERLESS_RULES or state.rule in WAITING_RULES):
-            kind = "ownerless" if state.rule in OWNERLESS_RULES else "waiting"
-            windows[(state.task_id, kind)].append((state.since, state.last_seen))
+    windows = state_windows(states)
 
     acc: dict[str, _Acc] = defaultdict(_Acc)
     for task in tasks:
@@ -207,7 +203,7 @@ def throughput(
             acc[role].handoffs += 1  # a review that sends a task back declares nothing
     for role, ids in agents.items():
         acc[role].agents = len(ids)
-        acc[role].busy = sum(_union(busy.get(i, [])) for i in ids)
+        acc[role].busy = sum(union_hours(busy.get(i, [])) for i in ids)
 
     out = []
     for role in sorted(acc):
@@ -257,7 +253,7 @@ class _Acc:
     waited: defaultdict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
 
 
-def _union(intervals: list[tuple[datetime, datetime]]) -> float:
+def union_hours(intervals: list[tuple[datetime, datetime]]) -> float:
     """Hours covered by the intervals."""
     total = 0.0
     cur: tuple[datetime, datetime] | None = None
@@ -273,6 +269,50 @@ def _union(intervals: list[tuple[datetime, datetime]]) -> float:
     return total / 3600
 
 
+type StateWindows = Mapping[tuple[str, str], Sequence[tuple[datetime, datetime]]]
+
+
+def state_windows(states: Iterable[OpenState]) -> StateWindows:
+    """When each task was ownerless or waiting, from Kelpie's alert states:
+    ``(task id, "ownerless" | "waiting") -> [(since, last seen)]``."""
+    windows: dict[tuple[str, str], list[tuple[datetime, datetime]]] = defaultdict(list)
+    for state in states:
+        if state.task_id and (state.rule in OWNERLESS_RULES or state.rule in WAITING_RULES):
+            kind = "ownerless" if state.rule in OWNERLESS_RULES else "waiting"
+            windows[(state.task_id, kind)].append((state.since, state.last_seen))
+    return windows
+
+
+def stage_spans(
+    task: Task,
+    sessions: Sequence[Session],
+    windows: StateWindows,
+    start: datetime,
+    end: datetime,
+    review_roles: Sequence[str],
+    role_of_session: _RoleOf,
+) -> list[tuple[str, datetime, datetime]]:
+    """The task's stages within ``[start, end)`` as ``(stage, from, to)`` stretches, in time
+    order (see the module docs); ``sessions`` are the task's own."""
+    if task.status.is_terminal and task.status_since < start:
+        return []
+    points = {end, task.status_since}
+    for s in sessions:
+        points.update((s.started_at, session_end(s, end)))
+    for kind in ("ownerless", "waiting"):
+        for a, b in windows.get((task.id, kind), ()):
+            points.update((a, b))
+    # from the task's first known moment: when it was created is not known
+    first = max(start, min(points))
+    cuts = sorted(p for p in points | {first} if first <= p <= end)
+    out = []
+    for a, b in pairwise(cuts):
+        stage = _stage_at(task, sessions, windows, a, review_roles, role_of_session, end)
+        if stage is not None:
+            out.append((stage, a, b))
+    return out
+
+
 def _task_stages(
     task: Task,
     sessions: Sequence[Session],
@@ -285,24 +325,12 @@ def _task_stages(
 ) -> dict[str, float]:
     """Hours of the task per stage within ``[start, end)`` (see the module docs); the
     stretches in the ``waiting`` stage are appended to ``waiting``."""
-    if task.status.is_terminal and task.status_since < start:
-        return {}
-    points = {end, task.status_since}
-    for s in sessions:
-        points.update((s.started_at, session_end(s, end)))
-    for kind in ("ownerless", "waiting"):
-        for a, b in windows.get((task.id, kind), ()):
-            points.update((a, b))
-    # from the task's first known moment: when it was created is not known
-    first = max(start, min(points))
-    cuts = sorted(p for p in points | {first} if first <= p <= end)
     out: Counter[str] = Counter()
-    for a, b in pairwise(cuts):
-        stage = _stage_at(task, sessions, windows, a, review_roles, role_of_session, end)
-        if stage is not None:
-            out[stage] += (b - a).total_seconds() / 3600
-            if stage == "waiting" and waiting is not None:
-                waiting.append((a, b))
+    spans = stage_spans(task, sessions, windows, start, end, review_roles, role_of_session)
+    for stage, a, b in spans:
+        out[stage] += (b - a).total_seconds() / 3600
+        if stage == "waiting" and waiting is not None:
+            waiting.append((a, b))
     return dict(out)
 
 

@@ -181,7 +181,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   ISO times, and the confirmation gives the recorded time in UTC ([#235](https://github.com/ch8er/kelpie/pull/235)).
 - Honest before/after: fixes less than a window apart are measured together and credited
   to none alone (per fix only its own role or command), per-day rates whose signal began
-  inside the window are listed as not compared, and small samples say *direction only*
+  inside the window are listed as not compared, throughput is compared only over hours
+  when agent work was available, and small samples say *direction only*
   ([#193](https://github.com/ch8er/kelpie/issues/193)).
 - Farm throughput per role, live gauges and Grafana panels; rework counted for the role that
   redid the work, not the reviewer ([#78](https://github.com/ch8er/kelpie/pull/78), [#116](https://github.com/ch8er/kelpie/pull/116)).
