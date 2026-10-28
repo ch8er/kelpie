@@ -1122,6 +1122,50 @@ and names the models without a price.
 | OpenAI | GPT-5.5, GPT-5.4, GPT-5.4 mini, GPT-5 | [developers.openai.com pricing](https://developers.openai.com/api/docs/pricing) |
 | Google | Gemini 4 Argon, Gemini 3.8 Flash, Gemini 3 Flash Preview | [ai.google.dev pricing](https://ai.google.dev/gemini-api/docs/pricing) |
 
+## [instructions]
+
+The instruction files each role loads (skills, `CLAUDE.md`, `AGENTS.md`, role prompts),
+measured for rule [`instruction_bloat`](#instruction_bloat) (incident 21). Off unless the
+section is present: with it, Kelpie reads these files on its own host, read-only (never
+through a symlink), and stores only their sizes and hashes (see
+[privacy](privacy.md#instruction-files)); it never edits them. Files on a `kelpie agent`
+host are not measured yet.
+
+| Key | Default | Type | Meaning |
+| --- | --- | --- | --- |
+| `defaults` | `true` | bool | Also measure the platform defaults of the adapters configured here (below). |
+| `every` | `"1h"` | duration ≥ 1m | How often the files are measured. |
+| `window` | `"7d"` | duration ≥ 1d | Growth, appends and edits are counted over this. |
+| `max_bytes` | `2000000` | integer > 0 | A larger file is skipped and logged. |
+| `max_files` | `2000` | integer > 0 | Files measured per scan, at most. |
+| `similarity` | `0.8` | number in (0, 1] | Two sections whose bodies are this alike (Jaccard over 3-word shingles) are near duplicates. |
+| `same_heading_similarity` | `0.5` | number in (0, 1] | ...or this alike under the same normalised heading. |
+| `min_value_files` | `3` | integer ≥ 2 | The same `key: value` line in this many files of a role is one value kept in several places. |
+
+`[[instructions.files]]` adds files; the first entry naming a path wins, and these come
+before the defaults:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `paths` | required | Globs (`~` expanded, `**` any depth). `{role}` in a path matches one path part and names the role; no `**` before it. |
+| `role` | every role | The role that loads them (not with `{role}`). |
+| `loaded` | `"always"` | `always`: read into every session of the role; `on_demand`: opened when needed (a skill). |
+| `owner` | unset | Who owns these instructions; named in the alert. |
+
+Platform defaults (`loaded` in brackets): Hermes `~/.hermes/SOUL.md` (always),
+`~/.hermes/skills/**/SKILL.md` (on demand), and per profile `~/.hermes/profiles/{role}/SOUL.md`
+and `.../skills/**/SKILL.md`, the profile mapped to its role as `[adapters.hermes] roles`
+does; Claude Code `~/.claude/CLAUDE.md` (always), `~/.claude/skills/*/SKILL.md` (on demand),
+`~/.claude/agents/{role}.md` (always); OpenClaw `AGENTS.md`, `SOUL.md`, `TOOLS.md` (always)
+and `skills/*/SKILL.md` (on demand) in `<state_dir>/workspace` and `<state_dir>/workspace-{role}`.
+A project's own `CLAUDE.md` and `.claude/skills` live in its checkout: list them under
+`[[instructions.files]]`.
+
+Tokens a day spent reading a file are its estimated tokens (characters / 4) times the
+sessions of its role (on its platform, for the defaults) that started in the last 24 hours
+(`token_basis = "sessions"`; for an on-demand file an upper bound). Counting real skill
+loads (Hermes `skill_view` calls, Claude Code skill loads) is not done yet.
+
 ## [resources.prometheus]
 
 Host readings from node_exporter through the Prometheus HTTP API, for rule 7. Off unless

@@ -212,11 +212,26 @@ ALTER TABLE snoozes ADD COLUMN grown_at TEXT;
 ALTER TABLE snoozes ADD COLUMN grown_by INTEGER;
 UPDATE snoozes SET behind_at_snooze = NULL WHERE source <> 'marker';
 """
+# Instruction files' sizes (kelpie.instructions, incident 21): one row when a file is first
+# measured and one each time its hash changes; never its text. ``appended`` is 1 when the
+# change only added bytes at the end, 0 when it changed or removed some, NULL for the first.
+_V10 = """
+CREATE TABLE instruction_sizes (
+    path        TEXT NOT NULL,
+    measured_at TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    chars       INTEGER NOT NULL,
+    sha256      TEXT NOT NULL,
+    sections    INTEGER NOT NULL,
+    appended    INTEGER,
+    PRIMARY KEY (path, measured_at)
+);
+"""
 SNOOZES_SINCE = 8  # the first schema with snoozes: read-only readers accept it (no growth)
 
 # version -> script that upgrades from version - 1. Append, never edit a released one.
 MIGRATIONS: dict[int, str] = {
-    1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9,
+    1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10,
 }  # fmt: skip
 SCHEMA_VERSION = max(MIGRATIONS)
 
@@ -1090,3 +1105,79 @@ class SqliteCostReports:
             ReportedCost(r["provider"], date.fromisoformat(r["day"]), r["usd"], r["model"] or None)
             for r in rows
         )
+
+
+# --- instruction file sizes (kelpie.instructions) ------------------------------------------
+
+
+class SizeRow(NamedTuple):
+    """One stored measurement of an instruction file: sizes and its hash, never its text."""
+
+    path: str
+    measured_at: datetime
+    bytes: int
+    chars: int
+    sha256: str
+    sections: int
+    appended: bool | None
+
+
+class SqliteInstructionStore:
+    """The size history of instruction files: a row when a file is first measured and when
+    its hash changes. :meth:`history` gives, per path, the last row at or before ``since``
+    (what the file was then) and every row after it, oldest first."""
+
+    def __init__(self, path: Path | str, busy_timeout_ms: int = 5000) -> None:
+        self._lock = threading.Lock()
+        self._db = _open(path, busy_timeout_ms)
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    def record(self, rows: Sequence[SizeRow]) -> None:
+        with self._lock, self._db:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO instruction_sizes"
+                " (path, measured_at, bytes, chars, sha256, sections, appended)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        r.path, _ts(r.measured_at), r.bytes, r.chars, r.sha256, r.sections,
+                        None if r.appended is None else int(r.appended),
+                    )
+                    for r in rows
+                ],
+            )  # fmt: skip
+
+    def history(self, since: datetime) -> dict[str, list[SizeRow]]:
+        cutoff = _ts(since)
+        sql = (
+            "SELECT * FROM instruction_sizes s WHERE measured_at > ? OR measured_at = ("
+            " SELECT MAX(measured_at) FROM instruction_sizes p"
+            " WHERE p.path = s.path AND p.measured_at <= ?)"
+            " ORDER BY path, measured_at"
+        )
+        with self._lock:
+            rows = self._db.execute(sql, (cutoff, cutoff)).fetchall()
+        out: dict[str, list[SizeRow]] = {}
+        for r in rows:
+            appended = r["appended"]
+            out.setdefault(r["path"], []).append(
+                SizeRow(
+                    r["path"], datetime.fromisoformat(r["measured_at"]), r["bytes"], r["chars"],
+                    r["sha256"], r["sections"], None if appended is None else bool(appended),
+                )
+            )  # fmt: skip
+        return out
+
+    def prune(self, before: datetime) -> int:
+        """Drop rows before ``before`` except each path's last one there (its size then)."""
+        cutoff = _ts(before)
+        with self._lock, self._db:
+            return self._db.execute(
+                "DELETE FROM instruction_sizes WHERE measured_at < ? AND measured_at < ("
+                " SELECT MAX(measured_at) FROM instruction_sizes p"
+                " WHERE p.path = instruction_sizes.path AND p.measured_at <= ?)",
+                (cutoff, cutoff),
+            ).rowcount

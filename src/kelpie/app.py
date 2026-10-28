@@ -111,9 +111,12 @@ from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import (
     SchemaOutdated,
     SqliteCostReports,
+    SqliteInstructionStore,
     SqliteLedgerStore,
     SqliteSpanStore,
 )
+from kelpie.instructions.config import InstructionSettings, load_instructions, platform_sources
+from kelpie.instructions.watch import InstructionWatch
 from kelpie.metrics import Metrics
 from kelpie.remote.config import AgentSettings, HubSettings, load_agent, load_hub
 from kelpie.remote.farm import RemoteFarm
@@ -238,6 +241,7 @@ class Settings:
     budgets: BudgetConfig = field(default_factory=BudgetConfig)  # [[budgets]], [prices]
     spend_settings: SpendSettings = field(default_factory=SpendSettings)  # [spend]
     resources: ResourceSettings = field(default_factory=ResourceSettings)
+    instructions: InstructionSettings = field(default_factory=InstructionSettings)
     github: GitHubSettings | None = None  # None: no [connectors.github] section
     block_conditions: tuple[BlockConditionPattern, ...] = ()
     human_tasks: HumanTaskSettings | None = None  # None: no [connectors.human_tasks]
@@ -282,6 +286,7 @@ def load_settings(path: Path | None) -> Settings:
         "prices",
         "spend",
         "resources",
+        "instructions",
         "connectors",
         "block_conditions",
         "alerts",
@@ -308,6 +313,7 @@ def load_settings(path: Path | None) -> Settings:
     try:
         traces = load_traces(data.get("traces"))
         resources = load_resources(data.get("resources"))
+        instructions = load_instructions(data.get("instructions"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     try:
@@ -347,6 +353,7 @@ def load_settings(path: Path | None) -> Settings:
         budgets=budgets,
         spend_settings=spend_settings,
         resources=resources,
+        instructions=instructions,
         llm_quotas=llm_quotas,
         cost_reports=cost_reports,
         alerts=alerts,
@@ -1005,6 +1012,7 @@ def merged_snapshot(
     offenders: OffenderWatch | None = None,
     remote: Callable[[datetime], Snapshot] | None = None,
     snoozes: SnoozeReader | None = None,
+    instructions: InstructionWatch | None = None,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
 
@@ -1032,6 +1040,9 @@ def merged_snapshot(
     recomputed hourly from the span store; a failed read is logged and counted. With
     ``snoozes``, ``Snapshot.snoozes`` is filled on the merged board (the agents' boards
     included: an agent never sends snoozes), from the store and the block reasons' markers.
+    With ``instructions``, the instruction files of this host are measured (hourly) into
+    ``Snapshot.instruction_files`` and ``instruction_duplicates``; a failed scan is logged
+    and the tick goes on without them.
     """
     last = _LastBudgets()
 
@@ -1128,6 +1139,13 @@ def merged_snapshot(
                 metrics.span_store_failed()
             else:
                 merged = replace(merged, output_offenders=found)
+        if instructions is not None:
+            try:
+                files, copies = instructions.read(merged)
+            except Exception as exc:
+                log.error("instruction files could not be measured: %s", type(exc).__name__)
+            else:
+                merged = replace(merged, instruction_files=files, instruction_duplicates=copies)
         if spans is not None and budgets is not None and budgets.budgets:
             merged = _with_budgets(merged, spans, budgets, metrics, last, remember)
         return merged
@@ -1731,6 +1749,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             providers=quotas,
             remote=remote,
             snoozes=snooze_reader(settings, store),
+            instructions=instruction_watch(settings, adapters),
         )
         loop = ControlLoop(engine, source, metrics)
         app = App(
@@ -1794,6 +1813,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         offenders=OffenderWatch(span_store, traces.outputs, settings.report.tz),
         remote=remote,
         snoozes=snooze_reader(settings, store),
+        instructions=instruction_watch(settings, adapters),
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     alerts = _start_alerts(settings, engine, metrics, store, clock)
@@ -2236,6 +2256,30 @@ def check_exposure(settings: Settings, host: str) -> None:
         settings.traces.check_exposure(host)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+
+
+def instruction_watch(
+    settings: Settings, adapters: Sequence[PlatformAdapter]
+) -> InstructionWatch | None:
+    """The instruction files to measure ([instructions]): the configured ones first, then
+    the defaults of the platforms whose adapters run here. None without the section."""
+    s = settings.instructions
+    if not s.enabled:
+        return None
+    sources = list(s.files)
+    if s.defaults:
+        for adapter in adapters:
+            if isinstance(adapter, hermes.HermesAdapter):
+                sources += platform_sources(adapter.name, role_of=adapter.role_of)
+            elif isinstance(adapter, OpenClawAdapter):
+                sources += platform_sources(adapter.name, str(adapter.state_dir))
+            else:
+                sources += platform_sources(adapter.name)
+    try:
+        store = SqliteInstructionStore(settings.db_path or ":memory:")
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        raise ConfigError(f"cannot open {settings.db_path}: {exc}") from exc
+    return InstructionWatch(store, s, tuple(sources))
 
 
 def _open_span_store(db_path: Path | None) -> SpanStore:

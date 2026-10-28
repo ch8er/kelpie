@@ -88,6 +88,7 @@ forbidden_modules = [
     "kelpie.metrics",
     "kelpie.traces",
     "kelpie.report",
+    "kelpie.instructions",
 ]
 
 [[tool.importlinter.contracts]]
@@ -98,6 +99,7 @@ source_modules = [
     "kelpie.rules",
     "kelpie.traces",
     "kelpie.resources",
+    "kelpie.instructions",
     "kelpie.alerts",
     "kelpie.connectors",
     "kelpie.adapters",
@@ -118,6 +120,7 @@ source_modules = [
     "kelpie.alerts",
     "kelpie.traces",
     "kelpie.resources",
+    "kelpie.instructions",
     "kelpie.report",
     "kelpie.app",
     "kelpie.server",
@@ -164,6 +167,23 @@ forbidden_modules = [
     "kelpie.server",
     "kelpie.cli",
     "kelpie.metrics",
+]
+
+[[tool.importlinter.contracts]]
+name = "Instruction measurements build on core only"
+type = "forbidden"
+source_modules = ["kelpie.instructions"]
+forbidden_modules = [
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.rules",
+    "kelpie.traces",
+    "kelpie.resources",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+    "kelpie.report",
 ]
 
 [[tool.importlinter.contracts]]
