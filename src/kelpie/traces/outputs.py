@@ -107,7 +107,7 @@ RECORD_TOOLS = ("tool:*_show", "tool:show_*", "tool:*Show")
 # parse) groups every command the role ran, which no advice fits; the catch-all ``tool:*``
 # row leaves them alone.
 SHELL_TOOLS = (
-    *("tool:Bash", "tool:bash", "tool:exec", "tool:exec_*", "tool:*_exec"),
+    *("tool:Bash*", "tool:*Bash", "tool:bash", "tool:exec", "tool:exec_*", "tool:*_exec"),
     *("tool:*shell*", "tool:*Shell*", "tool:*terminal*", "tool:*Terminal*"),
     *("tool:*_command", "tool:*Command", "tool:*_cmd", "tool:*Cmd"),
 )

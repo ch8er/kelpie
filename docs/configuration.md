@@ -1083,6 +1083,7 @@ commands = false`) group every command the role ran: the catch-all leaves them a
 | `commands` | *required* | Globs over the command prefix or executable; `*` is any shell command, `tool:*` any other tool. |
 | `reduction` | *required* | Expected share of output tokens removed, between 0 and 1 (exclusive). |
 | `platforms` | any | Agent platforms the filter works with, e.g. `["hermes", "claude-code"]`. |
+| `advice` | none | For advice that is not a filter (the built-in tool rows): what to do, as a title (`"Downscale images"`). |
 
 ## [[budgets]] and [prices]
 

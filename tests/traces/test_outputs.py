@@ -504,3 +504,15 @@ def test_hot_days_are_local_dates() -> None:
     found = [_call("npm test", 9000, late + timedelta(hours=i)) for i in range(2)]
     assert len(rank(found)[0].hot_days) == 2
     assert len(rank(found, tz=ZoneInfo("America/New_York"))[0].hot_days) == 1
+
+
+def test_a_configured_filter_may_carry_advice() -> None:
+    from kelpie.traces.config import load_outputs
+
+    row = {"name": "cut", "how": "ask for less", "commands": ["tool:*"], "reduction": 0.3}
+    (plain,) = load_outputs({"filters": [row]}).filters
+    assert plain.advice is None
+    (titled,) = load_outputs({"filters": [{**row, "advice": " Ask for less "}]}).filters
+    assert titled.advice == "Ask for less"
+    with pytest.raises(ValueError, match="advice"):
+        load_outputs({"filters": [{**row, "advice": ""}]})
