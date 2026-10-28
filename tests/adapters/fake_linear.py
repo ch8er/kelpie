@@ -68,6 +68,7 @@ class FakeLinear:
         self.rate_limited = False
         self.limited_ops: set[str] = set()  # operations answered RATELIMITED
         self.broken_teams: set[str] = set()  # their issue lists fail
+        self.broken_ops: set[str] = set()  # operations answered with a GraphQL error
         self.ignore_slots = False  # issueUpdate succeeds but leaves assignee and delegate
         self.url = ""
         self.lock = threading.Lock()
@@ -104,6 +105,8 @@ class FakeLinear:
 
     def answer(self, request: dict[str, Any]) -> Any:
         op, v = request.get("operationName"), request.get("variables") or {}
+        if op in self.broken_ops:
+            raise Broken
         return getattr(self, f"_{op}")(v)
 
     def _node(self, i: Issue) -> dict[str, Any]:
