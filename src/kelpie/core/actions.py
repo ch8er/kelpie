@@ -69,8 +69,8 @@ class Action:
 
     ``about_wait`` marks an alert that a task's block or wait lasts too long or names no
     condition, not that it is broken (a dead end, stale evidence). While a farm-wide
-    incident that explains the task's wait is open (a CI outage, :mod:`kelpie.core.incidents`),
-    the engine folds such alerts under it.
+    incident that explains the task's wait is open (an outage: failing CI jobs, a block
+    storm, :mod:`kelpie.core.incidents`), the engine folds such alerts under it.
     """
 
     kind: ActionKind

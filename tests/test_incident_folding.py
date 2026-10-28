@@ -242,3 +242,23 @@ def test_a_state_store_error_stops_folding_under_an_unreported_outage() -> None:
 
     engine.states.store = Broken(states=dict(engine.states.store.states))  # type: ignore[attr-defined]
     assert tick(engine, T0 + M)["T-1"] is not Outcome.SUPPRESSED
+
+
+def test_an_outage_from_another_rule_folds_the_same_way() -> None:
+    """A block storm (rule 4) has no CI job: it folds the alerts of the tasks it explains."""
+    from kelpie.core.incidents import BLOCK_STORM, Outage, incident_state_id
+
+    state = incident_state_id("stale_blocks", "waiting for ceo")
+    storm = Outage(state=state, signature="waiting for CEO", kind=BLOCK_STORM, tasks=("T-1",))
+    engine, ci, blocks, _ = farm()
+    ci.actions = [
+        Action(
+            ActionKind.ALERT, "ci_economy", "Block storm", severity=Severity.WARNING,
+            key=state, state=state, since=T0, params=storm.to_params(),
+        )
+    ]  # fmt: skip
+    blocks.actions = [wait_alert("T-1"), wait_alert("T-2")]
+    outcomes = tick(engine, T0)
+    assert outcomes["T-1"] is Outcome.SUPPRESSED and outcomes["T-2"] is Outcome.ALERTED
+    [folded] = [e for e in entries(engine, "T-1")]
+    assert folded.params[FOLDED_UNDER] == state
