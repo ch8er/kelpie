@@ -63,7 +63,7 @@ KEYS = frozenset(
 OUTPUT_KEYS = frozenset(
     {"threshold_tokens", "min_calls", "repeat_days", "window", "min_sample", "owners", "filters"}
 )
-FILTER_KEYS = frozenset({"name", "how", "commands", "reduction", "platforms"})
+FILTER_KEYS = frozenset({"name", "how", "commands", "reduction", "platforms", "advice"})
 ALLOW_UNAUTHENTICATED_ENV = "KELPIE_TRACES_ALLOW_UNAUTHENTICATED"
 _TRUE = frozenset({"1", "true", "yes", "on"})
 FORWARD_KEYS = frozenset(
@@ -413,6 +413,9 @@ def _load_filters(raw: Any) -> tuple[Filter, ...]:
         platforms = lists["platforms"]
         commands = lists["commands"]
         assert commands is not None
+        advice = entry.get("advice")
+        if advice is not None and (not isinstance(advice, str) or not advice.strip()):
+            raise ValueError(f"{where}: advice must be a non-empty string")
         out.append(
             Filter(
                 name=strings["name"],
@@ -420,6 +423,7 @@ def _load_filters(raw: Any) -> tuple[Filter, ...]:
                 commands=commands,
                 reduction=float(reduction),
                 platforms=None if platforms is None else tuple(map(_platform, platforms)),
+                advice=None if advice is None else advice.strip(),
             )
         )
     return tuple(out)

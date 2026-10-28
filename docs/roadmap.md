@@ -728,6 +728,7 @@ context on every run. Find them in traces and recommend a filter.
 - [x] Repeated offenders → `comment` addressed to the owner of the role's instructions (listed under "needs a human" in the daily report; rule `output_offenders`)
 - [x] Estimated savings in the daily report
 - [x] Fixtures: new `field-05-build-log-flood.yaml`
+- [x] Built-in tools too, not only shell commands (#197): advice for their kind (images downscaled, a record in a compact view and not re-read, a file in a range, any other tool asked for less)
 
 ### report: daily cost-of-chaos report
 labels: P0, week-3, area:report

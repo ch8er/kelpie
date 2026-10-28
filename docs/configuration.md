@@ -1079,8 +1079,14 @@ filter recommendation, read by the daily report. Only the size of an output is r
 With `[traces.outputs]` present, `[traces] retention` must cover `repeat_days` and twice
 `window`.
 
-`[[traces.outputs.filters]]` entries (built-in: `rtk`, `xcbeautify`, `errors-only`,
-`range`):
+`[[traces.outputs.filters]]` entries (built-in, in order: `rtk`, `xcbeautify`,
+`errors-only` for shell commands; then for other tools `downscale-images` for image tools
+(`vision*`, `*_vision*`, `*screenshot*`, `*_image`, ...), `range` for file reads,
+`compact-view` for tools that show a whole record (`*_show`, `show_*`, e.g. Hermes'
+`kanban_show`) and `ask-less` for any other tool, so every tool is ranked by its output tokens
+with advice for its kind. Globs match on word boundaries (`get_revision` is no vision tool).
+A shell tool's calls that carry no command (`tool:terminal`, `tool:Bash` with `[traces]
+commands = false`) group every command the role ran: the catch-all leaves them alone):
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -1089,6 +1095,7 @@ With `[traces.outputs]` present, `[traces] retention` must cover `repeat_days` a
 | `commands` | *required* | Globs over the command prefix or executable; `*` is any shell command, `tool:*` any other tool. |
 | `reduction` | *required* | Expected share of output tokens removed, between 0 and 1 (exclusive). |
 | `platforms` | any | Agent platforms the filter works with, e.g. `["hermes", "claude-code"]`. |
+| `advice` | none | For advice that is not a filter (the built-in tool rows): what to do, as a title (`"Downscale images"`). |
 
 ## [[budgets]] and [prices]
 

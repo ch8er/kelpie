@@ -101,3 +101,22 @@ def test_a_name_an_exporter_chose_is_never_posted_on_the_board(name: str) -> Non
     shown = action.params["command"]
     assert len(shown) <= 64 and not set(shown) & set("`@ \n")
     assert f"`{shown}`" in action.reason and name not in action.reason
+
+
+def test_the_fix_hint_names_only_exact_safe_names() -> None:
+    [nobody] = run(offender(command="tool:web_search", role=None))
+    assert nobody.reason.endswith('(`kelpie fix "<what changed>" --command tool:web_search`).')
+    [spaced] = run(offender(command="tool:web_search", role="qa team"))
+    assert spaced.reason.endswith(" once the change is noted with `kelpie fix`.")
+    [long] = run(offender(command="tool:" + "x" * 80))
+    assert long.reason.endswith(" once the change is noted with `kelpie fix`.")
+
+
+def test_a_tool_offender_is_told_how_its_fix_gets_verified() -> None:
+    [shell] = run(offender())
+    assert shell.reason.endswith("the daily report checks it before/after.")
+    [tool] = run(offender(command="tool:vision_analyze", filter="downscale-images"))
+    assert tool.reason.endswith(
+        "before/after once the change is noted"
+        ' (`kelpie fix "<what changed>" --command tool:vision_analyze --role developer`).'
+    )
