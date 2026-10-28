@@ -55,7 +55,12 @@ class OutputOffenders:
             f"{who}: `{command}` floods the {role} context, {o.mean_tokens:,.0f} tokens per "
             f"call on average over {o.calls} calls, above the threshold on {o.days} days. Add "
             f"to the {role} instructions: {o.how}. Estimated saving: about "
-            f"{o.saved_tokens:,} tokens; the daily report checks it before/after."
+            f"{o.saved_tokens:,} tokens; the daily report checks it before/after"
+            + (
+                f" once the change is noted (`kelpie fix --command {command}`)."
+                if command.startswith("tool:")  # no filter shows in a tool's calls
+                else "."
+            )
         )
         return Action(
             ActionKind.COMMENT if task else ActionKind.ALERT,

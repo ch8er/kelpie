@@ -364,12 +364,26 @@ def test_every_tool_gets_advice_for_its_kind() -> None:
         (rec,) = recommend(rank(found))
         return rec.filter.name
 
+    def nothing(key: str) -> bool:
+        found = [_call(key, 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
+        return recommend(rank(found)) == []
+
     assert advice("tool:vision_analyze") == "downscale-images"
     assert advice("tool:browser_screenshot") == "downscale-images"
+    assert advice("tool:TakeScreenshot") == "downscale-images"
+    assert advice("tool:ViewImage") == "downscale-images"  # not a file range
     assert advice("tool:kanban_show") == "compact-view"
     assert advice("tool:read_file") == "range"
+    assert advice("tool:mcp_fs_read_file") == "range"
     assert advice("tool:web_search") == "ask-less"
     assert advice("xcodebuild") == "xcbeautify"  # shell commands as before
+    # Word boundaries: "revision" is no vision, "thread" no read, image lists no image.
+    assert advice("tool:get_revision") == "ask-less"
+    assert advice("tool:revision_show") == "compact-view"
+    assert advice("tool:get_thread") == "ask-less"
+    assert advice("tool:list_images") == "ask-less"
+    # A shell tool's calls without a command group every command: no advice fits them.
+    assert nothing("tool:terminal") and nothing("tool:Bash")
 
 
 def test_filter_introduction_needs_earlier_unfiltered_calls() -> None:

@@ -1069,9 +1069,12 @@ With `[traces.outputs]` present, `[traces] retention` must cover `repeat_days` a
 
 `[[traces.outputs.filters]]` entries (built-in, in order: `rtk`, `xcbeautify`,
 `errors-only` for shell commands; then for other tools `downscale-images` for image tools
-(`*vision*`, `*screenshot*`, `*image*`), `range` for file reads, `compact-view` for tools that
-show a whole record (`*_show`, `*_status`, `*_list`, e.g. Hermes' `kanban_show`) and `ask-less`
-for any other tool, so every tool is ranked by its output tokens with advice for its kind):
+(`vision*`, `*_vision*`, `*screenshot*`, `*_image`, ...), `range` for file reads,
+`compact-view` for tools that show a whole record (`*_show`, `show_*`, e.g. Hermes'
+`kanban_show`) and `ask-less` for any other tool, so every tool is ranked by its output tokens
+with advice for its kind. Globs match on word boundaries (`get_revision` is no vision tool).
+A shell tool's calls that carry no command (`tool:terminal`, `tool:Bash` with `[traces]
+commands = false`) group every command the role ran: the catch-all leaves them alone):
 
 | Key | Default | Meaning |
 | --- | --- | --- |

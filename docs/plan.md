@@ -124,7 +124,7 @@ Rework and wasted sessions are the largest token leak on our farm (46 of 63 task
 
 - **Rule 12. Early conflict warning:** two live tasks editing the same files → warn both, or serialize the later one until the earlier merges (7)
 - **Dispatch gate:** a ready task whose prerequisite is not met (a referenced PR not merged, its CI red, a parent task not done) is put into "waiting" with that condition instead of being picked up; rule 2 wakes it when the condition is met. Field case: an agent was about to redo a migration while the PR it depended on was still red
-- **Huge tool outputs:** commands whose output floods the context (build and test logs, e.g. `xcodebuild`) are found in traces, ranked by tokens, and get a concrete filter recommendation — [RTK](https://github.com/rtk-ai/rtk) where it supports the platform, otherwise `xcbeautify`, errors only, tail; Kelpie measures and verifies the savings before/after and does not build its own filter; repeated offenders → `comment` to the agent's role instructions owner
+- **Huge tool outputs:** commands whose output floods the context (build and test logs, e.g. `xcodebuild`) are found in traces, ranked by tokens, and get a concrete filter recommendation — [RTK](https://github.com/rtk-ai/rtk) where it supports the platform, otherwise `xcbeautify`, errors only, tail; Kelpie measures and verifies the savings before/after and does not build its own filter; repeated offenders → `comment` to the agent's role instructions owner. Built-in tools are ranked too, with advice for their kind (images downscaled, a record read compactly and not re-read, a file in a range; #197)
 
 ### P1. Basic token optimization — recommendations in the daily report, from traces, no LLM
 

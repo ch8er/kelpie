@@ -85,12 +85,27 @@ RTK_PLATFORMS = (
     "kilo-code",
 )
 # Tools that return a file's content (case varies by platform: Read, read_file, view).
-FILE_TOOLS = ("tool:*read*", "tool:*Read*", "tool:view*", "tool:View*", "tool:cat")
-# Tools that look at an image (a screenshot, a rendered page): their output is the size of
-# the image as the model sees it.
-IMAGE_TOOLS = ("tool:*vision*", "tool:*Vision*", "tool:*screenshot*", "tool:*image*")
+# Globs are on word boundaries ("_", "." or a capital), so "revision" is no vision tool and
+# "thread" no read.
+FILE_TOOLS = (
+    *("tool:read*", "tool:*_read*", "tool:*.read*", "tool:Read*", "tool:*Read"),
+    *("tool:*ReadFile*", "tool:view*", "tool:View*", "tool:cat"),
+)
+# Tools that look at an image (a screenshot, a rendered page). What they put into the context
+# is the image, or an analysis of it (Hermes' vision_analyze): a smaller image costs less
+# either way, by how much is a guess until verified.
+IMAGE_TOOLS = (
+    *("tool:vision*", "tool:*_vision*", "tool:*Vision*", "tool:*screenshot*"),
+    *("tool:*Screenshot*", "tool:*_image", "tool:*Image", "tool:view_image", "tool:analyze_image*"),
+)
 # Tools that show a whole record (a card, an issue, a run): e.g. Hermes' kanban_show.
-RECORD_TOOLS = ("tool:*_show", "tool:*_status", "tool:*_list")
+RECORD_TOOLS = ("tool:*_show", "tool:show_*", "tool:*Show")
+# The agent platforms' shell tools: a call of one without a command prefix (commands not
+# recorded, or one Kelpie cannot parse) groups every command the role ran, which no advice
+# fits; the catch-all ``tool:*`` row leaves them alone.
+SHELL_TOOLS = frozenset(
+    {"tool:Bash", "tool:bash", "tool:terminal", "tool:shell", "tool:Shell", "tool:exec"}
+)
 # Platforms a span's service.name may name (other names are custom: platform unknown).
 KNOWN_PLATFORMS = frozenset({*RTK_PLATFORMS, "paperclip"})
 # Command families RTK filters (its README lists 100+ commands in these families).
@@ -148,7 +163,12 @@ class Filter:
 
     def matches(self, key: str) -> bool:
         if key.startswith(TOOL_KEY):
-            return any(c.startswith(TOOL_KEY) and fnmatchcase(key, c) for c in self.commands)
+            return any(
+                c.startswith(TOOL_KEY)
+                and fnmatchcase(key, c)
+                and not (c == "tool:*" and key in SHELL_TOOLS)
+                for c in self.commands
+            )
         exe = key.split(" ", 1)[0]
         return any(
             not c.startswith(TOOL_KEY) and (fnmatchcase(key, c) or fnmatchcase(exe, c))
@@ -208,8 +228,8 @@ DEFAULT_FILTERS: tuple[Filter, ...] = (
     Filter(
         name="compact-view",
         how=(
-            "read the compact view (the fields the step needs, the latest comments) instead "
-            "of the whole record, and keep what was read instead of reading it again in the "
+            "read only what the step needs (a compact or summary view where the tool has "
+            "one), and keep what was read instead of reading the same record again in the "
             "same session"
         ),
         commands=RECORD_TOOLS,
