@@ -993,19 +993,3 @@ def test_every_date_placeholder_is_filled(db: Path) -> None:
     link = summary_items(report, settings.url)[2]
     assert link == "https://reports.example.org/2026-03-02/report.md?day=2026-03-02"
     assert load_report({}).url is None
-
-
-def test_an_outage_s_state_is_no_lost_work_of_its_own() -> None:
-    """A block storm is rule 4's state, but its hours are its tasks' own blocks' (#252)."""
-    from kelpie.core.actions import Severity
-    from kelpie.core.incidents import incident_state_id
-    from kelpie.core.states import OpenState
-    from kelpie.report.daily import is_chaos
-
-    t = datetime(2026, 3, 2, tzinfo=UTC)
-    storm = OpenState(incident_state_id("stale_blocks", "x"), "stale_blocks", t, t, t, 0,
-                      Severity.WARNING, "s")  # fmt: skip
-    assert not is_chaos(storm)
-    assert is_chaos(
-        OpenState("stale_blocks:T-1:b", "stale_blocks", t, t, t, 0, Severity.WARNING, "s")
-    )

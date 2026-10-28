@@ -752,7 +752,9 @@ def _verifications(
         states=[r for r in inputs.states if is_chaos(r.state)],  # counted like the chaos
         cause=cause_of,
         start=counts_from,
-        hours=lambda st, lo, hi: state_hours(inputs.actions, st, lo, hi, _humans(inputs)),
+        hours=lambda st, lo, hi: state_hours(
+            inputs.actions, st, lo, hi, _humans(inputs), _own_states(r.state for r in inputs.states)
+        ),
         chaos_rules=frozenset(CHAOS_CAUSES),
         spans=known,
         counted=counted_llm(index, known),
@@ -900,6 +902,7 @@ def _chaos(
         (r.state for r in inputs.states if is_chaos(r.state)),
         key=lambda s: (rank_[cause_of(s)], s.opened_at, s.id),
     )
+    own = _own_states(chaos)
     for state in chaos:
         # From when Kelpie first reported it: a grace period or an allowed wait before the
         # threshold is not lost time. A lower bound (a rule going live re-opens a state).
@@ -916,6 +919,11 @@ def _chaos(
             agent_hours, waiting = people_agent_hours(inputs.actions, state, a, b)
             hours[PEOPLE] += agent_hours
             tasks[PEOPLE].update(waiting)
+            continue
+        if is_outage_state(state.id):
+            task_hours, named = outage_task_hours(inputs.actions, state, a, b, own)
+            hours[cause] += task_hours
+            tasks[cause].update(named)
             continue
         hours[cause] += (b - a).total_seconds() / 3600
         if state.task_id:
@@ -1080,15 +1088,53 @@ def state_hours(
     a: datetime,
     b: datetime,
     humans: frozenset[str] = frozenset(),
+    own: frozenset[str] = frozenset(),
 ) -> float:
     """What a chaos state costs in ``[a, b)``: its condition-hours, for a forgotten hold
     the idle agent-hours behind it (:func:`hold_agent_hours`), for a person's inbox the
-    agent-hours waiting on them (:func:`people_agent_hours`)."""
+    agent-hours waiting on them (:func:`people_agent_hours`), for an outage the hours of
+    its tasks without a chaos state of their own (``own``, :func:`outage_task_hours`)."""
     if state.id.startswith(HOLD_STATE):
         return hold_agent_hours(entries, state, a, b, humans)[0]
     if state.id.startswith(PEOPLE_STATE):
         return people_agent_hours(entries, state, a, b)[0]
+    if is_outage_state(state.id):
+        return outage_task_hours(entries, state, a, b, own)[0]
     return max((b - a).total_seconds() / 3600, 0.0)
+
+
+def _own_states(states: Iterable[OpenState]) -> frozenset[str]:
+    """Tasks with a chaos state of their own: their hours count there, not under an outage."""
+    return frozenset(
+        s.task_id for s in states if s.task_id and is_chaos(s) and not is_outage_state(s.id)
+    )
+
+
+def outage_task_hours(
+    entries: Sequence[LedgerEntry],
+    state: OpenState,
+    a: datetime,
+    b: datetime,
+    own: frozenset[str] = frozenset(),
+) -> tuple[float, tuple[str, ...]]:
+    """Task-hours a chaos rule's outage (a block storm) explains in ``[a, b)``: the tasks
+    its alerts list (``params.tasks``, with every handling including the hourly suppressed
+    repeats; see :func:`_sampled_hours`), less those with a chaos state of their own
+    (``own``: counted there). While the storm is only logged, the tasks' own alerts are not
+    folded and their states count; once it folds them, they have none, and count here."""
+
+    def sample(e: LedgerEntry) -> tuple[int, list[object]] | None:
+        if e.rule != state.rule or e.params.get("state") != state.id:
+            return None
+        listed = e.params.get("tasks")
+        ids = (
+            [t for t in listed if isinstance(t, str) and t not in own]
+            if isinstance(listed, list)
+            else []
+        )
+        return len(ids), list(ids)
+
+    return _sampled_hours(entries, state.since, a, b, sample)
 
 
 def _humans(inputs: ReportInputs) -> frozenset[str]:
@@ -1097,10 +1143,8 @@ def _humans(inputs: ReportInputs) -> frozenset[str]:
 
 def is_chaos(state: OpenState) -> bool:
     """A state that is lost work: a chaos rule's, except loop_breaker's budget and
-    forecast states (spend against a budget, not a loop) and outages (a block storm is
-    rule 4's, but the hours it explains are its tasks' own states': counted there)."""
-    if is_outage_state(state.id):
-        return False
+    forecast states (spend against a budget, not a loop). A chaos rule's outage (a block
+    storm, rule 4's) counts its tasks' hours (:func:`outage_task_hours`)."""
     if state.rule == "loop_breaker":
         return session_of(state) is not None
     return state.rule in CHAOS_CAUSES

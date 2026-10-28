@@ -314,7 +314,8 @@ def evaluate_rules(
             continue
         for a in actions:
             if a.task_id == task_id or _mentions(a.params, task_id):
-                findings.append(Finding(a, modes.get(rule.name, Mode.OBSERVE)))
+                mode = Mode.OBSERVE if a.observe_only else modes.get(rule.name, Mode.OBSERVE)
+                findings.append(Finding(a, mode))  # a new check stays in observe
     return findings, problems
 
 

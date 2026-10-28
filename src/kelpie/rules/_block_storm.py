@@ -23,8 +23,9 @@ other (by when their blocks began) → one ``warning`` outage of kind
 :data:`kelpie.core.incidents.BLOCK_STORM`: since the first of them, scoped to every task
 still blocked on that reason since then, with the reason as its cause and, when the reason
 names a person on the board, that person as the one who can end it: a human owner's id as
-a word, or a role one human alone holds, as whom the reason waits for ("waiting for CEO",
-"ask the lead", "CEO:").
+a word, or a role one person alone holds (no agent either), as whom the reason waits for
+("waiting for CEO", "ask the lead", "CEO:"). On a multi-host hub ids are matched without
+their host prefix, as the agents wrote them.
 
 **Resolves.** Once open (its state id in ``Snapshot.open_states``) it stays open while
 :func:`keep_open` tasks (half of ``min_tasks``, at least two) are still blocked on the
@@ -77,6 +78,7 @@ _GENERIC_WORDS = """
     waiting wait waits waited waiting_human needs need needs_input input blocked block blocks
     blocker label labeled review reviews reviewer ci approve approval approved dependency
     dependencies depends depend merge merged task tasks pr issue human answer reply response
+    waiting_ci waiting_pr_merge conflict conflicts rebase
     since until still please guard circuit breaker parked park kind reason none unknown
     question decision confirm confirmation help
 """
@@ -89,10 +91,10 @@ class _Blocked:
     since: datetime
 
 
-def normalise(reason: str, task_id: str | None = None) -> str:
+def normalise(reason: str, task_id: str | None = None, host: str | None = None) -> str:
     """A block reason with what differs per task stripped: the task's own id, dates, times,
     durations, hashes (see the module docs)."""
-    text = _own_stripped(reason, task_id).lower()
+    text = _own_stripped(reason, task_id, host).lower()
     for pattern in (_URL, _PR_REF, _TASK_ID, _DATE, _DURATION, _FRACTION, _HEX):
         text = pattern.sub(" ", text)
     return " ".join(_NOISE.sub(" ", text).split())
@@ -104,17 +106,27 @@ def informative(text: str) -> bool:
     return sum(1 for w in words if w not in _GENERIC and not w.isdigit()) >= MIN_WORDS
 
 
-def _own_stripped(reason: str, task_id: str | None) -> str:
+def _own_stripped(reason: str, task_id: str | None, host: str | None = None) -> str:
+    """The reason without the task's own id: as the board names it, and on a multi-host hub
+    (``<host>:<id>``) as the agent's platform wrote it, without the host."""
     text = reason[:MAX_REASON]
-    if task_id:
-        text = re.sub(rf"(?<![\w.-]){re.escape(task_id)}(?![\w-])", " ", text, flags=re.I)
+    for own in {task_id, _local(task_id, host)} - {None, ""}:
+        assert own is not None
+        text = re.sub(rf"(?<![\w.-]){re.escape(own)}(?![\w-])", " ", text, flags=re.I)
     return text
 
 
-def _refs(reason: str, task_id: str | None = None) -> tuple[str, ...]:
+def _local(item_id: str | None, host: str | None) -> str | None:
+    """An id without its multi-host namespace (``<host>:``)."""
+    if item_id is None or host is None:
+        return item_id
+    return item_id.removeprefix(f"{host}:")
+
+
+def _refs(reason: str, task_id: str | None = None, host: str | None = None) -> tuple[str, ...]:
     """What a reason names: PRs, URLs, other tasks' ids. Blocks naming different ones wait
     on different things, whatever the rest of their text says."""
-    text = _own_stripped(reason, task_id).lower()
+    text = _own_stripped(reason, task_id, host).lower()
     found = {*_URL.findall(text), *_PR_REF.findall(_URL.sub(" ", text))}
     found.update(_TASK_ID.findall(_PR_REF.sub(" ", _URL.sub(" ", text))))
     return tuple(sorted(found))
@@ -148,9 +160,9 @@ def storms(
             continue  # a wait Kelpie can check, or one it is told about but cannot see
         if snoozed is not None and (snooze := snoozed(task.id)) is not None and snooze.holds:
             continue  # a person decided to wait
-        text = normalise(block.reason, task.id)
+        text = normalise(block.reason, task.id, task.host)
         if informative(text):
-            key = (text, _refs(block.reason, task.id))
+            key = (text, _refs(block.reason, task.id, task.host))
             groups.setdefault(key, []).append(_Blocked(task, block.since))
     open_states = set(snapshot.open_states)
     actions = []
@@ -186,7 +198,7 @@ def _alert(
     first = min(scope, key=lambda b: (b.since, b.task.id))
     shown = _shown(first.task) or text
     span = max(b.since for b in scope) - since
-    person = _person(snapshot, first.task.block.reason if first.task.block else text)
+    person = _person(snapshot, first.task.block.reason if first.task.block else text, first.task)
     tasks = [b.task.id for b in scope]
     cause = f'{len(tasks)} tasks blocked within {_minutes(span)} on "{shown}"'
     outage = Outage(
@@ -197,11 +209,9 @@ def _alert(
         person=person,
         tasks=tuple(tasks),
     )
-    who = (
-        f" Only {person} can end it: one answer unblocks all of them."
-        if person
-        else " One fix unblocks all of them."
-    )
+    # No one named: the cause may still need a fix per task (each one rebasing), so no
+    # promise that one fix ends it.
+    who = f" Only {person} can end it: one answer unblocks all of them." if person else ""
     listed = ", ".join(tasks[:MAX_LISTED]) + (
         f" (+{len(tasks) - MAX_LISTED} more)" if len(tasks) > MAX_LISTED else ""
     )
@@ -225,7 +235,7 @@ def _shown(task: Task) -> str:
     """The reason as people read it: the earliest task's, without its own id."""
     if task.block is None:
         return ""
-    text = _own_stripped(task.block.reason, task.id)
+    text = _own_stripped(task.block.reason, task.id, task.host)
     text = re.sub(r"[\[(]\s*[\])]", " ", text)  # "[t_1]" left as "[]"
     return " ".join(text.split()).strip(" -,;.")
 
@@ -236,21 +246,33 @@ def _headline(n: int, person: str | None) -> str:
     return f"Block storm: {count(n, 'task')} blocked on the same reason{asks}"
 
 
-def _person(snapshot: Snapshot, reason: str) -> str | None:
+def _person(snapshot: Snapshot, reason: str, task: Task) -> str | None:
     """The human owner a reason names (see the module docs): by id as a word, else by a
-    role only one human holds, as whom it waits for."""
+    role one person alone holds (no agent either), as whom it waits for. On a multi-host
+    hub a person is named by their id on their own machine, and may be on several boards:
+    the one on the task's machine is named."""
     text = " ".join(reason[:MAX_REASON].lower().split())
-    humans = sorted((o for o in snapshot.owners if o.kind is OwnerKind.HUMAN), key=lambda o: o.id)
+    humans = sorted(
+        (o for o in snapshot.owners if o.kind is OwnerKind.HUMAN),
+        key=lambda o: (o.host != task.host, o.id),  # the task's own machine first
+    )
     for owner in humans:
-        if re.search(rf"(?<![\w.-]){re.escape(owner.id.lower())}(?![\w-])", text):
-            return owner.id
+        for own in {owner.id, _local(owner.id, owner.host)} - {None, ""}:
+            assert own is not None
+            if re.search(rf"(?<![\w.-]){re.escape(own.lower())}(?![\w-])", text):
+                return owner.id
     for owner in humans:
         role = owner.role.lower().strip()
-        if not role or sum(1 for o in humans if o.role.lower().strip() == role) > 1:
-            continue
+        holders = {
+            (o.kind, _local(o.id, o.host))
+            for o in snapshot.owners
+            if o.role.lower().strip() == role
+        }
+        if not role or len(holders) > 1:
+            continue  # several people, or agents too: whom it means is unclear
         r = re.escape(role)
         asked = (
-            rf"\b(?:waiting (?:for|on)|wait (?:for|on)|ask|asks|asking|needs?)"
+            rf"\b(?:waiting (?:for|on)|wait (?:for|on)|ask|asks|asking)"
             rf"(?: the)? {r}(?![\w-])|(?:^|[:(]\s*){r}\s*:"
         )
         if re.search(asked, text):

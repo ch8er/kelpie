@@ -116,7 +116,7 @@ def test_a_role_names_the_person_and_no_one_named_is_fine() -> None:
     plain = tuple(blocked(n, 50 - n, "simulator will not boot") for n in range(5))
     [alert] = storms(*plain)
     assert Outage.from_params(alert.params).person is None  # type: ignore[union-attr]
-    assert "One fix unblocks all of them." in alert.reason
+    assert alert.reason.endswith("T-0, T-1, T-2, T-3, T-4.")  # no one named: no promise
     agent = Owner("ceo", "ceo")  # an agent named like a person is no person
     [alert] = storms(*FIVE, owners=(agent,))
     assert Outage.from_params(alert.params).person is None  # type: ignore[union-attr]
@@ -217,6 +217,47 @@ def test_long_storms_and_long_lists() -> None:
     assert Outage.from_params(alert.params).signature == ASK  # type: ignore[union-attr]
 
 
+def test_on_a_multi_host_hub_ids_match_as_the_agents_wrote_them() -> None:
+    from kelpie.remote.protocol import namespace_snapshot
+
+    own = tuple(blocked(n, 50 - n, f"{ASK} [T-{n}]") for n in range(3))
+    others = tuple(blocked(n, 40 - n, ASK) for n in range(3, 6))
+    parts = [
+        namespace_snapshot(host, "hermes", Snapshot(now=NOW, tasks=tasks, owners=(CEO,)))
+        for host, tasks in (("mac1", own), ("mac2", others))
+    ]
+    hub = Snapshot(
+        now=NOW,
+        tasks=tuple(t for p in parts for t in p.tasks),
+        owners=tuple(o for p in parts for o in p.owners),
+    )
+    [alert] = [a for a in StaleBlocks().evaluate(hub) if is_outage_state(a.state or "")]
+    outage = Outage.from_params(alert.params)
+    assert outage is not None and len(outage.tasks) == 6  # own ids stripped on both hosts
+    assert outage.person == "mac1:ceo"  # the CEO on both boards is one person
+
+
+def test_a_role_agents_hold_too_names_no_one() -> None:
+    reviewer = Owner("person-3", "reviewer", OwnerKind.HUMAN)
+    bot = Owner("agent-rev", "reviewer")
+    asks = tuple(blocked(n, 50 - n, "waiting for reviewer (signing keys)") for n in range(5))
+    [alert] = storms(*asks, owners=(reviewer,))
+    assert Outage.from_params(alert.params).person == "person-3"  # type: ignore[union-attr]
+    [alert] = storms(*asks, owners=(reviewer, bot))
+    assert Outage.from_params(alert.params).person is None  # type: ignore[union-attr]
+    lead = Owner("person-7", "lead", OwnerKind.HUMAN)
+    times = tuple(blocked(n, 50 - n, "needs lead time on the runner pool") for n in range(5))
+    [alert] = storms(*times, owners=(lead,))
+    assert Outage.from_params(alert.params).person is None  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    "reason", ["waiting_ci: flaky", "merge conflict in CHANGELOG.md", "waiting_pr_merge: queue"]
+)
+def test_more_kinds_of_wait_alone(reason: str) -> None:
+    assert not informative(normalise(reason))
+
+
 def test_config() -> None:
     rule = build({"storm_min_tasks": 3, "storm_window": "30m"})
     assert rule.storm_min_tasks == 3 and rule.storm_window == 30 * M
@@ -265,3 +306,37 @@ def test_with_the_engine_the_storm_folds_the_per_task_alerts_once_switched_on() 
         if d.suppression is Suppression.INCIDENT
     )
     assert {d.action.task_id for d in done if d.outcome is Outcome.ALERTED} == {None, "T-9"}
+
+
+def test_the_storm_s_hours_count_once_in_the_cost_of_chaos() -> None:
+    """Logged only, the tasks' own states count; switched on, it folds their alerts (no
+    states of their own) and its tasks' hours count under it: never twice, never none."""
+    from datetime import date
+
+    from kelpie.core.config import EngineConfig, Mode
+    from kelpie.core.engine import Engine
+    from kelpie.report.daily import ReportInputs, build_report
+    from kelpie.report.store import StateRow
+    from tests.fakes import FakeAdapter, FakeAlerter
+
+    start = datetime(2026, 3, 2, 1, tzinfo=UTC)
+    tasks = tuple(
+        Task(f"T-{n}", "t", Status.BLOCKED, start, block=Block(ASK, start)) for n in range(5)
+    )
+    config = EngineConfig(dry_run=False, default_mode=Mode.SUGGEST)
+
+    def chaos_hours(rule: StaleBlocks) -> float:
+        engine = Engine([rule], adapters=[FakeAdapter()], alerter=FakeAlerter(), config=config)  # type: ignore[list-item]
+        for h in range(9):  # 01:30 to 09:30; the tasks' own alerts from 05:00 (4h)
+            now = start + timedelta(hours=h, minutes=30)
+            engine.tick(lambda now=now: Snapshot(now=now, tasks=tasks, owners=(CEO,)))
+        rows = [StateRow(s) for s in engine.states.store.open_states()]  # type: ignore[attr-defined]
+        log = list(engine.ledger.store.entries)  # type: ignore[attr-defined]
+        report = build_report(
+            ReportInputs(day=date(2026, 3, 2), tz=UTC, actions=log, states=rows, tasks=tasks),
+            sections={},
+        )
+        return sum(c.hours for c in report.chaos if c.rule == "stale_blocks")
+
+    assert chaos_hours(StaleBlocks()) == pytest.approx(5 * 4)  # T-0..T-4, 05:30 to 09:30
+    assert chaos_hours(StaleBlocks(storm_mode="rule")) == pytest.approx(5 * 8)  # from 01:30

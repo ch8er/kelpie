@@ -11,7 +11,7 @@ description: >
   separate waits.
 rule: stale_blocks
 config:
-  storm_min_tasks: 5
+  storm_min_tasks: 3  # low enough that the negative cases below could storm
   storm_window: "2h"
 snapshot:
   now: "2026-03-02T11:00:00+00:00"
@@ -39,6 +39,10 @@ snapshot:
     - {id: t_9c2e0003, title: "Backend task", status: blocked, status_since: "2026-03-02T10:25:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for CI on example/api#43", since: "2026-03-02T10:25:00+00:00", condition_id: C-3}}
     - {id: t_9c2e0004, title: "Backend task", status: blocked, status_since: "2026-03-02T10:30:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for CI on example/api#44", since: "2026-03-02T10:30:00+00:00", condition_id: C-4}}
     - {id: t_9c2e0005, title: "Backend task", status: blocked, status_since: "2026-03-02T10:35:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for CI on example/api#45", since: "2026-03-02T10:35:00+00:00", condition_id: C-5}}
+    # The same words without conditions, each naming its own PR: still not a storm.
+    - {id: t_9c2e0006, title: "Backend task", status: blocked, status_since: "2026-03-02T10:36:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for green CI of the payments service on example/api#46", since: "2026-03-02T10:36:00+00:00"}}
+    - {id: t_9c2e0007, title: "Backend task", status: blocked, status_since: "2026-03-02T10:37:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for green CI of the payments service on example/api#47", since: "2026-03-02T10:37:00+00:00"}}
+    - {id: t_9c2e0008, title: "Backend task", status: blocked, status_since: "2026-03-02T10:38:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for green CI of the payments service on example/api#48", since: "2026-03-02T10:38:00+00:00"}}
   conditions:
     - {id: C-0, kind: ci_status, task_id: t_9c2e0000, params: {repo: example/api, pr: 40}, satisfied: false, checked_at: "2026-03-02T10:58:00+00:00"}
     - {id: C-1, kind: ci_status, task_id: t_9c2e0001, params: {repo: example/api, pr: 41}, satisfied: false, checked_at: "2026-03-02T10:58:00+00:00"}
@@ -61,6 +65,6 @@ not_expected_actions:
     reason_contains: "pricing"
   - kind: alert
     reason_contains: "release date"
-  # Each task waits on its own PR's CI, which Kelpie checks: not a storm.
+  # Each task waits on its own PR's CI, which Kelpie checks, or names its own PR: not a storm.
   - kind: alert
-    reason_contains: "CI on"
+    reason_contains: "payments service"
