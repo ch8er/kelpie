@@ -1168,26 +1168,38 @@ def outage_steps(
     Each of its alerts (the announcement, then the hourly repeats while it stays open) names
     its whole scope as of then (``tasks``), which holds until the next one. Alerts of a
     check still in observe (``params.observe_only``) count nothing: switching a check on
-    is what moves the hours, from its first alert that counts on (not back-filled)."""
-    first = outage_counts_from(entries, state)
-    a = max(a, first)
+    is what moves the hours, from its first alert that counts on (not back-filled), until
+    an alert says it is back in observe (:func:`kelpie.report.waits.counted_spans`)."""
+    a = max(a, outage_counts_from(entries, state))
     return _sampled_steps(entries, state.since, a, b, _outage_sampler(state)) if b > a else []
 
 
 def outage_counts_from(entries: Sequence[LedgerEntry], state: OpenState) -> datetime:
     """When an outage's hours start counting: its first alert that counts (the announcement,
-    or the first once its check is switched on); none: its last sighting, so it counts
-    nothing (before/after then sees no first sighting of it either)."""
-    samples = _samples(entries, state.since, state.last_seen, _outage_sampler(state))
+    or the first once its check is switched on; a lower bound when the history loaded does
+    not reach back to it); none: its last sighting, so it counts nothing (before/after
+    then sees no first sighting of it either)."""
+    samples = _samples(entries, state.since, state.last_seen, _outage_sampler(state, None))
     return max(samples[0][0], counts_from(state)) if samples else state.last_seen
 
 
-def _outage_sampler(state: OpenState) -> Callable[[LedgerEntry], tuple[int, list[object]] | None]:
+def _outage_sampler(
+    state: OpenState, observed: tuple[int, list[object]] | None = (0, [])
+) -> Callable[[LedgerEntry], tuple[int, list[object]] | None]:
+    """An outage alert's tasks; one of a check in observe reads as ``observed`` (none
+    held: a check switched back stops counting; None: not a sample)."""
+
     def sample(e: LedgerEntry) -> tuple[int, list[object]] | None:
-        if e.params.get("state") != state.id or e.params.get(OBSERVE_ONLY) is True:
-            return None  # another state's, or a check still in observe: not counted
+        if e.params.get("state") != state.id:
+            return None  # another state's
         found = OutageParams.from_params(e.params)
-        return None if found is None else (len(found.tasks), list(found.tasks))
+        if found is None:
+            return None
+        return (
+            observed
+            if e.params.get(OBSERVE_ONLY) is True
+            else (len(found.tasks), list(found.tasks))
+        )
 
     return sample
 
@@ -1199,21 +1211,18 @@ def outage_spans(
     b: datetime,
     tasks: Iterable[Task] | None,
 ) -> list[tuple[str, datetime, datetime]]:
-    """:func:`outage_steps` per task: ``(task, start, end)``. A task counts while it is on
-    the board and not finished: an alert may name a task that has since been done or left
-    the board (rule 10 lists the tasks whose runs failed since the outage began), and an
-    outage holds no finished task. ``tasks`` None: every task an alert names, as named."""
-    board = None if tasks is None else {t.id: t for t in tasks}
+    """:func:`outage_steps` per task: ``(task, start, end)``. A task its alerts name counts
+    until it finished, if the board (``tasks``) shows it finished: alerts are hourly, so
+    the last one may name a task done since. A task off the board counts as its alerts
+    named it: adapters drop finished tasks after a while (hermes past ``lookback``), and
+    rules 4, 9 and 10 name only tasks open on the board at the time, so it held the task
+    then (at most an alert interval too long). ``tasks`` None: every task as named."""
+    board = {} if tasks is None else {t.id: t for t in tasks}
     out: list[tuple[str, datetime, datetime]] = []
     for lo, hi, _, ids in outage_steps(entries, state, a, b):
         for t in ids:
-            end = hi
-            if board is not None:
-                task = board.get(t)
-                if task is None:
-                    continue  # off the board: not this farm's wait any more
-                if task.status.is_terminal:
-                    end = min(hi, task.status_since)
+            task = board.get(t)
+            end = min(hi, task.status_since) if task and task.status.is_terminal else hi
             if end > lo:
                 out.append((t, lo, end))
     return out

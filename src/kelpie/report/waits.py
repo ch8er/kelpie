@@ -27,8 +27,9 @@ names, even when its reason names a person: the person can end it, but the hours
 outage's, not a people wait. A tool failure (rule 10: one tool failing the same way for
 many tasks) explains, under ``shared_tool_failure``, only the tasks it names too. Only the
 part of a wait inside the outage moves; the rest keeps the task's own cause. An outage
-whose check is still in observe (``params.observe_only`` on its last alert) moves nothing;
-a check switched on during an outage moves its waits from the outage's start.
+whose check is still in observe (``params.observe_only``) moves nothing: an outage moves
+waits from each alert of a switched-on check until a later observe-only one (switched
+back), never before its first such alert, as the cost of chaos counts it.
 
 **Snoozed** (issue #176). A wait a person chose is not one the farm lost. The part of a
 task's wait in ``[a, b)`` counts under ``snoozed`` only where all of these hold:
@@ -192,8 +193,8 @@ class BiggestWait:
 class OutageSpan:
     """One occurrence of an outage incident (:mod:`kelpie.core.incidents`), with what its
     alerts said about it: while it is open, the waits it explains count under it
-    (:attr:`wait_cause`) instead of their own cause. ``observe_only`` is its last alert's (a
-    check switched on during an outage moves its waits from the outage's start)."""
+    (:attr:`wait_cause`) instead of their own cause, over ``counted`` (:func:`counted_spans`;
+    None: its whole span unless ``observe_only``). ``observe_only`` is its last alert's."""
 
     since: datetime
     until: datetime  # its last_seen
@@ -207,6 +208,13 @@ class OutageSpan:
     person: str | None = None  # who can end it, when its reason names one
     # a check still in observe (``params.observe_only``): listed, its waits not moved
     observe_only: bool = False
+    counted: tuple[tuple[datetime, datetime], ...] | None = None
+
+    def spans(self) -> intervals.Spans:
+        """Where its waits move."""
+        if self.counted is not None:
+            return list(self.counted)
+        return [] if self.observe_only else [(self.since, self.until)]
 
     @property
     def wait_cause(self) -> str:
@@ -234,6 +242,25 @@ def outage_samples(
     )
 
 
+def counted_spans(
+    found: Sequence[tuple[datetime, bool]], until: datetime
+) -> tuple[tuple[datetime, datetime], ...]:
+    """Where an outage counts, from its alerts ``(at, observe only)`` in time order: from
+    each alert of a switched-on check until the next observe-only one (switched back) or
+    ``until``; nothing before its first such alert (an alert not loaded: a lower bound)."""
+    out: list[tuple[datetime, datetime]] = []
+    start: datetime | None = None
+    for at, observe in found:
+        if observe and start is not None:
+            out.append((start, at))
+            start = None
+        elif not observe and start is None:
+            start = at
+    if start is not None:
+        out.append((start, until))
+    return tuple((a, b) for a, b in out if b > a)
+
+
 def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[OutageSpan]:
     """The outages, each with the scope its alerts reported: every entry that names the
     state (``params.state``) within that occurrence's time span (the same signature failing
@@ -245,9 +272,11 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
     out = []
     for s in (s for s in states if is_outage_state(s.id)):
         found = [
-            (o, obs) for at, o, obs in samples if o.state == s.id and s.since <= at <= s.last_seen
+            (at, o, obs)
+            for at, o, obs in samples
+            if o.state == s.id and s.since <= at <= s.last_seen
         ]
-        mine = [o for o, _ in found]
+        mine = [o for _, o, _ in found]
         last = mine[-1] if mine else None
         out.append(
             OutageSpan(
@@ -261,7 +290,13 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
                 kind=last.kind if last else _kind_of(s.id),
                 reason=last.cause if last else None,
                 person=last.person if last else None,
-                observe_only=bool(found) and found[-1][1],
+                observe_only=bool(found) and found[-1][2],
+                # no alert loaded: its whole span (it names nothing then, so moves little)
+                counted=(
+                    counted_spans([(at, obs) for at, _, obs in found], s.last_seen)
+                    if found
+                    else None
+                ),
             )
         )
     return out
@@ -411,13 +446,11 @@ class WaitCauses:
         # a block storm first (it names the task), then a CI outage over the rest
         by_cause = {
             cause: intervals.merged(
-                (max(a, o.since), min(b, o.until))
+                (max(a, lo), min(b, hi))
                 for o in self._outages
-                if o.wait_cause == cause
-                and not o.observe_only
-                and o.since < b
-                and o.until > a
-                and self._explains(o, task)
+                if o.wait_cause == cause and self._explains(o, task)
+                for lo, hi in o.spans()
+                if lo < b and hi > a
             )
             for cause in (SHARED_BLOCKER, SHARED_TOOL_FAILURE, CI_OUTAGE)
         }

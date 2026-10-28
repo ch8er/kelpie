@@ -148,6 +148,7 @@ def test_a_storm_switched_on_counts_from_then_and_is_listed_apart() -> None:
     report = build_report(inputs)
     [line] = [c for c in report.chaos if c.rule == OUTAGE]
     assert line.hours == pytest.approx(4)  # 11:00-15:00
+    assert report.outage_wait_hours == pytest.approx(4)  # the waits split agrees
     [v] = report.verifications
     [left_out] = [e for e in v.excluded if "outage" in e.name]
     assert left_out.first == fix and left_out.after  # first counted when switched on
@@ -164,7 +165,8 @@ def test_a_ci_outages_tasks_count_once_under_the_outage() -> None:
     block = row("stale_blocks:R1:block", "stale_blocks", at(10), at(10), at(14), "R1")
     report = build_report(inputs(states=(state, block), actions=(sample,)), sections={})
     lines = {c.rule: c for c in report.chaos}
-    # from its first alert (03:00), not its state's opening: hours count from the sighting
+    # its only loaded alert is at 03:00 (the history does not reach the announcement at
+    # 02:00): a lower bound, from the first alert loaded
     assert lines[OUTAGE].hours == pytest.approx(2 * 17) and lines[OUTAGE].tasks == ("R1", "R2")
     assert lines["stale_blocks"].hours == 0 and lines["stale_blocks"].also_hours == 4.0
     titles = [a.title for a in report.recommendations]
@@ -261,10 +263,11 @@ def test_before_after_sees_an_outages_tasks() -> None:
     assert lost.after == pytest.approx(2 * 4)  # two tasks, 4 h, counted like the chaos
 
 
-def test_an_outage_counts_only_its_open_tasks_on_the_board() -> None:
-    """An alert may name a task done since, or one off the board (rule 10 lists the tasks
-    whose runs failed since the outage began): a finished task counts until it finished,
-    one off the board not at all. The cost of chaos and before/after agree."""
+def test_an_outage_counts_a_finished_task_until_it_finished() -> None:
+    """The last hourly alert may name a task done since: it counts until it finished (one
+    done before the outage not at all). A task off the board counts as named: adapters
+    drop finished tasks after a while, and the alerts named it while it was open. The
+    cost of chaos and before/after agree."""
     from kelpie.report.daily import state_hours
     from kelpie.report.fixes import MANUAL, FixEvent
 
@@ -276,12 +279,12 @@ def test_an_outage_counts_only_its_open_tasks_on_the_board() -> None:
         *open_tasks("T-1", at=fix),
         Task("T-2", "done mid-outage", Status.DONE, at + timedelta(hours=1), role="developer"),
         Task("T-3", "done before it", Status.DONE, fix, role="developer"),
-    )  # T-4 is not on the board
+    )  # T-4 is not on the board any more (finished, aged out)
     inputs = ReportInputs(day=fix.date(), tz=UTC, states=(state,), actions=(storm,),
                           tasks=board, fixes=(FixEvent(fix, MANUAL, "a fix"),))  # fmt: skip
     [line] = [c for c in build_report(inputs).chaos if c.rule == OUTAGE]
-    assert line.hours == pytest.approx(4 + 1)  # T-1 the whole 4 h, T-2 until it was done
-    assert state_hours((storm,), state.state, at, until, tasks=board) == pytest.approx(5)
+    assert line.hours == pytest.approx(4 + 1 + 4)  # T-1 and T-4 4 h, T-2 until it was done
+    assert state_hours((storm,), state.state, at, until, tasks=board) == pytest.approx(9)
     assert state_hours((storm,), state.state, at, until) == pytest.approx(4 * 4)  # as named
 
 
@@ -402,3 +405,28 @@ def test_an_outages_kind_without_its_alerts_follows_its_state() -> None:
     assert _kind_of(CI_NOT_STARTED_STATE) == CI_NOT_STARTED
     assert _kind_of("ci_economy:outage:0123456789ab") == CI_FAILURES
     assert _kind_of("some_new_rule:outage:0123456789ab") == CI_FAILURES  # the fallback
+
+
+def test_a_check_switched_back_to_observe_stops_counting() -> None:
+    """Counted from 10:00, back in observe at 12:00, open until 18:00: 2 h, in the cost of
+    chaos and in the waits split alike."""
+    from kelpie.report.waits import counted_spans
+
+    day = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
+    h = lambda n: day + timedelta(hours=n)  # noqa: E731
+    on, off = (
+        OutageParamsFactory.storm(h(10), ("T-1",)),
+        OutageParamsFactory.storm(h(12), ("T-1",), observe=True),
+    )
+    state = row(on.params["state"], "stale_blocks", h(10), h(10), h(18))
+    report = build_report(ReportInputs(day=day.date(), tz=UTC, states=(state,), actions=(on, off),
+                                       tasks=open_tasks("T-1", at=h(9))), sections={})  # fmt: skip
+    [line] = [c for c in report.chaos if c.rule == OUTAGE]
+    assert line.hours == pytest.approx(2)
+    assert report.outage_wait_hours == pytest.approx(2)
+    # and switched on again: counted again
+    assert counted_spans([(h(10), False), (h(12), True), (h(14), False)], h(18)) == (
+        (h(10), h(12)),
+        (h(14), h(18)),
+    )
+    assert counted_spans([(h(10), True)], h(18)) == ()

@@ -415,7 +415,7 @@ def test_ci_jobs_not_starting_are_a_shared_ci_failure() -> None:
     o = CiOutage(state=STATE, signature="CI jobs not starting", kind=CI_NOT_STARTED,
                  cause="jobs queued over 30 min on 3 PRs", repos=("example/app",),
                  tasks=("N1",))  # fmt: skip
-    sample = replace(ledger("ci_economy", **o.to_params()), at=at(11))
+    sample = replace(ledger("ci_economy", **o.to_params()), at=at(10))  # its announcement
     states = [outage_state(sid, at(10), at(16)).state for sid in (STATE, SID)]
     found = {x.state: x for x in outages(states, [sample, outage_sample(at(11))])}
     assert set(found) == {STATE, SID}
