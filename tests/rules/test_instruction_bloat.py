@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -118,3 +119,35 @@ def test_build_validates_its_parameters() -> None:
         build({"min_span": "soon"})
     with pytest.raises(ValueError, match=r"unknown parameters: \['paths'\]"):
         build({"paths": []})
+
+
+def test_an_alerted_file_stays_reported_until_it_is_split() -> None:
+    grown = file(chars=96_000, chars_since=96_000, loaded="on_demand", token_basis="sessions")
+    assert run(grown) == []  # never alerted: a stable large skill
+    state = "instruction_bloat:~/farm/dev/skills/a/SKILL.md"
+    snap = Snapshot(now=NOW, instruction_files=(grown,), open_states=(state,))
+    (a,) = InstructionBloat().evaluate(snap)
+    assert a.state == state and "still over 40,000" in a.reason
+    split = file(chars=9_000, chars_since=96_000, edits=1)
+    assert InstructionBloat().evaluate(replace(snap, instruction_files=(split,))) == []
+
+
+def test_copies_away_from_the_alerted_file_get_their_own_alert() -> None:
+    path = "~/farm/dev/skills/a/SKILL.md"
+    others = ("~/farm/dev/b.md:1", "~/farm/dev/c.md:2", "~/farm/dev/d.md:3")
+    dupes = (
+        InstructionDuplicate("developer", "section", (f"{path}:3", f"{path}:90"), 0.9),
+        InstructionDuplicate("developer", "value", others),
+    )
+    file_alert, copies = run(file(chars=50_000, chars_since=1_000), dupes=dupes)
+    assert file_alert.params["duplicate_sections"] == 1
+    assert file_alert.params["repeated_values"] == 0
+    assert copies.state == "instruction_bloat:copies:developer"
+    assert copies.params["repeated_values"] == 1 and copies.params["duplicate_sections"] == 0
+
+
+def test_headline_shows_growth_only_when_it_is_the_finding() -> None:
+    shrinking = file(chars=50_000, chars_since=60_000, loaded="always", tokens_per_day=10**6,
+                     tokens=12_500)  # fmt: skip
+    (a,) = run(shrinking)
+    assert a.params["headline"].endswith("~12,500 tokens")

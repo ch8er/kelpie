@@ -670,8 +670,9 @@ from counted loads: a large skill opened on demand that does not change is not b
 alert gives its size in characters and estimated tokens, its growth, whether it only grows
 (appends and nothing removed), its tokens a day and where that figure comes from, the
 near-duplicate sections and repeated values that involve it, and recommends a short core
-plus topic references. Copies in a role whose files are under every threshold get their
-own informational alert. Both are lasting states: alerted once, resolved when the file is
+plus topic references. Copies that involve no reported file get their own informational
+alert per role. Both are lasting states: alerted once, kept open while the file stays over
+`max_chars` (also once the growth window has moved past its growth), resolved when it is
 split. Kelpie never edits instruction files; the rule only alerts.
 
 | Key | Default | Type | Meaning |

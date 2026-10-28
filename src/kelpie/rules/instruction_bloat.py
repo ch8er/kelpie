@@ -19,9 +19,10 @@ A file is reported when one of these holds:
 The alert names the file, its size in characters and estimated tokens, its growth, whether
 it only grows (appends and nothing removed), its tokens a day and where that figure comes
 from, the copies of its sections and values, and recommends a short core plus topic
-references. Copies in a role's files without any file over a threshold get their own
-(informational) alert per role: one fact, one place. Each is a lasting state: alerted when
-it starts and resolved when the file is split. Kelpie never edits instruction files, so
+references. Copies that involve no reported file get their own (informational) alert per
+role: one fact, one place. Each is a lasting state: alerted when it starts, kept open while
+the file stays over ``max_chars`` (after the window has moved past its growth), and
+resolved when the file is split. Kelpie never edits instruction files, so
 the rule only alerts (observe by default).
 """
 
@@ -59,19 +60,23 @@ class InstructionBloat:
 
     def evaluate(self, snapshot: Snapshot) -> list[Action]:
         actions: list[Action] = []
-        alerted_roles: set[str | None] = set()
+        told: set[int] = set()  # copies named in a file's alert
         for f in snapshot.instruction_files:
             why = self._why(f, snapshot)
             if why:
-                copies = [d for d in snapshot.instruction_duplicates if _touches(d, f.path)]
-                actions.append(self._alert(f, why, copies, snapshot))
-                alerted_roles.add(f.role)
+                copies = [
+                    (i, d)
+                    for i, d in enumerate(snapshot.instruction_duplicates)
+                    if _touches(d, f.path)
+                ]
+                told.update(i for i, _ in copies)
+                actions.append(self._alert(f, why, [d for _, d in copies], snapshot))
         by_role: dict[str | None, list[InstructionDuplicate]] = {}
-        for d in snapshot.instruction_duplicates:
-            by_role.setdefault(d.role, []).append(d)
+        for i, d in enumerate(snapshot.instruction_duplicates):
+            if i not in told:
+                by_role.setdefault(d.role, []).append(d)
         for role, copies in sorted(by_role.items(), key=lambda kv: kv[0] or ""):
-            if role not in alerted_roles:
-                actions.append(_copies_alert(role, copies))
+            actions.append(_copies_alert(role, copies))
         return actions
 
     def _why(self, f: InstructionFile, snapshot: Snapshot) -> list[str]:
@@ -84,6 +89,9 @@ class InstructionBloat:
             why.append(
                 f"it grows {growth:,.0f} characters a week (over {self.max_growth_per_week:,})"
             )
+        if not why and f.chars >= self.max_chars and _state(f) in snapshot.open_states:
+            # Alerted before and not split yet: the window moved on, the file did not.
+            why.append(f"it is still over {self.max_chars:,} characters")
         costed = f.loaded == "always" or f.token_basis == "loads"
         if (
             f.chars >= self.max_chars
@@ -128,7 +136,8 @@ class InstructionBloat:
         if copies:
             parts.append(_copies_text(copies))
         parts.append(RECOMMENDATION)
-        state = f"{NAME}:{f.path}"
+        state = _state(f)
+        fast = growth is not None and growth >= self.max_growth_per_week
         return Action(
             ActionKind.ALERT,
             NAME,
@@ -151,7 +160,7 @@ class InstructionBloat:
                 "repeated_values": sum(1 for d in copies if d.kind == "value"),
                 **alert_params(
                     f"`{_name(f.path)}` ({role}): {f.chars:,} characters, "
-                    + (f"+{growth:,.0f} a week" if growth else f"~{f.tokens:,} tokens")
+                    + (f"{growth:+,.0f} a week" if fast else f"~{f.tokens:,} tokens")
                 ),
             },
         )
@@ -193,6 +202,10 @@ def _copies_text(copies: Sequence[InstructionDuplicate]) -> str:
         else:
             out.append(f"one value in {len(d.places)} places: {places}{more}")
     return "Copies: " + "; ".join(out) + "."
+
+
+def _state(f: InstructionFile) -> str:
+    return f"{NAME}:{f.path}"
 
 
 def _touches(d: InstructionDuplicate, path: str) -> bool:
