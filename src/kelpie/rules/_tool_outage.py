@@ -16,7 +16,9 @@ the command's last segment, after a ``;`` or ``|``, or after ``&&`` only from se
 xcodebuild`` (it exits 0 wherever the binary is). A command of more lines than the one its
 trace keeps is none: its last line's exit code decides. A foreground call that exited
 non-zero is a failure of that tool with its exit code as the error class (``127`` not found,
-``124`` timed out, ``1`` a failed build). One that exited 0 is a success only when the
+``124`` timed out, ``1`` a failed build), when the adapter says the command reaches its
+end (:func:`~kelpie.core.tools.command_complete`: no ``; swiftlint`` dropped after it, masked
+flag values aside). One that exited 0 is a success only when the
 adapter says the command is whole (:func:`~kelpie.core.tools.command_whole`: redaction keeps
 a prefix, and a dropped ``| xcbeautify`` or second line decides the exit code) and nothing
 after the tool was masked: a false success would end an outage. A call sent to the
@@ -54,6 +56,7 @@ from kelpie.core.model import Snapshot, Span, SpanKind
 from kelpie.core.tools import (
     ERROR,
     OK,
+    command_complete,
     command_multiline,
     command_whole,
     exit_code_of,
@@ -181,6 +184,8 @@ def _calls(snapshot: Snapshot, tools: Collection[str]) -> list[_Call]:
         tool, masked = found
         if result == OK and (masked or not command_whole(span)):
             continue  # a masked or dropped pipe may have decided the exit code
+        if result == ERROR and not command_complete(span):
+            continue  # a dropped "; swiftlint" may have failed, not the tool
         code = exit_code_of(span) if result == ERROR else None
         if result == ERROR and not code:
             continue  # a failure without its class cannot be grouped

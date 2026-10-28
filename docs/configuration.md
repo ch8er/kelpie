@@ -582,7 +582,9 @@ script run as `bash x.sh` or `timeout 600 ./x.sh` is masked whole and never seen
 counts only when the adapter says the redacted command is whole (Hermes:
 `kelpie.tool.command_whole`, one line with its last word kept) and nothing after the tool
 was masked: the redaction keeps a prefix, and a dropped `| xcbeautify` decides the exit
-code. Failures of one tool
+code. A failure counts only when the redacted command reaches the command's end, masked flag
+values aside (`kelpie.tool.command_complete`): a dropped `; swiftlint` may be the one that
+failed. Commands of more lines are not read. Failures of one tool
 with one exit code by `tool_outage_min_tasks` distinct tasks within `tool_outage_window`,
 with no success of the tool since → one `warning` "Tool outage: ios_sim.sh exits 127 for
 3 tasks", with the tasks and what the code usually means (127 not found, 124 timed out, 137

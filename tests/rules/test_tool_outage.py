@@ -11,7 +11,12 @@ import pytest
 from kelpie.core.actions import Action
 from kelpie.core.incidents import TOOL_FAILURES, Outage, is_outage_state
 from kelpie.core.model import Session, Snapshot, Span, SpanKind
-from kelpie.core.tools import COMMAND_WHOLE_ATTRIBUTE, EXIT_CODE_ATTRIBUTE, RESULT_ATTRIBUTE
+from kelpie.core.tools import (
+    COMMAND_COMPLETE_ATTRIBUTE,
+    COMMAND_WHOLE_ATTRIBUTE,
+    EXIT_CODE_ATTRIBUTE,
+    RESULT_ATTRIBUTE,
+)
 from kelpie.rules._tool_outage import tool_outage_state
 from kelpie.rules.loop_breaker import NAME, LoopBreaker, build
 
@@ -30,12 +35,15 @@ def call(
     result: str | None = None,
     key: str = "command",
     whole: bool = True,
+    complete: bool = True,
     **fields: Any,
 ) -> Span:
     at = NOW - minutes_ago * M
     attributes: dict[str, Any] = {key: command}
     if whole:
         attributes[COMMAND_WHOLE_ATTRIBUTE] = True
+    elif complete:
+        attributes[COMMAND_COMPLETE_ATTRIBUTE] = True
     if code is not None:
         attributes[EXIT_CODE_ATTRIBUTE] = code
     attributes[RESULT_ATTRIBUTE] = result or ("ok" if code == 0 else "error")
@@ -316,3 +324,20 @@ def test_a_task_that_left_the_snapshot_keeps_its_host_by_namespace() -> None:
     [alert] = found(*archived, tasks=live, owners=owners)
     assert alert.params["signature"] == "ios_sim.sh exit 127 on mac-a"
     assert found(*archived, call("mac-a:T-4", 10, 0), tasks=live, owners=owners) == []
+
+
+def test_a_failure_counts_only_when_the_command_reaches_its_end() -> None:
+    masked = three("xcodebuild -s*** *** ***", 65)  # the scheme's value is masked
+    masked = [
+        replace(sp, attributes={**sp.attributes, COMMAND_WHOLE_ATTRIBUTE: False}) for sp in masked
+    ]
+    masked = [
+        replace(sp, attributes={**sp.attributes, COMMAND_COMPLETE_ATTRIBUTE: True}) for sp in masked
+    ]
+    rule = LoopBreaker(tool_outage_tools=("xcodebuild",))
+    assert [a.params["signature"] for a in found(*masked, rule=rule)] == ["xcodebuild exit 65"]
+    # "xcodebuild clean build test && swiftlint": the redaction kept four words, swiftlint
+    # may be the 127.
+    cut = [call(t, m, command="ios_sim.sh test", whole=False, complete=False)
+           for t, m in (("T-1", 50), ("T-2", 40), ("T-3", 30))]  # fmt: skip
+    assert found(*cut) == []
