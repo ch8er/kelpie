@@ -24,8 +24,11 @@ tasks its alerts name (``tasks``) and the tasks waiting on CI or a merge of a PR
 scope (``prs``) or of a repository it covers (``repos``). A block storm (rule 4: many tasks
 blocked on the same reason at once) explains, under ``shared_blocker``, only the tasks it
 names, even when its reason names a person: the person can end it, but the hours are the
-outage's, not a people wait. Only the part of a wait inside the outage moves; the rest
-keeps the task's own cause.
+outage's, not a people wait. A tool failure (rule 10: one tool failing the same way for
+many tasks) explains, under ``shared_tool_failure``, only the tasks it names too. Only the
+part of a wait inside the outage moves; the rest keeps the task's own cause. An outage
+whose check is still in observe (``params.observe_only`` on its last alert) moves nothing;
+a check switched on during an outage moves its waits from the outage's start.
 
 **Snoozed** (issue #176). A wait a person chose is not one the farm lost. The part of a
 task's wait in ``[a, b)`` counts under ``snoozed`` only where all of these hold:
@@ -57,7 +60,14 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from kelpie.core.incidents import BLOCK_STORM, CI_FAILURES, FOLDED_UNDER, is_outage_state
+from kelpie.core.incidents import (
+    BLOCK_STORM,
+    CI_FAILURES,
+    CI_NOT_STARTED,
+    CI_NOT_STARTED_STATE,
+    FOLDED_UNDER,
+    is_outage_state,
+)
 from kelpie.core.incidents import Outage as OutageParams
 from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Suppression
 from kelpie.core.model import Condition, ConditionKind, Dependency, Snooze, Task
@@ -73,6 +83,7 @@ WAIT_CAUSES: Mapping[str, str] = {
     "merge": "PRs to pass checks and merge",
     "ci_outage": "a shared CI failure (an outage of the CI or of the base branch)",
     "shared_blocker": "a shared blocker (many tasks blocked on the same reason)",
+    "shared_tool_failure": "a shared tool failure (one tool failing the same way for many tasks)",
     "people": "people (approvals, human tasks)",
     "snoozed": "snoozed (deliberate)",
     "hold": "holds",
@@ -92,6 +103,8 @@ _SUGGESTIONS: Mapping[str, str] = {
     "timer": "shorten the scheduled waits",
     "shared_blocker": "end the shared blocker the Outages list names: one fix or one "
     "person's answer unblocks every task behind it",
+    "shared_tool_failure": "fix the failing tool the Outages list names (its install, path "
+    "or license on the host): one fix unblocks every task behind it",
     "snoozed": "nothing to fix: a person deferred these waits on purpose (kelpie snoozes "
     "lists them; kelpie unsnooze ends one early)",
     "other": "check what the custom conditions wait for and whether a connector can resolve "
@@ -125,6 +138,9 @@ _KINDS: Mapping[ConditionKind, str] = {
 MIN_HOURS = 1.0  # a smaller wait is no headline
 CI_OUTAGE = "ci_outage"
 SHARED_BLOCKER = "shared_blocker"  # a block storm's waits (incident 20)
+SHARED_TOOL_FAILURE = "shared_tool_failure"  # a tool failing for many tasks (rule 10)
+TOOL_FAILURES = "tool_failures"  # rule 10's outage kind (kelpie.core.incidents, #229)
+CI_KINDS = frozenset({CI_FAILURES, CI_NOT_STARTED})  # scoped by PRs and repositories too
 SNOOZED = "snoozed"  # waits a person snoozed: deliberate, never the biggest wait
 MAX_REASON = 2000  # characters of a block reason matched, as the GitHub step does
 # "owner/name#12" or a pull request URL in a pattern's ``pr`` group: the repository
@@ -193,8 +209,11 @@ class OutageSpan:
 
     @property
     def wait_cause(self) -> str:
-        """The wait cause its waits count under: a CI outage's or a shared blocker's."""
-        return SHARED_BLOCKER if self.kind == BLOCK_STORM else CI_OUTAGE
+        """The wait cause its waits count under: a CI outage's, a shared blocker's (a block
+        storm) or a shared tool failure's."""
+        if self.kind in CI_KINDS:
+            return CI_OUTAGE
+        return SHARED_TOOL_FAILURE if self.kind == TOOL_FAILURES else SHARED_BLOCKER
 
 
 def outage_samples(
@@ -203,12 +222,15 @@ def outage_samples(
     """What every outage alert said, any rule's and any kind's: ``(at, params, observe
     only)`` of each ledger entry whose params are an outage's (``params.state`` an outage
     state); observe only: written by a check still in observe (``params.observe_only``)."""
-    return [
-        (e.at, o, e.params.get(OBSERVE_ONLY) is True)
-        for e in entries
-        if is_outage_state(str(e.params.get("state", "")))
-        and (o := OutageParams.from_params(e.params)) is not None
-    ]
+    return sorted(
+        (
+            (e.at, o, e.params.get(OBSERVE_ONLY) is True)
+            for e in entries
+            if is_outage_state(str(e.params.get("state", "")))
+            and (o := OutageParams.from_params(e.params)) is not None
+        ),
+        key=lambda x: x[0],
+    )
 
 
 def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[OutageSpan]:
@@ -235,13 +257,22 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
                 tasks=frozenset(t for o in mine for t in o.tasks),
                 state=s.id,
                 signature=last.signature if last else None,
-                kind=last.kind if last else CI_FAILURES,
+                kind=last.kind if last else _kind_of(s.id),
                 reason=last.cause if last else None,
                 person=last.person if last else None,
                 observe_only=bool(found) and found[-1][1],
             )
         )
     return out
+
+
+def _kind_of(state_id: str) -> str:
+    """An outage's kind from its state id alone (none of its alerts is loaded): rule 9's
+    not-started state, else by the rule that owns it."""
+    if state_id == CI_NOT_STARTED_STATE:
+        return CI_NOT_STARTED
+    rule = state_id.split(":", 1)[0]
+    return {"stale_blocks": BLOCK_STORM, "loop_breaker": TOOL_FAILURES}.get(rule, CI_FAILURES)
 
 
 def outage_day(
@@ -260,7 +291,7 @@ def outage_day(
     fold starts, then at most one an hour), a lower bound."""
     a, b = max(outage.since, start), min(outage.until, end)
     folds_until = end if closed_at is None else min(closed_at, end)
-    storm = outage.kind == BLOCK_STORM
+    storm = outage.kind not in CI_KINDS  # scoped by its tasks
     prs: set[str] = set()
     before: OutageParams | None = None
     folded: set[tuple[str, str]] = set()
@@ -385,10 +416,14 @@ class WaitCauses:
                 and o.until > a
                 and self._explains(o, task)
             )
-            for cause in (SHARED_BLOCKER, CI_OUTAGE)
+            for cause in (SHARED_BLOCKER, SHARED_TOOL_FAILURE, CI_OUTAGE)
         }
-        by_cause[CI_OUTAGE] = intervals.minus(by_cause[CI_OUTAGE], by_cause[SHARED_BLOCKER])
-        outage = intervals.merged([*by_cause[SHARED_BLOCKER], *by_cause[CI_OUTAGE]])
+        # the outages that name the task first (a storm, then a tool failure), then CI
+        claimed: intervals.Spans = []
+        for cause in (SHARED_BLOCKER, SHARED_TOOL_FAILURE, CI_OUTAGE):
+            by_cause[cause] = intervals.minus(by_cause[cause], claimed)
+            claimed = intervals.merged([*claimed, *by_cause[cause]])
+        outage = claimed
         own = self(task)
         snoozed: intervals.Spans = []
         if own in ("people", UNKNOWN):
@@ -421,8 +456,8 @@ class WaitCauses:
         PR in its scope or of a repository it covers."""
         if task.id in outage.tasks:
             return True
-        if outage.kind == BLOCK_STORM:
-            return False  # a block storm explains only the tasks it names
+        if outage.kind not in CI_KINDS:
+            return False  # a block storm or a tool failure explains only the tasks it names
         found = self.condition(task)
         if found is None or found.kind not in (ConditionKind.CI_STATUS, ConditionKind.PR_MERGED):
             return False

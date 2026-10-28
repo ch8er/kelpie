@@ -212,9 +212,8 @@ def test_ci_jobs_not_starting_render_as_their_kind() -> None:
     markdown = render_markdown(
         build_report(inputs(states=(state,), actions=(sample,)), sections={})
     )
-    assert ("- CI jobs not starting `CI jobs not starting` (jobs queued over 30 min on 3 PRs) "
-            "since 2026-03-02 02:00 UTC") in markdown  # fmt: skip
-    assert "1 PR(s)" in markdown
+    assert ("- CI jobs not starting since 2026-03-02 02:00 UTC, still open: 1 PR(s), 0 alert(s) "
+            "folded under it. Cause: jobs queued over 30 min on 3 PRs") in markdown  # fmt: skip
 
 
 def test_before_after_sees_an_outages_tasks() -> None:
@@ -245,3 +244,82 @@ class OutageParamsFactory:
                    person="ceo", cause='blocked "waiting for ceo"')  # fmt: skip
         params = {**o.to_params(), **({OBSERVE_ONLY: True} if observe else {})}
         return entry(at, "stale_blocks", params, ActionKind.ALERT)
+
+
+# --- before/after scoping, tool failures, kind from the state id (review 2) -------------
+
+
+def _fix_day(
+    fixes: tuple[object, ...], states: tuple[StateRow, ...], actions: tuple[LedgerEntry, ...]
+) -> list[object]:
+    fix = datetime.fromisoformat("2026-03-01T08:00:00+00:00")
+    report = build_report(ReportInputs(day=fix.date() + timedelta(days=1), tz=UTC, states=states,
+                                       actions=actions, fixes=fixes))  # fmt: skip
+    [v] = report.verifications
+    return [v]
+
+
+def _storm_and_ci(fix: datetime) -> tuple[tuple[StateRow, ...], tuple[LedgerEntry, ...]]:
+    from kelpie.core.incidents import CiOutage
+
+    storm = OutageParamsFactory.storm(fix + timedelta(hours=1), ("T-1", "T-2"))
+    ci_sid = "ci_economy:outage:0123456789ab"
+    red = CiOutage(state=ci_sid, signature="ci.yml > build", job="build", tasks=("T-9",))
+    red_entry = entry(fix + timedelta(hours=1), "ci_economy", red.to_params(), ActionKind.ALERT)
+    at, until = fix + timedelta(hours=1), fix + timedelta(hours=5)
+    states = (row(storm.params["state"], "stale_blocks", at, at, until),
+              row(ci_sid, "ci_economy", at, at, until))  # fmt: skip
+    return states, (storm, red_entry)
+
+
+def _lost(v: object) -> object:
+    return next(m for m in v.metrics if m.name.startswith("hours lost"))  # type: ignore[attr-defined]
+
+
+def test_a_rules_fix_counts_its_own_outages_only() -> None:
+    from kelpie.report.fixes import MANUAL, FixEvent
+
+    fix = datetime.fromisoformat("2026-03-01T08:00:00+00:00")
+    states, actions = _storm_and_ci(fix)
+    [blocks] = _fix_day((FixEvent(fix, MANUAL, "a", "stale_blocks"),), states, actions)
+    assert _lost(blocks).name == "hours lost per day (stale_blocks)"
+    assert _lost(blocks).after == pytest.approx(2 * 4)  # its storm, not rule 9's outage
+    [ci] = _fix_day((FixEvent(fix, MANUAL, "b", "ci_economy"),), states, actions)
+    assert _lost(ci).name == "hours lost per day (ci_economy)"  # not "has none"
+    assert _lost(ci).after == pytest.approx(1 * 4)
+
+
+def test_a_storm_switched_on_by_a_config_change_is_listed_apart() -> None:
+    from kelpie.report.fixes import CONFIG, FixEvent
+
+    fix = datetime.fromisoformat("2026-03-01T08:00:00+00:00")
+    states, actions = _storm_and_ci(fix)
+    [v] = _fix_day((FixEvent(fix, CONFIG, "storm_mode = rule", "stale_blocks"),), states, actions)
+    [left_out] = [e for e in v.excluded if "outage" in e.name]
+    assert left_out.after == pytest.approx(2 * 4)  # its own storm only, not rule 9's outage
+
+
+def test_a_tool_failure_explains_only_its_tasks_under_its_own_cause() -> None:
+    from kelpie.report.waits import (
+        SHARED_TOOL_FAILURE,
+        TOOL_FAILURES,
+        OutageSpan,
+        WaitCauses,
+        outages,
+    )
+    from tests.report.test_waits import at, ci, waiting
+
+    tool = OutageSpan(at(8), at(12), repos=frozenset({"example/app"}), tasks=frozenset({"R1"}),
+                      state="loop_breaker:outage:0123456789ab", kind=TOOL_FAILURES)  # fmt: skip
+    assert tool.wait_cause == SHARED_TOOL_FAILURE
+    causes = WaitCauses((ci("R1"), ci("R2")), (), (), (), [tool])
+    assert causes.split(waiting("R1", "reviewer"), at(8), at(12)) == {
+        SHARED_TOOL_FAILURE: pytest.approx(4)
+    }
+    assert causes.split(waiting("R2", "reviewer"), at(8), at(12)) == {"ci": pytest.approx(4)}
+    # no alert loaded: the kind still follows the state's rule
+    found = outages([row("loop_breaker:outage:0123456789ab", "loop_breaker", at(8), at(8),
+                         at(12)).state,
+                     row("stale_blocks:outage:0123456789ab", "stale_blocks", at(8), at(8),
+                         at(12)).state], [])  # fmt: skip
+    assert [o.kind for o in found] == [TOOL_FAILURES, BLOCK_STORM]

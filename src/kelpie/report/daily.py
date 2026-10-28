@@ -20,11 +20,12 @@ as "also seen", never added. An outage incident (:mod:`kelpie.core.incidents`: a
 storm, a CI outage) counts the tasks each of its alerts names, from its first sighting to
 its last (``last_seen``; folds that go on until it closes count nowhere, a lower bound):
 the outage's own threshold is its grace, so a task's own grace period (a stale block's)
-does not apply to it; an outage whose check is still in observe counts nothing. What names
-no task adds up as it is: idle agents behind a hold, the waiting tasks rule 13 counts past
-the 20 ids it lists, a state without a task. A session's state counts on its task, and a
-task waiting behind two people's tasks counts once when rule 13 names it. A forgotten hold
-(rule 6, ``bottlenecks:hold:*``) is its own cause and counts idle agent-hours instead
+does not apply to it; an outage whose check is still in observe counts nothing, and one
+switched on during the outage counts from the outage's start. What names no task adds up as
+it is: idle agents behind a hold, the waiting tasks rule 13 counts past the 20 ids it
+lists, a state without a task. A session's state counts on its task, and a task waiting
+behind two people's tasks counts once when rule 13 names it. A forgotten hold (rule 6,
+``bottlenecks:hold:*``) is its own cause and counts idle agent-hours instead
 (:func:`hold_agent_hours`); so is a person's inbox (rule 13, ``needs_you:*``): the
 agent-hours of the agent tasks waiting on them (:func:`people_agent_hours`). A card stuck
 in a pre-work status with work behind it (rule 3, ``orphan_status:stuck-before-work:*``) is
@@ -164,7 +165,9 @@ from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
 from kelpie.report.waits import (
     CI_OUTAGE,
     SHARED_BLOCKER,
+    SHARED_TOOL_FAILURE,
     SNOOZED,
+    TOOL_FAILURES,
     BiggestWait,
     BlockKind,
     OutageSpan,
@@ -712,7 +715,11 @@ def _biggest_wait(
         roles,
         causes.split,
     )
-    explained = sum(r.waits.get(c, 0.0) for r in per_role for c in (CI_OUTAGE, SHARED_BLOCKER))
+    explained = sum(
+        r.waits.get(c, 0.0)
+        for r in per_role
+        for c in (CI_OUTAGE, SHARED_BLOCKER, SHARED_TOOL_FAILURE)
+    )
     found = biggest_wait(per_role, inputs.tasks, causes, inputs.farm)
     snoozed = snoozed_waits(per_role, inputs.tasks, causes)
     return found, _outage_lines(inputs, causes.outages, start, end), explained, snoozed
@@ -1384,7 +1391,8 @@ def _recommendations(
     if (
         wait is not None
         and wait.cause != UNKNOWN_WAIT  # the headline covers that one
-        and not (outage_line and wait.cause in (CI_OUTAGE, SHARED_BLOCKER))  # "farm outages" does
+        # "farm outages" covers it
+        and not (outage_line and wait.cause in (CI_OUTAGE, SHARED_BLOCKER, SHARED_TOOL_FAILURE))
     ):
         candidates.append(
             Advice(
@@ -1569,11 +1577,18 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
                     f"it, {o.folded} alert(s) folded under it{who}"
                 )
                 continue
-            what = f" ({md.text(o.reason)})" if o.reason else ""
+            what = f". Cause: {md.text(o.reason)}" if o.reason else ""
+            if o.kind == TOOL_FAILURES:
+                lines.append(
+                    f"- tool failure {md.code(o.signature)} {when}: {o.scope} task(s) failing, "
+                    f"{o.folded} alert(s) folded under it{what}"
+                )
+                continue
             label = "CI jobs not starting" if o.kind == CI_NOT_STARTED else "CI failure"
+            name = "" if o.signature == label else f" {md.code(o.signature)}"
             lines.append(
-                f"- {label} {md.code(o.signature)}{what} {when}: {o.scope} PR(s), {o.folded} "
-                "alert(s) folded under it"
+                f"- {label}{name} {when}: {o.scope} PR(s), {o.folded} alert(s) folded under "
+                f"it{what}"
             )
     if report.stuck_idle:
         lines += [
