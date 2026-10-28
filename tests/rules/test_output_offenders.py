@@ -108,5 +108,6 @@ def test_a_tool_offender_is_told_how_its_fix_gets_verified() -> None:
     assert shell.reason.endswith("the daily report checks it before/after.")
     [tool] = run(offender(command="tool:vision_analyze", filter="downscale-images"))
     assert tool.reason.endswith(
-        "before/after once the change is noted (`kelpie fix --command tool:vision_analyze`)."
+        "before/after once the change is noted"
+        ' (`kelpie fix "<what changed>" --command tool:vision_analyze --role developer`).'
     )

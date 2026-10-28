@@ -385,7 +385,12 @@ def test_every_tool_gets_advice_for_its_kind() -> None:
     titles = {f.name: f.advice for f in DEFAULT_FILTERS}
     assert titles["downscale-images"] == "Downscale images" and titles["xcbeautify"] is None
     # A shell tool's calls without a command group every command: no advice fits them.
-    assert nothing("tool:terminal") and nothing("tool:Bash")
+    shells = ("tool:terminal", "tool:Bash", "tool:run_terminal_cmd", "tool:run_shell_command",
+              "tool:run_in_terminal", "tool:run_command", "tool:execute_command",
+              "tool:local_shell", "tool:exec_command")  # fmt: skip
+    assert all(nothing(s) for s in shells)
+    assert advice("tool:fs-read-file") == "range" and advice("tool:mcp__x__ReadResource") == "range"
+    assert advice("tool:image") == "downscale-images"  # OpenClaw's image analysis
 
 
 def test_filter_introduction_needs_earlier_unfiltered_calls() -> None:

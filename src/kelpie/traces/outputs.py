@@ -88,23 +88,28 @@ RTK_PLATFORMS = (
 # Globs are on word boundaries ("_", "." or a capital), so "revision" is no vision tool and
 # "thread" no read.
 FILE_TOOLS = (
-    *("tool:read*", "tool:*_read*", "tool:*.read*", "tool:Read*", "tool:*Read"),
-    *("tool:*ReadFile*", "tool:view*", "tool:View*", "tool:cat"),
+    *("tool:read*", "tool:*_read*", "tool:*-read*", "tool:*.read*", "tool:Read*", "tool:*Read"),
+    *("tool:*Read[A-Z]*", "tool:view*", "tool:View*", "tool:cat"),
 )
 # Tools that look at an image (a screenshot, a rendered page). What they put into the context
 # is the image, or an analysis of it (Hermes' vision_analyze): a smaller image costs less
 # either way, by how much is a guess until verified.
 IMAGE_TOOLS = (
-    *("tool:vision*", "tool:*_vision*", "tool:*Vision*", "tool:*screenshot*"),
-    *("tool:*Screenshot*", "tool:*_image", "tool:*Image", "tool:view_image", "tool:analyze_image*"),
+    *("tool:vision*", "tool:*_vision*", "tool:*-vision*", "tool:*Vision*", "tool:*screenshot*"),
+    *("tool:*Screenshot*", "tool:image", "tool:image_*", "tool:*_image", "tool:*-image"),
+    *("tool:*Image", "tool:analyze_image*"),
 )
 # Tools that show a whole record (a card, an issue, a run): e.g. Hermes' kanban_show.
 RECORD_TOOLS = ("tool:*_show", "tool:show_*", "tool:*Show")
-# The agent platforms' shell tools: a call of one without a command prefix (commands not
-# recorded, or one Kelpie cannot parse) groups every command the role ran, which no advice
-# fits; the catch-all ``tool:*`` row leaves them alone.
-SHELL_TOOLS = frozenset(
-    {"tool:Bash", "tool:bash", "tool:terminal", "tool:shell", "tool:Shell", "tool:exec"}
+# The agent platforms' shell tools (Claude Code Bash, Hermes terminal, Cursor
+# run_terminal_cmd, Gemini CLI run_shell_command, Cline execute_command, Codex local_shell,
+# ...): a call of one without a command prefix (commands not recorded, or one Kelpie cannot
+# parse) groups every command the role ran, which no advice fits; the catch-all ``tool:*``
+# row leaves them alone.
+SHELL_TOOLS = (
+    *("tool:Bash", "tool:bash", "tool:exec", "tool:exec_*", "tool:*_exec"),
+    *("tool:*shell*", "tool:*Shell*", "tool:*terminal*", "tool:*Terminal*"),
+    *("tool:*_command", "tool:*Command", "tool:*_cmd", "tool:*Cmd"),
 )
 # Platforms a span's service.name may name (other names are custom: platform unknown).
 KNOWN_PLATFORMS = frozenset({*RTK_PLATFORMS, "paperclip"})
@@ -169,7 +174,7 @@ class Filter:
             return any(
                 c.startswith(TOOL_KEY)
                 and fnmatchcase(key, c)
-                and not (c == "tool:*" and key in SHELL_TOOLS)
+                and not (c == "tool:*" and any(fnmatchcase(key, g) for g in SHELL_TOOLS))
                 for c in self.commands
             )
         exe = key.split(" ", 1)[0]

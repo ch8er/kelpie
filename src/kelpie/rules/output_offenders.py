@@ -57,7 +57,8 @@ class OutputOffenders:
             f"to the {role} instructions: {o.how}. Estimated saving: about "
             f"{o.saved_tokens:,} tokens; the daily report checks it before/after"
             + (
-                f" once the change is noted (`kelpie fix --command {command}`)."
+                f' once the change is noted (`kelpie fix "<what changed>" --command {command}'
+                f" --role {role}`)."
                 if command.startswith("tool:")  # no filter shows in a tool's calls
                 else "."
             )
