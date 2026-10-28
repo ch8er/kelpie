@@ -15,9 +15,11 @@ exit code put it on the tool span (:data:`EXIT_CODE_ATTRIBUTE`) with the call's
   or no exit code. Never counted as either.
 
 Only calls that run a command (a shell tool) get them: another tool's exit code may be some
-other process's. Rules read them with :func:`result_of` and :func:`exit_code_of`; a span
-without them has no known result (the span's ``outcome`` stays what the exporter said).
-Which platform fields mean background or blocked is each adapter's (see its README).
+other process's. With them, :data:`COMMAND_WHOLE_ATTRIBUTE` says the span's command (a
+redacted prefix) is the whole command. Rules read them with :func:`result_of`,
+:func:`exit_code_of` and :func:`command_whole`; a span without them has no known result
+(the span's ``outcome`` stays what the exporter said; a blocked call keeps it too). Which
+platform fields mean background or blocked is each adapter's (see its README).
 """
 
 from __future__ import annotations
@@ -26,6 +28,9 @@ from kelpie.core.model import Span
 
 EXIT_CODE_ATTRIBUTE = "kelpie.tool.exit_code"
 RESULT_ATTRIBUTE = "kelpie.tool.result"
+# True when the span's command (a redacted prefix) still ends where the command did: one
+# line, nothing cut after it. Without it, the exit code may be a dropped pipe's.
+COMMAND_WHOLE_ATTRIBUTE = "kelpie.tool.command_whole"
 OK = "ok"
 ERROR = "error"
 BLOCKED = "blocked"
@@ -52,3 +57,8 @@ def exit_code_of(span: Span) -> int | None:
     """The span's exit code, if its adapter recorded one."""
     value = span.attributes.get(EXIT_CODE_ATTRIBUTE)
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def command_whole(span: Span) -> bool:
+    """Whether the span's command is the whole command (nothing cut after it)."""
+    return span.attributes.get(COMMAND_WHOLE_ATTRIBUTE) is True

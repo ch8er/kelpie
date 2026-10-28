@@ -274,6 +274,14 @@ def test_plugin_is_standalone() -> None:
             {"exit_code": 0, "background": True},
         ),
         ('{"exit_code": 0}', {"command": "x", "background": "false"}, {"exit_code": 0}),
+        # Waiting for an approval: it never ran.
+        (
+            '{"output": "", "exit_code": -1, "status": "pending_approval"}',
+            {},
+            {"exit_code": -1, "blocked": True},
+        ),
+        # Yielded to the background while it ran: no exit code yet.
+        ('{"exit_code": null, "session_id": "p1", "pid": 7}', {}, {"background": True}),
         ('{"exit_code": 10000000000000}', {}, {}),  # no exit code
         # Nothing to read: the error key alone, odd types, not JSON, too large.
         ('{"output": "x", "error": "boom"}', {}, {}),
@@ -310,3 +318,23 @@ def test_only_the_terminal_tool_reports_an_exit_code(spool: Path) -> None:
         set(),
         set(),
     ]
+
+
+@pytest.mark.parametrize(
+    ("command", "whole"),
+    [
+        ("./scripts/ios_sim.sh test", True),
+        ("cd app && ./scripts/ios_sim.sh test", True),
+        ("rtk xcodebuild test", True),
+        ("xcodebuild clean build test | xcbeautify", False),  # the pipe was dropped
+        ('./scripts/ios_sim.sh test\necho "exit: $?"', False),  # a second line
+        ("ios_sim.sh test --device x", False),  # masked last word
+        ("make test;", False),
+    ],
+)
+def test_whether_the_redacted_command_is_whole(spool: Path, command: str, whole: bool) -> None:
+    plugin.post_tool_call(
+        tool_name="terminal", args={"command": command}, result='{"exit_code": 0}'
+    )
+    (rec,) = lines(spool)
+    assert rec.get("command_whole", False) is whole

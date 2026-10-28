@@ -20,7 +20,10 @@ Kanban workers get ``HERMES_KANBAN_TASK`` and ``HERMES_KANBAN_RUN_ID`` in their 
 Privacy: raw arguments and results are never written. A tool call is recorded as the tool
 name, a hash of its canonical arguments and, for shell-like tools, a redacted prefix of the
 command (see :func:`redact_command`; disable with ``KELPIE_HERMES_SPOOL_COMMANDS=0``), and
-the size of its result in characters (``output_chars``), never the result itself.
+the size of its result in characters (``output_chars``), never the result itself. For the
+terminal tool also its exit code (an int), whether it went to the background or Hermes
+refused it, and whether the redacted prefix still ends where the command did
+(``command_whole``): booleans and a number, nothing of the output.
 
 Hooks are fire-and-forget: nothing here raises, blocks on the network or returns a value.
 """
@@ -301,6 +304,21 @@ def _command(args: Any) -> str | None:
     return None
 
 
+def _whole(args: dict[str, Any]) -> bool:
+    """Whether the redacted command still ends where the command does: one line, and its
+    last word (path aside) is the redaction's last. A masked last word is not."""
+    for key in _COMMAND_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value:
+            lines = value.strip().splitlines()
+            kept = redact_command(value)
+            if len(lines) != 1 or not kept or len(lines[0]) > MAX_RESULT_PARSE:
+                return False
+            last, end = kept.split()[-1], lines[0].split()[-1]
+            return last == end.rstrip("/").rsplit("/", 1)[-1] or last == end
+    return False
+
+
 def _text(value: Any) -> str | None:
     return str(value) if value not in (None, "") else None
 
@@ -377,16 +395,22 @@ MAX_EXIT_CODE = 2**31  # a larger one is no exit code
 def _result_fields(tool: str | None, args: Any, result: Any) -> dict[str, Any]:
     """For the terminal tool only (other tools' exit codes are not the call's: ``process``
     reports the code of the job it polls or kills): the exit code its result reports
-    (``exit_code``, an int), whether Hermes refused the call (``status: "blocked"``; an
-    exit code -1 alone is also a degraded backend or a fatal error, a failure), and whether
-    the command went to the background (asked for, or promoted from the foreground for a
-    long timeout: its 0 means started). The result's ``error`` key is not read: it is null
-    on a failed build too. Nothing of the output is kept."""
+    (``exit_code``, an int), whether Hermes refused the call (``status: "blocked"``, or
+    ``"pending_approval"``: it never ran; an exit code -1 alone is also a degraded backend or
+    a fatal error, a failure), whether the command went to the background (asked for, or
+    promoted from the foreground for a long timeout: its 0 means started), and whether the
+    redacted command still ends where the command did (``command_whole``: one line, its last
+    word kept; a pipe or a second line the redaction dropped decides the exit code). The
+    result's ``error`` key is not read: it is null on a failed build too. Nothing of the
+    output is kept."""
     if tool != TERMINAL_TOOL:
         return {}
     out: dict[str, Any] = {}
-    if isinstance(args, dict) and args.get("background") is True:
-        out["background"] = True
+    if isinstance(args, dict):
+        if args.get("background") is True:
+            out["background"] = True
+        if _whole(args):
+            out["command_whole"] = True
     data = result
     if isinstance(result, str):
         if len(result) > MAX_RESULT_PARSE or not result.lstrip().startswith("{"):
@@ -400,7 +424,7 @@ def _result_fields(tool: str | None, args: Any, result: Any) -> dict[str, Any]:
     code = data.get("exit_code")
     if isinstance(code, int) and not isinstance(code, bool) and abs(code) <= MAX_EXIT_CODE:
         out["exit_code"] = code
-    if data.get("status") == "blocked":
+    if data.get("status") in ("blocked", "pending_approval"):
         out["blocked"] = True
     if data.get("promoted_from_foreground") or ("pid" in data and "session_id" in data):
         out["background"] = True  # a background spawn: started, not done

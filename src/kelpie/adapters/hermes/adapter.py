@@ -187,7 +187,7 @@ from kelpie.core.model import (
 )
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
 from kelpie.core.tools import (
-    BLOCKED,
+    COMMAND_WHOLE_ATTRIBUTE,
     ERROR,
     EXIT_CODE_ATTRIBUTE,
     OK,
@@ -1793,7 +1793,8 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
             attributes[OUTPUT_CHARS_ATTRIBUTE] = chars
         outcome = str(rec["outcome"]) if rec.get("outcome") else None
         code = rec.get("exit_code")
-        code = code if isinstance(code, int) and not isinstance(code, bool) else None
+        ok_code = isinstance(code, int) and not isinstance(code, bool) and abs(code) <= 2**31
+        code = code if ok_code else None
         background, blocked = rec.get("background") is True, rec.get("blocked") is True
         known = code is not None or background or blocked
         if rec["type"] == TOOL and tool == TERMINAL_TOOL and known:
@@ -1801,10 +1802,12 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
             attributes[RESULT_ATTRIBUTE] = result
             if code is not None:
                 attributes[EXIT_CODE_ATTRIBUTE] = code
+            if rec.get("command_whole") is True:
+                attributes[COMMAND_WHOLE_ATTRIBUTE] = True
             if result in (OK, ERROR):  # a foreground exit code is the call's own account
                 outcome = result
-            elif result == BLOCKED:  # never ran: neither a failure nor a success
-                outcome = None
+            # A blocked call keeps Hermes' outcome (error): rule 10's error streak counts
+            # an agent cycling through refused commands; its result says it never ran.
         return HookEvent(
             kind=rec["type"],
             at=at,

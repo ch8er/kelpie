@@ -1120,8 +1120,9 @@ def test_a_marker_with_full_width_punctuation_matches_itself() -> None:
         ({"exit_code": 1, "outcome": "ok"}, "error", "error", 1),  # the exit code wins
         ({"exit_code": 124}, "error", "error", 124),
         ({"exit_code": 0, "background": True}, "ok", "unknown", 0),  # started, not done
-        # Refused: neither a failure nor a success (Hermes' hook says error for it).
-        ({"exit_code": -1, "blocked": True, "outcome": "error"}, None, "blocked", -1),
+        # Refused: its result says so; it keeps Hermes' outcome (rule 10's error streak).
+        ({"exit_code": -1, "blocked": True, "outcome": "error"}, "error", "blocked", -1),
+        ({"exit_code": 2**40}, "ok", None, None),  # no exit code
         ({"exit_code": -1}, "error", "error", -1),  # a degraded backend, a fatal error
         ({"exit_code": -15, "tool": "process"}, "ok", None, None),  # another job's code
         ({"exit_code": "1"}, "ok", None, None),  # not an int: no result known
