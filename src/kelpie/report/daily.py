@@ -735,8 +735,9 @@ def _verifications(
     roles, platforms = session_context(board, inputs.attribution)
     found = calls(known, roles, platforms)
     since, _ = day_bounds(inputs.day - timedelta(days=1), inputs.tz)
-    # Fixes from a window before the day before on: a recent fix may overlap an older one.
-    reach = since - inputs.verify_window
+    # Fixes from two windows before the day before on (as far as ``load_inputs`` reads): a
+    # recent fix may overlap an older one, which may overlap one older still.
+    reach = since - 2 * inputs.verify_window
     events = [
         *inputs.fixes,
         *mode_events(e for e in inputs.actions if e.at < end),
@@ -761,6 +762,7 @@ def _verifications(
         window=inputs.verify_window,
         min_sample=inputs.min_sample,
         review_roles=inputs.review_roles,
+        known_from=reach,
     )
     return verify_all(events, evidence, since)
 
@@ -1597,11 +1599,11 @@ def _fix_title(e: FixEvent, report: DailyReport) -> str:
     )
 
 
-def _direction_only(v: Verification) -> str:
+def _direction_only(v: Verification, metrics: Iterable[Metric]) -> str:
     return (
         f" Rows marked *direction only* have fewer than {v.min_sample} observations on a side"
         " or a short after-window: a direction, not a result."
-        if v.small_sample
+        if any(m.small for m in metrics)
         else ""
     )
 
@@ -1615,7 +1617,7 @@ def _single_lines(v: Verification, report: DailyReport) -> list[str]:
             *_excluded_lines(v, report),
         ]
     return [
-        f"{title}. After-window: {hours:.1f}h.{_direction_only(v)}",
+        f"{title}. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
         "",
         *_metric_table(v.metrics),
         *_excluded_lines(v, report),
@@ -1639,7 +1641,7 @@ def _group_lines(v: Verification, report: DailyReport) -> list[str]:
     out.append("")
     if v.metrics:
         out += [
-            f"Together. After-window: {hours:.1f}h.{_direction_only(v)}",
+            f"Together. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
             "",
             *_metric_table(v.metrics),
         ]
@@ -1649,15 +1651,23 @@ def _group_lines(v: Verification, report: DailyReport) -> list[str]:
         out += [
             "",
             "Per fix, only where one fix alone can explain it (its own role or command, "
-            "each over its own window):",
+            "each over its own window)." + _direction_only(v, (c.metric for c in v.own)),
             "",
             "| Fix | Metric | Before | After | Change | n before / after |",
             "|---|---|---:|---:|---:|---:|",
         ]
         for c in v.own:
             m = c.metric
-            fix = f"{_local(c.event.at, report)} {md.text(c.event.kind)}"
+            e = c.event
+            about = (e.command and md.code(e.command, cell=True)) or md.text(e.role or "")
+            fix = f"{_local(e.at, report)} {md.text(e.kind)}" + (f": {about}" if about else "")
             out.append(f"| {fix} | {_metric_cells(m)}")
+    if v.truncated is not None:
+        out += [
+            "",
+            f"Fixes are read from {_local(v.truncated, report)} on: an older fix may belong "
+            "to this group, and its before-window may hold a fix not listed here.",
+        ]
     return out + _excluded_lines(v, report)
 
 

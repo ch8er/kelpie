@@ -21,6 +21,8 @@ from kelpie.report.daily import ReportInputs, build_report, render_markdown
 from kelpie.report.fixes import CONFIG, MANUAL, FixEvent
 from kelpie.report.store import StateRow
 from kelpie.report.verify import Evidence, overlapping, verify_group
+from kelpie.traces.outputs import Call
+from tests.report.test_md import cells, live
 
 DAY = date(2026, 10, 20)  # the report's day; the day before is Oct 19
 RTK = datetime(2026, 10, 19, 14, tzinfo=UTC)  # rtk on the developers, reviewers 20 min on
@@ -245,3 +247,84 @@ def test_verify_group_of_one_is_verify() -> None:
     ev = Evidence(end=RTK + 24 * H)
     v = verify_group((fix,), ev)
     assert v.events == (fix,) and not v.together and v.own == ()
+
+
+def test_a_chain_reaching_past_the_loaded_fixes_says_so() -> None:
+    # A chain of fixes, each less than a day after the previous one: one group. The report
+    # of Oct 20 reads fixes from Oct 17 on; the chain starts 6 hours after that.
+    chain = tuple(
+        FixEvent(datetime(2026, 10, 17, 6, tzinfo=UTC) + i * 16 * H, MANUAL, f"fix {i}")
+        for i in range(4)
+    )  # Oct 17 06:00, 22:00, Oct 18 14:00, Oct 19 06:00
+    report = build_report(inputs(fixes=chain))
+    [v] = report.verifications
+    assert v.events == chain
+    assert v.truncated == datetime(2026, 10, 17, tzinfo=UTC)
+    assert "an older fix may belong to this group" in render_markdown(report)
+    # a group that starts a window after the cut is whole
+    [v] = build_report(inputs(fixes=LIVE_FIXES)).verifications
+    assert v.truncated is None
+
+
+def test_an_idle_start_of_the_history_is_not_traces_turning_on() -> None:
+    from kelpie.core.spans import span_key
+
+    # The loaded history starts Oct 17 00:00; the farm was idle until Oct 17 09:00.
+    fix = FixEvent(datetime(2026, 10, 18, 2, tzinfo=UTC), MANUAL, "x")
+    spans = [chat("developer-run", at, 1_000)
+             for at in hours(datetime(2026, 10, 17, 9, tzinfo=UTC), fix.at + 30 * H)]  # fmt: skip
+    counted = {span_key(s): "m" for s in spans}
+    ev = Evidence(end=fix.at + 24 * H, spans=spans, counted=counted,
+                  known_from=datetime(2026, 10, 17, tzinfo=UTC))  # fmt: skip
+    v = verify_group((fix,), ev)
+    assert v.excluded == () and any(m.name == "tokens per day" for m in v.metrics)
+    # without knowing where the history starts, the same traces count as newly enabled
+    unknown = Evidence(end=ev.end, spans=spans, counted=counted)
+    assert [x.name for x in verify_group((fix,), unknown).excluded] == ["tokens per day"]
+
+
+def test_hostile_text_in_a_group_keeps_its_cells() -> None:
+    from kelpie.core.spans import span_key
+
+    role = "dev | [x](https://evil.example)"
+    a = FixEvent(RTK, MANUAL, "note\n# heading | cell", role=role, command="a|b `c`")
+    b = FixEvent(RTK + H, MANUAL, "other", role="reviewer", rule="r|s")
+    spans = [chat("S-1", at, 1_000) for at in hours(RTK - 30 * H, RTK + 30 * H)]
+    calls = [Call(at, role, "a|b `c`", 100, False, None, None, None, None)
+             for at in hours(RTK - 20 * H, RTK + 20 * H)]  # fmt: skip
+    ev = Evidence(end=RTK + 30 * H, spans=spans, counted={span_key(s): "m" for s in spans},
+                  roles={"S-1": role}, calls=calls)  # fmt: skip
+    v = verify_group((a, b), ev)
+    assert v.own and v.metrics
+    lines = render_lines(build_report(inputs(fixes=())), v)
+    tables = [ln for ln in lines if ln.startswith("|")]
+    assert len(tables) > 4
+    for row in tables:
+        assert cells(row) == cells(header_of(lines, row)), row
+    text = "\n".join(lines)
+    assert not any(ln.startswith("#") for ln in lines)
+    assert not live("[x](", text) and not live("<", text)
+
+
+def render_lines(report: Any, v: Any) -> list[str]:
+    from dataclasses import replace
+
+    from kelpie.report.daily import _verification_lines
+
+    return _verification_lines(replace(report, verifications=(v,)))
+
+
+def header_of(lines: list[str], row: str) -> str:
+    i = lines.index(row)
+    while i > 0 and lines[i - 1].startswith("|"):
+        i -= 1
+    return lines[i]
+
+
+def test_the_llm_digest_credits_a_group_to_no_one_fix() -> None:
+    from kelpie.report.root_cause import digest
+
+    report = build_report(inputs(spans=live_case_spans(), fixes=LIVE_FIXES))
+    [check] = digest(report).data["fix_checks"]
+    assert check["rule"] is None and check["kind"] == "group"
+    assert check["fixes_together"] == 4

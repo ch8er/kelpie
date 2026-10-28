@@ -99,7 +99,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
             actions = store.actions(history, end)
             states = store.states(history, end)
             spans = store.spans(history, end)
-            fixes = store.fixes(reach, end)
+            fixes = store.fixes(reach - sources.report.verify_window, end)
             attribution = store.attribution()
             snoozes = store.snoozes(start)
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same

@@ -26,10 +26,12 @@ What the report cannot separate, it does not credit (#193):
   credited to none of them alone. Only what one fix alone can explain is shown per fix:
   its role's tokens, failures (and review time for a review role) when no other fix of
   the group touches that role or the whole farm, and its command's output per call when
-  no other fix names the same command for the same role.
+  no other fix names the same command for the same role. Fixes are read from
+  ``Evidence.known_from`` on: a group that starts less than a window after it says an
+  older fix may belong to it (``Verification.truncated``).
 - **Newly enabled signals.** A per-day rate whose data starts after the first quarter of
   the before-window has no "before" to compare with: tokens per day when traces began
-  that late, and with a config change in the group, a cause of hours lost seen first
+  that late (after a whole loaded window without a span, when ``known_from`` is set), and with a config change in the group, a cause of hours lost seen first
   after the change with nothing before (a connector or rule the change may have turned
   on). They are listed with their value after instead (:class:`Excluded`), so a new
   problem is not hidden. Means (per call, per session) still compare.
@@ -118,6 +120,8 @@ class Verification:
     own: tuple[Credited, ...] = ()
     excluded: tuple[Excluded, ...] = ()
     min_sample: int = DEFAULT_MIN_SAMPLE
+    # an older fix may belong to the group: fixes are known only from this time on
+    truncated: datetime | None = None
 
     @property
     def event(self) -> FixEvent:
@@ -152,6 +156,9 @@ class Evidence:
     calls: Sequence[Call] = ()
     window: timedelta = DEFAULT_WINDOW
     min_sample: int = DEFAULT_MIN_SAMPLE
+    # The earliest moment the loaded fixes, spans and states cover (None: unknown). A group
+    # that starts less than a window after it may have lost an older fix to the cut.
+    known_from: datetime | None = None
     review_roles: tuple[str, ...] = DEFAULT_REVIEW_ROLES
     # How the report counts a chaos state: its cause (a rule, or "bottlenecks:hold") and
     # its hours lost in a window (condition-hours, idle agent-hours for holds).
@@ -257,6 +264,7 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
             shared.add((e.command, scope.role))
             metrics.append(_output(ev, e.command, scope.role, before, after, short))
     shown = tuple(m for m in metrics if m is not None and _has_data(m))  # no data: no row
+    cut = ev.known_from is not None and first.at - ev.known_from < ev.window
     return Verification(
         events,
         shown,
@@ -264,6 +272,7 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
         tuple(own),
         tuple(dict.fromkeys(excluded)),
         ev.min_sample,
+        ev.known_from if cut else None,
     )
 
 
@@ -364,7 +373,7 @@ def _stuck(
                 new.add(cause)
                 excluded.append(
                     Excluded(
-                        f"hours lost per day ({cause})",
+                        f"hours lost per day ({md.text(cause)})",
                         firsts[cause],
                         ca[cause][0] / _days(a),
                         "h/day",
@@ -375,9 +384,9 @@ def _stuck(
     ha = sum(h for c, (h, _) in ca.items() if c not in new)
     na = sum(n for c, (_, n) in ca.items() if c not in new)
     if scoped:
-        name = f"hours lost per day ({event.rule})"
+        name = f"hours lost per day ({md.text(event.rule or '')})"
     elif event.rule:  # a rule without chaos states: all causes, and the name says so
-        name = f"hours lost per day (all causes; {event.rule} has none)"
+        name = f"hours lost per day (all causes; {md.text(event.rule)} has none)"
     else:
         name = "hours lost per day"
     small = short or min(nb, na) < ev.min_sample
@@ -407,7 +416,14 @@ def _tokens(
     who = f" ({md.text(event.role)})" if event.role else ""
     name = f"tokens per day{who}"
     began = _traces_from(ev)
-    if began is not None and began > b[0] + (b[1] - b[0]) / 4 and (nb or na):
+    # Traces began late in the before-window, and (when known) after a whole loaded window
+    # with no span at all: an idle night at the start of the history is no signal turning on.
+    if (
+        began is not None
+        and (nb or na)
+        and began > b[0] + (b[1] - b[0]) / 4
+        and (ev.known_from is None or began - ev.known_from >= ev.window)
+    ):
         excluded.append(Excluded(name, began, ta, "tokens/day"))
         return None
     small = short or min(nb, na) < ev.min_sample
