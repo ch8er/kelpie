@@ -197,6 +197,18 @@ LEAKS = [
     ('export A="x)" K=$(cat x ; hunter2 swordfish)', "hunter2"),
     ("export A=\\} B=${B:-x ; hunter2 swordfish}", "hunter2"),
     ("export A=1;; hunter2 b", "hunter2"),
+    ("cd /repo;#note ; hunter2 prod-db01", "hunter2"),
+    ("cd /repo&#note ; hunter2 prod-db01", "hunter2"),
+    ("cd /repo|#note ; hunter2 prod-db01\nmake", "hunter2"),
+    ("cd /repo ;#note && hunter2 prod-db01", "hunter2"),
+    ("export A='x'\"y ; hunter2 prod-db01\" && make test", "hunter2"),
+    ("cd 'x'\"y ; hunter2 z\" && make test", "hunter2"),
+    ("export A=\"x b 'a\"' ; hunter2 prod-db01 '", "hunter2"),
+    ("cd ` '`' ; hunter2 prod-db01 '", "hunter2"),
+    ('export TOKEN="`echo " ; hunter2 prod-db01 ; "`" && make', "hunter2"),
+    ('export A="x`y" ; hunter2 prod-db01 ; `" && make', "hunter2"),
+    ("export A=$[1 ; hunter2 ; 2] && make", "hunter2"),
+    ("A='x'\"y ; hunter2 z\" make", "hunter2"),
 ]
 
 
@@ -232,7 +244,7 @@ def test_no_secret_leaks(copy: str, cmd: str, secret: str) -> None:
         ("set -euo pipefail; pytest -q", "set *** ; pytest -q"),
         ("source ~/.secrets/env && gh pr checks 5", "source *** && gh pr checks 5"),
         (". ./env.sh && make", ". *** && make"),
-        ("export 'A=b; c' && make", "export *** && make"),
+        ("export 'A=b; c' && make", "export ***"),  # quoted: the rest is masked
         ("export A=1 || exit 1", "export *** || exit 1"),
         # Setup tokens are capped like a wrapper's (_MAX_WRAPPED): a long chain loses the end.
         (
@@ -291,6 +303,9 @@ def test_prefixes_still_work(cmd: str, prefix: str) -> None:
         "export A=x\\; hunter2 && make",
         "export K=$(cat x; hunter2) && make",
         "cd /repo # note ; hunter2 abc",
+        "cd /repo;#note ; hunter2 prod-db01",
+        "cd /repo&#note ; hunter2 prod-db01",
+        "cd /repo&&#note ; hunter2 prod-db01\nmake",
         "cd x <<EOF\nfoo ; hunter2 abc\nEOF",
     ],
 )

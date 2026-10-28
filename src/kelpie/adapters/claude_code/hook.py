@@ -170,9 +170,10 @@ _MAX_WRAPPED = 8  # wrapper tokens kept on top of _MAX_TOKENS
 # ``cd dir && make``): kept as a name with every argument masked, and, like a wrapper's
 # tokens, not counted against _MAX_TOKENS, so the command after the separator is kept.
 _SETUP = frozenset({"export", "cd", "pushd", "set", "source", ".", "unset", "umask", "ulimit"})
-# In a setup builtin's arguments: a substitution, a group or an escape, so a separator after it
-# may still be inside them (bash parses what counting cannot): the rest is masked.
-_UNCLEAR = frozenset("(){}\\")
+# A setup builtin's argument Kelpie can read for sure (an allowlist): letters, digits and
+# ``_ . / ~ : = + , @ % $ -``, no quote, escape, bracket, comment or operator in it. With any
+# other argument, where bash ends the builtin's arguments is not clear: the rest is masked.
+_SIMPLE_ARG = re.compile(r"^[\w./~:=+,@%$-]*$")
 _BLANKS = re.compile(r"[ \t]+")  # what bash splits words on
 
 
@@ -182,10 +183,15 @@ def _quoted_span(tokens: list[str], i: int) -> int:
     tok = tokens[i]
     if "\\" in tok and any(q in tok for q in _QUOTES):
         return len(tokens)  # an escaped quote: where the argument ends is not clear
-    quote = next((c for c in tok if c in _QUOTES), None)
+    kinds = {c for c in tok if c in _QUOTES}
+    if len(kinds) > 1:
+        return len(tokens)  # 'x'"y: counting one kind would end it in the wrong place
+    quote = next(iter(kinds), None)
     if quote is None or tok.count(quote) % 2 == 0:
         return i + 1
     for j in range(i + 1, len(tokens)):
+        if any(q in tokens[j] for q in _QUOTES if q != quote):
+            return len(tokens)  # another kind of quote inside: not clear either
         if tokens[j].count(quote) % 2 == 1:
             return j + 1
     return len(tokens)
@@ -281,11 +287,12 @@ def redact_command(command: str) -> str | None:
             if out[-1] != _MASK:  # one mask for all its arguments
                 out.append(_MASK)
                 extra = min(extra + 1, _MAX_WRAPPED)
-            if any(c in t for t in tokens[i:end] for c in _UNCLEAR) or tok.endswith(";;"):
-                break  # $(…), ${…}, x\;: where its arguments end is not clear, mask the rest
-            plain = not any(q in tok for q in _QUOTES)  # not 'x;'
-            if end == i + 1 and tok.endswith(";") and plain:
-                out.append(";")  # export X=1; make: the separator glued to the argument
+            glued = tok.endswith(";")  # export X=1; make: the separator glued to it
+            arg = tok[:-1] if glued else tok
+            if end != i + 1 or not (arg == _MASK or _SIMPLE_ARG.match(arg)):  # *** redacted
+                break  # $(…), 'x'"y", x\;, ;#: where its arguments end is not clear
+            if glued:
+                out.append(";")
                 extra = min(extra + 1, _MAX_WRAPPED)
                 exe, setup = True, False
         elif end > i + 1 or any(q in tok for q in _QUOTES):
