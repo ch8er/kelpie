@@ -571,19 +571,23 @@ farm's own hosts, where no CI check sees it (a broken Xcode install: every
 (`kelpie.tool.exit_code`, `kelpie.tool.result`; the Hermes adapter takes them from the
 terminal tool's result, never its `error` key): a foreground call that exited non-zero is a
 failure, its exit code the error class; one that exited 0 a success; a call sent to the
-background (its 0 means started) and one the platform refused (Hermes: exit -1) are
-neither. A call is the tool's when the tool is the command of the command's last segment
+background (its 0 means started) and one the platform did not run (Hermes:
+`status: "blocked"` or `"pending_approval"`) are neither; an exit code -1 alone is a failure
+(a degraded backend, a fatal error). A call is the tool's when the tool is the command of the command's last segment
 (after `;` or `|`, or after `&&` only from setup commands such as `cd` or `export`; past
-`FOO=1`, `env`, `time`, `timeout <duration>`): `cd app && ios_sim.sh test` is,
-`lint.sh && ios_sim.sh test`, `ios_sim.sh test | xcbeautify` and `pkill ios_sim.sh` are
-not. Commands are read as the trace redaction kept them: a script run as `bash x.sh` or
-`timeout 600 ./x.sh` is masked whole and never seen, and a success counts only when nothing
-after the tool was masked (a masked pipe's exit code is not the tool's). Failures of one tool
+`FOO=1` and the wrappers `env`, `sudo`, `nice`, `rtk`, `time`): `cd app && ios_sim.sh test`
+is, `lint.sh && ios_sim.sh test`, `ios_sim.sh test | xcbeautify`, `pkill ios_sim.sh` and
+`command -v xcodebuild` are not. Commands are read as the trace redaction kept them: a
+script run as `bash x.sh` or `timeout 600 ./x.sh` is masked whole and never seen. A success
+counts only when the adapter says the redacted command is whole (Hermes:
+`kelpie.tool.command_whole`, one line with its last word kept) and nothing after the tool
+was masked: the redaction keeps a prefix, and a dropped `| xcbeautify` decides the exit
+code. Failures of one tool
 with one exit code by `tool_outage_min_tasks` distinct tasks within `tool_outage_window`,
 with no success of the tool since → one `warning` "Tool outage: ios_sim.sh exits 127 for
 3 tasks", with the tasks and what the code usually means (127 not found, 124 timed out, 137
 killed). One outage per host where the tasks' host is known: a healthy host's successes do
-not hide a broken one. One task retrying its own failure is none. The "Resolved" notice
+not hide a broken one, nor do successes of tasks whose host is unknown. One task retrying its own failure is none. The "Resolved" notice
 names the tool's first success after the outage's last failure. Observe-only until
 `tool_outage_mode = "rule"`.
 

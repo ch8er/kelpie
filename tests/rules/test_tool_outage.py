@@ -10,7 +10,7 @@ import pytest
 from kelpie.core.actions import Action
 from kelpie.core.incidents import TOOL_FAILURES, Outage, is_outage_state
 from kelpie.core.model import Session, Snapshot, Span, SpanKind
-from kelpie.core.tools import EXIT_CODE_ATTRIBUTE, RESULT_ATTRIBUTE
+from kelpie.core.tools import COMMAND_WHOLE_ATTRIBUTE, EXIT_CODE_ATTRIBUTE, RESULT_ATTRIBUTE
 from kelpie.rules._tool_outage import tool_outage_state
 from kelpie.rules.loop_breaker import NAME, LoopBreaker, build
 
@@ -28,10 +28,13 @@ def call(
     command: str = "scripts/ios_sim.sh test",
     result: str | None = None,
     key: str = "command",
+    whole: bool = True,
     **fields: Any,
 ) -> Span:
     at = NOW - minutes_ago * M
     attributes: dict[str, Any] = {key: command}
+    if whole:
+        attributes[COMMAND_WHOLE_ATTRIBUTE] = True
     if code is not None:
         attributes[EXIT_CODE_ATTRIBUTE] = code
     attributes[RESULT_ATTRIBUTE] = result or ("ok" if code == 0 else "error")
@@ -205,8 +208,10 @@ def three(command: str, code: int = 127) -> list[Span]:
         "set *** ; ios_sim.sh test",
         "FOO=*** ios_sim.sh",
         "env FOO=*** ios_sim.sh test",
-        "timeout 600 ios_sim.sh test",
         "time -p ios_sim.sh test",
+        "sudo -u *** ios_sim.sh test",
+        "nice -n *** ios_sim.sh test",
+        "rtk ios_sim.sh test",
         "ios_sim.sh -s*** *** ***",  # a failure counts though a pipe may be masked
         "cat *** | ios_sim.sh",  # the last of a pipeline: its own exit code
     ],
@@ -220,6 +225,7 @@ def test_the_tool_s_own_exit_code(command: str) -> None:
     [
         "pkill ios_sim.sh",  # not the command
         "which ios_sim.sh",
+        "command -v ios_sim.sh",  # exits 0 wherever the binary is
         "lint.sh && ios_sim.sh test",  # which of them failed?
         "ios_sim.sh test || true",
         "ios_sim.sh test | xcbeautify",  # xcbeautify's exit code
@@ -237,6 +243,10 @@ def test_not_the_tool_s_own_exit_code(command: str) -> None:
 def test_a_success_counts_only_when_nothing_after_the_tool_was_masked() -> None:
     hidden = call("T-9", 10, 0, command="ios_sim.sh -s*** *** ***")  # | xcbeautify?
     assert len(found(*THREE, hidden)) == 1
+    # The redaction kept a prefix: "xcodebuild clean build test | xcbeautify" reads as
+    # "xcodebuild clean build test", and only the adapter knows the pipe was dropped.
+    cut = call("T-9", 10, 0, command="ios_sim.sh test", whole=False)
+    assert len(found(*THREE, cut)) == 1
     assert found(*THREE, call("T-9", 10, 0, command="ios_sim.sh test")) == []
 
 
@@ -253,12 +263,19 @@ def test_each_host_has_its_own_outage() -> None:
     assert alert.params["signature"] == "ios_sim.sh exit 127 on mac-a"
     assert alert.state == tool_outage_state(NAME, "ios_sim.sh", 127, "mac-a")
     assert "on mac-a for 3 tasks" in alert.reason
-    unknown = call("T-8", 10, 0)  # no host known: it counts for every host
-    assert found(*THREE, unknown, tasks=tasks, owners=owners) == []
-    snapshot = Snapshot(now=NOW, spans=(*THREE, healthy, unknown), tasks=tasks, owners=owners)
+    # A task the snapshot does not hold (archived): its host is unknown, and on a farm
+    # whose tasks name hosts it may be the healthy one: it ends no host's outage.
+    unknown = call("T-8", 10, 0)
+    assert len(found(*THREE, unknown, tasks=tasks, owners=owners)) == 1
+    fixed = call("T-1", 5, 0)  # on mac-a itself
+    snapshot = Snapshot(now=NOW, spans=(*THREE, healthy, fixed), tasks=tasks, owners=owners)
+    assert found(*snapshot.spans, tasks=tasks, owners=owners) == []
     assert RULE.resolved(alert.state or "", snapshot) == (
-        "ios_sim.sh ran successfully again at 2026-03-02 11:50 UTC in T-8."
+        "ios_sim.sh ran successfully again at 2026-03-02 11:55 UTC in T-1."
     )
+    assert RULE.resolved(alert.state or "", Snapshot(now=NOW, spans=(*THREE, healthy))) is None
+    # On a farm whose tasks name no host, any success counts.
+    assert found(*THREE, unknown) == []
 
 
 def test_calls_without_a_task_or_session_count_per_trace() -> None:

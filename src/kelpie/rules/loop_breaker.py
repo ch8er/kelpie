@@ -28,7 +28,7 @@ checks, all ending in ``stop`` (carrying ``session_id``) plus an ``alert``:
 - **correlated tool failures** (#229, signal 2): one of ``tool_outage_tools`` (the farm's
   build and test runners, config data; none: off) failing with the same exit code for
   ``tool_outage_min_tasks`` distinct tasks within ``tool_outage_window``, with no success
-  of it since → one ``warning`` outage per tool and exit code, scoped to those tasks, open
+  of it since → one ``warning`` outage per tool, exit code and host, scoped to those tasks, open
   until the tool runs successfully again. Not a stop: the cause is the tool or its host,
   not the runs. A new check: only logged (``tool_outage_mode = "observe"``) until set to
   ``"rule"``. See :mod:`kelpie.rules._tool_outage`.

@@ -4,13 +4,13 @@ title: "Correlated tool failures: the simulator script exits 127 for task after 
 description: >
   The farm's own Mac lost its Xcode command line tools. Every agent that ran the simulator
   script got exit code 127 (not found), and each blocked its task on its own: GitHub's CI
-  never ran it, so no failing-check outage fired. Rule 9 must report one outage of
+  never ran it, so no failing-check outage fired. Rule 10 must report one outage of
   `ios_sim.sh` exiting 127 for the three tasks it hit within half an hour, from the tool
   calls' exit codes, on commands as the redaction keeps them. A call sent to the background
   (exit 0 means started) and one Hermes refused to run are not failures; a `pkill` of the
   script and a success whose masked words may hide a pipe are no successes. One task retrying its own failing build is no
   outage, and a tool that ran successfully again since its failures is none either. Rule 10
-  reports it, not rule 9: the cause is on the farm's hosts, not in CI.
+  reports it, not rule 9 (CI): the cause is on the farm's hosts.
 rule: loop_breaker
 config:
   tool_outage_tools: [ios_sim.sh, xcodebuild, lint.sh]
@@ -20,7 +20,7 @@ snapshot:
   now: "2026-03-02T11:00:00+00:00"
   spans:
     # It worked this morning.
-    - {trace_id: TR-600, span_id: S600, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T09:00:00+00:00", end: "2026-03-02T09:04:00+00:00", task_id: T-600, session_id: S-600, outcome: ok, attributes: {command: "ios_sim.sh test", kelpie.tool.result: ok, kelpie.tool.exit_code: 0}}
+    - {trace_id: TR-600, span_id: S600, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T09:00:00+00:00", end: "2026-03-02T09:04:00+00:00", task_id: T-600, session_id: S-600, outcome: ok, attributes: {command: "ios_sim.sh test", kelpie.tool.result: ok, kelpie.tool.exit_code: 0, kelpie.tool.command_whole: true}}
     # Then three tasks within 20 minutes, and one retry: exit 127.
     - {trace_id: TR-601, span_id: S601, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:05:00+00:00", end: "2026-03-02T10:05:01+00:00", task_id: T-601, session_id: S-601, outcome: error, attributes: {command: "ios_sim.sh test", kelpie.tool.result: error, kelpie.tool.exit_code: 127}}
     - {trace_id: TR-602, span_id: S602, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:15:00+00:00", end: "2026-03-02T10:15:01+00:00", task_id: T-602, session_id: S-602, outcome: error, attributes: {command: "cd *** && ios_sim.sh build", kelpie.tool.result: error, kelpie.tool.exit_code: 127}}
@@ -31,15 +31,15 @@ snapshot:
     - {trace_id: TR-605, span_id: S605, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:22:00+00:00", end: "2026-03-02T10:22:01+00:00", task_id: T-605, session_id: S-605, outcome: error, attributes: {command: "ios_sim.sh test", kelpie.tool.result: blocked, kelpie.tool.exit_code: -1}}
     # Negative cases: a success that names the script but is not its run, and one whose
     # masked words may hide a pipe (its 0 may be the pipe's): neither ends the outage.
-    - {trace_id: TR-606, span_id: S606, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:35:00+00:00", end: "2026-03-02T10:35:01+00:00", task_id: T-606, session_id: S-606, outcome: ok, attributes: {command: "pkill ios_sim.sh", kelpie.tool.result: ok, kelpie.tool.exit_code: 0}}
-    - {trace_id: TR-607, span_id: S607, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:40:00+00:00", end: "2026-03-02T10:41:00+00:00", task_id: T-607, session_id: S-607, outcome: ok, attributes: {command: "ios_sim.sh -s*** *** ***", kelpie.tool.result: ok, kelpie.tool.exit_code: 0}}
+    - {trace_id: TR-606, span_id: S606, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:35:00+00:00", end: "2026-03-02T10:35:01+00:00", task_id: T-606, session_id: S-606, outcome: ok, attributes: {command: "pkill ios_sim.sh", kelpie.tool.result: ok, kelpie.tool.exit_code: 0, kelpie.tool.command_whole: true}}
+    - {trace_id: TR-607, span_id: S607, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:40:00+00:00", end: "2026-03-02T10:41:00+00:00", task_id: T-607, session_id: S-607, outcome: ok, attributes: {command: "ios_sim.sh -s*** *** ***", kelpie.tool.result: ok, kelpie.tool.exit_code: 0, kelpie.tool.command_whole: true}}
     # Negative case: one task retrying its own failing build five times.
     - {trace_id: TR-610, span_id: S610a, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:00:00+00:00", end: "2026-03-02T10:02:00+00:00", task_id: T-610, session_id: S-610, outcome: error, attributes: {command: "xcodebuild -scheme App test", kelpie.tool.result: error, kelpie.tool.exit_code: 65}, repeat: {count: 5, every: "5m"}}
     # Negative case: lint.sh failed for three tasks, then ran successfully again.
     - {trace_id: TR-620, span_id: S620, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:00:00+00:00", end: "2026-03-02T10:00:10+00:00", task_id: T-620, session_id: S-620, outcome: error, attributes: {command: "lint.sh", kelpie.tool.result: error, kelpie.tool.exit_code: 1}}
     - {trace_id: TR-621, span_id: S621, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:05:00+00:00", end: "2026-03-02T10:05:10+00:00", task_id: T-621, session_id: S-621, outcome: error, attributes: {command: "lint.sh", kelpie.tool.result: error, kelpie.tool.exit_code: 1}}
     - {trace_id: TR-622, span_id: S622, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:10:00+00:00", end: "2026-03-02T10:10:10+00:00", task_id: T-622, session_id: S-622, outcome: error, attributes: {command: "lint.sh", kelpie.tool.result: error, kelpie.tool.exit_code: 1}}
-    - {trace_id: TR-623, span_id: S623, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:40:00+00:00", end: "2026-03-02T10:40:10+00:00", task_id: T-623, session_id: S-623, outcome: ok, attributes: {command: "lint.sh", kelpie.tool.result: ok, kelpie.tool.exit_code: 0}}
+    - {trace_id: TR-623, span_id: S623, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:40:00+00:00", end: "2026-03-02T10:40:10+00:00", task_id: T-623, session_id: S-623, outcome: ok, attributes: {command: "lint.sh", kelpie.tool.result: ok, kelpie.tool.exit_code: 0, kelpie.tool.command_whole: true}}
 expected_actions:
   - kind: alert
     severity: warning

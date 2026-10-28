@@ -8,18 +8,20 @@ same tool failing with the same exit code for task after task.
 **Signs.** Tool spans of the snapshot whose result the adapter knows
 (:mod:`kelpie.core.tools`) and whose command runs one of ``tools`` (config data: the farm's
 build and test runners, e.g. ``ios_sim.sh``, ``xcodebuild``) where its exit code is the
-command's: the tool is the command (path aside, after variable assignments and ``env``,
-``time``, ``exec``, ``command``, ``nohup``, ``timeout <duration>``) of the command's last
-segment, after a ``;`` or ``|``, or after ``&&`` only from setup commands (``cd``,
-``export``, ``source``, ``set``, ...): ``cd app && ios_sim.sh test``, not
-``lint.sh && ios_sim.sh test`` (which of them failed?) nor ``pkill xcodebuild``. A
-foreground call that exited non-zero is a failure of that tool with its exit code as the
-error class (``127`` not found, ``124`` timed out, ``1`` a failed build). One that exited 0
-is a success only when nothing of the command after the tool was masked: redaction can
-hide a pipe (``xcodebuild ... | xcbeautify`` exits as ``xcbeautify`` does), and a false
-success would end an outage. A call sent to the background (its ``0`` means started) and
-one the platform refused to run (blocked) are neither, and a span with no known result
-does not count. Commands the redaction masked whole (``bash *** ***``) name no tool.
+command's: the tool is the command (path aside, after variable assignments and the
+wrappers ``env``, ``sudo``, ``nice``, ``rtk``, ``time``, ``exec``, ``nohup`` with their
+options) of the command's last segment, after a ``;`` or ``|``, or after ``&&`` only from
+setup commands (``cd``, ``export``, ``source``, ``set``, ...): ``cd app && ios_sim.sh
+test``, not ``lint.sh && ios_sim.sh test`` (which of them failed?), ``pkill xcodebuild``
+nor ``command -v xcodebuild`` (it exits 0 wherever the binary is). A foreground call that
+exited non-zero is a failure of that tool with its exit code as the error class (``127``
+not found, ``124`` timed out, ``1`` a failed build). One that exited 0 is a success only
+when the adapter says the command is whole (:func:`~kelpie.core.tools.command_whole`:
+redaction keeps a prefix, and a dropped ``| xcbeautify`` or second line decides the exit
+code) and nothing after the tool was masked: a false success would end an outage. A call
+sent to the background (its ``0`` means started) and one the platform refused to run
+(blocked) are neither, and a span with no known result does not count. Commands the
+redaction masked whole (``bash *** ***``, ``timeout 600 *** ***``) name no tool.
 
 **Open.** Failures of one tool with one exit code by at least ``min_tasks`` distinct tasks
 within ``window`` of each other, none followed by a success of that tool → one ``warning``
@@ -30,7 +32,8 @@ tasks it explains), with the exit code's meaning as its cause. A call's task is 
 else its session's; a session the snapshot ties to no task counts as one task, and a call
 with neither as one per trace. One task retrying the same failure is no outage. The host
 is the task's (``Task.host``) where the adapter knows it: a success on a healthy host does
-not hide a broken one, and a success on an unknown host counts for every host. It resolves
+not hide a broken one. A success on an unknown host counts for every host only on a farm
+whose tasks name no host; otherwise only for calls of unknown hosts. It resolves
 when the tool runs successfully again (:func:`ran_again`), or when no failure is left in
 the snapshot's spans: the window is the ``[traces] window`` at most, whose spans the
 snapshot holds.
@@ -46,15 +49,17 @@ from datetime import datetime, timedelta
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.incidents import TOOL_FAILURES, Outage, incident_state_id, is_outage_state
 from kelpie.core.model import Snapshot, Span, SpanKind
-from kelpie.core.tools import ERROR, OK, exit_code_of, result_of
+from kelpie.core.tools import ERROR, OK, command_whole, exit_code_of, result_of
 from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._ci_outage import _listed
 
 COMMAND_ATTRIBUTES = ("command", "kelpie.tool.command_prefix")  # the hook's, then OTLP's
 MAX_TASKS = 50  # tasks an outage's params list
 MASK = "***"  # what the redaction leaves of a word it hides
-# Words that run the command after them; ``timeout`` takes a duration first.
-WRAPPERS = frozenset({"env", "time", "exec", "command", "nohup", "timeout"})
+# Words that run the command after them (with their options); ``timeout`` takes a
+# duration first. ``command`` too, but ``command -v`` only looks the command up.
+WRAPPERS = frozenset({"env", "sudo", "nice", "rtk", "time", "exec", "command", "nohup", "timeout"})
+LOOKUPS = frozenset({"-v", "-V"})
 # Commands before ``&&`` that do not fail a build's way: the exit code is the build's.
 SETUP = frozenset({"cd", "pushd", "export", "source", ".", "set", "unset", "mkdir", "true"})
 SEPARATORS = frozenset({"&&", "||", ";", "|", "|&", "&"})
@@ -101,7 +106,8 @@ def tool_outages(
     if not tools or min_tasks <= 0:
         return []
     out = []
-    for group, failures in sorted(_open(_calls(snapshot, tools)).items(), key=_order):
+    calls = _calls(snapshot, tools)
+    for group, failures in sorted(_open(calls, _named_hosts(snapshot)).items(), key=_order):
         since = _since(failures, min_tasks, window)
         if since is None:
             continue
@@ -116,12 +122,15 @@ def ran_again(state_id: str, snapshot: Snapshot, rule: str, tools: Collection[st
     if not tools or not state_id.startswith(f"{rule}:") or not is_outage_state(state_id):
         return None
     calls = _calls(snapshot, tools)
+    hosts = _named_hosts(snapshot)
     groups = {(c.tool, c.code, c.host) for c in calls if not c.ok and c.code is not None}
     for tool, code, host in groups:
         if code is None or tool_outage_state(rule, tool, code, host) != state_id:
             continue
         last = max(c.at for c in calls if (c.tool, c.code, c.host) == (tool, code, host))
-        again = [c for c in calls if c.ok and c.tool == tool and _clears(c, host) and c.at > last]
+        again = [
+            c for c in calls if c.ok and c.tool == tool and _clears(c, host, hosts) and c.at > last
+        ]
         if again:
             first = min(again, key=lambda c: c.at)
             on = f" in {first.task}" if first.task else ""
@@ -134,9 +143,16 @@ def _order(item: tuple[_Group, list[_Call]]) -> tuple[str, int, str]:
     return tool, code, host or ""
 
 
-def _clears(success: _Call, host: str | None) -> bool:
+def _named_hosts(snapshot: Snapshot) -> bool:
+    """Whether the farm's tasks name hosts (multi-host): then an unknown host is its own."""
+    return any(t.host for t in snapshot.tasks)
+
+
+def _clears(success: _Call, host: str | None, named: bool) -> bool:
     """Whether a success of the tool ends its failures on ``host``."""
-    return success.host is None or host is None or success.host == host
+    if success.host == host:
+        return True
+    return not named and (success.host is None or host is None)
 
 
 def _calls(snapshot: Snapshot, tools: Collection[str]) -> list[_Call]:
@@ -154,8 +170,8 @@ def _calls(snapshot: Snapshot, tools: Collection[str]) -> list[_Call]:
         if found is None:
             continue
         tool, masked = found
-        if result == OK and masked:
-            continue  # a masked pipe may have hidden the tool's own exit code
+        if result == OK and (masked or not command_whole(span)):
+            continue  # a masked or dropped pipe may have decided the exit code
         code = exit_code_of(span) if result == ERROR else None
         if result == ERROR and not code:
             continue  # a failure without its class cannot be grouped
@@ -215,9 +231,13 @@ def _head(segment: Sequence[str]) -> tuple[int, str] | None:
         if "=" in word and not word.startswith("="):
             i += 1  # FOO=1
         elif word in WRAPPERS:
+            if word == "command" and i + 1 < len(segment) and segment[i + 1] in LOOKUPS:
+                return None  # looks the command up, does not run it
             i += 1
             while i < len(segment) and segment[i].startswith("-"):
-                i += 1  # its options
+                i += 1  # its options, and a masked value of one (sudo -u ***, nice -n ***)
+                if i < len(segment) and segment[i] == MASK:
+                    i += 1
             if word == "timeout":
                 i += 1  # its duration
         else:
@@ -227,13 +247,13 @@ def _head(segment: Sequence[str]) -> tuple[int, str] | None:
     return i, segment[i].rstrip("/").rsplit("/", 1)[-1]
 
 
-def _open(calls: Sequence[_Call]) -> Mapping[_Group, list[_Call]]:
+def _open(calls: Sequence[_Call], named: bool) -> Mapping[_Group, list[_Call]]:
     """Failures per tool, exit code and host, since that tool's last success there."""
     found: dict[_Group, list[_Call]] = defaultdict(list)
     for c in calls:  # oldest first
         if c.ok:
             for tool, code, host in list(found):
-                if tool == c.tool and _clears(c, host):
+                if tool == c.tool and _clears(c, host, named):
                     del found[tool, code, host]
         else:
             assert c.code is not None
