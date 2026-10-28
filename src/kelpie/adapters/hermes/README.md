@@ -444,7 +444,9 @@ relay them to the hub yet.
 The same `state.db` totals each session's tokens: per model in `session_model_usage`
 (summed over its billing and task rows), plus what the session's own columns hold beyond
 those rows on its own `model` (cumulative updates and sessions from before that table write
-no rows; Hermes' Insights reconciles them the same way). A model Hermes records as
+no rows; Hermes' Insights reconciles them the same way, except that Kelpie keeps the
+reasoning part). Each count is the larger of the two sources, so auxiliary calls of a
+session whose main loop wrote no rows are undercounted, as in Insights. A model Hermes records as
 `unknown` reads as none. Kelpie
 reads the sessions of `state_sources` active within `lookback`, read-only, with the waits,
 and gives one `SessionUsage` per session and model: on the same id as its waits (the run

@@ -654,3 +654,38 @@ def test_usage_goes_to_the_latest_run_started_by_then(tmp_path: Path) -> None:
     a = HermesAdapter(db_path=board.path, spool=None, git_state=False, state_home=home)
     found = {u.platform_session_id: u.session_id for u in a.snapshot(NOW).usage}
     assert found == {"h0": f"hermes-run-{old}", "h1": f"hermes-run-{new}"}
+
+
+def test_a_wait_belongs_to_the_run_its_session_started_in(tmp_path: Path) -> None:
+    """A worker of a never-closed older run that waits after a newer run started is still
+    the older run's, with or without usage of its own."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    board = Board(home / "kanban.db")
+    ws = tmp_path / "ws"
+    board.task("t1", "running", NOW - 300 * M, assignee="dev-1")
+    board.update("t1", workspace_kind="worktree", workspace_path=str(ws / "t1"))
+    old = board.run("t1", "dev-1", NOW - 240 * M, status="crashed")  # never closed
+    new = board.run("t1", "dev-1", NOW - 90 * M)
+    db = StateDb(home / "profiles" / "dev-1" / "state.db")  # no token columns: no usage
+    db.session("w0", str(ws / "t1"), NOW - 230 * M, NOW - 5 * M)
+    db.call("w0", NOW - 20 * M, "sleep 300")
+    db.session("w1", str(ws / "t1"), NOW - 80 * M, NOW - 5 * M)
+    db.call("w1", NOW - 10 * M, "sleep 300")
+    a = HermesAdapter(db_path=board.path, spool=None, git_state=False, state_home=home)
+    snap = a.snapshot(NOW)
+    assert snap.usage == ()
+    assert {(w.session_id, w.at) for w in snap.waits} == {
+        (f"hermes-run-{old}", NOW - 20 * M),
+        (f"hermes-run-{new}", NOW - 10 * M),
+    }
+
+
+def test_corrupt_counts_do_not_drop_the_profile(tmp_path: Path) -> None:
+    db = StateDb(tmp_path / "state.db", schema=USAGE_SCHEMA)
+    usage_session(db, "s1", None)
+    per_model(db, "s1", "m-main", 1, 2**62, 1, 0, 0, 0)
+    per_model(db, "s1", "m-main", 1, 2**62, 1, 0, 0, 0, task="title")  # SUM would overflow
+    usage_session(db, "s2", None, totals=(10, 1, 0, 0, 0, 1))
+    found = sorted((u.session, u.input_tokens) for u in state_db.read_usage(tmp_path, NOW - 60 * M))
+    assert found == [("s1", state_db.MAX_COUNT), ("s2", 10)]

@@ -317,7 +317,7 @@ class SessionUsage:
     output_tokens: int = 0
     cached_tokens: int = 0  # cache reads
     cache_write_tokens: int = 0
-    reasoning_tokens: int = 0
+    reasoning_tokens: int = 0  # part of output_tokens: never add it again
     calls: int = 0  # model API calls
     per_session_total: bool = True  # the session's total, not split by time
     source: str | None = None  # name of the platform adapter that reported it

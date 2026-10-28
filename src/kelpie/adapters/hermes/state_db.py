@@ -105,6 +105,7 @@ class Wait:
     at: datetime
     shape: str
     waited: timedelta | None
+    started: datetime | None = None  # the session's start: which run it belongs to
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +212,7 @@ def _read_usage(profile: str, path: Path, since: datetime, sources: Collection[s
         if sessions and _columns(conn, "session_model_usage") >= {"session_id", "model", *_COUNTS}:
             for chunk in _chunks(sorted(sessions)):
                 marks = ",".join("?" * len(chunk))
-                sums = ", ".join(f"SUM({c})" for c in _COUNTS)
+                sums = ", ".join(f"TOTAL({c})" for c in _COUNTS)  # a float: never overflows
                 for row in conn.execute(
                     f"SELECT session_id, model, {sums} FROM session_model_usage "
                     f"WHERE session_id IN ({marks}) GROUP BY session_id, model",
@@ -251,7 +252,10 @@ def _reconciled(
     """A session's counts per model: its ``session_model_usage`` rows, and what its own
     totals hold beyond all of them on its own model, as Hermes' Insights reconciles the two
     (``_compute_model_breakdown``): cumulative updates set the totals and write no row, and
-    sessions from before the table have no rows."""
+    sessions from before the table have no rows. Each count is the larger of the two, never
+    their sum. So, as in Insights, auxiliary usage (only ever rows) of a session whose main
+    loop wrote no rows is undercounted by that much. Unlike Insights, the reasoning
+    residual is kept: the totals count the main loop's reasoning too."""
     found: dict[str | None, list[int]] = {}
     for m, *n in rows:
         counts = found.setdefault(_model(m), [0] * len(_COUNTS))
@@ -310,10 +314,11 @@ def _read_db(profile: str, path: Path, since: datetime, sources: Collection[str]
             Wait(
                 profile,
                 sid,
-                sessions[sid],
+                sessions[sid][0],
                 datetime.fromtimestamp(at, UTC),
                 shape.shape,
                 None if waited is None else wait_bucket(waited),
+                sessions[sid][1],
             )
         )
     return waits
@@ -345,14 +350,21 @@ def _session_filter(
 
 def _sessions(
     conn: sqlite3.Connection, start: float, sources: Collection[str]
-) -> dict[str, str | None]:
-    """Session id -> working directory, of the sessions active since ``start``."""
-    where, args, active = _session_filter(_columns(conn, "sessions"), start, sources)
+) -> dict[str, tuple[str | None, datetime | None]]:
+    """Session id -> working directory and start, of the sessions active since ``start``."""
+    columns = _columns(conn, "sessions")
+    where, args, active = _session_filter(columns, start, sources)
+    began = "started_at" if "started_at" in columns else "NULL"
     rows = conn.execute(
-        f"SELECT id, cwd FROM sessions WHERE {where} ORDER BY {active} DESC LIMIT ?",
+        f"SELECT id, cwd, {began} FROM sessions WHERE {where} ORDER BY {active} DESC LIMIT ?",
         (*args, MAX_SESSIONS),
     )
-    return {str(sid): (cwd if isinstance(cwd, str) and cwd else None) for sid, cwd in rows}
+    out: dict[str, tuple[str | None, datetime | None]] = {}
+    for sid, cwd, raw in rows:
+        at = _epoch(raw)
+        when = None if at is None else datetime.fromtimestamp(at, UTC)
+        out[str(sid)] = (cwd if isinstance(cwd, str) and cwd else None, when)
+    return out
 
 
 def _wait_calls(

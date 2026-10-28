@@ -847,7 +847,8 @@ class HermesAdapter:
         for s in sessions:
             runs.setdefault((s.task_id, s.owner_id.casefold()), []).append(s)
         recent = [w for w in found if w.at >= now - self.state_window]
-        spans = [(w.profile, w.session, w.cwd, w.at, w.at) for w in recent]
+        # A wait belongs to the run its session started in, as the session's usage does.
+        spans = [(w.profile, w.session, w.cwd, w.started or w.at, w.at) for w in recent]
         spans += [(u.profile, u.session, u.cwd, u.started, u.last) for u in used]
         tasks: dict[str, str | None] = {}  # cwd -> task
         for _, _, cwd, _, _ in spans:
@@ -859,10 +860,11 @@ class HermesAdapter:
             mine = runs.get((task, profile), []) if task is not None else []
             open_then = [s for s in mine if s.started_at <= end and start <= (s.ended_at or now)]
             # The latest run started by then: a never-closed older run takes no later session.
+            # None started by then (clocks apart): the earliest.
             run = max(
                 (s for s in open_then if s.started_at <= start),
                 key=lambda s: s.started_at,
-                default=open_then[0] if open_then else None,
+                default=min(open_then, key=lambda s: s.started_at, default=None),
             )
             if run is not None:
                 homes[profile, sid] = (run.id, task)
