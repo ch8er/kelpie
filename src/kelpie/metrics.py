@@ -128,6 +128,11 @@ class Metrics:
         self.resource_readings = 0
         self.resource_failures: Counter[str] = Counter()
         self.connector_errors: Counter[str] = Counter()
+        # connector step -> since when its evidence is missing: its last good tick (else
+        # its first failure) while it fails tick after tick; None once it reads again
+        self.connector_failing: dict[str, datetime | None] = {}
+        self.connector_last_ok: dict[str, datetime] = {}
+        self.connector_now: datetime | None = None
         self.github_enabled = False
         self.github_requests: Counter[str] = Counter()
         self.github_rate_remaining = -1
@@ -350,9 +355,21 @@ class Metrics:
         with self._lock:
             self.block_condition_outcomes = dict(outcomes)
 
-    def connector_failed(self, name: str) -> None:
+    def connector_failed(self, name: str, now: datetime | None = None) -> None:
         with self._lock:
             self.connector_errors[name] += 1
+            if now is not None:
+                if self.connector_failing.get(name) is None:
+                    self.connector_failing[name] = self.connector_last_ok.get(name, now)
+                self.connector_now = now
+
+    def connector_ok(self, name: str, now: datetime) -> None:
+        """The step read fine this tick: a streak of failures ends."""
+        with self._lock:
+            if name in self.connector_failing:
+                self.connector_failing[name] = None
+            self.connector_last_ok[name] = now
+            self.connector_now = now
 
     def adapter_failed(self, name: str) -> None:
         with self._lock:
@@ -659,6 +676,8 @@ class Metrics:
                 "1 unless the last action-ledger read or write failed.",
                 [f"kelpie_ledger_up {int(self.ledger_up)}"],
             )
+            if self.connector_errors or self.github_enabled:
+                self._render_connectors(metric)
             if self.github_enabled:
                 self._render_github(metric)
             if self.traces_enabled:
@@ -1031,16 +1050,32 @@ class Metrics:
             [f"kelpie_budget_stale {int(self.budgets_stale_now)}"],
         )
 
-    def _render_github(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+    def _render_connectors(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
         metric(
             "kelpie_connector_errors_total",
             "counter",
-            "Connector snapshot steps that raised; the tick goes on without them.",
+            "Connector snapshot steps that raised; the tick carries the conditions they found "
+            "unmet or unknown on their last good tick, with their check times.",
             [
                 f"kelpie_connector_errors_total{_labels(connector=c)} {n}"
                 for c, n in sorted(self.connector_errors.items())
             ],
         )
+        now = self.connector_now
+        metric(
+            "kelpie_connector_failing_seconds",
+            "gauge",
+            "While a connector step fails tick after tick, seconds since its last good tick "
+            "(0: its last tick read fine). Past a rule's max_condition_age the conditions it "
+            "last checked are stale.",
+            [
+                f"kelpie_connector_failing_seconds{_labels(connector=c)} "
+                f"{max((now - since).total_seconds(), 0) if since is not None and now else 0:.0f}"
+                for c, since in sorted(self.connector_failing.items())
+            ],
+        )
+
+    def _render_github(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
         metric(
             "kelpie_github_requests_total",
             "counter",

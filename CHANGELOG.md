@@ -385,6 +385,16 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   these are checked before any database is opened. A port already in use (the hub's or the
   main listener's) is still found only when it is bound, after the database is opened
   ([#244](https://github.com/ch8er/kelpie/pull/244)).
+- A connector step that failed for one tick (human tasks, GitHub conditions) dropped the
+  conditions it had attached and checked, so waits looked unchecked and blocks bare until
+  the next good tick: one hiccup could alert, then resolve. What the step last found unmet
+  or unknown for waits and blocks is now carried forward (for up to 6 hours) with its
+  original check time and goes stale on its own after `max_condition_age`; what it found
+  met, and anything for a ready task, is not carried, so a failed step never wakes,
+  unblocks or parks anything. A block whose connector keeps failing stays linked to its
+  stale condition: rule 4 alerts on stale evidence instead of an unlinked block. New:
+  `kelpie_connector_failing_seconds` and the Prometheus alert `KelpieConnectorFailing`
+  ([#242](https://github.com/ch8er/kelpie/issues/242)).
 - Kelpie's blocks, parks and wakes on a Hermes board showed up as written by the profile
   Kelpie runs under (`default`): they are signed `kelpie` now, like its comments, and the name
   is `[adapters.hermes] author` ([#189](https://github.com/ch8er/kelpie/pull/189)).

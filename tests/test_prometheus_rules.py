@@ -54,3 +54,8 @@ def test_the_rules_are_loaded_by_prometheus_and_mounted_by_compose() -> None:
 def test_the_dashboard_shows_lost_alerts() -> None:
     text = Path(DASHBOARD).read_text()
     assert "increase(kelpie_alerts_failed_total[1h])" in text
+
+
+def test_a_connector_failing_past_the_freshness_window_is_alerted_on() -> None:
+    (rule,) = [r for r in _rules() if "kelpie_connector_failing_seconds" in r["expr"]]
+    assert rule["alert"] == "KelpieConnectorFailing" and "> 900" in rule["expr"]
