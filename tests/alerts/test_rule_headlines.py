@@ -39,6 +39,7 @@ CASES = {
     "rule_ci_economy": ("20-ci-outage", "CI outage"),
     "rule_no_progress": ("field-02-idle-context-resend", "No progress"),
     "rule_output_offenders": ("field-05-repeated-huge-outputs", "floods"),
+    "rule_instruction_bloat": ("21-skill-grows-append-only", "pr-review"),
     "rule_ping_pong": ("12-review-ping-pong", "ping-pong"),
     "rule_orphan_status": ("11-blocker-chain-dead-end", "Dead end"),
     "rule_resources": ("06-provider-quota-exhausted", "no quota left"),

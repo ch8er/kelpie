@@ -167,6 +167,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | 14 | `compaction_gate` | P2 | not implemented | | |
 | – | `return_causes` | P1 | implemented | `alert`, `comment` | adapter `comment` |
 | – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
+| – | `instruction_bloat` | P1 | implemented | `alert` | alert channel |
 
 Several rules share these terms:
 
@@ -657,6 +658,28 @@ alerted in a cleaned form.
 The rule takes no parameters of its own: thresholds and owners are in
 [[traces.outputs]](#tracesoutputs). It needs `[traces] enabled`; on a farm that reports
 tool calls only through hooks, `[adapters.hermes] lookback` must cover `repeat_days`.
+
+### instruction_bloat
+
+Incident 21: the instruction files each role loads (skills, `CLAUDE.md`, `AGENTS.md`, role
+prompts), measured read-only by Kelpie (sizes, section counts and hashes; never the text).
+A file is reported when it crossed `max_chars` within the growth window, when it grows
+faster than `max_growth_per_week`, or when it is over `max_chars` and costs at least
+`max_tokens_per_day`, counted only for files read into every session of their role or
+from counted loads: a large skill opened on demand that does not change is not bloat. The
+alert gives its size in characters and estimated tokens, its growth, whether it only grows
+(appends and nothing removed), its tokens a day and where that figure comes from, the
+near-duplicate sections and repeated values that involve it, and recommends a short core
+plus topic references. Copies in a role whose files are under every threshold get their
+own informational alert. Both are lasting states: alerted once, resolved when the file is
+split. Kelpie never edits instruction files; the rule only alerts.
+
+| Key | Default | Type | Meaning |
+| --- | --- | --- | --- |
+| `max_chars` | `40000` | integer > 0 | Size threshold in characters (about 10,000 tokens). |
+| `max_growth_per_week` | `10000` | integer > 0 | Characters added per week, over the growth window. |
+| `max_tokens_per_day` | `500000` | integer > 0 | Daily read cost that makes a file over `max_chars` worth splitting even when it is stable. |
+| `min_span` | `"1d"` | duration > 0 | Growth is judged only over at least this much history. |
 
 ## [storage]
 

@@ -88,6 +88,7 @@ EN: dict[str, str] = {
     "headline.no_progress": "Tokens spent with no progress",
     "headline.orphan_status": "Task with no owner",
     "headline.output_offenders": "Command floods agent context",
+    "headline.instruction_bloat": "Instructions keep growing",
     "headline.ping_pong": "Review ping-pong",
     "headline.resources": "Resources running out",
     "headline.return_causes": "A recurring cause of task returns",
@@ -155,6 +156,7 @@ RU: dict[str, str] = {
     "headline.no_progress": "Токены тратятся без прогресса",
     "headline.orphan_status": "У задачи нет владельца",  # noqa: RUF001 (Russian)
     "headline.output_offenders": "Команда засоряет контекст агентов",
+    "headline.instruction_bloat": "Инструкции агентов разрастаются",
     "headline.ping_pong": "Пинг-понг на ревью",
     "headline.resources": "Ресурсы на исходе",
     "headline.return_causes": "Повторяющаяся причина возвратов",

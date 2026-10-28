@@ -166,6 +166,7 @@ P0 is the MVP; P1 and P2 rules are backlog.
 | – | Dispatch gate | A ready task whose prerequisite is not met (a referenced PR red or not merged, a parent task not done) → parked in waiting on it; rule 2 wakes it | field |
 | 13 | "Needs you" inbox (P1) | Per person: human tasks with agent work behind them and agents waiting for their input or approval, sorted by cost of delay (agent-hours waited) → one escalation per person | 13 |
 | 14 | Compaction gate (P2) | Agent acts against the task's gate right after a context compaction | field |
+| – | Instruction bloat (P1) | A skill or role instruction file that crosses a size, grows fast or is large and read into every session, and copies of sections and values across a role's files → alert recommending a short core plus topic references; Kelpie never edits the files | 21 |
 
 P1 also extends rule 1 ("done" requires evidence; reopened-after-done rate) and rule 3 (stop
 patterns: tasks that nothing will move again, plus `kelpie why <task>`). "Field" means field
@@ -174,7 +175,7 @@ evidence from other farms rather than one of the 13 incidents.
 Rule names in code: `exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`,
 `ping_pong`, `bottlenecks`, `resources`, `ci_economy`, `loop_breaker`, `no_progress`,
 `conflict_warning`, `dispatch_gate`, `needs_you`, `compaction_gate`, `return_causes`,
-`output_offenders`, `checkpoints`.
+`output_offenders`, `instruction_bloat`, `checkpoints`.
 
 Foundation work alongside the rules (no LLM): **traces** (OpenTelemetry GenAI spans over
 OTLP, stored locally, optionally forwarded to Langfuse, Phoenix or Datadog; adapters write

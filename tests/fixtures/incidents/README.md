@@ -188,6 +188,9 @@ Fixture conventions:
 | – | `field-02-idle-context-resend.yaml` | `no_progress` | `alert` with `recommendations: [longer_heartbeat_interval, cheaper_maintenance_model, bounded_session_handoff]` for the idle agent resending a 12k-token context every 5 min; nothing for the productive session |
 | – | `field-03-budget-overrun.yaml` | `loop_breaker` | `alert` warning for the agent past the soft threshold; `alert` critical (spend, hard limit) and `stop` for the live session of the agent past the hard threshold; nothing for its ended session, or for the agent under budget |
 | – | `field-04-dispatch-red-pr.yaml` | `dispatch_gate` | `wait` T-F401 (its PR's head is red) and T-F402 (parent still in progress); nothing for a merged PR, an unknown or stale PR state, a finished parent, or a task in progress |
+| 21 | `21-skill-grows-append-only.yaml` | `instruction_bloat` | `alert` for the reviewer skill that grew append-only from 31,000 to 96,000 characters in a week, with its near-duplicate sections; nothing for the larger built-in skill that has not changed and is loaded on demand |
+| 21 | `21-stable-builtin-skill.yaml` | `instruction_bloat` | nothing for a large built-in skill loaded three times a day or a small CLAUDE.md; `alert` for a stable AGENTS.md over the threshold read into every ops session (960,000 tokens a day) |
+| 21 | `21-standing-answers-repeated.yaml` | `instruction_bloat` | informational `alert` for the support role's near-duplicate sections and one value in four files; nothing for a small, slowly growing developer file |
 | – | `field-05-repeated-huge-outputs.yaml` | `output_offenders` | `comment` T-F502 (the latest offending task still open; T-F503 is done) addressed to human-owner (xcbeautify for `xcodebuild`, 2 days, ~179k tokens); `alert` to whoever owns the ops instructions for `tool:read_file` (no task to comment on) |
 
 ## Adding a fixture
