@@ -31,10 +31,11 @@ What the report cannot separate, it does not credit (#193):
   older fix may belong to it (``Verification.truncated``).
 - **Newly enabled signals.** A per-day rate whose data starts after the first quarter of
   the before-window has no "before" to compare with: tokens per day when traces began
-  that late (after a whole loaded window without a span, when ``known_from`` is set), and with a config change in the group, a cause of hours lost seen first
-  after the change with nothing before (a connector or rule the change may have turned
-  on). They are listed with their value after instead (:class:`Excluded`), so a new
-  problem is not hidden. Means (per call, per session) still compare.
+  that late (after a whole loaded window without a span, when ``known_from`` is set),
+  and with a config change in the group, a cause of hours lost seen first after the
+  change with nothing before (a connector or rule the change may have turned on). They
+  are listed with their value after instead (:class:`Excluded`), so a new problem is
+  not hidden. Means (per call, per session) still compare.
 
 A side whose window starts before what the board still reports under-counts review time,
 failures and returns; ``kelpie report`` widens the board's lookback to two windows before
