@@ -130,6 +130,7 @@ Fixture conventions:
 | 10 | `10-reviewer-polls-ci.yaml` | `wait_condition` | `comment` T-1001 (register a condition and exit); no `requeue` |
 | 10 | `10-condition-satisfied-wake.yaml` | `wait_condition` | `wake` T-1011 (all conditions hold, freshly checked); `alert` T-1013 (overdue) and T-1014 (waiting on nothing); nothing for a pending condition, stale evidence, or a blocked task |
 | 10 | `10-productive-long-session.yaml` | `wait_condition` | `comment` only on the session polling a known CI check; nothing for a busy edit/test session |
+| 10 | `10-reviewer-sleeps-before-block.yaml` | `wait_condition` | `comment` T-1001 (its ended session slept 3 times and watched CI before blocking); nothing for T-1002's one short sleep |
 | 10 | `10-block-waits-on-pr-merge.yaml` | `stale_blocks` | reviewer self-block "waiting for CI/merge of #N" with a `pr_merged` condition attached from `[[block_conditions]]`: nothing while pending (T-1021), `alert` "limit 8h" when overdue (T-1022); unmatched FIX block 13h old keeps the "no condition" `alert` (T-1023) |
 | 10 | `10-block-pr-merged-unblock.yaml` | `stale_blocks` | `unblock` T-1031 once the PR merged; nothing for T-1032 (PR still open) |
 | 10 | `10-block-pr-closed-unmerged.yaml` | `stale_blocks` | `alert` T-1051 at once ("closed without merging"); nothing for T-1052 (PR still open) |

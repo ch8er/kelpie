@@ -27,6 +27,9 @@ worker_grace = "5s"                      # SIGTERM, then SIGKILL after this (at 
 author = "kelpie"                        # what Kelpie's comments, blocks, parks and wakes are signed with
 # wait_key = "/data/hermes-wait.key"     # signs Kelpie's parks and stops; default: next to the ledger
 human_owners = ["alice"]                 # assignees that are people, not agents (optional)
+state_home = "~/.hermes"                 # profiles' state.db: waits in sessions (default: Hermes'
+                                         # home of db_path); false = do not read
+state_sources = ["kanban", "subagent", "cron"]  # whose sessions: agents at work, not people's chats
 
 # Hermes tolerates heartbeats up to an hour old; Kelpie's default is 30 minutes.
 [engine.rules.exit_contract]
@@ -363,6 +366,7 @@ mode `0600`. Hooks never raise and do no network I/O.
 | `task_links` (parent, child) | `Dependency(child, depends_on=parent)` (links to archived parents dropped) |
 | `task_runs` row | `Session` `hermes-run-<id>` |
 | spool `tool` lines | `Span(kind=tool)` linked to the session and task, built by `kelpie.traces.hooks` with a task span and a session span around them; `tool_call_id` kept as `gen_ai.tool.call.id` |
+| a profile's `state.db`: a foreground `terminal` call that waits | `SessionWait` (see [Waits inside sessions](#waits-inside-sessions)) |
 
 Blocks (`Block.reason`), from a `blocked` event at or after `status_since`:
 
@@ -396,6 +400,42 @@ Liveness (`Session.last_heartbeat`): the latest of the run's `last_heartbeat_at`
 `last_heartbeat_at` (for the task's current run) and the newest spool tool call of the run. A
 valid Hermes claim counts as a heartbeat: an open run that is the task's `current_run_id` with
 `claim_expires` in the future is alive as of the snapshot.
+
+### Waits inside sessions
+
+Hermes keeps each profile's sessions and messages in a `state.db` of its own: `state.db` in
+Hermes' home for the `default` profile, `profiles/<name>/state.db` for the others
+(`state_home`, default Hermes' home of `db_path`). Kelpie opens each read-only, at most once
+a minute, and reads the sessions of `state_sources` by `source` or `created_source` (Kanban workers, subagents, cron jobs)
+active in the last 6 hours (`last_activity_at`, else their start) and their assistant
+messages' tool calls, on Hermes' own indexes. A rewound turn is left out, and a call that
+compaction copied counts once. A foreground `terminal` call (not `background`, not `… &`)
+whose command waits becomes a `SessionWait`, and nothing else of it is kept:
+
+| Command | Shape |
+| --- | --- |
+| `sleep N` (a simple command anywhere in the script: past `cd … &&`, assignments, pipes, new lines, `timeout`, `env`, `nohup`, `bash -c '…'`) | `sleep` |
+| `gh run watch …` (also `gh -R o/r run watch`) | `gh run watch` |
+| `gh pr checks … --watch` | `gh pr checks --watch` |
+| a `while`, `until` or `for` loop over one of them | `<shape> loop` |
+
+A heredoc's body is text, not commands; a group or loop sent to the background (`( … ) &`,
+`done &`) waits for nothing (what follows it still counts; `&>` is a redirection), and nor
+does a loop of sleeps under 10 seconds that runs no `gh` inside a larger script (waiting for a
+server to start). How long it waited: when the command does nothing
+but wait, the time until its own result message (at most the `sleep` arguments when it only
+sleeps); else the `sleep` arguments alone (`sleep 1 && make build` waited a second), or
+unknown. It is kept as the lower bound of its bucket (under 30s, 30s, 1m, 5m, 15m, 30m, 1h).
+
+A Hermes session's waits are all on one id: the run (`hermes-run-<id>`) of the task whose
+workspace (`worktree` or `scratch`) holds the session's directory, by the session's
+profile, open at the time of one of its waits; else the Hermes session's own
+(`hermes-session-<profile>-<id>`), with the task when the directory names one. The role is
+the profile's (`roles`, `role_from_name`). Rule 2 (`session_waits`) reads them. A
+`state.db` Kelpie cannot read, or whose rows it cannot make sense of, is logged once and
+skipped; the board is read all the same.
+On a multi-host farm the waits stay on the host that reads them: `kelpie agent` does not
+relay them to the hub yet.
 
 ### Progress note and git state
 

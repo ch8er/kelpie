@@ -210,6 +210,9 @@ class HermesSettings:
     # [[adapters.hermes.boards]]: several boards of this Hermes home, each with its own
     # db_path (then ``db_path`` and ``wait_key`` above are unused). (): one board, db_path.
     boards: tuple[HermesBoardSettings, ...] = ()
+    # Hermes' home: its profiles' state.db (waits inside sessions); None: not read
+    state_home: Path | None = hermes.DEFAULT_HOME
+    state_sources: tuple[str, ...] = hermes.DEFAULT_SOURCES  # Hermes session sources read
 
     def build(self) -> hermes.HermesAdapter | HermesBoards:
         if not self.boards:
@@ -222,13 +225,18 @@ class HermesSettings:
                 board=b.name,
                 name=f"hermes:{b.name}",
                 wait_key=b.wait_key or DEFAULT_WAIT_KEY.parent / board_key(b.name),
+                state_home=None,
             )
             for b in self.boards
         ]
+        first = self.boards[0].db_path
         host = None
         if self.tools is not None:  # the host's tool processes, read once for every board
-            host = self._adapter(db_path=self.boards[0].db_path, spool=None, tools=self.tools)
-        return HermesBoards(boards, spool=self.spool, host=host)
+            host = self._adapter(db_path=first, spool=None, tools=self.tools, state_home=None)
+        state = None
+        if self.state_home is not None:  # the profiles' state.db, read once for every board
+            state = self._adapter(db_path=first, spool=None, tools=None)
+        return HermesBoards(boards, spool=self.spool, host=host, state=state)
 
     def _adapter(self, **kw: Any) -> hermes.HermesAdapter:
         settings: dict[str, Any] = dict(
@@ -249,6 +257,8 @@ class HermesSettings:
             end_worker=self.end_worker,
             worker_grace=self.worker_grace.total_seconds(),
             author=self.author,
+            state_home=self.state_home,
+            state_sources=self.state_sources,
         )
         return hermes.HermesAdapter(**{**settings, **kw})
 
@@ -451,6 +461,8 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "tools",
         "author",
         "boards",
+        "state_home",
+        "state_sources",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     boards = _hermes_boards(section)
@@ -466,6 +478,23 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
             paths[key] = Path(value)
     db_path = paths["db_path"]
     assert db_path is not None
+    # The profiles' state.db are in Hermes' home: kanban.db's directory, or the home of a
+    # named board (<home>/kanban/boards/<slug>/kanban.db).
+    named = db_path.parent.parent
+    home = named.parent.parent if (named.name, named.parent.name) == ("boards", "kanban") else None
+    state_home = section.get("state_home", str(home or db_path.parent))
+    if state_home is not False and (not isinstance(state_home, str) or not state_home.strip()):
+        raise ConfigError("[adapters.hermes] state_home must be a non-empty string or false")
+    sources = section.get("state_sources", list(hermes.DEFAULT_SOURCES))
+    if (
+        not isinstance(sources, list)
+        or not sources
+        or not all(isinstance(x, str) and x.strip() for x in sources)
+    ):
+        raise ConfigError(
+            "[adapters.hermes] state_sources must be a non-empty list of Hermes session "
+            'sources (e.g. ["kanban", "subagent", "cron"])'
+        )
     try:
         lookback = parse_duration(section.get("lookback", hermes.DEFAULT_LOOKBACK))
     except (ValueError, TypeError, AttributeError) as exc:
@@ -618,6 +647,8 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         _hermes_tools(section.get("tools")),
         author,
         boards,
+        None if state_home is False else Path(state_home),
+        tuple(dict.fromkeys(x.strip() for x in sources)),
     )
 
 
@@ -1101,6 +1132,7 @@ def merged_snapshot(
                 resources=merged.resources + part.resources,
                 sessions=merged.sessions + part.sessions,
                 spans=merged.spans + part.spans,
+                waits=merged.waits + part.waits,
                 limit_hits=merged.limit_hits + part.limit_hits,
                 providers=merged.providers + part.providers,
                 builds=merged.builds + part.builds,
@@ -1450,7 +1482,7 @@ def board_only(adapter: PlatformAdapter) -> PlatformAdapter:
     """``adapter`` reading its board alone: tasks, blocks and dependencies, without the
     spool, git or process checks a tick also runs (``kelpie snooze``, ``kelpie doctor``)."""
     if isinstance(adapter, hermes.HermesAdapter):
-        return replace(adapter, git_state=False, spool=None, tools=None)
+        return replace(adapter, git_state=False, spool=None, tools=None, state_home=None)
     if isinstance(adapter, HermesBoards):
         boards = [replace(b, git_state=False) for b in adapter.boards]
         return HermesBoards(boards, name=adapter.name)

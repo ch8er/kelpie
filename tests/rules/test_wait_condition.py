@@ -1,14 +1,16 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
-from kelpie.core.actions import ActionKind
+from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import (
     Block,
     Condition,
     ConditionKind,
     Session,
+    SessionWait,
     Snapshot,
     Span,
     SpanKind,
@@ -308,3 +310,119 @@ def test_build_reads_the_inbox_settings() -> None:
 def test_bad_config(config: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         build(config)
+
+
+# --- waits inside sessions (Snapshot.waits) ---------------------------------------------
+
+
+def sw(sid: str, mins_ago: float, waited: float | None = 5, **kw: str | None) -> SessionWait:
+    """A ``sleep`` wait in session ``sid`` of T-1 by a reviewer, ``waited`` minutes."""
+    fields: dict[str, Any] = {"task_id": "T-1", "role": "reviewer", "shape": "sleep"} | kw
+    return SessionWait(
+        sid,
+        NOW - mins_ago * M,
+        waited=None if waited is None else waited * M,
+        **fields,
+    )
+
+
+def blocked_task(status: Status = Status.BLOCKED) -> Task:
+    return Task("T-1", "t", status, NOW - 5 * M)
+
+
+def session_wait_actions(
+    rule: WaitCondition, *waits: SessionWait, tasks: tuple[Task, ...] = (blocked_task(),)
+) -> list[Action]:
+    return list(rule.evaluate(Snapshot(now=NOW, tasks=tasks, waits=waits)))
+
+
+def test_a_session_that_waited_often_gets_one_comment_however_it_ended() -> None:
+    rule = WaitCondition()
+    waits = [sw("S-1", m, 1) for m in (50, 40, 30)]
+    (act,) = session_wait_actions(rule, *waits)
+    assert act.kind is ActionKind.COMMENT and act.task_id == "T-1" and act.once
+    assert act.key == "poll:S-1"  # the polling check's: one comment or the other
+    assert "3 times (sleep 3), at least 3 minutes in all" in act.reason
+    assert "block the task on a condition" in act.reason
+    assert act.params == {"session_id": "S-1", "waits": 3, "waited_s": 180, "shapes": {"sleep": 3}}
+    for status in (Status.WAITING, Status.IN_PROGRESS, Status.REVIEW):  # any open task
+        assert len(session_wait_actions(rule, *waits, tasks=(blocked_task(status),))) == 1
+
+
+def test_few_short_waits_are_not_flagged_but_one_long_wait_is() -> None:
+    rule = WaitCondition()
+    assert session_wait_actions(rule, sw("S-1", 50, 1), sw("S-1", 40, 1)) == []
+    assert session_wait_actions(rule, sw("S-1", 50, None), sw("S-1", 40, None)) == []
+    (act,) = session_wait_actions(rule, sw("S-1", 30, 15, shape="gh run watch"))
+    assert "once (gh run watch 1), at least 15 minutes in all" in act.reason
+    # Waits of different sessions do not add up.
+    assert session_wait_actions(rule, sw("S-1", 50, 1), sw("S-2", 40, 1), sw("S-3", 30, 1)) == []
+
+
+def test_waits_outside_the_lookback_do_not_count() -> None:
+    rule = WaitCondition(session_wait_lookback=60 * M)
+    assert session_wait_actions(rule, sw("S-1", 70, 1), sw("S-1", 65, 1), sw("S-1", 30, 1)) == []
+    future = SessionWait("S-1", NOW + M, "sleep", waited=60 * M, task_id="T-1")
+    assert session_wait_actions(rule, future) == []
+
+
+def test_sessions_without_an_open_task_are_counted_per_role() -> None:
+    rule = WaitCondition()
+    orchestrator = [sw("hs-1", m, 1, task_id=None, role="architect") for m in (50, 40, 30)]
+    done = [sw("S-2", m, 5, shape="sleep loop") for m in (20, 10)]
+    unknown = [sw("hs-2", m, 1, task_id="T-9", role=None) for m in (50, 40, 30)]
+    acts = session_wait_actions(
+        rule, *orchestrator, *done, *unknown, tasks=(blocked_task(Status.DONE),)
+    )
+    assert [(a.kind, a.task_id, a.key) for a in acts] == [
+        (ActionKind.ALERT, None, "session-waits:architect"),
+        (ActionKind.ALERT, None, "session-waits:reviewer"),
+        (ActionKind.ALERT, None, "session-waits:unknown"),
+    ]
+    arch, rev, _ = acts
+    assert arch.state == "wait_condition:session-waits:architect" and arch.since == NOW - 50 * M
+    assert arch.reason.startswith("1 architect session(s) waited inside themselves 3 times")
+    assert "Kelpie does not edit them" in arch.reason
+    assert rev.params["session_ids"] == ["S-2"] and rev.params["shapes"] == {"sleep loop": 2}
+
+
+def test_a_session_the_polling_check_commented_on_is_left_to_it() -> None:
+    rule = WaitCondition(poll_patterns={"ci_status": ("gh pr checks",)}, poll_min_repeats=2)
+    task = Task("T-1", "t", Status.REVIEW, NOW - 30 * M)
+    live = Session("S-1", "T-1", "reviewer-1", NOW - 30 * M, last_heartbeat=NOW - M)
+    spans = tuple(
+        Span("tr", f"sp{i}", "execute_tool bash", SpanKind.TOOL, NOW - (5 - i) * M,
+             end=NOW - (5 - i) * M + timedelta(seconds=2), session_id="S-1", tool="bash",
+             attributes={"command": "gh pr checks 1"})
+        for i in range(3)
+    )  # fmt: skip
+    waits = tuple(sw("S-1", m, 1) for m in (5, 4, 3))
+    snap = Snapshot(now=NOW, tasks=(task,), sessions=(live,), spans=spans, waits=waits)
+    polled = rule.evaluate(snap)
+    assert [(a.key, a.params.get("condition_kind")) for a in polled] == [("poll:S-1", "ci_status")]
+    (waits,) = WaitCondition().evaluate(snap)  # without poll patterns: the waits' comment
+    assert waits.key == "poll:S-1" and waits.once and "waits" in waits.params
+
+
+def test_short_waits_do_not_count() -> None:
+    rule = WaitCondition()
+    short = [sw("S-1", m, 0) for m in (50, 40, 30, 20)]  # each under 30 seconds
+    assert session_wait_actions(rule, *short) == []
+    unknown = [sw("S-1", m, None, shape="gh run watch") for m in (50, 40, 30)]
+    assert len(session_wait_actions(rule, *unknown)) == 1  # a watch of unknown length counts
+
+
+def test_session_waits_settings() -> None:
+    rule = build({"session_waits": 5, "session_wait_time": "30m", "session_wait_lookback": "2h"})
+    assert (rule.session_waits, rule.session_wait_time, rule.session_wait_lookback) == (
+        5,
+        30 * M,
+        120 * M,
+    )
+    off = build({"session_waits": 0})
+    assert session_wait_actions(off, *(sw("S-1", m, 20) for m in (50, 40, 30))) == []
+    for bad in (-1, True, "3"):
+        with pytest.raises(ValueError, match="session_waits"):
+            build({"session_waits": bad})
+    with pytest.raises(ValueError, match="session_wait_time"):
+        build({"session_wait_time": "0m"})

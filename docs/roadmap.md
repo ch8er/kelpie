@@ -347,6 +347,7 @@ thresholds: 8 repeats in 10 minutes, 5 errors in a row.
 - [x] Polled commands map to condition kinds via config (`poll_patterns`), never hard-coded CI commands
 - [x] Repeated-call detection lives in one helper in `kelpie.rules`, reused later by `loop_breaker` (rule 10)
 - [x] Fixtures: existing `10-reviewer-polls-ci.yaml`; new `10-productive-long-session.yaml`
+- [x] Waits inside a session (`sleep`, CI watches, loops over them) from the platform's own record of its commands (Hermes: each profile's `state.db`, shape and duration bucket only), however the session ends (#197); fixture `10-reviewer-sleeps-before-block.yaml`
 
 ### rules: orphan_status (rule 3, incident 11)
 labels: P0, week-1, area:rules
