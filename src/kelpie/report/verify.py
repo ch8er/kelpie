@@ -393,7 +393,12 @@ def _stuck(
                     Excluded(
                         f"hours lost per day ({md.text(cause)})",
                         firsts[cause],
-                        ca[cause][0] / _days(a),
+                        (
+                            ev.lost([r.state for r in ev.states if ev.cause(r.state) == cause], *a)
+                            if ev.lost is not None
+                            else ca[cause][0]
+                        )
+                        / _days(a),
                         "h/day",
                     )
                 )

@@ -313,7 +313,8 @@ report; no LLM is involved.
 
 **Before/after of fixes.** Every fix made on the report's day or the day before is measured
 over `[report] verify_window` (a day) before and after it: hours lost per day
-(only the fix's rule when it names one), tokens per day, task returns per day, review time
+(each task-hour once, as the cost of chaos counts them; only the fix's rule's own
+task-hours when it names one, which can differ from its line in the table), tokens per day, task returns per day, review time
 (sessions of `review_roles`), sessions that failed or ended without a status, and for a
 command fix the output tokens per call. A side with fewer than `min_sample` observations,
 or an after-window under a quarter of the window, is labelled *direction only*; every row

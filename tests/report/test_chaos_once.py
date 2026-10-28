@@ -170,3 +170,26 @@ def test_the_root_cause_digest_carries_the_overlap() -> None:
     )  # fmt: skip
     lost = digest(report).data["hours_lost"]
     assert [x["hours"] for x in lost] == [pytest.approx(8.0)]  # the 0 h line is left out
+    partly = build_report(
+        day_inputs(states=[inbox(end=15), stale("A-1", (13, 0), (17, 0))],
+                   actions=[inbox_sample(at(9), ["A-1"])])
+    )  # fmt: skip
+    rows = {x["rule"]: x for x in digest(partly).data["hours_lost"]}
+    assert rows["stale_blocks"]["hours"] == pytest.approx(2.0)
+    assert rows["stale_blocks"]["also_hours"] == pytest.approx(2.0)
+
+
+def test_let_a_rule_act_names_its_own_hours() -> None:
+    from kelpie.core.actions import ActionKind
+    from kelpie.core.config import Mode
+    from kelpie.core.ledger import Outcome
+    from tests.report.test_daily import entry
+
+    would = entry(at(14), "stale_blocks", ActionKind.COMMENT, Outcome.OBSERVED, "A-1")
+    report = build_report(
+        day_inputs(states=[inbox(end=15), stale("A-1", (13, 0), (17, 0))],
+                   actions=[inbox_sample(at(9), ["A-1"]), would],
+                   modes={"stale_blocks": Mode.OBSERVE})
+    )  # fmt: skip
+    [advice] = [a for a in report.recommendations if a.title == "Let stale_blocks act"]
+    assert "lasted 4.0 task-hours" in advice.detail  # its own, 2 of them also a person's

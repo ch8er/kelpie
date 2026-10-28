@@ -17,17 +17,17 @@ rule 4's stale block on it, two conditions of one rule), the hour counts under t
 cause in :data:`CHAOS_PRECEDENCE` (a person's inbox, then a stale block, then the rest in
 :data:`CHAOS_CAUSES` order), and the others' overlapping hours are shown as "also seen",
 never added. What names no task adds up as it is: idle agents behind a hold, the waiting
-tasks rule 13 counts past the 20 ids it lists, a state without a task (a session's state
-counts on its task; a task waiting behind two people's tasks counts once). A forgotten hold
-(rule 6, ``bottlenecks:hold:*``) is its own cause and counts idle agent-hours instead
-(:func:`hold_agent_hours`); so is a person's inbox (rule 13, ``needs_you:*``): the agent-
-hours of the agent tasks waiting on them (:func:`people_agent_hours`). A card stuck in a
-pre-work status with work behind it (rule 3, ``orphan_status:stuck-before-work:*``) is its
-own cause too, in card-hours. All are "hours lost"; ``[report] hour_usd`` turns them into
-dollars. A card in a pre-work status that rule 3 finds stuck (past ``prework_after``, not
-held, ignored or queued behind its own parent) but that no open task depends on, so rule 3
-never reported it, is listed under "Stuck, blocking nothing" with its age, and counts
-nowhere: it delays no work.
+tasks rule 13 counts past the 20 ids it lists, a state without a task. A session's state
+counts on its task, and a task waiting behind two people's tasks counts once when rule 13
+names it. A forgotten hold (rule 6, ``bottlenecks:hold:*``) is its own cause and counts
+idle agent-hours instead (:func:`hold_agent_hours`); so is a person's inbox (rule 13,
+``needs_you:*``): the agent- hours of the agent tasks waiting on them
+(:func:`people_agent_hours`). A card stuck in a pre-work status with work behind it (rule
+3, ``orphan_status:stuck-before-work:*``) is its own cause too, in card-hours. All are
+"hours lost"; ``[report] hour_usd`` turns them into dollars. A card in a pre-work status
+that rule 3 finds stuck (past ``prework_after``, not held, ignored or queued behind its own
+parent) but that no open task depends on, so rule 3 never reported it, is listed under
+"Stuck, blocking nothing" with its age, and counts nowhere: it delays no work.
 
 **Cost of chaos, dollars.** Tokens burned by sessions that were going nowhere: a session in
 a ``loop_breaker`` (identical calls, error streak) or ``no_progress`` state while it lasted,
@@ -962,9 +962,9 @@ class _ChaosHours:
     """What chaos states saw in a window, before a task-hour is counted once: per cause,
     ``keyed`` spans on a task, ``loose`` hours that name no task, and the tasks named."""
 
-    keyed: Mapping[str, list[tuple[str, datetime, datetime]]]
-    loose: Mapping[str, float]
-    tasks: Mapping[str, set[str]]
+    keyed: defaultdict[str, list[tuple[str, datetime, datetime]]]
+    loose: defaultdict[str, float]
+    tasks: defaultdict[str, set[str]]
 
 
 def _chaos_hours(
@@ -979,7 +979,9 @@ def _chaos_hours(
     rule going live re-opens a state) to its last sighting. A task-hour counts once (#228):
     per task, the spans each cause saw (a state on a session counts on its task); what names
     no task adds up as it is: idle agents behind a hold, waiting tasks rule 13 counted past
-    the ids it lists, a state without a task. ``on_state`` sees each state's window."""
+    the ids it lists, a state without a task. ``tasks`` are the tasks counted: for a
+    person's inbox, those rule 13 named as waiting during the window (up to its count).
+    ``on_state`` sees each state's window."""
     keyed: dict[str, list[tuple[str, datetime, datetime]]] = defaultdict(list)
     loose: dict[str, float] = defaultdict(float)
     tasks: dict[str, set[str]] = defaultdict(set)
