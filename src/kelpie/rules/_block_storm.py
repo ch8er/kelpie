@@ -25,7 +25,7 @@ still blocked on that reason since then, with the reason as its cause and, when 
 names a person on the board, that person as the one who can end it: a human owner's id as
 a word, or a role one person alone holds (no agent either), as whom the reason waits for
 ("waiting for CEO", "ask the lead", "CEO:"). On a multi-host hub ids are matched without
-their host prefix, as the agents wrote them.
+their host and board prefixes (``Task.local_id``), as the agents wrote them.
 
 **Resolves.** Once open (its state id in ``Snapshot.open_states``) it stays open while
 :func:`keep_open` tasks (half of ``min_tasks``, at least two) are still blocked on the
@@ -91,10 +91,10 @@ class _Blocked:
     since: datetime
 
 
-def normalise(reason: str, task_id: str | None = None, host: str | None = None) -> str:
+def normalise(reason: str, *own: str | None) -> str:
     """A block reason with what differs per task stripped: the task's own id, dates, times,
     durations, hashes (see the module docs)."""
-    text = _own_stripped(reason, task_id, host).lower()
+    text = _own_stripped(reason, *own).lower()
     for pattern in (_URL, _PR_REF, _TASK_ID, _DATE, _DURATION, _FRACTION, _HEX):
         text = pattern.sub(" ", text)
     return " ".join(_NOISE.sub(" ", text).split())
@@ -106,13 +106,12 @@ def informative(text: str) -> bool:
     return sum(1 for w in words if w not in _GENERIC and not w.isdigit()) >= MIN_WORDS
 
 
-def _own_stripped(reason: str, task_id: str | None, host: str | None = None) -> str:
-    """The reason without the task's own id: as the board names it, and on a multi-host hub
-    (``<host>:<id>``) as the agent's platform wrote it, without the host."""
+def _own_stripped(reason: str, *own: str | None) -> str:
+    """The reason without the task's own ids: as the board names it, and as the agent's
+    platform wrote it, without a multi-host hub's or a board's prefix (``Task.local_id``)."""
     text = reason[:MAX_REASON]
-    for own in {task_id, _local(task_id, host)} - {None, ""}:
-        assert own is not None
-        text = re.sub(rf"(?<![\w.-]){re.escape(own)}(?![\w-])", " ", text, flags=re.I)
+    for item in {o for o in own if o}:
+        text = re.sub(rf"(?<![\w.-]){re.escape(item)}(?![\w-])", " ", text, flags=re.I)
     return text
 
 
@@ -123,10 +122,10 @@ def _local(item_id: str | None, host: str | None) -> str | None:
     return item_id.removeprefix(f"{host}:")
 
 
-def _refs(reason: str, task_id: str | None = None, host: str | None = None) -> tuple[str, ...]:
+def _refs(reason: str, *own: str | None) -> tuple[str, ...]:
     """What a reason names: PRs, URLs, other tasks' ids. Blocks naming different ones wait
     on different things, whatever the rest of their text says."""
-    text = _own_stripped(reason, task_id, host).lower()
+    text = _own_stripped(reason, *own).lower()
     found = {*_URL.findall(text), *_PR_REF.findall(_URL.sub(" ", text))}
     found.update(_TASK_ID.findall(_PR_REF.sub(" ", _URL.sub(" ", text))))
     return tuple(sorted(found))
@@ -160,11 +159,12 @@ def storms(
             continue  # a wait Kelpie can check, or one it is told about but cannot see
         if snoozed is not None and (snooze := snoozed(task.id)) is not None and snooze.holds:
             continue  # a person decided to wait
-        text = normalise(block.reason, task.id, task.host)
+        text = normalise(block.reason, task.id, task.local_id)
         if informative(text):
-            refs = _refs(block.reason, task.id, task.host)
-            # what a reason names ("t_5", "#12") is its own machine's on a multi-host hub
-            key = (text, (f"{task.host}:", *refs) if refs and task.host else refs)
+            refs = _refs(block.reason, task.id, task.local_id)
+            # what a reason names ("t_5", "#12") is its own machine's and board's
+            where = f"{task.host or ''}:{task.board or ''}"
+            key = (text, (where, *refs) if refs and where != ":" else refs)
             groups.setdefault(key, []).append(_Blocked(task, block.since))
     open_states = set(snapshot.open_states)
     actions = []
@@ -237,7 +237,7 @@ def _shown(task: Task) -> str:
     """The reason as people read it: the earliest task's, without its own id."""
     if task.block is None:
         return ""
-    text = _own_stripped(task.block.reason, task.id, task.host)
+    text = _own_stripped(task.block.reason, task.id, task.local_id)
     text = re.sub(r"[\[(]\s*[\])]", " ", text)  # "[t_1]" left as "[]"
     return " ".join(text.split()).strip(" -,;.")
 

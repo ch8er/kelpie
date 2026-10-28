@@ -256,6 +256,18 @@ def test_on_a_hub_what_a_reason_names_is_its_own_machine_s() -> None:
     assert Outage.from_params(alert.params).person == "mac1:person-7"  # type: ignore[union-attr]
 
 
+def test_on_named_boards_ids_match_as_the_board_names_them() -> None:
+    def on(board: str, n: int, reason: str) -> Task:
+        t = blocked(n, 50 - n, reason.format(n=n))
+        return replace(t, id=f"{board}:T-{n}", board=board)
+
+    own = tuple(on("ios", n, ASK + " [T-{n}]") for n in range(5))
+    assert len(storms(*own)) == 1  # each one's own id, as its board wrote it, is stripped
+    dep = "waiting for t_5a01 to ship the schema migration"
+    mixed = (*(on("ios", n, dep) for n in range(3)), *(on("web", n, dep) for n in range(3, 6)))
+    assert storms(*mixed, rule=StaleBlocks(storm_min_tasks=4)) == []  # two boards' t_5a01
+
+
 def test_a_role_agents_hold_too_names_no_one() -> None:
     reviewer = Owner("person-3", "reviewer", OwnerKind.HUMAN)
     bot = Owner("agent-rev", "reviewer")
