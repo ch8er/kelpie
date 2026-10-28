@@ -38,7 +38,7 @@ import math
 import re
 import shlex
 import sqlite3
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -166,8 +166,9 @@ def read_usage(
     home: Path, since: datetime, sources: Collection[str] = DEFAULT_SOURCES
 ) -> list[Usage]:
     """Token usage of the sessions of every profile active since ``since`` (item 1 of #197):
-    per session and model from Hermes' ``session_model_usage`` where it has rows, else the
-    session's own totals and model. Totals of the whole session, not of a day."""
+    per session and model from Hermes' ``session_model_usage``, and what the session's own
+    totals hold beyond those rows on its own model (:func:`_reconciled`). Totals of the
+    whole session, not of a day."""
     usage: list[Usage] = []
     for profile, path in state_dbs(home):
         try:
@@ -177,6 +178,7 @@ def read_usage(
     return usage
 
 
+MAX_COUNT = 2**53  # a count beyond this is corrupt: Hermes' own bound
 _TOKENS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 _COUNTS = (*_TOKENS, "reasoning_tokens", "api_call_count")
 
@@ -225,9 +227,7 @@ def _read_usage(profile: str, path: Path, since: datetime, sources: Collection[s
             continue
         ended = _epoch(ended_raw)
         last = _epoch(last_raw) or ended or started
-        rows = per_model.get(sid) or [(model, *counts)]
-        for m, *n in rows:
-            numbers = [int(x) if isinstance(x, int | float) and x > 0 else 0 for x in n]
+        for m, numbers in _reconciled(model, counts, per_model.get(sid, ())).items():
             if not any(numbers):
                 continue
             out.append(
@@ -235,7 +235,7 @@ def _read_usage(profile: str, path: Path, since: datetime, sources: Collection[s
                     profile,
                     sid,
                     cwd if isinstance(cwd, str) and cwd else None,
-                    str(m) if m else None,
+                    m,
                     datetime.fromtimestamp(started, UTC),
                     datetime.fromtimestamp(max(last, started), UTC),
                     None if ended is None else datetime.fromtimestamp(ended, UTC),
@@ -243,6 +243,41 @@ def _read_usage(profile: str, path: Path, since: datetime, sources: Collection[s
                 )
             )
     return out
+
+
+def _reconciled(
+    model: object, totals: Sequence[object], rows: Iterable[Sequence[object]]
+) -> dict[str | None, list[int]]:
+    """A session's counts per model: its ``session_model_usage`` rows, and what its own
+    totals hold beyond all of them on its own model, as Hermes' Insights reconciles the two
+    (``_compute_model_breakdown``): cumulative updates set the totals and write no row, and
+    sessions from before the table have no rows."""
+    found: dict[str | None, list[int]] = {}
+    for m, *n in rows:
+        counts = found.setdefault(_model(m), [0] * len(_COUNTS))
+        for i, x in enumerate(n):
+            counts[i] += _count(x)
+    summed = [sum(c[i] for c in found.values()) for i in range(len(_COUNTS))]
+    rest = [max(0, _count(x) - summed[i]) for i, x in enumerate(totals)]
+    if any(rest):
+        counts = found.setdefault(_model(model), [0] * len(_COUNTS))
+        for i, x in enumerate(rest):
+            counts[i] += x
+    return found
+
+
+def _model(value: object) -> str | None:
+    """A model name; Hermes writes ``unknown`` where it had none."""
+    return str(value) if value and str(value) != "unknown" else None
+
+
+def _count(value: object) -> int:
+    """A token or call count; anything not a finite non-negative number reads as 0."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0
+    if not math.isfinite(value) or value <= 0:
+        return 0
+    return int(min(value, MAX_COUNT))
 
 
 def _read_db(profile: str, path: Path, since: datetime, sources: Collection[str]) -> list[Wait]:

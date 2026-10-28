@@ -557,6 +557,30 @@ def test_usage_per_session_and_model(tmp_path: Path) -> None:
     ]
 
 
+def test_usage_reconciles_session_totals_with_per_model_rows(tmp_path: Path) -> None:
+    """As Hermes' Insights: what a session's totals hold beyond all its rows (cumulative
+    updates write no row) is the session model's."""
+    db = StateDb(tmp_path / "state.db", schema=USAGE_SCHEMA)
+    usage_session(db, "s1", None, totals=(1_000, 10, 0, 0, 0, 5))
+    per_model(db, "s1", "m-aux", 1, 7, 1, 0, 0, 0, task="vision")  # nothing else has rows
+    usage_session(db, "s2", None, totals=(300, 30, 0, 0, 0, 3))
+    per_model(db, "s2", "m-main", 2, 200, 20, 0, 0, 0)  # the rest: an absolute update
+    usage_session(db, "s3", None, totals=(0, 0, 0, 0, 0, 0))
+    per_model(db, "s3", "unknown", 1, 5, 5, 0, 0, 0)  # Hermes' seeded rows
+    per_model(db, "s3", "m-main", 1, float("inf"), 4, 0, 0, 0, task="title")  # corrupt
+    found = sorted(
+        (u.session, u.model or "", u.input_tokens, u.output_tokens, u.calls)
+         for u in state_db.read_usage(tmp_path, NOW - 60 * M)
+    )  # fmt: skip
+    assert found == [
+        ("s1", "m-aux", 7, 1, 1),
+        ("s1", "m-main", 993, 9, 4),
+        ("s2", "m-main", 300, 30, 3),
+        ("s3", "", 5, 5, 1),
+        ("s3", "m-main", 0, 4, 1),
+    ]
+
+
 def test_usage_of_an_older_schema(tmp_path: Path) -> None:
     old = """
     CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, started_at REAL NOT NULL,
@@ -611,3 +635,22 @@ def test_the_adapter_puts_usage_on_the_run_in_kelpies_token_convention(tmp_path:
     assert (on_run.output_tokens, on_run.reasoning_tokens, on_run.calls) == (200, 40, 10)
     assert on_run.per_session_total and on_run.last_at == NOW - 2 * M
     assert (own.session_id, own.task_id) == ("hermes-session-dev-1-h2", None)
+
+
+def test_usage_goes_to_the_latest_run_started_by_then(tmp_path: Path) -> None:
+    """A never-closed older run of the same task and profile takes no later session."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    board = Board(home / "kanban.db")
+    ws = tmp_path / "ws"
+    board.task("t1", "running", NOW - 300 * M, assignee="dev-1")
+    board.update("t1", workspace_kind="worktree", workspace_path=str(ws / "t1"))
+    old = board.run("t1", "dev-1", NOW - 240 * M, status="crashed")  # never closed
+    new = board.run("t1", "dev-1", NOW - 90 * M)
+    db = StateDb(home / "profiles" / "dev-1" / "state.db", schema=USAGE_SCHEMA)
+    usage_session(db, "h0", str(ws / "t1"), started=NOW - 230 * M, last=NOW - 200 * M,
+                  totals=(5, 5, 0, 0, 0, 1))  # fmt: skip
+    usage_session(db, "h1", str(ws / "t1"), started=NOW - 80 * M, totals=(5, 5, 0, 0, 0, 1))
+    a = HermesAdapter(db_path=board.path, spool=None, git_state=False, state_home=home)
+    found = {u.platform_session_id: u.session_id for u in a.snapshot(NOW).usage}
+    assert found == {"h0": f"hermes-run-{old}", "h1": f"hermes-run-{new}"}

@@ -857,8 +857,12 @@ class HermesAdapter:
         for profile, sid, cwd, start, end in spans:
             task = tasks.get(cwd) if cwd else None
             mine = runs.get((task, profile), []) if task is not None else []
-            run = next(
-                (s for s in mine if s.started_at <= end and start <= (s.ended_at or now)), None
+            open_then = [s for s in mine if s.started_at <= end and start <= (s.ended_at or now)]
+            # The latest run started by then: a never-closed older run takes no later session.
+            run = max(
+                (s for s in open_then if s.started_at <= start),
+                key=lambda s: s.started_at,
+                default=open_then[0] if open_then else None,
             )
             if run is not None:
                 homes[profile, sid] = (run.id, task)

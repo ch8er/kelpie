@@ -442,7 +442,10 @@ relay them to the hub yet.
 ### Token usage
 
 The same `state.db` totals each session's tokens: per model in `session_model_usage`
-(summed over its billing and task rows), else the session's own columns and `model`. Kelpie
+(summed over its billing and task rows), plus what the session's own columns hold beyond
+those rows on its own `model` (cumulative updates and sessions from before that table write
+no rows; Hermes' Insights reconciles them the same way). A model Hermes records as
+`unknown` reads as none. Kelpie
 reads the sessions of `state_sources` active within `lookback`, read-only, with the waits,
 and gives one `SessionUsage` per session and model: on the same id as its waits (the run
 it worked in, else `hermes-session-<profile>-<id>`), with `platform_session_id` (Hermes' id,
@@ -450,7 +453,9 @@ for spans of the same session), the task, the profile as `owner_id` and its role
 fields follow `Span`: `input_tokens` is Hermes' uncached input plus cache reads and writes,
 `cached_tokens` the reads. A record is the session's total up to `last_at`
 (`per_session_total`): Hermes keeps no per-call counts. The daily report uses them for
-spend per role where traces carry no task (issue #197, item 1).
+spend per role where traces carry no task (issue #197, item 1). Billing routes are summed
+per model: usage included in a subscription is not told apart from metered usage. Like the
+waits, usage stays on the host that reads it: `kelpie agent` does not relay it yet.
 
 ### Progress note and git state
 
