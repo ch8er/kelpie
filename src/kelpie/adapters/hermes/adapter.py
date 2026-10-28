@@ -139,7 +139,7 @@ from kelpie.adapters.hermes.park import (
     unblock_args,
 )
 from kelpie.adapters.hermes.processes import HostTools, ToolProcesses, read_host, resolve, task_at
-from kelpie.adapters.hermes.state_db import DEFAULT_SOURCES, Wait, read_waits
+from kelpie.adapters.hermes.state_db import DEFAULT_SOURCES, Usage, Wait, read_usage, read_waits
 from kelpie.adapters.hermes.stop import (
     CLI_TIMEOUT,
     DEFAULT_CLI,
@@ -170,6 +170,7 @@ from kelpie.core.model import (
     ResourceKind,
     Return,
     Session,
+    SessionUsage,
     SessionWait,
     Snapshot,
     Span,
@@ -635,7 +636,7 @@ class HermesAdapter:
         default=None, init=False, repr=False, compare=False
     )
     # the last read of the profiles' state.db, with its time (read at most every STATE_EVERY)
-    _state_seen: tuple[datetime, tuple[Wait, ...]] | None = field(
+    _state_seen: tuple[datetime, tuple[Wait, ...], tuple[Usage, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
     wait_key: Path = DEFAULT_WAIT_KEY  # signs park and stop markers (park.py, stop.py)
@@ -753,7 +754,8 @@ class HermesAdapter:
             sessions, slots = self._with_tools(self.tools, part.sessions, part.tasks, rows, now)
             part = replace(part, sessions=sessions, resources=slots)
         if self.state_home is not None:
-            part = replace(part, waits=self._waits(self.state_home, now, part.sessions, rows))
+            waits, usage = self._state(self.state_home, now, part.sessions, rows)
+            part = replace(part, waits=waits, usage=usage)
         return part
 
     def read_board(
@@ -800,38 +802,41 @@ class HermesAdapter:
             spans=spans,
         ), rows
 
-    def _waits(
+    def _state(
         self,
         home: Path,
         now: datetime,
         sessions: Sequence[Session],
         rows: Mapping[str, sqlite3.Row],
-    ) -> tuple[SessionWait, ...]:
-        """Waits inside sessions from the profiles' ``state.db`` (state_db.py), each Hermes
-        session's on one id: the run it worked in (the run of the task whose workspace is
-        the session's directory, by the session's profile, open at the time of one of its
-        waits), else the Hermes session's own (``hermes-session-<profile>-<id>``), with the
-        task if known. A workspace path several tasks share belongs to none of them. Nothing
-        that goes wrong here stops the board's snapshot: the waits are left out."""
+    ) -> tuple[tuple[SessionWait, ...], tuple[SessionUsage, ...]]:
+        """Waits inside sessions and token usage per session and model, from the profiles'
+        ``state.db`` (state_db.py), each Hermes session's on one id: the run it worked in
+        (the run of the task whose workspace is the session's directory, by the session's
+        profile, open while it was), else the Hermes session's own
+        (``hermes-session-<profile>-<id>``), with the task if known. A workspace path
+        several tasks share belongs to none of them. Waits are of the last ``state_window``,
+        usage of the sessions active within ``lookback``. Nothing that goes wrong here stops
+        the board's snapshot: both are left out."""
         try:
-            return self._read_waits(home, now, sessions, rows)
-        except Exception as exc:  # waits are an extra: the board is read without them
-            warn_once((str(home), "waits"), "hermes: waits in sessions not read: %s", exc)
-            return ()
+            return self._read_state(home, now, sessions, rows)
+        except Exception as exc:  # an extra: the board is read without them
+            warn_once((str(home), "state"), "hermes: state.db not read: %s", exc)
+            return (), ()
 
-    def _read_waits(
+    def _read_state(
         self,
         home: Path,
         now: datetime,
         sessions: Sequence[Session],
         rows: Mapping[str, sqlite3.Row],
-    ) -> tuple[SessionWait, ...]:
+    ) -> tuple[tuple[SessionWait, ...], tuple[SessionUsage, ...]]:
         seen = self._state_seen
         if seen is not None and timedelta(0) <= now - seen[0] < STATE_EVERY:
-            found = seen[1]
+            found, used = seen[1], seen[2]
         else:
             found = tuple(read_waits(home, now - self.state_window, self.state_sources))
-            self._state_seen = (now, found)
+            used = tuple(read_usage(home, now - self.lookback, self.state_sources))
+            self._state_seen = (now, found, used)
         users: dict[str, list[str]] = {}
         for tid, row in rows.items():
             raw = str(_col(row, "workspace_path") or "").strip()
@@ -842,21 +847,30 @@ class HermesAdapter:
         for s in sessions:
             runs.setdefault((s.task_id, s.owner_id.casefold()), []).append(s)
         recent = [w for w in found if w.at >= now - self.state_window]
+        # A wait belongs to the run its session started in, as the session's usage does.
+        spans = [(w.profile, w.session, w.cwd, w.started or w.at, w.at) for w in recent]
+        spans += [(u.profile, u.session, u.cwd, u.started, u.last) for u in used]
         tasks: dict[str, str | None] = {}  # cwd -> task
-        for w in recent:
-            if w.cwd and w.cwd not in tasks:
-                tasks[w.cwd] = task_at(resolve(w.cwd), workspaces)
+        for _, _, cwd, _, _ in spans:
+            if cwd and cwd not in tasks:
+                tasks[cwd] = task_at(resolve(cwd), workspaces)
         homes: dict[tuple[str, str], tuple[str, str | None]] = {}  # Hermes session -> id, task
-        for w in recent:
-            task = tasks.get(w.cwd) if w.cwd else None
-            mine = runs.get((task, w.profile), []) if task is not None else []
-            run = next((s for s in mine if s.started_at <= w.at <= (s.ended_at or now)), None)
-            key = (w.profile, w.session)
+        for profile, sid, cwd, start, end in spans:
+            task = tasks.get(cwd) if cwd else None
+            mine = runs.get((task, profile), []) if task is not None else []
+            open_then = [s for s in mine if s.started_at <= end and start <= (s.ended_at or now)]
+            # The latest run started by then: a never-closed older run takes no later session.
+            # None started by then (clocks apart): the earliest.
+            run = max(
+                (s for s in open_then if s.started_at <= start),
+                key=lambda s: s.started_at,
+                default=min(open_then, key=lambda s: s.started_at, default=None),
+            )
             if run is not None:
-                homes[key] = (run.id, task)
+                homes[profile, sid] = (run.id, task)
             else:
-                homes.setdefault(key, (f"hermes-session-{w.profile}-{w.session}", task))
-        out = [
+                homes.setdefault((profile, sid), (f"hermes-session-{profile}-{sid}", task))
+        waits = [
             SessionWait(
                 session_id=homes[w.profile, w.session][0],
                 at=w.at,
@@ -868,7 +882,31 @@ class HermesAdapter:
             )
             for w in recent
         ]
-        return tuple(sorted(out, key=lambda w: (w.at, w.session_id)))
+        usage = [
+            SessionUsage(
+                session_id=homes[u.profile, u.session][0],
+                platform_session_id=u.session,
+                started_at=u.started,
+                last_at=u.last,
+                model=u.model,
+                ended_at=u.ended,
+                task_id=homes[u.profile, u.session][1],
+                role=self.role_of(u.profile),
+                owner_id=u.profile,
+                input_tokens=u.input_tokens + u.cache_read_tokens + u.cache_write_tokens,
+                output_tokens=u.output_tokens,
+                cached_tokens=u.cache_read_tokens,
+                cache_write_tokens=u.cache_write_tokens,
+                reasoning_tokens=u.reasoning_tokens,
+                calls=u.calls,
+                source=self.name,
+            )
+            for u in used
+        ]
+        return (
+            tuple(sorted(waits, key=lambda w: (w.at, w.session_id))),
+            tuple(sorted(usage, key=lambda u: (u.last_at, u.session_id, u.model or ""))),
+        )
 
     def _with_tools(
         self,

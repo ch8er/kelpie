@@ -38,7 +38,7 @@ import math
 import re
 import shlex
 import sqlite3
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -105,6 +105,26 @@ class Wait:
     at: datetime
     shape: str
     waited: timedelta | None
+    started: datetime | None = None  # the session's start: which run it belongs to
+
+
+@dataclass(frozen=True, slots=True)
+class Usage:
+    """Token usage of one Hermes session and model, as ``state.db`` totals it."""
+
+    profile: str
+    session: str  # Hermes' session id in that profile's state.db
+    cwd: str | None
+    model: str | None
+    started: datetime
+    last: datetime  # last activity, else the end, else the start
+    ended: datetime | None
+    input_tokens: int  # uncached, as Hermes counts it
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    reasoning_tokens: int
+    calls: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +163,127 @@ def read_waits(
     return waits
 
 
+def read_usage(
+    home: Path, since: datetime, sources: Collection[str] = DEFAULT_SOURCES
+) -> list[Usage]:
+    """Token usage of the sessions of every profile active since ``since`` (item 1 of #197):
+    per session and model from Hermes' ``session_model_usage``, and what the session's own
+    totals hold beyond those rows on its own model (:func:`_reconciled`). Totals of the
+    whole session, not of a day."""
+    usage: list[Usage] = []
+    for profile, path in state_dbs(home):
+        try:
+            usage += _read_usage(profile, path, since, sources)
+        except Exception as exc:  # whatever a database holds must not stop the board's read
+            warn_once((str(path), "usage"), "hermes: cannot read usage in %s: %s", path, exc)
+    return usage
+
+
+MAX_COUNT = 2**53  # a count beyond this is corrupt: Hermes' own bound
+_TOKENS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+_COUNTS = (*_TOKENS, "reasoning_tokens", "api_call_count")
+
+
+def _read_usage(profile: str, path: Path, since: datetime, sources: Collection[str]) -> list[Usage]:
+    conn = sqlite3.connect(
+        path.resolve().as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000
+    )
+    try:
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA query_only=1")
+        conn.execute("BEGIN")  # one read transaction: a consistent view
+        columns = _columns(conn, "sessions")
+        where, args, active = _session_filter(columns, since.timestamp(), sources)
+        have = [c for c in _COUNTS if c in columns]
+        picked = ", ".join(
+            f"{c}" if c in columns else "NULL"
+            for c in ("cwd", "model", "started_at", "ended_at", "last_activity_at")
+        )
+        totals = ", ".join(f"COALESCE({c}, 0)" if c in have else "0" for c in _COUNTS)
+        sessions = {
+            str(r[0]): r[1:]
+            for r in conn.execute(
+                f"SELECT id, {picked}, {totals} FROM sessions WHERE {where} "
+                f"ORDER BY {active} DESC LIMIT ?",
+                (*args, MAX_SESSIONS),
+            )
+        }
+        per_model: dict[str, list[tuple[Any, ...]]] = {}
+        if sessions and _columns(conn, "session_model_usage") >= {"session_id", "model", *_COUNTS}:
+            for chunk in _chunks(sorted(sessions)):
+                marks = ",".join("?" * len(chunk))
+                sums = ", ".join(f"TOTAL({c})" for c in _COUNTS)  # a float: never overflows
+                for row in conn.execute(
+                    f"SELECT session_id, model, {sums} FROM session_model_usage "
+                    f"WHERE session_id IN ({marks}) GROUP BY session_id, model",
+                    chunk,
+                ):
+                    per_model.setdefault(str(row[0]), []).append(row[1:])
+    finally:
+        conn.close()
+    out = []
+    for sid, (cwd, model, started_raw, ended_raw, last_raw, *counts) in sessions.items():
+        started = _epoch(started_raw)
+        if started is None:
+            continue
+        ended = _epoch(ended_raw)
+        last = _epoch(last_raw) or ended or started
+        for m, numbers in _reconciled(model, counts, per_model.get(sid, ())).items():
+            if not any(numbers):
+                continue
+            out.append(
+                Usage(
+                    profile,
+                    sid,
+                    cwd if isinstance(cwd, str) and cwd else None,
+                    m,
+                    datetime.fromtimestamp(started, UTC),
+                    datetime.fromtimestamp(max(last, started), UTC),
+                    None if ended is None else datetime.fromtimestamp(ended, UTC),
+                    *numbers,
+                )
+            )
+    return out
+
+
+def _reconciled(
+    model: object, totals: Sequence[object], rows: Iterable[Sequence[object]]
+) -> dict[str | None, list[int]]:
+    """A session's counts per model: its ``session_model_usage`` rows, and what its own
+    totals hold beyond all of them on its own model, as Hermes' Insights reconciles the two
+    (``_compute_model_breakdown``): cumulative updates set the totals and write no row, and
+    sessions from before the table have no rows. Each count is the larger of the two, never
+    their sum. So, as in Insights, auxiliary usage (only ever rows) of a session whose main
+    loop wrote no rows is undercounted by that much. Unlike Insights, the reasoning
+    residual is kept: the totals count the main loop's reasoning too."""
+    found: dict[str | None, list[int]] = {}
+    for m, *n in rows:
+        counts = found.setdefault(_model(m), [0] * len(_COUNTS))
+        for i, x in enumerate(n):
+            counts[i] += _count(x)
+    summed = [sum(c[i] for c in found.values()) for i in range(len(_COUNTS))]
+    rest = [max(0, _count(x) - summed[i]) for i, x in enumerate(totals)]
+    if any(rest):
+        counts = found.setdefault(_model(model), [0] * len(_COUNTS))
+        for i, x in enumerate(rest):
+            counts[i] += x
+    return found
+
+
+def _model(value: object) -> str | None:
+    """A model name; Hermes writes ``unknown`` where it had none."""
+    return str(value) if value and str(value) != "unknown" else None
+
+
+def _count(value: object) -> int:
+    """A token or call count; anything not a finite non-negative number reads as 0."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return 0
+    if not math.isfinite(value) or value <= 0:
+        return 0
+    return int(min(value, MAX_COUNT))
+
+
 def _read_db(profile: str, path: Path, since: datetime, sources: Collection[str]) -> list[Wait]:
     conn = sqlite3.connect(
         path.resolve().as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000
@@ -173,10 +314,11 @@ def _read_db(profile: str, path: Path, since: datetime, sources: Collection[str]
             Wait(
                 profile,
                 sid,
-                sessions[sid],
+                sessions[sid][0],
                 datetime.fromtimestamp(at, UTC),
                 shape.shape,
                 None if waited is None else wait_bucket(waited),
+                sessions[sid][1],
             )
         )
     return waits
@@ -186,11 +328,11 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def _sessions(
-    conn: sqlite3.Connection, start: float, sources: Collection[str]
-) -> dict[str, str | None]:
-    """Session id -> working directory, of the sessions active since ``start``."""
-    columns = _columns(conn, "sessions")
+def _session_filter(
+    columns: Collection[str], start: float, sources: Collection[str]
+) -> tuple[str, list[object], str]:
+    """The ``WHERE`` of the sessions read (active since ``start``, of ``sources``), its
+    arguments, and the activity expression (Hermes' own index for recent sessions)."""
     active = (
         "COALESCE(last_activity_at, started_at)" if "last_activity_at" in columns else "started_at"
     )
@@ -203,11 +345,26 @@ def _sessions(
         else:
             where += f" AND source IN ({marks})"
             args += sorted(sources)
+    return where, args, active
+
+
+def _sessions(
+    conn: sqlite3.Connection, start: float, sources: Collection[str]
+) -> dict[str, tuple[str | None, datetime | None]]:
+    """Session id -> working directory and start, of the sessions active since ``start``."""
+    columns = _columns(conn, "sessions")
+    where, args, active = _session_filter(columns, start, sources)
+    began = "started_at" if "started_at" in columns else "NULL"
     rows = conn.execute(
-        f"SELECT id, cwd FROM sessions WHERE {where} ORDER BY {active} DESC LIMIT ?",
+        f"SELECT id, cwd, {began} FROM sessions WHERE {where} ORDER BY {active} DESC LIMIT ?",
         (*args, MAX_SESSIONS),
     )
-    return {str(sid): (cwd if isinstance(cwd, str) and cwd else None) for sid, cwd in rows}
+    out: dict[str, tuple[str | None, datetime | None]] = {}
+    for sid, cwd, raw in rows:
+        at = _epoch(raw)
+        when = None if at is None else datetime.fromtimestamp(at, UTC)
+        out[str(sid)] = (cwd if isinstance(cwd, str) and cwd else None, when)
+    return out
 
 
 def _wait_calls(
