@@ -56,6 +56,12 @@ connector's business.
    (repositories, workflows, runners, PRs) and the tasks it explains, open until a build
    passes that job again. See :mod:`kelpie.rules._ci_outage`; the params are the contract
    in :mod:`kelpie.core.incidents`. ``outage_min_prs = 0`` turns it off.
+
+5. **CI jobs that never start** (#229): builds the CI refused (no runner, no step: a spending
+   limit, a failed payment) or left queued for ``queued_after``, across ``outage_min_prs``
+   change requests → one ``warning`` outage that says which. A new check: only logged
+   (``not_started_mode = "observe"``) until set to ``"rule"``. See
+   :mod:`kelpie.rules._ci_not_started`.
 """
 
 from __future__ import annotations
@@ -85,6 +91,8 @@ from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
 from kelpie.rules._alerts import count as counted
+from kelpie.rules._ci_not_started import STATE as NOT_STARTED
+from kelpie.rules._ci_not_started import not_started, ran_again
 from kelpie.rules._ci_outage import outages, passed_again
 
 NAME = "ci_economy"
@@ -130,6 +138,9 @@ class CiEconomy:
     max_reading_age: timedelta = timedelta(hours=1)
     outage_min_prs: int = 3
     outage_window: timedelta = timedelta(hours=2)
+    # CI jobs that never start (#229): refused, or queued this long, across outage_min_prs.
+    queued_after: timedelta = timedelta(minutes=30)
+    not_started_mode: str = "observe"  # a new check: "observe", or "rule" (the rule's mode)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -144,10 +155,19 @@ class CiEconomy:
             actions.append(waste)
         actions.extend(self._quota(recent, snapshot))
         actions.extend(outages(snapshot, NAME, self.outage_min_prs, self.outage_window))
+        observe = self.not_started_mode == "observe"
+        actions.extend(
+            not_started(
+                snapshot, NAME, self.outage_min_prs, self.outage_window, self.queued_after, observe
+            )
+        )
         return actions
 
     def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
-        """An outage resolves when its job passes again: say where. None for the others."""
+        """An outage resolves when its job passes again (CI starts jobs again): say where.
+        None for the others."""
+        if state_id == NOT_STARTED:
+            return ran_again(snapshot)
         if not is_outage_state(state_id):
             return None
         return passed_again(state_id, snapshot, self.outage_min_prs, self.outage_window)
@@ -551,7 +571,14 @@ def _number(value: Any, name: str, *, top: float | None = None, zero: bool = Fal
 def build(config: dict[str, Any]) -> CiEconomy:
     config = dict(config)
     kwargs: dict[str, Any] = {}
-    for key in ("window", "forecast_horizon", "quota_period", "max_reading_age", "outage_window"):
+    for key in (
+        "window",
+        "forecast_horizon",
+        "quota_period",
+        "max_reading_age",
+        "outage_window",
+        "queued_after",
+    ):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     if "docs_globs" in config:
@@ -566,6 +593,11 @@ def build(config: dict[str, Any]) -> CiEconomy:
         kwargs["waste_min_minutes"] = _number(
             config.pop("waste_min_minutes"), "waste_min_minutes", zero=True
         )
+    if "not_started_mode" in config:
+        mode = config.pop("not_started_mode")
+        if mode not in ("observe", "rule"):
+            raise ValueError('not_started_mode must be "observe" or "rule" (the rule\'s own mode)')
+        kwargs["not_started_mode"] = mode
     if "outage_min_prs" in config:
         value = config.pop("outage_min_prs")
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1000:

@@ -452,17 +452,26 @@ class Job:
     connector like ``Build.status``. ``step`` is the first named step that did not succeed in
     a job that did not succeed, when the CI names one. ``runner`` is the machine a job that
     did not succeed ran on (None for a CI's shared hosted pool, whose names do not identify a
-    machine) and ``labels`` the runner labels it asked for (e.g. ``self-hosted``, an OS)."""
+    machine) and ``labels`` the runner labels it asked for (e.g. ``self-hosted``, an OS).
+    ``started`` is False for a job the CI never started: no runner took it and it ran no step
+    (on GitHub, a spending limit or a failed payment); such a job is not ``failed``, it never
+    ran."""
 
     name: str
     conclusion: BuildStatus
     step: str | None = None
     runner: str | None = None
     labels: tuple[str, ...] = ()
+    started: bool = True
 
     @property
     def failed(self) -> bool:
-        return self.conclusion is BuildStatus.FAILURE
+        return self.conclusion is BuildStatus.FAILURE and self.started
+
+    @property
+    def refused(self) -> bool:
+        """The CI ended it without starting it (no runner, no step)."""
+        return self.conclusion is BuildStatus.FAILURE and not self.started
 
 
 @dataclass(frozen=True, slots=True)

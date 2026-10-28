@@ -367,9 +367,9 @@ def test_a_finished_build_says_which_job_and_step_failed_and_where() -> None:
                 ("self-hosted", "linux"),
             ),
             Job("lint", BuildStatus.SUCCESS),
-            Job("deploy", BuildStatus.CANCELLED),
+            Job("deploy", BuildStatus.CANCELLED, started=False),
             Job("docs", BuildStatus.SKIPPED),
-            Job("odd", BuildStatus.UNKNOWN),
+            Job("odd", BuildStatus.UNKNOWN, started=False),
         )
         assert [j.failed for j in done.jobs] == [True, False, False, False, False]
         assert active.jobs is None  # an active run's jobs are not read
@@ -385,7 +385,10 @@ def test_jobs_are_read_once_per_attempt_and_none_when_not_read() -> None:
         first = source(Snapshot(now=NOW)).builds[0].jobs
         clock.advance(minutes=5)
         assert source(Snapshot(now=clock.now)).builds[0].jobs == first
-        assert first == (Job("build", BuildStatus.FAILURE),) and gh.paths().count(jobs) == 1
+        assert (
+            first == (Job("build", BuildStatus.FAILURE, started=False),)
+            and gh.paths().count(jobs) == 1
+        )
     with serve() as gh:  # the request fails: not read, and asked again next scan
         runs_page(gh, [run(1, 30, status="completed", conclusion="failure")])
         gh.reply(f"{RUNS}/1/attempts/1/jobs?per_page=100", {"message": "boom"}, status=500)
@@ -714,3 +717,19 @@ def test_a_hosted_runner_has_no_machine_name() -> None:
             ("test", None, ("ubuntu-latest",)),
             ("build", "mac-1", ("ubuntu-latest",)),
         ]
+
+
+def test_a_job_the_ci_refused_never_started() -> None:
+    """GitHub's answer to a spending limit or a failed payment, as seen on a live repository:
+    the job "failed" in two seconds with no runner and no step."""
+    with serve() as gh:
+        runs_page(gh, [run(1, 30, status="completed", conclusion="failure")])
+        ran = {"name": "test", "status": "completed", "conclusion": "failure", "steps": [
+            {"name": "Run tests", "conclusion": "failure"}], "runner_name": "GitHub Actions 7",
+            "runner_group_name": "GitHub Actions"}  # fmt: skip
+        refused = {"name": "ci-ok", "status": "completed", "conclusion": "failure", "steps": [],
+            "runner_name": "", "runner_group_name": "", "labels": ["ubuntu-24.04"]}  # fmt: skip
+        gh.reply(f"{RUNS}/1/attempts/1/jobs?per_page=100", job_list(ran, refused))
+        test, ci_ok = ci(gh)(Snapshot(now=NOW)).builds[0].jobs or ()
+        assert test.started and test.failed and not test.refused
+        assert not ci_ok.started and ci_ok.refused and not ci_ok.failed

@@ -1,0 +1,64 @@
+id: "20-ci-not-started"
+incident: 20
+title: "CI jobs that never start: a spending limit stops every PR's CI at once"
+description: >
+  The farm's CI provider stopped starting jobs: a spending limit was reached. A job it
+  refuses does not fail the usual way: it ends at once with no runner and no step, and
+  every PR's required check is red without anything having run. Rule 9's failing-jobs
+  outage must not mistake that for a broken toolchain, and the waits must not look like
+  separate PR problems. Rule 9 must report one outage of CI jobs not starting, with the PRs
+  and the tasks waiting on them, while a repository whose CI ran again since is not part of
+  it.
+rule: ci_economy
+config:
+  outage_min_prs: 3
+  outage_window: "2h"
+  queued_after: "30m"
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  tasks:
+    - {id: T-401, title: "Checkout page", status: waiting, status_since: "2026-03-02T11:20:00+00:00", owner_id: agent-dev-1}
+    - {id: T-402, title: "Cart totals", status: waiting, status_since: "2026-03-02T11:25:00+00:00", owner_id: agent-dev-2}
+  conditions:
+    - {id: C-401, kind: ci_status, task_id: T-401, params: {repo: example/shop, pr: 61}, satisfied: false, checked_at: "2026-03-02T11:58:00+00:00"}
+    - {id: C-402, kind: ci_status, task_id: T-402, params: {repo: example/shop, pr: 62}, satisfied: false, checked_at: "2026-03-02T11:58:00+00:00"}
+  pull_requests:
+    - {repo: example/shop, number: 61, title: "T-401 checkout page", branch: "task/T-401", task_ids: [T-401]}
+    - {repo: example/shop, number: 62, title: "T-402 cart totals", branch: "task/T-402", task_ids: [T-402]}
+    - {repo: example/shop, number: 63, title: "T-403 coupons", branch: "task/T-403"}
+  builds:
+    # Three PRs: the required check refused (no runner, no step), the other jobs ran.
+    - {id: B-61, source: ci, repo: example/shop, workflow: .github/workflows/ci.yml, branch: task/T-401, sha: "6100000",
+       event: pull_request, pr: 61, status: failure, started_at: "2026-03-02T11:15:00+00:00",
+       finished_at: "2026-03-02T11:19:00+00:00", minutes: 4,
+       jobs: [{name: test, conclusion: success}, {name: ci-ok, conclusion: failure, started: false}]}
+    - {id: B-62, source: ci, repo: example/shop, workflow: .github/workflows/ci.yml, branch: task/T-402, sha: "6200000",
+       event: pull_request, pr: 62, status: failure, started_at: "2026-03-02T11:21:00+00:00",
+       finished_at: "2026-03-02T11:21:02+00:00", minutes: 0,
+       jobs: [{name: test, conclusion: failure, started: false}, {name: ci-ok, conclusion: failure, started: false}]}
+    # A third run sits queued: no runner picks it up.
+    - {id: B-63, source: ci, repo: example/shop, workflow: .github/workflows/ci.yml, branch: task/T-403, sha: "6300000",
+       event: pull_request, pr: 63, status: queued, started_at: "2026-03-02T11:10:00+00:00"}
+    # Negative case: another repository's CI was refused once, but has run again since.
+    - {id: B-71, source: ci, repo: example/docs, workflow: .github/workflows/ci.yml, branch: task/T-501, sha: "7100000",
+       event: pull_request, pr: 5, status: failure, started_at: "2026-03-02T11:00:00+00:00",
+       finished_at: "2026-03-02T11:00:02+00:00", minutes: 0,
+       jobs: [{name: build, conclusion: failure, started: false}]}
+    - {id: B-72, source: ci, repo: example/docs, workflow: .github/workflows/ci.yml, branch: main, sha: "7200000",
+       event: push, status: success, started_at: "2026-03-02T11:30:00+00:00",
+       finished_at: "2026-03-02T11:35:00+00:00", minutes: 5, jobs: [{name: build, conclusion: success}]}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "CI jobs not starting since 2026-03-02 11:10 UTC: 3 change(s) in example/shop"
+    params:
+      kind: ci_not_started
+      repos: [example/shop]
+      prs: ["example/shop#61", "example/shop#62", "example/shop#63"]
+      tasks: [T-401, T-402]
+not_expected_actions:
+  # Refused jobs are not a toolchain outage of failing jobs.
+  - kind: alert
+    reason_contains: "CI outage since"
+  - kind: alert
+    reason_contains: "example/docs"

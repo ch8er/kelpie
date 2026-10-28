@@ -467,6 +467,8 @@ forecasts the CI minutes quota, and reports a CI outage as one incident. Needs b
 | `max_reading_age` | `"1h"` | duration, > 0 | Quota readings older than this are ignored. |
 | `outage_min_prs` | `3` | count, 0 (off) or 2–1000 | A CI outage: some window holds failures of this many change requests (repository and branch; retries count) at the same workflow, job and step, with evidence that the environment broke; twice as many without it... |
 | `outage_window` | `"2h"` | duration, > 0 | ...that window's length; a failure counts until the job passes again in its repository. |
+| `queued_after` | `"30m"` | duration, > 0 | CI jobs not starting: a build still queued this long counts, as does a finished one with a job the CI refused (no runner, no step) within `outage_window`; `outage_min_prs` change requests with one → one outage. |
+| `not_started_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"` (then it follows the rule's mode and folds the tasks' own alerts). |
 
 Waste categories, each build counted once in this order: superseded, already verified
 commit, docs-only, draft, WIP commit.
@@ -499,6 +501,16 @@ failures leave the CI connector's window or too few of them stay readable, and m
 open again. The failing step comes from the job list the CI connector reads for billable
 minutes (no logs); a build whose jobs it did not read takes no part. Times are the builds'
 finish times.
+
+CI jobs that never start (#229) are a separate outage: a CI that hit a spending limit or a
+failed payment refuses jobs (they end at once with no runner and no step) or leaves runs
+queued. A refused job is not a failing one: it never counts toward the outage above. Once
+`outage_min_prs` change requests have a refused build within `outage_window` or a build
+queued for `queued_after`, one `warning` "CI jobs not starting since <time>" names the
+repositories, PRs and waiting tasks and says which it is: check the CI's billing and
+spending limits (refused) or that runners are up (queued). A repository's refused builds
+stop counting once a later build there started all its jobs; the "Resolved" notice names
+the newest such build. Observe-only until `not_started_mode = "rule"`.
 
 ### 10. loop_breaker
 
