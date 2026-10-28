@@ -770,6 +770,7 @@ context growth per step, restarts from zero.
 **Acceptance criteria**
 - [x] Cache hit rate per role and model, with the steps where the cache breaks
 - [x] Context growth per step; sessions with runaway context flagged
+- [x] Runaway context as a live alert per session (rule 11: `context_alert_tokens`, `context_min_steps`), not only a report line (#197); fixture `field-07-runaway-context.yaml`
 - [x] Tokens burned on restarts from zero (feeds the cost of chaos)
 - [x] Recommendations with estimated savings in the daily report
 

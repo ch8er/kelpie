@@ -417,6 +417,13 @@ KINDS = {
         "Replace the blocker that can never clear",
         1,
     ),
+    # no_progress
+    "runaway context": Kind(
+        "no_progress",
+        from_fixture("field-07-runaway-context"),
+        "Session S-F701: 190k-token context, +10,000 per step",
+        "Compact the context or bound the session",
+    ),
     # wait_condition
     "overdue": Kind(
         "wait_condition",

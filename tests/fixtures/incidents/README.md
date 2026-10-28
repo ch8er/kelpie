@@ -195,6 +195,7 @@ Fixture conventions:
 | 21 | `21-stable-builtin-skill.yaml` | `instruction_bloat` | nothing for a large built-in skill loaded three times a day or a small CLAUDE.md; `alert` for a stable AGENTS.md over the threshold read into every ops session (960,000 tokens a day) |
 | 21 | `21-standing-answers-repeated.yaml` | `instruction_bloat` | informational `alert` for the support role's near-duplicate sections and one value in four files; nothing for a small, slowly growing developer file |
 | – | `field-05-repeated-huge-outputs.yaml` | `output_offenders` | `comment` T-F502 (the latest offending task still open; T-F503 is done) addressed to human-owner (xcbeautify for `xcodebuild`, 2 days, ~179k tokens); `alert` to whoever owns the ops instructions for `tool:read_file` (no task to comment on) |
+| – | `field-07-runaway-context.yaml` | `no_progress` | `alert` for T-F701's session (190k-token context after 8 steps, +10k per step, though it commits); nothing for the session that compacted, nor for one with too few steps |
 
 ## Adding a fixture
 
