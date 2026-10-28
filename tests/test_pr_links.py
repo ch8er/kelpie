@@ -131,6 +131,29 @@ def test_namespaced_ids_link_by_their_local_id_when_it_is_unique() -> None:
     }
 
 
+def test_board_namespaced_ids_link_by_their_local_id_on_one_host_and_across_hosts() -> None:
+    def on(board: str, tid: str, host: str | None = None) -> Task:
+        prefix = f"{host}:{board}" if host else board
+        return replace(t(f"{prefix}:{tid}"), board=board, host=host)
+
+    tasks = [on("qr", "t_1a"), on("sign", "t_2b"), on("qr", "t_3c"), on("sign", "t_3c")]
+    tasks.append(on("qr", "t_4d", host="vm-1"))
+    pulls = (
+        pr(1, "t_1a: fix login", "hermes/t_1a"),
+        pr(2, "Child", "hermes/t_2b"),
+        pr(3, "same id on two boards", "hermes/t_3c"),
+        pr(4, "on a board of another host", "hermes/t_4d"),
+    )
+    assert ids(link_tasks(pulls, tasks, None)) == {
+        1: ("qr:t_1a",),
+        2: ("sign:t_2b",),
+        3: (),
+        4: ("vm-1:qr:t_4d",),
+    }
+    assert t("qr:t_1a").local_id is None  # no board: not namespaced
+    assert replace(t("qr:"), board="qr").local_id is None  # nothing after the prefix
+
+
 def test_on_a_partial_farm_only_local_ids_known_unique_link() -> None:
     from kelpie.core.pr_links import unique_local_ids
 

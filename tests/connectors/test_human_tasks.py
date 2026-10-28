@@ -437,3 +437,16 @@ def test_status_lines(tmp_path: Path) -> None:
     )
     assert "hermes human owners alice, bob" in both
     assert Settings().human_tasks is None
+
+
+def test_block_reason_names_a_human_task_of_the_same_board_by_its_local_id() -> None:
+    def on(board: str, task: Task) -> Task:
+        return replace(task, id=f"{board}:{task.id}", board=board)
+
+    agent = on("qr", blocked_agent("waiting_human: Approval in H-1."))
+    out = attach(agent, on("qr", human_task(Status.DONE)), on("sign", human_task()))
+    (c,) = out.conditions
+    assert c.task_id == "qr:T-1" and c.params["task"] == "qr:H-1" and c.satisfied is True
+    # The same local id on another board only: never that board's task.
+    out = attach(agent, on("sign", human_task(Status.DONE)))
+    assert out.conditions == ()
