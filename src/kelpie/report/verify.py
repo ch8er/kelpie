@@ -26,13 +26,13 @@ What the report cannot separate, it does not credit (#193):
   (:func:`overlapping`): the group is measured once, from ``window`` before its first
   fix to ``window`` after its last, over the rule and role its fixes share (else all),
   and credited to none of them alone. Only what one fix alone can explain is shown per
-  fix: its role's tokens, failures, throughput (and review time for a review role) when
-  no other fix of the group touches that role or the whole farm, and its command's
-  output per call when no other fix names the same command for the same role. Fixes are
-  read from ``Evidence.known_from`` on: a group that starts less than a window after it
-  says an older fix may belong to it (``Verification.truncated``), and its before-window
-  starts at ``known_from`` at the earliest (a side under a quarter of the window is
-  *direction only*).
+  fix: its role's tokens and failures (and review time for a review role) when no other
+  fix of the group touches that role or the whole farm, and its command's output per
+  call when no other fix names the same command for the same role. Fixes are read from
+  ``Evidence.known_from`` on: a group that starts less than a window after it says an
+  older fix may belong to it (``Verification.truncated``), and its before-window starts
+  at ``known_from`` at the earliest (a side under a quarter of the window is *direction
+  only*).
 - **Newly enabled signals.** A per-day rate whose data starts after the first quarter of
   the before-window has no "before" to compare with: tokens per day when traces began
   that late (after a whole loaded window without a span, when ``known_from`` is set),
@@ -254,7 +254,6 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
             mine = [
                 _tokens(ev, e, b, a, _short(b, a, ev), excluded),
                 _failures(ev, e, b, a),
-                _done_per_work_hour(ev, e, b, a, _short(b, a, ev)),
             ]
             if e.role in ev.review_roles:
                 mine.append(_review_time(ev, e, b, a))
@@ -527,16 +526,23 @@ def _failures(ev: Evidence, event: FixEvent, b: Window, a: Window) -> Metric:
     )
 
 
-WORK_STAGES = frozenset({"queue", "working", "review"})  # ready work, or work under way
+# Ready work, work under way, or work nobody owns (still work the farm should have done).
+WORK_STAGES = frozenset({"queue", "working", "review", "ownerless"})
 
 
 def _done_per_work_hour(
     ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool
 ) -> Metric | None:
     """Tasks done per hour while agent work was available: some agent task (not a
-    person's) of the fix's role (all roles without one) was ready, being worked on or in
-    review. Hours with nothing to do are left out: an idle farm is not a slower one, nor
-    a farm that ran out of work. None without board tasks."""
+    person's) of the fix's role (all agent tasks without one) was ready, being worked on, in
+    review or ownerless. Hours with nothing to do are left out: an idle farm is not a
+    slower one, nor a farm that ran out of work. A task counts under its role as the board
+    reports it now (a task in review may carry the reviewer's role by then, as in
+    :mod:`kelpie.report.throughput`). Work hours are a lower bound for done tasks (queue
+    time before their first session is not known), so a side with under a quarter of the
+    window of work is *direction only*. Never credited to one fix of a group: a task gets
+    done through several roles. None without board tasks; no row when nothing was done on
+    either side (a stalled farm shows in hours lost instead)."""
     if not ev.tasks:
         return None
     people = {o.id for o in ev.owners if o.kind is OwnerKind.HUMAN}
@@ -548,6 +554,8 @@ def _done_per_work_hour(
     windows = state_windows(r.state for r in ev.states)
 
     def role_of_session(s: Session) -> str | None:
+        # Only to tell review sessions from work (both count as work here); unlike
+        # throughput(), no fallback to the task's role is needed for that.
         return owner_role.get(s.owner_id) or roles.get(s.id)
 
     def task_role(t: Task) -> str | None:
@@ -580,12 +588,19 @@ def _done_per_work_hour(
     who = f" ({md.text(event.role)})" if event.role else ""
     return Metric(
         f"tasks done per hour with work available{who} "
-        f"({hb:.0f} of {wb:.0f}h -> {ha:.0f} of {wa:.0f}h with work)",
+        f"({_h(hb)} of {_h(wb)}h -> {_h(ha)} of {_h(wa)}h with work)",
         "/h",
         nb / hb if hb else None,
         na / ha if ha else None,
         nb,
         na,
-        short or min(nb, na) < ev.min_sample,
+        short or min(nb, na) < ev.min_sample or min(hb, ha) < ev.window / HOUR / 4,
         lower_is_better=False,
     )
+
+
+HOUR = timedelta(hours=1)
+
+
+def _h(hours: float) -> str:
+    return f"{hours:.0f}" if hours >= 10 else f"{hours:.1f}"
