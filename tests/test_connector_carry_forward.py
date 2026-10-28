@@ -419,6 +419,24 @@ def test_a_ready_tasks_gate_is_never_carried() -> None:
     assert failed.conditions == () and rule.evaluate(failed) == []
 
 
+def test_a_condition_a_ready_task_reads_is_never_carried() -> None:
+    """Named by a blocked task's block but linked to a ready task by ``task_id``: carried
+    for the block, it would gate the ready task."""
+    since = T0 - timedelta(hours=1)
+    ready = Task("R", "Ship", Status.READY, T0 - M)
+    blocked = Task("B", "t", Status.BLOCKED, since, block=Block("waiting for CI", since, "C"))
+    given = Condition("C", ConditionKind.CI_STATUS, "R")
+
+    def checking(snapshot: Snapshot) -> Snapshot:
+        return replace(snapshot, conditions=(replace(given, satisfied=False, checked_at=T0),))
+
+    ticks = Ticks(Snapshot(now=T0, tasks=(ready, blocked), conditions=(given,)), "ci", checking)
+    rule = DispatchGate()
+    assert [a.kind for a in rule.evaluate(ticks.at(T0, failing=False))] == [ActionKind.WAIT]
+    failed = ticks.at(T0 + M, failing=True)
+    assert failed.conditions == (given,) and rule.evaluate(failed) == []
+
+
 def test_widen_is_bounded_by_carry_for() -> None:
     since = T0 - timedelta(hours=1)
     gone = Condition("C-9", HUMAN, "W-9", {"task": "H-1"}, False, checked_at=T0)

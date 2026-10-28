@@ -172,8 +172,8 @@ def carry_forward(snapshot: Snapshot, last: Contribution) -> Snapshot:
     blocked, are carried: they keep their ``checked_at``, so they go stale on their own and
     no rule acts on them once they are older than its ``max_condition_age``, and meanwhile
     they keep the alerts about that wait or block quiet. A check that found a condition met
-    is never carried, nor anything for a task in another status (a ready task's gate), so a
-    failed step never wakes, unblocks, releases or parks anything. A check is carried only
+    is never carried, nor any condition a task in another status reads (a ready task's gate),
+    so a failed step never wakes, unblocks, releases or parks anything. A check is carried only
     onto a condition still exactly as the step was given it (not one registered again,
     changed or checked meanwhile) and named once; an attached condition only onto the same
     block, unchanged since it was linked. Nothing older than :data:`CARRY_FOR` is carried.
@@ -188,11 +188,19 @@ def carry_forward(snapshot: Snapshot, last: Contribution) -> Snapshot:
         for t in tasks
         if t.id in where and t.block is not None and t.block.condition_id
     }
+    # A condition any other task reads (as its own, or named by its block) is never carried:
+    # it could gate a ready task, or override a done task's evidence.
+    others = {t.id for t in tasks if t.id not in where}
+    read_elsewhere = {
+        t.block.condition_id
+        for t in tasks
+        if t.id in others and t.block is not None and t.block.condition_id
+    } | {c.id for c in conditions if c.task_id in others}
     inputs = {c.id: c for c in last.inputs}
     links = {link.condition_id: link for link in last.links}
     added: list[Condition] = []
     for old in last.conditions:
-        if old.satisfied or not _recent(old, snapshot.now):
+        if old.satisfied or not _recent(old, snapshot.now) or old.id in read_elsewhere:
             continue
         if old.id in at:
             now = conditions[at[old.id]]
