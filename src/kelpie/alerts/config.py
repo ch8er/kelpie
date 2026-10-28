@@ -25,7 +25,7 @@
     min_severity = "critical"
 
 An alert goes to every channel whose ``min_severity`` it reaches. ``task_url`` must be an
-http(s) URL containing ``{id}``; unset, ``[report] task_url`` is used when it is one.
+http(s) URL containing ``{id}``; unset, ``[report] task_url`` (checked the same way).
 Secrets are read from the environment when the channels are built; a missing or malformed
 one stops Kelpie at startup.
 """

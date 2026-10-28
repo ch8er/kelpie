@@ -494,6 +494,11 @@ def test_report_config() -> None:
         {"timezone": ""},
         {"dir": ""},
         {"task_url": "https://no-placeholder"},
+        {"task_url": "javascript:{id}"},
+        {"task_url": "board://tasks/{id}"},
+        {"task_url": "https://{id}.board.example.org/"},  # {id} in the host
+        {"task_url": "https://user:secret@board.example.org/t/{id}"},
+        {"task_url": 5},
         {"url": "https://reports.example.org/latest.md"},  # no {date}
         {"url": "file:///srv/reports/kelpie-report-{date}.md"},  # not http(s)
         {"url": "https://{date}.reports.example.org/"},  # {date} in the host

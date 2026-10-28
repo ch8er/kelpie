@@ -1490,7 +1490,7 @@ report's own text stays English.
 | `dedup_window` | `"10m"` | duration, >= 0 | Identical alerts within this window are sent once per channel. |
 | `queue_size` | `50` | count, 1 to 1000 | Per channel; alerts that do not fit are dropped and counted. |
 | `language` | `"en"` | `en` \| `ru` | Language of Kelpie's own words in an alert (headlines, labels, units, "Kelpie did"). Text that rules and agents wrote is shown as it is. Any other value stops startup. |
-| `task_url` | `[report] task_url` | http(s) URL with `{id}` | The "Open task" link of each task in an alert; the id is URL-quoted into `{id}`, which must not be in the host. Unset: `[report] task_url` when that is an http(s) URL, else no links. |
+| `task_url` | `[report] task_url` | http(s) URL with `{id}` | The "Open task" link of each task in an alert; the id is URL-quoted into `{id}`, which must not be in the host. Unset: `[report] task_url`. |
 | `channels` | `[]` | array of tables | `[[alerts.channels]]`, see below. Names must be unique. |
 
 Telegram channel (`type = "telegram"`):
@@ -1653,7 +1653,7 @@ once a day when `at` is set.
 | --- | --- | --- | --- |
 | `timezone` | `"UTC"` | IANA name | Where a day starts and ends. |
 | `dir` | unset | path | Writes `kelpie-report-<date>.md` there. Unset: stdout only. |
-| `task_url` | unset | string with `{id}` | Links task ids in the Markdown. |
+| `task_url` | unset | http(s) URL with `{id}` | Links task ids in the Markdown (and, unless `[alerts] task_url` is set, in alerts). Checked like `[alerts] task_url`: a plain http(s) URL, no credentials, `{id}` not in the host. |
 | `url` | unset | http(s) URL with `{date}` | Where the full report of a day can be read (e.g. where `dir` is served); the chat summary links it as "Open report", with the day (YYYY-MM-DD) in `{date}`, which must not be in the host. Unset: no link. |
 | `hour_usd` | unset | dollars, > 0 | What an hour lost costs: a stuck task-hour, or an agent-hour idle behind a hold or waiting on a person. Unset: hours stay hours. |
 | `channels` | all | list of channel names | `[[alerts.channels]]` that get the summary with `--send`. |

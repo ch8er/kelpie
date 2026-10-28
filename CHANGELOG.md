@@ -331,6 +331,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 ### Safety
 
+- `[report] task_url` must be an http(s) URL with `{id}` outside its host, checked like
+  `[alerts] task_url`: a template such as `javascript:{id}` no longer reaches the report's
+  task links. A config with another scheme now fails to load with a clear error.
 - Dry-run is on by default and every rule starts in `observe`. `act` mode is refused at
   startup for rules whose actions the configured adapter cannot yet carry out ([#4](https://github.com/ch8er/kelpie/pull/4), [#13](https://github.com/ch8er/kelpie/pull/13)).
 - A failed or unexecutable action always alerts at warning or above, once per failure

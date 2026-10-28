@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from kelpie.alerts.render import check_url_template, plain_http_url
+from kelpie.alerts.render import check_task_url, check_url_template, plain_http_url
 from kelpie.core.serde import parse_duration
 from kelpie.report.verify import DEFAULT_MIN_SAMPLE, DEFAULT_REVIEW_ROLES, DEFAULT_WINDOW
 
@@ -39,9 +39,10 @@ SEVERITIES = ("info", "warning", "critical")
 @dataclass(frozen=True, slots=True)
 class ReportSettings:
     """``timezone``: where a day starts and ends. ``dir``: where ``kelpie report`` writes
-    ``kelpie-report-<date>.md`` (None: stdout only). ``task_url``: a link template with
-    ``{id}`` for task ids. ``url``: where the full report of a day can be read, an http(s)
-    template with ``{date}`` (YYYY-MM-DD), linked from the chat summary (None: no link).
+    ``kelpie-report-<date>.md`` (None: stdout only). ``task_url``: a link template for task
+    ids, an http(s) URL with ``{id}`` outside its host (checked as ``[alerts] task_url``).
+    ``url``: where the full report of a day can be read, an http(s) template with
+    ``{date}`` (YYYY-MM-DD), linked from the chat summary (None: no link).
     ``hour_usd``: what an hour of stuck work costs (e.g. an agent slot), to put chaos hours
     into dollars; None leaves hours as hours. ``channels``: the
     ``[[alerts.channels]]`` that get the summary (None: all), sent at ``severity``.
@@ -91,8 +92,8 @@ def load_report(section: Any) -> ReportSettings:
     if out_dir is not None and (not isinstance(out_dir, str) or not out_dir.strip()):
         raise ValueError("[report] dir must be a non-empty path")
     url = section.get("task_url")
-    if url is not None and (not isinstance(url, str) or "{id}" not in url):
-        raise ValueError("[report] task_url must be a string containing {id}")
+    if url is not None:  # an http(s) link, as alerts' task_url: no other scheme in a link
+        check_task_url(url, "[report] task_url")
     report_url = section.get("url")
     if report_url is not None:
         check_url_template(report_url, "{date}", "[report] url")
