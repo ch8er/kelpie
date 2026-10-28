@@ -4,14 +4,16 @@ expiry is never lost: not on a full queue, at shutdown or under flood control.""
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
 from kelpie.alerts import Delivery
-from kelpie.alerts.delivery import Expiring
+from kelpie.alerts.delivery import Expiring, _Expire
 from kelpie.core.actions import Severity
 from kelpie.core.alerts import AlertEvent, Transition
 
@@ -74,19 +76,60 @@ class Plain:
         self.sent.append(message)
 
 
+def offers(worker: Any) -> list[object]:
+    """What ``Delivery`` puts on ``worker``'s queue, in order (sends and expiries)."""
+    seen: list[object] = []
+    offer = worker.offer
+
+    def recording(message: object) -> str | None:
+        seen.append(message)
+        return offer(message)
+
+    worker.offer = recording
+    return seen
+
+
 def test_only_a_channel_with_controls_hears_of_an_unshown_resolve() -> None:
     on, off, plain = Buttons(), Buttons(name="tg-off", expiring=False), Plain()
     assert isinstance(on, Expiring) and not isinstance(plain, Expiring)
     delivery = Delivery([on, off, plain])
-    try:
-        delivery.deliver(opened())
-        delivery.deliver(resolved())  # info: below every min_severity here
-        on.wait(2)
-        assert on.log == [("send", "alert T-1", True), ("expire", "alert T-1", True)]
-        assert off.log == [("send", "alert T-1", True)]  # buttons off: no queue slot used
-        assert [m.subject for m in plain.sent] == ["alert T-1"]
-    finally:
-        delivery.close(1.0)
+    offered = {worker.channel.name: offers(worker) for worker in delivery._workers}
+    delivery.deliver(opened())
+    delivery.deliver(resolved())  # info: below every min_severity here
+    # Each channel has its own worker: close delivers every queue in order and joins them
+    # all, so no channel's log is read while its worker may still write it.
+    delivery.close(WAIT)
+    assert on.log == [("send", "alert T-1", True), ("expire", "alert T-1", True)]
+    assert off.log == [("send", "alert T-1", True)]
+    assert [m.subject for m in plain.sent] == ["alert T-1"]
+    # buttons off and no controls: the resolve took no queue slot
+    assert {name: [isinstance(m, _Expire) for m in seen] for name, seen in offered.items()} == {
+        "telegram": [False, True],
+        "tg-off": [False],
+        "slack": [False],
+    }
+
+
+def test_a_close_that_comes_as_the_worker_wakes_still_delivers_what_was_queued() -> None:
+    channel = Buttons()
+    delivery = Delivery([channel])
+    (worker,) = delivery._workers
+    get, waiting = worker.queue.get, threading.Event()
+
+    def get_that_gave_up(timeout: float | None = None) -> object:
+        # the worker's get timed out on an empty queue; alerts and close come before it
+        # looks at the stopping flag
+        worker.queue.get = get  # type: ignore[method-assign]
+        waiting.set()
+        assert worker.stopping.wait(WAIT)
+        raise queue.Empty
+
+    worker.queue.get = get_that_gave_up  # type: ignore[method-assign]
+    assert waiting.wait(WAIT)
+    delivery.deliver(opened())
+    delivery.deliver(resolved())
+    delivery.close(WAIT)
+    assert channel.log == [("send", "alert T-1", True), ("expire", "alert T-1", True)]
 
 
 def test_an_expiry_that_cannot_be_queued_is_done_locally_at_once() -> None:

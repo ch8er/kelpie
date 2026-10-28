@@ -240,7 +240,9 @@ class _Worker:
             try:
                 message = self.queue.get(timeout=0.1)
             except queue.Empty:
-                if self.stopping.is_set():
+                # close may have come, with alerts queued before it, after get gave up:
+                # those are delivered like the rest until the deadline
+                if self.stopping.is_set() and (self._expired() or self.queue.empty()):
                     self._drain()
                     return
                 continue
