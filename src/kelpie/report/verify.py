@@ -363,7 +363,8 @@ def _stuck(
         cause = ev.cause(s)
         if exact:
             return cause == event.rule
-        return not scoped or cause.split(":")[0] == event.rule
+        # a rule covers its own outages too (rule 4's block storms count under "outage")
+        return not scoped or event.rule in (cause.split(":")[0], s.rule)
 
     def by_cause(w: Window) -> dict[str, tuple[float, int]]:
         out: dict[str, tuple[float, int]] = {}

@@ -14,20 +14,25 @@ last tick that still saw it), clipped to the day; a lower bound, since a rule go
 re-opens its states. The unit is *task-hours*, each counted once (#228): when several
 states cover the same task at the same time (rule 13 listing it as waiting on a person,
 rule 4's stale block on it, two conditions of one rule), the hour counts under the first
-cause in :data:`CHAOS_PRECEDENCE` (a person's inbox, then a stale block, then the rest in
-:data:`CHAOS_CAUSES` order), and the others' overlapping hours are shown as "also seen",
-never added. What names no task adds up as it is: idle agents behind a hold, the waiting
-tasks rule 13 counts past the 20 ids it lists, a state without a task. A session's state
-counts on its task, and a task waiting behind two people's tasks counts once when rule 13
-names it. A forgotten hold (rule 6, ``bottlenecks:hold:*``) is its own cause and counts
-idle agent-hours instead (:func:`hold_agent_hours`); so is a person's inbox (rule 13,
-``needs_you:*``): the agent- hours of the agent tasks waiting on them
-(:func:`people_agent_hours`). A card stuck in a pre-work status with work behind it (rule
-3, ``orphan_status:stuck-before-work:*``) is its own cause too, in card-hours. All are
-"hours lost"; ``[report] hour_usd`` turns them into dollars. A card in a pre-work status
-that rule 3 finds stuck (past ``prework_after``, not held, ignored or queued behind its own
-parent) but that no open task depends on, so rule 3 never reported it, is listed under
-"Stuck, blocking nothing" with its age, and counts nowhere: it delays no work.
+cause in :data:`CHAOS_PRECEDENCE` (an outage, then a person's inbox, then a stale block,
+then the rest in :data:`CHAOS_CAUSES` order), and the others' overlapping hours are shown
+as "also seen", never added. An outage incident (:mod:`kelpie.core.incidents`: a block
+storm, a CI outage) counts the tasks each of its alerts names, from its first sighting to
+its last (``last_seen``; folds that go on until it closes count nowhere, a lower bound):
+the outage's own threshold is its grace, so a task's own grace period (a stale block's)
+does not apply to it; an outage whose check is still in observe counts nothing. What names
+no task adds up as it is: idle agents behind a hold, the waiting tasks rule 13 counts past
+the 20 ids it lists, a state without a task. A session's state counts on its task, and a
+task waiting behind two people's tasks counts once when rule 13 names it. A forgotten hold
+(rule 6, ``bottlenecks:hold:*``) is its own cause and counts idle agent-hours instead
+(:func:`hold_agent_hours`); so is a person's inbox (rule 13, ``needs_you:*``): the
+agent-hours of the agent tasks waiting on them (:func:`people_agent_hours`). A card stuck
+in a pre-work status with work behind it (rule 3, ``orphan_status:stuck-before-work:*``) is
+its own cause too, in card-hours. All are "hours lost"; ``[report] hour_usd`` turns them
+into dollars. A card in a pre-work status that rule 3 finds stuck (past ``prework_after``,
+not held, ignored or queued behind its own parent) but that no open task depends on, so
+rule 3 never reported it, is listed under "Stuck, blocking nothing" with its age, and
+counts nowhere: it delays no work.
 
 **Cost of chaos, dollars.** Tokens burned by sessions that were going nowhere: a session in
 a ``loop_breaker`` (identical calls, error streak) or ``no_progress`` state while it lasted,
@@ -101,7 +106,7 @@ from typing import Any
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.incidents import BLOCK_STORM, is_outage_state
+from kelpie.core.incidents import BLOCK_STORM, CI_FAILURES, CI_NOT_STARTED, is_outage_state
 from kelpie.core.incidents import Outage as OutageParams
 from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Outcome, Suppression
 from kelpie.core.model import (
@@ -227,9 +232,8 @@ CHAOS_PRECEDENCE: tuple[str, ...] = (
 )
 # What a human can do about a cause when no rule could have fixed it by itself.
 REMEDIES: Mapping[str, str] = {
-    OUTAGE: "end the shared cause each outage under Outages names (one fix, or one person's "
-    "answer, unblocks every task behind it), and switch on the outage checks so their alerts "
-    "fold under it",
+    OUTAGE: "end the shared cause each outage under Outages names: one fix, or one person's "
+    "answer, unblocks every task behind it",
     "orphan_status": "give ownerless statuses an owner: route them to a role or let "
     "orphan_status reassign them",
     "wait_condition": "check the conditions agents wait for: a connector that stopped "
@@ -373,9 +377,9 @@ class OutageLine:
     since: datetime
     until: datetime  # its last sighting by the end of the day
     open: bool  # still open at the end of the day
-    prs: int  # its scope that day: PRs, or for a block storm tasks
+    scope: int  # its scope that day: PRs, or for a block storm tasks
     folded: int
-    kind: str = "ci_failures"
+    kind: str = CI_FAILURES
     reason: str | None = None  # what happened, in one line
     person: str | None = None  # who can end it
     observe_only: bool = False  # a check still in observe: listed, not counted
@@ -469,7 +473,7 @@ class DailyReport:
     biggest_wait: BiggestWait | None = None  # the role and cause tasks waited longest for
     # cards stuck before work that nothing waits on: listed, never counted as hours lost
     stuck_idle: tuple[StuckCard, ...] = ()
-    outages: tuple[OutageLine, ...] = ()  # rule 9's CI outages of the day
+    outages: tuple[OutageLine, ...] = ()  # the day's outages (kelpie.core.incidents)
     outage_wait_hours: float = 0.0  # the day's waiting time all of them explained
     planned: PlannedWaits | None = None  # behind work planned for later: never counted
     snoozed: SnoozedWaits | None = None  # deliberate waits a person snoozed: never chaos
@@ -694,7 +698,7 @@ def wait_causes(inputs: ReportInputs, start: datetime, end: datetime) -> WaitCau
 def _biggest_wait(
     inputs: ReportInputs, start: datetime, end: datetime, roles: Mapping[str, str]
 ) -> tuple[BiggestWait | None, tuple[OutageLine, ...], float, SnoozedWaits | None]:
-    """The biggest wait, the day's CI outages and the waiting time they explain, and the
+    """The biggest wait, the day's outages and the waiting time they explain, and the
     snoozed waits (the same split, so no hour counts twice)."""
     causes = wait_causes(inputs, start, end)
     per_role = throughput(
@@ -787,7 +791,8 @@ def _verifications(
         return ()
     evidence = Evidence(
         end=end,
-        states=[r for r in inputs.states if is_chaos(r.state)],  # counted like the chaos
+        # counted like the chaos: an outage's tasks too (#229)
+        states=[r for r in inputs.states if is_chaos(r.state) or is_outage_state(r.state.id)],
         cause=cause_of,
         start=counts_from,
         hours=lambda st, lo, hi: state_hours(inputs.actions, st, lo, hi, _humans(inputs)),
@@ -1269,7 +1274,11 @@ def state_hours(
 ) -> float:
     """What a chaos state costs in ``[a, b)`` on its own: its hours, for a forgotten hold
     the idle agent-hours behind it (:func:`hold_agent_hours`), for a person's inbox the
-    agent-hours waiting on them (:func:`people_agent_hours`)."""
+    agent-hours waiting on them (:func:`people_agent_hours`), for an outage the task-hours of
+    the tasks it held (:func:`outage_steps`)."""
+    if is_outage_state(state.id):
+        return sum(n * (hi - lo).total_seconds() / 3600 for lo, hi, n, _ in outage_steps(
+            entries, state, a, b))  # fmt: skip
     if state.id.startswith(HOLD_STATE):
         return hold_agent_hours(entries, state, a, b, humans)[0]
     if state.id.startswith(PEOPLE_STATE):
@@ -1283,11 +1292,8 @@ def _humans(inputs: ReportInputs) -> frozenset[str]:
 
 def is_chaos(state: OpenState) -> bool:
     """A state that is lost work: a chaos rule's, except loop_breaker's budget and
-    forecast states (spend against a budget, not a loop) and outages: a block storm is
-    rule 4's, but its hours are its tasks' (their own states, or rule 13's inbox when it
-    takes their blocks), never the storm's on top. Once a storm folds its tasks' alerts
-    they open no state of their own: those hours are missing until the report attributes
-    outages by kind (#229, track C)."""
+    forecast states (spend against a budget, not a loop) and outages, which count apart:
+    their tasks' hours under the ``outage`` cause (:func:`outage_steps`, #229)."""
     if is_outage_state(state.id):
         return False
     if state.rule == "loop_breaker":
@@ -1374,7 +1380,12 @@ def _recommendations(
     filters_in_use: frozenset[tuple[str, str | None]] = frozenset(),
 ) -> tuple[Advice, ...]:
     candidates: list[Advice] = list(extra)
-    if wait is not None and wait.cause != UNKNOWN_WAIT:  # the headline covers that one
+    outage_line = any(c.rule == OUTAGE and c.hours > 0 for c in chaos)
+    if (
+        wait is not None
+        and wait.cause != UNKNOWN_WAIT  # the headline covers that one
+        and not (outage_line and wait.cause in (CI_OUTAGE, SHARED_BLOCKER))  # "farm outages" does
+    ):
         candidates.append(
             Advice(
                 title=f"Cut the {md.short_text(wait.role)} wait for {wait.label}",
@@ -1525,14 +1536,16 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             "",
             "Hours lost: task-hours, how long a task was stuck after Kelpie first reported "
             "it, each task-hour counted once: when several rules saw the same task at the "
-            "same time, under the first of a person's inbox, a stale block, an ownerless "
+            "same time, under the first of a farm outage (from its first sighting), a "
+            "person's inbox, a stale block, an ownerless "
             "task, a wait past its limit, an exit without a final status, review ping-pong, "
             "idle capacity, a card stuck before work, a runaway loop, activity without "
             "progress (a lower bound); for forgotten holds, idle agent-hours: the "
             "agents rule 6 saw idle behind the hold after its expiry, over time; for agents "
             "waiting on people, agent-hours: the agent tasks rule 13 saw waiting on a "
             "person's approval or human task, over time (a human gate rule 6 also reports "
-            "counts in both lines).",
+            "counts in both lines). `outage` is a cause, not a rule: the tasks the incidents "
+            "under Outages held.",
         ]
     else:
         lines.append("No hours lost and no tokens burned on loops, idle sessions or restarts.")
@@ -1552,14 +1565,15 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             if o.kind == BLOCK_STORM:
                 who = f"; only {md.text(o.person)} can end it" if o.person else ""
                 lines.append(
-                    f"- block storm {md.code(o.signature)} {when}: {o.prs} task(s) blocked on "
+                    f"- block storm {md.code(o.signature)} {when}: {o.scope} task(s) blocked on "
                     f"it, {o.folded} alert(s) folded under it{who}"
                 )
                 continue
             what = f" ({md.text(o.reason)})" if o.reason else ""
+            label = "CI jobs not starting" if o.kind == CI_NOT_STARTED else "CI failure"
             lines.append(
-                f"- {md.code(o.signature)}{what} {when}: {o.prs} PR(s), {o.folded} alert(s) "
-                "folded under it"
+                f"- {label} {md.code(o.signature)}{what} {when}: {o.scope} PR(s), {o.folded} "
+                "alert(s) folded under it"
             )
     if report.stuck_idle:
         lines += [

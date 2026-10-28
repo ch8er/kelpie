@@ -38,7 +38,7 @@ def test_the_report_names_each_outage_with_its_folded_alerts() -> None:
     entries = (sample, folded(4, "a"), folded(5, "a"), folded(6, "b"), folded(21, "late"))
     report = build_report(inputs(states=(state,), actions=entries), sections={})
     [line] = report.outages
-    assert (line.signature, line.prs, line.folded, line.open) == (
+    assert (line.signature, line.scope, line.folded, line.open) == (
         SIGNATURE,
         2,
         2,  # alert "a" twice (hourly repeat) counts once; "late" is after the outage
@@ -72,7 +72,7 @@ def test_an_outage_from_yesterday_counts_only_the_days_prs_and_folds() -> None:
     )
     report = build_report(inputs(states=(state,), actions=entries), sections={})
     [line] = report.outages
-    assert line.since == at(-5) and (line.prs, line.folded) == (3, 1)
+    assert line.since == at(-5) and (line.scope, line.folded) == (3, 1)
     assert "since 2026-03-01 19:00 UTC, until 2026-03-02 06:00 UTC" in render_markdown(report)
 
 

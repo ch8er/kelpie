@@ -31,7 +31,7 @@ keeps the task's own cause.
 task's wait in ``[a, b)`` counts under ``snoozed`` only where all of these hold:
 
 - its own cause is ``people`` or ``unknown`` (never a hold, CI, a merge or another
-  condition, nor a CI outage: those are the farm's waits whatever a person snoozed);
+  condition, nor an outage: those are the farm's waits whatever a person snoozed);
 - a snooze holds there (from when it was set to its end, or to when ``kelpie serve``
   latched growth behind it): the task's own, or that of a task it waits on on the board
   (a dependency on it, or an unmet ``human_task`` condition naming it; also the
@@ -174,8 +174,9 @@ class BiggestWait:
 @dataclass(frozen=True, slots=True)
 class OutageSpan:
     """One occurrence of an outage incident (:mod:`kelpie.core.incidents`), with what its
-    alerts said about it: while it is open, the waits it explains count under it (``cause``)
-    instead of their own cause."""
+    alerts said about it: while it is open, the waits it explains count under it
+    (:attr:`wait_cause`) instead of their own cause. ``observe_only`` is its last alert's (a
+    check switched on during an outage moves its waits from the outage's start)."""
 
     since: datetime
     until: datetime  # its last_seen
@@ -215,7 +216,8 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
     state (``params.state``) within that occurrence's time span (the same signature failing
     again later reuses the state id). Entries are as of their time (written at most hourly),
     so the repository clause in :meth:`WaitCauses.split` covers a CI outage's later
-    joiners. An outage none of whose entries is loaded is a CI outage with no scope."""
+    joiners. An outage none of whose entries is loaded is read as failing CI jobs with no
+    scope (its kind is in the entries)."""
     samples = outage_samples(entries)
     out = []
     for s in (s for s in states if is_outage_state(s.id)):
@@ -363,11 +365,12 @@ class WaitCauses:
         return _KINDS.get(found.kind, "other") if found is not None else UNKNOWN
 
     def split(self, task: Task, a: datetime, b: datetime) -> dict[str, float]:
-        """Hours of the task's wait in ``[a, b)`` by cause: the part an open CI outage
-        explains under ``ci_outage``, the part a snooze holds under ``snoozed`` (see the
-        module docs: only a people or unknown wait, never while rule 13 listed the task as
-        live), the rest under the task's own cause. A hold is deliberate: a held task's
-        wait stays the hold's, outage or not."""
+        """Hours of the task's wait in ``[a, b)`` by cause: the part an open outage
+        explains under its cause (a block storm's ``shared_blocker`` first, then
+        ``ci_outage``), the part a snooze holds under ``snoozed`` (see the
+        module docs: only a people or unknown wait, never while rule 13 listed
+        the task as live), the rest under the task's own cause. A hold is
+        deliberate: a held task's wait stays the hold's, outage or not."""
         total = (b - a).total_seconds() / 3600
         if self._labels.intersection(task.labels):
             return {"hold": total}
