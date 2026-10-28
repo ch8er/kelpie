@@ -267,7 +267,7 @@ def test_a_live_tool_run_marks_the_session_and_slots_are_readings(
     board.task("t_3", "done", ago(hours=1), assignee="dev-3")
     seen: dict[str, object] = {}
 
-    def host(config, now, tasks, workspaces):  # type: ignore[no-untyped-def]
+    def host(config, now, tasks, workspaces, aliases=None):  # type: ignore[no-untyped-def]
         seen["tasks"] = set(tasks)
         seen["workspaces"] = dict(workspaces)
         runs = {"t_1": ToolRun("xcodebuild", ago(minutes=12)), "t_2": ToolRun("x", ago(hours=1))}
@@ -312,7 +312,7 @@ def test_a_shared_workspace_is_no_task_workspace(
         board.update(tid, workspace_kind="worktree", workspace_path=str(path))
     seen: dict[str, object] = {}
 
-    def host(config, now, tasks, workspaces):  # type: ignore[no-untyped-def]
+    def host(config, now, tasks, workspaces, aliases=None):  # type: ignore[no-untyped-def]
         seen.update(tasks=set(tasks), workspaces=dict(workspaces))
         return HostTools()
 

@@ -21,6 +21,7 @@ from typing import Any, Protocol
 
 from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_code
 from kelpie.adapters.hermes import adapter as hermes
+from kelpie.adapters.hermes.boards import HermesBoards
 from kelpie.adapters.hermes.git_state import valid_base_ref
 from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME, board_key
 from kelpie.adapters.hermes.processes import (
@@ -74,7 +75,9 @@ from kelpie.core.model import (
     ReportedCost,
     Snapshot,
     Snooze,
+    Span,
     SpanKind,
+    Task,
 )
 from kelpie.core.ports import (
     ActionConnector,
@@ -199,10 +202,27 @@ class HermesSettings:
     # db_path (then ``db_path`` and ``wait_key`` above are unused). (): one board, db_path.
     boards: tuple[HermesBoardSettings, ...] = ()
 
-    def build(self) -> hermes.HermesAdapter:
-        return hermes.HermesAdapter(
-            db_path=self.db_path,
-            spool=self.spool,
+    def build(self) -> hermes.HermesAdapter | HermesBoards:
+        if not self.boards:
+            return self._adapter(db_path=self.db_path, spool=self.spool, tools=self.tools)
+        boards = [
+            self._adapter(
+                db_path=b.db_path,
+                spool=None,
+                tools=None,
+                board=b.name,
+                name=f"hermes:{b.name}",
+                wait_key=b.wait_key or DEFAULT_WAIT_KEY.parent / board_key(b.name),
+            )
+            for b in self.boards
+        ]
+        host = None
+        if self.tools is not None:  # the host's tool processes, read once for every board
+            host = self._adapter(db_path=self.boards[0].db_path, spool=None, tools=self.tools)
+        return HermesBoards(boards, spool=self.spool, host=host)
+
+    def _adapter(self, **kw: Any) -> hermes.HermesAdapter:
+        settings: dict[str, Any] = dict(
             lookback=self.lookback,
             git_state=self.git_state,
             git_timeout=self.git_timeout,
@@ -219,9 +239,9 @@ class HermesSettings:
             prework_statuses=self.prework_statuses,
             end_worker=self.end_worker,
             worker_grace=self.worker_grace.total_seconds(),
-            tools=self.tools,
             author=self.author,
         )
+        return hermes.HermesAdapter(**{**settings, **kw})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1061,13 +1081,17 @@ def merged_snapshot(
                 limit_hits=merged.limit_hits + part.limit_hits,
                 providers=merged.providers + part.providers,
                 builds=merged.builds + part.builds,
+                unobserved=merged.unobserved + part.unobserved,  # boards of a Hermes home
             )
+            for board in part.unobserved:  # one board of several could not be read
+                metrics.adapter_failed(f"{adapter.name}/{board}")
+                complete = False
         if remote is not None:
             try:
                 part = remote(now)
             except Exception:
                 log.exception("merging the agents' boards failed")
-                merged = replace(merged, unobserved=("hub",))
+                merged = replace(merged, unobserved=(*merged.unobserved, "hub"))
             else:
                 merged = replace(
                     merged,
@@ -1077,7 +1101,7 @@ def merged_snapshot(
                     conditions=merged.conditions + part.conditions,
                     sessions=merged.sessions + part.sessions,
                     spans=merged.spans + part.spans,
-                    unobserved=part.unobserved,
+                    unobserved=merged.unobserved + part.unobserved,
                 )
         for name, step in enrich:
             try:
@@ -1096,7 +1120,9 @@ def merged_snapshot(
                 metrics.span_store_failed()
             else:
                 merged = replace(
-                    merged, spans=merge_spans(stored, merged.spans), span_totals=totals
+                    merged,
+                    spans=_board_tasks(merge_spans(stored, merged.spans), merged.tasks),
+                    span_totals=totals,
                 )
         if resources is not None:
             try:
@@ -1266,6 +1292,28 @@ class SnoozeReader:
                 log.warning("task %s: snooze marker %r ignored: %s", p.task_id, p.token, p.why)
 
 
+def _board_tasks(spans: tuple[Span, ...], tasks: Sequence[Task]) -> tuple[Span, ...]:
+    """Stored spans that name a board's task by its id on the board (OTLP from Hermes:
+    ``hermes.kanban.task_id`` is ``t_1a``, the task ``qr:t_1a``) with the task's id, when
+    exactly one board has that id; others as they are."""
+    found: dict[str, list[str]] = {}
+    for t in tasks:
+        if t.board and (local := t.local_id) is not None:
+            host = t.id[: len(t.id) - len(local) - len(t.board) - 1]  # "<host>:" or ""
+            found.setdefault(f"{host}{local}", []).append(t.id)
+    if not found:
+        return spans
+    ids = {t.id for t in tasks}
+    return tuple(
+        replace(s, task_id=hit[0])
+        if s.task_id is not None
+        and s.task_id not in ids
+        and len(hit := found.get(s.task_id, [])) == 1
+        else s
+        for s in spans
+    )
+
+
 def _observed(task_id: str, unobserved: Sequence[str]) -> bool:
     """Whether the task's own part of the farm is in the snapshot (as the engine's
     ``_blind`` reads ``Snapshot.unobserved``: ``hub`` means no agent board at all)."""
@@ -1344,8 +1392,6 @@ def _unique_owners(owners: tuple[Owner, ...]) -> tuple[Owner, ...]:
 def build_adapters(settings: Settings) -> list[PlatformAdapter]:
     adapters: list[PlatformAdapter] = []
     if settings.hermes is not None and settings.hermes.enabled:
-        if settings.hermes.boards:  # until the adapter reads several boards (#198)
-            raise ConfigError("[[adapters.hermes.boards]] is not supported by this build yet")
         adapters.append(settings.hermes.build())
     if settings.claude_code is not None and settings.claude_code.enabled:
         adapters.append(settings.claude_code.build())
@@ -1365,6 +1411,9 @@ def board_only(adapter: PlatformAdapter) -> PlatformAdapter:
     spool, git or process checks a tick also runs (``kelpie snooze``, ``kelpie doctor``)."""
     if isinstance(adapter, hermes.HermesAdapter):
         return replace(adapter, git_state=False, spool=None, tools=None)
+    if isinstance(adapter, HermesBoards):
+        boards = [replace(b, git_state=False) for b in adapter.boards]
+        return HermesBoards(boards, name=adapter.name)
     if isinstance(adapter, OpenClawAdapter):
         return replace(adapter, spool=None)
     return adapter
@@ -1657,7 +1706,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     # into an alert that is only logged. The defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
     for adapter in adapters:  # Kelpie's park and stop markers are issued on the app's clock
-        if isinstance(adapter, hermes.HermesAdapter):
+        if isinstance(adapter, hermes.HermesAdapter | HermesBoards):
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
     hub = _build_hub(settings, adapters, clock)
@@ -2297,7 +2346,7 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
     they report, so a platform gap is not judged there."""
     ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
     cancel = ci is not None and ci.enabled and ci.allow_cancel
-    has_hermes = any(isinstance(a, hermes.HermesAdapter) for a in adapters)
+    has_hermes = any(isinstance(a, hermes.HermesAdapter | HermesBoards) for a in adapters)
     found: dict[str, ActBlocker] = {}
     for planned in PLANNED:
         name, effects = planned.name, planned.effects
