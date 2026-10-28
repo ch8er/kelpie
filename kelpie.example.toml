@@ -103,6 +103,13 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # [engine.rules.output_offenders]  # no parameters: thresholds and owners are in
 #                                  # [traces.outputs]; needs [traces] enabled
 #
+# [engine.rules.instruction_bloat]  # incident 21; the files are in [instructions]
+# max_chars = 40000          # size threshold (about 10,000 tokens)
+# max_growth_per_week = 10000  # characters added a week
+# max_tokens_per_day = 500000  # a file over max_chars read for this much a day (always
+#                            # loaded, or counted loads) is worth splitting even if stable
+# min_span = "1d"            # growth judged over at least this much history
+#
 # [engine.rules.return_causes]
 # window = "24h"            # returns counted
 # min_returns = 5           # ...at least this many for a finding

@@ -601,6 +601,63 @@ class OutputOffender:
     recent_tasks: tuple[str, ...] = ()  # tasks of its unfiltered calls, the latest first
 
 
+# How a platform loads an instruction file: into every session of its role (CLAUDE.md,
+# AGENTS.md, a role prompt), or on demand when the agent opens it (a skill).
+InstructionLoad = Literal["always", "on_demand"]
+# Where an instruction file's tokens a day come from: counted loads of it (tool calls or
+# spans that open a skill), or its size times the sessions of its role (an estimate; for an
+# on-demand file an upper bound).
+TokenBasis = Literal["loads", "sessions"]
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionFile:
+    """One instruction file a role loads (a skill, CLAUDE.md, AGENTS.md, a role prompt),
+    measured read-only when the snapshot is assembled (``kelpie.instructions``): sizes,
+    counts and hashes only, never its text. ``since`` is the oldest measurement kept within
+    the growth window (or the first one ever, when the file is younger), ``chars_since`` its
+    size then; ``appends`` and ``edits`` count the changes seen since, those that only added
+    text at the end and those that changed or removed some."""
+
+    path: str  # as shown to people, the home directory as ~
+    role: str | None  # None: every role of its platform loads it
+    chars: int
+    tokens: int  # estimated from chars
+    sections: int  # headings
+    loaded: InstructionLoad = "always"
+    since: datetime | None = None
+    chars_since: int | None = None
+    appends: int = 0
+    edits: int = 0
+    tokens_per_day: int | None = None
+    token_basis: TokenBasis | None = None
+    owner: str | None = None  # who owns the role's instructions
+
+    @property
+    def only_grows(self) -> bool:
+        """Changed since ``since``, and only ever by appending."""
+        return self.appends > 0 and self.edits == 0
+
+    def growth_per_week(self, now: datetime, min_span: timedelta) -> float | None:
+        """Characters added per week since ``since``; None over less than ``min_span``."""
+        if self.since is None or self.chars_since is None or now - self.since < min_span:
+            return None
+        return (self.chars - self.chars_since) * timedelta(days=7) / (now - self.since)
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionDuplicate:
+    """Copies of one thing within or across a role's instruction files: a section whose
+    normalised heading and body are near-identical (``similarity``, 0..1), or a value (one
+    ``key: value`` fact) written in several files. ``places`` are ``path:line`` of each
+    copy; the text itself is never kept."""
+
+    role: str | None
+    kind: Literal["section", "value"]
+    places: tuple[str, ...]
+    similarity: float = 1.0
+
+
 # Where a snooze came from: ``kelpie snooze`` (cli), a reply to an alert (chat), or an
 # ``until:`` marker in the block reason (marker; read from the board, never stored).
 SnoozeSource = Literal["cli", "chat", "marker"]
@@ -683,6 +740,9 @@ class Snapshot:
     closed_pull_requests_since: datetime | None = None
     # Repeated huge-output offenders over [traces.outputs] repeat_days (span store).
     output_offenders: tuple[OutputOffender, ...] = ()
+    # The instruction files each role loads and the copies found in them ([instructions]).
+    instruction_files: tuple[InstructionFile, ...] = ()
+    instruction_duplicates: tuple[InstructionDuplicate, ...] = ()
     # Parts of the farm that are not in this snapshot (multi-host: agents and
     # ``<agent>/<adapter>`` boards that are silent, stale or failed, whose task ids start
     # with ``<agent>:``; ``hub`` when no agent board could be read). A rule that stops

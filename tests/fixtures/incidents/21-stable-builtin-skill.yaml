@@ -1,0 +1,58 @@
+id: "21-stable-builtin-skill"
+incident: 21
+title: "A large built-in skill that does not change and is loaded rarely"
+description: >
+  A platform's built-in skill is well over the size threshold, but nobody appends to it and
+  counted loads show it is opened a few times a day; a developer CLAUDE.md is small. Neither
+  is reported: size alone, without growth or a cost, is not bloat. The ops role's AGENTS.md
+  has not changed either, but it is over the threshold and read into every ops session, so
+  its daily cost is real and it is reported.
+rule: instruction_bloat
+config:
+  max_chars: 40000
+  max_growth_per_week: 10000
+  max_tokens_per_day: 500000
+snapshot:
+  now: "2026-03-09T12:00:00+00:00"
+  instruction_files:
+    - path: "~/.hermes/skills/builtin/platform-guide/SKILL.md"
+      role: null
+      chars: 110000
+      tokens: 27500
+      sections: 52
+      loaded: on_demand
+      since: "2026-03-02T12:00:00+00:00"
+      chars_since: 110000
+      tokens_per_day: 82500  # three loads a day
+      token_basis: loads
+    - path: "~/farm/dev/CLAUDE.md"
+      role: developer
+      chars: 6000
+      tokens: 1500
+      sections: 8
+      loaded: always
+      since: "2026-03-02T12:00:00+00:00"
+      chars_since: 5800
+      appends: 1
+      tokens_per_day: 90000
+      token_basis: sessions
+    - path: "~/farm/ops/AGENTS.md"
+      role: ops
+      chars: 48000
+      tokens: 12000
+      sections: 31
+      loaded: always
+      since: "2026-03-02T12:00:00+00:00"
+      chars_since: 48000
+      tokens_per_day: 960000  # 80 sessions a day
+      token_basis: sessions
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "about 960,000 tokens a day"
+    params: {path: "~/farm/ops/AGENTS.md", only_grows: false, token_basis: sessions}
+not_expected_actions:
+  - kind: alert
+    params: {path: "~/.hermes/skills/builtin/platform-guide/SKILL.md"}
+  - kind: alert
+    params: {path: "~/farm/dev/CLAUDE.md"}

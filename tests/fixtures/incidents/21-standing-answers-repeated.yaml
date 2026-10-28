@@ -1,0 +1,41 @@
+id: "21-standing-answers-repeated"
+incident: 21
+title: "One role keeps its standing answers in overlapping files, one default in several"
+description: >
+  The support role kept its standing answers in several overlapping files: two sections are
+  near-identical across files, and the same default value is written in four of them. No
+  file is over a threshold, so the copies get their own informational alert: when the value
+  changes, a stale copy goes into the output. A developer file that grows slowly and stays
+  small is left alone.
+rule: instruction_bloat
+config:
+  max_chars: 40000
+  max_growth_per_week: 10000
+snapshot:
+  now: "2026-03-09T12:00:00+00:00"
+  instruction_files:
+    - {path: "~/farm/support/answers-billing.md", role: support, chars: 12000, tokens: 3000, sections: 14, since: "2026-03-02T12:00:00+00:00", chars_since: 12000}
+    - {path: "~/farm/support/answers-accounts.md", role: support, chars: 9000, tokens: 2250, sections: 11, since: "2026-03-02T12:00:00+00:00", chars_since: 9000}
+    - {path: "~/farm/dev/AGENTS.md", role: developer, chars: 15000, tokens: 3750, sections: 20, since: "2026-03-02T12:00:00+00:00", chars_since: 13500, appends: 2}
+  instruction_duplicates:
+    - role: support
+      kind: section
+      places: ["~/farm/support/answers-billing.md:40", "~/farm/support/answers-accounts.md:12"]
+      similarity: 0.88
+    - role: support
+      kind: value
+      places:
+        - "~/farm/support/answers-billing.md:7"
+        - "~/farm/support/answers-accounts.md:5"
+        - "~/farm/support/answers-refunds.md:9"
+        - "~/farm/support/answers-trials.md:3"
+expected_actions:
+  - kind: alert
+    severity: info
+    reason_contains: "one value in 4 places"
+    params: {role: support, duplicate_sections: 1, repeated_values: 1}
+not_expected_actions:
+  - kind: alert
+    params: {path: "~/farm/dev/AGENTS.md"}
+  - kind: alert
+    params: {role: developer}
