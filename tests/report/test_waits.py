@@ -406,6 +406,18 @@ def test_waits_inside_a_ci_outage_count_under_it() -> None:
     assert of7.split(waiting("L2", "reviewer"), at(10), at(16)) == {CI_OUTAGE: pytest.approx(6)}
 
 
+def test_ci_jobs_not_starting_are_not_a_shared_ci_failure_yet() -> None:
+    from kelpie.core.incidents import CI_NOT_STARTED, CiOutage
+    from kelpie.report.waits import outages
+    from kelpie.rules._ci_not_started import STATE
+
+    o = CiOutage(state=STATE, signature="CI jobs not starting", kind=CI_NOT_STARTED, tasks=("N1",))
+    sample = replace(ledger("ci_economy", **o.to_params()), at=at(11))
+    states = [outage_state(sid, at(10), at(16)).state for sid in (STATE, SID)]
+    found = outages(states, [sample, outage_sample(at(11))])
+    assert [x.state for x in found] == [SID]  # until the report attributes kinds (#229)
+
+
 def test_the_report_headlines_a_ci_outage() -> None:
     state = outage_state(SID, at(2), at(20))
     samples = (outage_sample(at(3), repos=("example/app",)),)

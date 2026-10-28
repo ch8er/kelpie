@@ -27,7 +27,8 @@ Mapping:
 - ``jobs``: from the same job list, read once per finished run attempt: each job's name and
   conclusion (mapped like the run's), and for a job that did not succeed its first named
   step that did not succeed, the runner it ran on and the labels it asked for (rule 9 tells
-  a CI outage from a broken PR by them). None when not read: the run is active, the list is
+  a CI outage from a broken PR by them), and whether it started at all (no runner and no
+  step: GitHub refused it, a spending limit or a failed payment). None when not read: the run is
   partial or missing, the request failed, or the scan's budget for job lists is spent;
 - ``superseded_by``: a newer run of the same workflow, branch, head repository and event,
   and for ``pull_request`` runs the same PR number and base branch, was created after it.
@@ -127,6 +128,7 @@ _ACTIVE = {
     "pending": BuildStatus.QUEUED,
     "in_progress": BuildStatus.RUNNING,
 }
+_HELD = frozenset({"waiting", "pending"})  # an approval or a concurrency group holds the run
 _CONCLUSIONS = {
     "success": BuildStatus.SUCCESS,
     "neutral": BuildStatus.SUCCESS,
@@ -602,6 +604,7 @@ class GitHubCI:
             finished_at=finished,
             minutes=minutes,
             jobs=jobs,
+            held=run.get("status") in _HELD,
         )
 
     def _run_jobs(
@@ -807,6 +810,8 @@ def _job(job: Mapping[str, Any]) -> Job | None:
         if isinstance(c := s.get("conclusion"), str) and c in _FAILED and (n := _str(s.get("name")))
     )
     step, runner = next(steps, None), _str(job.get("runner_name"))
+    # Never started: no runner took it and it ran no step (a spending limit, a payment).
+    started = bool(runner) or bool(_list(job.get("steps")))
     if job.get("runner_group_name") == HOSTED_GROUP:
         runner = None  # a pool name GitHub reuses across machines, not a machine
     labels = job.get("labels") if isinstance(job.get("labels"), list) else []
@@ -816,6 +821,7 @@ def _job(job: Mapping[str, Any]) -> Job | None:
         step=step[:MAX_NAME] if step else None,
         runner=runner[:MAX_NAME] if runner else None,
         labels=tuple(x[:MAX_NAME] for x in labels if isinstance(x, str) and x)[:MAX_LABELS],
+        started=started,
     )
 
 
