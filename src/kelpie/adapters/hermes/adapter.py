@@ -600,6 +600,8 @@ class HermesAdapter:
     roles: Mapping[str, str] = field(default_factory=dict)
     role_from_name: bool = True  # dev-1, dev-2 -> dev; false: a profile is its own role
     name: str = "hermes"
+    # The board's name when it is one of several of the home (boards.py); None: the only one.
+    board: str | None = None
     # The action kinds it carries out (``kelpie agent`` offers only these): stop, park, wake
     # of a task Kelpie parked (requeue), comment. unblock and wip_commit are not implemented.
     actions: ClassVar[frozenset[ActionKind]] = frozenset(
@@ -722,14 +724,28 @@ class HermesAdapter:
     def snapshot(self, now: datetime) -> Snapshot:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
+        part, rows = self.read_board(now, self._spans(now - self.lookback))
+        if self.tools is None:
+            return part
+        sessions, slots = self._with_tools(self.tools, part.sessions, part.tasks, rows, now)
+        return replace(part, sessions=sessions, resources=slots)
+
+    def read_board(
+        self, now: datetime, spans: tuple[Span, ...], own_spans: bool = False
+    ) -> tuple[Snapshot, dict[str, sqlite3.Row]]:
+        """The board as of ``now`` without the host's tool processes, and its task rows (for
+        :meth:`_with_tools`). ``spans`` are the hook spool's; ``own_spans``: keep only those
+        of this board's tasks and runs (a spool several boards share, see boards.py)."""
         cutoff = now - self.lookback
-        spans = self._spans(cutoff)
-        beats: dict[str, datetime] = {}
-        for span in spans:
-            if span.kind is SpanKind.TOOL and span.session_id and span.end is not None:
-                beats[span.session_id] = max(span.end, beats.get(span.session_id, span.end))
         try:
             with self._connect() as conn:  # one read transaction: a consistent view
+                if own_spans:
+                    spans = _own_spans(conn, spans)
+                beats: dict[str, datetime] = {}
+                for span in spans:
+                    if span.kind is SpanKind.TOOL and span.session_id and span.end is not None:
+                        end = span.end
+                        beats[span.session_id] = max(end, beats.get(span.session_id, end))
                 tasks, owner_ids, rows, waits = self._tasks(conn, cutoff)
                 ids = {t.id for t in tasks}
                 dependencies = self._dependencies(conn, ids)
@@ -740,9 +756,6 @@ class HermesAdapter:
         if self.git_state:  # outside the read transaction: git may be slow
             sessions, states = self._with_git_state(sessions, tasks, rows, now)
             tasks = tuple(_with_files(t, states.get(t.id)) for t in tasks)
-        slots: tuple[Resource, ...] = ()
-        if self.tools is not None:
-            sessions, slots = self._with_tools(self.tools, sessions, tasks, rows, now)
         owners = tuple(
             Owner(
                 id=p,
@@ -759,8 +772,7 @@ class HermesAdapter:
             conditions=waits,
             sessions=tuple(replace(s, source=self.name) for s in sessions),
             spans=spans,
-            resources=slots,
-        )
+        ), rows
 
     def _with_tools(
         self,
@@ -1574,6 +1586,38 @@ class HermesAdapter:
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
     ) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)
+
+
+def _own_spans(conn: _Connection, spans: tuple[Span, ...]) -> tuple[Span, ...]:
+    """The spans of a shared spool that belong to this board: their task is on it and their
+    run, if any, is a run of that task here. Spans naming no task belong to no board."""
+    task_ids = sorted({s.task_id for s in spans if s.task_id})
+    if not task_ids:
+        return ()
+    known: set[str] = set()
+    runs: dict[int, str] = {}
+    for chunk in range(0, len(task_ids), 500):  # SQLite's host parameter limit
+        part = task_ids[chunk : chunk + 500]
+        marks = f"({_in_clause(part)})"
+        known.update(
+            str(r["id"]) for r in conn.execute(f"SELECT id FROM tasks WHERE id IN {marks}", part)
+        )
+        runs.update(
+            (int(r["id"]), str(r["task_id"]))
+            for r in conn.execute(
+                f"SELECT id, task_id FROM task_runs WHERE task_id IN {marks}", part
+            )
+        )
+
+    def mine(span: Span) -> bool:
+        if span.task_id not in known:
+            return False
+        if span.session_id is None:
+            return True
+        rid = run_id(span.session_id)
+        return rid is not None and runs.get(rid) == span.task_id
+
+    return tuple(s for s in spans if mine(s))
 
 
 def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
