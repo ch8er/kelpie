@@ -31,7 +31,7 @@ MIN_SHINGLES = 8  # a section shorter than this is not compared (a heading and a
 COMMON_SHINGLE = 64  # a shingle in more sections than this only joins, never seeds, a pair
 
 _HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*?)[ \t#]*$")
-_FENCE = re.compile(r"^ {0,3}(```|~~~)")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _WORD = re.compile(r"\w+")
 # "- **Default timeout**: 30m", "retries = 3", "* base branch: main"
 _FACT = re.compile(
@@ -70,7 +70,7 @@ class Unreadable(Exception):
 
 
 def read_file(path: Path, max_bytes: int) -> bytes:
-    """The bytes of a regular file, never through a symlink and at most ``max_bytes``."""
+    """The bytes of a regular file that is not itself a symlink, at most ``max_bytes``."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
@@ -111,7 +111,7 @@ def _structure(text: str) -> tuple[tuple[Section, ...], tuple[tuple[int, int], .
     facts: list[tuple[int, int]] = []
     heading: tuple[int, str] | None = None
     body: list[str] = []
-    fence: str | None = None
+    fence: str | None = None  # the open fence's marker (its character, at least its length)
 
     def close() -> None:
         if heading is not None:
@@ -121,7 +121,11 @@ def _structure(text: str) -> tuple[tuple[Section, ...], tuple[tuple[int, int], .
         line = lines[i]
         m = _FENCE.match(line)
         if m:
-            fence = None if fence == m.group(1) else (fence or m.group(1))
+            marker, info = m.group(1), m.group(2).strip()
+            if fence is None:
+                fence = marker
+            elif marker[0] == fence[0] and len(marker) >= len(fence) and not info:
+                fence = None
             body.append(line)
             continue
         if fence is None:
@@ -213,11 +217,23 @@ def _section_copies(
         for s in f.measure.sections
         if len(s.shingles) >= MIN_SHINGLES
     ]
-    index: dict[int, list[int]] = {}
-    for n, (_, s) in enumerate(items):
-        for sh in s.shingles:
-            index.setdefault(sh, []).append(n)
     parent = list(range(len(items)))
+    best: dict[int, float] = {}
+    # Exact copies first, however many: only one of each body is compared further, so a
+    # shingle shared by many copies of one section never hides them (COMMON_SHINGLE).
+    first: dict[frozenset[int], int] = {}
+    unique: list[int] = []
+    for n, (_, s) in enumerate(items):
+        rep = first.setdefault(s.shingles, n)
+        if rep == n:
+            unique.append(n)
+        else:
+            parent[n] = rep
+            best[n] = best[rep] = 1.0
+    index: dict[int, list[int]] = {}
+    for n in unique:
+        for sh in items[n][1].shingles:
+            index.setdefault(sh, []).append(n)
 
     def find(n: int) -> int:
         while parent[n] != n:
@@ -225,8 +241,8 @@ def _section_copies(
             n = parent[n]
         return n
 
-    best: dict[int, float] = {}
-    for n, (_, s) in enumerate(items):
+    for n in unique:
+        s = items[n][1]
         candidates: set[int] = set()
         for sh in s.shingles:
             posting = index[sh]

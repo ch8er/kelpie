@@ -6,11 +6,11 @@ each file is read read-only (never through a symlink, at most ``max_bytes``), me
 and whenever its hash changes, with whether the change only appended; the growth window is
 read back from those rows. Between scans the last result is reused.
 
-Tokens a day spent reading a file: its estimated tokens times the sessions of its role
-(of its platform, for the platform defaults) that started in the last 24 hours of the
-snapshot, ``token_basis = "sessions"``. For a file loaded on demand (a skill) that is an
-upper bound; counted loads (Hermes ``skill_view`` calls, Claude Code skill loads) will
-replace it where a platform records them.
+Tokens a day spent reading a file: its estimated tokens times the sessions on this host of
+its role (of its platform, for the platform defaults; any, for a file every role loads)
+that started in the last 24 hours of the snapshot, ``token_basis = "sessions"``. For a file
+loaded on demand (a skill) that is an upper bound; counted loads (Hermes ``skill_view``
+calls, Claude Code skill loads) will replace it where a platform records them.
 
 Only files on this host are measured: a ``kelpie agent`` host's files are not (yet).
 """
@@ -88,6 +88,7 @@ class InstructionWatch:
         found: list[Found] = []
         seen: set[Path] = set()
         skipped: dict[str, str] = {}
+        unread: set[str] = set()
         rows: list[SizeRow] = []
         for source, path, role in self._paths():
             if path in seen:
@@ -96,6 +97,7 @@ class InstructionWatch:
             shown = self._shown(path)
             if len(found) >= self.settings.max_files:
                 skipped[shown] = f"over [instructions] max_files ({self.settings.max_files})"
+                unread.add(str(path))
                 continue
             last = history.get(str(path), [])
             previous = (last[-1].bytes, last[-1].sha256) if last else None
@@ -103,6 +105,7 @@ class InstructionWatch:
                 m = measure(read_file(path, self.settings.max_bytes), previous)
             except Unreadable as exc:
                 skipped[shown] = str(exc)
+                unread.add(str(path))
                 continue
             found.append(Found(path, shown, role, source, m))
             if previous is None or previous[1] != m.sha256:
@@ -112,7 +115,9 @@ class InstructionWatch:
                 history.setdefault(str(path), []).append(row)
         if rows:
             self.store.record(rows)
-        self.store.prune(window_start)
+        # A file no longer found (deleted, unconfigured) loses its history; one that could
+        # not be read this time keeps it.
+        self.store.prune(window_start, keep={str(f.path) for f in found} | unread)
         for shown, why in skipped.items():
             if self.skipped.get(shown) != why:
                 log.warning("instruction file %s not measured: %s", shown, why)
@@ -128,7 +133,7 @@ class InstructionWatch:
                     path = Path(match)
                     role = source.role
                     if "{role}" in expanded:
-                        name = _role_part(expanded, path)
+                        name = _role_part(expanded, match)
                         if name is None:
                             continue
                         role = source.role_of(name) if source.role_of else name
@@ -149,21 +154,30 @@ class InstructionWatch:
         s = self.settings
         out: list[InstructionDuplicate] = []
         shared_paths = {f.shown for f in shared}
-        for role in [None, *roles]:
+        groups: list[tuple[str | None, list[Found]]] = []
+        # The shared files per platform (no session loads two platforms' files; files of no
+        # platform go with each), then each role with the shared files of its platforms.
+        platforms = sorted({f.source.platform for f in shared if f.source.platform}) or [None]
+        for platform in platforms:
+            groups.append((None, [f for f in shared if f.source.platform in (platform, None)]))
+        for role in roles:
             own = [f for f in found if f.role == role]
-            if role is not None:
-                platforms = {f.source.platform for f in own}
-                own += [f for f in shared if f.source.platform in platforms | {None}]
+            theirs = {f.source.platform for f in own} | {None}
+            groups.append((role, own + [f for f in shared if f.source.platform in theirs]))
+        seen: set[tuple[str, tuple[str, ...]]] = set()
+        for role, group in groups:
             for d in copies(
                 role,
-                (Scanned(f.shown, f.measure) for f in own),
+                (Scanned(f.shown, f.measure) for f in group),
                 similarity=s.similarity,
                 same_heading_similarity=s.same_heading_similarity,
                 min_value_files=s.min_value_files,
             ):
                 if role is not None and all(_place_path(p) in shared_paths for p in d.places):
                     continue
-                out.append(d)
+                if (d.kind, d.places) not in seen:  # files of no platform are in each pass
+                    seen.add((d.kind, d.places))
+                    out.append(d)
         return tuple(out)
 
     # --- the snapshot's view --------------------------------------------------------
@@ -171,15 +185,16 @@ class InstructionWatch:
     def _file(
         self, f: Found, now: datetime, sessions: dict[tuple[str | None, str | None], int]
     ) -> InstructionFile:
-        rows = self._history.get(str(f.path), [])
         start = now - self.settings.window
+        rows = self._history.get(str(f.path), [])
+        # The scan cut its history at its own clock: cut again at this read's.
+        before = [r for r in rows if r.measured_at <= start]
+        rows = before[-1:] + [r for r in rows if r.measured_at > start]
         base = rows[0] if rows else None
         since = max(base.measured_at, start) if base else None
         later = rows[1:]
-        tokens_per_day: int | None = None
-        if f.source.platform is not None or f.role is not None:
-            n = sessions.get((f.source.platform, f.role), 0)
-            tokens_per_day = f.measure.tokens * n
+        n = sessions.get((f.source.platform, f.role), 0)
+        tokens_per_day = f.measure.tokens * n
         return InstructionFile(
             path=f.shown,
             role=f.role,
@@ -197,13 +212,12 @@ class InstructionWatch:
         )
 
 
-def _role_part(pattern: str, path: Path) -> str | None:
-    """The part of ``path`` that ``{role}`` in ``pattern`` matched (no ``**`` before it)."""
-    parts = pattern.split(os.sep)
+def _role_part(pattern: str, match: str) -> str | None:
+    """The part of ``match`` that ``{role}`` in ``pattern`` matched, both normalised (glob
+    keeps some doubled separators and drops others); the config refuses ``**`` before it."""
+    parts = os.path.normpath(pattern).split(os.sep)
     k = next(i for i, p in enumerate(parts) if "{role}" in p)
-    if any("**" in p for p in parts[:k]):
-        return None
-    actual = str(path).split(os.sep)
+    actual = os.path.normpath(match).split(os.sep)
     if len(actual) <= k:
         return None
     before, _, after = parts[k].partition("{role}")
@@ -218,14 +232,19 @@ def _place_path(place: str) -> str:
 
 
 def _sessions_per_day(snapshot: Snapshot) -> dict[tuple[str | None, str | None], int]:
-    """Sessions that started in the last 24 hours, per (platform, role); also per (platform,
-    None), (None, role) and (None, None) for files every role or any platform loads."""
-    roles = {o.id: o.role for o in snapshot.owners}
+    """Sessions on this host that started in the last 24 hours, per (platform, role); also
+    per (platform, None), (None, role) and (None, None) for files every role or any
+    platform loads. A ``kelpie agent`` host's sessions read that host's files, which are not
+    measured here, so they are left out."""
+    owners = {o.id: o for o in snapshot.owners}
     counts: dict[tuple[str | None, str | None], int] = {}
     for s in snapshot.sessions:
         if not snapshot.now - DAY <= s.started_at <= snapshot.now:
             continue
-        role = roles.get(s.owner_id) if s.owner_id else None
+        owner = owners.get(s.owner_id)
+        if owner is not None and owner.host is not None:
+            continue
+        role = owner.role if owner is not None else None
         for key in {(s.source, role), (s.source, None), (None, role), (None, None)}:
             counts[key] = counts.get(key, 0) + 1
     return counts

@@ -1126,8 +1126,8 @@ and names the models without a price.
 
 The instruction files each role loads (skills, `CLAUDE.md`, `AGENTS.md`, role prompts),
 measured for rule [`instruction_bloat`](#instruction_bloat) (incident 21). Off unless the
-section is present: with it, Kelpie reads these files on its own host, read-only (never
-through a symlink), and stores only their sizes and hashes (see
+section is present: with it, Kelpie reads these files on its own host, read-only (a file that is itself a
+symlink is skipped), and stores only their sizes and hashes (see
 [privacy](privacy.md#instruction-files)); it never edits them. Files on a `kelpie agent`
 host are not measured yet.
 

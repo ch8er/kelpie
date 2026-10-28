@@ -1171,13 +1171,23 @@ class SqliteInstructionStore:
             )  # fmt: skip
         return out
 
-    def prune(self, before: datetime) -> int:
-        """Drop rows before ``before`` except each path's last one there (its size then)."""
+    def prune(self, before: datetime, keep: Collection[str] | None = None) -> int:
+        """Drop rows before ``before`` except each path's last one there (its size then);
+        with ``keep``, also every row of a path not in it (a file no longer measured)."""
         cutoff = _ts(before)
         with self._lock, self._db:
-            return self._db.execute(
+            n = self._db.execute(
                 "DELETE FROM instruction_sizes WHERE measured_at < ? AND measured_at < ("
                 " SELECT MAX(measured_at) FROM instruction_sizes p"
                 " WHERE p.path = instruction_sizes.path AND p.measured_at <= ?)",
                 (cutoff, cutoff),
             ).rowcount
+            if keep is not None:
+                stored = [
+                    r[0] for r in self._db.execute("SELECT DISTINCT path FROM instruction_sizes")
+                ]
+                gone = [(p,) for p in stored if p not in keep]
+                n += self._db.executemany(
+                    "DELETE FROM instruction_sizes WHERE path = ?", gone
+                ).rowcount
+            return n

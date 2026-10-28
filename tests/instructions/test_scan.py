@@ -92,3 +92,17 @@ def test_read_file_refuses_symlinks_non_files_and_large_files(tmp_path: Path) ->
     os.mkfifo(fifo)
     with pytest.raises(Unreadable, match="not a regular file"):
         read_file(fifo, 100)
+
+
+def test_many_exact_copies_are_one_group() -> None:
+    files = [Scanned(f"~/s{i:03}.md", measure(doc(("Boilerplate", CASE)))) for i in range(70)]
+    (dupe,) = copies("dev", files)
+    assert len(dupe.places) == 70 and dupe.similarity == 1.0
+
+
+def test_fences_close_only_on_their_own_marker() -> None:
+    text = (
+        "## Real\n" + CASE + "\n````\n```python\n## not one\n```\n## nor this\n````\n"
+        "~~~\n## inside tilde\n~~~ info\n## still inside\n~~~\n## After\n" + OTHER + "\n"
+    )
+    assert [s.heading for s in measure(text.encode()).sections] == ["real", "after"]

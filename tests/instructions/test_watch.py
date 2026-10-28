@@ -125,3 +125,27 @@ def test_copies_across_a_role_and_the_shared_files(farm: Path) -> None:
     kinds = {(d.role, d.kind, len(d.places)) for d in copies}
     assert ("reviewer", "section", 2) in kinds
     assert ("reviewer", "value", 3) in kinds  # the shared AGENTS.md counts for the role
+
+
+def test_remote_sessions_do_not_count_and_files_of_every_role_count_all(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("# Project\n" + "x" * 396)  # 101 tokens
+    settings = InstructionSettings(enabled=True)
+    w = InstructionWatch(
+        SqliteInstructionStore(":memory:"), settings, (Source((f"{tmp_path}/CLAUDE.md",)),)
+    )
+    owners = (Owner("dev", "developer"), Owner("laptop:dev", "developer", host="laptop"))
+    local = sessions(T0, 3, "dev")
+    remote = tuple(
+        Session(f"r{i}", "laptop:T-1", "laptop:dev", T0, source="hermes") for i in range(4)
+    )
+    (f,) = w.read(Snapshot(now=T0, owners=owners, sessions=local + remote))[0]
+    assert f.tokens_per_day == f.tokens * 3 and f.token_basis == "sessions"
+
+
+def test_role_from_a_path_with_doubled_separators(tmp_path: Path) -> None:
+    (tmp_path / "w-ops").mkdir()
+    (tmp_path / "w-ops" / "AGENTS.md").write_text("# Ops\n")
+    src = Source((f"{tmp_path}//w-{{role}}/AGENTS.md",))
+    w = InstructionWatch(SqliteInstructionStore(":memory:"), InstructionSettings(), (src,))
+    (f,) = w.read(Snapshot(now=T0))[0]
+    assert f.role == "ops"

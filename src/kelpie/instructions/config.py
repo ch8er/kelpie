@@ -145,6 +145,8 @@ def load_instructions(section: Any) -> InstructionSettings:
             if isinstance(value, bool) or not isinstance(value, int | float) or not 0 < value <= 1:
                 raise ValueError(f"{SECTION} {key} must be a number in (0, 1]")
             kwargs[key] = float(value)
+    if kwargs.get("every", timedelta(hours=1)) > kwargs.get("window", timedelta(days=7)):
+        raise ValueError(f"{SECTION} every must not be longer than window")
     kwargs["files"] = _files(section.get("files", []))
     return InstructionSettings(**kwargs)
 
@@ -182,6 +184,8 @@ def _files(raw: Any) -> tuple[Source, ...]:
         role = entry.get("role")
         if role is not None and (not isinstance(role, str) or not role.strip()):
             raise ValueError(f"{at} role must be a non-empty string")
+        if any("**" in p.partition("{role}")[0] for p in paths if "{role}" in p):
+            raise ValueError(f"{at} paths may not have ** before {{role}}")
         if role is not None and any("{role}" in p for p in paths):
             raise ValueError(f"{at} sets role and uses {{role}} in a path: pick one")
         loaded = entry.get("loaded", "always")

@@ -52,6 +52,8 @@ def test_files_entries() -> None:
         ({"files": [{"paths": ["a"], "extra": 1}]}, "unknown"),
         ({"files": [{"paths": ["{role}/{role}"]}]}, "once each"),
         ({"files": [{"paths": ["{role}/x"], "role": "dev"}]}, "pick one"),
+        ({"files": [{"paths": ["a/**/{role}/x"]}]}, r"\*\* before"),
+        ({"every": "2d", "window": "1d"}, "every must not be longer than window"),
         ({"files": [{"paths": ["a"], "loaded": "sometimes"}]}, "loaded must be one of"),
         ({"files": [{"paths": ["a"], "role": ""}]}, "role must be"),
         ({"files": [{"paths": ["a"], "owner": 3}]}, "owner must be"),

@@ -70,4 +70,4 @@ def test_the_snapshot_carries_the_measured_files(tmp_path: Path, tmp_db: Path) -
     snap = merged_snapshot([], Metrics(), lambda: now, instructions=w)()
     (f,) = snap.instruction_files
     assert f.path.endswith("AGENTS.md") and f.chars == 7 and f.sections == 1
-    assert f.tokens_per_day is None  # no platform, no role: no sessions to count
+    assert f.tokens_per_day == 0 and f.token_basis == "sessions"  # no sessions today
