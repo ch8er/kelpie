@@ -168,6 +168,18 @@ LEAKS = [
     ("tool x\x1fhunter2", "hunter2"),
     ('"a\\" | cat hunter2 x"', "hunter2"),
     ('echo \\"hi hunter2\\"', "hunter2"),
+    # setup builtins (#197): their arguments stay masked to the separator that really ends them
+    ("export A=x\\; hunter2 swordfish", "hunter2"),
+    ("cd my\\; hunter2 swordfish", "hunter2"),
+    ("set -- a\\; hunter2 swordfish", "hunter2"),
+    ("export A=x\\\\\\; hunter2", "hunter2"),
+    ("export K=$(cat /etc/x; hunter2 swordfish)", "hunter2"),
+    ("export K=$(true; echo hunter2 swordfish)", "hunter2"),
+    ("export K=$(cat x ; hunter2 abc)", "hunter2"),
+    ("export K=${A:-x; hunter2} && make", "hunter2"),
+    ("export A='x; y' hunter2", "hunter2"),
+    ("source ~/.secrets/env.sh && gh pr checks 5", "secrets"),
+    ("cd /home/alice/private && make test", "alice"),
 ]
 
 
@@ -253,6 +265,19 @@ def test_commands_stay_recognizable(cmd: str, expected: str) -> None:
 )
 def test_prefixes_still_work(cmd: str, prefix: str) -> None:
     assert command_prefix(command.redact_command(cmd)) == prefix
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'export A="x ; hunter2 abc" && make',
+        "export A=x\\; hunter2 && make",
+        "export K=$(cat x; hunter2) && make",
+    ],
+)
+def test_prefix_of_a_raw_setup_command_never_names_its_values(raw: str) -> None:
+    assert command_prefix(raw) != "hunter2"
+    assert command_prefix(command.redact_command(raw)) in {"make", "export"}
 
 
 def test_detect_filter_still_sees_a_pipe_in_the_prefix() -> None:

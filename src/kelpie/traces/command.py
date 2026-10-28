@@ -152,6 +152,7 @@ def redact_command(command: str) -> str | None:
     words = False  # plain words are still kept (right after the executable)
     wrapper = None  # flags of the wrapper whose options come next (sudo -u x make)
     setup = False  # in a setup builtin's arguments (export X=… &&): all masked
+    depth = 0  # brackets open in them ($(…), ${…}): a separator inside is still theirs
     extra = 0  # wrapper and setup tokens, not counted against _MAX_TOKENS
     while i < len(tokens) and len(out) < _MAX_TOKENS + extra:
         tok = tokens[i]
@@ -181,16 +182,18 @@ def redact_command(command: str) -> str | None:
             continue
         if tok.startswith("#"):
             break
-        if tok in _SEPARATORS and end == i + 1:
+        if tok in _SEPARATORS and end == i + 1 and not (setup and depth):
             out.append(tok)
             if setup:  # the separator after a setup builtin is its own, too
                 extra = min(extra + 1, _MAX_WRAPPED)
             exe, words, setup = True, False, False
         elif setup:
+            depth += tok.count("(") + tok.count("{") - tok.count(")") - tok.count("}")
             if out[-1] != _MASK:  # one mask for all its arguments
                 out.append(_MASK)
                 extra = min(extra + 1, _MAX_WRAPPED)
-            if end == i + 1 and tok.endswith(";") and not any(q in tok for q in _QUOTES):
+            plain = "\\" not in tok and not any(q in tok for q in _QUOTES)  # not x\; nor 'x;'
+            if end == i + 1 and tok.endswith(";") and plain and not depth:
                 out.append(";")  # export X=1; make: the separator glued to the argument
                 extra = min(extra + 1, _MAX_WRAPPED)
                 exe, setup = True, False
@@ -206,7 +209,7 @@ def redact_command(command: str) -> str | None:
                 wrapper = _WRAPPERS[base]
                 extra = min(extra + 1, _MAX_WRAPPED)
             elif ok and base in _SETUP:
-                setup, words = True, False
+                setup, words, depth = True, False, 0
                 extra = min(extra + 1, _MAX_WRAPPED)
         elif _FLAG.match(tok):
             out.append(tok)
@@ -274,7 +277,13 @@ def command_prefix(command: str | None) -> str | None:
     tokens = command.split()
     # Setup builtins before the command (export X=… &&, cd dir &&, …;): the command after.
     while tokens and _base(tokens[0]) in _SETUP:
-        cut = next((k for k, t in enumerate(tokens) if t in _THEN), None)
+        cut = None
+        for k, t in enumerate(tokens):
+            if t in _THEN:
+                cut = k
+                break
+            if t in _SEPARATORS or any(c in t for c in "'\"`\\$();"):
+                break  # a pipe, a quote, an escape or a substitution: where it ends is unclear
         if cut is None or cut == len(tokens) - 1:
             break
         del tokens[: cut + 1]
