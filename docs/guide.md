@@ -311,14 +311,28 @@ over `[report] verify_window` (a day) before and after it: hours lost per day
 (only the fix's rule when it names one), tokens per day, task returns per day, review time
 (sessions of `review_roles`), sessions that failed or ended without a status, and for a
 command fix the output tokens per call. A side with fewer than `min_sample` observations,
-or an after-window under a quarter of the window, is labelled a small sample. Fixes come
+or an after-window under a quarter of the window, is labelled *direction only*; every row
+shows its sample sizes. What the report cannot separate it does not credit:
+
+- *Overlapping fixes.* Fixes less than a window apart are one group ("3 fixes within 19.0h
+  of each other"), measured once from a window before the first to a window after the
+  last, and credited to none of them alone. Per fix it shows only what that fix alone can
+  explain: its role's tokens and failures when no other fix of the group touches that
+  role or the whole farm, and its command's output per call when no other fix names the
+  same command for the same role.
+- *Newly enabled signals.* Tokens per day whose traces began after the first quarter of
+  the before-window, and, with a config change in the group, a cause of hours lost first
+  seen after it with nothing before (a connector or rule the change may have turned on),
+  are listed under "Not compared" with their value after, never as "+900% worse".
+
+Fixes come
 from `kelpie fix "lifted the merge hold" [--rule R] [--command PREFIX] [--role ROLE]
 [--at TIME]` (check with `kelpie fix --list [--days N]`), from config changes (`kelpie serve` notes when its config file changed), from
 rule mode changes in the action ledger (observe to act, dry-run off) and from output
 filters that appear in traces (`rtk`, `| xcbeautify`). Board-based metrics (review time,
 failures, returns) need the board as far back as the before-window of the day before's
-fixes: `kelpie report` widens the Hermes lookback to that by itself (about 73h for
-yesterday with the defaults; further for an older `--date`), only for the report, so the
+fixes: `kelpie report` widens the Hermes lookback to that by itself (about 97h for
+yesterday with the defaults: two windows, for an older fix a recent one overlaps; further for an older `--date`), only for the report, so the
 rules of `kelpie serve` keep `[adapters.hermes] lookback`. Spans must be kept as long
 (`[traces] retention`, 7d by default), and the Hermes hook spool (20 MB, one rotation) must
 still hold that much. `kelpie fix --at` without an offset is read in

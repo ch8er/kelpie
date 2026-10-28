@@ -84,11 +84,13 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
     tz = sources.report.tz
     start, end = day_bounds(day, tz)
     day_before, _ = day_bounds(day - timedelta(days=1), tz)  # 23 or 25h around DST
-    # Earlier days: repeated output offenders, and the before-window of yesterday's fixes.
-    # An hour of slack: a calendar day around a DST change is 23 or 25 hours.
+    # Earlier days: repeated output offenders, and the before-window of yesterday's fixes,
+    # which may join an older fix within a window of them (measured from a window before
+    # it). An hour of slack: a calendar day around a DST change is 23 or 25 hours.
+    reach = day_before - sources.report.verify_window
     history = min(
         start - timedelta(days=max(sources.outputs.repeat_days - 1, 0)),
-        day_before - sources.report.verify_window,
+        reach - sources.report.verify_window,
     ) - timedelta(hours=1)
     actions, states, spans, fixes, attribution = [], [], [], [], None
     snoozes: list[Snooze] = []
@@ -97,7 +99,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
             actions = store.actions(history, end)
             states = store.states(history, end)
             spans = store.spans(history, end)
-            fixes = store.fixes(day_before, end)
+            fixes = store.fixes(reach, end)
             attribution = store.attribution()
             snoozes = store.snoozes(start)
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same

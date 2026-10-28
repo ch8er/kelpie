@@ -93,7 +93,7 @@ def test_a_hostile_role_in_a_before_after_metric_keeps_its_cell() -> None:
     spans = [
         Span(f"tr-{h}", f"s-{h}", "chat", SpanKind.LLM, at + timedelta(hours=h),
              at + timedelta(hours=h), session_id="S-1", model="m", input_tokens=100)
-        for h in (-3, -2, 2, 3)
+        for h in (-6, -2, 2, 3)  # traces cover the before-window
     ]  # fmt: skip
     event = FixEvent(at, "manual", "note", rule=None, role=role)
     ev = Evidence(end=at + timedelta(hours=6), spans=spans,

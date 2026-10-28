@@ -89,7 +89,9 @@ def test_small_samples_are_labelled() -> None:
     report = build_report(inputs(min_sample=20))
     assert metric(report, "review time").small
     assert report.verifications[0].small_sample
-    assert "small sample: a direction, not a result" in render_markdown(report)
+    markdown = render_markdown(report)
+    assert "fewer than 20 observations on a side" in markdown
+    assert "| review time (direction only) | 48.0 min | 27.0 min |" in markdown
 
 
 def test_short_after_window_is_a_small_sample() -> None:
@@ -97,7 +99,8 @@ def test_short_after_window_is_a_small_sample() -> None:
     spans = [
         Span("tr", f"s{i}", "chat", SpanKind.LLM, at, at, session_id="D-1", model="m",
              input_tokens=100)
-        for i, at in enumerate((late - timedelta(hours=1), late + timedelta(hours=1)))
+        for i, at in enumerate((late - timedelta(hours=23), late - timedelta(hours=1),
+                                late + timedelta(hours=1)))
     ]  # fmt: skip
     report = build_report(inputs(fixes=(FixEvent(late, MANUAL, "late fix"),), spans=spans))
     [v] = report.verifications
@@ -162,6 +165,7 @@ def test_tokens_returns_and_command_output() -> None:
         )  # fmt: skip
 
     spans = [
+        chat(0, FIX - timedelta(hours=23), 0),  # traces cover the before-window
         chat(1, FIX - timedelta(hours=3), 10_000),
         chat(2, FIX + timedelta(hours=3), 4_000),
     ]

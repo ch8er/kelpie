@@ -205,14 +205,15 @@ def test_the_report_looks_back_as_far_as_its_day_needs(
     hermes = f'[adapters.hermes]\ndb_path = "{tmp_path / "kanban.db"}"\nspool = false\n'
     settings = load_settings(config(tmp_path, hermes))  # [report] timezone = Europe/Berlin
     assert settings.hermes is not None and settings.hermes.lookback == timedelta(hours=24)
-    # report of Mar 2 at 00:05 on Mar 3 (Berlin): back to Mar 1 00:00 minus a 1d window
+    # report of Mar 2 at 00:05 on Mar 3 (Berlin): back to Mar 1 00:00 minus two 1d windows
+    # (a fix of Mar 1 may overlap one of Feb 28, measured from a window before that)
     now = datetime(2026, 3, 2, 23, 5, tzinfo=UTC)
     wide = report_settings(settings, date(2026, 3, 2), now)
     assert wide.hermes is not None
     assert wide.hermes.lookback == now - datetime(
-        2026, 2, 28, 0, tzinfo=ZoneInfo("Europe/Berlin")
+        2026, 2, 27, 0, tzinfo=ZoneInfo("Europe/Berlin")
     ) + timedelta(hours=1)
-    assert timedelta(hours=73) < wide.hermes.lookback < timedelta(hours=74)
+    assert timedelta(hours=97) < wide.hermes.lookback < timedelta(hours=98)
     # an older --date reaches further; a longer configured lookback is kept
     older = report_settings(settings, date(2026, 2, 20), now)
     assert older.hermes is not None and older.hermes.lookback > timedelta(days=11)

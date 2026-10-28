@@ -168,6 +168,7 @@ def digest(report: DailyReport) -> Digest:
             {
                 "rule": _name(v.event.rule) if v.event.rule else None,
                 "kind": _name(v.event.kind),
+                "fixes_together": len(v.events),
                 "after_hours": _num(v.after.total_seconds() / 3600),
                 "metrics": [
                     {
