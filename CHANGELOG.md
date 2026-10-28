@@ -377,6 +377,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   that was not set (the GitHub Issues and Linear quickstarts before the token is exported);
   it now fails its `config loads` check and names the variable
   ([#249](https://github.com/ch8er/kelpie/issues/249)).
+- A `kelpie serve` refused for its config (a missing token, header or admin key variable,
+  an unknown alert channel setting) no longer leaves an empty `kelpie.db` behind: the config
+  is checked before any database is opened.
 - Kelpie's blocks, parks and wakes on a Hermes board showed up as written by the profile
   Kelpie runs under (`default`): they are signed `kelpie` now, like its comments, and the name
   is `[adapters.hermes] author` ([#189](https://github.com/ch8er/kelpie/pull/189)).

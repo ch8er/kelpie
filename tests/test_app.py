@@ -578,3 +578,39 @@ def test_status_lists_who_may_record_a_persons_decisions(tmp_path: Path) -> None
         path.read_text().replace("[adapters.hermes]\n", "[adapters.hermes]\nenabled = false\n")
     )
     assert _human_decisions_status(load_settings(path)) == []
+
+
+MISSING = "KELPIE_TEST_UNSET_VARIABLE"
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        f'[traces]\ntoken_env = "{MISSING}"\n',
+        "[[traces.forward]]\n"
+        'endpoint = "https://example.org/v1/traces"\n'
+        f'headers_env = {{ Authorization = "{MISSING}" }}\n',
+        f'[connectors.cost_reports.anthropic]\nkind = "anthropic"\nadmin_key_env = "{MISSING}"\n',
+        f'[[alerts.channels]]\ntype = "telegram"\ntoken_env = "{MISSING}"\nchat_id = "-100123"\n',
+        f'[connectors.github]\nrepos = ["example/repo"]\ntoken_env = "{MISSING}"\n',
+        '[hub]\nlisten = "127.0.0.1:1"\nallow_plain_http = true\n'
+        f'[[hub.agents]]\nname = "laptop"\ntoken_env = "{MISSING}"\n',
+    ],
+    ids=[
+        "traces-token",
+        "forward-header",
+        "cost-report-key",
+        "alert-channel",
+        "github-token",
+        "hub-agent",
+    ],
+)
+def test_a_refused_config_opens_no_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str
+) -> None:
+    monkeypatch.delenv(MISSING, raising=False)
+    db = tmp_path / "kelpie.db"
+    path = write(tmp_path, f'[storage]\npath = "{db}"\n{section}')
+    with pytest.raises(ConfigError, match=MISSING):
+        build_app(load_settings(path))
+    assert not db.exists()

@@ -1631,12 +1631,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         ),
     ]:
         log.warning(warning)
-    try:
-        store: LedgerStore = (
-            MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
-        )
-    except (OSError, sqlite3.Error, RuntimeError) as exc:
-        raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
+    # Everything the config can be refused for is checked before any storage is opened:
+    # a kelpie serve that will not start leaves no database behind.
     traces = settings.traces
     try:
         # With [hub] this port takes no spans: its token (or token file) is not needed.
@@ -1664,11 +1660,18 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
     hub = _build_hub(settings, adapters, clock)
+    enrich, connectors = connector_steps(settings, metrics, clock)
+    costs_source = cost_report_source(settings)  # kelpie serve only: reads with the admin key
+    try:
+        store: LedgerStore = (
+            MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
+        )
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
-    enrich, connectors = connector_steps(settings, metrics, clock)
-    costs = cost_report_steps(settings, metrics)  # kelpie serve only: reads with the admin key
+    costs = cost_report_steps(settings, metrics, costs_source)
     enrich += costs
     engine = Engine(
         loaded.rules,
@@ -2108,12 +2111,12 @@ def reconcile_spend(
     return reconcile(costs, estimated, thresholds, scopes)
 
 
-def cost_report_steps(
-    settings: Settings, metrics: Metrics | None = None
-) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+def cost_report_source(settings: Settings) -> CostReportReader | None:
+    """The reader of ``[connectors.cost_reports]`` (None without it); ConfigError when an
+    admin key is missing. Opens nothing."""
     reports = settings.cost_reports
     if reports is None:
-        return []
+        return None
     try:
         source = reports.build()
     except ValueError as exc:
@@ -2122,6 +2125,21 @@ def cost_report_steps(
         log.info(
             "[connectors.cost_reports.%s] admin key read from $%s", r.provider, r.admin_key_env
         )
+    return source
+
+
+def cost_report_steps(
+    settings: Settings,
+    metrics: Metrics | None = None,
+    source: CostReportReader | None = None,
+) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+    """The cost report step, with its store opened (``source``: from
+    :func:`cost_report_source`, built here when not given)."""
+    if settings.cost_reports is None:
+        return []
+    if source is None:
+        source = cost_report_source(settings)
+    assert source is not None
     try:
         store = SqliteCostReports(settings.db_path) if settings.db_path is not None else None
     except (OSError, sqlite3.Error, RuntimeError) as exc:
