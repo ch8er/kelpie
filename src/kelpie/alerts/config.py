@@ -32,7 +32,6 @@ one stops Kelpie at startup.
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -54,8 +53,6 @@ from kelpie.alerts.slack import SlackSettings
 from kelpie.alerts.telegram import TelegramSettings
 from kelpie.core.serde import parse_duration
 
-log = logging.getLogger(__name__)
-
 SECTION = "[alerts]"
 MAX_QUEUE = 1000
 MAX_RETRY_HORIZON = timedelta(hours=24)
@@ -70,7 +67,6 @@ class AlertSettings:
     queue_size: int = DEFAULT_QUEUE_SIZE
     retry_horizon: timedelta = DEFAULT_RETRY_HORIZON
     rendering: RenderSettings = DEFAULT_RENDERING  # language and task_url
-    links_note: str | None = None  # why alerts carry no task links, when config says one
 
     @property
     def button_channels(self) -> tuple[TelegramSettings, ...]:
@@ -124,21 +120,19 @@ def load_alerts(
     section: Any, report_task_url: str | None = None, tz: tzinfo = UTC
 ) -> AlertSettings:
     """``[alerts]``; ``report_task_url`` is ``[report] task_url``, the default link
-    template (used only when it is an http(s) URL: the report may link elsewhere); ``tz``
-    is ``[report] timezone``, where alerts show when a snooze ends."""
+    template (checked the same way: an http(s) URL with ``{id}``); ``tz`` is ``[report]
+    timezone``, where alerts show when a snooze ends."""
     if section is None:
-        url, note = _inherited(report_task_url)
-        return AlertSettings(rendering=RenderSettings(task_url=url, tz=tz), links_note=note)
+        return AlertSettings(rendering=RenderSettings(task_url=_inherited(report_task_url), tz=tz))
     if not isinstance(section, Mapping):
         raise ValueError(f"{SECTION} must be a table")
     if extra := set(section) - _KEYS:
         raise ValueError(f"{SECTION}: unknown keys {sorted(extra)}")
     language = i18n.check_language(section.get("language", i18n.DEFAULT), f"{SECTION} language")
-    note = None
     if "task_url" in section:
         task_url: str | None = check_task_url(section["task_url"], f"{SECTION} task_url")
     else:
-        task_url, note = _inherited(report_task_url)
+        task_url = _inherited(report_task_url)
     try:
         window = parse_duration(section.get("dedup_window", DEFAULT_WINDOW))
     except (ValueError, TypeError) as exc:
@@ -156,19 +150,13 @@ def load_alerts(
         raise ValueError(f"{SECTION} retry_horizon must be between 0 and {MAX_RETRY_HORIZON}")
     rendering = RenderSettings(language, task_url, tz)
     channels = _channels(section.get("channels", []))
-    return AlertSettings(channels, window, size, horizon, rendering, note)
+    return AlertSettings(channels, window, size, horizon, rendering)
 
 
-def _inherited(url: str | None) -> tuple[str | None, str | None]:
-    """``[report] task_url`` for alerts, or why not (it is not an http(s) link)."""
-    if url is None:
-        return None, None
-    try:
-        return check_task_url(url), None
-    except ValueError:
-        note = "[report] task_url is not an http(s) URL; set [alerts] task_url"
-        log.warning("alerts carry no task links: %s", note)
-        return None, note
+def _inherited(url: str | None) -> str | None:
+    """``[report] task_url`` for alerts (``load_report`` has checked it already; a direct
+    caller gets the same error)."""
+    return None if url is None else check_task_url(url, "[report] task_url")
 
 
 def _channels(entries: Any) -> tuple[ChannelSettings, ...]:

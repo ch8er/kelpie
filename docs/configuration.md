@@ -1653,7 +1653,7 @@ once a day when `at` is set.
 | --- | --- | --- | --- |
 | `timezone` | `"UTC"` | IANA name | Where a day starts and ends. |
 | `dir` | unset | path | Writes `kelpie-report-<date>.md` there. Unset: stdout only. |
-| `task_url` | unset | http(s) URL with `{id}` | Links task ids in the Markdown (and, unless `[alerts] task_url` is set, in alerts). Checked like `[alerts] task_url`: a plain http(s) URL, no credentials, `{id}` not in the host. |
+| `task_url` | unset | http(s) URL with `{id}` | Links task ids in the Markdown (and, unless `[alerts] task_url` is set, in alerts). Checked like `[alerts] task_url`: a plain http(s) URL, no credentials, at most 600 characters, `{id}` not in the host. |
 | `url` | unset | http(s) URL with `{date}` | Where the full report of a day can be read (e.g. where `dir` is served); the chat summary links it as "Open report", with the day (YYYY-MM-DD) in `{date}`, which must not be in the host. Unset: no link. |
 | `hour_usd` | unset | dollars, > 0 | What an hour lost costs: a stuck task-hour, or an agent-hour idle behind a hold or waiting on a person. Unset: hours stay hours. |
 | `channels` | all | list of channel names | `[[alerts.channels]]` that get the summary with `--send`. |
