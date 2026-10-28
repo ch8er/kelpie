@@ -39,7 +39,11 @@ session_stale_after = "60m"
 
 Unknown keys stop Kelpie at startup. `kelpie status` lists the adapter, whether the database
 is readable and how old the last spool line is (or that the spool is missing). One section
-watches one board. Kelpie opens `kanban.db` read-only (`mode=ro`, `query_only`), one short
+watches one Hermes home: one board with `db_path`, or several with `[[adapters.hermes.boards]]`
+(`name`, `db_path`, optional `wait_key`; ids then become `<name>:<id>`, the spool is split
+by task and run, tool processes are read once, actions go to the board in the id's prefix:
+[configuration.md](../../../../docs/configuration.md#adaptershermesboards), code in
+`boards.py`). Kelpie opens `kanban.db` read-only (`mode=ro`, `query_only`), one short
 read transaction per snapshot, and never writes to it; Hermes writers in WAL mode are not
 blocked and uncommitted rows are not seen.
 

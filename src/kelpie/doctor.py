@@ -24,6 +24,7 @@ from kelpie import net
 from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.claude_code.adapter import ClaudeCodeAdapter
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
+from kelpie.adapters.hermes.boards import HermesBoards
 from kelpie.adapters.hermes.git_state import read_git_state
 from kelpie.adapters.hermes.proctable import ProcessTable, Procfs, host_table
 from kelpie.adapters.issues import doctor as github_issues
@@ -279,10 +280,16 @@ def check_rule_modes(
     return _pass(name, summary)
 
 
+def _board(name: str, adapter: HermesAdapter) -> str:
+    """A check's name, with the board when it is one of several (``kanban.db (qr)``)."""
+    return name if adapter.board is None else f"{name} ({adapter.board})"
+
+
 def check_board(adapter: HermesAdapter) -> tuple[Check, int | None]:
     """The check, and the number of running tasks (None when the board cannot be read)."""
-    name = "kanban.db"
-    fix = f"set db_path in [adapters.hermes] to the board's kanban.db (now {adapter.db_path})"
+    name = _board("kanban.db", adapter)
+    where = "[adapters.hermes]" if adapter.board is None else f"board {adapter.board}"
+    fix = f"set db_path in {where} to the board's kanban.db (now {adapter.db_path})"
     try:
         total, running = adapter.board_counts()
     except (HermesError, sqlite3.Error) as exc:
@@ -291,7 +298,7 @@ def check_board(adapter: HermesAdapter) -> tuple[Check, int | None]:
     return _pass(name, detail), running
 
 
-def check_hooks(adapter: HermesAdapter, now: datetime, running: int | None) -> Check:
+def check_hooks(adapter: HermesAdapter | HermesBoards, now: datetime, running: int | None) -> Check:
     name = "hooks fire"
     spool = adapter.spool
     if spool is None:
@@ -364,7 +371,9 @@ def check_traces_token(settings: Settings, environ: Mapping[str, str]) -> Check:
             fixes.append("run doctor as the user kelpie serve runs as")
     home = Path(environ.get("HOME") or Path.home())
     hermes = settings.hermes
-    roots += [hermes.db_path.expanduser().parent] if hermes is not None else []
+    if hermes is not None:
+        dbs = [b.db_path for b in hermes.boards] or [hermes.db_path]
+        roots += [db.expanduser().parent for db in dbs]
     roots += [home / ".hermes", home / ".claude"]
     roots = list(dict.fromkeys(r for r in roots if r.is_dir()))
     marker = f"{traces.token_env}="
@@ -546,7 +555,7 @@ def check_pr_blocks(settings: Settings, adapter: HermesAdapter, now: datetime) -
     serve`` does: a block pattern must match, its ``pr`` group must name a PR of a repository
     in ``[connectors.github] repos``. Links other connectors add (human tasks) are not
     considered."""
-    name = "PR blocks have conditions"
+    name = _board("PR blocks have conditions", adapter)
     try:
         # The board only: no spool, no git (worktrees readable already asked git), no ps.
         tasks = replace(adapter, git_state=False, spool=None, tools=None).snapshot(now).tasks
@@ -695,7 +704,7 @@ def check_worker_stop(adapter: HermesAdapter, table: ProcessTable | None = None)
 
 
 def check_worktrees(adapter: HermesAdapter) -> Check:
-    name = "worktrees readable"
+    name = _board("worktrees readable", adapter)
     if not adapter.git_state:
         return _skip(name, "git_state = false")
     try:
@@ -1181,6 +1190,10 @@ def _one[T](adapters: Sequence[PlatformAdapter], kind: type[T]) -> T:
     return next(a for a in adapters if isinstance(a, kind))
 
 
+def _boards_of(adapter: HermesAdapter | HermesBoards) -> list[HermesAdapter]:
+    return list(adapter.boards) if isinstance(adapter, HermesBoards) else [adapter]
+
+
 def run_checks(
     config: Path | None,
     prometheus: str | None = None,
@@ -1204,16 +1217,19 @@ def run_checks(
         check_rule_modes(settings, loaded, adapters),
     ]
     hermes = settings.hermes
-    adapter = next((a for a in adapters if isinstance(a, HermesAdapter)), None)
+    adapter = next((a for a in adapters if isinstance(a, HermesAdapter | HermesBoards)), None)
+    # The boards read one by one: one, or each of a Hermes home's [[adapters.hermes.boards]]
+    boards = [] if adapter is None else _boards_of(adapter)
     why = "no [adapters.hermes] section" if hermes is None else "adapter disabled"
     # Tasks in progress per enabled platform (None: unknown); spans are only expected then.
     counts: list[int | None] = []
     if adapter is None:
         checks += [_skip("kanban.db", why), _skip("hooks fire", why)]
     else:
-        board, running = check_board(adapter)
+        found = [check_board(b) for b in boards]
+        running = None if any(n is None for _, n in found) else sum(n or 0 for _, n in found)
         counts.append(running)
-        checks += [board, check_hooks(adapter, at, running)]
+        checks += [c for c, _ in found] + [check_hooks(adapter, at, running)]
     cc = settings.claude_code
     cc_checks: list[Check] = []
     if cc is not None:  # only when configured, so Hermes-only output stays as it was
@@ -1261,12 +1277,13 @@ def run_checks(
     checks.append(check_prices(settings, at))
     checks.append(check_spend_modes(settings, at))
     checks += check_cost_reports(settings, at, environ)
-    checks.append(_skip("worktrees readable", why) if adapter is None else check_worktrees(adapter))
-    checks.append(_skip(WORKERS, why) if adapter is None else check_worker_stop(adapter))
-    pr_blocks = "PR blocks have conditions"
-    checks.append(
-        _skip(pr_blocks, why) if adapter is None else check_pr_blocks(settings, adapter, at)
-    )
+    if adapter is None:
+        checks.append(_skip("worktrees readable", why))
+    checks += [check_worktrees(b) for b in boards]
+    checks.append(_skip(WORKERS, why) if not boards else check_worker_stop(boards[0]))
+    if adapter is None:
+        checks.append(_skip("PR blocks have conditions", why))
+    checks += [check_pr_blocks(settings, b, at) for b in boards]
     checks.append(check_snooze_markers(settings, at))
     checks += cc_checks
     checks += oc_checks
