@@ -481,6 +481,8 @@ def test_report_config() -> None:
     assert settings.hour_usd == 4.0 and settings.channels == ("ops",)
     assert settings.dir is not None and "~" not in str(settings.dir)
     assert load_report(None) == ReportSettings()
+    longest = "https://board.example.org/" + "a" * 510 + "{id}"  # 600 once a 64-char id fills it
+    assert load_report({"task_url": longest}).task_url == longest
     tables = load_report({"sections": {"model-fit": {"routine_roles": ["reviewer"]}}})
     assert tables.sections == {"model-fit": {"routine_roles": ["reviewer"]}}
 
@@ -494,6 +496,12 @@ def test_report_config() -> None:
         {"timezone": ""},
         {"dir": ""},
         {"task_url": "https://no-placeholder"},
+        {"task_url": "javascript:{id}"},  # not http(s)
+        {"task_url": "https://{id}.board.example.org/"},  # {id} in the host
+        {"task_url": "https://user:secret@board.example.org/t/{id}"},  # credentials
+        {"task_url": "board://t/{id}"},  # not http(s)
+        {"task_url": 3},
+        {"task_url": "https://board.example.org/" + "a" * 511 + "{id}"},  # 601 once filled
         {"url": "https://reports.example.org/latest.md"},  # no {date}
         {"url": "file:///srv/reports/kelpie-report-{date}.md"},  # not http(s)
         {"url": "https://{date}.reports.example.org/"},  # {date} in the host

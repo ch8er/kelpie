@@ -348,6 +348,11 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - On macOS too: Kelpie reads the worker's identity with libproc, as Hermes fingerprints it there,
   and checks it again right before each signal (macOS has no pidfd)
   ([#231](https://github.com/ch8er/kelpie/issues/231)).
+- `[report] task_url` is checked like `[alerts] task_url`: an http(s) URL with `{id}`
+  outside the host, no credentials, and at most 600 characters once a 64-character id fills
+  `{id}`. A relative or non-http template (`javascript:{id}`, `board://{id}`) used to be put
+  into the report's task links as it was; such a config now fails to load with an error
+  naming `[report] task_url`.
 
 ### Fixed
 
