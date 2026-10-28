@@ -304,6 +304,11 @@ def test_prefixes_still_work(cmd: str, prefix: str) -> None:
         "export K=$(cat x; hunter2) && make",
         "cd /repo # note ; hunter2 abc",
         "cd /repo;#note ; hunter2 prod-db01",
+        "'y/cd && hunter2 z'",
+        '"y/cd && hunter2 z"',
+        "'/export ; hunter2 prod-db01'",
+        "cd a && 'y/cd && hunter2 z'",
+        "'a/cd && hunter2 z' && make",
         "cd /repo&#note ; hunter2 prod-db01",
         "cd /repo&&#note ; hunter2 prod-db01\nmake",
         "cd x <<EOF\nfoo ; hunter2 abc\nEOF",
@@ -311,7 +316,7 @@ def test_prefixes_still_work(cmd: str, prefix: str) -> None:
 )
 def test_prefix_of_a_raw_setup_command_never_names_its_values(raw: str) -> None:
     assert command_prefix(raw) != "hunter2"
-    assert command_prefix(command.redact_command(raw)) in {"make", "export", "cd"}
+    assert command_prefix(command.redact_command(raw)) in {"make", "export", "cd", None}
 
 
 def test_detect_filter_still_sees_a_pipe_in_the_prefix() -> None:
@@ -337,6 +342,12 @@ def test_redaction_is_stable_on_random_commands() -> None:
         cmd = " ".join(rng.choice(pool) for _ in range(rng.randint(1, 9)))
         once = command.redact_command(cmd)
         assert once is None or command.redact_command(once) == once, cmd
+
+
+def test_a_glued_separator_stays_within_the_cap() -> None:
+    cmd = "sudo sudo sudo sudo sudo sudo sudo sudo gh && cd x; make test"
+    once = command.redact_command(cmd)
+    assert once is not None and command.redact_command(once) == once
 
 
 def test_redaction_is_stable() -> None:

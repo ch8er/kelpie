@@ -203,7 +203,7 @@ def redact_command(command: str) -> str | None:
             arg = tok[:-1] if glued else tok
             if end != i + 1 or not (arg == _MASK or _SIMPLE_ARG.match(arg)):  # *** redacted
                 break  # $(…), 'x'"y", x\;, ;#: where its arguments end is not clear
-            if glued:
+            if glued and len(out) < _MAX_TOKENS + extra:  # within the cap, as any token
                 out.append(";")
                 extra = min(extra + 1, _MAX_WRAPPED)
                 exe, setup = True, False
@@ -287,7 +287,7 @@ def command_prefix(command: str | None) -> str | None:
     tokens = command.split()
     # Setup builtins before the command (export X=… &&, cd dir &&, …;): the command after.
     first = len(command.strip().splitlines()[0].split()) if command.strip() else 0
-    while tokens and _base(tokens[0]) in _SETUP:
+    while tokens and _SIMPLE_ARG.match(tokens[0]) and _base(tokens[0]) in _SETUP:
         cut = None
         for k, t in enumerate(tokens[:first]):  # its first line only (a raw heredoc follows)
             if t in _THEN:

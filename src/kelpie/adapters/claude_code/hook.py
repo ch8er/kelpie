@@ -291,7 +291,7 @@ def redact_command(command: str) -> str | None:
             arg = tok[:-1] if glued else tok
             if end != i + 1 or not (arg == _MASK or _SIMPLE_ARG.match(arg)):  # *** redacted
                 break  # $(…), 'x'"y", x\;, ;#: where its arguments end is not clear
-            if glued:
+            if glued and len(out) < _MAX_TOKENS + extra:  # within the cap, as any token
                 out.append(";")
                 extra = min(extra + 1, _MAX_WRAPPED)
                 exe, setup = True, False
