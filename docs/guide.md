@@ -226,7 +226,12 @@ report; no LLM is involved.
   without progress),
   from when Kelpie first reported the condition to when it last saw it, clipped to the
   day (a lower bound: a grace period or an allowed wait is not counted). The unit is
-  condition-hours, with two causes in agent-hours instead: forgotten holds (rule 6) count
+  task-hours, each counted once: when several rules see the same task at the same time
+  (rule 13 lists it as waiting on a person while rule 4 holds a stale block on it, or one
+  rule has two conditions on it), the hour counts under the first of a person's inbox, a
+  stale block, then the others in table order, and the others' overlapping hours are
+  listed under "Also seen, not added" (the headline is the sum of the lines). Two causes
+  are in agent-hours instead: forgotten holds (rule 6) count
   the idle agent-hours behind them, from the idle agents rule 6 reports while the hold
   stays open, and a person's inbox (rule 13) counts the agent-hours of the agent tasks
   waiting on them (approvals, human tasks); a human gate rule 6 also reports counts
