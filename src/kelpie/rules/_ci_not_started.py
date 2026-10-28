@@ -6,17 +6,19 @@ It never counted toward an outage, and every PR waiting on CI looked like its ow
 
 **Refused.** A finished build with a job the CI refused (``Job.refused``: no runner took
 it, no step ran; on the live repository a required check was refused while the other jobs
-had run), where that job used to run: an earlier build of the same repository, workflow
-and trigger started a job of that name. A job that never runs for that trigger (a deploy
-job an environment's protection rules refuse on PRs) is no sign. A refusal counts until a
-later build of that repository and workflow starts a job of that name (CI runs it again),
-however long that takes; builds are dated by when they started, never when they finished.
+had run). It is a sign when the CI refused the whole run (every job: protection rules
+refuse single jobs), or when that job used to run there: an earlier build of the same
+repository and workflow started a job of that name for the same trigger (for a push, the
+same branch). A deploy job that an environment's branch rules refuse on PRs or on feature
+branches is no sign. A refusal counts until a later build of that repository and workflow
+starts a job of that name (CI runs it again), however long that takes; builds are dated by
+when they started, never when they finished, and a skipped job never ran.
 
 **Queued.** A build still queued for at least ``queued_after``, unless the CI holds it on
-purpose (``Build.held``: an approval, a concurrency group) or runners take work in its
-repository and workflow: a build there is running, or one started after it was queued and
-ran all its jobs (a busy runner is a queue, not an outage). Builds whose jobs the
-connector did not read take part only by being queued.
+purpose (``Build.held``: an approval, a concurrency group) or runners take work anywhere on
+the farm: a build is running, or one started after it was queued and started a job (a busy
+runner is a queue, not an outage; a stopped CI or dead runners start nothing). Builds whose
+jobs the connector did not read take part only by being queued.
 
 **Open.** Signs of at least ``min_prs`` change requests (repository and branch) within
 ``window`` of each other → one ``warning`` outage of kind
@@ -25,8 +27,8 @@ connector did not read take part only by being queued.
 the signs since then, their repositories, PRs and the tasks waiting on those PRs' CI or
 merge (as rule 9's failing-job outages), with a cause that says which: refused (check the
 CI's billing and spending limits, or a protection rule) or queued (check that runners are
-up). It resolves when fewer are left; the notice names the first build that ran a refused
-job again (:func:`ran_again`).
+up). It resolves when fewer are left; the notice names the first build that ran a job
+refused since the outage began again (:func:`ran_again`).
 """
 
 from __future__ import annotations
@@ -43,7 +45,6 @@ from kelpie.rules._ci_outage import _change, _listed, _newest, _pulls, _repo, _t
 STATE = CI_NOT_STARTED_STATE
 
 _Key = tuple[str, str | None, str]  # repository, workflow, job name
-_Started = dict[_Key, list[tuple[datetime, Build]]]  # builds that started such a job
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,21 +75,20 @@ def not_started(
     return [replace(alert, observe_only=observe)]
 
 
-def ran_again(snapshot: Snapshot) -> str | None:
-    """For the "Resolved" notice: the first build that started a refused job again after
-    its repository's last refusal of it. None when there is none (the outage ended another
-    way: the engine's general notice says so)."""
-    started = _started(snapshot)
+def ran_again(snapshot: Snapshot, since: datetime | None = None) -> str | None:
+    """For the "Resolved" notice: the first build that started a job again after its last
+    refusal there, of those refused since the outage began (``since``). None when there is
+    none (a queue that cleared, or the outage ended another way: the engine's general
+    notice says so)."""
+    started = _Started.of(snapshot)
     last: dict[_Key, datetime] = {}
-    for b in snapshot.builds:
-        for job in b.jobs or ():
-            key = (_repo(b), b.workflow, job.name)
-            if job.refused and b.started_at is not None and _used_to_run(started, key, b):
-                last[key] = max(b.started_at, last.get(key, b.started_at))
+    for _, at, key in _refusals(snapshot, started):
+        if since is None or at >= since:
+            last[key] = max(at, last.get(key, at))
     again = [
         (at, b.id, b, key[2])
         for key, refused in last.items()
-        for at, b in started.get(key, ())
+        for at, b in started.runs.get(key, ())
         if at > refused
     ]
     if not again:
@@ -99,58 +99,98 @@ def ran_again(snapshot: Snapshot) -> str | None:
     )
 
 
-def _started(snapshot: Snapshot) -> _Started:
-    found: _Started = {}
+@dataclass(frozen=True, slots=True)
+class _Started:
+    """Builds that started each job (skipped ones never ran), by when they started."""
+
+    runs: dict[_Key, list[tuple[datetime, Build]]]
+    last: dict[_Key, datetime]  # the latest start of each job
+    # the earliest start of each job by trigger and push branch; ``any`` whatever the trigger
+    first: dict[tuple[_Key, str | None, str | None], datetime]
+    any: dict[_Key, datetime]
+
+    @classmethod
+    def of(cls, snapshot: Snapshot) -> _Started:
+        runs: dict[_Key, list[tuple[datetime, Build]]] = {}
+        last: dict[_Key, datetime] = {}
+        first: dict[tuple[_Key, str | None, str | None], datetime] = {}
+        any_: dict[_Key, datetime] = {}
+        for b in snapshot.builds:
+            if b.started_at is None:
+                continue
+            for job in b.jobs or ():
+                if not job.started or job.conclusion is BuildStatus.SKIPPED:
+                    continue
+                key = (_repo(b), b.workflow, job.name)
+                runs.setdefault(key, []).append((b.started_at, b))
+                last[key] = max(b.started_at, last.get(key, b.started_at))
+                trigger = (key, b.event, _branch(b))
+                first[trigger] = min(b.started_at, first.get(trigger, b.started_at))
+                any_[key] = min(b.started_at, any_.get(key, b.started_at))
+        return cls(runs, last, first, any_)
+
+    def used_to_run(self, key: _Key, build: Build) -> bool:
+        """Whether an earlier build of the same trigger started this job (it can run here);
+        where a trigger is unknown (the refused build's or the earlier one's), any counts."""
+        assert build.started_at is not None
+        if build.event is None:
+            starts = [self.any.get(key)]
+        else:
+            starts = [
+                self.first.get((key, build.event, _branch(build))),
+                self.first.get((key, None, None)),
+            ]
+        return any(at is not None and at < build.started_at for at in starts)
+
+
+def _branch(build: Build) -> str | None:
+    """The branch a push's evidence must share (branch rules); other triggers: none."""
+    return build.branch if build.event == "push" else None
+
+
+def _refusals(snapshot: Snapshot, started: _Started) -> list[tuple[Build, datetime, _Key]]:
+    """Refused jobs that are signs (see the module docs), whether or not they ran again."""
+    found = []
     for b in snapshot.builds:
-        if b.started_at is None:
+        jobs = b.jobs or ()
+        if b.started_at is None or not any(j.refused for j in jobs):
             continue
-        for job in b.jobs or ():
-            if job.started:
-                found.setdefault((_repo(b), b.workflow, job.name), []).append((b.started_at, b))
+        whole = all(j.refused for j in jobs)
+        for job in jobs:
+            key = (_repo(b), b.workflow, job.name)
+            if job.refused and (whole or started.used_to_run(key, b)):
+                found.append((b, b.started_at, key))
     return found
 
 
-def _used_to_run(started: _Started, key: _Key, build: Build) -> bool:
-    """Whether an earlier build of the same trigger started this job (it can run here)."""
-    assert build.started_at is not None
-    return any(
-        at < build.started_at and (b.event == build.event or None in (b.event, build.event))
-        for at, b in started.get(key, ())
-    )
-
-
 def _signs(snapshot: Snapshot, queued_after: timedelta) -> list[_Sign]:
-    started = _started(snapshot)
-    signs = []
+    started = _Started.of(snapshot)
+    signs = {
+        b.id: _Sign(at, b, queued=False)
+        for b, at, key in _refusals(snapshot, started)
+        if started.last.get(key, at) <= at  # not run again since
+    }
+    moving = _moving(snapshot)
     for b in snapshot.builds:
-        if b.started_at is None:
+        if b.status is not BuildStatus.QUEUED or b.started_at is None or b.held:
             continue
-        if b.status is BuildStatus.QUEUED:
-            old = snapshot.now - b.started_at >= queued_after
-            if old and not b.held and not _moving(snapshot, b):
-                signs.append(_Sign(b.started_at, b, queued=True))
-            continue
-        for job in b.jobs or ():
-            key = (_repo(b), b.workflow, job.name)
-            again = any(at > b.started_at for at, _ in started.get(key, ()))
-            if job.refused and not again and _used_to_run(started, key, b):
-                signs.append(_Sign(b.started_at, b, queued=False))
-                break
-    return sorted(signs, key=lambda s: (s.at, s.build.id))
+        old = snapshot.now - b.started_at >= queued_after
+        if old and (moving is None or moving <= b.started_at):
+            signs[b.id] = _Sign(b.started_at, b, queued=True)
+    return sorted(signs.values(), key=lambda s: (s.at, s.build.id))
 
 
-def _moving(snapshot: Snapshot, queued: Build) -> bool:
-    """Whether runners take work in the queued build's repository and workflow."""
-    assert queued.started_at is not None
-    for b in snapshot.builds:
-        if _repo(b) != _repo(queued) or b.workflow != queued.workflow or b.id == queued.id:
-            continue
-        if b.status is BuildStatus.RUNNING:
-            return True
-        later = b.started_at is not None and b.started_at > queued.started_at
-        if later and b.jobs and all(j.started for j in b.jobs):
-            return True
-    return False
+def _moving(snapshot: Snapshot) -> datetime | None:
+    """The latest sign that runners take work anywhere on the farm: now while a build
+    runs, else the latest start of a build that started a job. None: no sign."""
+    if any(b.status is BuildStatus.RUNNING for b in snapshot.builds):
+        return snapshot.now
+    starts = [
+        b.started_at
+        for b in snapshot.builds
+        if b.started_at is not None and any(j.started for j in b.jobs or ())
+    ]
+    return max(starts, default=None)
 
 
 def _since(signs: list[_Sign], min_prs: int, window: timedelta) -> datetime | None:

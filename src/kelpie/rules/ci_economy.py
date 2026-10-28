@@ -163,11 +163,13 @@ class CiEconomy:
         )
         return actions
 
-    def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
+    def resolved(
+        self, state_id: str, snapshot: Snapshot, since: datetime | None = None
+    ) -> str | None:
         """An outage resolves when its job passes again (CI starts jobs again): say where.
         None for the others."""
         if state_id == NOT_STARTED:
-            return ran_again(snapshot)
+            return ran_again(snapshot, since)
         if not is_outage_state(state_id):
             return None
         return passed_again(state_id, snapshot, self.outage_min_prs, self.outage_window)

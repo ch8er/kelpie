@@ -157,3 +157,61 @@ def test_config() -> None:
         build({"not_started_mode": "act"})
     with pytest.raises(ValueError, match="queued_after"):
         build({"queued_after": "0s"})
+
+
+def test_branch_rules_on_pushes_are_no_sign() -> None:
+    deploy = Job("deploy", FAILED, started=False)
+    on_main = ran(300, event="push", jobs=(RAN, Job("deploy", PASSED)))  # deploys from main
+    pushes = [
+        refused(n, 40 - n, event="push", pr=None, jobs=(RAN, deploy)) for n in range(1, 4)
+    ]  # feature branches: the environment's branch rules refuse deploy
+    assert found(on_main, *pushes) == []
+    again_on_main = [refused(n, 40 - n, event="push", branch="main", pr=None, sha=f"m{n}",
+                             jobs=(RAN, deploy)) for n in range(1, 4)]  # fmt: skip
+    assert found(on_main, *again_on_main) == []  # one branch: one change, not three
+
+
+def test_a_whole_run_refused_is_a_sign_without_history() -> None:
+    whole = [
+        refused(n, 40 - n, jobs=(Job("test", FAILED, started=False), REFUSED)) for n in (1, 2, 3)
+    ]
+    assert found(*whole) != []  # a stopped CI: older runs may be out of the connector's view
+
+
+def test_a_busy_runner_anywhere_is_a_queue() -> None:
+    waiting = (queued(1, 50), queued(2, 45), queued(3, 40))
+    elsewhere = replace(ran(60, repo="example/ui", workflow="ui.yml"), status=BuildStatus.RUNNING)
+    assert found(*waiting, elsewhere) == []
+    later = ran(35, repo="example/other")  # a runner took other work after they queued
+    assert found(*waiting, later) == []
+
+
+def test_skipped_jobs_never_ran() -> None:
+    skipped = ran(300, jobs=(RAN, Job("ci-ok", BuildStatus.SKIPPED)))
+    assert found(skipped, *THREE) == []  # no evidence ci-ok can run here
+    assert found(BEFORE, *THREE, ran(20, jobs=(RAN, Job("ci-ok", BuildStatus.SKIPPED)))) != []
+
+
+def test_the_resolved_notice_is_about_this_outage() -> None:
+    rule = CiEconomy()
+    evidence = replace(BEFORE, id="B-early", started_at=NOW - 700 * M)
+    older = (refused(7, 600), ran(500))  # a refusal and its recovery hours before
+    snapshot = Snapshot(now=NOW, builds=(evidence, *older))
+    assert rule.resolved(STATE, snapshot, since=NOW - 60 * M) is None  # e.g. a queue cleared
+    assert rule.resolved(STATE, snapshot) is not None  # without since: any
+
+
+def test_through_the_engine_the_notice_names_the_recovery() -> None:
+    from kelpie.core.config import EngineConfig, Mode
+    from kelpie.core.engine import Engine
+    from tests.fakes import FakeAdapter, FakeAlerter
+
+    alerter = FakeAlerter()
+    config = EngineConfig(dry_run=False, default_mode=Mode.SUGGEST)
+    rule = CiEconomy(not_started_mode="rule")
+    engine = Engine([rule], adapters=[FakeAdapter()], alerter=alerter, config=config)  # type: ignore[list-item]
+    engine.tick(lambda: Snapshot(now=NOW, builds=(BEFORE, *THREE)))
+    later = NOW + 30 * M
+    engine.tick(lambda: Snapshot(now=later, builds=(BEFORE, *THREE, ran(-20))))
+    [notice] = [e for e in alerter.events if e.state == STATE and e.transition.value == "resolved"]
+    assert "CI started jobs again: B-0--20 in example/shop ran ci-ok" in notice.reason
