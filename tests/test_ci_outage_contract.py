@@ -56,3 +56,34 @@ def test_the_state_id_is_stable_and_names_the_signature() -> None:
     assert state != outage_state_id(None, "build", "Select toolchain")
     assert outage_state_id("a", "b", None) != outage_state_id(None, "a", "b")  # same signature
     assert not is_outage_state("ci_economy:waste")
+
+
+def test_outages_have_kinds_and_any_rule_can_report_one() -> None:
+    from kelpie.core.incidents import BLOCK_STORM, CI_FAILURES, Outage, incident_state_id
+
+    state = incident_state_id("stale_blocks", "waiting for ceo (xcode first launch)")
+    assert state.startswith("stale_blocks:outage:") and is_outage_state(state)
+    storm = Outage(
+        state=state,
+        signature="waiting for CEO (Xcode first launch)",
+        kind=BLOCK_STORM,
+        cause='7 tasks blocked within 52 min: "waiting for CEO (Xcode first launch)"',
+        person="ceo",
+        tasks=("T-1", "T-2"),
+    )
+    assert Outage.from_params(storm.to_params()) == storm
+    assert storm.job == "" and CiOutage is Outage
+    # Params written before kinds existed read as failing CI jobs.
+    old = {k: v for k, v in outage().to_params().items() if k not in ("kind", "cause", "person")}
+    assert Outage.from_params(old) == outage() and outage().kind == CI_FAILURES
+    for bad in ("unknown", ["block_storm"], 3, None):
+        assert Outage.from_params({**storm.to_params(), "kind": bad}) is None, bad
+    assert Outage.from_params({**outage().to_params(), "job": ""}) is None  # CI needs a job
+
+
+def test_only_outage_states_are_outage_states() -> None:
+    from kelpie.core.incidents import incident_state_id
+
+    assert is_outage_state(incident_state_id("loop_breaker", "ios_sim.sh"))
+    for not_one in ("outage:abc", ":outage:abc", "stale_blocks:outage:", "stale_blocks:T-1:b"):
+        assert not is_outage_state(not_one), not_one
