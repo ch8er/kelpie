@@ -334,21 +334,24 @@ right before a write.
 
 - Never raise out of a snapshot step for a single failure; degrade to an unknown result. A
   step that raises anyway is logged, counted in `kelpie_connector_errors_total` and skipped
-  for that tick. The conditions it found unmet or unknown on its last good tick (checked,
-  or attached to a block or a ready task) are carried forward with their original
-  `checked_at`, so a single failed tick raises no alert about them; a step that keeps failing
-  lets them go stale after `max_condition_age`, and then no rule acts on them. A check that
-  found a condition met is never carried: a failed step wakes, unblocks or releases nothing.
-  A check is carried only onto a condition still exactly as the step was given it, an
-  attached condition only onto the same unchanged block, or (linked by `task_id` alone) the
-  unchanged task. A block keeps its link to a stale condition, so rule 4 alerts that the
-  evidence is stale (after `stale_evidence_after`) rather than that the block names no
-  condition, and rule 1 does not requeue it. Only conditions and their links are carried:
-  what else a step adds (pull requests, CI builds, cost reconciliations) is missing for the
-  tick, as before. `kelpie_connector_failing_seconds` counts the time since the step's last
-  good tick, and the shipped Prometheus rule `KelpieConnectorFailing` fires past 15 minutes.
-  This is the one mechanism for every condition step; a step need not keep its own copy.
-  (The LLM quota source is not a step: it keeps each provider's last status itself.)
+  for that tick. The conditions it found unmet or unknown on its last good tick, for a task
+  that waits or is blocked (checked, or attached to its block), are carried forward with
+  their original `checked_at`, so a single failed tick raises no alert about them; a step
+  that keeps failing lets them go stale after `max_condition_age`, and then no rule acts on
+  them. Nothing else is carried: a check that found a condition met, or anything for a task
+  in another status (a ready task's gate, a review), so a failed step never wakes, unblocks,
+  releases or parks anything. A check is carried only onto a condition still exactly as the
+  step was given it (and named by one condition only), an attached condition only onto the
+  same unchanged block, and nothing for longer than 6 hours from its check. Meanwhile a block
+  keeps its link to a stale unmet condition, so rule 4 alerts that the evidence is stale
+  (after `stale_evidence_after`) rather than that the block names no condition, and rule 1
+  does not requeue it; after 6 hours the block is bare again, as before. Only conditions
+  and their links are carried: what else a step adds (pull requests, CI builds, cost
+  reconciliations) is missing for the tick, as before. `kelpie_connector_failing_seconds`
+  counts the time since the step's last good tick, and the shipped Prometheus rule
+  `KelpieConnectorFailing` fires past 15 minutes. This is the one mechanism for every
+  condition step; a step need not keep its own copy. (The LLM quota source is not a step:
+  it keeps each provider's last status itself.)
 - Bound every tick: a request budget and a wall-clock budget per tick, a cache, backoff on
   rate limits.
 - Secrets come from environment variables named in the config. Never log them or put them

@@ -21,7 +21,7 @@ from kelpie.connectors.github.client import GitHubClient
 from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.connectors.human_tasks import HumanTaskConnector
 from kelpie.core.actions import Action, ActionKind
-from kelpie.core.conditions import Contribution, carry_forward, contribution
+from kelpie.core.conditions import CARRY_FOR, Contribution, carry_forward, contribution, widen
 from kelpie.core.model import (
     Block,
     Condition,
@@ -34,6 +34,7 @@ from kelpie.core.model import (
 )
 from kelpie.core.rule import Rule
 from kelpie.metrics import Metrics
+from kelpie.rules.dispatch_gate import DispatchGate
 from kelpie.rules.stale_blocks import StaleBlocks
 from tests.connectors.fake_github import TOKEN, Clock, FakeGitHub, serve
 
@@ -342,26 +343,42 @@ def test_a_failing_step_with_no_good_tick_carries_nothing() -> None:
 
 def test_nothing_is_carried_onto_a_condition_that_changed() -> None:
     since = T0 - timedelta(hours=1)
+    w1 = (Task("W-1", "t", Status.WAITING, since),)
     given = Condition("C-1", HUMAN, "W-1", {"task": "H-1"}, registered_at=since)
     checked = Condition(
         "C-1", HUMAN, "W-1", {"task": "H-1"}, False, checked_at=T0, registered_at=since
     )
     last = contribution(
-        Snapshot(now=T0, conditions=(given,)), Snapshot(now=T0, conditions=(checked,))
+        Snapshot(now=T0, tasks=w1, conditions=(given,)),
+        Snapshot(now=T0, tasks=w1, conditions=(checked,)),
     )
     assert last == Contribution((checked,), (given,), ())
     later = T0 + M
-    assert carry_forward(Snapshot(now=later, conditions=(given,)), last).conditions == (checked,)
+
+    def carried(*conditions: Condition, tasks: tuple[Task, ...] = w1) -> tuple[Condition, ...]:
+        return carry_forward(
+            Snapshot(now=later, tasks=tasks, conditions=conditions), last
+        ).conditions
+
+    assert carried(given) == (checked,)
     # Registered again (a new wait): the old check is not its evidence.
     again = Condition("C-1", HUMAN, "W-1", {"task": "H-1"}, registered_at=later)
-    assert carry_forward(Snapshot(now=later, conditions=(again,)), last).conditions == (again,)
+    assert carried(again) == (again,)
     # Checked by someone else meanwhile (an adapter that reports results): theirs stands.
     theirs = Condition(
         "C-1", HUMAN, "W-1", {"task": "H-1"}, True, later, later, registered_at=since
     )
-    assert carry_forward(Snapshot(now=later, conditions=(theirs,)), last).conditions == (theirs,)
+    assert carried(theirs) == (theirs,)
     # Gone from the board: not brought back.
-    assert carry_forward(Snapshot(now=later), last).conditions == ()
+    assert carried() == ()
+    # Its task no longer waits (a ready task's condition gates it: never carried).
+    assert carried(given, tasks=(replace(w1[0], status=Status.READY),)) == (given,)
+    # Two conditions by that id (two adapters): which one the check was is unknown.
+    other = replace(given, task_id="W-2")
+    assert carried(given, other) == (given, other)
+    # Checked longer ago than CARRY_FOR.
+    late = carry_forward(Snapshot(now=T0 + CARRY_FOR + M, tasks=w1, conditions=(given,)), last)
+    assert late.conditions == (given,)
 
 
 def test_an_attached_condition_comes_back_only_onto_the_same_block() -> None:
@@ -387,17 +404,29 @@ def test_an_attached_condition_comes_back_only_onto_the_same_block() -> None:
     assert carry_forward(Snapshot(now=later), last) == Snapshot(now=later)
 
 
-def test_a_gate_condition_comes_back_only_while_its_task_is_unchanged() -> None:
+def test_a_ready_tasks_gate_is_never_carried() -> None:
+    """Carrying would let ``dispatch_gate`` park a task on what a failed step last saw."""
     ready = Task("T-1", "Ship after #123", Status.READY, T0 - M)
     gate = Condition("ready:T-1", ConditionKind.PR_MERGED, "T-1", satisfied=False, checked_at=T0)
-    last = contribution(
-        Snapshot(now=T0, tasks=(ready,)), Snapshot(now=T0, tasks=(ready,), conditions=(gate,))
-    )
-    later = T0 + M
-    assert carry_forward(Snapshot(now=later, tasks=(ready,)), last).conditions == (gate,)
-    edited = replace(ready, title="Ship")  # no longer names the PR
-    assert carry_forward(Snapshot(now=later, tasks=(edited,)), last).conditions == ()
-    assert carry_forward(Snapshot(now=later), last).conditions == ()
+
+    def gating(snapshot: Snapshot) -> Snapshot:
+        return replace(snapshot, conditions=(*snapshot.conditions, gate))
+
+    ticks = Ticks(Snapshot(now=T0, tasks=(ready,)), "github", gating)
+    rule = DispatchGate()
+    assert [a.kind for a in rule.evaluate(ticks.at(T0, failing=False))] == [ActionKind.WAIT]
+    failed = ticks.at(T0 + M, failing=True)
+    assert failed.conditions == () and rule.evaluate(failed) == []
+
+
+def test_widen_is_bounded_by_carry_for() -> None:
+    since = T0 - timedelta(hours=1)
+    gone = Condition("C-9", HUMAN, "W-9", {"task": "H-1"}, False, checked_at=T0)
+    last = Contribution((gone,), (replace(gone, satisfied=None, checked_at=None),))
+    board = Snapshot(now=T0 + M, tasks=(Task("W-1", "t", Status.WAITING, since),))
+    assert widen(Contribution(), last, board).conditions == (gone,)
+    later = replace(board, now=T0 + CARRY_FOR + M)
+    assert widen(Contribution(), last, later) == Contribution()
 
 
 def test_a_partial_tick_keeps_what_it_did_not_see() -> None:

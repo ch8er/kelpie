@@ -3,7 +3,9 @@ attach conditions during snapshot assembly, so both read the linkage alike."""
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 
 from kelpie.core.model import Block, Condition, ConditionKind, Snapshot, Status, Task
 
@@ -95,22 +97,28 @@ def _check_task_status(condition: Condition, snapshot: Snapshot) -> Condition:
 # --- carrying a failed step's conditions forward ------------------------------------------
 
 
+# A failed step's conditions are carried for this long at most (from their check): past it
+# the tick is as if the step attached and checked nothing, as before carrying existed.
+CARRY_FOR = timedelta(hours=6)
+# Only waits and blocks are carried: their alerts are what a failed tick would flap. A ready
+# task's gate or a review's conditions are left out, so carrying never parks anything.
+_CARRIED_STATUSES = frozenset({Status.WAITING, Status.BLOCKED})
+
+
 @dataclass(frozen=True, slots=True)
 class Link:
-    """Where a step attached a condition: the block it linked, as the block was before, or
-    (a condition linked by ``task_id`` alone) the task as the step read it."""
+    """A block a step linked to a condition it attached, as the block was before."""
 
     condition_id: str
     task_id: str
-    block: Block | None = None
-    task: Task | None = None
+    block: Block
 
 
 @dataclass(frozen=True, slots=True)
 class Contribution:
     """What a condition step put into the snapshot on its last good tick: the conditions it
-    attached or checked (``inputs`` holds a checked one as the step was given it), and
-    where it attached them."""
+    attached or checked (``inputs`` holds a checked one as the step was given it), and the
+    blocks it linked to the ones it attached."""
 
     conditions: tuple[Condition, ...] = ()
     inputs: tuple[Condition, ...] = ()
@@ -122,35 +130,33 @@ def contribution(before: Snapshot, after: Snapshot) -> Contribution:
     was = {c.id: c for c in before.conditions}
     changed = tuple(c for c in after.conditions if was.get(c.id) != c)
     inputs = tuple(was[c.id] for c in changed if c.id in was)
-    tasks = {t.id: t for t in before.tasks}
-    linked = {
-        t.block.condition_id: t for t in after.tasks if t.block is not None and t.block.condition_id
-    }
-    links: list[Link] = []
-    for c in changed:
-        if c.id in was:
-            continue
-        task = linked.get(c.id)
-        old = tasks.get(task.id) if task is not None else None
-        if task is not None and old is not None and old.block is not None:
-            if old.block.condition_id is None:
-                links.append(Link(c.id, task.id, block=old.block))
-        elif task is None and c.task_id is not None and c.task_id in tasks:
-            links.append(Link(c.id, c.task_id, task=tasks[c.task_id]))
-    return Contribution(changed, inputs, tuple(links))
+    blocks = {t.id: t.block for t in before.tasks}
+    links = tuple(
+        Link(t.block.condition_id, t.id, old)
+        for t in after.tasks
+        if t.block is not None
+        and t.block.condition_id
+        and t.block.condition_id not in was
+        and (old := blocks.get(t.id)) is not None
+        and old.condition_id is None
+    )
+    return Contribution(changed, inputs, links)
 
 
 def widen(new: Contribution, last: Contribution, snapshot: Snapshot) -> Contribution:
     """``new``, from a tick that did not see the whole farm (``snapshot``: an adapter or an
     agent missing), with what ``last`` held for tasks not on that board, so a failure on the
-    next tick still finds them."""
+    next tick still finds them; within :data:`CARRY_FOR` of their check, so what a farm that
+    is never whole keeps stays bounded."""
     on_board = {t.id for t in snapshot.tasks}
     taken = {c.id for c in new.conditions}
     task_of = {link.condition_id: link.task_id for link in last.links}
     keep = {
         c.id
         for c in last.conditions
-        if c.id not in taken and task_of.get(c.id, c.task_id) not in on_board
+        if c.id not in taken
+        and task_of.get(c.id, c.task_id) not in on_board
+        and _recent(c, snapshot.now)
     }
     return Contribution(
         new.conditions + tuple(c for c in last.conditions if c.id in keep),
@@ -162,37 +168,49 @@ def widen(new: Contribution, last: Contribution, snapshot: Snapshot) -> Contribu
 def carry_forward(snapshot: Snapshot, last: Contribution) -> Snapshot:
     """``snapshot`` with what a step put in on its last good tick, for a tick it failed.
 
-    Only checks that found a condition unmet or unknown are carried: they keep their
-    ``checked_at``, so they go stale on their own and no rule acts on them once they are
-    older than its ``max_condition_age``, and meanwhile they keep alerts quiet. A check
-    that found it met is never carried, so a failed step never wakes, unblocks or releases
-    anything. A check is carried only onto a condition still exactly as the step was given
-    it (not one registered again, changed or checked meanwhile); an attached condition only
-    onto the same block, unchanged since it was linked, or (linked by ``task_id`` alone)
-    while its task is exactly as the step read it.
+    Only checks that found a condition unmet or unknown, for a task that waits or is
+    blocked, are carried: they keep their ``checked_at``, so they go stale on their own and
+    no rule acts on them once they are older than its ``max_condition_age``, and meanwhile
+    they keep the alerts about that wait or block quiet. A check that found a condition met
+    is never carried, nor anything for a task in another status (a ready task's gate), so a
+    failed step never wakes, unblocks, releases or parks anything. A check is carried only
+    onto a condition still exactly as the step was given it (not one registered again,
+    changed or checked meanwhile) and named once; an attached condition only onto the same
+    block, unchanged since it was linked. Nothing older than :data:`CARRY_FOR` is carried.
     """
     conditions = list(snapshot.conditions)
+    counts = Counter(c.id for c in conditions)
     at = {c.id: i for i, c in enumerate(conditions)}
     tasks = list(snapshot.tasks)
-    where = {t.id: i for i, t in enumerate(tasks)}
+    where = {t.id: i for i, t in enumerate(tasks) if t.status in _CARRIED_STATUSES}
+    held = {
+        t.block.condition_id
+        for t in tasks
+        if t.id in where and t.block is not None and t.block.condition_id
+    }
     inputs = {c.id: c for c in last.inputs}
     links = {link.condition_id: link for link in last.links}
     added: list[Condition] = []
     for old in last.conditions:
-        if old.satisfied:
+        if old.satisfied or not _recent(old, snapshot.now):
             continue
         if old.id in at:
-            if inputs.get(old.id) == conditions[at[old.id]]:
+            now = conditions[at[old.id]]
+            if (
+                counts[old.id] == 1
+                and inputs.get(old.id) == now
+                and (old.id in held or now.task_id in where)
+            ):
                 conditions[at[old.id]] = old
             continue
         link = links.get(old.id)
         i = where.get(link.task_id) if link is not None else None
-        if link is None or i is None:
+        if link is None or i is None or tasks[i].block != link.block:
             continue
-        task = tasks[i]
-        if link.block is not None and task.block == link.block:
-            tasks[i] = replace(task, block=replace(link.block, condition_id=old.id))
-            added.append(old)
-        elif link.task is not None and task == link.task:
-            added.append(old)
+        tasks[i] = replace(tasks[i], block=replace(link.block, condition_id=old.id))
+        added.append(old)
     return replace(snapshot, tasks=tuple(tasks), conditions=tuple(conditions) + tuple(added))
+
+
+def _recent(condition: Condition, now: datetime) -> bool:
+    return condition.checked_at is not None and now - condition.checked_at <= CARRY_FOR
