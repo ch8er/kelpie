@@ -67,6 +67,7 @@ snapshot:
 expected_actions:
   - kind: alert
     task_id: T-F701
+    severity: info
     reason_contains: "190,000-token context after 8 steps"
     params: {session_id: S-F701, context_tokens: 190000, steps: 8, per_step: 10000, reread_tokens: 1240000, recommendations: [compact_context, bounded_session_handoff]}
 not_expected_actions:

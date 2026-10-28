@@ -379,7 +379,8 @@ def context_alerts(
 def test_a_session_whose_context_ran_away_gets_one_lasting_info_alert() -> None:
     [a] = context_alerts(*growing(sizes=(60_000, 80_000, 30_000, 70_000, 110_000)))
     assert a.kind is ActionKind.ALERT and a.severity is Severity.INFO and a.task_id == "T-1"
-    assert a.state == a.key == "no_progress:context:S-1" and a.since == NOW - 5 * M
+    assert a.state == a.key == "no_progress/context:S-1"
+    assert a.since is None  # the engine keeps when it opened: the window slides
     # The compaction (80k -> 30k) is left out of the growth per step: (20k + 40k + 40k) / 3.
     assert a.params == {
         "session_id": "S-1",
@@ -402,7 +403,7 @@ def test_runaway_context_thresholds_and_hysteresis() -> None:
     assert context_alerts(*growing(sizes=(120_000, 130_000, 40_000))) == []  # compacted
     held = growing(sizes=(85_000, 85_000, 81_000))
     assert context_alerts(*held) == []
-    [a] = context_alerts(*held, open_states=("no_progress:context:S-1",))  # kept open above 80%
+    [a] = context_alerts(*held, open_states=("no_progress/context:S-1",))  # kept open above 80%
     assert a.params["per_step"] == -2000
     off = NoProgress(context_alert_tokens=0, min_tokens_without_progress=10**12)
     assert context_alerts(*growing(sizes=(200_000,) * 6), rule=off) == []
@@ -419,6 +420,28 @@ def test_runaway_context_of_a_session_the_board_does_not_know() -> None:
     old = [replace(s, start=s.start - 40 * M) for s in spans]
     future = [replace(s, start=s.start + 10 * M) for s in spans]
     assert context_alerts(*old) == [] and context_alerts(*future) == []
+
+
+def test_an_ended_session_is_not_told_to_compact() -> None:
+    snap = Snapshot(
+        now=NOW,
+        tasks=(Task("T-1", "t", Status.IN_PROGRESS, START),),
+        sessions=(Session("S-1", "T-1", "a-1", START, ended_at=NOW - 2 * M),),
+        spans=tuple(growing(sizes=(150_000, 160_000, 170_000))),
+    )
+    assert CONTEXT_RULE.evaluate(snap) == []
+
+
+def test_side_calls_on_another_model_are_no_compaction() -> None:
+    main = growing(sizes=(150_000, 152_000, 154_000, 156_000))
+    side = [
+        replace(s, span_id=f"side-{i}", start=s.start + timedelta(seconds=20), input_tokens=2_000,
+                model="model-small")
+        for i, s in enumerate(main)
+    ]  # fmt: skip
+    [a] = context_alerts(*main, *side)
+    assert a.params["per_step"] == 2000 and a.params["steps"] == 4
+    assert a.params["context_tokens"] == 156_000 and a.params["model"] == "model-a"
 
 
 def test_runaway_context_settings() -> None:

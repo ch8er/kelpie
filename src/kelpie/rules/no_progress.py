@@ -38,10 +38,12 @@ LLM spans that started in ``window``: at least ``context_min_steps`` steps and a
 step whose context (input tokens, cached ones included) is at least ``context_alert_tokens``
 → one ``info`` alert, a lasting state per session, with the context, the mean growth per
 step (compactions, a step below half the one before, left out) and the tokens re-read in the
-window, recommending compaction or a bounded session. Once open it stays open while the
-context is above ``CONTEXT_KEEP`` of the threshold, so a session near it does not flap, and
-it closes when the session compacts or goes quiet. The task is the board session's, else
-the spans'. ``context_alert_tokens = 0`` turns it off.
+window, recommending compaction or a bounded session. Steps are judged per model, the one with
+the largest context speaking for the session: side calls on a small model are no compaction.
+A board session that has ended is left out: there is nothing left to compact. Once open it
+stays open while the context is above ``CONTEXT_KEEP`` of the threshold, so a session near it
+does not flap, and it closes when the session compacts or goes quiet. The task is the board
+session's, else the spans'. ``context_alert_tokens = 0`` turns it off.
 """
 
 from __future__ import annotations
@@ -104,32 +106,40 @@ class NoProgress:
     def _runaway_context(
         self, snapshot: Snapshot, index: SpanIndex, window_start: datetime
     ) -> list[Action]:
-        steps: dict[str, list[Span]] = defaultdict(list)
+        # Per session and model: a session's side calls on a small model (a summary, a
+        # title) would otherwise look like compactions between its main model's steps.
+        steps: dict[str, dict[str | None, list[Span]]] = defaultdict(lambda: defaultdict(list))
         for span in outermost_llm_spans(snapshot.spans, index):
             if span.session_id and window_start <= span.start <= snapshot.now:
-                steps[span.session_id].append(span)
+                steps[span.session_id][span.model].append(span)
         board = {s.id: s for s in snapshot.sessions}
         actions: list[Action] = []
-        for sid, spans in sorted(steps.items()):
-            spans.sort(key=lambda s: (s.start, s.span_id))
-            state = f"{NAME}:context:{sid}"
+        for sid, by_model in sorted(steps.items()):
+            session = board.get(sid)
+            if session is not None and session.ended_at is not None:
+                continue  # over: nothing left to compact or bound
+            state = context_state(sid)
             bar = self.context_alert_tokens
             if state in snapshot.open_states:
                 bar = int(bar * CONTEXT_KEEP)
-            sizes = [s.input_tokens for s in spans]
-            if len(sizes) < self.context_min_steps or sizes[-1] < bar:
+            runs = []
+            for spans in by_model.values():
+                spans.sort(key=lambda s: (s.start, s.span_id))
+                sizes = [s.input_tokens for s in spans]
+                if len(sizes) >= self.context_min_steps and sizes[-1] >= bar:
+                    runs.append((sizes[-1], spans[-1].model or "", spans))
+            if not runs:
                 continue
+            _, _, spans = max(runs, key=lambda r: (r[0], r[1]))  # the largest context
+            sizes = [s.input_tokens for s in spans]
             grown = [b - a for a, b in pairwise(sizes) if b >= COMPACTION_RATIO * a]
             per_step = round(statistics.fmean(grown)) if grown else 0
-            session = board.get(sid)
             task_id = (
                 session.task_id
                 if session is not None
                 else next((s.task_id for s in reversed(spans) if s.task_id), None)
             )
-            actions.append(
-                self._context_alert(sid, task_id, sizes, per_step, spans[0].start, spans[-1].model)
-            )
+            actions.append(self._context_alert(sid, task_id, sizes, per_step, spans[-1].model))
         return actions
 
     def _context_alert(
@@ -138,7 +148,6 @@ class NoProgress:
         task_id: str | None,
         sizes: Sequence[int],
         per_step: int,
-        since: datetime,
         model: str | None,
     ) -> Action:
         window = _fmt(self.window)
@@ -166,9 +175,8 @@ class NoProgress:
                     "Compact the context or bound the session" if task_id else None,
                 ),
             },
-            key=f"{NAME}:context:{sid}",
-            state=f"{NAME}:context:{sid}",
-            since=since,
+            key=context_state(sid),
+            state=context_state(sid),  # since: when it opened (the window slides)
         )
 
     def _alert(self, session: Session, tokens: int, stalled_since: datetime) -> Action:
@@ -206,6 +214,11 @@ class NoProgress:
             signals.append(session.last_commit_at)
         signals.extend(a.at for a in session.artifacts)
         return max(signals, default=None)
+
+
+def context_state(session_id: str) -> str:
+    """The state of a session's runaway-context alert (apart from ``no_progress:<id>``)."""
+    return f"{NAME}/context:{session_id}"
 
 
 def _fmt(d: timedelta) -> str:
