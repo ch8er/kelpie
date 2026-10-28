@@ -1352,12 +1352,18 @@ def _recommendations(
         how = (
             f"route it through {rec.filter.name} like the farm's other commands that already run "
             "through it"
-            if in_use
+            if in_use and rec.filter.advice is None
             else rec.filter.how
+        )
+        # a built-in tool's advice is a way to call it, not a filter to put it through
+        title = (
+            f"{rec.filter.advice}: {md.code(group.key)} output{role}"
+            if rec.filter.advice is not None
+            else f"Filter {md.code(group.key)} output{role} with {rec.filter.name}{maybe}"
         )
         candidates.append(
             Advice(
-                title=f"Filter {md.code(group.key)} output{role} with {rec.filter.name}{maybe}",
+                title=title,
                 detail=(
                     f"{group.calls} calls put {group.tokens:,} tokens into the context, "
                     f"{round(group.mean):,} per call; {how}. Expected saving: about "

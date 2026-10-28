@@ -1026,3 +1026,22 @@ def test_a_runaway_context_is_no_lost_work() -> None:
 
     assert is_chaos(state("no_progress:S-1"))  # tokens without progress: lost work
     assert not is_chaos(state("no_progress/context:S-1"))  # re-read context: not idle work
+
+
+def test_a_built_in_tools_advice_is_its_title_not_a_filter() -> None:
+    from kelpie.core.budgets import PriceTable
+    from kelpie.report.daily import _Pricer, _recommendations
+    from kelpie.traces.outputs import DEFAULT_FILTERS, OutputGroup, Recommendation
+
+    by_name = {f.name: f for f in DEFAULT_FILTERS}
+    group = OutputGroup("developer", "tool:vision_analyze", 40, 400_000, 20_000, False)
+    image = Recommendation(group, by_name["downscale-images"], 200_000, False, None, True)
+    shell = OutputGroup("developer", "xcodebuild", 4, 160_000, 40_000, False)
+    filtered = Recommendation(shell, by_name["xcbeautify"], 112_000, False, None, True)
+    advice = _recommendations(
+        ReportInputs(day=DAY, tz=UTC), (), (), [image, filtered], _Pricer(PriceTable()), {}
+    )
+    titles = [a.title for a in advice]
+    assert "Downscale images: `tool:vision_analyze` output (developer)" in titles
+    assert "Filter `xcodebuild` output (developer) with xcbeautify" in titles
+    assert not any("with downscale-images" in t for t in titles)
