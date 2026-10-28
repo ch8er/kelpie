@@ -366,6 +366,7 @@ mode `0600`. Hooks never raise and do no network I/O.
 | `task_links` (parent, child) | `Dependency(child, depends_on=parent)` (links to archived parents dropped) |
 | `task_runs` row | `Session` `hermes-run-<id>` |
 | spool `tool` lines | `Span(kind=tool)` linked to the session and task, built by `kelpie.traces.hooks` with a task span and a session span around them; `tool_call_id` kept as `gen_ai.tool.call.id` |
+| spool `tool` line `exit_code` (from the terminal result, an int), `background`, `blocked` (Hermes refused it: `status: "blocked"`) | `kelpie.tool.exit_code` and `kelpie.tool.result` on the tool span: `ok` (0), `error` (non-zero, the exit code is its class), `blocked` (also exit code -1), `unknown` (a background call: 0 means started); a foreground exit code sets the span's `outcome`. The result's `error` key is never read: it is null on a failed build too (`kelpie.core.tools`, #229) |
 | a profile's `state.db`: a foreground `terminal` call that waits | `SessionWait` (see [Waits inside sessions](#waits-inside-sessions)) |
 | a profile's `state.db`: a session's tokens (`session_model_usage`, else `sessions` totals) | `SessionUsage` per session and model (see [Token usage](#token-usage)) |
 

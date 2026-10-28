@@ -241,3 +241,41 @@ def test_plugin_is_standalone() -> None:
         for a in (n.names if isinstance(n, ast.Import) else [n])
     }
     assert not {m for m in modules if m and m.startswith("kelpie")}
+
+
+@pytest.mark.parametrize(
+    ("result", "args", "expected"),
+    [
+        # The farm's sample (#229): Hermes' terminal result, failed and successful alike.
+        ('{"output": "BUILD OK", "exit_code": 0, "error": null}', {}, {"exit_code": 0}),
+        ('{"output": "x: not found", "exit_code": 127, "error": null}', {}, {"exit_code": 127}),
+        ({"output": "timed out", "exit_code": 124, "error": None}, {}, {"exit_code": 124}),
+        (
+            '{"output": "", "exit_code": -1, "status": "blocked", "error": "refused"}',
+            {},
+            {"exit_code": -1, "blocked": True},
+        ),
+        (
+            '{"output": "started", "exit_code": 0, "error": null}',
+            {"command": "make serve", "background": True},
+            {"exit_code": 0, "background": True},
+        ),
+        # Nothing to read: the error key alone, odd types, not JSON, too large.
+        ('{"output": "x", "error": "boom"}', {}, {}),
+        ('{"exit_code": "1"}', {}, {}),
+        ('{"exit_code": true}', {}, {}),
+        ("plain text output", {}, {}),
+        ("[1, 2]", {}, {}),
+        ("{" + " " * plugin.MAX_RESULT_PARSE + "}", {}, {}),
+        ('{"exit_code": 1' , {}, {}),
+    ],
+)  # fmt: skip
+def test_exit_code_and_background_from_the_result(
+    spool: Path, result: object, args: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    plugin.post_tool_call(tool_name="terminal", args=args, result=result, status="ok")
+    (rec,) = lines(spool)
+    found = {k: rec[k] for k in ("exit_code", "blocked", "background") if k in rec}
+    assert found == expected
+    text = spool.read_text()
+    assert "BUILD OK" not in text and "refused" not in text and "not found" not in text

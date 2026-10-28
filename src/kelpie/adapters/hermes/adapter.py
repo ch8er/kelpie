@@ -179,6 +179,7 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
+from kelpie.core.tools import ERROR, EXIT_CODE_ATTRIBUTE, OK, RESULT_ATTRIBUTE, tool_result
 from kelpie.traces.hooks import SESSION_END, TOOL, HookEvent, spans_from_hook_events
 from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE
 
@@ -1776,6 +1777,17 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
         chars = rec.get("output_chars")
         if isinstance(chars, int) and not isinstance(chars, bool) and chars >= 0:
             attributes[OUTPUT_CHARS_ATTRIBUTE] = chars
+        outcome = str(rec["outcome"]) if rec.get("outcome") else None
+        code = rec.get("exit_code")
+        code = code if isinstance(code, int) and not isinstance(code, bool) else None
+        background, blocked = rec.get("background") is True, rec.get("blocked") is True
+        if rec["type"] == TOOL and (code is not None or background or blocked):
+            result = tool_result(code, background=background, blocked=blocked)
+            attributes[RESULT_ATTRIBUTE] = result
+            if code is not None:
+                attributes[EXIT_CODE_ATTRIBUTE] = code
+            if result in (OK, ERROR):  # a foreground exit code is the call's own account
+                outcome = result
         return HookEvent(
             kind=rec["type"],
             at=at,
@@ -1785,7 +1797,7 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
             tool=str(tool) if tool else None,
             args_hash=str(rec["args_hash"]) if rec.get("args_hash") else None,
             duration=timedelta(milliseconds=millis),
-            outcome=str(rec["outcome"]) if rec.get("outcome") else None,
+            outcome=outcome,
             tool_call_id=str(call_id) if call_id else None,
             attributes=attributes,
         )

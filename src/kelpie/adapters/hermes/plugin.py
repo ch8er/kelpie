@@ -367,6 +367,32 @@ def _output_chars(result: Any) -> int | None:
         return len(str(result))
 
 
+MAX_RESULT_PARSE = 1 << 20  # characters of a tool result read for its exit code
+
+
+def _result_fields(result: Any) -> dict[str, Any]:
+    """The exit code a tool result reports (``exit_code``, an int) and whether Hermes
+    refused the call (``status: "blocked"``). The result's ``error`` key is not read: it is
+    null on a failed build too. Nothing of the output is kept."""
+    data = result
+    if isinstance(result, str):
+        if len(result) > MAX_RESULT_PARSE or not result.lstrip().startswith("{"):
+            return {}
+        try:
+            data = json.loads(result)
+        except (ValueError, RecursionError):
+            return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, Any] = {}
+    code = data.get("exit_code")
+    if isinstance(code, int) and not isinstance(code, bool):
+        out["exit_code"] = code
+    if data.get("status") == "blocked":
+        out["blocked"] = True
+    return out
+
+
 def post_tool_call(**kwargs: Any) -> None:
     try:
         args = kwargs.get("args", kwargs.get("params"))
@@ -382,7 +408,10 @@ def post_tool_call(**kwargs: Any) -> None:
             "outcome": "error" if status in {"error", "failed", "failure"} else "ok",
             "duration_ms": _duration_ms(kwargs.get("duration_ms")),
             "output_chars": _output_chars(kwargs.get("result")),
+            **_result_fields(kwargs.get("result")),
         }
+        if isinstance(args, dict) and args.get("background"):
+            record["background"] = True  # its exit code 0 means started, not done
         append(record)
     except Exception:  # hooks must never break the agent
         return

@@ -1109,3 +1109,36 @@ def test_a_marker_with_full_width_punctuation_matches_itself() -> None:
     d = HumanDecision("решение\uff08CEO\uff09", frozenset({"partner"}))  # full-width ( )
     assert d.recorded("partner", "Решение(CEO): 20 runs")  # NFKC, then escaped
     assert not d.recorded("partner", "Решение CEO: 20 runs")
+
+
+@pytest.mark.parametrize(
+    ("fields", "outcome", "result", "code"),
+    [
+        # The farm's sample (#229): what each kind of call becomes on its span.
+        ({"exit_code": 0}, "ok", "ok", 0),
+        ({"exit_code": 127}, "error", "error", 127),
+        ({"exit_code": 1, "outcome": "ok"}, "error", "error", 1),  # the exit code wins
+        ({"exit_code": 124}, "error", "error", 124),
+        ({"exit_code": 0, "background": True}, "ok", "unknown", 0),  # started, not done
+        ({"exit_code": -1, "blocked": True}, "ok", "blocked", -1),  # refused: no failure
+        ({"exit_code": -1}, "ok", "blocked", -1),
+        ({"exit_code": "1"}, "ok", None, None),  # not an int: no result known
+        ({"exit_code": True}, "ok", None, None),
+        ({}, "ok", None, None),  # an older plugin, or a tool without an exit code
+        ({"outcome": "error"}, "error", None, None),
+    ],
+)  # fmt: skip
+def test_a_spool_exit_code_becomes_the_calls_result(
+    board: Board,
+    tmp_path: Path,
+    fields: dict[str, object],
+    outcome: str,
+    result: str | None,
+    code: int | None,
+) -> None:
+    from kelpie.core.tools import exit_code_of, result_of
+
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(tool_line(ago(minutes=5), **fields) + "\n")
+    [tool] = [s for s in adapter(board, spool).snapshot(NOW).spans if s.kind is SpanKind.TOOL]
+    assert (tool.outcome, result_of(tool), exit_code_of(tool)) == (outcome, result, code)
