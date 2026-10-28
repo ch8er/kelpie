@@ -180,6 +180,23 @@ LEAKS = [
     ("export A='x; y' hunter2", "hunter2"),
     ("source ~/.secrets/env.sh && gh pr checks 5", "secrets"),
     ("cd /home/alice/private && make test", "alice"),
+    (
+        "export ARCH=$(case $(uname -m) in arm64) echo a; mysql prod-db01 hunter2 x;; esac)",
+        "hunter2",
+    ),
+    (
+        "export ARCH=$(case $(uname -m) in arm64) echo a; mysql prod-db01 hunter2 x;; esac)",
+        "prod-db01",
+    ),
+    ("export MSG=':)' TOKEN=$(vault read x; echo hunter2 swordfish)", "hunter2"),
+    ("export A=x} K=$(cat f; ssh prod-db01 hunter2 x)", "prod-db01"),
+    ("cd /tmp/a} && export K=$(cat f; psql prod-db01 hunter2 x)", "hunter2"),
+    ("export K=${A%)} L=$(a; ssh prod-db01 hunter2 x)", "hunter2"),
+    ("export K=${A//)/x} L=$(a; ssh prod-db01 hunter2 x)", "hunter2"),
+    ("export A=\\) K=$(cat x ; hunter2 swordfish)", "hunter2"),
+    ('export A="x)" K=$(cat x ; hunter2 swordfish)', "hunter2"),
+    ("export A=\\} B=${B:-x ; hunter2 swordfish}", "hunter2"),
+    ("export A=1;; hunter2 b", "hunter2"),
 ]
 
 
@@ -273,11 +290,13 @@ def test_prefixes_still_work(cmd: str, prefix: str) -> None:
         'export A="x ; hunter2 abc" && make',
         "export A=x\\; hunter2 && make",
         "export K=$(cat x; hunter2) && make",
+        "cd /repo # note ; hunter2 abc",
+        "cd x <<EOF\nfoo ; hunter2 abc\nEOF",
     ],
 )
 def test_prefix_of_a_raw_setup_command_never_names_its_values(raw: str) -> None:
     assert command_prefix(raw) != "hunter2"
-    assert command_prefix(command.redact_command(raw)) in {"make", "export"}
+    assert command_prefix(command.redact_command(raw)) in {"make", "export", "cd"}
 
 
 def test_detect_filter_still_sees_a_pipe_in_the_prefix() -> None:

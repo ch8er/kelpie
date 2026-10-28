@@ -157,6 +157,9 @@ _MAX_WRAPPED = 8  # wrapper tokens kept on top of _MAX_TOKENS
 # ``cd dir && make``): kept as a name with every argument masked, and, like a wrapper's
 # tokens, not counted against _MAX_TOKENS, so the command after the separator is kept.
 _SETUP = frozenset({"export", "cd", "pushd", "set", "source", ".", "unset", "umask", "ulimit"})
+# In a setup builtin's arguments: a substitution, a group or an escape, so a separator after it
+# may still be inside them (bash parses what counting cannot): the rest is masked.
+_UNCLEAR = frozenset("(){}\\")
 _BLANKS = re.compile(r"[ \t]+")  # what bash splits words on
 
 
@@ -227,7 +230,6 @@ def redact_command(command: str) -> str | None:
     words = False  # plain words are still kept (right after the executable)
     wrapper = None  # flags of the wrapper whose options come next (sudo -u x make)
     setup = False  # in a setup builtin's arguments (export X=… &&): all masked
-    depth = 0  # brackets open in them ($(…), ${…}): a separator inside is still theirs
     extra = 0  # wrapper and setup tokens, not counted against _MAX_TOKENS
     while i < len(tokens) and len(out) < _MAX_TOKENS + extra:
         tok = tokens[i]
@@ -257,18 +259,19 @@ def redact_command(command: str) -> str | None:
             continue
         if tok.startswith("#"):
             break
-        if tok in _SEPARATORS and end == i + 1 and not (setup and depth):
+        if tok in _SEPARATORS and end == i + 1:
             out.append(tok)
             if setup:  # the separator after a setup builtin is its own, too
                 extra = min(extra + 1, _MAX_WRAPPED)
             exe, words, setup = True, False, False
         elif setup:
-            depth += tok.count("(") + tok.count("{") - tok.count(")") - tok.count("}")
             if out[-1] != _MASK:  # one mask for all its arguments
                 out.append(_MASK)
                 extra = min(extra + 1, _MAX_WRAPPED)
-            plain = "\\" not in tok and not any(q in tok for q in _QUOTES)  # not x\; nor 'x;'
-            if end == i + 1 and tok.endswith(";") and plain and not depth:
+            if any(c in t for t in tokens[i:end] for c in _UNCLEAR) or tok.endswith(";;"):
+                break  # $(…), ${…}, x\;: where its arguments end is not clear, mask the rest
+            plain = not any(q in tok for q in _QUOTES)  # not 'x;'
+            if end == i + 1 and tok.endswith(";") and plain:
                 out.append(";")  # export X=1; make: the separator glued to the argument
                 extra = min(extra + 1, _MAX_WRAPPED)
                 exe, setup = True, False
@@ -284,7 +287,7 @@ def redact_command(command: str) -> str | None:
                 wrapper = _WRAPPERS[base]
                 extra = min(extra + 1, _MAX_WRAPPED)
             elif ok and base in _SETUP:
-                setup, words, depth = True, False, 0
+                setup, words = True, False
                 extra = min(extra + 1, _MAX_WRAPPED)
         elif _FLAG.match(tok):
             out.append(tok)
