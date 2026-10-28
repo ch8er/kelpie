@@ -205,8 +205,8 @@ format" and "Privacy" sections of their READMEs.
   to both tests. Describe what is recorded in [docs/privacy.md](docs/privacy.md).
 - Create the spool with mode `0600`, never follow a symlink or block on a FIFO there, and
   read it defensively (size limits, malformed lines skipped): agents can write next to it.
-  Task files are read the same way (`_open_regular` and `_read_task` in
-  `claude_code/adapter.py`).
+  `src/kelpie/adapters/_spool.py` does this for you. Task files are read the same way
+  (`open_regular` there, `_read_task` in `claude_code/adapter.py`).
 - Make `kelpie spool scrub` find the new spool (`_scrub` in `src/kelpie/cli.py` and
   `default_spools` in `src/kelpie/traces/scrub.py`).
 

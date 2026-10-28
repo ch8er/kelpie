@@ -3,6 +3,8 @@
 Shared by the Claude Code and OpenClaw adapters. Agents can write next to the spool, so a
 file is opened without following a symlink or blocking on a FIFO, checked to be a regular
 file on the open descriptor, and read up to a byte limit with overlong lines skipped.
+:func:`open_regular` is also the safe open for any other file agents can write (stop
+markers, the doctors' reads of settings and config files).
 """
 
 from __future__ import annotations
