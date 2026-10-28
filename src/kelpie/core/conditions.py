@@ -3,7 +3,8 @@ attach conditions during snapshot assembly, so both read the linkage alike."""
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import datetime
 
 from kelpie.core.model import Condition, ConditionKind, Snapshot, Status, Task
 
@@ -90,3 +91,86 @@ def _check_task_status(condition: Condition, snapshot: Snapshot) -> Condition:
     return replace(
         condition, params=params, satisfied=False, satisfied_at=None, checked_at=snapshot.now
     )
+
+
+# --- carrying a failed step's conditions forward ------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Link:
+    """A block a step linked to a condition it attached, as the block was then."""
+
+    task_id: str
+    condition_id: str
+    reason: str
+    since: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class Contribution:
+    """What a condition step put into the snapshot on its last good tick: the conditions it
+    attached or checked (``inputs`` holds a checked one as the step was given it), and the
+    blocks it linked to the conditions it attached."""
+
+    conditions: tuple[Condition, ...] = ()
+    inputs: tuple[Condition, ...] = ()
+    links: tuple[Link, ...] = ()
+
+
+def contribution(before: Snapshot, after: Snapshot) -> Contribution:
+    """What a step changed between its input ``before`` and its output ``after``."""
+    was = {c.id: c for c in before.conditions}
+    changed = tuple(c for c in after.conditions if was.get(c.id) != c)
+    inputs = tuple(was[c.id] for c in changed if c.id in was)
+    blocks = {t.id: t.block for t in before.tasks}
+    links = tuple(
+        Link(t.id, t.block.condition_id, old.reason, old.since)
+        for t in after.tasks
+        if t.block is not None
+        and t.block.condition_id
+        and (old := blocks.get(t.id)) is not None
+        and old.condition_id != t.block.condition_id
+    )
+    return Contribution(changed, inputs, links)
+
+
+def carry_forward(snapshot: Snapshot, last: Contribution) -> Snapshot:
+    """``snapshot`` with what a step put in on its last good tick, for a tick it failed.
+
+    Its checks keep their ``checked_at``, so they go stale on their own and no rule acts on
+    them once they are older than its ``max_condition_age``; the conditions it attached come
+    back with their links. A check is carried only onto a condition that is still exactly
+    as the step was given it (not one registered again, changed or checked meanwhile), and
+    an attached condition only onto a block unchanged since it was linked, or (linked by
+    ``task_id`` alone) while its task is on the board.
+    """
+    conditions = list(snapshot.conditions)
+    at = {c.id: i for i, c in enumerate(conditions)}
+    tasks = list(snapshot.tasks)
+    where = {t.id: i for i, t in enumerate(tasks)}
+    inputs = {c.id: c for c in last.inputs}
+    links = {link.condition_id: link for link in last.links}
+    added: list[Condition] = []
+    for old in last.conditions:
+        if old.id in at:
+            if inputs.get(old.id) == conditions[at[old.id]]:
+                conditions[at[old.id]] = old
+            continue
+        if old.id in inputs:
+            continue  # the step checked it, and it is gone from the board
+        link = links.get(old.id)
+        if link is None:
+            if old.task_id is not None and old.task_id in where:
+                added.append(old)
+            continue
+        i = where.get(link.task_id)
+        block = tasks[i].block if i is not None else None
+        if (
+            i is not None
+            and block is not None
+            and block.condition_id is None
+            and (block.reason, block.since) == (link.reason, link.since)
+        ):
+            tasks[i] = replace(tasks[i], block=replace(block, condition_id=old.id))
+            added.append(old)
+    return replace(snapshot, tasks=tuple(tasks), conditions=tuple(conditions) + tuple(added))

@@ -334,7 +334,13 @@ right before a write.
 
 - Never raise out of a snapshot step for a single failure; degrade to an unknown result. A
   step that raises anyway is logged, counted in `kelpie_connector_errors_total` and skipped
-  for that tick.
+  for that tick. The conditions it attached or checked on its last good tick are carried
+  forward unchanged, with their original `checked_at` (and the blocks they were linked to,
+  while those blocks are unchanged), so one failed tick changes nothing the rules see; a
+  step that keeps failing lets them go stale after `max_condition_age`, and then no rule acts
+  on them. `kelpie_connector_failing_seconds` says how long a step has failed tick after
+  tick, and the shipped Prometheus rule `KelpieConnectorFailing` fires past 15 minutes. This
+  is the one mechanism for every condition step; a step need not keep its own copy.
 - Bound every tick: a request budget and a wall-clock budget per tick, a cache, backoff on
   rate limits.
 - Secrets come from environment variables named in the config. Never log them or put them

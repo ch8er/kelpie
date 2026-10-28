@@ -64,7 +64,7 @@ from kelpie.connectors.human_tasks import (
 from kelpie.connectors.llm_quotas import LlmQuotaSettings, load_llm_quotas
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
-from kelpie.core.conditions import check_task_status
+from kelpie.core.conditions import Contribution, carry_forward, check_task_status, contribution
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
@@ -1033,7 +1033,10 @@ def merged_snapshot(
     whole remote farm counts as unobserved for that tick.
 
     ``enrich`` are named connector steps run on the merged board (e.g. GitHub conditions);
-    one that raises is logged, counted in ``kelpie_connector_errors_total`` and skipped.
+    one that raises is logged, counted in ``kelpie_connector_errors_total`` (and
+    ``kelpie_connector_failing_seconds`` while it keeps failing) and skipped, with the
+    conditions it attached or checked on its last good tick carried forward unchanged: they
+    keep their ``checked_at`` and go stale on their own (``max_condition_age``).
 
     An adapter that raises is logged, counted in ``kelpie_adapter_errors_total`` and left
     out of that tick; the others still count. With ``spans``, stored spans of the window
@@ -1054,6 +1057,7 @@ def merged_snapshot(
     included: an agent never sends snoozes), from the store and the block reasons' markers.
     """
     last = _LastBudgets()
+    carried: dict[str, Contribution] = {}  # per connector step, from its last good tick
 
     def source() -> Snapshot:
         now = clock()
@@ -1104,12 +1108,18 @@ def merged_snapshot(
                     unobserved=merged.unobserved + part.unobserved,
                 )
         for name, step in enrich:
+            before = merged
             try:
                 merged = step(merged)
             except Exception as exc:
                 log.error("connector %s failed to update the snapshot: %s", name, exc)
-                metrics.connector_failed(name)
+                metrics.connector_failed(name, now)
                 complete = False
+                if (kept := carried.get(name)) is not None:
+                    merged = carry_forward(merged, kept)
+            else:
+                carried[name] = contribution(before, merged)
+                metrics.connector_ok(name, now)
         if snoozes is not None:
             merged = snoozes.apply(merged, complete)
         if spans is not None:
