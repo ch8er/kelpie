@@ -103,6 +103,18 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # [engine.rules.output_offenders]  # no parameters: thresholds and owners are in
 #                                  # [traces.outputs]; needs [traces] enabled
 #
+# Instruction files per role, for rule instruction_bloat (incident 21). Off unless present;
+# read-only, sizes and hashes only. See docs/configuration.md, "[instructions]".
+# [instructions]
+# defaults = true            # also the platform defaults of the adapters configured here
+# every = "1h"
+# window = "7d"              # growth, appends and edits counted over this
+# [[instructions.files]]
+# role = "developer"         # omit: every role; or {role} in a path
+# paths = ["~/farm/dev/CLAUDE.md", "~/farm/dev/.claude/skills/*/SKILL.md"]
+# loaded = "always"          # or "on_demand" (skills)
+# owner = "human-owner"
+#
 # [engine.rules.instruction_bloat]  # incident 21; the files are in [instructions]
 # max_chars = 40000          # size threshold (about 10,000 tokens)
 # max_growth_per_week = 10000  # characters added a week

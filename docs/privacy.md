@@ -15,6 +15,7 @@ keep less. It describes the code as it is; the files named below are the referen
 | OpenClaw hook records | session id, session key (the part naming a chat peer or group replaced by a keyed hash), agent id, run id, session end reasons, the session id a session resumed or was replaced by; tool name, call id, hash of arguments, a redacted command, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
 | OpenClaw Workboard cards | card id, board, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, session key (reduced like the hook's) and run id, block reason (500 characters); every comment (2000 characters) and attempt error of the cards read is in memory for the tick, only the latest since a block is kept | claim tokens, attachments, proof, worker logs | read in place, not copied | |
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
+| Instruction file sizes (optional, `[instructions]`) | per file: its path, when measured, size in bytes and characters, SHA-256, section count, whether a change only appended; in memory for one scan only, hashed word shingles per section and hashed `key: value` facts, to find copies | the files' text, headings and values | `kelpie.db`, table `instruction_sizes`: a row when a file is first measured and when its hash changes | the growth window (`[instructions] window`, 7 days) plus each file's last row before it; all rows of a file once it is no longer found |
 | Provider cost reports (optional) | per provider and UTC day: the token cost per model (Anthropic) or the day's total (OpenAI), in USD | workspaces, projects, API keys, users, line items | `kelpie.db`, table `cost_reports` | 90 days |
 | Action ledger, alert states | each action Kelpie proposed or took, with its reason text; each snooze button press with the person's Telegram user id and name | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
@@ -274,6 +275,14 @@ tick: tasks, titles, assignees, statuses, block reasons, links, runs and run sum
 `git_state = true` it asks git for the branch, the last commit id and time, and the number
 of changed files of live task worktrees. None of this is stored as such, but rule actions
 quote parts of it (see the next section).
+
+## Instruction files
+
+With `[instructions]`, Kelpie opens the instruction files it is pointed at (and the
+platform defaults of its adapters) read-only (a file that is itself a symlink is skipped) and at most
+`max_bytes` each, measures them and drops the text. Alerts of rule `instruction_bloat` name
+a file's path, its sizes, and the `path:line` of copied sections and values, never their
+text. Kelpie never writes to these files.
 
 ## Actions, alerts and reports
 

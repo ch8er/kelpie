@@ -21,6 +21,7 @@ src/kelpie/
   remote/       multi-host: kelpie agent, the hub of kelpie serve, the wire protocol
   alerts/       real-time alert delivery: one router over channels (Telegram, Slack)
   resources/    host resource readings from Prometheus/node_exporter (optional)
+  instructions/ instruction files per role: read-only sizes, growth, copies (optional)
   selftest/     kelpie selftest: live checks of act paths on a throwaway board, mock model
   sim/          a simulated farm (loopback only) for kelpie demo and the e2e tests
   demo/         kelpie demo: the simulated farm's day, narrated
