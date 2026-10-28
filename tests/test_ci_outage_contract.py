@@ -76,7 +76,7 @@ def test_outages_have_kinds_and_any_rule_can_report_one() -> None:
     # Params written before kinds existed read as failing CI jobs.
     old = {k: v for k, v in outage().to_params().items() if k not in ("kind", "cause", "person")}
     assert Outage.from_params(old) == outage() and outage().kind == CI_FAILURES
-    for bad in ("unknown", "tool_failures", ["block_storm"], 3, None):
+    for bad in ("unknown", "tool_timeouts", ["block_storm"], 3, None):
         assert Outage.from_params({**storm.to_params(), "kind": bad}) is None, bad
     assert Outage.from_params({**outage().to_params(), "job": ""}) is None  # CI needs a job
 

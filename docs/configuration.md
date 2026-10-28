@@ -553,6 +553,10 @@ Other keys:
 | `session_stale_after` | `"30m"` | duration, > 0 | Only live sessions are stopped. |
 | `agents.<owner id>` | `{}` | table of thresholds | Per-agent overrides. Wins over `roles`. |
 | `roles.<role>` | `{}` | table of thresholds | Per-role overrides. |
+| `tool_outage_tools` | `[]` (off) | list of non-empty strings | Correlated tool failures: the farm's build and test runners (e.g. `["ios_sim.sh", "xcodebuild"]`), matched as the command of a tool call's last segment, path aside (see below). |
+| `tool_outage_min_tasks` | `3` | 2 to 1000 | Distinct tasks (a session tied to no task counts as one) failing one tool with one exit code within `tool_outage_window` → one outage. |
+| `tool_outage_window` | `"30m"` | duration, > 0 | How close together those failures must be; the `[traces] window` at most, whose spans the snapshot holds. |
+| `tool_outage_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"`. |
 
 ```toml
 [engine.rules.loop_breaker.agents.agent-ops-1]
@@ -560,6 +564,34 @@ identical_calls = 20
 [engine.rules.loop_breaker.roles.maintenance]
 consecutive_errors = 8
 ```
+
+Correlated tool failures (#229, signal 2): a tool of `tool_outage_tools` failing on the
+farm's own hosts, where no CI check sees it (a broken Xcode install: every
+`ios_sim.sh` run exits 127). It reads the exit codes adapters record on tool calls
+(`kelpie.tool.exit_code`, `kelpie.tool.result`; the Hermes adapter takes them from the
+terminal tool's result, never its `error` key): a foreground call that exited non-zero is a
+failure, its exit code the error class; one that exited 0 a success; a call sent to the
+background (its 0 means started) and one the platform did not run (Hermes:
+`status: "blocked"` or `"pending_approval"`) are neither; an exit code -1 alone is a failure
+(a degraded backend, a fatal error). A call is the tool's when the tool is the command of the command's last segment
+(after `;` or `|`, or after `&&` only from setup commands such as `cd` or `export`; past
+`FOO=1` and the wrappers `env`, `sudo`, `nice`, `rtk`, `time`): `cd app && ios_sim.sh test`
+is, `lint.sh && ios_sim.sh test`, `ios_sim.sh test | xcbeautify`, `pkill ios_sim.sh` and
+`command -v xcodebuild` are not. Commands are read as the trace redaction kept them: a
+script run as `bash x.sh` or `timeout 600 ./x.sh` is masked whole and never seen. A success
+counts only when the adapter says the redacted command is whole (Hermes:
+`kelpie.tool.command_whole`, one line with its last word kept) and nothing after the tool
+was masked: the redaction keeps a prefix, and a dropped `| xcbeautify` decides the exit
+code. A failure counts only when the redacted command reaches the command's end, masked flag
+values aside (`kelpie.tool.command_complete`): a dropped `; swiftlint` may be the one that
+failed. Commands of more lines are not read. Failures of one tool
+with one exit code by `tool_outage_min_tasks` distinct tasks within `tool_outage_window`,
+with no success of the tool since → one `warning` "Tool outage: ios_sim.sh exits 127 for
+3 tasks", with the tasks and what the code usually means (127 not found, 124 timed out, 137
+killed). One outage per host where the tasks' host is known: a healthy host's successes do
+not hide a broken one, nor do successes of tasks whose host is unknown. One task retrying its own failure is none. The "Resolved" notice
+names the tool's first success after the outage's last failure. Observe-only until
+`tool_outage_mode = "rule"`.
 
 ### 11. no_progress
 

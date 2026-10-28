@@ -11,10 +11,11 @@ contract between the three. It lives in core because the engine reads it.
 - **State.** ``<rule>:outage:<key>`` (:func:`incident_state_id`; :func:`outage_state_id` for
   rule 9's failing CI jobs), where ``<key>`` hashes what identifies the outage: for failing
   CI jobs the workflow, job and failing step, not the repository (one broken runner spans
-  repositories); for a block storm the shared block reason. ``since`` is its first sign;
-  ``last_seen`` advances while it is open. The same outage recurring later opens the same
-  state id anew: tell occurrences apart by their time span. The alert key is the state id,
-  stable for the outage's life. :func:`is_outage_state` matches every rule's outages.
+  repositories); for a block storm the shared block reason; for tool failures the tool,
+  exit code and host. ``since`` is its first sign; ``last_seen`` advances while it is open.
+  The same outage recurring later opens the same state id anew: tell occurrences apart by
+  their time span. The alert key is the state id, stable for the outage's life.
+  :func:`is_outage_state` matches every rule's outages.
 - **Params**: an :class:`Outage` (:meth:`Outage.to_params`), read back with
   :meth:`Outage.from_params`. ``kind`` says which signal found it (:data:`KINDS`); params
   without one (written before kinds existed) read as failing CI jobs. The ledger stores
@@ -56,9 +57,10 @@ MAX_BUILDS = 20  # failing build ids an outage's params list, newest first
 CI_FAILURES = "ci_failures"  # rule 9: change requests failing at the same CI job and step
 CI_NOT_STARTED = "ci_not_started"  # rule 9: CI jobs that never start
 BLOCK_STORM = "block_storm"  # rule 4: many tasks blocked on the same reason at once
+TOOL_FAILURES = "tool_failures"  # rule 10: one tool failing the same way for many tasks
 # A closed set on purpose: params of an unknown kind (a newer Kelpie's) are not read as
 # something they are not; a new signal adds its kind here.
-KINDS = frozenset({CI_FAILURES, CI_NOT_STARTED, BLOCK_STORM})
+KINDS = frozenset({CI_FAILURES, CI_NOT_STARTED, BLOCK_STORM, TOOL_FAILURES})
 
 
 def outage_signature(workflow: str | None, job: str, step: str | None) -> str:
@@ -99,8 +101,9 @@ class Outage:
     ``job`` and ``step`` are the signature's parts. ``prs`` are ``owner/name#N``. ``tasks``
     are the tasks the outage explains (for CI kinds: the blocked or waiting tasks of the
     PRs in scope, and tasks waiting on an unmet CI or merge condition of those PRs; for a
-    block storm: the blocked tasks). ``runners`` are runner names and labels; ``builds``
-    build ids (at most :data:`MAX_BUILDS`)."""
+    block storm: the blocked tasks; for tool failures: the tasks whose runs failed).
+    ``runners`` are runner names and labels; ``builds`` build ids (at most
+    :data:`MAX_BUILDS`)."""
 
     state: str
     signature: str

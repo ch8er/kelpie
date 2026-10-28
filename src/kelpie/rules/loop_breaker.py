@@ -24,7 +24,14 @@ checks, all ending in ``stop`` (carrying ``session_id``) plus an ``alert``:
   of the same key, models without a price, and for a bill of everything rather than
   tokens: web search, tools and other non-token items); higher, at prices above the
   bill's (a discount, batch, credits or a ``[prices]`` entry) or calls the provider did
-  not bill (another platform's under the provider's ``models``).
+  not bill (another platform's under the provider's ``models``);
+- **correlated tool failures** (#229, signal 2): one of ``tool_outage_tools`` (the farm's
+  build and test runners, config data; none: off) failing with the same exit code for
+  ``tool_outage_min_tasks`` distinct tasks within ``tool_outage_window``, with no success
+  of it since → one ``warning`` outage per tool, exit code and host, scoped to those tasks, open
+  until the tool runs successfully again. Not a stop: the cause is the tool or its host,
+  not the runs. A new check: only logged (``tool_outage_mode = "observe"``) until set to
+  ``"rule"``. See :mod:`kelpie.rules._tool_outage`.
 
 Precedence with rule 2 (``wait_condition``): a run of identical calls that matches
 ``poll_patterns`` is polling, which rule 2 coaches with a ``comment`` once the same check
@@ -78,6 +85,7 @@ from kelpie.rules._calls import (
 )
 from kelpie.rules._tasks import DEFAULT_STALE_AFTER, is_live
 from kelpie.rules._tokens import SpanIndex, span_index, tokens_since
+from kelpie.rules._tool_outage import ran_again, tool_outages
 from kelpie.rules.wait_condition import WaitCondition
 
 NAME = "loop_breaker"
@@ -118,6 +126,12 @@ class LoopBreaker:
     # A hard day or project budget is shared by many sessions: alert only, unless set.
     stop_on_shared_budgets: bool = False
     session_stale_after: timedelta = DEFAULT_STALE_AFTER
+    # Correlated tool failures (#229): these tools (none: off) failing the same way for
+    # tool_outage_min_tasks tasks within tool_outage_window (the [traces] window at most).
+    tool_outage_tools: tuple[str, ...] = ()
+    tool_outage_min_tasks: int = 3
+    tool_outage_window: timedelta = timedelta(minutes=30)
+    tool_outage_mode: str = "observe"  # a new check: "observe", or "rule" (the rule's mode)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -147,6 +161,16 @@ class LoopBreaker:
             for status in snapshot.budgets:
                 actions.extend(self._budget(status, snapshot))
         actions.extend(self._bill(snapshot))
+        actions.extend(
+            tool_outages(
+                snapshot,
+                NAME,
+                self.tool_outage_tools,
+                self.tool_outage_min_tasks,
+                self.tool_outage_window,
+                self.tool_outage_mode == "observe",
+            )
+        )
         return actions
 
     # --- the bill -----------------------------------------------------------------------
@@ -184,10 +208,11 @@ class LoopBreaker:
             )
 
     def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
-        """What the newest reconciled day of a ``bill:`` state's provider shows now."""
+        """What the newest reconciled day of a ``bill:`` state's provider shows now; for a
+        tool outage, the tool's next success."""
         prefix = f"{NAME}:bill:"
         if not state_id.startswith(prefix):
-            return None
+            return ran_again(state_id, snapshot, NAME, self.tool_outage_tools)
         provider = state_id.removeprefix(prefix)
         days = [r for r in snapshot.reconciliations if r.provider == provider]
         if not days:
@@ -548,7 +573,7 @@ def build(config: dict[str, Any]) -> LoopBreaker:
     own = {k: config.pop(k) for k in list(config) if k in _THRESHOLD_KEYS}
     if own:
         kwargs["thresholds"] = Thresholds(**_threshold_values(own, "thresholds"))
-    for key in ("forecast_horizon", "session_stale_after"):
+    for key in ("forecast_horizon", "session_stale_after", "tool_outage_window"):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     if "poll_patterns" in config:
@@ -561,6 +586,24 @@ def build(config: dict[str, Any]) -> LoopBreaker:
     for key in ("agents", "roles"):
         if key in config:
             kwargs[key] = _overrides(config.pop(key), key)
+    if "tool_outage_tools" in config:
+        tools = config.pop("tool_outage_tools")
+        if not isinstance(tools, list | tuple) or not all(isinstance(t, str) and t for t in tools):
+            raise ValueError("tool_outage_tools must be a list of non-empty strings")
+        kwargs["tool_outage_tools"] = tuple(tools)
+    if "tool_outage_min_tasks" in config:
+        value = config.pop("tool_outage_min_tasks")
+        if isinstance(value, bool) or not isinstance(value, int) or not 2 <= value <= 1000:
+            raise ValueError(
+                "tool_outage_min_tasks must be a whole number from 2 to 1000: one task "
+                "retrying a failure is not an outage"
+            )
+        kwargs["tool_outage_min_tasks"] = value
+    if "tool_outage_mode" in config:
+        mode = config.pop("tool_outage_mode")
+        if mode not in ("observe", "rule"):
+            raise ValueError('tool_outage_mode must be "observe" or "rule" (the rule\'s own mode)')
+        kwargs["tool_outage_mode"] = mode
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     rule = LoopBreaker(**kwargs)
