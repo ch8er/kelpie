@@ -118,12 +118,13 @@ def tool_outages(
         return []
     out = []
     calls = _calls(snapshot, tools)
+    live = {t.id for t in snapshot.tasks if not t.status.is_terminal}
     for group, failures in sorted(_open(calls, _named_hosts(snapshot)).items(), key=_order):
         since = _since(failures, min_tasks, window)
         if since is None:
             continue
         scope = [f for f in failures if f.at >= since]
-        out.append(replace(_alert(rule, group, scope, since), observe_only=observe))
+        out.append(replace(_alert(rule, group, scope, since, live), observe_only=observe))
     return out
 
 
@@ -309,10 +310,14 @@ def _since(failures: Sequence[_Call], min_tasks: int, window: timedelta) -> date
     return None
 
 
-def _alert(rule: str, group: _Group, scope: Sequence[_Call], since: datetime) -> Action:
+def _alert(
+    rule: str, group: _Group, scope: Sequence[_Call], since: datetime, live: Collection[str]
+) -> Action:
     tool, code, host = group
     state = tool_outage_state(rule, tool, code, host)
-    tasks = sorted({c.task for c in scope if c.task})
+    # The tasks it explains now: those still on the board and not finished (the report
+    # counts their hours; a finished or archived task's failures still count as signs).
+    tasks = sorted({c.task for c in scope if c.task and c.task in live})
     distinct = count(len({c.who for c in scope}), "task")
     meaning = MEANINGS.get(code, "failed")
     on = f" on {host}" if host else ""
@@ -324,7 +329,7 @@ def _alert(rule: str, group: _Group, scope: Sequence[_Call], since: datetime) ->
         cause=cause,
         tasks=tuple(tasks[:MAX_TASKS]),
     )
-    whose = f"the tasks: {_listed(tasks)}" if tasks else "the runs (no task is known)"
+    whose = f"the tasks: {_listed(tasks)}" if tasks else "the runs (no open task is known)"
     reason = (
         f"Tool outage since {since:%Y-%m-%d %H:%M} UTC: {cause}, {len(scope)} run(s), and "
         f"nothing has run {tool} successfully since. The cause is the tool or the host it "

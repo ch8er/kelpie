@@ -5,7 +5,8 @@ description: >
   The farm's own Mac lost its Xcode command line tools. Every agent that ran the simulator
   script got exit code 127 (not found), and each blocked its task on its own: GitHub's CI
   never ran it, so no failing-check outage fired. Rule 10 must report one outage of
-  `ios_sim.sh` exiting 127 for the three tasks it hit within half an hour, from the tool
+  `ios_sim.sh` exiting 127 for the tasks it hit within half an hour, listing those still
+  open, from the tool
   calls' exit codes, on commands as the redaction keeps them. A call sent to the background
   (exit 0 means started) and one Hermes refused to run are not failures; a `pkill` of the
   script and a success whose masked words may hide a pipe are no successes. One task retrying its own failing build is no
@@ -18,6 +19,12 @@ config:
   tool_outage_window: "30m"
 snapshot:
   now: "2026-03-02T11:00:00+00:00"
+  tasks:
+    - {id: T-601, title: "Checkout screen", status: blocked, status_since: "2026-03-02T10:10:00+00:00", owner_id: agent-dev-1}
+    - {id: T-602, title: "Cart badge", status: blocked, status_since: "2026-03-02T10:20:00+00:00", owner_id: agent-dev-2}
+    - {id: T-603, title: "Coupon field", status: in_progress, status_since: "2026-03-02T10:00:00+00:00", owner_id: agent-dev-3}
+    # Negative case: a task that failed the same way earlier and is done is no task it explains now.
+    - {id: T-609, title: "Settings icon", status: done, status_since: "2026-03-02T10:30:00+00:00", owner_id: agent-dev-4}
   spans:
     # It worked this morning.
     - {trace_id: TR-600, span_id: S600, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T09:00:00+00:00", end: "2026-03-02T09:04:00+00:00", task_id: T-600, session_id: S-600, outcome: ok, attributes: {command: "ios_sim.sh test", kelpie.tool.result: ok, kelpie.tool.exit_code: 0, kelpie.tool.command_whole: true}}
@@ -26,6 +33,7 @@ snapshot:
     - {trace_id: TR-602, span_id: S602, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:15:00+00:00", end: "2026-03-02T10:15:01+00:00", task_id: T-602, session_id: S-602, outcome: error, attributes: {command: "cd *** && ios_sim.sh build", kelpie.tool.result: error, kelpie.tool.exit_code: 127, kelpie.tool.command_complete: true}}
     - {trace_id: TR-603, span_id: S603, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:25:00+00:00", end: "2026-03-02T10:25:01+00:00", task_id: T-603, session_id: S-603, outcome: error, attributes: {command: "ios_sim.sh test", kelpie.tool.result: error, kelpie.tool.exit_code: 127, kelpie.tool.command_complete: true}}
     - {trace_id: TR-601, span_id: S601b, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:30:00+00:00", end: "2026-03-02T10:30:01+00:00", task_id: T-601, session_id: S-601, outcome: error, attributes: {command: "ios_sim.sh test", kelpie.tool.result: error, kelpie.tool.exit_code: 127, kelpie.tool.command_complete: true}}
+    - {trace_id: TR-609, span_id: S609, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:12:00+00:00", end: "2026-03-02T10:12:01+00:00", task_id: T-609, session_id: S-609, outcome: error, attributes: {command: "ios_sim.sh test", kelpie.tool.result: error, kelpie.tool.exit_code: 127, kelpie.tool.command_complete: true}}
     # Negative cases: started in the background (0 = started), refused by Hermes (-1).
     - {trace_id: TR-604, span_id: S604, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:20:00+00:00", end: "2026-03-02T10:20:01+00:00", task_id: T-604, session_id: S-604, outcome: ok, attributes: {command: "ios_sim.sh boot", kelpie.tool.result: unknown, kelpie.tool.exit_code: 0}}
     - {trace_id: TR-605, span_id: S605, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:22:00+00:00", end: "2026-03-02T10:22:01+00:00", task_id: T-605, session_id: S-605, outcome: error, attributes: {command: "ios_sim.sh test", kelpie.tool.result: blocked, kelpie.tool.exit_code: -1}}
@@ -43,7 +51,7 @@ snapshot:
 expected_actions:
   - kind: alert
     severity: warning
-    reason_contains: "Tool outage since 2026-03-02 10:05 UTC: ios_sim.sh exits 127 (not found) for 3 tasks, 4 run(s)"
+    reason_contains: "Tool outage since 2026-03-02 10:05 UTC: ios_sim.sh exits 127 (not found) for 4 tasks, 5 run(s)"
     params:
       kind: tool_failures
       signature: "ios_sim.sh exit 127"
@@ -59,3 +67,5 @@ not_expected_actions:
     reason_contains: "T-605"
   - kind: alert
     reason_contains: "T-606"
+  - kind: alert
+    reason_contains: "T-609"

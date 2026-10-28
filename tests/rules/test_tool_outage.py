@@ -10,7 +10,7 @@ import pytest
 
 from kelpie.core.actions import Action
 from kelpie.core.incidents import TOOL_FAILURES, Outage, is_outage_state
-from kelpie.core.model import Session, Snapshot, Span, SpanKind
+from kelpie.core.model import Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.tools import (
     COMMAND_COMPLETE_ATTRIBUTE,
     COMMAND_WHOLE_ATTRIBUTE,
@@ -67,7 +67,15 @@ def call(
 THREE = (call("T-1", 50), call("T-2", 40), call("T-3", 30))
 
 
+def board(*ids: str, status: Status = Status.IN_PROGRESS) -> tuple[Task, ...]:
+    return tuple(Task(t, t, status, NOW - 90 * M) for t in ids)
+
+
+BOARD = board(*(f"T-{n}" for n in range(1, 10)))
+
+
 def found(*spans: Span, rule: LoopBreaker = RULE, **fields: Any) -> list[Action]:
+    fields.setdefault("tasks", BOARD)
     actions = rule.evaluate(Snapshot(now=NOW, spans=spans, **fields))
     return [a for a in actions if is_outage_state(a.state or "")]
 
@@ -295,7 +303,7 @@ def test_calls_without_a_task_or_session_count_per_trace() -> None:
     many = [call(None, m, session_id=None, trace_id=f"TR-{m}") for m in (50, 40, 30)]
     [alert] = found(*many, Span("TR-0", "SP-0", "chat", SpanKind.LLM, NOW))  # not a tool span
     assert alert.params["tasks"] == []
-    assert alert.reason.endswith("not the runs (no task is known).")
+    assert alert.reason.endswith("not the runs (no open task is known).")
 
 
 def test_an_error_without_a_failing_exit_code_is_not_grouped() -> None:
@@ -341,3 +349,12 @@ def test_a_failure_counts_only_when_the_command_reaches_its_end() -> None:
     cut = [call(t, m, command="ios_sim.sh test", whole=False, complete=False)
            for t, m in (("T-1", 50), ("T-2", 40), ("T-3", 30))]  # fmt: skip
     assert found(*cut) == []
+
+
+def test_it_lists_only_the_tasks_still_open() -> None:
+    done = board("T-2", status=Status.DONE)
+    [alert] = found(*THREE, tasks=(*board("T-1"), *done))  # T-3 left the board
+    assert alert.params["tasks"] == ["T-1"]
+    assert "for 3 tasks" in alert.reason and alert.reason.endswith("not the tasks: T-1.")
+    [alert] = found(*THREE, tasks=done)
+    assert alert.params["tasks"] == [] and alert.reason.endswith("(no open task is known).")
