@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -436,7 +438,7 @@ class Engine:
         for state in gone:
             now_true = self._resolved_text(state, snapshot)
             age = snapshot.now - state.since
-            note = _StateNote(AlertTransition.RESOLVED, age, now_true)
+            note = _StateNote(AlertTransition.RESOLVED, age, now_true, closes=state.id)
             notice = Action(
                 ActionKind.ALERT,
                 state.rule,
@@ -458,7 +460,13 @@ class Engine:
         hook = getattr(self._by_name.get(state.rule), "resolved", None)
         if callable(hook):
             try:
-                text = hook(state.id, snapshot)
+                # a hook that takes ``last_key`` also learns which alert last announced it
+                wants_key = "last_key" in inspect.signature(hook).parameters
+                text = (
+                    hook(state.id, snapshot, last_key=state.key)
+                    if wants_key
+                    else hook(state.id, snapshot)
+                )
             except Exception:
                 log.exception("rule %s failed to describe resolved state %s", state.rule, state.id)
                 text = None
@@ -682,6 +690,9 @@ class Engine:
                 items=alert_items(action, snapshot, effects_done=effects_done),
                 snoozed=snoozed_items(action, snapshot),
                 snoozed_total=_count(action.params.get("snoozed_total")),
+                at=snapshot.now,
+                # a resolve notice names the state it closes (its Action.state stays None)
+                state=action.state if note is None or note.closes is None else note.closes,
             )
         )
         return True
@@ -694,6 +705,9 @@ class _StateNote:
     transition: AlertTransition
     age: timedelta | None  # how long the condition has been open (escalated, resolved)
     reason: str  # the rule's own reason, without the wording of the transition
+    # a resolve notice: the state it closes, which its event names (never Action.state,
+    # which would keep the state open)
+    closes: str | None = None
 
 
 _TRANSITIONS = {
@@ -760,11 +774,11 @@ def alert_items(
     action: Action, snapshot: Snapshot, *, effects_done: bool = False
 ) -> tuple[AlertItem, ...]:
     """The tasks an alert is about: ``params.items`` (mappings with ``task_id`` and optional
-    ``title``, ``needed``, ``since``, ``blocking`` and ``snooze``; other keys are the rule's
-    own and are ignored; malformed entries are skipped), else the action's own task (with
-    ``params.snooze``). A ``snooze`` is a mapping (:func:`_snooze_note`); a malformed one is
-    dropped, the item kept. Titles come from
-    the entry, else the snapshot; ages are counted to ``snapshot.now``. Only the actions of
+    ``title``, ``needed``, ``since``, ``blocking``, ``snooze`` and ``snooze_task``; other
+    keys are the rule's own and are ignored; malformed entries are skipped), else the
+    action's own task (with ``params.snooze`` and ``params.snooze_task``). A ``snooze`` is a
+    mapping (:func:`_snooze_note`); a malformed one is dropped, the item kept. Titles come
+    from the entry, else the snapshot; ages are counted to ``snapshot.now``. Only the actions of
     the current tick are rendered, never ledger rows. With ``effects_done`` (the alert
     announces effects Kelpie carried out: a stop, a close) no item says what is needed: the
     rule's ask is what Kelpie already did; a suggested, failed or not executed effect keeps
@@ -793,6 +807,7 @@ def _items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
             _count(action.params.get("blocking")),
             _start(since),
             _snooze_note(action.params.get("snooze")),
+            _task_ref(action.params.get("snooze_task")),
         ),
     )
 
@@ -863,7 +878,26 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
         _count(blocking),
         _start(since),
         _snooze_note(entry.get("snooze")),
+        _task_ref(entry.get("snooze_task")),
     )
+
+
+MAX_TASK_REF = 200  # characters of a ``snooze_task``; a longer one is dropped
+_UNPRINTABLE = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})  # never in a task id
+
+
+def _task_ref(value: object) -> str | None:
+    """A task id a rule names (``snooze_task``), or None when it is absent or malformed: too
+    long, or with a control or format character (it may come from a condition an agent
+    registered, and ends up in logs and chat buttons)."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > MAX_TASK_REF:
+        return None
+    if any(unicodedata.category(ch) in _UNPRINTABLE for ch in value):
+        return None
+    return value
 
 
 def _since(value: object) -> tuple[bool, datetime | None]:

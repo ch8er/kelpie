@@ -34,7 +34,7 @@ configure what exists.
 - [[connectors.human_tasks]](#connectorshuman_tasks)
 - [[connectors.llm_quotas]](#connectorsllm_quotas)
 - [[connectors.cost_reports]](#connectorscost_reports)
-- [[alerts]](#alerts)
+- [[alerts]](#alerts), [snoozing from the alert](#snoozing-from-the-alert)
 - [[report]](#report), [report sections](#report-sections)
 - [[agent]](#agent) and [[hub]](#hub): multi-host
 - [Checks across sections](#checks-across-sections)
@@ -247,6 +247,28 @@ cannot see is not.
 | `poll_window` | `"10m"` | duration, > 0 | Window for the repeat count; also how long one check may block before it counts as polling. |
 | `poll_error_streak` | `5` | count, >= 1 | Comment when the same polled check failed this many times in a row. |
 | `session_stale_after` | `"30m"` | duration, > 0 | See [live session](#rules). |
+
+**Waits rule 13 lists go to rule 13.** A waiting task that rule 13 lists in a person's
+"needs you" digest, parked on a task the person can do now by a `human_task` condition with
+no other unmet condition, gets no overdue alert from this rule: the person gets one message
+instead of two, as for blocks (rule 4, above). This rule reads the farm with rule 13's whole
+`[engine.rules.needs_you]` section and leaves exactly what rule 13 lists, its time
+thresholds aside. Under the hand-off rule 13's snooze handling decides what the person
+hears: a snoozed human task is in the digest's footer, and one whose snooze ended or whose
+work grew is back in the digest. A listed wait whose conditions Kelpie cannot check (never
+checked, last checked longer ago than `max_condition_age`, or the connector reports an error) keeps this rule's overdue alert, worded as a
+connector problem ("C-1 was not checked on this pass: is the connector
+running?"), snoozed or not: the digest cannot say what Kelpie does not know. Everything else
+stays this rule's: a wait on a task the person cannot move yet (in the backlog or triage),
+one that also waits for a PR or CI, a dead end (the human task was cancelled), a condition
+Kelpie cannot see, a task waiting on nothing, and the wake. When a wait moves to the digest
+while its alert is open, the "Resolved" notice says it is in the person's digest now (rule 4
+does the same for a block). The hand-off applies only while rule 13 reaches people: it is loaded, and it is not in
+`observe` mode while this rule is in `suggest` or `act` (else this rule alerts as before).
+Kelpie decides that from the modes: `needs_you` is not a key to set here, and a mistake in
+rule 13's section is reported as rule 13's. Kelpie logs a warning at startup when rule 13
+waits longer than this rule before it lists a wait (`human_wait_alert_after` longer than
+`max_wait`): the wait is then announced by neither rule in between.
 
 ### 3. orphan_status
 
@@ -646,8 +668,9 @@ tool calls only through hooks, `[adapters.hermes] lookback` must cover `repeat_d
 
 A snooze records that a person knows a task waits on purpose until a date (a decision
 deferred to a release, a manual pass planned for a day). `kelpie snooze <task> --until ...`
-stores one ([install.md, "Command line"](install.md)). A stored snooze wins over a marker
-for the same task. `kelpie serve` puts active snoozes, and those expired within the last 7
+stores one ([install.md, "Command line"](install.md)), and so does a press on a Telegram
+alert's snooze button ([Snoozing from the alert](#snoozing-from-the-alert)). A stored
+snooze wins over a marker for the same task. `kelpie serve` puts active snoozes, and those expired within the last 7
 days, into every snapshot; expired snoozes are pruned from the database after 30 days.
 `kelpie why <task>` shows the task's snooze.
 
@@ -679,7 +702,12 @@ agent-health alerts, and list it as "from marker".
   reminders. A marker holds only a block that waits on a person (it asks one, or waits
   only on human tasks), never an agent's own wait on CI or its own parking.
 - `wait_condition` (rule 2): no overdue alert on a waiting task whose only unmet
-  conditions are human tasks a snooze holds; a dead end still alerts.
+  conditions are human tasks a snooze holds; a dead end still alerts. A wait Kelpie cannot
+  check (a condition never checked or not checked within `max_condition_age`, or one the connector reports an error for) is never
+  held: it keeps alerting. While rule 13 reaches people, a wait it lists is left to it, and
+  rule 13's snooze handling decides what the person hears (see
+  [2. wait_condition](#2-wait_condition)); a wait Kelpie cannot check keeps rule 2's alert
+  then too.
 
 Agent-health rules (`loop_breaker`, `no_progress`, `exit_contract`, `orphan_status`, ...)
 never honour a snooze. A snoozed task alerts again when its snooze ends ("Snooze ran
@@ -730,7 +758,7 @@ The Hermes platform adapter. Absent: no platform, and snapshots hold no tasks. D
 | `git_timeout` | `"5s"` | duration, > 0 | Limit for each git call. |
 | `cli` | `"hermes"` | name or path | Hermes executable used for `stop`. |
 | `cli_timeout` | `"10s"` | duration, > 0 and <= 60s | Limit for one `stop` command; it runs inside the tick. |
-| `end_worker` | `true` | bool | After a stop's block, end the run's worker processes (submitter, agent, the agent's descendants) once their pid and start fingerprint match what Hermes recorded; Linux only. `false`: left to Hermes' dispatcher, which reaps a worker it can verify at least 2 minutes later. See the [Hermes adapter](../src/kelpie/adapters/hermes/README.md). |
+| `end_worker` | `true` | bool | After a stop's block, end the run's worker processes (submitter, agent, the agent's descendants) once their pid and start fingerprint match what Hermes recorded; Linux (`/proc`) and macOS (libproc). `false`: left to Hermes' dispatcher, which reaps a worker it can verify at least 2 minutes later. See the [Hermes adapter](../src/kelpie/adapters/hermes/README.md). |
 | `author` | `"kelpie"` | lowercase name | What Kelpie signs its comments, blocks, parks and wakes with on the board (`--author`, `HERMES_PROFILE_NAME`); its own comments are skipped when people's are read, so not the name of a profile or of one of `human_owners`. |
 | `worker_grace` | `"5s"` | duration, > 0 and <= 30s | Between SIGTERM and SIGKILL when ending a stopped run's worker; it runs inside the tick, after the block. A stop takes about `cli_timeout` + `worker_grace` + 2s at most (plus waits on a busy board): on a `kelpie agent`, keep that well below `[hub] action_timeout`. |
 | `prework_statuses` | `["triage", "scheduled"]` | list of `triage`, `scheduled` | Hermes statuses before any work starts: rule 3 alerts when a card sits there past `prework_after` with tasks depending on it. Kelpie's own parks in `scheduled` are `waiting`, not pre-work. |
@@ -872,7 +900,9 @@ What is kept from each span: [privacy.md](privacy.md).
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `true` | bool | `false`: no ingest, no span store, no budgets. |
-| `token_env` | `"KELPIE_TRACES_TOKEN"` | variable name | Bearer token exporters must send. Used when the variable is set. Written here, the variable must be set or Kelpie refuses to start. |
+| `token_env` | `"KELPIE_TRACES_TOKEN"` | variable name | Bearer token exporters must send. Used when the variable is set. Written here, the variable must be set or Kelpie refuses to start. With `token_file`: the variable name inside that file. |
+| `token_file` | none | path | An env file holding `<token_env>=<token>`, read instead of the environment and read again when it changes, so the token can be rotated without a restart (below). It must exist, hold the token and be a regular file of the user `kelpie serve` runs as (not a symlink), or Kelpie refuses to start; `kelpie traces rotate-token` creates it. A relative path is taken from the working directory, like `[storage] path`. Not read with `[hub]` (that port takes no spans). |
+| `token_grace` | `"2h"` | duration, 0 to 7d | How long `kelpie traces rotate-token` keeps the replaced token valid. 0: it accepts no previous token at all. |
 | `allow_unauthenticated` | `false` | bool | Accept spans without a token on a non-loopback address. See [install.md](install.md#otlp-token-and-the-exposure-check). |
 | `window` | `"30m"` | duration, > 0 | Stored spans each tick sees. |
 | `totals_window` | `"24h"` | duration, > 0 | Per-session totals (calls, errors, tokens) in each tick. |
@@ -884,6 +914,25 @@ What is kept from each span: [privacy.md](privacy.md).
 | `task_attribute` | `"kelpie.task_id"` | attribute name | Span or resource attribute naming the task. |
 | `session_attribute` | `"kelpie.session_id"` | attribute name | Attribute naming the session; else `gen_ai.conversation.id`, else `session.id`. |
 | `commands` | `true` | bool | Keep a grouping prefix of shell commands on tool spans (`kelpie.tool.command_prefix`). `false`: drop it. |
+
+**Rotating the token.** With `token_file` set, `kelpie traces rotate-token [--grace 2h]`
+writes a new token to the file (mode 600, replaced atomically under a lock; other lines
+are kept, commented-out copies of the token lines are dropped; a missing folder is
+created with mode 700) and keeps the token it replaces valid for the grace period, so sessions that
+started with it keep reporting. `--grace 0s` accepts no previous token at all, revoking
+those of earlier rotations too. The replaced token is kept only as a SHA-256 hash with its expiry, on the
+line `<token_env>_GRACE`. It prints no token, only what it did and how many previous
+tokens are still accepted. It runs only as the user who owns the file's folder and
+refuses a symlink, a file of another user and a folder others may write to.
+`kelpie serve` reads the file again within a second, and only trusts a regular file of
+its own user (or root) that others may not write, in a folder others may not write;
+otherwise it keeps the tokens it read before and `kelpie_traces_token_file_ok` is 0.
+`/metrics` has `kelpie_traces_grace_tokens` (previous tokens still accepted) and
+`kelpie_traces_grace_requests_total` (requests that used one: agents not on the new token
+yet). `kelpie doctor` warns when the token is in a backup (`*.bak*`, `*~`, `*.orig`,
+`*.old`) or a file others can read under the token file's folder, the Hermes home or
+`~/.claude`, and lists the other files that hold a copy. See
+[security.md](security.md#traces-token).
 
 ### [[traces.forward]]
 
@@ -1455,6 +1504,8 @@ Telegram channel (`type = "telegram"`):
 | `name` | `"telegram"` | Lower-case word; needed with two Telegram channels. |
 | `api_url` | `"https://api.telegram.org"` | Another Bot API server; plain http only on loopback. |
 | `format` | `"html"` | `html` (bold headline and titles, links) or `plain`. An HTML message Telegram cannot parse is sent once more as plain text. |
+| `buttons` | `false` | Snooze buttons on the alerts a snooze would quiet, and a poller that takes the presses ([Snoozing from the alert](#snoozing-from-the-alert)). On at most one Telegram channel; needs `[storage] path`. |
+| `allowed_user_ids` | `[]` | Telegram user ids (numbers, at most 100) that may press the buttons. With `buttons = true` an empty list stops startup and fails `kelpie doctor`. |
 
 Slack channel (`type = "slack"`):
 
@@ -1479,6 +1530,119 @@ The plain `text` fallback is sent with formatting off and `&`, `<` and `>` escap
 is inserted into the text, so ids, commands and URLs copy as they are. In every channel `@`
 in task and agent text is shown as a fullwidth `＠`, so `@here` or `<!channel>` ping nobody,
 and invisible format characters are removed.
+
+### Snoozing from the alert
+
+A person can snooze a wait from the alert that reminds them of it, without a terminal
+([#176](https://github.com/ch8er/kelpie/issues/176)). It appears only on the items a snooze
+would quiet: each item of rule 13's digest (not one whose block can never clear), rule 4's
+no-condition and overdue alerts (not a dead end, a condition Kelpie cannot see or stale
+evidence), and rule 2's overdue alert on a wait for one person's human task (the button
+snoozes the human task, and says so: "1. Snooze H-7 1d"). Never on agent-health alerts, and
+never on a "resolved" message.
+
+- **Slack** gets no buttons. Under each such item it shows the command that does it, as
+  plain text on its own line so it copies cleanly: `kelpie snooze T-101 --until
+  2026-10-22`, a date 3 days after the alert's day in `[report] timezone` (through that day;
+  edit it before you run it). A task id that is not a plain token (letters, digits and
+  `._:/#+=,%~-`), or that starts with `-` (the command would read it as an option), gets no
+  line: it would have to be pasted into a shell. Ids with `#` or `~` are shell-quoted.
+- **Telegram**, with `buttons = true`, puts three buttons under each such item: "1. Snooze
+  1d", "3d", "7d". A press snoozes that task from now for that many days (stored like
+  `kelpie snooze`, "from chat"), answers with a short toast and edits the alert: a line
+  "✅ 1. Snoozed T-101 until 2026-10-22 14:05 UTC by Alice" is added at the end and that
+  item's buttons go (when the line would not fit Telegram's 4096 characters, the buttons go
+  and the line is sent as a reply to the alert). The next digest lists the task in its
+  footer. A button that has expired answers so, with the `kelpie snooze` command that still
+  works, and that message's buttons are taken off. A press never shortens
+  a snooze set with `kelpie snooze` that ends later: it is refused (`already_snoozed`) and
+  the toast says until when the task is already snoozed.
+
+Like `kelpie snooze`, a press stores its snooze even under the global dry-run (`dry_run =
+true`, the default): a snooze changes nothing on the farm, it only quiets alerts. Its ledger
+entry then says so (`dry_run: true` in its parameters, and "Stored under the global
+dry-run" in its reason).
+
+```toml
+[[alerts.channels]]
+type = "telegram"
+token_env = "KELPIE_TELEGRAM_TOKEN"
+chat_id = "-1001234567890"
+buttons = true
+allowed_user_ids = [123456789, 987654321]   # who may snooze; ask @userinfobot for yours
+```
+
+Use a bot dedicated to Kelpie. Kelpie reads presses with `getUpdates` long polling only,
+never a webhook, so it needs no inbound port; Telegram refuses `getUpdates` while the bot
+has a webhook, and another program reading the same bot's updates would take Kelpie's
+presses. `kelpie doctor` checks both settings and the bot ("snooze buttons telegram": FAIL
+with an empty `allowed_user_ids`, without a database, or when the bot has a webhook set).
+
+**Security model.** The buttons are an inbound control channel, so they are built to do one
+thing and refuse everything else.
+
+- *What a press can do*: snooze one task for 1, 3 or 7 days (at most `[snooze] max_days`).
+  Nothing else: no button can unblock, close, stop, requeue or reassign a task, or change a
+  rule's mode. A snooze only holds repeat human-wait reminders (see [[snooze]](#snooze)),
+  and it ends early when more work is blocked behind the task, as any snooze does.
+- *Who*: a press counts only when its sender's Telegram user id is in `allowed_user_ids`
+  **and** the message is in the configured `chat_id`. A user id is a number Telegram
+  assigns; a name or `@username` is never trusted. Everything else is ignored and counted
+  in `kelpie_chat_rejected_total{reason}`: `unknown_user`, `wrong_chat`, `bad_ref`,
+  `expired_ref`, `used_ref`, `already_snoozed`, `rate_limited`, `malformed`,
+  `not_callback`. A press from someone not in `allowed_user_ids` or from another chat gets
+  no answer at all, and neither does a malformed one or a user's 11th press within a
+  minute. A refused press of an allowed person in the chat is answered "Not allowed." and
+  nothing more (for `already_snoozed`, until when the task is snoozed; for `expired_ref`,
+  that the button has expired).
+- *What a button carries*: no task text, only a signed reference,
+  `s<days>.<record id>.<MAC>` (at most 41 bytes; Telegram allows 64). The record, kept by
+  Kelpie, names the alert, the task, the item, when it was issued and the message it went
+  out in; the MAC is the first 16 bytes of an HMAC-SHA256, under a key Kelpie generates on
+  first use, over the chat id, the days and the record id, compared in constant time.
+  Record ids are never reused. A forged, truncated or edited reference, or one from another
+  chat or another message, is `bad_ref`.
+- *Expiry*: a reference is good for 24 hours (the longest escalation step), and only while
+  it is on the latest message of its alert in that chat. Every message of the alert counts,
+  with buttons or without: the next escalation step, a changed digest, a digest with
+  nothing left to snooze or the alert resolving makes the older message's buttons expire
+  (`expired_ref`), and Kelpie removes them from that message (best effort). An alert that
+  resolves expires its buttons also when the channel does not show the "resolved" message
+  (it is `info`, below the default `min_severity`), when that message cannot be sent, or
+  when the alert queue is full; then only the removal from the chat may be skipped (also
+  while Telegram asks Kelpie to slow down). Each reference is used once (`used_ref`): it is
+  claimed before the snooze is written, and given back only when the write fails.
+- *Replay*: Kelpie stores the `getUpdates` offset and moves it past an update before acting
+  on it, so a press is taken at most once, also across restarts. The offset also moves past
+  updates Kelpie drops as malformed, so none comes back.
+- *Where the key lives*: in the button store, `kelpie.buttons.db` beside `[storage] path`
+  (for `/var/lib/kelpie/kelpie.db`: `/var/lib/kelpie/kelpie.buttons.db`), created with mode
+  `0600` (tightened if it was readable by others), owned by Kelpie's user, never opened
+  through a symlink (Kelpie refuses to start when another user owns the file, or when the
+  file SQLite opened is not the one it checked, and warns when the directory is writable by
+  others), apart from `kelpie.db`, which other commands read and people share to debug. It
+  also holds the update offset, the references (pruned 7 days after issue), each alert's
+  latest message id and Kelpie's copy of the messages with buttons (their text as Telegram
+  answered it, which the acknowledgements edit). The key is never logged and never in config. Delete the file to rotate the key: every
+  button already sent then stops working.
+- *Every press is recorded*: the snooze (`kelpie snoozes`, "from chat", with the person's
+  name) and a ledger entry (kind `snooze`, rule `chat`, outcome `executed`, executor the
+  channel; who, with their user id, what and until when; `kelpie why <task>` lists it),
+  written in one transaction that takes the write lock before it reads, so a `kelpie
+  snooze` from another process cannot slip in between: there is no chat snooze without its
+  entry.
+- *Untrusted text*: the person's name is shown cleaned, without invisible characters and
+  with `@` broken, set as code so that Telegram turns nothing in it into a link, and the
+  acknowledgement is plain text with the message's own formatting entities, never parsed
+  as HTML. It is built from Kelpie's copy of the message, never from the copy a press
+  carries, so presses close together keep every acknowledgement. A task id with a control
+  or invisible character gets no button. Every Bot API call goes through Kelpie's HTTP helper to the configured `api_url`
+  only (no redirects, bounded answers), with the token never logged.
+- *Never in the control loop*: the poller runs in its own thread, waits at least a second
+  between two polls, backs off exponentially on errors (up to 5 minutes, longer when
+  Telegram says so; `kelpie_chat_api_errors_total{call,cause}`), and stops with Kelpie
+  under the alert delivery's shutdown deadline. Presses are counted in
+  `kelpie_chat_actions_total{outcome}` (`snoozed`, `rejected`, `failed`).
 
 ## [report]
 

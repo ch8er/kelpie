@@ -35,14 +35,7 @@ from kelpie.adapters.hermes.stop import (
     stop_comment,
     verify_stop,
 )
-from kelpie.adapters.hermes.worker import (
-    Plan,
-    Proc,
-    RunWorker,
-    fingerprint,
-    instantiation_epoch,
-    read_proc,
-)
+from kelpie.adapters.hermes.worker import Plan, Proc, RunWorker, host_table
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
@@ -271,11 +264,8 @@ def test_task_still_running_after_cli_success_is_an_error(
 
 
 def pid_alive(pid: int) -> bool:
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-    except OSError:
-        return False
-    return state != "Z"  # a zombie is dead, only not reaped yet
+    p = host_table().read(pid)
+    return p is not None and p.state != "Z"  # a zombie is dead, only not reaped yet
 
 
 def test_cli_timeout_kills_the_whole_process_group(
@@ -422,17 +412,19 @@ def sleeper() -> subprocess.Popen[bytes]:
 
 
 def record_worker(board: Board, rid: int, pid: int) -> None:
-    """The run's submitter as Hermes records it: pid, start fingerprint, this host's claim."""
-    p = read_proc(pid)
+    """The run's submitter as Hermes records it on this system (Linux or macOS): pid, start
+    fingerprint, this host's claim."""
+    table = host_table()
+    p = table.read(pid)
     assert p is not None
     board.conn.execute(
         "UPDATE task_runs SET worker_pid = ?, worker_started_at = ?, claim_lock = ? WHERE id = ?",
-        (pid, fingerprint(p, instantiation_epoch()), f"{socket.gethostname()}:1", rid),
+        (pid, table.fingerprint(p, table.epoch()[0]), f"{socket.gethostname()}:1", rid),
     )
     board.conn.commit()
 
 
-@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="needs /proc")
+@pytest.mark.skipif(host_table().unavailable() is not None, reason="needs /proc or libproc")
 def test_stop_ends_the_runs_worker(board: Board, fake_cli: tuple[str, Path]) -> None:
     exe, _ = fake_cli
     rid = running(board)

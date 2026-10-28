@@ -6,7 +6,7 @@ import dataclasses
 import re
 import types
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from enum import Enum
 from functools import cache
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
@@ -42,6 +42,38 @@ def parse_datetime(value: str | datetime) -> datetime:
     if dt.tzinfo is None:
         raise ValueError(f"datetime must be timezone-aware: {value!r}")
     return dt
+
+
+def parse_when(value: str, now: datetime, tz: tzinfo) -> datetime:
+    """A past point in time as a person types it: ``now``; ``-`` then a duration, that long
+    before ``now`` (``-30m``, ``-2h``, ``-1d2h``: whole numbers with ``d``, ``h``, ``m``,
+    ``s`` in that order, any case); or an ISO 8601 date or date and time, in ``tz`` when it
+    has no offset (a date is its midnight there; a wall time a DST change skips or repeats
+    resolves as Python does, to the first). ValueError names the accepted forms."""
+    text = value.strip()
+    try:
+        if text.lower() == "now":
+            return now
+        if text.startswith("-"):
+            try:
+                ago = parse_duration(text[1:].strip().lower())
+            except ValueError:
+                ago = None
+            if ago is None or ago <= timedelta(0):
+                raise ValueError(f"invalid relative time {value!r}: use now, -30m, -2h or -1d2h")
+            return now - ago
+        try:
+            at = datetime.fromisoformat(text)
+        except ValueError:
+            raise ValueError(
+                f"invalid time {value!r}: use now, a relative time such as -2h, or an ISO time"
+            ) from None
+        at = at if at.tzinfo is not None else at.replace(tzinfo=tz)
+        at.astimezone(UTC)  # out of range (year 1 with an offset) raises here, not later,
+        at.astimezone(tz)  # in UTC or where it is shown
+        return at
+    except OverflowError:
+        raise ValueError(f"time {value!r} is out of range") from None
 
 
 @cache

@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from kelpie import __version__
 from kelpie.app import (
@@ -26,6 +27,86 @@ from kelpie.app import (
 )
 
 log = logging.getLogger("kelpie.cli")
+
+
+_RELATIVE = re.compile(r"-\d+[dhms]\w*", re.IGNORECASE)
+_GLOBAL_VALUES = frozenset({"--config", "--log-level"})  # global options that take a value
+
+
+def _relative_at(argv: list[str]) -> list[str]:
+    """``kelpie fix ... --at -2h`` as ``--at=-2h``: argparse takes a value that starts with
+    ``-`` for an option. Only for ``fix``, and not after ``--``."""
+    command = None
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg in _GLOBAL_VALUES:
+            skip = True
+        elif not arg.startswith("-"):
+            command = arg
+            break
+    if command != "fix":
+        return argv
+    out: list[str] = []
+    for i, arg in enumerate(argv):
+        if arg == "--":
+            return out + argv[i:]
+        if out and out[-1] == "--at" and _RELATIVE.fullmatch(arg):
+            out[-1] = f"--at={arg}"
+        else:
+            out.append(arg)
+    return out
+
+
+def _rotate_token(settings: Settings, grace_text: str | None) -> int:
+    """``kelpie traces rotate-token``: counts and times only, never a token."""
+    from kelpie.core.serde import parse_duration
+    from kelpie.traces.auth import TokenFileError, rotate
+    from kelpie.traces.config import MAX_TOKEN_GRACE
+
+    traces = settings.traces
+    path = traces.token_file
+    if path is None:
+        print(
+            "kelpie: set [traces] token_file first: rotating a token read from "
+            f"${traces.token_env} would need kelpie serve and every agent restarted",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        grace = traces.token_grace if grace_text is None else parse_duration(grace_text)
+    except ValueError:
+        print(f"kelpie: --grace must be a duration such as 2h, got {grace_text!r}", file=sys.stderr)
+        return 2
+    if not timedelta(0) <= grace <= MAX_TOKEN_GRACE:
+        print("kelpie: --grace must be between 0s and 7d", file=sys.stderr)
+        return 2
+    try:
+        done = rotate(path, traces.token_env, grace, datetime.now(UTC))
+    except TokenFileError as exc:
+        print(f"kelpie: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"kelpie: cannot write {path}: {exc.strerror}", file=sys.stderr)
+        return 1
+    if done.created:
+        print(f"wrote a new traces token to {done.path} (mode 600); there was none before")
+    elif done.grace_until is not None:
+        until = done.grace_until.isoformat(timespec="minutes")
+        print(
+            f"rotated the traces token in {done.path} (mode 600); "
+            f"the old one is accepted until {until}"
+        )
+    else:
+        print(f"rotated the traces token in {done.path} (mode 600); no previous one is accepted")
+    print(f"previous tokens accepted: {done.grace}")
+    print(
+        "kelpie serve, running as this user, reads the file again within a second "
+        "(kelpie_traces_token_file_ok on /metrics is 0 when it cannot); start the OTLP "
+        "exporters with the new token so new sessions use it"
+    )
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -54,7 +135,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     fix.add_argument("--role", help="the role it applies to")
     fix.add_argument(
-        "--at", help="when (ISO time; without an offset in [report] timezone; default: now)"
+        "--at",
+        help="when: now (the default), a time before now such as -30m, -2h or -1d2h, or an "
+        "ISO time (without an offset: in [report] timezone)",
     )
     fix.add_argument(
         "--list", action="store_true", help="list the fixes recorded in the last --days instead"
@@ -147,7 +230,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     scrub.add_argument("--dry-run", action="store_true", help="count, change nothing")
 
-    args = parser.parse_args(argv)
+    traces = sub.add_parser("traces", help="OTLP ingest maintenance")
+    traces_sub = traces.add_subparsers(dest="traces_command", required=True)
+    rotate = traces_sub.add_parser(
+        "rotate-token",
+        help="write a new ingest token to [traces] token_file; the old one stays valid for "
+        "the grace period (prints no token)",
+    )
+    rotate.add_argument(
+        "--grace", help="how long the old token stays valid (default: [traces] token_grace)"
+    )
+
+    args = parser.parse_args(_relative_at(sys.argv[1:] if argv is None else list(argv)))
     logging.basicConfig(
         level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
@@ -217,6 +311,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return code
         if args.command == "spool":
             return _scrub(settings, args.paths, args.dry_run)
+        if args.command == "traces":
+            return _rotate_token(settings, args.grace)
         if args.command == "selftest":
             from kelpie.selftest.hermes import run as run_selftest
 

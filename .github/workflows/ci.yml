@@ -98,14 +98,33 @@ jobs:
             ${{ runner.temp }}/e2e/**/*.toml
           if-no-files-found: ignore
 
+  # macOS: the libproc process table that ends a stopped Hermes run's worker there, against
+  # real processes, and its fingerprint against psutil's (what Hermes records on macOS); and
+  # kelpie selftest stop end to end against a fake Hermes.
+  macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: >-
+          uv run --with psutil pytest -v
+          tests/adapters/test_hermes_proctable.py
+          tests/adapters/test_hermes_worker.py
+          tests/adapters/test_hermes_stop.py
+          tests/selftest
+
   ci-ok:
-    needs: [changes, lint, test, e2e]
+    needs: [changes, lint, test, e2e, macos]
     if: always() && (github.event_name == 'push' || !github.event.pull_request.draft)
     runs-on: ubuntu-24.04
     steps:
       - name: Fail if a needed job failed or was cancelled
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: |
-          echo "changes=${{ needs.changes.result }} lint=${{ needs.lint.result }} test=${{ needs.test.result }} e2e=${{ needs.e2e.result }}"
+          echo "changes=${{ needs.changes.result }} lint=${{ needs.lint.result }} test=${{ needs.test.result }} e2e=${{ needs.e2e.result }} macos=${{ needs.macos.result }}"
           exit 1
       - run: echo "CI ok"

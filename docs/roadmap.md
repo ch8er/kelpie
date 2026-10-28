@@ -761,6 +761,22 @@ context growth per step, restarts from zero.
 - [x] Tokens burned on restarts from zero (feeds the cost of chaos)
 - [x] Recommendations with estimated savings in the daily report
 
+### traces: instruction bloat — skills and role instructions that only grow (incident 21)
+labels: P1, area:traces
+Agents append a section to their own skills after every case and nobody prunes them: on a
+live farm three roles' skills reached the platform's ~100K-character cap, with duplicated
+sections and one fact copied into eight files. Kelpie measures and recommends; it never edits
+instruction files.
+
+**Acceptance criteria**
+- [ ] Instruction files per role are config data (`[instructions]` globs per role or platform defaults: Hermes profile skills, Claude Code `CLAUDE.md` / `.claude/skills`, OpenClaw `AGENTS.md`); read-only, sizes and hashes only stored, never contents
+- [ ] Size (characters, estimated tokens) and growth per week per file; a file that only grows is named
+- [ ] Tokens a day spent reading them: from tool calls or spans that load a skill (Hermes `skill_view`, Claude Code skill loads), else size × sessions of the role, said which
+- [ ] Near-duplicate sections within and across a role's files (normalised heading and body similarity), and a value repeated in several files (one fact, one place)
+- [ ] An alert (observe by default) when a file crosses `max_chars` or grows faster than `max_growth_per_week`, recommending a short core plus topic references; the report lists the top files with their token cost
+- [ ] `kelpie fix` before/after works for a split: tokens a day on instructions and tokens per completed task for that role
+- [ ] Fixtures: a synthetic skill growing append-only past the threshold → alert; a large but stable built-in skill loaded rarely → no alert
+
 ### traces: token optimization — repeated fragments, unused tools, model fit, diff-only review
 labels: P1, week-3, area:traces
 Find repeated prompt fragments, tools that are offered but never used, roles that could run
@@ -815,7 +831,7 @@ cloud VM, several VMs). Blocks the release.
 - [x] Transport: HTTPS or a configured plain-HTTP bind on a private network, per-agent token, request size limits, agent heartbeats; a silent agent → alert, and its tasks are not treated as abandoned while it is silent
 - [x] Single-host mode (adapters in-process) stays the default and unchanged
 - [x] Prometheus/node_exporter and OTLP already work over the network; document one setup per case: laptop only, laptop + cloud VM, two VMs
-- [x] e2e: two simulated hosts, one farm; an agent going silent; an action routed to the right host
+- [x] e2e: two simulated hosts, one farm; an agent going silent (on a driven clock, `tests/remote/test_silent_agent.py`); an action routed to the right host
 - [x] Security: the agent never accepts arbitrary commands, only the action kinds its adapters implement
 
 ### project: code health — performance, duplication, refactoring

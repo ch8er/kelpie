@@ -319,6 +319,7 @@ Ids change from `t_1a` to `laptop:t_1a`, so the server sees a new farm:
    with auth and limits, adapters declaring their action kinds.
 3. Central merge and routing: namespacing, remote executors with budgets, `unobserved`,
    silence and skew alerts, the OTLP relay, metrics, the no-mixed-mode check.
-4. End-to-end: two simulated hosts in `tests/sim`, one farm; an agent going silent; an
-   action routed to the right host.
+4. End-to-end: two simulated hosts in `tests/sim`, one farm, an action routed to the
+   right host; an agent going silent, in one process on a driven clock
+   (`tests/remote/test_silent_agent.py`).
 5. Setup guides: laptop only, laptop + cloud VM, two VMs.

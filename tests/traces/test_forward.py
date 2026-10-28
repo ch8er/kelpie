@@ -293,7 +293,9 @@ def test_bad_forward_config(tmp_path: Path, text: str) -> None:
         load_settings(write(tmp_path, text))
 
 
-def test_missing_header_env_stops_kelpie(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_header_env_stops_kelpie(
+    tmp_path: Path, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("LANGFUSE_AUTH", raising=False)
     with pytest.raises(ConfigError, match="LANGFUSE_AUTH"):
         build_app(load_settings(write(tmp_path, LANGFUSE)))

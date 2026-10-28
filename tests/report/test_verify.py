@@ -462,3 +462,50 @@ def test_kelpie_fix_list(
         assert exc.value.code == 2 and why in capsys.readouterr().err
     assert main([*args, "--list", "--days", "3650"]) == 0
     assert "old" in capsys.readouterr().out
+
+
+def test_kelpie_fix_at_now_and_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n[report]\ntimezone = "Asia/Tokyo"\n'
+    )
+    SqliteLedgerStore(tmp_path / "kelpie.db").close()
+    args = ["--config", str(path), "fix"]
+    assert main([*args, "one", "--at", "now"]) == 0
+    assert main([*args, "two", "--at", "-2h"]) == 0  # not taken for an option
+    assert main([*args, "three", "--at=-1d2h", "--rule", "bottlenecks"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert all(line.startswith("fix noted at ") and "+00:00 (" in line for line in out), out
+    stamps = [datetime.fromisoformat(line.split()[3].rstrip(":")) for line in out]
+    assert stamps[0] - stamps[1] == pytest.approx(timedelta(hours=2), abs=timedelta(minutes=1))
+    assert stamps[0] - stamps[2] == pytest.approx(timedelta(hours=26), abs=timedelta(minutes=1))
+    settings = load_settings(path)
+    text, code = note_fix(settings, "x", when="2h")
+    assert code == 2 and "--at: invalid time '2h'" in text
+    assert note_fix(settings, "x", when="")[1] == 2  # --at= is not "now"
+    text, code = note_fix(settings, "x", when="-800000d")
+    assert code == 2 and "out of range" in text
+    assert main([*args, "four", "--at", "-2H"]) == 0
+    assert "Asia/Tokyo)" in capsys.readouterr().out  # UTC, then the clock there
+    with pytest.raises(SystemExit):  # after --: a second note, refused by argparse
+        main([*args, "five", "--", "--at", "-2h"])
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["fix", "n", "--at", "-2h"], ["fix", "n", "--at=-2h"]),
+        (["--config", "fix", "fix", "--at", "-1D2h"], ["--config", "fix", "fix", "--at=-1D2h"]),
+        (["fix", "--", "--at", "-2h"], ["fix", "--", "--at", "-2h"]),
+        (["spool", "scrub", "--at", "-2h"], ["spool", "scrub", "--at", "-2h"]),
+        (["--config=x.toml", "fix", "--at", "now"], ["--config=x.toml", "fix", "--at", "now"]),
+        (["fix", "--at", "-2x"], ["fix", "--at", "-2x"]),
+    ],
+)
+def test_relative_at_is_joined_for_fix_only(argv: list[str], expected: list[str]) -> None:
+    from kelpie.cli import _relative_at
+
+    assert _relative_at(argv) == expected

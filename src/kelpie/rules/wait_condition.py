@@ -19,12 +19,34 @@ The can-never-be-met and waits-on-nothing alerts list the tasks stuck behind the
 (``params.stuck_ids``, as rule 3 reads chains), so rule 3 does not alert on the same dead end.
 
 **Snoozed human tasks** (issue #176, :mod:`kelpie.rules._snoozes`). A task waiting past
-``max_wait`` only on ``human_task`` conditions, each checked unmet (``satisfied`` false, no
-``params.error``: one Kelpie cannot check keeps alerting), whose human tasks a snooze holds
-(a person deferred them on purpose) gets no overdue alert while the snooze holds: it would
-repeat a wait the person knows about. It alerts again once a snooze expires or more work is blocked
-behind the human task; a dead end still alerts at once. A snooze on the waiting task itself
-changes nothing here.
+``max_wait`` only on ``human_task`` conditions, each known unmet (``satisfied`` false, fresh
+evidence, no ``params.error``: :func:`_known_unmet`), whose human tasks a snooze holds (a
+person deferred them on purpose) gets no overdue alert while the snooze holds: it would repeat a
+wait the person knows about. It alerts again once a snooze expires or more work is blocked
+behind the human task; a dead end still alerts at once. A snooze on the waiting task itself changes
+nothing here. A wait Kelpie cannot check (a condition never checked, stale, or one the connector
+reports an error for) is never held: it keeps alerting.
+
+**Waits rule 13 lists are rule 13's** (issue #213, as rule 4's blocks since #169). While
+rule 13 reaches people, this rule gets its settings (``needs_you``, set by ``kelpie.app``:
+rule 13's config section, else ``false``) and leaves it the overdue alert of every waiting
+task :func:`~kelpie.rules.needs_you.inbox_task_ids` lists (its time thresholds ignored, so
+``max_wait`` still applies): a task parked on a human task the person can move now, by a
+``human_task`` condition (or a dispatch gate's ``task_status`` on it) with no other unmet
+condition, every one of them known unmet. The person hears about that wait once, in their
+digest, under the human task; under the hand-off rule 13's snooze handling decides (a
+snoozed item is in its footer, one whose snooze expired or whose work grew is back in the
+digest). A listed wait whose conditions Kelpie cannot check keeps this rule's overdue alert,
+worded as a connector problem ("C-1 was not checked on this pass: is the
+connector running?", ``params.unchecked_conditions``): the digest cannot say what Kelpie
+does not know, and a snooze holds nothing for it. Rule 13 lists no waiting task with a
+dead end or a condition Kelpie cannot see, and none that waits on something else too (a PR,
+CI), so those alert here as before, and so does a wait on a human task the person cannot
+move yet. Every other alert is this rule's whoever lists the task: a dead end, a condition
+Kelpie cannot see, no condition registered, a poll inside a session, and the wake. Without
+rule 13 reaching people (it is not loaded, or it runs in ``observe`` while this rule does
+not), the overdue alert is sent as before. :meth:`WaitCondition.resolved` says so when a
+wait moves to the digest while it is open.
 
 Keeping the dispatcher from declaring a waiting task dead is the adapter's job (see
 :class:`kelpie.core.ports.PlatformAdapter`); this rule never requeues waiting tasks.
@@ -35,7 +57,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
+from functools import cache, partial
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
@@ -50,8 +73,8 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.core.serde import parse_duration
-from kelpie.rules import register
-from kelpie.rules._alerts import alert_params
+from kelpie.rules import needs_you, register
+from kelpie.rules._alerts import alert_params, check_connectors
 from kelpie.rules._calls import (
     CallKey,
     call_key,
@@ -87,14 +110,18 @@ class WaitCondition:
     poll_error_streak: int = 5
     max_condition_age: timedelta = DEFAULT_MAX_CONDITION_AGE
     session_stale_after: timedelta = DEFAULT_STALE_AFTER
+    # Rule 13 as it reaches people (kelpie.app sets it from needs_you's config while it
+    # does), or None: the waits it lists are left to it, with no overdue alert from here.
+    inbox: needs_you.NeedsYou | None = None
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         actions: list[Action] = []
         behind = behind_lookup(snapshot, self.session_stale_after)
+        listed = self._listed(snapshot)
         for task in snapshot.tasks:
             if task.status is Status.WAITING:
-                actions.extend(self._check_waiting(task, snapshot, behind))
+                actions.extend(self._check_waiting(task, snapshot, behind, listed))
         if self.poll_patterns:
             waiting = {t.id for t in snapshot.tasks if t.status is Status.WAITING}
             for session in snapshot.sessions:
@@ -104,10 +131,52 @@ class WaitCondition:
                     actions.extend(self._check_polling(session, snapshot))
         return actions
 
+    def _listed(self, snapshot: Snapshot) -> Callable[[], frozenset[str]] | None:
+        """The tasks rule 13 lists, worked out when first asked (only an overdue wait needs
+        it, so wakes, dead ends and a farm without overdue waits never walk rule 13's graph);
+        None without the hand-off."""
+        inbox = self.inbox
+        if inbox is None:
+            return None
+        return cache(lambda: needs_you.inbox_task_ids(snapshot, inbox))
+
+    def resolved(
+        self, state_id: str, snapshot: Snapshot, last_key: str | None = None
+    ) -> str | None:
+        """The resolve notice of a wait that moved to rule 13's digest while it was open (this
+        rule alerted on it, and would without the hand-off): where it is listed now, and that
+        a snooze holds it there, not that the wait is gone. None otherwise: the engine's
+        general notice, also when the last alert was about the connector (it recovered)."""
+        if self.inbox is None or (last_key or "").startswith("overdue-unchecked:"):
+            return None
+        task = next(
+            (
+                t
+                for t in snapshot.tasks
+                if t.status is Status.WAITING
+                and state_id == f"{NAME}:{t.id}:{t.status_since.isoformat()}"
+            ),
+            None,
+        )
+        if task is None:
+            return None
+        behind = behind_lookup(snapshot, self.session_stale_after)
+        listed = self._listed(snapshot)
+        assert listed is not None
+        if any(a.state == state_id for a in self._check_waiting(task, snapshot, behind, listed)):
+            return None  # still reported
+        if not any(a.state == state_id for a in self._check_waiting(task, snapshot, behind)):
+            return None  # it would be gone anyway: the wait's own news, not the hand-off's
+        return needs_you.digest_notice(snapshot, self.inbox, task.id, "wait")
+
     # --- waiting tasks ------------------------------------------------------------------
 
     def _check_waiting(
-        self, task: Task, snapshot: Snapshot, behind: Callable[[str], list[str]]
+        self,
+        task: Task,
+        snapshot: Snapshot,
+        behind: Callable[[str], list[str]],
+        listed: Callable[[], frozenset[str]] | None = None,
     ) -> Iterable[Action]:
         waited = snapshot.now - task.status_since
         since = task.status_since.isoformat()
@@ -193,29 +262,75 @@ class WaitCondition:
             return
         if waited >= self.max_wait:
             pending = [c for c in conditions if not c.satisfied]
-            if _snoozed_people(pending, snapshot):
-                return  # deferred on purpose by the person it waits on: no reminder
-            yield Action(
-                ActionKind.ALERT,
-                NAME,
-                f"Task {task.id} has waited {_hours(waited)} (limit {_hours(self.max_wait)}) "
-                f"for {', '.join(f'{c.id} ({c.kind})' for c in pending)}.",
-                task_id=task.id,
-                severity=Severity.WARNING,
-                key=f"overdue:{task.id}:{since}",
-                state=f"{NAME}:{task.id}:{since}",
+            known = partial(
+                _known_unmet,
                 since=task.status_since,
-                params={
-                    "pending_conditions": [c.id for c in pending],
-                    **alert_params(
-                        f"{task.id} has waited {_hours(waited)} for its condition"
-                        + ("s" if len(pending) > 1 else ""),
-                        "Check why the condition has not cleared",
-                        len(behind(task.id)),
-                    ),
-                },
-                about_wait=True,  # a CI outage that explains the wait folds it
+                now=snapshot.now,
+                max_age=self.max_condition_age,
             )
+            if _snoozed_people(pending, snapshot, known):
+                return  # deferred on purpose by the person it waits on: no reminder
+            unchecked: list[Condition] = []
+            if listed is not None and pending and task.id in listed():
+                # In the person's "needs you" digest: no alert of ours says the same again,
+                # unless Kelpie cannot tell what the wait is on (the digest cannot say it).
+                unchecked = [c for c in pending if not known(c)]
+                if not unchecked:
+                    return
+            yield self._overdue(task, snapshot, behind, pending, unchecked, known)
+
+    def _overdue(
+        self,
+        task: Task,
+        snapshot: Snapshot,
+        behind: Callable[[str], list[str]],
+        pending: Sequence[Condition],
+        unchecked: Sequence[Condition],
+        known: Callable[[Condition], bool],
+    ) -> Action:
+        waited = snapshot.now - task.status_since
+        since = task.status_since.isoformat()
+        what = ", ".join(f"{c.id} ({c.kind})" for c in pending)
+        headline = f"{task.id} has waited {_hours(waited)} for its condition" + (
+            "s" if len(pending) > 1 else ""
+        )
+        reason = (
+            f"Task {task.id} has waited {_hours(waited)} (limit {_hours(self.max_wait)}) "
+            f"for {what}."
+        )
+        needed = "Check why the condition has not cleared"
+        params: dict[str, Any] = {
+            "pending_conditions": [c.id for c in pending],
+            **_snooze_target(pending, known),
+        }
+        if unchecked:
+            # A wait the person's digest lists, but Kelpie cannot check: say what is wrong
+            # with the checking, which only an operator can fix.
+            cause = "; ".join(
+                _unchecked_text(c, task.status_since, snapshot.now) for c in unchecked
+            )
+            reason = (
+                f"{reason[:-1]}, and Kelpie cannot tell whether it still waits on a person: "
+                f"{cause}. Is the connector running?"
+            )
+            more = f" and {len(unchecked) - 1} more" if len(unchecked) > 1 else ""
+            first = _unchecked_text(unchecked[0], task.status_since, snapshot.now)
+            headline = f"{task.id} has waited {_hours(waited)}: {first}{more}"
+            needed = check_connectors(sorted({c.kind for c in unchecked}))
+            params["unchecked_conditions"] = [c.id for c in unchecked]
+        return Action(
+            ActionKind.ALERT,
+            NAME,
+            reason,
+            task_id=task.id,
+            severity=Severity.WARNING,
+            # its own key: the connector wording is news, announced as a change of the state
+            key=f"{'overdue-unchecked' if unchecked else 'overdue'}:{task.id}:{since}",
+            state=f"{NAME}:{task.id}:{since}",
+            since=task.status_since,
+            params={**params, **alert_params(headline, needed, len(behind(task.id)))},
+            about_wait=True,  # a CI outage that explains the wait folds it
+        )
 
     # --- polling inside a session -------------------------------------------------------
 
@@ -282,19 +397,60 @@ class WaitCondition:
         return poll_kind(self.poll_patterns, span)
 
 
-def _snoozed_people(pending: Sequence[Condition], snapshot: Snapshot) -> bool:
+def _known_unmet(
+    c: Condition, since: datetime, now: datetime, max_age: timedelta = DEFAULT_MAX_CONDITION_AGE
+) -> bool:
+    """Whether Kelpie knows the condition does not hold: checked unmet since the wait began
+    and recently (:func:`~kelpie.rules._tasks.fresh`, as every rule reads evidence), with no
+    error from the connector. An unchecked one, one the connector cannot check, or one whose
+    connector stopped checking is not known."""
+    return c.satisfied is False and "error" not in c.params and fresh(c, since, now, max_age)
+
+
+def _unchecked_text(c: Condition, since: datetime, now: datetime) -> str:
+    """Why a condition is not known unmet, for the connector problem an alert names."""
+    error = c.params.get("error")
+    if error:
+        return f"the connector reports {error} for {c.id}"
+    if c.satisfied is False and c.checked_at is not None and c.checked_at >= since:
+        return f"{c.id} was last checked {_hours(now - c.checked_at)} ago"
+    return f"{c.id} was not checked on this pass"
+
+
+def _snoozed_people(
+    pending: Sequence[Condition], snapshot: Snapshot, known: Callable[[Condition], bool]
+) -> bool:
     """Whether every unmet condition is a human task that a snooze holds."""
     held = checker(snapshot)
     for c in pending:
         ref = c.params.get("task")
         if c.kind is not ConditionKind.HUMAN_TASK or not isinstance(ref, str):
             return False
-        if c.satisfied is not False or "error" in c.params:
-            return False  # not known unmet (unchecked, or Kelpie cannot check it): it alerts
+        if not known(c):
+            return False  # unchecked, or Kelpie cannot check it: it alerts
         found = held(ref)
         if found is None or not found.holds:
             return False
     return bool(pending)
+
+
+def _snooze_target(
+    pending: Sequence[Condition], known: Callable[[Condition], bool]
+) -> dict[str, Any]:
+    """``snooze_task`` for an overdue wait on one person's human task (#176), only where a
+    snooze on that task would hold this alert: every pending condition a ``human_task`` one
+    on that same task and known unmet (``known``: :func:`_known_unmet`, exactly what
+    :func:`_snoozed_people` requires). Nothing for any other wait: a snooze would hold
+    nothing there, so a chat offers none."""
+    refs: set[object] = set()
+    for c in pending:
+        ref = c.params.get("task")
+        holdable = c.kind is ConditionKind.HUMAN_TASK and isinstance(ref, str) and known(c)
+        refs.add(ref if holdable else None)
+    if len(refs) != 1:
+        return {}
+    (ref,) = refs
+    return {"snooze_task": ref} if ref else {}
 
 
 def _hours(d: timedelta) -> str:
@@ -339,6 +495,8 @@ def build(config: dict[str, Any]) -> WaitCondition:
             kwargs[key] = _positive_int(config.pop(key), key)
     if "poll_patterns" in config:
         kwargs["poll_patterns"] = parse_poll_patterns(config.pop("poll_patterns"))
+    if "needs_you" in config:
+        kwargs["inbox"] = needs_you.hand_off(config.pop("needs_you"))
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return WaitCondition(**kwargs)

@@ -1,0 +1,63 @@
+id: "13-wait-left-to-inbox"
+incident: 13
+title: "A wait on a person's task is left to the needs-you inbox"
+description: >
+  An agent task parked on a person's task by a human_task condition was announced twice
+  (#213): by rule 2 once it had waited past max_wait, and by rule 13 in the person's digest,
+  under that human task. While rule 13 reaches people (needs_you, set by Kelpie), rule 2
+  sends no overdue alert for a waiting task rule 13 lists (W-1: 30h on a task the CEO can
+  do now). Everything else stays rule 2's: a wait on a task the person cannot move yet
+  (W-2), one that also waits for a PR (W-3, so it waits on the PR first), a dead end (W-4),
+  a task waiting on nothing (W-5) and one that points at a condition Kelpie cannot see
+  (W-6). A wait within max_wait (W-7) alerts nobody. 13-wait-in-inbox is the same farm
+  seen by rule 13; 13-wait-inbox-off is it without rule 13.
+rule: wait_condition
+config:
+  max_wait: "24h"
+  needs_you: {approval_wait_after: "30m", human_wait_alert_after: "1h", default_approver: ceo}
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # The person can do H-1 now (ready, nothing open before it): the inbox lists it.
+    - {id: H-1, title: "Sign the vendor contract", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    # Still in triage: only a person moves it out of there, so the inbox lists nothing under it.
+    - {id: H-2, title: "Pick the price tier", status: backlog, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo, prework: true}
+    - {id: H-3, title: "Approve the listing", status: cancelled, status_since: "2026-10-18T09:00:00+00:00", role: owner, owner_id: ceo}
+    # W-1: parked on H-1 by a human_task condition for 30h, past max_wait.
+    - {id: W-1, title: "Integrate the vendor API", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-2: the same wait, but on a task the person cannot move yet.
+    - {id: W-2, title: "Set the prices", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-3: waits on H-1 and on a PR: it waits on the PR first, so the inbox does not list it.
+    - {id: W-3, title: "Vendor webhooks", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-4: its human task was cancelled: nothing will ever wake it.
+    - {id: W-4, title: "Publish the listing", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-5: waiting on nothing at all.
+    - {id: W-5, title: "Update the docs", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - id: W-6
+      title: "Rotate the keys"
+      status: waiting
+      status_since: "2026-10-18T04:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting for C-6", since: "2026-10-18T04:00:00+00:00", condition_id: C-6}
+    # Look-alike: parked on H-1 for 2h, well within max_wait.
+    - {id: W-7, title: "Vendor onboarding", status: waiting, status_since: "2026-10-19T08:00:00+00:00", role: developer, owner_id: agent-dev-1}
+  conditions:
+    - {id: C-1, kind: human_task, task_id: W-1, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-2, kind: human_task, task_id: W-2, params: {task: H-2}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-3a, kind: human_task, task_id: W-3, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-3b, kind: pr_merged, task_id: W-3, params: {pr: 7}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-4, kind: human_task, task_id: W-4, params: {task: H-3, terminal: true}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-7, kind: human_task, task_id: W-7, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-19T08:00:00+00:00"}
+expected_actions:
+  - {kind: alert, task_id: W-2, reason_contains: "limit 24.0h"}
+  - {kind: alert, task_id: W-3, reason_contains: "limit 24.0h"}
+  - {kind: alert, task_id: W-4, reason_contains: "nothing will ever wake it"}
+  - {kind: alert, task_id: W-5, reason_contains: "without any registered condition"}
+  - {kind: alert, task_id: W-6, reason_contains: "which Kelpie cannot see"}
+not_expected_actions:
+  - {kind: alert, task_id: W-1}
+  - {kind: alert, task_id: W-7}

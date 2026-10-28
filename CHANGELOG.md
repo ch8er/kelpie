@@ -111,6 +111,11 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - Spans built from adapter hooks when a platform emits none, merged with OTLP spans so
   nothing is counted twice ([#17](https://github.com/ch8er/kelpie/pull/17), [#20](https://github.com/ch8er/kelpie/pull/20)).
 - Optional forwarding of accepted traces to Langfuse, Phoenix or Datadog ([#18](https://github.com/ch8er/kelpie/pull/18)).
+- The traces ingest token can be rotated without dropping spans: `[traces] token_file`
+  (an env file Kelpie reads again when it changes) and `kelpie traces rotate-token`, which
+  writes a new token, keeps the old one valid for `token_grace` (as a hash only) and prints
+  no token; grace use is on `/metrics`, and `kelpie doctor` warns about backups and readable
+  files that hold the token ([#236](https://github.com/ch8er/kelpie/pull/236), [docs/security.md](docs/security.md#traces-token)).
 - Message content, tool arguments and tool results are not stored. Commands are reduced by
   an allowlist redaction shared by OTLP ingest and both hooks, and `kelpie spool scrub`
   re-redacts older spool files ([#101](https://github.com/ch8er/kelpie/pull/101)).
@@ -163,6 +168,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   bill is checked against the estimate from traces ([#195](https://github.com/ch8er/kelpie/pull/195), [#209](https://github.com/ch8er/kelpie/pull/209)).
 - Before/after verification of fixes recorded with `kelpie fix`, and `kelpie fix --list`
   ([#54](https://github.com/ch8er/kelpie/pull/54), [#57](https://github.com/ch8er/kelpie/pull/57)).
+- `kelpie fix --at` takes `now` and times before now (`-30m`, `-2h`, `-1d2h`) as well as
+  ISO times, and the confirmation gives the recorded time in UTC ([#235](https://github.com/ch8er/kelpie/pull/235)).
 - Farm throughput per role, live gauges and Grafana panels; rework counted for the role that
   redid the work, not the reviewer ([#78](https://github.com/ch8er/kelpie/pull/78), [#116](https://github.com/ch8er/kelpie/pull/116)).
 - A sections extension point with per-section settings, and token sections that read them
@@ -205,6 +212,22 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   repeat the title; for a person's own task whose block can never clear, it names the dead
   end or the condition Kelpie cannot see, which rule 4 no longer alerts on separately
   ([#169](https://github.com/ch8er/kelpie/issues/169)).
+- A waiting agent task parked on a person's task by a `human_task` condition reaches them
+  once, in rule 13's "Waiting for you" digest: rule 2 (`wait_condition`) no longer sends its
+  overdue alert for a waiting task rule 13 lists, while rule 13 reaches people (it is loaded
+  and not in `observe` while rule 2 is not), the way rule 4 leaves blocks to it. Rule 2
+  reads the farm with rule 13's settings and leaves exactly what rule 13 lists; its dead-end,
+  condition-not-visible, no-condition and wake outputs, a wait on a task the person cannot
+  move yet and a wait that also depends on a PR or CI stay its own. Without rule 13 reaching
+  people rule 2 alerts as before, and a snoozed human wait is still held. A listed wait
+  whose conditions Kelpie cannot check (never checked, not checked within `max_condition_age`, or the connector reports an error)
+  keeps rule 2's overdue alert, snoozed or not, worded as a connector problem ("C-1 was not
+  checked on this pass: is the connector running?"). When a wait or a block
+  moves to the digest while its alert is open, the "Resolved" notice says it is in the
+  person's digest now instead of "no longer reported". Kelpie logs a
+  warning at startup when rule 13's `human_wait_alert_after` is longer than rule 2's
+  `max_wait`, the same check as for rule 4
+  ([#213](https://github.com/ch8er/kelpie/issues/213)).
 - The daily report's "agents waiting on people" no longer counts an agent task that also
   waits on a PR or CI first: rule 13 does not count it as waiting on the person's task,
   nor in that person's cost of delay ([#169](https://github.com/ch8er/kelpie/issues/169)).
@@ -265,6 +288,30 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - `kelpie selftest stop --adapter hermes` runs rule 10's stop end to end on a throwaway Hermes
   home and board, with a local mock model (zero tokens), and reports each step
   ([#190](https://github.com/ch8er/kelpie/pull/190)).
+  It runs on macOS too, and `kelpie doctor` says how this host ends a stopped run's worker
+  ([#231](https://github.com/ch8er/kelpie/issues/231)).
+- Snoozes, part 3 ([#176](https://github.com/ch8er/kelpie/issues/176)): snooze from the
+  alert itself. Slack shows a ready-to-copy `kelpie snooze <task> --until <date>` line under
+  each item a snooze would quiet (rule 13's digest items, rule 4's no-condition and overdue
+  alerts, rule 2's overdue wait on one human task; never agent-health alerts). Telegram,
+  with `buttons = true` and `allowed_user_ids` (off by default), shows "Snooze 1d / 3d / 7d"
+  buttons there: a press from an allowed user in the configured chat snoozes the task
+  (`source = "chat"`, at most 7 days; stored under the global dry-run too, like `kelpie
+  snooze`), records the press in the ledger in the same transaction (kind `snooze`: who,
+  with their user id, what, until; it notes a dry-run), answers with a toast and edits the
+  alert ("Snoozed until … by …", that item's buttons removed). A press never shortens a
+  longer `kelpie snooze`: it is refused and says until when. A button carries only a short
+  HMAC-signed reference (key generated on first use in `kelpie.buttons.db`, 0600) that
+  expires after 24 hours or at the alert's next message (any, also when the alert resolves
+  unseen below the channel's `min_severity`; the older buttons are then removed), and is
+  used once; an expired button says so, with the `kelpie snooze` command that still works.
+  A button that snoozes another task than its item's (rule 2: the human task) names it.
+  Acknowledgements are built from Kelpie's copy of the message, so quick presses keep each
+  other's lines; one that does not fit is a reply. Presses are read with
+  `getUpdates` long polling in their own thread (offset persisted, at least a second
+  between polls, back-off, shutdown deadline); anything else is ignored and counted in
+  `kelpie_chat_rejected_total{reason}`, and strangers and other chats get no answer.
+  `kelpie doctor` fails on an empty allow-list, a missing database or a bot with a webhook.
 - `kelpie report` prints the daily report as Markdown, and `--send` posts the summary to the
   alert channels ([#47](https://github.com/ch8er/kelpie/pull/47), [#52](https://github.com/ch8er/kelpie/pull/52)).
 - Prometheus metrics for the engine, adapters, connectors, traces and budgets, and a
@@ -298,6 +345,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   agent's tool commands) once their pid and start time match what Hermes recorded, instead of
   leaving them to Hermes' reaper for two minutes or more; the alert and `kelpie why` say what
   happened, or why Kelpie did not signal them ([#186](https://github.com/ch8er/kelpie/pull/186)).
+- On macOS too: Kelpie reads the worker's identity with libproc, as Hermes fingerprints it there,
+  and checks it again right before each signal (macOS has no pidfd)
+  ([#231](https://github.com/ch8er/kelpie/issues/231)).
 
 ### Fixed
 
