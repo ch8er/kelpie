@@ -134,6 +134,20 @@ class RemoteFarm:
                         )
                     continue
                 parts.append(namespace_snapshot(view.name, part.name, part.snapshot))
+                for board in part.unobserved:  # one board of several the adapter reads
+                    where = f"{source}:{board}"
+                    unobserved.append(f"{view.name}:{board}")  # the prefix of its task ids
+                    failing.add(where)
+                    if self.observer is not None:
+                        self.observer.adapter_failed(where)
+                    if where not in self._failing:
+                        self._failing.add(where)
+                        self._alert(
+                            Severity.WARNING,
+                            f"board {where} unreadable",
+                            f"Agent {view.name} cannot read its {part.name} board {board}; "
+                            "its tasks are not evaluated until it can.",
+                        )
         for source in sorted(self._failing - failing):
             if source.split("/")[0] in fresh:  # read again, or no longer reported
                 self._failing.discard(source)

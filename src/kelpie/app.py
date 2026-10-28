@@ -1083,6 +1083,9 @@ def merged_snapshot(
                 builds=merged.builds + part.builds,
                 unobserved=merged.unobserved + part.unobserved,  # boards of a Hermes home
             )
+            for board in part.unobserved:  # one board of several could not be read
+                metrics.adapter_failed(f"{adapter.name}/{board}")
+                complete = False
         if remote is not None:
             try:
                 part = remote(now)

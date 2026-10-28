@@ -781,6 +781,7 @@ class HermesAdapter:
         tasks: Sequence[Task],
         rows: Mapping[str, sqlite3.Row],
         now: datetime,
+        aliases: Mapping[str, str | None] | None = None,
     ) -> tuple[tuple[Session, ...], tuple[Resource, ...]]:
         """The long tool run of each unfinished task, on its live session (rule 9 holds its
         commit reminders meanwhile), and the use of each slot pool (see processes.py). A
@@ -803,7 +804,7 @@ class HermesAdapter:
         workspaces = {path: found[0] if len(found) == 1 else None for path, found in users.items()}
         shared = {t for found in users.values() if len(found) > 1 for t in found}
         mine = open_ids - shared
-        host = read_host(tools, now, mine, workspaces)
+        host = read_host(tools, now, mine, workspaces, aliases)
         read_at = now
         if host is not None:
             self._host_seen = (now, host)

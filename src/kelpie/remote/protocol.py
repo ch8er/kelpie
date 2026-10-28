@@ -381,6 +381,9 @@ class AdapterReport:
     actions: frozenset[ActionKind]
     snapshot: Snapshot | None = None
     error: str | None = None
+    # Boards of the adapter it could not read this time (Snapshot.unobserved of a Hermes
+    # home with several boards): their ids' prefixes on the agent.
+    unobserved: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +413,8 @@ def encode_report(
             part["snapshot"] = encode_snapshot(a.snapshot)
         if a.error is not None:
             part["error"] = _clip(a.error, MAX_REASON)
+        if a.unobserved:  # left out when empty: a hub of the release before reads the rest
+            part["unobserved"] = list(a.unobserved)
         parts.append(part)
     return {
         "version": VERSION,
@@ -448,7 +453,7 @@ def decode_report(data: object) -> Report:
         raise ProtocolError("report: adapters must be a list of 1 to 16 entries")
     parts: list[AdapterReport] = []
     for item in raw:
-        part = _object(item, "adapter", {"name", "actions", "snapshot", "error"})
+        part = _object(item, "adapter", {"name", "actions", "snapshot", "error", "unobserved"})
         name = part.get("name")
         if not isinstance(name, str) or _ADAPTER_NAME.fullmatch(name) is None:
             raise ProtocolError("adapter: name must match [a-z0-9_-]{1,64}")
@@ -466,12 +471,20 @@ def decode_report(data: object) -> Report:
         if has_snapshot == (error is not None):
             raise ProtocolError(f"adapter {name}: exactly one of snapshot and error")
         snapshot = decode_snapshot(part["snapshot"]) if has_snapshot else None
+        unobserved = part.get("unobserved", [])
+        if (
+            not isinstance(unobserved, list)
+            or len(unobserved) > 16
+            or not all(isinstance(u, str) and _ADAPTER_NAME.fullmatch(u) for u in unobserved)
+        ):
+            raise ProtocolError(f"adapter {name}: unobserved must be up to 16 board names")
         parts.append(
             AdapterReport(
                 name,
                 frozenset(ActionKind(k) for k in kinds),
                 snapshot,
                 None if error is None else _text(error, MAX_REASON),
+                tuple(unobserved),
             )
         )
     return Report(version, sent_at, timedelta(seconds=interval), tuple(parts), boot, seq)

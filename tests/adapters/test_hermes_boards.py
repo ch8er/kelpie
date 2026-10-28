@@ -228,7 +228,7 @@ def test_tool_processes_are_read_once_over_every_boards_tasks(
         b.update(tid, workspace_kind="worktree", workspace_path=str(tmp_path / tid))
     reads: list[dict[str, object]] = []
 
-    def host(config, now, tasks, workspaces):  # type: ignore[no-untyped-def]
+    def host(config, now, tasks, workspaces, aliases=None):  # type: ignore[no-untyped-def]
         reads.append({"tasks": set(tasks), "workspaces": dict(workspaces)})
         return HostTools(
             {"sign:t_s1": ToolRun("xcodebuild", ago(minutes=3))}, {"sim": PoolUse(2, 1)}
@@ -247,3 +247,25 @@ def test_tool_processes_are_read_once_over_every_boards_tasks(
     assert running == {"qr:hermes-run-1": None, "sign:hermes-run-1": "xcodebuild"}
     slots = sorted(r.name for r in snap.resources if r.kind is ResourceKind.SLOTS)
     assert slots == ["sim:agent", "sim:ci"]  # once for the host, not once per board
+
+
+def test_a_workspace_pattern_names_a_task_by_its_id_on_its_board() -> None:
+    tools = ToolProcesses(workspace_patterns=("work/{task}",))
+    aliases = {"t_q1": "qr:t_q1", "t_3": None}
+    tasks = {"qr:t_q1", "sign:t_3", "qr:t_3"}
+    assert tools.task_of("/home/a/work/t_q1/src", tasks, {}, aliases) == "qr:t_q1"
+    assert tools.task_of("/home/a/work/t_3", tasks, {}, aliases) is None  # on two boards
+    assert tools.task_of("/home/a/work/t_q1", {"t_q1"}, {}) == "t_q1"  # one board: as before
+
+
+def test_a_spool_line_two_boards_claim_goes_to_neither(
+    boards: tuple[Board, Board], tmp_path: Path
+) -> None:
+    qr, sign = boards
+    sign.task("t_q1", "running", ago(hours=2), assignee="dev-2")  # the same id on both boards
+    sign.run("t_q1", "dev-2", ago(hours=1))  # run 2 on sign
+    qr.run("t_q1", "dev-1", ago(hours=1))  # run 2 on qr too
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(line("t_q1", 2, ago(minutes=5), tool_call_id="c1") + "\n")
+    snap = make(qr, sign, spool=spool).snapshot(NOW)
+    assert snap.spans == ()

@@ -732,3 +732,26 @@ def test_a_reported_condition_named_like_another_machine_is_fine() -> None:
         "params": {},
     }
     assert _condition("laptop", {"id": "c1@vm-1", "kind": "custom"}, ["vm-1"]) is None
+
+
+def test_a_board_an_agent_cannot_read_is_unobserved_and_told_once() -> None:
+    from kelpie.core.engine import _blind
+
+    rig = Rig()
+    qr = replace(
+        board(rig.clock.now),
+        tasks=tuple(replace(t, id=f"qr:{t.id}", board="qr") for t in board(rig.clock.now).tasks),
+    )
+    for _ in range(2):
+        rig.report("laptop", AdapterReport("hermes", KINDS, qr, unobserved=("sign",)))
+        rig.report("vm-1")
+        snap = rig.tick()
+    assert snap.unobserved == ("laptop:sign",)
+    assert _blind("laptop:sign:t_9", snap.unobserved) and not _blind(
+        "laptop:qr:t_1a", snap.unobserved
+    )
+    assert rig.titles() == ["[kelpie] board laptop/hermes:sign unreadable"]
+    rig.report("laptop", AdapterReport("hermes", KINDS, qr))
+    rig.report("vm-1")
+    assert rig.tick().unobserved == ()
+    assert "Resolved" in rig.alerter.sent[-1][1]

@@ -135,13 +135,19 @@ class HermesBoards:
             dependencies=tuple(d for p in parts for d in p.dependencies),
             conditions=tuple(c for p in parts for c in p.conditions),
             sessions=tuple(s for p in parts for s in p.sessions),
-            spans=tuple(s for p in parts for s in p.spans),
+            spans=_claimed_once(parts),
             unobserved=tuple(unobserved),
         )
         if self.host is None or self.host.tools is None:
             return merged
+        # A workspace pattern matches a task's id on its board: the namespaced id it stands
+        # for, none when several boards have it (as for a shared workspace path).
+        aliases: dict[str, str | None] = {}
+        for t in merged.tasks:
+            if (local := t.local_id) is not None:
+                aliases[local] = None if local in aliases else t.id
         sessions, slots = self.host._with_tools(
-            self.host.tools, merged.sessions, merged.tasks, rows, now
+            self.host.tools, merged.sessions, merged.tasks, rows, now, aliases
         )
         return replace(merged, sessions=sessions, resources=slots)
 
@@ -189,6 +195,18 @@ class HermesBoards:
     ) -> None:
         board, local = self._route(task_id)
         board.wip_commit(local, message, branch=branch, draft_pr=draft_pr)
+
+
+def _claimed_once(parts: Sequence[Snapshot]) -> tuple[Span, ...]:
+    """The spool's spans of every board, without any two boards claimed (the same task id
+    and run on both: a session is never on two boards)."""
+    claims: dict[tuple[str, str], int] = {}
+    for p in parts:
+        for s in p.spans:
+            claims[(s.trace_id, s.span_id)] = claims.get((s.trace_id, s.span_id), 0) + 1
+    if twice := sorted(k for k, n in claims.items() if n > 1):
+        log.warning("hermes: %d spool spans match tasks on several boards; dropped", len(twice))
+    return tuple(s for p in parts for s in p.spans if claims[(s.trace_id, s.span_id)] == 1)
 
 
 def namespace_board(board: str, part: Snapshot, source: str) -> Snapshot:
