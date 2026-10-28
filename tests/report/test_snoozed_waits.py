@@ -33,7 +33,7 @@ from kelpie.report.config import ReportSettings
 from kelpie.report.daily import DailyReport, ReportInputs, build_report, render_markdown
 from kelpie.report.run import ReportSources, load_inputs
 from kelpie.report.store import ReportStore, StateRow
-from kelpie.report.waits import SNOOZED, WAIT_CAUSES, Outage, WaitCauses
+from kelpie.report.waits import SNOOZED, WAIT_CAUSES, OutageSpan, WaitCauses
 from kelpie.rules import REGISTRY
 from kelpie.traces.outputs import OutputSettings
 from tests.incidents import load
@@ -137,7 +137,7 @@ def test_many_snoozes_are_counted() -> None:
 def test_a_snooze_never_takes_a_ci_merge_outage_or_hold_wait() -> None:
     task = Task("W2", "w", Status.BLOCKED, at(0), block=Block("ci", at(0), "C-2"))
     ci = Condition("C-2", ConditionKind.CI_STATUS, "W2", {"repo": "example/repo"}, False)
-    outage = Outage(at(4), at(12), repos=frozenset({"example/repo"}))
+    outage = OutageSpan(at(4), at(12), repos=frozenset({"example/repo"}))
     causes = WaitCauses([ci], [], ("freeze",), (), [outage], [snooze("W2", at(8), at(16))])
     assert causes.split(task, at(0), at(20)) == pytest.approx({"ci_outage": 8.0, "ci": 12.0})
     held = Task("W2", "w", Status.BLOCKED, at(0), labels=("freeze",))

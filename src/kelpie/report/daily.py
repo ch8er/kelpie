@@ -101,8 +101,9 @@ from typing import Any
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.incidents import is_outage_state
-from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
+from kelpie.core.incidents import BLOCK_STORM, is_outage_state
+from kelpie.core.incidents import Outage as OutageParams
+from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Outcome, Suppression
 from kelpie.core.model import (
     Condition,
     Dependency,
@@ -157,10 +158,11 @@ from kelpie.report.verify import (
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
 from kelpie.report.waits import (
     CI_OUTAGE,
+    SHARED_BLOCKER,
     SNOOZED,
     BiggestWait,
     BlockKind,
-    Outage,
+    OutageSpan,
     WaitCauses,
     biggest_wait,
     outage_day,
@@ -194,10 +196,14 @@ PEOPLE = "needs_you"
 PEOPLE_STATE = PEOPLE + ":"
 # Rule 3's cards stuck in a pre-work status (triage, scheduled) with work behind them.
 PREWORK = "orphan_status:prework"
+# An outage incident's tasks (kelpie.core.incidents: a block storm, a CI outage): their
+# hours count under the outage, first (#229).
+OUTAGE = "outage"
 PREWORK_STATE = "orphan_status:stuck-before-work:"
 
 # Rules whose long-lived states are work the farm lost, and what to call that loss.
 CHAOS_CAUSES: Mapping[str, str] = {
+    OUTAGE: "farm outages (one shared cause)",
     "orphan_status": "ownerless tasks",
     "stale_blocks": "blocks that outlived their cause",
     "wait_condition": "waits past their limit",
@@ -210,15 +216,20 @@ CHAOS_CAUSES: Mapping[str, str] = {
     "loop_breaker": "runaway loops",
     "no_progress": "activity without progress",
 }
-# Which cause counts a task-hour that several chaos states cover (#228): a person's inbox
-# (the wait has a name), then a stale block, then the rest in CHAOS_CAUSES order.
+# Which cause counts a task-hour that several chaos states cover (#228): an outage (one
+# shared cause behind many tasks, #229), a person's inbox (the wait has a name), then a
+# stale block, then the rest in CHAOS_CAUSES order.
 CHAOS_PRECEDENCE: tuple[str, ...] = (
+    OUTAGE,
     PEOPLE,
     "stale_blocks",
-    *(c for c in CHAOS_CAUSES if c not in (PEOPLE, "stale_blocks")),
+    *(c for c in CHAOS_CAUSES if c not in (OUTAGE, PEOPLE, "stale_blocks")),
 )
 # What a human can do about a cause when no rule could have fixed it by itself.
 REMEDIES: Mapping[str, str] = {
+    OUTAGE: "end the shared cause each outage under Outages names (one fix, or one person's "
+    "answer, unblocks every task behind it), and switch on the outage checks so their alerts "
+    "fold under it",
     "orphan_status": "give ownerless statuses an owner: route them to a role or let "
     "orphan_status reassign them",
     "wait_condition": "check the conditions agents wait for: a connector that stopped "
@@ -353,16 +364,21 @@ class SnoozedWaits:
 
 @dataclass(frozen=True, slots=True)
 class OutageLine:
-    """A CI outage of the day (rule 9), for the report: what failed, since when (it may have
-    begun on an earlier day), until when, the PRs in its scope that day and the alerts
-    folded under it that day (a lower bound; :func:`kelpie.report.waits.outage_day`)."""
+    """An outage of the day (:mod:`kelpie.core.incidents`), for the report: what failed,
+    since when (it may have begun on an earlier day), until when, its scope that day (PRs
+    for a CI outage, tasks for a block storm) and the alerts folded under it that day (a
+    lower bound; :func:`kelpie.report.waits.outage_day`)."""
 
     signature: str
     since: datetime
     until: datetime  # its last sighting by the end of the day
     open: bool  # still open at the end of the day
-    prs: int
+    prs: int  # its scope that day: PRs, or for a block storm tasks
     folded: int
+    kind: str = "ci_failures"
+    reason: str | None = None  # what happened, in one line
+    person: str | None = None  # who can end it
+    observe_only: bool = False  # a check still in observe: listed, not counted
 
 
 @dataclass(frozen=True, slots=True)
@@ -692,14 +708,14 @@ def _biggest_wait(
         roles,
         causes.split,
     )
-    explained = sum(r.waits.get(CI_OUTAGE, 0.0) for r in per_role)
+    explained = sum(r.waits.get(c, 0.0) for r in per_role for c in (CI_OUTAGE, SHARED_BLOCKER))
     found = biggest_wait(per_role, inputs.tasks, causes, inputs.farm)
     snoozed = snoozed_waits(per_role, inputs.tasks, causes)
     return found, _outage_lines(inputs, causes.outages, start, end), explained, snoozed
 
 
 def _outage_lines(
-    inputs: ReportInputs, found: Sequence[Outage], start: datetime, end: datetime
+    inputs: ReportInputs, found: Sequence[OutageSpan], start: datetime, end: datetime
 ) -> tuple[OutageLine, ...]:
     closed = {(row.state.id, row.state.since): row.closed_at for row in inputs.states}
     entries = [e for e in inputs.actions if e.at < end]
@@ -719,6 +735,10 @@ def _outage_lines(
                 closed_at is None or closed_at >= end,
                 prs,
                 folded,
+                o.kind,
+                o.reason,
+                o.person,
+                o.observe_only,
             )
         )
     return tuple(out)
@@ -916,7 +936,7 @@ def _chaos(
         if (session := session_of(state)) is not None:
             burn(state.rule, session, a, b)
 
-    chaos = [r.state for r in inputs.states if is_chaos(r.state)]
+    chaos = [r.state for r in inputs.states if is_chaos(r.state) or is_outage_state(r.state.id)]
     found = _chaos_hours(inputs, chaos, start, end, on_state)
     keyed, loose, tasks = found.keyed, found.loose, found.tasks
     for entry in actions:
@@ -991,6 +1011,11 @@ def _chaos_hours(
         if b <= a:
             continue
         cause = cause_of(state)
+        if cause == OUTAGE:
+            for lo, hi, _, ids in outage_steps(inputs.actions, state, a, b):
+                keyed[OUTAGE].extend((t, lo, hi) for t in ids)
+                tasks[OUTAGE].update(ids)
+            continue
         if cause == HOLDS:
             agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
             loose[HOLDS] += agent_hours
@@ -1060,7 +1085,9 @@ def counts_from(state: OpenState) -> datetime:
 
 
 def cause_of(state: OpenState) -> str:
-    """The :data:`CHAOS_CAUSES` key a chaos state counts under."""
+    """The :data:`CHAOS_CAUSES` key a chaos state (or an outage's) counts under."""
+    if is_outage_state(state.id):
+        return OUTAGE
     if state.id.startswith(HOLD_STATE):
         return HOLDS
     if state.id.startswith(PREWORK_STATE):
@@ -1116,6 +1143,24 @@ def people_steps(
     """:func:`people_agent_hours` as steps: ``(start, end, waiting count, the ids rule 13
     listed then)`` over ``[a, b)``; the count may exceed the ids (rule 13 lists at most 20)."""
     return _sampled_steps(entries, state.opened_at, a, b, _inbox_sampler(state, False))
+
+
+def outage_steps(
+    entries: Sequence[LedgerEntry], state: OpenState, a: datetime, b: datetime
+) -> list[tuple[datetime, datetime, int, tuple[str, ...]]]:
+    """The tasks an outage held over ``[a, b)``, as steps: ``(start, end, count, task ids)``.
+    Each of its alerts (the announcement, then the hourly repeats while it stays open) names
+    its whole scope as of then (``tasks``), which holds until the next one. Alerts of a
+    check still in observe (``params.observe_only``) count nothing: switching a check on
+    is what moves the hours."""
+
+    def sample(e: LedgerEntry) -> tuple[int, list[object]] | None:
+        if e.params.get("state") != state.id or e.params.get(OBSERVE_ONLY) is True:
+            return None  # another state's, or a check still in observe: not counted
+        found = OutageParams.from_params(e.params)
+        return None if found is None else (len(found.tasks), list(found.tasks))
+
+    return _sampled_steps(entries, state.since, a, b, sample)
 
 
 def _inbox_sampler(
@@ -1494,16 +1539,27 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     if report.outages:
         lines += [
             "",
-            f"**CI outages** (rule 9; {report.outage_wait_hours:.1f} task-hours of waiting fell "
-            'inside them and count under "a shared CI failure", not CI or merges; PRs in scope and '
-            "alerts folded under each are the day's):",
+            f"**Outages** ({report.outage_wait_hours:.1f} task-hours of waiting fell inside them "
+            'and count under the outage ("a shared CI failure", "a shared blocker"), not under '
+            "CI, merges or people; scope and alerts folded under each are the day's):",
             "",
         ]
         for o in report.outages:
             until = "still open" if o.open else f"until {_local(o.until, report)}"
+            when = f"since {_local(o.since, report)}, {until}"
+            trial = " (observe only: its check is not switched on, its waits not counted here)"
+            when += trial if o.observe_only else ""
+            if o.kind == BLOCK_STORM:
+                who = f"; only {md.text(o.person)} can end it" if o.person else ""
+                lines.append(
+                    f"- block storm {md.code(o.signature)} {when}: {o.prs} task(s) blocked on "
+                    f"it, {o.folded} alert(s) folded under it{who}"
+                )
+                continue
+            what = f" ({md.text(o.reason)})" if o.reason else ""
             lines.append(
-                f"- {md.code(o.signature)} since {_local(o.since, report)}, {until}: "
-                f"{o.prs} PR(s), {o.folded} alert(s) folded under it"
+                f"- {md.code(o.signature)}{what} {when}: {o.prs} PR(s), {o.folded} alert(s) "
+                "folded under it"
             )
     if report.stuck_idle:
         lines += [

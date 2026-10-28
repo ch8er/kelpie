@@ -17,10 +17,14 @@
 4. the kind of its last condition, met by now;
 5. else ``unknown``: the task waited without telling Kelpie what for.
 
-**CI outage.** While rule 9's CI outage incident is open (:mod:`kelpie.core.incidents`), the
-waiting time it explains counts under ``ci_outage`` instead: tasks its alerts name
-(``tasks``), and tasks waiting on CI or a merge of a PR in its scope (``prs``) or of a
-repository it covers (``repos``). Only the part of a wait inside the outage moves; the rest
+**Outages** (:mod:`kelpie.core.incidents`, #229). While an outage incident is open, the
+waiting time it explains counts under it instead of the task's own cause. A CI outage
+(rule 9: failing CI jobs, or jobs that never start) explains, under ``ci_outage``, the
+tasks its alerts name (``tasks``) and the tasks waiting on CI or a merge of a PR in its
+scope (``prs``) or of a repository it covers (``repos``). A block storm (rule 4: many tasks
+blocked on the same reason at once) explains, under ``shared_blocker``, only the tasks it
+names, even when its reason names a person: the person can end it, but the hours are the
+outage's, not a people wait. Only the part of a wait inside the outage moves; the rest
 keeps the task's own cause.
 
 **Snoozed** (issue #176). A wait a person chose is not one the farm lost. The part of a
@@ -53,15 +57,9 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from kelpie.core.incidents import (
-    CI_FAILURES,
-    CI_NOT_STARTED_STATE,
-    FOLDED_UNDER,
-    OUTAGE_STATE_PREFIX,
-    CiOutage,
-    is_outage_state,
-)
-from kelpie.core.ledger import LedgerEntry, Suppression
+from kelpie.core.incidents import BLOCK_STORM, CI_FAILURES, FOLDED_UNDER, is_outage_state
+from kelpie.core.incidents import Outage as OutageParams
+from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Suppression
 from kelpie.core.model import Condition, ConditionKind, Dependency, Snooze, Task
 from kelpie.core.states import OpenState
 from kelpie.report import farm, intervals, md
@@ -74,6 +72,7 @@ WAIT_CAUSES: Mapping[str, str] = {
     "ci": "CI",
     "merge": "PRs to pass checks and merge",
     "ci_outage": "a shared CI failure (an outage of the CI or of the base branch)",
+    "shared_blocker": "a shared blocker (many tasks blocked on the same reason)",
     "people": "people (approvals, human tasks)",
     "snoozed": "snoozed (deliberate)",
     "hold": "holds",
@@ -91,6 +90,8 @@ _SUGGESTIONS: Mapping[str, str] = {
     "quota": "spread the role over more providers or models, or raise the quota",
     "tasks": "unblock the tasks they depend on first, or drop the dependency",
     "timer": "shorten the scheduled waits",
+    "shared_blocker": "end the shared blocker the Outages list names: one fix or one "
+    "person's answer unblocks every task behind it",
     "snoozed": "nothing to fix: a person deferred these waits on purpose (kelpie snoozes "
     "lists them; kelpie unsnooze ends one early)",
     "other": "check what the custom conditions wait for and whether a connector can resolve "
@@ -123,6 +124,7 @@ _KINDS: Mapping[ConditionKind, str] = {
 }
 MIN_HOURS = 1.0  # a smaller wait is no headline
 CI_OUTAGE = "ci_outage"
+SHARED_BLOCKER = "shared_blocker"  # a block storm's waits (incident 20)
 SNOOZED = "snoozed"  # waits a person snoozed: deliberate, never the biggest wait
 MAX_REASON = 2000  # characters of a block reason matched, as the GitHub step does
 # "owner/name#12" or a pull request URL in a pattern's ``pr`` group: the repository
@@ -170,10 +172,10 @@ class BiggestWait:
 
 
 @dataclass(frozen=True, slots=True)
-class Outage:
-    """One occurrence of a CI outage (rule 9's state, :mod:`kelpie.core.incidents`), with
-    what its alerts said about it: while it is open, the waits it explains count under
-    ``ci_outage`` instead of CI or merges."""
+class OutageSpan:
+    """One occurrence of an outage incident (:mod:`kelpie.core.incidents`), with what its
+    alerts said about it: while it is open, the waits it explains count under it (``cause``)
+    instead of their own cause."""
 
     since: datetime
     until: datetime  # its last_seen
@@ -182,73 +184,101 @@ class Outage:
     tasks: frozenset[str] = frozenset()
     state: str = ""
     signature: str | None = None  # how people read it, e.g. "ci.yml > build > Select toolchain"
+    kind: str = CI_FAILURES  # what found it (kelpie.core.incidents.KINDS)
+    reason: str | None = None  # what happened, in one line (the incident's ``cause``)
+    person: str | None = None  # who can end it, when its reason names one
+    # a check still in observe (``params.observe_only``): listed, its waits not moved
+    observe_only: bool = False
+
+    @property
+    def wait_cause(self) -> str:
+        """The wait cause its waits count under: a CI outage's or a shared blocker's."""
+        return SHARED_BLOCKER if self.kind == BLOCK_STORM else CI_OUTAGE
 
 
-def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[Outage]:
-    """Rule 9's CI outages, each with the scope its alerts reported: every entry that names
-    the state (``params.state``) within that occurrence's time span (the same signature
-    failing again later reuses the state id). Entries are as of their time (written at most
-    hourly), so the repository clause in :meth:`WaitCauses.split` covers later joiners."""
-    entries = list(entries)
-    # Rule 9's failing CI jobs only, until the report attributes the other kinds (#229): a
-    # block storm, or CI jobs that never start (a state of rule 9's too), are not "a shared
-    # CI failure".
-    samples = [
-        (e.at, o)
+def outage_samples(
+    entries: Iterable[LedgerEntry],
+) -> list[tuple[datetime, OutageParams, bool]]:
+    """What every outage alert said, any rule's and any kind's: ``(at, params, observe
+    only)`` of each ledger entry whose params are an outage's (``params.state`` an outage
+    state); observe only: written by a check still in observe (``params.observe_only``)."""
+    return [
+        (e.at, o, e.params.get(OBSERVE_ONLY) is True)
         for e in entries
-        if e.rule == "ci_economy" and (o := CiOutage.from_params(e.params)) is not None
+        if is_outage_state(str(e.params.get("state", "")))
+        and (o := OutageParams.from_params(e.params)) is not None
     ]
-    other = {CI_NOT_STARTED_STATE} | {o.state for _, o in samples if o.kind != CI_FAILURES}
-    samples = [(at, o) for at, o in samples if o.kind == CI_FAILURES]
-    found = [
-        s
-        for s in states
-        if is_outage_state(s.id) and s.id.startswith(OUTAGE_STATE_PREFIX) and s.id not in other
-    ]
+
+
+def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[OutageSpan]:
+    """The outages, each with the scope its alerts reported: every entry that names the
+    state (``params.state``) within that occurrence's time span (the same signature failing
+    again later reuses the state id). Entries are as of their time (written at most hourly),
+    so the repository clause in :meth:`WaitCauses.split` covers a CI outage's later
+    joiners. An outage none of whose entries is loaded is a CI outage with no scope."""
+    samples = outage_samples(entries)
     out = []
-    for s in found:
-        mine = [o for at, o in samples if o.state == s.id and s.since <= at <= s.last_seen]
+    for s in (s for s in states if is_outage_state(s.id)):
+        found = [
+            (o, obs) for at, o, obs in samples if o.state == s.id and s.since <= at <= s.last_seen
+        ]
+        mine = [o for o, _ in found]
+        last = mine[-1] if mine else None
         out.append(
-            Outage(
+            OutageSpan(
                 since=s.since,
                 until=s.last_seen,
                 repos=frozenset(r.lower() for o in mine for r in o.repos),
                 prs=frozenset(p.lower() for o in mine for p in o.prs),
                 tasks=frozenset(t for o in mine for t in o.tasks),
                 state=s.id,
-                signature=mine[-1].signature if mine else None,
+                signature=last.signature if last else None,
+                kind=last.kind if last else CI_FAILURES,
+                reason=last.cause if last else None,
+                person=last.person if last else None,
+                observe_only=bool(found) and found[-1][1],
             )
         )
     return out
 
 
 def outage_day(
-    outage: Outage,
+    outage: OutageSpan,
     entries: Iterable[LedgerEntry],
     start: datetime,
     end: datetime,
     closed_at: datetime | None = None,
 ) -> tuple[int, int]:
-    """The PRs in an outage's scope and the alerts folded under it between ``start`` and ``end``:
-    the PRs in its scope during that span, from its samples in it and the last one before
-    it (its scope as the span began; samples are hourly, so a PR that went green just
-    before may count); and the alerts folded under it with an entry in that span until
-    it closed (``closed_at``; the engine keeps folding for a while after its last
-    sighting), counted once each (one entry when a fold starts, then at most one an hour),
-    a lower bound."""
+    """The PRs (for a block storm: the tasks) in an outage's scope and the alerts folded under
+    it between ``start`` and ``end``: those in its scope during that span, from its
+    samples in it and the last one before it (its scope as the span began; samples are
+    hourly, so a PR that went green just before may count); and the alerts folded under
+    it with an entry in that span until it closed (``closed_at``; the engine keeps
+    folding for a while after its last sighting), counted once each (one entry when a
+    fold starts, then at most one an hour), a lower bound."""
     a, b = max(outage.since, start), min(outage.until, end)
     folds_until = end if closed_at is None else min(closed_at, end)
+    storm = outage.kind == BLOCK_STORM
     prs: set[str] = set()
-    before: CiOutage | None = None
+    before: OutageParams | None = None
     folded: set[tuple[str, str]] = set()
+
+    def scope(o: OutageParams) -> Iterable[str]:
+        return o.tasks if storm else (p.lower() for p in o.prs)
+
     for e in sorted(entries, key=lambda e: e.at):
-        if e.rule == "ci_economy" and (o := CiOutage.from_params(e.params)) is not None:
+        o = (
+            OutageParams.from_params(e.params)
+            if is_outage_state(str(e.params.get("state", "")))
+            else None
+        )
+        if o is not None:
             if o.state != outage.state or not outage.since <= e.at <= b:
                 continue
             if e.at < a:
                 before = o
             else:
-                prs.update(p.lower() for p in o.prs)
+                prs.update(scope(o))
         elif (
             a <= e.at <= folds_until
             and e.suppression is Suppression.INCIDENT
@@ -256,7 +286,7 @@ def outage_day(
         ):
             folded.add((e.rule, e.fingerprint))
     if before is not None:
-        prs.update(p.lower() for p in before.prs)
+        prs.update(scope(before))
     return len(prs), len(folded)
 
 
@@ -270,7 +300,7 @@ class WaitCauses:
         entries: Iterable[LedgerEntry],
         hold_labels: Collection[str] = (),
         block_kinds: Sequence[BlockKind] = (),
-        outages: Sequence[Outage] = (),
+        outages: Sequence[OutageSpan] = (),
         snoozes: Iterable[Snooze] = (),
         dependencies: Iterable[Dependency] = (),
         inboxes: Iterable[OpenState] = (),
@@ -319,7 +349,7 @@ class WaitCauses:
         self._live = _live_waits(before, inboxes)
 
     @property
-    def outages(self) -> tuple[Outage, ...]:
+    def outages(self) -> tuple[OutageSpan, ...]:
         return self._outages
 
     def __call__(self, task: Task) -> str:
@@ -341,11 +371,21 @@ class WaitCauses:
         total = (b - a).total_seconds() / 3600
         if self._labels.intersection(task.labels):
             return {"hold": total}
-        outage = intervals.merged(
-            (max(a, o.since), min(b, o.until))
-            for o in self._outages
-            if o.since < b and o.until > a and self._explains(o, task)
-        )
+        # a block storm first (it names the task), then a CI outage over the rest
+        by_cause = {
+            cause: intervals.merged(
+                (max(a, o.since), min(b, o.until))
+                for o in self._outages
+                if o.wait_cause == cause
+                and not o.observe_only
+                and o.since < b
+                and o.until > a
+                and self._explains(o, task)
+            )
+            for cause in (SHARED_BLOCKER, CI_OUTAGE)
+        }
+        by_cause[CI_OUTAGE] = intervals.minus(by_cause[CI_OUTAGE], by_cause[SHARED_BLOCKER])
+        outage = intervals.merged([*by_cause[SHARED_BLOCKER], *by_cause[CI_OUTAGE]])
         own = self(task)
         snoozed: intervals.Spans = []
         if own in ("people", UNKNOWN):
@@ -360,8 +400,9 @@ class WaitCauses:
         out: dict[str, float] = {}
         if held > 1e-9:
             out[SNOOZED] = held
-        if covered > 1e-9:
-            out[CI_OUTAGE] = covered
+        for cause, spans in by_cause.items():
+            if (hours := intervals.hours(spans)) > 1e-9:
+                out[cause] = hours
         if total - held - covered > 1e-9:
             out[own] = total - held - covered
         return out
@@ -372,11 +413,13 @@ class WaitCauses:
         ids = {task.id} | self._humans.get(task.id, set())
         return [self._snoozes[i] for i in sorted(ids) if i in self._snoozes]
 
-    def _explains(self, outage: Outage, task: Task) -> bool:
-        """The outage names the task, or the task waits on CI or a merge of a PR in its
-        scope or of a repository it covers."""
+    def _explains(self, outage: OutageSpan, task: Task) -> bool:
+        """The outage names the task, or (a CI outage) the task waits on CI or a merge of a
+        PR in its scope or of a repository it covers."""
         if task.id in outage.tasks:
             return True
+        if outage.kind == BLOCK_STORM:
+            return False  # a block storm explains only the tasks it names
         found = self.condition(task)
         if found is None or found.kind not in (ConditionKind.CI_STATUS, ConditionKind.PR_MERGED):
             return False

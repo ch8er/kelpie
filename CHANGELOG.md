@@ -173,6 +173,12 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - Waits inside an open CI outage (rule 9) count under "a shared CI failure", not CI or merges, and
   the report lists each outage of the day with its PRs and the alerts folded under it
   ([#182](https://github.com/ch8er/kelpie/pull/182), [#201](https://github.com/ch8er/kelpie/pull/201)).
+- Every outage kind in the report (#229, incident 20): a block storm's waits count under "a
+  shared blocker" for the tasks it names, even when its reason names a person, and in the
+  cost of chaos an outage's tasks count once, under "farm outages", ahead of the person's
+  inbox and their stale blocks. The "Outages" list names each outage's kind, scope and who
+  can end it; an outage whose check is still in observe is listed, and its waits stay
+  where they were ([#229](https://github.com/ch8er/kelpie/issues/229)).
 - Suggestions check what the farm already has (approvers, holds, block conditions, budgets,
   modes); merge automation is never advised ([#173](https://github.com/ch8er/kelpie/pull/173)).
 - Listed, never counted: cards stuck before work that block nothing, and agent tasks planned

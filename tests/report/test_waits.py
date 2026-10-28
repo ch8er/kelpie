@@ -406,16 +406,31 @@ def test_waits_inside_a_ci_outage_count_under_it() -> None:
     assert of7.split(waiting("L2", "reviewer"), at(10), at(16)) == {CI_OUTAGE: pytest.approx(6)}
 
 
-def test_ci_jobs_not_starting_are_not_a_shared_ci_failure_yet() -> None:
+def test_ci_jobs_not_starting_are_a_shared_ci_failure() -> None:
     from kelpie.core.incidents import CI_NOT_STARTED, CiOutage
-    from kelpie.report.waits import outages
+    from kelpie.core.ledger import OBSERVE_ONLY
+    from kelpie.report.waits import CI_OUTAGE, outages
     from kelpie.rules._ci_not_started import STATE
 
-    o = CiOutage(state=STATE, signature="CI jobs not starting", kind=CI_NOT_STARTED, tasks=("N1",))
+    o = CiOutage(state=STATE, signature="CI jobs not starting", kind=CI_NOT_STARTED,
+                 cause="jobs queued over 30 min on 3 PRs", repos=("example/app",),
+                 tasks=("N1",))  # fmt: skip
     sample = replace(ledger("ci_economy", **o.to_params()), at=at(11))
     states = [outage_state(sid, at(10), at(16)).state for sid in (STATE, SID)]
-    found = outages(states, [sample, outage_sample(at(11))])
-    assert [x.state for x in found] == [SID]  # until the report attributes kinds (#229)
+    found = {x.state: x for x in outages(states, [sample, outage_sample(at(11))])}
+    assert set(found) == {STATE, SID}
+    stuck = found[STATE]
+    assert stuck.kind == CI_NOT_STARTED and stuck.wait_cause == CI_OUTAGE
+    assert stuck.reason == "jobs queued over 30 min on 3 PRs" and not stuck.observe_only
+    causes = WaitCauses((ci("R1"),), [sample], (), (), [stuck])
+    r1 = waiting("R1", "reviewer")  # waits on CI in the outage's repository
+    assert causes.split(r1, at(10), at(14)) == {CI_OUTAGE: pytest.approx(4)}
+    trial = replace(sample, params={**sample.params, OBSERVE_ONLY: True})
+    [observed] = [x for x in outages(states, [trial]) if x.state == STATE]
+    assert observed.observe_only  # a check still in observe moves no wait
+    assert WaitCauses((ci("R1"),), [trial], (), (), [observed]).split(r1, at(10), at(14)) == {
+        "ci": pytest.approx(4)
+    }
 
 
 def test_the_report_headlines_a_ci_outage() -> None:
@@ -430,14 +445,14 @@ def test_the_report_headlines_a_ci_outage() -> None:
 
 
 def test_overlapping_outages_count_each_hour_once() -> None:
-    from kelpie.report.waits import CI_OUTAGE, Outage
+    from kelpie.report.waits import CI_OUTAGE, OutageSpan
 
     repos = frozenset({"example/app"})
     spans = [(at(2), at(10)), (at(4), at(6)), (at(5), at(12)), (at(-5), at(1))]
-    of = WaitCauses((ci("R1"),), (), (), (), [Outage(a, b, repos) for a, b in spans])
+    of = WaitCauses((ci("R1"),), (), (), (), [OutageSpan(a, b, repos) for a, b in spans])
     split = of.split(waiting("R1", "reviewer"), at(0), at(24))
     assert split == {CI_OUTAGE: pytest.approx(1 + 10), "ci": pytest.approx(13)}
-    late = WaitCauses((ci("R1"),), (), (), (), [Outage(at(20), at(30), repos)])
+    late = WaitCauses((ci("R1"),), (), (), (), [OutageSpan(at(20), at(30), repos)])
     assert late.split(waiting("R1", "reviewer"), at(18), at(24)) == {
         CI_OUTAGE: pytest.approx(4),
         "ci": pytest.approx(2),
@@ -445,9 +460,9 @@ def test_overlapping_outages_count_each_hour_once() -> None:
 
 
 def test_a_held_task_waits_for_its_hold_during_an_outage() -> None:
-    from kelpie.report.waits import Outage
+    from kelpie.report.waits import OutageSpan
 
-    o = Outage(at(0), at(24), frozenset({"example/app"}), tasks=frozenset({"R1"}))
+    o = OutageSpan(at(0), at(24), frozenset({"example/app"}), tasks=frozenset({"R1"}))
     of = WaitCauses((ci("R1"),), (), ("freeze",), (), [o])
     held = waiting("R1", "reviewer", labels=("freeze",))
     assert of.split(held, at(8), at(12)) == {"hold": pytest.approx(4)}

@@ -1,4 +1,4 @@
-"""The report's list of the day's CI outages (rule 9, ``kelpie.core.incidents``).
+"""The report's list of the day's outages (``kelpie.core.incidents``).
 
 The day is test_waits' (2026-03-02, UTC): an outage's waiting time comes from its tasks
 R1-R3, which wait on CI in ``example/app`` from 08:00.
@@ -46,7 +46,7 @@ def test_the_report_names_each_outage_with_its_folded_alerts() -> None:
     )
     assert report.outage_wait_hours == pytest.approx(3 * 12)  # R1-R3 from 08:00 to 20:00
     markdown = render_markdown(report)
-    assert "**CI outages** (rule 9; 36.0 task-hours of waiting fell inside them" in markdown
+    assert "**Outages** (36.0 task-hours of waiting fell inside them" in markdown
     assert f"`{SIGNATURE}` since 2026-03-02 02:00 UTC, until 2026-03-02 20:00 UTC" in markdown
     assert "2 PR(s), 2 alert(s) folded under it" in markdown
 
@@ -110,7 +110,7 @@ def test_an_outage_outside_the_day_is_not_listed() -> None:
 
 def test_no_outage_no_list() -> None:
     report = build_report(inputs(), sections={})
-    assert report.outages == () and "CI outages" not in render_markdown(report)
+    assert report.outages == () and "**Outages**" not in render_markdown(report)
 
 
 def test_folds_after_the_last_sighting_count_until_the_outage_closes() -> None:

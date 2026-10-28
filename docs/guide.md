@@ -268,18 +268,26 @@ report; no LLM is involved.
   role's agents had a session running, with a concrete suggestion. A task's wait counts
   under a hold (rule 6's hold labels), else the kind of the unmet condition it waits on (a
   person's `human_task`, CI, PRs to pass checks and merge, LLM quotas, other tasks,
-  timers; a CI found red comes before the merge of the same PR), else a person when rule 13 listed
-  it that day (an approval, parked on a human task), else unknown. While rule 9's CI outage
-  incident is open, the waits it explains (tasks it names, CI and merge waits in its
-  repositories) count under "a shared CI failure" for that time (a held task's wait stays
-  the hold's). Under the cost of chaos, "CI outages" lists each outage of the day: its
-  signature, since when (perhaps an earlier day) and until when or still open, and the PRs
-  in its scope and the alerts folded under it that day (a lower bound), with the waiting
-  time all of them explained together. The report makes no network calls: it runs the
-  connector steps that read only the board (`task_status`, human tasks from block
-  reasons), and a block reason a `[[block_conditions]]` pattern matches counts as a CI or
-  merge wait by the pattern's kind, without a PR lookup. The "Farm throughput" section
-  breaks each role's waiting time down by cause.
+  timers; a CI found red comes before the merge of the same PR), else a person when rule
+  13 listed it that day (an approval, parked on a human task), else unknown. While an
+  outage incident is open, the waits it explains count under it for that time (a held
+  task's wait stays the hold's): a CI outage of rule 9 (failing CI jobs, or jobs that
+  never start) explains the tasks it names and CI and merge waits in its repositories,
+  under "a shared CI failure"; a block storm of rule 4 (many tasks blocked on the same
+  reason at once) explains only the tasks it names, under "a shared blocker", even when
+  its reason names a person. In the cost of chaos those tasks' hours count once, under
+  "farm outages", ahead of the person's inbox and their stale blocks. Under the cost of
+  chaos, "Outages" lists each outage of the day: its signature, its reason, since when
+  (perhaps an earlier day) and until when or still open, its scope that day (PRs, or for a
+  block storm tasks) and the alerts folded under it (a lower bound), who can end it when
+  its reason names a person, and the waiting time all of them explained together. An
+  outage whose check is still in observe (`storm_mode`, `not_started_mode`) is listed as
+  such, and its waits stay where they were until the check is switched on. The report
+  makes no network calls: it runs the connector steps that read only the board
+  (`task_status`, human tasks from block reasons), and a block reason a
+  `[[block_conditions]]` pattern matches counts as a CI or merge wait by the pattern's
+  kind, without a PR lookup. The "Farm throughput" section breaks each role's waiting time
+  down by cause.
 - **Context and model fit** (from traces, `kelpie.traces.fit`): content a read-like tool
   loaded unchanged into many sessions of a role (same tool, arguments hash and size); tools
   offered but never called, when the platform lists them in the span attribute
