@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -342,3 +343,89 @@ def test_engine_announces_once_stays_quiet_and_resolves_after_progress() -> None
     [resolved] = tick(40, committed=True)
     assert resolved.action.reason.startswith("Resolved") and len(alerter.sent) == 2
     assert engine.states.store.open_states() == []
+
+
+# --- runaway context ----------------------------------------------------------------------
+
+
+def growing(session: str = "S-1", sizes: tuple[int, ...] = (), task: str | None = None) -> list:
+    """LLM steps of ``session`` one minute apart, ending a minute ago, with these contexts."""
+    n = len(sizes)
+    return [
+        replace(llm(f"{session}-{i}", NOW - (n - i) * M, tokens_in=size, session=session),
+                task_id=task, model="model-a")
+        for i, size in enumerate(sizes)
+    ]  # fmt: skip
+
+
+CONTEXT_RULE = NoProgress(
+    context_alert_tokens=100_000, context_min_steps=3, min_tokens_without_progress=10**12
+)
+
+
+def context_alerts(
+    *spans: Span, open_states: tuple[str, ...] = (), rule: NoProgress = CONTEXT_RULE
+) -> list:
+    snap = Snapshot(
+        now=NOW,
+        tasks=(Task("T-1", "t", Status.IN_PROGRESS, START),),
+        sessions=(Session("S-1", "T-1", "a-1", START),),
+        spans=spans,
+        open_states=open_states,
+    )
+    return list(rule.evaluate(snap))
+
+
+def test_a_session_whose_context_ran_away_gets_one_lasting_info_alert() -> None:
+    [a] = context_alerts(*growing(sizes=(60_000, 80_000, 30_000, 70_000, 110_000)))
+    assert a.kind is ActionKind.ALERT and a.severity is Severity.INFO and a.task_id == "T-1"
+    assert a.state == a.key == "no_progress:context:S-1" and a.since == NOW - 5 * M
+    # The compaction (80k -> 30k) is left out of the growth per step: (20k + 40k + 40k) / 3.
+    assert a.params == {
+        "session_id": "S-1",
+        "context_tokens": 110_000,
+        "steps": 5,
+        "per_step": 33_333,
+        "reread_tokens": 350_000,
+        "window": "30m",
+        "model": "model-a",
+        "recommendations": ["compact_context", "bounded_session_handoff"],
+        "headline": "Session S-1: 110k-token context, +33,333 per step",
+        "needed": "Compact the context or bound the session",
+    }
+    assert "re-reads all of it: 350,000 input tokens in 30m" in a.reason
+
+
+def test_runaway_context_thresholds_and_hysteresis() -> None:
+    assert context_alerts(*growing(sizes=(99_000, 99_500, 99_999))) == []  # below the bar
+    assert context_alerts(*growing(sizes=(150_000, 160_000))) == []  # too few steps
+    assert context_alerts(*growing(sizes=(120_000, 130_000, 40_000))) == []  # compacted
+    held = growing(sizes=(85_000, 85_000, 81_000))
+    assert context_alerts(*held) == []
+    [a] = context_alerts(*held, open_states=("no_progress:context:S-1",))  # kept open above 80%
+    assert a.params["per_step"] == -2000
+    off = NoProgress(context_alert_tokens=0, min_tokens_without_progress=10**12)
+    assert context_alerts(*growing(sizes=(200_000,) * 6), rule=off) == []
+
+
+def test_runaway_context_of_a_session_the_board_does_not_know() -> None:
+    spans = growing("hs-9", (100_000, 110_000, 120_000), task="T-7")
+    [a] = context_alerts(*spans)
+    assert a.task_id == "T-7" and a.params["session_id"] == "hs-9"
+    [b] = context_alerts(*growing("hs-9", (100_000, 110_000, 120_000)))
+    assert b.task_id is None and "needed" not in b.params
+    assert b.reason.startswith("Session hs-9 carries a 120,000-token context after 3 steps")
+    # Steps before the window, or after now, do not count.
+    old = [replace(s, start=s.start - 40 * M) for s in spans]
+    future = [replace(s, start=s.start + 10 * M) for s in spans]
+    assert context_alerts(*old) == [] and context_alerts(*future) == []
+
+
+def test_runaway_context_settings() -> None:
+    rule = build({"context_alert_tokens": 200_000, "context_min_steps": 10})
+    assert (rule.context_alert_tokens, rule.context_min_steps) == (200_000, 10)
+    assert build({"context_alert_tokens": 0}).context_alert_tokens == 0
+    for key, bad in (("context_alert_tokens", -1), ("context_min_steps", 1),
+                     ("context_min_steps", True), ("context_alert_tokens", "1")):  # fmt: skip
+        with pytest.raises(ValueError, match=key):
+            build({key: bad})

@@ -1,0 +1,78 @@
+id: "field-07-runaway-context"
+incident: null
+title: "A session's context grows past 150k tokens and is re-read on every step"
+description: >
+  Field evidence from a live farm (synthetic reconstruction, issue #197). Ten to thirteen
+  sessions a day grew to 160k-433k tokens of context, a few thousand more per step, and
+  every model call re-read all of it: 30-80M re-read tokens a day, even in sessions that
+  made progress. The daily report showed it a day late; rule 11 now alerts per session,
+  with the context, the growth per step and the tokens re-read, and recommends compacting
+  or a bounded session. A session that compacted below the threshold, and one with too few
+  steps to tell, are left alone.
+rule: no_progress
+config:
+  window: "30m"
+  context_alert_tokens: 150000
+  context_min_steps: 5
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  owners:
+    - {id: agent-dev-7, role: developer}
+    - {id: reviewer-7, role: reviewer}
+  tasks:
+    - id: T-F701
+      title: "Port the importer to the new schema"
+      status: in_progress
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-7
+    - id: T-F702
+      title: "Review the importer port"
+      status: review
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-7
+  sessions:
+    - id: S-F701
+      task_id: T-F701
+      owner_id: agent-dev-7
+      started_at: "2026-03-02T11:00:00+00:00"
+      last_heartbeat: "2026-03-02T11:51:20+00:00"
+      last_commit_at: "2026-03-02T11:50:00+00:00"
+    - id: S-F702
+      task_id: T-F702
+      owner_id: reviewer-7
+      started_at: "2026-03-02T11:00:00+00:00"
+      last_heartbeat: "2026-03-02T11:51:20+00:00"
+      last_commit_at: "2026-03-02T11:50:00+00:00"
+  spans:
+    - {trace_id: TR-F701, span_id: SP-A-0, name: chat, kind: llm, start: "2026-03-02T11:30:00+00:00", end: "2026-03-02T11:30:20+00:00", session_id: S-F701, model: model-a, input_tokens: 120000, output_tokens: 800, cached_tokens: 114000}
+    - {trace_id: TR-F701, span_id: SP-A-1, name: chat, kind: llm, start: "2026-03-02T11:33:00+00:00", end: "2026-03-02T11:33:20+00:00", session_id: S-F701, model: model-a, input_tokens: 130000, output_tokens: 800, cached_tokens: 123500}
+    - {trace_id: TR-F701, span_id: SP-A-2, name: chat, kind: llm, start: "2026-03-02T11:36:00+00:00", end: "2026-03-02T11:36:20+00:00", session_id: S-F701, model: model-a, input_tokens: 140000, output_tokens: 800, cached_tokens: 133000}
+    - {trace_id: TR-F701, span_id: SP-A-3, name: chat, kind: llm, start: "2026-03-02T11:39:00+00:00", end: "2026-03-02T11:39:20+00:00", session_id: S-F701, model: model-a, input_tokens: 150000, output_tokens: 800, cached_tokens: 142500}
+    - {trace_id: TR-F701, span_id: SP-A-4, name: chat, kind: llm, start: "2026-03-02T11:42:00+00:00", end: "2026-03-02T11:42:20+00:00", session_id: S-F701, model: model-a, input_tokens: 160000, output_tokens: 800, cached_tokens: 152000}
+    - {trace_id: TR-F701, span_id: SP-A-5, name: chat, kind: llm, start: "2026-03-02T11:45:00+00:00", end: "2026-03-02T11:45:20+00:00", session_id: S-F701, model: model-a, input_tokens: 170000, output_tokens: 800, cached_tokens: 161500}
+    - {trace_id: TR-F701, span_id: SP-A-6, name: chat, kind: llm, start: "2026-03-02T11:48:00+00:00", end: "2026-03-02T11:48:20+00:00", session_id: S-F701, model: model-a, input_tokens: 180000, output_tokens: 800, cached_tokens: 171000}
+    - {trace_id: TR-F701, span_id: SP-A-7, name: chat, kind: llm, start: "2026-03-02T11:51:00+00:00", end: "2026-03-02T11:51:20+00:00", session_id: S-F701, model: model-a, input_tokens: 190000, output_tokens: 800, cached_tokens: 180500}
+    - {trace_id: TR-F702, span_id: SP-B-0, name: chat, kind: llm, start: "2026-03-02T11:31:00+00:00", end: "2026-03-02T11:31:20+00:00", session_id: S-F702, model: model-a, input_tokens: 60000, output_tokens: 800, cached_tokens: 57000}
+    - {trace_id: TR-F702, span_id: SP-B-1, name: chat, kind: llm, start: "2026-03-02T11:35:00+00:00", end: "2026-03-02T11:35:20+00:00", session_id: S-F702, model: model-a, input_tokens: 90000, output_tokens: 800, cached_tokens: 85500}
+    - {trace_id: TR-F702, span_id: SP-B-2, name: chat, kind: llm, start: "2026-03-02T11:39:00+00:00", end: "2026-03-02T11:39:20+00:00", session_id: S-F702, model: model-a, input_tokens: 120000, output_tokens: 800, cached_tokens: 114000}
+    - {trace_id: TR-F702, span_id: SP-B-3, name: chat, kind: llm, start: "2026-03-02T11:43:00+00:00", end: "2026-03-02T11:43:20+00:00", session_id: S-F702, model: model-a, input_tokens: 145000, output_tokens: 800, cached_tokens: 137750}
+    - {trace_id: TR-F702, span_id: SP-B-4, name: chat, kind: llm, start: "2026-03-02T11:47:00+00:00", end: "2026-03-02T11:47:20+00:00", session_id: S-F702, model: model-a, input_tokens: 40000, output_tokens: 800, cached_tokens: 38000}
+    - {trace_id: TR-F702, span_id: SP-B-5, name: chat, kind: llm, start: "2026-03-02T11:51:00+00:00", end: "2026-03-02T11:51:20+00:00", session_id: S-F702, model: model-a, input_tokens: 60000, output_tokens: 800, cached_tokens: 57000}
+    - {trace_id: TR-F703, span_id: SP-C-0, name: chat, kind: llm, start: "2026-03-02T11:40:00+00:00", end: "2026-03-02T11:40:20+00:00", session_id: hs-orch-3, model: model-a, input_tokens: 150000, output_tokens: 800, cached_tokens: 142500}
+    - {trace_id: TR-F703, span_id: SP-C-1, name: chat, kind: llm, start: "2026-03-02T11:44:00+00:00", end: "2026-03-02T11:44:20+00:00", session_id: hs-orch-3, model: model-a, input_tokens: 160000, output_tokens: 800, cached_tokens: 152000}
+    - {trace_id: TR-F703, span_id: SP-C-2, name: chat, kind: llm, start: "2026-03-02T11:48:00+00:00", end: "2026-03-02T11:48:20+00:00", session_id: hs-orch-3, model: model-a, input_tokens: 170000, output_tokens: 800, cached_tokens: 161500}
+    - {trace_id: TR-F703, span_id: SP-C-3, name: chat, kind: llm, start: "2026-03-02T11:52:00+00:00", end: "2026-03-02T11:52:20+00:00", session_id: hs-orch-3, model: model-a, input_tokens: 180000, output_tokens: 800, cached_tokens: 171000}
+expected_actions:
+  - kind: alert
+    task_id: T-F701
+    reason_contains: "190,000-token context after 8 steps"
+    params: {session_id: S-F701, context_tokens: 190000, steps: 8, per_step: 10000, reread_tokens: 1240000, recommendations: [compact_context, bounded_session_handoff]}
+not_expected_actions:
+  - kind: alert
+    task_id: T-F702
+  - kind: alert
+    params: {session_id: hs-orch-3}
+  - kind: alert
+    reason_contains: "no progress"

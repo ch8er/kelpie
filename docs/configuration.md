@@ -559,13 +559,18 @@ consecutive_errors = 8
 ### 11. no_progress
 
 Alerts when a session spends tokens without a status change, commit or artifact, with
-recommendations.
+recommendations; and, progress or not, when a session's context runs away: every step
+re-reads all of it (an `info` alert per session, recommending compaction or a bounded
+session). The context check reads the spans' own sessions, so it also works where the board does
+not know a trace's session (the alert then names no task unless the spans do).
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `window` | `"30m"` | duration, > 0 | Tokens and progress are compared over this sliding window. `[traces] window` must be at least this long (Kelpie warns otherwise). |
 | `min_tokens_without_progress` | `100000` | tokens, >= 1 | Alert at this many input plus output tokens with no progress. |
 | `claim_grace` | `"2m"` | duration, >= 0 | A status change this soon after the session start is the claim, not progress. |
+| `context_alert_tokens` | `150000` | tokens, >= 0 | Alert when a session's latest step within `window` reads a context (input tokens, cached ones included) of at least this, after `context_min_steps` steps in the window. Once open, the alert stays open above 80% of it. `0`: off. |
+| `context_min_steps` | `5` | count, >= 2 | Steps (counted model calls) a session needs in `window` before its context is judged. |
 
 ### 12. conflict_warning
 

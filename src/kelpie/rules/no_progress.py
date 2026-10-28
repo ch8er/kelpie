@@ -29,21 +29,37 @@ then stalls again is announced again.
 
 The recommendations cannot be told apart from the data (a session never says why it is
 idle), so all three are always given.
+
+**Runaway context** (issue #197). A session that keeps growing its context re-reads all of
+it on every step, whether it makes progress or not: on a live farm 10 to 13 sessions a day
+grew to 160k-433k tokens (+1.4k-6.9k per step), 30-80M re-read tokens a day. Per session of
+the spans (its ``session_id``, whether or not the board knows the session), over the counted
+LLM spans that started in ``window``: at least ``context_min_steps`` steps and a latest
+step whose context (input tokens, cached ones included) is at least ``context_alert_tokens``
+→ one ``info`` alert, a lasting state per session, with the context, the mean growth per
+step (compactions, a step below half the one before, left out) and the tokens re-read in the
+window, recommending compaction or a bounded session. Once open it stays open while the
+context is above ``CONTEXT_KEEP`` of the threshold, so a session near it does not flap, and
+it closes when the session compacts or goes quiet. The task is the board session's, else
+the spans'. ``context_alert_tokens = 0`` turns it off.
 """
 
 from __future__ import annotations
 
+import statistics
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import pairwise
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import Session, Snapshot
+from kelpie.core.model import Session, Snapshot, Span
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
-from kelpie.rules._tokens import span_index, tokens_since
+from kelpie.rules._tokens import SpanIndex, outermost_llm_spans, span_index, tokens_since
 
 NAME = "no_progress"
 
@@ -52,6 +68,9 @@ RECOMMENDATIONS = (
     "cheaper_maintenance_model",
     "bounded_session_handoff",
 )
+CONTEXT_RECOMMENDATIONS = ("compact_context", "bounded_session_handoff")
+CONTEXT_KEEP = 0.8  # an open runaway-context alert stays open above this share of the bar
+COMPACTION_RATIO = 0.5  # a step below this share of the one before compacted the context
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +78,9 @@ class NoProgress:
     window: timedelta = timedelta(minutes=30)  # the default [traces] window
     min_tokens_without_progress: int = 100_000
     claim_grace: timedelta = timedelta(minutes=2)
+    # Runaway context: a session's latest context at least this (0: off), after this many steps.
+    context_alert_tokens: int = 150_000
+    context_min_steps: int = 5
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -75,7 +97,79 @@ class NoProgress:
             if last is None or last < window_start:
                 stalled_since = max(last or session.started_at, session.started_at)
                 actions.append(self._alert(session, tokens, stalled_since))
+        if self.context_alert_tokens:
+            actions.extend(self._runaway_context(snapshot, index, window_start))
         return actions
+
+    def _runaway_context(
+        self, snapshot: Snapshot, index: SpanIndex, window_start: datetime
+    ) -> list[Action]:
+        steps: dict[str, list[Span]] = defaultdict(list)
+        for span in outermost_llm_spans(snapshot.spans, index):
+            if span.session_id and window_start <= span.start <= snapshot.now:
+                steps[span.session_id].append(span)
+        board = {s.id: s for s in snapshot.sessions}
+        actions: list[Action] = []
+        for sid, spans in sorted(steps.items()):
+            spans.sort(key=lambda s: (s.start, s.span_id))
+            state = f"{NAME}:context:{sid}"
+            bar = self.context_alert_tokens
+            if state in snapshot.open_states:
+                bar = int(bar * CONTEXT_KEEP)
+            sizes = [s.input_tokens for s in spans]
+            if len(sizes) < self.context_min_steps or sizes[-1] < bar:
+                continue
+            grown = [b - a for a, b in pairwise(sizes) if b >= COMPACTION_RATIO * a]
+            per_step = round(statistics.fmean(grown)) if grown else 0
+            session = board.get(sid)
+            task_id = (
+                session.task_id
+                if session is not None
+                else next((s.task_id for s in reversed(spans) if s.task_id), None)
+            )
+            actions.append(
+                self._context_alert(sid, task_id, sizes, per_step, spans[0].start, spans[-1].model)
+            )
+        return actions
+
+    def _context_alert(
+        self,
+        sid: str,
+        task_id: str | None,
+        sizes: Sequence[int],
+        per_step: int,
+        since: datetime,
+        model: str | None,
+    ) -> Action:
+        window = _fmt(self.window)
+        reread = sum(sizes)
+        of_task = f" of task {task_id}" if task_id else ""
+        return Action(
+            ActionKind.ALERT,
+            NAME,
+            f"Session {sid}{of_task} carries a {sizes[-1]:,}-token context after "
+            f"{len(sizes)} steps in the last {window} ({per_step:+,} per step), and every "
+            f"step re-reads all of it: {reread:,} input tokens in {window}. Compact the "
+            "context, or bound the session and hand off to a fresh one with a summary.",
+            task_id=task_id,
+            params={
+                "session_id": sid,
+                "context_tokens": sizes[-1],
+                "steps": len(sizes),
+                "per_step": per_step,
+                "reread_tokens": reread,
+                "window": window,
+                "model": model,
+                "recommendations": list(CONTEXT_RECOMMENDATIONS),
+                **alert_params(
+                    f"Session {sid}: {sizes[-1] // 1000}k-token context, {per_step:+,} per step",
+                    "Compact the context or bound the session" if task_id else None,
+                ),
+            },
+            key=f"{NAME}:context:{sid}",
+            state=f"{NAME}:context:{sid}",
+            since=since,
+        )
 
     def _alert(self, session: Session, tokens: int, stalled_since: datetime) -> Action:
         window = _fmt(self.window)
@@ -145,6 +239,12 @@ def build(config: dict[str, Any]) -> NoProgress:
         if not isinstance(n, int) or isinstance(n, bool) or n < 1:
             raise ValueError("min_tokens_without_progress must be a positive integer")
         kwargs["min_tokens_without_progress"] = n
+    for key, least in (("context_alert_tokens", 0), ("context_min_steps", 2)):
+        if key in config:
+            n = config.pop(key)
+            if not isinstance(n, int) or isinstance(n, bool) or n < least:
+                raise ValueError(f"{key} must be an integer >= {least}")
+            kwargs[key] = n
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return NoProgress(**kwargs)
