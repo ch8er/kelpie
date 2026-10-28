@@ -157,6 +157,11 @@ uv run kelpie status               # rules, their mode, board readable, spool ag
 curl -s localhost:9464/metrics | grep -E '^kelpie_(dry_run|engine_ticks_total|actions_total|snapshot_spans)'
 ```
 
+With the config of step 2 alone, `kelpie serve` logs two warnings at start, both expected
+in observe mode: `checkpoints makes no WIP commits` (it needs `[connectors.github.pulls]`)
+and, without step 4, that OTLP ingest accepts spans without a token (it listens on
+`127.0.0.1` only).
+
 `kelpie doctor` checks: config and rules load; each rule's mode is what the config says
 (all observe, dry-run on, after this quickstart); the board
 is readable; the spool has a line from the last hour; spans arrived in the last hour (SKIP if
@@ -166,7 +171,9 @@ neither, or with `end_worker = false`); block
 reasons that name a PR can be checked by `[[block_conditions]]` (a WARN, not a failure,
 when not: those blocks would look stuck); Prometheus
 answers (`--prometheus URL` or `KELPIE_PROMETHEUS_URL`, otherwise `localhost:9090` is tried
-and skipped if absent). "hooks fire" and "OTLP spans arrive" are SKIP while no task is
+and skipped if absent). It also FAILs `disk watched` until rule 7 reads the disks from
+Prometheus (`[resources.prometheus]`, step 6 and install.md, "Host resources"): on a live farm
+a disk filled unseen without it (incident 19). "hooks fire" and "OTLP spans arrive" are SKIP while no task is
 running; run doctor while one is, to make them count.
 Run it in the directory (and with the `KELPIE_DB`) that `kelpie serve` uses: it reads the span
 store from there.
@@ -210,9 +217,11 @@ docker compose exec kelpie kelpie doctor --prometheus http://prometheus:9090
 Prometheus has a ready `kelpie` scrape job; the `node` job targets `node-exporter:9100`
 (`docker compose --profile local-agents up`), otherwise it shows as down, which is harmless.
 
-Optional: to get disk and memory alerts and a heavy-task limit, point Kelpie at that
-Prometheus with `[resources.prometheus]` and `[engine.rules.resources]` (see
-`kelpie.example.toml`); without them the `resources` rule has no data and stays silent.
+Disk and memory alerts and a heavy-task limit: point Kelpie at that Prometheus with
+`[resources.prometheus]` and `[engine.rules.resources]` (see `kelpie.example.toml` and
+[install.md, Host resources](install.md#host-resources-node_exporter-prometheus-and-directory-sizes)).
+Without them the `resources` rule has no data and stays silent, and `kelpie doctor` fails
+`disk watched`.
 
 Optional: real-time alerts to Telegram with `[[alerts.channels]]` (`type = "telegram"`,
 bot token from an environment variable, see `kelpie.example.toml`); `kelpie status` shows the

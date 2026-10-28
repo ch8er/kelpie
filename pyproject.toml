@@ -43,6 +43,25 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/kelpie"]
 
+# The sdist carries what builds and runs Kelpie and what the docs point at, not the tests
+# (their fixtures included), CI or agent settings (#249).
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/docs",
+    "/deploy",
+    "/scripts",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/SECURITY.md",
+    "/CONTRIBUTING.md",
+    "/kelpie.example.toml",
+    "/Dockerfile",
+    "/docker-compose.yml",
+    "/.env.example",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

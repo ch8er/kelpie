@@ -109,6 +109,9 @@ now computes that before/after for every fix it knows about.
 
 Every quickstart starts read-only (dry-run, `observe`). `kelpie doctor` checks the setup and
 prints a fix under each failure; `kelpie why <task>` explains why one task is not moving.
+On a new machine doctor fails `disk watched` until node_exporter and Prometheus watch the
+agents' disks ([Host resources](https://github.com/ch8er/kelpie/blob/main/docs/install.md#host-resources-node_exporter-prometheus-and-directory-sizes));
+the paths in its `fix:` lines (`docs/...`, `src/...`) are in the repository.
 
 ### Hermes
 
