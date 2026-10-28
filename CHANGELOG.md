@@ -91,6 +91,15 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - Claude Code: reads shared task lists and a command-hook spool, stops a session through
   the hook, and detects idle interactive sessions that are still alive ([#79](https://github.com/ch8er/kelpie/pull/79), [#88](https://github.com/ch8er/kelpie/pull/88),
   [#113](https://github.com/ch8er/kelpie/pull/113)).
+- OpenClaw: reads Workboard cards and a spool written by a Kelpie plugin inside the
+  Gateway, and stops a session (a marker the plugin enforces, plus aborting the run in
+  flight); doctor checks and a quickstart ([#140](https://github.com/ch8er/kelpie/pull/140),
+  [#149](https://github.com/ch8er/kelpie/pull/149), [#154](https://github.com/ch8er/kelpie/pull/154), [#155](https://github.com/ch8er/kelpie/pull/155)).
+- GitHub Issues and Linear as the task queue of issue agents (Copilot coding agent, Codex
+  cloud, the Claude Code Action, OpenHands): reads issues and their pull requests, and in
+  `act` mode requeues, unblocks, comments and reassigns through the tracker's API; doctor
+  checks and a quickstart ([#180](https://github.com/ch8er/kelpie/pull/180), [#192](https://github.com/ch8er/kelpie/pull/192),
+  [#200](https://github.com/ch8er/kelpie/pull/200), [#203](https://github.com/ch8er/kelpie/pull/203), [#221](https://github.com/ch8er/kelpie/pull/221)).
 
 #### Connectors
 
@@ -324,10 +333,11 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   with the real Kelpie watching and the day's report at the end; offline, no config
   ([#134](https://github.com/ch8er/kelpie/pull/134), [#151](https://github.com/ch8er/kelpie/pull/151)). `--web` opens the report as a self-contained web page
   ([#152](https://github.com/ch8er/kelpie/pull/152)).
-- Multi-host, work in progress: the design (`docs/multi-host.md`) and the first two steps,
-  `kelpie agent` and the authenticated, bounded transport. `kelpie serve` does not yet
-  accept agent reports, so multi-host is not usable end to end in this pre-release
-  ([#96](https://github.com/ch8er/kelpie/pull/96), [#119](https://github.com/ch8er/kelpie/pull/119), [#124](https://github.com/ch8er/kelpie/pull/124)).
+- Multi-host: `kelpie agent` on each machine with agents reads its boards and carries out
+  the actions routed to it; a central `kelpie serve` with `[hub]` (per-agent tokens) merges
+  the agents' boards and routes actions back. Setups for a laptop, a laptop and a cloud VM,
+  and two VMs are in `docs/deploy.md` ([#96](https://github.com/ch8er/kelpie/pull/96), [#119](https://github.com/ch8er/kelpie/pull/119), [#124](https://github.com/ch8er/kelpie/pull/124),
+  [#127](https://github.com/ch8er/kelpie/pull/127), [#128](https://github.com/ch8er/kelpie/pull/128), [#129](https://github.com/ch8er/kelpie/pull/129)).
 
 ### Safety
 
@@ -359,6 +369,10 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 - `kelpie fix` wrote its errors to stdout; they go to stderr now, as for `report`, `why` and
   `snooze` ([#246](https://github.com/ch8er/kelpie/pull/246)).
+- `kelpie doctor` crashed with a traceback when an adapter's `token_env` named a variable
+  that was not set (the GitHub Issues and Linear quickstarts before the token is exported);
+  it now fails its `config loads` check and names the variable
+  ([#249](https://github.com/ch8er/kelpie/issues/249)).
 - Kelpie's blocks, parks and wakes on a Hermes board showed up as written by the profile
   Kelpie runs under (`default`): they are signed `kelpie` now, like its comments, and the name
   is `[adapters.hermes] author` ([#189](https://github.com/ch8er/kelpie/pull/189)).
@@ -394,6 +408,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 ### Internal
 
+- The sdist carries the source, docs, deploy files and scripts, not the tests, their
+  fixtures, CI or agent settings; the release build checks that neither file carries tests,
+  a database, a config or `.env` ([#249](https://github.com/ch8er/kelpie/issues/249)).
 - Alert wording is now structured fields passed through the `Alerter` port ([#135](https://github.com/ch8er/kelpie/pull/135)).
 - One hold-labels helper shared by the app and the rules ([#99](https://github.com/ch8er/kelpie/pull/99)).
 - A simulated Hermes farm with end-to-end scenarios against `kelpie serve`, including act

@@ -29,27 +29,38 @@ Credit is given in the advisory unless you prefer otherwise.
 Kelpie is an automation service with write access to the systems it supervises, so
 please keep these properties in mind when assessing impact:
 
-- **It holds credentials.** Typical deployments give Kelpie tokens for agent platforms,
-  GitHub (PRs, CI status), LLM provider APIs (quota checks), Slack (alerts) and optionally
-  Langfuse. Leaking any of them through logs, reports, traces, `/metrics` or error
-  messages is in scope.
+- **It holds credentials.** Typical deployments give Kelpie tokens for agent platforms
+  and issue trackers (GitHub Issues, Linear), GitHub (PRs, CI status), LLM provider APIs
+  (quota checks, cost reports with an admin key), Telegram and Slack (alerts), the OTLP
+  ingest and `kelpie agent` tokens, and optionally Langfuse. Leaking any of them through
+  logs, reports, traces, `/metrics` or error messages is in scope. How Kelpie keeps them:
+  [docs/security.md](docs/security.md).
 - **It can cancel CI runs.** With `[connectors.github.ci] allow_cancel` (off by default)
-  Kelpie cancels superseded GitHub Actions runs in the `cancel_repos` allow-list. This is
-  its only write to GitHub; it needs `Actions: write`, which should be granted to a separate
-  token (`cancel_token_env`) scoped to those repositories only, so the token that reads PRs
-  and CI stays read-only. Anything that makes Kelpie cancel a run outside that policy, or
-  one that was not superseded, is in scope.
-- **It acts on task boards.** Kelpie can requeue, unblock, comment on, reassign and
-  WIP-commit tasks, and cancel superseded CI runs (above). Anything that lets an untrusted party trigger or forge those actions
-  (for example spoofed platform events or OTLP spans, or crafted condition payloads) is
-  in scope.
+  Kelpie cancels superseded GitHub Actions runs in the `cancel_repos` allow-list. It needs
+  `Actions: write`, which should be granted to a separate token (`cancel_token_env`) scoped
+  to those repositories only, so the token that reads PRs and CI stays read-only. Anything
+  that makes Kelpie cancel a run outside that policy, or one that was not superseded, is in
+  scope.
+- **It writes to issues.** With `[adapters.github_issues]` or `[adapters.linear]` and a
+  rule in `act` mode, Kelpie changes labels, assignees and comments of the issues it reads,
+  with the standing of the token's account. That and cancelling runs are its only writes to
+  GitHub.
+- **It acts on task boards and sessions.** Kelpie can requeue, unblock, wake, park,
+  close, comment on, reassign and WIP-commit tasks, stop agent sessions (through the platform's
+  CLI or a stop marker its hook enforces, ending the stopped run's worker on Hermes), and
+  cancel superseded CI runs (above). Anything that lets an untrusted party trigger or forge
+  those actions (for example spoofed platform events, hook spool lines or OTLP spans,
+  crafted condition payloads, or a forged `kelpie agent` report) is in scope.
+- **It takes input from chat.** With `buttons = true` on a Telegram channel, an allowed
+  user's button press snoozes a task. Anything that lets someone else snooze, or a press
+  do more than snooze, is in scope.
 - **It ingests untrusted text.** Task titles, comments, tool outputs and trace attributes
   are produced by agents and may contain attacker-controlled content. Injection into
   Slack messages, the HTML/Markdown report, SQL storage, or (when enabled) prompts for the
   optional report LLM is in scope.
-- **Network exposure.** The OTLP ingest endpoint, the HTTP API and `/metrics` should not be
-  exposed to the internet without authentication. Missing or bypassable authentication on
-  these endpoints is in scope.
+- **Network exposure.** The OTLP ingest endpoint, the hub that `kelpie agent` reports to,
+  `/metrics` and `/healthz` should not be exposed to the internet without authentication.
+  Missing or bypassable authentication on these endpoints is in scope.
 - **Out of scope:** vulnerabilities in the agent platforms themselves, Prometheus, Grafana,
   node_exporter or Langfuse (report them upstream), and issues that require an attacker
   who already controls the Kelpie host.
