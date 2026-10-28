@@ -330,6 +330,11 @@ def test_only_the_terminal_tool_reports_an_exit_code(spool: Path) -> None:
         ('./scripts/ios_sim.sh test\necho "exit: $?"', False),  # a second line
         ("ios_sim.sh test --device x", False),  # masked last word
         ("make test;", False),
+        # Cut at the redaction's four words, ending on the same word as the command.
+        ("xcodebuild clean build test | grep -v test", False),
+        ("ios_sim.sh boot build test 2>&1 | tee test", False),
+        ("xcodebuild clean build test", False),  # four words: cut or not, it cannot tell
+        ("ios_sim.sh test  \n", True),
     ],
 )
 def test_whether_the_redacted_command_is_whole(spool: Path, command: str, whole: bool) -> None:
@@ -338,3 +343,4 @@ def test_whether_the_redacted_command_is_whole(spool: Path, command: str, whole:
     )
     (rec,) = lines(spool)
     assert rec.get("command_whole", False) is whole
+    assert rec.get("command_multiline", False) is ("\n" in command.strip())

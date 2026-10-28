@@ -304,19 +304,22 @@ def _command(args: Any) -> str | None:
     return None
 
 
-def _whole(args: dict[str, Any]) -> bool:
-    """Whether the redacted command still ends where the command does: one line, and its
-    last word (path aside) is the redaction's last. A masked last word is not."""
+def _shape(args: dict[str, Any]) -> dict[str, bool]:
+    """Whether the redacted command still ends where the command does (``command_whole``:
+    one line, the redaction reached its end, its last word kept: a separator after it would
+    be kept too) and whether the command has more lines (``command_multiline``: the last
+    line decides the exit code, and only the first is kept)."""
     for key in _COMMAND_KEYS:
         value = args.get(key)
-        if isinstance(value, str) and value:
+        if isinstance(value, str) and value.strip():
             lines = value.strip().splitlines()
+            if len(lines) > 1:
+                return {"command_multiline": True}
             kept = redact_command(value)
-            if len(lines) != 1 or not kept or len(lines[0]) > MAX_RESULT_PARSE:
-                return False
-            last, end = kept.split()[-1], lines[0].split()[-1]
-            return last == end.rstrip("/").rsplit("/", 1)[-1] or last == end
-    return False
+            if not kept or _MASK in kept.split()[-1] or len(lines[0]) > _MAX_LINE - 2:
+                return {}
+            return {"command_whole": True} if redact_command(f"{lines[0]} ;") == f"{kept} ;" else {}
+    return {}
 
 
 def _text(value: Any) -> str | None:
@@ -399,8 +402,8 @@ def _result_fields(tool: str | None, args: Any, result: Any) -> dict[str, Any]:
     ``"pending_approval"``: it never ran; an exit code -1 alone is also a degraded backend or
     a fatal error, a failure), whether the command went to the background (asked for, or
     promoted from the foreground for a long timeout: its 0 means started), and whether the
-    redacted command still ends where the command did (``command_whole``: one line, its last
-    word kept; a pipe or a second line the redaction dropped decides the exit code). The
+    redacted command still ends where the command did (:func:`_shape`: a pipe or a second
+    line the redaction dropped decides the exit code). The
     result's ``error`` key is not read: it is null on a failed build too. Nothing of the
     output is kept."""
     if tool != TERMINAL_TOOL:
@@ -409,8 +412,7 @@ def _result_fields(tool: str | None, args: Any, result: Any) -> dict[str, Any]:
     if isinstance(args, dict):
         if args.get("background") is True:
             out["background"] = True
-        if _whole(args):
-            out["command_whole"] = True
+        out.update(_shape(args))
     data = result
     if isinstance(result, str):
         if len(result) > MAX_RESULT_PARSE or not result.lstrip().startswith("{"):

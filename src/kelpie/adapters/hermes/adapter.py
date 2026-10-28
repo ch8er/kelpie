@@ -187,6 +187,7 @@ from kelpie.core.model import (
 )
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
 from kelpie.core.tools import (
+    COMMAND_MULTILINE_ATTRIBUTE,
     COMMAND_WHOLE_ATTRIBUTE,
     ERROR,
     EXIT_CODE_ATTRIBUTE,
@@ -1804,6 +1805,8 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
                 attributes[EXIT_CODE_ATTRIBUTE] = code
             if rec.get("command_whole") is True:
                 attributes[COMMAND_WHOLE_ATTRIBUTE] = True
+            if rec.get("command_multiline") is True:
+                attributes[COMMAND_MULTILINE_ATTRIBUTE] = True
             if result in (OK, ERROR):  # a foreground exit code is the call's own account
                 outcome = result
             # A blocked call keeps Hermes' outcome (error): rule 10's error streak counts

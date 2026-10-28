@@ -1145,3 +1145,20 @@ def test_a_spool_exit_code_becomes_the_calls_result(
     spool.write_text(tool_line(ago(minutes=5), **fields) + "\n")
     [tool] = [s for s in adapter(board, spool).snapshot(NOW).spans if s.kind is SpanKind.TOOL]
     assert (tool.outcome, result_of(tool), exit_code_of(tool)) == (outcome, result, code)
+
+
+def test_the_command_s_shape_reaches_the_span(board: Board, tmp_path: Path) -> None:
+    from kelpie.core.tools import command_multiline, command_whole
+
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(
+        tool_line(ago(minutes=5), exit_code=0, command_whole=True)
+        + "\n"
+        + tool_line(ago(minutes=4), exit_code=1, command_multiline=True, tool_call_id="c2")
+        + "\n"
+    )
+    spans = [s for s in adapter(board, spool).snapshot(NOW).spans if s.kind is SpanKind.TOOL]
+    assert [(command_whole(s), command_multiline(s)) for s in spans] == [
+        (True, False),
+        (False, True),
+    ]

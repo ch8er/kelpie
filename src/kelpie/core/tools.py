@@ -16,8 +16,9 @@ exit code put it on the tool span (:data:`EXIT_CODE_ATTRIBUTE`) with the call's
 
 Only calls that run a command (a shell tool) get them: another tool's exit code may be some
 other process's. With them, :data:`COMMAND_WHOLE_ATTRIBUTE` says the span's command (a
-redacted prefix) is the whole command. Rules read them with :func:`result_of`,
-:func:`exit_code_of` and :func:`command_whole`; a span without them has no known result
+redacted prefix) is the whole command, :data:`COMMAND_MULTILINE_ATTRIBUTE` that it has more
+lines. Rules read them with :func:`result_of`, :func:`exit_code_of`, :func:`command_whole`
+and :func:`command_multiline`; a span without them has no known result
 (the span's ``outcome`` stays what the exporter said; a blocked call keeps it too). Which
 platform fields mean background or blocked is each adapter's (see its README).
 """
@@ -31,6 +32,9 @@ RESULT_ATTRIBUTE = "kelpie.tool.result"
 # True when the span's command (a redacted prefix) still ends where the command did: one
 # line, nothing cut after it. Without it, the exit code may be a dropped pipe's.
 COMMAND_WHOLE_ATTRIBUTE = "kelpie.tool.command_whole"
+# True when the command has more lines than its first, which is all a redacted prefix keeps:
+# the last line's exit code is not the first's command's.
+COMMAND_MULTILINE_ATTRIBUTE = "kelpie.tool.command_multiline"
 OK = "ok"
 ERROR = "error"
 BLOCKED = "blocked"
@@ -62,3 +66,8 @@ def exit_code_of(span: Span) -> int | None:
 def command_whole(span: Span) -> bool:
     """Whether the span's command is the whole command (nothing cut after it)."""
     return span.attributes.get(COMMAND_WHOLE_ATTRIBUTE) is True
+
+
+def command_multiline(span: Span) -> bool:
+    """Whether the span's command has more lines than the one it keeps."""
+    return span.attributes.get(COMMAND_MULTILINE_ATTRIBUTE) is True
