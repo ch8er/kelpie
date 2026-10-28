@@ -168,6 +168,47 @@ LEAKS = [
     ("tool x\x1fhunter2", "hunter2"),
     ('"a\\" | cat hunter2 x"', "hunter2"),
     ('echo \\"hi hunter2\\"', "hunter2"),
+    # setup builtins (#197): their arguments stay masked to the separator that really ends them
+    ("export A=x\\; hunter2 swordfish", "hunter2"),
+    ("cd my\\; hunter2 swordfish", "hunter2"),
+    ("set -- a\\; hunter2 swordfish", "hunter2"),
+    ("export A=x\\\\\\; hunter2", "hunter2"),
+    ("export K=$(cat /etc/x; hunter2 swordfish)", "hunter2"),
+    ("export K=$(true; echo hunter2 swordfish)", "hunter2"),
+    ("export K=$(cat x ; hunter2 abc)", "hunter2"),
+    ("export K=${A:-x; hunter2} && make", "hunter2"),
+    ("export A='x; y' hunter2", "hunter2"),
+    ("source ~/.secrets/env.sh && gh pr checks 5", "secrets"),
+    ("cd /home/alice/private && make test", "alice"),
+    (
+        "export ARCH=$(case $(uname -m) in arm64) echo a; mysql prod-db01 hunter2 x;; esac)",
+        "hunter2",
+    ),
+    (
+        "export ARCH=$(case $(uname -m) in arm64) echo a; mysql prod-db01 hunter2 x;; esac)",
+        "prod-db01",
+    ),
+    ("export MSG=':)' TOKEN=$(vault read x; echo hunter2 swordfish)", "hunter2"),
+    ("export A=x} K=$(cat f; ssh prod-db01 hunter2 x)", "prod-db01"),
+    ("cd /tmp/a} && export K=$(cat f; psql prod-db01 hunter2 x)", "hunter2"),
+    ("export K=${A%)} L=$(a; ssh prod-db01 hunter2 x)", "hunter2"),
+    ("export K=${A//)/x} L=$(a; ssh prod-db01 hunter2 x)", "hunter2"),
+    ("export A=\\) K=$(cat x ; hunter2 swordfish)", "hunter2"),
+    ('export A="x)" K=$(cat x ; hunter2 swordfish)', "hunter2"),
+    ("export A=\\} B=${B:-x ; hunter2 swordfish}", "hunter2"),
+    ("export A=1;; hunter2 b", "hunter2"),
+    ("cd /repo;#note ; hunter2 prod-db01", "hunter2"),
+    ("cd /repo&#note ; hunter2 prod-db01", "hunter2"),
+    ("cd /repo|#note ; hunter2 prod-db01\nmake", "hunter2"),
+    ("cd /repo ;#note && hunter2 prod-db01", "hunter2"),
+    ("export A='x'\"y ; hunter2 prod-db01\" && make test", "hunter2"),
+    ("cd 'x'\"y ; hunter2 z\" && make test", "hunter2"),
+    ("export A=\"x b 'a\"' ; hunter2 prod-db01 '", "hunter2"),
+    ("cd ` '`' ; hunter2 prod-db01 '", "hunter2"),
+    ('export TOKEN="`echo " ; hunter2 prod-db01 ; "`" && make', "hunter2"),
+    ('export A="x`y" ; hunter2 prod-db01 ; `" && make', "hunter2"),
+    ("export A=$[1 ; hunter2 ; 2] && make", "hunter2"),
+    ("A='x'\"y ; hunter2 z\" make", "hunter2"),
 ]
 
 
@@ -196,7 +237,20 @@ def test_no_secret_leaks(copy: str, cmd: str, secret: str) -> None:
         ("mysql -ppw db", "mysql -p*** ***"),
         ('curl -H "Authorization: Bearer x" https://h.test', "curl -H *** ***"),
         ("git clone https://u:p@host.test/repo", "git clone ***"),
-        ("export TOKEN=x; gh pr checks", "export *** *** ***"),
+        ("export TOKEN=x; gh pr checks", "export *** ; gh pr checks"),
+        ("export DEVELOPER_DIR=/A/x.app A=1 && ./scripts/sim.sh test", "export *** && sim.sh test"),
+        ("cd /home/a/repo && make test", "cd *** && make test"),
+        ("cd build; cmake ..", "cd *** ; cmake ***"),
+        ("set -euo pipefail; pytest -q", "set *** ; pytest -q"),
+        ("source ~/.secrets/env && gh pr checks 5", "source *** && gh pr checks 5"),
+        (". ./env.sh && make", ". *** && make"),
+        ("export 'A=b; c' && make", "export ***"),  # quoted: the rest is masked
+        ("export A=1 || exit 1", "export *** || exit 1"),
+        # Setup tokens are capped like a wrapper's (_MAX_WRAPPED): a long chain loses the end.
+        (
+            "cd /x && cd /y && cd /z && export A=1 && make test",
+            "cd *** && cd *** && cd *** && export *** &&",
+        ),
         ('git commit -m "a b c" --amend', "git commit -m ***"),
         ("ssh user@host.test ls", "ssh *** ***"),
         ("ls -la /tmp", "ls -l*** ***"),
@@ -231,10 +285,38 @@ def test_commands_stay_recognizable(cmd: str, expected: str) -> None:
         ("env -i PATH=x make test", "make test"),
         ("nice -5 make", "make"),
         ("sudo -u root -g wheel nice -n 5 make test", "make test"),
+        ("export DEVELOPER_DIR=/A/x.app && ./scripts/sim.sh test", "sim.sh"),
+        ("cd /repo && xcodebuild test -scheme App", "xcodebuild test"),
+        ("export A=1; cd /r && npm test", "npm test"),
+        ("cd /repo", "cd"),
+        ("export A=1 || exit 1", "export"),
     ],
 )
 def test_prefixes_still_work(cmd: str, prefix: str) -> None:
     assert command_prefix(command.redact_command(cmd)) == prefix
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'export A="x ; hunter2 abc" && make',
+        "export A=x\\; hunter2 && make",
+        "export K=$(cat x; hunter2) && make",
+        "cd /repo # note ; hunter2 abc",
+        "cd /repo;#note ; hunter2 prod-db01",
+        "'y/cd && hunter2 z'",
+        '"y/cd && hunter2 z"',
+        "'/export ; hunter2 prod-db01'",
+        "cd a && 'y/cd && hunter2 z'",
+        "'a/cd && hunter2 z' && make",
+        "cd /repo&#note ; hunter2 prod-db01",
+        "cd /repo&&#note ; hunter2 prod-db01\nmake",
+        "cd x <<EOF\nfoo ; hunter2 abc\nEOF",
+    ],
+)
+def test_prefix_of_a_raw_setup_command_never_names_its_values(raw: str) -> None:
+    assert command_prefix(raw) != "hunter2"
+    assert command_prefix(command.redact_command(raw)) in {"make", "export", "cd", None}
 
 
 def test_detect_filter_still_sees_a_pipe_in_the_prefix() -> None:
@@ -260,6 +342,12 @@ def test_redaction_is_stable_on_random_commands() -> None:
         cmd = " ".join(rng.choice(pool) for _ in range(rng.randint(1, 9)))
         once = command.redact_command(cmd)
         assert once is None or command.redact_command(once) == once, cmd
+
+
+def test_a_glued_separator_stays_within_the_cap() -> None:
+    cmd = "sudo sudo sudo sudo sudo sudo sudo sudo gh && cd x; make test"
+    once = command.redact_command(cmd)
+    assert once is not None and command.redact_command(once) == once
 
 
 def test_redaction_is_stable() -> None:

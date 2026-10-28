@@ -166,6 +166,14 @@ _WRAPPERS = {
     "rtk": (frozenset(), frozenset()),
 }
 _MAX_WRAPPED = 8  # wrapper tokens kept on top of _MAX_TOKENS
+# Shell builtins that only set up for the command after them (``export X=… && make``,
+# ``cd dir && make``): kept as a name with every argument masked, and, like a wrapper's
+# tokens, not counted against _MAX_TOKENS, so the command after the separator is kept.
+_SETUP = frozenset({"export", "cd", "pushd", "set", "source", ".", "unset", "umask", "ulimit"})
+# A setup builtin's argument Kelpie can read for sure (an allowlist): letters, digits and
+# ``_ . / ~ : = + , @ % $ -``, no quote, escape, bracket, comment or operator in it. With any
+# other argument, where bash ends the builtin's arguments is not clear: the rest is masked.
+_SIMPLE_ARG = re.compile(r"^[\w./~:=+,@%$-]*$")
 _BLANKS = re.compile(r"[ \t]+")  # what bash splits words on
 
 
@@ -175,10 +183,15 @@ def _quoted_span(tokens: list[str], i: int) -> int:
     tok = tokens[i]
     if "\\" in tok and any(q in tok for q in _QUOTES):
         return len(tokens)  # an escaped quote: where the argument ends is not clear
-    quote = next((c for c in tok if c in _QUOTES), None)
+    kinds = {c for c in tok if c in _QUOTES}
+    if len(kinds) > 1:
+        return len(tokens)  # 'x'"y: counting one kind would end it in the wrong place
+    quote = next(iter(kinds), None)
     if quote is None or tok.count(quote) % 2 == 0:
         return i + 1
     for j in range(i + 1, len(tokens)):
+        if any(q in tokens[j] for q in _QUOTES if q != quote):
+            return len(tokens)  # another kind of quote inside: not clear either
         if tokens[j].count(quote) % 2 == 1:
             return j + 1
     return len(tokens)
@@ -217,7 +230,10 @@ def redact_command(command: str) -> str | None:
     ``--flag=value`` values, paths, URLs, hosts, ``user:pass``, quoted text, variables. Once
     a flag or a masked argument appears, later plain words are masked too: they may be its
     value. A secret passed as a lowercase word right after the executable
-    (``redis-cli auth hunter2``) is still kept.
+    (``redis-cli auth hunter2``) is still kept. A setup builtin (``export``, ``cd``,
+    ``source``, ``set``, ...) keeps its name and one ``***`` for all its arguments, and its
+    tokens do not count against the four, so ``export X=… && ./sim.sh test`` keeps the
+    command it sets up: ``export *** && sim.sh test``.
     """
     lines = command.strip().splitlines()
     if not lines:
@@ -232,7 +248,8 @@ def redact_command(command: str) -> str | None:
     exe = True  # the next argument is an executable
     words = False  # plain words are still kept (right after the executable)
     wrapper = None  # flags of the wrapper whose options come next (sudo -u x make)
-    extra = 0  # wrapper tokens, not counted against _MAX_TOKENS
+    setup = False  # in a setup builtin's arguments (export X=… &&): all masked
+    extra = 0  # wrapper and setup tokens, not counted against _MAX_TOKENS
     while i < len(tokens) and len(out) < _MAX_TOKENS + extra:
         tok = tokens[i]
         end = _quoted_span(tokens, i)
@@ -261,19 +278,36 @@ def redact_command(command: str) -> str | None:
             continue
         if tok.startswith("#"):
             break
-        if end > i + 1 or any(q in tok for q in _QUOTES):
+        if tok in _SEPARATORS and end == i + 1:
+            out.append(tok)
+            if setup:  # the separator after a setup builtin is its own, too
+                extra = min(extra + 1, _MAX_WRAPPED)
+            exe, words, setup = True, False, False
+        elif setup:
+            if out[-1] != _MASK:  # one mask for all its arguments
+                out.append(_MASK)
+                extra = min(extra + 1, _MAX_WRAPPED)
+            glued = tok.endswith(";")  # export X=1; make: the separator glued to it
+            arg = tok[:-1] if glued else tok
+            if end != i + 1 or not (arg == _MASK or _SIMPLE_ARG.match(arg)):  # *** redacted
+                break  # $(…), 'x'"y", x\;, ;#: where its arguments end is not clear
+            if glued and len(out) < _MAX_TOKENS + extra:  # within the cap, as any token
+                out.append(";")
+                extra = min(extra + 1, _MAX_WRAPPED)
+                exe, setup = True, False
+        elif end > i + 1 or any(q in tok for q in _QUOTES):
             out.append(_MASK)
             exe = words = False
-        elif tok in _SEPARATORS:
-            out.append(tok)
-            exe, words = True, False
         elif exe:
             base = tok.rstrip("/").rsplit("/", 1)[-1]
-            ok = bool(_EXE.match(base)) and not _ASSIGN.match(base)
+            ok = (bool(_EXE.match(base)) and not _ASSIGN.match(base)) or base == "."
             out.append(base if ok else _MASK)
             exe, words = False, ok
             if ok and base in _WRAPPERS:
                 wrapper = _WRAPPERS[base]
+                extra = min(extra + 1, _MAX_WRAPPED)
+            elif ok and base in _SETUP:
+                setup, words = True, False
                 extra = min(extra + 1, _MAX_WRAPPED)
         elif _FLAG.match(tok):
             out.append(tok)
