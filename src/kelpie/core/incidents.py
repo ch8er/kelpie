@@ -4,8 +4,9 @@ A CI outage (a broken toolchain on a runner, every PR red for hours), a block st
 agents blocked within the hour on "waiting for CEO (Xcode first launch)") or CI jobs that
 never start are one incident each, not one alert per task. The rule that detects one
 reports it as a long-lived alert state; the engine folds the per-task alerts it explains
-under it; the daily report attributes the waits it explains to the outage. This module is
-the contract between the three. It lives in core because the engine reads it.
+under it; the daily report attributes the waits it explains to the outage (rule 9's failing
+CI jobs today; the other kinds as the report learns them, #229). This module is the
+contract between the three. It lives in core because the engine reads it.
 
 - **State.** ``<rule>:outage:<key>`` (:func:`incident_state_id`; :func:`outage_state_id` for
   rule 9's failing CI jobs), where ``<key>`` hashes what identifies the outage: for failing
@@ -19,8 +20,9 @@ the contract between the three. It lives in core because the engine reads it.
   without one (written before kinds existed) read as failing CI jobs. The ledger stores
   them with each announcement and, while the outage stays open, with the suppressed repeat
   it writes at most once an hour (repeats in between only count on that entry). So the
-  scope (``prs``, ``tasks``) of an entry is as of that entry: a task that joined since is
-  matched by its repository (``repos``).
+  scope (``prs``, ``tasks``) of an entry is as of that entry: for CI kinds a task that joined
+  since is matched by its repository (``repos``); a block storm has no repositories, so its
+  tasks are those of its latest sample.
 - **Folded alerts** (the engine): other rules' alerts that a task's block or wait lasts too
   long or names no condition (``Action.about_wait``) about tasks in ``tasks`` are held back
   while the outage is open: not critical ones, not ones more severe than the outage's alert,
@@ -38,11 +40,13 @@ the contract between the three. It lives in core because the engine reads it.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 OUTAGE = "outage"  # the middle part of every outage's state id
+_OUTAGE_ID = re.compile(rf"[a-z][a-z0-9_]*:{OUTAGE}:[0-9a-f]{{12}}")
 OUTAGE_STATE_PREFIX = "ci_economy:outage:"  # rule 9's failing CI jobs
 FOLDED_UNDER = "folded_under"  # param of a folded alert: the state id of its incident
 MAX_BUILDS = 20  # failing build ids an outage's params list, newest first
@@ -51,8 +55,9 @@ MAX_BUILDS = 20  # failing build ids an outage's params list, newest first
 CI_FAILURES = "ci_failures"  # rule 9: change requests failing at the same CI job and step
 CI_NOT_STARTED = "ci_not_started"  # rule 9: CI jobs that never start
 BLOCK_STORM = "block_storm"  # rule 4: many tasks blocked on the same reason at once
-TOOL_FAILURES = "tool_failures"  # the same tool failing for many tasks at once
-KINDS = frozenset({CI_FAILURES, CI_NOT_STARTED, BLOCK_STORM, TOOL_FAILURES})
+# A closed set on purpose: params of an unknown kind (a newer Kelpie's) are not read as
+# something they are not; a new signal adds its kind here.
+KINDS = frozenset({CI_FAILURES, CI_NOT_STARTED, BLOCK_STORM})
 
 
 def outage_signature(workflow: str | None, job: str, step: str | None) -> str:
@@ -73,9 +78,9 @@ def outage_state_id(workflow: str | None, job: str, step: str | None) -> str:
 
 def is_outage_state(state_id: str) -> bool:
     """Whether a state id (an alert state, or a folded alert's ``folded_under``) is an
-    outage's, whichever rule found it."""
-    rule, _, rest = state_id.partition(":")
-    return bool(rule) and rest.startswith(f"{OUTAGE}:") and len(rest) > len(OUTAGE) + 1
+    outage's, whichever rule found it: exactly what :func:`incident_state_id` makes, so a
+    task, host or session named "outage" in another rule's state id is no outage."""
+    return _OUTAGE_ID.fullmatch(state_id) is not None
 
 
 @dataclass(frozen=True, slots=True)

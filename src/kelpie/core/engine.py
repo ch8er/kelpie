@@ -28,7 +28,7 @@ from kelpie.core.alerts import (
 from kelpie.core.alerts import Transition as AlertTransition
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
-from kelpie.core.incidents import FOLDED_UNDER, CiOutage, is_outage_state
+from kelpie.core.incidents import FOLDED_UNDER, Outage, is_outage_state
 from kelpie.core.ledger import (
     ActionLedger,
     Dispatched,
@@ -239,7 +239,7 @@ class Engine:
             if state is None or now - state.last_seen >= self.states.resolve_after:
                 del self._incidents[state_id]
 
-    def _note_incident(self, action: Action, outage: CiOutage, dispatched: Dispatched) -> None:
+    def _note_incident(self, action: Action, outage: Outage, dispatched: Dispatched) -> None:
         """Remember what an incident alert folds, by whether people got it: delivered now, or
         announced live before (its state is committed only once handled live, so a failed
         escalation of an outage people already know of keeps folding; a failed first
@@ -751,13 +751,14 @@ class _Incident:
     reaches: bool  # people got its alert; else it was only logged
 
 
-def _incident(action: Action) -> CiOutage | None:
-    """The CI outage an alert reports, if it is one (its params name its own state)."""
+def _incident(action: Action) -> Outage | None:
+    """The outage an alert reports, whichever rule found it (its params name its own
+    state)."""
     if action.kind is not ActionKind.ALERT or action.state is None:
         return None
     if not is_outage_state(action.state):
         return None
-    outage = CiOutage.from_params(action.params)
+    outage = Outage.from_params(action.params)
     return outage if outage is not None and outage.state == action.state else None
 
 

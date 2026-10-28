@@ -53,7 +53,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from kelpie.core.incidents import FOLDED_UNDER, CiOutage, is_outage_state
+from kelpie.core.incidents import FOLDED_UNDER, OUTAGE_STATE_PREFIX, CiOutage, is_outage_state
 from kelpie.core.ledger import LedgerEntry, Suppression
 from kelpie.core.model import Condition, ConditionKind, Dependency, Snooze, Task
 from kelpie.core.states import OpenState
@@ -183,7 +183,9 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
     failing again later reuses the state id). Entries are as of their time (written at most
     hourly), so the repository clause in :meth:`WaitCauses.split` covers later joiners."""
     entries = list(entries)
-    found = [s for s in states if is_outage_state(s.id)]
+    # Rule 9's only, until the report attributes the other kinds (#229): a block storm is not
+    # "a shared CI failure".
+    found = [s for s in states if is_outage_state(s.id) and s.id.startswith(OUTAGE_STATE_PREFIX)]
     samples = [
         (e.at, o)
         for e in entries
