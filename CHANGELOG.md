@@ -351,6 +351,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 ### Fixed
 
+- `kelpie fix` wrote its errors to stdout; they go to stderr now, as for `report`, `why` and
+  `snooze` ([#246](https://github.com/ch8er/kelpie/pull/246)).
 - Kelpie's blocks, parks and wakes on a Hermes board showed up as written by the profile
   Kelpie runs under (`default`): they are signed `kelpie` now, like its comments, and the name
   is `[adapters.hermes] author` ([#189](https://github.com/ch8er/kelpie/pull/189)).
