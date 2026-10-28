@@ -685,29 +685,39 @@ class Snapshot:
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _index: _Index | None = field(default=None, init=False, repr=False, compare=False)
+
+    # The lookups below are indexed on first use: rules ask per task, so a linear scan per
+    # call made a tick quadratic in the board's size. The indexes are derived data, not a
+    # change to the snapshot, and give the same answers a scan would (the first match by id;
+    # tasks and sessions in snapshot order).
+
+    def _lookups(self) -> _Index:
+        index = self._index
+        if index is None:
+            index = _Index.of(self)
+            object.__setattr__(self, "_index", index)
+        return index
 
     def task(self, task_id: str) -> Task | None:
-        return next((t for t in self.tasks if t.id == task_id), None)
+        return self._lookups().tasks.get(task_id)
 
     def owner(self, owner_id: str) -> Owner | None:
-        return next((o for o in self.owners if o.id == owner_id), None)
+        return self._lookups().owners.get(owner_id)
 
     def condition(self, condition_id: str) -> Condition | None:
-        return next((c for c in self.conditions if c.id == condition_id), None)
+        return self._lookups().conditions.get(condition_id)
 
     def dependents(self, task_id: str) -> tuple[Task, ...]:
-        ids = {d.task_id for d in self.dependencies if d.depends_on == task_id}
-        return tuple(t for t in self.tasks if t.id in ids)
+        return self._lookups().dependents.get(task_id, ())
 
     def build(self, build_id: str) -> Build | None:
-        return next((b for b in self.builds if b.id == build_id), None)
+        return self._lookups().builds.get(build_id)
 
     def sessions_for(self, task_id: str) -> tuple[Session, ...]:
-        return tuple(s for s in self.sessions if s.task_id == task_id)
+        return self._lookups().sessions.get(task_id, ())
 
     def spans_for_session(self, session_id: str) -> tuple[Span, ...]:
-        # Indexed on first use: rules ask per session, and a snapshot can hold many spans.
-        # The cache is derived data, not a change to the snapshot.
         index = self._spans_by_session
         if index is None:
             grouped: dict[str, list[Span]] = {}
@@ -717,6 +727,47 @@ class Snapshot:
             index = {k: tuple(v) for k, v in grouped.items()}
             object.__setattr__(self, "_spans_by_session", index)
         return index.get(session_id, ())
+
+
+def _first_by_id[T: (Task, Owner, Condition, Build)](items: tuple[T, ...]) -> dict[str, T]:
+    """Items by id; with a repeated id, the first one (as a scan from the start finds)."""
+    by_id: dict[str, T] = {}
+    for item in items:
+        by_id.setdefault(item.id, item)
+    return by_id
+
+
+@dataclass(frozen=True, slots=True)
+class _Index:
+    """A snapshot's lookups by id, built once (:meth:`Snapshot._lookups`)."""
+
+    tasks: dict[str, Task]
+    owners: dict[str, Owner]
+    conditions: dict[str, Condition]
+    builds: dict[str, Build]
+    dependents: dict[str, tuple[Task, ...]]  # by the id they depend on, in task order
+    sessions: dict[str, tuple[Session, ...]]  # by task id, in session order
+
+    @classmethod
+    def of(cls, snapshot: Snapshot) -> _Index:
+        depends_on: dict[str, set[str]] = {}  # dependent task id -> the ids it depends on
+        for d in snapshot.dependencies:
+            depends_on.setdefault(d.task_id, set()).add(d.depends_on)
+        dependents: dict[str, list[Task]] = {}
+        for t in snapshot.tasks:  # every task with that id, as the scan returned them
+            for target in depends_on.get(t.id, ()):
+                dependents.setdefault(target, []).append(t)
+        sessions: dict[str, list[Session]] = {}
+        for s in snapshot.sessions:
+            sessions.setdefault(s.task_id, []).append(s)
+        return cls(
+            tasks=_first_by_id(snapshot.tasks),
+            owners=_first_by_id(snapshot.owners),
+            conditions=_first_by_id(snapshot.conditions),
+            builds=_first_by_id(snapshot.builds),
+            dependents={k: tuple(v) for k, v in dependents.items()},
+            sessions={k: tuple(v) for k, v in sessions.items()},
+        )
 
 
 def active_snooze(snapshot: Snapshot, task_id: str) -> Snooze | None:
