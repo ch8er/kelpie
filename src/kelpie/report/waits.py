@@ -53,7 +53,13 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from kelpie.core.incidents import FOLDED_UNDER, OUTAGE_STATE_PREFIX, CiOutage, is_outage_state
+from kelpie.core.incidents import (
+    CI_FAILURES,
+    FOLDED_UNDER,
+    OUTAGE_STATE_PREFIX,
+    CiOutage,
+    is_outage_state,
+)
 from kelpie.core.ledger import LedgerEntry, Suppression
 from kelpie.core.model import Condition, ConditionKind, Dependency, Snooze, Task
 from kelpie.core.states import OpenState
@@ -183,13 +189,20 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
     failing again later reuses the state id). Entries are as of their time (written at most
     hourly), so the repository clause in :meth:`WaitCauses.split` covers later joiners."""
     entries = list(entries)
-    # Rule 9's only, until the report attributes the other kinds (#229): a block storm is not
-    # "a shared CI failure".
-    found = [s for s in states if is_outage_state(s.id) and s.id.startswith(OUTAGE_STATE_PREFIX)]
+    # Rule 9's failing CI jobs only, until the report attributes the other kinds (#229): a
+    # block storm, or CI jobs that never start (a state of rule 9's too), are not "a shared
+    # CI failure".
     samples = [
         (e.at, o)
         for e in entries
         if e.rule == "ci_economy" and (o := CiOutage.from_params(e.params)) is not None
+    ]
+    other = {o.state for _, o in samples if o.kind != CI_FAILURES}
+    samples = [(at, o) for at, o in samples if o.kind == CI_FAILURES]
+    found = [
+        s
+        for s in states
+        if is_outage_state(s.id) and s.id.startswith(OUTAGE_STATE_PREFIX) and s.id not in other
     ]
     out = []
     for s in found:
