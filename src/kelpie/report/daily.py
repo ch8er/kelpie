@@ -1355,9 +1355,10 @@ def _recommendations(
             if in_use and rec.filter.advice is None
             else rec.filter.how
         )
-        # a built-in tool's advice is a way to call it, not a filter to put it through
+        # A built-in tool's advice is a way to call it, not a filter to put it through; it
+        # carries no platform caveat (the default advice rows work on any platform).
         title = (
-            f"{rec.filter.advice}: {md.code(group.key)} output{role}"
+            f"{md.text(rec.filter.advice)}: {md.code(group.key)} output{role}"
             if rec.filter.advice is not None
             else f"Filter {md.code(group.key)} output{role} with {rec.filter.name}{maybe}"
         )
@@ -1368,7 +1369,11 @@ def _recommendations(
                     f"{group.calls} calls put {group.tokens:,} tokens into the context, "
                     f"{round(group.mean):,} per call; {how}. Expected saving: about "
                     f"{rec.saved_tokens:,} tokens a day (assumed {rec.filter.reduction:.0%}; "
-                    "verified before/after once it is in place)"
+                    + (
+                        "verified before/after once noted with `kelpie fix`)"
+                        if rec.filter.advice is not None
+                        else "verified before/after once it is in place)"
+                    )
                 ),
                 usd=pricer.input_usd(rec.saved_tokens, model),
                 tasks=group.tasks,
@@ -2063,11 +2068,15 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
     for r in report.offenders:
         owner = f"{md.text(r.owner)}: " if r.owner else ""
         g = r.group
-        role = md.text(g.role or "agents")
+        whose = f"{md.text(g.role)}'s" if g.role else "agents'"
+        what = (
+            f'"{md.text(r.filter.advice)}" for {md.code(g.key)}'  # a way to call a built-in tool
+            if r.filter.advice is not None
+            else f"{md.text(r.filter.name)} for {md.code(g.key)}"
+        )
         out.append(
-            f"- {owner}add {r.filter.name} for {md.code(g.key)} to the {role}' "
-            f"instructions: above the threshold on {len(g.hot_days)} days "
-            f"{tasks(g.tasks)}".rstrip()
+            f"- {owner}add {what} to the {whose} instructions: above the threshold on "
+            f"{len(g.hot_days)} days {tasks(g.tasks)}".rstrip()
         )
     return out
 

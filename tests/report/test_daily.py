@@ -1045,3 +1045,40 @@ def test_a_built_in_tools_advice_is_its_title_not_a_filter() -> None:
     assert "Downscale images: `tool:vision_analyze` output (developer)" in titles
     assert "Filter `xcodebuild` output (developer) with xcbeautify" in titles
     assert not any("with downscale-images" in t for t in titles)
+    [image_advice] = [a for a in advice if a.title.startswith("Downscale images")]
+    assert "once noted with `kelpie fix`" in image_advice.detail
+    # an advice row the farm's spans already name is still advice, not "route it through"
+    in_use = _recommendations(
+        ReportInputs(day=DAY, tz=UTC), (), (), [image], _Pricer(PriceTable()), {},
+        filters_in_use=frozenset({("downscale-images", None)}),
+    )  # fmt: skip
+    [again] = in_use
+    assert by_name["downscale-images"].how in again.detail
+    assert "route it through" not in again.detail
+
+
+def test_needs_a_human_names_the_advice_for_a_built_in_tool() -> None:
+    from dataclasses import replace
+
+    from kelpie.traces.outputs import DEFAULT_FILTERS, OutputGroup, Recommendation
+
+    by_name = {f.name: f for f in DEFAULT_FILTERS}
+    day = datetime(2026, 3, 1, tzinfo=UTC).date()
+    hot = (day, day)
+    image = OutputGroup(
+        "developer", "tool:vision_analyze", 40, 400_000, 20_000, False, hot_days=hot
+    )
+    shell = OutputGroup(None, "xcodebuild", 4, 160_000, 40_000, False, hot_days=hot)
+    report = replace(
+        build_report(ReportInputs(day=DAY, tz=UTC)),
+        offenders=(
+            Recommendation(image, by_name["downscale-images"], 1, True, None, True),
+            Recommendation(shell, by_name["xcbeautify"], 1, True, None, True),
+        ),
+    )
+    markdown = render_markdown(report)
+    assert (
+        '- add "Downscale images" for `tool:vision_analyze` to the developer\'s instructions'
+        in markdown
+    )
+    assert "- add xcbeautify for `xcodebuild` to the agents' instructions" in markdown
