@@ -25,8 +25,9 @@ def test_result_classes() -> None:
     assert tool_result(1) == tool_result(127) == tool_result(124) == ERROR
     assert tool_result(0, background=True) == tool_result(1, background=True) == UNKNOWN
     assert tool_result(None) == UNKNOWN
-    assert tool_result(-1) == tool_result(0, blocked=True) == BLOCKED
-    assert tool_result(-1, background=True) == BLOCKED  # refused, not started
+    assert tool_result(0, blocked=True) == tool_result(None, blocked=True) == BLOCKED
+    assert tool_result(-1) == ERROR  # a platform's own failure to run it, or a signal
+    assert tool_result(-1, background=True, blocked=True) == BLOCKED  # refused, not started
 
 
 def test_reading_them_back() -> None:

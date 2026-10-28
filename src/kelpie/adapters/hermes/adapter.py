@@ -139,7 +139,14 @@ from kelpie.adapters.hermes.park import (
     unblock_args,
 )
 from kelpie.adapters.hermes.processes import HostTools, ToolProcesses, read_host, resolve, task_at
-from kelpie.adapters.hermes.state_db import DEFAULT_SOURCES, Usage, Wait, read_usage, read_waits
+from kelpie.adapters.hermes.state_db import (
+    DEFAULT_SOURCES,
+    TERMINAL_TOOL,
+    Usage,
+    Wait,
+    read_usage,
+    read_waits,
+)
 from kelpie.adapters.hermes.stop import (
     CLI_TIMEOUT,
     DEFAULT_CLI,
@@ -179,7 +186,14 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
-from kelpie.core.tools import ERROR, EXIT_CODE_ATTRIBUTE, OK, RESULT_ATTRIBUTE, tool_result
+from kelpie.core.tools import (
+    BLOCKED,
+    ERROR,
+    EXIT_CODE_ATTRIBUTE,
+    OK,
+    RESULT_ATTRIBUTE,
+    tool_result,
+)
 from kelpie.traces.hooks import SESSION_END, TOOL, HookEvent, spans_from_hook_events
 from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE
 
@@ -1781,13 +1795,16 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
         code = rec.get("exit_code")
         code = code if isinstance(code, int) and not isinstance(code, bool) else None
         background, blocked = rec.get("background") is True, rec.get("blocked") is True
-        if rec["type"] == TOOL and (code is not None or background or blocked):
+        known = code is not None or background or blocked
+        if rec["type"] == TOOL and tool == TERMINAL_TOOL and known:
             result = tool_result(code, background=background, blocked=blocked)
             attributes[RESULT_ATTRIBUTE] = result
             if code is not None:
                 attributes[EXIT_CODE_ATTRIBUTE] = code
             if result in (OK, ERROR):  # a foreground exit code is the call's own account
                 outcome = result
+            elif result == BLOCKED:  # never ran: neither a failure nor a success
+                outcome = None
         return HookEvent(
             kind=rec["type"],
             at=at,

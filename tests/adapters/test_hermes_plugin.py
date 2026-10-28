@@ -260,6 +260,21 @@ def test_plugin_is_standalone() -> None:
             {"command": "make serve", "background": True},
             {"exit_code": 0, "background": True},
         ),
+        # A degraded backend or a fatal error: -1 without a block is a failure.
+        (
+            '{"output": "", "exit_code": -1, "status": "degraded", "error": "SSH host down"}',
+            {},
+            {"exit_code": -1},
+        ),
+        # A long foreground call Hermes promoted to the background: started, not done.
+        (
+            '{"output": "Background process started", "session_id": "p1", "pid": 42,'
+            ' "exit_code": 0, "promoted_from_foreground": true}',
+            {"command": "xcodebuild test", "timeout": 3600},
+            {"exit_code": 0, "background": True},
+        ),
+        ('{"exit_code": 0}', {"command": "x", "background": "false"}, {"exit_code": 0}),
+        ('{"exit_code": 10000000000000}', {}, {}),  # no exit code
         # Nothing to read: the error key alone, odd types, not JSON, too large.
         ('{"output": "x", "error": "boom"}', {}, {}),
         ('{"exit_code": "1"}', {}, {}),
@@ -279,3 +294,19 @@ def test_exit_code_and_background_from_the_result(
     assert found == expected
     text = spool.read_text()
     assert "BUILD OK" not in text and "refused" not in text and "not found" not in text
+    assert "SSH host" not in text
+
+
+def test_only_the_terminal_tool_reports_an_exit_code(spool: Path) -> None:
+    """``process`` reports the exit code of the job it polls or kills, not its own."""
+    for result in (
+        '{"status": "exited", "exit_code": 1}',
+        '{"status": "killed", "exit_code": -15}',
+    ):
+        plugin.post_tool_call(tool_name="process", args={"action": "poll"}, result=result)
+    assert [
+        {k for k in ("exit_code", "blocked", "background") if k in r} for r in lines(spool)
+    ] == [
+        set(),
+        set(),
+    ]

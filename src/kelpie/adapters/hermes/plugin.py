@@ -370,26 +370,40 @@ def _output_chars(result: Any) -> int | None:
 MAX_RESULT_PARSE = 1 << 20  # characters of a tool result read for its exit code
 
 
-def _result_fields(result: Any) -> dict[str, Any]:
-    """The exit code a tool result reports (``exit_code``, an int) and whether Hermes
-    refused the call (``status: "blocked"``). The result's ``error`` key is not read: it is
-    null on a failed build too. Nothing of the output is kept."""
+TERMINAL_TOOL = "terminal"  # Hermes' shell tool: its exit code is the command's
+MAX_EXIT_CODE = 2**31  # a larger one is no exit code
+
+
+def _result_fields(tool: str | None, args: Any, result: Any) -> dict[str, Any]:
+    """For the terminal tool only (other tools' exit codes are not the call's: ``process``
+    reports the code of the job it polls or kills): the exit code its result reports
+    (``exit_code``, an int), whether Hermes refused the call (``status: "blocked"``; an
+    exit code -1 alone is also a degraded backend or a fatal error, a failure), and whether
+    the command went to the background (asked for, or promoted from the foreground for a
+    long timeout: its 0 means started). The result's ``error`` key is not read: it is null
+    on a failed build too. Nothing of the output is kept."""
+    if tool != TERMINAL_TOOL:
+        return {}
+    out: dict[str, Any] = {}
+    if isinstance(args, dict) and args.get("background") is True:
+        out["background"] = True
     data = result
     if isinstance(result, str):
         if len(result) > MAX_RESULT_PARSE or not result.lstrip().startswith("{"):
-            return {}
+            return out
         try:
             data = json.loads(result)
         except (ValueError, RecursionError):
-            return {}
+            return out
     if not isinstance(data, dict):
-        return {}
-    out: dict[str, Any] = {}
+        return out
     code = data.get("exit_code")
-    if isinstance(code, int) and not isinstance(code, bool):
+    if isinstance(code, int) and not isinstance(code, bool) and abs(code) <= MAX_EXIT_CODE:
         out["exit_code"] = code
     if data.get("status") == "blocked":
         out["blocked"] = True
+    if data.get("promoted_from_foreground") or ("pid" in data and "session_id" in data):
+        out["background"] = True  # a background spawn: started, not done
     return out
 
 
@@ -408,10 +422,8 @@ def post_tool_call(**kwargs: Any) -> None:
             "outcome": "error" if status in {"error", "failed", "failure"} else "ok",
             "duration_ms": _duration_ms(kwargs.get("duration_ms")),
             "output_chars": _output_chars(kwargs.get("result")),
-            **_result_fields(kwargs.get("result")),
         }
-        if isinstance(args, dict) and args.get("background"):
-            record["background"] = True  # its exit code 0 means started, not done
+        record.update(_result_fields(record["tool"], args, kwargs.get("result")))
         append(record)
     except Exception:  # hooks must never break the agent
         return
