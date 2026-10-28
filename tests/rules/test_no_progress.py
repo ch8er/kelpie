@@ -454,7 +454,11 @@ def test_steps_count_per_session_and_a_model_no_longer_at_work_does_not_speak() 
     late = [replace(one, span_id=f"late-{i}", start=NOW - M + i * timedelta(seconds=10),
                     input_tokens=50_000, model="model-b") for i in range(3)]  # fmt: skip
     old = [replace(s, start=s.start - 5 * M) for s in growing(sizes=(200_000,) * 5)]
-    assert context_alerts(*old, *late) == []  # model-a has most tokens but stopped
+    assert context_alerts(*old, *late) == []  # model-a stopped; model-b's context is small
+    switched = [replace(s, input_tokens=180_000 + i) for i, s in enumerate(late)]
+    [after] = context_alerts(*old, *switched)  # a runaway on the model that took over
+    assert after.params["model"] == "model-b" and after.params["context_tokens"] == 180_002
+    assert after.params["reread_tokens"] == 5 * 200_000 + 3 * 180_000 + 3  # all its steps
 
 
 def test_runaway_context_hooks() -> None:

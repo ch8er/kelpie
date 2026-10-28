@@ -39,9 +39,9 @@ and a latest step whose context (input tokens, cached ones included) is at least
 ``context_alert_tokens`` → one ``info`` alert, a lasting state per session, with the
 context, the mean growth per step (compactions, a step below half the one before, left out)
 and the tokens re-read in the window, recommending compaction or a bounded session. The
-context is the main model's (the one with most input tokens in the window, while it is still
-at work: its latest step among the session's last two), so side calls on a small model are
-no compaction. A board session that has ended is left out: there is nothing left to compact.
+context is the main model's (of the models still at work, a step among the session's last
+two, the one with most input tokens in the window), so side calls on a small model are no
+compaction. A board session that has ended is left out: there is nothing left to compact.
 Once open it stays open while the context is above ``CONTEXT_KEEP`` of the threshold, so a
 session near it does not flap, and it closes when the session compacts or goes quiet. The
 task is the board session's, else the spans'. ``context_alert_tokens = 0`` turns it off.
@@ -120,10 +120,7 @@ class NoProgress:
             if len(spans) < self.context_min_steps:
                 continue
             spans.sort(key=lambda s: (s.start, s.span_id))
-            found = _main_model(spans)
-            if found is None:
-                continue  # the model with most of the context is not the one at work now
-            (main,) = found
+            main = _main_model(spans)
             mine = [s for s in spans if s.model == main]
             sizes = [s.input_tokens for s in mine]
             bar = self.context_alert_tokens
@@ -138,7 +135,10 @@ class NoProgress:
                 if session is not None
                 else next((s.task_id for s in reversed(spans) if s.task_id), None)
             )
-            actions.append(self._context_alert(sid, task_id, sizes, len(spans), per_step, main))
+            reread = sum(s.input_tokens for s in spans)  # every step re-reads its context
+            actions.append(
+                self._context_alert(sid, task_id, sizes, len(spans), reread, per_step, main)
+            )
         return actions
 
     def boards(self, state_id: str) -> bool:
@@ -165,11 +165,11 @@ class NoProgress:
         task_id: str | None,
         sizes: Sequence[int],
         steps: int,
+        reread: int,
         per_step: int,
         model: str | None,
     ) -> Action:
         window = _fmt(self.window)
-        reread = sum(sizes)
         of_task = f" of task {task_id}" if task_id else ""
         return Action(
             ActionKind.ALERT,
@@ -243,15 +243,16 @@ def context_state(session_id: str) -> str:
     return CONTEXT_PREFIX + session_id
 
 
-def _main_model(spans: Sequence[Span]) -> tuple[str | None] | None:
-    """The model that carries the session's context (most input tokens in the window, a
-    model not named being one), if it is still at work: its latest step among the session's
-    last ``MAIN_RECENT`` (side calls on a small model come between its steps); else None."""
+def _main_model(spans: Sequence[Span]) -> str | None:
+    """The model that carries the session's context: of those still at work (a step among
+    the session's last ``MAIN_RECENT``; side calls on a small model come between its steps),
+    the one with most input tokens in the window. A model not named counts as one."""
+    recent = {s.model for s in spans[-MAIN_RECENT:]}
     totals: dict[str | None, int] = defaultdict(int)
     for s in spans:
-        totals[s.model] += s.input_tokens
-    main = max(totals, key=lambda m: (totals[m], m or ""))
-    return (main,) if any(s.model == main for s in spans[-MAIN_RECENT:]) else None
+        if s.model in recent:
+            totals[s.model] += s.input_tokens
+    return max(totals, key=lambda m: (totals[m], m or ""))
 
 
 def _fmt(d: timedelta) -> str:
