@@ -57,7 +57,7 @@ from kelpie.core.incidents import FOLDED_UNDER, OUTAGE_STATE_PREFIX, CiOutage, i
 from kelpie.core.ledger import LedgerEntry, Suppression
 from kelpie.core.model import Condition, ConditionKind, Dependency, Snooze, Task
 from kelpie.core.states import OpenState
-from kelpie.report import farm, md
+from kelpie.report import farm, intervals, md
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.throughput import RoleThroughput
 
@@ -327,22 +327,22 @@ class WaitCauses:
         total = (b - a).total_seconds() / 3600
         if self._labels.intersection(task.labels):
             return {"hold": total}
-        outage = _merged(
+        outage = intervals.merged(
             (max(a, o.since), min(b, o.until))
             for o in self._outages
             if o.since < b and o.until > a and self._explains(o, task)
         )
         own = self(task)
-        snoozed: _Spans = []
+        snoozed: intervals.Spans = []
         if own in ("people", UNKNOWN):
-            windows = _merged(
+            windows = intervals.merged(
                 (max(a, s.created_at), min(b, _holds_until(s))) for s in self.snooze_sources(task)
             )
-            live = _merged(
+            live = intervals.merged(
                 (max(a, lo or a), min(b, hi or b)) for lo, hi in self._live.get(task.id, ())
             )
-            snoozed = _minus(_minus(windows, live), outage)
-        held, covered = _hours(snoozed), _hours(outage)
+            snoozed = intervals.minus(intervals.minus(windows, live), outage)
+        held, covered = intervals.hours(snoozed), intervals.hours(outage)
         out: dict[str, float] = {}
         if held > 1e-9:
             out[SNOOZED] = held
@@ -443,40 +443,6 @@ def biggest_wait(
                 repos[repo] += 1
     repo = min(repos, key=lambda x: (-repos[x], x)) if repos else None
     return BiggestWait(role, cause, hours, r.busy_hours, waited, repo, facts)
-
-
-type _Spans = list[tuple[datetime, datetime]]
-
-
-def _merged(spans: Iterable[tuple[datetime, datetime]]) -> _Spans:
-    """Non-empty spans, sorted and merged where they overlap."""
-    out: _Spans = []
-    for lo, hi in sorted(x for x in spans if x[1] > x[0]):
-        if out and lo <= out[-1][1]:
-            out[-1] = (out[-1][0], max(out[-1][1], hi))
-        else:
-            out.append((lo, hi))
-    return out
-
-
-def _hours(spans: _Spans) -> float:
-    return sum((hi - lo).total_seconds() for lo, hi in spans) / 3600
-
-
-def _minus(x: _Spans, y: _Spans) -> _Spans:
-    """The parts of merged spans ``x`` outside merged spans ``y``."""
-    out: _Spans = []
-    for lo, hi in x:
-        start = lo
-        for lo2, hi2 in y:
-            if hi2 <= start or lo2 >= hi:
-                continue
-            if lo2 > start:
-                out.append((start, lo2))
-            start = max(start, hi2)
-        if hi > start:
-            out.append((start, hi))
-    return out
 
 
 def _holds_until(s: Snooze) -> datetime:
