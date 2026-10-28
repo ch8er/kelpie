@@ -184,30 +184,30 @@ def note_fix(
     role: str | None = None,
     when: str | None = None,
     clock: Callable[[], datetime] = utc_now,
-) -> tuple[str, int]:
+) -> tuple[str, str, int]:
     """``kelpie fix``: record a manual fix for the daily report to verify."""
     if settings.db_path is None:
-        return "kelpie: fixes need a database ([storage] path is :memory:)\n", 2
+        return "", "kelpie: fixes need a database ([storage] path is :memory:)\n", 2
     if not settings.db_path.exists():
-        return f"kelpie: no database at {settings.db_path} yet; run kelpie serve first\n", 2
+        return "", f"kelpie: no database at {settings.db_path} yet; run kelpie serve first\n", 2
     now = clock()
     try:  # now, -2h, or ISO (without an offset: in [report] timezone)
         at = parse_when(when, now, settings.report.tz) if when is not None else now
     except ValueError as exc:
-        return f"kelpie: --at: {exc}\n", 2
+        return "", f"kelpie: --at: {exc}\n", 2
     if at > now + FUTURE_SKEW:
-        return f"kelpie: --at {_both(at, settings.report.tz)} is in the future\n", 2
+        return "", f"kelpie: --at {_both(at, settings.report.tz)} is in the future\n", 2
     if rule is not None and rule not in REGISTRY:
-        return f"kelpie: unknown rule {rule!r}\n", 2
+        return "", f"kelpie: unknown rule {rule!r}\n", 2
     event = FixEvent(at, MANUAL, note, rule, command, role)
     try:
         with FixStore(settings.db_path) as store:
             store.add(event)
     except ValueError as exc:
-        return f"kelpie: {exc}\n", 2
+        return "", f"kelpie: {exc}\n", 2
     except (OSError, sqlite3.Error) as exc:
-        return f"kelpie: cannot write to {settings.db_path}: {exc}\n", 1
-    return f"fix noted at {_both(at, settings.report.tz)}: {event.note.strip()}\n", 0
+        return "", f"kelpie: cannot write to {settings.db_path}: {exc}\n", 1
+    return f"fix noted at {_both(at, settings.report.tz)}: {event.note.strip()}\n", "", 0
 
 
 def _both(at: datetime, tz: tzinfo) -> str:
@@ -218,23 +218,23 @@ def _both(at: datetime, tz: tzinfo) -> str:
 
 def list_fixes(
     settings: Settings, days: int = 7, clock: Callable[[], datetime] = utc_now
-) -> tuple[str, int]:
+) -> tuple[str, str, int]:
     """``kelpie fix --list``: the fixes recorded in the last ``days`` (manual and config;
     mode changes and filters are found when the report runs), in [report] timezone."""
     if not 0 < days <= MAX_LIST_DAYS:
-        return f"kelpie: --days must be between 1 and {MAX_LIST_DAYS}\n", 2
+        return "", f"kelpie: --days must be between 1 and {MAX_LIST_DAYS}\n", 2
     if settings.db_path is None:
-        return "kelpie: fixes need a database ([storage] path is :memory:)\n", 2
+        return "", "kelpie: fixes need a database ([storage] path is :memory:)\n", 2
     if not settings.db_path.exists():
-        return "no fixes recorded (no database yet)\n", 0
+        return "no fixes recorded (no database yet)\n", "", 0
     now = clock()
     try:
         with ReportStore(settings.db_path) as store:
             found = store.fixes(now - timedelta(days=days), now + FUTURE_SKEW)
     except (OSError, sqlite3.Error, RuntimeError) as exc:
-        return f"kelpie: cannot read the database {settings.db_path}: {exc}\n", 1
+        return "", f"kelpie: cannot read the database {settings.db_path}: {exc}\n", 1
     if not found:
-        return f"no fixes recorded in the last {days} day(s)\n", 0
+        return f"no fixes recorded in the last {days} day(s)\n", "", 0
     tz = settings.report.tz
     lines = []
     for f in found:
@@ -245,7 +245,7 @@ def list_fixes(
         when = f.at.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
         note = " ".join(f.note.split())  # one line per fix
         lines.append(f"{when}  {f.kind:<6}  {note}" + (f"  [{scope}]" if scope else ""))
-    return "\n".join(lines) + "\n", 0
+    return "\n".join(lines) + "\n", "", 0
 
 
 def scheduled_run(

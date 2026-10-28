@@ -272,12 +272,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not args.list and args.note is None:
                 fix.error("a note is required unless --list is given")
             if args.list:
-                text, code = list_fixes(settings, 7 if args.days is None else args.days)
+                out, err, code = list_fixes(settings, 7 if args.days is None else args.days)
             else:
-                text, code = note_fix(
+                out, err, code = note_fix(
                     settings, args.note, args.rule, args.command_prefix, args.role, args.at
                 )
-            sys.stdout.write(text)
+            sys.stdout.write(out)
+            sys.stderr.write(err)
             return code
         if args.command == "report":
             from kelpie.report.cli import run as run_report

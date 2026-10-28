@@ -273,9 +273,9 @@ def test_kelpie_fix_command(
     assert main([*args, "--at", "2026-03-01T08:00:00+00:00", "--command", "make test"]) == 0
     assert "fix noted at 2026-03-01T08:00+00:00" in capsys.readouterr().out
     settings = load_settings(path)
-    assert note_fix(settings, "x", rule="no_such_rule")[1] == 2
-    assert note_fix(settings, "x", when="yesterday")[1] == 2
-    assert note_fix(settings, " ")[1] == 2
+    assert note_fix(settings, "x", rule="no_such_rule")[2] == 2
+    assert note_fix(settings, "x", when="yesterday")[2] == 2
+    assert note_fix(settings, " ")[2] == 2
     with ReportStore(tmp_path / "kelpie.db") as store:
         [fix] = store.fixes(FIX - timedelta(hours=1), FIX + timedelta(hours=1))
     assert (fix.rule, fix.command, fix.note) == (
@@ -285,7 +285,7 @@ def test_kelpie_fix_command(
     )
     memory = tmp_path / "memory.toml"
     memory.write_text('[storage]\npath = ":memory:"\n')
-    assert note_fix(load_settings(memory), "x")[1] == 2
+    assert note_fix(load_settings(memory), "x")[2] == 2
 
 
 def test_verify_config() -> None:
@@ -397,12 +397,12 @@ def test_kelpie_fix_times_and_order(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n[report]\ntimezone = "Asia/Tokyo"\n'
     )
     settings = load_settings(path)
-    text, code = note_fix(settings, "too early")
+    _, text, code = note_fix(settings, "too early")
     assert code == 2 and "run kelpie serve first" in text
     SqliteLedgerStore(tmp_path / "kelpie.db").close()
     now = lambda: datetime(2026, 3, 1, 12, tzinfo=UTC)  # noqa: E731
-    assert note_fix(settings, "naive", when="2026-03-01T09:00", clock=now)[1] == 0
-    text, code = note_fix(settings, "later", when="2026-03-02T09:00+00:00", clock=now)
+    assert note_fix(settings, "naive", when="2026-03-01T09:00", clock=now)[2] == 0
+    _, text, code = note_fix(settings, "later", when="2026-03-02T09:00+00:00", clock=now)
     assert code == 2 and "future" in text
     with ReportStore(tmp_path / "kelpie.db") as store:
         [fix] = store.fixes(FIX - timedelta(days=1), FIX + timedelta(days=1))
@@ -438,18 +438,18 @@ def test_kelpie_fix_list(
         f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n[report]\ntimezone = "Europe/Berlin"\n'
     )
     settings = load_settings(path)
-    assert list_fixes(settings) == ("no fixes recorded (no database yet)\n", 0)
+    assert list_fixes(settings) == ("no fixes recorded (no database yet)\n", "", 0)
     SqliteLedgerStore(tmp_path / "kelpie.db").close()
     now = lambda: datetime(2026, 3, 2, 12, tzinfo=UTC)  # noqa: E731
     assert list_fixes(settings, clock=now)[0].startswith("no fixes recorded in the last 7")
     for when, note in (("2026-03-01T09:00", "lifted the merge hold"), ("2026-02-01T09:00", "old")):
-        assert note_fix(settings, note, rule="bottlenecks", when=when, clock=now)[1] == 0
-    text, code = list_fixes(settings, clock=now)
+        assert note_fix(settings, note, rule="bottlenecks", when=when, clock=now)[2] == 0
+    text, _, code = list_fixes(settings, clock=now)
     assert code == 0 and text.splitlines() == [
         "2026-03-01 09:00 CET  manual  lifted the merge hold  [rule=bottlenecks]"
     ]
-    assert list_fixes(settings, days=0)[1] == 2
-    assert list_fixes(settings, days=10**9)[1] == 2
+    assert list_fixes(settings, days=0)[2] == 2
+    assert list_fixes(settings, days=10**9)[2] == 2
     args = ["--config", str(path), "fix"]
     for bad, why in (
         ([], "note is required"),
@@ -483,10 +483,10 @@ def test_kelpie_fix_at_now_and_relative(
     assert stamps[0] - stamps[1] == pytest.approx(timedelta(hours=2), abs=timedelta(minutes=1))
     assert stamps[0] - stamps[2] == pytest.approx(timedelta(hours=26), abs=timedelta(minutes=1))
     settings = load_settings(path)
-    text, code = note_fix(settings, "x", when="2h")
+    _, text, code = note_fix(settings, "x", when="2h")
     assert code == 2 and "--at: invalid time '2h'" in text
-    assert note_fix(settings, "x", when="")[1] == 2  # --at= is not "now"
-    text, code = note_fix(settings, "x", when="-800000d")
+    assert note_fix(settings, "x", when="")[2] == 2  # --at= is not "now"
+    _, text, code = note_fix(settings, "x", when="-800000d")
     assert code == 2 and "out of range" in text
     assert main([*args, "four", "--at", "-2H"]) == 0
     assert "Asia/Tokyo)" in capsys.readouterr().out  # UTC, then the clock there
@@ -509,3 +509,20 @@ def test_relative_at_is_joined_for_fix_only(argv: list[str], expected: list[str]
     from kelpie.cli import _relative_at
 
     assert _relative_at(argv) == expected
+
+
+def test_kelpie_fix_errors_go_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text(f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n')
+    SqliteLedgerStore(tmp_path / "kelpie.db").close()
+    args = ["--config", str(path), "fix"]
+    for extra in (["x", "--rule", "no_such_rule"], ["x", "--at", "2h"], ["--list", "--days", "0"]):
+        assert main([*args, *extra]) == 2
+        got = capsys.readouterr()
+        assert got.out == "" and got.err.startswith("kelpie: ")
+    assert main([*args, "ok"]) == 0
+    got = capsys.readouterr()
+    assert got.out.startswith("fix noted at ") and got.err == ""
