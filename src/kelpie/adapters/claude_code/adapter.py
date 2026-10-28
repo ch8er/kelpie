@@ -74,6 +74,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
+from kelpie.adapters import _spool
 from kelpie.adapters.claude_code import hook
 from kelpie.adapters.claude_code.process import process_state
 from kelpie.core.actions import ActionKind, ActionResult
@@ -357,18 +358,9 @@ class ClaudeCodeAdapter:
         dated after ``until``."""
         if self.spool is None:
             return None
-        try:
-            fd = _open_regular(self.spool)
-        except OSError:
+        tail = _spool.tail_lines(self.spool, SPOOL_TAIL)
+        if tail is None:
             return None
-        try:
-            size = os.fstat(fd).st_size
-            os.lseek(fd, max(0, size - SPOOL_TAIL), os.SEEK_SET)
-            tail = os.read(fd, SPOOL_TAIL).decode("utf-8", "replace").splitlines()
-        except OSError:
-            return None
-        finally:
-            os.close(fd)
         oldest = datetime.min.replace(tzinfo=UTC)
         for line in reversed(tail):
             if (event := parse_line(line, oldest, until)) is not None:
@@ -705,16 +697,7 @@ class ClaudeCodeAdapter:
         return spans_from_hook_events(hook_events, prefix=self.name)
 
     def _spool_lines(self, cutoff: datetime) -> Iterator[str]:
-        if self.spool is None:
-            return
-        rotated = self.spool.with_name(self.spool.name + ".1")
-        for path in (rotated, self.spool):
-            try:
-                if path is rotated and path.stat().st_mtime < cutoff.timestamp():
-                    continue  # nothing in it can be inside the lookback
-                yield from _read_lines(path, MAX_SPOOL_READ)
-            except OSError:
-                continue
+        return _spool.spool_lines(self.spool, cutoff, MAX_SPOOL_READ, MAX_LINE)
 
     def _events(self, cutoff: datetime, until: datetime | None = None) -> Iterator[SpoolEvent]:
         for line in self._spool_lines(cutoff):
@@ -805,37 +788,6 @@ class ClaudeCodeAdapter:
         raise UnsupportedAction(UNSUPPORTED)
 
 
-def _open_regular(path: Path) -> int:
-    """A descriptor for a regular file at ``path``, opened without following a symlink or
-    blocking on a FIFO (agents can write next to the spool). Raises OSError otherwise."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{path} is not a regular file")
-    except OSError:
-        os.close(fd)
-        raise
-    return fd
-
-
-def _read_lines(path: Path, limit: int) -> Iterator[str]:
-    """Lines of a regular file, reading at most ``limit`` bytes; overlong lines skipped."""
-    fd = _open_regular(path)
-    with os.fdopen(fd, "rb") as f:
-        left = limit
-        while left > 0:
-            line = f.readline(min(MAX_LINE + 1, left))
-            if not line:
-                return
-            left -= len(line)
-            if len(line) > MAX_LINE:
-                while line and not line.endswith(b"\n") and left > 0:  # skip its rest
-                    line = f.readline(min(MAX_LINE + 1, left))
-                    left -= len(line)
-                continue
-            yield line.decode("utf-8", "replace")
-
-
 def write_marker(directory: Path, session_id: str, reason: str, at: float) -> Path:
     """Write ``<directory>/<session_id>.json`` atomically (mode 0600), replacing an older one."""
     if not hook._SESSION_ID.fullmatch(session_id):
@@ -859,7 +811,7 @@ def write_marker(directory: Path, session_id: str, reason: str, at: float) -> Pa
 def read_marker(directory: Path, session_id: str) -> datetime | None:
     """When the session's stop marker was written; None if there is no usable one."""
     try:
-        fd = _open_regular(directory / f"{session_id}.json")
+        fd = _spool.open_regular(directory / f"{session_id}.json")
     except OSError:
         return None
     try:
