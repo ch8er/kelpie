@@ -89,6 +89,7 @@ _WRAPPERS = {
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 _GH_VALUED = frozenset({"-R", "--repo", "--hostname"})  # gh's global flags that take a value
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_GH_IN = re.compile(r"(?:^|[\s\"'`(;|&])gh(?:\s|$)")  # gh run inside a word: "$(gh …)", `gh …`
 _FD = re.compile(r"(?<![^\s;&|(])\d(?=[<>])")  # a file descriptor glued to a redirection
 _SLEEP_ARG = re.compile(r"(\d+(?:\.\d+)?)([smhd]?)")
 _UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -314,11 +315,12 @@ def wait_shape(command: str, nested: bool = False) -> Shape | None:
     tokens = _tokens(command)
     if tokens is None:
         return None
-    tokens = _drop_background_groups(tokens)  # ( … ) &, done &: nothing waits for them
+    kept = _drop_background_groups(tokens)  # ( … ) &, done &: nothing waits for them
+    dropped, tokens = len(kept) < len(tokens), kept
     found: list[tuple[str, timedelta | None, bool]] = []  # shape, slept, inside a loop
     other = False  # something else runs too
-    outside = False  # something else runs outside any loop
-    gh_looped = False  # a loop runs gh (a CI poll, however short its sleeps)
+    outside = dropped  # something else runs outside any loop (a group sent off is)
+    gh_looped = _gh_in_loop(tokens)  # a CI poll, however short its sleeps
     depth = 0  # loops open
     for words, background in _commands(tokens):
         head = words[0]
@@ -329,7 +331,8 @@ def wait_shape(command: str, nested: bool = False) -> Shape | None:
             depth = max(0, depth - 1) if head == "done" else depth
             continue
         if background:
-            continue  # cmd &: it runs on, the session does not wait for it
+            outside = outside or not depth  # cmd &: it runs on, and it is other work
+            continue  # the session does not wait for it
         inner = _unwrap(words)
         if inner is None:
             other = True
@@ -362,6 +365,20 @@ def wait_shape(command: str, nested: bool = False) -> Shape | None:
     sleeps = [t for s, t, _ in found if s == "sleep"]
     slept = None if not sleeps or None in sleeps else sum(sleeps, timedelta(0))  # type: ignore[arg-type]
     return Shape(main, slept, not other)
+
+
+def _gh_in_loop(tokens: Sequence[str]) -> bool:
+    """Whether a loop runs ``gh``: as a command, or inside a word (``[ "$(gh run view 1)" =
+    done ]``, ``st=`gh run view 1```)."""
+    depth = 0
+    for k, tok in enumerate(tokens):
+        if _command_start(tokens, k) and tok in _LOOPS:
+            depth += 1
+        elif _command_start(tokens, k) and tok == "done":
+            depth = max(0, depth - 1)
+        elif depth and (tok == "gh" or _GH_IN.search(tok)):
+            return True
+    return False
 
 
 def _short(slept: timedelta | None) -> bool:
@@ -432,7 +449,7 @@ def _drop_background_groups(tokens: Sequence[str]) -> list[str]:
             j = i - 1
             while j >= 1 and _redirect(out[j - 1]):  # past its redirections
                 j -= 2
-            closer = j
+            closer = j if j >= 0 else None
         start = _group_start(out, closer) if closer is not None else None
         if start is None:
             i += 1

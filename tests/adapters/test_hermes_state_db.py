@@ -182,6 +182,13 @@ def shape(command: str) -> tuple[str, timedelta | None, bool] | None:
         ("{ gh run watch 1; } &>log", ("gh run watch", None, True)),
         ("(gh run watch 1) &>log", ("gh run watch", None, True)),
         (">log & echo done", None),
+        (
+            'git push && while [ "$(gh run view 1 -q .status)" != done ]; do sleep 5; done',
+            ("sleep loop", None, False),
+        ),
+        ("git push; while true; do st=`gh run view 1`; sleep 5; done", ("sleep loop", None, False)),
+        ("npm start & for i in $(seq 30); do curl -s localhost && break; sleep 1; done", None),
+        ("> x & while true; do sleep 60; done", ("sleep loop", None, True)),  # no j = -1
     ],
 )
 def test_wait_shapes(command: str, expected: tuple[str, timedelta | None, bool] | None) -> None:
@@ -283,6 +290,27 @@ def test_a_worker_session_is_read_by_its_origin(tmp_path: Path) -> None:
     db.conn.commit()
     db.call("w", NOW - 20 * M, "sleep 120")
     assert [w.session for w in read_waits(tmp_path, NOW - 60 * M)] == ["w"]
+
+
+def test_a_result_is_paired_by_call_id_first(tmp_path: Path) -> None:
+    db = StateDb(tmp_path / "state.db")
+    db.session("s", None, NOW - 60 * M, NOW)
+    call = {"id": "fc_1", "call_id": "call_9", "function": {"name": "terminal",
+            "arguments": '{"command": "gh run watch 3"}'}}  # fmt: skip
+    db.conn.execute(
+        "INSERT INTO messages (session_id, role, tool_calls, timestamp) VALUES ('s', 'assistant',"
+        " ?, ?)",
+        (json.dumps([call]), (NOW - 30 * M).timestamp()),
+    )
+    db.conn.execute(
+        "INSERT INTO messages (session_id, role, tool_call_id, timestamp)"
+        " VALUES ('s', 'tool', 'call_9', ?)",
+        ((NOW - 10 * M).timestamp(),),
+    )
+    db.conn.commit()
+    assert [(w.shape, w.waited) for w in read_waits(tmp_path, NOW - 60 * M)] == [
+        ("gh run watch", 15 * M)
+    ]
 
 
 def test_an_older_schema_is_read_with_what_it_has(tmp_path: Path) -> None:
