@@ -117,7 +117,7 @@ from kelpie.core.storage import (
 from kelpie.metrics import Metrics
 from kelpie.remote.config import AgentSettings, HubSettings, load_agent, load_hub
 from kelpie.remote.farm import RemoteFarm
-from kelpie.remote.hub import Hub, HubServer, HubService
+from kelpie.remote.hub import Hub, HubServer, HubService, server_context
 from kelpie.report.config import ReportSettings, load_report
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
@@ -1662,6 +1662,23 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     hub = _build_hub(settings, adapters, clock)
     enrich, connectors = connector_steps(settings, metrics, clock)
     costs_source = cost_report_source(settings)  # kelpie serve only: reads with the admin key
+    tokens = None
+    if traces.enabled and traces.token_file is not None and settings.hub is None:
+        try:  # also refuses a file others could have written (owner, mode, folders)
+            tokens = TokenFile(
+                traces.token_file,
+                traces.token_env,
+                clock,
+                on_error=lambda why: log.error("[traces] token_file %s", why),
+            )
+        except TokenFileError as exc:
+            raise ConfigError(f"[traces] token_file {exc}") from None
+        if loose_mode(traces.token_file):
+            log.warning(
+                "[traces] token_file %s can be read by others than its owner: chmod 600 it",
+                traces.token_file,
+            )
+        metrics.token_file = tokens.status
     try:
         store: LedgerStore = (
             MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
@@ -1733,23 +1750,6 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "OTLP ingest on /v1/traces accepts spans without a token; set $%s",
             traces.token_env,
         )
-    tokens = None
-    if traces.token_file is not None and settings.hub is None:
-        try:
-            tokens = TokenFile(
-                traces.token_file,
-                traces.token_env,
-                clock,
-                on_error=lambda why: log.error("[traces] token_file %s", why),
-            )
-        except TokenFileError as exc:
-            raise ConfigError(f"[traces] token_file {exc}") from None
-        if loose_mode(traces.token_file):
-            log.warning(
-                "[traces] token_file %s can be read by others than its owner: chmod 600 it",
-                traces.token_file,
-            )
-        metrics.token_file = tokens.status
     ingest = TraceIngest(
         store=span_store,
         clock=clock,
@@ -1839,7 +1839,12 @@ def _build_hub(
         tokens = settings.hub.tokens()
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    if not settings.hub.tls:
+    if settings.hub.tls:
+        try:  # a cert or key that does not load is refused before any storage is opened
+            server_context(settings.hub)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+    else:
         log.warning("[hub] takes agents over plain http: their tokens cross the network in clear")
     return Hub(settings.hub, tokens, clock)
 
