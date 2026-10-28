@@ -1194,7 +1194,11 @@ def run_checks(
         fix = "fix the config; kelpie status shows what it parsed"
         return [_fail("config loads", str(exc), fix)]
     at = now().astimezone(UTC)
-    adapters = build_adapters(settings)  # built once: the modes check and the platform checks
+    try:  # built once: the modes check and the platform checks
+        adapters = build_adapters(settings)
+    except ConfigError as exc:  # e.g. an adapter's token_env names an unset variable
+        fix = "export the variable it names, or fix the config"
+        return [_fail("config loads", str(exc), fix)]
     checks = [
         _pass("config loads", f"{settings.source or 'defaults'}, {len(loaded.rules)} rules"),
         check_rule_modes(settings, loaded, adapters),

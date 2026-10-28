@@ -122,6 +122,28 @@ def test_bad_config_is_one_failure(tmp_path: Path) -> None:
     assert check.render().splitlines()[1].startswith("  fix: ")
 
 
+@pytest.mark.parametrize(
+    ("section", "variable"),
+    [
+        (
+            '[adapters.github_issues]\nrepos = ["example/repo"]\ntoken_env = "KELPIE_X_TOKEN"\n',
+            "KELPIE_X_TOKEN",
+        ),
+        ('[adapters.linear]\nteams = ["ENG"]\ntoken_env = "KELPIE_X_KEY"\n', "KELPIE_X_KEY"),
+    ],
+)
+def test_an_adapter_token_that_is_not_set_is_one_failure_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str, variable: str
+) -> None:
+    monkeypatch.delenv(variable, raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text(section)
+    (check,) = run_checks(path, environ={})
+    assert (check.status, check.name) == ("FAIL", "config loads")
+    assert f"${variable} is not set" in check.detail
+    assert "export the variable" in check.fix
+
+
 def test_no_hermes_section_skips_the_board_checks() -> None:
     checks = {c.name: c.status for c in run_checks(None, environ={})}
     assert checks["kanban.db"] == checks["hooks fire"] == checks["worktrees readable"] == "SKIP"
