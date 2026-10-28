@@ -160,6 +160,9 @@ class Filter:
     commands: tuple[str, ...]
     reduction: float
     platforms: tuple[str, ...] | None = None
+    # What to do, for a title ("Downscale images"): advice that is not a filter to put a
+    # command through; None for a filter.
+    advice: str | None = None
 
     def matches(self, key: str) -> bool:
         if key.startswith(TOOL_KEY):
@@ -218,12 +221,14 @@ DEFAULT_FILTERS: tuple[Filter, ...] = (
         ),
         commands=IMAGE_TOOLS,
         reduction=0.5,
+        advice="Downscale images",
     ),
     Filter(
         name="range",
         how="read a line range or search the file instead of returning it whole",
         commands=FILE_TOOLS,
         reduction=0.5,
+        advice="Read a range",
     ),
     Filter(
         name="compact-view",
@@ -234,6 +239,7 @@ DEFAULT_FILTERS: tuple[Filter, ...] = (
         ),
         commands=RECORD_TOOLS,
         reduction=0.5,
+        advice="Read a compact view, once",
     ),
     Filter(
         name="ask-less",
@@ -243,6 +249,7 @@ DEFAULT_FILTERS: tuple[Filter, ...] = (
         ),
         commands=("tool:*",),
         reduction=0.3,
+        advice="Ask for less",
     ),
 )
 

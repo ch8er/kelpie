@@ -382,6 +382,8 @@ def test_every_tool_gets_advice_for_its_kind() -> None:
     assert advice("tool:revision_show") == "compact-view"
     assert advice("tool:get_thread") == "ask-less"
     assert advice("tool:list_images") == "ask-less"
+    titles = {f.name: f.advice for f in DEFAULT_FILTERS}
+    assert titles["downscale-images"] == "Downscale images" and titles["xcbeautify"] is None
     # A shell tool's calls without a command group every command: no advice fits them.
     assert nothing("tool:terminal") and nothing("tool:Bash")
 
