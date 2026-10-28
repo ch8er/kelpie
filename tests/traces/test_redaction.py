@@ -196,7 +196,20 @@ def test_no_secret_leaks(copy: str, cmd: str, secret: str) -> None:
         ("mysql -ppw db", "mysql -p*** ***"),
         ('curl -H "Authorization: Bearer x" https://h.test', "curl -H *** ***"),
         ("git clone https://u:p@host.test/repo", "git clone ***"),
-        ("export TOKEN=x; gh pr checks", "export *** *** ***"),
+        ("export TOKEN=x; gh pr checks", "export *** ; gh pr checks"),
+        ("export DEVELOPER_DIR=/A/x.app A=1 && ./scripts/sim.sh test", "export *** && sim.sh test"),
+        ("cd /home/a/repo && make test", "cd *** && make test"),
+        ("cd build; cmake ..", "cd *** ; cmake ***"),
+        ("set -euo pipefail; pytest -q", "set *** ; pytest -q"),
+        ("source ~/.secrets/env && gh pr checks 5", "source *** && gh pr checks 5"),
+        (". ./env.sh && make", ". *** && make"),
+        ("export 'A=b; c' && make", "export *** && make"),
+        ("export A=1 || exit 1", "export *** || exit 1"),
+        # Setup tokens are capped like a wrapper's (_MAX_WRAPPED): a long chain loses the end.
+        (
+            "cd /x && cd /y && cd /z && export A=1 && make test",
+            "cd *** && cd *** && cd *** && export *** &&",
+        ),
         ('git commit -m "a b c" --amend', "git commit -m ***"),
         ("ssh user@host.test ls", "ssh *** ***"),
         ("ls -la /tmp", "ls -l*** ***"),
@@ -231,6 +244,11 @@ def test_commands_stay_recognizable(cmd: str, expected: str) -> None:
         ("env -i PATH=x make test", "make test"),
         ("nice -5 make", "make"),
         ("sudo -u root -g wheel nice -n 5 make test", "make test"),
+        ("export DEVELOPER_DIR=/A/x.app && ./scripts/sim.sh test", "sim.sh"),
+        ("cd /repo && xcodebuild test -scheme App", "xcodebuild test"),
+        ("export A=1; cd /r && npm test", "npm test"),
+        ("cd /repo", "cd"),
+        ("export A=1 || exit 1", "export"),
     ],
 )
 def test_prefixes_still_work(cmd: str, prefix: str) -> None:
