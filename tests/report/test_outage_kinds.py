@@ -424,9 +424,44 @@ def test_a_check_switched_back_to_observe_stops_counting() -> None:
     [line] = [c for c in report.chaos if c.rule == OUTAGE]
     assert line.hours == pytest.approx(2)
     assert report.outage_wait_hours == pytest.approx(2)
+    [listed] = report.outages
+    assert not listed.observe_only and listed.back_in_observe == h(12)
+    markdown = render_markdown(report)
+    assert "(its check back in observe since 2026-03-01 12:00 UTC: its waits counted" in markdown
+    assert "not switched on" not in markdown
     # and switched on again: counted again
     assert counted_spans([(h(10), False), (h(12), True), (h(14), False)], h(18)) == (
         (h(10), h(12)),
         (h(14), h(18)),
     )
     assert counted_spans([(h(10), True)], h(18)) == ()
+
+
+def test_a_storm_holds_a_task_from_the_alert_that_names_it() -> None:
+    """A task a later alert names (T-2 from 12:00, blocked since 09:00), and one a later
+    alert drops (T-3 after 12:00, still blocked): held only while named, in the cost of
+    chaos and in the waits split alike (not back-filled per task)."""
+    day = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
+    h = lambda n: day + timedelta(hours=n)  # noqa: E731
+    first = OutageParamsFactory.storm(h(10), ("T-1", "T-3"))
+    later = OutageParamsFactory.storm(h(12), ("T-1", "T-2"))
+    state = row(first.params["state"], "stale_blocks", h(10), h(10), h(16))
+    report = build_report(ReportInputs(day=day.date(), tz=UTC, states=(state,),
+                                       actions=(first, later),
+                                       tasks=open_tasks("T-1", "T-2", "T-3", at=h(9))),
+                          sections={})  # fmt: skip
+    [line] = [c for c in report.chaos if c.rule == OUTAGE]
+    assert line.hours == pytest.approx(6 + 4 + 2)  # T-1 10-16, T-2 12-16, T-3 10-12
+    assert report.outage_wait_hours == pytest.approx(line.hours)
+
+
+def test_alerts_at_one_time_an_alert_that_counts_wins() -> None:
+    from dataclasses import replace
+
+    from kelpie.report.waits import outage_samples
+
+    at = datetime.fromisoformat("2026-03-01T10:00:00+00:00")
+    counted = OutageParamsFactory.storm(at, ("T-1",))
+    observed = replace(OutageParamsFactory.storm(at, ("T-1",), observe=True), fingerprint="o")
+    for order in ((counted, observed), (observed, counted)):
+        assert [obs for _, _, obs in outage_samples(order)] == [True, False]

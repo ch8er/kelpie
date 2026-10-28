@@ -58,7 +58,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from kelpie.core.incidents import (
@@ -193,8 +193,11 @@ class BiggestWait:
 class OutageSpan:
     """One occurrence of an outage incident (:mod:`kelpie.core.incidents`), with what its
     alerts said about it: while it is open, the waits it explains count under it
-    (:attr:`wait_cause`) instead of their own cause, over ``counted`` (:func:`counted_spans`;
-    None: its whole span unless ``observe_only``). ``observe_only`` is its last alert's."""
+    (:attr:`wait_cause`) instead of their own cause, over ``counted`` (:func:`counted_spans`).
+    A block storm or a tool failure explains only the tasks it names, each over the spans
+    an alert that counts named it (``named``, :func:`named_spans`): as the cost of chaos
+    counts it. ``observe_only`` is its last alert's. ``counted`` and ``named`` None (built
+    without alerts): its whole span unless ``observe_only``, for every task it names."""
 
     since: datetime
     until: datetime  # its last_seen
@@ -206,15 +209,24 @@ class OutageSpan:
     kind: str = CI_FAILURES  # what found it (kelpie.core.incidents.KINDS)
     reason: str | None = None  # what happened, in one line (the incident's ``cause``)
     person: str | None = None  # who can end it, when its reason names one
-    # a check still in observe (``params.observe_only``): listed, its waits not moved
+    # its last alert's check is in observe (``params.observe_only``)
     observe_only: bool = False
     counted: tuple[tuple[datetime, datetime], ...] | None = None
+    named: Mapping[str, tuple[tuple[datetime, datetime], ...]] | None = field(
+        default=None, compare=False
+    )
 
     def spans(self) -> intervals.Spans:
         """Where its waits move."""
         if self.counted is not None:
             return list(self.counted)
         return [] if self.observe_only else [(self.since, self.until)]
+
+    def task_spans(self, task: str) -> intervals.Spans:
+        """Where it holds a task it names."""
+        if self.named is not None:
+            return list(self.named.get(task, ()))
+        return self.spans() if task in self.tasks else []
 
     @property
     def wait_cause(self) -> str:
@@ -238,7 +250,7 @@ def outage_samples(
             if is_outage_state(str(e.params.get("state", "")))
             and (o := OutageParams.from_params(e.params)) is not None
         ),
-        key=lambda x: x[0],
+        key=lambda x: (x[0], not x[2]),  # at one time, an alert that counts last (it wins)
     )
 
 
@@ -259,6 +271,21 @@ def counted_spans(
     if start is not None:
         out.append((start, until))
     return tuple((a, b) for a, b in out if b > a)
+
+
+def named_spans(
+    found: Sequence[tuple[datetime, bool, Collection[str]]], until: datetime
+) -> dict[str, tuple[tuple[datetime, datetime], ...]]:
+    """Where an outage holds each task, from its alerts ``(at, observe only, tasks)`` in
+    time order: an alert that counts holds the tasks it names until the next alert (or
+    ``until``), the steps :func:`kelpie.report.daily.outage_steps` counts."""
+    held: dict[str, list[tuple[datetime, datetime]]] = {}
+    for i, (at, observe, tasks) in enumerate(found):
+        end = found[i + 1][0] if i + 1 < len(found) else until
+        if not observe and end > at:
+            for t in tasks:
+                held.setdefault(t, []).append((at, end))
+    return {t: tuple(intervals.merged(spans)) for t, spans in held.items()}
 
 
 def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[OutageSpan]:
@@ -294,6 +321,11 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
                 # no alert loaded: its whole span (it names nothing then, so moves little)
                 counted=(
                     counted_spans([(at, obs) for at, _, obs in found], s.last_seen)
+                    if found
+                    else None
+                ),
+                named=(
+                    named_spans([(at, obs, o.tasks) for at, o, obs in found], s.last_seen)
                     if found
                     else None
                 ),
@@ -448,8 +480,8 @@ class WaitCauses:
             cause: intervals.merged(
                 (max(a, lo), min(b, hi))
                 for o in self._outages
-                if o.wait_cause == cause and self._explains(o, task)
-                for lo, hi in o.spans()
+                if o.wait_cause == cause
+                for lo, hi in self._holds(o, task)
                 if lo < b and hi > a
             )
             for cause in (SHARED_BLOCKER, SHARED_TOOL_FAILURE, CI_OUTAGE)
@@ -487,13 +519,18 @@ class WaitCauses:
         ids = {task.id} | self._humans.get(task.id, set())
         return [self._snoozes[i] for i in sorted(ids) if i in self._snoozes]
 
+    def _holds(self, outage: OutageSpan, task: Task) -> intervals.Spans:
+        """Where the outage holds the task: a block storm or a tool failure over the spans
+        its alerts named it; a CI outage over its counted spans, if it explains the task."""
+        if outage.kind not in CI_KINDS:
+            return outage.task_spans(task.id)
+        return outage.spans() if self._explains(outage, task) else []
+
     def _explains(self, outage: OutageSpan, task: Task) -> bool:
-        """The outage names the task, or (a CI outage) the task waits on CI or a merge of a
-        PR in its scope or of a repository it covers."""
+        """A CI outage names the task, or the task waits on CI or a merge of a PR in its
+        scope or of a repository it covers."""
         if task.id in outage.tasks:
             return True
-        if outage.kind not in CI_KINDS:
-            return False  # a block storm or a tool failure explains only the tasks it names
         found = self.condition(task)
         if found is None or found.kind not in (ConditionKind.CI_STATUS, ConditionKind.PR_MERGED):
             return False

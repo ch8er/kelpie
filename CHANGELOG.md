@@ -180,6 +180,7 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   "farm outages", from the outage's first alert that counts, ahead of the person's inbox and
   their stale blocks. The "Outages" list names each outage's kind, scope and who can end it;
   an outage whose check is still in observe is listed, and its waits stay where they were
+  (until it is switched on; switched back to observe, it stops counting)
   ([#270](https://github.com/ch8er/kelpie/pull/270)).
 - Suggestions check what the farm already has (approvers, holds, block conditions, budgets,
   modes); merge automation is never advised ([#173](https://github.com/ch8er/kelpie/pull/173)).

@@ -386,6 +386,7 @@ class OutageLine:
     reason: str | None = None  # what happened, in one line
     person: str | None = None  # who can end it
     observe_only: bool = False  # a check still in observe: listed, not counted
+    back_in_observe: datetime | None = None  # counted, then its check switched back
 
 
 @dataclass(frozen=True, slots=True)
@@ -749,7 +750,8 @@ def _outage_lines(
                 o.kind,
                 o.reason,
                 o.person,
-                o.observe_only,
+                o.observe_only and not o.spans(),
+                o.spans()[-1][1] if o.observe_only and o.spans() else None,
             )
         )
     return tuple(out)
@@ -1625,6 +1627,11 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             when = f"since {_local(o.since, report)}, {until}"
             trial = " (observe only: its check is not switched on, its waits not counted here)"
             when += trial if o.observe_only else ""
+            if o.back_in_observe is not None:
+                when += (
+                    f" (its check back in observe since {_local(o.back_in_observe, report)}: "
+                    "its waits counted until then)"
+                )
             if o.kind == BLOCK_STORM:
                 who = f"; only {md.text(o.person)} can end it" if o.person else ""
                 lines.append(
