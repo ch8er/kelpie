@@ -434,7 +434,8 @@ profile, open at the time of one of its waits; else the Hermes session's own
 the profile's (`roles`, `role_from_name`). Rule 2 (`session_waits`) reads them. A
 `state.db` Kelpie cannot read, or whose rows it cannot make sense of, is logged once and
 skipped; the board is read all the same.
-On a multi-host farm the waits stay on the host that reads them: `kelpie agent` does not
+With several boards of one home (`[[adapters.hermes.boards]]`) the profiles' `state.db` are
+read once per snapshot, for every board's tasks and runs. On a multi-host farm the waits stay on the host that reads them: `kelpie agent` does not
 relay them to the hub yet.
 
 ### Progress note and git state
