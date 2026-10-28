@@ -320,10 +320,13 @@ def _shape(args: dict[str, Any]) -> dict[str, bool]:
                 return {"command_multiline": True}
             line = lines[0]
             kept = redact_command(value)
-            if not kept or len(line) > _MAX_LINE - 2 or _glued(line):
+            if not kept or len(line) > _MAX_LINE - 2 or _glued(line) or _substituted(line):
                 return {}
-            if _separators(line) != _separators(kept):
+            words, shown = _words(line), kept.split()
+            if _separators(words) != _separators(shown):
                 return {}
+            if shown[-1] in _SEPARATOR_WORDS and words[-1] != shown[-1]:
+                return {}  # cut right after a separator: the command after it was dropped
             out = {"command_complete": True}
             if _MASK not in kept.split()[-1] and redact_command(f"{line} ;") == f"{kept} ;":
                 out["command_whole"] = True
@@ -331,8 +334,25 @@ def _shape(args: dict[str, Any]) -> dict[str, bool]:
     return {}
 
 
-def _separators(text: str) -> list[str]:
-    return [w for w in text.split() if w in _SEPARATOR_WORDS]
+def _words(line: str) -> list[str]:
+    """A line's words, a plain word's glued ``;`` (``cd ios;``) as a word of its own, as the
+    redaction reads it."""
+    out = []
+    for word in line.split():
+        if len(word) > 1 and word.endswith(";") and _SIMPLE_ARG.match(word[:-1]):
+            out += [word[:-1], ";"]
+        else:
+            out.append(word)
+    return out
+
+
+def _separators(words: list[str]) -> list[str]:
+    return [w for w in words if w in _SEPARATOR_WORDS]
+
+
+def _substituted(line: str) -> bool:
+    """Whether a separator may be inside a command substitution (``$(ls | head)``)."""
+    return any(s in line for s in ("$(", "<(", ">(", "`")) and bool(_SEPARATOR_CHARS.search(line))
 
 
 _SEPARATOR_CHARS = re.compile(r"[;|&]")
@@ -341,8 +361,9 @@ _REDIRECT = re.compile(r"\d*>&\d*|&>>?|\d*>\|")  # 2>&1, &>log, >| : not separat
 
 
 def _glued(line: str) -> bool:
-    """Whether a separator character is part of a word (``a;b``, ``test;``, ``'x|y'``)."""
-    for word in line.split():
+    """Whether a separator character is part of a word (``a;b``, ``test;swiftlint``,
+    ``'x|y'``); a plain word's trailing ``;`` is a separator of its own (:func:`_words`)."""
+    for word in _words(line):
         if word in _SEPARATOR_WORDS:
             continue
         if _SEPARATOR_CHARS.search(_REDIRECT.sub("", word)):

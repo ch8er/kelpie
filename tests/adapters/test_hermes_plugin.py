@@ -353,7 +353,14 @@ def test_whether_the_redacted_command_is_whole(spool: Path, command: str, whole:
     [
         ("xcodebuild -scheme App test", True),  # masked words, but it ends there
         ("ios_sim.sh test --device x", True),
-        ("xcodebuild test 2>&1 | xcbeautify", True),
+        ("xcodebuild test 2>&1 | xcbeautify", False),  # kept up to the pipe, not after it
+        ("xcodebuild -scheme App && swiftlint", False),
+        ("xcodebuild -scheme App ; swiftlint", False),
+        ("ios_sim.sh test &", True),
+        ("cd ios; ./ios_sim.sh test", True),  # a glued ; the redaction reads
+        ("export DEVELOPER_DIR=/x; xcodebuild test", True),
+        ("ios_sim.sh $(ls | head )", False),  # a pipe inside a substitution
+        ("ios_sim.sh $(date)", True),
         ("ios_sim.sh test; swiftlint", False),  # glued: the ; is masked
         ("ios_sim.sh a;b", False),
         ("ios_sim.sh 'a b'; swiftlint", False),
