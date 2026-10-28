@@ -481,6 +481,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #
 # [adapters.hermes]
 # db_path = "~/.hermes/kanban.db"   # named boards: ~/.hermes/kanban/boards/<slug>/kanban.db
+#                                    (several boards of one home: [[adapters.hermes.boards]] below)
 # spool = "~/.hermes/kelpie/spool.jsonl"  # tool-call spans from the Hermes plugin; false = off
 # lookback = "24h"                  # runs, spans and finished tasks older than this are left out
 #                                    (the rules' window; kelpie report reads as far back as its day needs)
@@ -517,6 +518,16 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # [adapters.hermes.roles]
 # reviewer-bot = "reviewer"
 # merger = "reviewer"
+#
+# Several boards of one Hermes home in one Kelpie (instead of db_path and wait_key above):
+# ids become <name>:<id>; spool, profiles and tools stay in [adapters.hermes].
+# [[adapters.hermes.boards]]
+# name = "qr"
+# db_path = "~/.hermes/kanban/boards/qr/kanban.db"
+# wait_key = "/data/hermes-wait-qr.key"   # default: hermes-wait-<name>.key next to the ledger
+# [[adapters.hermes.boards]]
+# name = "sign"
+# db_path = "~/.hermes/kanban/boards/sign/kanban.db"
 #
 # Long tool runs and simulator slots, from the host's processes (ps, lsof): a task is busy
 # while one of names runs in its workspace, so rule 9 holds its commit reminders; slot

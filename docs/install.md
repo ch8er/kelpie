@@ -187,6 +187,62 @@ Adapter details (status mapping, blocks, git state, `stop`): the
 [Hermes adapter README](../src/kelpie/adapters/hermes/README.md). What the plugin records:
 [privacy.md](privacy.md#hermes-hooks-plugin).
 
+### Two Hermes boards on one host
+
+One `kelpie serve` watches every board of a Hermes home: list them under
+`[[adapters.hermes.boards]]` ([configuration.md](configuration.md#adaptershermesboards)).
+Run one Kelpie per Hermes home, not one per board: two instances read the same spool and
+host, ingest the same spans twice and alert twice per disk. Run ids restart on every board,
+and an instance watching one board cannot tell the other board's spool lines from its own,
+so another board's run 42 counts as activity of its run 42 (a stuck run looks alive, and
+rule 10 can count another run's calls). Only one Kelpie may act on a board.
+
+```toml
+[adapters.hermes]
+spool = "~/.hermes/kelpie/spool.jsonl"
+
+[[adapters.hermes.boards]]
+name = "qr"
+db_path = "~/.hermes/kanban/boards/qr/kanban.db"
+
+[[adapters.hermes.boards]]
+name = "sign"
+db_path = "~/.hermes/kanban/boards/sign/kanban.db"
+```
+
+**Migrating from two instances (one per board).** The two `kelpie.db` files are **not
+merged: the merged Kelpie starts with a fresh database.** Task and session ids gain the board
+prefix (`t_1a` becomes `qr:t_1a`), so the old ledger, alert states and snoozes would match no
+task, and resolving the old alert states would send a "resolved" for each of them. What a
+fresh database loses: stored OTLP spans, so spend and budget windows start at zero (a
+rolling window under-counts until one full window has passed, task budgets lose their
+history) and so do output-offender counts; cooldowns and alert states, so every current
+problem alerts once more on the first ticks, and the old instances' open alerts never get a
+"resolved"; snoozes and recorded fixes. Steps:
+
+1. Stop both instances (their LaunchAgents or services). If either is in `act` mode, wake or
+   finish the tasks it parked first, or carry its key over (step 2).
+2. Keep both old configs. Write one new config: the sections both had (`[adapters.hermes]`
+   without `db_path`, one `[[adapters.hermes.boards]]` per board, `[resources.prometheus]`,
+   `[traces]` and alert channels once) and a new `[storage] path`. To keep Kelpie's parks
+   and stops recognised, set each board's `wait_key` to its old instance's key: its
+   `[adapters.hermes] wait_key`, by default `hermes-wait.key` next to its old `kelpie.db`
+   (`~/.kelpie/` with an in-memory ledger). If both instances used the same file, copy it to
+   two files (mode 600), one per board: two boards may not share a key.
+3. In every profile's `hermes_otel.yaml` keep one Kelpie OTLP backend (the merged
+   instance's port and token) and remove the other.
+4. List the snoozes still active on each old instance
+   (`kelpie --config <old kelpie.toml> snoozes`), then run `kelpie doctor` and
+   `kelpie serve` with the new config, and re-apply the snoozes you still want
+   (`kelpie snooze`, with the prefixed ids). Consider the first hours in dry-run or
+   observe: every open problem alerts again.
+5. Keep the old databases and configs, unchanged, for the days before the switch:
+   `kelpie --config <old kelpie.toml> report --date <day>` reads that instance's own
+   database, board and report dir (with the new config it would read the old ledger against
+   today's prefixed ids, and write over the new instance's report file for that day). The
+   switch day is split across the three databases; the merged report is complete from the
+   first full day after it.
+
 ## kelpie doctor
 
 `kelpie doctor` checks a first live run and prints one line per check, `PASS`, `WARN`,
@@ -292,6 +348,7 @@ rather than copying the file.
 
 ## Next steps
 
-1. Point Kelpie at your platform (`[adapters.hermes]`) and check it with `kelpie doctor`.
+1. Point Kelpie at your platform (`[adapters.hermes]`, several boards:
+   `[[adapters.hermes.boards]]`) and check it with `kelpie doctor`.
 2. Add connectors and alert channels as needed: [configuration.md](configuration.md).
 3. Let it run in observe mode for a day, then follow the [act checklist](act-checklist.md).

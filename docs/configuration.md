@@ -790,7 +790,59 @@ The Hermes platform adapter. Absent: no platform, and snapshots hold no tasks. D
 | `worker_grace` | `"5s"` | duration, > 0 and <= 30s | Between SIGTERM and SIGKILL when ending a stopped run's worker; it runs inside the tick, after the block. A stop takes about `cli_timeout` + `worker_grace` + 2s at most (plus waits on a busy board): on a `kelpie agent`, keep that well below `[hub] action_timeout`. |
 | `prework_statuses` | `["triage", "scheduled"]` | list of `triage`, `scheduled` | Hermes statuses before any work starts: rule 3 alerts when a card sits there past `prework_after` with tasks depending on it. Kelpie's own parks in `scheduled` are `waiting`, not pre-work. |
 | `human_owners` | `[]` | list of names | Assignees that are people, not agents; case-insensitive. Their tasks get a human owner, which `[connectors.human_tasks]` needs. Also changes `ping_pong`'s default escalation target and who `bottlenecks` and `orphan_status` count as agents. A person stays a person when another adapter lists the same name, in any case (e.g. a Claude Code task-list owner), and never counts as an idle agent. Comment and description authors with these names are people too (rule 1's acceptance criteria). |
+| `boards` | none | array of tables | Several boards of this Hermes home: see [[[adapters.hermes.boards]]](#adaptershermesboards). Then `db_path` and `wait_key` are set per board; setting them here stops Kelpie at startup. |
 | `human_decisions` | `[]` | array of tables: `marker`, `relays`, optional `person` | A person's decisions an agent records (`[[adapters.hermes.human_decisions]]`, e.g. `marker = "решение CEO"`, `relays = ["partner"]`, `person = "ceo"`): a comment, or a task description, by one of `relays` (profiles, case-insensitive) that opens with `marker` and a separator on its line (`:`, `-` before no word, an en or em dash; case-insensitive, past invisible characters and markdown emphasis: "Решение CEO: ...") is a person's, all of it, written by `person` (one of `human_owners`; else the relay). "Жду решение CEO", a quote or the marker further on are the agent's own words. Rule 1 then reads its acceptance criteria and verdicts as that person's; relayed comments are kept apart from people's own, so they never push those out. Relays are required, and may not be human owners, `kelpie` or `user` (Hermes' default CLI author), nor appear in two entries; `kelpie status` lists them: any agent can write the words. On a multi-host farm set it where the Hermes adapter runs (the `kelpie agent` host). |
+
+### [[adapters.hermes.boards]]
+
+One Kelpie watches several Kanban boards of one Hermes home (named boards,
+`~/.hermes/kanban/boards/<slug>/kanban.db`), as one adapter. Everything that belongs to the
+home stays in `[adapters.hermes]` and is shared by the boards: the spool, `cli`, profiles
+and their `roles`, `human_owners`, `human_decisions`, `author`, `lookback`, `git_state` and
+`[adapters.hermes.tools]`. Each board has:
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `name` | required | 1-32 of `a-z 0-9 - _`, starting with a letter or digit | Prefixes the board's ids: task `t_1a` of board `qr` is `qr:t_1a` in rules, alerts, the report and `kelpie why`, its run 42 is session `qr:hermes-run-42` (run ids restart on every board). Distinct per board. |
+| `db_path` | required | path | The board's `kanban.db`. Opened read-only. Distinct per board. |
+| `wait_key` | `hermes-wait-<name>.key` next to the ledger | path | Signs Kelpie's parks and stops on this board; a marker of one board never verifies on another. Distinct per board. |
+
+```toml
+[adapters.hermes]
+spool = "~/.hermes/kelpie/spool.jsonl"   # one spool for the home: each line goes to its board
+human_owners = ["alice"]
+
+[[adapters.hermes.boards]]
+name = "qr"
+db_path = "~/.hermes/kanban/boards/qr/kanban.db"
+
+[[adapters.hermes.boards]]
+name = "sign"
+db_path = "~/.hermes/kanban/boards/sign/kanban.db"
+```
+
+- **Spool.** Read once per tick; a line goes to the board that has its task and, under that
+  task, its run. A line that names no Kanban task, or that two boards claim, goes to none (a
+  session is never on two boards). With `db_path` alone (no `boards`) such lines are kept, unattributed.
+- **Host-level readings exist once:** tool runs and slot pools (`[adapters.hermes.tools]`)
+  are read once over every board's tasks; resources (`[resources.prometheus]`), OTLP ingest
+  and the ledger are Kelpie's, not a board's. A stored OTLP span that names a task by its
+  id on the board (`[traces] task_attribute = "hermes.kanban.task_id"` gives `t_1a`) is
+  linked to `qr:t_1a` when exactly one board has that id.
+- **Actions** (rule 10's stop, parks and wakes, comments) go to the board in the id's
+  prefix, through `hermes` with that board's `HERMES_KANBAN_DB`; an id of no board is
+  refused before anything runs.
+- **A board that cannot be read** is left out of that tick and listed as unobserved: its
+  open alerts are held, not resolved, and `kelpie_adapter_errors_total{adapter="hermes/<name>"}`
+  counts it. The other boards go on. If none can be read, the adapter fails as one board would.
+- `kelpie status` lists each board (`board qr: <path>`); `kelpie doctor` checks each
+  (`kanban.db (qr)`, `worktrees readable (qr)`, `PR blocks have conditions (qr)`); the hooks,
+  worker-stop and host checks run once.
+- On a multi-host farm the same section goes in the `kelpie agent`'s config; ids are then
+  `<host>:<board>:<id>`.
+
+The single-table form (`db_path` in `[adapters.hermes]`) is unchanged: ids are not prefixed.
+Moving from two Kelpie instances to one: [install.md](install.md#two-hermes-boards-on-one-host).
 
 ### [adapters.hermes.tools]
 

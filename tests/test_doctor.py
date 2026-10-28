@@ -805,3 +805,32 @@ def test_stop_ends_workers_names_the_backend_or_why_not(tmp_path: Path) -> None:
     adapter.end_worker = False
     off = check_worker_stop(adapter, Procfs())
     assert off.status == "WARN" and off.fix == "set [adapters.hermes] end_worker = true"
+
+
+def test_two_boards_of_one_home_are_checked_one_by_one_without_a_failure(farm: Farm) -> None:
+    """#198: one Kelpie for two boards; host-level checks run once."""
+    farm.make_healthy()
+    second = Board(farm.root / "sign.db")
+    second.task("t_2", "running", NOW - timedelta(hours=1))
+    second.close()
+    path = farm.root / "kelpie.toml"
+    path.write_text(
+        f'[storage]\npath = "{farm.db}"\n[adapters.hermes]\nspool = "{farm.spool}"\n'
+        f'[[adapters.hermes.boards]]\nname = "qr"\ndb_path = "{farm.board.path}"\n'
+        f'[[adapters.hermes.boards]]\nname = "sign"\ndb_path = "{second.path}"\n'
+        f"{farm.resources}"
+    )
+    found = run_checks(path, now=lambda: NOW, environ={})
+    names = [c.name for c in found]
+    for name in ("kanban.db", "worktrees readable", "PR blocks have conditions"):
+        assert names.count(f"{name} (qr)") == names.count(f"{name} (sign)") == 1
+        assert name not in names
+    for name in ("hooks fire", "stop ends workers", "disk watched", "OTLP spans arrive"):
+        assert names.count(name) == 1  # the host's, once
+    checks = {c.name: c for c in found}
+    assert "1 running" in checks["kanban.db (sign)"].detail
+    assert checks["hooks fire"].status == "PASS"
+    assert not [c.name for c in found if c.status == "FAIL"]
+    second.path.unlink()
+    check = {c.name: c for c in run_checks(path, now=lambda: NOW, environ={})}["kanban.db (sign)"]
+    assert check.status == "FAIL" and "board sign" in check.fix
