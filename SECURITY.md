@@ -43,11 +43,12 @@ please keep these properties in mind when assessing impact:
   scope.
 - **It writes to issues.** With `[adapters.github_issues]` or `[adapters.linear]` and a
   rule in `act` mode, Kelpie changes labels, assignees and comments of the issues it reads,
-  with the standing of the token's account. That and cancelling runs are its only writes to
-  GitHub.
+  reopens a closed issue to requeue it, and on Linear also sets an issue's workflow state and
+  delegate, with the standing of the token's account. Those and cancelling runs are its only
+  writes to GitHub.
 - **It acts on task boards and sessions.** Kelpie can requeue, unblock, wake, park,
   close, comment on, reassign and WIP-commit tasks, stop agent sessions (through the platform's
-  CLI or a stop marker its hook enforces, ending the stopped run's worker on Hermes), and
+  CLI, a stop marker its hook enforces or aborting the run in flight (OpenClaw), ending the stopped run's worker on Hermes), and
   cancel superseded CI runs (above). Anything that lets an untrusted party trigger or forge
   those actions (for example spoofed platform events, hook spool lines or OTLP spans,
   crafted condition payloads, or a forged `kelpie agent` report) is in scope.

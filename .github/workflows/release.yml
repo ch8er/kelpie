@@ -67,10 +67,12 @@ jobs:
           cd /tmp && /tmp/smoke/bin/kelpie status
       - name: The files carry no tests, local state or secrets
         run: |
-          if tar tzf dist/*.tar.gz | grep -E '^[^/]+/(tests|\.claude|\.github)/|\.db(-wal|-shm)?$|(^|/)(kelpie\.toml|\.env|hermes-wait\.key)$'; then
+          tar tzf dist/*.tar.gz > /tmp/sdist.txt
+          unzip -Z1 dist/*.whl > /tmp/wheel.txt
+          if grep -E '^[^/]+/(tests|\.claude|\.github)/|\.db(-wal|-shm)?$|(^|/)(kelpie\.toml|\.env|hermes-wait\.key)$' /tmp/sdist.txt; then
             echo "::error::the sdist carries the files above"; exit 1
           fi
-          if unzip -Z1 dist/*.whl | grep -E '\.db(-wal|-shm)?$|(^|/)(kelpie\.toml|\.env|hermes-wait\.key)$|^tests/'; then
+          if grep -E '\.db(-wal|-shm)?$|(^|/)(kelpie\.toml|\.env|hermes-wait\.key)$|^tests/' /tmp/wheel.txt; then
             echo "::error::the wheel carries the files above"; exit 1
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
