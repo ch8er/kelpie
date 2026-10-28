@@ -1665,8 +1665,9 @@ def _group_lines(v: Verification, report: DailyReport) -> list[str]:
     if v.truncated is not None:
         out += [
             "",
-            f"Fixes are read from {_local(v.truncated, report)} on: an older fix may belong "
-            "to this group, and its before-window may hold a fix not listed here.",
+            f"Fixes and data are read from {_local(v.truncated, report)} on: an older fix "
+            "may belong to this group, and its before-window starts there at the earliest "
+            "(shorter than a window, so per-day rates cover only that part).",
         ]
     return out + _excluded_lines(v, report)
 

@@ -28,7 +28,9 @@ What the report cannot separate, it does not credit (#193):
   the group touches that role or the whole farm, and its command's output per call when
   no other fix names the same command for the same role. Fixes are read from
   ``Evidence.known_from`` on: a group that starts less than a window after it says an
-  older fix may belong to it (``Verification.truncated``).
+  older fix may belong to it (``Verification.truncated``), and its before-window starts
+  at ``known_from`` at the earliest (a side under a quarter of the window is *direction
+  only*).
 - **Newly enabled signals.** A per-day rate whose data starts after the first quarter of
   the before-window has no "before" to compare with: tokens per day when traces began
   that late (after a whole loaded window without a span, when ``known_from`` is set),
@@ -228,7 +230,7 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
     events = tuple(sorted(events, key=lambda e: (e.at, e.kind, e.note)))
     first, last = events[0], events[-1]
     before, after = _windows(first.at, last.at, ev)
-    short = after[1] - after[0] < ev.window / 4
+    short = _short(before, after, ev)
     scope = _scope(events)
     excluded: list[Excluded] = []
     metrics = [
@@ -245,7 +247,7 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
         if others and e.role and all(o.role is not None and o.role != e.role for o in others):
             b, a = _windows(e.at, e.at, ev)
             mine = [
-                _tokens(ev, e, b, a, a[1] - a[0] < ev.window / 4, excluded),
+                _tokens(ev, e, b, a, _short(b, a, ev), excluded),
                 _failures(ev, e, b, a),
             ]
             if e.role in ev.review_roles:
@@ -256,7 +258,7 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
         clash = [o for o in others if o.command == e.command and _roles_meet(o.role, e.role)]
         if not clash:
             b, a = _windows(e.at, e.at, ev)
-            m = _output(ev, e.command, e.role, b, a, a[1] - a[0] < ev.window / 4)
+            m = _output(ev, e.command, e.role, b, a, _short(b, a, ev))
             if not others:
                 metrics.append(m)
             elif _has_data(m):
@@ -281,7 +283,17 @@ Window = tuple[datetime, datetime]
 
 
 def _windows(first: datetime, last: datetime, ev: Evidence) -> tuple[Window, Window]:
-    return (first - ev.window, first), (last, min(last + ev.window, ev.end))
+    """Before and after; the before-window starts no earlier than the loaded data
+    (``known_from``): per-day rates over a part never loaded would read as zero."""
+    start = first - ev.window
+    if ev.known_from is not None:
+        start = min(max(start, ev.known_from), first)
+    return (start, first), (last, min(last + ev.window, ev.end))
+
+
+def _short(b: Window, a: Window, ev: Evidence) -> bool:
+    """A side under a quarter of the window: a direction, not a result."""
+    return min(b[1] - b[0], a[1] - a[0]) < ev.window / 4
 
 
 def _has_data(m: Metric) -> bool:

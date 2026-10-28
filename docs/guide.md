@@ -321,7 +321,8 @@ shows its sample sizes. What the report cannot separate it does not credit:
   other fix of the group touches that role or the whole farm, and its command's output
   per call when no other fix names the same command for the same role. A group that
   starts less than a window after the oldest fix the report reads says that an older fix
-  may belong to it.
+  may belong to it, and its before-window starts no earlier than the data the report
+  reads.
 - *Newly enabled signals.* Tokens per day whose traces began after the first quarter of
   the before-window, and, with a config change in the group, a cause of hours lost first
   seen after it with nothing before (a connector or rule the change may have turned on),

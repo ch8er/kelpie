@@ -261,6 +261,15 @@ def test_a_chain_reaching_past_the_loaded_fixes_says_so() -> None:
     assert v.events == chain
     assert v.truncated == datetime(2026, 10, 17, tzinfo=UTC)
     assert "an older fix may belong to this group" in render_markdown(report)
+    # steady traffic from the start of the loaded data: no fake change from the cut
+    known = datetime(2026, 10, 17, tzinfo=UTC)
+    spans = [
+        chat("developer-run", at, 100) for at in hours(known, datetime(2026, 10, 21, tzinfo=UTC))
+    ]
+    [v] = build_report(inputs(fixes=chain, spans=spans)).verifications
+    tokens = next(m for m in v.metrics if m.name == "tokens per day")
+    assert tokens.before == pytest.approx(2_400) and tokens.after == pytest.approx(2_400)
+    assert tokens.n_before == 6  # the 6 hours loaded before the first fix
     # a group that starts a window after the cut is whole
     [v] = build_report(inputs(fixes=LIVE_FIXES)).verifications
     assert v.truncated is None
