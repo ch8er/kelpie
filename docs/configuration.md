@@ -233,7 +233,9 @@ on `/metrics` (`kelpie_role_reopened_after_done_ratio`) and in the daily report.
 
 Wakes a waiting task when every condition of its current wait holds on fresh evidence;
 alerts when a wait can never be met, runs past `max_wait`, or has no condition; comments on
-sessions that poll a known check instead of registering a condition and exiting. A wait
+sessions that poll a known check instead of registering a condition and exiting, and on
+sessions that waited inside themselves (`sleep`, a CI watch, a loop over them) however they
+ended. A wait
 past `max_wait`, or one with no condition, that an open CI outage explains (rule 9) is
 folded under the outage's alert instead of being sent; a dead end or a condition Kelpie
 cannot see is not.
@@ -248,6 +250,9 @@ cannot see is not.
 | `poll_window` | `"10m"` | duration, > 0 | Window for the repeat count; also how long one check may block before it counts as polling. |
 | `poll_error_streak` | `5` | count, >= 1 | Comment when the same polled check failed this many times in a row. |
 | `session_stale_after` | `"30m"` | duration, > 0 | See [live session](#rules). |
+| `session_waits` | `3` | count, >= 0 | A session that waited inside itself this many times within `session_wait_lookback` gets one comment on its task (block on a condition and exit), however it ended; under the live polling check's key, so a session gets one comment or the other. Only waits of 30 seconds or more, or of unknown length (a watch, a loop), count. `0`: off. The waits come from the platform's own record of the commands (the Hermes adapter: each profile's `state.db`, `state_home`), as their shape and duration bucket only. |
+| `session_wait_time` | `"10m"` | duration, > 0 | Also flag a session whose waits add up to this long (the lower bounds of their buckets: under 30s, 30s, 1m, 5m, 15m, 30m, 1h). |
+| `session_wait_lookback` | `"6h"` | duration, > 0 | Waits older than this do not count (the Hermes adapter reads the last 6 hours: longer sees no more there). Sessions not on an open task Kelpie knows of (an orchestrator's, a finished task's) are counted per role in one `info` alert instead: the role's instructions are the owner's to change. |
 
 **Waits rule 13 lists go to rule 13.** A waiting task that rule 13 lists in a person's
 "needs you" digest, parked on a task the person can do now by a `human_task` condition with
@@ -806,6 +811,8 @@ The Hermes platform adapter. Absent: no platform, and snapshots hold no tasks. D
 | `end_worker` | `true` | bool | After a stop's block, end the run's worker processes (submitter, agent, the agent's descendants) once their pid and start fingerprint match what Hermes recorded; Linux (`/proc`) and macOS (libproc). `false`: left to Hermes' dispatcher, which reaps a worker it can verify at least 2 minutes later. See the [Hermes adapter](../src/kelpie/adapters/hermes/README.md). |
 | `author` | `"kelpie"` | lowercase name | What Kelpie signs its comments, blocks, parks and wakes with on the board (`--author`, `HERMES_PROFILE_NAME`); its own comments are skipped when people's are read, so not the name of a profile or of one of `human_owners`. |
 | `worker_grace` | `"5s"` | duration, > 0 and <= 30s | Between SIGTERM and SIGKILL when ending a stopped run's worker; it runs inside the tick, after the block. A stop takes about `cli_timeout` + `worker_grace` + 2s at most (plus waits on a busy board): on a `kelpie agent`, keep that well below `[hub] action_timeout`. |
+| `state_home` | Hermes' home of `db_path` | path or `false` | Hermes' home: each profile's `state.db` (`state.db` itself for `default`, `profiles/<name>/state.db` for the others), read-only, at most once a minute, for the waits inside sessions of the last 6 hours (rule 2's `session_waits`). Default: the directory of `db_path`, or `<home>` for a named board's `<home>/kanban/boards/<slug>/kanban.db`. A home without any `state.db` is logged once. `false`: not read. |
+| `state_sources` | `["kanban", "subagent", "cron"]` | list of Hermes session sources | Whose sessions are read for waits: Kanban workers, their subagents and cron jobs by default, not a person's own chats (`cli`, `telegram`, ...). |
 | `prework_statuses` | `["triage", "scheduled"]` | list of `triage`, `scheduled` | Hermes statuses before any work starts: rule 3 alerts when a card sits there past `prework_after` with tasks depending on it. Kelpie's own parks in `scheduled` are `waiting`, not pre-work. |
 | `human_owners` | `[]` | list of names | Assignees that are people, not agents; case-insensitive. Their tasks get a human owner, which `[connectors.human_tasks]` needs. Also changes `ping_pong`'s default escalation target and who `bottlenecks` and `orphan_status` count as agents. A person stays a person when another adapter lists the same name, in any case (e.g. a Claude Code task-list owner), and never counts as an idle agent. Comment and description authors with these names are people too (rule 1's acceptance criteria). |
 | `boards` | none | array of tables | Several boards of this Hermes home: see [[[adapters.hermes.boards]]](#adaptershermesboards). Then `db_path` and `wait_key` are set per board; setting them here stops Kelpie at startup. |

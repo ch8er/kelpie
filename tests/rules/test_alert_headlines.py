@@ -30,6 +30,7 @@ from kelpie.core.model import (
     ProviderStatus,
     Resource,
     ResourceKind,
+    SessionWait,
     Snapshot,
     Status,
     Task,
@@ -460,6 +461,19 @@ KINDS = {
         "Nothing will wake T-1: its condition C-1 can never be met",
         "Replace the condition, or move the task on",
         1,
+    ),
+    "waits inside sessions": Kind(
+        "wait_condition",
+        built(
+            Snapshot(
+                now=NOW,
+                waits=tuple(
+                    SessionWait(f"S-{i}", NOW - i * M, "sleep", waited=20 * M, role="architect")
+                    for i in (1, 2)
+                ),
+            )
+        ),
+        "architect agents waited inside 2 sessions",
     ),
     # stale_blocks
     "block, nothing to check": Kind(

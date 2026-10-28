@@ -110,11 +110,8 @@ class ToolProcesses:
         search), else a ``workspace_patterns`` match naming a task on the board.
         ``aliases``: the task a matched id on its board stands for (several boards: the
         board-namespaced id, None when more than one board has it)."""
-        for root, task in sorted(workspaces.items(), key=lambda kv: (-len(kv[0]), kv[0])):
-            if cwd == root or cwd.startswith(root.rstrip("/") + "/"):
-                if task is not None:
-                    return task
-                break  # shared: no shorter root claims it; a pattern still may
+        if (task := task_at(cwd, workspaces)) is not None:
+            return task
         for p in self._patterns:
             for m in p.finditer(cwd):
                 found = m["task"] if aliases is None else aliases.get(m["task"])
@@ -361,6 +358,15 @@ def _run(argv: list[str], budget: _Budget, ok: tuple[int, ...] = (0,)) -> str | 
         warn_once((argv[0], "output"), "hermes: tool runs not read: %s wrote too much", argv[0])
         return None
     return done.stdout
+
+
+def task_at(cwd: str, workspaces: Mapping[str, str | None]) -> str | None:
+    """The task of the longest of Hermes' workspace paths that holds ``cwd``; None when
+    none does, or that path is shared (mapped to None: no shorter one claims it)."""
+    for root, task in sorted(workspaces.items(), key=lambda kv: (-len(kv[0]), kv[0])):
+        if cwd == root or cwd.startswith(root.rstrip("/") + "/"):
+            return task
+    return None
 
 
 def resolve(path: str | Path) -> str:

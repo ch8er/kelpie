@@ -124,6 +124,16 @@ def test_tool_processes_are_read_by_one_host_reader(tmp_path: Path) -> None:
     assert all(b.tools is None for b in adapter.boards)
 
 
+def test_state_db_is_read_by_one_reader_for_every_board(tmp_path: Path) -> None:
+    (adapter,) = build_adapters(load_settings(write(tmp_path, TWO)))
+    assert isinstance(adapter, HermesBoards) and adapter.state is not None
+    assert adapter.state.state_home is not None and adapter.state.tools is None
+    assert all(b.state_home is None for b in adapter.boards)
+    off = TWO.replace('human_owners = ["alice"]', 'human_owners = ["alice"]\nstate_home = false')
+    (none,) = build_adapters(load_settings(write(tmp_path, off)))
+    assert isinstance(none, HermesBoards) and none.state is None
+
+
 def test_status_and_act_guard_know_the_boards(tmp_path: Path) -> None:
     from kelpie.app import ActBlocker, act_blockers, render_adapters
 

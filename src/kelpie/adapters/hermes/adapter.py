@@ -86,6 +86,12 @@ Each path is read at most once per snapshot, by up to ``GIT_WORKERS`` threads, a
 ``GIT_BUDGET_FACTOR * git_timeout``; a path whose git call timed out is skipped for
 ``GIT_BACKOFF`` (by snapshot time).
 
+Waits inside sessions. With ``state_home``, each profile's ``state.db`` (Hermes' own
+session store, read-only, see :mod:`kelpie.adapters.hermes.state_db`) gives the commands
+that waited inside a session (``sleep``, a CI watch, a loop over them) as
+:class:`~kelpie.core.model.SessionWait`, on the run of the task whose workspace the
+session worked in (:meth:`HermesAdapter._waits`).
+
 Liveness. ``Session.last_heartbeat`` is the latest of the run's ``last_heartbeat_at``, the
 task's ``last_heartbeat_at`` (when the run is the task's ``current_run_id``) and the newest
 spool tool call of the run. A valid Hermes claim counts as a heartbeat: an open run that is the
@@ -132,7 +138,8 @@ from kelpie.adapters.hermes.park import (
     schedule_args,
     unblock_args,
 )
-from kelpie.adapters.hermes.processes import HostTools, ToolProcesses, read_host, resolve
+from kelpie.adapters.hermes.processes import HostTools, ToolProcesses, read_host, resolve, task_at
+from kelpie.adapters.hermes.state_db import DEFAULT_SOURCES, Wait, read_waits
 from kelpie.adapters.hermes.stop import (
     CLI_TIMEOUT,
     DEFAULT_CLI,
@@ -163,6 +170,7 @@ from kelpie.core.model import (
     ResourceKind,
     Return,
     Session,
+    SessionWait,
     Snapshot,
     Span,
     SpanKind,
@@ -195,6 +203,11 @@ GIT_WORKERS = 4  # workspaces read in parallel
 GIT_BUDGET_FACTOR = 2  # all git calls of one snapshot end within this many git_timeouts
 GIT_BACKOFF = timedelta(minutes=5)  # a workspace whose git timed out is skipped this long
 HOST_READ_KEPT = timedelta(minutes=5)  # a failed read of tool runs reuses the last good one
+DEFAULT_HOME = Path("~/.hermes")  # Hermes' home: its profiles' state.db (state_db.py)
+DEFAULT_STATE_WINDOW = timedelta(hours=6)  # waits in sessions active this long ago
+STATE_EVERY = timedelta(minutes=1)  # state.db is read at most this often (snapshot time)
+# The workspace kinds whose directory is one task's: a session working there is the task's.
+TASK_DIR_KINDS = ("worktree", "scratch")
 
 NOT_IMPLEMENTED = (
     "this Hermes action is not implemented yet (only stop is); "
@@ -594,6 +607,11 @@ class HermesAdapter:
     # Long tool runs (a build, a simulator) and tool slots read from the host's processes
     # ([adapters.hermes.tools]); None: not read.
     tools: ToolProcesses | None = None
+    # Hermes' home, whose profiles' state.db record their sessions' commands: waits inside
+    # sessions (state_db.py). None: not read.
+    state_home: Path | None = None
+    state_window: timedelta = DEFAULT_STATE_WINDOW
+    state_sources: tuple[str, ...] = DEFAULT_SOURCES  # Hermes session sources read
     prework_statuses: Collection[str] = DEFAULT_PREWORK
     # Profile -> role (Hermes lowercases profiles). Others: the profile without a trailing
     # "-<number>" (dev-1 -> dev), else the profile itself.
@@ -614,6 +632,10 @@ class HermesAdapter:
     # the last good read of the host's tool runs and slots, with its time: one failed read
     # (a slow lsof under a build) must not drop running_tool and remind mid-build
     _host_seen: tuple[datetime, HostTools] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    # the last read of the profiles' state.db, with its time (read at most every STATE_EVERY)
+    _state_seen: tuple[datetime, tuple[Wait, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
     wait_key: Path = DEFAULT_WAIT_KEY  # signs park and stop markers (park.py, stop.py)
@@ -637,6 +659,8 @@ class HermesAdapter:
         self.roles = {k.strip().casefold(): v.strip().casefold() for k, v in self.roles.items()}
         if self.spool is not None:
             self.spool = Path(self.spool).expanduser()
+        if self.state_home is not None:
+            self.state_home = Path(self.state_home).expanduser()
         self.wait_key = Path(self.wait_key).expanduser()
 
     def role_of(self, profile: str) -> str:
@@ -725,10 +749,12 @@ class HermesAdapter:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
         part, rows = self.read_board(now, self._spans(now - self.lookback))
-        if self.tools is None:
-            return part
-        sessions, slots = self._with_tools(self.tools, part.sessions, part.tasks, rows, now)
-        return replace(part, sessions=sessions, resources=slots)
+        if self.tools is not None:
+            sessions, slots = self._with_tools(self.tools, part.sessions, part.tasks, rows, now)
+            part = replace(part, sessions=sessions, resources=slots)
+        if self.state_home is not None:
+            part = replace(part, waits=self._waits(self.state_home, now, part.sessions, rows))
+        return part
 
     def read_board(
         self, now: datetime, spans: tuple[Span, ...], own_spans: bool = False
@@ -773,6 +799,76 @@ class HermesAdapter:
             sessions=tuple(replace(s, source=self.name) for s in sessions),
             spans=spans,
         ), rows
+
+    def _waits(
+        self,
+        home: Path,
+        now: datetime,
+        sessions: Sequence[Session],
+        rows: Mapping[str, sqlite3.Row],
+    ) -> tuple[SessionWait, ...]:
+        """Waits inside sessions from the profiles' ``state.db`` (state_db.py), each Hermes
+        session's on one id: the run it worked in (the run of the task whose workspace is
+        the session's directory, by the session's profile, open at the time of one of its
+        waits), else the Hermes session's own (``hermes-session-<profile>-<id>``), with the
+        task if known. A workspace path several tasks share belongs to none of them. Nothing
+        that goes wrong here stops the board's snapshot: the waits are left out."""
+        try:
+            return self._read_waits(home, now, sessions, rows)
+        except Exception as exc:  # waits are an extra: the board is read without them
+            warn_once((str(home), "waits"), "hermes: waits in sessions not read: %s", exc)
+            return ()
+
+    def _read_waits(
+        self,
+        home: Path,
+        now: datetime,
+        sessions: Sequence[Session],
+        rows: Mapping[str, sqlite3.Row],
+    ) -> tuple[SessionWait, ...]:
+        seen = self._state_seen
+        if seen is not None and timedelta(0) <= now - seen[0] < STATE_EVERY:
+            found = seen[1]
+        else:
+            found = tuple(read_waits(home, now - self.state_window, self.state_sources))
+            self._state_seen = (now, found)
+        users: dict[str, list[str]] = {}
+        for tid, row in rows.items():
+            raw = str(_col(row, "workspace_path") or "").strip()
+            if _col(row, "workspace_kind") in TASK_DIR_KINDS and Path(raw).is_absolute():
+                users.setdefault(resolve(raw), []).append(tid)
+        workspaces = {path: ids[0] if len(ids) == 1 else None for path, ids in users.items()}
+        runs: dict[tuple[str, str], list[Session]] = {}
+        for s in sessions:
+            runs.setdefault((s.task_id, s.owner_id.casefold()), []).append(s)
+        recent = [w for w in found if w.at >= now - self.state_window]
+        tasks: dict[str, str | None] = {}  # cwd -> task
+        for w in recent:
+            if w.cwd and w.cwd not in tasks:
+                tasks[w.cwd] = task_at(resolve(w.cwd), workspaces)
+        homes: dict[tuple[str, str], tuple[str, str | None]] = {}  # Hermes session -> id, task
+        for w in recent:
+            task = tasks.get(w.cwd) if w.cwd else None
+            mine = runs.get((task, w.profile), []) if task is not None else []
+            run = next((s for s in mine if s.started_at <= w.at <= (s.ended_at or now)), None)
+            key = (w.profile, w.session)
+            if run is not None:
+                homes[key] = (run.id, task)
+            else:
+                homes.setdefault(key, (f"hermes-session-{w.profile}-{w.session}", task))
+        out = [
+            SessionWait(
+                session_id=homes[w.profile, w.session][0],
+                at=w.at,
+                shape=w.shape,
+                waited=w.waited,
+                task_id=homes[w.profile, w.session][1],
+                role=self.role_of(w.profile),
+                source=self.name,
+            )
+            for w in recent
+        ]
+        return tuple(sorted(out, key=lambda w: (w.at, w.session_id)))
 
     def _with_tools(
         self,

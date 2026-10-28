@@ -9,11 +9,29 @@ condition and exits; the task becomes ``waiting``. This rule:
   (checked since the wait began and within ``max_condition_age``);
 - alerts when a task waits past ``max_wait``, or (after a short grace) waits on nothing;
 - spots agents that wait *inside* a live session by polling a known check, and tells them
-  to register a condition and exit.
+  to register a condition and exit;
+- spots sessions that waited inside themselves (``sleep``, a CI watch, a loop over them, as
+  their platform recorded the commands: ``Snapshot.waits``), however the session ended.
 
 Polling detection only looks at calls matching ``poll_patterns`` (condition kind → command
 substrings), which is configuration, never code: Kelpie knows no particular CI. Without
 patterns it stays silent. Generic loops are rule 10's (``loop_breaker``).
+
+**Waits inside sessions** (issue #197). A session that waited ``session_waits`` times or more
+within ``session_wait_lookback``, or at least ``session_wait_time`` in all (the lower bounds
+of the waits' buckets), wasted its context on waiting even when it then blocked the task as
+it should: on a live farm a reviewer slept hundreds of times polling CI before each block.
+The adapter recognises the waits (the Hermes adapter from each profile's ``state.db``) and
+keeps only their shape and duration bucket. Only waits of ``MIN_WAIT`` or more, or of unknown
+length (a watch, a loop), count: a two-second sleep while a server starts is no polling. A
+session of an unfinished task gets one comment on the task, once, under the key of the live
+polling check's comment (``poll:<session>``): block on a condition for what it waits for and
+exit. After a polling comment it is not sent (the ledger has the key within its once window);
+after it, a polling comment waits out only the usual cooldown. Sessions not on an open task
+Kelpie knows of (an orchestrator's, a finished task's) are counted per role, in one info
+alert for the role's
+owner to act on (its instructions are theirs: Kelpie never edits them). The Hermes adapter
+reads the last 6 hours: a longer ``session_wait_lookback`` sees no more there.
 
 The can-never-be-met and waits-on-nothing alerts list the tasks stuck behind the waiting one
 (``params.stuck_ids``, as rule 3 reads chains), so rule 3 does not alert on the same dead end.
@@ -66,6 +84,7 @@ from kelpie.core.model import (
     Condition,
     ConditionKind,
     Session,
+    SessionWait,
     Snapshot,
     Span,
     SpanKind,
@@ -74,7 +93,7 @@ from kelpie.core.model import (
 )
 from kelpie.core.serde import parse_duration
 from kelpie.rules import needs_you, register
-from kelpie.rules._alerts import alert_params, check_connectors
+from kelpie.rules._alerts import alert_params, check_connectors, count
 from kelpie.rules._calls import (
     CallKey,
     call_key,
@@ -96,6 +115,7 @@ from kelpie.rules._tasks import (
 )
 
 NAME = "wait_condition"
+MIN_WAIT = timedelta(seconds=30)  # a shorter wait inside a session does not count
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +128,10 @@ class WaitCondition:
     poll_min_repeats: int = 8
     poll_window: timedelta = timedelta(minutes=10)
     poll_error_streak: int = 5
+    # Waits inside a session (Snapshot.waits): this many, or this long in all, in the lookback.
+    session_waits: int = 3  # 0: off
+    session_wait_time: timedelta = timedelta(minutes=10)
+    session_wait_lookback: timedelta = timedelta(hours=6)
     max_condition_age: timedelta = DEFAULT_MAX_CONDITION_AGE
     session_stale_after: timedelta = DEFAULT_STALE_AFTER
     # Rule 13 as it reaches people (kelpie.app sets it from needs_you's config while it
@@ -122,13 +146,19 @@ class WaitCondition:
         for task in snapshot.tasks:
             if task.status is Status.WAITING:
                 actions.extend(self._check_waiting(task, snapshot, behind, listed))
+        polled: set[str] = set()
         if self.poll_patterns:
             waiting = {t.id for t in snapshot.tasks if t.status is Status.WAITING}
             for session in snapshot.sessions:
                 if session.task_id in waiting:
                     continue  # already did the right thing; the wake will follow
                 if is_live(session, snapshot.now, self.session_stale_after):
-                    actions.extend(self._check_polling(session, snapshot))
+                    found = list(self._check_polling(session, snapshot))
+                    if found:
+                        polled.add(session.id)
+                    actions.extend(found)
+        if self.session_waits:
+            actions.extend(self._check_session_waits(snapshot, polled))
         return actions
 
     def _listed(self, snapshot: Snapshot) -> Callable[[], frozenset[str]] | None:
@@ -396,6 +426,84 @@ class WaitCondition:
     def _kind_for(self, span: Span) -> str | None:
         return poll_kind(self.poll_patterns, span)
 
+    # --- waits inside sessions (Snapshot.waits) -----------------------------------------
+
+    def _check_session_waits(self, snapshot: Snapshot, polled: set[str]) -> Iterable[Action]:
+        since = snapshot.now - self.session_wait_lookback
+        sessions: dict[str, list[SessionWait]] = defaultdict(list)
+        for w in snapshot.waits:
+            if w.waited is not None and w.waited < MIN_WAIT:
+                continue
+            if since < w.at <= snapshot.now and w.session_id not in polled:
+                sessions[w.session_id].append(w)
+        by_role: dict[str, list[list[SessionWait]]] = defaultdict(list)
+        for sid, waits in sorted(sessions.items()):
+            waits.sort(key=lambda w: w.at)
+            if len(waits) < self.session_waits and _waited(waits) < self.session_wait_time:
+                continue
+            task_id = next((w.task_id for w in reversed(waits) if w.task_id), None)
+            task = snapshot.task(task_id) if task_id is not None else None
+            if task is None or task.status.is_terminal:
+                by_role[waits[-1].role or "unknown"].append(waits)
+                continue
+            yield Action(
+                ActionKind.COMMENT,
+                NAME,
+                f"This task's session waited inside itself {_waits_text(waits)}. Waiting in a "
+                "session re-reads its whole context on every check and holds its slot, even "
+                "when the task is blocked afterwards: block the task on a condition for what "
+                "it waits for (CI, a merge, a review) and exit; Kelpie wakes it when the "
+                "condition holds.",
+                task_id=task.id,
+                key=f"poll:{sid}",  # the live polling check's: one comment or the other
+                once=True,
+                params=_waits_params(waits) | {"session_id": sid},
+            )
+        for role, found in sorted(by_role.items()):
+            waits = [w for ws in found for w in ws]
+            yield Action(
+                ActionKind.ALERT,
+                NAME,
+                f"{len(found)} {role} session(s) waited inside themselves "
+                f"{_waits_text(waits)} in the last {_hours(self.session_wait_lookback)}, "
+                "not on an open task Kelpie knows of. Waiting in a session re-reads its context on "
+                f"every check: {role} agents should block on a condition and exit instead "
+                "(their instructions are yours to change; Kelpie does not edit them).",
+                key=f"session-waits:{role}",
+                state=f"{NAME}:session-waits:{role}",
+                since=min(w.at for w in waits),
+                params=_waits_params(waits)
+                | {"role": role, "session_ids": sorted({w.session_id for w in waits})}
+                | alert_params(f"{role} agents waited inside {count(len(found), 'session')}"),
+            )
+
+
+def _waited(waits: Sequence[SessionWait]) -> timedelta:
+    """At least how long ``waits`` waited: the sum of their buckets' lower bounds."""
+    return sum((w.waited for w in waits if w.waited is not None), timedelta(0))
+
+
+def _waits_text(waits: Sequence[SessionWait]) -> str:
+    shapes: dict[str, int] = defaultdict(int)
+    for w in waits:
+        shapes[w.shape] += 1
+    parts = ", ".join(f"{shape} {n}" for shape, n in sorted(shapes.items(), key=lambda x: -x[1]))
+    total = _waited(waits)
+    least = f", at least {_minutes(total)} in all" if total >= timedelta(minutes=1) else ""
+    times = "once" if len(waits) == 1 else f"{len(waits)} times"
+    return f"{times} ({parts}){least}"
+
+
+def _waits_params(waits: Sequence[SessionWait]) -> dict[str, Any]:
+    shapes: dict[str, int] = defaultdict(int)
+    for w in waits:
+        shapes[w.shape] += 1
+    return {
+        "waits": len(waits),
+        "waited_s": int(_waited(waits).total_seconds()),
+        "shapes": dict(sorted(shapes.items())),
+    }
+
 
 def _known_unmet(
     c: Condition, since: datetime, now: datetime, max_age: timedelta = DEFAULT_MAX_CONDITION_AGE
@@ -493,6 +601,14 @@ def build(config: dict[str, Any]) -> WaitCondition:
     for key in ("poll_min_repeats", "poll_error_streak"):
         if key in config:
             kwargs[key] = _positive_int(config.pop(key), key)
+    if "session_waits" in config:
+        value = config.pop("session_waits")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError("session_waits must be a non-negative integer (0: off)")
+        kwargs["session_waits"] = value
+    for key in ("session_wait_time", "session_wait_lookback"):
+        if key in config:
+            kwargs[key] = _duration(config.pop(key), key)
     if "poll_patterns" in config:
         kwargs["poll_patterns"] = parse_poll_patterns(config.pop("poll_patterns"))
     if "needs_you" in config:

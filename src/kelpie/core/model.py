@@ -269,6 +269,32 @@ class Session:
     running_tool_since: datetime | None = None
 
 
+# Lower bounds of the buckets a wait inside a session is kept in (SessionWait.waited).
+WAIT_BUCKETS = tuple(timedelta(seconds=s) for s in (0, 30, 60, 5 * 60, 15 * 60, 30 * 60, 60 * 60))
+
+
+def wait_bucket(waited: timedelta) -> timedelta:
+    """The lower bound of the :data:`WAIT_BUCKETS` bucket ``waited`` falls in."""
+    return max((b for b in WAIT_BUCKETS if b <= waited), default=WAIT_BUCKETS[0])
+
+
+@dataclass(frozen=True, slots=True)
+class SessionWait:
+    """A command an agent ran to wait inside its session (``sleep``, a CI watch, a loop
+    over them), as its platform recorded it (issue #197, rule 2). Only the command's shape
+    and how long it waited, bucketed, are kept: never its arguments."""
+
+    # The Snapshot session it ran in when the adapter matched one, else the platform's own
+    # session id (then no Snapshot session has it).
+    session_id: str
+    at: datetime
+    shape: str  # "sleep", "gh run watch", "gh pr checks --watch", "<shape> loop"
+    waited: timedelta | None = None  # the lower bound of its bucket (WAIT_BUCKETS); None: unknown
+    task_id: str | None = None
+    role: str | None = None
+    source: str | None = None  # name of the platform adapter that reported it
+
+
 class SpanKind(StrEnum):
     TASK = "task"
     SESSION = "session"
@@ -722,6 +748,8 @@ class Snapshot:
     resources: tuple[Resource, ...] = ()
     sessions: tuple[Session, ...] = ()
     spans: tuple[Span, ...] = ()
+    # Waits inside sessions, from the platform's own record of its commands (rule 2).
+    waits: tuple[SessionWait, ...] = ()
     # Aggregates over a longer window than ``spans`` (see ``[traces] totals_window``).
     span_totals: tuple[SpanTotals, ...] = ()
     # Budget state per budget and subject ([[budgets]]), computed when the snapshot is

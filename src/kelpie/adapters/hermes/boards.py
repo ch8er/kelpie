@@ -62,6 +62,9 @@ class HermesBoards:
     # The host's tool runs and slots, read over every board's tasks (a board's own
     # ``tools`` stays None); its ``_host_seen`` keeps the last good read.
     host: HermesAdapter | None = None
+    # The profiles' state.db (waits inside sessions), read once for every board's tasks and
+    # runs (a board's own ``state_home`` stays None); its ``_state_seen`` keeps the last read.
+    state: HermesAdapter | None = None
     name: str = "hermes"
     actions: ClassVar[frozenset[ActionKind]] = HermesAdapter.actions
 
@@ -138,6 +141,9 @@ class HermesBoards:
             spans=_claimed_once(parts),
             unobserved=tuple(unobserved),
         )
+        if self.state is not None and self.state.state_home is not None:
+            waits = self.state._waits(self.state.state_home, now, merged.sessions, rows)
+            merged = replace(merged, waits=waits)
         if self.host is None or self.host.tools is None:
             return merged
         # A workspace pattern matches a task's id on its board: the namespaced id it stands

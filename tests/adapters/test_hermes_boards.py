@@ -269,3 +269,35 @@ def test_a_spool_line_two_boards_claim_goes_to_neither(
     spool.write_text(line("t_q1", 2, ago(minutes=5), tool_call_id="c1") + "\n")
     snap = make(qr, sign, spool=spool).snapshot(NOW)
     assert snap.spans == ()
+
+
+def test_waits_in_sessions_are_read_once_over_every_board(
+    boards: tuple[Board, Board], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    from tests.adapters.test_hermes_state_db import StateDb
+
+    qr, sign = boards
+    ws = tmp_path / "ws"
+    sign.update("t_s1", workspace_kind="worktree", workspace_path=str(ws / "t_s1"))
+    home = tmp_path / "home"
+    db = StateDb(home / "profiles" / "dev-1" / "state.db")
+    db.session("h1", str(ws / "t_s1"), ago(minutes=50), ago(minutes=5))
+    db.call("h1", ago(minutes=30), "sleep 300", result=ago(minutes=25))
+    reads: list[datetime] = []
+    real = hermes_adapter.read_waits
+
+    def counted(*args: object) -> object:
+        reads.append(NOW)
+        return real(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(hermes_adapter, "read_waits", counted)
+    a = make(qr, sign)
+    state = replace(a.boards[0], board=None, name="hermes", state_home=home)
+    a = HermesBoards(a.boards, state=state)
+    snap = a.snapshot(NOW)
+    assert len(reads) == 1  # one home, one read, whatever the number of boards
+    (w,) = snap.waits
+    assert (w.task_id, w.role, w.shape) == ("sign:t_s1", "dev", "sleep")
+    assert w.session_id == next(s.id for s in snap.sessions if s.task_id == "sign:t_s1")

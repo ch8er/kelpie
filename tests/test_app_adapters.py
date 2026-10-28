@@ -17,6 +17,7 @@ from kelpie.app import (
     ConfigError,
     HermesSettings,
     Settings,
+    board_only,
     build_adapters,
     build_app,
     load_rules,
@@ -106,6 +107,7 @@ def test_hermes_values(tmp_path: Path) -> None:
         timedelta(hours=6),
         True,
         wait_key=(settings.db_path or Path()).parent / "hermes-wait.key",
+        state_home=Path("/data"),  # db_path's directory
     )
 
 
@@ -665,3 +667,36 @@ def test_hermes_author(tmp_path: Path) -> None:
         load_settings(
             write(tmp_path, '[adapters.hermes]\nauthor = "alice"\nhuman_owners = ["Alice"]\n')
         )
+
+
+def test_hermes_state_home(tmp_path: Path) -> None:
+    (default,) = build_adapters(load_settings(write(tmp_path, "[adapters.hermes]\n")))
+    assert isinstance(default, HermesAdapter)
+    assert default.state_home == Path("~/.hermes").expanduser()  # db_path's directory
+    named = '[adapters.hermes]\ndb_path = "/data/hermes/kanban/boards/ops/kanban.db"\n'
+    (board,) = build_adapters(load_settings(write(tmp_path, named)))
+    assert isinstance(board, HermesAdapter)
+    assert board.state_home == Path("/data/hermes")  # a named board's Hermes home
+    other = '[adapters.hermes]\ndb_path = "/data/elsewhere/kanban.db"\n'
+    (moved,) = build_adapters(load_settings(write(tmp_path, other)))
+    assert isinstance(moved, HermesAdapter) and moved.state_home == Path("/data/elsewhere")
+    assert moved.state_sources == ("kanban", "subagent", "cron")
+    picked = '[adapters.hermes]\nstate_sources = ["kanban", " telegram ", "kanban"]\n'
+    (chats,) = build_adapters(load_settings(write(tmp_path, picked)))
+    assert isinstance(chats, HermesAdapter) and chats.state_sources == ("kanban", "telegram")
+    for bad in ("[]", '"kanban"', '[""]', "[1]"):
+        with pytest.raises(ConfigError, match="state_sources"):
+            load_settings(write(tmp_path, f"[adapters.hermes]\nstate_sources = {bad}\n"))
+    (off,) = build_adapters(
+        load_settings(write(tmp_path, "[adapters.hermes]\nstate_home = false\n"))
+    )
+    assert isinstance(off, HermesAdapter) and off.state_home is None
+    (home,) = build_adapters(
+        load_settings(write(tmp_path, '[adapters.hermes]\nstate_home = "/data/hermes"\n'))
+    )
+    assert isinstance(home, HermesAdapter) and home.state_home == Path("/data/hermes")
+    only = board_only(home)
+    assert isinstance(only, HermesAdapter) and only.state_home is None
+    for bad in ('""', "true", "3"):
+        with pytest.raises(ConfigError, match="state_home"):
+            load_settings(write(tmp_path, f"[adapters.hermes]\nstate_home = {bad}\n"))
