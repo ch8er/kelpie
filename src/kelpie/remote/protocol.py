@@ -153,6 +153,8 @@ def to_plain(value: Any) -> Any:
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         out: dict[str, Any] = {}
         for f in dataclasses.fields(value):
+            if not f.init:  # derived data (a snapshot's lookup indexes), never sent
+                continue
             v = getattr(value, f.name)
             if f.default is not dataclasses.MISSING and v == f.default:
                 continue
