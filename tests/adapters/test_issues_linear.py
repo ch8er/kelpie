@@ -79,7 +79,16 @@ def test_workflow_states_delegates_and_relations(lin: FakeLinear) -> None:
         state_type="started",
         delegate="Codex",
         updated=ago(minutes=5),
-        history=[{"createdAt": iso(ago(hours=1)), "toDelegate": {"displayName": "Codex"}}],
+        history=[
+            {
+                "createdAt": iso(ago(hours=1)),
+                "toDelegate": {"id": "user-codex", "displayName": "Codex", "app": True},
+            },
+            {
+                "createdAt": iso(ago(minutes=30)),  # someone else under the agent's name
+                "toDelegate": {"id": "user-impostor", "displayName": "Codex", "app": True},
+            },
+        ],
         attachments=[
             {
                 "url": "https://github.com/acme/app/pull/7",
@@ -841,7 +850,11 @@ def test_history_of_an_odd_shape_is_read_as_far_as_it_makes_sense() -> None:
 
     at = iso(ago(hours=1))
     assert (
-        _events([{"createdAt": at, "addedLabels": 5, "removedLabels": [None, {"name": 3}]}]) == ()
+        _events(
+            [{"createdAt": at, "addedLabels": 5, "removedLabels": [None, {"name": 3}]}],
+            lambda user, delegate: None,
+        )
+        == ()
     )
 
 
@@ -987,3 +1000,115 @@ def test_the_agents_stay_known_when_the_hourly_lookup_fails(lin: FakeLinear) -> 
     lin.rate_limited = False
     snap = a.snapshot(NOW + timedelta(minutes=3))
     assert {t.id: t.owner_id for t in snap.tasks} == {"ENG-2": "codex"}
+
+
+def test_a_teams_read_waits_until_the_hour_has_room_for_it_and_the_reserve(
+    lin: FakeLinear,
+) -> None:
+    lin.issue("ENG-1", "x", ago(days=1))
+    lin.headers = {"X-Complexity": "5000"}  # each request, users and two pages: 15,000
+    a = adapter(lin)
+    a.snapshot(NOW)
+    lin.headers = {"X-RateLimit-Complexity-Remaining": "59000"}  # room for the reserve only
+    a.comment("ENG-1", "x")
+    count = len(lin.requests)
+    a.snapshot(NOW + timedelta(minutes=3))
+    assert "KelpieIssues" not in lin.ops()[count:]  # 50,000 kept + 10,000 last read > 59,000
+    assert "kept for writes" in (a.tracker.problem or "")  # type: ignore[attr-defined]
+
+
+def test_history_read_while_the_agents_were_unknown_is_named_once_they_are(
+    lin: FakeLinear,
+) -> None:
+    lin.issue(
+        "ENG-2",
+        "x",
+        ago(days=2),
+        state_type="started",
+        delegate="Codex",
+        labels=["a"],
+        updated=ago(minutes=5),
+        history=[
+            {
+                "createdAt": iso(ago(hours=1)),
+                "toDelegate": {"id": "user-codex", "displayName": "Codex", "app": True},
+            }
+        ],
+    )
+    lin.broken_ops = {"KelpieUsers"}  # the agents' users cannot be looked up yet
+    a = adapter(lin)
+    assert tasks(a)["ENG-2"].owner_id == UNKNOWN
+    lin.broken_ops = set()
+    t = {x.id: x for x in a.snapshot(NOW + timedelta(minutes=3)).tasks}  # history cached
+    assert (t["ENG-2"].owner_id, t["ENG-2"].status_since) == ("codex", ago(hours=1))
+
+
+def test_history_names_users_as_the_slots_do(lin: FakeLinear) -> None:
+    lin.issue(
+        "ENG-1",
+        "x",
+        ago(days=2),
+        labels=["a"],
+        history=[
+            {
+                "createdAt": iso(ago(hours=3)),
+                "toDelegate": {"id": "user-x", "displayName": "Helper", "app": False},
+            },
+            {
+                "createdAt": iso(ago(hours=2)),
+                "toAssignee": {"id": "user-y", "displayName": "codex[bot]", "app": False},
+            },
+            {
+                "createdAt": iso(ago(hours=1)),
+                "toAssignee": {"id": "user-dana", "displayName": "dana", "app": False},
+            },
+        ],
+    )
+    (item,) = adapter(lin).tracker.read(NOW)  # type: ignore[attr-defined]
+    assert [(e.kind, e.name) for e in item.events] == [
+        ("assigned", UNKNOWN),  # a delegate that is no app user
+        ("assigned", UNKNOWN),  # a name Kelpie does not take
+        ("assigned", "dana"),
+    ]
+
+
+def test_a_large_team_is_not_starved_by_its_own_last_read(lin: FakeLinear) -> None:
+    lin.issue("ENG-1", "x", ago(days=1))
+    a = adapter(lin)
+    reader = a.tracker
+    a.snapshot(NOW)
+    reader._team_cost["ENG"] = (210_000, 21)  # type: ignore[attr-defined]
+    lin.headers = {
+        "X-RateLimit-Complexity-Remaining": "250000",  # a fresh hour of 300,000
+        "X-RateLimit-Complexity-Limit": "300000",
+    }
+    a.comment("ENG-1", "x")
+    count = len(lin.requests)
+    a.snapshot(NOW + timedelta(minutes=3))
+    assert "KelpieIssues" in lin.ops()[count:]  # 50,000 + at most 150,000 <= 250,000
+
+
+def test_a_teams_read_waits_for_room_for_its_requests_too(lin: FakeLinear) -> None:
+    lin.issue("ENG-1", "x", ago(days=1))
+    a = adapter(lin)
+    a.snapshot(NOW)  # the lists: two requests
+    lin.headers = {"X-RateLimit-Requests-Remaining": "101"}  # the reserve and one more
+    a.comment("ENG-1", "x")
+    count = len(lin.requests)
+    a.snapshot(NOW + timedelta(minutes=3))
+    assert "KelpieIssues" not in lin.ops()[count:]  # 100 kept + 2 the last read took > 101
+
+
+@pytest.mark.parametrize("broken", ["KelpieUsers", "KelpieLabels"])
+def test_an_action_whose_lookups_fail_keeps_the_agents_known(lin: FakeLinear, broken: str) -> None:
+    lin.issue("ENG-2", "x", ago(days=1), state_type="started", delegate="Codex")
+    a = adapter(lin)
+    assert tasks(a)["ENG-2"].owner_id == "codex"
+    reader = a.tracker
+    reader._looked_up = NOW - timedelta(hours=2)  # type: ignore[attr-defined]
+    lin.broken_ops = {broken, "KelpieUsers"}  # the action's lookups fail; the hourly one too
+    with pytest.raises(IssuesError):
+        a.requeue("ENG-2", "quiet")
+    assert "KelpieUpdate" not in lin.ops()
+    t = {x.id: x for x in a.snapshot(NOW + timedelta(minutes=3)).tasks}
+    assert t["ENG-2"].owner_id == "codex"
