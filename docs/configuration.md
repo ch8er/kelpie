@@ -553,6 +553,10 @@ Other keys:
 | `session_stale_after` | `"30m"` | duration, > 0 | Only live sessions are stopped. |
 | `agents.<owner id>` | `{}` | table of thresholds | Per-agent overrides. Wins over `roles`. |
 | `roles.<role>` | `{}` | table of thresholds | Per-role overrides. |
+| `tool_outage_tools` | `[]` (off) | list of non-empty strings | Correlated tool failures: the farm's build and test runners (e.g. `["ios_sim.sh", "xcodebuild"]`), matched as a whole word of a tool call's command, path aside. |
+| `tool_outage_min_tasks` | `3` | 2 to 1000 | Distinct tasks (a session tied to no task counts as one) failing one tool with one exit code within `tool_outage_window` → one outage. |
+| `tool_outage_window` | `"30m"` | duration, > 0 | How close together those failures must be; the `[traces] window` at most, whose spans the snapshot holds. |
+| `tool_outage_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"`. |
 
 ```toml
 [engine.rules.loop_breaker.agents.agent-ops-1]
@@ -560,6 +564,20 @@ identical_calls = 20
 [engine.rules.loop_breaker.roles.maintenance]
 consecutive_errors = 8
 ```
+
+Correlated tool failures (#229, signal 2): a tool of `tool_outage_tools` failing on the
+farm's own hosts, where no CI check sees it (a broken Xcode install: every
+`ios_sim.sh` run exits 127). It reads the exit codes adapters record on tool calls
+(`kelpie.tool.exit_code`, `kelpie.tool.result`; the Hermes adapter takes them from the
+terminal tool's result, never its `error` key): a foreground call that exited non-zero is a
+failure, its exit code the error class; one that exited 0 a success; a call sent to the
+background (its 0 means started) and one the platform refused (Hermes: exit -1) are
+neither. Failures of one tool with one exit code by `tool_outage_min_tasks` distinct tasks
+within `tool_outage_window`, with no success of the tool since → one `warning` "Tool
+outage: ios_sim.sh exits 127 for 3 tasks", with the tasks and what the code usually means
+(127 not found, 124 timed out, 137 killed). One task retrying its own failure is none. The
+"Resolved" notice names the tool's next success. Observe-only until
+`tool_outage_mode = "rule"`.
 
 ### 11. no_progress
 

@@ -56,9 +56,10 @@ MAX_BUILDS = 20  # failing build ids an outage's params list, newest first
 CI_FAILURES = "ci_failures"  # rule 9: change requests failing at the same CI job and step
 CI_NOT_STARTED = "ci_not_started"  # rule 9: CI jobs that never start
 BLOCK_STORM = "block_storm"  # rule 4: many tasks blocked on the same reason at once
+TOOL_FAILURES = "tool_failures"  # rule 10: one tool failing the same way for many tasks
 # A closed set on purpose: params of an unknown kind (a newer Kelpie's) are not read as
 # something they are not; a new signal adds its kind here.
-KINDS = frozenset({CI_FAILURES, CI_NOT_STARTED, BLOCK_STORM})
+KINDS = frozenset({CI_FAILURES, CI_NOT_STARTED, BLOCK_STORM, TOOL_FAILURES})
 
 
 def outage_signature(workflow: str | None, job: str, step: str | None) -> str:
@@ -99,8 +100,9 @@ class Outage:
     ``job`` and ``step`` are the signature's parts. ``prs`` are ``owner/name#N``. ``tasks``
     are the tasks the outage explains (for CI kinds: the blocked or waiting tasks of the
     PRs in scope, and tasks waiting on an unmet CI or merge condition of those PRs; for a
-    block storm: the blocked tasks). ``runners`` are runner names and labels; ``builds``
-    build ids (at most :data:`MAX_BUILDS`)."""
+    block storm: the blocked tasks; for tool failures: the tasks whose runs failed).
+    ``runners`` are runner names and labels; ``builds`` build ids (at most
+    :data:`MAX_BUILDS`)."""
 
     state: str
     signature: str

@@ -1,0 +1,54 @@
+id: "20-tool-outage"
+incident: 20
+title: "Correlated tool failures: the simulator script exits 127 for task after task"
+description: >
+  The farm's own Mac lost its Xcode command line tools. Every agent that ran the simulator
+  script got exit code 127 (not found), and each blocked its task on its own: GitHub's CI
+  never ran it, so no failing-check outage fired. Rule 9 must report one outage of
+  `ios_sim.sh` exiting 127 for the three tasks it hit within half an hour, from the tool
+  calls' exit codes. A call sent to the background (exit 0 means started) and one Hermes
+  refused to run (exit -1) are not failures. One task retrying its own failing build is no
+  outage, and a tool that ran successfully again since its failures is none either. Rule 10
+  reports it, not rule 9: the cause is on the farm's hosts, not in CI.
+rule: loop_breaker
+config:
+  tool_outage_tools: [ios_sim.sh, xcodebuild, lint.sh]
+  tool_outage_min_tasks: 3
+  tool_outage_window: "30m"
+snapshot:
+  now: "2026-03-02T11:00:00+00:00"
+  spans:
+    # It worked this morning.
+    - {trace_id: TR-600, span_id: S600, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T09:00:00+00:00", end: "2026-03-02T09:04:00+00:00", task_id: T-600, session_id: S-600, outcome: ok, attributes: {command: "scripts/ios_sim.sh test", kelpie.tool.result: ok, kelpie.tool.exit_code: 0}}
+    # Then three tasks within 20 minutes, and one retry: exit 127.
+    - {trace_id: TR-601, span_id: S601, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:05:00+00:00", end: "2026-03-02T10:05:01+00:00", task_id: T-601, session_id: S-601, outcome: error, attributes: {command: "scripts/ios_sim.sh test", kelpie.tool.result: error, kelpie.tool.exit_code: 127}}
+    - {trace_id: TR-602, span_id: S602, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:15:00+00:00", end: "2026-03-02T10:15:01+00:00", task_id: T-602, session_id: S-602, outcome: error, attributes: {command: "cd app && ./scripts/ios_sim.sh build", kelpie.tool.result: error, kelpie.tool.exit_code: 127}}
+    - {trace_id: TR-603, span_id: S603, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:25:00+00:00", end: "2026-03-02T10:25:01+00:00", task_id: T-603, session_id: S-603, outcome: error, attributes: {command: "scripts/ios_sim.sh test", kelpie.tool.result: error, kelpie.tool.exit_code: 127}}
+    - {trace_id: TR-601, span_id: S601b, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:30:00+00:00", end: "2026-03-02T10:30:01+00:00", task_id: T-601, session_id: S-601, outcome: error, attributes: {command: "scripts/ios_sim.sh test", kelpie.tool.result: error, kelpie.tool.exit_code: 127}}
+    # Negative cases: started in the background (0 = started), refused by Hermes (-1).
+    - {trace_id: TR-604, span_id: S604, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:20:00+00:00", end: "2026-03-02T10:20:01+00:00", task_id: T-604, session_id: S-604, outcome: ok, attributes: {command: "scripts/ios_sim.sh boot", kelpie.tool.result: unknown, kelpie.tool.exit_code: 0}}
+    - {trace_id: TR-605, span_id: S605, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:22:00+00:00", end: "2026-03-02T10:22:01+00:00", task_id: T-605, session_id: S-605, outcome: error, attributes: {command: "scripts/ios_sim.sh test", kelpie.tool.result: blocked, kelpie.tool.exit_code: -1}}
+    # Negative case: one task retrying its own failing build five times.
+    - {trace_id: TR-610, span_id: S610a, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:00:00+00:00", end: "2026-03-02T10:02:00+00:00", task_id: T-610, session_id: S-610, outcome: error, attributes: {command: "xcodebuild -scheme App test", kelpie.tool.result: error, kelpie.tool.exit_code: 65}, repeat: {count: 5, every: "5m"}}
+    # Negative case: lint.sh failed for three tasks, then ran successfully again.
+    - {trace_id: TR-620, span_id: S620, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:00:00+00:00", end: "2026-03-02T10:00:10+00:00", task_id: T-620, session_id: S-620, outcome: error, attributes: {command: "scripts/lint.sh", kelpie.tool.result: error, kelpie.tool.exit_code: 1}}
+    - {trace_id: TR-621, span_id: S621, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:05:00+00:00", end: "2026-03-02T10:05:10+00:00", task_id: T-621, session_id: S-621, outcome: error, attributes: {command: "scripts/lint.sh", kelpie.tool.result: error, kelpie.tool.exit_code: 1}}
+    - {trace_id: TR-622, span_id: S622, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:10:00+00:00", end: "2026-03-02T10:10:10+00:00", task_id: T-622, session_id: S-622, outcome: error, attributes: {command: "scripts/lint.sh", kelpie.tool.result: error, kelpie.tool.exit_code: 1}}
+    - {trace_id: TR-623, span_id: S623, name: "execute_tool terminal", kind: tool, tool: terminal, start: "2026-03-02T10:40:00+00:00", end: "2026-03-02T10:40:10+00:00", task_id: T-623, session_id: S-623, outcome: ok, attributes: {command: "scripts/lint.sh", kelpie.tool.result: ok, kelpie.tool.exit_code: 0}}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "Tool outage since 2026-03-02 10:05 UTC: ios_sim.sh exits 127 (not found) for 3 tasks, 4 run(s)"
+    params:
+      kind: tool_failures
+      signature: "ios_sim.sh exit 127"
+      tasks: [T-601, T-602, T-603]
+not_expected_actions:
+  - kind: alert
+    reason_contains: "xcodebuild"
+  - kind: alert
+    reason_contains: "lint.sh"
+  - kind: alert
+    reason_contains: "T-604"
+  - kind: alert
+    reason_contains: "T-605"
