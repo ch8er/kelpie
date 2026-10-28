@@ -589,8 +589,9 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
 
 
 def _hermes_boards(section: Mapping[str, Any]) -> tuple[HermesBoardSettings, ...]:
-    """``[[adapters.hermes.boards]]``: names and databases distinct, none of the one-board
-    keys (``db_path``, ``wait_key``) beside them."""
+    """``[[adapters.hermes.boards]]``: names and databases distinct (paths compared after
+    ``~`` expansion and resolving symlinks), none of the one-board keys (``db_path``,
+    ``wait_key``) beside them. Keys are checked distinct once defaulted (_with_wait_key)."""
     if "boards" not in section:
         return ()
     where = "[[adapters.hermes.boards]]"
@@ -630,9 +631,6 @@ def _hermes_boards(section: Mapping[str, Any]) -> tuple[HermesBoardSettings, ...
     dbs = [b.db_path.expanduser().resolve() for b in boards]
     if len(set(dbs)) < len(dbs):
         raise ConfigError(f"{where} lists a db_path twice: one board is one entry")
-    keys = [b.wait_key.expanduser().resolve() for b in boards if b.wait_key is not None]
-    if len(set(keys)) < len(keys):
-        raise ConfigError(f"{where} share a wait_key: each board signs with its own")
     return tuple(boards)
 
 
@@ -712,13 +710,16 @@ def _with_wait_key(hermes: HermesSettings | None, db: Path | None) -> HermesSett
         return hermes
     where = DEFAULT_WAIT_KEY.parent if db is None else db.parent
     if hermes.boards:  # a key per board: a marker of one board never verifies on another
-        return replace(
-            hermes,
-            boards=tuple(
-                b if b.wait_key is not None else replace(b, wait_key=where / board_key(b.name))
-                for b in hermes.boards
-            ),
+        boards = tuple(
+            b if b.wait_key is not None else replace(b, wait_key=where / board_key(b.name))
+            for b in hermes.boards
         )
+        keys = [b.wait_key.expanduser().resolve() for b in boards if b.wait_key is not None]
+        if len(set(keys)) < len(keys):  # compared after the defaults, ~ and symlinks
+            raise ConfigError(
+                "[[adapters.hermes.boards]] share a wait_key: each board signs with its own"
+            )
+        return replace(hermes, boards=boards)
     if hermes.wait_key is not None:
         return hermes
     return replace(hermes, wait_key=where / WAIT_KEY_NAME)

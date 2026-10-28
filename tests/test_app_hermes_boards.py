@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from kelpie.app import ConfigError, HermesBoardSettings, load_settings
+from kelpie.adapters.hermes.park import DEFAULT_WAIT_KEY
+from kelpie.app import (
+    ConfigError,
+    HermesBoardSettings,
+    HermesSettings,
+    _with_wait_key,
+    build_adapters,
+    load_settings,
+)
 
 TWO = """
 [adapters.hermes]
@@ -78,13 +86,24 @@ def test_bad_boards_stop_kelpie(tmp_path: Path, text: str, match: str) -> None:
         load_settings(write(tmp_path, text))
 
 
-def test_in_memory_ledger_keeps_board_keys_in_kelpie_home(tmp_path: Path) -> None:
-    from kelpie.adapters.hermes.park import DEFAULT_WAIT_KEY
-    from kelpie.app import _with_wait_key
-
-    hermes = load_settings(write(tmp_path, board())).hermes
-    assert hermes is not None
-    unkeyed = type(hermes)(boards=(HermesBoardSettings("qr", Path("/d/qr.db")),))
+def test_in_memory_ledger_keeps_board_keys_in_kelpie_home() -> None:
+    unkeyed = HermesSettings(boards=(HermesBoardSettings("qr", Path("/d/qr.db")),))
     keyed = _with_wait_key(unkeyed, None)
     assert keyed is not None
     assert keyed.boards[0].wait_key == DEFAULT_WAIT_KEY.parent / "hermes-wait-qr.key"
+
+
+def test_an_explicit_key_may_not_be_another_boards_default(tmp_path: Path) -> None:
+    ledger = load_settings(None).db_path
+    assert ledger is not None
+    taken = ledger.parent / "hermes-wait-qr.key"
+    text = board() + board("sign", "/d/s.db", f'wait_key = "{taken}"\n')
+    with pytest.raises(ConfigError, match="share a wait_key"):
+        load_settings(write(tmp_path, text))
+
+
+def test_boards_are_refused_until_the_adapter_reads_them(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="not supported"):
+        build_adapters(load_settings(write(tmp_path, TWO)))
+    off = TWO.replace('human_owners = ["alice"]', "enabled = false")
+    assert build_adapters(load_settings(write(tmp_path, off))) == []

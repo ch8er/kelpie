@@ -152,6 +152,9 @@ def test_board_namespaced_ids_link_by_their_local_id_on_one_host_and_across_host
     }
     assert t("qr:t_1a").local_id is None  # no board: not namespaced
     assert replace(t("qr:"), board="qr").local_id is None  # nothing after the prefix
+    assert replace(t("vm-1:qr:"), host="vm-1", board="qr").local_id is None
+    assert replace(t("vm-1:t_1a"), host="vm-1", board="qr").local_id is None  # no board prefix
+    assert replace(t("qr:t_1a"), host="vm-1", board="qr").local_id == "t_1a"
 
 
 def test_on_a_partial_farm_only_local_ids_known_unique_link() -> None:

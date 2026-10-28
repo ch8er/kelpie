@@ -179,6 +179,8 @@ class Task:
         for prefix in (self.host, self.board):
             if prefix and rest.startswith(f"{prefix}:") and len(rest) > len(prefix) + 1:
                 rest = rest[len(prefix) + 1 :]
+            elif prefix and prefix == self.board:
+                return None  # a board's task always carries its board's prefix
         return None if rest == self.id else rest
 
 
