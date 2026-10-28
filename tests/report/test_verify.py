@@ -17,7 +17,7 @@ from kelpie.core.ledger import LedgerEntry, Outcome
 from kelpie.core.model import Owner, Return, Session, Span, SpanKind, Status, Task
 from kelpie.core.states import OpenState
 from kelpie.core.storage import SqliteLedgerStore
-from kelpie.report.cli import note_fix
+from kelpie.report.cli import list_fixes, note_fix
 from kelpie.report.config import load_report
 from kelpie.report.daily import ReportInputs, build_report, render_markdown
 from kelpie.report.fixes import CONFIG, MANUAL, FixEvent, FixStore, read_fixes, record_config_change
@@ -526,3 +526,37 @@ def test_kelpie_fix_errors_go_to_stderr(
     assert main([*args, "ok"]) == 0
     got = capsys.readouterr()
     assert got.out.startswith("fix noted at ") and got.err == ""
+
+
+def test_every_kelpie_fix_error_leaves_stdout_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    now = datetime(2026, 3, 2, 12, tzinfo=UTC)
+
+    def settings(db: str) -> Any:
+        path = tmp_path / "kelpie.toml"
+        path.write_text(f'[storage]\npath = "{db}"\n')
+        return load_settings(path)
+
+    memory, missing = settings(":memory:"), settings(str(tmp_path / "none.db"))
+    (tmp_path / "dir.db").mkdir()  # exists, but sqlite cannot open it
+    broken = settings(str(tmp_path / "dir.db"))
+    SqliteLedgerStore(tmp_path / "kelpie.db").close()
+    good = settings(str(tmp_path / "kelpie.db"))
+    clock = lambda: now  # noqa: E731
+    results = [
+        (note_fix(memory, "n", clock=clock), 2),
+        (list_fixes(memory, clock=clock), 2),
+        (note_fix(missing, "n", clock=clock), 2),
+        (note_fix(good, "n", when="2026-03-03T12:00+00:00", clock=clock), 2),  # future
+        (note_fix(good, "n", when="2h", clock=clock), 2),
+        (note_fix(good, "n", rule="no_such_rule", clock=clock), 2),
+        (note_fix(good, "   ", clock=clock), 2),  # an empty note
+        (list_fixes(good, days=0, clock=clock), 2),
+        (note_fix(broken, "n", clock=clock), 1),
+        (list_fixes(broken, clock=clock), 1),
+    ]
+    for (out, err, code), expected in results:
+        assert (out, code) == ("", expected), err
+        assert err.startswith("kelpie: ") and err.endswith("\n")
