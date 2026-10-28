@@ -452,6 +452,9 @@ class Engine:
                 task_id=state.task_id,
                 key=f"resolved:{state.id}|{state.opened_at.isoformat()}",
                 params={"state": state.id},
+                # told in the mode it was announced in: no live "resolved" for a state
+                # people were never told about (an observe-only check's)
+                observe_only=state.mode is Mode.OBSERVE,
             )
             dispatched = self._process_noted(notice, snapshot, note)
             results.append(dispatched)

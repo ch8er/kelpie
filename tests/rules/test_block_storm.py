@@ -17,10 +17,11 @@ from kelpie.core.model import (
     Owner,
     OwnerKind,
     Snapshot,
+    Snooze,
     Status,
     Task,
 )
-from kelpie.rules._block_storm import normalise
+from kelpie.rules._block_storm import _refs, informative, keep_open, normalise
 from kelpie.rules.stale_blocks import StaleBlocks, build
 
 NOW = datetime(2026, 3, 2, 11, tzinfo=UTC)
@@ -46,16 +47,48 @@ FIVE = tuple(blocked(n, 60 - 10 * n) for n in range(5))
 @pytest.mark.parametrize(
     "variant",
     [
-        "needs_input: Waiting for CEO (Xcode first launch) [t_5a0c2e71]",
+        "needs_input: Waiting for CEO (Xcode first launch) [T-1]",
         "NEEDS_INPUT:  waiting for ceo (xcode first launch).",
-        "needs_input: waiting for CEO (Xcode first launch) since 2026-03-02 10:12",
-        "needs_input: waiting for CEO (Xcode first launch) - T-17, a1b2c3d4e5",
+        "needs_input: waiting for CEO (Xcode first launch) 2026-03-02 10:12",
+        "needs_input: waiting for CEO (Xcode first launch) - T-1, a1b2c3d4e5, 20 min",
     ],
 )
-def test_reasons_differing_in_ids_case_and_times_are_one(variant: str) -> None:
-    extra = variant.endswith("10:12")  # "since" is a word: that one stays different
-    assert (normalise(variant) == normalise(ASK)) is not extra
-    assert normalise("re-add the deadbeef cache") == "re add the deadbeef cache"  # no digit
+def test_reasons_differing_in_own_id_case_times_and_hashes_are_one(variant: str) -> None:
+    assert normalise(variant, "T-1") == normalise(ASK, "T-2")
+    assert _refs(variant, "T-1") == ()
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("waiting for T-100 to merge its schema", "waiting for T-101 to merge its schema"),
+        ("disk full on host-1 build cache", "disk full on host-2 build cache"),
+        ("quota exhausted for gpt-4 batch jobs", "quota exhausted for gpt-5 batch jobs"),
+        ("build fails on ios17 simulator", "build fails on ios18 simulator"),
+        ("needs Xcode 15 installed on the mac", "needs Xcode 16 installed on the mac"),
+        ("tests fail under python3.11 only", "tests fail under python3.12 only"),
+    ],
+)
+def test_what_a_reason_names_keeps_reasons_apart(a: str, b: str) -> None:
+    assert (normalise(a, "T-9"), _refs(a, "T-9")) != (normalise(b, "T-9"), _refs(b, "T-9"))
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "label 'blocked'",
+        "waiting_human: needs_input",
+        "guard: hermes circuit breaker (3/3)",
+        "waiting for review",
+        "waiting for CI",
+        "needs_input: approve",
+        "blocked: dependency",
+        "blocked",
+    ],
+)
+def test_a_kind_of_wait_alone_is_no_shared_reason(reason: str) -> None:
+    assert not informative(normalise(reason))
+    assert storms(*(blocked(n, 50 - n, reason) for n in range(6))) == []
 
 
 def test_five_tasks_blocked_on_the_same_question_are_one_outage() -> None:
@@ -126,10 +159,62 @@ def test_it_resolves_once_enough_are_unblocked() -> None:
 
 
 def test_a_storm_naming_different_prs_is_two() -> None:
-    a = tuple(blocked(n, 50 - n, "waiting for review of example/app#7") for n in range(5))
-    b = tuple(blocked(n + 10, 50 - n, "waiting for review of example/app#8") for n in range(5))
+    a = tuple(blocked(n, 50 - n, "waiting for design sign-off on example/app#7") for n in range(5))
+    b = tuple(
+        blocked(n + 10, 50 - n, "waiting for design sign-off on example/app#8") for n in range(5)
+    )
     found = storms(*a, *b)
     assert len(found) == 2 and found[0].state != found[1].state
+
+
+def test_a_storm_half_answered_stays_one_and_does_not_flap() -> None:
+    [alert] = storms(*FIVE)
+    opened = {"open_states": (alert.state,)}
+    assert keep_open(5) == 2 and keep_open(9) == 4
+    assert storms(*FIVE[3:], **opened) != []  # three answered: two still wait on it
+    assert storms(*FIVE[4:], **opened) == []  # one left: resolved
+    assert storms(*FIVE[3:]) == []  # not open: two do not open one
+    early = tuple(blocked(n, 300 - 10 * n) for n in range(5))  # 4-5 h ago
+    [alert] = storms(*early)
+    later = (*early[1:], blocked(5, 10))  # T-0 answered, T-5 blocked hours after the rest
+    assert storms(*later) == []  # not within the window...
+    [kept] = storms(*later, open_states=(alert.state,))  # ...but still the open storm
+    tasks = Outage.from_params(kept.params).tasks  # type: ignore[union-attr]
+    assert tasks == ("T-1", "T-2", "T-3", "T-4", "T-5")
+
+
+def test_tasks_a_person_snoozed_do_not_count() -> None:
+    def snooze(task: Task) -> Snooze:
+        return Snooze(task.id, NOW + 600 * M, "after the release", "ceo", NOW - 5 * M)
+
+    held = {t.id: snooze(t) for t in FIVE[:2]}
+    assert storms(*FIVE, snoozes=held) == []  # three left
+    assert storms(*FIVE, blocked(5, 5), blocked(6, 6), snoozes=held) != []
+
+
+def test_the_person_is_one_the_reason_waits_for() -> None:
+    def person(reason: str, *owners: Owner) -> str | None:
+        found = storms(*(blocked(n, 50 - n, reason) for n in range(5)), owners=owners)
+        return Outage.from_params(found[0].params).person if found else "no storm"  # type: ignore[union-attr]
+
+    alice = Owner("alice-smith", "pm", OwnerKind.HUMAN)
+    assert person("needs alice-smith to sign the vendor contract", alice) == "alice-smith"
+    assert person("needs alice-smithson to sign the vendor contract", alice) is None
+    lead = Owner("person-7", "lead", OwnerKind.HUMAN)
+    assert person("lead time on the runner pool is too long", lead) is None  # not an ask
+    assert person("ask the lead about the runner pool", lead) == "person-7"
+    assert person("lead: restart the runner pool", lead) == "person-7"
+    other_lead = Owner("person-8", "lead", OwnerKind.HUMAN)
+    assert person("ask the lead about the runner pool", lead, other_lead) is None  # which?
+
+
+def test_long_storms_and_long_lists() -> None:
+    many = tuple(blocked(n, 400 - 20 * n) for n in range(12))
+    [alert] = storms(*many, rule=StaleBlocks(storm_window=timedelta(hours=5)))
+    assert "within 3.7 h" in alert.reason and "(+2 more)" in alert.reason
+    own = tuple(blocked(n, 50 - n, f"{ASK} [T-{n}]") for n in range(5))
+    [alert] = storms(*own)
+    assert Outage.from_params(alert.params).signature == ASK  # type: ignore[union-attr]
 
 
 def test_config() -> None:

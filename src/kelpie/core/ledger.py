@@ -132,6 +132,10 @@ def fingerprint(action: Action) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
+# Param of an entry an ``observe_only`` action wrote: its mode is not its rule's mode.
+OBSERVE_ONLY = "observe_only"
+
+
 def subject(action: Action) -> str:
     """What the rate limit counts against."""
     if action.task_id:
@@ -172,7 +176,8 @@ class LedgerEntry:
             reason=a.reason,
             task_id=a.task_id,
             executor=a.executor,
-            params=canonical(a.params),
+            # an observe-only check's entry is marked: its mode is not the rule's
+            params=canonical({**a.params, OBSERVE_ONLY: True} if a.observe_only else a.params),
             suppression=dispatched.suppression,
             detail=dispatched.detail,
         )

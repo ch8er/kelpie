@@ -73,11 +73,13 @@ snooze holds the block's alert state resolves; when the snooze is what closed it
 notice says the block is snoozed.
 
 **Block storms** (issue #229, :mod:`kelpie.rules._block_storm`). ``storm_min_tasks`` (5)
-tasks blocked within ``storm_window`` (2h) on the same reason, once ids, references and
-numbers are stripped, are one outage: one alert with the shared reason as its cause, the
-person it names (who can end it) and the tasks; their per-task alerts fold under it.
-Only blocks without a condition Kelpie can check count. A new check: its alert is only
-logged (``storm_mode = "observe"``) until set to ``"rule"``, which follows the rule's mode.
+tasks blocked within ``storm_window`` (2h) on the same reason (the task's own id, times
+and hashes stripped; what it names kept apart) are one outage: one alert with the shared
+reason as its cause, the person it names (who can end it) and the tasks. Only blocks
+without a condition Kelpie can check count, and not snoozed ones. A new check: its alert and
+its "resolved" notice are only logged (``storm_mode = "observe"``) until set to ``"rule"``,
+which follows the rule's mode and folds this rule's alerts of its tasks under it (rule 13's
+inbox items are not folded).
 
 The dead-end and no-condition alerts list the tasks stuck behind the blocked one
 (``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
@@ -144,7 +146,9 @@ class StaleBlocks:
             if task.status is Status.BLOCKED and task.block is not None:
                 actions.extend(self._check(task, snapshot, behind, listed, snoozed))
         observe = self.storm_mode == "observe"
-        actions.extend(storms(snapshot, NAME, self.storm_min_tasks, self.storm_window, observe))
+        actions.extend(
+            storms(snapshot, NAME, self.storm_min_tasks, self.storm_window, observe, snoozed)
+        )
         return actions
 
     def _check(
