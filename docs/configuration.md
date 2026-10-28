@@ -553,7 +553,7 @@ Other keys:
 | `session_stale_after` | `"30m"` | duration, > 0 | Only live sessions are stopped. |
 | `agents.<owner id>` | `{}` | table of thresholds | Per-agent overrides. Wins over `roles`. |
 | `roles.<role>` | `{}` | table of thresholds | Per-role overrides. |
-| `tool_outage_tools` | `[]` (off) | list of non-empty strings | Correlated tool failures: the farm's build and test runners (e.g. `["ios_sim.sh", "xcodebuild"]`), matched as a whole word of a tool call's command, path aside. |
+| `tool_outage_tools` | `[]` (off) | list of non-empty strings | Correlated tool failures: the farm's build and test runners (e.g. `["ios_sim.sh", "xcodebuild"]`), matched as the command of a tool call's last segment, path aside (see below). |
 | `tool_outage_min_tasks` | `3` | 2 to 1000 | Distinct tasks (a session tied to no task counts as one) failing one tool with one exit code within `tool_outage_window` → one outage. |
 | `tool_outage_window` | `"30m"` | duration, > 0 | How close together those failures must be; the `[traces] window` at most, whose spans the snapshot holds. |
 | `tool_outage_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"`. |
@@ -572,11 +572,19 @@ farm's own hosts, where no CI check sees it (a broken Xcode install: every
 terminal tool's result, never its `error` key): a foreground call that exited non-zero is a
 failure, its exit code the error class; one that exited 0 a success; a call sent to the
 background (its 0 means started) and one the platform refused (Hermes: exit -1) are
-neither. Failures of one tool with one exit code by `tool_outage_min_tasks` distinct tasks
-within `tool_outage_window`, with no success of the tool since → one `warning` "Tool
-outage: ios_sim.sh exits 127 for 3 tasks", with the tasks and what the code usually means
-(127 not found, 124 timed out, 137 killed). One task retrying its own failure is none. The
-"Resolved" notice names the tool's next success. Observe-only until
+neither. A call is the tool's when the tool is the command of the command's last segment
+(after `;` or `|`, or after `&&` only from setup commands such as `cd` or `export`; past
+`FOO=1`, `env`, `time`, `timeout <duration>`): `cd app && ios_sim.sh test` is,
+`lint.sh && ios_sim.sh test`, `ios_sim.sh test | xcbeautify` and `pkill ios_sim.sh` are
+not. Commands are read as the trace redaction kept them: a script run as `bash x.sh` or
+`timeout 600 ./x.sh` is masked whole and never seen, and a success counts only when nothing
+after the tool was masked (a masked pipe's exit code is not the tool's). Failures of one tool
+with one exit code by `tool_outage_min_tasks` distinct tasks within `tool_outage_window`,
+with no success of the tool since → one `warning` "Tool outage: ios_sim.sh exits 127 for
+3 tasks", with the tasks and what the code usually means (127 not found, 124 timed out, 137
+killed). One outage per host where the tasks' host is known: a healthy host's successes do
+not hide a broken one. One task retrying its own failure is none. The "Resolved" notice
+names the tool's first success after the outage's last failure. Observe-only until
 `tool_outage_mode = "rule"`.
 
 ### 11. no_progress

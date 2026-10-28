@@ -35,13 +35,17 @@ def call(
     if code is not None:
         attributes[EXIT_CODE_ATTRIBUTE] = code
     attributes[RESULT_ATTRIBUTE] = result or ("ok" if code == 0 else "error")
-    base: dict[str, Any] = {"task_id": task, "session_id": f"S-{task}", "end": at}
+    base: dict[str, Any] = {
+        "trace_id": f"TR-{task}",
+        "task_id": task,
+        "session_id": f"S-{task}",
+        "end": at,
+    }
     return Span(
-        f"TR-{task}",
-        f"SP-{task}-{minutes_ago:g}",
-        "execute_tool terminal",
-        SpanKind.TOOL,
-        at - 0.1 * M,
+        span_id=f"SP-{task}-{minutes_ago:g}",
+        name="execute_tool terminal",
+        kind=SpanKind.TOOL,
+        start=at - 0.1 * M,
         tool="terminal",
         attributes=attributes,
         **{**base, **fields},
@@ -187,3 +191,85 @@ def test_through_the_engine_the_notice_names_the_recovery() -> None:
     assert "Tool outage" in opened.reason
     [notice] = [e for e in alerter.events if e.state == STATE and e.transition.value == "resolved"]
     assert "ios_sim.sh ran successfully again at 2026-03-02 12:20 UTC in T-9." in notice.reason
+
+
+def three(command: str, code: int = 127) -> list[Span]:
+    return [call(t, m, code, command=command) for t, m in (("T-1", 50), ("T-2", 40), ("T-3", 30))]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ios_sim.sh test",  # as the redaction keeps scripts/ios_sim.sh test
+        "cd *** && ios_sim.sh build",
+        "set *** ; ios_sim.sh test",
+        "FOO=*** ios_sim.sh",
+        "env FOO=*** ios_sim.sh test",
+        "timeout 600 ios_sim.sh test",
+        "time -p ios_sim.sh test",
+        "ios_sim.sh -s*** *** ***",  # a failure counts though a pipe may be masked
+        "cat *** | ios_sim.sh",  # the last of a pipeline: its own exit code
+    ],
+)
+def test_the_tool_s_own_exit_code(command: str) -> None:
+    assert [a.params["signature"] for a in found(*three(command))] == ["ios_sim.sh exit 127"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pkill ios_sim.sh",  # not the command
+        "which ios_sim.sh",
+        "lint.sh && ios_sim.sh test",  # which of them failed?
+        "ios_sim.sh test || true",
+        "ios_sim.sh test | xcbeautify",  # xcbeautify's exit code
+        "ios_sim.sh test ; echo done",
+        "ios_sim.sh & wait",
+        "bash *** ***",  # masked whole: no tool
+        "timeout 600 *** ***",
+        "",
+    ],
+)
+def test_not_the_tool_s_own_exit_code(command: str) -> None:
+    assert found(*three(command)) == []
+
+
+def test_a_success_counts_only_when_nothing_after_the_tool_was_masked() -> None:
+    hidden = call("T-9", 10, 0, command="ios_sim.sh -s*** *** ***")  # | xcbeautify?
+    assert len(found(*THREE, hidden)) == 1
+    assert found(*THREE, call("T-9", 10, 0, command="ios_sim.sh test")) == []
+
+
+def test_each_host_has_its_own_outage() -> None:
+    from kelpie.core.model import Owner, Status, Task
+
+    def task(tid: str, host: str | None) -> Task:
+        return Task(tid, tid, Status.IN_PROGRESS, NOW - 90 * M, owner_id="dev-1", host=host)
+
+    tasks = (*(task(t, "mac-a") for t in ("T-1", "T-2", "T-3")), task("T-9", "mac-b"))
+    owners = (Owner("dev-1", "dev"),)
+    healthy = call("T-9", 10, 0)
+    [alert] = found(*THREE, healthy, tasks=tasks, owners=owners)
+    assert alert.params["signature"] == "ios_sim.sh exit 127 on mac-a"
+    assert alert.state == tool_outage_state(NAME, "ios_sim.sh", 127, "mac-a")
+    assert "on mac-a for 3 tasks" in alert.reason
+    unknown = call("T-8", 10, 0)  # no host known: it counts for every host
+    assert found(*THREE, unknown, tasks=tasks, owners=owners) == []
+    snapshot = Snapshot(now=NOW, spans=(*THREE, healthy, unknown), tasks=tasks, owners=owners)
+    assert RULE.resolved(alert.state or "", snapshot) == (
+        "ios_sim.sh ran successfully again at 2026-03-02 11:50 UTC in T-8."
+    )
+
+
+def test_calls_without_a_task_or_session_count_per_trace() -> None:
+    one = [call(None, m, session_id=None, trace_id="TR-x") for m in (50, 40, 30)]
+    assert found(*one) == []  # one trace retrying
+    many = [call(None, m, session_id=None, trace_id=f"TR-{m}") for m in (50, 40, 30)]
+    [alert] = found(*many, Span("TR-0", "SP-0", "chat", SpanKind.LLM, NOW))  # not a tool span
+    assert alert.params["tasks"] == []
+    assert alert.reason.endswith("not the runs (no task is known).")
+
+
+def test_an_error_without_a_failing_exit_code_is_not_grouped() -> None:
+    zero = [call(t, m, 0, result="error") for t, m in (("T-1", 50), ("T-2", 40), ("T-3", 30))]
+    assert found(*zero) == []

@@ -11,10 +11,11 @@ contract between the three. It lives in core because the engine reads it.
 - **State.** ``<rule>:outage:<key>`` (:func:`incident_state_id`; :func:`outage_state_id` for
   rule 9's failing CI jobs), where ``<key>`` hashes what identifies the outage: for failing
   CI jobs the workflow, job and failing step, not the repository (one broken runner spans
-  repositories); for a block storm the shared block reason. ``since`` is its first sign;
-  ``last_seen`` advances while it is open. The same outage recurring later opens the same
-  state id anew: tell occurrences apart by their time span. The alert key is the state id,
-  stable for the outage's life. :func:`is_outage_state` matches every rule's outages.
+  repositories); for a block storm the shared block reason; for tool failures the tool,
+  exit code and host. ``since`` is its first sign; ``last_seen`` advances while it is open.
+  The same outage recurring later opens the same state id anew: tell occurrences apart by
+  their time span. The alert key is the state id, stable for the outage's life.
+  :func:`is_outage_state` matches every rule's outages.
 - **Params**: an :class:`Outage` (:meth:`Outage.to_params`), read back with
   :meth:`Outage.from_params`. ``kind`` says which signal found it (:data:`KINDS`); params
   without one (written before kinds existed) read as failing CI jobs. The ledger stores
