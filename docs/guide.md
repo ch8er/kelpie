@@ -321,9 +321,9 @@ shows its sample sizes. What the report cannot separate it does not credit:
 - *Overlapping fixes.* Fixes less than a window apart are one group ("3 fixes within 19.0h
   of each other"), measured once from a window before the first to a window after the
   last, and credited to none of them alone. Per fix it shows only what that fix alone can
-  explain: its role's tokens, failures and throughput (and review time for a review role) when no
-  other fix of the group touches that role or the whole farm, and its command's output
-  per call when no other fix names the same command for the same role. A group that
+  explain: its role's tokens, failures and throughput (and review time for a review
+  role) when no other fix of the group touches that role or the whole farm, and its
+  command's output per call when no other fix names the same command for the same role. A group that
   starts less than a window after the oldest fix the report reads says that an older fix
   may belong to it, and its before-window starts no earlier than the data the report
   reads.
