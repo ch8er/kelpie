@@ -1148,7 +1148,7 @@ def test_a_spool_exit_code_becomes_the_calls_result(
 
 
 def test_the_command_s_shape_reaches_the_span(board: Board, tmp_path: Path) -> None:
-    from kelpie.core.tools import command_multiline, command_whole
+    from kelpie.core.tools import command_complete, command_multiline, command_whole
 
     spool = tmp_path / "spool.jsonl"
     spool.write_text(
@@ -1156,9 +1156,9 @@ def test_the_command_s_shape_reaches_the_span(board: Board, tmp_path: Path) -> N
         + "\n"
         + tool_line(ago(minutes=4), exit_code=1, command_multiline=True, tool_call_id="c2")
         + "\n"
+        + tool_line(ago(minutes=3), exit_code=1, command_complete=True, tool_call_id="c3")
+        + "\n"
     )
     spans = [s for s in adapter(board, spool).snapshot(NOW).spans if s.kind is SpanKind.TOOL]
-    assert [(command_whole(s), command_multiline(s)) for s in spans] == [
-        (True, False),
-        (False, True),
-    ]
+    found = [(command_whole(s), command_complete(s), command_multiline(s)) for s in spans]
+    assert found == [(True, True, False), (False, False, True), (False, True, False)]

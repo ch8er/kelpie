@@ -344,3 +344,29 @@ def test_whether_the_redacted_command_is_whole(spool: Path, command: str, whole:
     (rec,) = lines(spool)
     assert rec.get("command_whole", False) is whole
     assert rec.get("command_multiline", False) is ("\n" in command.strip())
+    if whole:
+        assert rec["command_complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("command", "complete"),
+    [
+        ("xcodebuild -scheme App test", True),  # masked words, but it ends there
+        ("ios_sim.sh test --device x", True),
+        ("xcodebuild test 2>&1 | xcbeautify", True),
+        ("ios_sim.sh test; swiftlint", False),  # glued: the ; is masked
+        ("ios_sim.sh a;b", False),
+        ("ios_sim.sh 'a b'; swiftlint", False),
+        ("xcodebuild clean build test && swiftlint", False),  # cut at four words
+        ("ios_sim.sh test # note", True),  # a comment runs nothing
+        ("xcodebuild -scheme App test | xcbeautify", False),  # the pipe was dropped
+    ],
+)
+def test_whether_the_redacted_command_reaches_its_end(
+    spool: Path, command: str, complete: bool
+) -> None:
+    plugin.post_tool_call(
+        tool_name="terminal", args={"command": command}, result='{"exit_code": 1}'
+    )
+    (rec,) = lines(spool)
+    assert rec.get("command_complete", False) is complete

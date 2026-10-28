@@ -305,21 +305,49 @@ def _command(args: Any) -> str | None:
 
 
 def _shape(args: dict[str, Any]) -> dict[str, bool]:
-    """Whether the redacted command still ends where the command does (``command_whole``:
-    one line, the redaction reached its end, its last word kept: a separator after it would
-    be kept too) and whether the command has more lines (``command_multiline``: the last
-    line decides the exit code, and only the first is kept)."""
+    """How far the redacted command (a prefix) speaks for the command's exit code:
+    ``command_complete`` when the command is one line, no separator is glued to a word
+    (``test;swiftlint`` masks it) and the prefix shows every separator the line has (none
+    was dropped with the words after it); ``command_whole`` when the redaction also reached
+    the line's end (a separator after it would be kept too) and its last word is not masked;
+    ``command_multiline`` when the command has more lines (the last decides the exit code,
+    and only the first is kept)."""
     for key in _COMMAND_KEYS:
         value = args.get(key)
         if isinstance(value, str) and value.strip():
             lines = value.strip().splitlines()
             if len(lines) > 1:
                 return {"command_multiline": True}
+            line = lines[0]
             kept = redact_command(value)
-            if not kept or _MASK in kept.split()[-1] or len(lines[0]) > _MAX_LINE - 2:
+            if not kept or len(line) > _MAX_LINE - 2 or _glued(line):
                 return {}
-            return {"command_whole": True} if redact_command(f"{lines[0]} ;") == f"{kept} ;" else {}
+            if _separators(line) != _separators(kept):
+                return {}
+            out = {"command_complete": True}
+            if _MASK not in kept.split()[-1] and redact_command(f"{line} ;") == f"{kept} ;":
+                out["command_whole"] = True
+            return out
     return {}
+
+
+def _separators(text: str) -> list[str]:
+    return [w for w in text.split() if w in _SEPARATOR_WORDS]
+
+
+_SEPARATOR_CHARS = re.compile(r"[;|&]")
+_SEPARATOR_WORDS = frozenset({";", "|", "||", "&", "&&", "|&"})
+_REDIRECT = re.compile(r"\d*>&\d*|&>>?|\d*>\|")  # 2>&1, &>log, >| : not separators
+
+
+def _glued(line: str) -> bool:
+    """Whether a separator character is part of a word (``a;b``, ``test;``, ``'x|y'``)."""
+    for word in line.split():
+        if word in _SEPARATOR_WORDS:
+            continue
+        if _SEPARATOR_CHARS.search(_REDIRECT.sub("", word)):
+            return True
+    return False
 
 
 def _text(value: Any) -> str | None:

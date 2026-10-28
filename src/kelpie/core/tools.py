@@ -16,9 +16,10 @@ exit code put it on the tool span (:data:`EXIT_CODE_ATTRIBUTE`) with the call's
 
 Only calls that run a command (a shell tool) get them: another tool's exit code may be some
 other process's. With them, :data:`COMMAND_WHOLE_ATTRIBUTE` says the span's command (a
-redacted prefix) is the whole command, :data:`COMMAND_MULTILINE_ATTRIBUTE` that it has more
-lines. Rules read them with :func:`result_of`, :func:`exit_code_of`, :func:`command_whole`
-and :func:`command_multiline`; a span without them has no known result
+redacted prefix) is the whole command, :data:`COMMAND_COMPLETE_ATTRIBUTE` that it reaches
+the command's end with masked words, :data:`COMMAND_MULTILINE_ATTRIBUTE` that it has more
+lines. Rules read them with :func:`result_of`, :func:`exit_code_of`, :func:`command_whole`,
+:func:`command_complete` and :func:`command_multiline`; a span without them has no known result
 (the span's ``outcome`` stays what the exporter said; a blocked call keeps it too). Which
 platform fields mean background or blocked is each adapter's (see its README).
 """
@@ -32,6 +33,9 @@ RESULT_ATTRIBUTE = "kelpie.tool.result"
 # True when the span's command (a redacted prefix) still ends where the command did: one
 # line, nothing cut after it. Without it, the exit code may be a dropped pipe's.
 COMMAND_WHOLE_ATTRIBUTE = "kelpie.tool.command_whole"
+# True when the redacted prefix reaches the command's end, though words in it may be masked
+# (a flag's value): the exit code is that of its last visible command. Implied by whole.
+COMMAND_COMPLETE_ATTRIBUTE = "kelpie.tool.command_complete"
 # True when the command has more lines than its first, which is all a redacted prefix keeps:
 # the last line's exit code is not the first's command's.
 COMMAND_MULTILINE_ATTRIBUTE = "kelpie.tool.command_multiline"
@@ -71,3 +75,8 @@ def command_whole(span: Span) -> bool:
 def command_multiline(span: Span) -> bool:
     """Whether the span's command has more lines than the one it keeps."""
     return span.attributes.get(COMMAND_MULTILINE_ATTRIBUTE) is True
+
+
+def command_complete(span: Span) -> bool:
+    """Whether the span's command reaches the command's end (masked words aside)."""
+    return command_whole(span) or span.attributes.get(COMMAND_COMPLETE_ATTRIBUTE) is True
