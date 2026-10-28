@@ -246,7 +246,7 @@ class Engine:
         announcement folds nothing). Under dry-run, what live mode would do (the rules'
         configured modes)."""
         if self.config.dry_run:
-            reaches = self.config.mode_for(action.rule) is not Mode.OBSERVE
+            reaches = self._configured(action) is not Mode.OBSERVE
             logged = not reaches
         else:
             known = self._safe_get_state(outage.state)
@@ -280,7 +280,7 @@ class Engine:
             or action.task_id is None
         ):
             return None
-        quiet = self.config.mode_for(action.rule) is Mode.OBSERVE
+        quiet = self._configured(action) is Mode.OBSERVE
         for state_id, incident in sorted(self._incidents.items()):
             if (
                 action.task_id in incident.tasks
@@ -301,7 +301,7 @@ class Engine:
             state_id, now = action.state, snapshot.now
             self._safe_state(lambda: self.states.touch(self.states.store.get_state(state_id), now))
         dispatched = Dispatched(
-            folded, self._mode(action.rule), Outcome.SUPPRESSED, Suppression.INCIDENT
+            folded, self._mode(action), Outcome.SUPPRESSED, Suppression.INCIDENT
         )
         self._record(dispatched, snapshot.now)
         return dispatched
@@ -320,7 +320,7 @@ class Engine:
         self._announcer_severity = {}
 
     def _process(self, action: Action, snapshot: Snapshot) -> Dispatched:
-        mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
+        mode = self._mode(action)
         try:
             hit = self.ledger.check(action, mode, snapshot.now)
             self._ledger_down_since = None
@@ -385,13 +385,19 @@ class Engine:
 
     # --- long-lived states --------------------------------------------------------------
 
-    def _mode(self, rule: str) -> Mode:
-        return Mode.OBSERVE if self.config.dry_run else self.config.mode_for(rule)
+    def _configured(self, action: Action) -> Mode:
+        """The action's mode as configured: its rule's, or observe for an action its rule
+        marks ``observe_only`` (a new check that stays in observe until switched on)."""
+        return Mode.OBSERVE if action.observe_only else self.config.mode_for(action.rule)
+
+    def _mode(self, action: Action) -> Mode:
+        """The effective mode: observe under dry-run, else as configured."""
+        return Mode.OBSERVE if self.config.dry_run else self._configured(action)
 
     def _state_alert(self, action: Action, snapshot: Snapshot) -> Dispatched:
         """Deliver an alert about a long-lived state only on a transition."""
         assert action.state is not None
-        now, mode = snapshot.now, self._mode(action.rule)
+        now, mode = snapshot.now, self._mode(action)
         try:
             transition, new, current = self.states.peek(action, now, mode)
         except Exception:

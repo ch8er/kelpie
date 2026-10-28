@@ -321,6 +321,9 @@ that came due during the outage is sent when it ends.
 | `unlinked_alert_after` | `"4h"` | duration or `false` | Alert on a block with no condition Kelpie can see after this. `false`: off. |
 | `max_block` | `"8h"` | duration or `false` | Alert when a linked condition is still unmet after this. `false`: off. |
 | `stale_evidence_after` | `"1h"` | duration or `false` | Alert when the connector has not checked a linked condition for this long. `false`: off. |
+| `storm_min_tasks` | `5` | count, 0 (off) or 2–1000 | A block storm (#229): this many tasks blocked on the same reason (ids, references and numbers stripped; blocks without a condition Kelpie can check)... |
+| `storm_window` | `"2h"` | duration, > 0 | ...within this of each other are one outage: one alert with the shared reason, the person it names and the tasks; their per-task alerts fold under it. |
+| `storm_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its alert is only logged until set to `"rule"`, which follows the rule's mode. |
 
 A condition that can never be met (a PR closed without merging, a human task cancelled)
 alerts at once.
