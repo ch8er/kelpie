@@ -617,25 +617,29 @@ def test_a_refused_config_opens_no_database(
     assert not db.exists()
 
 
-@pytest.mark.parametrize("case", ["token-file-trust", "hub-tls-cert"])
+@pytest.mark.parametrize("case", ["token-file-trust", "hub-tls-missing", "hub-tls-malformed"])
 def test_a_refused_token_file_or_tls_cert_opens_no_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, case: str
 ) -> None:
     db = tmp_path / "kelpie.db"
+    token = secrets.token_hex(32)
     if case == "token-file-trust":
         token_file = tmp_path / "traces.env"
-        token_file.write_text("KELPIE_TRACES_TOKEN=" + secrets.token_hex(32) + "\n")
+        token_file.write_text(f"KELPIE_TRACES_TOKEN={token}\n")
         token_file.chmod(0o660)  # others (the group) may write to it
         section, message = f'[traces]\ntoken_file = "{token_file}"\n', r"\[traces\] token_file"
     else:
-        monkeypatch.setenv("KELPIE_TEST_AGENT_TOKEN", secrets.token_hex(32))
-        missing = tmp_path / "missing.pem"
+        monkeypatch.setenv("KELPIE_TEST_AGENT_TOKEN", token)
+        pem = tmp_path / "hub.pem"
+        if case == "hub-tls-malformed":
+            pem.write_text("-----BEGIN CERTIFICATE-----\nnot a certificate\n")
         section = (
-            f'[hub]\nlisten = "127.0.0.1:1"\ntls_cert = "{missing}"\ntls_key = "{missing}"\n'
+            f'[hub]\nlisten = "127.0.0.1:1"\ntls_cert = "{pem}"\ntls_key = "{pem}"\n'
             '[[hub.agents]]\nname = "laptop"\ntoken_env = "KELPIE_TEST_AGENT_TOKEN"\n'
         )
         message = "cannot load tls_cert"
     path = write(tmp_path, f'[storage]\npath = "{db}"\n{section}')
-    with pytest.raises(ConfigError, match=message):
+    with pytest.raises(ConfigError, match=message) as refused:
         build_app(load_settings(path))
     assert not db.exists()
+    assert token not in str(refused.value) and token not in caplog.text

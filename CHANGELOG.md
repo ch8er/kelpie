@@ -380,8 +380,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - A `kelpie serve` refused for its config (a missing token, header or admin key variable, an
   alert channel's token or buttons, a `[traces] token_file` others could have written, a
   `[hub]` TLS cert or key that does not load) no longer leaves an empty `kelpie.db` behind:
-  these are checked before any database is opened. A hub port already in use is still found
-  only when it is bound, last ([#244](https://github.com/ch8er/kelpie/pull/244)).
+  these are checked before any database is opened. A port already in use (the hub's or the
+  main listener's) is still found only when it is bound, after the database is opened
+  ([#244](https://github.com/ch8er/kelpie/pull/244)).
 - Kelpie's blocks, parks and wakes on a Hermes board showed up as written by the profile
   Kelpie runs under (`default`): they are signed `kelpie` now, like its comments, and the name
   is `[adapters.hermes] author` ([#189](https://github.com/ch8er/kelpie/pull/189)).

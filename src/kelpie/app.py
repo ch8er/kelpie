@@ -1631,8 +1631,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         ),
     ]:
         log.warning(warning)
-    # Everything the config can be refused for is checked before any storage is opened:
-    # a kelpie serve that will not start leaves no database behind.
+    # Everything build_app refuses a config for is checked before any storage is opened, so
+    # a kelpie serve that will not start leaves no database behind. Ports are found taken
+    # only when bound: the hub's at the end of build_app, the main listener's after it.
     traces = settings.traces
     try:
         # With [hub] this port takes no spans: its token (or token file) is not needed.
@@ -1839,14 +1840,15 @@ def _build_hub(
         tokens = settings.hub.tokens()
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+    tls = None
     if settings.hub.tls:
         try:  # a cert or key that does not load is refused before any storage is opened
-            server_context(settings.hub)
+            tls = server_context(settings.hub)
         except ValueError as exc:
             raise ConfigError(str(exc)) from exc
     else:
         log.warning("[hub] takes agents over plain http: their tokens cross the network in clear")
-    return Hub(settings.hub, tokens, clock)
+    return Hub(settings.hub, tokens, clock, tls)
 
 
 def _with_hub(app: App, hub: Hub | None, traces: TraceIngest | None = None) -> App:
