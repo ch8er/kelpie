@@ -149,6 +149,8 @@ class RemoteFarm:
                             "its tasks are not evaluated until it can.",
                         )
         for source in sorted(self._failing - failing):
+            if source.split(":")[0] in failing:  # a board of an adapter that fails whole
+                continue
             if source.split("/")[0] in fresh:  # read again, or no longer reported
                 self._failing.discard(source)
                 self._alert(

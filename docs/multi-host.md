@@ -61,7 +61,7 @@ TLS, size limits and authentication for agents do not change `/metrics`. Three c
 
 | Call | Body (agent → server) | Reply |
 | --- | --- | --- |
-| `/v1/agent/report` | protocol version, agent version, its `interval`, `sent_at`; per adapter: name, the action kinds it carries out, and its snapshot or the error it failed with | `{}` |
+| `/v1/agent/report` | protocol version, agent version, its `interval`, `sent_at`; per adapter: name, the action kinds it carries out, and its snapshot or the error it failed with, plus the boards it could not read (`unobserved`, only when there are some: several Hermes boards, listed as `<agent>:<board>` and alerted once) | `{}` |
 | `/v1/agent/actions` | results of actions carried out since the last call | actions for this agent; held open up to 20 s until one is queued (long poll) |
 | `/v1/traces` | OTLP/HTTP, relayed by the agent from local exporters | as the OTLP endpoint |
 
@@ -286,7 +286,7 @@ and `requeue` are idempotent there; `comment` may repeat once.
 | Wrong or missing token | 401, logged with the peer address; nothing is read. |
 | Token used by two processes | Polls replace each other and reports alternate; a warning in the log. |
 | Oversized, malformed or out-of-order body | 400/411/413/415; the agent logs the reply and keeps its loop going. |
-| Version mismatch | 400 naming the unknown field; the agent logs it. |
+| Version mismatch | 400 naming the unknown field; the agent logs it. A newer agent whose adapter could not read one of several boards sends `unobserved`, which an older hub refuses: on those ticks the whole agent is silent there. |
 | Server or agent restart | Agents re-send everything on the next report; see "at most once" for pending actions. |
 
 ## Moving a single-host setup to multi-host

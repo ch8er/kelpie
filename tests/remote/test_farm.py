@@ -751,6 +751,11 @@ def test_a_board_an_agent_cannot_read_is_unobserved_and_told_once() -> None:
         "laptop:qr:t_1a", snap.unobserved
     )
     assert rig.titles() == ["[kelpie] board laptop/hermes:sign unreadable"]
+    # The whole adapter failing is not the board being read again.
+    rig.report("laptop", AdapterReport("hermes", KINDS, error="OSError"))
+    rig.report("vm-1")
+    rig.tick()
+    assert all("again" not in body for _, body, *_ in rig.alerter.sent)
     rig.report("laptop", AdapterReport("hermes", KINDS, qr))
     rig.report("vm-1")
     assert rig.tick().unobserved == ()

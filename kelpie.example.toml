@@ -507,9 +507,6 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # reviewer-bot = "reviewer"
 # merger = "reviewer"
 #
-# Long tool runs and simulator slots, from the host's processes (ps, lsof): a task is busy
-# while one of names runs in its workspace, so rule 9 holds its commit reminders; slot
-# pools are exported as kelpie_tool_slots{pool} and kelpie_tool_slots_held{pool,holder}.
 # Several boards of one Hermes home in one Kelpie (instead of db_path and wait_key above):
 # ids become <name>:<id>; spool, profiles and tools stay in [adapters.hermes].
 # [[adapters.hermes.boards]]
@@ -520,6 +517,9 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # name = "sign"
 # db_path = "~/.hermes/kanban/boards/sign/kanban.db"
 #
+# Long tool runs and simulator slots, from the host's processes (ps, lsof): a task is busy
+# while one of names runs in its workspace, so rule 9 holds its commit reminders; slot
+# pools are exported as kelpie_tool_slots{pool} and kelpie_tool_slots_held{pool,holder}.
 # [adapters.hermes.tools]
 # names = ["xcodebuild", "ios_sim.sh"]   # required: no tool is built in
 # workspace_patterns = [".worktrees/{task}", "workspaces/{task}"]  # besides Hermes' own path

@@ -373,7 +373,13 @@ def check_traces_token(settings: Settings, environ: Mapping[str, str]) -> Check:
     hermes = settings.hermes
     if hermes is not None:
         dbs = [b.db_path for b in hermes.boards] or [hermes.db_path]
-        roots += [db.expanduser().parent for db in dbs]
+        for db in (d.expanduser() for d in dbs):
+            # a named board (<home>/kanban/boards/<slug>/kanban.db): its home holds the profiles
+            named = len(db.parents) > 3 and (db.parents[1].name, db.parents[2].name) == (
+                "boards",
+                "kanban",
+            )
+            roots += [db.parents[3] if named else db.parent]
     roots += [home / ".hermes", home / ".claude"]
     roots = list(dict.fromkeys(r for r in roots if r.is_dir()))
     marker = f"{traces.token_env}="
