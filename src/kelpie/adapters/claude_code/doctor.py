@@ -15,11 +15,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from kelpie.adapters._spool import open_regular
 from kelpie.adapters.claude_code.adapter import (
     FUTURE_SKEW,
     ClaudeCodeAdapter,
     ClaudeCodeError,
-    _open_regular,
     format_age,
 )
 
@@ -144,7 +144,7 @@ def _read_settings(path: Path) -> Any:
     """The parsed settings file. Agents can write ``~/.claude``: opened without following a
     symlink or blocking on a FIFO, regular files only, a bounded read. Raises OSError or
     ValueError (the message never carries the file's content)."""
-    fd = _open_regular(path)
+    fd = open_regular(path)
     try:
         raw = os.read(fd, MAX_SETTINGS + 1)
     finally:
