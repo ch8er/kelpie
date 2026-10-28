@@ -570,7 +570,7 @@ not know a trace's session (the alert then names no task unless the spans do).
 | `min_tokens_without_progress` | `100000` | tokens, >= 1 | Alert at this many input plus output tokens with no progress. |
 | `claim_grace` | `"2m"` | duration, >= 0 | A status change this soon after the session start is the claim, not progress. |
 | `context_alert_tokens` | `150000` | tokens, >= 0 | Alert when a session's latest step within `window` reads a context (input tokens, cached ones included) of at least this, after `context_min_steps` steps in the window. Once open, the alert stays open above 80% of it. `0`: off. |
-| `context_min_steps` | `5` | count, >= 2 | Steps (counted model calls) a session needs in `window` before its context is judged. |
+| `context_min_steps` | `5` | count, >= 2 | Steps (counted model calls, of all its models) a session needs in `window` before its context is judged. The context is the main model's: the one with most input tokens in the window, while its latest step is among the session's last two (side calls on a small model are no compaction). The alert counts as tokens re-read, not as lost work, in the daily report. |
 
 ### 12. conflict_warning
 

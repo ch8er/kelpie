@@ -1247,6 +1247,8 @@ def is_chaos(state: OpenState) -> bool:
         return False
     if state.rule == "loop_breaker":
         return session_of(state) is not None
+    if state.id.startswith("no_progress/context:"):
+        return False  # a runaway context: tokens re-read, the session may well progress
     return state.rule in CHAOS_CAUSES
 
 

@@ -1012,3 +1012,17 @@ def test_an_outage_s_state_is_no_lost_work_of_its_own() -> None:
     assert is_chaos(
         OpenState("stale_blocks:T-1:b", "stale_blocks", t, t, t, 0, Severity.WARNING, "s")
     )
+
+
+def test_a_runaway_context_is_no_lost_work() -> None:
+    from kelpie.core.actions import Severity
+    from kelpie.core.states import OpenState
+    from kelpie.report.daily import is_chaos
+
+    at = datetime(2026, 3, 2, 9, tzinfo=UTC)
+
+    def state(sid: str) -> OpenState:
+        return OpenState(sid, "no_progress", at, at, at, 0, Severity.INFO, "x", task_id="T-9")
+
+    assert is_chaos(state("no_progress:S-1"))  # tokens without progress: lost work
+    assert not is_chaos(state("no_progress/context:S-1"))  # re-read context: not idle work

@@ -440,8 +440,34 @@ def test_side_calls_on_another_model_are_no_compaction() -> None:
         for i, s in enumerate(main)
     ]  # fmt: skip
     [a] = context_alerts(*main, *side)
-    assert a.params["per_step"] == 2000 and a.params["steps"] == 4
+    assert a.params["per_step"] == 2000 and a.params["steps"] == 8  # all the session's steps
     assert a.params["context_tokens"] == 156_000 and a.params["model"] == "model-a"
+
+
+def test_steps_count_per_session_and_a_model_no_longer_at_work_does_not_speak() -> None:
+    a = growing(sizes=(200_000,) * 4)
+    b = [replace(s, span_id=f"b-{i}", start=s.start + timedelta(seconds=20), model="model-b")
+         for i, s in enumerate(a)]  # fmt: skip
+    [alert] = context_alerts(*a, *b)  # 8 steps on two models: judged on the session's steps
+    assert alert.params["steps"] == 8
+    one = growing(sizes=(1,))[0]
+    late = [replace(one, span_id=f"late-{i}", start=NOW - M + i * timedelta(seconds=10),
+                    input_tokens=50_000, model="model-b") for i in range(3)]  # fmt: skip
+    old = [replace(s, start=s.start - 5 * M) for s in growing(sizes=(200_000,) * 5)]
+    assert context_alerts(*old, *late) == []  # model-a has most tokens but stopped
+
+
+def test_runaway_context_hooks() -> None:
+    state = "no_progress/context:hs-9"
+    assert CONTEXT_RULE.boards(state) is False  # spans only: never blind to a missing board
+    assert CONTEXT_RULE.boards("no_progress:S-1") is True
+    quiet = Snapshot(now=NOW)
+    assert CONTEXT_RULE.resolved(state, quiet) == (
+        "Session hs-9's context is below the bar now: it compacted or went quiet."
+    )
+    ended = Snapshot(now=NOW, sessions=(Session("hs-9", "T-1", "a-1", START, ended_at=NOW),))
+    assert CONTEXT_RULE.resolved(state, ended) == "Session hs-9 ended."
+    assert CONTEXT_RULE.resolved("no_progress:S-1", quiet) is None
 
 
 def test_runaway_context_settings() -> None:

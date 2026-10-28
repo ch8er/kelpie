@@ -34,16 +34,17 @@ idle), so all three are always given.
 it on every step, whether it makes progress or not: on a live farm 10 to 13 sessions a day
 grew to 160k-433k tokens (+1.4k-6.9k per step), 30-80M re-read tokens a day. Per session of
 the spans (its ``session_id``, whether or not the board knows the session), over the counted
-LLM spans that started in ``window``: at least ``context_min_steps`` steps and a latest
-step whose context (input tokens, cached ones included) is at least ``context_alert_tokens``
-→ one ``info`` alert, a lasting state per session, with the context, the mean growth per
-step (compactions, a step below half the one before, left out) and the tokens re-read in the
-window, recommending compaction or a bounded session. Steps are judged per model, the one with
-the largest context speaking for the session: side calls on a small model are no compaction.
-A board session that has ended is left out: there is nothing left to compact. Once open it
-stays open while the context is above ``CONTEXT_KEEP`` of the threshold, so a session near it
-does not flap, and it closes when the session compacts or goes quiet. The task is the board
-session's, else the spans'. ``context_alert_tokens = 0`` turns it off.
+LLM spans that started in ``window``: at least ``context_min_steps`` steps (all its models')
+and a latest step whose context (input tokens, cached ones included) is at least
+``context_alert_tokens`` → one ``info`` alert, a lasting state per session, with the
+context, the mean growth per step (compactions, a step below half the one before, left out)
+and the tokens re-read in the window, recommending compaction or a bounded session. The
+context is the main model's (the one with most input tokens in the window, while it is still
+at work: its latest step among the session's last two), so side calls on a small model are
+no compaction. A board session that has ended is left out: there is nothing left to compact.
+Once open it stays open while the context is above ``CONTEXT_KEEP`` of the threshold, so a
+session near it does not flap, and it closes when the session compacts or goes quiet. The
+task is the board session's, else the spans'. ``context_alert_tokens = 0`` turns it off.
 """
 
 from __future__ import annotations
@@ -106,32 +107,30 @@ class NoProgress:
     def _runaway_context(
         self, snapshot: Snapshot, index: SpanIndex, window_start: datetime
     ) -> list[Action]:
-        # Per session and model: a session's side calls on a small model (a summary, a
-        # title) would otherwise look like compactions between its main model's steps.
-        steps: dict[str, dict[str | None, list[Span]]] = defaultdict(lambda: defaultdict(list))
+        steps: dict[str, list[Span]] = defaultdict(list)
         for span in outermost_llm_spans(snapshot.spans, index):
             if span.session_id and window_start <= span.start <= snapshot.now:
-                steps[span.session_id][span.model].append(span)
+                steps[span.session_id].append(span)
         board = {s.id: s for s in snapshot.sessions}
         actions: list[Action] = []
-        for sid, by_model in sorted(steps.items()):
+        for sid, spans in sorted(steps.items()):
             session = board.get(sid)
             if session is not None and session.ended_at is not None:
                 continue  # over: nothing left to compact or bound
-            state = context_state(sid)
-            bar = self.context_alert_tokens
-            if state in snapshot.open_states:
-                bar = int(bar * CONTEXT_KEEP)
-            runs = []
-            for spans in by_model.values():
-                spans.sort(key=lambda s: (s.start, s.span_id))
-                sizes = [s.input_tokens for s in spans]
-                if len(sizes) >= self.context_min_steps and sizes[-1] >= bar:
-                    runs.append((sizes[-1], spans[-1].model or "", spans))
-            if not runs:
+            if len(spans) < self.context_min_steps:
                 continue
-            _, _, spans = max(runs, key=lambda r: (r[0], r[1]))  # the largest context
-            sizes = [s.input_tokens for s in spans]
+            spans.sort(key=lambda s: (s.start, s.span_id))
+            found = _main_model(spans)
+            if found is None:
+                continue  # the model with most of the context is not the one at work now
+            (main,) = found
+            mine = [s for s in spans if s.model == main]
+            sizes = [s.input_tokens for s in mine]
+            bar = self.context_alert_tokens
+            if context_state(sid) in snapshot.open_states:
+                bar = int(bar * CONTEXT_KEEP)
+            if sizes[-1] < bar:
+                continue
             grown = [b - a for a, b in pairwise(sizes) if b >= COMPACTION_RATIO * a]
             per_step = round(statistics.fmean(grown)) if grown else 0
             task_id = (
@@ -139,14 +138,33 @@ class NoProgress:
                 if session is not None
                 else next((s.task_id for s in reversed(spans) if s.task_id), None)
             )
-            actions.append(self._context_alert(sid, task_id, sizes, per_step, spans[-1].model))
+            actions.append(self._context_alert(sid, task_id, sizes, len(spans), per_step, main))
         return actions
+
+    def boards(self, state_id: str) -> bool:
+        """A runaway-context state reads spans only: a part of the farm not in the snapshot
+        cannot hide its end (``Rule`` docs: ``boards``)."""
+        return not state_id.startswith(CONTEXT_PREFIX)
+
+    def resolved(
+        self, state_id: str, snapshot: Snapshot, last_key: str | None = None
+    ) -> str | None:
+        """What became of a runaway context: the session ended, or it is below the bar (it
+        compacted, or went quiet)."""
+        if not state_id.startswith(CONTEXT_PREFIX):
+            return None
+        sid = state_id[len(CONTEXT_PREFIX) :]
+        session = next((s for s in snapshot.sessions if s.id == sid), None)
+        if session is not None and session.ended_at is not None:
+            return f"Session {sid} ended."
+        return f"Session {sid}'s context is below the bar now: it compacted or went quiet."
 
     def _context_alert(
         self,
         sid: str,
         task_id: str | None,
         sizes: Sequence[int],
+        steps: int,
         per_step: int,
         model: str | None,
     ) -> Action:
@@ -157,14 +175,14 @@ class NoProgress:
             ActionKind.ALERT,
             NAME,
             f"Session {sid}{of_task} carries a {sizes[-1]:,}-token context after "
-            f"{len(sizes)} steps in the last {window} ({per_step:+,} per step), and every "
+            f"{steps} steps in the last {window} ({per_step:+,} per step), and every "
             f"step re-reads all of it: {reread:,} input tokens in {window}. Compact the "
             "context, or bound the session and hand off to a fresh one with a summary.",
             task_id=task_id,
             params={
                 "session_id": sid,
                 "context_tokens": sizes[-1],
-                "steps": len(sizes),
+                "steps": steps,
                 "per_step": per_step,
                 "reread_tokens": reread,
                 "window": window,
@@ -216,9 +234,24 @@ class NoProgress:
         return max(signals, default=None)
 
 
+CONTEXT_PREFIX = f"{NAME}/context:"  # runaway-context states, apart from no_progress:<id>
+MAIN_RECENT = 2  # the main model's latest step is among the session's last this many
+
+
 def context_state(session_id: str) -> str:
     """The state of a session's runaway-context alert (apart from ``no_progress:<id>``)."""
-    return f"{NAME}/context:{session_id}"
+    return CONTEXT_PREFIX + session_id
+
+
+def _main_model(spans: Sequence[Span]) -> tuple[str | None] | None:
+    """The model that carries the session's context (most input tokens in the window, a
+    model not named being one), if it is still at work: its latest step among the session's
+    last ``MAIN_RECENT`` (side calls on a small model come between its steps); else None."""
+    totals: dict[str | None, int] = defaultdict(int)
+    for s in spans:
+        totals[s.model] += s.input_tokens
+    main = max(totals, key=lambda m: (totals[m], m or ""))
+    return (main,) if any(s.model == main for s in spans[-MAIN_RECENT:]) else None
 
 
 def _fmt(d: timedelta) -> str:
