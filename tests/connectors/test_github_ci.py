@@ -733,3 +733,14 @@ def test_a_job_the_ci_refused_never_started() -> None:
         test, ci_ok = ci(gh)(Snapshot(now=NOW)).builds[0].jobs or ()
         assert test.started and test.failed and not test.refused
         assert not ci_ok.started and ci_ok.refused and not ci_ok.failed
+
+
+def test_a_run_an_approval_or_concurrency_group_holds_is_held() -> None:
+    """Queued on purpose: a deployment approval ("waiting") or a concurrency group ("pending")
+    holds it, not a missing runner (#229)."""
+    with serve() as gh:
+        runs_page(gh, [run(1, 30, status="waiting"), run(2, 30, status="pending"),
+                       run(3, 30, status="queued")])  # fmt: skip
+        builds = {b.id: b for b in ci(gh)(Snapshot(now=NOW)).builds}
+    assert [b.held for _, b in sorted(builds.items())] == [True, True, False]
+    assert {b.status for b in builds.values()} == {BuildStatus.QUEUED}

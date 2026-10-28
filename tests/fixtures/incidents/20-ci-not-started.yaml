@@ -27,6 +27,11 @@ snapshot:
     - {repo: example/shop, number: 62, title: "T-402 cart totals", branch: "task/T-402", task_ids: [T-402]}
     - {repo: example/shop, number: 63, title: "T-403 coupons", branch: "task/T-403"}
   builds:
+    # The jobs ran on PRs before: a refusal of them is a sign.
+    - {id: B-60, source: ci, repo: example/shop, workflow: .github/workflows/ci.yml, branch: task/T-400, sha: "6000000",
+       event: pull_request, pr: 60, status: success, started_at: "2026-03-02T09:00:00+00:00",
+       finished_at: "2026-03-02T09:06:00+00:00", minutes: 6,
+       jobs: [{name: test, conclusion: success}, {name: ci-ok, conclusion: success}]}
     # Three PRs: the required check refused (no runner, no step), the other jobs ran.
     - {id: B-61, source: ci, repo: example/shop, workflow: .github/workflows/ci.yml, branch: task/T-401, sha: "6100000",
        event: pull_request, pr: 61, status: failure, started_at: "2026-03-02T11:15:00+00:00",
@@ -40,6 +45,9 @@ snapshot:
     - {id: B-63, source: ci, repo: example/shop, workflow: .github/workflows/ci.yml, branch: task/T-403, sha: "6300000",
        event: pull_request, pr: 63, status: queued, started_at: "2026-03-02T11:10:00+00:00"}
     # Negative case: another repository's CI was refused once, but has run again since.
+    - {id: B-70, source: ci, repo: example/docs, workflow: .github/workflows/ci.yml, branch: task/T-500, sha: "7000000",
+       event: pull_request, pr: 4, status: success, started_at: "2026-03-02T09:00:00+00:00",
+       finished_at: "2026-03-02T09:03:00+00:00", minutes: 3, jobs: [{name: build, conclusion: success}]}
     - {id: B-71, source: ci, repo: example/docs, workflow: .github/workflows/ci.yml, branch: task/T-501, sha: "7100000",
        event: pull_request, pr: 5, status: failure, started_at: "2026-03-02T11:00:00+00:00",
        finished_at: "2026-03-02T11:00:02+00:00", minutes: 0,

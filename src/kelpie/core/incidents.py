@@ -47,7 +47,8 @@ from typing import Any
 
 OUTAGE = "outage"  # the middle part of every outage's state id
 _OUTAGE_ID = re.compile(rf"[a-z][a-z0-9_]*:{OUTAGE}:[0-9a-f]{{12}}")
-OUTAGE_STATE_PREFIX = "ci_economy:outage:"  # rule 9's failing CI jobs
+# Rule 9's outages: failing CI jobs, and CI_NOT_STARTED_STATE.
+OUTAGE_STATE_PREFIX = "ci_economy:outage:"
 FOLDED_UNDER = "folded_under"  # param of a folded alert: the state id of its incident
 MAX_BUILDS = 20  # failing build ids an outage's params list, newest first
 
@@ -74,6 +75,10 @@ def incident_state_id(rule: str, *parts: str | None) -> str:
 def outage_state_id(workflow: str | None, job: str, step: str | None) -> str:
     """The state id of rule 9's outage of failing CI jobs with this signature."""
     return incident_state_id("ci_economy", workflow, job, step)
+
+
+# Rule 9's one farm-wide outage of CI jobs that never start.
+CI_NOT_STARTED_STATE = incident_state_id("ci_economy", "not_started")
 
 
 def is_outage_state(state_id: str) -> bool:

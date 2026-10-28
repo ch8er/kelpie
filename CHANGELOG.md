@@ -50,7 +50,7 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   ([#41](https://github.com/ch8er/kelpie/pull/41), [#107](https://github.com/ch8er/kelpie/pull/107), [#178](https://github.com/ch8er/kelpie/pull/178)).
   CI jobs that never start (refused for billing or limits, or queued too long) across
   many PRs are one outage too, not a toolchain failure; observe-only until switched on
-  (#229).
+  ([#254](https://github.com/ch8er/kelpie/pull/254)).
 - `loop_breaker` (rule 10): stops a run that repeats identical tool calls, hits an error
   streak or exceeds a hard budget ([#33](https://github.com/ch8er/kelpie/pull/33)).
 - `no_progress` (rule 11): alerts when a session spends many tokens with no status change,

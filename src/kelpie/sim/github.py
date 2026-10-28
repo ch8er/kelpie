@@ -392,6 +392,9 @@ class FakeGitHub:
                 "started_at": iso(run.created),
                 "completed_at": iso(done) if run.status == "completed" else None,
                 "conclusion": run.conclusion,
+                # a job a runner took: the CI started it (one with neither was refused)
+                "runner_name": "sim-runner",
+                "steps": [{"name": "Build", "conclusion": run.conclusion}],
             }
             return 200, {"total_count": 1, "jobs": [job]}
         return 404, {"message": "Not Found"}

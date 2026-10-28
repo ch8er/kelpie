@@ -128,6 +128,7 @@ _ACTIVE = {
     "pending": BuildStatus.QUEUED,
     "in_progress": BuildStatus.RUNNING,
 }
+_HELD = frozenset({"waiting", "pending"})  # an approval or a concurrency group holds the run
 _CONCLUSIONS = {
     "success": BuildStatus.SUCCESS,
     "neutral": BuildStatus.SUCCESS,
@@ -603,6 +604,7 @@ class GitHubCI:
             finished_at=finished,
             minutes=minutes,
             jobs=jobs,
+            held=run.get("status") in _HELD,
         )
 
     def _run_jobs(

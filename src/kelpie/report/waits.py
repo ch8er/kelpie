@@ -55,6 +55,7 @@ from datetime import datetime
 
 from kelpie.core.incidents import (
     CI_FAILURES,
+    CI_NOT_STARTED_STATE,
     FOLDED_UNDER,
     OUTAGE_STATE_PREFIX,
     CiOutage,
@@ -197,7 +198,7 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
         for e in entries
         if e.rule == "ci_economy" and (o := CiOutage.from_params(e.params)) is not None
     ]
-    other = {o.state for _, o in samples if o.kind != CI_FAILURES}
+    other = {CI_NOT_STARTED_STATE} | {o.state for _, o in samples if o.kind != CI_FAILURES}
     samples = [(at, o) for at, o in samples if o.kind == CI_FAILURES]
     found = [
         s

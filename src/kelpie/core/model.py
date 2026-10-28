@@ -490,7 +490,9 @@ class Build:
     configured to cancel; rules only ask to cancel such builds. ``jobs`` are the build's
     jobs once it finished (jobs the connector could not read left out; empty: none
     listed). None means not read: an active, queued or skipped build, a partial job list, a
-    failed request or no request budget left. None never means "nothing failed".
+    failed request or no request budget left. None never means "nothing failed". ``held``:
+    a queued build the CI holds on purpose (a deployment approval, a concurrency group), not
+    one waiting for a runner.
     """
 
     id: str
@@ -511,6 +513,7 @@ class Build:
     superseded_by: str | None = None
     cancellable: bool = False
     jobs: tuple[Job, ...] | None = None
+    held: bool = False  # queued on purpose: an approval or a concurrency group holds it
 
 
 @dataclass(frozen=True, slots=True)
