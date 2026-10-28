@@ -1091,6 +1091,42 @@ fixes.
 - [ ] GitHub: the `dependencies/blocked_by` and `sub_issues` answers, and `labels=` scoping, on a real repository
 - [ ] Linear: one `kelpie doctor` run on a workspace; `X-Complexity` of the issue page and history queries; history order; attachment metadata `status`/`draft`; how fenced notes render; whether delegating again or a mention restarts an agent; whether a parent team's labels show on a sub-team's issues
 
+### instructions: counted skill loads, a report section and before/after for a split (#241 follow-up)
+labels: P1, area:traces
+#241 shipped sizes, growth and duplicates with tokens a day estimated as size × sessions.
+The Hermes state.db reader (#271) is on main now, so loads can be counted.
+
+**Acceptance criteria**
+- [ ] Tokens a day from counted loads (Hermes `skill_view`, Claude Code skill loads), `token_basis = "loads"`, falling back to sessions and saying which
+- [ ] Daily report section: the top instruction files by tokens a day, with growth and copies
+- [ ] `kelpie fix` before/after for a split: tokens a day on instructions and tokens per completed task for that role
+- [ ] Files on `kelpie agent` hosts measured and their sessions counted
+
+### hermes boards: the board in metrics and the report (#198 follow-up)
+labels: P1, adapter
+One Kelpie now watches several boards (#198), but metrics carry no board label and the report
+has no per-board view, so two projects on one farm read as one.
+
+**Acceptance criteria**
+- [ ] A `board` label on per-task and per-adapter metrics (bounded: configured board names only)
+- [ ] Daily report: cost of chaos, throughput and biggest wait per board, plus the farm total
+- [ ] Alerts and `kelpie why` show the board name, not only the id prefix
+
+### report: backlog-release spike and toolchain version in outages (#193 follow-up)
+labels: P1, area:core
+**Acceptance criteria**
+- [ ] A throughput spike right after a fix that unblocked a queue is named as a backlog release, and the next full day is preferred for the comparison
+- [ ] Toolchain version (e.g. Xcode / CoreSimulator, read through the textfile collector as config data) recorded per host; an outage that starts when it changes names the change as the likely cause (incident 20)
+
+### docs: reconcile the roadmap with what is merged
+labels: P1, documentation
+Many items here were finished by parallel sessions without ticking their criteria, so the
+roadmap no longer says what is left.
+
+**Acceptance criteria**
+- [ ] Every item's criteria ticked or left open against main, with the PR that did it
+- [ ] Finished items with every criterion ticked; duplicates merged; the plan's "Plan and status" agrees
+
 ## Later (P2, on signal)
 
 ### rules: compaction_gate — gate violation after context compaction (rule 14, field evidence)
