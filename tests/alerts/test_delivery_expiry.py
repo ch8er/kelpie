@@ -78,15 +78,14 @@ def test_only_a_channel_with_controls_hears_of_an_unshown_resolve() -> None:
     on, off, plain = Buttons(), Buttons(name="tg-off", expiring=False), Plain()
     assert isinstance(on, Expiring) and not isinstance(plain, Expiring)
     delivery = Delivery([on, off, plain])
-    try:
-        delivery.deliver(opened())
-        delivery.deliver(resolved())  # info: below every min_severity here
-        on.wait(2)
-        assert on.log == [("send", "alert T-1", True), ("expire", "alert T-1", True)]
-        assert off.log == [("send", "alert T-1", True)]  # buttons off: no queue slot used
-        assert [m.subject for m in plain.sent] == ["alert T-1"]
-    finally:
-        delivery.close(1.0)
+    delivery.deliver(opened())
+    delivery.deliver(resolved())  # info: below every min_severity here
+    # Each channel has its own worker: close delivers every queue in order and joins them
+    # all, so no channel's log is read while its worker may still write it.
+    delivery.close(WAIT)
+    assert on.log == [("send", "alert T-1", True), ("expire", "alert T-1", True)]
+    assert off.log == [("send", "alert T-1", True)]  # buttons off: no queue slot used
+    assert [m.subject for m in plain.sent] == ["alert T-1"]
 
 
 def test_an_expiry_that_cannot_be_queued_is_done_locally_at_once() -> None:
