@@ -387,10 +387,13 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   ([#244](https://github.com/ch8er/kelpie/pull/244)).
 - A connector step that failed for one tick (human tasks, GitHub conditions) dropped the
   conditions it had attached and checked, so waits looked unchecked and blocks bare until
-  the next good tick: one hiccup could alert, or resolve a digest item. The step's last
-  checked conditions are now carried forward with their original check times, and go stale
-  on their own after `max_condition_age`. New: `kelpie_connector_failing_seconds` and the
-  Prometheus alert `KelpieConnectorFailing` ([#242](https://github.com/ch8er/kelpie/issues/242)).
+  the next good tick: one hiccup could alert, then resolve. What the step last found unmet
+  or unknown is now carried forward with its original check time and goes stale on its own
+  after `max_condition_age`; what it found met is not carried, so a failed step never wakes
+  or unblocks anything. A block whose connector keeps failing stays linked to its stale
+  condition: rule 4 alerts on stale evidence instead of an unlinked block. New:
+  `kelpie_connector_failing_seconds` and the Prometheus alert `KelpieConnectorFailing`
+  ([#242](https://github.com/ch8er/kelpie/issues/242)).
 - Kelpie's blocks, parks and wakes on a Hermes board showed up as written by the profile
   Kelpie runs under (`default`): they are signed `kelpie` now, like its comments, and the name
   is `[adapters.hermes] author` ([#189](https://github.com/ch8er/kelpie/pull/189)).

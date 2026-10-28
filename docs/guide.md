@@ -382,6 +382,13 @@ Alerts still waiting when Kelpie shuts down during a chat outage are counted as
 `kelpie_alerts_dropped_total{reason="shutdown"}`, not as failed, so `KelpieAlertDeliveryFailed`
 does not fire for them.
 
+A connector step that fails (GitHub unreachable, a bug in a step) keeps, for that tick, the
+conditions it found unmet or unknown on its last good tick, with their check times; they go
+stale after the rules' `max_condition_age` (see [extending.md](extending.md), "Rules for
+connectors"). `kelpie_connector_failing_seconds{connector}` counts the time since the
+step's last good tick while it fails, and the bundled rule `KelpieConnectorFailing` fires past
+15 minutes, the default `max_condition_age`: lower its threshold if you set a shorter one.
+
 Items a snooze would quiet can be snoozed from the alert: Slack shows the `kelpie snooze`
 command under each, and Telegram, with `buttons = true`, shows "Snooze 1d / 3d / 7d" buttons
 that only the people in `allowed_user_ids` can use ([configuration.md, "Snoozing from the

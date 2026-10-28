@@ -7,8 +7,9 @@ the rules see, and a step that keeps failing lets them go stale on their own: pa
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -48,8 +49,11 @@ class Board:
 
     board: Snapshot
     name: str = "board"
+    failing: bool = False
 
     def snapshot(self, now: datetime) -> Snapshot:
+        if self.failing:
+            raise RuntimeError("adapter unreachable")
         return Snapshot(
             now=now,
             tasks=self.board.tasks,
@@ -74,12 +78,20 @@ class Flaky:
 class Ticks:
     """``merged_snapshot`` on a driven clock, with one connector step."""
 
-    def __init__(self, board: Snapshot, name: str, step: Callable[[Snapshot], Snapshot]):
+    def __init__(
+        self,
+        board: Snapshot,
+        name: str,
+        step: Callable[[Snapshot], Snapshot],
+        other: Snapshot | None = None,
+    ):
         self.now = T0
         self.metrics = Metrics()
         self.step = Flaky(step)
+        self.board = Board(board)
+        self.other = Board(other or Snapshot(now=T0), name="other")
         self.source = merged_snapshot(
-            [Board(board)],  # type: ignore[list-item]
+            [self.board, self.other],  # type: ignore[list-item]
             self.metrics,
             lambda: self.now,
             enrich=[("task_status", lambda s: s), (name, self.step)],
@@ -150,6 +162,13 @@ def human_rules(tmp_path: Path) -> list[Rule]:
     return load_rules(load_settings(path).engine).rules
 
 
+def failing_seconds(metrics: Metrics, name: str) -> str:
+    """The gauge's value for ``name``, or "" when it has none."""
+    prefix = f'kelpie_connector_failing_seconds{{connector="{name}"}} '
+    lines = [x for x in metrics.render().splitlines() if x.startswith(prefix)]
+    return lines[0].removeprefix(prefix) if lines else ""
+
+
 def test_human_tasks_failing_one_tick_changes_nothing(human_rules: list[Rule]) -> None:
     ticks = Ticks(digest_board(), "human_tasks", HumanTaskConnector())
     good = ticks.at(T0, failing=False)
@@ -163,7 +182,7 @@ def test_human_tasks_failing_one_tick_changes_nothing(human_rules: list[Rule]) -
     assert failed.conditions == good.conditions  # carried, with their original checked_at
     assert summary(run(human_rules, failed)) == expected  # no alert, nothing resolved
     assert ticks.metrics.connector_errors["human_tasks"] == 1
-    assert ticks.metrics.connector_failing_for("human_tasks") == timedelta(0)
+    assert failing_seconds(ticks.metrics, "human_tasks") == "60"  # since the last good tick
 
 
 def test_human_tasks_failing_past_max_condition_age_goes_stale(
@@ -185,16 +204,14 @@ def test_human_tasks_failing_past_max_condition_age_goes_stale(
         "W-2",
         "W-3",
     }
-    assert ticks.metrics.connector_failing_for("human_tasks") == 15 * M
-    assert 'kelpie_connector_failing_seconds{connector="human_tasks"} 900' in (
-        ticks.metrics.render()
-    )
+    assert failing_seconds(ticks.metrics, "human_tasks") == "960"
     ticks.at(T0 + 17 * M, failing=False)
-    assert ticks.metrics.connector_failing_for("human_tasks") is None
-    assert 'kelpie_connector_failing_seconds{connector="human_tasks"} 0' in (ticks.metrics.render())
+    assert failing_seconds(ticks.metrics, "human_tasks") == "0"
 
 
-def test_a_carried_human_task_done_wakes_only_while_fresh(human_rules: list[Rule]) -> None:
+def test_a_met_check_is_never_carried(human_rules: list[Rule]) -> None:
+    """A failed step wakes nothing: what it last found met may no longer hold (the person
+    reopened their task), and the board it could not read would say so."""
     board = digest_board()
     done = tuple(
         t if t.id != "H-1" else Task(t.id, t.title, Status.DONE, T0 - M, owner_id="ceo")
@@ -210,15 +227,40 @@ def test_a_carried_human_task_done_wakes_only_while_fresh(human_rules: list[Rule
         return {a.task_id for a in run(human_rules, snapshot) if a.kind is ActionKind.WAKE}
 
     assert wakes(ticks.at(T0, failing=False)) == {"W-1", "W-2", "W-3"}
-    assert wakes(ticks.at(T0 + 5 * M, failing=True)) == {"W-1", "W-2", "W-3"}
-    assert wakes(ticks.at(T0 + 16 * M, failing=True)) == set()
+    ticks.board.board = board  # H-1 reopened
+    failed = ticks.at(T0 + 2 * M, failing=True)
+    assert failed.conditions == board.conditions  # as the adapter gives them: unchecked
+    assert wakes(failed) == set()
+
+
+def test_a_met_block_condition_is_not_carried() -> None:
+    since = T0 - timedelta(hours=1)
+    task = Task("T-1", "t", Status.BLOCKED, since, block=Block("waiting_human: H-1", since))
+    human = Task("H-1", "Approve", Status.DONE, T0 - M, owner_id="ceo")
+    owners = (Owner("ceo", "owner", OwnerKind.HUMAN),)
+    pattern = re.compile(r"waiting_human: (?P<task>H-\d+)")
+    ticks = Ticks(
+        Snapshot(now=T0, tasks=(task, human), owners=owners),
+        "human_tasks",
+        HumanTaskConnector([pattern]),
+    )
+    good = ticks.at(T0, failing=False)
+    assert [c.satisfied for c in good.conditions] == [True]
+    ticks.board.board = Snapshot(
+        now=T0, tasks=(task, replace(human, status=Status.READY)), owners=owners
+    )
+    failed = ticks.at(T0 + 5 * M, failing=True)  # past stale_blocks' unblock grace
+    assert failed.conditions == () and failed.tasks[0].block == task.block
+    assert ActionKind.UNBLOCK not in {a.kind for a in StaleBlocks().evaluate(failed)}
 
 
 # --- GitHub: a block waiting for a PR ----------------------------------------------------
 
 
-def github_board() -> Snapshot:
-    since = T0 - timedelta(hours=3)
+def github_board(age: timedelta = timedelta(hours=5)) -> Snapshot:
+    """T-1 blocked on PR #123 for longer than rule 4's ``unlinked_alert_after`` (4h): a
+    bare block alerts at once."""
+    since = T0 - age
     task = Task(
         "T-1",
         "Review change",
@@ -238,38 +280,53 @@ def github_step(gh: FakeGitHub, clock: Clock) -> ConditionSync:
     return ConditionSync(connector, load_block_conditions(patterns, [REPO]))
 
 
-@pytest.mark.parametrize("merged", [False, True])
-def test_github_failing_one_tick_changes_nothing(merged: bool) -> None:
+def keys(actions: Sequence[Action]) -> list[str]:
+    return sorted(a.key.split(":", 1)[0] for a in actions)
+
+
+def test_github_failing_one_tick_changes_nothing() -> None:
     rule = StaleBlocks()
     with serve() as gh:
-        gh.pull(REPO, 123, merged=merged, state="closed" if merged else "open")
+        gh.pull(REPO, 123)
         ticks = Ticks(github_board(), "github", github_step(gh, Clock(T0)))
         good = ticks.at(T0, failing=False)
     (condition,) = good.conditions
-    assert condition.checked_at == T0 and condition.satisfied is merged
-    expected = summary(rule.evaluate(good))
-    assert [s[1] for s in expected] == (["unblock"] if merged else [])
+    assert condition.checked_at == T0 and condition.satisfied is False
+    assert rule.evaluate(good) == []
+    # Without carrying, the block is bare for that tick: rule 4's unlinked alert.
+    assert keys(rule.evaluate(Snapshot(now=T0 + M, tasks=github_board().tasks))) == ["unlinked"]
 
     failed = ticks.at(T0 + M, failing=True)
     assert failed.conditions == good.conditions and failed.tasks == good.tasks
-    assert summary(rule.evaluate(failed)) == expected
+    assert rule.evaluate(failed) == []  # no alert, so nothing to resolve on the next tick
     assert ticks.metrics.connector_errors["github"] == 1
 
 
 def test_github_failing_past_max_condition_age_goes_stale() -> None:
+    """The block stays linked to its stale condition: no rule acts on it, and after
+    ``stale_evidence_after`` (1h) rule 4 says the evidence is stale (not that the block
+    names no condition, which it does)."""
     rule = StaleBlocks()
     with serve() as gh:
-        gh.pull(REPO, 123, merged=True, state="closed")
+        gh.pull(REPO, 123)
         ticks = Ticks(github_board(), "github", github_step(gh, Clock(T0)))
         ticks.at(T0, failing=False)
-    assert [a.kind for a in rule.evaluate(ticks.at(T0 + 15 * M, failing=True))] == [
-        ActionKind.UNBLOCK
-    ]
     late = ticks.at(T0 + 16 * M, failing=True)
     (condition,) = late.conditions
     assert condition.checked_at == T0 and late.tasks[0].block is not None
     assert late.tasks[0].block.condition_id == condition.id
-    assert ActionKind.UNBLOCK not in {a.kind for a in rule.evaluate(late)}
+    assert rule.evaluate(late) == []
+    assert keys(rule.evaluate(ticks.at(T0 + 61 * M, failing=True))) == ["stale-evidence"]
+
+
+def test_a_merged_pr_is_not_carried() -> None:
+    rule = StaleBlocks()
+    with serve() as gh:
+        gh.pull(REPO, 123, merged=True, state="closed")
+        ticks = Ticks(github_board(timedelta(hours=1)), "github", github_step(gh, Clock(T0)))
+        assert [a.kind for a in rule.evaluate(ticks.at(T0, failing=False))] == [ActionKind.UNBLOCK]
+    failed = ticks.at(T0 + M, failing=True)
+    assert failed.conditions == () and rule.evaluate(failed) == []
 
 
 # --- the mechanism ------------------------------------------------------------------------
@@ -279,6 +336,8 @@ def test_a_failing_step_with_no_good_tick_carries_nothing() -> None:
     ticks = Ticks(digest_board(), "human_tasks", HumanTaskConnector())
     first = ticks.at(T0, failing=True)
     assert first.conditions == digest_board().conditions
+    assert failing_seconds(ticks.metrics, "human_tasks") == "0"
+    assert failing_seconds(Ticks(digest_board(), "x", HumanTaskConnector()).metrics, "x") == ""
 
 
 def test_nothing_is_carried_onto_a_condition_that_changed() -> None:
@@ -326,21 +385,61 @@ def test_an_attached_condition_comes_back_only_onto_the_same_block() -> None:
         assert out.tasks == (moved,) and out.conditions == ()
     # The task left the board.
     assert carry_forward(Snapshot(now=later), last) == Snapshot(now=later)
-    # An unlinked attached condition comes back while its task is on the board.
-    bare = Condition("pre:T-1", ConditionKind.PR_MERGED, "T-1", checked_at=T0)
-    last = Contribution((bare,))
-    assert carry_forward(Snapshot(now=later, tasks=(task,)), last).conditions == (bare,)
+
+
+def test_a_gate_condition_comes_back_only_while_its_task_is_unchanged() -> None:
+    ready = Task("T-1", "Ship after #123", Status.READY, T0 - M)
+    gate = Condition("ready:T-1", ConditionKind.PR_MERGED, "T-1", satisfied=False, checked_at=T0)
+    last = contribution(
+        Snapshot(now=T0, tasks=(ready,)), Snapshot(now=T0, tasks=(ready,), conditions=(gate,))
+    )
+    later = T0 + M
+    assert carry_forward(Snapshot(now=later, tasks=(ready,)), last).conditions == (gate,)
+    edited = replace(ready, title="Ship")  # no longer names the PR
+    assert carry_forward(Snapshot(now=later, tasks=(edited,)), last).conditions == ()
     assert carry_forward(Snapshot(now=later), last).conditions == ()
+
+
+def test_a_partial_tick_keeps_what_it_did_not_see() -> None:
+    """A tick that missed part of the farm (an adapter failed) keeps the last good tick's
+    conditions for the tasks it did not see, so a failure on the next tick finds them."""
+    board = digest_board()
+    here = Snapshot(
+        now=T0,
+        tasks=tuple(t for t in board.tasks if t.id != "W-1"),
+        owners=board.owners,
+        conditions=tuple(c for c in board.conditions if c.task_id != "W-1"),
+    )
+    there = Snapshot(
+        now=T0,
+        tasks=tuple(t for t in board.tasks if t.id == "W-1"),
+        conditions=tuple(c for c in board.conditions if c.task_id == "W-1"),
+    )
+    ticks = Ticks(here, "human_tasks", HumanTaskConnector(), other=there)
+    good = {c.id: c for c in ticks.at(T0, failing=False).conditions}
+    ticks.other.failing = True
+    ticks.at(T0 + M, failing=False)  # W-1's adapter missing: C-1 not checked
+    ticks.other.failing = False
+    back = {c.id: c for c in ticks.at(T0 + 2 * M, failing=True).conditions}
+    assert back["C-1"] == good["C-1"]  # from tick T0
+    assert back["C-2"].checked_at == T0 + M
+    # A complete tick replaces it all: W-1 gone for good, C-1 is not kept.
+    ticks.other.board = Snapshot(now=T0)
+    ticks.at(T0 + 3 * M, failing=False)
+    ticks.other.board = there
+    assert ticks.at(T0 + 4 * M, failing=True).conditions[-1] == there.conditions[0]
 
 
 def test_metrics_render_the_failure_streak() -> None:
     metrics = Metrics()
     assert "kelpie_connector" not in metrics.render()
-    metrics.connector_failed("github", T0)
-    metrics.connector_failed("github", T0 + 2 * M)
+    metrics.connector_ok("github", T0)
+    metrics.connector_failed("github", T0 + M)
+    metrics.connector_failed("github", T0 + 3 * M)
     rendered = metrics.render()
     assert 'kelpie_connector_errors_total{connector="github"} 2' in rendered
-    assert 'kelpie_connector_failing_seconds{connector="github"} 120' in rendered
-    metrics.connector_ok("github", T0 + 3 * M)
-    assert 'kelpie_connector_failing_seconds{connector="github"} 0' in metrics.render()
-    assert metrics.connector_failing_for("github") is None
+    assert failing_seconds(metrics, "github") == "180"  # since the last good tick
+    metrics.connector_ok("github", T0 + 4 * M)
+    assert failing_seconds(metrics, "github") == "0"
+    metrics.connector_failed("github", T0)  # the clock stepped back
+    assert failing_seconds(metrics, "github") == "0"

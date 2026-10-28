@@ -128,8 +128,10 @@ class Metrics:
         self.resource_readings = 0
         self.resource_failures: Counter[str] = Counter()
         self.connector_errors: Counter[str] = Counter()
-        # connector step -> since when it fails, tick after tick (None: its last tick read)
+        # connector step -> since when its evidence is missing: its last good tick (else
+        # its first failure) while it fails tick after tick; None once it reads again
         self.connector_failing: dict[str, datetime | None] = {}
+        self.connector_last_ok: dict[str, datetime] = {}
         self.connector_now: datetime | None = None
         self.github_enabled = False
         self.github_requests: Counter[str] = Counter()
@@ -358,7 +360,7 @@ class Metrics:
             self.connector_errors[name] += 1
             if now is not None:
                 if self.connector_failing.get(name) is None:
-                    self.connector_failing[name] = now
+                    self.connector_failing[name] = self.connector_last_ok.get(name, now)
                 self.connector_now = now
 
     def connector_ok(self, name: str, now: datetime) -> None:
@@ -366,15 +368,8 @@ class Metrics:
         with self._lock:
             if name in self.connector_failing:
                 self.connector_failing[name] = None
+            self.connector_last_ok[name] = now
             self.connector_now = now
-
-    def connector_failing_for(self, name: str) -> timedelta | None:
-        """How long the step has failed tick after tick, or None when it reads fine."""
-        with self._lock:
-            since = self.connector_failing.get(name)
-            if since is None or self.connector_now is None:
-                return None
-            return self.connector_now - since
 
     def adapter_failed(self, name: str) -> None:
         with self._lock:
@@ -1059,8 +1054,8 @@ class Metrics:
         metric(
             "kelpie_connector_errors_total",
             "counter",
-            "Connector snapshot steps that raised; the tick carries the conditions they "
-            "checked on their last good tick, with their check times.",
+            "Connector snapshot steps that raised; the tick carries the conditions they found "
+            "unmet or unknown on their last good tick, with their check times.",
             [
                 f"kelpie_connector_errors_total{_labels(connector=c)} {n}"
                 for c, n in sorted(self.connector_errors.items())
@@ -1070,11 +1065,12 @@ class Metrics:
         metric(
             "kelpie_connector_failing_seconds",
             "gauge",
-            "How long the connector step has failed tick after tick (0: it read fine). Past "
-            "a rule's max_condition_age its carried conditions are stale.",
+            "While a connector step fails tick after tick, seconds since its last good tick "
+            "(0: its last tick read fine). Past a rule's max_condition_age the conditions it "
+            "last checked are stale.",
             [
                 f"kelpie_connector_failing_seconds{_labels(connector=c)} "
-                f"{(now - since).total_seconds() if since is not None and now else 0:.0f}"
+                f"{max((now - since).total_seconds(), 0) if since is not None and now else 0:.0f}"
                 for c, since in sorted(self.connector_failing.items())
             ],
         )
