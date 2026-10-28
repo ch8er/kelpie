@@ -1067,8 +1067,11 @@ filter recommendation, read by the daily report. Only the size of an output is r
 With `[traces.outputs]` present, `[traces] retention` must cover `repeat_days` and twice
 `window`.
 
-`[[traces.outputs.filters]]` entries (built-in: `rtk`, `xcbeautify`, `errors-only`,
-`range`):
+`[[traces.outputs.filters]]` entries (built-in, in order: `rtk`, `xcbeautify`,
+`errors-only` for shell commands; then for other tools `downscale-images` for image tools
+(`*vision*`, `*screenshot*`, `*image*`), `range` for file reads, `compact-view` for tools that
+show a whole record (`*_show`, `*_status`, `*_list`, e.g. Hermes' `kanban_show`) and `ask-less`
+for any other tool, so every tool is ranked by its output tokens with advice for its kind):
 
 | Key | Default | Meaning |
 | --- | --- | --- |

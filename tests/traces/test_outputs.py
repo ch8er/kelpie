@@ -354,8 +354,22 @@ def test_custom_service_name_is_an_unknown_platform() -> None:
 
 def test_range_filter_is_for_file_reads_only() -> None:
     reads = [_call("tool:read_file", 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
-    search = [_call("tool:web_search", 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
-    assert [r.filter.name for r in recommend(rank(reads + search))] == ["range"]
+    search = [_call("tool:web_search", 10_000, T0 + timedelta(minutes=i)) for i in range(3)]
+    assert [r.filter.name for r in recommend(rank(reads + search))] == ["range", "ask-less"]
+
+
+def test_every_tool_gets_advice_for_its_kind() -> None:
+    def advice(key: str) -> str:
+        found = [_call(key, 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
+        (rec,) = recommend(rank(found))
+        return rec.filter.name
+
+    assert advice("tool:vision_analyze") == "downscale-images"
+    assert advice("tool:browser_screenshot") == "downscale-images"
+    assert advice("tool:kanban_show") == "compact-view"
+    assert advice("tool:read_file") == "range"
+    assert advice("tool:web_search") == "ask-less"
+    assert advice("xcodebuild") == "xcbeautify"  # shell commands as before
 
 
 def test_filter_introduction_needs_earlier_unfiltered_calls() -> None:
@@ -364,7 +378,17 @@ def test_filter_introduction_needs_earlier_unfiltered_calls() -> None:
 
 
 def test_default_filter_table_order() -> None:
-    assert [f.name for f in DEFAULT_FILTERS] == ["rtk", "xcbeautify", "errors-only", "range"]
+    assert [f.name for f in DEFAULT_FILTERS] == [
+        "rtk",
+        "xcbeautify",
+        "errors-only",
+        "downscale-images",
+        "range",
+        "compact-view",
+        "ask-less",
+    ]
+    assert not any(f.matches("tool:kanban_show") for f in DEFAULT_FILTERS[:3])  # shell only
+    assert not DEFAULT_FILTERS[-1].matches("make test")
     assert not DEFAULT_FILTERS[0].matches("xcodebuild")
     assert DEFAULT_FILTERS[0].matches("python3 -m pytest")
 

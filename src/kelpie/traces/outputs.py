@@ -24,8 +24,13 @@ over at least ``min_calls`` calls gets the first filter of the table (:class:`Fi
 ``[[traces.outputs.filters]]``) that matches its key and supports its platform: RTK
 (github.com/rtk-ai/rtk) for the command families it covers, on the agent platforms it hooks
 into; otherwise e.g. ``xcbeautify`` for ``xcodebuild``, then errors only and a tail for any
-other command. Kelpie does not filter anything itself. Estimated savings are the group's
-unfiltered tokens times the filter's expected ``reduction`` (an assumption until verified).
+other command. Tools that are not shell commands get advice for their kind (issue #197: on a
+live farm built-in tools were the real offenders, an image analysis at 25-56k tokens, a card
+view at 6-14k re-read many times a session): images downscaled or cropped, a record read in
+a compact view and not again, a file in a range, and any other tool asked for less and not
+called again for the same thing. Kelpie does not filter anything itself. Estimated savings
+are the group's unfiltered tokens times the filter's expected ``reduction`` (an assumption
+until verified).
 A group above the threshold on ``repeat_days`` different days is a repeated offender: the
 owner of the role's instructions (``owners``) should add the filter there.
 
@@ -81,6 +86,11 @@ RTK_PLATFORMS = (
 )
 # Tools that return a file's content (case varies by platform: Read, read_file, view).
 FILE_TOOLS = ("tool:*read*", "tool:*Read*", "tool:view*", "tool:View*", "tool:cat")
+# Tools that look at an image (a screenshot, a rendered page): their output is the size of
+# the image as the model sees it.
+IMAGE_TOOLS = ("tool:*vision*", "tool:*Vision*", "tool:*screenshot*", "tool:*image*")
+# Tools that show a whole record (a card, an issue, a run): e.g. Hermes' kanban_show.
+RECORD_TOOLS = ("tool:*_show", "tool:*_status", "tool:*_list")
 # Platforms a span's service.name may name (other names are custom: platform unknown).
 KNOWN_PLATFORMS = frozenset({*RTK_PLATFORMS, "paperclip"})
 # Command families RTK filters (its README lists 100+ commands in these families).
@@ -181,10 +191,38 @@ DEFAULT_FILTERS: tuple[Filter, ...] = (
         reduction=0.5,
     ),
     Filter(
+        name="downscale-images",
+        how=(
+            "downscale or crop an image before analysing it (at most 1024 px on its long "
+            "side, only the region that matters), and analyse each image once"
+        ),
+        commands=IMAGE_TOOLS,
+        reduction=0.5,
+    ),
+    Filter(
         name="range",
         how="read a line range or search the file instead of returning it whole",
         commands=FILE_TOOLS,
         reduction=0.5,
+    ),
+    Filter(
+        name="compact-view",
+        how=(
+            "read the compact view (the fields the step needs, the latest comments) instead "
+            "of the whole record, and keep what was read instead of reading it again in the "
+            "same session"
+        ),
+        commands=RECORD_TOOLS,
+        reduction=0.5,
+    ),
+    Filter(
+        name="ask-less",
+        how=(
+            "ask the tool for less (a limit, a range, a summary), and keep its result instead "
+            "of calling it again for the same thing in the same session"
+        ),
+        commands=("tool:*",),
+        reduction=0.3,
     ),
 )
 
