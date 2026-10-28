@@ -528,8 +528,10 @@ def test_report_config_errors(section: Any) -> None:
 # --- accounting edge cases (review findings) ------------------------------------------
 
 
-def opened(sid: str, rule: str, since: datetime, opened_at: datetime, last: datetime) -> StateRow:
-    return StateRow(OpenState(sid, rule, since, opened_at, last, 0, Severity.WARNING, "s", "T-9"))
+def opened(
+    sid: str, rule: str, since: datetime, opened_at: datetime, last: datetime, task: str = "T-9"
+) -> StateRow:
+    return StateRow(OpenState(sid, rule, since, opened_at, last, 0, Severity.WARNING, "s", task))
 
 
 def day_inputs(**kw: Any) -> ReportInputs:
@@ -790,8 +792,9 @@ def test_cards_stuck_before_work_are_their_own_line() -> None:
         at(6),
         at(8),
         at(12),
+        "T-5",
     )
-    ownerless = opened("orphan_status:T-3", "orphan_status", at(9), at(9), at(10))
+    ownerless = opened("orphan_status:T-3", "orphan_status", at(9), at(9), at(10), "T-3")
     chaos = {c.rule: c for c in build_report(day_inputs(states=[stuck, ownerless])).chaos}
     assert chaos["orphan_status:prework"].hours == pytest.approx(4.0)
     assert chaos["orphan_status:prework"].cause == "cards stuck before work (triage, scheduled)"

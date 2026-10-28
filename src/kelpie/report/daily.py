@@ -8,16 +8,23 @@ same report. No LLM: an optional root-cause section is a later, separate step.
 **Cost of chaos, hours.** Long-lived alert states (``kelpie.core.states``) of the rules in
 :data:`CHAOS_CAUSES` describe work that is stuck: an ownerless task, a block that outlived
 its cause, a runaway loop (``loop_breaker``'s budget and forecast states are spend, not
-chaos, and are left out). Each counts from when Kelpie first reported it (``opened_at``:
-a grace period or an allowed wait before the threshold is not lost) to its ``last_seen``
-(the last tick that still saw it), clipped to the day; a lower bound, since a rule going
-live re-opens its states. Two conditions on one task both count: the unit is
-*condition-hours*, not wall-clock hours. A forgotten hold (rule 6, ``bottlenecks:hold:*``)
-is its own cause and counts idle agent-hours instead (:func:`hold_agent_hours`); so is a
-person's inbox (rule 13, ``needs_you:*``): the agent-hours of the agent tasks waiting on
-them (:func:`people_agent_hours`). A card stuck in a pre-work status with work behind it
-(rule 3, ``orphan_status:stuck-before-work:*``) is its own cause too, in card-hours. All
-are "hours lost"; ``[report] hour_usd`` turns them into dollars. A card in a pre-work status
+chaos, and are left out). Each counts from when Kelpie first reported it (``opened_at``: a
+grace period or an allowed wait before the threshold is not lost) to its ``last_seen`` (the
+last tick that still saw it), clipped to the day; a lower bound, since a rule going live
+re-opens its states. The unit is *task-hours*, each counted once (#228): when several
+states cover the same task at the same time (rule 13 listing it as waiting on a person,
+rule 4's stale block on it, two conditions of one rule), the hour counts under the first
+cause in :data:`CHAOS_PRECEDENCE` (a person's inbox, then a stale block, then the rest in
+:data:`CHAOS_CAUSES` order), and the others' overlapping hours are shown as "also seen",
+never added. What names no task adds up as it is: idle agents behind a hold, the waiting
+tasks rule 13 counts past the 20 ids it lists, a state without a task. A session's state
+counts on its task, and a task waiting behind two people's tasks counts once when rule 13
+names it. A forgotten hold (rule 6, ``bottlenecks:hold:*``) is its own cause and counts
+idle agent-hours instead (:func:`hold_agent_hours`); so is a person's inbox (rule 13,
+``needs_you:*``): the agent- hours of the agent tasks waiting on them
+(:func:`people_agent_hours`). A card stuck in a pre-work status with work behind it (rule
+3, ``orphan_status:stuck-before-work:*``) is its own cause too, in card-hours. All are
+"hours lost"; ``[report] hour_usd`` turns them into dollars. A card in a pre-work status
 that rule 3 finds stuck (past ``prework_after``, not held, ignored or queued behind its own
 parent) but that no open task depends on, so rule 3 never reported it, is listed under
 "Stuck, blocking nothing" with its age, and counts nowhere: it delays no work.
@@ -122,7 +129,7 @@ from kelpie.core.spans import (
 )
 from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
-from kelpie.report import farm, md
+from kelpie.report import farm, intervals, md
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.fixes import FixEvent
 from kelpie.report.sections import (
@@ -203,6 +210,13 @@ CHAOS_CAUSES: Mapping[str, str] = {
     "loop_breaker": "runaway loops",
     "no_progress": "activity without progress",
 }
+# Which cause counts a task-hour that several chaos states cover (#228): a person's inbox
+# (the wait has a name), then a stale block, then the rest in CHAOS_CAUSES order.
+CHAOS_PRECEDENCE: tuple[str, ...] = (
+    PEOPLE,
+    "stale_blocks",
+    *(c for c in CHAOS_CAUSES if c not in (PEOPLE, "stale_blocks")),
+)
 # What a human can do about a cause when no rule could have fixed it by itself.
 REMEDIES: Mapping[str, str] = {
     "orphan_status": "give ownerless statuses an owner: route them to a role or let "
@@ -377,9 +391,13 @@ class StuckCard:
 class ChaosLine:
     rule: str
     cause: str
-    hours: float
+    hours: float  # counted once: hours an earlier cause already counted are in also_hours
     spend: Spend
     tasks: tuple[str, ...]
+    # the rule's own hours on tasks an earlier cause (CHAOS_PRECEDENCE) already counted then,
+    # and those causes: shown for review, never added to the hours lost
+    also_hours: float = 0.0
+    also_under: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -753,6 +771,7 @@ def _verifications(
         cause=cause_of,
         start=counts_from,
         hours=lambda st, lo, hi: state_hours(inputs.actions, st, lo, hi, _humans(inputs)),
+        lost=lambda found, lo, hi: lost_hours(inputs, found, lo, hi),
         chaos_rules=frozenset(CHAOS_CAUSES),
         spans=known,
         counted=counted_llm(index, known),
@@ -893,35 +912,13 @@ def _chaos(
             if a <= last_at(span) < b:
                 burned.setdefault(span_key(span), rule)
 
-    hours: dict[str, float] = defaultdict(float)
-    tasks: dict[str, set[str]] = defaultdict(set)
-    rank_ = {rule: i for i, rule in enumerate(CHAOS_CAUSES)}
-    chaos = sorted(
-        (r.state for r in inputs.states if is_chaos(r.state)),
-        key=lambda s: (rank_[cause_of(s)], s.opened_at, s.id),
-    )
-    for state in chaos:
-        # From when Kelpie first reported it: a grace period or an allowed wait before the
-        # threshold is not lost time. A lower bound (a rule going live re-opens a state).
-        a, b = max(counts_from(state), start), min(state.last_seen, end)
-        if b <= a:
-            continue
-        cause = cause_of(state)
-        if cause == HOLDS:
-            agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
-            hours[HOLDS] += agent_hours
-            tasks[HOLDS].update(held)
-            continue
-        if cause == PEOPLE:
-            agent_hours, waiting = people_agent_hours(inputs.actions, state, a, b)
-            hours[PEOPLE] += agent_hours
-            tasks[PEOPLE].update(waiting)
-            continue
-        hours[cause] += (b - a).total_seconds() / 3600
-        if state.task_id:
-            tasks[cause].add(state.task_id)
+    def on_state(state: OpenState, a: datetime, b: datetime) -> None:
         if (session := session_of(state)) is not None:
             burn(state.rule, session, a, b)
+
+    chaos = [r.state for r in inputs.states if is_chaos(r.state)]
+    found = _chaos_hours(inputs, chaos, start, end, on_state)
+    keyed, loose, tasks = found.keyed, found.loose, found.tasks
     for entry in actions:
         if entry.rule != "exit_contract" or entry.kind is not ActionKind.REQUEUE:
             continue
@@ -940,19 +937,117 @@ def _chaos(
         rule: pricer.price(usage(found, {span_key(s): counted[span_key(s)] for s in found}))
         for rule, found in by_rule.items()
     }
+    hours, also = _count_once(keyed)
     lines = [
         ChaosLine(
             rule,
             CHAOS_CAUSES[rule],
-            hours[rule],
+            hours.get(rule, 0.0) + loose[rule],
             money.get(rule, Spend()),
             tuple(sorted(tasks[rule])),
+            sum(also.get(rule, {}).values()),
+            tuple(c for c in CHAOS_PRECEDENCE if c in also.get(rule, {})),
         )
         for rule in CHAOS_CAUSES
-        if hours[rule] > 0 or money.get(rule, Spend()).tokens > 0
+        if hours.get(rule, 0.0) + loose[rule] > 0
+        or money.get(rule, Spend()).tokens > 0
+        or also.get(rule)
     ]
     lines.sort(key=lambda c: (-c.spend.usd, -c.hours, c.rule))
     return tuple(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class _ChaosHours:
+    """What chaos states saw in a window, before a task-hour is counted once: per cause,
+    ``keyed`` spans on a task, ``loose`` hours that name no task, and the tasks named."""
+
+    keyed: defaultdict[str, list[tuple[str, datetime, datetime]]]
+    loose: defaultdict[str, float]
+    tasks: defaultdict[str, set[str]]
+
+
+def _chaos_hours(
+    inputs: ReportInputs,
+    states: Iterable[OpenState],
+    start: datetime,
+    end: datetime,
+    on_state: Callable[[OpenState, datetime, datetime], None] | None = None,
+) -> _ChaosHours:
+    """Each chaos state in ``[start, end)``, from when Kelpie first reported it (a grace
+    period or an allowed wait before the threshold is not lost time; a lower bound, since a
+    rule going live re-opens a state) to its last sighting. A task-hour counts once (#228):
+    per task, the spans each cause saw (a state on a session counts on its task); what names
+    no task adds up as it is: idle agents behind a hold, waiting tasks rule 13 counted past
+    the ids it lists, a state without a task. ``tasks`` are the tasks counted: for a
+    person's inbox, those rule 13 named as waiting during the window (up to its count).
+    ``on_state`` sees each state's window."""
+    keyed: dict[str, list[tuple[str, datetime, datetime]]] = defaultdict(list)
+    loose: dict[str, float] = defaultdict(float)
+    tasks: dict[str, set[str]] = defaultdict(set)
+    rank_ = {rule: i for i, rule in enumerate(CHAOS_CAUSES)}
+    for state in sorted(states, key=lambda s: (rank_[cause_of(s)], s.opened_at, s.id)):
+        a, b = max(counts_from(state), start), min(state.last_seen, end)
+        if b <= a:
+            continue
+        cause = cause_of(state)
+        if cause == HOLDS:
+            agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
+            loose[HOLDS] += agent_hours
+            tasks[HOLDS].update(held)
+            continue
+        if cause == PEOPLE:
+            for lo, hi, count, listed in people_steps(inputs.actions, state, a, b):
+                ids = listed[:count]  # an alert without the count counts 0, as before
+                keyed[PEOPLE].extend((t, lo, hi) for t in ids)
+                loose[PEOPLE] += max(count - len(ids), 0) * (hi - lo).total_seconds() / 3600
+                tasks[PEOPLE].update(ids)
+            continue
+        if state.task_id:
+            keyed[cause].append((state.task_id, a, b))
+            tasks[cause].add(state.task_id)
+        else:
+            loose[cause] += (b - a).total_seconds() / 3600
+        if on_state is not None:
+            on_state(state, a, b)
+    return _ChaosHours(keyed, loose, tasks)
+
+
+def lost_hours(
+    inputs: ReportInputs, states: Iterable[OpenState], start: datetime, end: datetime
+) -> float:
+    """The hours lost ``states`` cost in ``[start, end)``, each task-hour once, as the cost
+    of chaos counts them (for before/after verification, :mod:`kelpie.report.verify`)."""
+    found = _chaos_hours(inputs, states, start, end)
+    return sum(_count_once(found.keyed)[0].values()) + sum(found.loose.values())
+
+
+def _count_once(
+    keyed: Mapping[str, Sequence[tuple[str, datetime, datetime]]],
+) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """Each cause's task-hours, a task-hour counted once: by the first cause in
+    :data:`CHAOS_PRECEDENCE` that saw the task then (two states of one cause on one task
+    count once too). Also, per cause, the hours of its own that an earlier cause had
+    already counted, by that cause."""
+    claimed: dict[str, list[tuple[str, intervals.Spans]]] = defaultdict(list)
+    hours: dict[str, float] = {}
+    also: dict[str, dict[str, float]] = {}
+    for cause in CHAOS_PRECEDENCE:
+        by_task: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
+        for task, a, b in keyed.get(cause, ()):
+            by_task[task].append((a, b))
+        for task, spans in by_task.items():
+            own = intervals.merged(spans)
+            new = own
+            for earlier, seen in claimed[task]:
+                rest = intervals.minus(new, seen)
+                if (lost := intervals.hours(new) - intervals.hours(rest)) > 1e-9:
+                    also.setdefault(cause, {})
+                    also[cause][earlier] = also[cause].get(earlier, 0.0) + lost
+                new = rest
+            hours[cause] = hours.get(cause, 0.0) + intervals.hours(new)
+            claimed[task].append((cause, own))
+    return hours, also
 
 
 def counts_from(state: OpenState) -> datetime:
@@ -1012,6 +1107,22 @@ def people_agent_hours(
     planned for later are not waiting (incident 20): rule 13 leaves them out of that count
     and reports them apart (``planned_agent_tasks``, ``planned``), which ``planned`` reads
     instead; they never count as hours lost."""
+    return _sampled_hours(entries, state.opened_at, a, b, _inbox_sampler(state, planned))
+
+
+def people_steps(
+    entries: Sequence[LedgerEntry], state: OpenState, a: datetime, b: datetime
+) -> list[tuple[datetime, datetime, int, tuple[str, ...]]]:
+    """:func:`people_agent_hours` as steps: ``(start, end, waiting count, the ids rule 13
+    listed then)`` over ``[a, b)``; the count may exceed the ids (rule 13 lists at most 20)."""
+    return _sampled_steps(entries, state.opened_at, a, b, _inbox_sampler(state, False))
+
+
+def _inbox_sampler(
+    state: OpenState, planned: bool
+) -> Callable[[LedgerEntry], tuple[int, list[object]] | None]:
+    """What one of rule 13's escalations of this inbox says: how many agent tasks wait (or
+    are planned, with ``planned``) on the person, and their ids."""
     person = state.id[len(PEOPLE_STATE) :]
     count_key, ids_key = (
         (PLANNED_AGENT_TASKS, PLANNED_TASKS) if planned else ("waiting_agent_tasks", "waiting")
@@ -1028,7 +1139,55 @@ def people_agent_hours(
         n = count if isinstance(count, int) and not isinstance(count, bool) else 0
         return max(n, 0), waiting if isinstance(waiting, list) else []
 
-    return _sampled_hours(entries, state.opened_at, a, b, sample)
+    return sample
+
+
+def _samples(
+    entries: Sequence[LedgerEntry],
+    first: datetime,
+    b: datetime,
+    sample: Callable[[LedgerEntry], tuple[int, list[object]] | None],
+) -> list[tuple[datetime, int, list[object]]]:
+    return sorted(
+        (
+            (e.at, found[0], found[1])
+            for e in entries
+            if first <= e.at < b and (found := sample(e)) is not None
+        ),
+        key=lambda x: (x[0], x[1]),
+    )
+
+
+def _sampled_steps(
+    entries: Sequence[LedgerEntry],
+    first: datetime,
+    a: datetime,
+    b: datetime,
+    sample: Callable[[LedgerEntry], tuple[int, list[object]] | None],
+) -> list[tuple[datetime, datetime, int, tuple[str, ...]]]:
+    """A count a state's alerts report (idle agents, waiting tasks) as a step function over
+    ``[a, b)``: ``(start, end, count, ids)`` per step. Each sample of this episode of the
+    state (at or after ``first``) holds until the next one; before the first sample in the
+    window, the latest earlier sample applies, else the first one. No sample at all: no
+    step. ``ids`` are the strings that sample names, once each."""
+    samples = _samples(entries, first, b, sample)
+    if not samples:
+        return []
+
+    def ids(raw: list[object]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(t for t in raw if isinstance(t, str)))
+
+    before = [x for x in samples if x[0] <= a]
+    _, level, named = before[-1] if before else samples[0]
+    out: list[tuple[datetime, datetime, int, tuple[str, ...]]] = []
+    at = a
+    for when, count, raw in samples:
+        if when <= a:
+            continue
+        out.append((at, when, level, ids(named)))
+        at, level, named = when, count, raw
+    out.append((at, b, level, ids(named)))
+    return [x for x in out if x[1] > x[0]]
 
 
 def _sampled_hours(
@@ -1038,32 +1197,14 @@ def _sampled_hours(
     b: datetime,
     sample: Callable[[LedgerEntry], tuple[int, list[object]] | None],
 ) -> tuple[float, tuple[str, ...]]:
-    """Integrate a count a state's alerts report (idle agents, waiting tasks) over
-    ``[a, b)``: each sample of this episode of the state (at or after ``first``) holds
-    until the next one, a step function. Before the first sample in the window, the latest
-    earlier sample applies, else the first one. No sample at all: 0. Also the task ids the
-    samples name."""
-    samples = sorted(
-        (
-            (e.at, found[0], found[1])
-            for e in entries
-            if first <= e.at < b and (found := sample(e)) is not None
-        ),
-        key=lambda x: (x[0], x[1]),
+    """The step function of :func:`_sampled_steps` integrated over ``[a, b)``, and the task
+    ids every sample of the episode up to ``b`` names."""
+    total = sum(
+        n * (hi - lo).total_seconds() / 3600
+        for lo, hi, n, _ in _sampled_steps(entries, first, a, b, sample)
     )
-    if not samples:
-        return 0.0, ()
-    before = [x for x in samples if x[0] <= a]
-    level = (before[-1] if before else samples[0])[1]
-    total, at = 0.0, a
-    for when, count, _ in samples:
-        if when <= a:
-            continue
-        total += level * (when - at).total_seconds() / 3600
-        at, level = when, count
-    total += level * (b - at).total_seconds() / 3600
-    named = sorted({t for _, _, ids in samples for t in ids if isinstance(t, str)})
-    return total, tuple(named)
+    named = {t for _, _, raw in _samples(entries, first, b, sample) for t in raw}
+    return total, tuple(sorted(t for t in named if isinstance(t, str)))
 
 
 def _held(params: Mapping[str, object]) -> list[object]:
@@ -1081,7 +1222,7 @@ def state_hours(
     b: datetime,
     humans: frozenset[str] = frozenset(),
 ) -> float:
-    """What a chaos state costs in ``[a, b)``: its condition-hours, for a forgotten hold
+    """What a chaos state costs in ``[a, b)`` on its own: its hours, for a forgotten hold
     the idle agent-hours behind it (:func:`hold_agent_hours`), for a person's inbox the
     agent-hours waiting on them (:func:`people_agent_hours`)."""
     if state.id.startswith(HOLD_STATE):
@@ -1230,6 +1371,8 @@ def _recommendations(
     for f in would_fix:  # most subjects first: describe a rule by its main action
         acting.setdefault(f.rule, f)
     for line in chaos:
+        if line.hours <= 0 and not line.spend.tokens:
+            continue  # all its hours were counted under an earlier cause (#228)
         mode = inputs.modes.get(line.rule, Mode.OBSERVE)
         fix = acting.get(line.rule)
         blocked = inputs.act_blockers.get(line.rule)
@@ -1238,7 +1381,8 @@ def _recommendations(
             title = f"Let {line.rule} act"
             detail = (
                 f"in {mode} mode it would have done {fix.kind} on {fix.count} "
-                f"subject(s); {line.cause} lasted {line.hours:.1f} condition-hours"
+                f"subject(s); {line.cause} lasted {line.hours + line.also_hours:.1f} "
+                "task-hours"
             )
             if inputs.farm.dry_run:
                 detail += " (Kelpie runs in dry-run: no rule acts until [engine] dry_run = false)"
@@ -1308,14 +1452,29 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
                 f"Stuck hours at ${report.hour_usd:,.2f}/hour: "
                 f"${report.chaos_hours * report.hour_usd:,.2f}.",
             ]
+        overlap = [c for c in report.chaos if c.also_hours > 0]
+        if overlap:
+            seen = "; ".join(
+                f"`{c.rule}` {c.also_hours:.1f} h (counted under "
+                f"{', '.join(f'`{u}`' for u in c.also_under)})"
+                for c in overlap
+            )
+            lines += [
+                "",
+                f"Also seen, not added (the same tasks over the same hours): {seen}.",
+            ]
         lines += [
             "",
-            "Hours lost: condition-hours, how long each condition lasted after Kelpie first "
-            "reported it, summed over conditions (two on one task both count; a lower bound); "
-            "for forgotten holds, idle agent-hours: the agents rule 6 saw idle behind the hold "
-            "after its expiry, over time; for agents waiting on people, agent-hours: the agent "
-            "tasks rule 13 saw waiting on a person's approval or human task, over time (a "
-            "human gate rule 6 also reports counts in both lines).",
+            "Hours lost: task-hours, how long a task was stuck after Kelpie first reported "
+            "it, each task-hour counted once: when several rules saw the same task at the "
+            "same time, under the first of a person's inbox, a stale block, an ownerless "
+            "task, a wait past its limit, an exit without a final status, review ping-pong, "
+            "idle capacity, a card stuck before work, a runaway loop, activity without "
+            "progress (a lower bound); for forgotten holds, idle agent-hours: the "
+            "agents rule 6 saw idle behind the hold after its expiry, over time; for agents "
+            "waiting on people, agent-hours: the agent tasks rule 13 saw waiting on a "
+            "person's approval or human task, over time (a human gate rule 6 also reports "
+            "counts in both lines).",
         ]
     else:
         lines.append("No hours lost and no tokens burned on loops, idle sessions or restarts.")
