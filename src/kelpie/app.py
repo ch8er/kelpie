@@ -22,7 +22,7 @@ from typing import Any, Protocol
 from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_code
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes.git_state import valid_base_ref
-from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME
+from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME, board_key
 from kelpie.adapters.hermes.processes import (
     DEFAULT_TIMEOUT as DEFAULT_TOOL_TIMEOUT,
 )
@@ -149,9 +149,26 @@ class ConfigError(ValueError):
     """The configuration cannot be used; Kelpie refuses to start."""
 
 
+# [[adapters.hermes.boards]] name: the prefix of the board's task ids (``<name>:t_1a``).
+_BOARD_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+@dataclass(frozen=True, slots=True)
+class HermesBoardSettings:
+    """``[[adapters.hermes.boards]]``: one Kanban board of the Hermes home. Profiles, the
+    spool, the CLI and the host's tool processes belong to the home, so they stay in
+    ``[adapters.hermes]``; a board has its database and its own park-signing key."""
+
+    name: str  # prefixes the board's task and session ids: <name>:t_1a
+    db_path: Path
+    # Signs Kelpie's parks and stops on this board; None: hermes-wait-<name>.key next to
+    # the ledger (see _with_wait_key).
+    wait_key: Path | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class HermesSettings:
-    """``[adapters.hermes]``: where the Kanban board and the hooks spool live."""
+    """``[adapters.hermes]``: where the Kanban board (or boards) and the hooks spool live."""
 
     db_path: Path = hermes.DEFAULT_DB
     spool: Path | None = hermes.DEFAULT_SPOOL  # None: spool reading disabled
@@ -178,6 +195,9 @@ class HermesSettings:
     # Long tool runs and tool slots read from the host's processes ([adapters.hermes.tools])
     tools: ToolProcesses | None = None
     author: str = AUTHOR  # the name Kelpie signs its blocks, parks, wakes and comments with
+    # [[adapters.hermes.boards]]: several boards of this Hermes home, each with its own
+    # db_path (then ``db_path`` and ``wait_key`` above are unused). (): one board, db_path.
+    boards: tuple[HermesBoardSettings, ...] = ()
 
     def build(self) -> hermes.HermesAdapter:
         return hermes.HermesAdapter(
@@ -397,8 +417,10 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "worker_grace",
         "tools",
         "author",
+        "boards",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
+    boards = _hermes_boards(section)
     paths: dict[str, Path | None] = {}
     for key, default in (("db_path", hermes.DEFAULT_DB), ("spool", hermes.DEFAULT_SPOOL)):
         value = section.get(key, str(default))
@@ -562,7 +584,54 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         worker_grace,
         _hermes_tools(section.get("tools")),
         author,
+        boards,
     )
+
+
+def _hermes_boards(section: Mapping[str, Any]) -> tuple[HermesBoardSettings, ...]:
+    """``[[adapters.hermes.boards]]``: names and databases distinct (paths compared after
+    ``~`` expansion and resolving symlinks), none of the one-board keys (``db_path``,
+    ``wait_key``) beside them. Keys are checked distinct once defaulted (_with_wait_key)."""
+    if "boards" not in section:
+        return ()
+    where = "[[adapters.hermes.boards]]"
+    raw = section["boards"]
+    if not isinstance(raw, list) or not raw or not all(isinstance(b, Mapping) for b in raw):
+        raise ConfigError(f"{where} must be one or more tables")
+    if both := sorted({"db_path", "wait_key"} & set(section)):
+        raise ConfigError(
+            f"[adapters.hermes] {', '.join(both)} cannot be set beside {where}: set "
+            f"{'it' if len(both) == 1 else 'them'} on each board"
+        )
+    boards: list[HermesBoardSettings] = []
+    for entry in raw:
+        if extra := set(entry) - {"name", "db_path", "wait_key"}:
+            raise ConfigError(f"unknown {where} keys: {sorted(extra)}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not _BOARD_NAME.fullmatch(name):
+            raise ConfigError(
+                f"{where} entries need a name of 1-32 lowercase letters, digits, '-' or '_' "
+                "(it prefixes the board's task ids)"
+            )
+        values: dict[str, Path | None] = {}
+        for key in ("db_path", "wait_key"):
+            value = entry.get(key)
+            if value is None and key == "wait_key":
+                values[key] = None
+            elif not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"{where} {name}: {key} must be a non-empty path")
+            else:
+                values[key] = Path(value)
+        db_path = values["db_path"]
+        assert db_path is not None
+        boards.append(HermesBoardSettings(name, db_path, values["wait_key"]))
+    names = [b.name for b in boards]
+    if twice := sorted({n for n in names if names.count(n) > 1}):
+        raise ConfigError(f"{where} names {', '.join(twice)} twice")
+    dbs = [b.db_path.expanduser().resolve() for b in boards]
+    if len(set(dbs)) < len(dbs):
+        raise ConfigError(f"{where} lists a db_path twice: one board is one entry")
+    return tuple(boards)
 
 
 def _hermes_tools(raw: Any) -> ToolProcesses | None:
@@ -637,9 +706,23 @@ def _with_wait_key(hermes: HermesSettings | None, db: Path | None) -> HermesSett
     """The park-signing key defaults next to the ledger, which a deployment keeps (a
     container's data volume): losing the key leaves Kelpie's parks unrecognised. With an
     in-memory ledger it is ``~/.kelpie/hermes-wait.key``."""
-    if hermes is None or hermes.wait_key is not None:
+    if hermes is None:
         return hermes
-    return replace(hermes, wait_key=DEFAULT_WAIT_KEY if db is None else db.parent / WAIT_KEY_NAME)
+    where = DEFAULT_WAIT_KEY.parent if db is None else db.parent
+    if hermes.boards:  # a key per board: a marker of one board never verifies on another
+        boards = tuple(
+            b if b.wait_key is not None else replace(b, wait_key=where / board_key(b.name))
+            for b in hermes.boards
+        )
+        keys = [b.wait_key.expanduser().resolve() for b in boards if b.wait_key is not None]
+        if len(set(keys)) < len(keys):  # compared after the defaults, ~ and symlinks
+            raise ConfigError(
+                "[[adapters.hermes.boards]] share a wait_key: each board signs with its own"
+            )
+        return replace(hermes, boards=boards)
+    if hermes.wait_key is not None:
+        return hermes
+    return replace(hermes, wait_key=where / WAIT_KEY_NAME)
 
 
 def _load_claude_code(adapters: Mapping[str, Any]) -> ClaudeCodeSettings | None:
@@ -1261,6 +1344,8 @@ def _unique_owners(owners: tuple[Owner, ...]) -> tuple[Owner, ...]:
 def build_adapters(settings: Settings) -> list[PlatformAdapter]:
     adapters: list[PlatformAdapter] = []
     if settings.hermes is not None and settings.hermes.enabled:
+        if settings.hermes.boards:  # until the adapter reads several boards (#198)
+            raise ConfigError("[[adapters.hermes.boards]] is not supported by this build yet")
         adapters.append(settings.hermes.build())
     if settings.claude_code is not None and settings.claude_code.enabled:
         adapters.append(settings.claude_code.build())

@@ -13,9 +13,10 @@ description or comments never link it: on a live farm 8 of 10 such matches were 
 A fork's PR links nothing (its branch names are its own, and its title is not ours to
 trust).
 
-On a multi-host farm task ids are namespaced (``laptop:t_1a``, ``Task.host`` = ``laptop``):
-the id without the prefix is a code too, but only while no other task has the same local
-id, so a PR is never linked to look-alike tasks on several hosts.
+On a multi-host farm task ids are namespaced (``laptop:t_1a``, ``Task.host`` = ``laptop``),
+and so are they when one adapter watches several boards (``qr:t_1a``, ``Task.board`` =
+``qr``): the id without the prefixes is a code too, but only while no other task has the
+same local id, so a PR is never linked to look-alike tasks on several hosts or boards.
 
 ``task_code`` runs over agent-written titles on every scan, so :func:`compile_task_code`
 refuses patterns that can backtrack badly (a repeated group that itself repeats,
@@ -155,13 +156,13 @@ def link_tasks(
 
 
 def unique_local_ids(tasks: Sequence[Task]) -> frozenset[str]:
-    """Local ids (casefolded) that exactly one host-namespaced task has."""
+    """Local ids (casefolded) that exactly one host- or board-namespaced task has."""
     seen = Counter(i.casefold() for t in tasks if (i := _local_id(t)) is not None)
     return frozenset(i for i, n in seen.items() if n == 1)
 
 
 def _local_id(task: Task) -> str | None:
-    """The id on the task's own board when it is host-namespaced (``<host>:<id>``)."""
-    if task.host and task.id.startswith(f"{task.host}:"):
-        return task.id[len(task.host) + 1 :].strip() or None
-    return None
+    """The id on the task's own board when it is namespaced by host or board
+    (``<host>:<id>``, ``<board>:<id>``)."""
+    local = task.local_id
+    return None if local is None else local.strip() or None

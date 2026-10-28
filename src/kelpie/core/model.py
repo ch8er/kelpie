@@ -166,6 +166,22 @@ class Task:
     comments: tuple[Comment, ...] = ()
     body_author: str | None = None
     created_at: datetime | None = None
+    # The board the task is on when one adapter watches several (Hermes named boards): its
+    # id is then ``<board>:<id on the board>``, after the host's prefix on a multi-host farm
+    # (``<host>:<board>:<id>``). None: the adapter watches one board.
+    board: str | None = None
+
+    @property
+    def local_id(self) -> str | None:
+        """The id on the task's own board when the id is namespaced by its host
+        (``<host>:``) and/or its board (``<board>:``); None when it is not."""
+        rest = self.id
+        for prefix in (self.host, self.board):
+            if prefix and rest.startswith(f"{prefix}:") and len(rest) > len(prefix) + 1:
+                rest = rest[len(prefix) + 1 :]
+            elif prefix and prefix == self.board:
+                return None  # a board's task always carries its board's prefix
+        return None if rest == self.id else rest
 
 
 class ResourceKind(StrEnum):
