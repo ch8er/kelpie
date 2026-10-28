@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -226,6 +227,8 @@ def test_the_tool_s_own_exit_code(command: str) -> None:
         "pkill ios_sim.sh",  # not the command
         "which ios_sim.sh",
         "command -v ios_sim.sh",  # exits 0 wherever the binary is
+        "command -pv ios_sim.sh",
+        "command -p -V ios_sim.sh",
         "lint.sh && ios_sim.sh test",  # which of them failed?
         "ios_sim.sh test || true",
         "ios_sim.sh test | xcbeautify",  # xcbeautify's exit code
@@ -290,3 +293,26 @@ def test_calls_without_a_task_or_session_count_per_trace() -> None:
 def test_an_error_without_a_failing_exit_code_is_not_grouped() -> None:
     zero = [call(t, m, 0, result="error") for t, m in (("T-1", 50), ("T-2", 40), ("T-3", 30))]
     assert found(*zero) == []
+
+
+def test_a_command_of_more_lines_is_none() -> None:
+    from kelpie.core.tools import COMMAND_MULTILINE_ATTRIBUTE
+
+    spans = three("ios_sim.sh test")
+    lines = [
+        replace(sp, attributes={**sp.attributes, COMMAND_MULTILINE_ATTRIBUTE: True}) for sp in spans
+    ]
+    assert found(*lines) == []  # the second line's 127, e.g. a missing swiftlint
+
+
+def test_a_task_that_left_the_snapshot_keeps_its_host_by_namespace() -> None:
+    from kelpie.core.model import Owner, Status, Task
+
+    owners = (Owner("mac-a:dev-1", "dev", host="mac-a"),)
+    live = (Task("mac-a:T-4", "T-4", Status.IN_PROGRESS, NOW - 90 * M, host="mac-a"),)
+    archived = [
+        call(f"mac-a:T-{n}", m, session_id=f"mac-a:S-{n}") for n, m in ((1, 50), (2, 40), (3, 30))
+    ]
+    [alert] = found(*archived, tasks=live, owners=owners)
+    assert alert.params["signature"] == "ios_sim.sh exit 127 on mac-a"
+    assert found(*archived, call("mac-a:T-4", 10, 0), tasks=live, owners=owners) == []

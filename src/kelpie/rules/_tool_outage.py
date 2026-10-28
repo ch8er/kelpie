@@ -8,20 +8,21 @@ same tool failing with the same exit code for task after task.
 **Signs.** Tool spans of the snapshot whose result the adapter knows
 (:mod:`kelpie.core.tools`) and whose command runs one of ``tools`` (config data: the farm's
 build and test runners, e.g. ``ios_sim.sh``, ``xcodebuild``) where its exit code is the
-command's: the tool is the command (path aside, after variable assignments and the
-wrappers ``env``, ``sudo``, ``nice``, ``rtk``, ``time``, ``exec``, ``nohup`` with their
-options) of the command's last segment, after a ``;`` or ``|``, or after ``&&`` only from
-setup commands (``cd``, ``export``, ``source``, ``set``, ...): ``cd app && ios_sim.sh
-test``, not ``lint.sh && ios_sim.sh test`` (which of them failed?), ``pkill xcodebuild``
-nor ``command -v xcodebuild`` (it exits 0 wherever the binary is). A foreground call that
-exited non-zero is a failure of that tool with its exit code as the error class (``127``
-not found, ``124`` timed out, ``1`` a failed build). One that exited 0 is a success only
-when the adapter says the command is whole (:func:`~kelpie.core.tools.command_whole`:
-redaction keeps a prefix, and a dropped ``| xcbeautify`` or second line decides the exit
-code) and nothing after the tool was masked: a false success would end an outage. A call
-sent to the background (its ``0`` means started) and one the platform refused to run
-(blocked) are neither, and a span with no known result does not count. Commands the
-redaction masked whole (``bash *** ***``, ``timeout 600 *** ***``) name no tool.
+command's: the tool is the command (path aside, after variable assignments and the wrappers
+``env``, ``sudo``, ``nice``, ``rtk``, ``time``, ``exec``, ``nohup`` with their options) of
+the command's last segment, after a ``;`` or ``|``, or after ``&&`` only from setup commands
+(``cd``, ``export``, ``source``, ``set``, ...): ``cd app && ios_sim.sh test``, not ``lint.sh
+&& ios_sim.sh test`` (which of them failed?), ``pkill xcodebuild`` nor ``command -v
+xcodebuild`` (it exits 0 wherever the binary is). A command of more lines than the one its
+trace keeps is none: its last line's exit code decides. A foreground call that exited
+non-zero is a failure of that tool with its exit code as the error class (``127`` not found,
+``124`` timed out, ``1`` a failed build). One that exited 0 is a success only when the
+adapter says the command is whole (:func:`~kelpie.core.tools.command_whole`: redaction keeps
+a prefix, and a dropped ``| xcbeautify`` or second line decides the exit code) and nothing
+after the tool was masked: a false success would end an outage. A call sent to the
+background (its ``0`` means started) and one the platform refused to run (blocked) are
+neither, and a span with no known result does not count. Commands the redaction masked whole
+(``bash *** ***``, ``timeout 600 *** ***``) name no tool.
 
 **Open.** Failures of one tool with one exit code by at least ``min_tasks`` distinct tasks
 within ``window`` of each other, none followed by a success of that tool → one ``warning``
@@ -30,13 +31,14 @@ since the first failure of the earliest such group after the tool's last success
 later as older spans leave the snapshot), scoped to the tasks that failed (they are the
 tasks it explains), with the exit code's meaning as its cause. A call's task is its span's,
 else its session's; a session the snapshot ties to no task counts as one task, and a call
-with neither as one per trace. One task retrying the same failure is no outage. The host
-is the task's (``Task.host``) where the adapter knows it: a success on a healthy host does
-not hide a broken one. A success on an unknown host counts for every host only on a farm
-whose tasks name no host; otherwise only for calls of unknown hosts. It resolves
-when the tool runs successfully again (:func:`ran_again`), or when no failure is left in
-the snapshot's spans: the window is the ``[traces] window`` at most, whose spans the
-snapshot holds.
+with neither as one per trace. One task retrying the same failure is no outage. The host is
+the task's (``Task.host``) where the adapter knows it, else the host whose namespace the
+call's task or session id is in (a multi-host farm's ``<host>:<id>``, also for a task the
+snapshot no longer holds): a success on a healthy host does not hide a broken one. A success
+on an unknown host counts for every host only on a farm whose tasks name no host; otherwise
+only for calls of unknown hosts. It resolves when the tool runs successfully again
+(:func:`ran_again`), or when no failure is left in the snapshot's spans: the window is the
+``[traces] window`` at most, whose spans the snapshot holds.
 """
 
 from __future__ import annotations
@@ -49,7 +51,14 @@ from datetime import datetime, timedelta
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.incidents import TOOL_FAILURES, Outage, incident_state_id, is_outage_state
 from kelpie.core.model import Snapshot, Span, SpanKind
-from kelpie.core.tools import ERROR, OK, command_whole, exit_code_of, result_of
+from kelpie.core.tools import (
+    ERROR,
+    OK,
+    command_multiline,
+    command_whole,
+    exit_code_of,
+    result_of,
+)
 from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._ci_outage import _listed
 
@@ -59,7 +68,6 @@ MASK = "***"  # what the redaction leaves of a word it hides
 # Words that run the command after them (with their options); ``timeout`` takes a
 # duration first. ``command`` too, but ``command -v`` only looks the command up.
 WRAPPERS = frozenset({"env", "sudo", "nice", "rtk", "time", "exec", "command", "nohup", "timeout"})
-LOOKUPS = frozenset({"-v", "-V"})
 # Commands before ``&&`` that do not fail a build's way: the exit code is the build's.
 SETUP = frozenset({"cd", "pushd", "export", "source", ".", "set", "unset", "mkdir", "true"})
 SEPARATORS = frozenset({"&&", "||", ";", "|", "|&", "&"})
@@ -159,13 +167,14 @@ def _calls(snapshot: Snapshot, tools: Collection[str]) -> list[_Call]:
     names = set(tools)
     sessions = {s.id: s.task_id for s in snapshot.sessions}
     hosts = {t.id: t.host for t in snapshot.tasks}
+    named = {h for h in hosts.values() if h}
     out = []
     for span in snapshot.spans:
         if span.kind is not SpanKind.TOOL:
             continue
         result = result_of(span)
-        if result not in (OK, ERROR):
-            continue  # background (started), blocked (refused), or not known
+        if result not in (OK, ERROR) or command_multiline(span):
+            continue  # background, blocked, not known; or a later line's exit code
         found = _tool(span, names)
         if found is None:
             continue
@@ -182,9 +191,18 @@ def _calls(snapshot: Snapshot, tools: Collection[str]) -> list[_Call]:
             who = f"session {span.session_id}"
         else:
             who = f"trace {span.trace_id}"
-        host = hosts.get(task) if task else None
+        host = (hosts.get(task) if task else None) or _namespace(task or span.session_id, named)
         out.append(_Call(span.end or span.start, tool, task, who, host, result == OK, code))
     return sorted(out, key=lambda c: c.at)
+
+
+def _namespace(ident: str | None, hosts: Collection[str]) -> str | None:
+    """The host whose namespace an id is in (a multi-host farm's ``<host>:<id>``): a task
+    that left the snapshot (archived) still ran there."""
+    if not ident or ":" not in ident:
+        return None
+    prefix = ident.split(":", 1)[0]
+    return prefix if prefix in hosts else None
 
 
 def _tool(span: Span, names: set[str]) -> tuple[str, bool] | None:
@@ -231,8 +249,8 @@ def _head(segment: Sequence[str]) -> tuple[int, str] | None:
         if "=" in word and not word.startswith("="):
             i += 1  # FOO=1
         elif word in WRAPPERS:
-            if word == "command" and i + 1 < len(segment) and segment[i + 1] in LOOKUPS:
-                return None  # looks the command up, does not run it
+            if word == "command" and any(_lookup(w) for w in _options(segment[i + 1 :])):
+                return None  # command -v looks the command up, does not run it
             i += 1
             while i < len(segment) and segment[i].startswith("-"):
                 i += 1  # its options, and a masked value of one (sudo -u ***, nice -n ***)
@@ -245,6 +263,21 @@ def _head(segment: Sequence[str]) -> tuple[int, str] | None:
     if i >= len(segment) or MASK in segment[i]:
         return None
     return i, segment[i].rstrip("/").rsplit("/", 1)[-1]
+
+
+def _options(words: Sequence[str]) -> list[str]:
+    """The option words a command's arguments start with."""
+    out = []
+    for word in words:
+        if not word.startswith("-") or word == "--":
+            break
+        out.append(word)
+    return out
+
+
+def _lookup(option: str) -> bool:
+    """Whether ``command``'s option asks for a lookup (``-v``, ``-V``, ``-pv``)."""
+    return not option.startswith("--") and ("v" in option[1:] or "V" in option[1:])
 
 
 def _open(calls: Sequence[_Call], named: bool) -> Mapping[_Group, list[_Call]]:
