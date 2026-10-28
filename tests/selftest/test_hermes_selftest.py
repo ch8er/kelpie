@@ -17,14 +17,16 @@ from pathlib import Path
 
 import pytest
 
-from kelpie.adapters.hermes.worker import PROC
+from kelpie.adapters.hermes.worker import host_table
 from kelpie.app import HermesSettings, Settings
 from kelpie.cli import main
 from kelpie.core.config import EngineConfig
 from kelpie.selftest import hermes as selftest
 from kelpie.selftest.hermes import hermes_env
 
-pytestmark = pytest.mark.skipif(not (PROC / "self" / "stat").exists(), reason="needs /proc")
+pytestmark = pytest.mark.skipif(
+    host_table().unavailable() is not None, reason="needs /proc or libproc"
+)
 
 FAKE = Path(__file__).with_name("fake_hermes.py")
 
@@ -167,17 +169,20 @@ def test_the_cli_runs_it(fake: Path, tmp_path: Path, capsys: pytest.CaptureFixtu
 
 def leftovers(tmp_path: Path) -> list[int]:
     """Processes still running with a throwaway home under ``tmp_path``, or working there."""
-    needle = f"HERMES_HOME={tmp_path}".encode()
+    table = host_table()
+    root = tmp_path.resolve()
+    needle = f"HERMES_HOME={root}".encode()
     found = []
-    for entry in Path("/proc").iterdir():
-        if entry.name.isdigit() and int(entry.name) != os.getpid():
-            try:
-                env = (entry / "environ").read_bytes().split(b"\0")
-                cwd = Path(os.readlink(entry / "cwd"))
-            except OSError:
-                continue
-            if any(v.startswith(needle) for v in env) or tmp_path in cwd.parents:
-                found.append(int(entry.name))
+    for pid in table.pids():
+        if pid == os.getpid():
+            continue
+        p = table.read(pid)
+        if p is None or p.state in "ZXx":
+            continue
+        env = table.environ(pid) or []
+        cwd = table.cwd(pid)
+        if any(v.startswith(needle) for v in env) or (cwd is not None and root in cwd.parents):
+            found.append(pid)
     return found
 
 

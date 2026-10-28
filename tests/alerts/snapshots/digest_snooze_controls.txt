@@ -1,0 +1,12 @@
+🟡 Waiting for you: 3 tasks (oldest 24 h)
+
+1. Enable R2 for backups — 24 h · t_r2a1b2c3
+   Needed: CEO: enable R2 in the Cloudflare dashboard
+   Blocking: 2 tasks · Open task: https://board.example.org/tasks/t_r2a1b2c3
+2. Sign the vendor contract — 6.0 h · H-1
+   Blocking: 2 tasks · Open task: https://board.example.org/tasks/H-1
+3. Publish the app — 1.0 h · t_dead
+   Needed: its PR was closed unmerged
+   Blocking: none · Open task: https://board.example.org/tasks/t_dead
+Why: Needs you (ceo): 3 item(s) hold 4 agent task(s), 31.0 agent-hours waited so far.
+Rule: needs_you

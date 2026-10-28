@@ -7,7 +7,7 @@ import logging
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 
 from kelpie.app import (
     Settings,
@@ -23,6 +23,7 @@ from kelpie.app import (
 from kelpie.core.budgets import BudgetMode
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import Snapshot
+from kelpie.core.serde import parse_when
 from kelpie.metrics import Metrics
 from kelpie.report.daily import StuckCheck, day_bounds
 from kelpie.report.farm import FarmFacts
@@ -190,14 +191,12 @@ def note_fix(
     if not settings.db_path.exists():
         return f"kelpie: no database at {settings.db_path} yet; run kelpie serve first\n", 2
     now = clock()
-    try:
-        at = datetime.fromisoformat(when) if when else now
-    except ValueError:
-        return f"kelpie: --at must be an ISO time, got {when!r}\n", 2
-    if at.tzinfo is None:
-        at = at.replace(tzinfo=settings.report.tz)  # as typed, in [report] timezone
+    try:  # now, -2h, or ISO (without an offset: in [report] timezone)
+        at = parse_when(when, now, settings.report.tz) if when is not None else now
+    except ValueError as exc:
+        return f"kelpie: --at: {exc}\n", 2
     if at > now + FUTURE_SKEW:
-        return f"kelpie: --at {at.isoformat(timespec='minutes')} is in the future\n", 2
+        return f"kelpie: --at {_both(at, settings.report.tz)} is in the future\n", 2
     if rule is not None and rule not in REGISTRY:
         return f"kelpie: unknown rule {rule!r}\n", 2
     event = FixEvent(at, MANUAL, note, rule, command, role)
@@ -208,7 +207,13 @@ def note_fix(
         return f"kelpie: {exc}\n", 2
     except (OSError, sqlite3.Error) as exc:
         return f"kelpie: cannot write to {settings.db_path}: {exc}\n", 1
-    return f"fix noted at {at.isoformat(timespec='minutes')}: {event.note.strip()}\n", 0
+    return f"fix noted at {_both(at, settings.report.tz)}: {event.note.strip()}\n", 0
+
+
+def _both(at: datetime, tz: tzinfo) -> str:
+    """``at`` in UTC, then as the clock in ``[report] timezone`` shows it."""
+    utc = at.astimezone(UTC).isoformat(timespec="minutes")
+    return f"{utc} ({at.astimezone(tz):%Y-%m-%d %H:%M} {tz})"
 
 
 def list_fixes(

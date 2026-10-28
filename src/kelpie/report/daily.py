@@ -1180,7 +1180,7 @@ def _recommendations(
     if wait is not None and wait.cause != UNKNOWN_WAIT:  # the headline covers that one
         candidates.append(
             Advice(
-                title=f"Cut the {md.text(wait.role)} wait for {wait.label}",
+                title=f"Cut the {md.short_text(wait.role)} wait for {wait.label}",
                 detail=(
                     f"{len(wait.tasks)} task(s) of the role waited {wait.hours:.1f} task-hours "
                     f"for {wait.label} (time the work stood still, valued like hours lost), "
@@ -1193,7 +1193,7 @@ def _recommendations(
     for rec in filters:
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
-        role = f" ({md.text(group.role)})" if group.role else ""
+        role = f" ({md.short_text(group.role)})" if group.role else ""
         # other commands of the same platform already run through it
         in_use = (rec.filter.name, group.platform) in filters_in_use
         maybe = "" if rec.platform_known or in_use else " if RTK supports your agent platform"

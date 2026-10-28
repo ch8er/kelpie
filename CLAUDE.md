@@ -57,6 +57,11 @@ tests/fixtures/incidents/   synthetic incident fixtures (format: README.md there
 - Before marking a PR ready, run the `reviewer` subagent (`.claude/agents/reviewer.md`) on
   the diff against `main` and fix its findings.
 - Never wait for CI inside a session: push and move on.
+- Merging: rebase onto main, run the full local suite, mark ready and enable GitHub
+  auto-merge (squash; `PUT /repos/{owner}/{repo}/pulls/{n}/ccr/auto_merge`), then move on.
+  GitHub merges when `ci-ok` passes. main builds on every push: if main goes red, the PR
+  whose merge broke it is fixed or reverted before anything else, and no PR is marked
+  ready on a red main.
 - Adding a rule: module in `src/kelpie/rules/` with `@register("<name>")` (auto-imported);
   the name must be in `PLANNED`; fixtures with `rule: <name>` then run automatically;
   add `tests/rules/test_<name>.py` for edge cases.

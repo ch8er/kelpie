@@ -1,0 +1,36 @@
+{
+  "text": "🟡 <b>Waiting for you: 3 tasks (oldest 24 h)</b>\n\n1. <b>Enable R2 for backups</b> — 24 h · <code>t_r2a1b2c3</code>\n   Needed: CEO: enable R2 in the Cloudflare dashboard\n   Blocking: 2 tasks · <a href=\"https://board.example.org/tasks/t_r2a1b2c3\">Open task</a>\n2. <b>Sign the vendor contract</b> — 6.0 h · <code>H-1</code>\n   Blocking: 2 tasks · <a href=\"https://board.example.org/tasks/H-1\">Open task</a>\n3. <b>Publish the app</b> — 1.0 h · <code>t_dead</code>\n   Needed: its PR was closed unmerged\n   Blocking: none · <a href=\"https://board.example.org/tasks/t_dead\">Open task</a>\nWhy: Needs you (ceo): 3 item(s) hold 4 agent task(s), 31.0 agent-hours waited so far.\nRule: <code>needs_you</code>",
+  "parse_mode": "HTML",
+  "reply_markup": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "1. Snooze 1d",
+          "callback_data": "s1.1.L3z-JMHc061Ovvy7yGSN-A"
+        },
+        {
+          "text": "3d",
+          "callback_data": "s3.1.g8J8FKhHAsuSUdGpvF9iJA"
+        },
+        {
+          "text": "7d",
+          "callback_data": "s7.1.3uEo3tQ9UvS0_NprcHWgZg"
+        }
+      ],
+      [
+        {
+          "text": "2. Snooze 1d",
+          "callback_data": "s1.2.ambyoEWhGo3Nlss9UHbrXg"
+        },
+        {
+          "text": "3d",
+          "callback_data": "s3.2.O8EXRz2hRQQsvucTQH2ung"
+        },
+        {
+          "text": "7d",
+          "callback_data": "s7.2.Lr2P4HMUq_RKhKl_WFQMag"
+        }
+      ]
+    ]
+  }
+}

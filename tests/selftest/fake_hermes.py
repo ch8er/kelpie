@@ -29,7 +29,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from kelpie.adapters.hermes.worker import fingerprint, instantiation_epoch, read_proc
+from kelpie.adapters.hermes.worker import host_table
 from kelpie.sim import hermes_cli
 from kelpie.sim.board import KANBAN_SCHEMA
 
@@ -80,11 +80,14 @@ def spawn(code: str, *, keep_env: bool = False) -> subprocess.Popen[bytes]:
 
 
 def print_of(pid: int) -> str:
+    """Hermes' fingerprint of ``pid`` on this system (Linux /proc, macOS libproc)."""
+    table = host_table()
+    epoch, _ = table.epoch()
     for _ in range(100):
-        if (p := read_proc(pid)) is not None:
-            return fingerprint(p, instantiation_epoch())
+        if (p := table.read(pid)) is not None:
+            return table.fingerprint(p, epoch)
         time.sleep(0.01)
-    raise SystemExit(f"no /proc entry for {pid}")
+    raise SystemExit(f"process {pid} cannot be read")
 
 
 def dispatch(board: str) -> int:

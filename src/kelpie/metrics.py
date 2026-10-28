@@ -104,6 +104,9 @@ class Metrics:
         self.rules: list[tuple[str, str, bool]] = []  # (name, mode, implemented)
         self.traces_enabled = False
         self.traces_requests: Counter[str] = Counter()
+        self.traces_grace_requests = 0  # authenticated by a rotated-out token
+        # [traces] token_file in use: (its last read worked, previous tokens accepted)
+        self.token_file: Callable[[], tuple[bool, int]] | None = None
         self.spans_received_total: Counter[str] = Counter()
         self.spans_rejected_total: Counter[str] = Counter()
         self.span_rows: Callable[[], int] | None = None  # the span store's count
@@ -140,6 +143,11 @@ class Metrics:
         self.alerts_sent: Counter[str] = Counter()
         self.alerts_failed: Counter[tuple[str, str]] = Counter()
         self.alerts_dropped: Counter[tuple[str, str]] = Counter()
+        # chat input: snooze button presses (kelpie.alerts.buttons.ChatObserver, #176)
+        self.chat_channels: tuple[str, ...] = ()
+        self.chat_actions: Counter[tuple[str, str]] = Counter()
+        self.chat_rejections: Counter[tuple[str, str]] = Counter()
+        self.chat_api_errors: Counter[tuple[str, str, str]] = Counter()
 
     def set_rules(self, statuses: Iterable[RuleStatus], dry_run: bool) -> None:
         with self._lock:
@@ -167,6 +175,10 @@ class Metrics:
     def traces_request(self, code: int) -> None:
         with self._lock:
             self.traces_requests[str(code)] += 1
+
+    def traces_grace_request(self) -> None:
+        with self._lock:
+            self.traces_grace_requests += 1
 
     def spans_received(self, kind: str, count: int) -> None:
         with self._lock:
@@ -261,6 +273,24 @@ class Metrics:
     def alert_dropped(self, channel: str, reason: str) -> None:
         with self._lock:
             self.alerts_dropped[(channel, reason)] += 1
+
+    # --- chat input (kelpie.alerts.buttons.ChatObserver) -------------------------------
+
+    def set_chat_channels(self, names: Iterable[str]) -> None:
+        with self._lock:
+            self.chat_channels = tuple(names)
+
+    def chat_action(self, channel: str, outcome: str) -> None:
+        with self._lock:
+            self.chat_actions[(channel, outcome)] += 1
+
+    def chat_rejected(self, channel: str, reason: str) -> None:
+        with self._lock:
+            self.chat_rejections[(channel, reason)] += 1
+
+    def chat_api_error(self, channel: str, call: str, cause: str) -> None:
+        with self._lock:
+            self.chat_api_errors[(channel, call, cause)] += 1
 
     # --- LLM providers (kelpie.connectors.llm_quotas.source.ProbeObserver) -------------
 
@@ -645,6 +675,8 @@ class Metrics:
                 self._render_providers(metric)
             if self.alert_channels:
                 self._render_alerts(metric)
+            if self.chat_channels:
+                self._render_chat(metric)
             return "\n".join(out) + "\n"
 
     def _render_throughput(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
@@ -753,6 +785,39 @@ class Metrics:
             [
                 f"kelpie_alerts_dropped_total{_labels(channel=n, reason=r)} {v}"
                 for (n, r), v in sorted(self.alerts_dropped.items())
+            ],
+        )
+
+    def _render_chat(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        metric(
+            "kelpie_chat_actions_total",
+            "counter",
+            "Snooze button presses, by channel and outcome (snoozed, rejected, failed).",
+            [
+                f"kelpie_chat_actions_total{_labels(channel=n, outcome=o)} "
+                f"{self.chat_actions.get((n, o), 0)}"
+                for n in self.chat_channels
+                for o in ("snoozed", "rejected", "failed")
+            ],
+        )
+        metric(
+            "kelpie_chat_rejected_total",
+            "counter",
+            "Button presses and updates ignored, by channel and reason (unknown_user, "
+            "wrong_chat, bad_ref, expired_ref, used_ref, already_snoozed, rate_limited, malformed,"
+            " not_callback).",
+            [
+                f"kelpie_chat_rejected_total{_labels(channel=n, reason=r)} {v}"
+                for (n, r), v in sorted(self.chat_rejections.items())
+            ],
+        )
+        metric(
+            "kelpie_chat_api_errors_total",
+            "counter",
+            "Failed Bot API calls of the button poller, by channel, call and cause.",
+            [
+                f"kelpie_chat_api_errors_total{_labels(channel=n, call=c, cause=k)} {v}"
+                for (n, c, k), v in sorted(self.chat_api_errors.items())
             ],
         )
 
@@ -1028,6 +1093,31 @@ class Metrics:
                 for c, n in sorted(self.traces_requests.items())
             ],
         )
+        if self.token_file is not None:
+            try:
+                ok, grace = self.token_file()
+            except Exception:
+                ok, grace = False, 0
+            metric(
+                "kelpie_traces_token_file_ok",
+                "gauge",
+                "1 when the last read of [traces] token_file worked; 0: Kelpie keeps the "
+                "tokens it read before (a rotation or revocation has not taken effect).",
+                [f"kelpie_traces_token_file_ok {int(ok)}"],
+            )
+            metric(
+                "kelpie_traces_grace_tokens",
+                "gauge",
+                "Rotated-out traces tokens still accepted ([traces] token_grace).",
+                [f"kelpie_traces_grace_tokens {grace}"],
+            )
+            metric(
+                "kelpie_traces_grace_requests_total",
+                "counter",
+                "OTLP requests authenticated by a rotated-out token within its grace period: "
+                "agents not yet on the new token.",
+                [f"kelpie_traces_grace_requests_total {self.traces_grace_requests}"],
+            )
         metric(
             "kelpie_spans_received_total",
             "counter",

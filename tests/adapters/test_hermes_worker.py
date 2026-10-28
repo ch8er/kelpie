@@ -19,6 +19,7 @@ from kelpie.adapters.hermes.worker import (
     NO_WORKER,
     PROC,
     Proc,
+    Procfs,
     RunWorker,
     _signal,
     end,
@@ -234,7 +235,7 @@ def test_a_stale_pid_now_kelpies_is_just_gone() -> None:
 
 def test_without_proc_nothing_is_signalled(spawn: Spawn, tmp_path: Path) -> None:
     child = spawn()
-    plan = targets(recorded(child.pid), proc=tmp_path)
+    plan = targets(recorded(child.pid), table=Procfs(tmp_path))
     assert plan.refused == "processes cannot be verified on this system"
 
 
@@ -273,7 +274,7 @@ def test_hidepid_options(tmp_path: Path, options: str, hidden: bool) -> None:
         "no separator here\n"
         f"22 1 0:21 / /proc rw,nosuid shared:12 master:1 - proc proc {options}\n",
     )
-    assert worker._hidepid(proc) is hidden
+    assert Procfs(proc).hidepid() is hidden
 
 
 @pytest.mark.parametrize(("boot", "pid1"), [(None, True), ("b", False), (None, False)])
@@ -282,14 +283,18 @@ def test_without_boot_id_or_pid_1_nothing_is_proven(
 ) -> None:
     proc = fake_proc(tmp_path, "", boot=boot, pid1=pid1)
     fake_process(proc, 4321, 1, 5)
-    plan = targets(RunWorker(4321, "b:1|5", None, None, f"{HOST}:1"), proc=proc, uid=os.getuid())
+    plan = targets(
+        RunWorker(4321, "b:1|5", None, None, f"{HOST}:1"), table=Procfs(proc), uid=os.getuid()
+    )
     assert plan.refused == "Kelpie cannot read this system's boot id or pid 1 start time"
 
 
 def test_a_fingerprint_with_an_empty_part_is_another_namespace(tmp_path: Path) -> None:
     proc = fake_proc(tmp_path, "")
     fake_process(proc, 4321, 1, 5)
-    plan = targets(RunWorker(4321, "b:|5", None, None, f"{HOST}:1"), proc=proc, uid=os.getuid())
+    plan = targets(
+        RunWorker(4321, "b:|5", None, None, f"{HOST}:1"), table=Procfs(proc), uid=os.getuid()
+    )
     assert plan.refused is not None and "PID namespace" in plan.refused
 
 
@@ -297,7 +302,9 @@ def test_a_fingerprint_with_an_empty_part_is_another_namespace(tmp_path: Path) -
 def test_odd_start_times_are_unchecked(tmp_path: Path, value: str) -> None:
     proc = fake_proc(tmp_path, "")
     fake_process(proc, 4321, 1, 5)
-    plan = targets(RunWorker(4321, value, None, None, f"{HOST}:1"), proc=proc, uid=os.getuid())
+    plan = targets(
+        RunWorker(4321, value, None, None, f"{HOST}:1"), table=Procfs(proc), uid=os.getuid()
+    )
     assert plan.refused == "Hermes recorded no fingerprint Kelpie can check"
 
 
@@ -314,13 +321,15 @@ def test_a_child_whose_pid_changes_between_the_reads_brings_nothing(
     real = worker.children
     reads = iter([0, 1])
 
-    def children(proc_: Path = PROC) -> dict[int, list[Proc]]:
+    def children(table: Procfs) -> dict[int, list[Proc]]:
         if next(reads) == 1:  # the second read: 50 is a stranger now
             (proc / "50" / "stat").write_text(STAT.format(pid=50, ppid=1, start=99))
-        return real(proc_)
+        return real(table)
 
     monkeypatch.setattr(worker, "children", children)
-    plan = targets(RunWorker(None, None, 40, "b:1|5", f"{HOST}:1"), proc=proc, uid=os.getuid())
+    plan = targets(
+        RunWorker(None, None, 40, "b:1|5", f"{HOST}:1"), table=Procfs(proc), uid=os.getuid()
+    )
     assert sorted(p.pid for p in plan.procs) == [40, 70]
 
 
@@ -332,31 +341,33 @@ def test_the_agent_gone_during_the_reads_brings_no_descendants(
     fake_process(proc, 50, 40, 6)
     real = worker.children
 
-    def children(proc_: Path = PROC) -> dict[int, list[Proc]]:
-        found = real(proc_)
+    def children(table: Procfs) -> dict[int, list[Proc]]:
+        found = real(table)
         (proc / "40" / "stat").write_text(STAT.format(pid=40, ppid=1, start=77))  # reused
         return found
 
     monkeypatch.setattr(worker, "children", children)
-    plan = targets(RunWorker(None, None, 40, "b:1|5", f"{HOST}:1"), proc=proc, uid=os.getuid())
+    plan = targets(
+        RunWorker(None, None, 40, "b:1|5", f"{HOST}:1"), table=Procfs(proc), uid=os.getuid()
+    )
     assert [p.pid for p in plan.procs] == [40]
 
 
 def test_a_hidden_or_unreadable_process_is_refused_not_gone(tmp_path: Path) -> None:
     hidden = fake_proc(tmp_path, "22 1 0:21 / /proc rw - proc proc rw,hidepid=invisible\n")
     worker = RunWorker(4321, "b:1|5", None, None, f"{HOST}:1")
-    assert targets(worker, proc=hidden).refused == (
+    assert targets(worker, table=Procfs(hidden)).refused == (
         "Kelpie cannot see other users' processes (/proc is mounted with hidepid)"
     )
     (hidden / "self" / "mountinfo").write_text("22 1 0:21 / /proc rw - proc proc rw\n")
-    assert targets(worker, proc=hidden).refused is None  # visible to all: really gone
+    assert targets(worker, table=Procfs(hidden)).refused is None  # visible to all: really gone
     (hidden / "4321").mkdir()  # there, but its stat cannot be read (hidepid=noaccess)
-    assert targets(worker, proc=hidden).refused == "Kelpie cannot read /proc/4321"
+    assert targets(worker, table=Procfs(hidden)).refused == "Kelpie cannot read /proc/4321"
 
 
 def test_an_impossible_pid_is_refused(tmp_path: Path) -> None:
     proc = fake_proc(tmp_path, "")
-    assert targets(RunWorker(1, "b:1|5", None, None, f"{HOST}:1"), proc=proc).refused == (
+    assert targets(RunWorker(1, "b:1|5", None, None, f"{HOST}:1"), table=Procfs(proc)).refused == (
         "Hermes recorded an impossible pid (1)"
     )
 
@@ -365,7 +376,7 @@ def test_a_process_that_changed_is_not_signalled(spawn: Spawn) -> None:
     child = spawn()
     p = read_proc(child.pid)
     assert p is not None
-    _signal(Proc(p.pid, p.ppid, p.state, p.start + 1, p.uid), 9, PROC)
+    _signal(Proc(p.pid, p.ppid, p.state, p.start + 1, p.uid), 9, Procfs())
     assert alive(child.pid)
 
 
@@ -375,7 +386,7 @@ def test_a_worker_that_does_not_die_is_reported(
     child = spawn()
     p = read_proc(child.pid)
     assert p is not None
-    monkeypatch.setattr(worker, "_signal", lambda *a: None)  # the signals do not land
+    monkeypatch.setattr(worker, "_signal", lambda *a: True)  # the signals do not land
     ticks = iter(range(100))
     result = end([p], grace=1, clock=lambda: next(ticks), sleep=lambda s: None)
     assert (result.killed, result.ended, result.survivors) == (True, 0, [child.pid])

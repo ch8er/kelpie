@@ -102,3 +102,32 @@ def test_a_hostile_role_in_a_before_after_metric_keeps_its_cell() -> None:
     [metric] = [m for m in verify(event, ev).metrics if m.name.startswith("tokens per day")]
     row = f"| {metric.name} | x |"
     assert cells(row) == 2 and not live("[x]", row) and not live("<img", row)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["r" * 300, "&" * 300, "*<[|" * 80, "a&b " * 90, "x", "a" * 80, "a" * 81, "&" * 16, "&" * 17,
+     "", " ", "\t\n", "\x00\x01\u200b"],
+)  # fmt: skip
+def test_short_text_caps_the_escaped_text(value: str) -> None:
+    from kelpie.report.md import MAX_NAME, short_text, text
+
+    out = short_text(value)
+    assert len(out) <= MAX_NAME
+    if len(text(value)) <= MAX_NAME:
+        assert out == text(value)  # what fits is not cut
+    else:
+        assert out.endswith("...") and not out.endswith("\\...")  # no escape split
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["`" * 300, "a`" * 200, "example/" + "b" * 300, "app", "b" * 79, "b" * 80, "b" * 81, "", " "],
+)
+def test_short_code_caps_the_whole_span(value: str) -> None:
+    from kelpie.report.md import MAX_NAME, code, short_code
+
+    out = short_code(value)
+    assert len(out) <= MAX_NAME + 2
+    if "`" not in value:
+        assert out == code(value)  # a plain name renders as md.code renders it

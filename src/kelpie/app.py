@@ -36,6 +36,13 @@ from kelpie.adapters.issues.config import (
 )
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
+from kelpie.alerts.buttons import (
+    AlreadySnoozed,
+    ButtonStore,
+    ChatControl,
+    Press,
+    button_store_path,
+)
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
 from kelpie.connectors.cost_reports import CostReportsSettings, load_cost_reports
@@ -84,7 +91,13 @@ from kelpie.core.ports import (
 from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
-from kelpie.core.snooze import MarkerProblem, SnoozeSettings, load_snooze, with_snoozes
+from kelpie.core.snooze import (
+    MarkerProblem,
+    SnoozeSettings,
+    chat_snooze,
+    load_snooze,
+    with_snoozes,
+)
 from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.spend import (
     Estimate,
@@ -113,6 +126,7 @@ from kelpie.rules.ci_economy import CiEconomy
 from kelpie.rules.conflict_warning import ConflictWarning
 from kelpie.rules.no_progress import NoProgress
 from kelpie.rules.resources import Resources
+from kelpie.traces.auth import TokenFile, TokenFileError, loose_mode
 from kelpie.traces.config import TraceSettings, load_traces
 from kelpie.traces.forward import Forwarder
 from kelpie.traces.hooks import merge_hook_spans
@@ -750,12 +764,12 @@ def _rule_config(
     inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own; ``orphan_status``
     inherits ``bottlenecks``' hold labels, ``needs_you`` its planned and hold labels as
     ``planned_labels`` (one definition of a planned wait), and ``return_causes``
-    ``conflict_warning``'s ``expected_shared`` the same way. ``stale_blocks`` always reads
-    ``needs_you``'s settings (see :func:`_stale_blocks_config`); ``registry`` holds the rules
-    being loaded (default: every registered one)."""
+    ``conflict_warning``'s ``expected_shared`` the same way. ``stale_blocks`` and
+    ``wait_condition`` always read ``needs_you``'s settings (see :func:`_with_inbox`);
+    ``registry`` holds the rules being loaded (default: every registered one)."""
     section = dict(config.rules.get(name, {}))
-    if name == "stale_blocks":
-        return _stale_blocks_config(section, config, REGISTRY if registry is None else registry)
+    if name in _LEAVES_TO_INBOX:
+        return _with_inbox(name, section, config, REGISTRY if registry is None else registry)
     if name == "needs_you" and "planned_labels" not in section:
         planned = planned_labels(config.rules.get("bottlenecks", {}))
         if planned:
@@ -788,24 +802,31 @@ def _rule_config(
     return section
 
 
-def _stale_blocks_config(
-    section: dict[str, Any], config: EngineConfig, registry: Mapping[str, RuleFactory]
+# Rules that leave the tasks rule 13 lists to it, with its settings (``needs_you``): rule 4
+# for blocks (#169), rule 2 for waits (#213).
+_LEAVES_TO_INBOX = frozenset({"stale_blocks", "wait_condition"})
+
+
+def _with_inbox(
+    name: str,
+    section: dict[str, Any],
+    config: EngineConfig,
+    registry: Mapping[str, RuleFactory],
 ) -> dict[str, Any]:
-    """Rule 4 leaves the blocks rule 13 lists as questions for a person to rule 13, while
-    rule 13 reaches people: it is loaded, and it is not in ``observe`` while rule 4 is not
-    (else rule 4's alerts would be the only ones a person gets). It then gets rule 13's
-    whole config section as ``needs_you`` (its reasons, the ``[[block_conditions]]``
-    patterns and planned labels included), so the two rules read the farm alike; else
-    ``needs_you = false``. Rule 13's section is checked here, so a mistake in it is reported
-    as rule 13's."""
+    """Rule ``name`` (rule 4 or 2) leaves the tasks rule 13 lists as waiting for a person to
+    rule 13, while rule 13 reaches people: it is loaded, and it is not in ``observe`` while
+    ``name`` is not (else ``name``'s alerts would be the only ones a person gets). It then
+    gets rule 13's whole config section as ``needs_you`` (its reasons, the
+    ``[[block_conditions]]`` patterns and planned labels included), so the rules read the
+    farm alike; else ``needs_you = false``. Rule 13's section is checked here, so a mistake
+    in it is reported as rule 13's."""
     if "needs_you" in section:
         raise ValueError(
             "needs_you is set automatically from the rules' modes (whether rule 13 reaches "
-            "people), not in [engine.rules.stale_blocks]"
+            f"people), not in [engine.rules.{name}]"
         )
     active = "needs_you" in registry and (
-        config.mode_for("needs_you") is not Mode.OBSERVE
-        or config.mode_for("stale_blocks") is Mode.OBSERVE
+        config.mode_for("needs_you") is not Mode.OBSERVE or config.mode_for(name) is Mode.OBSERVE
     )
     if not active:
         section["needs_you"] = False
@@ -819,29 +840,38 @@ def _stale_blocks_config(
     return section
 
 
+# Rule 13's wait, and the wait of the rule that leaves it a task, per rule: a task listed
+# there is announced by neither until rule 13's wait has passed.
+_INBOX_GAPS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "stale_blocks": (
+        ("approval_wait_after", "unlinked_alert_after", "a block that asks a person"),
+        ("human_wait_alert_after", "max_block", "a block that asks a person"),
+    ),
+    "wait_condition": (("human_wait_alert_after", "max_wait", "a wait on a person's task"),),
+}
+
+
 def _warn_inbox_gaps(rules: Sequence[Rule]) -> None:
-    """A block rule 4 leaves to rule 13 is announced by neither until rule 13's own wait has
-    passed: say so when that is longer than rule 4's (the gap is silent)."""
-    four = next((r for r in rules if r.name == "stale_blocks"), None)
-    inbox = getattr(four, "inbox", None)
-    if four is None or inbox is None:
-        return
-    pairs = (
-        ("approval_wait_after", "unlinked_alert_after"),
-        ("human_wait_alert_after", "max_block"),
-    )
-    for thirteen, own in pairs:
-        theirs, mine = getattr(inbox, thirteen), getattr(four, own)
-        if mine is not None and theirs > mine:
-            log.warning(
-                "needs_you.%s (%s) is longer than stale_blocks.%s (%s): a block that asks a "
-                "person is announced by neither rule for %s in between",
-                thirteen,
-                theirs,
-                own,
-                mine,
-                theirs - mine,
-            )
+    """A task rule 4 or rule 2 leaves to rule 13 is announced by neither until rule 13's own
+    wait has passed: say so when that is longer than the rule's own (the gap is silent)."""
+    for rule in rules:
+        inbox = getattr(rule, "inbox", None)
+        if inbox is None:
+            continue
+        for thirteen, own, what in _INBOX_GAPS.get(rule.name, ()):
+            theirs, mine = getattr(inbox, thirteen), getattr(rule, own)
+            if mine is not None and theirs > mine:
+                log.warning(
+                    "needs_you.%s (%s) is longer than %s.%s (%s): %s is announced by neither "
+                    "rule for %s in between",
+                    thirteen,
+                    theirs,
+                    rule.name,
+                    own,
+                    mine,
+                    what,
+                    theirs - mine,
+                )
 
 
 def hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
@@ -1524,7 +1554,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
     traces = settings.traces
     try:
-        token = traces.token()
+        # With [hub] this port takes no spans: its token (or token file) is not needed.
+        token = traces.token() if settings.hub is None else None
         destinations = [f.destination() for f in traces.forward] if traces.enabled else []
         prometheus = settings.resources.prometheus
         reader = prometheus.build() if prometheus is not None else None
@@ -1603,7 +1634,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             loop,
             metrics,
             store,
-            alerts=_start_alerts(settings, engine, metrics),
+            alerts=_start_alerts(settings, engine, metrics, store, clock),
         )
         return _with_hub(app, hub)
     span_store = _open_span_store(settings.db_path)
@@ -1614,11 +1645,29 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "OTLP ingest on /v1/traces accepts spans without a token; set $%s",
             traces.token_env,
         )
+    tokens = None
+    if traces.token_file is not None and settings.hub is None:
+        try:
+            tokens = TokenFile(
+                traces.token_file,
+                traces.token_env,
+                clock,
+                on_error=lambda why: log.error("[traces] token_file %s", why),
+            )
+        except TokenFileError as exc:
+            raise ConfigError(f"[traces] token_file {exc}") from None
+        if loose_mode(traces.token_file):
+            log.warning(
+                "[traces] token_file %s can be read by others than its owner: chmod 600 it",
+                traces.token_file,
+            )
+        metrics.token_file = tokens.status
     ingest = TraceIngest(
         store=span_store,
         clock=clock,
         observer=metrics,
         token=token,
+        tokens=tokens,
         max_body_bytes=traces.max_body_bytes,
         options=traces.options,
         max_concurrent=traces.max_concurrent_requests,
@@ -1658,7 +1707,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         snoozes=snooze_reader(settings, store),
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
-    alerts = _start_alerts(settings, engine, metrics)
+    alerts = _start_alerts(settings, engine, metrics, store, clock)
     if hub is not None:
         # A span whose ids no agent token vouches for could be forged into any host's
         # namespace: with a hub, spans come only through the agents.
@@ -1723,16 +1772,67 @@ def _with_hub(app: App, hub: Hub | None, traces: TraceIngest | None = None) -> A
     return app
 
 
-def _start_alerts(settings: Settings, engine: Engine, metrics: Metrics) -> Delivery | None:
-    """Start the alert channels (their worker threads) and give the engine its alerter. Done
-    last in ``build_app``, so a startup error before this point leaves no thread behind."""
+def _start_alerts(
+    settings: Settings,
+    engine: Engine,
+    metrics: Metrics,
+    store: LedgerStore,
+    clock: Callable[[], datetime],
+) -> Delivery | None:
+    """Start the alert channels (their worker threads, and the snooze button poller of a
+    Telegram channel with ``buttons = true``) and give the engine its alerter. Done last in
+    ``build_app``, so a startup error before this point leaves no thread behind."""
+    control = _chat_control(settings, store, metrics, clock)
     try:
-        alerts = settings.alerts.build(metrics)
+        alerts = settings.alerts.build(metrics, control=control)
     except ValueError as exc:
+        if control is not None:
+            control.store.close()
         raise ConfigError(str(exc)) from exc
     if alerts is not None:
         engine.alerter = alerts.alerter()
     return alerts
+
+
+def _chat_control(
+    settings: Settings, store: LedgerStore, metrics: Metrics, clock: Callable[[], datetime]
+) -> ChatControl | None:
+    """What snooze buttons need (#176): their store beside the database, and the callback
+    that writes a press's snooze and its ledger entry to Kelpie's store. None when no
+    channel has buttons."""
+    channels = settings.alerts.button_channels
+    if not channels:
+        return None
+    if settings.db_path is None or not isinstance(store, SqliteLedgerStore):
+        raise ConfigError(
+            '[alerts] snooze buttons need a database: set [storage] path (not ":memory:")'
+        )
+    path = button_store_path(settings.db_path)
+    try:
+        buttons = ButtonStore(path)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        raise ConfigError(f"cannot open the button store {path}: {exc}") from exc
+
+    sqlite_store = store
+
+    def snooze(press: Press, now: datetime) -> datetime:
+        record, entry = chat_snooze(
+            press.task_id,
+            press.days,
+            press.name,
+            press.user_id,
+            press.channel,
+            now,
+            settings.snooze,
+            dry_run=settings.engine.dry_run,
+        )
+        # The snooze and its ledger entry in one transaction: no chat snooze without one.
+        if (held := sqlite_store.put_chat_snooze(record, entry)) is not None:
+            raise AlreadySnoozed(held.until)
+        return record.until
+
+    metrics.set_chat_channels(c.name for c in channels)
+    return ChatControl(buttons, snooze, clock, metrics)
 
 
 def connector_steps(
@@ -2219,16 +2319,21 @@ def _dry_run_status(settings: Settings) -> str:
     return "on (nothing leaves Kelpie)"
 
 
-def _traces_status(traces: TraceSettings) -> str:
+def _traces_status(traces: TraceSettings, hub: bool = False) -> str:
     if not traces.enabled:
         return "disabled"
+    if hub:
+        return "POST /v1/traces off on this port: agents relay spans to the hub"
     try:
         token = traces.token()
     except ValueError as exc:
         return f"NOT ready: {exc}"
-    auth = (
-        f"bearer token from ${traces.token_env}" if token else f"open (${traces.token_env} unset)"
-    )
+    if traces.token_file is not None:
+        auth = f"bearer token from {traces.token_file} (rotatable, grace {traces.token_grace})"
+    elif token:
+        auth = f"bearer token from ${traces.token_env}"
+    else:
+        auth = f"open (${traces.token_env} unset)"
     forward = "".join(f", forward to {f.name} ({f.display_endpoint})" for f in traces.forward)
     return f"POST /v1/traces, {auth}, window {traces.window}, retention {traces.retention}{forward}"
 
@@ -2631,7 +2736,7 @@ def render_status(
         f"dry-run:  {_dry_run_status(settings)}",
         f"interval: {engine.interval}",
         f"ledger:   {settings.db_path or '(in memory)'}",
-        f"traces:   {_traces_status(settings.traces)}",
+        f"traces:   {_traces_status(settings.traces, settings.hub is not None)}",
         *render_prices(settings, unpriced),
         f"resources: {_resources_status(settings.resources)}",
         *_github_status(settings),

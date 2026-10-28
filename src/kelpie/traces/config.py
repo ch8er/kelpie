@@ -8,10 +8,18 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from kelpie.core.serde import parse_duration
+from kelpie.traces.auth import (
+    TokenFileError,
+    looks_like_token,
+    parse_token_file,
+    read_token_file,
+    valid_name,
+)
 from kelpie.traces.forward import (
     DEFAULT_QUEUE_BYTES,
     DEFAULT_QUEUE_SIZE,
@@ -29,10 +37,14 @@ from kelpie.traces.store import DEFAULT_MAX_SNAPSHOT_SPANS
 
 MAX_RETENTION = timedelta(days=3650)
 DEFAULT_TOKEN_ENV = "KELPIE_TRACES_TOKEN"
+DEFAULT_TOKEN_GRACE = timedelta(hours=2)
+MAX_TOKEN_GRACE = timedelta(days=7)
 KEYS = frozenset(
     {
         "enabled",
         "token_env",
+        "token_file",
+        "token_grace",
         "window",
         "totals_window",
         "retention",
@@ -128,6 +140,10 @@ class TraceSettings:
     enabled: bool = True
     token_env: str = DEFAULT_TOKEN_ENV
     token_env_explicit: bool = False  # set in the config: the variable must then be set
+    # An env file holding <token_env>=<token> (kelpie.traces.auth): read instead of the
+    # environment, again when it changes; `kelpie traces rotate-token` writes it.
+    token_file: Path | None = None
+    token_grace: timedelta = DEFAULT_TOKEN_GRACE  # a rotated-out token stays valid this long
     window: timedelta = timedelta(minutes=30)  # raw spans merged into each snapshot
     totals_window: timedelta = timedelta(hours=24)  # per-session aggregates in the snapshot
     retention: timedelta = timedelta(days=7)
@@ -150,9 +166,30 @@ class TraceSettings:
     def token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The bearer token ingest requires, or None when it is open.
 
-        Raises ValueError when ``token_env`` was configured explicitly but is not set: the
-        operator asked for authentication, so Kelpie refuses to start without it.
+        Raises ValueError when ``token_env`` was configured explicitly but is not set, or
+        ``token_file`` cannot be read or has no token: the operator asked for
+        authentication, so Kelpie refuses to start without it. The message names the
+        variable or the file, never a token.
         """
+        if self.token_file is not None:
+            if not self.enabled:
+                return None
+            try:
+                text = read_token_file(self.token_file)
+                found = parse_token_file(text, self.token_env, str(self.token_file)).token
+            except OSError as exc:
+                raise ValueError(
+                    f"[traces] token_file {self.token_file}: cannot read it ({exc.strerror}); "
+                    "`kelpie traces rotate-token` creates it"
+                ) from None
+            except TokenFileError as exc:
+                raise ValueError(f"[traces] token_file {exc}") from None
+            if found is None:
+                raise ValueError(
+                    f"[traces] token_file {self.token_file}: no {self.token_env}= line; "
+                    "`kelpie traces rotate-token` writes one"
+                )
+            return found
         token = environ.get(self.token_env, "").strip()
         if token:
             return token
@@ -241,6 +278,21 @@ def load_traces(section: Any) -> TraceSettings:
         raise ValueError(
             "[traces] retention must cover [traces.outputs] repeat_days and twice its window"
         )
+    if looks_like_token(strings["token_env"]):  # never echoed
+        raise ValueError("[traces] token_env looks like a token: name the variable instead")
+    if not valid_name(strings["token_env"]):  # never echoed: it may be a pasted token
+        raise ValueError("[traces] token_env must be the name of an environment variable")
+    token_file = section.get("token_file")
+    if token_file is not None and (not isinstance(token_file, str) or not token_file.strip()):
+        raise ValueError("[traces] token_file must be a path")
+    if token_file is not None and looks_like_token(Path(token_file.strip()).name):
+        raise ValueError("[traces] token_file looks like a token, not a path to a file")
+    try:
+        token_grace = parse_duration(section.get("token_grace", "2h"))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(f"[traces] token_grace: {exc}") from exc
+    if not timedelta(0) <= token_grace <= MAX_TOKEN_GRACE:
+        raise ValueError("[traces] token_grace must be between 0s and 7d")
     forward = _load_forward(section.get("forward", []))
     if forward and not enabled:
         raise ValueError(
@@ -250,6 +302,8 @@ def load_traces(section: Any) -> TraceSettings:
         enabled=enabled,
         token_env=strings["token_env"],
         token_env_explicit="token_env" in section,
+        token_file=Path(token_file.strip()).expanduser() if token_file is not None else None,
+        token_grace=token_grace,
         window=durations["window"],
         totals_window=durations["totals_window"],
         retention=durations["retention"],

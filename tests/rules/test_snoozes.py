@@ -28,6 +28,7 @@ from kelpie.core.model import (
     Status,
     Task,
 )
+from kelpie.rules import needs_you
 from kelpie.rules._snoozes import behind_count, check, describe
 from kelpie.rules.needs_you import NeedsYou
 from kelpie.rules.needs_you import build as build_needs_you
@@ -462,6 +463,25 @@ def test_a_dead_end_on_a_snoozed_item_is_announced_exactly_once() -> None:
     assert [a for a in StaleBlocks(inbox=inbox).evaluate(board) if a.task_id == "H-1"] == []
 
 
+def test_the_hand_off_notice_calls_an_item_snoozed_only_when_the_digest_holds_it() -> None:
+    """H-1 is snoozed but its PR closed unmerged: the digest has it live, so rule 4's notice
+    says it is in the digest now. A-2 is parked on the healthy snoozed H-2: in the footer."""
+    incident = load(FIXTURES / "13-snoozed-item-dead-end.yaml")
+    board, inbox = incident.snapshot, build_needs_you(dict(incident.config))
+    four = StaleBlocks(inbox=inbox)
+
+    def state(tid: str) -> str:
+        block = board.task(tid).block  # type: ignore[union-attr]
+        return f"stale_blocks:{tid}:{block.since.isoformat()}"  # type: ignore[union-attr]
+
+    live = four.resolved(state("H-1"), board)
+    assert live is not None and "is in the person's needs-you digest now" in live
+    assert "snoozed" not in live
+    held = four.resolved(state("A-2"), board)
+    assert held is not None
+    assert "A-2 is snoozed in the person's needs-you digest, under H-2" in held
+
+
 # --- rule 2 --------------------------------------------------------------------------------
 
 
@@ -492,13 +512,190 @@ def test_rule_2_holds_the_overdue_reminder_of_a_snoozed_human_task_only() -> Non
     assert len(rule.evaluate(snap(board, held, conditions=[broken]))) == 1
 
 
+def test_rule_2_leaves_a_wait_rule_13_lists_to_it_snoozed_or_not() -> None:
+    """With rule 13 reaching people rule 2 sends no overdue alert for a wait rule 13 lists:
+    in the digest, back in it after its snooze expired, or in its footer (#213). A wait on
+    a task the person cannot move yet is listed nowhere, so rule 2 keeps it."""
+    h = Task("H-1", "sign", Status.READY, NOW - 40 * H, role="owner", owner_id="ceo")
+    cond = Condition("C-1", ConditionKind.HUMAN_TASK, "W-1", {"task": "H-1"}, False, checked_at=NOW)
+    board = [h, waiting("W-1", NOW - 30 * H)]
+    rule = WaitCondition(inbox=NY)
+    plain = snap(board, conditions=[cond])
+    assert rule.evaluate(plain) == []
+    assert WaitCondition().evaluate(plain) != []  # without the hand-off it alerts
+    (digest,) = NY.evaluate(plain)
+    assert digest.params["waiting"] == ["W-1"]
+    back = snap(board, [snooze("H-1", until=NOW - H)], conditions=[cond])
+    assert rule.evaluate(back) == []
+    (digest,) = NY.evaluate(back)
+    assert digest.params["items"][0]["snooze"]["state"] == "expired"
+    held = snap(board, [snooze("H-1", behind=1)], conditions=[cond])
+    assert rule.evaluate(held) == [] and NY.evaluate(held) == []  # in the footer, said once
+    # the person cannot move H-1 yet (triage): rule 13 lists nothing, so rule 2 alerts
+    triage = replace(h, status=Status.BACKLOG, prework=True)
+    later = snap([triage, board[1]], conditions=[cond])
+    assert NY.evaluate(later) == []
+    assert [a.key for a in rule.evaluate(later)] == [f"overdue:W-1:{(NOW - 30 * H).isoformat()}"]
+    # A wait Kelpie cannot check is never held by a snooze and never handed off, though
+    # rule 13 lists the task (or holds it in its footer): it alerts about the connector.
+    unchecked = replace(cond, satisfied=None, checked_at=None)
+    errored = replace(cond, satisfied=None, params={"task": "H-1", "error": "not_found"})
+    for found, text in (
+        (unchecked, "C-1 was not checked on this pass"),
+        (errored, "the connector reports not_found for C-1"),
+    ):
+        for snoozes in ([], [snooze("H-1", behind=1)], [snooze("H-1", until=NOW - H)]):
+            (alert,) = rule.evaluate(snap(board, snoozes, conditions=[found]))
+            assert f"{text}. Is the connector running?" in alert.reason
+            assert alert.params["unchecked_conditions"] == ["C-1"]
+            assert alert.params["headline"] == f"W-1 has waited 30.0h: {text}"
+            assert alert.params["needed"] == (
+                "Check that whatever checks human_task conditions is running "
+                "(kelpie doctor shows the connectors)"
+            )
+    (digest,) = NY.evaluate(snap(board, conditions=[unchecked]))
+    assert digest.params["waiting"] == ["W-1"]  # unsnoozed: in the digest, and the alert
+    assert NY.evaluate(snap(board, [snooze("H-1", behind=1)], conditions=[unchecked])) == []
+    known = Condition(
+        "C-2", ConditionKind.HUMAN_TASK, "W-1", {"task": "H-1"}, False, checked_at=NOW
+    )
+    (both,) = rule.evaluate(snap(board, conditions=[unchecked, known]))
+    assert both.params["unchecked_conditions"] == ["C-1"]  # only what is not known
+
+
+def test_a_wait_that_moves_to_the_digest_says_so_when_it_resolves() -> None:
+    """Rule 2's overdue state closes because rule 13 lists the wait now: the notice says
+    where it went, not that the wait is gone (#213); rule 4 does the same for a block."""
+    h = Task("H-1", "sign", Status.READY, NOW - 40 * H, role="owner", owner_id="ceo")
+    cond = Condition("C-1", ConditionKind.HUMAN_TASK, "W-1", {"task": "H-1"}, False, checked_at=NOW)
+    wait = waiting("W-1", NOW - 30 * H)
+    state = f"wait_condition:W-1:{(NOW - 30 * H).isoformat()}"
+    rule = WaitCondition(inbox=NY)
+    listed = snap([h, wait], conditions=[cond])
+    notice = rule.resolved(state, listed)
+    assert notice is not None and notice.startswith("Task W-1 is in the person's needs-you")
+    assert "digest now, under H-1: that digest announces the wait" in notice
+    assert WaitCondition().resolved(state, listed) is None  # no hand-off: the general notice
+    assert rule.resolved(f"{state}x", listed) is None
+    triage = replace(h, status=Status.BACKLOG, prework=True)
+    assert rule.resolved(state, snap([triage, wait], conditions=[cond])) is None  # still alerts
+    met = replace(cond, satisfied=True)
+    assert rule.resolved(state, snap([h, wait], conditions=[met])) is None  # woken: its own news
+    assert rule.resolved(state, snap([h], conditions=[cond])) is None  # the wait is gone
+    # rule 4: a block that asks a person
+    block = question("t_1", NOW - 10 * H)
+    assert block.block is not None
+    four_state = f"stale_blocks:t_1:{block.block.since.isoformat()}"
+    said = StaleBlocks(inbox=NY).resolved(four_state, snap([block]))
+    assert said is not None and "in the person's needs-you digest now: that digest" in said
+    assert StaleBlocks().resolved(four_state, snap([block])) is None
+
+
+def test_evidence_that_is_not_fresh_is_not_known_and_keeps_rule_2_alerting() -> None:
+    """A connector that checked once and then stopped leaves the wait unknown: neither the
+    snooze hold nor the hand-off applies, and the alert says how long ago it last checked."""
+    h = Task("H-1", "sign", Status.READY, NOW - 40 * H, role="owner", owner_id="ceo")
+    board = [h, waiting("W-1", NOW - 30 * H)]
+    stale = Condition(
+        "C-1", ConditionKind.HUMAN_TASK, "W-1", {"task": "H-1"}, False, checked_at=NOW - 3 * H
+    )
+    before = replace(stale, checked_at=NOW - 31 * H)  # checked before the wait began
+    fresh_one = replace(stale, checked_at=NOW - timedelta(minutes=14))
+    rule = WaitCondition(inbox=NY)
+    for snoozes in ([], [snooze("H-1", behind=1)]):
+        (alert,) = rule.evaluate(snap(board, snoozes, conditions=[stale]))
+        assert "C-1 was last checked 3.0h ago. Is the connector running?" in alert.reason
+        assert alert.params["unchecked_conditions"] == ["C-1"]
+        (alert,) = rule.evaluate(snap(board, snoozes, conditions=[before]))
+        assert "C-1 was not checked on this pass" in alert.reason
+        assert rule.evaluate(snap(board, snoozes, conditions=[fresh_one])) == []
+    assert len(WaitCondition().evaluate(snap(board, [snooze("H-1", behind=1)], conditions=[stale])))
+
+
+def test_the_connector_wording_is_announced_as_a_change_of_the_overdue_state() -> None:
+    """W-1 is overdue while H-1 is in triage (rule 2's plain alert); H-1 becomes ready while
+    C-1 is unchecked: rule 13 lists it, rule 2 keeps its alert but names the connector, and
+    the engine announces that once as a change, not as the same alert still open."""
+    triage = Task("H-1", "sign", Status.BACKLOG, NOW - 40 * H, role="owner", owner_id="ceo")
+    triage = replace(triage, prework=True)
+    ready = replace(triage, status=Status.READY, prework=False)
+    wait = waiting("W-1", NOW - 30 * H)
+    cond = Condition("C-1", ConditionKind.HUMAN_TASK, "W-1", {"task": "H-1"}, None)
+    m = timedelta(minutes=1)
+    sent = ticks(
+        [WaitCondition(inbox=NY), NY],
+        [
+            snap([triage, wait], conditions=[cond], now=NOW),
+            snap([ready, wait], conditions=[cond], now=NOW + m),
+            snap([ready, wait], conditions=[cond], now=NOW + 2 * m),
+        ],
+    )
+    assert [t for t, _ in sent[0]] == [Transition.NEW]
+    changed = [(t, why) for t, why in sent[1] if "Task W-1 has waited" in why]
+    assert [t for t, _ in changed] == [Transition.CHANGED]  # one message, the connector's
+    assert "C-1 was not checked on this pass. Is the connector running?" in changed[0][1]
+    assert sent[2] == []
+
+
+def test_the_hand_off_notice_says_when_the_digest_only_holds_the_item_in_its_footer() -> None:
+    h = Task("H-1", "sign", Status.READY, NOW - 40 * H, role="owner", owner_id="ceo")
+    block = blocked("B-1", NOW - 10 * H, "parked until H-1")
+    cond = Condition("C-1", ConditionKind.HUMAN_TASK, "B-1", {"task": "H-1"}, False, checked_at=NOW)
+    state = f"stale_blocks:B-1:{(NOW - 10 * H).isoformat()}"
+    four = StaleBlocks(inbox=NY)
+    live = snap([h, block], conditions=[cond])
+    said = four.resolved(state, live, last_key=f"overdue:B-1:{(NOW - 10 * H).isoformat()}")
+    assert said is not None and "is in the person's needs-you digest now, under H-1" in said
+    held = snap([h, block], [snooze("H-1", behind=1)], conditions=[cond])
+    said = four.resolved(state, held)
+    assert said is not None and "is snoozed in the person's needs-you digest, under H-1" in said
+    assert "its footer lists it" in said
+    # the connector recovered: that closed the state, not a move to the digest
+    assert four.resolved(state, live, last_key="stale-evidence:B-1:x") is None
+    wait_state = f"wait_condition:W-1:{(NOW - 30 * H).isoformat()}"
+    wait_cond = replace(cond, task_id="W-1")
+    board = snap([h, waiting("W-1", NOW - 30 * H)], conditions=[wait_cond])
+    two = WaitCondition(inbox=NY)
+    assert two.resolved(wait_state, board, last_key="overdue:W-1:x") is not None
+    assert two.resolved(wait_state, board, last_key="overdue-unchecked:W-1:x") is None
+
+
+def test_rule_2_works_out_rule_13s_list_only_for_an_overdue_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    real = needs_you.inbox_task_ids
+
+    def counting(snapshot: Snapshot, settings: NeedsYou) -> frozenset[str]:
+        calls.append(1)
+        return real(snapshot, settings)
+
+    monkeypatch.setattr(needs_you, "inbox_task_ids", counting)
+    h = Task("H-1", "sign", Status.READY, NOW - 40 * H, role="owner", owner_id="ceo")
+    cond = Condition("C-1", ConditionKind.HUMAN_TASK, "W-1", {"task": "H-1"}, False, checked_at=NOW)
+    dead = {"task": "H-1", "terminal": True}
+    ended = Condition("C-2", ConditionKind.HUMAN_TASK, "W-2", dead, False, checked_at=NOW)
+    rule = WaitCondition(inbox=NY)
+    young = [h, waiting("W-1", NOW - 2 * H), waiting("W-2", NOW - 30 * H)]
+    assert len(rule.evaluate(snap(young, conditions=[cond, ended]))) == 1  # the dead end
+    assert calls == []  # nothing overdue: rule 13's graph was never walked
+    old = [h, waiting("W-1", NOW - 30 * H), waiting("W-3", NOW - 30 * H)]
+    other = Condition("C-3", ConditionKind.PR_MERGED, "W-3", {"pr": 7}, False, checked_at=NOW)
+    assert len(rule.evaluate(snap(old, conditions=[cond, other]))) == 1  # W-3 alerts, W-1 listed
+    assert calls == [1]  # once, for both overdue waits
+
+
 # --- the engine, across ticks --------------------------------------------------------------
 
 
 def ticks(rules: list[Any], boards: list[Snapshot]) -> list[list[tuple[Transition, str]]]:
     config = EngineConfig(
         dry_run=False,
-        modes={"needs_you": Mode.SUGGEST, "stale_blocks": Mode.SUGGEST},
+        modes={
+            "needs_you": Mode.SUGGEST,
+            "stale_blocks": Mode.SUGGEST,
+            "wait_condition": Mode.SUGGEST,
+        },
         state_escalations=(timedelta(hours=4), timedelta(hours=24)),
         state_resolve_after=timedelta(minutes=10),
     )

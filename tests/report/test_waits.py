@@ -470,3 +470,51 @@ def test_block_reason_prs_ending_in_punctuation() -> None:
     task = Task("B", "b", Status.BLOCKED, at(8), block=Block("waiting for CI of #12).", at(8)))
     found = WaitCauses((), (), (), kinds).condition(task)
     assert found is not None and found.params == {"repo": "x/y", "pr": 12}
+
+
+@pytest.mark.parametrize(
+    ("role", "repo"),
+    [
+        ("r" * 700, "example/" + "a" * 700),
+        ("&" * 700, "`" * 700),  # escapes grow & fivefold; a backtick run lengthens the fence
+        ("*<" * 350, "example/a`b" * 70),
+        ("reviewer", "`" * 700),
+    ],
+)
+def test_long_names_never_push_the_suggestion_out_of_a_chat_line(role: str, repo: str) -> None:
+    from kelpie.alerts.render import one_line
+    from kelpie.alerts.summary import MAX_LINE
+    from kelpie.report.farm import FarmFacts
+    from kelpie.report.md import MAX_NAME
+    from kelpie.report.waits import WAIT_CAUSES, BiggestWait
+
+    nothing = FarmFacts(approvers=False, hold_owners=False, hold_expiry=False,
+                        block_conditions=False, budgets=False)  # fmt: skip
+    for facts in (FarmFacts(), nothing):
+        for cause in WAIT_CAUSES:
+            wait = BiggestWait(role, cause, 12.0, 3.0, ("T-1", "T-2", "T-3"), repo, facts)
+            line = wait.headline()
+            assert one_line(line, MAX_LINE) == line, (cause, len(line))
+            assert line.endswith(f"Suggestion: {wait.suggestion}.")
+            name = line.removeprefix("Biggest wait: ").split(" tasks spent ")[0]
+            assert len(name) <= MAX_NAME
+
+
+def test_short_names_read_unchanged() -> None:
+    from kelpie.report.waits import BiggestWait
+
+    line = BiggestWait("reviewer", "ci", 12.0, 3.0, ("T-1",), "example/app").headline()
+    assert line.startswith("Biggest wait: reviewer tasks") and "mostly on `example/app`" in line
+
+
+def test_a_long_role_is_capped_in_the_recommendation_title_too() -> None:
+    from kelpie.report.md import MAX_NAME
+
+    role = "&" * 700
+    lone = (replace(waiting("R1", "reviewer"), role=role),)
+    report = build_report(
+        inputs(tasks=lone, sessions=(), conditions=(ci("R1"),), actions=()), sections={}
+    )
+    assert report.biggest_wait is not None and report.biggest_wait.role == role
+    [title] = [a.title for a in report.recommendations if a.title.startswith("Cut the ")]
+    assert title.endswith(" wait for CI") and len(title) <= MAX_NAME + len("Cut the  wait for CI")
