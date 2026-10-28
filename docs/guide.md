@@ -228,8 +228,8 @@ report; no LLM is involved.
   The unit is task-hours, each counted once: when several rules see the same task at the
   same time (rule 13 lists it as waiting on a person while rule 4 holds a stale block on
   it, or one rule has two conditions on it), the hour counts under the first of a farm
-  outage (the tasks its alerts name, from the outage's first sighting: its own threshold
-  is its grace), a person's inbox, a stale block, then in this order: an ownerless task, a
+  outage (the tasks its alerts name while they are on the board and not finished, from
+  the outage's first alert that counts: its own threshold is its grace), a person's inbox, a stale block, then in this order: an ownerless task, a
   wait past its limit, an exit without a final status, review ping-pong, idle capacity, a
   card stuck before work, a runaway loop, activity without progress; the others'
   overlapping hours are listed under "Also seen, not added" (the headline is the sum of
@@ -277,14 +277,18 @@ report; no LLM is involved.
   never start) explains the tasks it names and CI and merge waits in its repositories,
   under "a shared CI failure"; a block storm of rule 4 (many tasks blocked on the same
   reason at once) explains only the tasks it names, under "a shared blocker", even when
-  its reason names a person. In the cost of chaos those tasks' hours count once, under
+  its reason names a person; a tool failure of rule 10 (one tool failing the same way for
+  many tasks) explains only the tasks it names, under "a shared tool failure". In the cost
+  of chaos those tasks' hours count once, under
   "farm outages", ahead of the person's inbox and their stale blocks. Under the cost of
   chaos, "Outages" lists each outage of the day: its signature, its reason, since when
   (perhaps an earlier day) and until when or still open, its scope that day (PRs, or for a
   block storm tasks) and the alerts folded under it (a lower bound), who can end it when
   its reason names a person, and the waiting time all of them explained together. An
   outage whose check is still in observe (`storm_mode`, `not_started_mode`) is listed as
-  such, and its waits stay where they were until the check is switched on. The report
+  such, and its waits stay where they were until the check is switched on; its hours count
+  from the first alert after that, and before/after lists them apart, as a signal the
+  config change turned on. The report
   makes no network calls: it runs the connector steps that read only the board
   (`task_status`, human tasks from block reasons), and a block reason a
   `[[block_conditions]]` pattern matches counts as a CI or merge wait by the pattern's

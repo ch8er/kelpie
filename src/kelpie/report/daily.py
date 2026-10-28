@@ -801,8 +801,12 @@ def _verifications(
         # counted like the chaos: an outage's tasks too (#229)
         states=[r for r in inputs.states if is_chaos(r.state) or is_outage_state(r.state.id)],
         cause=cause_of,
-        start=counts_from,
-        hours=lambda st, lo, hi: state_hours(inputs.actions, st, lo, hi, _humans(inputs)),
+        start=lambda st: (
+            outage_counts_from(inputs.actions, st) if is_outage_state(st.id) else counts_from(st)
+        ),
+        hours=lambda st, lo, hi: state_hours(
+            inputs.actions, st, lo, hi, _humans(inputs), inputs.tasks
+        ),
         lost=lambda found, lo, hi: lost_hours(inputs, found, lo, hi),
         chaos_rules=frozenset(CHAOS_CAUSES),
         spans=known,
@@ -1024,9 +1028,9 @@ def _chaos_hours(
             continue
         cause = cause_of(state)
         if cause == OUTAGE:
-            for lo, hi, _, ids in outage_steps(inputs.actions, state, a, b):
-                keyed[OUTAGE].extend((t, lo, hi) for t in ids)
-                tasks[OUTAGE].update(ids)
+            for t, lo, hi in outage_spans(inputs.actions, state, a, b, inputs.tasks):
+                keyed[OUTAGE].append((t, lo, hi))
+                tasks[OUTAGE].add(t)
             continue
         if cause == HOLDS:
             agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
@@ -1164,15 +1168,55 @@ def outage_steps(
     Each of its alerts (the announcement, then the hourly repeats while it stays open) names
     its whole scope as of then (``tasks``), which holds until the next one. Alerts of a
     check still in observe (``params.observe_only``) count nothing: switching a check on
-    is what moves the hours."""
+    is what moves the hours, from its first alert that counts on (not back-filled)."""
+    first = outage_counts_from(entries, state)
+    a = max(a, first)
+    return _sampled_steps(entries, state.since, a, b, _outage_sampler(state)) if b > a else []
 
+
+def outage_counts_from(entries: Sequence[LedgerEntry], state: OpenState) -> datetime:
+    """When an outage's hours start counting: its first alert that counts (the announcement,
+    or the first once its check is switched on); none: its last sighting, so it counts
+    nothing (before/after then sees no first sighting of it either)."""
+    samples = _samples(entries, state.since, state.last_seen, _outage_sampler(state))
+    return max(samples[0][0], counts_from(state)) if samples else state.last_seen
+
+
+def _outage_sampler(state: OpenState) -> Callable[[LedgerEntry], tuple[int, list[object]] | None]:
     def sample(e: LedgerEntry) -> tuple[int, list[object]] | None:
         if e.params.get("state") != state.id or e.params.get(OBSERVE_ONLY) is True:
             return None  # another state's, or a check still in observe: not counted
         found = OutageParams.from_params(e.params)
         return None if found is None else (len(found.tasks), list(found.tasks))
 
-    return _sampled_steps(entries, state.since, a, b, sample)
+    return sample
+
+
+def outage_spans(
+    entries: Sequence[LedgerEntry],
+    state: OpenState,
+    a: datetime,
+    b: datetime,
+    tasks: Iterable[Task] | None,
+) -> list[tuple[str, datetime, datetime]]:
+    """:func:`outage_steps` per task: ``(task, start, end)``. A task counts while it is on
+    the board and not finished: an alert may name a task that has since been done or left
+    the board (rule 10 lists the tasks whose runs failed since the outage began), and an
+    outage holds no finished task. ``tasks`` None: every task an alert names, as named."""
+    board = None if tasks is None else {t.id: t for t in tasks}
+    out: list[tuple[str, datetime, datetime]] = []
+    for lo, hi, _, ids in outage_steps(entries, state, a, b):
+        for t in ids:
+            end = hi
+            if board is not None:
+                task = board.get(t)
+                if task is None:
+                    continue  # off the board: not this farm's wait any more
+                if task.status.is_terminal:
+                    end = min(hi, task.status_since)
+            if end > lo:
+                out.append((t, lo, end))
+    return out
 
 
 def _inbox_sampler(
@@ -1278,14 +1322,15 @@ def state_hours(
     a: datetime,
     b: datetime,
     humans: frozenset[str] = frozenset(),
+    tasks: Iterable[Task] | None = None,
 ) -> float:
     """What a chaos state costs in ``[a, b)`` on its own: its hours, for a forgotten hold
     the idle agent-hours behind it (:func:`hold_agent_hours`), for a person's inbox the
     agent-hours waiting on them (:func:`people_agent_hours`), for an outage the task-hours of
-    the tasks it held (:func:`outage_steps`)."""
+    the open tasks on the board it held (:func:`outage_spans`)."""
     if is_outage_state(state.id):
-        return sum(n * (hi - lo).total_seconds() / 3600 for lo, hi, n, _ in outage_steps(
-            entries, state, a, b))  # fmt: skip
+        spans = outage_spans(entries, state, a, b, tasks)
+        return sum((hi - lo).total_seconds() / 3600 for _, lo, hi in spans)
     if state.id.startswith(HOLD_STATE):
         return hold_agent_hours(entries, state, a, b, humans)[0]
     if state.id.startswith(PEOPLE_STATE):
@@ -1561,7 +1606,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
         lines += [
             "",
             f"**Outages** ({report.outage_wait_hours:.1f} task-hours of waiting fell inside them "
-            'and count under the outage ("a shared CI failure", "a shared blocker"), not under '
+            'and count under the outage ("a shared CI failure", "a shared blocker", "a shared tool '
+            'failure"), not under '
             "CI, merges or people; scope and alerts folded under each are the day's):",
             "",
         ]

@@ -12,6 +12,7 @@ from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.incidents import BLOCK_STORM, is_outage_state
 from kelpie.core.ledger import LedgerEntry, Outcome
+from kelpie.core.model import Status, Task
 from kelpie.core.states import OpenState
 from kelpie.report.daily import OUTAGE, PEOPLE, ReportInputs, build_report, render_markdown
 from kelpie.report.store import StateRow
@@ -32,6 +33,11 @@ def entry(at: datetime, rule: str, params: dict[str, object], kind: ActionKind) 
 def row(sid: str, rule: str, since: datetime, opened: datetime, last: datetime,
         task: str | None = None) -> StateRow:  # fmt: skip
     return StateRow(OpenState(sid, rule, since, opened, last, 0, Severity.WARNING, "s", task))
+
+
+def open_tasks(*ids: str, at: datetime) -> tuple[Task, ...]:
+    """Tasks on the board, open since ``at``: an outage counts only those."""
+    return tuple(Task(t, t, Status.BLOCKED, at, role="developer") for t in ids)
 
 
 def storm_day() -> ReportInputs:
@@ -125,6 +131,28 @@ def test_a_storm_still_in_observe_is_listed_not_counted() -> None:
     assert "(observe only: its check is not switched on" in render_markdown(report)
 
 
+def test_a_storm_switched_on_counts_from_then_and_is_listed_apart() -> None:
+    """Observed from 09:00, switched on at 11:00 by a config change: the hours count from
+    11:00 (not back-filled to 09:00), and before/after lists the storm as a signal the
+    change turned on, not as an after-window regression."""
+    from kelpie.report.fixes import CONFIG, FixEvent
+
+    fix = datetime.fromisoformat("2026-03-01T11:00:00+00:00")
+    seen, until = fix - timedelta(hours=2), fix + timedelta(hours=4)
+    observed = OutageParamsFactory.storm(seen, ("T-1",), observe=True)
+    counted = OutageParamsFactory.storm(fix, ("T-1",))
+    state = row(observed.params["state"], "stale_blocks", seen, seen, until)
+    switch_on = FixEvent(fix, CONFIG, "storm_mode = rule", "stale_blocks")
+    inputs = ReportInputs(day=fix.date(), tz=UTC, states=(state,), actions=(observed, counted),
+                          tasks=open_tasks("T-1", at=seen), fixes=(switch_on,))  # fmt: skip
+    report = build_report(inputs)
+    [line] = [c for c in report.chaos if c.rule == OUTAGE]
+    assert line.hours == pytest.approx(4)  # 11:00-15:00
+    [v] = report.verifications
+    [left_out] = [e for e in v.excluded if "outage" in e.name]
+    assert left_out.first == fix and left_out.after  # first counted when switched on
+
+
 # --- CI outages in the cost of chaos, precedence, observe-only waits, scope (review) -----
 
 
@@ -136,7 +164,8 @@ def test_a_ci_outages_tasks_count_once_under_the_outage() -> None:
     block = row("stale_blocks:R1:block", "stale_blocks", at(10), at(10), at(14), "R1")
     report = build_report(inputs(states=(state, block), actions=(sample,)), sections={})
     lines = {c.rule: c for c in report.chaos}
-    assert lines[OUTAGE].hours == pytest.approx(2 * 18) and lines[OUTAGE].tasks == ("R1", "R2")
+    # from its first alert (03:00), not its state's opening: hours count from the sighting
+    assert lines[OUTAGE].hours == pytest.approx(2 * 17) and lines[OUTAGE].tasks == ("R1", "R2")
     assert lines["stale_blocks"].hours == 0 and lines["stale_blocks"].also_hours == 4.0
     titles = [a.title for a in report.recommendations]
     assert "Reduce farm outages (one shared cause)" in titles
@@ -225,10 +254,35 @@ def test_before_after_sees_an_outages_tasks() -> None:
                 fix + timedelta(hours=1), fix + timedelta(hours=5))  # fmt: skip
     report = build_report(ReportInputs(day=fix.date() + timedelta(days=1), tz=UTC,
                                        states=(state,), actions=(storm,),
+                                       tasks=open_tasks("T-1", "T-2", at=fix),
                                        fixes=(FixEvent(fix, MANUAL, "a fix"),)))  # fmt: skip
     [v] = report.verifications
     lost = next(m for m in v.metrics if m.name.startswith("hours lost"))
     assert lost.after == pytest.approx(2 * 4)  # two tasks, 4 h, counted like the chaos
+
+
+def test_an_outage_counts_only_its_open_tasks_on_the_board() -> None:
+    """An alert may name a task done since, or one off the board (rule 10 lists the tasks
+    whose runs failed since the outage began): a finished task counts until it finished,
+    one off the board not at all. The cost of chaos and before/after agree."""
+    from kelpie.report.daily import state_hours
+    from kelpie.report.fixes import MANUAL, FixEvent
+
+    fix = datetime.fromisoformat("2026-03-01T08:00:00+00:00")
+    at, until = fix + timedelta(hours=1), fix + timedelta(hours=5)
+    storm = OutageParamsFactory.storm(at, ("T-1", "T-2", "T-3", "T-4"))
+    state = row(storm.params["state"], "stale_blocks", at, at, until)
+    board = (
+        *open_tasks("T-1", at=fix),
+        Task("T-2", "done mid-outage", Status.DONE, at + timedelta(hours=1), role="developer"),
+        Task("T-3", "done before it", Status.DONE, fix, role="developer"),
+    )  # T-4 is not on the board
+    inputs = ReportInputs(day=fix.date(), tz=UTC, states=(state,), actions=(storm,),
+                          tasks=board, fixes=(FixEvent(fix, MANUAL, "a fix"),))  # fmt: skip
+    [line] = [c for c in build_report(inputs).chaos if c.rule == OUTAGE]
+    assert line.hours == pytest.approx(4 + 1)  # T-1 the whole 4 h, T-2 until it was done
+    assert state_hours((storm,), state.state, at, until, tasks=board) == pytest.approx(5)
+    assert state_hours((storm,), state.state, at, until) == pytest.approx(4 * 4)  # as named
 
 
 class OutageParamsFactory:
@@ -254,7 +308,8 @@ def _fix_day(
 ) -> list[object]:
     fix = datetime.fromisoformat("2026-03-01T08:00:00+00:00")
     report = build_report(ReportInputs(day=fix.date() + timedelta(days=1), tz=UTC, states=states,
-                                       actions=actions, fixes=fixes))  # fmt: skip
+                                       actions=actions, fixes=fixes,
+                                       tasks=open_tasks("T-1", "T-2", "T-9", at=fix)))  # fmt: skip
     [v] = report.verifications
     return [v]
 
@@ -323,3 +378,27 @@ def test_a_tool_failure_explains_only_its_tasks_under_its_own_cause() -> None:
                      row("stale_blocks:outage:0123456789ab", "stale_blocks", at(8), at(8),
                          at(12)).state], [])  # fmt: skip
     assert [o.kind for o in found] == [TOOL_FAILURES, BLOCK_STORM]
+
+
+def test_a_tool_failure_renders_as_its_kind() -> None:
+    from dataclasses import replace
+
+    from kelpie.report.daily import OutageLine
+    from kelpie.report.waits import TOOL_FAILURES
+
+    at = datetime.fromisoformat("2026-03-02T09:00:00+00:00")
+    line = OutageLine("web_fetch", at, at + timedelta(hours=2), False, 3, 1, TOOL_FAILURES,
+                      reason="HTTP 503 on every call")  # fmt: skip
+    report = replace(build_report(storm_day(), sections={}), outages=(line,))
+    assert ("- tool failure `web_fetch` since 2026-03-02 09:00 UTC, until 2026-03-02 11:00 UTC: "
+            "3 task(s) failing, 1 alert(s) folded under it. Cause: HTTP 503 on every call"
+            ) in render_markdown(report)  # fmt: skip
+
+
+def test_an_outages_kind_without_its_alerts_follows_its_state() -> None:
+    from kelpie.core.incidents import CI_FAILURES, CI_NOT_STARTED, CI_NOT_STARTED_STATE
+    from kelpie.report.waits import _kind_of
+
+    assert _kind_of(CI_NOT_STARTED_STATE) == CI_NOT_STARTED
+    assert _kind_of("ci_economy:outage:0123456789ab") == CI_FAILURES
+    assert _kind_of("some_new_rule:outage:0123456789ab") == CI_FAILURES  # the fallback

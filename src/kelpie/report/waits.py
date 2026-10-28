@@ -139,7 +139,8 @@ MIN_HOURS = 1.0  # a smaller wait is no headline
 CI_OUTAGE = "ci_outage"
 SHARED_BLOCKER = "shared_blocker"  # a block storm's waits (incident 20)
 SHARED_TOOL_FAILURE = "shared_tool_failure"  # a tool failing for many tasks (rule 10)
-TOOL_FAILURES = "tool_failures"  # rule 10's outage kind (kelpie.core.incidents, #229)
+# rule 10's outage kind (#229). TODO: import it from kelpie.core.incidents once #273 lands.
+TOOL_FAILURES = "tool_failures"
 CI_KINDS = frozenset({CI_FAILURES, CI_NOT_STARTED})  # scoped by PRs and repositories too
 SNOOZED = "snoozed"  # waits a person snoozed: deliberate, never the biggest wait
 MAX_REASON = 2000  # characters of a block reason matched, as the GitHub step does
@@ -268,7 +269,9 @@ def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list
 
 def _kind_of(state_id: str) -> str:
     """An outage's kind from its state id alone (none of its alerts is loaded): rule 9's
-    not-started state, else by the rule that owns it."""
+    not-started state, else by the rule that owns it; a rule this does not know (rule 9's
+    failing jobs, or a check added later) reads as failing CI jobs, the kind of params
+    written before kinds existed."""
     if state_id == CI_NOT_STARTED_STATE:
         return CI_NOT_STARTED
     rule = state_id.split(":", 1)[0]
