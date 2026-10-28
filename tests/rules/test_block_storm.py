@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -237,6 +238,24 @@ def test_on_a_multi_host_hub_ids_match_as_the_agents_wrote_them() -> None:
     assert outage.person == "mac1:ceo"  # the CEO on both boards is one person
 
 
+def test_on_a_hub_what_a_reason_names_is_its_own_machine_s() -> None:
+    def on(host: str, n: int) -> Task:
+        t = blocked(n, 50 - n, "waiting for t_5a01 to ship the schema migration")
+        return replace(t, id=f"{host}:{t.id}", host=host)
+
+    mixed = (on("mac1", 0), on("mac1", 1), on("mac2", 2), on("mac2", 3), on("mac2", 4))
+    assert storms(*mixed, rule=StaleBlocks(storm_min_tasks=3)) != []  # mac2's three
+    assert storms(*mixed) == []  # five tasks, but two different t_5a01s
+    lead = Owner("mac1:person-7", "lead", OwnerKind.HUMAN, host="mac1")
+    bot = Owner("mac2:agent-lead", "lead", host="mac2")  # another machine's agent
+    asks = tuple(
+        replace(t, id=f"mac1:{t.id}", host="mac1")
+        for t in (blocked(n, 50 - n, "ask the lead about the runner pool") for n in range(5))
+    )
+    [alert] = storms(*asks, owners=(lead, bot))
+    assert Outage.from_params(alert.params).person == "mac1:person-7"  # type: ignore[union-attr]
+
+
 def test_a_role_agents_hold_too_names_no_one() -> None:
     reviewer = Owner("person-3", "reviewer", OwnerKind.HUMAN)
     bot = Owner("agent-rev", "reviewer")
@@ -308,15 +327,17 @@ def test_with_the_engine_the_storm_folds_the_per_task_alerts_once_switched_on() 
     assert {d.action.task_id for d in done if d.outcome is Outcome.ALERTED} == {None, "T-9"}
 
 
-def test_the_storm_s_hours_count_once_in_the_cost_of_chaos() -> None:
-    """Logged only, the tasks' own states count; switched on, it folds their alerts (no
-    states of their own) and its tasks' hours count under it: never twice, never none."""
+def test_the_storm_s_hours_are_never_counted_twice_in_the_cost_of_chaos() -> None:
+    """Its tasks' hours count where they count without it: their own states, or rule 13's
+    inbox when it takes their blocks. Switched on, it folds their alerts and they open no
+    state: those hours wait for the report's attribution by kind (roadmap, #229)."""
     from datetime import date
 
     from kelpie.core.config import EngineConfig, Mode
     from kelpie.core.engine import Engine
     from kelpie.report.daily import ReportInputs, build_report
     from kelpie.report.store import StateRow
+    from kelpie.rules.needs_you import NeedsYou
     from tests.fakes import FakeAdapter, FakeAlerter
 
     start = datetime(2026, 3, 2, 1, tzinfo=UTC)
@@ -325,8 +346,8 @@ def test_the_storm_s_hours_count_once_in_the_cost_of_chaos() -> None:
     )
     config = EngineConfig(dry_run=False, default_mode=Mode.SUGGEST)
 
-    def chaos_hours(rule: StaleBlocks) -> float:
-        engine = Engine([rule], adapters=[FakeAdapter()], alerter=FakeAlerter(), config=config)  # type: ignore[list-item]
+    def chaos(*rules: Any) -> dict[str, float]:
+        engine = Engine(list(rules), adapters=[FakeAdapter()], alerter=FakeAlerter(), config=config)
         for h in range(9):  # 01:30 to 09:30; the tasks' own alerts from 05:00 (4h)
             now = start + timedelta(hours=h, minutes=30)
             engine.tick(lambda now=now: Snapshot(now=now, tasks=tasks, owners=(CEO,)))
@@ -336,7 +357,10 @@ def test_the_storm_s_hours_count_once_in_the_cost_of_chaos() -> None:
             ReportInputs(day=date(2026, 3, 2), tz=UTC, actions=log, states=rows, tasks=tasks),
             sections={},
         )
-        return sum(c.hours for c in report.chaos if c.rule == "stale_blocks")
+        return {c.rule: c.hours for c in report.chaos if c.hours}
 
-    assert chaos_hours(StaleBlocks()) == pytest.approx(5 * 4)  # T-0..T-4, 05:30 to 09:30
-    assert chaos_hours(StaleBlocks(storm_mode="rule")) == pytest.approx(5 * 8)  # from 01:30
+    assert chaos(StaleBlocks()) == {"stale_blocks": pytest.approx(5 * 4)}  # 05:30 to 09:30
+    assert chaos(StaleBlocks(storm_mode="rule")) == {}  # folded: the known gap
+    inbox = NeedsYou(default_approver="ceo")
+    handed = chaos(StaleBlocks(inbox=inbox), inbox)  # rule 13 takes the blocks
+    assert set(handed) == {"needs_you"}  # once, not again under the storm

@@ -162,7 +162,9 @@ def storms(
             continue  # a person decided to wait
         text = normalise(block.reason, task.id, task.host)
         if informative(text):
-            key = (text, _refs(block.reason, task.id, task.host))
+            refs = _refs(block.reason, task.id, task.host)
+            # what a reason names ("t_5", "#12") is its own machine's on a multi-host hub
+            key = (text, (f"{task.host}:", *refs) if refs and task.host else refs)
             groups.setdefault(key, []).append(_Blocked(task, block.since))
     open_states = set(snapshot.open_states)
     actions = []
@@ -266,7 +268,7 @@ def _person(snapshot: Snapshot, reason: str, task: Task) -> str | None:
         holders = {
             (o.kind, _local(o.id, o.host))
             for o in snapshot.owners
-            if o.role.lower().strip() == role
+            if o.role.lower().strip() == role and o.serves(task)
         }
         if not role or len(holders) > 1:
             continue  # several people, or agents too: whom it means is unclear

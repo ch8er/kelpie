@@ -68,3 +68,5 @@ not_expected_actions:
   # Each task waits on its own PR's CI, which Kelpie checks, or names its own PR: not a storm.
   - kind: alert
     reason_contains: "payments service"
+  - kind: alert
+    reason_contains: "CI on example/api"
