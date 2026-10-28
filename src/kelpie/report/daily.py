@@ -144,7 +144,7 @@ from kelpie.report.verify import (
     Verification,
     filter_events,
     mode_events,
-    verify,
+    verify_all,
 )
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
 from kelpie.report.waits import (
@@ -735,15 +735,16 @@ def _verifications(
     roles, platforms = session_context(board, inputs.attribution)
     found = calls(known, roles, platforms)
     since, _ = day_bounds(inputs.day - timedelta(days=1), inputs.tz)
+    # Fixes from two windows before the day before on (as far as ``load_inputs`` reads): a
+    # recent fix may overlap an older one, which may overlap one older still.
+    reach = since - 2 * inputs.verify_window
     events = [
         *inputs.fixes,
         *mode_events(e for e in inputs.actions if e.at < end),
         *filter_events(found, replace(inputs.outputs, window=inputs.verify_window)),
     ]
-    events = sorted(
-        (e for e in events if since <= e.at < end), key=lambda e: (e.at, e.kind, e.note)
-    )
-    if not events:
+    events = [e for e in events if reach <= e.at < end]
+    if not any(e.at >= since for e in events):
         return ()
     evidence = Evidence(
         end=end,
@@ -761,8 +762,9 @@ def _verifications(
         window=inputs.verify_window,
         min_sample=inputs.min_sample,
         review_roles=inputs.review_roles,
+        known_from=reach,
     )
-    return tuple(verify(e, evidence) for e in events)
+    return verify_all(events, evidence, since)
 
 
 def _priced(inputs: ReportInputs, spend: Spend) -> bool:
@@ -1571,37 +1573,132 @@ def _local(at: datetime, report: DailyReport) -> str:
     return at.astimezone(report.tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
+_SHOWN_FIXES = 8  # fixes listed by name in a group; the rest are counted
+
+
 def _verification_lines(report: DailyReport) -> list[str]:
     out: list[str] = []
     for v in report.verifications:
-        e = v.event
-        scope = ", ".join(
-            x
-            for x in (e.rule and f"rule {md.text(e.rule)}", e.role and f"role {md.text(e.role)}")
-            if x
-        )
-        hours = v.after.total_seconds() / 3600
-        title = f"**{_local(e.at, report)}, {e.kind}**: {_inline(e.note)}" + (
-            f" ({scope})" if scope else ""
-        )
-        if not v.metrics:
-            out += [f"{title}. No data on either side yet (after-window: {hours:.1f}h).", ""]
-            continue
-        out += [
-            f"{title}. After-window: {hours:.1f}h"
-            + (", small sample: a direction, not a result." if v.small_sample else "."),
-            "",
-            "| Metric | Before | After | Change | n before / after |",
-            "|---|---:|---:|---:|---:|",
-        ]
-        for m in v.metrics:
-            small = " (small sample)" if m.small else ""
-            out.append(
-                f"| {m.name}{small} | {_value(m.before, m.unit)} | {_value(m.after, m.unit)} "
-                f"| {_change(m)} | {m.n_before} / {m.n_after} |"
-            )
+        out += _group_lines(v, report) if v.together else _single_lines(v, report)
         out.append("")
     return out[:-1] if out else out
+
+
+def _fix_title(e: FixEvent, report: DailyReport) -> str:
+    scope = ", ".join(
+        x
+        for x in (
+            e.rule and f"rule {md.text(e.rule)}",
+            e.role and f"role {md.text(e.role)}",
+            e.command and f"command {md.code(e.command)}",
+        )
+        if x
+    )
+    return f"**{_local(e.at, report)}, {e.kind}**: {_inline(e.note)}" + (
+        f" ({scope})" if scope else ""
+    )
+
+
+def _direction_only(v: Verification, metrics: Iterable[Metric]) -> str:
+    return (
+        f" Rows marked *direction only* have fewer than {v.min_sample} observations on a side"
+        " or a short after-window: a direction, not a result."
+        if any(m.small for m in metrics)
+        else ""
+    )
+
+
+def _single_lines(v: Verification, report: DailyReport) -> list[str]:
+    hours = v.after.total_seconds() / 3600
+    title = _fix_title(v.event, report)
+    if not v.metrics:
+        return [
+            f"{title}. No data on either side yet (after-window: {hours:.1f}h).",
+            *_excluded_lines(v, report),
+        ]
+    return [
+        f"{title}. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
+        "",
+        *_metric_table(v.metrics),
+        *_excluded_lines(v, report),
+    ]
+
+
+def _group_lines(v: Verification, report: DailyReport) -> list[str]:
+    """Overlapping fixes: one comparison credited to none of them alone, then what one
+    fix alone can explain."""
+    hours = v.after.total_seconds() / 3600
+    span = v.span.total_seconds() / 3600
+    out = [
+        f"**{len(v.events)} fixes within {span:.1f}h of each other**: their effects cannot be "
+        "separated, so they are measured together, from a window before the first to a "
+        "window after the last, and credited to none of them alone.",
+        "",
+    ]
+    out += [f"- {_fix_title(e, report)}" for e in v.events[:_SHOWN_FIXES]]
+    if len(v.events) > _SHOWN_FIXES:
+        out.append(f"- and {len(v.events) - _SHOWN_FIXES} more")
+    out.append("")
+    if v.metrics:
+        out += [
+            f"Together. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
+            "",
+            *_metric_table(v.metrics),
+        ]
+    else:
+        out.append(f"Together: no data on either side yet (after-window: {hours:.1f}h).")
+    if v.own:
+        out += [
+            "",
+            "Per fix, only where one fix alone can explain it (its own role or command, "
+            "each over its own window)." + _direction_only(v, (c.metric for c in v.own)),
+            "",
+            "| Fix | Metric | Before | After | Change | n before / after |",
+            "|---|---|---:|---:|---:|---:|",
+        ]
+        for c in v.own:
+            m = c.metric
+            e = c.event
+            about = (e.command and md.code(e.command, cell=True)) or md.text(e.role or "")
+            fix = f"{_local(e.at, report)} {md.text(e.kind)}" + (f": {about}" if about else "")
+            out.append(f"| {fix} | {_metric_cells(m)}")
+    if v.truncated is not None:
+        out += [
+            "",
+            f"Fixes and data are read from {_local(v.truncated, report)} on: an older fix "
+            "may belong to this group, and its before-window starts there at the earliest "
+            "(shorter than a window, so per-day rates cover only that part).",
+        ]
+    return out + _excluded_lines(v, report)
+
+
+def _metric_table(metrics: Sequence[Metric]) -> list[str]:
+    return [
+        "| Metric | Before | After | Change | n before / after |",
+        "|---|---:|---:|---:|---:|",
+        *(f"| {_metric_cells(m)}" for m in metrics),
+    ]
+
+
+def _metric_cells(m: Metric) -> str:
+    small = " (direction only)" if m.small else ""
+    return (
+        f"{m.name}{small} | {_value(m.before, m.unit)} | {_value(m.after, m.unit)} "
+        f"| {_change(m)} | {m.n_before} / {m.n_after} |"
+    )
+
+
+def _excluded_lines(v: Verification, report: DailyReport) -> list[str]:
+    if not v.excluded:
+        return []
+    out = ["", "Not compared (no full before to compare with):", ""]
+    for x in v.excluded:
+        after = f"; after: {_value(x.after, x.unit)}" if x.after is not None else ""
+        out.append(
+            f"- {x.name}: its data starts at {_local(x.first, report)}, after the "
+            f"before-window began: a newly enabled signal, or something new{after}."
+        )
+    return out
 
 
 def _inline(text: str) -> str:

@@ -39,6 +39,7 @@ from kelpie import net
 from kelpie.report.config import LlmSettings
 from kelpie.report.daily import CHAOS_CAUSES, DailyReport
 from kelpie.report.sections import Section
+from kelpie.report.verify import Verification
 
 log = logging.getLogger(__name__)
 
@@ -166,8 +167,10 @@ def digest(report: DailyReport) -> Digest:
         ],
         "fix_checks": [
             {
-                "rule": _name(v.event.rule) if v.event.rule else None,
-                "kind": _name(v.event.kind),
+                # a group's metrics belong to no one fix: only what all its fixes share
+                "rule": _name(rule) if (rule := _shared(v, "rule")) else None,
+                "kind": _name(_shared(v, "kind") or "group"),
+                "fixes_together": len(v.events),
                 "after_hours": _num(v.after.total_seconds() / 3600),
                 "metrics": [
                     {
@@ -184,6 +187,12 @@ def digest(report: DailyReport) -> Digest:
         ],
     }
     return Digest(data, tasks.aliases)
+
+
+def _shared(v: Verification, attr: str) -> str | None:
+    """The value all fixes of a verification share, None when they differ."""
+    found = {getattr(e, attr) for e in v.events}
+    return found.pop() if len(found) == 1 else None
 
 
 def _num(value: float | None) -> float | None:

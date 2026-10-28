@@ -108,14 +108,15 @@ def _stuck_check(engine: EngineConfig) -> StuckCheck | None:
 
 def report_settings(settings: Settings, day: date, now: datetime) -> Settings:
     """``settings`` with the adapters looking back as far as the report of ``day`` needs:
-    sessions and done tasks from the before-window of the day before's fixes on, plus an
-    hour of slack (DST, a run a few minutes after midnight). Only the report reads this far
+    sessions and done tasks from the before-window of the day before's fixes on, and of an
+    older fix they overlap (two windows), plus an hour of slack (DST, a run a few minutes
+    after midnight). Only the report reads this far
     back; ``kelpie serve``'s rules keep ``[adapters.hermes] lookback``."""
     hermes = settings.hermes
     if hermes is None:
         return settings
     day_before, _ = day_bounds(day - timedelta(days=1), settings.report.tz)
-    needed = now - (day_before - settings.report.verify_window) + REPORT_SLACK
+    needed = now - (day_before - 2 * settings.report.verify_window) + REPORT_SLACK
     if needed <= hermes.lookback:
         return settings
     return replace(settings, hermes=replace(hermes, lookback=needed))
