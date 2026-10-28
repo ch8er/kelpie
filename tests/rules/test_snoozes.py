@@ -337,7 +337,7 @@ def test_rule_4_resolve_notice_says_the_block_is_snoozed() -> None:
 # --- who reads snoozes ---------------------------------------------------------------------
 
 RULES = Path(__file__).parents[2] / "src" / "kelpie" / "rules"
-HONOUR = {"needs_you.py", "stale_blocks.py", "wait_condition.py", "_snoozes.py"}
+HONOUR = {"needs_you.py", "stale_blocks.py", "_block_storm.py", "wait_condition.py", "_snoozes.py"}
 SNOOZE_MODULES = {"kelpie.rules._snoozes", "kelpie.core.snooze"}
 
 

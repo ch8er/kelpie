@@ -50,7 +50,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from kelpie.core.ledger import LedgerEntry, Outcome
+from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Outcome
 from kelpie.core.model import Session, Span, Status, Task
 from kelpie.core.spans import SpanKey, last_at, span_key
 from kelpie.core.states import OpenState
@@ -175,11 +175,12 @@ class Evidence:
 
 def mode_events(entries: Iterable[LedgerEntry]) -> list[FixEvent]:
     """A fix event wherever a rule's ledger entries switch mode (first entry per rule is
-    the baseline). Suppressed entries are skipped: they repeat an earlier decision."""
+    the baseline). Suppressed entries are skipped: they repeat an earlier decision; so are
+    an observe-only check's (``OBSERVE_ONLY``): its mode is not the rule's."""
     last: dict[str, str] = {}
     out: list[FixEvent] = []
     for e in sorted(entries, key=lambda e: (e.at, e.rule)):
-        if e.outcome is Outcome.SUPPRESSED:
+        if e.outcome is Outcome.SUPPRESSED or e.params.get(OBSERVE_ONLY) is True:
             continue
         before = last.get(e.rule)
         last[e.rule] = e.mode.value

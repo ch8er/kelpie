@@ -1,0 +1,72 @@
+id: "20-block-storm"
+incident: 20
+title: "Seven agents blocked on the same question within the hour: one outage, not seven waits"
+description: >
+  The toolchain on the farm's macOS host broke. Within the hour seven agents blocked their
+  tasks on nearly the same words, "waiting for CEO (Xcode first launch)", differing only in
+  case, spacing and the task ids they added. Kelpie saw seven independent waits on a person
+  and counted them seven times. Rule 4 must see one outage with its start, its scope (the
+  seven tasks), its cause and the person who can end it, while three tasks waiting on the
+  same person for different reasons, and six tasks each waiting on its own PR's CI, stay
+  separate waits.
+rule: stale_blocks
+config:
+  storm_min_tasks: 3  # low enough that the negative cases below could storm
+  storm_window: "2h"
+snapshot:
+  now: "2026-03-02T11:00:00+00:00"
+  owners:
+    - {id: ceo, role: ceo, kind: human}
+    - {id: agent-ios-1, role: developer}
+    - {id: agent-ios-2, role: developer}
+    - {id: agent-ios-3, role: developer}
+    - {id: agent-web-1, role: developer}
+    - {id: agent-api-1, role: developer}
+  tasks:
+    - {id: t_5a0c2e70, title: "iOS task 1", status: blocked, status_since: "2026-03-02T10:00:00+00:00", owner_id: agent-ios-1, block: {reason: "needs_input: waiting for CEO (Xcode first launch)", since: "2026-03-02T10:00:00+00:00"}}
+    - {id: t_5a0c2e71, title: "iOS task 2", status: blocked, status_since: "2026-03-02T10:06:00+00:00", owner_id: agent-ios-2, block: {reason: "needs_input: Waiting for CEO (Xcode first launch) [t_5a0c2e71]", since: "2026-03-02T10:06:00+00:00"}}
+    - {id: t_5a0c2e72, title: "iOS task 3", status: blocked, status_since: "2026-03-02T10:14:00+00:00", owner_id: agent-ios-3, block: {reason: "needs_input: waiting for CEO  (Xcode first launch).", since: "2026-03-02T10:14:00+00:00"}}
+    - {id: t_5a0c2e73, title: "iOS task 4", status: blocked, status_since: "2026-03-02T10:21:00+00:00", owner_id: agent-ios-1, block: {reason: "NEEDS_INPUT: waiting for CEO (Xcode first launch)", since: "2026-03-02T10:21:00+00:00"}}
+    - {id: t_5a0c2e74, title: "iOS task 5", status: blocked, status_since: "2026-03-02T10:33:00+00:00", owner_id: agent-ios-2, block: {reason: "needs_input: waiting for CEO (Xcode first launch) - t_5a0c2e74", since: "2026-03-02T10:33:00+00:00"}}
+    - {id: t_5a0c2e75, title: "iOS task 6", status: blocked, status_since: "2026-03-02T10:41:00+00:00", owner_id: agent-ios-3, block: {reason: "needs_input: waiting for ceo (xcode first launch)", since: "2026-03-02T10:41:00+00:00"}}
+    - {id: t_5a0c2e76, title: "iOS task 7", status: blocked, status_since: "2026-03-02T10:52:00+00:00", owner_id: agent-ios-1, block: {reason: "needs_input: waiting for CEO (Xcode first launch)", since: "2026-03-02T10:52:00+00:00"}}
+    - {id: t_7b1d0001, title: "Product task", status: blocked, status_since: "2026-03-02T10:05:00+00:00", owner_id: agent-web-1, block: {reason: "needs_input: CEO to approve the pricing page copy", since: "2026-03-02T10:05:00+00:00"}}
+    - {id: t_7b1d0002, title: "Product task", status: blocked, status_since: "2026-03-02T10:20:00+00:00", owner_id: agent-web-1, block: {reason: "needs_input: CEO to pick the release date", since: "2026-03-02T10:20:00+00:00"}}
+    - {id: t_7b1d0003, title: "Product task", status: blocked, status_since: "2026-03-02T10:40:00+00:00", owner_id: agent-web-1, block: {reason: "needs_input: CEO sign-off on the legal text", since: "2026-03-02T10:40:00+00:00"}}
+    - {id: t_9c2e0000, title: "Backend task", status: blocked, status_since: "2026-03-02T10:10:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for CI on example/api#40", since: "2026-03-02T10:10:00+00:00", condition_id: C-0}}
+    - {id: t_9c2e0001, title: "Backend task", status: blocked, status_since: "2026-03-02T10:15:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for CI on example/api#41", since: "2026-03-02T10:15:00+00:00", condition_id: C-1}}
+    - {id: t_9c2e0002, title: "Backend task", status: blocked, status_since: "2026-03-02T10:20:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for CI on example/api#42", since: "2026-03-02T10:20:00+00:00", condition_id: C-2}}
+    - {id: t_9c2e0003, title: "Backend task", status: blocked, status_since: "2026-03-02T10:25:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for CI on example/api#43", since: "2026-03-02T10:25:00+00:00", condition_id: C-3}}
+    - {id: t_9c2e0004, title: "Backend task", status: blocked, status_since: "2026-03-02T10:30:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for CI on example/api#44", since: "2026-03-02T10:30:00+00:00", condition_id: C-4}}
+    - {id: t_9c2e0005, title: "Backend task", status: blocked, status_since: "2026-03-02T10:35:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for CI on example/api#45", since: "2026-03-02T10:35:00+00:00", condition_id: C-5}}
+    # The same words without conditions, each naming its own PR: still not a storm.
+    - {id: t_9c2e0006, title: "Backend task", status: blocked, status_since: "2026-03-02T10:36:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for green CI of the payments service on example/api#46", since: "2026-03-02T10:36:00+00:00"}}
+    - {id: t_9c2e0007, title: "Backend task", status: blocked, status_since: "2026-03-02T10:37:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for green CI of the payments service on example/api#47", since: "2026-03-02T10:37:00+00:00"}}
+    - {id: t_9c2e0008, title: "Backend task", status: blocked, status_since: "2026-03-02T10:38:00+00:00", owner_id: agent-api-1, block: {reason: "waiting for green CI of the payments service on example/api#48", since: "2026-03-02T10:38:00+00:00"}}
+  conditions:
+    - {id: C-0, kind: ci_status, task_id: t_9c2e0000, params: {repo: example/api, pr: 40}, satisfied: false, checked_at: "2026-03-02T10:58:00+00:00"}
+    - {id: C-1, kind: ci_status, task_id: t_9c2e0001, params: {repo: example/api, pr: 41}, satisfied: false, checked_at: "2026-03-02T10:58:00+00:00"}
+    - {id: C-2, kind: ci_status, task_id: t_9c2e0002, params: {repo: example/api, pr: 42}, satisfied: false, checked_at: "2026-03-02T10:58:00+00:00"}
+    - {id: C-3, kind: ci_status, task_id: t_9c2e0003, params: {repo: example/api, pr: 43}, satisfied: false, checked_at: "2026-03-02T10:58:00+00:00"}
+    - {id: C-4, kind: ci_status, task_id: t_9c2e0004, params: {repo: example/api, pr: 44}, satisfied: false, checked_at: "2026-03-02T10:58:00+00:00"}
+    - {id: C-5, kind: ci_status, task_id: t_9c2e0005, params: {repo: example/api, pr: 45}, satisfied: false, checked_at: "2026-03-02T10:58:00+00:00"}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "Block storm since 2026-03-02 10:00 UTC: 7 tasks blocked within 52 min"
+    params:
+      kind: block_storm
+      person: ceo
+      signature: "needs_input: waiting for CEO (Xcode first launch)"
+      tasks: [t_5a0c2e70, t_5a0c2e71, t_5a0c2e72, t_5a0c2e73, t_5a0c2e74, t_5a0c2e75, t_5a0c2e76]
+not_expected_actions:
+  # The same person, different questions: three waits, not a storm.
+  - kind: alert
+    reason_contains: "pricing"
+  - kind: alert
+    reason_contains: "release date"
+  # Each task waits on its own PR's CI, which Kelpie checks, or names its own PR: not a storm.
+  - kind: alert
+    reason_contains: "payments service"
+  - kind: alert
+    reason_contains: "CI on example/api"

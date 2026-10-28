@@ -72,6 +72,15 @@ snoozed; they then say so (``params.snooze``, as rule 13's items carry it). Whil
 snooze holds the block's alert state resolves; when the snooze is what closed it, the
 notice says the block is snoozed.
 
+**Block storms** (issue #229, :mod:`kelpie.rules._block_storm`). ``storm_min_tasks`` (5)
+tasks blocked within ``storm_window`` (2h) on the same reason (the task's own id, times
+and hashes stripped; what it names kept apart) are one outage: one alert with the shared
+reason as its cause, the person it names (who can end it) and the tasks. Only blocks
+without a condition Kelpie can check count, and not snoozed ones. A new check: its alert and
+its "resolved" notice are only logged (``storm_mode = "observe"``) until set to ``"rule"``,
+which follows the rule's mode and folds this rule's alerts of its tasks under it (rule 13's
+inbox items are not folded).
+
 The dead-end and no-condition alerts list the tasks stuck behind the blocked one
 (``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
 does not raise a second alert for the same dead end.
@@ -95,6 +104,7 @@ from kelpie.core.model import Condition, ConditionKind, KelpieMark, Snapshot, St
 from kelpie.core.serde import parse_duration
 from kelpie.rules import needs_you, register
 from kelpie.rules._alerts import alert_params, check_connectors
+from kelpie.rules._block_storm import storms
 from kelpie.rules._chains import behind_lookup, behind_text
 from kelpie.rules._snoozes import SnoozeCheck, checker, describe
 from kelpie.rules._tasks import (
@@ -120,6 +130,11 @@ class StaleBlocks:
     # Rule 13 as it reaches people (kelpie.app sets it from needs_you's config while it
     # does), or None: the blocks it lists that ask a person are left to it.
     inbox: needs_you.NeedsYou | None = None
+    # Block storms (#229): this many tasks blocked on the same reason within storm_window
+    # are one outage; 0 turns it off.
+    storm_min_tasks: int = 5
+    storm_window: timedelta = timedelta(hours=2)
+    storm_mode: str = "observe"  # "observe" (a new check: logged only) or "rule": the rule's mode
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -130,6 +145,10 @@ class StaleBlocks:
         for task in snapshot.tasks:
             if task.status is Status.BLOCKED and task.block is not None:
                 actions.extend(self._check(task, snapshot, behind, listed, snoozed))
+        observe = self.storm_mode == "observe"
+        actions.extend(
+            storms(snapshot, NAME, self.storm_min_tasks, self.storm_window, observe, snoozed)
+        )
         return actions
 
     def _check(
@@ -460,6 +479,20 @@ def build(config: dict[str, Any]) -> StaleBlocks:
             kwargs[key] = None if value is False else _duration(value, key)
     if "needs_you" in config:
         kwargs["inbox"] = needs_you.hand_off(config.pop("needs_you"))
+    if "storm_min_tasks" in config:
+        value = config.pop("storm_min_tasks")
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1000:
+            raise ValueError("storm_min_tasks must be a whole number from 0 (off) to 1000")
+        if value == 1:
+            raise ValueError("storm_min_tasks must be at least 2: one blocked task is no storm")
+        kwargs["storm_min_tasks"] = value
+    if "storm_window" in config:
+        kwargs["storm_window"] = _duration(config.pop("storm_window"), "storm_window")
+    if "storm_mode" in config:
+        mode = config.pop("storm_mode")
+        if mode not in ("observe", "rule"):
+            raise ValueError('storm_mode must be "observe" or "rule" (the rule\'s own mode)')
+        kwargs["storm_mode"] = mode
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return StaleBlocks(**kwargs)

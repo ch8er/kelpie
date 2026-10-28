@@ -94,6 +94,7 @@ from typing import Any
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
+from kelpie.core.incidents import is_outage_state
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
 from kelpie.core.model import (
     Condition,
@@ -1096,7 +1097,13 @@ def _humans(inputs: ReportInputs) -> frozenset[str]:
 
 def is_chaos(state: OpenState) -> bool:
     """A state that is lost work: a chaos rule's, except loop_breaker's budget and
-    forecast states (spend against a budget, not a loop)."""
+    forecast states (spend against a budget, not a loop) and outages: a block storm is
+    rule 4's, but its hours are its tasks' (their own states, or rule 13's inbox when it
+    takes their blocks), never the storm's on top. Once a storm folds its tasks' alerts
+    they open no state of their own: those hours are missing until the report attributes
+    outages by kind (#229, track C)."""
+    if is_outage_state(state.id):
+        return False
     if state.rule == "loop_breaker":
         return session_of(state) is not None
     return state.rule in CHAOS_CAUSES

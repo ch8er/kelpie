@@ -33,6 +33,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   only when every pull request of its family is merged ([#10](https://github.com/ch8er/kelpie/pull/10), [#83](https://github.com/ch8er/kelpie/pull/83), [#109](https://github.com/ch8er/kelpie/pull/109), [#115](https://github.com/ch8er/kelpie/pull/115)).
 - `stale_blocks` (rule 4): clears a block when the outside condition it waited on is met,
   on fresh evidence only, and alerts on blocks it cannot clear ([#11](https://github.com/ch8er/kelpie/pull/11)).
+  Many tasks blocked on the same reason at once are one outage (a block storm), with the
+  person who can end it; observe-only until switched on ([#252](https://github.com/ch8er/kelpie/pull/252)).
 - `ping_pong` (rule 5): escalates a task that bounces between developer and reviewer for
   more than a set number of rounds ([#27](https://github.com/ch8er/kelpie/pull/27)).
 - `bottlenecks` (rule 6): finds idle agents behind a sequential chain, overloaded roles

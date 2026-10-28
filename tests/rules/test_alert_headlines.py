@@ -17,6 +17,7 @@ from kelpie.alerts import render
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import AlertEvent
 from kelpie.core.engine import alert_items
+from kelpie.core.incidents import is_outage_state
 from kelpie.core.model import (
     Block,
     BudgetScope,
@@ -717,8 +718,8 @@ def test_stale_blocks_counts_what_waits_as_rules_2_3_and_13_do(path: Path) -> No
     behind = behind_lookup(snapshot)
     config = incident.config if incident.rule == "stale_blocks" else {}
     for action in evaluate("stale_blocks", snapshot, config):
-        if action.kind is not ActionKind.ALERT:
-            continue
+        if action.kind is not ActionKind.ALERT or is_outage_state(action.state or ""):
+            continue  # a block storm is about many tasks (tests/rules/test_block_storm.py)
         assert action.task_id is not None
         waiting = behind(action.task_id)
         assert action.params["blocking"] == len(waiting), action
