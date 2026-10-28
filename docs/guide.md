@@ -310,15 +310,18 @@ report; no LLM is involved.
 **Before/after of fixes.** Every fix made on the report's day or the day before is measured
 over `[report] verify_window` (a day) before and after it: hours lost per day
 (only the fix's rule when it names one), tokens per day, task returns per day, review time
-(sessions of `review_roles`), sessions that failed or ended without a status, and for a
-command fix the output tokens per call. A side with fewer than `min_sample` observations,
+(sessions of `review_roles`), sessions that failed or ended without a status, tasks done
+per hour *with work available* (hours when an agent task of the fix's role was ready,
+being worked on or in review; an idle farm or one that ran out of work is not slower,
+and a person's tasks are not agent work), and for a command fix the output tokens per
+call. A side with fewer than `min_sample` observations,
 or an after-window under a quarter of the window, is labelled *direction only*; every row
 shows its sample sizes. What the report cannot separate it does not credit:
 
 - *Overlapping fixes.* Fixes less than a window apart are one group ("3 fixes within 19.0h
   of each other"), measured once from a window before the first to a window after the
   last, and credited to none of them alone. Per fix it shows only what that fix alone can
-  explain: its role's tokens and failures (and review time for a review role) when no
+  explain: its role's tokens, failures and throughput (and review time for a review role) when no
   other fix of the group touches that role or the whole farm, and its command's output
   per call when no other fix names the same command for the same role. A group that
   starts less than a window after the oldest fix the report reads says that an older fix

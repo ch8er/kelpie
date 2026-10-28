@@ -337,3 +337,35 @@ def test_the_llm_digest_credits_a_group_to_no_one_fix() -> None:
     [check] = digest(report).data["fix_checks"]
     assert check["rule"] is None and check["kind"] == "group"
     assert check["fixes_together"] == 4
+
+
+def test_throughput_counts_only_hours_with_work_available() -> None:
+    """The queue runs out after the fix (the rest waits on a person): fewer tasks a day,
+    but not slower work. Done per hour with work available stays the same."""
+    from kelpie.core.model import OwnerKind, Task
+
+    fix = FixEvent(datetime(2026, 10, 19, 12, tzinfo=UTC), MANUAL, "x", role="developer")
+    f = fix.at
+    owners = (*OWNERS, Owner("person-1", "developer", OwnerKind.HUMAN))
+    # The last ready task: queued from f-23h on, blocked on a person from f+6h.
+    queued = Task("Q", "q", Status.BLOCKED, f + 6 * H, role="developer", owner_id="dev-1")
+    sessions = [Session("q-run", "Q", "dev-1", f - 24 * H, f - 23 * H, Status.READY)]
+    done_at = [f - 23 * H + 2 * i * H for i in range(12)] + [f + H, f + 3 * H, f + 5 * H]
+    tasks = [queued]
+    for i, at in enumerate(done_at):
+        tasks.append(Task(f"D-{i}", "d", Status.DONE, at, role="developer", owner_id="dev-1"))
+        sessions.append(Session(f"d-{i}", f"D-{i}", "dev-1", at - H, at, Status.DONE))
+    # A person's task is ready the whole time: not agent work.
+    tasks.append(Task("P", "p", Status.READY, f - 30 * H, role="developer", owner_id="person-1"))
+    report = build_report(
+        inputs(fixes=(fix,), tasks=tasks, sessions=sessions, owners=owners, min_sample=3)
+    )
+    [v] = report.verifications
+    m = next(m for m in v.metrics if m.name.startswith("tasks done per hour"))
+    assert m.name.endswith("(24 of 24h -> 6 of 24h with work)")
+    assert (m.n_before, m.n_after) == (12, 3)
+    assert m.before == pytest.approx(0.5) and m.after == pytest.approx(0.5)
+    assert m.improved is None
+    assert "| tasks done per hour with work available (developer) (24 of 24h" in render_markdown(
+        report
+    )
