@@ -1,3 +1,4 @@
+import secrets
 import sqlite3
 import threading
 import urllib.request
@@ -578,3 +579,67 @@ def test_status_lists_who_may_record_a_persons_decisions(tmp_path: Path) -> None
         path.read_text().replace("[adapters.hermes]\n", "[adapters.hermes]\nenabled = false\n")
     )
     assert _human_decisions_status(load_settings(path)) == []
+
+
+MISSING = "KELPIE_TEST_UNSET_VARIABLE"
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        f'[traces]\ntoken_env = "{MISSING}"\n',
+        "[[traces.forward]]\n"
+        'endpoint = "https://example.org/v1/traces"\n'
+        f'headers_env = {{ Authorization = "{MISSING}" }}\n',
+        f'[connectors.cost_reports.anthropic]\nkind = "anthropic"\nadmin_key_env = "{MISSING}"\n',
+        f'[[alerts.channels]]\ntype = "telegram"\ntoken_env = "{MISSING}"\nchat_id = "-100123"\n',
+        f'[connectors.github]\nrepos = ["example/repo"]\ntoken_env = "{MISSING}"\n',
+        '[hub]\nlisten = "127.0.0.1:1"\nallow_plain_http = true\n'
+        f'[[hub.agents]]\nname = "laptop"\ntoken_env = "{MISSING}"\n',
+    ],
+    ids=[
+        "traces-token",
+        "forward-header",
+        "cost-report-key",
+        "alert-channel",
+        "github-token",
+        "hub-agent",
+    ],
+)
+def test_a_refused_config_opens_no_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str
+) -> None:
+    monkeypatch.delenv(MISSING, raising=False)
+    db = tmp_path / "kelpie.db"
+    path = write(tmp_path, f'[storage]\npath = "{db}"\n{section}')
+    with pytest.raises(ConfigError, match=MISSING):
+        build_app(load_settings(path))
+    assert not db.exists()
+
+
+@pytest.mark.parametrize("case", ["token-file-trust", "hub-tls-missing", "hub-tls-malformed"])
+def test_a_refused_token_file_or_tls_cert_opens_no_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, case: str
+) -> None:
+    db = tmp_path / "kelpie.db"
+    token = secrets.token_hex(32)
+    if case == "token-file-trust":
+        token_file = tmp_path / "traces.env"
+        token_file.write_text(f"KELPIE_TRACES_TOKEN={token}\n")
+        token_file.chmod(0o660)  # others (the group) may write to it
+        section, message = f'[traces]\ntoken_file = "{token_file}"\n', r"\[traces\] token_file"
+    else:
+        monkeypatch.setenv("KELPIE_TEST_AGENT_TOKEN", token)
+        pem = tmp_path / "hub.pem"
+        if case == "hub-tls-malformed":
+            pem.write_text("-----BEGIN CERTIFICATE-----\nnot a certificate\n")
+        section = (
+            f'[hub]\nlisten = "127.0.0.1:1"\ntls_cert = "{pem}"\ntls_key = "{pem}"\n'
+            '[[hub.agents]]\nname = "laptop"\ntoken_env = "KELPIE_TEST_AGENT_TOKEN"\n'
+        )
+        message = "cannot load tls_cert"
+    path = write(tmp_path, f'[storage]\npath = "{db}"\n{section}')
+    with pytest.raises(ConfigError, match=message) as refused:
+        build_app(load_settings(path))
+    assert not db.exists()
+    assert token not in str(refused.value) and token not in caplog.text

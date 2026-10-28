@@ -117,7 +117,7 @@ from kelpie.core.storage import (
 from kelpie.metrics import Metrics
 from kelpie.remote.config import AgentSettings, HubSettings, load_agent, load_hub
 from kelpie.remote.farm import RemoteFarm
-from kelpie.remote.hub import Hub, HubServer, HubService
+from kelpie.remote.hub import Hub, HubServer, HubService, server_context
 from kelpie.report.config import ReportSettings, load_report
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
@@ -1631,12 +1631,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         ),
     ]:
         log.warning(warning)
-    try:
-        store: LedgerStore = (
-            MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
-        )
-    except (OSError, sqlite3.Error, RuntimeError) as exc:
-        raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
+    # Everything build_app refuses a config for is checked before any storage is opened, so
+    # a kelpie serve that will not start leaves no database behind. Ports are found taken
+    # only when bound: the hub's at the end of build_app, the main listener's after it.
     traces = settings.traces
     try:
         # With [hub] this port takes no spans: its token (or token file) is not needed.
@@ -1664,11 +1661,35 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
     hub = _build_hub(settings, adapters, clock)
+    enrich, connectors = connector_steps(settings, metrics, clock)
+    costs_source = cost_report_source(settings)  # kelpie serve only: reads with the admin key
+    tokens = None
+    if traces.enabled and traces.token_file is not None and settings.hub is None:
+        try:  # also refuses a file others could have written (owner, mode, folders)
+            tokens = TokenFile(
+                traces.token_file,
+                traces.token_env,
+                clock,
+                on_error=lambda why: log.error("[traces] token_file %s", why),
+            )
+        except TokenFileError as exc:
+            raise ConfigError(f"[traces] token_file {exc}") from None
+        if loose_mode(traces.token_file):
+            log.warning(
+                "[traces] token_file %s can be read by others than its owner: chmod 600 it",
+                traces.token_file,
+            )
+        metrics.token_file = tokens.status
+    try:
+        store: LedgerStore = (
+            MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
+        )
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
-    enrich, connectors = connector_steps(settings, metrics, clock)
-    costs = cost_report_steps(settings, metrics)  # kelpie serve only: reads with the admin key
+    costs = cost_report_steps(settings, metrics, costs_source)
     enrich += costs
     engine = Engine(
         loaded.rules,
@@ -1730,23 +1751,6 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "OTLP ingest on /v1/traces accepts spans without a token; set $%s",
             traces.token_env,
         )
-    tokens = None
-    if traces.token_file is not None and settings.hub is None:
-        try:
-            tokens = TokenFile(
-                traces.token_file,
-                traces.token_env,
-                clock,
-                on_error=lambda why: log.error("[traces] token_file %s", why),
-            )
-        except TokenFileError as exc:
-            raise ConfigError(f"[traces] token_file {exc}") from None
-        if loose_mode(traces.token_file):
-            log.warning(
-                "[traces] token_file %s can be read by others than its owner: chmod 600 it",
-                traces.token_file,
-            )
-        metrics.token_file = tokens.status
     ingest = TraceIngest(
         store=span_store,
         clock=clock,
@@ -1836,9 +1840,15 @@ def _build_hub(
         tokens = settings.hub.tokens()
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    if not settings.hub.tls:
+    tls = None
+    if settings.hub.tls:
+        try:  # a cert or key that does not load is refused before any storage is opened
+            tls = server_context(settings.hub)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+    else:
         log.warning("[hub] takes agents over plain http: their tokens cross the network in clear")
-    return Hub(settings.hub, tokens, clock)
+    return Hub(settings.hub, tokens, clock, tls)
 
 
 def _with_hub(app: App, hub: Hub | None, traces: TraceIngest | None = None) -> App:
@@ -2108,12 +2118,12 @@ def reconcile_spend(
     return reconcile(costs, estimated, thresholds, scopes)
 
 
-def cost_report_steps(
-    settings: Settings, metrics: Metrics | None = None
-) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+def cost_report_source(settings: Settings) -> CostReportReader | None:
+    """The reader of ``[connectors.cost_reports]`` (None without it); ConfigError when an
+    admin key is missing. Opens nothing."""
     reports = settings.cost_reports
     if reports is None:
-        return []
+        return None
     try:
         source = reports.build()
     except ValueError as exc:
@@ -2122,6 +2132,21 @@ def cost_report_steps(
         log.info(
             "[connectors.cost_reports.%s] admin key read from $%s", r.provider, r.admin_key_env
         )
+    return source
+
+
+def cost_report_steps(
+    settings: Settings,
+    metrics: Metrics | None = None,
+    source: CostReportReader | None = None,
+) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+    """The cost report step, with its store opened (``source``: from
+    :func:`cost_report_source`, built here when not given)."""
+    if settings.cost_reports is None:
+        return []
+    if source is None:
+        source = cost_report_source(settings)
+    assert source is not None
     try:
         store = SqliteCostReports(settings.db_path) if settings.db_path is not None else None
     except (OSError, sqlite3.Error, RuntimeError) as exc:
