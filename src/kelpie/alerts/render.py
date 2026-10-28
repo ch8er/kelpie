@@ -80,6 +80,7 @@ MAX_NOTE = 140  # characters of "Needed" and of a headline taken from the reason
 MAX_HEADLINE = 100  # a rule's own headline (kelpie.rules._alerts)
 MAX_TITLE = 120
 MAX_ID = 100
+MAX_TASK_ID = 64  # characters of a task id that a task_url template must still fit
 MAX_REASON = 1000  # characters of the reason shown
 MAX_DID = 1500
 MAX_URL = 600
@@ -170,8 +171,13 @@ def plain_http_url(url: object) -> str | None:
 
 
 def check_task_url(value: object, where: str = "[alerts] task_url") -> str:
-    """A link template: an http(s) URL containing ``{id}``; a ``ValueError`` names the key."""
-    return check_url_template(value, "{id}", where)
+    """A link template: an http(s) URL containing ``{id}``, still at most ``MAX_URL``
+    characters once a ``MAX_TASK_ID``-character id fills it (a sanity bound: a URL-quoted
+    id can be longer); a ``ValueError`` names the key."""
+    url = check_url_template(value, "{id}", where)
+    if plain_http_url(url.replace("{id}", "x" * MAX_TASK_ID)) is None:
+        raise ValueError(f"{where} is too long once a {MAX_TASK_ID}-character id fills {{id}}")
+    return url
 
 
 def check_url_template(value: object, placeholder: str, where: str) -> str:

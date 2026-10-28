@@ -1475,7 +1475,7 @@ report's own text stays English.
 | `dedup_window` | `"10m"` | duration, >= 0 | Identical alerts within this window are sent once per channel. |
 | `queue_size` | `50` | count, 1 to 1000 | Per channel; alerts that do not fit are dropped and counted. |
 | `language` | `"en"` | `en` \| `ru` | Language of Kelpie's own words in an alert (headlines, labels, units, "Kelpie did"). Text that rules and agents wrote is shown as it is. Any other value stops startup. |
-| `task_url` | `[report] task_url` | http(s) URL with `{id}` | The "Open task" link of each task in an alert; the id is URL-quoted into `{id}`, which must not be in the host. Unset: `[report] task_url`, or no links when that is unset too. |
+| `task_url` | `[report] task_url` | http(s) URL with `{id}` | The "Open task" link of each task in an alert; the id is URL-quoted into `{id}`, which must not be in the host. At most 600 characters once a 64-character id fills `{id}`. Unset: `[report] task_url`, or no links when that is unset too. |
 | `channels` | `[]` | array of tables | `[[alerts.channels]]`, see below. Names must be unique. |
 
 Telegram channel (`type = "telegram"`):

@@ -706,7 +706,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # retry_horizon = "15m"     # how long a transient failure is retried before the alert is lost
 # language = "en"           # en | ru: Kelpie's own words in alerts; agents' text is shown as is
 # task_url = "https://board.example.org/tasks/{id}"  # "Open task" link per task; http(s) and
-#                           # {id} required. Unset: [report] task_url, if it is an http(s) URL
+#                           # {id} required, not in the host. Unset: [report] task_url
 #
 # [[alerts.channels]]
 # type = "telegram"
@@ -744,6 +744,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # at = "00:15"                     # kelpie serve runs yesterday's report at this local time
 # dir = "/var/lib/kelpie/reports"  # writes kelpie-report-<date>.md; unset: stdout only
 # task_url = "https://board.example.org/tasks/{id}"  # links task ids in the Markdown
+#                                  # (http(s), {id} required, not in the host)
 # url = "https://reports.example.org/kelpie-report-{date}.md"  # the summary's "Open report"
 #                                  # link (http(s), {date} = YYYY-MM-DD); unset: no link
 # hour_usd = 2.5                   # what a stuck task-hour costs; unset: hours stay hours

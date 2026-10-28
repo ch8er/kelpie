@@ -34,7 +34,6 @@ KEYS = frozenset(
     }
 )
 SEVERITIES = ("info", "warning", "critical")
-MAX_TASK_ID = 64  # characters of a task id that [report] task_url must still fit
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,11 +94,6 @@ def load_report(section: Any) -> ReportSettings:
     url = section.get("task_url")
     if url is not None:
         check_task_url(url, "[report] task_url")
-        # as for url below: the link must still fit once a (URL-quoted) id fills {id}
-        if plain_http_url(url.replace("{id}", "x" * MAX_TASK_ID)) is None:
-            raise ValueError(
-                f"[report] task_url is too long once a {MAX_TASK_ID}-character id fills {{id}}"
-            )
     report_url = section.get("url")
     if report_url is not None:
         check_url_template(report_url, "{date}", "[report] url")

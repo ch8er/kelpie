@@ -2715,8 +2715,6 @@ def _alerts_status(alerts: AlertSettings) -> list[str]:
     problems = alerts.problems()
     lines = [f"alerts:   {c.name}: {c.describe()}" for c in alerts.channels]
     lines += [f"alerts:   NOT ready: {p}" for p in problems]
-    if alerts.links_note:
-        lines.append(f"alerts:   task links: off ({alerts.links_note})")
     return lines
 
 
