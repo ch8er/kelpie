@@ -9,8 +9,9 @@ observe to act, or dry-run turned off), or an output filter that appeared in tra
 
 Each fix is measured over ``window`` before it and the same length after it (shorter when
 the report ends sooner): hours lost per day (chaos states counted exactly like the report's
-cost of chaos, condition-hours and for forgotten holds idle agent-hours; only the fix's
-rule when it names one), tokens per day (the fix's
+cost of chaos: task-hours, each once, and for forgotten holds idle agent-hours; only the
+fix's rule when it names one, its own task-hours whatever another rule also saw), tokens
+per day (the fix's
 role when it names one), returns per day, review time
 (mean session length of ``review_roles``), sessions that failed or ended without a final
 status, and for a command fix the output tokens per call of that command. A side with fewer
@@ -164,13 +165,16 @@ class Evidence:
     known_from: datetime | None = None
     review_roles: tuple[str, ...] = DEFAULT_REVIEW_ROLES
     # How the report counts a chaos state: its cause (a rule, or "bottlenecks:hold") and
-    # its hours lost in a window (condition-hours, idle agent-hours for holds).
+    # its hours lost in a window (task-hours, idle agent-hours for holds).
     cause: Callable[[OpenState], str] = lambda s: s.rule
     # When a state starts counting (a person's inbox: when it opened, see the report).
     start: Callable[[OpenState], datetime] = lambda s: max(s.since, s.opened_at)
     hours: Callable[[OpenState, datetime, datetime], float] = lambda s, lo, hi: (
         (hi - lo).total_seconds() / 3600
     )
+    # The hours lost of several states in a window, each task-hour once, as the report
+    # counts them (#228); None: the sum of ``hours`` per state.
+    lost: Callable[[Sequence[OpenState], datetime, datetime], float] | None = None
 
 
 def mode_events(entries: Iterable[LedgerEntry]) -> list[FixEvent]:
@@ -397,6 +401,9 @@ def _stuck(
     nb = sum(n for c, (_, n) in cb.items() if c not in new)
     ha = sum(h for c, (h, _) in ca.items() if c not in new)
     na = sum(n for c, (_, n) in ca.items() if c not in new)
+    if ev.lost is not None:  # a task-hour once, as the report counts it (#228)
+        kept = [r.state for r in ev.states if counts(r.state) and ev.cause(r.state) not in new]
+        hb, ha = ev.lost(kept, *b), ev.lost(kept, *a)
     if scoped:
         name = f"hours lost per day ({md.text(event.rule or '')})"
     elif event.rule:  # a rule without chaos states: all causes, and the name says so

@@ -223,28 +223,27 @@ report; no LLM is involved.
 - **Cost of chaos, hours**: long-lived alert states of the rules that describe stuck work
   (ownerless tasks, blocks that outlived their cause, waits past their limit, review
   ping-pong, idle capacity behind bottlenecks and human gates, runaway loops, activity
-  without progress),
-  from when Kelpie first reported the condition to when it last saw it, clipped to the
-  day (a lower bound: a grace period or an allowed wait is not counted). The unit is
-  task-hours, each counted once: when several rules see the same task at the same time
-  (rule 13 lists it as waiting on a person while rule 4 holds a stale block on it, or one
-  rule has two conditions on it), the hour counts under the first of a person's inbox, a
-  stale block, then the others in table order, and the others' overlapping hours are
-  listed under "Also seen, not added" (the headline is the sum of the lines). Two causes
-  are in agent-hours instead: forgotten holds (rule 6) count
-  the idle agent-hours behind them, from the idle agents rule 6 reports while the hold
-  stays open, and a person's inbox (rule 13) counts the agent-hours of the agent tasks
-  waiting on them (approvals, human tasks); a human gate rule 6 also reports counts
-  in both lines. Cards stuck in a pre-work status such as
-  triage or scheduled while other tasks wait on them (rule 3) are a line of their own; a
-  card rule 3 finds stuck (past `prework_after`, not held, ignored or queued behind its own
-  parent) that nothing waits on is listed under "Stuck, blocking nothing" with its age, and
-  not counted in the hours or dollars (it delays no work). Agent tasks planned for later
-  (not started: a pre-work status or a planned label; incident 20) never count as waiting:
-  rule 13 leaves them out of its count, and those behind a person's open inbox are listed
-  under "Planned waits" in agent-hours, never counted.
-  Humans (owners of kind `human`) never count as idle agents. `[report] hour_usd` prices
-  them all.
+  without progress), from when Kelpie first reported the condition to when it last saw it,
+  clipped to the day (a lower bound: a grace period or an allowed wait is not counted).
+  The unit is task-hours, each counted once: when several rules see the same task at the
+  same time (rule 13 lists it as waiting on a person while rule 4 holds a stale block on
+  it, or one rule has two conditions on it), the hour counts under the first of a person's
+  inbox, a stale block, then in this order: an ownerless task, a wait past its limit, an
+  exit without a final status, review ping-pong, idle capacity, a card stuck before work,
+  a runaway loop, activity without progress; the others' overlapping hours are listed
+  under "Also seen, not added" (the headline is the sum of the lines). Two causes are in
+  agent-hours instead: forgotten holds (rule 6) count the idle agent-hours behind them,
+  from the idle agents rule 6 reports while the hold stays open, and a person's inbox
+  (rule 13) counts the agent-hours of the agent tasks waiting on them (approvals, human
+  tasks); a human gate rule 6 also reports counts in both lines. Cards stuck in a pre-work
+  status such as triage or scheduled while other tasks wait on them (rule 3) are a line of
+  their own; a card rule 3 finds stuck (past `prework_after`, not held, ignored or queued
+  behind its own parent) that nothing waits on is listed under "Stuck, blocking nothing"
+  with its age, and not counted in the hours or dollars (it delays no work). Agent tasks
+  planned for later (not started: a pre-work status or a planned label; incident 20) never
+  count as waiting: rule 13 leaves them out of its count, and those behind a person's open
+  inbox are listed under "Planned waits" in agent-hours, never counted. Humans (owners of
+  kind `human`) never count as idle agents. `[report] hour_usd` prices them all.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
   flagged, and by every session `exit_contract` requeued (a restart). Spend follows each
   provider's spend mode (`[spend]`): with an API key, dollars (`[prices]` over Kelpie's

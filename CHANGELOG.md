@@ -397,8 +397,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   ([#242](https://github.com/ch8er/kelpie/issues/242)).
 - The cost of chaos counts a stuck task-hour once: rule 13 listing a task as waiting on a
   person while rule 4 holds a stale block on it counted the same hours twice, inflating the
-  headline (incident 20). The first of a person's inbox, a stale block, then the other
-  causes counts it; the others' overlapping hours are listed as "also seen", not added
+  headline (incident 20). Each hour counts under one cause, in a fixed order: a person's
+  inbox first, then a stale block, then the rest. The other causes' overlapping hours are
+  listed as "also seen", not added; before/after checks count the same way
   ([#228](https://github.com/ch8er/kelpie/issues/228)).
 - Kelpie's blocks, parks and wakes on a Hermes board showed up as written by the profile
   Kelpie runs under (`default`): they are signed `kelpie` now, like its comments, and the name

@@ -136,9 +136,9 @@ def test_mode_changes_come_from_the_ledger() -> None:
     )
 
 
-def _state(rule: str, since: datetime, last: datetime) -> StateRow:
+def _state(rule: str, since: datetime, last: datetime, task: str = "T-1") -> StateRow:
     return StateRow(
-        OpenState(f"{rule}:x{since:%H}", rule, since, since, last, 0, Severity.WARNING, "s", "T-1")
+        OpenState(f"{rule}:x{since:%H}", rule, since, since, last, 0, Severity.WARNING, "s", task)
     )
 
 
@@ -146,7 +146,7 @@ def test_stuck_hours_of_the_fixed_rule() -> None:
     states = (
         _state("stale_blocks", FIX - timedelta(hours=12), FIX),  # 12h before
         _state("stale_blocks", FIX + timedelta(hours=2), FIX + timedelta(hours=3)),  # 1h after
-        _state("orphan_status", FIX + timedelta(hours=1), FIX + timedelta(hours=9)),
+        _state("orphan_status", FIX + timedelta(hours=1), FIX + timedelta(hours=9), "T-2"),
     )
     event = FixEvent(FIX, MANUAL, "conditions for CI blocks", rule="stale_blocks")
     report = build_report(inputs(fixes=(event,), states=states))
@@ -564,3 +564,17 @@ def test_every_kelpie_fix_error_leaves_stdout_empty(
     for (out, err, code), expected in results:
         assert (out, code) == ("", expected), err
         assert err.startswith("kelpie: ") and err.endswith("\n")
+
+
+def test_hours_lost_count_a_task_hour_once_like_the_report() -> None:
+    # T-1 ownerless 1h-9h after the fix, its block stale 2h-3h: 8 task-hours, not 9 (#228)
+    states = (
+        _state("stale_blocks", FIX + timedelta(hours=2), FIX + timedelta(hours=3)),
+        _state("orphan_status", FIX + timedelta(hours=1), FIX + timedelta(hours=9)),
+    )
+    everything = build_report(inputs(states=states))
+    assert metric(everything, "hours lost").after == pytest.approx(8)
+    # the fixed rule's own hours, whatever another rule also saw
+    event = FixEvent(FIX, MANUAL, "conditions for CI blocks", rule="stale_blocks")
+    scoped = build_report(inputs(fixes=(event,), states=states))
+    assert metric(scoped, "hours lost").after == pytest.approx(1)

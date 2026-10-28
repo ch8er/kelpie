@@ -117,11 +117,13 @@ def digest(report: DailyReport) -> Digest:
                 "rule": _name(c.rule),
                 "cause": c.cause if c.cause in _CAUSES else "other",
                 "hours": _num(c.hours),
+                # the rule's own hours an earlier cause counted (never added to the total)
+                "also_hours": _num(c.also_hours),
                 "usd": _num(c.spend.usd) if report.priced else None,
                 "tasks": len(c.tasks),
                 "examples": [tasks(t) for t in c.tasks[:MAX_IDS]],
             }
-            for c in report.chaos[:MAX_ITEMS]
+            for c in [c for c in report.chaos if c.hours > 0 or c.spend.tokens][:MAX_ITEMS]
         ],
         "actions": [
             {

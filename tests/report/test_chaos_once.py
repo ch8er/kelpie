@@ -5,18 +5,28 @@ are shown as "also seen", never added."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from kelpie.report.daily import CHAOS_PRECEDENCE, PEOPLE, build_report, render_markdown
+from kelpie.report.daily import (
+    CHAOS_CAUSES,
+    CHAOS_PRECEDENCE,
+    PEOPLE,
+    PREWORK,
+    build_report,
+    render_markdown,
+)
+from kelpie.report.store import StateRow
 from tests.report.test_daily import at, day_inputs, inbox_sample, opened
 
 
-def stale(task: str, start: tuple[int, int], end: tuple[int, int]) -> object:
+def stale(task: str, start: tuple[int, int], end: tuple[int, int]) -> StateRow:
     return opened(f"stale_blocks:{task}:block", "stale_blocks", at(*start), at(*start),
                   at(*end), task)  # fmt: skip
 
 
-def inbox(end: int = 17) -> object:
+def inbox(end: int = 17) -> StateRow:
     return opened("needs_you:human-owner", "needs_you", at(9), at(9), at(end), "H-1")
 
 
@@ -91,8 +101,6 @@ def test_waits_past_the_listed_ids_still_count() -> None:
     # rule 13 counts 25 waiting tasks but lists 20: the 5 it cannot name add up as they are
     sample = inbox_sample(at(9), [f"A-{i}" for i in range(20)])
     counted = sample.params | {"waiting_agent_tasks": 25}
-    from dataclasses import replace
-
     report = build_report(
         day_inputs(states=[inbox(), stale("A-0", (9, 0), (17, 0))],
                    actions=[replace(sample, params=counted)])
@@ -104,6 +112,61 @@ def test_waits_past_the_listed_ids_still_count() -> None:
 
 def test_a_person_comes_first_then_a_stale_block() -> None:
     assert CHAOS_PRECEDENCE[:2] == (PEOPLE, "stale_blocks")
-    from kelpie.report.daily import CHAOS_CAUSES
-
     assert sorted(CHAOS_PRECEDENCE) == sorted(CHAOS_CAUSES)
+
+
+def test_a_task_behind_two_people_counts_once() -> None:
+    lead = opened("needs_you:human-lead", "needs_you", at(9), at(9), at(17), "H-2")
+    samples = [inbox_sample(at(9), ["A-1"]), inbox_sample(at(9), ["A-1"], person="human-lead")]
+    [line] = build_report(day_inputs(states=[inbox(), lead], actions=samples)).chaos
+    assert line.rule == PEOPLE and line.hours == pytest.approx(8.0)  # was 16 before #228
+
+
+def test_a_wait_on_a_person_and_a_block_on_the_human_task_both_count() -> None:
+    # A-1 waits on the person; the human task H-1 itself has a stale block: two tasks
+    report = build_report(
+        day_inputs(states=[inbox(), stale("H-1", (9, 0), (17, 0))],
+                   actions=[inbox_sample(at(9), ["A-1"])])
+    )  # fmt: skip
+    assert report.chaos_hours == pytest.approx(16.0)
+    assert all(c.also_hours == 0 for c in report.chaos)
+
+
+def test_an_ownerless_card_comes_before_its_stuck_before_work_line() -> None:
+    card = "orphan_status:stuck-before-work:T-5:2026-03-02T06:00:00+00:00"
+    stuck = opened(card, "orphan_status", at(6), at(8), at(12), "T-5")
+    ownerless = opened("orphan_status:T-5", "orphan_status", at(9), at(9), at(10), "T-5")
+    lines = {c.rule: c for c in build_report(day_inputs(states=[stuck, ownerless])).chaos}
+    assert lines["orphan_status"].hours == pytest.approx(1.0)
+    assert lines[PREWORK].hours == pytest.approx(3.0)
+    assert lines[PREWORK].also_hours == pytest.approx(1.0)
+
+
+def test_a_session_state_counts_on_its_task() -> None:
+    session = opened("no_progress:S-1", "no_progress", at(10), at(10), at(14), "T-2")
+    lines = {c.rule: c for c in build_report(
+        day_inputs(states=[stale("T-2", (9, 0), (17, 0)), session])
+    ).chaos}  # fmt: skip
+    assert lines["stale_blocks"].hours == pytest.approx(8.0)
+    assert lines["no_progress"].hours == 0 and lines["no_progress"].also_hours == 4.0
+
+
+def test_a_line_whose_hours_were_all_counted_earlier_gets_no_advice() -> None:
+    report = build_report(
+        day_inputs(states=[inbox(), stale("A-1", (9, 30), (17, 0))],
+                   actions=[inbox_sample(at(9), ["A-1"])])
+    )  # fmt: skip
+    titles = [a.title for a in report.recommendations]
+    assert not any("blocks that outlived their cause" in t for t in titles)
+    assert all(a.hours > 0 or a.usd > 0 for a in report.recommendations)
+
+
+def test_the_root_cause_digest_carries_the_overlap() -> None:
+    from kelpie.report.root_cause import digest
+
+    report = build_report(
+        day_inputs(states=[inbox(), stale("A-1", (9, 30), (17, 0))],
+                   actions=[inbox_sample(at(9), ["A-1"])])
+    )  # fmt: skip
+    lost = digest(report).data["hours_lost"]
+    assert [x["hours"] for x in lost] == [pytest.approx(8.0)]  # the 0 h line is left out
