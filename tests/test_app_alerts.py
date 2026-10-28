@@ -103,9 +103,8 @@ def test_alert_language_and_task_link_come_from_config(tmp_path: Path) -> None:
     )
     assert load_settings(path).alerts.rendering.task_url == "https://board.example.org/t/{id}"
     path.write_text(path.read_text().replace("https://board.example.org/t/{id}", "board://{id}"))
-    settings = load_settings(path)
-    status = render_status(settings, load_rules(settings.engine))
-    assert "alerts:   task links: off ([report] task_url is not an http(s) URL" in status
+    with pytest.raises(ConfigError, match=r"\[report\] task_url must be an http\(s\) URL"):
+        load_settings(path)
     with pytest.raises(ConfigError, match=r"\[alerts\] language"):
         load_settings(write(tmp_path, extra='language = "de"'))
     with pytest.raises(ConfigError, match=r"\[alerts\] task_url"):
