@@ -60,6 +60,8 @@ include = [
     "/Dockerfile",
     "/docker-compose.yml",
     "/.env.example",
+    "/.dockerignore",
+    "/uv.lock",
 ]
 
 [tool.ruff]

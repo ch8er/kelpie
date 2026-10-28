@@ -55,7 +55,8 @@ spool = "~/.claude/kelpie/spool.jsonl"  # written by the hook (step 4)
 `tasks_dir` defaults to `~/.claude/tasks`; change it to `$CLAUDE_CONFIG_DIR/tasks` if your
 sessions set `CLAUDE_CONFIG_DIR`. The list's directory appears when the first session with
 that `CLAUDE_CODE_TASK_LIST_ID` creates a task; until then `kelpie status` shows the adapter
-as not readable and `kelpie doctor` fails "task lists" and "hooks fire".
+as not readable and `kelpie doctor` fails `claude code task lists` (and `claude code hooks
+fire` until the hook has written to the spool).
 
 ## 4. The hook
 

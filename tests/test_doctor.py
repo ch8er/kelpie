@@ -141,7 +141,7 @@ def test_an_adapter_token_that_is_not_set_is_one_failure_not_a_crash(
     (check,) = run_checks(path, environ={})
     assert (check.status, check.name) == ("FAIL", "config loads")
     assert f"${variable} is not set" in check.detail
-    assert "set the variable" in check.fix
+    assert "export the variable" in check.fix
 
 
 def test_no_hermes_section_skips_the_board_checks() -> None:

@@ -1197,7 +1197,7 @@ def run_checks(
     try:  # built once: the modes check and the platform checks
         adapters = build_adapters(settings)
     except ConfigError as exc:  # e.g. an adapter's token_env names an unset variable
-        fix = "set the variable it names, or fix the config; kelpie status shows what it parsed"
+        fix = "export the variable it names, or fix the config"
         return [_fail("config loads", str(exc), fix)]
     checks = [
         _pass("config loads", f"{settings.source or 'defaults'}, {len(loaded.rules)} rules"),
