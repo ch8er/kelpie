@@ -367,6 +367,7 @@ mode `0600`. Hooks never raise and do no network I/O.
 | `task_runs` row | `Session` `hermes-run-<id>` |
 | spool `tool` lines | `Span(kind=tool)` linked to the session and task, built by `kelpie.traces.hooks` with a task span and a session span around them; `tool_call_id` kept as `gen_ai.tool.call.id` |
 | a profile's `state.db`: a foreground `terminal` call that waits | `SessionWait` (see [Waits inside sessions](#waits-inside-sessions)) |
+| a profile's `state.db`: a session's tokens (`session_model_usage`, else `sessions` totals) | `SessionUsage` per session and model (see [Token usage](#token-usage)) |
 
 Blocks (`Block.reason`), from a `blocked` event at or after `status_since`:
 
@@ -437,6 +438,19 @@ skipped; the board is read all the same.
 With several boards of one home (`[[adapters.hermes.boards]]`) the profiles' `state.db` are
 read once per snapshot, for every board's tasks and runs. On a multi-host farm the waits stay on the host that reads them: `kelpie agent` does not
 relay them to the hub yet.
+
+### Token usage
+
+The same `state.db` totals each session's tokens: per model in `session_model_usage`
+(summed over its billing and task rows), else the session's own columns and `model`. Kelpie
+reads the sessions of `state_sources` active within `lookback`, read-only, with the waits,
+and gives one `SessionUsage` per session and model: on the same id as its waits (the run
+it worked in, else `hermes-session-<profile>-<id>`), with `platform_session_id` (Hermes' id,
+for spans of the same session), the task, the profile as `owner_id` and its role. Token
+fields follow `Span`: `input_tokens` is Hermes' uncached input plus cache reads and writes,
+`cached_tokens` the reads. A record is the session's total up to `last_at`
+(`per_session_total`): Hermes keeps no per-call counts. The daily report uses them for
+spend per role where traces carry no task (issue #197, item 1).
 
 ### Progress note and git state
 

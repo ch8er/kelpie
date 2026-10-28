@@ -295,6 +295,34 @@ class SessionWait:
     source: str | None = None  # name of the platform adapter that reported it
 
 
+@dataclass(frozen=True, slots=True)
+class SessionUsage:
+    """Token usage of one agent session and model, as its platform recorded it (item 1 of
+    #197: on Hermes, each profile's state.db). Totals of the whole session up to ``last_at``,
+    not of a day (``per_session_total``); token fields follow :class:`Span`: input includes
+    the cached tokens."""
+
+    # A Snapshot session's id when matched (the run it worked in), else the platform's
+    # (Hermes: hermes-session-<profile>-<id>), as for SessionWait.
+    session_id: str
+    platform_session_id: str  # the platform's own id: spans with this session_id are the same
+    started_at: datetime
+    last_at: datetime  # last activity (else the end, else the start)
+    model: str | None = None
+    ended_at: datetime | None = None
+    task_id: str | None = None
+    role: str | None = None  # the agent's role (Hermes: the profile's)
+    owner_id: str | None = None  # the agent (Hermes: the profile)
+    input_tokens: int = 0  # cached ones included, as Span.input_tokens
+    output_tokens: int = 0
+    cached_tokens: int = 0  # cache reads
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    calls: int = 0  # model API calls
+    per_session_total: bool = True  # the session's total, not split by time
+    source: str | None = None  # name of the platform adapter that reported it
+
+
 class SpanKind(StrEnum):
     TASK = "task"
     SESSION = "session"
@@ -750,6 +778,9 @@ class Snapshot:
     spans: tuple[Span, ...] = ()
     # Waits inside sessions, from the platform's own record of its commands (rule 2).
     waits: tuple[SessionWait, ...] = ()
+    # Token usage per agent session and model, from the platform's own record (the report's
+    # per-role spend where traces carry no task).
+    usage: tuple[SessionUsage, ...] = ()
     # Aggregates over a longer window than ``spans`` (see ``[traces] totals_window``).
     span_totals: tuple[SpanTotals, ...] = ()
     # Budget state per budget and subject ([[budgets]]), computed when the snapshot is

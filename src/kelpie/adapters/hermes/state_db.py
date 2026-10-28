@@ -108,6 +108,25 @@ class Wait:
 
 
 @dataclass(frozen=True, slots=True)
+class Usage:
+    """Token usage of one Hermes session and model, as ``state.db`` totals it."""
+
+    profile: str
+    session: str  # Hermes' session id in that profile's state.db
+    cwd: str | None
+    model: str | None
+    started: datetime
+    last: datetime  # last activity, else the end, else the start
+    ended: datetime | None
+    input_tokens: int  # uncached, as Hermes counts it
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    reasoning_tokens: int
+    calls: int
+
+
+@dataclass(frozen=True, slots=True)
 class Shape:
     """What :func:`wait_shape` finds in a command."""
 
@@ -141,6 +160,89 @@ def read_waits(
         except Exception as exc:  # whatever a database holds must not stop the board's read
             warn_once((str(path), "state"), "hermes: cannot read %s: %s", path, exc)
     return waits
+
+
+def read_usage(
+    home: Path, since: datetime, sources: Collection[str] = DEFAULT_SOURCES
+) -> list[Usage]:
+    """Token usage of the sessions of every profile active since ``since`` (item 1 of #197):
+    per session and model from Hermes' ``session_model_usage`` where it has rows, else the
+    session's own totals and model. Totals of the whole session, not of a day."""
+    usage: list[Usage] = []
+    for profile, path in state_dbs(home):
+        try:
+            usage += _read_usage(profile, path, since, sources)
+        except Exception as exc:  # whatever a database holds must not stop the board's read
+            warn_once((str(path), "usage"), "hermes: cannot read usage in %s: %s", path, exc)
+    return usage
+
+
+_TOKENS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+_COUNTS = (*_TOKENS, "reasoning_tokens", "api_call_count")
+
+
+def _read_usage(profile: str, path: Path, since: datetime, sources: Collection[str]) -> list[Usage]:
+    conn = sqlite3.connect(
+        path.resolve().as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000
+    )
+    try:
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA query_only=1")
+        conn.execute("BEGIN")  # one read transaction: a consistent view
+        columns = _columns(conn, "sessions")
+        where, args, active = _session_filter(columns, since.timestamp(), sources)
+        have = [c for c in _COUNTS if c in columns]
+        picked = ", ".join(
+            f"{c}" if c in columns else "NULL"
+            for c in ("cwd", "model", "started_at", "ended_at", "last_activity_at")
+        )
+        totals = ", ".join(f"COALESCE({c}, 0)" if c in have else "0" for c in _COUNTS)
+        sessions = {
+            str(r[0]): r[1:]
+            for r in conn.execute(
+                f"SELECT id, {picked}, {totals} FROM sessions WHERE {where} "
+                f"ORDER BY {active} DESC LIMIT ?",
+                (*args, MAX_SESSIONS),
+            )
+        }
+        per_model: dict[str, list[tuple[Any, ...]]] = {}
+        if sessions and _columns(conn, "session_model_usage") >= {"session_id", "model", *_COUNTS}:
+            for chunk in _chunks(sorted(sessions)):
+                marks = ",".join("?" * len(chunk))
+                sums = ", ".join(f"SUM({c})" for c in _COUNTS)
+                for row in conn.execute(
+                    f"SELECT session_id, model, {sums} FROM session_model_usage "
+                    f"WHERE session_id IN ({marks}) GROUP BY session_id, model",
+                    chunk,
+                ):
+                    per_model.setdefault(str(row[0]), []).append(row[1:])
+    finally:
+        conn.close()
+    out = []
+    for sid, (cwd, model, started_raw, ended_raw, last_raw, *counts) in sessions.items():
+        started = _epoch(started_raw)
+        if started is None:
+            continue
+        ended = _epoch(ended_raw)
+        last = _epoch(last_raw) or ended or started
+        rows = per_model.get(sid) or [(model, *counts)]
+        for m, *n in rows:
+            numbers = [int(x) if isinstance(x, int | float) and x > 0 else 0 for x in n]
+            if not any(numbers):
+                continue
+            out.append(
+                Usage(
+                    profile,
+                    sid,
+                    cwd if isinstance(cwd, str) and cwd else None,
+                    str(m) if m else None,
+                    datetime.fromtimestamp(started, UTC),
+                    datetime.fromtimestamp(max(last, started), UTC),
+                    None if ended is None else datetime.fromtimestamp(ended, UTC),
+                    *numbers,
+                )
+            )
+    return out
 
 
 def _read_db(profile: str, path: Path, since: datetime, sources: Collection[str]) -> list[Wait]:
@@ -186,11 +288,11 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def _sessions(
-    conn: sqlite3.Connection, start: float, sources: Collection[str]
-) -> dict[str, str | None]:
-    """Session id -> working directory, of the sessions active since ``start``."""
-    columns = _columns(conn, "sessions")
+def _session_filter(
+    columns: Collection[str], start: float, sources: Collection[str]
+) -> tuple[str, list[object], str]:
+    """The ``WHERE`` of the sessions read (active since ``start``, of ``sources``), its
+    arguments, and the activity expression (Hermes' own index for recent sessions)."""
     active = (
         "COALESCE(last_activity_at, started_at)" if "last_activity_at" in columns else "started_at"
     )
@@ -203,6 +305,14 @@ def _sessions(
         else:
             where += f" AND source IN ({marks})"
             args += sorted(sources)
+    return where, args, active
+
+
+def _sessions(
+    conn: sqlite3.Connection, start: float, sources: Collection[str]
+) -> dict[str, str | None]:
+    """Session id -> working directory, of the sessions active since ``start``."""
+    where, args, active = _session_filter(_columns(conn, "sessions"), start, sources)
     rows = conn.execute(
         f"SELECT id, cwd FROM sessions WHERE {where} ORDER BY {active} DESC LIMIT ?",
         (*args, MAX_SESSIONS),

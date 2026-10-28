@@ -1133,6 +1133,7 @@ def merged_snapshot(
                 sessions=merged.sessions + part.sessions,
                 spans=merged.spans + part.spans,
                 waits=merged.waits + part.waits,
+                usage=merged.usage + part.usage,
                 limit_hits=merged.limit_hits + part.limit_hits,
                 providers=merged.providers + part.providers,
                 builds=merged.builds + part.builds,

@@ -478,3 +478,136 @@ def test_state_db_is_read_at_most_once_a_minute(
     assert reads[0][1] == ("kanban", "subagent", "cron")
     a = HermesAdapter(db_path=board.path, spool=None, git_state=False)
     assert a.snapshot(NOW).waits == ()  # no state_home: not read
+
+
+# --- token usage per session and model (item 1 of #197) ------------------------------------
+
+USAGE_SCHEMA = """
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY, source TEXT NOT NULL, cwd TEXT, model TEXT, started_at REAL NOT NULL,
+    ended_at REAL, last_activity_at REAL, input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0, cache_read_tokens INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0, reasoning_tokens INTEGER DEFAULT 0,
+    api_call_count INTEGER DEFAULT 0
+);
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, tool_calls TEXT,
+    tool_call_id TEXT, content TEXT, tool_name TEXT, timestamp REAL
+);
+CREATE TABLE session_model_usage (
+    session_id TEXT NOT NULL, model TEXT NOT NULL, billing_provider TEXT NOT NULL DEFAULT '',
+    task TEXT NOT NULL DEFAULT '', api_call_count INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+
+def usage_session(
+    db: StateDb,
+    sid: str,
+    cwd: str | None,
+    *,
+    source: str = "kanban",
+    started: datetime = NOW - 60 * M,
+    last: datetime = NOW - M,
+    totals: tuple[int, ...] = (0, 0, 0, 0, 0, 0),
+    model: str = "m-main",
+) -> None:
+    db.conn.execute(
+        "INSERT INTO sessions (id, source, cwd, model, started_at, last_activity_at, input_tokens,"
+        " output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (sid, source, cwd, model, started.timestamp(), last.timestamp(), *totals),
+    )
+    db.conn.commit()
+
+
+def per_model(db: StateDb, sid: str, model: str, *counts: int, task: str = "") -> None:
+    db.conn.execute(
+        "INSERT INTO session_model_usage (session_id, model, task, api_call_count, input_tokens,"
+        " output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (sid, model, task, *counts),
+    )
+    db.conn.commit()
+
+
+def test_usage_per_session_and_model(tmp_path: Path) -> None:
+    db = StateDb(tmp_path / "profiles" / "dev-1" / "state.db", schema=USAGE_SCHEMA)
+    usage_session(db, "s1", "/ws/t1", totals=(1, 1, 1, 1, 1, 1))
+    per_model(db, "s1", "m-main", 10, 1_000, 200, 50_000, 300, 40)
+    per_model(db, "s1", "m-main", 2, 100, 20, 0, 0, 0, task="title")  # another billing row
+    per_model(db, "s1", "m-small", 3, 500, 50, 0, 0, 0)
+    usage_session(db, "s2", None, totals=(400, 30, 9_000, 0, 0, 4))  # no per-model rows
+    usage_session(db, "chat", None, source="telegram", totals=(9, 9, 9, 9, 9, 9))
+    usage_session(db, "old", None, started=NOW - 30 * 60 * M, last=NOW - 25 * 60 * M,
+                  totals=(9, 9, 9, 9, 9, 9))  # fmt: skip
+    usage_session(db, "idle", None)  # nothing used
+    found = sorted(
+        (u.session, u.model, u.input_tokens, u.output_tokens, u.cache_read_tokens,
+         u.cache_write_tokens, u.reasoning_tokens, u.calls)
+        for u in state_db.read_usage(tmp_path, NOW - 24 * 60 * M)
+    )  # fmt: skip
+    assert found == [
+        ("s1", "m-main", 1_100, 220, 50_000, 300, 40, 12),
+        ("s1", "m-small", 500, 50, 0, 0, 0, 3),
+        ("s2", "m-main", 400, 30, 9_000, 0, 0, 4),
+    ]
+
+
+def test_usage_of_an_older_schema(tmp_path: Path) -> None:
+    old = """
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, started_at REAL NOT NULL,
+                           input_tokens INTEGER, output_tokens INTEGER);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, tool_calls TEXT,
+                           tool_call_id TEXT, content TEXT, tool_name TEXT, timestamp REAL);
+    """
+    db = StateDb(tmp_path / "state.db", schema=old)
+    db.conn.execute("INSERT INTO sessions VALUES ('s', NULL, ?, 70, 7)", ((NOW - M).timestamp(),))
+    db.conn.commit()
+    (u,) = state_db.read_usage(tmp_path, NOW - 60 * M)
+    assert (u.model, u.input_tokens, u.output_tokens, u.calls, u.last) == (
+        None,
+        70,
+        7,
+        0,
+        u.started,
+    )
+
+
+def test_the_adapter_puts_usage_on_the_run_in_kelpies_token_convention(tmp_path: Path) -> None:
+    home = tmp_path / "hermes"
+    home.mkdir()
+    board = Board(home / "kanban.db")
+    ws = tmp_path / "ws"
+    board.task("t1", "running", NOW - 120 * M, assignee="dev-1")
+    board.update("t1", workspace_kind="worktree", workspace_path=str(ws / "t1"))
+    run = board.run("t1", "dev-1", NOW - 90 * M)
+    db = StateDb(home / "profiles" / "dev-1" / "state.db", schema=USAGE_SCHEMA)
+    usage_session(db, "h1", str(ws / "t1"), started=NOW - 80 * M, last=NOW - 2 * M)
+    per_model(db, "h1", "m-main", 10, 1_000, 200, 50_000, 300, 40)
+    usage_session(db, "h2", None, totals=(5, 5, 0, 0, 0, 1))  # an orchestrator's session
+    a = HermesAdapter(db_path=board.path, spool=None, git_state=False, state_home=home)
+    snap = a.snapshot(NOW)
+    on_run, own = sorted(snap.usage, key=lambda u: u.platform_session_id)
+    assert (on_run.session_id, on_run.platform_session_id, on_run.task_id) == (
+        f"hermes-run-{run}",
+        "h1",
+        "t1",
+    )
+    assert (on_run.role, on_run.owner_id, on_run.model, on_run.source) == (
+        "dev",
+        "dev-1",
+        "m-main",
+        "hermes",
+    )
+    assert (on_run.input_tokens, on_run.cached_tokens, on_run.cache_write_tokens) == (
+        51_300,
+        50_000,
+        300,  # input includes the cached tokens, as Span.input_tokens
+    )
+    assert (on_run.output_tokens, on_run.reasoning_tokens, on_run.calls) == (200, 40, 10)
+    assert on_run.per_session_total and on_run.last_at == NOW - 2 * M
+    assert (own.session_id, own.task_id) == ("hermes-session-dev-1-h2", None)
