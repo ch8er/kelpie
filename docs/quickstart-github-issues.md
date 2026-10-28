@@ -85,9 +85,11 @@ uv run kelpie status               # rules, their mode, the tracker, boards and 
 
 What `kelpie doctor` checks for GitHub Issues (GETs only):
 
-- **token**: the variable is set: a FAIL when `token_env` names one that is not set (as in
-  step 3), a WARN when no `token_env` is configured and Kelpie would read anonymously (60
-  requests an hour, public repositories only).
+- **token**: the variable is set. When `token_env` names one that is not set (as in step 3
+  before the `export`), doctor stops at its first check, `config loads`, with a FAIL naming
+  the variable, as `kelpie serve` and `kelpie status` refuse to start. A WARN when no
+  `token_env` is configured and Kelpie would read anonymously (60 requests an hour, public
+  repositories only).
 - **repositories**: each answers, and the account's role there: a WARN when it cannot label,
   assign or comment, or when it administers the repository (Kelpie's changes would carry
   that standing). What a fine-grained token itself may do cannot be read with GETs.
