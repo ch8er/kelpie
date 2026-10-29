@@ -346,7 +346,13 @@ So `GH_TOKEN=abc gh pr checks 5` is stored as `gh pr checks 5`. This is best eff
 `KELPIE_HERMES_SPOOL_COMMANDS=0` to record no command at all. A spool written by an older
 plugin (before ch8er/kelpie#82, which kept secrets such as `curl -u user:pass`) is cleaned
 with `kelpie spool scrub`, run as the spool's owner, after the new plugin is installed. The spool file is created with
-mode `0600`. Hooks never raise and do no network I/O.
+mode `0600` (a new spool folder with `0700`), never written through a symlink or into a FIFO.
+Hooks never raise and do no network I/O.
+
+Agents can write next to the spool, so Kelpie reads it defensively: regular files only (a
+symlinked or FIFO spool is not read; a symlinked *folder* is fine), at most 64 MiB per
+file, and lines over 16 KiB skipped. A worktree's `.git` file and a linked worktree's
+`commondir` and `gitdir` are read the same way, at most 4 KiB each.
 
 ## What Kelpie sees
 

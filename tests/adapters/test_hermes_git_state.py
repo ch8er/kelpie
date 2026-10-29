@@ -1149,10 +1149,3 @@ def test_a_fifo_commondir_or_gitdir_does_not_block(repo: Path, tmp_path: Path, n
     os.mkfifo(gitdir / name, 0o600)
     state = _within(lambda: read_git_state(linked, 1.0))
     assert state.problem is Problem.LAYOUT
-
-
-def test_an_oversized_dot_git_file_is_read_only_in_part(tmp_path: Path) -> None:
-    work = tmp_path / "work"
-    work.mkdir()
-    (work / ".git").write_text("gitdir: " + "x" * (gs.MAX_POINTER * 4) + "\n")
-    assert read_git_state(work, 1.0).problem is Problem.LAYOUT

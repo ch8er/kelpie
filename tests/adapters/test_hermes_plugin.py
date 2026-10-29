@@ -407,3 +407,20 @@ def test_never_blocks_on_a_fifo_spool(spool: Path) -> None:
 def test_spool_folder_is_private(spool: Path) -> None:
     plugin.post_tool_call(tool_name="t", args={})
     assert stat.S_IMODE(spool.parent.stat().st_mode) == 0o700
+
+
+def test_never_writes_into_a_fifo_someone_reads(spool: Path) -> None:
+    spool.parent.mkdir(parents=True)
+    os.mkfifo(spool, 0o600)
+    reader = os.open(spool, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        plugin.post_tool_call(tool_name="t", args={})
+        assert os.read(reader, 4096) == b""  # nothing went into the pipe (no writer left)
+    finally:
+        os.close(reader)
+
+
+def test_a_regular_spool_is_still_written(spool: Path) -> None:
+    plugin.post_tool_call(tool_name="t", args={})
+    plugin.post_tool_call(tool_name="u", args={})
+    assert [r["tool"] for r in lines(spool)] == ["t", "u"]

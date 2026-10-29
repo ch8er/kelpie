@@ -378,7 +378,7 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   skipped. It also reads a worktree's `.git`, `commondir` and `gitdir` files that way. Before,
   an agent that put a FIFO at the spool or at its worktree's `.git` stalled the control loop
   until restart. The Hermes plugin no longer writes its spool through a symlink or blocks on
-  a FIFO, and creates the spool folder with mode 0700
+  a FIFO, and creates a new spool folder with mode 0700
   ([#275](https://github.com/ch8er/kelpie/issues/275)).
 
 ### Fixed

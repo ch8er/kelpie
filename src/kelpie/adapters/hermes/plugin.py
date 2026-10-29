@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -416,7 +417,8 @@ def append(record: dict[str, Any]) -> None:
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
     fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
     try:
-        os.write(fd, line.encode("utf-8"))
+        if stat.S_ISREG(os.fstat(fd).st_mode):  # not into a FIFO someone reads
+            os.write(fd, line.encode("utf-8"))
     finally:
         os.close(fd)
 
