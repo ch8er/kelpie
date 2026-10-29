@@ -571,11 +571,46 @@ def test_an_outage_whose_since_moved_past_the_day_still_loads(tmp_path: Path) ->
     store.close()
     with ReportStore(path) as report_store:
         rows = report_store.states(h(-48), h(24))
-    assert [r.state.id for r in rows] == [sid]
-    # open at the end of the day, so it needs a human that day too
-    report = build_report(ReportInputs(day=d.date(), tz=UTC, states=tuple(rows)), sections={})
+    assert {r.state.id for r in rows} == {sid, later}  # outages load: their alerts decide
+    alerts = (tool_alert(sid, h(22)), tool_alert(later, h(26)))
+    report = build_report(ReportInputs(day=d.date(), tz=UTC, states=tuple(rows), actions=alerts,
+                                       tasks=open_tasks("T-1", at=h(20))), sections={})  # fmt: skip
+    # open at the end of the day, so it needs a human that day too, from its first alert;
+    # the later one has no alert in the day: nothing of it shows
     [line] = report.open_states
-    assert line.state.id == sid and line.open_hours == pytest.approx(2)  # 22:00-24:00
+    assert line.state.id == sid and line.since == h(22) and line.open_hours == pytest.approx(2)
+    assert [o.since for o in report.outages] == [h(22)]
+    assert "open 2.0h since 2026-03-01 22:00 UTC" in render_markdown(report)
+
+
+def tool_alert(sid: str, at: datetime, observe: bool = False) -> LedgerEntry:
+    """Rule 10's alert of a tool failure naming T-1."""
+    from kelpie.core.incidents import TOOL_FAILURES, Outage
+    from kelpie.core.ledger import OBSERVE_ONLY
+
+    o = Outage(state=sid, signature="ios_sim.sh exit 127", kind=TOOL_FAILURES, tasks=("T-1",))
+    params = {**o.to_params(), **({OBSERVE_ONLY: True} if observe else {})}
+    return entry(at, "loop_breaker", params, ActionKind.ALERT)
+
+
+def test_an_outage_switched_on_after_the_day_still_shows_that_day() -> None:
+    """Observed 21:00-23:00, its check switched on the next morning: the engine re-opens the
+    row in place (since and opened_at the next day). The day's report still lists it, from
+    its first alert; live 10:00-14:00 before going back to observe, its hours count."""
+    d = datetime(2026, 3, 1, tzinfo=UTC)
+    h = lambda n: d + timedelta(hours=n)  # noqa: E731
+    sid = "loop_breaker:outage:0123456789ab"
+    reopened = row(sid, "loop_breaker", h(32.6), h(33), h(34))
+    observed = tuple(tool_alert(sid, h(n), observe=True) for n in (21, 22, 23))
+    report = build_report(ReportInputs(day=d.date(), tz=UTC, states=(reopened,), actions=observed,
+                                       tasks=open_tasks("T-1", at=h(20))), sections={})  # fmt: skip
+    assert [(o.since, o.observe_only) for o in report.outages] == [(h(21), True)]
+    assert [o.since for o in report.open_states] == [h(21)]
+    live = (*(tool_alert(sid, h(n)) for n in (10, 11, 12, 13)), tool_alert(sid, h(14), True))
+    report = build_report(ReportInputs(day=d.date(), tz=UTC, states=(reopened,), actions=live,
+                                       tasks=open_tasks("T-1", at=h(9))), sections={})  # fmt: skip
+    [line] = [c for c in report.chaos if c.rule == OUTAGE]
+    assert line.hours == pytest.approx(4)
 
 
 def test_an_outage_after_the_day_leaves_before_after_alone() -> None:

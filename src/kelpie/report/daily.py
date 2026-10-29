@@ -157,7 +157,7 @@ from kelpie.report.sections import (
     load_sections,
     run_sections,
 )
-from kelpie.report.store import StateRow, began
+from kelpie.report.store import StateRow
 from kelpie.report.throughput import RoleThroughput, throughput
 from kelpie.report.verify import (
     DEFAULT_MIN_SAMPLE,
@@ -454,7 +454,8 @@ class InboxLine:
 @dataclass(frozen=True, slots=True)
 class OpenLine:
     state: OpenState
-    open_hours: float  # from when it began (store.began) to the end of the day (or last seen)
+    open_hours: float  # from ``since`` to the end of the day (or last seen, if earlier)
+    since: datetime  # its ``since``; an outage's, from its alerts (_outage_starts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -542,7 +543,7 @@ def build_report(
     actions = [e for e in inputs.actions if start <= e.at < end]
     chaos = _chaos(inputs, actions, spans, counted, pricer, start, end)
     fixed, would_fix, not_done = _actions(actions)
-    open_states = _open_states(inputs.states, end)
+    open_states = _open_states(inputs.states, end, _outage_starts(inputs, end))
     inbox = _inbox(inputs.actions, open_states, end)
     filters, groups = _outputs(inputs, end, spans)
     completed = tuple(
@@ -1448,18 +1449,38 @@ def _task_ids(entries: Iterable[LedgerEntry]) -> tuple[str, ...]:
     return tuple(sorted({e.task_id for e in entries if e.task_id}))
 
 
-def _open_states(rows: Sequence[StateRow], end: datetime) -> tuple[OpenLine, ...]:
+def _outage_starts(inputs: ReportInputs, end: datetime) -> dict[tuple[str, datetime], datetime]:
+    """When each outage occurrence began, by ``(id, last_seen)``: the earlier of its
+    ``since`` and its first alert before ``end``; one with no alert before ``end`` is absent
+    (it began after the day, whatever its row says)."""
+    found = outages(
+        [r.state for r in inputs.states if is_outage_state(r.state.id)],
+        [e for e in inputs.actions if e.at < end],
+        _occurrences(inputs),
+    )
+    return {(o.state, o.until): o.since for o in found if o.counted is not None}
+
+
+def _open_states(
+    rows: Sequence[StateRow],
+    end: datetime,
+    outage_starts: Mapping[tuple[str, datetime], datetime] | None = None,
+) -> tuple[OpenLine, ...]:
+    """The conditions open at the end of the day; an outage from when its alerts say it
+    began (``outage_starts``; none before the end: not listed)."""
     out = []
     for row in rows:
         if row.closed_at is not None and row.closed_at < end:
             continue  # resolved within the day
-        start = began(row.state)  # an outage's since may have moved past the end
-        if start >= end:
+        start: datetime | None = row.state.since
+        if outage_starts is not None and is_outage_state(row.state.id):
+            start = outage_starts.get((row.state.id, row.state.last_seen))
+        if start is None or start >= end:
             continue
         upto = min(end, max(row.state.last_seen, start))
-        out.append(OpenLine(row.state, (upto - start).total_seconds() / 3600))
+        out.append(OpenLine(row.state, (upto - start).total_seconds() / 3600, start))
     rank_ = {"critical": 0, "warning": 1, "info": 2}
-    out.sort(key=lambda o: (rank_[o.state.severity], o.state.since, o.state.id))
+    out.sort(key=lambda o: (rank_[o.state.severity], o.since, o.state.id))
     return tuple(out)
 
 
@@ -2248,7 +2269,7 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
         level = f", escalation {s.level}" if s.level else ""
         out.append(
             f"- **{s.severity}** `{s.rule}`{task}: open {o.open_hours:.1f}h since "
-            f"{_local(s.since, report)}{level}, "
+            f"{_local(o.since, report)}{level}, "
             f"last seen {_local(s.last_seen, report)}: {md.text(s.summary)}"
         )
     for f in report.not_done:
