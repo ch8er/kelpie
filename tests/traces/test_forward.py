@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import gzip
+import os
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -536,3 +539,52 @@ def test_garbled_response_is_a_retryable_failure() -> None:
     finally:
         thread.join(5)
         listener.close()
+
+
+def test_plain_http_never_goes_through_an_environment_proxy(
+    receiver: tuple[Receiver, str],
+) -> None:
+    """With http_proxy set, the headers (secrets) and spans went to the proxy in clear and
+    the collector got nothing (#275 M3). urllib reads the proxy settings when an opener is
+    built, at import, so the send runs in a fresh interpreter with them set."""
+    proxy = Receiver()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.handler())
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        env = {k: v for k, v in os.environ.items() if "proxy" not in k.lower()}
+        for var in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            env[var] = f"http://127.0.0.1:{server.server_address[1]}"
+        r, url = receiver
+        code = (
+            "import sys\n"
+            "from kelpie.traces.forward import Destination, Export, send_http\n"
+            "send_http(Destination('d', sys.argv[1], {'Authorization': 'Bearer t'}),"
+            " Export(b'{}', 'x/y'))\n"
+        )
+        subprocess.run([sys.executable, "-c", code, url], env=env, check=True, timeout=30)
+        assert len(r.received) == 1 and r.received[0].headers["Authorization"] == "Bearer t"
+        assert proxy.received == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_large_answer_is_not_read_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Answer:
+        def __init__(self) -> None:
+            self.asked: list[int | None] = []
+
+        def __enter__(self) -> Answer:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            pass
+
+        def read(self, size: int | None = None) -> bytes:
+            self.asked.append(size)
+            return b""
+
+    answer = Answer()
+    monkeypatch.setattr(forward._DIRECT, "open", lambda *a, **k: answer)
+    send_http(Destination("d", "http://127.0.0.1:9/v1/traces"), Export(b"{}", "x/y"))
+    assert answer.asked == [forward.MAX_RESPONSE]
