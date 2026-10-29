@@ -292,6 +292,9 @@ def test_cli_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--config", str(path), "status"]) == 0
     out = capsys.readouterr().out
     assert "stale_blocks" in out and "loop_breaker" in out
+    # durations as the config writes them, not as timedeltas
+    assert "interval: 30s\n" in out
+    assert ", window 30m, retention 7d" in out
 
 
 def test_cli_rejects_unknown_rule(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

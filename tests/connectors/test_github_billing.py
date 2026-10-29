@@ -550,10 +550,10 @@ def test_status_names_the_account_and_the_variable_never_the_token(
     loaded = load_rules(settings.engine)
     monkeypatch.delenv("BILL", raising=False)
     unset = render_status(settings, loaded)
-    assert "farm-owner, every 0:30:00 (NOT ready: [connectors.github.ci] billing_token_env" in unset
+    assert "farm-owner, every 30m (NOT ready: [connectors.github.ci] billing_token_env" in unset
     monkeypatch.setenv("BILL", BILLING)
     status = render_status(settings, loaded)
-    assert "billing usage of user farm-owner, every 0:30:00 (token from $BILL)" in status
+    assert "billing usage of user farm-owner, every 30m (token from $BILL)" in status
     assert BILLING not in status
     (warning,) = billing_interval_warnings(loaded.rules, settings)
     assert "billing_interval (0:30:00) keeps a reading for up to 1:00:00, longer than" in warning
