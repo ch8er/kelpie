@@ -3,6 +3,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
+import stat
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -377,3 +380,47 @@ def test_whether_the_redacted_command_reaches_its_end(
     )
     (rec,) = lines(spool)
     assert rec.get("command_complete", False) is complete
+
+
+# --- the spool is never written through a symlink or a FIFO (#275 L2) -------------------
+
+
+def test_never_writes_through_a_symlinked_spool(spool: Path, tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("keep\n")
+    spool.parent.mkdir(parents=True)
+    spool.symlink_to(target)
+    plugin.post_tool_call(tool_name="t", args={})
+    assert target.read_text() == "keep\n"
+
+
+def test_never_blocks_on_a_fifo_spool(spool: Path) -> None:
+    spool.parent.mkdir(parents=True)
+    os.mkfifo(spool, 0o600)
+    worker = threading.Thread(target=lambda: plugin.post_tool_call(tool_name="t", args={}))
+    worker.daemon = True
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive()
+
+
+def test_spool_folder_is_private(spool: Path) -> None:
+    plugin.post_tool_call(tool_name="t", args={})
+    assert stat.S_IMODE(spool.parent.stat().st_mode) == 0o700
+
+
+def test_never_writes_into_a_fifo_someone_reads(spool: Path) -> None:
+    spool.parent.mkdir(parents=True)
+    os.mkfifo(spool, 0o600)
+    reader = os.open(spool, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        plugin.post_tool_call(tool_name="t", args={})
+        assert os.read(reader, 4096) == b""  # nothing went into the pipe (no writer left)
+    finally:
+        os.close(reader)
+
+
+def test_a_regular_spool_is_still_written(spool: Path) -> None:
+    plugin.post_tool_call(tool_name="t", args={})
+    plugin.post_tool_call(tool_name="u", args={})
+    assert [r["tool"] for r in lines(spool)] == ["t", "u"]
