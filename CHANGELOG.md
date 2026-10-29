@@ -375,8 +375,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   load and then drop every "Open task" link.
 - OTLP ingest refuses a gzip body of more than 64 members (exporters send one): many tiny
   members cost quadratic CPU, minutes for one 8 MiB request. `[[traces.forward]]` never
-  sends plain http through a proxy from the environment (`http_proxy`), which got the
-  forward headers and the spans in clear while the collector got nothing; it reads at most
+  sends plain http through a proxy from the environment (`http_proxy`), which saw the
+  forward headers and the spans in clear (use https to forward through a proxy); it reads at most
   64 KiB of a collector's answer ([#275](https://github.com/ch8er/kelpie/issues/275)).
 
 ### Fixed

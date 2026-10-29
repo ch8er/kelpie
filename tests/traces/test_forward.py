@@ -544,8 +544,8 @@ def test_garbled_response_is_a_retryable_failure() -> None:
 def test_plain_http_never_goes_through_an_environment_proxy(
     receiver: tuple[Receiver, str],
 ) -> None:
-    """With http_proxy set, the headers (secrets) and spans went to the proxy in clear and
-    the collector got nothing (#275 M3). urllib reads the proxy settings when an opener is
+    """With http_proxy set, the headers (secrets) and spans went to the proxy in clear
+    (#275 M3). urllib reads the proxy settings when an opener is
     built, at import, so the send runs in a fresh interpreter with them set."""
     proxy = Receiver()
     server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.handler())
