@@ -127,9 +127,11 @@ def test_the_image_is_latest_only_for_a_final_release() -> None:
     assert "enable=${{ needs.verify.outputs.prerelease == 'false' }}" in meta["with"]["tags"]
 
 
-def test_every_action_is_pinned_to_a_commit() -> None:
-    for name, job in workflow()["jobs"].items():
-        for step in job["steps"]:
+@pytest.mark.parametrize("file", ["release.yml", "ci.yml"])
+def test_every_action_is_pinned_to_a_commit(file: str) -> None:
+    data = yaml.safe_load((ROOT / ".github/workflows" / file).read_text())
+    for name, job in data["jobs"].items():
+        for step in job.get("steps", ()):
             if "uses" in step:
                 assert re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", step["uses"]), (name, step)
 
@@ -139,3 +141,20 @@ def test_only_our_wheel_comes_from_testpypi() -> None:
     script = check["run"]
     assert "unsafe-best-match" not in script and "--index-url" not in script
     assert 'sha256sum "/tmp/testpypi/$name"' in script and '[ "$got" = "$want" ]' in script
+
+
+_TOKEN_SHAPES = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}"
+    r"|xox[abpr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})"
+)
+
+
+def test_the_package_ships_nothing_shaped_like_a_real_token() -> None:
+    """The simulator's fake GitHub tokens were ``ghp_``-shaped and shipped in the wheel;
+    secret scanners on package indexes may flag such strings (#267 item 4, #275)."""
+    found = [
+        f"{path.relative_to(ROOT)}: {m.group()[:8]}..."
+        for path in sorted((ROOT / "src" / "kelpie").rglob("*.py"))
+        for m in _TOKEN_SHAPES.finditer(path.read_text("utf-8"))
+    ]
+    assert found == []

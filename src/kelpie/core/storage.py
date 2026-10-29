@@ -680,7 +680,10 @@ def open_readonly(
 ) -> sqlite3.Connection:
     """A connection that never writes, not even a migration (``kelpie status``). ``oldest``:
     an older schema it may also read (the snooze readers accept :data:`SNOOZES_SINCE`)."""
-    db = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True, check_same_thread=False)
+    # as_uri() escapes the path: a "?", "#" or "%" in it no longer ends or changes the URI
+    # (a "#" used to drop "?mode=ro" and open another file read-write).
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    db = sqlite3.connect(uri, uri=True, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     version = db.execute("PRAGMA user_version").fetchone()[0]

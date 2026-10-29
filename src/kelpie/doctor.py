@@ -912,14 +912,24 @@ def _labels(client: PrometheusClient, promql: str, label: str) -> set[str]:
     return {s.labels.get(label, "") for s in client.query(promql)}
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        return None  # urllib then raises HTTPError with the 3xx code
+
+
 def check_prometheus(url: str | None, environ: Mapping[str, str]) -> Check:
     name = "Prometheus reachable"
     explicit = url or environ.get(PROMETHEUS_ENV)
     base = (explicit or DEFAULT_PROMETHEUS).rstrip("/")
     fix = "start Prometheus (docker compose up prometheus) or pass the right --prometheus URL"
-    if urlsplit(base).scheme not in ("http", "https"):
+    parts = urlsplit(base)
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        # Never echoed: the URL may hold a password or a token.
+        return _fail(name, "the URL must not contain credentials, a query or a fragment", fix)
+    if parts.scheme not in ("http", "https"):
         return _fail(name, f"{base}: only http and https URLs are supported", fix)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via a proxy
+    # Never via a proxy, never following a redirect (the check is about this URL).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
     try:
         with opener.open(f"{base}/-/ready", timeout=3) as response:
             problem = "" if response.status == 200 else f"HTTP {response.status}"

@@ -560,3 +560,21 @@ def test_prune_runs_at_most_hourly() -> None:
     for minutes in (0, 30, 61, 90):
         reader.apply(Snapshot(now=NOW + timedelta(minutes=minutes)))
     assert pruned == [NOW, NOW + timedelta(minutes=61)]
+
+
+@pytest.mark.parametrize("folder", ["a#b", "c?mode=rwc&x", "d%2e"])
+def test_open_readonly_escapes_the_path(tmp_path: Path, folder: str) -> None:
+    """``file:{path}?mode=ro`` was not escaped: with "#" in the path, ``a#b/kelpie.db``
+    opened ``a`` read-write (#275 L1, #248 D10)."""
+    path = tmp_path / folder / "kelpie.db"
+    path.parent.mkdir()
+    SqliteLedgerStore(path).close()
+    before = sorted(p.name for p in tmp_path.iterdir())
+    conn = open_readonly(path, 1000)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("CREATE TABLE t (x)")  # read-only, and the right file
+    finally:
+        conn.close()
+    assert sorted(p.name for p in tmp_path.iterdir()) == before  # nothing created

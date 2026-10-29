@@ -336,3 +336,20 @@ def test_runs_as_a_script_with_only_the_standard_library(spool: Path) -> None:
     )
     assert (done.returncode, done.stdout) == (0, "")
     assert lines(spool)[0]["tool"] == "read"
+
+
+def test_a_peer_key_that_is_not_a_regular_file_is_unusable(tmp_path: Path) -> None:
+    """A directory raised IsADirectoryError and a FIFO with a writer BlockingIOError, so
+    the adapter failed on every tick (#275 L3)."""
+    folder = tmp_path / "peer.key"
+    folder.mkdir()
+    assert hook.read_peer_key(folder) is None
+    fifo = tmp_path / "fifo.key"
+    os.mkfifo(fifo, 0o600)
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    writer = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+    try:
+        assert hook.read_peer_key(fifo) is None
+    finally:
+        os.close(writer)
+        os.close(reader)

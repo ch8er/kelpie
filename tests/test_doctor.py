@@ -834,3 +834,44 @@ def test_two_boards_of_one_home_are_checked_one_by_one_without_a_failure(farm: F
     second.path.unlink()
     check = {c.name: c for c in run_checks(path, now=lambda: NOW, environ={})}["kanban.db (sign)"]
     assert check.status == "FAIL" and "board sign" in check.fix
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://admin:S3CRET-PW@127.0.0.1:9",
+        "http://127.0.0.1:9/?token=S3CRET-Q",
+        "http://127.0.0.1:9/#S3CRET-F",
+    ],
+)
+def test_prometheus_url_secrets_are_refused_and_never_printed(farm: Farm, url: str) -> None:
+    """The URL came from --prometheus or $KELPIE_PROMETHEUS_URL unchecked and was echoed
+    whole, password and token included (#275 L6)."""
+    check = farm.checks(url)["Prometheus reachable"]
+    assert check.status == "FAIL"
+    assert "S3CRET" not in check.detail and "S3CRET" not in check.fix
+    assert "credentials" in check.detail
+
+
+def test_prometheus_redirect_is_not_followed(farm: Farm, prometheus: str) -> None:
+    hits: list[str] = []
+
+    class Moved(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            hits.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", f"{prometheus}/-/ready")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Moved)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        check = farm.checks(f"http://127.0.0.1:{server.server_port}")["Prometheus reachable"]
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert hits == ["/-/ready"]
+    assert check.status == "FAIL"  # a redirect elsewhere is not "reachable"
