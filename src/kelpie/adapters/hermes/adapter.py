@@ -117,6 +117,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
+from kelpie.adapters import _spool
 from kelpie.adapters.hermes.git_state import (
     DEFAULT_TIMEOUT,
     GitState,
@@ -203,6 +204,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_DB = Path("~/.hermes/kanban.db")
 DEFAULT_SPOOL = Path("~/.hermes/kelpie/spool.jsonl")
+SPOOL_TAIL = 65536  # bytes read from the end of the spool to find its newest line
+MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
+MAX_SPOOL_LINE = 16 * 1024  # a longer spool line is skipped (the plugin writes under 2 KB)
 DEFAULT_LOOKBACK = timedelta(hours=24)
 DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
 # Branches task work starts from: a task's files are what it changed since its newest
@@ -730,12 +734,8 @@ class HermesAdapter:
     def last_spool_at(self) -> datetime | None:
         if self.spool is None:
             return None
-        try:
-            with self.spool.open("rb") as f:
-                f.seek(0, 2)
-                f.seek(max(0, f.tell() - 65536))
-                tail = f.read().decode("utf-8", "replace").splitlines()
-        except OSError:
+        tail = _spool.tail_lines(self.spool, SPOOL_TAIL)
+        if tail is None:
             return None
         for line in reversed(tail):
             try:
@@ -1475,17 +1475,8 @@ class HermesAdapter:
     # --- hooks spool ---------------------------------------------------------------------
 
     def _spool_lines(self, cutoff: datetime) -> Iterator[str]:
-        if self.spool is None:
-            return
-        rotated = self.spool.with_name(self.spool.name + ".1")
-        for path in (rotated, self.spool):
-            try:
-                if path is rotated and path.stat().st_mtime < cutoff.timestamp():
-                    continue  # nothing in it can be inside the lookback
-                with path.open(encoding="utf-8", errors="replace") as f:
-                    yield from f
-            except OSError:
-                continue
+        # Agents write next to the spool: no symlink, no FIFO, a byte and a line cap.
+        return _spool.spool_lines(self.spool, cutoff, MAX_SPOOL_READ, MAX_SPOOL_LINE)
 
     def _spans(self, cutoff: datetime) -> tuple[Span, ...]:
         events = (_event_from_line(line, cutoff) for line in self._spool_lines(cutoff))

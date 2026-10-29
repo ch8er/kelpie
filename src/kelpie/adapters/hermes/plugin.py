@@ -408,11 +408,13 @@ def _rotate(path: Path, limit: int) -> None:
 def append(record: dict[str, Any]) -> None:
     """Append one line to the spool, rotating it to ``<spool>.1`` at the size cap."""
     path = spool_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     _rotate(path, _max_bytes())
     line = json.dumps(record, separators=(",", ":"), default=str) + "\n"
-    # One O_APPEND write per line: concurrent workers do not interleave short lines.
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    # One O_APPEND write per line: concurrent workers do not interleave short lines. Never
+    # through a symlink, never blocking on a FIFO (with no reader, opening one fails).
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
     try:
         os.write(fd, line.encode("utf-8"))
     finally:

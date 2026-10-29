@@ -6,8 +6,9 @@ import os
 import shutil
 import stat
 import subprocess
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1117,3 +1118,41 @@ def test_borrowed_objects_or_refs_are_refused(repo: Path, tmp_path: Path, trick:
         (dot / "refs").symlink_to(repo / ".git" / "refs")
     state = read_git_state(ws, 5.0)
     assert state.problem is Problem.LAYOUT and state.paths is None
+
+
+# --- agent-written pointer files are read safely (#275 H2) ------------------------------
+
+
+def _within(fn: Callable[[], GitState], seconds: float = 10.0) -> GitState:
+    out: list[GitState] = []
+    worker = threading.Thread(target=lambda: out.append(fn()), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), "blocked"
+    return out[0]
+
+
+def test_a_fifo_dot_git_does_not_block(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    os.mkfifo(work / ".git", 0o600)
+    state = _within(lambda: read_git_state(work, 1.0))
+    assert state.problem is Problem.LAYOUT
+
+
+@pytest.mark.parametrize("name", ["commondir", "gitdir"])
+def test_a_fifo_commondir_or_gitdir_does_not_block(repo: Path, tmp_path: Path, name: str) -> None:
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", str(linked))
+    gitdir = Path((linked / ".git").read_text().split(":", 1)[1].strip())
+    (gitdir / name).unlink()
+    os.mkfifo(gitdir / name, 0o600)
+    state = _within(lambda: read_git_state(linked, 1.0))
+    assert state.problem is Problem.LAYOUT
+
+
+def test_an_oversized_dot_git_file_is_read_only_in_part(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".git").write_text("gitdir: " + "x" * (gs.MAX_POINTER * 4) + "\n")
+    assert read_git_state(work, 1.0).problem is Problem.LAYOUT
