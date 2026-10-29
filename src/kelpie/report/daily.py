@@ -157,7 +157,7 @@ from kelpie.report.sections import (
     load_sections,
     run_sections,
 )
-from kelpie.report.store import StateRow
+from kelpie.report.store import StateRow, began
 from kelpie.report.throughput import RoleThroughput, throughput
 from kelpie.report.verify import (
     DEFAULT_MIN_SAMPLE,
@@ -454,7 +454,7 @@ class InboxLine:
 @dataclass(frozen=True, slots=True)
 class OpenLine:
     state: OpenState
-    open_hours: float  # from ``since`` to the end of the day (or last seen, if earlier)
+    open_hours: float  # from when it began (store.began) to the end of the day (or last seen)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1453,10 +1453,11 @@ def _open_states(rows: Sequence[StateRow], end: datetime) -> tuple[OpenLine, ...
     for row in rows:
         if row.closed_at is not None and row.closed_at < end:
             continue  # resolved within the day
-        if row.state.since >= end:
+        start = began(row.state)  # an outage's since may have moved past the end
+        if start >= end:
             continue
-        upto = min(end, max(row.state.last_seen, row.state.since))
-        out.append(OpenLine(row.state, (upto - row.state.since).total_seconds() / 3600))
+        upto = min(end, max(row.state.last_seen, start))
+        out.append(OpenLine(row.state, (upto - start).total_seconds() / 3600))
     rank_ = {"critical": 0, "warning": 1, "info": 2}
     out.sort(key=lambda o: (rank_[o.state.severity], o.state.since, o.state.id))
     return tuple(out)

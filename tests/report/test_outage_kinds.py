@@ -565,9 +565,37 @@ def test_an_outage_whose_since_moved_past_the_day_still_loads(tmp_path: Path) ->
                          None, mode=Mode.ACT))  # fmt: skip
     store.save(OpenState("stale_blocks:T-9:block", "stale_blocks", h(25), h(25), h(26), 0,
                          Severity.WARNING, "s", "T-9", mode=Mode.ACT))  # fmt: skip
+    later = "loop_breaker:outage:fedcba987654"  # opened after the end: the next day's
+    store.save(OpenState(later, "loop_breaker", h(25.5), h(26), h(26), 0, Severity.WARNING,
+                         "s", None, mode=Mode.ACT))  # fmt: skip
     store.close()
     with ReportStore(path) as report_store:
-        assert [r.state.id for r in report_store.states(h(-48), h(24))] == [sid]
+        rows = report_store.states(h(-48), h(24))
+    assert [r.state.id for r in rows] == [sid]
+    # open at the end of the day, so it needs a human that day too
+    report = build_report(ReportInputs(day=d.date(), tz=UTC, states=tuple(rows)), sections={})
+    [line] = report.open_states
+    assert line.state.id == sid and line.open_hours == pytest.approx(2)  # 22:00-24:00
+
+
+def test_an_outage_after_the_day_leaves_before_after_alone() -> None:
+    """A rule's mode change verified with no outage of it that day: an outage of the rule
+    that only starts counting after the day (a later one) changes nothing."""
+    from kelpie.report.fixes import FixEvent
+
+    d = datetime(2026, 3, 2, tzinfo=UTC)
+    h = lambda n: d + timedelta(hours=n)  # noqa: E731
+    stale = row("stale_blocks:T-2:block", "stale_blocks", h(-40), h(-40), h(20), task="T-2")
+    later = row("ci_economy:outage:0123456789ab", "ci_economy", h(-1), h(26), h(30))
+    fixes = (FixEvent(h(-12), "mode", "ci_economy to act", rule="ci_economy"),)
+
+    def metrics(states: tuple[StateRow, ...]) -> list[object]:
+        report = build_report(ReportInputs(day=d.date(), tz=UTC, states=states, fixes=fixes,
+                                           tasks=open_tasks("T-1", "T-2", at=h(-50))),
+                              sections={})  # fmt: skip
+        return [(m.name, m.before, m.after) for v in report.verifications for m in v.metrics]
+
+    assert metrics((stale,)) and metrics((stale, later)) == metrics((stale,))
 
 
 def test_each_outage_line_has_its_own_occurrences_scope_and_folds() -> None:

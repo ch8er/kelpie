@@ -38,6 +38,12 @@ class StateRow:
     closed_at: datetime | None = None
 
 
+def began(state: OpenState) -> datetime:
+    """When a state began, as far as its row shows: its ``since``; an outage's, the earlier
+    of that and when it was opened (its ``since`` may have moved forward since)."""
+    return min(state.since, state.opened_at) if is_outage_state(state.id) else state.since
+
+
 def _ts(at: datetime) -> str:
     return at.astimezone(UTC).isoformat(timespec="microseconds")
 
@@ -83,14 +89,14 @@ class ReportStore:
     def states(self, start: datetime, end: datetime) -> list[StateRow]:
         """States open at ``end`` or closed after ``start``, that began before ``end``. An
         outage's ``since`` may have moved past ``end`` since (rules 4 and 10 move it forward
-        as early blocks or failures age out, and an escalation stores it): outages load
-        whatever their ``since``, and their alerts decide what counts."""
+        as early blocks or failures age out, and an escalation stores it): an outage began
+        before ``end`` if it was opened before it too (:func:`began`)."""
         rows = self._db.execute(
             "SELECT * FROM states WHERE (closed_at IS NULL OR closed_at >= ?) ORDER BY since, id",
             (_ts(start),),
         ).fetchall()
         found = [StateRow(_state(r), _time(r["closed_at"])) for r in rows]
-        return [r for r in found if r.state.since < end or is_outage_state(r.state.id)]
+        return [r for r in found if began(r.state) < end]
 
     def spans(self, start: datetime, end: datetime) -> list[Span]:
         """Stored spans whose last time falls in ``[start, end)``."""

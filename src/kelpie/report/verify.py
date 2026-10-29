@@ -361,7 +361,10 @@ def _stuck(
     scoped = (
         exact
         or event.rule in {c.split(":")[0] for c in ev.chaos_rules}
-        or (event.rule is not None and any(r.state.rule == event.rule for r in ev.states))
+        or (
+            event.rule is not None
+            and any(r.state.rule == event.rule and ev.start(r.state) < ev.end for r in ev.states)
+        )
     )
 
     def counts(s: OpenState) -> bool:
