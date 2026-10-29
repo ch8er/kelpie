@@ -279,8 +279,10 @@ report; no LLM is involved.
   repositories, under "a shared CI failure"; a block storm of rule 4 (many tasks blocked
   on the same reason at once) explains only the tasks it names, under "a shared blocker",
   even when its reason names a person; a tool failure of rule 10 (one tool failing the
-  same way for many tasks) explains only the tasks it names, under "a shared tool
-  failure". In the cost of chaos those tasks' hours count once, under "farm outages",
+  same way for many tasks) explains only the tasks it names, under "a shared tool failure"
+  (in the cost of chaos its tasks count while named, in progress or not: the failing tool
+  holds their work; the waits split sees only their waiting time). In the cost of chaos
+  those tasks' hours count once, each occurrence of an outage apart, under "farm outages",
   ahead of the person's inbox and their stale blocks. Under the cost of chaos, "Outages"
   lists each outage of the day: its signature, its reason, since when (perhaps an earlier
   day) and until when or still open, its scope that day (PRs, or for a block storm tasks)

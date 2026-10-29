@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -289,26 +289,54 @@ def named_spans(
     return {t: tuple(intervals.merged(spans)) for t, spans in held.items()}
 
 
-def outages(states: Iterable[OpenState], entries: Iterable[LedgerEntry]) -> list[OutageSpan]:
+def occurrence_after(
+    rows: Iterable[tuple[OpenState, datetime | None]],
+) -> Callable[[OpenState], datetime | None]:
+    """Where an outage occurrence's alerts begin: after the previous occurrence of the same
+    state closed (``rows``: each state with its ``closed_at``). Neither ``since`` (rules move
+    it: rule 9 walks it back over failures still active, rule 10 and rule 4 forward as early
+    failures or blocks age out) nor ``opened_at`` (the engine re-opens a state when its
+    check is switched on again) tells one occurrence from the next. None: no earlier close
+    loaded, every alert loaded up to its last sighting."""
+    closes: dict[str, list[datetime]] = {}
+    for state, closed_at in rows:
+        if closed_at is not None and is_outage_state(state.id):
+            closes.setdefault(state.id, []).append(closed_at)
+
+    def after(state: OpenState) -> datetime | None:
+        found = [c for c in closes.get(state.id, ()) if c <= state.opened_at]
+        return max(found) if found else None
+
+    return after
+
+
+def outages(
+    states: Iterable[OpenState],
+    entries: Iterable[LedgerEntry],
+    after: Callable[[OpenState], datetime | None] | None = None,
+) -> list[OutageSpan]:
     """The outages, each with the scope its alerts reported: every entry that names the
-    state (``params.state``) within that occurrence's time span (the same signature failing
-    again later reuses the state id). Entries are as of their time (written at most hourly),
+    state (``params.state``) within that occurrence (after the previous one closed,
+    :func:`occurrence_after`, up to its last sighting: the same signature failing again
+    later reuses the state id); it is listed from its earliest, ``since`` or its first
+    alert. Entries are as of their time (written at most hourly),
     so the repository clause in :meth:`WaitCauses.split` covers a CI outage's later
     joiners. An outage none of whose entries is loaded is read as failing CI jobs with no
     scope (its kind is in the entries)."""
     samples = outage_samples(entries)
     out = []
     for s in (s for s in states if is_outage_state(s.id)):
+        lo = after(s) if after is not None else None
         found = [
             (at, o, obs)
             for at, o, obs in samples
-            if o.state == s.id and s.since <= at <= s.last_seen
+            if o.state == s.id and (lo is None or at > lo) and at <= s.last_seen
         ]
         mine = [o for _, o, _ in found]
         last = mine[-1] if mine else None
         out.append(
             OutageSpan(
-                since=s.since,
+                since=min(s.since, found[0][0]) if found else s.since,
                 until=s.last_seen,
                 repos=frozenset(r.lower() for o in mine for r in o.repos),
                 prs=frozenset(p.lower() for o in mine for p in o.prs),

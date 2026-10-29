@@ -500,3 +500,48 @@ def test_a_ci_outage_holds_a_named_task_while_named_and_its_scope_throughout() -
     causes = WaitCauses((ci("R1"),), (), (), (), [o])
     assert causes.split(waiting("R1", "reviewer"), at(10), at(16)) == {CI_OUTAGE: pytest.approx(6)}
     assert causes.split(waiting("N1", "reviewer"), at(10), at(16))[CI_OUTAGE] == pytest.approx(4)
+
+
+def test_an_outage_closed_and_opened_again_counts_each_occurrence_apart() -> None:
+    """Rule 9 walks a reopened outage's since back to the old start: its occurrences share
+    the since, and the time it was closed counts nowhere. Each is listed as it was."""
+    from dataclasses import replace
+
+    from kelpie.core.incidents import CiOutage
+
+    day = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
+    h = lambda n: day + timedelta(hours=n)  # noqa: E731
+    sid = "ci_economy:outage:0123456789ab"
+
+    def alert(n: float) -> LedgerEntry:
+        red = CiOutage(state=sid, signature="ci.yml > build", job="build",
+                       repos=("example/app",), tasks=("T-1",))  # fmt: skip
+        return entry(h(n), "ci_economy", red.to_params(), ActionKind.ALERT)
+
+    old = replace(row(sid, "ci_economy", h(9.5), h(10), h(11.75)), closed_at=h(12))
+    new = row(sid, "ci_economy", h(9.5), h(15), h(18))
+    report = build_report(ReportInputs(day=day.date(), tz=UTC, states=(old, new),
+                                       actions=tuple(alert(n) for n in (10, 11, 15, 16, 17)),
+                                       tasks=open_tasks("T-1", at=h(9))), sections={})  # fmt: skip
+    [line] = [c for c in report.chaos if c.rule == OUTAGE]
+    assert line.hours == pytest.approx(1.75 + 3)  # 10:00-11:45, 15:00-18:00
+    assert report.outage_wait_hours == pytest.approx(1.75 + 3)
+    assert [o.open for o in report.outages] == [False, True]
+
+
+def test_an_outage_whose_since_moves_forward_keeps_its_earlier_alerts() -> None:
+    """Rule 10's since is its first failure still in the traces window, and an escalation
+    stores it: by 14:00 it reads 13:30. Its alerts from 10:00 still count, and it is
+    listed from then."""
+    day = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
+    h = lambda n: day + timedelta(hours=n)  # noqa: E731
+    alerts = tuple(OutageParamsFactory.storm(h(n), ("T-1", "T-2")) for n in range(10, 18))
+    state = row(alerts[0].params["state"], "stale_blocks", h(13.5), h(10), h(18))
+    board = open_tasks("T-1", "T-2", at=h(9))
+    report = build_report(ReportInputs(day=day.date(), tz=UTC, states=(state,), actions=alerts,
+                                       tasks=board), sections={})  # fmt: skip
+    [line] = [c for c in report.chaos if c.rule == OUTAGE]
+    assert line.hours == pytest.approx(2 * 8)
+    assert report.outage_wait_hours == pytest.approx(2 * 8)
+    [listed] = report.outages
+    assert listed.since == h(10)
