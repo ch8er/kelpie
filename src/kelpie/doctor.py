@@ -1234,7 +1234,7 @@ def run_checks(
         return [_fail("config loads", str(exc), fix)]
     at = now().astimezone(UTC)
     try:  # built once: the modes check and the platform checks
-        adapters = build_adapters(settings)
+        adapters = build_adapters(settings, environ)
     except ConfigError as exc:  # e.g. an adapter's token_env names an unset variable
         fix = "export the variable it names, or fix the config"
         return [_fail("config loads", str(exc), fix)]

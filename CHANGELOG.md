@@ -380,6 +380,11 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   until restart. The Hermes plugin no longer writes its spool through a symlink or blocks on
   a FIFO, and creates a new spool folder with mode 0700
   ([#275](https://github.com/ch8er/kelpie/issues/275)).
+- OTLP ingest refuses a gzip body of more than 64 members (exporters send one): many tiny
+  members cost quadratic CPU, minutes for one 8 MiB request. `[[traces.forward]]` never
+  sends plain http through a proxy from the environment (`http_proxy`), which saw the
+  forward headers and the spans in clear (use https to forward through a proxy); it reads at most
+  64 KiB of a collector's answer ([#275](https://github.com/ch8er/kelpie/issues/275)).
 
 ### Fixed
 
@@ -389,6 +394,12 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   that was not set (the GitHub Issues and Linear quickstarts before the token is exported);
   it now fails its `config loads` check and names the variable
   ([#249](https://github.com/ch8er/kelpie/issues/249)).
+- First-run rough edges ([#267](https://github.com/ch8er/kelpie/issues/267)): `kelpie
+  status` writes durations as the config does (`30s`, `30m`, `7d`) instead of
+  `7 days, 0:00:00`, and so do the startup warnings that compare durations; `kelpie serve` warns that checkpoints makes no WIP commits without
+  `[connectors.github.pulls]` only when a configured adapter makes WIP commits (or on a
+  hub), not on every farm; `kelpie doctor` builds the adapters from the environment it
+  checks. The package lists Python 3.13, which installs and runs.
 - A `kelpie serve` refused for its config (a missing token, header or admin key variable, an
   alert channel's token or buttons, a `[traces] token_file` others could have written, a
   `[hub]` TLS cert or key that does not load) no longer leaves an empty `kelpie.db` behind:

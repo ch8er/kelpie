@@ -204,7 +204,7 @@ The resume note goes out with the commit and says where the changes are if it fa
 | `tool_long_after` | `"5m"` | duration, > 0 | An open TOOL span holds reminders once it has run this long: short calls do not. An adapter's `running_tool` holds from its start (it is long by what it is). |
 | `wip_ci` | `"skip_ci"` | `skip_ci` \| `draft_pr` | How the WIP commit avoids CI: `[skip ci]` in the message, or a push to a draft PR. Never onto an open PR (drafts included, so with `draft_pr` the draft of a first WIP commit refuses the next ones), nor onto a branch whose PR closed after the session started: none whose head is the session's or task's branch or that belongs to the task, and not without a known branch. A person gets an alert about the uncommitted changes instead. |
 | `wip_pr_margin` | `"1m"` | duration, > 0, < `act_within` | A WIP commit waits until `[connectors.github.pulls]` read the open PRs in full at least this long after the exit (an agent's last act may be opening a PR); until then nothing is said, not even the resume note. A PR someone else opens between that scan and the commit (up to `poll_interval`) is not seen. |
-| `wip_without_pr_check` | `false` | bool | WIP commits without that wait, for a farm whose task branches never carry PRs. Without it and without `[connectors.github.pulls]`, there are no WIP commits (warned at startup). A fork's PR, or one in a repository not in `[connectors.github] repos`, is not seen. |
+| `wip_without_pr_check` | `false` | bool | WIP commits without that wait, for a farm whose task branches never carry PRs. Without it and without `[connectors.github.pulls]`, there are no WIP commits (warned at startup when a configured adapter makes WIP commits, or on a hub). A fork's PR, or one in a repository not in `[connectors.github] repos`, is not seen. |
 | `session_stale_after` | `"30m"` | duration, > 0 | See [live session](#rules). |
 | `act_within` | `"24h"` | duration, > 0 | WIP commit and resume note only this long after the exit; a decision never made by then gets one alert. Keep it plus 1h shorter than `[engine] once_window`, and no longer than `[connectors.github.pulls] closed_lookback` (Kelpie warns at startup). |
 
@@ -1049,7 +1049,7 @@ What is kept from each span: [privacy.md](privacy.md).
 | `totals_window` | `"24h"` | duration, > 0 | Per-session totals (calls, errors, tokens) in each tick. |
 | `retention` | `"7d"` | duration, > 0, <= 3650d | Spans older than this are pruned, hourly. Must be at least `window` and `totals_window`. |
 | `max_rows` | `1000000` | count, >= 1 | ...and the oldest beyond this row count. |
-| `max_body_bytes` | `8388608` | bytes, >= 1 | Larger requests (also after gunzip) get 413. |
+| `max_body_bytes` | `8388608` | bytes, >= 1 | Larger requests (also after gunzip) get 413. A gzip body of more than 64 members gets 400 (exporters send one). |
 | `max_snapshot_spans` | `50000` | count, >= 1 | At most this many stored spans per tick, newest first. |
 | `max_concurrent_requests` | `4` | count, >= 1 | Requests decoded at once; more get 503 and are retried by the exporter. |
 | `task_attribute` | `"kelpie.task_id"` | attribute name | Span or resource attribute naming the task. |
@@ -1090,6 +1090,12 @@ destination. Needs `[traces]` enabled. The global dry-run does not stop forwardi
 | `queue_size` | `1000` | requests, >= 1 | Requests waiting per destination; beyond that they are dropped. |
 | `queue_bytes` | `67108864` | bytes, >= 1 | Bytes waiting per destination (64 MiB). |
 | `retries` | `3` | count, 0 to 10 | Retries on network errors, 429 and 5xx. |
+
+An `http://` endpoint is always reached directly, never through `http_proxy` or
+`all_proxy`: a proxy would see the `headers_env` secrets and the spans in clear. An
+`https://` endpoint follows `https_proxy` and `no_proxy` (a CONNECT tunnel), so use https to
+reach a collector through an egress proxy. Kelpie reads at most 64 KiB of a collector's
+answer.
 
 Examples for Langfuse, Phoenix and Datadog are in [How Kelpie works, "Forwarding"](guide.md#forwarding-to-langfuse-phoenix-or-datadog).
 
