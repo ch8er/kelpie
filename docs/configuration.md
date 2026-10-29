@@ -1049,7 +1049,7 @@ What is kept from each span: [privacy.md](privacy.md).
 | `totals_window` | `"24h"` | duration, > 0 | Per-session totals (calls, errors, tokens) in each tick. |
 | `retention` | `"7d"` | duration, > 0, <= 3650d | Spans older than this are pruned, hourly. Must be at least `window` and `totals_window`. |
 | `max_rows` | `1000000` | count, >= 1 | ...and the oldest beyond this row count. |
-| `max_body_bytes` | `8388608` | bytes, >= 1 | Larger requests (also after gunzip) get 413. |
+| `max_body_bytes` | `8388608` | bytes, >= 1 | Larger requests (also after gunzip) get 413. A gzip body of more than 64 members gets 400 (exporters send one). |
 | `max_snapshot_spans` | `50000` | count, >= 1 | At most this many stored spans per tick, newest first. |
 | `max_concurrent_requests` | `4` | count, >= 1 | Requests decoded at once; more get 503 and are retried by the exporter. |
 | `task_attribute` | `"kelpie.task_id"` | attribute name | Span or resource attribute naming the task. |
@@ -1090,6 +1090,12 @@ destination. Needs `[traces]` enabled. The global dry-run does not stop forwardi
 | `queue_size` | `1000` | requests, >= 1 | Requests waiting per destination; beyond that they are dropped. |
 | `queue_bytes` | `67108864` | bytes, >= 1 | Bytes waiting per destination (64 MiB). |
 | `retries` | `3` | count, 0 to 10 | Retries on network errors, 429 and 5xx. |
+
+An `http://` endpoint is always reached directly, never through `http_proxy` or
+`all_proxy`: a proxy would see the `headers_env` secrets and the spans in clear. An
+`https://` endpoint follows `https_proxy` and `no_proxy` (a CONNECT tunnel), so use https to
+reach a collector through an egress proxy. Kelpie reads at most 64 KiB of a collector's
+answer.
 
 Examples for Langfuse, Phoenix and Datadog are in [How Kelpie works, "Forwarding"](guide.md#forwarding-to-langfuse-phoenix-or-datadog).
 

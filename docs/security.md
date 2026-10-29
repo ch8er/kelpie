@@ -16,6 +16,11 @@ token file; the config holds names, not values. Where Kelpie says which secret i
 (logs, `kelpie status`, `kelpie doctor`, error messages) it names the variable or the file.
 The audit checks that no value reaches logs, `/metrics`, errors or reports.
 
+Secrets never go to a proxy in clear: plain-http requests that carry one (GitHub and Linear
+on loopback, `[[traces.forward]]` with `headers_env`, `kelpie agent` on a private network)
+are sent directly, never through `http_proxy`; https requests may use `https_proxy` through
+a CONNECT tunnel.
+
 ## Traces token
 
 The OTLP ingest token (`[traces] token_env`, `KELPIE_TRACES_TOKEN`) is the one secret the
