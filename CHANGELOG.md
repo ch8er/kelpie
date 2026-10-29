@@ -373,6 +373,13 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   fails to load with an error naming `[report] task_url`. Both keys must also stay within
   600 characters once a 64-character id fills `{id}`: a longer `[alerts] task_url` used to
   load and then drop every "Open task" link.
+- The Hermes adapter reads its hook spool the way the Claude Code and OpenClaw adapters do:
+  never through a symlink, never blocking on a FIFO, with a byte cap and overlong lines
+  skipped. It also reads a worktree's `.git`, `commondir` and `gitdir` files that way. Before,
+  an agent that put a FIFO at the spool or at its worktree's `.git` stalled the control loop
+  until restart. The Hermes plugin no longer writes its spool through a symlink or blocks on
+  a FIFO, and creates a new spool folder with mode 0700
+  ([#275](https://github.com/ch8er/kelpie/issues/275)).
 
 ### Fixed
 
