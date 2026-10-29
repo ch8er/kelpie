@@ -227,23 +227,25 @@ report; no LLM is involved.
   clipped to the day (a lower bound: a grace period or an allowed wait is not counted).
   The unit is task-hours, each counted once: when several rules see the same task at the
   same time (rule 13 lists it as waiting on a person while rule 4 holds a stale block on
-  it, or one rule has two conditions on it), the hour counts under the first of a person's
-  inbox, a stale block, then in this order: an ownerless task, a wait past its limit, an
-  exit without a final status, review ping-pong, idle capacity, a card stuck before work,
-  a runaway loop, activity without progress; the others' overlapping hours are listed
-  under "Also seen, not added" (the headline is the sum of the lines). Two causes are in
-  agent-hours instead: forgotten holds (rule 6) count the idle agent-hours behind them,
-  from the idle agents rule 6 reports while the hold stays open, and a person's inbox
-  (rule 13) counts the agent-hours of the agent tasks waiting on them (approvals, human
-  tasks); a human gate rule 6 also reports counts in both lines. Cards stuck in a pre-work
-  status such as triage or scheduled while other tasks wait on them (rule 3) are a line of
-  their own; a card rule 3 finds stuck (past `prework_after`, not held, ignored or queued
-  behind its own parent) that nothing waits on is listed under "Stuck, blocking nothing"
-  with its age, and not counted in the hours or dollars (it delays no work). Agent tasks
-  planned for later (not started: a pre-work status or a planned label; incident 20) never
-  count as waiting: rule 13 leaves them out of its count, and those behind a person's open
-  inbox are listed under "Planned waits" in agent-hours, never counted. Humans (owners of
-  kind `human`) never count as idle agents. `[report] hour_usd` prices them all.
+  it, or one rule has two conditions on it), the hour counts under the first of a farm
+  outage (the tasks its alerts name, a finished one until it finished, from the outage's
+  first alert that counts: its own threshold is its grace), a person's inbox, a stale
+  block, then in this order: an ownerless task, a wait past its limit, an exit without a
+  final status, review ping-pong, idle capacity, a card stuck before work, a runaway loop,
+  activity without progress; the others' overlapping hours are listed under "Also seen,
+  not added" (the headline is the sum of the lines). Two causes are in agent-hours
+  instead: forgotten holds (rule 6) count the idle agent-hours behind them, from the idle
+  agents rule 6 reports while the hold stays open, and a person's inbox (rule 13) counts
+  the agent-hours of the agent tasks waiting on them (approvals, human tasks); a human
+  gate rule 6 also reports counts in both lines. Cards stuck in a pre-work status such as
+  triage or scheduled while other tasks wait on them (rule 3) are a line of their own; a
+  card rule 3 finds stuck (past `prework_after`, not held, ignored or queued behind its
+  own parent) that nothing waits on is listed under "Stuck, blocking nothing" with its
+  age, and not counted in the hours or dollars (it delays no work). Agent tasks planned
+  for later (not started: a pre-work status or a planned label; incident 20) never count
+  as waiting: rule 13 leaves them out of its count, and those behind a person's open inbox
+  are listed under "Planned waits" in agent-hours, never counted. Humans (owners of kind
+  `human`) never count as idle agents. `[report] hour_usd` prices them all.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
   flagged, and by every session `exit_contract` requeued (a restart). Spend follows each
   provider's spend mode (`[spend]`): with an API key, dollars (`[prices]` over Kelpie's
@@ -268,15 +270,29 @@ report; no LLM is involved.
   role's agents had a session running, with a concrete suggestion. A task's wait counts
   under a hold (rule 6's hold labels), else the kind of the unmet condition it waits on (a
   person's `human_task`, CI, PRs to pass checks and merge, LLM quotas, other tasks,
-  timers; a CI found red comes before the merge of the same PR), else a person when rule 13 listed
-  it that day (an approval, parked on a human task), else unknown. While rule 9's CI outage
-  incident is open, the waits it explains (tasks it names, CI and merge waits in its
-  repositories) count under "a shared CI failure" for that time (a held task's wait stays
-  the hold's). Under the cost of chaos, "CI outages" lists each outage of the day: its
-  signature, since when (perhaps an earlier day) and until when or still open, and the PRs
-  in its scope and the alerts folded under it that day (a lower bound), with the waiting
-  time all of them explained together. The report makes no network calls: it runs the
-  connector steps that read only the board (`task_status`, human tasks from block
+  timers; a CI found red comes before the merge of the same PR), else a person when rule
+  13 listed it that day (an approval, parked on a human task), else unknown. While an
+  outage incident is open, the waits it explains count under it for that time (a held
+  task's wait stays the hold's here; the cost of chaos counts an outage's tasks whatever
+  their labels, as a stale block counts): a CI outage of rule 9 (failing CI jobs, or jobs
+  that never start) explains the tasks it names and CI and merge waits in its
+  repositories, under "a shared CI failure"; a block storm of rule 4 (many tasks blocked
+  on the same reason at once) explains only the tasks it names, under "a shared blocker",
+  even when its reason names a person; a tool failure of rule 10 (one tool failing the
+  same way for many tasks) explains only the tasks it names, under "a shared tool failure"
+  (in the cost of chaos its tasks count while named, in progress or not: the failing tool
+  holds their work; the waits split sees only their waiting time). In the cost of chaos
+  those tasks' hours count once, each occurrence of an outage apart, under "farm outages",
+  ahead of the person's inbox and their stale blocks. Under the cost of chaos, "Outages"
+  lists each outage of the day: its signature, its reason, since when (perhaps an earlier
+  day) and until when or still open, its scope that day (PRs, or for a block storm tasks)
+  and the alerts folded under it (a lower bound), who can end it when its reason names a
+  person, and the waiting time all of them explained together. An outage whose check is
+  still in observe (`storm_mode`, `not_started_mode`) is listed as such, and its waits
+  stay where they were until the check is switched on; its hours count from the first
+  alert after that (until a check switched back to observe), and before/after lists them
+  apart, as a signal the config change turned on. The report makes no network calls: it
+  runs the connector steps that read only the board (`task_status`, human tasks from block
   reasons), and a block reason a `[[block_conditions]]` pattern matches counts as a CI or
   merge wait by the pattern's kind, without a PR lookup. The "Farm throughput" section
   breaks each role's waiting time down by cause.

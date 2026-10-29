@@ -1,4 +1,4 @@
-"""The report's list of the day's CI outages (rule 9, ``kelpie.core.incidents``).
+"""The report's list of the day's outages (``kelpie.core.incidents``).
 
 The day is test_waits' (2026-03-02, UTC): an outage's waiting time comes from its tasks
 R1-R3, which wait on CI in ``example/app`` from 08:00.
@@ -38,7 +38,7 @@ def test_the_report_names_each_outage_with_its_folded_alerts() -> None:
     entries = (sample, folded(4, "a"), folded(5, "a"), folded(6, "b"), folded(21, "late"))
     report = build_report(inputs(states=(state,), actions=entries), sections={})
     [line] = report.outages
-    assert (line.signature, line.prs, line.folded, line.open) == (
+    assert (line.signature, line.scope, line.folded, line.open) == (
         SIGNATURE,
         2,
         2,  # alert "a" twice (hourly repeat) counts once; "late" is after the outage
@@ -46,7 +46,7 @@ def test_the_report_names_each_outage_with_its_folded_alerts() -> None:
     )
     assert report.outage_wait_hours == pytest.approx(3 * 12)  # R1-R3 from 08:00 to 20:00
     markdown = render_markdown(report)
-    assert "**CI outages** (rule 9; 36.0 task-hours of waiting fell inside them" in markdown
+    assert "**Outages** (36.0 task-hours of waiting fell inside them" in markdown
     assert f"`{SIGNATURE}` since 2026-03-02 02:00 UTC, until 2026-03-02 20:00 UTC" in markdown
     assert "2 PR(s), 2 alert(s) folded under it" in markdown
 
@@ -72,7 +72,7 @@ def test_an_outage_from_yesterday_counts_only_the_days_prs_and_folds() -> None:
     )
     report = build_report(inputs(states=(state,), actions=entries), sections={})
     [line] = report.outages
-    assert line.since == at(-5) and (line.prs, line.folded) == (3, 1)
+    assert line.since == at(-5) and (line.scope, line.folded) == (3, 1)
     assert "since 2026-03-01 19:00 UTC, until 2026-03-02 06:00 UTC" in render_markdown(report)
 
 
@@ -110,7 +110,7 @@ def test_an_outage_outside_the_day_is_not_listed() -> None:
 
 def test_no_outage_no_list() -> None:
     report = build_report(inputs(), sections={})
-    assert report.outages == () and "CI outages" not in render_markdown(report)
+    assert report.outages == () and "**Outages**" not in render_markdown(report)
 
 
 def test_folds_after_the_last_sighting_count_until_the_outage_closes() -> None:

@@ -357,13 +357,22 @@ def _stuck(
     turned on (a connector, a rule): it is left out and listed instead."""
     # A rule covers its causes (bottlenecks covers bottlenecks:hold); a cause is exact.
     exact = event.rule in ev.chaos_rules and ":" in (event.rule or "")
-    scoped = exact or event.rule in {c.split(":")[0] for c in ev.chaos_rules}
+    # ... and its own outages (rule 9's are a cause of their own, "outage", not a rule's)
+    scoped = (
+        exact
+        or event.rule in {c.split(":")[0] for c in ev.chaos_rules}
+        or (
+            event.rule is not None
+            and any(r.state.rule == event.rule and ev.start(r.state) < ev.end for r in ev.states)
+        )
+    )
 
     def counts(s: OpenState) -> bool:
         cause = ev.cause(s)
         if exact:
             return cause == event.rule
-        return not scoped or cause.split(":")[0] == event.rule
+        # a rule covers its own outages too (rule 4's block storms count under "outage")
+        return not scoped or event.rule in (cause.split(":")[0], s.rule)
 
     def by_cause(w: Window) -> dict[str, tuple[float, int]]:
         out: dict[str, tuple[float, int]] = {}
@@ -394,7 +403,14 @@ def _stuck(
                         f"hours lost per day ({md.text(cause)})",
                         firsts[cause],
                         (
-                            ev.lost([r.state for r in ev.states if ev.cause(r.state) == cause], *a)
+                            ev.lost(
+                                [
+                                    r.state
+                                    for r in ev.states
+                                    if counts(r.state) and ev.cause(r.state) == cause
+                                ],
+                                *a,
+                            )
                             if ev.lost is not None
                             else ca[cause][0]
                         )

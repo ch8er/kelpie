@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kelpie.core.incidents import is_outage_state
 from kelpie.core.ledger import LedgerEntry
 from kelpie.core.model import Snooze, Span
 from kelpie.core.spans import Attribution
@@ -80,13 +81,17 @@ class ReportStore:
         return [_entry(r) for r in rows]
 
     def states(self, start: datetime, end: datetime) -> list[StateRow]:
-        """States open at ``end`` or closed after ``start``, that began before ``end``."""
+        """States open at ``end`` or closed after ``start``, that began before ``end``. An
+        outage's row cannot tell when it began (rules 4 and 10 move its ``since`` forward and
+        an escalation stores it; a check switched on re-opens it in place): outages load
+        whatever their ``since``, and their alerts before ``end`` decide what the report
+        shows of them (none: nothing)."""
         rows = self._db.execute(
-            "SELECT * FROM states WHERE since < ? AND (closed_at IS NULL OR closed_at >= ?)"
-            " ORDER BY since, id",
-            (_ts(end), _ts(start)),
+            "SELECT * FROM states WHERE (closed_at IS NULL OR closed_at >= ?) ORDER BY since, id",
+            (_ts(start),),
         ).fetchall()
-        return [StateRow(_state(r), _time(r["closed_at"])) for r in rows]
+        found = [StateRow(_state(r), _time(r["closed_at"])) for r in rows]
+        return [r for r in found if r.state.since < end or is_outage_state(r.state.id)]
 
     def spans(self, start: datetime, end: datetime) -> list[Span]:
         """Stored spans whose last time falls in ``[start, end)``."""
