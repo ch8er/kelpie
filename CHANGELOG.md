@@ -384,7 +384,7 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   ([#249](https://github.com/ch8er/kelpie/issues/249)).
 - First-run rough edges ([#267](https://github.com/ch8er/kelpie/issues/267)): `kelpie
   status` writes durations as the config does (`30s`, `30m`, `7d`) instead of
-  `7 days, 0:00:00`; `kelpie serve` warns that checkpoints makes no WIP commits without
+  `7 days, 0:00:00`, and so do the startup warnings that compare durations; `kelpie serve` warns that checkpoints makes no WIP commits without
   `[connectors.github.pulls]` only when a configured adapter makes WIP commits (or on a
   hub), not on every farm; `kelpie doctor` builds the adapters from the environment it
   checks. The package lists Python 3.13, which installs and runs.

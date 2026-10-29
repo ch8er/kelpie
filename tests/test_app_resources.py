@@ -185,7 +185,7 @@ def test_warns_when_the_fetch_interval_outlasts_the_reading_age(tmp_path: Path) 
     settings = settings_from(tmp_path, text)
     loaded = load_rules(settings.engine)
     (warning,) = resource_interval_warnings(loaded.rules, settings.resources)
-    assert "interval (0:15:00)" in warning and "max_reading_age" in warning
+    assert "interval (15m)" in warning and "max_reading_age" in warning
     fine = settings_from(tmp_path, toml(None, 'interval = "5m"'))
     assert resource_interval_warnings(load_rules(fine.engine).rules, fine.resources) == []
     assert resource_interval_warnings(loaded.rules, ResourceSettings()) == []

@@ -158,7 +158,7 @@ def test_warns_when_the_probe_interval_outlasts_the_reading_age(tmp_path: Path) 
     settings = settings_from(tmp_path, toml(extra='interval = "15m"'))
     loaded = load_rules(settings.engine)
     (warning,) = provider_interval_warnings(loaded.rules, settings.llm_quotas)
-    assert "provider main interval (0:15:00)" in warning
+    assert "provider main interval (15m)" in warning
     fine = settings_from(tmp_path, toml())
     assert provider_interval_warnings(load_rules(fine.engine).rules, fine.llm_quotas) == []
     assert provider_interval_warnings(loaded.rules, None) == []

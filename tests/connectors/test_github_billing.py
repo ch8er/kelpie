@@ -556,7 +556,7 @@ def test_status_names_the_account_and_the_variable_never_the_token(
     assert "billing usage of user farm-owner, every 30m (token from $BILL)" in status
     assert BILLING not in status
     (warning,) = billing_interval_warnings(loaded.rules, settings)
-    assert "billing_interval (0:30:00) keeps a reading for up to 1:00:00, longer than" in warning
+    assert "billing_interval (30m) keeps a reading for up to 1h, longer than" in warning
 
 
 @pytest.mark.parametrize(("interval", "warned"), [("5m", False), ("6m", True)])
