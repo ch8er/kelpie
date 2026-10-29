@@ -67,6 +67,7 @@ from kelpie.core.incidents import (
     CI_NOT_STARTED,
     CI_NOT_STARTED_STATE,
     FOLDED_UNDER,
+    TOOL_FAILURES,
     is_outage_state,
 )
 from kelpie.core.incidents import Outage as OutageParams
@@ -140,8 +141,6 @@ MIN_HOURS = 1.0  # a smaller wait is no headline
 CI_OUTAGE = "ci_outage"
 SHARED_BLOCKER = "shared_blocker"  # a block storm's waits (incident 20)
 SHARED_TOOL_FAILURE = "shared_tool_failure"  # a tool failing for many tasks (rule 10)
-# rule 10's outage kind (#229). TODO: import it from kelpie.core.incidents once #273 lands.
-TOOL_FAILURES = "tool_failures"
 CI_KINDS = frozenset({CI_FAILURES, CI_NOT_STARTED})  # scoped by PRs and repositories too
 SNOOZED = "snoozed"  # waits a person snoozed: deliberate, never the biggest wait
 MAX_REASON = 2000  # characters of a block reason matched, as the GitHub step does
@@ -250,7 +249,9 @@ def outage_samples(
             if is_outage_state(str(e.params.get("state", "")))
             and (o := OutageParams.from_params(e.params)) is not None
         ),
-        key=lambda x: (x[0], not x[2]),  # at one time, an alert that counts last (it wins)
+        # at one time, an alert that counts last (it wins), the widest last: as in the cost
+        # of chaos (kelpie.report.daily._samples)
+        key=lambda x: (x[0], not x[2], 0 if x[2] else len(x[1].tasks)),
     )
 
 
@@ -520,17 +521,16 @@ class WaitCauses:
         return [self._snoozes[i] for i in sorted(ids) if i in self._snoozes]
 
     def _holds(self, outage: OutageSpan, task: Task) -> intervals.Spans:
-        """Where the outage holds the task: a block storm or a tool failure over the spans
-        its alerts named it; a CI outage over its counted spans, if it explains the task."""
-        if outage.kind not in CI_KINDS:
-            return outage.task_spans(task.id)
-        return outage.spans() if self._explains(outage, task) else []
+        """Where the outage holds the task: over the spans its alerts named it (as the cost
+        of chaos counts it); a CI outage also over its counted spans when the task waits on
+        CI or a merge in its scope."""
+        if outage.kind in CI_KINDS and self._in_scope(outage, task):
+            return outage.spans()
+        return outage.task_spans(task.id)
 
-    def _explains(self, outage: OutageSpan, task: Task) -> bool:
-        """A CI outage names the task, or the task waits on CI or a merge of a PR in its
-        scope or of a repository it covers."""
-        if task.id in outage.tasks:
-            return True
+    def _in_scope(self, outage: OutageSpan, task: Task) -> bool:
+        """The task waits on CI or a merge of a PR in the CI outage's scope or of a
+        repository it covers."""
         found = self.condition(task)
         if found is None or found.kind not in (ConditionKind.CI_STATUS, ConditionKind.PR_MERGED):
             return False

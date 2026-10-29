@@ -358,13 +358,8 @@ def test_a_storm_switched_on_by_a_config_change_is_listed_apart() -> None:
 
 
 def test_a_tool_failure_explains_only_its_tasks_under_its_own_cause() -> None:
-    from kelpie.report.waits import (
-        SHARED_TOOL_FAILURE,
-        TOOL_FAILURES,
-        OutageSpan,
-        WaitCauses,
-        outages,
-    )
+    from kelpie.core.incidents import TOOL_FAILURES
+    from kelpie.report.waits import SHARED_TOOL_FAILURE, OutageSpan, WaitCauses, outages
     from tests.report.test_waits import at, ci, waiting
 
     tool = OutageSpan(at(8), at(12), repos=frozenset({"example/app"}), tasks=frozenset({"R1"}),
@@ -386,8 +381,8 @@ def test_a_tool_failure_explains_only_its_tasks_under_its_own_cause() -> None:
 def test_a_tool_failure_renders_as_its_kind() -> None:
     from dataclasses import replace
 
+    from kelpie.core.incidents import TOOL_FAILURES
     from kelpie.report.daily import OutageLine
-    from kelpie.report.waits import TOOL_FAILURES
 
     at = datetime.fromisoformat("2026-03-02T09:00:00+00:00")
     line = OutageLine("web_fetch", at, at + timedelta(hours=2), False, 3, 1, TOOL_FAILURES,
@@ -465,3 +460,43 @@ def test_alerts_at_one_time_an_alert_that_counts_wins() -> None:
     observed = replace(OutageParamsFactory.storm(at, ("T-1",), observe=True), fingerprint="o")
     for order in ((counted, observed), (observed, counted)):
         assert [obs for _, _, obs in outage_samples(order)] == [True, False]
+
+
+def test_a_check_switched_on_again_keeps_its_earlier_hours() -> None:
+    """On at 10:00, back in observe at 12:00, on again at 16:00: the engine re-opens the
+    state then (``opened_at`` 16:00, ``since`` still 10:00). Both spans count, in the
+    cost of chaos and in the waits split alike."""
+    day = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
+    h = lambda n: day + timedelta(hours=n)  # noqa: E731
+    alerts = (
+        OutageParamsFactory.storm(h(10), ("T-1",)),
+        OutageParamsFactory.storm(h(12), ("T-1",), observe=True),
+        OutageParamsFactory.storm(h(16), ("T-1",)),
+    )
+    state = row(alerts[0].params["state"], "stale_blocks", h(10), h(16), h(18))
+    report = build_report(ReportInputs(day=day.date(), tz=UTC, states=(state,), actions=alerts,
+                                       tasks=open_tasks("T-1", at=h(9))), sections={})  # fmt: skip
+    [line] = [c for c in report.chaos if c.rule == OUTAGE]
+    assert line.hours == pytest.approx(2 + 2)
+    assert report.outage_wait_hours == pytest.approx(4)
+
+
+def test_a_ci_outage_holds_a_named_task_while_named_and_its_scope_throughout() -> None:
+    """A task a CI outage's later alert names (not waiting on CI in its scope) is held from
+    that alert on, as the cost of chaos counts it; a CI wait in its repository throughout."""
+    from kelpie.core.incidents import CiOutage
+    from kelpie.report.waits import CI_OUTAGE, WaitCauses, outages
+    from tests.report.test_waits import at, ci, waiting
+
+    sid = "ci_economy:outage:0123456789ab"
+
+    def alert(when: datetime, tasks: tuple[str, ...]) -> LedgerEntry:
+        red = CiOutage(state=sid, signature="ci.yml > build", job="build",
+                       repos=("example/app",), tasks=tasks)  # fmt: skip
+        return entry(when, "ci_economy", red.to_params(), ActionKind.ALERT)
+
+    entries = [alert(at(10), ("R1",)), alert(at(12), ("R1", "N1"))]
+    [o] = outages([row(sid, "ci_economy", at(10), at(10), at(16)).state], entries)
+    causes = WaitCauses((ci("R1"),), (), (), (), [o])
+    assert causes.split(waiting("R1", "reviewer"), at(10), at(16)) == {CI_OUTAGE: pytest.approx(6)}
+    assert causes.split(waiting("N1", "reviewer"), at(10), at(16))[CI_OUTAGE] == pytest.approx(4)

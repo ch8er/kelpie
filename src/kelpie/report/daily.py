@@ -107,7 +107,13 @@ from typing import Any
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.incidents import BLOCK_STORM, CI_FAILURES, CI_NOT_STARTED, is_outage_state
+from kelpie.core.incidents import (
+    BLOCK_STORM,
+    CI_FAILURES,
+    CI_NOT_STARTED,
+    TOOL_FAILURES,
+    is_outage_state,
+)
 from kelpie.core.incidents import Outage as OutageParams
 from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Outcome, Suppression
 from kelpie.core.model import (
@@ -167,7 +173,6 @@ from kelpie.report.waits import (
     SHARED_BLOCKER,
     SHARED_TOOL_FAILURE,
     SNOOZED,
-    TOOL_FAILURES,
     BiggestWait,
     BlockKind,
     OutageSpan,
@@ -1096,9 +1101,13 @@ def _count_once(
 def counts_from(state: OpenState) -> datetime:
     """When a chaos state starts counting: when Kelpie first reported it, not before its
     condition began. A person's inbox (rule 13) counts from when it opened: its ``since``
-    is its longest current wait, which moves forward as items are answered."""
+    is its longest current wait, which moves forward as items are answered. An outage
+    counts from its condition's start: the engine re-opens a state when its check is
+    switched on again, while what counts is its alerts (:func:`outage_steps`)."""
     if state.id.startswith(PEOPLE_STATE):
         return state.opened_at
+    if is_outage_state(state.id):
+        return state.since
     return max(state.since, state.opened_at)
 
 

@@ -397,8 +397,10 @@ def test_waits_inside_a_ci_outage_count_under_it() -> None:
                     samples, (), (), [o])  # fmt: skip
     r1 = waiting("R1", "reviewer")  # waits on CI in the outage's repository
     assert of.split(r1, at(8), at(24)) == {CI_OUTAGE: pytest.approx(6), "ci": pytest.approx(10)}
-    named = waiting("N1", "developer")  # no condition, but the outage names it
+    named = waiting("N2", "developer")  # no condition, but the outage names it (from 11:00)
     assert of.split(named, at(12), at(14)) == {CI_OUTAGE: pytest.approx(2)}
+    dropped = waiting("N1", "developer")  # named at 10:00 only: held until the next alert
+    assert of.split(dropped, at(10), at(12)) == {CI_OUTAGE: pytest.approx(1), "unknown": 1}
     in_scope = waiting("L1", "reviewer")  # its PR (example/lib#1) is not in scope...
     assert of.split(in_scope, at(10), at(16)) == {"ci": pytest.approx(6)}
     pr7 = replace(ci("L2", repo="example/lib"), params={"repo": "example/lib", "pr": 7})
