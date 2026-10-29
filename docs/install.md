@@ -270,7 +270,7 @@ with a `pip` install, read them on GitHub.
 | claude code stop markers | `stop_dir` is a writable directory, or can be created. |
 | github ci `<repo>` | One line per repository of `[connectors.github]` (at most 20): which source CI is read from (statuses and check-runs, or the commit's Actions runs where those answer 403), and the permission a 403 means. Probes with the head of the newest pull request (else the newest workflow run; skipped if there is none). `WARN` when commit statuses are refused (Actions cannot see Jenkins, Buildkite or CircleCI). Fails when the Actions runs are refused (`Actions: read`), a rejected token, an organization policy (SAML, IP allow list) or an unknown repository. With `ci_workflows`, a further line `github ci_workflows <repo>` fails for an entry that matches no workflow (or only a disabled one) and warns for a name shared by several files. Only with that section. |
 | github pull requests `<repo>` | Fails with `Pull requests: read` when the pull requests answer 403: conditions read the PR first. Shown only then. |
-| Prometheus reachable | Prometheus answers on `/-/ready` (`--prometheus URL` or `$KELPIE_PROMETHEUS_URL`, else `localhost:9090` is tried and skipped if absent). |
+| Prometheus reachable | Prometheus answers on `/-/ready` (`--prometheus URL` or `$KELPIE_PROMETHEUS_URL`, else `localhost:9090` is tried and skipped if absent). A URL with credentials, a query or a fragment is refused without being printed; a redirect is not followed and fails the check. |
 
 "hooks fire", "claude code hooks fire" and "OTLP spans arrive" are skipped while no task is
 running (in progress, on Claude Code); run doctor while one is. Run it in the directory and with the `KELPIE_DB` that `kelpie serve` uses, because it

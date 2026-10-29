@@ -454,6 +454,13 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - Lasting-state alerts failed to read their escalation defaults from a slotted dataclass,
   found on the first live run ([#24](https://github.com/ch8er/kelpie/pull/24)).
 - Nested LLM spans were counted twice in token totals ([#29](https://github.com/ch8er/kelpie/pull/29)).
+- `kelpie doctor` refuses a `--prometheus` / `$KELPIE_PROMETHEUS_URL` with credentials, a
+  query or a fragment instead of printing it whole, and no longer follows a redirect.
+  Reading the store read-only (`kelpie status`, `why`, `snooze`) escapes the path: a `#`,
+  `?` or `%` in it used to open another file, read-write. The OpenClaw hook's peer key is
+  read only from a regular file, so a directory or FIFO there no longer fails every tick.
+  The simulator's fake GitHub tokens no longer look like real ones, and CI's actions are
+  pinned by commit like the release's ([#275](https://github.com/ch8er/kelpie/issues/275)).
 
 ### Internal
 

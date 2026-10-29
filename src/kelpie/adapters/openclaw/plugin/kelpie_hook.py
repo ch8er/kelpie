@@ -45,6 +45,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import sys
 import time
 from pathlib import Path
@@ -347,7 +348,11 @@ def read_peer_key(path: Path) -> bytes | None:
     except OSError:
         return None
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
         raw = os.read(fd, 2 * PEER_KEY_BYTES + 2)
+    except OSError:
+        return None
     finally:
         os.close(fd)
     try:
