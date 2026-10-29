@@ -24,6 +24,7 @@ from kelpie.core.config import EngineConfig
 from kelpie.core.model import Snapshot
 from kelpie.metrics import Metrics
 from tests.connectors.fake_github import TOKEN
+from tests.remote.test_wiring import free_port
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 
@@ -323,7 +324,7 @@ def test_build_app_wires_the_pull_requests_step(
     assert "checkpoints makes no WIP commits" not in caplog.text
     caplog.clear()
     build_app(load_settings(write(tmp_path, CONFIG))).close()  # no [connectors.github.pulls]
-    assert "checkpoints makes no WIP commits" in caplog.text
+    assert "checkpoints makes no WIP commits" not in caplog.text  # nothing makes WIP commits
     assert "cache_ttl" not in caplog.text
     slow = text.replace('poll_interval = "5m"', 'poll_interval = "1m"')
     build_app(load_settings(write(tmp_path, slow))).close()
@@ -340,6 +341,42 @@ def test_build_app_wires_the_pull_requests_step(
     unchecked = short + "[engine.rules.checkpoints]\nwip_without_pr_check = true\n"
     build_app(load_settings(write(tmp_path, unchecked))).close()
     assert "closed_lookback is shorter" not in caplog.text  # no PR check, no refusal
+
+
+class _WipCommits:
+    """A platform adapter that carries out WIP commits (no shipped adapter does yet)."""
+
+    name = "wip"
+    actions = frozenset({ActionKind.WIP_COMMIT})
+
+
+def test_checkpoints_warning_only_where_wip_commits_are_made(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    caplog.set_level("INFO")
+    monkeypatch.setattr("kelpie.app.build_adapters", lambda *a, **k: [_WipCommits()])
+    build_app(load_settings(write(tmp_path, CONFIG))).close()  # no [connectors.github.pulls]
+    assert "checkpoints makes no WIP commits" in caplog.text
+    caplog.clear()
+    unchecked = CONFIG + "[engine.rules.checkpoints]\nwip_without_pr_check = true\n"
+    build_app(load_settings(write(tmp_path, unchecked))).close()
+    assert "checkpoints makes no WIP commits" not in caplog.text
+
+
+def test_checkpoints_warning_on_a_hub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hub's agents' adapters are known only once they report: warned there."""
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    caplog.set_level("INFO")
+    monkeypatch.setenv("KELPIE_TEST_AGENT_TOKEN", TOKEN)
+    hub = CONFIG + (
+        f'[hub]\nlisten = "127.0.0.1:{free_port()}"\nallow_plain_http = true\n'
+        '[[hub.agents]]\nname = "laptop"\ntoken_env = "KELPIE_TEST_AGENT_TOKEN"\n'
+    )
+    build_app(load_settings(write(tmp_path, hub))).close()
+    assert "checkpoints makes no WIP commits" in caplog.text
 
 
 def test_pull_requests_step_off_unless_configured(

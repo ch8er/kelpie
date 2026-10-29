@@ -157,9 +157,8 @@ uv run kelpie status               # rules, their mode, board readable, spool ag
 curl -s localhost:9464/metrics | grep -E '^kelpie_(dry_run|engine_ticks_total|actions_total|snapshot_spans)'
 ```
 
-With the config of step 2 alone, `kelpie serve` logs two warnings at start, both expected
-in observe mode: `checkpoints makes no WIP commits` (it needs `[connectors.github.pulls]`)
-and, without step 4, that OTLP ingest accepts spans without a token (it listens on
+With the config of step 2 alone and without step 4, `kelpie serve` logs one warning at
+start, expected in observe mode: OTLP ingest accepts spans without a token (it listens on
 `127.0.0.1` only).
 
 `kelpie doctor` checks: config and rules load; each rule's mode is what the config says

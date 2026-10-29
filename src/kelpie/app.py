@@ -1012,12 +1012,12 @@ def _warn_inbox_gaps(rules: Sequence[Rule]) -> None:
                     "needs_you.%s (%s) is longer than %s.%s (%s): %s is announced by neither "
                     "rule for %s in between",
                     thirteen,
-                    theirs,
+                    _span(theirs),
                     rule.name,
                     own,
-                    mine,
+                    _span(mine),
                     what,
-                    theirs - mine,
+                    _span(theirs - mine),
                 )
 
 
@@ -1462,7 +1462,10 @@ def _unique_owners(owners: tuple[Owner, ...]) -> tuple[Owner, ...]:
     )
 
 
-def build_adapters(settings: Settings) -> list[PlatformAdapter]:
+def build_adapters(
+    settings: Settings, environ: Mapping[str, str] = os.environ
+) -> list[PlatformAdapter]:
+    """The enabled platform adapters; tokens are read from ``environ``."""
     adapters: list[PlatformAdapter] = []
     if settings.hermes is not None and settings.hermes.enabled:
         adapters.append(settings.hermes.build())
@@ -1473,7 +1476,7 @@ def build_adapters(settings: Settings) -> list[PlatformAdapter]:
     for issues in (settings.github_issues, settings.linear):
         if issues is not None and issues.enabled:
             try:
-                adapters.append(issues.build())
+                adapters.append(issues.build(environ))
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
     return adapters
@@ -1597,8 +1600,8 @@ def trace_window_warnings(rules: Sequence[Rule], traces: TraceSettings) -> list[
     if not traces.enabled:
         return []
     return [
-        f"rule 'no_progress' window ({rule.window}) is longer than [traces] window "
-        f"({traces.window}): it sees only the newest spans and undercounts tokens"
+        f"rule 'no_progress' window ({_span(rule.window)}) is longer than [traces] window "
+        f"({_span(traces.window)}): it sees only the newest spans and undercounts tokens"
         for rule in rules
         if isinstance(rule, NoProgress) and rule.window > traces.window
     ]
@@ -1636,8 +1639,8 @@ def ci_window_errors(rules: Sequence[Rule], settings: Settings) -> list[str]:
     if ci is None or not ci.enabled:
         return []
     return [
-        f"rule 'ci_economy' window ({rule.window}) is longer than [connectors.github.ci] "
-        f"window ({ci.window}): it would undercount builds and burn"
+        f"rule 'ci_economy' window ({_span(rule.window)}) is longer than [connectors.github.ci] "
+        f"window ({_span(ci.window)}): it would undercount builds and burn"
         for rule in rules
         if isinstance(rule, CiEconomy) and rule.window > ci.window
     ]
@@ -1652,10 +1655,10 @@ def billing_interval_warnings(rules: Sequence[Rule], settings: Settings) -> list
         return []
     kept = ci.billing_interval * KEEP_FOR
     return [
-        f"[connectors.github.ci] billing_interval ({ci.billing_interval}) keeps a reading for "
-        f"up to {kept}, longer than rule 'ci_economy' max_reading_age "
-        f"({rule.max_reading_age}): when reads fail, the CI minutes quota would go unwatched "
-        "until the reading expires"
+        f"[connectors.github.ci] billing_interval ({_span(ci.billing_interval)}) keeps a "
+        f"reading for up to {_span(kept)}, longer than rule 'ci_economy' max_reading_age "
+        f"({_span(rule.max_reading_age)}): when reads fail, the CI minutes quota would go "
+        "unwatched until the reading expires"
         for rule in rules
         if isinstance(rule, CiEconomy) and kept > rule.max_reading_age
     ]
@@ -1668,8 +1671,8 @@ def resource_interval_warnings(rules: Sequence[Rule], resources: ResourceSetting
     if prometheus is None:
         return []
     return [
-        f"[resources.prometheus] interval ({prometheus.interval}) is longer than rule "
-        f"'resources' max_reading_age ({rule.max_reading_age}): host readings would be "
+        f"[resources.prometheus] interval ({_span(prometheus.interval)}) is longer than rule "
+        f"'resources' max_reading_age ({_span(rule.max_reading_age)}): host readings would be "
         "ignored as stale between fetches"
         for rule in rules
         if isinstance(rule, Resources) and prometheus.interval > rule.max_reading_age
@@ -1694,9 +1697,9 @@ def provider_interval_warnings(rules: Sequence[Rule], quotas: LlmQuotaSettings |
     if quotas is None:
         return []
     return [
-        f"[connectors.llm_quotas] provider {p.name} interval ({p.interval}) is longer than "
-        f"rule 'resources' max_reading_age ({rule.max_reading_age}): its readings would be "
-        "ignored between probes"
+        f"[connectors.llm_quotas] provider {p.name} interval ({_span(p.interval)}) is longer "
+        f"than rule 'resources' max_reading_age ({_span(rule.max_reading_age)}): its readings "
+        "would be ignored between probes"
         for rule in rules
         if isinstance(rule, Resources)
         for p in quotas.providers
@@ -1713,16 +1716,11 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     pulls = (
         github is not None and github.enabled and github.pulls is not None and github.pulls.enabled
     )
-    if (
+    needs_pulls = (
         checkpoints is not None
         and not getattr(checkpoints, "wip_without_pr_check", True)
         and not pulls
-    ):
-        log.warning(
-            "checkpoints makes no WIP commits: it needs [connectors.github.pulls] to see "
-            "that a branch has no open PR (or set wip_without_pr_check = true where task "
-            "branches never carry PRs)"
-        )
+    )
     act_within = getattr(checkpoints, "act_within", None)
     if act_within is not None:
         if act_within + timedelta(hours=1) >= settings.engine.once_window:
@@ -1778,6 +1776,16 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     # Without [[alerts.channels]] there is no alerter: an effect nobody can carry out turns
     # into an alert that is only logged. The defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
+    # Only where something would make WIP commits: an adapter that carries them out, or a
+    # hub, whose agents' adapters are known only once they report.
+    if needs_pulls and (
+        settings.hub is not None or any(ActionKind.WIP_COMMIT in _declared(a) for a in adapters)
+    ):
+        log.warning(
+            "checkpoints makes no WIP commits: it needs [connectors.github.pulls] to see "
+            "that a branch has no open PR (or set wip_without_pr_check = true where task "
+            "branches never carry PRs)"
+        )
     for adapter in adapters:  # Kelpie's park and stop markers are issued on the app's clock
         if isinstance(adapter, hermes.HermesAdapter | HermesBoards):
             adapter.clock = clock
@@ -2587,13 +2595,15 @@ def _traces_status(traces: TraceSettings, hub: bool = False) -> str:
     except ValueError as exc:
         return f"NOT ready: {exc}"
     if traces.token_file is not None:
-        auth = f"bearer token from {traces.token_file} (rotatable, grace {traces.token_grace})"
+        grace = _span(traces.token_grace)
+        auth = f"bearer token from {traces.token_file} (rotatable, grace {grace})"
     elif token:
         auth = f"bearer token from ${traces.token_env}"
     else:
         auth = f"open (${traces.token_env} unset)"
     forward = "".join(f", forward to {f.name} ({f.display_endpoint})" for f in traces.forward)
-    return f"POST /v1/traces, {auth}, window {traces.window}, retention {traces.retention}{forward}"
+    window, retention = _span(traces.window), _span(traces.retention)
+    return f"POST /v1/traces, {auth}, window {window}, retention {retention}{forward}"
 
 
 def read_budgets(
@@ -2824,8 +2834,8 @@ def render_budgets(
             if v is not None
         )
         lines.append(
-            f"  {b.name}: {b.scope}{match}, {b.unit}, {b.mode}, window {b.window}"
-            f" (burn rate over {b.burn_window}), {limits}"
+            f"  {b.name}: {b.scope}{match}, {b.unit}, {b.mode}, window {_span(b.window)}"
+            f" (burn rate over {_span(b.burn_window)}), {limits}"
         )
         if isinstance(statuses, str):
             lines.append(f"    spend unavailable: {statuses}")
@@ -2861,7 +2871,7 @@ def _resources_status(resources: ResourceSettings) -> str:
     auth = f"bearer token from ${p.token_env}" if token else "no token"
     return (
         f"Prometheus {p.display_url}, {len(p.hosts)} host(s) by label {p.host_label}, "
-        f"every {p.interval}, {auth}"
+        f"every {_span(p.interval)}, {auth}"
     )
 
 
@@ -2902,7 +2912,7 @@ def _github_status(settings: Settings) -> list[str]:
                 auth = f"NOT ready: {exc}"
             lines.append(
                 f"github ci: minutes used from the billing usage of {kind} "
-                f"{ci.billing_account}, every {ci.billing_interval} ({auth})"
+                f"{ci.billing_account}, every {_span(ci.billing_interval)} ({auth})"
             )
     return lines
 
@@ -2961,7 +2971,7 @@ def _providers_status(quotas: LlmQuotaSettings | None) -> str:
         except ValueError as exc:
             return f"NOT ready: {exc}"
         parts.append(
-            f"{p.name} ({p.kind} {p.display_url}{p.path.split('?')[0]}, every {p.interval})"
+            f"{p.name} ({p.kind} {p.display_url}{p.path.split('?')[0]}, every {_span(p.interval)})"
         )
     return ", ".join(parts)
 
@@ -2990,7 +3000,7 @@ def render_status(
     lines = [
         f"config:   {settings.source or '(defaults)'}",
         f"dry-run:  {_dry_run_status(settings)}",
-        f"interval: {engine.interval}",
+        f"interval: {_span(engine.interval)}",
         f"ledger:   {settings.db_path or '(in memory)'}",
         f"traces:   {_traces_status(settings.traces, settings.hub is not None)}",
         *render_prices(settings, unpriced),
@@ -3021,7 +3031,10 @@ def render_status(
 
 def _span(d: timedelta) -> str:
     """A config duration as it is written, e.g. ``7d``, ``36h``, ``90m``."""
-    seconds = int(d.total_seconds())
+    total = d.total_seconds()
+    seconds = int(total)
+    if seconds != total or seconds == 0:  # a fraction of a second, or none
+        return f"{total:g}s"
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
         if seconds % size == 0:
             return f"{seconds // size}{unit}"

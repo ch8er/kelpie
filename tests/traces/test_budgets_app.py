@@ -372,7 +372,7 @@ def test_status_shows_budgets_and_their_state(tmp_path: Path) -> None:
     assert not isinstance(current, str) and len(current) == 5
     text = render_status(settings, load_rules(settings.engine), [], current, now=NOW)
     assert "budgets:" in text
-    assert "  farm-daily: day, usd, api, window 1 day, 0:00:00" in text
+    assert "  farm-daily: day, usd, api, window 1d (burn rate over 1h)" in text
     assert "soft 5.00, hard 10.00" in text
     assert "    agent-dev-1: ok, spent 1,650,000 tokens, remaining 350,000, 2,640,000/h" in text
     assert "runs out 2026-03-02 12:07 UTC" in text
