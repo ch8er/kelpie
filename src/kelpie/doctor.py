@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import time
+import urllib.error
 import urllib.request
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -922,7 +923,11 @@ def check_prometheus(url: str | None, environ: Mapping[str, str]) -> Check:
     explicit = url or environ.get(PROMETHEUS_ENV)
     base = (explicit or DEFAULT_PROMETHEUS).rstrip("/")
     fix = "start Prometheus (docker compose up prometheus) or pass the right --prometheus URL"
-    parts = urlsplit(base)
+    try:
+        parts = urlsplit(base)
+        parts.port  # noqa: B018 - raises on a bad port
+    except ValueError:
+        return _fail(name, "the URL is not valid", fix)
     if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
         # Never echoed: the URL may hold a password or a token.
         return _fail(name, "the URL must not contain credentials, a query or a fragment", fix)
@@ -930,14 +935,19 @@ def check_prometheus(url: str | None, environ: Mapping[str, str]) -> Check:
         return _fail(name, f"{base}: only http and https URLs are supported", fix)
     # Never via a proxy, never following a redirect (the check is about this URL).
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    answered = False
     try:
         with opener.open(f"{base}/-/ready", timeout=3) as response:
             problem = "" if response.status == 200 else f"HTTP {response.status}"
+    except urllib.error.HTTPError as exc:
+        answered = 300 <= exc.code < 400  # something there sends us elsewhere: say so
+        redirect = " (redirect not followed)" if answered else ""
+        problem = f"HTTP {exc.code}{redirect}"
     except (OSError, ValueError) as exc:
         problem = str(getattr(exc, "reason", exc))
     if not problem:
         return _pass(name, f"{base}/-/ready")
-    if explicit is None:
+    if explicit is None and not answered:
         return _skip(name, f"nothing at {base}; pass --prometheus URL or set ${PROMETHEUS_ENV}")
     return _fail(name, f"{base}/-/ready: {problem}", fix)
 

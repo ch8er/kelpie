@@ -875,3 +875,8 @@ def test_prometheus_redirect_is_not_followed(farm: Farm, prometheus: str) -> Non
         server.server_close()
     assert hits == ["/-/ready"]
     assert check.status == "FAIL"  # a redirect elsewhere is not "reachable"
+    assert "redirect not followed" in check.detail
+
+
+def test_prometheus_malformed_url_fails_cleanly(farm: Farm) -> None:
+    assert farm.checks("http://[::1")["Prometheus reachable"].status == "FAIL"

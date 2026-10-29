@@ -127,7 +127,9 @@ def test_the_image_is_latest_only_for_a_final_release() -> None:
     assert "enable=${{ needs.verify.outputs.prerelease == 'false' }}" in meta["with"]["tags"]
 
 
-@pytest.mark.parametrize("file", ["release.yml", "ci.yml"])
+@pytest.mark.parametrize(
+    "file", sorted(p.name for p in (ROOT / ".github/workflows").glob("*.y*ml"))
+)
 def test_every_action_is_pinned_to_a_commit(file: str) -> None:
     data = yaml.safe_load((ROOT / ".github/workflows" / file).read_text())
     for name, job in data["jobs"].items():
@@ -154,7 +156,8 @@ def test_the_package_ships_nothing_shaped_like_a_real_token() -> None:
     secret scanners on package indexes may flag such strings (#267 item 4, #275)."""
     found = [
         f"{path.relative_to(ROOT)}: {m.group()[:8]}..."
-        for path in sorted((ROOT / "src" / "kelpie").rglob("*.py"))
-        for m in _TOKEN_SHAPES.finditer(path.read_text("utf-8"))
+        for path in sorted((ROOT / "src" / "kelpie").rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts
+        for m in _TOKEN_SHAPES.finditer(path.read_text("utf-8", "replace"))
     ]
     assert found == []
