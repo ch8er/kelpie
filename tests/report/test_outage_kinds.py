@@ -545,3 +545,102 @@ def test_an_outage_whose_since_moves_forward_keeps_its_earlier_alerts() -> None:
     assert report.outage_wait_hours == pytest.approx(2 * 8)
     [listed] = report.outages
     assert listed.since == h(10)
+
+
+def test_an_outage_whose_since_moved_past_the_day_still_loads(tmp_path: Path) -> None:
+    """A tool outage open from 22:00, escalated at 02:00 the next day: the escalation
+    stores rule 10's since (01:30, its first failure still in the traces window). The day's
+    report still loads it; other states still load only if they began before the end."""
+    from kelpie.core.storage import SqliteLedgerStore
+    from kelpie.report.store import ReportStore
+
+    d = datetime(2026, 3, 1, tzinfo=UTC)
+    h = lambda n: d + timedelta(hours=n)  # noqa: E731
+    sid = "loop_breaker:outage:0123456789ab"
+    path = tmp_path / "k.db"
+    store = SqliteLedgerStore(path)
+    store.save(OpenState(sid, "loop_breaker", h(21.9), h(22), h(22), 0, Severity.WARNING, "s",
+                         None, mode=Mode.ACT))  # fmt: skip
+    store.save(OpenState(sid, "loop_breaker", h(25.5), h(22), h(26), 1, Severity.WARNING, "s",
+                         None, mode=Mode.ACT))  # fmt: skip
+    store.save(OpenState("stale_blocks:T-9:block", "stale_blocks", h(25), h(25), h(26), 0,
+                         Severity.WARNING, "s", "T-9", mode=Mode.ACT))  # fmt: skip
+    store.close()
+    with ReportStore(path) as report_store:
+        assert [r.state.id for r in report_store.states(h(-48), h(24))] == [sid]
+
+
+def test_each_outage_line_has_its_own_occurrences_scope_and_folds() -> None:
+    from dataclasses import replace
+
+    from kelpie.core.incidents import FOLDED_UNDER, CiOutage
+    from kelpie.core.ledger import Suppression
+
+    day = datetime.fromisoformat("2026-03-01T00:00:00+00:00")
+    h = lambda n: day + timedelta(hours=n)  # noqa: E731
+    sid = "ci_economy:outage:0123456789ab"
+
+    def ci(n: float, pr: str) -> LedgerEntry:
+        o = CiOutage(state=sid, signature="ci.yml > build", job="build", repos=("example/app",),
+                     prs=(pr,), tasks=("T-1",))  # fmt: skip
+        return entry(h(n), "ci_economy", o.to_params(), ActionKind.ALERT)
+
+    def fold(n: float, i: int) -> LedgerEntry:
+        e = entry(h(n), "ci_economy", {FOLDED_UNDER: sid}, ActionKind.ALERT)
+        return replace(e, fingerprint=f"fold-{i}", suppression=Suppression.INCIDENT)
+
+    alerts = (ci(10, "example/app#1"), fold(10.5, 1), ci(11, "example/app#1"),
+              ci(15, "example/app#2"), fold(15.5, 2), ci(16, "example/app#2"))  # fmt: skip
+    old = replace(row(sid, "ci_economy", h(9.5), h(10), h(11.75)), closed_at=h(12))
+    new = row(sid, "ci_economy", h(9.5), h(15), h(18))  # since walked back by rule 9
+    report = build_report(ReportInputs(day=day.date(), tz=UTC, states=(old, new), actions=alerts,
+                                       tasks=open_tasks("T-1", at=h(9))), sections={})  # fmt: skip
+    assert [(o.open, o.scope, o.folded) for o in report.outages] == [(False, 1, 1), (True, 1, 1)]
+
+
+def test_before_after_counts_each_occurrence_and_a_moved_since() -> None:
+    from dataclasses import replace
+
+    from kelpie.core.incidents import CiOutage
+    from kelpie.report.fixes import MANUAL, FixEvent
+
+    fix = datetime.fromisoformat("2026-03-01T08:00:00+00:00")
+    h = lambda n: fix + timedelta(hours=n)  # noqa: E731
+    sid = "ci_economy:outage:0123456789ab"
+
+    def ci(n: float) -> LedgerEntry:
+        o = CiOutage(state=sid, signature="ci.yml > build", job="build", repos=("example/app",),
+                     tasks=("T-1",))  # fmt: skip
+        return entry(h(n), "ci_economy", o.to_params(), ActionKind.ALERT)
+
+    def after(states: tuple[StateRow, ...], actions: tuple[LedgerEntry, ...]) -> float:
+        report = build_report(ReportInputs(day=fix.date() + timedelta(days=1), tz=UTC,
+                                           states=states, actions=actions,
+                                           tasks=open_tasks("T-1", "T-2", at=h(-10)),
+                                           fixes=(FixEvent(fix, MANUAL, "a fix"),)))  # fmt: skip
+        [v] = report.verifications
+        return _lost(v).after  # type: ignore[attr-defined, no-any-return]
+
+    old = replace(row(sid, "ci_economy", h(0.5), h(1), h(2.75)), closed_at=h(3))
+    new = row(sid, "ci_economy", h(0.5), h(6), h(8))
+    assert after((old, new), tuple(ci(n) for n in (1, 2, 6, 7))) == pytest.approx(1.75 + 2)
+    storm = tuple(OutageParamsFactory.storm(h(n), ("T-1", "T-2")) for n in range(1, 9))
+    moved = row(storm[0].params["state"], "stale_blocks", h(4.5), h(1), h(9))
+    assert after((moved,), storm) == pytest.approx(2 * 8)
+
+
+def test_an_occurrence_is_bounded_by_the_previous_close_only() -> None:
+    from dataclasses import replace
+
+    from kelpie.report.waits import occurrence_after
+
+    h = lambda n: datetime(2026, 3, 1, tzinfo=UTC) + timedelta(hours=n)  # noqa: E731
+    sid = "ci_economy:outage:0123456789ab"
+    first = replace(row(sid, "ci_economy", h(1), h(1), h(2)), closed_at=h(3))
+    second = replace(row(sid, "ci_economy", h(1), h(5), h(6)), closed_at=h(7))
+    # the third was re-opened in place by a switch-on at 12:00 (opened_at moves, no close)
+    third = row(sid, "ci_economy", h(1), h(12), h(14))
+    after = occurrence_after((r.state, r.closed_at) for r in (first, second, third))
+    assert [after(r.state) for r in (first, second, third)] == [None, h(3), h(7)]
+    alone = occurrence_after([(third.state, None)])  # the earlier closes not loaded
+    assert alone(third.state) is None

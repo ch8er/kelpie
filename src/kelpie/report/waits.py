@@ -214,6 +214,8 @@ class OutageSpan:
     named: Mapping[str, tuple[tuple[datetime, datetime], ...]] | None = field(
         default=None, compare=False
     )
+    # its alerts are after this (the previous occurrence's close, :func:`occurrence_after`)
+    after: datetime | None = None
 
     def spans(self) -> intervals.Spans:
         """Where its waits move."""
@@ -337,6 +339,7 @@ def outages(
         out.append(
             OutageSpan(
                 since=min(s.since, found[0][0]) if found else s.since,
+                after=lo,
                 until=s.last_seen,
                 repos=frozenset(r.lower() for o in mine for r in o.repos),
                 prs=frozenset(p.lower() for o in mine for p in o.prs),
@@ -389,6 +392,8 @@ def outage_day(
     folding for a while after its last sighting), counted once each (one entry when a
     fold starts, then at most one an hour), a lower bound."""
     a, b = max(outage.since, start), min(outage.until, end)
+    if outage.after is not None:  # this occurrence only (rule 9 may walk since back past it)
+        a = max(a, outage.after)
     folds_until = end if closed_at is None else min(closed_at, end)
     storm = outage.kind not in CI_KINDS  # scoped by its tasks
     prs: set[str] = set()
@@ -407,6 +412,8 @@ def outage_day(
         if o is not None:
             if o.state != outage.state or not outage.since <= e.at <= b:
                 continue
+            if outage.after is not None and e.at <= outage.after:
+                continue  # the previous occurrence's
             if e.at < a:
                 before = o
             else:
