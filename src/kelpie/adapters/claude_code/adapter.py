@@ -53,9 +53,10 @@ A ``TaskUpdate`` counts only on a watched list: the hook records the session's l
 Skill loads: each ``Skill`` call of the last 24 hours is a
 :class:`~kelpie.core.model.SkillLoad` (the skill's name, the session's owner as its role),
 for the instruction files' tokens a day. They are counted only when every tool line of the
-window comes from a hook that records them (version 2) and ``lookback`` covers the window;
-otherwise none are reported and those files fall back to sessions. A skill a person invokes
-with a slash command runs no tool and is not counted.
+window comes from a hook that records them (version 2), the spool still holds a line from
+the window's first hour (``lookback`` covers it and no rotation dropped it), and every
+``Skill`` call names its skill; otherwise none are reported and those files fall back to
+sessions. A skill a person invokes with a slash command runs no tool and is not counted.
 
 Liveness: an interactive session waiting at its prompt fires no hooks, so its last line ages
 like a crashed session's. For a session without ``SessionEnd`` the Claude Code process the
@@ -108,6 +109,10 @@ DEFAULT_STOP_DIR = Path(hook.DEFAULT_STOP_DIR)
 DEFAULT_LOOKBACK = timedelta(hours=24)
 LOADS_WINDOW = timedelta(hours=24)  # skill loads counted over this (tokens a day)
 SKILL_VERSION = 2  # the hook version that records the skill of a Skill call
+SKILL_TOOL = "Skill"
+# The spool covers the loads window when it still holds a line from its first hour (older
+# lines are cut at ``lookback``): not rotated away, not a fresh install.
+COVERED_FROM = timedelta(hours=1)
 DEFAULT_OWNER = "claude-code"
 NO_TASK_PREFIX = "session:"
 MAX_TASK_FILE = 1024 * 1024  # bytes; a larger task file is skipped
@@ -407,15 +412,19 @@ class ClaudeCodeAdapter:
         self, events: Sequence[SpoolEvent], sessions: Sequence[Session], now: datetime
     ) -> dict[str, Any]:
         """``Snapshot`` fields of the skills loaded (``Skill`` calls) in the last
-        ``LOADS_WINDOW``, counted only when the spool covers the whole window with a hook
-        that records them: every tool line of the window from hook version 2 on."""
+        ``LOADS_WINDOW``, counted only when the spool covers the whole window (it holds a
+        line from the window's first hour: not rotated away, not a fresh install) with a hook
+        that records them (every tool line of the window from version 2 on) and every
+        ``Skill`` call names its skill."""
         start = now - LOADS_WINDOW
         recent = [e for e in events if e.type == "tool" and start <= e.at <= now]
         if (
             self.spool is None
             or self.lookback < LOADS_WINDOW
             or not recent
+            or min(e.at for e in events) > start + COVERED_FROM
             or any(e.version < SKILL_VERSION for e in recent)
+            or any(e.tool == SKILL_TOOL and e.outcome != "error" and not e.skill for e in recent)
         ):
             return {}
         owner = {s.id: s.owner_id for s in sessions}
@@ -428,7 +437,7 @@ class ClaudeCodeAdapter:
                 source=self.name,
             )
             for e in recent
-            if e.skill is not None and e.outcome != "error"
+            if e.tool == SKILL_TOOL and e.skill is not None and e.outcome != "error"
         )
         return {"skill_loads": loads, "skill_loads_counted": (self.name,)}
 

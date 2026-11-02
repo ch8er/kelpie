@@ -682,11 +682,17 @@ class SkillLoad:
     platform recorded it (Hermes ``skill_view``, a Claude Code ``Skill`` call): the skill's
     name and who opened it when, never the skill's text or the call's other arguments."""
 
-    skill: str  # the skill's name: its directory, the parent of SKILL.md
+    # The name it was opened by: its directory (the parent of SKILL.md), with the categories
+    # above it when the call named them (``dev/release-notes``), or ``plugin:name`` for a
+    # plugin's skill (Claude Code).
+    skill: str
     at: datetime
     session_id: str  # the platform's own session id
     role: str | None = None
     source: str | None = None  # name of the platform adapter that reported it
+    # Where the session ran on its platform, as an instruction path's ``{role}`` part names
+    # it (Hermes: the profile, of which a role may have several); None: by role alone.
+    profile: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

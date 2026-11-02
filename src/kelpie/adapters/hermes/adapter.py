@@ -808,6 +808,7 @@ class HermesAdapter:
                         session_id=f"hermes-session-{x.profile}-{x.session}",
                         role=self.role_of(x.profile),
                         source=self.name,
+                        profile=x.profile,
                     )
                     for x in sorted(found, key=lambda x: (x.at, x.profile, x.session))
                     if now - LOADS_WINDOW <= x.at <= now

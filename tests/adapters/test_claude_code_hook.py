@@ -366,8 +366,14 @@ def test_args_hash_matches_otlp_ingest(args: Any) -> None:
     ("given", "kept"),
     [
         ({"skill": "review-pr"}, "review-pr"),
-        ({"skill": "farm-plugin:release-notes", "args": "SECRET ARGS"}, "release-notes"),
-        ({"skill": "../../etc/passwd"}, "passwd"),
+        ({"skill": "/review-pr"}, "review-pr"),
+        ({"command": "review-pr"}, "review-pr"),  # older Claude Code
+        (
+            {"skill": "farm-plugin:release-notes", "args": "SECRET ARGS"},
+            "farm-plugin:release-notes",
+        ),
+        ({"skill": "../../etc/passwd"}, None),
+        ({"skill": "a/b"}, None),
         ({"skill": "two words"}, None),
         ({"skill": 3}, None),
         ("not a dict", None),

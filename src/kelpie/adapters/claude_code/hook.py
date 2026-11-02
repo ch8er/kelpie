@@ -25,7 +25,8 @@ launcher assigned) and ``KELPIE_AGENT`` (the agent's name on the farm).
 Task list updates. For a ``TaskUpdate`` tool call the line also carries the task id, the
 status and the owner the session set (``task``, ``task_status``, ``task_owner``), never the
 subject or description: that is how Kelpie knows which task a session works on and what it
-declared at the end. For a ``Skill`` call it carries the skill's name (``skill``), so Kelpie
+declared at the end. For a ``Skill`` call it carries the skill's name (``skill``, with its
+plugin's as ``plugin:name``), so Kelpie
 can count how often each skill is loaded (the instruction files' tokens a day).
 
 Stop. Kelpie stops a session by writing ``<stop dir>/<session_id>.json`` (``stop_dir``,
@@ -82,7 +83,8 @@ HOOK_VERSION = 2
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 TASK_TOOL = "TaskUpdate"
 SKILL_TOOL = "Skill"
-_SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")  # used with fullmatch
+# A skill's name, optionally after its plugin's (``plugin:name``); used with fullmatch.
+_SKILL_NAME = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}:)?[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "deleted"})
 
 EVENTS = {
@@ -390,11 +392,14 @@ def _task_update(args: Any) -> dict[str, str | None]:
 
 
 def _skill(args: Any) -> str | None:
-    """The name of the skill a ``Skill`` call loads (``plugin:name`` -> ``name``, the
-    directory its SKILL.md is in); never its arguments."""
-    if not isinstance(args, dict) or not isinstance(args.get("skill"), str):
+    """The name of the skill a ``Skill`` call loads (``name``, or ``plugin:name`` for a
+    plugin's skill), never its arguments; None when it is not a skill name."""
+    if not isinstance(args, dict):
         return None
-    name = args["skill"].strip().rpartition(":")[2].rstrip("/").rpartition("/")[2]
+    name = args.get("skill", args.get("command"))  # older Claude Code: "command"
+    if not isinstance(name, str):
+        return None
+    name = name.strip().removeprefix("/")
     return name if _SKILL_NAME.fullmatch(name) else None
 
 

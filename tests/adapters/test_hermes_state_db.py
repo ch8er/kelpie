@@ -720,17 +720,32 @@ def test_skill_views_of_a_skill_are_counted_once(tmp_path: Path) -> None:
     view(db, "s", NOW - 50 * M, {"name": "review"}, call_id="c1", state=(0, 1))  # compacted
     view(db, "s", NOW - 50 * M, {"name": "review"}, call_id="c1")  # its copy: once
     view(db, "s", NOW - 40 * M, {"name": "review"}, state=(0, 0))  # rewound
-    view(db, "s", NOW - 30 * M, {"name": "dev/release-notes", "file_path": "SKILL.md"})
+    view(db, "s", NOW - 30 * M, {"name": "dev/release-notes/", "file_path": "SKILL.md"})
     view(db, "s", NOW - 20 * M, {"name": "review", "file_path": "references/api.md"})
-    view(db, "s", NOW - 10 * M, {"name": "two words"})
-    view(db, "s", NOW - 10 * M, {"name": 5})
     db.call("s", NOW - 5 * M, "cat SKILL.md")  # a terminal call, not a skill view
     loads = state_db.read_skill_loads(tmp_path, NOW - 24 * 60 * M)
     assert loads is not None
     assert [(x.profile, x.session, x.at, x.skill) for x in loads] == [
         ("dev-1", "s", NOW - 50 * M, "review"),
-        ("dev-1", "s", NOW - 30 * M, "release-notes"),
+        ("dev-1", "s", NOW - 30 * M, "dev/release-notes"),
     ]
+
+
+@pytest.mark.parametrize("name", ["two words", 5, "../secret", "x" * 200])
+def test_a_skill_view_kelpie_cannot_read_counts_no_loads(tmp_path: Path, name: object) -> None:
+    db = StateDb(tmp_path / "state.db")
+    db.session("s", None, NOW - 60 * M, NOW)
+    view(db, "s", NOW - 50 * M, {"name": "review"})
+    view(db, "s", NOW - 40 * M, {"name": name})
+    assert state_db.read_skill_loads(tmp_path, NOW - 24 * 60 * M) is None
+
+
+def test_too_many_sessions_count_no_loads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db = StateDb(tmp_path / "state.db")
+    for sid in ("a", "b"):
+        db.session(sid, None, NOW - 60 * M, NOW)
+    monkeypatch.setattr(state_db, "MAX_SESSIONS", 2)
+    assert state_db.read_skill_loads(tmp_path, NOW - 24 * 60 * M) is None
 
 
 def test_skill_loads_are_not_counted_without_every_state_db(tmp_path: Path) -> None:
@@ -754,8 +769,8 @@ def test_the_adapter_reports_skill_loads_by_role(tmp_path: Path) -> None:
     a = HermesAdapter(db_path=board.path, spool=None, git_state=False, state_home=home)
     snap = a.snapshot(NOW)
     assert snap.skill_loads_counted == ("hermes",)
-    assert [(x.skill, x.role, x.session_id, x.source) for x in snap.skill_loads] == [
-        ("review", "dev", "hermes-session-dev-2-s", "hermes")
+    assert [(x.skill, x.role, x.profile, x.session_id) for x in snap.skill_loads] == [
+        ("review", "dev", "dev-2", "hermes-session-dev-2-s")
     ]
     view(db, "s", NOW - 1 * M, {"name": "review"})
     assert len(a.snapshot(NOW + 30 * S).skill_loads) == 1  # read at most once a minute

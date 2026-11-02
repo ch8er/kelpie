@@ -1307,11 +1307,15 @@ Tokens a day spent reading a file are its estimated tokens (characters / 4) time
 it was read in the last 24 hours, and `token_basis` says which count that is:
 
 - `loads`: a skill (`<name>/SKILL.md`, on demand) of a platform that counts skill loads, times
-  the loads of a skill of that name by its role (the role's own skill of the name, else the
-  one every role shares). Hermes counts `skill_view` calls from each profile's `state.db`
+  the loads of a skill of that name (with its categories, when the call named them) in the
+  profile whose files it is in, else by its role, else, for a skill every role shares, by
+  any role. Hermes counts `skill_view` calls from each profile's `state.db`
   (`[adapters.hermes] state_home`; a view of a linked reference file is not a load), Claude
-  Code its `Skill` calls from the hook (version 2 of `hook.py` or later, and a `lookback`
-  of at least 24 hours). A skill nobody opened costs nothing.
+  Code its `Skill` calls from the hook (version 2 of `hook.py` or later, a `lookback` of at
+  least 24 hours, and a spool that still holds the day: not rotated away). A plugin's skill
+  (`plugin:name`) matches none of these files. A skill nobody opened costs nothing. When a
+  platform cannot count every load (a `state.db` it cannot read, a call it cannot parse,
+  over 2,000 sessions a day in a profile), it counts none that time.
 - `sessions`, otherwise: the sessions of its role (on its platform, for the defaults) that
   started in the last 24 hours. The cost of an always-loaded file; for an on-demand file of
   a platform whose loads could not be counted this time (no `state.db`, one that cannot be

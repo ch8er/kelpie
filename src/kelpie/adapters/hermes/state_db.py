@@ -31,8 +31,11 @@ redaction still holds.
 
 **Skill loads** (issue #282, rule ``instruction_bloat``). A ``skill_view`` call that opens a
 skill's ``SKILL.md`` (no ``file_path``, or ``SKILL.md`` itself; a linked reference file is
-not the skill) becomes a :class:`Load`: the skill's name (its last path part, as the
-skill's directory is named) and when. Calls are counted once in the same way as waits.
+not the skill) becomes a :class:`Load`: the skill's name as the call gave it (its
+directory, with the categories above it when named: ``dev/release-notes``) and when. Calls
+are counted once in the same way as waits. A ``skill_view`` whose name Kelpie cannot read,
+or a profile with more sessions than ``MAX_SESSIONS`` in the window, makes the count
+incomplete: then no loads are reported at all.
 """
 
 from __future__ import annotations
@@ -206,14 +209,20 @@ def read_skill_loads(
     loads: list[Load] = []
     for profile, path in dbs:
         try:
-            loads += _read_loads(profile, path, since, sources)
+            found = _read_loads(profile, path, since, sources)
         except Exception as exc:  # whatever a database holds must not stop the board's read
             warn_once((str(path), "loads"), "hermes: cannot read skill loads in %s: %s", path, exc)
             return None
+        if found is None:
+            return None
+        loads += found
     return loads
 
 
-def _read_loads(profile: str, path: Path, since: datetime, sources: Collection[str]) -> list[Load]:
+def _read_loads(
+    profile: str, path: Path, since: datetime, sources: Collection[str]
+) -> list[Load] | None:
+    """The loads of one profile; None when they cannot all be counted."""
     conn = sqlite3.connect(
         path.resolve().as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000
     )
@@ -223,13 +232,22 @@ def _read_loads(profile: str, path: Path, since: datetime, sources: Collection[s
         conn.execute("BEGIN")
         start = since.timestamp()
         sessions = _sessions(conn, start, sources)
+        if len(sessions) >= MAX_SESSIONS:
+            warn_once((str(path), "loads-cap"), "hermes: skill loads in %s not counted: "
+                      "over %d sessions a day", path, MAX_SESSIONS)  # fmt: skip
+            return None
         rows = _tool_call_rows(conn, sessions, start)
     finally:
         conn.close()
     seen: set[object] = set()
     out = []
     for sid, at, raw in rows:
-        for call_id, skill in _skill_views(raw):
+        views = _skill_views(raw)
+        if views is None:
+            warn_once((str(path), "loads-name"), "hermes: skill loads in %s not counted: a "
+                      "skill_view names no skill Kelpie can read", path)  # fmt: skip
+            return None
+        for call_id, skill in views:
             key: object = (call_id.split("|", 1)[0], at) if call_id else (sid, at, skill)
             if key in seen:
                 continue
@@ -241,23 +259,27 @@ def _read_loads(profile: str, path: Path, since: datetime, sources: Collection[s
 SKILL_TOOL = "skill_view"
 SKILL_FILE = "SKILL.md"
 MAX_SKILL = 128  # characters of a skill name; a longer one is not counted
-_SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # with fullmatch
+# A skill name, with the categories above it: parts of letters, digits, ".", "_", "-", none
+# of them starting with a dot (no "..").
+_SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
 
 
-def _skill_views(raw: Any) -> list[tuple[str, str]]:
+def _skill_views(raw: Any) -> list[tuple[str, str]] | None:
     """``(tool call id, skill name)`` of the ``skill_view`` calls in a message's
-    ``tool_calls`` that open a skill's own ``SKILL.md``."""
+    ``tool_calls`` that open a skill's own ``SKILL.md``; None when one names its skill in a
+    way Kelpie cannot read (a load it would miss)."""
     out = []
     for call_id, args in _calls(raw, SKILL_TOOL):
-        name = args.get("name")
-        if not isinstance(name, str) or len(name) > MAX_SKILL:
-            continue
         file_path = args.get("file_path")
         if file_path not in (None, "", SKILL_FILE):
             continue  # a reference file linked from the skill, not the skill
-        skill = name.strip().rstrip("/").rpartition("/")[2]
-        if _SKILL_NAME.fullmatch(skill):
-            out.append((call_id, skill))
+        name = args.get("name")
+        if not isinstance(name, str) or len(name) > MAX_SKILL:
+            return None
+        skill = name.strip().strip("/")
+        if not _SKILL_NAME.fullmatch(skill):
+            return None
+        out.append((call_id, skill))
     return out
 
 

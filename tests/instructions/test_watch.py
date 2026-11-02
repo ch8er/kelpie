@@ -223,3 +223,45 @@ def test_a_shared_skill_counts_the_loads_of_roles_without_their_own(tmp_path: Pa
         "~/profiles/dev/skills/review/SKILL.md": 1,
     }
     store.close()
+
+
+def test_loads_go_to_the_profile_they_were_opened_in(tmp_path: Path) -> None:
+    for d in ("profiles/dev-1", "profiles/dev-2", "profiles/Dev-3"):
+        (tmp_path / d / "skills" / "review").mkdir(parents=True)
+        (tmp_path / d / "skills" / "review" / "SKILL.md").write_text(lesson(1))
+    for d in ("shared/github/review", "shared/gitlab/review"):
+        (tmp_path / d).mkdir(parents=True)
+        (tmp_path / d / "SKILL.md").write_text(lesson(1))
+    sources = (
+        Source((f"{tmp_path}/shared/**/SKILL.md",), loaded="on_demand", platform="hermes"),
+        Source(
+            (f"{tmp_path}/profiles/{{role}}/skills/*/SKILL.md",),
+            loaded="on_demand",
+            platform="hermes",
+            role_of=lambda name: name.rsplit("-", 1)[0].lower(),
+        ),
+    )
+    store = SqliteInstructionStore(":memory:")
+    w = InstructionWatch(store, InstructionSettings(enabled=True), sources, home=str(tmp_path))
+
+    def load(skill: str, profile: str | None, role: str = "dev") -> SkillLoad:
+        return SkillLoad(skill, T0 - timedelta(hours=1), "s", role, "hermes", profile)
+
+    loads = (
+        load("review", "dev-2"),
+        load("review", "dev-2"),
+        load("review", "dev-3"),  # Hermes lowercases profiles; the directory is Dev-3
+        load("review", "dev-9"),  # a profile with no skill of its own: the shared one
+        load("gitlab/review", "dev-9"),  # categories named: that skill only
+        load("tools:review", "dev-1"),  # a plugin's skill: none of these files
+    )
+    snap = Snapshot(now=T0, skill_loads=loads, skill_loads_counted=("hermes",))
+    got = {f.path: f.tokens_per_day // f.tokens for f in w.read(snap)[0]}
+    assert got == {
+        "~/shared/github/review/SKILL.md": 1,
+        "~/shared/gitlab/review/SKILL.md": 1,
+        "~/profiles/Dev-3/skills/review/SKILL.md": 1,
+        "~/profiles/dev-1/skills/review/SKILL.md": 0,
+        "~/profiles/dev-2/skills/review/SKILL.md": 2,
+    }
+    store.close()

@@ -12,9 +12,12 @@ last 24 hours of the snapshot.
 - ``token_basis = "loads"``: a skill (``<name>/SKILL.md``, loaded on demand) of a platform
   that counted its skill loads this tick (``Snapshot.skill_loads_counted``: Hermes
   ``skill_view`` calls from ``state.db``, Claude Code ``Skill`` calls from its hook) is read
-  as often as its role opened a skill of that name: the role's own skill of the name if it
-  has one, else the one every role of the platform shares (the first by path, if several
-  share the name). A skill nobody opened costs nothing.
+  as often as a skill of that name was opened (with its categories, when the call named
+  them: ``dev/release-notes`` is ``.../dev/release-notes/SKILL.md``) by: the profile whose
+  path it is under (what ``{role}`` matched), else its role, else any role when it is a
+  skill every role of the platform shares; the first by path wins where several fit. A
+  plugin's skill (``plugin:name``) is none of these files. A skill nobody opened costs
+  nothing.
 - ``token_basis = "sessions"``, otherwise: the sessions on this host of its role (of its
   platform, for the platform defaults; any, for a file every role loads) that started in
   the window. For an always-loaded file that is the cost; for a skill of a platform that
@@ -53,6 +56,7 @@ class Found:
     role: str | None
     source: Source
     measure: Measure
+    scope: str | None = None  # what ``{role}`` matched in its path (a Hermes profile)
 
 
 @dataclass(slots=True)
@@ -99,7 +103,7 @@ class InstructionWatch:
         skipped: dict[str, str] = {}
         unread: set[str] = set()
         rows: list[SizeRow] = []
-        for source, path, role in self._paths():
+        for source, path, role, scope in self._paths():
             if path in seen:
                 continue
             seen.add(path)
@@ -116,7 +120,7 @@ class InstructionWatch:
                 skipped[shown] = str(exc)
                 unread.add(str(path))
                 continue
-            found.append(Found(path, shown, role, source, m))
+            found.append(Found(path, shown, role, source, m, scope))
             if previous is None or previous[1] != m.sha256:
                 row = SizeRow(str(path), now, m.bytes, m.chars, m.sha256, len(m.sections),
                               m.appended)  # fmt: skip
@@ -134,19 +138,19 @@ class InstructionWatch:
         self._found, self._history = tuple(found), history
         self._copies = self._find_copies(found)
 
-    def _paths(self) -> Iterable[tuple[Source, Path, str | None]]:
+    def _paths(self) -> Iterable[tuple[Source, Path, str | None, str | None]]:
         for source in self.sources:
             for pattern in source.paths:
                 expanded = os.path.expanduser(pattern)
                 for match in sorted(glob.glob(expanded.replace("{role}", "*"), recursive=True)):
                     path = Path(match)
-                    role = source.role
+                    role, name = source.role, None
                     if "{role}" in expanded:
                         name = _role_part(expanded, match)
                         if name is None:
                             continue
                         role = source.role_of(name) if source.role_of else name
-                    yield source, path, role
+                    yield source, path, role, name
 
     def _shown(self, path: Path) -> str:
         text = str(path)
@@ -269,10 +273,18 @@ def _loads_per_file(found: Sequence[Found], snapshot: Snapshot) -> dict[Path, in
     for load in snapshot.skill_loads:
         if load.source is None or not snapshot.now - DAY <= load.at <= snapshot.now:
             continue
-        files = skills.get((load.source, load.skill), [])
-        own = [f for f in files if f.role is not None and f.role == load.role]
-        shared = sorted((f for f in files if f.role is None), key=lambda f: f.shown)
-        if target := (own or shared)[:1]:
+        name = load.skill.rpartition("/")[2]
+        files = sorted(skills.get((load.source, name), []), key=lambda f: f.shown)
+        if "/" in load.skill:  # categories named: only the skill under them
+            tail = f"/{load.skill}/{SKILL_FILE}"
+            files = [f for f in files if f.path.as_posix().endswith(tail)]
+        profile = load.profile.casefold() if load.profile else None
+        here = [f for f in files if profile and f.scope and f.scope.casefold() == profile]
+        own = [f for f in files if f.scope is None and f.role is not None and f.role == load.role]
+        if not profile:  # by role alone: any profile of the role
+            own += [f for f in files if f.scope is not None and f.role == load.role]
+        shared = [f for f in files if f.role is None]
+        if target := (here or own or shared)[:1]:
             out[target[0].path] += 1
     return out
 
