@@ -318,6 +318,13 @@ board the report is unchanged.
   resuming it. Each comes with a recommendation and its estimated saving, which competes
   for the top 3. Traces keep no prompt text, so a break is located by step and preceding
   tool, not by the line of the prompt that changed.
+- **Instruction files** (with `[instructions]`, incident 21): the files each role loads that
+  cost the most tokens a day, as measured when the report runs (the 24 hours before), with
+  where the figure comes from (counted skill loads, or size times sessions: an *estimate*,
+  for a skill loaded on demand an upper bound), size, growth over the `[instructions]`
+  window (and "only appends"), and how many copied sections and values each takes part in.
+  Paths and numbers only, never a file's text; rule `instruction_bloat` alerts on what
+  crosses its thresholds. `kelpie report` reads the size history and writes none of it.
 
 **Before/after of fixes.** Every fix made on the report's day or the day before is measured
 over `[report] verify_window` (a day) before and after it: hours lost per day

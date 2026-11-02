@@ -256,3 +256,28 @@ def test_sources_read_the_bills_through_the_app(
     assert src.reconcile is not None
     assert src.reconcile(date(2026, 3, 1), date(2026, 3, 1)) == "no cost reports"
     assert asked == [(settings, date(2026, 3, 1), date(2026, 3, 1))]
+
+
+def test_the_report_board_measures_instruction_files_without_writing_their_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    import kelpie.report.cli as report_cli
+
+    skill = tmp_path / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Review\n" + "x" * 100)
+    monkeypatch.setattr(report_cli, "build_adapters", lambda settings: [])
+    extra = (
+        f"[instructions]\ndefaults = false\n[[instructions.files]]\n"
+        f'paths = ["{tmp_path}/skills/*/SKILL.md"]\nloaded = "on_demand"\n'
+    )
+    settings = load_settings(config(tmp_path, extra))
+    now = datetime(2026, 3, 3, 1, tzinfo=UTC)
+    board = report_cli.report_board(settings, date(2026, 3, 2), lambda: now, Metrics())
+    (f,) = board.instruction_files
+    assert f.chars == 109 and f.token_basis == "sessions"
+    assert settings.db_path is not None
+    with sqlite3.connect(settings.db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM instruction_sizes").fetchone() == (0,)

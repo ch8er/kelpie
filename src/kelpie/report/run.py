@@ -138,6 +138,9 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         act_blockers=sources.act_blockers,
         farm=sources.farm,
         snoozes=snoozes,
+        instruction_files=board.instruction_files,
+        instruction_duplicates=board.instruction_duplicates,
+        instructions_at=board.now if board.instruction_files else None,
     )
 
 

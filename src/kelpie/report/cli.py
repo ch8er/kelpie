@@ -10,12 +10,14 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
 
 from kelpie.app import (
+    ConfigError,
     Settings,
     _rule_config,
     act_blockers,
     build_adapters,
     connector_steps,
     hold_labels,
+    instruction_watch,
     merged_snapshot,
     read_reconciliations,
     utc_now,
@@ -130,10 +132,23 @@ def report_board(
     tasks from block reasons), so the report knows what more waiting tasks wait for. Like
     ``kelpie why`` without ``--refresh``, the report calls no network service of its own:
     a block reason ``[[block_conditions]]`` matches counts as a CI or merge wait without
-    a PR lookup (:class:`kelpie.report.waits.BlockKind`)."""
+    a PR lookup (:class:`kelpie.report.waits.BlockKind`). With ``[instructions]``, the
+    instruction files are measured too (read-only, the size history only read), for the
+    section ``instructions``."""
     enrich, _ = connector_steps(settings, metrics, clock, network=False)
     adapters = build_adapters(report_settings(settings, day, clock()))
-    return merged_snapshot(adapters, metrics, clock, enrich=enrich)()
+    try:
+        instructions = instruction_watch(settings, adapters)
+    except ConfigError as exc:  # the report goes on without the section
+        log.error("instruction files not measured for the report: %s", exc)
+        instructions = None
+    if instructions is not None:
+        instructions.record = False  # kelpie serve keeps the size history
+    try:
+        return merged_snapshot(adapters, metrics, clock, enrich=enrich, instructions=instructions)()
+    finally:
+        if instructions is not None:
+            instructions.store.close()
 
 
 def run(

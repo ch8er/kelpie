@@ -110,6 +110,8 @@ from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
 from kelpie.core.model import (
     Condition,
     Dependency,
+    InstructionDuplicate,
+    InstructionFile,
     Owner,
     OwnerKind,
     Reconciliation,
@@ -337,6 +339,11 @@ class ReportInputs:
     bill_day: date | None = None  # the UTC day checked, when cost reports are configured
     # Stored snoozes that ended after the day began (#176): deliberate waits, not chaos.
     snoozes: Sequence[Snooze] = ()
+    # The instruction files each role loads, as the board measured them (``instructions_at``)
+    # when the report was built ([instructions]; the section ``instructions``).
+    instruction_files: Sequence[InstructionFile] = ()
+    instruction_duplicates: Sequence[InstructionDuplicate] = ()
+    instructions_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
