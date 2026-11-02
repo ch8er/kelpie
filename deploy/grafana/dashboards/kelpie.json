@@ -668,7 +668,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "kelpie_tasks",
+          "expr": "sum by (status) (kelpie_tasks)",
           "legendFormat": "{{status}}"
         }
       ],
@@ -733,7 +733,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "kelpie_prework_tasks",
+          "expr": "sum by (platform_status) (kelpie_prework_tasks)",
           "legendFormat": "{{platform_status}}"
         }
       ],
@@ -766,7 +766,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "kelpie_prework_oldest_seconds",
+          "expr": "max by (platform_status) (kelpie_prework_oldest_seconds)",
           "legendFormat": "{{platform_status}}"
         }
       ],
@@ -1757,7 +1757,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "kelpie_role_tasks_done_24h / 24",
+          "expr": "sum by (role) (kelpie_role_tasks_done_24h) / 24",
           "legendFormat": "{{role}}"
         }
       ],
@@ -1889,7 +1889,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "kelpie_role_returns_24h / (kelpie_role_tasks_done_24h > 0)",
+          "expr": "sum by (role) (kelpie_role_returns_24h) / (sum by (role) (kelpie_role_tasks_done_24h) > 0)",
           "legendFormat": "{{role}}"
         },
         {
@@ -1898,7 +1898,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "B",
-          "expr": "kelpie_role_reopened_after_done_ratio",
+          "expr": "sum by (role) (kelpie_role_reopened_after_done_24h) / ((sum by (role) (kelpie_role_tasks_done_24h) + sum by (role) (kelpie_role_reopened_after_done_24h)) > 0)",
           "legendFormat": "{{role}} reopened after done"
         }
       ],

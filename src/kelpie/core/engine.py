@@ -821,6 +821,7 @@ def _items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
             _start(since),
             _snooze_note(action.params.get("snooze")),
             _task_ref(action.params.get("snooze_task")),
+            task.board if task is not None else None,
         ),
     )
 
@@ -892,6 +893,7 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
         _start(since),
         _snooze_note(entry.get("snooze")),
         _task_ref(entry.get("snooze_task")),
+        _board(task_id, snapshot),
     )
 
 
@@ -931,6 +933,12 @@ def _count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _board(task_id: str, snapshot: Snapshot) -> str | None:
+    """The board the task is on when an adapter watches several (#283); None otherwise."""
+    task = snapshot.task(task_id)
+    return task.board if task is not None else None
 
 
 def _title(task_id: str, snapshot: Snapshot) -> str | None:

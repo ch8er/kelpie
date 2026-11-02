@@ -111,6 +111,15 @@ HOSTILE = event(
     did=Did.SUGGESTED,
     did_text="Suggested: clear the block on <b>t/1</b> *now* @here.",
 )
+BOARDS = event(
+    rule="stale_blocks",
+    reason="3 tasks blocked with no condition Kelpie can check.",
+    items=(
+        AlertItem("app-a:t_1a", "Ship the login screen", 5 * H, None, 2, board="app-a"),
+        AlertItem("app-b:t_1a", "Store listing copy", 3 * H, None, 0, board="app-b"),
+        AlertItem("svc:t_77", "Rotate the API keys", 26 * H, None, None, board="svc"),
+    ),
+)
 OVERFLOW_ITEMS = event(
     rule="needs_you",
     reason="Needs you.",
@@ -174,6 +183,13 @@ CASES: dict[str, tuple[AlertEvent, RenderSettings]] = {
         EN,
     ),
     "overflow_items": (OVERFLOW_ITEMS, EN),
+    # several boards (#283): each item names its board, not only the id's prefix
+    "boards_digest": (BOARDS, EN),
+    "boards_digest_ru": (BOARDS, RU),
+    "boards_single_no_link": (
+        event(items=(single(task_id="svc:t_9", board="svc", blocking=None),)),
+        NO_LINK,
+    ),
     "overflow_body": (OVERFLOW_BODY, EN),
 }
 

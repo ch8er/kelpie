@@ -219,6 +219,7 @@ class ItemView:
     snooze: str | None = None  # back from a snooze: "Snooze expired 2026-10-25"
     snooze_task: str | None = None  # the task a snooze from the chat would set (raw id)
     command: str | None = None  # Slack: "kelpie snooze <task> --until <date>"
+    board: str | None = None  # "Board: qr", on a farm with several boards (#283)
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,7 +384,14 @@ def _item(number: int, item: AlertItem, settings: RenderSettings) -> ItemView:
         link=link,
         snooze=_snooze_mark(item.snooze, settings),
         snooze_task=item.snooze_task,
+        board=_board(item.board, lang),
     )
+
+
+def _board(board: str | None, lang: str) -> str | None:
+    """"Board: qr": the board's name spelled out, not only the id's prefix (#283)."""
+    name = _cut_words(_flat(defang(board)), MAX_ID) if board else ""
+    return f"{i18n.text(lang, 'label.board')}: {name}" if name else None
 
 
 def snooze_command(task_id: str | None, at: datetime, settings: RenderSettings) -> str | None:
@@ -688,7 +696,9 @@ def _item_lines(item: ItemView, style: Style, needed_label: str) -> list[str]:
         lines.append(f"{INDENT}{style.esc(needed_label)}: {note}")
     if item.snooze:
         lines.append(f"{INDENT}{fit(item.snooze, _BUDGET['snooze'], style)}")
-    parts = [style.esc(item.blocking)] if item.blocking else []
+    parts = [style.esc(item.board)] if item.board else []
+    if item.blocking:
+        parts.append(style.esc(item.blocking))
     if item.link is not None:
         parts.append(style.link(style.esc(item.link.label), item.link.url))
     if parts:
@@ -849,12 +859,13 @@ def _item_elements(item: ItemView, needed_label: str) -> list[dict[str, Any]]:
         out += [el(f"\n{INDENT}{needed_label}: "), el(item.needed)]
     if item.snooze:
         out.append(el(f"\n{INDENT}{item.snooze}"))
-    if item.blocking or item.link is not None:
+    words = [w for w in (item.board, item.blocking) if w]
+    if words or item.link is not None:
         out.append(el(f"\n{INDENT}"))
-        if item.blocking:
-            out.append(el(item.blocking))
+        if words:
+            out.append(el(" · ".join(words)))
         if item.link is not None:
-            if item.blocking:
+            if words:
                 out.append(el(" · "))
             out.append({"type": "link", "url": item.link.url, "text": item.link.label})
     if item.command:  # plain text on a line of its own: it copies as it is
