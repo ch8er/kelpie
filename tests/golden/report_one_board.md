@@ -110,6 +110,7 @@ These estimates overlap with each other and with the token optimization and huge
 | hours lost per day (orphan_status) (direction only) | 4.0 h/day | 0.0 h/day | -100% better | 1 / 0 |
 | tokens per day (direction only) | 993,920 | 415,000 | -58% better | 56 / 8 |
 | sessions failed or without status (0 of 0 -> 1 of 1) (direction only) | n/a | 100% | n/a | 0 / 1 |
+| tasks done per hour with work available (4.0 of 24h -> 12 of 12h with work) (direction only) | 0.2 | 0.2 | -33% worse | 1 / 2 |
 
 ## Largest tool outputs
 
