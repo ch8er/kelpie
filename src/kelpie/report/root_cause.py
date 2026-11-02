@@ -174,6 +174,8 @@ def digest(report: DailyReport) -> Digest:
                 "kind": _name(_shared(v, "kind") or "group"),
                 "fixes_together": len(v.events),
                 "after_hours": _num(v.after.total_seconds() / 3600),
+                # a throughput spike from released backlog: tasks done that were waiting
+                "backlog_release": v.release.tasks if v.release is not None else None,
                 "metrics": [
                     {
                         "name": _name(m.name.split(" (")[0].replace(" ", "_")),

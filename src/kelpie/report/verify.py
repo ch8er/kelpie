@@ -128,6 +128,9 @@ class Verification:
     min_sample: int = DEFAULT_MIN_SAMPLE
     # an older fix may belong to the group: fixes are known only from this time on
     truncated: datetime | None = None
+    # a throughput spike right after the fix(es) from released backlog (throughput then
+    # compares the next full day)
+    release: Release | None = None
 
     @property
     def event(self) -> FixEvent:
@@ -241,13 +244,14 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
     short = _short(before, after, ev)
     scope = _scope(events)
     excluded: list[Excluded] = []
+    released: list[Release] = []
     metrics = [
         _stuck(ev, scope, before, after, short, excluded, _config_at(events)),
         _tokens(ev, scope, before, after, short, excluded),
         _returns(ev, before, after, short),
         _review_time(ev, scope, before, after),
         _failures(ev, scope, before, after),
-        _done_per_work_hour(ev, scope, before, after, short),
+        _done_per_work_hour(ev, scope, before, after, short, released),
     ]
     own: list[Credited] = []
     shared: set[tuple[str, str | None]] = set()
@@ -285,6 +289,7 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
         tuple(dict.fromkeys(excluded)),
         ev.min_sample,
         ev.known_from if cut else None,
+        released[0] if released else None,
     )
 
 
@@ -542,8 +547,40 @@ def _failures(ev: Evidence, event: FixEvent, b: Window, a: Window) -> Metric:
 WORK_STAGES = frozenset({"queue", "working", "review", "ownerless"})
 
 
+# A backlog release (#193): right after a fix, at least RELEASE_MIN tasks that were ready or
+# blocked before it are done within the first ``window / RELEASE_PART``, at RELEASE_FACTOR
+# times the rate before the fix and (when known) the rate over the rest of the after-window.
+RELEASE_PART = 4
+RELEASE_MIN = 3
+RELEASE_FACTOR = 2.0
+# What a task was doing just before the fix for it to count as released: ready (``queue``)
+# or blocked/waiting.
+RELEASED_STAGES = frozenset({"queue", "waiting"})
+
+
+@dataclass(frozen=True, slots=True)
+class Release:
+    """A throughput spike right after a fix that unblocked a queue: ``tasks`` that were
+    ready or blocked before the fix were done between ``start`` (the fix) and ``end`` (the
+    last of them), released backlog rather than a faster farm. Throughput is compared over
+    ``steady`` instead: the next full day after the burst (``full_day``), else what is left
+    of the after-window after the burst window."""
+
+    tasks: int
+    done: int  # all tasks done in the burst window, released or not
+    start: datetime
+    end: datetime
+    steady: tuple[datetime, datetime]
+    full_day: bool
+
+
 def _done_per_work_hour(
-    ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool
+    ev: Evidence,
+    event: FixEvent,
+    b: Window,
+    a: Window,
+    short: bool,
+    released: list[Release] | None = None,
 ) -> Metric | None:
     """Tasks done per hour while agent work was available: some agent task (not a
     person's) of the fix's role (all agent tasks without one) was ready, being worked on, in
@@ -554,7 +591,11 @@ def _done_per_work_hour(
     time before their first session is not known), so a side with under a quarter of the
     window of work is *direction only*. Never credited to one fix of a group: a task gets
     done through several roles. None without board tasks; no row when nothing was done on
-    either side (a stalled farm shows in hours lost instead)."""
+    either side (a stalled farm shows in hours lost instead).
+
+    A backlog release right after the fix (:class:`Release`, appended to ``released``) is
+    named, and the after side is measured over the next full day instead (else the rest of
+    the after-window, after the burst)."""
     if not ev.tasks:
         return None
     people = {o.id for o in ev.owners if o.kind is OwnerKind.HUMAN}
@@ -594,21 +635,77 @@ def _done_per_work_hour(
         hours = union_hours(busy)
         return hours, (w[1] - w[0]).total_seconds() / 3600, done
 
-    (hb, wb, nb), (ha, wa, na) = side(b), side(a)
+    def waited_at(t: Task, at: datetime) -> bool:
+        """Whether the task was ready or blocked just before ``at``."""
+        own = sorted(by_task.get(t.id, ()), key=lambda s: (s.started_at, s.id))
+        spans = stage_spans(t, own, windows, at - ev.window, at, ev.review_roles, role_of_session)
+        return bool(spans) and spans[-1][2] == at and spans[-1][0] in RELEASED_STAGES
+
+    (hb, wb, nb) = side(b)
+    release = _release(ev, mine, waited_at, nb / wb if wb else 0.0, a)
+    if release is not None and released is not None:
+        released.append(release)
+    after = release.steady if release is not None else a
+    (ha, wa, na) = side(after)
     if not (hb or ha or nb or na):
         return None
     who = f" ({md.text(event.role)})" if event.role else ""
+    steady = ""
+    if release is not None:
+        steady = ", after: the next full day" if release.full_day else ", after: past the burst"
     return Metric(
         f"tasks done per hour with work available{who} "
-        f"({_h(hb)} of {_h(wb)}h -> {_h(ha)} of {_h(wa)}h with work)",
+        f"({_h(hb)} of {_h(wb)}h -> {_h(ha)} of {_h(wa)}h with work{steady})",
         "/h",
         nb / hb if hb else None,
         na / ha if ha else None,
         nb,
         na,
-        short or min(nb, na) < ev.min_sample or min(hb, ha) < ev.window / HOUR / 4,
+        short
+        or min(nb, na) < ev.min_sample
+        or min(hb, ha) < ev.window / HOUR / 4
+        or after[1] - after[0] < ev.window / 4,
         lower_is_better=False,
     )
+
+
+def _release(
+    ev: Evidence,
+    mine: Sequence[Task],
+    waited_at: Callable[[Task, datetime], bool],
+    rate_before: float,
+    a: Window,
+) -> Release | None:
+    """A backlog release right after the fix (``a[0]``), or None. Rates are tasks done per
+    wall-clock hour: the burst over the first ``window / RELEASE_PART`` after the fix, the
+    before-window, and the rest of the after-window when at least as long as the burst
+    window (a farm that got faster stays fast; a released backlog runs out)."""
+    burst = (a[0], min(a[0] + ev.window / RELEASE_PART, a[1]))
+    if burst[1] <= burst[0]:
+        return None
+    done = [t for t in mine if t.status is Status.DONE and burst[0] <= t.status_since < burst[1]]
+    released = [t for t in done if waited_at(t, a[0])]
+    if len(released) < RELEASE_MIN or 2 * len(released) < len(done):
+        return None
+    full = ev.window / RELEASE_PART / HOUR  # the burst rate is over the whole burst window
+    rate = len(done) / full
+    if rate < RELEASE_FACTOR * rate_before:
+        return None
+    rest = (burst[1], a[1])
+    if rest[1] - rest[0] >= burst[1] - burst[0]:
+        n = sum(1 for t in mine if t.status is Status.DONE and rest[0] <= t.status_since < rest[1])
+        if rate < RELEASE_FACTOR * n / ((rest[1] - rest[0]) / HOUR):
+            return None
+    end = max(t.status_since for t in released)
+    # The next full day starting after the last released task: days end where the report's
+    # day does (``ev.end``), so they are the report's own days.
+    day = ev.end - ((ev.end - end - _TICK) // DAY) * DAY
+    if day + ev.window <= ev.end:
+        return Release(len(released), len(done), a[0], end, (day, day + ev.window), True)
+    return Release(len(released), len(done), a[0], end, (burst[1], a[1]), False)
+
+
+_TICK = timedelta(microseconds=1)
 
 
 HOUR = timedelta(hours=1)
