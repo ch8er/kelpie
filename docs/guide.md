@@ -351,8 +351,10 @@ shows its sample sizes. What the report cannot separate it does not credit:
   after the fix (the burst window), at least 4 tasks are done that had been ready or
   blocked for at least that long just before it, they are at least half of the tasks done
   then, and that pace (tasks per wall-clock hour) is more than twice the pace before the
-  fix and over the rest of the after-window. A fix less than one and a quarter windows
-  before the report's end is not judged: what follows the burst is not known yet. The report
+  fix and over the rest of the after-window. A fix less than half a window before the
+  report's end is not judged: what follows the burst is not known yet. A task counts as
+  ready only from its first known moment (a session or an alert state), so tasks held back
+  before any agent touched them are missed, and the release with them. The report
   names the release ("Backlog release: 8 of the 11 tasks done in the 6.0h after the fix
   were ready or blocked before it") and compares tasks done per hour over the next full day
   after the burst instead. While that day is not over, or when a later fix falls in it, it

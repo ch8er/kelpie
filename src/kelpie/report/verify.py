@@ -648,7 +648,9 @@ def _done_per_work_hour(
 
     def waited_at(t: Task, at: datetime, enough: timedelta) -> bool:
         """Whether the task had been ready or blocked for at least ``enough`` just before
-        ``at`` (a routine queue turns over faster than a backlog held back)."""
+        ``at`` (a routine queue turns over faster than a backlog held back). A task is
+        known from its first session or alert state only: one held back before any agent
+        touched it is not seen, so a release can be missed, never invented."""
         own = sorted(by_task.get(t.id, ()), key=lambda s: (s.started_at, s.id))
         spans = stage_spans(t, own, windows, at - ev.window, at, ev.review_roles, role_of_session)
         since = at
