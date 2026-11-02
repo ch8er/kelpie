@@ -64,6 +64,8 @@ from kelpie.core.tools import (
 )
 from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._ci_outage import _listed
+from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
+from kelpie.rules._toolchain import with_change
 
 COMMAND_ATTRIBUTES = ("command", "kelpie.tool.command_prefix")  # the hook's, then OTLP's
 MAX_TASKS = 50  # tasks an outage's params list
@@ -111,6 +113,7 @@ def tool_outages(
     min_tasks: int,
     window: timedelta,
     observe: bool = True,
+    toolchain_window: timedelta = TOOLCHAIN_WINDOW,
 ) -> list[Action]:
     """One alert per open outage of a tool (see the module docs); none without ``tools``.
     With ``observe`` (a new check) the alerts are only logged."""
@@ -124,7 +127,10 @@ def tool_outages(
         if since is None:
             continue
         scope = [f for f in failures if f.at >= since]
-        out.append(replace(_alert(rule, group, scope, since, live), observe_only=observe))
+        alert = _alert(rule, group, scope, since, live)
+        hosts = (group[2],) if group[2] else None
+        alert = with_change(alert, snapshot, since, toolchain_window, hosts)
+        out.append(replace(alert, observe_only=observe))
     return out
 
 

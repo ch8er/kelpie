@@ -18,6 +18,10 @@ from kelpie.resources.prometheus import (
     DEFAULT_HOST_LABEL,
     DEFAULT_INTERVAL,
     DEFAULT_TIMEOUT,
+    DEFAULT_TOOLCHAIN_LOOKBACK,
+    DEFAULT_TOOLCHAIN_METRIC,
+    DEFAULT_TOOLCHAIN_TOOL_LABEL,
+    DEFAULT_TOOLCHAIN_VERSION_LABEL,
     QUERY_NAMES,
     PrometheusConfig,
     PrometheusSource,
@@ -34,10 +38,14 @@ SECTIONS = frozenset({"prometheus"})
 PROMETHEUS_KEYS = frozenset(
     {
         "url", "hosts", "host_label", "timeout", "interval", "token_env", "queries",
-        "growth_window", "growth_sustain", "load_on_macos",
+        "growth_window", "growth_sustain", "load_on_macos", "toolchain_metric",
+        "toolchain_tool_label", "toolchain_version_label", "toolchain_lookback",
     }
 )  # fmt: skip
 _LABEL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_METRIC = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")
+MIN_TOOLCHAIN_LOOKBACK = timedelta(hours=1)
+MAX_TOOLCHAIN_LOOKBACK = timedelta(days=7)
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 MAX_QUERY_LENGTH = 2000
@@ -58,6 +66,11 @@ class PrometheusSettings:
     growth_window: timedelta = DEFAULT_GROWTH_WINDOW  # disk and directory growth rates
     growth_sustain: timedelta = DEFAULT_GROWTH_SUSTAIN  # ...capped at what held this long
     load_on_macos: bool = False  # macOS load counts waiting threads: off by default
+    # Toolchain versions per host (incident 20): a metric with a tool and a version label.
+    toolchain_metric: str = DEFAULT_TOOLCHAIN_METRIC
+    toolchain_tool_label: str = DEFAULT_TOOLCHAIN_TOOL_LABEL
+    toolchain_version_label: str = DEFAULT_TOOLCHAIN_VERSION_LABEL
+    toolchain_lookback: timedelta = DEFAULT_TOOLCHAIN_LOOKBACK
 
     @property
     def display_url(self) -> str:
@@ -105,6 +118,10 @@ class PrometheusSettings:
             growth_window=self.growth_window,
             growth_sustain=self.growth_sustain,
             load_on_macos=self.load_on_macos,
+            toolchain_metric=self.toolchain_metric,
+            toolchain_tool_label=self.toolchain_tool_label,
+            toolchain_version_label=self.toolchain_version_label,
+            toolchain_lookback=self.toolchain_lookback,
         )
         return PrometheusSource(config, observer)
 
@@ -219,6 +236,24 @@ def _load_prometheus(section: Any) -> PrometheusSettings:
     load_on_macos = section.get("load_on_macos", False)
     if not isinstance(load_on_macos, bool):
         raise ValueError("[resources.prometheus] load_on_macos must be true or false")
+    metric = _string(section, "toolchain_metric", DEFAULT_TOOLCHAIN_METRIC)
+    if not _METRIC.fullmatch(metric):
+        raise ValueError("[resources.prometheus] toolchain_metric is not a valid metric name")
+    tool_label = _string(section, "toolchain_tool_label", DEFAULT_TOOLCHAIN_TOOL_LABEL)
+    version_label = _string(section, "toolchain_version_label", DEFAULT_TOOLCHAIN_VERSION_LABEL)
+    for key, value in (
+        ("toolchain_tool_label", tool_label),
+        ("toolchain_version_label", version_label),
+    ):
+        if not _LABEL.fullmatch(value) or value == host_label:
+            raise ValueError(
+                f"[resources.prometheus] {key} must be a valid label name other than host_label"
+            )
+    if tool_label == version_label:
+        raise ValueError("[resources.prometheus] toolchain tool and version labels must differ")
+    lookback = _duration(section, "toolchain_lookback", DEFAULT_TOOLCHAIN_LOOKBACK)
+    if not MIN_TOOLCHAIN_LOOKBACK <= lookback <= MAX_TOOLCHAIN_LOOKBACK:
+        raise ValueError("[resources.prometheus] toolchain_lookback must be 1h to 7d")
     raw_queries = section.get("queries", {})
     if not isinstance(raw_queries, Mapping):
         raise ValueError("[resources.prometheus.queries] must be a table")
@@ -247,4 +282,8 @@ def _load_prometheus(section: Any) -> PrometheusSettings:
         growth_window=growth_window,
         growth_sustain=growth_sustain,
         load_on_macos=load_on_macos,
+        toolchain_metric=metric,
+        toolchain_tool_label=tool_label,
+        toolchain_version_label=version_label,
+        toolchain_lookback=lookback,
     )

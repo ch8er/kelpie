@@ -474,6 +474,20 @@ class BudgetStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolchainChange:
+    """A host's toolchain version changed (incident 20: an Xcode update broke every iOS
+    build): ``tool`` (a name from config data, e.g. ``xcode``) went from ``before`` to
+    ``after`` at ``at``, as first seen by the source. ``before`` is None when the old
+    version is not known (the reading began with the new one)."""
+
+    host: str
+    tool: str
+    after: str
+    at: datetime
+    before: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LimitHit:
     """A provider usage limit was reached: the run was refused until ``resets_at``.
     ``limit`` names the limit (e.g. a rolling 5-hour or a weekly window; the LLM quota
@@ -809,6 +823,9 @@ class Snapshot:
     # statuses (stale), so a rule should neither resolve nor raise budget alerts on them.
     budgets_ok: bool = True
     limit_hits: tuple[LimitHit, ...] = ()  # observed provider limits (budgets forecast them)
+    # Toolchain version changes per host within the source's lookback (an outage that starts
+    # soon after one names it as the likely cause).
+    toolchain_changes: tuple[ToolchainChange, ...] = ()
     providers: tuple[ProviderStatus, ...] = ()  # LLM provider quota and auth probes
     # Trace-based spend against providers' cost reports, per provider and closed UTC day
     # ([connectors.cost_reports]); the newest day first.

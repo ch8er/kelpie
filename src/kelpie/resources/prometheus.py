@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from kelpie import __version__, net
-from kelpie.core.model import Resource, ResourceKind
+from kelpie.core.model import Resource, ResourceKind, ToolchainChange
 
 log = logging.getLogger(__name__)
 
@@ -126,7 +126,24 @@ DEFAULT_QUERIES: Mapping[str, str] = {
         + " and kelpie_path_bytes offset {half_window}"
     ),
     "path_written": 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}',
+    # Toolchain versions per host (incident 20), e.g. from scripts/kelpie-toolchain.sh:
+    # when each version was first and last seen within ``toolchain_lookback``. A version
+    # that first shows up inside it, after another, is a change. ``{toolchain_metric}``,
+    # ``{tool_label}`` and ``{version_label}`` are config data.
+    "toolchain_first": (
+        "min by ({host_label}, {tool_label}, {version_label})"
+        " (min_over_time(timestamp({toolchain_metric})[{lookback}:{step}]))"
+    ),
+    "toolchain_last": (
+        "max by ({host_label}, {tool_label}, {version_label})"
+        " (max_over_time(timestamp({toolchain_metric})[{lookback}:{step}]))"
+    ),
 }
+DEFAULT_TOOLCHAIN_METRIC = "kelpie_toolchain_info"
+DEFAULT_TOOLCHAIN_TOOL_LABEL = "tool"
+DEFAULT_TOOLCHAIN_VERSION_LABEL = "version"
+DEFAULT_TOOLCHAIN_LOOKBACK = timedelta(hours=48)
+TOOLCHAIN_STEP = timedelta(minutes=5)  # how precisely a change is timed
 DEFAULT_GROWTH_WINDOW = timedelta(hours=6)
 DEFAULT_GROWTH_SUSTAIN = timedelta(hours=1)  # at most growth_window (config.py)
 MIN_GROWTH_SLICE = timedelta(minutes=1)
@@ -235,6 +252,10 @@ class PrometheusConfig:
     growth_sustain: timedelta = DEFAULT_GROWTH_SUSTAIN  # rates capped at what held over this
     # macOS counts threads waiting on I/O in its load average: 300-800 on a healthy Mac.
     load_on_macos: bool = False
+    toolchain_metric: str = DEFAULT_TOOLCHAIN_METRIC
+    toolchain_tool_label: str = DEFAULT_TOOLCHAIN_TOOL_LABEL
+    toolchain_version_label: str = DEFAULT_TOOLCHAIN_VERSION_LABEL
+    toolchain_lookback: timedelta = DEFAULT_TOOLCHAIN_LOOKBACK
 
     def query_text(self, name: str) -> str:
         """The query, its placeholders filled in (in custom queries too): ``{host_label}``,
@@ -248,6 +269,11 @@ class PrometheusConfig:
             .replace("{window}", f"{seconds}s")
             .replace("{sustain}", f"{int(self.growth_sustain.total_seconds())}s")
             .replace("{slice}", f"{int(self.growth_slice.total_seconds())}s")
+            .replace("{toolchain_metric}", self.toolchain_metric)
+            .replace("{tool_label}", self.toolchain_tool_label)
+            .replace("{version_label}", self.toolchain_version_label)
+            .replace("{lookback}", f"{int(self.toolchain_lookback.total_seconds())}s")
+            .replace("{step}", f"{int(TOOLCHAIN_STEP.total_seconds())}s")
         )
 
     @property
@@ -276,6 +302,7 @@ class PrometheusSource:
         self._optional_warned: set[str] = set()
         self._macs: set[str] = set()  # hosts seen running macOS: an OS does not change
         self._os_known = False  # the os query answered at least once
+        self._changes: tuple[ToolchainChange, ...] = ()
 
     def read(self, now: datetime) -> tuple[Resource, ...]:
         if self._next_at is not None and now < self._next_at:
@@ -283,8 +310,10 @@ class PrometheusSource:
         self._next_at = now + self.config.interval
         try:
             self._cached = self._fetch(now)
+            self._changes = self._toolchain(now)
         except Exception as caught:
             self._cached = ()  # no data rather than old data
+            self._changes = ()
             exc = (
                 caught
                 if isinstance(caught, QueryError)
@@ -308,7 +337,62 @@ class PrometheusSource:
                 self.observer.resource_read(len(self._cached))
         return self._cached
 
+    def toolchain_changes(self, now: datetime) -> tuple[ToolchainChange, ...]:
+        """Toolchain version changes per host within ``toolchain_lookback``, as of the last
+        :meth:`read` (implements :class:`kelpie.core.ports.ToolchainReader`)."""
+        return self._changes
+
     # --- queries ------------------------------------------------------------------------
+
+    def _toolchain(self, now: datetime) -> tuple[ToolchainChange, ...]:
+        """Changes from when each (host, tool, version) was first and last seen: a version
+        first seen after the lookback began, while another was seen before it, is a change
+        from the one seen last before it. A version seen from the start of the lookback is
+        no change, nor is the only version a host ever reported (the script was just
+        installed). Optional: no metric, no changes."""
+        tool, version = self.config.toolchain_tool_label, self.config.toolchain_version_label
+        first = self._optional_labelled("toolchain_first", (tool, version), now)
+        last = self._optional_labelled("toolchain_last", (tool, version), now)
+        start = now - self.config.toolchain_lookback + TOOLCHAIN_STEP
+        seen: dict[tuple[str, str], list[tuple[datetime, datetime, str]]] = {}
+        for (host, (name, ver)), at in first.items():
+            if name and ver and (host, (name, ver)) in last:
+                seen.setdefault((host, name), []).append((at, last[(host, (name, ver))], ver))
+        out: list[ToolchainChange] = []
+        for (host, name), versions in sorted(seen.items()):
+            versions.sort()
+            for at, _, ver in versions[1:]:
+                if at <= start:
+                    continue
+                older = [(end, v) for begin, end, v in versions if begin < at and v != ver]
+                if older:
+                    out.append(ToolchainChange(host, name, ver, at, max(older)[1]))
+        return tuple(out)
+
+    def _optional_labelled(
+        self, name: str, labels: tuple[str, str], now: datetime
+    ) -> dict[tuple[str, tuple[str, str]], datetime]:
+        """A query whose value is a Unix time, per (Kelpie host, two label values); a
+        failure of only this query is logged once and yields nothing."""
+        try:
+            samples = self.client.query(self.config.query_text(name))
+        except QueryError as exc:
+            if name not in self._optional_warned:
+                self._optional_warned.add(name)
+                log.warning(
+                    "Prometheus query %s failed (%s); readings come without it", name, exc.cause
+                )
+            if self.observer is not None:
+                self.observer.resource_query_failed(f"{name}_{exc.cause}")
+            return {}
+        out: dict[tuple[str, tuple[str, str]], datetime] = {}
+        for sample in samples:
+            host = self._hosts.get(sample.labels.get(self.config.host_label, ""))
+            if host is None or not math.isfinite(sample.value):
+                continue
+            key = (host, (sample.labels.get(labels[0], ""), sample.labels.get(labels[1], "")))
+            out[key] = _when(sample.value, now)
+        return out
 
     def _optional(
         self, name: str, now: datetime, by_mount: bool = False, label: str = "mountpoint"

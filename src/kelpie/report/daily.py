@@ -105,6 +105,7 @@ from typing import Any
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
+from kelpie.core.incidents import Outage as OutageParams
 from kelpie.core.incidents import is_outage_state
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
 from kelpie.core.model import (
@@ -378,6 +379,17 @@ class OutageLine:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolchainCause:
+    """An outage of the day (any kind) whose alert named a toolchain change on a host
+    shortly before it began as its likely cause (incident 20, #284)."""
+
+    signature: str
+    kind: str
+    since: datetime
+    change: str  # the alert's own line: what changed, where, when
+
+
+@dataclass(frozen=True, slots=True)
 class PlannedWaits:
     """Agent tasks planned for later behind a person's open inbox (rule 13's ``planned``):
     not waiting, so listed and never counted as hours lost. Planned work behind a human task
@@ -467,6 +479,8 @@ class DailyReport:
     stuck_idle: tuple[StuckCard, ...] = ()
     outages: tuple[OutageLine, ...] = ()  # rule 9's CI outages of the day
     outage_wait_hours: float = 0.0  # the day's waiting time all of them explained
+    # outages of the day (any kind) whose alerts named a toolchain change as the likely cause
+    toolchain_causes: tuple[ToolchainCause, ...] = ()
     planned: PlannedWaits | None = None  # behind work planned for later: never counted
     snoozed: SnoozedWaits | None = None  # deliberate waits a person snoozed: never chaos
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
@@ -587,6 +601,7 @@ def build_report(
         biggest_wait=wait,
         outages=outage_lines,
         outage_wait_hours=outage_hours,
+        toolchain_causes=_toolchain_causes(inputs, start, end),
         stuck_idle=_stuck_idle(inputs, start, end),
         planned=_planned_waits(inputs, start, end),
         snoozed=snoozed,
@@ -767,6 +782,31 @@ def _outage_lines(
             )
         )
     return tuple(out)
+
+
+def _toolchain_causes(
+    inputs: ReportInputs, start: datetime, end: datetime
+) -> tuple[ToolchainCause, ...]:
+    """Outages open within the day whose alerts (as of that occurrence) named a toolchain
+    change: the first such alert of each occurrence."""
+    named: dict[str, list[tuple[datetime, OutageParams]]] = {}
+    for e in inputs.actions:
+        if e.at < end and (o := OutageParams.from_params(e.params)) is not None and o.toolchain:
+            named.setdefault(o.state, []).append((e.at, o))
+    out: list[ToolchainCause] = []
+    for row in inputs.states:
+        st = row.state
+        if not is_outage_state(st.id) or st.since >= end or st.last_seen < start:
+            continue
+        found = sorted(
+            (x for x in named.get(st.id, ()) if st.since <= x[0] <= st.last_seen),
+            key=lambda x: x[0],
+        )
+        if found:
+            o = found[0][1]
+            assert o.toolchain is not None
+            out.append(ToolchainCause(o.signature, o.kind, st.since, o.toolchain))
+    return tuple(sorted(out, key=lambda c: (c.since, c.signature)))
 
 
 def _reconciled(found: Sequence[Reconciliation] | str) -> tuple[Reconciliation, ...]:
@@ -1550,6 +1590,18 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             lines.append(
                 f"- {md.code(o.signature)} since {_local(o.since, report)}, {until}: "
                 f"{o.prs} PR(s), {o.folded} alert(s) folded under it"
+            )
+    if report.toolchain_causes:
+        lines += [
+            "",
+            "**Toolchain changes before outages** (a version change on a host shortly before "
+            "the outage began: its likely cause, read from the textfile collector):",
+            "",
+        ]
+        for c in report.toolchain_causes:
+            lines.append(
+                f"- {md.text(c.kind.replace('_', ' '))} {md.code(c.signature)} since "
+                f"{_local(c.since, report)}: {md.text(c.change)}"
             )
     if report.stuck_idle:
         lines += [

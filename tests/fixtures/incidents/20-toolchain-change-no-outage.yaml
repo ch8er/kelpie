@@ -1,0 +1,38 @@
+id: "20-toolchain-change-no-outage"
+incident: 20
+title: "A toolchain update with no outage after it is named as no one's cause"
+description: >
+  The active Xcode on the farm's macOS host changed at 01:00 and builds kept working all
+  night: no outage followed it. At 09:00 a different question blocked three tasks (a
+  person must answer it), long after the six-hour window. Rule 4 reports that block storm
+  without blaming the old update, and names no likely cause.
+rule: stale_blocks
+config:
+  storm_min_tasks: 3
+  storm_window: "2h"
+snapshot:
+  now: "2026-03-02T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: ceo, kind: human}
+    - {id: agent-ios-1, role: developer}
+    - {id: agent-ios-2, role: developer}
+    - {id: agent-ios-3, role: developer}
+  tasks:
+    - {id: T-801, title: "iOS task 1", status: blocked, status_since: "2026-03-02T09:00:00+00:00", owner_id: agent-ios-1, block: {reason: "waiting for CEO to pick the app icon", since: "2026-03-02T09:00:00+00:00"}}
+    - {id: T-802, title: "iOS task 2", status: blocked, status_since: "2026-03-02T09:10:00+00:00", owner_id: agent-ios-2, block: {reason: "waiting for CEO to pick the app icon", since: "2026-03-02T09:10:00+00:00"}}
+    - {id: T-803, title: "iOS task 3", status: blocked, status_since: "2026-03-02T09:20:00+00:00", owner_id: agent-ios-3, block: {reason: "waiting for CEO to pick the app icon", since: "2026-03-02T09:20:00+00:00"}}
+  toolchain_changes:
+    - {host: mac-ios-1, tool: xcode, before: "16.0 (16A242d)", after: "16.1 (16B40)", at: "2026-03-02T01:00:00+00:00"}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "Block storm since 2026-03-02 09:00 UTC: 3 tasks blocked"
+    params:
+      kind: block_storm
+      person: ceo
+      toolchain: null
+not_expected_actions:
+  - kind: alert
+    reason_contains: "Likely cause"
+  - kind: alert
+    reason_contains: "xcode"

@@ -86,6 +86,7 @@ from kelpie.rules._calls import (
 from kelpie.rules._tasks import DEFAULT_STALE_AFTER, is_live
 from kelpie.rules._tokens import SpanIndex, span_index, tokens_since
 from kelpie.rules._tool_outage import ran_again, tool_outages
+from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
 from kelpie.rules.wait_condition import WaitCondition
 
 NAME = "loop_breaker"
@@ -131,6 +132,8 @@ class LoopBreaker:
     tool_outage_tools: tuple[str, ...] = ()
     tool_outage_min_tasks: int = 3
     tool_outage_window: timedelta = timedelta(minutes=30)
+    # A toolchain change on a host this long before an outage began is its likely cause.
+    toolchain_window: timedelta = TOOLCHAIN_WINDOW
     tool_outage_mode: str = "observe"  # a new check: "observe", or "rule" (the rule's mode)
     name: str = NAME
 
@@ -169,6 +172,7 @@ class LoopBreaker:
                 self.tool_outage_min_tasks,
                 self.tool_outage_window,
                 self.tool_outage_mode == "observe",
+                self.toolchain_window,
             )
         )
         return actions
@@ -573,7 +577,12 @@ def build(config: dict[str, Any]) -> LoopBreaker:
     own = {k: config.pop(k) for k in list(config) if k in _THRESHOLD_KEYS}
     if own:
         kwargs["thresholds"] = Thresholds(**_threshold_values(own, "thresholds"))
-    for key in ("forecast_horizon", "session_stale_after", "tool_outage_window"):
+    for key in (
+        "forecast_horizon",
+        "session_stale_after",
+        "tool_outage_window",
+        "toolchain_window",
+    ):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     if "poll_patterns" in config:
