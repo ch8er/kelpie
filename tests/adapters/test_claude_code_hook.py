@@ -360,3 +360,27 @@ def test_symlinked_spool_is_not_followed(spool: Path, tmp_path: Path) -> None:
 @pytest.mark.parametrize("args", [{"command": "ls -la"}, {}, None, ["a", 1], {"b": 2, "a": [1]}])
 def test_args_hash_matches_otlp_ingest(args: Any) -> None:
     assert hook.args_hash(args) == args_hash(args)
+
+
+@pytest.mark.parametrize(
+    ("given", "kept"),
+    [
+        ({"skill": "review-pr"}, "review-pr"),
+        ({"skill": "farm-plugin:release-notes", "args": "SECRET ARGS"}, "release-notes"),
+        ({"skill": "../../etc/passwd"}, "passwd"),
+        ({"skill": "two words"}, None),
+        ({"skill": 3}, None),
+        ("not a dict", None),
+    ],
+)
+def test_skill_call_records_the_skill_name_only(spool: Path, given: Any, kept: str | None) -> None:
+    assert run(base("PostToolUse", tool_name="Skill", tool_input=given, tool_use_id="t1")) == 0
+    (rec,) = lines(spool)
+    assert rec["skill"] == kept and rec["v"] == 2
+    assert "SECRET" not in spool.read_text()
+
+
+def test_failed_skill_call_records_no_skill(spool: Path) -> None:
+    run(base("PostToolUseFailure", tool_name="Skill", tool_input={"skill": "x"}, error="no"))
+    (rec,) = lines(spool)
+    assert "skill" not in rec

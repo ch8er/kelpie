@@ -556,3 +556,39 @@ def test_end_to_end_exit_contract_alerts_instead_of_requeue(
         (ActionKind.REQUEUE, Outcome.NOT_EXECUTED)
     ]
     assert alerter.sent[0][0] == "[exit_contract] requeue farm/1 (not executed, needs a human)"
+
+
+# --- skill loads --------------------------------------------------------------------------
+
+
+def skill(farm: Farm, at: float, name: str | None, version: int = 2, outcome: str = "ok") -> None:
+    farm.event("tool", at, tool="Skill", outcome=outcome, skill=name, v=version, agent="dev-1")
+
+
+def test_skill_loads_are_counted_with_the_session_owner_as_role(farm: Farm) -> None:
+    skill(farm, ago(hours=30), "review")  # before the window (and the lookback)
+    skill(farm, ago(hours=3), "review")
+    skill(farm, ago(hours=2), "review")
+    skill(farm, ago(hours=2), "review", outcome="error")  # it did not load
+    skill(farm, ago(hours=1), None)  # a Skill call whose name the hook did not keep
+    farm.event("tool", ago(minutes=30), tool="Bash", outcome="ok", v=2, agent="dev-1")
+    snap = farm.adapter().snapshot(NOW)
+    assert snap.skill_loads_counted == ("claude-code",)
+    assert [(x.skill, x.role, x.source) for x in snap.skill_loads] == [
+        ("review", "dev-1", "claude-code"),
+        ("review", "dev-1", "claude-code"),
+    ]
+
+
+def test_skill_loads_are_not_counted_from_an_older_hook(farm: Farm) -> None:
+    skill(farm, ago(hours=3), "review")
+    farm.event("tool", ago(hours=2), tool="Bash", outcome="ok", v=1)
+    snap = farm.adapter().snapshot(NOW)
+    assert snap.skill_loads == () and snap.skill_loads_counted == ()
+
+
+def test_skill_loads_need_a_lookback_of_a_day(farm: Farm) -> None:
+    skill(farm, ago(hours=1), "review")
+    snap = farm.adapter(lookback=timedelta(hours=6)).snapshot(NOW)
+    assert snap.skill_loads_counted == ()
+    assert farm.adapter(spool=None).snapshot(NOW).skill_loads_counted == ()

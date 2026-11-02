@@ -1134,6 +1134,8 @@ def merged_snapshot(
                 spans=merged.spans + part.spans,
                 waits=merged.waits + part.waits,
                 usage=merged.usage + part.usage,
+                skill_loads=merged.skill_loads + part.skill_loads,
+                skill_loads_counted=merged.skill_loads_counted + part.skill_loads_counted,
                 limit_hits=merged.limit_hits + part.limit_hits,
                 providers=merged.providers + part.providers,
                 builds=merged.builds + part.builds,
@@ -2386,6 +2388,8 @@ def instruction_watch(
         for adapter in adapters:
             if isinstance(adapter, hermes.HermesAdapter):
                 sources += platform_sources(adapter.name, role_of=adapter.role_of)
+            elif isinstance(adapter, HermesBoards):  # the boards share the home's profiles
+                sources += platform_sources(adapter.name, role_of=adapter.boards[0].role_of)
             elif isinstance(adapter, OpenClawAdapter):
                 sources += platform_sources(adapter.name, str(adapter.state_dir))
             else:

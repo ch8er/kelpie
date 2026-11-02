@@ -1303,10 +1303,22 @@ and `skills/*/SKILL.md` (on demand) in `<state_dir>/workspace` and `<state_dir>/
 A project's own `CLAUDE.md` and `.claude/skills` live in its checkout: list them under
 `[[instructions.files]]`.
 
-Tokens a day spent reading a file are its estimated tokens (characters / 4) times the
-sessions of its role (on its platform, for the defaults) that started in the last 24 hours
-(`token_basis = "sessions"`; for an on-demand file an upper bound). Counting real skill
-loads (Hermes `skill_view` calls, Claude Code skill loads) is not done yet.
+Tokens a day spent reading a file are its estimated tokens (characters / 4) times how often
+it was read in the last 24 hours, and `token_basis` says which count that is:
+
+- `loads`: a skill (`<name>/SKILL.md`, on demand) of a platform that counts skill loads, times
+  the loads of a skill of that name by its role (the role's own skill of the name, else the
+  one every role shares). Hermes counts `skill_view` calls from each profile's `state.db`
+  (`[adapters.hermes] state_home`; a view of a linked reference file is not a load), Claude
+  Code its `Skill` calls from the hook (version 2 of `hook.py` or later, and a `lookback`
+  of at least 24 hours). A skill nobody opened costs nothing.
+- `sessions`, otherwise: the sessions of its role (on its platform, for the defaults) that
+  started in the last 24 hours. The cost of an always-loaded file; for an on-demand file of
+  a platform whose loads could not be counted this time (no `state.db`, one that cannot be
+  read, an older hook) an upper bound.
+
+A file listed under `[[instructions.files]]` names no platform, so it is always on
+`sessions`.
 
 ## [resources.prometheus]
 

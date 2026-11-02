@@ -50,6 +50,13 @@ Sessions: one per Claude Code ``session_id`` seen in the spool within ``lookback
 A ``TaskUpdate`` counts only on a watched list: the hook records the session's list
 (``CLAUDE_CODE_TASK_LIST_ID``, else its own session id), so private tasks stay private.
 
+Skill loads: each ``Skill`` call of the last 24 hours is a
+:class:`~kelpie.core.model.SkillLoad` (the skill's name, the session's owner as its role),
+for the instruction files' tokens a day. They are counted only when every tool line of the
+window comes from a hook that records them (version 2) and ``lookback`` covers the window;
+otherwise none are reported and those files fall back to sessions. A skill a person invokes
+with a slash command runs no tool and is not counted.
+
 Liveness: an interactive session waiting at its prompt fires no hooks, so its last line ages
 like a crashed session's. For a session without ``SessionEnd`` the Claude Code process the
 hook recorded is checked (:mod:`kelpie.adapters.claude_code.process`: Linux only, and only
@@ -82,6 +89,7 @@ from kelpie.core.model import (
     Dependency,
     Owner,
     Session,
+    SkillLoad,
     Snapshot,
     Span,
     Status,
@@ -98,6 +106,8 @@ DEFAULT_TASKS_DIR = Path("~/.claude/tasks")
 DEFAULT_SPOOL = Path("~/.claude/kelpie/spool.jsonl")
 DEFAULT_STOP_DIR = Path(hook.DEFAULT_STOP_DIR)
 DEFAULT_LOOKBACK = timedelta(hours=24)
+LOADS_WINDOW = timedelta(hours=24)  # skill loads counted over this (tokens a day)
+SKILL_VERSION = 2  # the hook version that records the skill of a Skill call
 DEFAULT_OWNER = "claude-code"
 NO_TASK_PREFIX = "session:"
 MAX_TASK_FILE = 1024 * 1024  # bytes; a larger task file is skipped
@@ -193,6 +203,7 @@ class SpoolEvent:
     task: str | None = None
     task_status: str | None = None
     task_owner: str | None = None
+    skill: str | None = None  # the skill a Skill call loaded (hook version 2)
     version: int = 0  # the hook's spool format version (``v``); 0 before stop support
     pid: int | None = None  # the Claude Code process the hook ran under
     pid_start: str | None = None  # its start time (Linux clock ticks since boot)
@@ -255,6 +266,7 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         task=_text(rec.get("task")),
         task_status=_text(rec.get("task_status")),
         task_owner=_text(rec.get("task_owner")),
+        skill=_text(rec.get("skill")),
         version=rec["v"] if isinstance(rec.get("v"), int) and not isinstance(rec["v"], bool) else 0,
         pid=rec["pid"]
         if isinstance(rec.get("pid"), int) and not isinstance(rec["pid"], bool) and rec["pid"] > 1
@@ -388,7 +400,37 @@ class ClaudeCodeAdapter:
             dependencies=dependencies,
             sessions=sessions,
             spans=self._spans(events, sessions),
+            **self._skill_loads(events, sessions, now),
         )
+
+    def _skill_loads(
+        self, events: Sequence[SpoolEvent], sessions: Sequence[Session], now: datetime
+    ) -> dict[str, Any]:
+        """``Snapshot`` fields of the skills loaded (``Skill`` calls) in the last
+        ``LOADS_WINDOW``, counted only when the spool covers the whole window with a hook
+        that records them: every tool line of the window from hook version 2 on."""
+        start = now - LOADS_WINDOW
+        recent = [e for e in events if e.type == "tool" and start <= e.at <= now]
+        if (
+            self.spool is None
+            or self.lookback < LOADS_WINDOW
+            or not recent
+            or any(e.version < SKILL_VERSION for e in recent)
+        ):
+            return {}
+        owner = {s.id: s.owner_id for s in sessions}
+        loads = tuple(
+            SkillLoad(
+                skill=e.skill,
+                at=e.at,
+                session_id=e.session_id,
+                role=owner.get(e.session_id),
+                source=self.name,
+            )
+            for e in recent
+            if e.skill is not None and e.outcome != "error"
+        )
+        return {"skill_loads": loads, "skill_loads_counted": (self.name,)}
 
     def _read_list(self, task_list: str, strict: bool = False) -> list[_TaskFile]:
         path = self.tasks_dir / list_dir_name(task_list)

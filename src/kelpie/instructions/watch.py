@@ -6,11 +6,19 @@ each file is read read-only (never through a symlink, at most ``max_bytes``), me
 and whenever its hash changes, with whether the change only appended; the growth window is
 read back from those rows. Between scans the last result is reused.
 
-Tokens a day spent reading a file: its estimated tokens times the sessions on this host of
-its role (of its platform, for the platform defaults; any, for a file every role loads)
-that started in the last 24 hours of the snapshot, ``token_basis = "sessions"``. For a file
-loaded on demand (a skill) that is an upper bound; counted loads (Hermes ``skill_view``
-calls, Claude Code skill loads) will replace it where a platform records them.
+Tokens a day spent reading a file: its estimated tokens times how often it was read in the
+last 24 hours of the snapshot.
+
+- ``token_basis = "loads"``: a skill (``<name>/SKILL.md``, loaded on demand) of a platform
+  that counted its skill loads this tick (``Snapshot.skill_loads_counted``: Hermes
+  ``skill_view`` calls from ``state.db``, Claude Code ``Skill`` calls from its hook) is read
+  as often as its role opened a skill of that name: the role's own skill of the name if it
+  has one, else the one every role of the platform shares (the first by path, if several
+  share the name). A skill nobody opened costs nothing.
+- ``token_basis = "sessions"``, otherwise: the sessions on this host of its role (of its
+  platform, for the platform defaults; any, for a file every role loads) that started in
+  the window. For an always-loaded file that is the cost; for a skill of a platform that
+  counts no loads it is an upper bound.
 
 Only files on this host are measured: a ``kelpie agent`` host's files are not (yet).
 """
@@ -25,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from kelpie.core.model import InstructionDuplicate, InstructionFile, Snapshot
+from kelpie.core.model import InstructionDuplicate, InstructionFile, Snapshot, TokenBasis
 from kelpie.core.storage import SizeRow, SqliteInstructionStore
 from kelpie.instructions.config import InstructionSettings, Source
 from kelpie.instructions.scan import Measure, Scanned, Unreadable, copies, measure, read_file
@@ -78,7 +86,8 @@ class InstructionWatch:
                 self._next = now + every
                 self.failed = False
         sessions = _sessions_per_day(snapshot)
-        return tuple(self._file(f, now, sessions) for f in self._found), self._copies
+        loads = _loads_per_file(self._found, snapshot)
+        return tuple(self._file(f, now, sessions, loads) for f in self._found), self._copies
 
     # --- scanning -------------------------------------------------------------------
 
@@ -183,7 +192,11 @@ class InstructionWatch:
     # --- the snapshot's view --------------------------------------------------------
 
     def _file(
-        self, f: Found, now: datetime, sessions: dict[tuple[str | None, str | None], int]
+        self,
+        f: Found,
+        now: datetime,
+        sessions: dict[tuple[str | None, str | None], int],
+        loads: dict[Path, int],
     ) -> InstructionFile:
         start = now - self.settings.window
         rows = self._history.get(str(f.path), [])
@@ -193,7 +206,10 @@ class InstructionWatch:
         base = rows[0] if rows else None
         since = max(base.measured_at, start) if base else None
         later = rows[1:]
+        basis: TokenBasis = "sessions"
         n = sessions.get((f.source.platform, f.role), 0)
+        if f.path in loads:
+            basis, n = "loads", loads[f.path]
         tokens_per_day = f.measure.tokens * n
         return InstructionFile(
             path=f.shown,
@@ -207,7 +223,7 @@ class InstructionWatch:
             appends=sum(1 for r in later if r.appended is True),
             edits=sum(1 for r in later if r.appended is not True),
             tokens_per_day=tokens_per_day,
-            token_basis="sessions" if tokens_per_day is not None else None,
+            token_basis=basis,
             owner=f.source.owner,
         )
 
@@ -229,6 +245,36 @@ def _role_part(pattern: str, match: str) -> str | None:
 
 def _place_path(place: str) -> str:
     return place.rpartition(":")[0]
+
+
+SKILL_FILE = "SKILL.md"
+
+
+def skill_name(path: Path) -> str | None:
+    """The name a platform opens a skill by: the directory of its ``SKILL.md``."""
+    return (path.parent.name or None) if path.name == SKILL_FILE else None
+
+
+def _loads_per_file(found: Sequence[Found], snapshot: Snapshot) -> dict[Path, int]:
+    """Loads in the last 24 hours of each skill whose platform counted them this tick
+    (every such skill is a key, opened or not)."""
+    counted = set(snapshot.skill_loads_counted)
+    skills: dict[tuple[str, str], list[Found]] = {}  # (platform, name) -> its files
+    for f in found:
+        name = skill_name(f.path)
+        platform = f.source.platform
+        if f.source.loaded == "on_demand" and platform in counted and name is not None:
+            skills.setdefault((platform, name), []).append(f)
+    out = {f.path: 0 for files in skills.values() for f in files}
+    for load in snapshot.skill_loads:
+        if load.source is None or not snapshot.now - DAY <= load.at <= snapshot.now:
+            continue
+        files = skills.get((load.source, load.skill), [])
+        own = [f for f in files if f.role is not None and f.role == load.role]
+        shared = sorted((f for f in files if f.role is None), key=lambda f: f.shown)
+        if target := (own or shared)[:1]:
+            out[target[0].path] += 1
+    return out
 
 
 def _sessions_per_day(snapshot: Snapshot) -> dict[tuple[str | None, str | None], int]:

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from kelpie.core.model import Owner, Session, Snapshot
+from kelpie.core.model import Owner, Session, SkillLoad, Snapshot
 from kelpie.core.storage import SqliteInstructionStore
 from kelpie.instructions.config import InstructionSettings, Source
 from kelpie.instructions.watch import InstructionWatch
@@ -149,3 +150,76 @@ def test_role_from_a_path_with_doubled_separators(tmp_path: Path) -> None:
     w = InstructionWatch(SqliteInstructionStore(":memory:"), InstructionSettings(), (src,))
     (f,) = w.read(Snapshot(now=T0))[0]
     assert f.role == "ops"
+
+
+def test_skills_of_a_platform_counting_loads_cost_their_loads(farm: Path, tmp_path: Path) -> None:
+    store = SqliteInstructionStore(tmp_path / "k.db")
+    for role in ("reviewer", "dev-1"):
+        (farm / "profiles" / role / "skills" / "review" / "SKILL.md").write_text(lesson(1))
+    (farm / "profiles" / "dev-1" / "skills" / "unused").mkdir()
+    (farm / "profiles" / "dev-1" / "skills" / "unused" / "SKILL.md").write_text(lesson(2))
+    (farm / "AGENTS.md").write_text("# Core\n")
+    w = watch(farm, store)
+    owners = (Owner("reviewer", "reviewer"), Owner("dev-1", "dev"))
+
+    def load(role: str, hours: float, skill: str = "review", source: str = "hermes") -> SkillLoad:
+        return SkillLoad(skill, T0 - timedelta(hours=hours), "s", role, source)
+
+    loads = (
+        load("reviewer", 1),
+        load("reviewer", 2),
+        load("reviewer", 30),  # yesterday's
+        load("dev", 3),
+        load("dev", 3, source="claude-code"),  # another platform's skill of that name
+        load("ops", 3),  # a role with no such skill: no file of its own nor a shared one
+    )
+    snap = Snapshot(
+        now=T0,
+        owners=owners,
+        sessions=sessions(T0, 7),
+        skill_loads=loads,
+        skill_loads_counted=("hermes",),
+    )
+    files = {f.path: f for f in w.read(snap)[0]}
+    rev = files["~/profiles/reviewer/skills/review/SKILL.md"]
+    assert (rev.token_basis, rev.tokens_per_day) == ("loads", rev.tokens * 2)
+    dev = files["~/profiles/dev-1/skills/review/SKILL.md"]
+    assert (dev.role, dev.token_basis, dev.tokens_per_day) == ("dev", "loads", dev.tokens)
+    unused = files["~/profiles/dev-1/skills/unused/SKILL.md"]
+    assert (unused.token_basis, unused.tokens_per_day) == ("loads", 0)
+    agents = files["~/AGENTS.md"]  # always loaded: read into every session
+    assert (agents.token_basis, agents.tokens_per_day) == ("sessions", agents.tokens * 7)
+    # The platform did not count its loads this tick: sessions, an upper bound.
+    files = {f.path: f for f in w.read(replace(snap, skill_loads_counted=()))[0]}
+    rev = files["~/profiles/reviewer/skills/review/SKILL.md"]
+    assert (rev.token_basis, rev.tokens_per_day) == ("sessions", rev.tokens * 7)
+    store.close()
+
+
+def test_a_shared_skill_counts_the_loads_of_roles_without_their_own(tmp_path: Path) -> None:
+
+    for d in ("shared/a/review", "shared/b/review", "profiles/dev/skills/review"):
+        (tmp_path / d).mkdir(parents=True)
+        (tmp_path / d / "SKILL.md").write_text(lesson(1))
+    sources = (
+        Source((f"{tmp_path}/shared/**/SKILL.md",), loaded="on_demand", platform="hermes"),
+        Source(
+            (f"{tmp_path}/profiles/{{role}}/skills/*/SKILL.md",),
+            loaded="on_demand",
+            platform="hermes",
+        ),
+    )
+    store = SqliteInstructionStore(":memory:")
+    w = InstructionWatch(store, InstructionSettings(enabled=True), sources, home=str(tmp_path))
+    loads = tuple(
+        SkillLoad("review", T0 - timedelta(hours=1), "s", role, "hermes")
+        for role in ("dev", "ops", "qa")
+    )
+    snap = Snapshot(now=T0, skill_loads=loads, skill_loads_counted=("hermes",))
+    got = {f.path: f.tokens_per_day // f.tokens for f in w.read(snap)[0]}
+    assert got == {
+        "~/shared/a/review/SKILL.md": 2,  # the first of the shared skills of that name
+        "~/shared/b/review/SKILL.md": 0,
+        "~/profiles/dev/skills/review/SKILL.md": 1,
+    }
+    store.close()

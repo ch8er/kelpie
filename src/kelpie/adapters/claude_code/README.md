@@ -110,7 +110,9 @@ stages; everything else is `***`. So `curl -u admin:pw https://x` is `curl -u **
 [docs/privacy.md](../../../../docs/privacy.md#hermes-hooks-plugin)). A secret written as a
 plain lowercase word right after the executable is still kept (`redis-cli auth hunter2`);
 `KELPIE_CLAUDE_SPOOL_COMMANDS=0` records no command. A spool written by an older hook is cleaned with `kelpie spool scrub`, run as the spool's owner. For `TaskUpdate` calls only the task id, status and owner are kept, never
-subjects or descriptions. The spool is created with mode `0600` (not through a symlink); keep
+subjects or descriptions. For `Skill` calls only the skill's name is kept (`skill`, the part after
+a plugin's `plugin:` prefix; hook version 2), never the arguments: Kelpie counts how often
+each skill is loaded for the instruction files' tokens a day (`[instructions]`). The spool is created with mode `0600` (not through a symlink); keep
 its directory `0700` as above.
 
 ## Stopping a session

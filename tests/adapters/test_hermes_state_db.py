@@ -689,3 +689,93 @@ def test_corrupt_counts_do_not_drop_the_profile(tmp_path: Path) -> None:
     usage_session(db, "s2", None, totals=(10, 1, 0, 0, 0, 1))
     found = sorted((u.session, u.input_tokens) for u in state_db.read_usage(tmp_path, NOW - 60 * M))
     assert found == [("s1", state_db.MAX_COUNT), ("s2", 10)]
+
+
+# --- skill loads (issue #282) ---------------------------------------------------------------
+
+
+def view(
+    db: StateDb,
+    sid: str,
+    at: datetime,
+    args: object,
+    call_id: str | None = None,
+    state: tuple[int, int] = (1, 0),
+) -> None:
+    db._calls += 1
+    fn = {"name": "skill_view", "arguments": json.dumps(args)}
+    call = {"id": call_id or f"call_{db._calls}", "type": "function", "function": fn}
+    db.conn.execute(
+        "INSERT INTO messages (session_id, role, tool_calls, timestamp, active, compacted)"
+        " VALUES (?, 'assistant', ?, ?, ?, ?)",
+        (sid, json.dumps([call]), at.timestamp(), *state),
+    )
+    db.conn.commit()
+
+
+def test_skill_views_of_a_skill_are_counted_once(tmp_path: Path) -> None:
+    db = StateDb(tmp_path / "profiles" / "dev-1" / "state.db")
+    db.session("s", "/ws", NOW - 30 * 60 * M, NOW)
+    view(db, "s", NOW - 25 * 60 * M, {"name": "review"})  # before the window
+    view(db, "s", NOW - 50 * M, {"name": "review"}, call_id="c1", state=(0, 1))  # compacted
+    view(db, "s", NOW - 50 * M, {"name": "review"}, call_id="c1")  # its copy: once
+    view(db, "s", NOW - 40 * M, {"name": "review"}, state=(0, 0))  # rewound
+    view(db, "s", NOW - 30 * M, {"name": "dev/release-notes", "file_path": "SKILL.md"})
+    view(db, "s", NOW - 20 * M, {"name": "review", "file_path": "references/api.md"})
+    view(db, "s", NOW - 10 * M, {"name": "two words"})
+    view(db, "s", NOW - 10 * M, {"name": 5})
+    db.call("s", NOW - 5 * M, "cat SKILL.md")  # a terminal call, not a skill view
+    loads = state_db.read_skill_loads(tmp_path, NOW - 24 * 60 * M)
+    assert loads is not None
+    assert [(x.profile, x.session, x.at, x.skill) for x in loads] == [
+        ("dev-1", "s", NOW - 50 * M, "review"),
+        ("dev-1", "s", NOW - 30 * M, "release-notes"),
+    ]
+
+
+def test_skill_loads_are_not_counted_without_every_state_db(tmp_path: Path) -> None:
+    assert state_db.read_skill_loads(tmp_path, NOW) is None  # no state.db at all
+    StateDb(tmp_path / "state.db")
+    bad = tmp_path / "profiles" / "dev" / "state.db"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("not a database")
+    assert state_db.read_skill_loads(tmp_path, NOW) is None
+    bad.unlink()
+    assert state_db.read_skill_loads(tmp_path, NOW) == []
+
+
+def test_the_adapter_reports_skill_loads_by_role(tmp_path: Path) -> None:
+    home = tmp_path / "hermes"
+    home.mkdir()
+    board = Board(home / "kanban.db")
+    db = StateDb(home / "profiles" / "dev-2" / "state.db")
+    db.session("s", None, NOW - 60 * M, NOW)
+    view(db, "s", NOW - 50 * M, {"name": "review"})
+    a = HermesAdapter(db_path=board.path, spool=None, git_state=False, state_home=home)
+    snap = a.snapshot(NOW)
+    assert snap.skill_loads_counted == ("hermes",)
+    assert [(x.skill, x.role, x.session_id, x.source) for x in snap.skill_loads] == [
+        ("review", "dev", "hermes-session-dev-2-s", "hermes")
+    ]
+    view(db, "s", NOW - 1 * M, {"name": "review"})
+    assert len(a.snapshot(NOW + 30 * S).skill_loads) == 1  # read at most once a minute
+    assert len(a.snapshot(NOW + 2 * M).skill_loads) == 2
+    plain = HermesAdapter(db_path=board.path, spool=None, git_state=False)
+    assert plain.snapshot(NOW).skill_loads_counted == ()
+
+
+def test_a_failed_count_of_skill_loads_counts_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "hermes"
+    home.mkdir()
+    board = Board(home / "kanban.db")
+    StateDb(home / "state.db")
+
+    def boom(*a: object) -> list[object]:
+        raise ValueError("odd row")
+
+    monkeypatch.setattr(hermes_adapter, "read_skill_loads", boom)
+    a = HermesAdapter(db_path=board.path, spool=None, git_state=False, state_home=home)
+    snap = a.snapshot(NOW)
+    assert snap.skill_loads == () and snap.skill_loads_counted == ()

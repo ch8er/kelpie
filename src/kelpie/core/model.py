@@ -677,6 +677,19 @@ TokenBasis = Literal["loads", "sessions"]
 
 
 @dataclass(frozen=True, slots=True)
+class SkillLoad:
+    """One time an agent opened a skill (an instruction file loaded on demand), as its
+    platform recorded it (Hermes ``skill_view``, a Claude Code ``Skill`` call): the skill's
+    name and who opened it when, never the skill's text or the call's other arguments."""
+
+    skill: str  # the skill's name: its directory, the parent of SKILL.md
+    at: datetime
+    session_id: str  # the platform's own session id
+    role: str | None = None
+    source: str | None = None  # name of the platform adapter that reported it
+
+
+@dataclass(frozen=True, slots=True)
 class InstructionFile:
     """One instruction file a role loads (a skill, CLAUDE.md, AGENTS.md, a role prompt),
     measured read-only when the snapshot is assembled (``kelpie.instructions``): sizes,
@@ -814,6 +827,10 @@ class Snapshot:
     # The instruction files each role loads and the copies found in them ([instructions]).
     instruction_files: tuple[InstructionFile, ...] = ()
     instruction_duplicates: tuple[InstructionDuplicate, ...] = ()
+    # Skills opened in the last 24 hours (Hermes ``skill_view``, Claude Code ``Skill``), and
+    # the adapters that counted them this tick: for their skills, no load means none.
+    skill_loads: tuple[SkillLoad, ...] = ()
+    skill_loads_counted: tuple[str, ...] = ()
     # Parts of the farm that are not in this snapshot (multi-host: agents and
     # ``<agent>/<adapter>`` boards that are silent, stale or failed, whose task ids start
     # with ``<agent>:``; ``hub`` when no agent board could be read). A rule that stops
