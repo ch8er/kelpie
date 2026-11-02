@@ -281,3 +281,20 @@ def test_the_report_board_measures_instruction_files_without_writing_their_histo
     assert settings.db_path is not None
     with sqlite3.connect(settings.db_path) as db:
         assert db.execute("SELECT COUNT(*) FROM instruction_sizes").fetchone() == (0,)
+
+
+def test_the_report_goes_on_when_the_instruction_store_cannot_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import kelpie.report.cli as report_cli
+
+    def broken(*args: Any, **kw: Any) -> Any:
+        raise ConfigError("cannot open the database")
+
+    monkeypatch.setattr(report_cli, "build_adapters", lambda settings: [])
+    monkeypatch.setattr(report_cli, "instruction_watch", broken)
+    settings = load_settings(config(tmp_path, "[instructions]\n"))
+    now = datetime(2026, 3, 3, 1, tzinfo=UTC)
+    board = report_cli.report_board(settings, date(2026, 3, 2), lambda: now, Metrics())
+    assert board.instruction_files == ()
+    assert "instruction files not measured" in caplog.text

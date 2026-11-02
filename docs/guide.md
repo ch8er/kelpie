@@ -324,7 +324,8 @@ board the report is unchanged.
   for a skill loaded on demand an upper bound), size, growth over the `[instructions]`
   window (and "only appends"), and how many copied sections and values each takes part in.
   Paths and numbers only, never a file's text; rule `instruction_bloat` alerts on what
-  crosses its thresholds. `kelpie report` reads the size history and writes none of it.
+  crosses its thresholds. `kelpie report` reads the size history and writes none of it; a report
+  built more than a day after its day ended (a past day, a catch-up) leaves the section out.
 
 **Before/after of fixes.** Every fix made on the report's day or the day before is measured
 over `[report] verify_window` (a day) before and after it: hours lost per day

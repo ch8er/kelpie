@@ -133,17 +133,16 @@ def report_board(
     ``kelpie why`` without ``--refresh``, the report calls no network service of its own:
     a block reason ``[[block_conditions]]`` matches counts as a CI or merge wait without
     a PR lookup (:class:`kelpie.report.waits.BlockKind`). With ``[instructions]``, the
-    instruction files are measured too (read-only, the size history only read), for the
-    section ``instructions``."""
+    instruction files are measured too (read-only; the size history is read, never
+    written), for the section ``instructions``."""
     enrich, _ = connector_steps(settings, metrics, clock, network=False)
     adapters = build_adapters(report_settings(settings, day, clock()))
     try:
-        instructions = instruction_watch(settings, adapters)
+        # kelpie serve keeps the size history: the report only reads it.
+        instructions = instruction_watch(settings, adapters, record=False)
     except ConfigError as exc:  # the report goes on without the section
         log.error("instruction files not measured for the report: %s", exc)
         instructions = None
-    if instructions is not None:
-        instructions.record = False  # kelpie serve keeps the size history
     try:
         return merged_snapshot(adapters, metrics, clock, enrich=enrich, instructions=instructions)()
     finally:

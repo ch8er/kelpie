@@ -2376,10 +2376,11 @@ def check_exposure(settings: Settings, host: str) -> None:
 
 
 def instruction_watch(
-    settings: Settings, adapters: Sequence[PlatformAdapter]
+    settings: Settings, adapters: Sequence[PlatformAdapter], record: bool = True
 ) -> InstructionWatch | None:
     """The instruction files to measure ([instructions]): the configured ones first, then
-    the defaults of the platforms whose adapters run here. None without the section."""
+    the defaults of the platforms whose adapters run here. None without the section.
+    ``record``: False to only read the size history (``kelpie report``)."""
     s = settings.instructions
     if not s.enabled:
         return None
@@ -2398,7 +2399,7 @@ def instruction_watch(
         store = SqliteInstructionStore(settings.db_path or ":memory:")
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open {settings.db_path}: {exc}") from exc
-    return InstructionWatch(store, s, tuple(sources))
+    return InstructionWatch(store, s, tuple(sources), record=record)
 
 
 def _open_span_store(db_path: Path | None) -> SpanStore:

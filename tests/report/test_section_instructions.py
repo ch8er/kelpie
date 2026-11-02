@@ -58,7 +58,7 @@ def test_the_costliest_files_with_their_basis_growth_and_copies() -> None:
             appends=1,
         ),
         file("~/.claude/skills/pdf/SKILL.md", 0, role=None),
-        file("~/never-read.md", None),  # not measured for cost: left out
+        file("~/never-read.md", None),  # no tokens a day: left out
     )
     ops = "~/farm/ops/AGENTS.md"
     copies = (
@@ -99,4 +99,26 @@ def test_top_is_configurable_and_no_files_is_no_section() -> None:
 def test_paths_and_roles_are_escaped() -> None:
     files = (file("~/a|b`c/SKILL.md", 10, role="dev|*x*"),)
     text = section(report(instruction_files=files))
-    assert "dev\\|\\*x\\*" in text and "| `~/a\\|b`" not in text
+    assert "dev\\|\\*x\\*" in text
+    assert "| ``~/a\\|b`c/SKILL.md`` |" in text
+
+
+def test_long_paths_keep_their_end() -> None:
+    base = "~/.hermes/profiles/developer/skills/software-development/test-driven-development"
+    files = (file(f"{base}-a/SKILL.md", 2), file(f"{base}-b/SKILL.md", 1))
+    rows = [r for r in section(report(instruction_files=files)).splitlines() if r.startswith("| `")]
+    cells = [r.split(" | ")[0] for r in rows]
+    assert cells[0] != cells[1]
+    assert cells[0].endswith("development-a/SKILL.md`") and "..." in cells[0]
+    assert all(len(c) <= 2 + 2 + 80 for c in cells)
+
+
+def test_a_report_built_long_after_its_day_has_no_section() -> None:
+    from datetime import timedelta
+
+    files = (file("~/s/SKILL.md", 10),)
+    late = ReportInputs(day=DAY, tz=UTC, instructions_at=AT + timedelta(days=2),
+                        instruction_files=files)  # fmt: skip
+    assert "## Instruction files" not in render_markdown(build_report(late))
+    unknown = ReportInputs(day=DAY, tz=UTC, instruction_files=files)
+    assert "## Instruction files" not in render_markdown(build_report(unknown))
