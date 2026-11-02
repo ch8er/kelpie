@@ -346,14 +346,18 @@ shows its sample sizes. What the report cannot separate it does not credit:
   the before-window, and, with a config change in the group, a cause of hours lost first
   seen after it with nothing before (a connector or rule the change may have turned on),
   are listed under "Not compared" with their value after, never as "+900% worse".
-- *Backlog release.* When at least 3 tasks that were ready or blocked just before a fix
-  are done within a quarter of the window after it, at twice the pace before the fix and
-  twice the pace over the rest of the after-window (when there is that much of it), they
-  are released backlog, not a faster farm. The report names the release ("Backlog
-  release: 8 of the 11 tasks done in the 4.0h after the fix were ready or blocked before
-  it") and compares tasks done per hour over the next full day after the burst instead.
-  Until that day is over, it compares the rest of the after-window past the burst, and a
-  later report settles it.
+- *Backlog release.* Right after a fix, a burst of tasks that the fix let go is released
+  backlog, not a faster farm. It is named when, within the first quarter of the window
+  after the fix (the burst window), at least 4 tasks are done that had been ready or
+  blocked for at least that long just before it, they are at least half of the tasks done
+  then, and that pace (tasks per wall-clock hour) is more than twice the pace before the
+  fix and over the rest of the after-window. A fix less than one and a quarter windows
+  before the report's end is not judged: what follows the burst is not known yet. The report
+  names the release ("Backlog release: 8 of the 11 tasks done in the 6.0h after the fix
+  were ready or blocked before it") and compares tasks done per hour over the next full day
+  after the burst instead. While that day is not over, or when a later fix falls in it, it
+  compares the rest of the after-window past the burst. For a group of fixes, the burst is
+  looked for after the last one.
 
 Fixes come from `kelpie fix "lifted the merge hold" [--rule R] [--command PREFIX]
 [--role ROLE] [--at TIME]` (check with `kelpie fix --list [--days N]`), from config

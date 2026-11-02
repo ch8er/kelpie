@@ -65,23 +65,24 @@ def released(n: int, blocked_at: datetime, first_done: datetime) -> list[Task | 
 def spike() -> dict[str, Any]:
     return case(
         steady("D", F - 24 * H, REPORT_DAY + 24 * H, 2 * H),
-        released(8, F - 3 * H, F + H / 2),
+        released(8, F - 8 * H, F + H / 2),
     )
 
 
 def improvement() -> dict[str, Any]:
-    """Before: one every two hours; after: one an hour, all day long. Three tasks were
-    ready at the fix and are done first: an ordinary queue, not a release."""
+    """Before: one every two hours; after: one an hour, all day long. Four tasks had been
+    ready since the morning and are done first, but at the pace that then holds: a faster
+    farm, not a release."""
     ready = []
-    for i in range(3):
+    for i in range(4):
         done = F + (i + 1) * H
         ready.append(Task(f"R-{i}", "r", Status.DONE, done, role="developer", owner_id="dev-1"))
-        ready.append(Session(f"r-{i}-0", f"R-{i}", "dev-1", F - 5 * H, F - 4 * H, Status.READY))
+        ready.append(Session(f"r-{i}-0", f"R-{i}", "dev-1", F - 9 * H, F - 8 * H, Status.READY))
         ready.append(Session(f"r-{i}-1", f"R-{i}", "dev-1", done - H / 2, done, Status.DONE))
     return case(
         steady("D", F - 24 * H, F, 2 * H),
         ready,
-        steady("N", F + 3 * H, REPORT_DAY + 24 * H, H),
+        steady("N", F + 4 * H, REPORT_DAY + 24 * H, H),
     )
 
 
@@ -95,7 +96,7 @@ def test_a_spike_right_after_an_unblocking_fix_is_a_backlog_release() -> None:
     r = v.release
     assert r is not None
     assert (r.tasks, r.done) == (8, 11)  # 3 of the steady ones fell in the burst window
-    assert r.start == F and r.end == F + 4 * H
+    assert r.start == F and r.end == F + 6 * H  # the burst window: a quarter of a day
     assert r.full_day and r.steady == (REPORT_DAY, REPORT_DAY + 24 * H)
     m = throughput(v)
     # after: the report's day, the steady pace again (12 done, one every two hours)
@@ -105,7 +106,7 @@ def test_a_spike_right_after_an_unblocking_fix_is_a_backlog_release() -> None:
     # about the pace before (work hours shift a little), not the burst's 20 in the window
     assert m.after < 1.3 * m.before
     markdown = render_markdown(report)
-    assert "Backlog release: 8 of the 11 tasks done in the 4.0h after the fix" in markdown
+    assert "Backlog release: 8 of the 11 tasks done in the 6.0h after the fix" in markdown
     assert "compares the next full day (2026-10-20 00:00 UTC to 2026-10-21 00:00 UTC)" in markdown
     assert digest(report).data["fix_checks"][0]["backlog_release"] == 8
 
@@ -115,7 +116,7 @@ def test_without_the_next_full_day_the_rest_of_the_after_window_is_compared() ->
     fix = FixEvent(F + 24 * H, MANUAL, "x", role="developer")
     shifted = case(
         steady("D", F, REPORT_DAY + 24 * H, 2 * H),
-        released(8, F + 21 * H, F + 24.5 * H),
+        released(8, F + 16 * H, F + 24.5 * H),
     )
     report = build_report(inputs(fixes=(fix,), **shifted))
     [v] = report.verifications
@@ -139,11 +140,11 @@ def test_a_genuine_improvement_is_not_a_backlog_release() -> None:
 
 
 def test_a_few_unblocked_tasks_are_not_a_release() -> None:
-    # two released tasks: below the minimum, whatever the rate
+    # three released tasks: below the minimum, whatever the pace
     report = build_report(
         inputs(
             fixes=(FIX,),
-            **case(steady("D", F - 24 * H, REPORT_DAY + 24 * H, 2 * H), released(2, F - H, F)),
+            **case(steady("D", F - 24 * H, REPORT_DAY + 24 * H, 2 * H), released(3, F - 8 * H, F)),
         )
     )
     [v] = report.verifications
@@ -158,3 +159,53 @@ def test_a_burst_of_new_work_is_not_a_release() -> None:
     )
     [v] = report.verifications
     assert v.release is None
+
+
+def test_a_routine_queue_is_not_a_release() -> None:
+    # the same eight tasks done right after the fix, but ready only since an hour before
+    # it: a queue turning over, not a backlog the fix let go
+    report = build_report(
+        inputs(
+            fixes=(FIX,),
+            **case(
+                steady("D", F - 24 * H, REPORT_DAY + 24 * H, 2 * H), released(8, F - H, F + H / 2)
+            ),
+        )
+    )
+    [v] = report.verifications
+    assert v.release is None
+
+
+def test_a_fix_too_late_to_see_the_pace_after_the_burst_names_no_release() -> None:
+    # fixed at 20:00 of the report's day: four hours after it, the pace that follows a
+    # burst is unknown, so a faster farm cannot be told from a release
+    late = F + 32 * H
+    fix = FixEvent(late, MANUAL, "x", role="developer")
+    shape = case(
+        steady("D", F, REPORT_DAY + 24 * H, 2 * H), released(8, late - 8 * H, late + H / 4)
+    )
+    [v] = build_report(inputs(fixes=(fix,), **shape)).verifications
+    assert v.release is None
+    m = throughput(v)
+    assert "after:" not in m.name and m.n_after > 0  # the after-window is kept
+
+
+def test_the_next_full_day_stops_short_of_a_later_fix() -> None:
+    # a second fix on the report's day, more than a window after the first: the next
+    # full day would measure it too, so the first compares past its burst instead
+    later = FixEvent(REPORT_DAY + 13 * H, MANUAL, "faster builds", role="developer")
+    report = build_report(inputs(fixes=(FIX, later), **spike()))
+    first = next(v for v in report.verifications if v.event == FIX)
+    assert first.release is not None and not first.release.full_day
+    assert first.release.steady == (F + 6 * H, F + 24 * H)
+
+
+def test_a_group_names_the_release_after_its_last_fix() -> None:
+    rev = FixEvent(F - 2 * H, MANUAL, "reviews read the diff", role="reviewer")
+    report = build_report(inputs(fixes=(rev, FIX), **spike()))
+    [v] = report.verifications
+    assert v.together and v.release is not None
+    assert (v.release.tasks, v.release.start) == (8, F)
+    assert "Backlog release: 8 of the 11 tasks done in the 6.0h after the last fix" in (
+        render_markdown(report)
+    )
