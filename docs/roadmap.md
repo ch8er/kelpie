@@ -408,7 +408,8 @@ alert with a rebalancing suggestion.
 - [x] Long sequential chains with idle agents → `alert` suggesting parallelization, with `critical_path_length`
 - [x] Overloaded role with idle roles elsewhere → `alert` with a rebalancing suggestion
 - [x] Farm or role idle longer than N minutes (config) while ready work waits (queued tasks, mergeable PRs from the GitHub connector) → `alert` with the idle time, the waiting work and the likely cause (an active hold, an empty queue upstream)
-- [ ] Holds are first-class: a hold (a label, flag or pause, matched by config) has an owner and an expiry (default from config); expired hold → `alert`; in act mode the executor that owns it lifts it
+- [x] Holds have an owner and an expiry (default from config); expired hold → `alert` with the owner and the idle cost (#48, #90)
+- [ ] Holds matched by flag or pause, not only by PR label; in act mode the executor that owns a hold lifts it (no executor owns a label yet)
 - [x] Idle hours caused by holds go to the cost-of-chaos report
 - [x] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`, `14-forgotten-merge-hold.yaml` (hold set, promised lift missed, ready PRs waiting about 5 h)
 
@@ -482,7 +483,7 @@ recommending `storm_mode = "rule"` or `not_started_mode = "rule"`:
 
 **Acceptance criteria**
 - [ ] Rule 13 folds its "needs you" items for a block storm's tasks under the storm (today the person gets both once the storm is switched on, and for the incident-20 shape, "waiting for CEO", rule 4 hands those blocks to rule 13, so the storm folds nothing there)
-- [ ] The report attributes a storm's, a not-started outage's and a tool outage's waits by `Outage.kind` (track C, #228, #264); until then a switched-on storm's or tool outage's folded tasks open no state, and their hours are missing from the cost of chaos
+- [ ] The report attributes a storm's, a not-started outage's and a tool outage's waits by `Outage.kind` (track C, #228, #264); until then a switched-on storm's or tool outage's folded tasks open no state, and their hours are missing from the cost of chaos. In progress in draft #270
 - [ ] A storm-specific "resolved" text ("N of M tasks unblocked")
 - [x] Correlated tool failures (signal 2), on the farm's sample of what Hermes records for a failing command (observe-only, `tool_outage_mode`; before `"rule"`, check its outages on the live farm)
 
@@ -576,7 +577,7 @@ quotas run out or logins expire, and suggest a concurrency level tuned to the pr
 
 **Acceptance criteria**
 - [x] Repeated limit hits aggregated into one alert with counts per provider
-- [ ] Suggested concurrency per provider derived from the observed limit
+- [ ] Suggested concurrency per provider derived from the observed limit (not started)
 - [x] Credentials expired or expiring within a window → `alert` (critical when expired)
 - [x] Fixtures: existing `06-llm-quota-and-expired-auth.yaml`
 
@@ -591,7 +592,7 @@ how long the quota will last. The rule stays CI-agnostic; CI specifics live in a
 - [x] Depends on CI build/run records in the snapshot (see "close model gaps"): commit sha, branch, trigger event, draft flag, changed paths, duration/minutes, status, `superseded_by`
 - [x] Each wasted build is classified (draft/WIP, superseded, docs-only, already verified) with the minutes it burned
 - [x] Superseded running builds → `cancel_build`, executed by the CI connector (not the platform adapter) through action routing (see "action routing")
-- [ ] Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check)
+- [ ] (not started) Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check)
 - [x] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks` (minutes used from GitHub's billing usage report, #107)
 - [x] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
 
@@ -630,7 +631,8 @@ block (incident 10 in another form). Turn such blocks into conditions instead of
 - [x] Matched blocks count as waiting: no "block without condition" alert
 - [x] A condition is bound to the exact target the task waits for: repo, PR number and the PR's head SHA. `ci_green` means the required checks on that head are green; green CI on `main` or on another PR never satisfies it; a new push to the PR resets it. When a task waits for a PR to land, the condition is `pr_merged`, not `ci_green` (field case: a duty agent unblocked a task because CI on `main` was green while the PR it waited for was still red)
 - [x] Unmatched blocks, and matched ones whose PR cannot be resolved, keep the current behaviour
-- [ ] Fixtures: new `15-review-block-waiting-merge.yaml` (synthetic names), with a 13 h unmatched block as the true positive; new `15-green-main-red-pr.yaml` (main green, the awaited PR head red → the block stays)
+- [x] Fixture for a review block waiting on a merge, with a 13 h unmatched block as the true positive: `10-block-waits-on-pr-merge.yaml` (#31)
+- [ ] Fixture `15-green-main-red-pr.yaml` (main green, the awaited PR head red → the block stays); today the head binding is tested only in `tests/connectors/test_github_blocks.py`
 
 ### connectors: LLM provider quotas and auth health
 labels: P0, week-2, area:connectors
@@ -638,10 +640,10 @@ Read rate-limit and quota state and credential expiry for configured LLM provide
 provider APIs where available and from trace errors otherwise.
 
 **Acceptance criteria**
-- [ ] `quota_reset` conditions evaluated
-- [ ] Limit hits from spans counted per provider
-- [ ] Credential expiry exposed as a resource
-- [ ] Provider usage and cost APIs read where they exist (API keys) and fed to budgets as a spend source
+- [ ] `quota_reset` conditions evaluated (the kind exists; no connector evaluates it)
+- [ ] Limit hits from spans counted per provider (hits come from the status probes and are counted per provider, #35; none from spans)
+- [x] Credential expiry exposed in the snapshot (`ProviderStatus.expires_at` from the status probe, not a `Resource`; alerted by rule 7; #35)
+- [ ] Provider usage and cost APIs fed to budgets as a spend source: the same criterion as "Spend sources" in "core: budgets and spend" and tracked there (the cost reports are read and reconciled, #204, #205)
 - [x] No provider SDK is required by core
 
 ### connectors: human tasks
@@ -658,10 +660,11 @@ labels: P0, week-2, area:report
 No custom UI in the MVP. Kelpie exposes Prometheus metrics, Grafana shows them, and traces
 open in Langfuse.
 
-- [ ] `/metrics` in Prometheus text format: tick duration, actions per rule, tasks per status, idle time per role
+- [x] `/metrics` in Prometheus text format: tick duration, actions per rule, tasks per status (#7)
+- [ ] `/metrics`: idle time per role (only the idle-agent count exists)
 - [x] `/metrics`: idle agents per role (count)
 - [x] Grafana dashboard JSON provisioned by docker compose
-- [ ] Dashboard links to traces in Langfuse when configured
+- [ ] Dashboard links to traces in Langfuse when configured (not started)
 
 ### core: budgets and spend — thresholds, burn-rate forecast, spend sources
 labels: P0, week-2, area:core
@@ -673,7 +676,8 @@ are limits.
 - [x] Budget config objects: scope (day, task, agent, project), window, soft and hard thresholds; strict validation like the rest of the config
 - [x] Soft threshold → `alert`; hard threshold → `stop` through `SupportsStop` (act mode only, alert fallback otherwise); transition-based alerts like other lasting states
 - [x] Burn-rate forecast: "budget runs out at <time>"; in subscription mode, time to the next limit from observed limit hits
-- [ ] Spend sources: traces (tokens × price table in config, cached tokens priced separately); Claude Code's OpenTelemetry cost and token metrics via OTLP ingest; provider cost APIs via the provider quota connector
+- [x] Spend from traces: tokens × price table, cached tokens and cache writes priced separately (#29, #184, #196)
+- [ ] Spend sources: Claude Code's OpenTelemetry cost and token metrics via OTLP ingest (ingest takes `/v1/traces` only); provider cost APIs as a budget source (today they only check the bill, #205)
 - [x] Spend and remaining budget exported on `/metrics`; shown in `kelpie status`
 - [x] `loop_breaker` (rule 10) reads budgets from here instead of its own config
 - [x] No double counting of nested LLM spans in spend sums (see the double-count issue)
@@ -693,6 +697,9 @@ who cannot see inside the cloud session.
 labels: P0, week-2, area:deploy
 Run Kelpie against the real Hermes farm: every rule in `observe` mode first, then `suggest`
 and `act` rule by rule. Record every rule trigger so each one can be checked by hand.
+
+The first live runs in observe produced incidents 14–20 in the plan and the fixes that
+followed; the criteria below were never recorded as such.
 
 **Acceptance criteria**
 - [ ] 24 h in `observe` mode with every rule trigger logged and reviewed
@@ -768,6 +775,9 @@ fix, review time dropped from 48 to 27 minutes, and failures from 9 of 29 to 1 o
 labels: P0, week-3, area:core
 A quick terminal view of the farm from Kelpie's storage, without a custom UI.
 
+Today `kelpie status` (#7) shows the config, the rules it would load with their mode, the
+adapters, budgets and prices; none of the criteria below.
+
 **Acceptance criteria**
 - [ ] Shows tasks per status, waiting conditions, open alerts and the last actions per rule
 - [ ] Works against a running server or directly against the storage file
@@ -793,13 +803,16 @@ sections and one fact copied into eight files. Kelpie measures and recommends; i
 instruction files.
 
 **Acceptance criteria**
-- [ ] Instruction files per role are config data (`[instructions]` globs per role or platform defaults: Hermes profile skills, Claude Code `CLAUDE.md` / `.claude/skills`, OpenClaw `AGENTS.md`); read-only, sizes and hashes only stored, never contents
-- [ ] Size (characters, estimated tokens) and growth per week per file; a file that only grows is named
-- [ ] Tokens a day spent reading them: from tool calls or spans that load a skill (Hermes `skill_view`, Claude Code skill loads), else size × sessions of the role, said which
-- [ ] Near-duplicate sections within and across a role's files (normalised heading and body similarity), and a value repeated in several files (one fact, one place)
-- [ ] An alert (observe by default) when a file crosses `max_chars` or grows faster than `max_growth_per_week`, recommending a short core plus topic references; the report lists the top files with their token cost
-- [ ] `kelpie fix` before/after works for a split: tokens a day on instructions and tokens per completed task for that role
-- [ ] Fixtures: a synthetic skill growing append-only past the threshold → alert; a large but stable built-in skill loaded rarely → no alert
+- [x] Instruction files per role are config data (`[instructions]` globs per role or platform defaults: Hermes profile skills, Claude Code `CLAUDE.md` / `.claude/skills`, OpenClaw `AGENTS.md`); read-only, sizes and hashes only stored, never contents (#269)
+- [x] Size (characters, estimated tokens) and growth per week per file; a file that only grows is named (#261, #269)
+- [x] Tokens a day spent reading them, as size × sessions of the role, saying which (#269); counted loads moved to the follow-up item below (#282)
+- [x] Near-duplicate sections within and across a role's files (normalised heading and body similarity), and a value repeated in several files (one fact, one place) (#269)
+- [x] An alert (observe by default) when a file crosses `max_chars` or grows faster than `max_growth_per_week`, recommending a short core plus topic references (#261); the report section moved to the follow-up item below (#282)
+- [x] Fixtures: a synthetic skill growing append-only past the threshold → alert; a large but stable built-in skill loaded rarely → no alert (`21-skill-grows-append-only.yaml`, `21-stable-builtin-skill.yaml`, #261)
+
+The rest (counted loads, the report section, `kelpie fix` before/after for a split) is the
+follow-up item "instructions: counted skill loads, a report section and before/after for a
+split" (#282).
 
 ### traces: token optimization — repeated fragments, unused tools, model fit, diff-only review
 labels: P1, week-3, area:traces
@@ -828,6 +841,9 @@ rate, cost per completed task.
 labels: P1, week-3, area:report
 Turn throughput metrics into recommendations following the theory of constraints: find the
 bottleneck, relieve it, subordinate the rest, elevate it.
+
+Not started. The inputs exist: time per stage and role (#78), the top-3 list in the daily
+report (#52) and `kelpie fix` before/after (#54, #258).
 
 **Acceptance criteria**
 - [ ] The current bottleneck role or stage identified each day
@@ -864,12 +880,16 @@ Five tracks wrote code in parallel, so helpers are likely duplicated (git calls,
 windows, block-reason parsing, condition binding, alert text). Do this after the live farm
 run is debugged and before the security audit, so the audit covers the final code.
 
+Tracked as #248. Its survey (comment on #248) lists every finding; #262 and #263 landed, and
+the rest was left until after the release on purpose (modules in active PRs, rows D6/D7 that
+change user-facing messages).
+
 **Acceptance criteria**
-- [ ] Profile a tick and the daily report on a large synthetic farm (e.g. 2,000 tasks, 1M spans, 6 months of ledger); publish the numbers in the PR; fix the top hotspots
+- [ ] Profile a tick and the daily report on a large synthetic farm (e.g. 2,000 tasks, 1M spans, 6 months of ledger); publish the numbers in the PR; fix the top hotspots (rules on boards of 1k and 4k tasks profiled and the top hotspot fixed, #262; not the report, spans or ledger)
 - [ ] Per-tick time budget as a test (fails if a tick on the large farm exceeds it)
-- [ ] Duplicate-code report (e.g. pylint duplicate-code or jscpd) before and after; shared helpers consolidated in core/ or the owning package
-- [ ] No behaviour change: unit and e2e suites pass unchanged; one refactor per PR, each small enough to review
-- [ ] Dead code and unused config keys removed; CLAUDE.md layout updated if modules move
+- [ ] Duplicate-code report (e.g. pylint duplicate-code or jscpd) before and after; shared helpers consolidated in core/ or the owning package (survey by AST pass; one helper consolidated, #263)
+- [x] No behaviour change: unit and e2e suites pass unchanged; one refactor per PR, each small enough to review (#262, #263)
+- [ ] Dead code and unused config keys removed; CLAUDE.md layout updated if modules move (found in the survey, X1–X4; not removed)
 
 ### project: whole-codebase security audit before the first public release
 labels: P0, week-3, area:project
@@ -881,16 +901,23 @@ Threat model: agents on the farm are untrusted — they control task titles and 
 block reasons, git config in worktrees, spool contents and tool output sizes. Kelpie holds
 GitHub, Telegram, Slack and LLM provider tokens.
 
+Done as #275 on main @ a56d4c6: 0 critical, 2 high, 7 medium, 14 low. Both high findings
+and the clear fixes landed (#278, #279, #280). Still open, after the release unless the owner
+decides otherwise: M1 (forged spans or spool lines can make rule 10 stop another agent's run;
+a decision for the owner, see #275), M4–M7 and L4, L5, L7–L11, L13, L14 (Dockerfile digests,
+the release job's checkout). Verdict: safe to tag 0.1.0a1 once M1 is decided and the release
+notes say `kelpie serve` stays on loopback or behind a limiting proxy until M5 is fixed.
+
 **Acceptance criteria**
-- [ ] Subprocess calls (Hermes CLI, git): no injection, minimal environment, no token leakage
-- [ ] No SQL built from strings with untrusted data
-- [ ] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section
-- [ ] Outbound HTTP: no redirects with credentials, TLS verified, response size limits
-- [ ] OTLP and `/metrics` endpoints: auth, bind address, body limits
-- [ ] File paths from config and data: no traversal, safe symlink handling
-- [ ] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host
-- [ ] Clear fixes as small PRs; design questions as issues
-- [ ] `docs/security.md`: threat model, what Kelpie trusts, what it never stores
+- [x] Subprocess calls (Hermes CLI, git): no injection, minimal environment, no token leakage (#275)
+- [x] No SQL built from strings with untrusted data (#275; L1, the read-only URI, fixed in #280)
+- [ ] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section (audited in #275; L6 fixed in #280; open: L7, L8, command-redaction gaps)
+- [x] Outbound HTTP: no redirects with credentials, TLS verified, response size limits (#275; M3 and L12 fixed in #279; M4, the Linear client's deadline, open)
+- [ ] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279; open: M1, M5, L10, L11)
+- [x] File paths from config and data: no traversal, safe symlink handling (H1, H2 fixed in #278)
+- [x] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host (#275; L9, no length cap on agent reasons, open)
+- [ ] Clear fixes as small PRs (#278, #279, #280); design questions as issues (M1 and the open findings are listed on #275, not filed as issues)
+- [x] `docs/security.md`: threat model, what Kelpie trusts, what it never stores (in place; updated by the audit in #279)
 
 ### deploy: `kelpie demo` — see Kelpie work without a farm
 labels: P0, week-3, area:deploy
@@ -909,10 +936,10 @@ labels: P0, week-3, area:deploy
 Publish the open core: first public pre-release on PyPI and a container image.
 
 **Acceptance criteria**
-- [ ] Release workflow builds and publishes with trusted publishing (workflow and `docs/release.md` in place; ticked after the first tag)
+- [ ] Release workflow builds and publishes with trusted publishing (workflow and `docs/release.md` in place, #105, #260; ticked after the first tag, which also needs the PyPI and TestPyPI accounts the owner creates)
 - [ ] `pip install kelpie-sre` provides a working `kelpie` CLI
 - [ ] Container image published and referenced by docker-compose.yml (the workflow pushes it to GHCR; compose takes it through `KELPIE_IMAGE`)
-- [ ] Changelog and release notes
+- [ ] Changelog and release notes (`CHANGELOG.md` has `[0.1.0a1] - Unreleased`, #143; release notes at the tag must say serve stays on loopback until #275 M5 is fixed)
 
 ### project: 10 conversations with farm owners
 labels: P1, week-3, area:project
@@ -937,7 +964,7 @@ progress on new pushes, skip already verified commits).
 
 **Acceptance criteria**
 - [x] Recommendation lists each suggested change with the minutes it would have saved
-- [ ] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff)
+- [ ] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff) (in progress in draft #237)
 - [x] No CI-specific syntax in `kelpie.rules`
 
 The recommendation is in #227 (the waste summary and its `params.pipelines`); rendering and opening the PR are the next step.
@@ -1084,6 +1111,8 @@ and the daily report's act advice. And `PlatformExecutor` routes `wake` to
 `adapter.requeue` whatever the adapter declares: the issues adapter leaves `wake` out on
 purpose, yet a wake on one of its tasks would restart the agent.
 
+In progress in #219.
+
 **Acceptance criteria**
 - [ ] `kelpie doctor` and the daily report judge each rule's actions per adapter whose tasks it can target, telling "acts on some adapters' tasks" from "cannot act here"
 - [ ] `PlatformExecutor` does not run an action kind an adapter's declared `actions` leaves out (the engine alerts instead)
@@ -1131,7 +1160,7 @@ labels: P1, area:core
 ### docs: reconcile the roadmap with what is merged
 labels: P1, documentation
 Many items here were finished by parallel sessions without ticking their criteria, so the
-roadmap no longer says what is left.
+roadmap no longer says what is left. In progress (#285).
 
 **Acceptance criteria**
 - [ ] Every item's criteria ticked or left open against main, with the PR that did it
