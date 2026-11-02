@@ -63,7 +63,7 @@ same records power alert deduplication and the before/after report.
 - [x] Fingerprint = rule, kind, target and the params that matter; identical actions within the cooldown (config) are suppressed and counted
 - [x] Max actions per task per hour (config); excess actions are dropped and reported once as an alert
 - [x] Ledger persisted through the storage protocol (an in-memory implementation until the SQLite storage issue lands); survives a restart
-- [x] The alert pipeline and the before/after report read the ledger instead of keeping their own history (#5, #12, #52, #54)
+- [x] The alert pipeline and the before/after report read the ledger instead of keeping their own history (#5, #52, #54; alert states in the ledger's storage, table `states`, #12)
 - [x] Unit tests with a fake clock
 
 ### core: action routing — task source, executor targets, executor registry
@@ -168,7 +168,7 @@ already did by itself; duplicates are merged instead of repeated.
 
 **Acceptance criteria**
 - [x] Alert payload carries severity, the affected tasks/hosts, the action Kelpie already took (or "dry-run: would …") and what a human should do (`AlertEvent`: severity, items with `needed` and `blocking`, `did`; a host only as the subject; #97, #135, #187, #212)
-- [x] Alerts with nothing for a human to do are not sent in real time (they go to the daily report) (per-channel `min_severity`, default warning; open states listed in the report; #47, #206)
+- [x] Alerts with nothing for a human to do are not sent in real time (they go to the daily report) (info alerts, which carry nothing to do, stay out of chat by default: per-channel `min_severity`, default warning; open states are listed in the report; #47, #206)
 - [ ] Identical or overlapping alerts within a configurable window are merged into one with a count, using the action ledger's fingerprints and cooldown (no separate dedup store). Done except the count: repeats are suppressed and counted in the ledger (#5), lasting states alert on transitions (#12), per-task alerts fold under an open outage (#183, #247); the message never shows the count
 - [x] Untrusted task text is escaped before it reaches any alerter (#64, #187)
 
@@ -217,9 +217,9 @@ There is no endpoint and no agent-side helper; the first criterion stays open fo
 
 **Acceptance criteria**
 - [ ] `POST /conditions` with kind, params and task id (no endpoint; conditions come from block reasons and parks)
-- [x] Authentication required (park markers are HMAC-signed; forged or replayed markers are not trusted, #75, #189)
+- [ ] Authentication required (no endpoint; park markers are HMAC-signed, so forged or replayed parks are not trusted, #75, #189)
 - [ ] Duplicate registrations are idempotent (the ledger stops repeat parks; a second park of a parked task raises `UnsupportedAction` instead of being a no-op)
-- [x] Registering a condition puts the task into a "waiting" state visible to rules (a parked task reads back as `waiting`, #75)
+- [x] Registering a condition puts the task into a "waiting" state visible to rules (for parks: a parked task reads back as `waiting`, #75)
 
 ### traces: OTLP ingest with GenAI semantic conventions
 labels: P0, week-1, area:traces
@@ -306,10 +306,10 @@ Implement `requeue`, `unblock`, `comment`, `wake`, `reassign` and `wip_commit` f
 
 **Acceptance criteria**
 - [x] Every action leaves a comment on the task explaining what Kelpie did and why (stop, park, wake and comment each record their reason on the board, signed `kelpie`; #36, #75, #189)
-- [x] Actions are idempotent (re-running the same action is a no-op) (waking an awake task is quiet; a park re-checks status and run; #75)
+- [ ] Actions are idempotent (re-running the same action is a no-op) (waking an awake task is quiet, #75, and the ledger stops repeats; but a second park of a parked task, or a requeue of a task Kelpie did not park, raises `UnsupportedAction`)
 - [x] Concurrent writes with Hermes handled safely (transactions, retry on lock) (Kelpie never writes `kanban.db`: every write goes through the `hermes kanban` CLI; reads are read-only with a busy timeout; #13, #75)
 - [x] Tasks in Kelpie's `waiting` status are reported to the Hermes dispatcher as waiting and alive, never as dead (the "waiting" heartbeat of rule 2) (a parked task sits in Hermes `scheduled`, which the dispatcher does not treat as dead; `test_a_parked_ready_task_does_not_make_its_assignee_look_active`, #75)
-- [ ] `unblock`, `reassign` and `wip_commit` for Hermes (today `unblock` raises `NotImplementedError`; `reassign` and `wip_commit` are not declared)
+- [ ] `unblock`, `reassign` and `wip_commit` for Hermes (today `unblock` and `wip_commit` raise `NotImplementedError` and are not declared; `reassign` is not implemented)
 
 ### adapters: Hermes plugin for post_tool_call and on_session_end
 labels: P0, week-1, area:adapters
