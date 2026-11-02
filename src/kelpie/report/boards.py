@@ -10,12 +10,14 @@ two there is nothing to split and the report says nothing new.
 
 **How it is split.** Each board's day is the farm's day with only what is on that board: its
 tasks, dependencies, conditions, snoozes and sessions, the ledger entries and alert states
-about its tasks or sessions, and the spans of its sessions. The report is built over that
-(:func:`kelpie.report.daily.build_report`, without the extra sections), so a board's numbers
-are counted exactly as the farm's are. Owners are shared: a Hermes home's profiles work on
-every board. What names no board (a forgotten hold's idle agents, a person's inbox across
-boards, a span of no board's session) counts only in the farm total, and the difference is
-shown as "not on one board".
+about its tasks or sessions (an entry by its task, else its ``session_id`` param), and the
+spans of its sessions. Its cost of chaos and completed tasks come from the report built over
+that (:func:`kelpie.report.daily.build_report`, without the extra sections), so they are
+counted as the farm's are. Its biggest wait is classified with the farm's wait causes: a
+person's inbox, a CI outage or a snooze names no board, yet says what a board's task waited
+for. Owners are shared: a Hermes home's profiles work on every board. What names no board
+(a forgotten hold's idle agents, a person's inbox, a state without a task) counts only in
+the farm total, and the difference is shown as "not on one board".
 """
 
 from __future__ import annotations
@@ -27,10 +29,9 @@ from typing import TYPE_CHECKING
 from kelpie.core.model import Task
 
 if TYPE_CHECKING:
+    from kelpie.core.ledger import LedgerEntry
     from kelpie.report.daily import DailyReport, ReportInputs
     from kelpie.report.waits import BiggestWait
-
-MAX_BOARDS = 32  # boards shown; the farm total still counts every one
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,8 +59,7 @@ def board_prefix(task: Task) -> str | None:
 
 
 def board_prefixes(tasks: Iterable[Task]) -> tuple[str, ...]:
-    """The boards of ``tasks``, sorted: longest first where one prefix starts another, so
-    ``h1:qr`` is matched before ``h1`` would be."""
+    """The boards of ``tasks`` (their ids' prefixes), sorted."""
     found = {p for t in tasks if (p := board_prefix(t)) is not None}
     return tuple(sorted(found))
 
@@ -106,9 +106,7 @@ def split_inputs(inputs: ReportInputs) -> dict[str, ReportInputs]:
             dependencies=tuple(d for d in inputs.dependencies if mine(d.task_id)),
             conditions=tuple(c for c in inputs.conditions if mine(c.task_id)),
             snoozes=tuple(s for s in inputs.snoozes if mine(s.task_id)),
-            actions=tuple(
-                e for e in inputs.actions if (of(e.task_id) if e.task_id else of(e.subject)) == p
-            ),
+            actions=tuple(e for e in inputs.actions if _entry_board(e, by_session) == p),
             states=tuple(
                 r for r in inputs.states if by_session(session_of(r.state), r.state.task_id) == p
             ),
@@ -119,12 +117,24 @@ def split_inputs(inputs: ReportInputs) -> dict[str, ReportInputs]:
     return parts
 
 
+def _entry_board(
+    entry: LedgerEntry, by_session: Callable[[str | None, str | None], str | None]
+) -> str | None:
+    """A ledger entry's board: its task's, else its session's (``params.session_id``, as the
+    report reads a restart's session). Never its subject (``task:<id>``, ``session:<id>``)."""
+    session = entry.params.get("session_id")
+    return by_session(session if isinstance(session, str) else None, entry.task_id)
+
+
 def board_lines(
-    inputs: ReportInputs, build: Callable[[ReportInputs], DailyReport]
+    inputs: ReportInputs,
+    build: Callable[[ReportInputs], DailyReport],
+    wait: Callable[[ReportInputs], BiggestWait | None],
 ) -> tuple[BoardLine, ...]:
-    """Each board's line, from ``build`` over its part of the inputs; () for one board."""
+    """Each board's line: chaos and completed tasks from ``build`` over its part of the
+    inputs, the biggest wait from ``wait``; () for one board."""
     lines = []
-    for board, part in list(split_inputs(inputs).items())[:MAX_BOARDS]:
+    for board, part in split_inputs(inputs).items():
         r = build(part)
         spend = r.chaos_spend
         lines.append(
@@ -135,7 +145,7 @@ def board_lines(
                 chaos_plan_tokens=spend.plan_tokens,
                 chaos_usd=r.chaos_usd,
                 completed=len(r.completed),
-                biggest_wait=r.biggest_wait,
+                biggest_wait=wait(part),
             )
         )
     return tuple(lines)
@@ -146,13 +156,14 @@ def rest_line(report: DailyReport, lines: Iterable[BoardLine]) -> BoardLine | No
     None when that is nothing worth a line."""
     shown = tuple(lines)
     spend = report.chaos_spend
+    # Never below zero: a board's part holds a subset of the farm's, counted the same way.
     rest = BoardLine(
         board="",
-        chaos_hours=report.chaos_hours - sum(b.chaos_hours for b in shown),
-        chaos_tokens=spend.billed_tokens - sum(b.chaos_tokens for b in shown),
-        chaos_plan_tokens=spend.plan_tokens - sum(b.chaos_plan_tokens for b in shown),
-        chaos_usd=report.chaos_usd - sum(b.chaos_usd for b in shown),
-        completed=len(report.completed) - sum(b.completed for b in shown),
+        chaos_hours=max(report.chaos_hours - sum(b.chaos_hours for b in shown), 0.0),
+        chaos_tokens=max(spend.billed_tokens - sum(b.chaos_tokens for b in shown), 0),
+        chaos_plan_tokens=max(spend.plan_tokens - sum(b.chaos_plan_tokens for b in shown), 0),
+        chaos_usd=max(report.chaos_usd - sum(b.chaos_usd for b in shown), 0.0),
+        completed=max(len(report.completed) - sum(b.completed for b in shown), 0),
         biggest_wait=None,
     )
     if (

@@ -503,10 +503,13 @@ def build_report(
     inputs: ReportInputs,
     sections: Mapping[str, SectionBuilder] | None = None,
     section_keys: Mapping[str, frozenset[str]] | None = None,
+    *,
+    per_board: bool = True,
 ) -> DailyReport:
     """The day's report. ``sections`` are the extra section builders (default: every one
     registered in :mod:`kelpie.report.sections`), ``section_keys`` the config keys each
-    accepts (default: as registered)."""
+    accepts (default: as registered). With ``per_board`` and several boards, each board's
+    line is built too (:mod:`kelpie.report.boards`)."""
     start, end = day_bounds(inputs.day, inputs.tz)
     spans = [s for s in inputs.spans if start <= last_at(s) < end]
     index = {span_key(s): s for s in inputs.spans}
@@ -587,8 +590,35 @@ def build_report(
         ),
         bill_day=inputs.bill_day,
         act_blockers=inputs.act_blockers,
-        boards=board_lines(inputs, lambda part: build_report(part, {}, {})),
+        boards=_boards(inputs, start, end, context.roles) if per_board else (),
     )
+
+
+def _boards(
+    inputs: ReportInputs, start: datetime, end: datetime, roles: Mapping[str, str]
+) -> tuple[BoardLine, ...]:
+    """Each board's line (#283): its chaos and completed tasks counted over its part of the
+    inputs, its biggest wait classified with the farm's wait causes (a person's inbox, a CI
+    outage, a snooze name no board but say what a board's task waited for)."""
+    causes: list[WaitCauses] = []
+
+    def wait(part: ReportInputs) -> BiggestWait | None:
+        if not causes:
+            causes.append(wait_causes(inputs, start, end))
+        per_role = throughput(
+            part.tasks,
+            part.sessions,
+            inputs.owners,
+            [row.state for row in part.states],
+            start,
+            end,
+            inputs.review_roles,
+            roles,
+            causes[0].split,
+        )
+        return biggest_wait(per_role, part.tasks, causes[0], inputs.farm)
+
+    return board_lines(inputs, lambda part: build_report(part, {}, {}, per_board=False), wait)
 
 
 def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> PlannedWaits | None:

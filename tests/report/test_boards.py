@@ -3,13 +3,24 @@ and a service), each with its cost of chaos, throughput and biggest wait, plus t
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
 
 from kelpie.core.actions import ActionKind
-from kelpie.core.ledger import Outcome
-from kelpie.core.model import Owner, Session, Status, Task
+from kelpie.core.config import Mode
+from kelpie.core.ledger import LedgerEntry, Outcome
+from kelpie.core.model import (
+    Condition,
+    ConditionKind,
+    Dependency,
+    Owner,
+    Session,
+    Snooze,
+    Status,
+    Task,
+)
 from kelpie.report.boards import board_prefix, board_prefixes, rest_line, split_inputs
 from kelpie.report.daily import build_report, render_markdown
 from kelpie.report.store import StateRow
@@ -135,3 +146,81 @@ def test_hostile_board_names_stay_in_their_cell() -> None:
     markdown = render_markdown(build_report(day_inputs(tasks=evil), {}, {}))
     rows = [line for line in markdown.splitlines() if line.startswith("| `")]
     assert len(rows) == 2 and all(line.count(" | ") == 5 for line in rows)
+
+
+def _escalation(hour: int, waiting: list[str]) -> LedgerEntry:
+    """Rule 13's hourly record of a person's inbox: no task, the waiting tasks in params."""
+    return LedgerEntry(
+        at=at(hour),
+        fingerprint=f"needs_you:{hour}",
+        subject="rule::needs_you",
+        rule="needs_you",
+        kind=ActionKind.ESCALATE,
+        mode=Mode.ACT,
+        outcome=Outcome.EXECUTED,
+        reason="r",
+        params={"escalate_to": "alice", "waiting": waiting, "approvals": []},
+    )
+
+
+def test_a_boards_wait_is_classified_with_the_farms_causes() -> None:
+    """A person's inbox names no board, yet says what a board's task waited for."""
+    base = inputs()
+    found = build_report(
+        replace(
+            base, actions=(*base.actions, *(_escalation(h, ["svc:t_9"]) for h in range(6, 21)))
+        ),
+        {},
+        {},
+    )
+    assert found.biggest_wait is not None and found.biggest_wait.cause == "people"
+    [svc] = [b for b in found.boards if b.board == "svc"]
+    assert svc.biggest_wait is not None
+    assert (svc.biggest_wait.cause, svc.biggest_wait.hours) == ("people", found.biggest_wait.hours)
+
+
+def test_an_entry_of_a_session_only_goes_to_its_board() -> None:
+    requeue = LedgerEntry(
+        at=at(14),
+        fingerprint="f",
+        subject="session:svc:hermes-run-1",
+        rule="exit_contract",
+        kind=ActionKind.REQUEUE,
+        mode=Mode.ACT,
+        outcome=Outcome.EXECUTED,
+        reason="r",
+        params={"session_id": "svc:hermes-run-1"},
+    )
+    subject_only = replace(requeue, subject="task:app-a:t_1", params={})
+    parts = split_inputs(replace(inputs(), actions=(requeue, subject_only)))
+    assert [e.subject for e in parts["svc"].actions] == ["session:svc:hermes-run-1"]
+    assert not parts["app-a"].actions  # a subject alone never names a board
+
+
+def test_split_on_a_multi_host_farm() -> None:
+    """``h1:svc`` and ``svc`` are two boards; dependencies, conditions, snoozes, states and
+    spans go with their task or session."""
+    here = task("svc", "t_1", Status.WAITING, at(3))
+    there = Task("h1:svc:t_1", "t", Status.BLOCKED, at(3), board="svc", host="h1")
+    sessions = (Session("h1:svc:hermes-run-1", "h1:svc:t_1", "ops-1", at(4)),)
+    parts = split_inputs(
+        day_inputs(
+            tasks=(here, there),
+            sessions=sessions,
+            dependencies=(Dependency("h1:svc:t_1", "h1:svc:t_0"), Dependency("svc:t_1", "x")),
+            conditions=(Condition("c", ConditionKind.PR_MERGED, "svc:t_1"),),
+            snoozes=(Snooze("h1:svc:t_1", at(20), None, None, at(1)),),
+            states=(
+                StateRow(state("no_progress:h1:svc:hermes-run-1", "no_progress", at(4), at(5))),
+            ),
+            spans=tuple(llm("h1:svc:hermes-run-1", "", at(4), 1, timedelta(minutes=1), (1, 1, 0))),
+        )
+    )
+    assert list(parts) == ["h1:svc", "svc"]
+    far, near = parts["h1:svc"], parts["svc"]
+    assert [d.task_id for d in far.dependencies] == ["h1:svc:t_1"]
+    assert [d.task_id for d in near.dependencies] == ["svc:t_1"]
+    assert [c.id for c in near.conditions] == ["c"] and not far.conditions
+    assert [s.task_id for s in far.snoozes] == ["h1:svc:t_1"] and not near.snoozes
+    assert len(far.states) == 1 and not near.states  # by its session
+    assert len(far.spans) == 1 and not near.spans
