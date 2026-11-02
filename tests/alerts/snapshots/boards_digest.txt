@@ -1,0 +1,10 @@
+🟡 Block Kelpie cannot clear: 3 tasks (oldest 26 h)
+
+1. Ship the login screen — 5.0 h · app-a:t_1a
+   Board: app-a · Blocking: 2 tasks · Open task: https://board.example.org/tasks/app-a%3At_1a
+2. Store listing copy — 3.0 h · app-b:t_1a
+   Board: app-b · Blocking: none · Open task: https://board.example.org/tasks/app-b%3At_1a
+3. Rotate the API keys — 26 h · svc:t_77
+   Board: svc · Open task: https://board.example.org/tasks/svc%3At_77
+Why: 3 tasks blocked with no condition Kelpie can check.
+Rule: stale_blocks

@@ -45,6 +45,16 @@ def _labels(**labels: str) -> str:
     return "{" + ",".join(f'{k}="{_escape(v)}"' for k, v in labels.items()) + "}"
 
 
+# A task's board as a label value: None (no label) unless boards are configured, then the
+# board's configured name, or "" for a task on no configured board (#283).
+type BoardKey = str | None
+
+
+def _on(board: BoardKey, **labels: str) -> str:
+    """``labels`` with ``board`` first when the farm has several boards."""
+    return _labels(**labels) if board is None else _labels(board=board, **labels)
+
+
 # Task budgets can have a subject per task: only these many per budget are exported (the
 # highest spend), plus every task past a threshold.
 MAX_TASK_SERIES = 20
@@ -84,21 +94,28 @@ class Metrics:
         self.actions: Counter[tuple[str, str, str, str]] = Counter()
         self.rule_errors: Counter[str] = Counter()
         self.adapter_errors: Counter[str] = Counter()
+        # (adapter, board) -> snapshots of one board of several that failed (#198, #283)
+        self.board_errors: Counter[tuple[str, str]] = Counter()
+        # [[adapters.hermes.boards]] names: the only values of the ``board`` label; (): one
+        # board, no label (#283)
+        self.boards: tuple[str, ...] = ()
         # multi-host: agent -> (up, unix time of its last report or 0)
         self.agents: dict[str, tuple[bool, float]] = {}
         self.ledger_up = True
         self.open_states: Counter[str] = Counter()
-        self.tasks: Counter[str] = Counter()
+        self.tasks: Counter[tuple[BoardKey, str]] = Counter()
         self.idle_agents: Counter[str] = Counter()  # role -> idle agents (0 if all busy)
-        # platform status -> (cards in it before work, seconds the oldest has sat there)
-        self.prework: dict[str, tuple[int, float]] = {}
+        # (board, platform status) -> (cards in it before work, seconds the oldest sat there)
+        self.prework: dict[tuple[BoardKey, str], tuple[int, float]] = {}
         # tool slot pool -> (slots, {holder: slots held}) (Hermes [adapters.hermes.tools])
         self.slots: dict[str, tuple[int, dict[str, int]]] = {}
         # throughput per role now; open tasks per stage and role
         self.roles: dict[str, RoleGauges] = {}
         # roles that review: returns count for the role that redoes the work ([report])
         self.review_roles: tuple[str, ...] = ("reviewer",)
-        self.stages: Counter[tuple[str, str]] = Counter()
+        self.stages: Counter[tuple[str, str, BoardKey]] = Counter()  # (stage, role, board)
+        # with boards: (board, role) -> (done, returns, reopened) over the last 24h
+        self.board_roles: dict[tuple[str, str], tuple[int, int, int]] = {}
         self.fleet_seen = False
         self.dry_run = True
         self.rules: list[tuple[str, str, bool]] = []  # (name, mode, implemented)
@@ -168,6 +185,22 @@ class Metrics:
         with self._lock:
             for name in names:  # expose 0 so rate() sees the first error
                 self.adapter_errors.setdefault(name, 0)
+
+    def set_boards(self, adapter: str, names: Iterable[str]) -> None:
+        """The boards ``adapter`` watches (``[[adapters.hermes.boards]]``): the ``board``
+        label's only values. Not called for one board: no label, output as before."""
+        with self._lock:
+            names = tuple(names)
+            self.boards = tuple(dict.fromkeys((*self.boards, *names)))
+            for name in names:  # expose 0 so rate() sees the first error
+                self.board_errors.setdefault((adapter, name), 0)
+
+    def _board(self, board: str | None, host: str | None = None) -> BoardKey:
+        """The label value of a task's board: bounded by the configured names, never taken
+        from the data (a task of an agent's board on a hub has a host: not ours)."""
+        if not self.boards:
+            return None
+        return board if board in self.boards and host is None else ""
 
     # --- traces (kelpie.traces.ingest.IngestObserver, kelpie.traces.store.StoreObserver) --
 
@@ -371,9 +404,16 @@ class Metrics:
             self.connector_last_ok[name] = now
             self.connector_now = now
 
-    def adapter_failed(self, name: str) -> None:
+    def adapter_failed(self, name: str, board: str | None = None) -> None:
+        """A snapshot of adapter ``name`` failed, or one of its ``board`` of several did
+        (counted under the adapter and a ``board`` label when the board is configured)."""
         with self._lock:
-            self.adapter_errors[name] += 1
+            if board is None:
+                self.adapter_errors[name] += 1
+            elif board in self.boards:
+                self.board_errors[(name, board)] += 1
+            else:  # not configured here: kept in the adapter label, as before
+                self.adapter_errors[f"{name}/{board}"] += 1
 
     # --- multi-host (kelpie.remote.farm.FarmObserver) ---------------------------------------
 
@@ -405,16 +445,24 @@ class Metrics:
         Idle agents are counted as the bottlenecks rule counts them by default (no
         ``min_idle_time``, no ``ready_is_queued``), so they may differ from the rule's view."""
         self.fleet_seen = True
-        self.tasks = Counter(dict.fromkeys(Status, 0))
-        self.tasks.update(t.status for t in snapshot.tasks)
-        prework: dict[str, list[float]] = {}
+        boards: list[BoardKey] = list(self.boards) if self.boards else [None]
+        of_board = {t.id: self._board(t.board, t.host) for t in snapshot.tasks}
+        if "" in of_board.values():
+            boards.append("")
+        self.tasks = Counter({(b, str(s)): 0 for b in boards for s in Status})
+        self.tasks.update((of_board[t.id], str(t.status)) for t in snapshot.tasks)
+        prework: dict[tuple[BoardKey, str], list[float]] = {}
         for t in snapshot.tasks:
             if t.prework:
                 age = (snapshot.now - t.status_since).total_seconds()
-                prework.setdefault(t.platform_status or "unknown", []).append(age)
-        self.prework = {
-            k: (len(v), max(v)) for k, v in sorted(prework.items())[:MAX_PREWORK_SERIES]
-        }
+                key = (of_board[t.id], t.platform_status or "unknown")
+                prework.setdefault(key, []).append(age)
+        shown: dict[BoardKey, int] = {}  # series kept per board: one never crowds out another
+        self.prework = {}
+        for k, v in sorted(prework.items(), key=lambda kv: (kv[0][0] or "", kv[0][1])):
+            if shown.get(k[0], 0) < MAX_PREWORK_SERIES:
+                shown[k[0]] = shown.get(k[0], 0) + 1
+                self.prework[k] = (len(v), max(v))
         slots: dict[str, tuple[int, dict[str, int]]] = {}
         for r in snapshot.resources:
             if r.kind is ResourceKind.SLOTS and r.used is not None and r.limit is not None:
@@ -424,9 +472,15 @@ class Metrics:
         self.slots = dict(sorted(slots.items())[:MAX_SLOT_POOLS])
         loads = role_loads(snapshot)
         self.idle_agents = Counter({r: len(load.idle) for r, load in loads.items()})
-        self._throughput(snapshot, loads)
+        self._throughput(snapshot, loads, of_board, boards)
 
-    def _throughput(self, snapshot: Snapshot, loads: Mapping[str, RoleLoad]) -> None:
+    def _throughput(
+        self,
+        snapshot: Snapshot,
+        loads: Mapping[str, RoleLoad],
+        of_board: Mapping[str, BoardKey],
+        boards: Sequence[BoardKey],
+    ) -> None:
         """Agents, agents with work and the ownerless queue per role (as the bottlenecks
         rule counts them), tasks done, returns and reopens over the last 24h, and open tasks per
         stage. Not the daily report's utilization, queue or rework rate: those are measured
@@ -436,6 +490,8 @@ class Metrics:
         done: Counter[str] = Counter()
         returns: Counter[str] = Counter()
         reopened: Counter[str] = Counter()
+        # with boards: the same per (board, role), task by task
+        per_board: dict[tuple[BoardKey, str], list[int]] = {}
         self.stages = Counter()
         live = {s.task_id for s in snapshot.sessions if is_live(s, now)}
         owner_roles = {o.id: o.role for o in snapshot.owners}
@@ -448,21 +504,27 @@ class Metrics:
 
         for t in snapshot.tasks:
             role = of_task.get(t.id, UNKNOWN_ROLE)
+            board = of_board.get(t.id)
             if t.status is Status.DONE and now - day <= t.status_since <= now:
                 done[role] += 1
+                per_board.setdefault((board, role), [0, 0, 0])[0] += 1
             for back in t.returns:
                 if now - day <= back.at <= now:  # for the role that redoes it, not review
-                    returns[
-                        rework_role(
-                            t, back.at, by_task.get(t.id, ()), own_role, self.review_roles, now
-                        )
-                    ] += 1
-            reopened[role] += sum(1 for at in t.reopened_at if now - day <= at <= now)
+                    redo = rework_role(
+                        t, back.at, by_task.get(t.id, ()), own_role, self.review_roles, now
+                    )
+                    returns[redo] += 1
+                    per_board.setdefault((board, redo), [0, 0, 0])[1] += 1
+            back_out = sum(1 for at in t.reopened_at if now - day <= at <= now)
+            reopened[role] += back_out
+            if back_out:
+                per_board.setdefault((board, role), [0, 0, 0])[2] += back_out
             if (stage := live_stage(t, t.id in live)) is not None:
-                self.stages[(stage, role)] += 1
-        for role in {role for _, role in self.stages} | set(loads):
-            for stage in STAGES:
-                self.stages[(stage, role)] += 0  # every stage of every known role
+                self.stages[(stage, role, board)] += 1
+        for role in {role for _, role, _ in self.stages} | set(loads):
+            for board in boards:
+                for stage in STAGES:
+                    self.stages[(stage, role, board)] += 0  # every stage of every known role
         self.roles = {
             role: RoleGauges(
                 agents=len(loads[role].agents) if role in loads else 0,
@@ -479,6 +541,12 @@ class Metrics:
                 | {r for r, n in reopened.items() if n}
             )
         }
+        self.board_roles = {}
+        if self.boards:  # every role on every board, so a board's series never vanish
+            for board in boards:
+                for role in self.roles:
+                    found = per_board.get((board, role), (0, 0, 0))
+                    self.board_roles[(board or "", role)] = (found[0], found[1], found[2])
 
     def tick_failed(self, engine: Engine) -> None:
         with self._lock:
@@ -572,6 +640,10 @@ class Metrics:
                 [
                     f"kelpie_adapter_errors_total{_labels(adapter=a)} {n}"
                     for a, n in sorted(self.adapter_errors.items())
+                ]
+                + [
+                    f"kelpie_adapter_errors_total{_labels(adapter=a, board=b)} {n}"
+                    for (a, b), n in sorted(self.board_errors.items())
                 ],
             )
             if self.agents:
@@ -617,7 +689,7 @@ class Metrics:
                     "kelpie_tasks",
                     "gauge",
                     "Tasks in the last snapshot, by normalized status.",
-                    [f"kelpie_tasks{_labels(status=str(k))} {n}" for k, n in self.tasks.items()],
+                    [f"kelpie_tasks{_on(b, status=s)} {n}" for (b, s), n in self.tasks.items()],
                 )
                 metric(
                     "kelpie_prework_tasks",
@@ -626,8 +698,8 @@ class Metrics:
                     "the platform's own status (incident 17); also those still waiting for "
                     "parents of their own. A status shows only while a card is in it.",
                     [
-                        f"kelpie_prework_tasks{_labels(platform_status=k)} {n}"
-                        for k, (n, _) in self.prework.items()
+                        f"kelpie_prework_tasks{_on(b, platform_status=k)} {n}"
+                        for (b, k), (n, _) in self.prework.items()
                     ],
                 )
                 metric(
@@ -635,8 +707,8 @@ class Metrics:
                     "gauge",
                     "How long the oldest card in each pre-work status has sat there.",
                     [
-                        f"kelpie_prework_oldest_seconds{_labels(platform_status=k)} {age:.0f}"
-                        for k, (_, age) in self.prework.items()
+                        f"kelpie_prework_oldest_seconds{_on(b, platform_status=k)} {age:.0f}"
+                        for (b, k), (_, age) in self.prework.items()
                     ],
                 )
                 if self.slots:
@@ -727,21 +799,34 @@ class Metrics:
                 "Done tasks of the role moved back out of done in the last 24h.",
             ),
         )
+        # Task counts (done, returns, reopens) carry the task's board when there are boards;
+        # agents, agents with work and the ownerless queue are the role's across boards.
+        by_task = ("done_24h", "returns_24h", "reopened_24h")
         for name, field, help_ in names:
-            samples = [
-                f"{name}{_labels(role=r)} {getattr(v, field)}" for r, v in self.roles.items()
-            ]
+            if self.boards and field in by_task:
+                i = by_task.index(field)
+                samples = [
+                    f"{name}{_on(b, role=r)} {v[i]}" for (b, r), v in self.board_roles.items()
+                ]
+            else:
+                samples = [
+                    f"{name}{_labels(role=r)} {getattr(v, field)}" for r, v in self.roles.items()
+                ]
             metric(name, "gauge", help_, samples)
+        counts: list[tuple[BoardKey, str, int, int]]
+        if self.boards:
+            counts = [(b, r, d, o) for (b, r), (d, _, o) in self.board_roles.items()]
+        else:
+            counts = [(None, r, v.done_24h, v.reopened_24h) for r, v in self.roles.items()]
         metric(
             "kelpie_role_reopened_after_done_ratio",
             "gauge",
             "Of the role's completions in the last 24h (tasks still done, plus those reopened "
             "since), the share reopened; roles with a completion only.",
             [
-                f"kelpie_role_reopened_after_done_ratio{_labels(role=r)} "
-                f"{v.reopened_24h / (v.done_24h + v.reopened_24h):.4g}"
-                for r, v in self.roles.items()
-                if v.done_24h + v.reopened_24h
+                f"kelpie_role_reopened_after_done_ratio{_on(b, role=r)} {o / (d + o):.4g}"
+                for b, r, d, o in counts
+                if d + o
             ],
         )
         metric(
@@ -749,8 +834,10 @@ class Metrics:
             "gauge",
             "Open tasks now per stage (working, queue, review, waiting, ownerless) and role.",
             [
-                f"kelpie_tasks_by_stage{_labels(role=r, stage=s)} {n}"
-                for (s, r), n in sorted(self.stages.items(), key=lambda kv: kv[0][::-1])
+                f"kelpie_tasks_by_stage{_on(b, role=r, stage=s)} {n}"
+                for (s, r, b), n in sorted(
+                    self.stages.items(), key=lambda kv: (kv[0][2] or "", kv[0][1], kv[0][0])
+                )
             ],
         )
 

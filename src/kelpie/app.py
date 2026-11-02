@@ -1140,7 +1140,7 @@ def merged_snapshot(
                 unobserved=merged.unobserved + part.unobserved,  # boards of a Hermes home
             )
             for board in part.unobserved:  # one board of several could not be read
-                metrics.adapter_failed(f"{adapter.name}/{board}")
+                metrics.adapter_failed(adapter.name, board)
                 complete = False
         if remote is not None:
             try:
@@ -1844,6 +1844,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     remote = farm.snapshot if farm is not None else None
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     metrics.set_adapters(a.name for a in adapters)
+    for a in adapters:  # several boards: a ``board`` label of their names (#283)
+        if isinstance(a, HermesBoards):
+            metrics.set_boards(a.name, a.board_names)
     metrics.set_budgets_enabled(bool(settings.budgets.budgets))
     if reader is not None:
         reader.observer = metrics

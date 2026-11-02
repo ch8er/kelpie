@@ -1,0 +1,7 @@
+Kelpie daily report 2026-03-02
+Cost of chaos: 21.8 hours lost, $1.96 in 680,420 tokens burned + $873.33 in stuck hours. 1,000 tokens of unpriced models not in dollars. 2 tasks completed, $1.34 per completed task.
+Biggest wait: developer tasks spent 14.0 task-hours waiting for an unknown cause (no condition registered) (1 task(s)), against 16.0 agent-hours of work. Suggestion: have agents register a condition when they wait (ci_status, human_task, ...), so Kelpie can tell what they wait for and wake them when it holds.
+Needs a human: 2 open condition(s).
+1. Reduce blocks that outlived their cause
+2. Reduce activity without progress
+3. Let orphan_status act
