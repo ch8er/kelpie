@@ -408,7 +408,7 @@ alert with a rebalancing suggestion.
 - [x] Long sequential chains with idle agents → `alert` suggesting parallelization, with `critical_path_length`
 - [x] Overloaded role with idle roles elsewhere → `alert` with a rebalancing suggestion
 - [x] Farm or role idle longer than N minutes (config) while ready work waits (queued tasks, mergeable PRs from the GitHub connector) → `alert` with the idle time, the waiting work and the likely cause (an active hold, an empty queue upstream)
-- [x] Holds have an owner and an expiry (default from config); expired hold → `alert` with the owner and the idle cost (#48, #90, #99)
+- [x] Holds have an owner and an expiry (default from config); expired hold → `alert` with the owner and the idle cost (#48, #90)
 - [ ] Holds matched by flag or pause, not only by PR label; in act mode the executor that owns a hold lifts it (no executor owns a label yet)
 - [x] Idle hours caused by holds go to the cost-of-chaos report
 - [x] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`, `14-forgotten-merge-hold.yaml` (hold set, promised lift missed, ready PRs waiting about 5 h)
@@ -642,7 +642,7 @@ provider APIs where available and from trace errors otherwise.
 **Acceptance criteria**
 - [ ] `quota_reset` conditions evaluated (the kind exists; no connector evaluates it)
 - [ ] Limit hits from spans counted per provider (hits come from the status probes and are counted per provider, #35; none from spans)
-- [x] Credential expiry exposed as a resource (as `ProviderStatus.expires_at` from the status probe, alerted by rule 7; #35)
+- [x] Credential expiry exposed in the snapshot (`ProviderStatus.expires_at` from the status probe, not a `Resource`; alerted by rule 7; #35)
 - [ ] Provider usage and cost APIs fed to budgets as a spend source: the same criterion as "Spend sources" in "core: budgets and spend" and tracked there (the cost reports are read and reconciled, #204, #205)
 - [x] No provider SDK is required by core
 
@@ -911,11 +911,11 @@ notes say `kelpie serve` stays on loopback or behind a limiting proxy until M5 i
 **Acceptance criteria**
 - [x] Subprocess calls (Hermes CLI, git): no injection, minimal environment, no token leakage (#275)
 - [x] No SQL built from strings with untrusted data (#275; L1, the read-only URI, fixed in #280)
-- [x] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section (#275; L6 fixed in #280; L7/L8 redaction gaps open)
+- [ ] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section (audited in #275; L6 fixed in #280; open: L7, L8, command-redaction gaps)
 - [x] Outbound HTTP: no redirects with credentials, TLS verified, response size limits (#275; M3 and L12 fixed in #279; M4, the Linear client's deadline, open)
-- [x] OTLP and `/metrics` endpoints: auth, bind address, body limits (#275; M2 fixed in #279; M5, serve's pre-auth deadline and connection cap, open)
+- [ ] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279; open: M1, M5, L10, L11)
 - [x] File paths from config and data: no traversal, safe symlink handling (H1, H2 fixed in #278)
-- [x] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host (#275)
+- [x] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host (#275; L9, no length cap on agent reasons, open)
 - [ ] Clear fixes as small PRs (#278, #279, #280); design questions as issues (M1 and the open findings are listed on #275, not filed as issues)
 - [x] `docs/security.md`: threat model, what Kelpie trusts, what it never stores (in place; updated by the audit in #279)
 
@@ -1160,7 +1160,7 @@ labels: P1, area:core
 ### docs: reconcile the roadmap with what is merged
 labels: P1, documentation
 Many items here were finished by parallel sessions without ticking their criteria, so the
-roadmap no longer says what is left.
+roadmap no longer says what is left. In progress (#285).
 
 **Acceptance criteria**
 - [ ] Every item's criteria ticked or left open against main, with the PR that did it
