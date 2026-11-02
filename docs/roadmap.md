@@ -63,7 +63,7 @@ same records power alert deduplication and the before/after report.
 - [x] Fingerprint = rule, kind, target and the params that matter; identical actions within the cooldown (config) are suppressed and counted
 - [x] Max actions per task per hour (config); excess actions are dropped and reported once as an alert
 - [x] Ledger persisted through the storage protocol (an in-memory implementation until the SQLite storage issue lands); survives a restart
-- [ ] The alert pipeline and the before/after report read the ledger instead of keeping their own history
+- [x] The alert pipeline and the before/after report read the ledger instead of keeping their own history (#5, #52, #54; alert states in the ledger's storage, table `states`, #12)
 - [x] Unit tests with a fake clock
 
 ### core: action routing — task source, executor targets, executor registry
@@ -102,6 +102,8 @@ project dependencies so that ruff, import-linter and pytest can run right away.
 - [ ] Script is idempotent and safe to re-run
 - [ ] Documented in `CONTRIBUTING.md`
 
+Not started: there is no setup script; `CONTRIBUTING.md` documents `uv sync` and the checks by hand.
+
 ### core: engine loop with configurable interval and dry-run
 labels: P0, week-1, area:core
 Run `Engine.tick` every N seconds (config, default 30 s) with a snapshot provider assembled
@@ -120,12 +122,12 @@ Persist what Kelpie saw and did so that the report and before/after comparisons 
 SQLite by default; keep the schema DuckDB-compatible for analytics.
 
 **Acceptance criteria**
-- [ ] Tables for tasks (status history), sessions and conditions (the action ledger table and versioned migrations landed with engine item A)
+- [ ] Tables for tasks (status history), sessions and conditions (the action ledger table and versioned migrations landed with engine item A; the `states` table with #12). Status history is the same work as #157 and the model-gaps criterion on status history
 - [ ] Retention for raw action-ledger rows: 30 days by default plus a size cap, both configurable; the in-memory ledger store is bounded too
 - [ ] Closed alert states (table `states`) pruned with the raw ledger rows
 - [ ] Daily aggregates kept indefinitely (per rule, action kind and mode; executed / suppressed / failed counts), because rule 8's before/after verification needs history; aggregates are written before raw rows are pruned
 - [ ] Pruning runs inside `kelpie serve` on a schedule and never blocks action dispatch (separate thread or short batched transactions; WAL)
-- [ ] The trace store will follow the same policy shape (raw rows with age + size limits, aggregates kept); note only, not built here
+- [ ] The trace store will follow the same policy shape (raw rows with age + size limits, aggregates kept); note only, not built here. Raw part done for spans (`[traces] retention`, `max_rows`, pruned in a background thread, #16); no aggregates
 - [x] Storage lives behind a protocol in `kelpie.core`; no adapter imports
 - [x] Tests run against a temporary database file
 
@@ -136,7 +138,7 @@ and a `kelpie` CLI with `serve`, `check-config` and `run-once --dry-run`.
 
 **Acceptance criteria**
 - [x] `uv run kelpie serve` starts the loop with the configured adapter
-- [ ] `kelpie run-once --dry-run` prints the actions for a single snapshot and exits
+- [ ] `kelpie run-once --dry-run` prints the actions for a single snapshot and exits (not built; `kelpie why <task>` explains one task, `kelpie status` lists rules and modes)
 - [x] Secrets can be supplied via environment variables, never only in the file
 - [x] Invalid config fails fast with a readable error
 
@@ -146,12 +148,14 @@ Writing the 13 incident fixtures forced several facts into free text or `params`
 the ones rules actually need to typed fields before implementing those rules.
 
 **Acceptance criteria**
-- [ ] `Condition` can be shared by several tasks and references what it waits on (task, person, PR)
-- [ ] `Return` records its cause category and conflicting files; `Task` can reference repo/PR
-- [ ] `Session` and heavy tasks can be tied to a host; `Owner` exposes availability/capacity
+- [ ] `Condition` can be shared by several tasks and references what it waits on (task, person, PR) (today one `task_id`; the target is in untyped `params`)
+- [x] `Return` records its cause category (#110, #174); `Task` has `repo` and `branch`, and a PR links to tasks through `PullRequest.task_ids` (#90, #103)
+- [ ] `Return` records its conflicting files (still in `params`)
+- [x] Tasks and owners can be tied to a host (`Task.host`, `Owner.host`, #127)
+- [ ] `Session` tied to a host; `Owner` exposes availability/capacity
 - [ ] `Block` has a category so allowed-reason checks do not parse free text
-- [ ] `Resource` has `sampled_at` and a window for event counts (e.g. hits per day)
-- [ ] Task status history is available to rules (time-to-accept, bounce count)
+- [ ] `Resource` has `sampled_at` and a window for event counts (e.g. hits per day) (the sample time is `Resource.at`; `events` has no window)
+- [ ] Task status history is available to rules (time-to-accept, bounce count) (rules see `status_since`, `returns`, `reopened_at`, `review_rounds`; no history, see #157)
 - [x] CI build/run records in the snapshot, supplied by the CI connector (fixture 05 today only
       has the `ci_minutes` quota resource): commit sha, branch, trigger event, draft flag,
       changed paths, duration/minutes, status, `superseded_by`. Field names stay CI-agnostic
@@ -163,10 +167,10 @@ Real-time alerts must be worth reading. Every alert is actionable and states wha
 already did by itself; duplicates are merged instead of repeated.
 
 **Acceptance criteria**
-- [ ] Alert payload carries severity, the affected tasks/hosts, the action Kelpie already took (or "dry-run: would …") and what a human should do
-- [ ] Alerts with nothing for a human to do are not sent in real time (they go to the daily report)
-- [ ] Identical or overlapping alerts within a configurable window are merged into one with a count, using the action ledger's fingerprints and cooldown (no separate dedup store)
-- [ ] Untrusted task text is escaped before it reaches any alerter
+- [x] Alert payload carries severity, the affected tasks/hosts, the action Kelpie already took (or "dry-run: would …") and what a human should do (`AlertEvent`: severity, items with `needed` and `blocking`, `did`; a host only as the subject; #97, #135, #187, #212)
+- [x] Alerts with nothing for a human to do are not sent in real time (they go to the daily report) (info alerts, which carry nothing to do, stay out of chat by default: per-channel `min_severity`, default warning; open states are listed in the report; #47, #206)
+- [ ] Identical or overlapping alerts within a configurable window are merged into one with a count, using the action ledger's fingerprints and cooldown (no separate dedup store). Done except the count: repeats are suppressed and counted in the ledger (#5), lasting states alert on transitions (#12), per-task alerts fold under an open outage (#183, #247); the message never shows the count
+- [x] Untrusted task text is escaped before it reaches any alerter (#64, #187)
 
 ### core: Slack alerter
 labels: P0, area:core
@@ -206,11 +210,16 @@ labels: P0, week-1, area:core
 HTTP endpoint (and a helper in the Hermes plugin) for an agent to register a condition for
 its task before exiting. Needed by the wait-for-condition rule.
 
+Built in another shape: Kelpie, not the agent, registers the condition. A block reason that
+matches `[[block_conditions]]` gets its condition from a connector (#31), and the dispatch
+gate parks a task with `SupportsWait` (Hermes: `scheduled` with a signed marker, #75, #189).
+There is no endpoint and no agent-side helper; the first criterion stays open for that.
+
 **Acceptance criteria**
-- [ ] `POST /conditions` with kind, params and task id
-- [ ] Authentication required
-- [ ] Duplicate registrations are idempotent
-- [ ] Registering a condition puts the task into a "waiting" state visible to rules
+- [ ] `POST /conditions` with kind, params and task id (no endpoint; conditions come from block reasons and parks)
+- [ ] Authentication required (no endpoint; park markers are HMAC-signed, so forged or replayed parks are not trusted, #75, #189)
+- [ ] Duplicate registrations are idempotent (the ledger stops repeat parks; a second park of a parked task raises `UnsupportedAction` instead of being a no-op)
+- [x] Registering a condition puts the task into a "waiting" state visible to rules (for parks: a parked task reads back as `waiting`, #75)
 
 ### traces: OTLP ingest with GenAI semantic conventions
 labels: P0, week-1, area:traces
@@ -275,8 +284,8 @@ labels: P0, week-1, area:rules
 A restarted task continues from the last commit instead of starting from zero.
 
 **Acceptance criteria**
-- [ ] Requeued tasks carry the last commit reference, the progress note and a short git log
-- [ ] The adapter passes them into the next session's prompt
+- [ ] Requeued tasks carry the last commit reference, the progress note and a short git log (commit, branch and note done, #14, #136; no git log)
+- [ ] The adapter passes them into the next session's prompt (today a `comment` on the task the next agent has to read)
 - [x] Restarts from zero are counted (input for the daily report and token optimization)
 - [x] New fixture `16-checkpoint-resume-from-commit.yaml` (`rule: checkpoints`, `incident: null`)
 
@@ -296,17 +305,18 @@ labels: P0, week-1, area:adapters
 Implement `requeue`, `unblock`, `comment`, `wake`, `reassign` and `wip_commit` for Hermes.
 
 **Acceptance criteria**
-- [ ] Every action leaves a comment on the task explaining what Kelpie did and why
-- [ ] Actions are idempotent (re-running the same action is a no-op)
-- [ ] Concurrent writes with Hermes handled safely (transactions, retry on lock)
-- [ ] Tasks in Kelpie's `waiting` status are reported to the Hermes dispatcher as waiting and alive, never as dead (the "waiting" heartbeat of rule 2); fixture `10-waiting-heartbeat` in the adapter tests
+- [x] Every action leaves a comment on the task explaining what Kelpie did and why (stop, park, wake and comment each record their reason on the board, signed `kelpie`; #36, #75, #189)
+- [ ] Actions are idempotent (re-running the same action is a no-op) (waking an awake task is quiet, #75, and the ledger stops repeats; but a second park of a parked task, or a requeue of a task Kelpie did not park, raises `UnsupportedAction`)
+- [x] Concurrent writes with Hermes handled safely (transactions, retry on lock) (Kelpie never writes `kanban.db`: every write goes through the `hermes kanban` CLI; reads are read-only with a busy timeout; #13, #75)
+- [x] Tasks in Kelpie's `waiting` status are reported to the Hermes dispatcher as waiting and alive, never as dead (the "waiting" heartbeat of rule 2) (a parked task sits in Hermes `scheduled`, which the dispatcher does not treat as dead; `test_a_parked_ready_task_does_not_make_its_assignee_look_active`, #75)
+- [ ] `unblock`, `reassign` and `wip_commit` for Hermes (today `unblock` and `wip_commit` raise `NotImplementedError` and are not declared; `reassign` is not implemented)
 
 ### adapters: Hermes plugin for post_tool_call and on_session_end
 labels: P0, week-1, area:adapters
 A Hermes plugin that runs on the agent host and sends session events and spans to Kelpie.
 
 **Acceptance criteria**
-- [ ] `on_session_end` sends final status, exit reason and worktree state
+- [x] `on_session_end` sends final status, exit reason and worktree state (the hook sends the end; final status and exit reason come from the run outcomes in `kanban.db`, worktree state from git; #13, #15)
 - [x] `post_tool_call` sends heartbeat and tool span (via the hooks-to-spans helper)
 - [x] Plugin never blocks the agent if Kelpie is unreachable (buffer and drop)
 - [x] Install instructions in docs
