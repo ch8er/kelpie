@@ -389,7 +389,7 @@ def _item(number: int, item: AlertItem, settings: RenderSettings) -> ItemView:
 
 
 def _board(board: str | None, lang: str) -> str | None:
-    """"Board: qr": the board's name spelled out, not only the id's prefix (#283)."""
+    """The board's name spelled out ("Board: qr"), not only the id's prefix (#283)."""
     name = _cut_words(_flat(defang(board)), MAX_ID) if board else ""
     return f"{i18n.text(lang, 'label.board')}: {name}" if name else None
 

@@ -315,8 +315,8 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (adapter) (rate(kelpie_adapter_errors_total[5m])) * 60",
-          "legendFormat": "adapter {{adapter}}"
+          "expr": "sum by (adapter, board) (rate(kelpie_adapter_errors_total[5m])) * 60",
+          "legendFormat": "adapter {{adapter}} {{board}}"
         },
         {
           "datasource": {

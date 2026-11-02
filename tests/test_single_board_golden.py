@@ -24,7 +24,7 @@ from tests.test_metrics_fleet import _snapshot as fleet_snapshot
 
 GOLDEN = Path(__file__).parent / "golden"
 UPDATE = "UPDATE_GOLDEN"  # not KELPIE_*: conftest unsets those
-# Metric families with a board label on a farm with several boards.
+# Metric families a board label could touch on a farm with several boards.
 BOARD_FAMILIES = (
     "kelpie_tasks",
     "kelpie_prework_",
@@ -56,8 +56,9 @@ def _families(text: str) -> str:
 
 def test_metrics_of_one_board() -> None:
     snapshot = fleet_snapshot()
-    prework = Task("T-6", "t", Status.BACKLOG, NOW - timedelta(hours=3), platform_status="triage",
-                   prework=True)  # fmt: skip
+    prework = Task(
+        "T-6", "t", Status.BACKLOG, NOW - timedelta(hours=3), platform_status="triage", prework=True
+    )
     returned = Task("T-7", "t", Status.DONE, NOW - timedelta(hours=1), role="coder")
     snapshot = Snapshot(
         now=snapshot.now,
@@ -80,8 +81,16 @@ def test_report_of_one_board(db: Path) -> None:  # noqa: F811 (the fixture)
 
 def test_why_of_one_board() -> None:
     hour = timedelta(hours=1)
-    task = Task("T-1", "Ship it", Status.BLOCKED, NOW - 2 * hour, owner_id="dev", role="coder",
-                block=Block("waiting_ci", NOW - 2 * hour), source="hermes")  # fmt: skip
+    task = Task(
+        "T-1",
+        "Ship it",
+        Status.BLOCKED,
+        NOW - 2 * hour,
+        owner_id="dev",
+        role="coder",
+        block=Block("waiting_ci", NOW - 2 * hour),
+        source="hermes",
+    )
     after = Task("T-2", "Next", Status.READY, NOW - hour)
     snapshot = Snapshot(
         now=NOW,
@@ -101,8 +110,9 @@ def test_why_names_the_board_of_three() -> None:
     """With three boards (#283) ``why`` names the board on a line of its own and in JSON."""
     hour = timedelta(hours=1)
     tasks = tuple(
-        Task(f"{b}:t_1", "Ship it", Status.BLOCKED, NOW - hour, block=Block("x", NOW - hour),
-             board=b)  # fmt: skip
+        Task(
+            f"{b}:t_1", "Ship it", Status.BLOCKED, NOW - hour, block=Block("x", NOW - hour), board=b
+        )
         for b in ("app-a", "app-b", "svc")
     )
     snapshot = Snapshot(now=NOW, tasks=tasks)

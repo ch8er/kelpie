@@ -457,8 +457,12 @@ class Metrics:
                 age = (snapshot.now - t.status_since).total_seconds()
                 key = (of_board[t.id], t.platform_status or "unknown")
                 prework.setdefault(key, []).append(age)
-        shown = sorted(prework.items(), key=lambda kv: (kv[0][0] or "", kv[0][1]))
-        self.prework = {k: (len(v), max(v)) for k, v in shown[: MAX_PREWORK_SERIES * len(boards)]}
+        shown: dict[BoardKey, int] = {}  # series kept per board: one never crowds out another
+        self.prework = {}
+        for k, v in sorted(prework.items(), key=lambda kv: (kv[0][0] or "", kv[0][1])):
+            if shown.get(k[0], 0) < MAX_PREWORK_SERIES:
+                shown[k[0]] = shown.get(k[0], 0) + 1
+                self.prework[k] = (len(v), max(v))
         slots: dict[str, tuple[int, dict[str, int]]] = {}
         for r in snapshot.resources:
             if r.kind is ResourceKind.SLOTS and r.used is not None and r.limit is not None:
@@ -639,7 +643,7 @@ class Metrics:
                 ]
                 + [
                     f"kelpie_adapter_errors_total{_labels(adapter=a, board=b)} {n}"
-                    for (a, b), n in self.board_errors.items()
+                    for (a, b), n in sorted(self.board_errors.items())
                 ],
             )
             if self.agents:

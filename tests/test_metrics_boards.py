@@ -13,7 +13,7 @@ from kelpie.core.engine import Engine
 from kelpie.core.model import Owner, Snapshot, Status, Task
 from kelpie.metrics import Metrics
 from tests.adapters.kanban import Board
-from tests.test_single_board_golden import assert_golden
+from tests.test_single_board_golden import _families, assert_golden
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 NAMES = ("app-a", "app-b", "svc")
@@ -98,9 +98,3 @@ def test_label_values_never_come_from_the_data() -> None:
     assert 'kelpie_role_tasks_done_24h{board="svc",role="dev"} 0' in text
     metrics.adapter_failed("hermes", "x")  # an unconfigured board keeps the old form
     assert 'kelpie_adapter_errors_total{adapter="hermes/x"} 1' in metrics.render()
-
-
-def _families(text: str) -> str:
-    from tests.test_single_board_golden import _families as families
-
-    return families(text)

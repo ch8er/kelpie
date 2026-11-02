@@ -896,14 +896,15 @@ db_path = "~/.hermes/kanban/boards/sign/kanban.db"
   refused before anything runs.
 - **A board that cannot be read** is left out of that tick and listed as unobserved: its
   open alerts are held, not resolved, and
-  `kelpie_adapter_errors_total{adapter="hermes",board="<name>"}` counts it. The other boards
-  go on. If none can be read, the adapter fails as one board would.
+  `kelpie_adapter_errors_total{adapter="hermes",board="<name>"}` counts it (it was
+  `adapter="hermes/<name>"` before #283). The other boards go on. If none can be read, the
+  adapter fails as one board would and only `{adapter="hermes"}` counts it.
 - **Metrics** carry a `board` label (#283) on the per-task gauges: `kelpie_tasks`,
   `kelpie_prework_tasks`, `kelpie_prework_oldest_seconds`, `kelpie_tasks_by_stage`,
   `kelpie_role_tasks_done_24h`, `kelpie_role_returns_24h`,
   `kelpie_role_reopened_after_done_24h` and `_ratio`. Its values are the configured board
   names only, never a value from the data: a task on no configured board (another adapter's,
-  or an agent's on a hub) has `board=""`. Agent gauges (`kelpie_role_agents`,
+  or an agent's on a hub) has `board=""`, shown only while such a task exists. Agent gauges (`kelpie_role_agents`,
   `kelpie_idle_agents`, ...) have no board label: the home's profiles work on every board.
   The Grafana dashboard sums over boards; `sum by (board) (...)` splits a panel.
 - **Alerts** name each task's board ("Board: qr" beside "Blocking"), and so does `kelpie why`

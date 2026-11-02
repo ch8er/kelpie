@@ -43,6 +43,7 @@ def _metrics() -> Metrics:
     metrics.set_budgets_enabled(True)
     metrics.set_resources(True)
     metrics.set_alert_channels(["channel-a"])
+    metrics.set_boards("hermes", ["board-a"])  # several boards: the board label (#283)
     metrics.alert_sent("channel-a")
     metrics.alert_failed("channel-a", "timeout")
     metrics.alert_dropped("channel-a", "queue_full")
