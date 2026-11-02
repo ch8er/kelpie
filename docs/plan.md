@@ -188,26 +188,26 @@ To keep the scope focused, Kelpie does not build what already exists or is not n
 
 ## Plan and status
 
-Three weeks, three steps: the core with traces and the first adapter, the full rule set, then the report with optimization and publication. Status as of Nov 2; the evidence for every item is in `docs/roadmap.md`.
+Three weeks, three steps: the core with traces and the first adapter, the full rule set, then the report with optimization and publication. Status as of Nov 2; the evidence for every item is in `docs/roadmap.md`. A line is ticked only when its roadmap items have no open criterion; otherwise it says what is left.
 
 **Week 1, Oct 15–21**
 
 - [x] Engine safety first: action ledger, routing to executors, stop capability, per-rule mode (A–D)
 - [x] Repository, `CLAUDE.md`, cloud environment, fixtures from the farm incidents
-- [x] Core: model of tasks, statuses, owners, conditions and resources
+- [ ] Core: model of tasks, statuses, owners, conditions and resources — in use by every rule; the model gaps item is open (shared conditions, block categories, status history, session hosts)
 - [x] Traces: OTLP intake following GenAI semantic conventions, storage, export to Langfuse
-- [x] Checkpoints: commit reminders, WIP commit on exit, resume from the last commit
+- [ ] Checkpoints: commit reminders, WIP commit on exit, resume from the last commit — the resume note carries no git log and reaches the next session as a task comment, not in its prompt
 - [x] Hermes adapter: hooks and reading `kanban.db`
 - [x] Rules: exit contract, "wait for condition", orphan statuses, stale blocks
 
 **Week 2, Oct 22–28** (started early, Week 1 finished on Oct 15)
 
 - [x] Before the rules: span dedup by tool-call id, quickstart for Hermes and `kelpie doctor`, so the live run can start in parallel
-- [x] Rules: ping-pong, role bottlenecks, environment resources, CI economy
+- [ ] Rules: ping-pong, role bottlenecks, environment resources, CI economy — all four act; open: holds by flag or pause and lifted in act mode, suggested concurrency per LLM provider, rule 9's fail-fast cancel, the green-main/red-PR fixture
 - [x] Rules: loop and budget breaker (10), activity without progress (11)
 - [ ] Budgets and spend: budget config, thresholds, burn-rate forecast, spend from traces, Claude Code metrics and provider cost APIs — all but two spend sources: Claude Code's OpenTelemetry metrics are not ingested, and provider cost reports check the bill but do not feed budgets
-- [x] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container
-- [x] Condition connectors: GitHub and CI, LLM provider quotas, human tasks — no connector evaluates `quota_reset` yet, and limit hits come from provider probes, not spans
+- [ ] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container — works; an unreachable Prometheus is logged and counted, not alerted
+- [ ] Condition connectors: GitHub and CI, LLM provider quotas, human tasks — all three work; no connector evaluates `quota_reset` yet, and limit hits come from provider probes, not spans
 - [ ] Run on our own farm and record every rule trigger — observe runs on the farm produced incidents 14–20 and their fixes; the recorded 24 h observe and 48 h act runs of the roadmap item were not done
 
 **Week 3, Oct 29 – Nov 4**
@@ -216,15 +216,15 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [x] Token savings that act: rule 12 (conflict warning), dispatch gate, huge tool outputs
 - [x] Token optimization recommendations (cache breaks, model fit per role, diff-only review) and throughput metrics
 - [x] Multi-host: `kelpie agent` on each agent machine, central `kelpie serve` anywhere (blocks the release)
-- [x] Code health after the live run is debugged: performance profile, duplicate code, refactoring — the survey and the release-safe part (#248); the rest is after the release
-- [x] Whole-codebase security audit after the code-health pass (blocks the release) — #275: no critical or high finding open
+- [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring — the survey and the release-safe part are done (#248); the rest is after the release
+- [ ] Whole-codebase security audit after the code-health pass (blocks the release) — the audit is done (#275) and no critical or high finding is open; M1 waits for the owner, other medium and low findings are open
 - [x] `kelpie demo`: the farm simulator replays real incidents so anyone can see Kelpie work in two minutes without a farm
 - [ ] Documentation and publication of the open core — the guides, quickstarts, `docs/security.md`, the release workflow and the changelog are in place; nothing is published yet
 - [ ] 10 conversations with farm owners
 
 Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1 item (the rules backlog, `kelpie why`, the Claude Code adapter, return causes, the LLM root-cause section, the naming check) follows weeks 2–3, in the order of the backlog in `docs/roadmap.md`.
 
-**Where the project is.** Every P0 rule (1–7, 9–12, the dispatch gate) and the daily report (rule 8) are merged. So are the P1 rules backlog except the rule-9 CI config PR, `kelpie why`, and four adapters (Hermes, Claude Code, OpenClaw, GitHub Issues / Linear). Multi-host, budgets with spend modes, real-time alerts to Telegram and Slack with snoozes, `kelpie demo` and `kelpie selftest` are merged too. The code-health pass and the security audit are done.
+**Where the project is.** Every P0 rule (1–7, 9–12, the dispatch gate) and the daily report (rule 8) are merged. So are the P1 rules backlog except the rule-9 CI config PR and the #229 outage follow-ups, `kelpie why`, and four adapters (Hermes, Claude Code, OpenClaw, GitHub Issues / Linear). Multi-host, budgets with spend modes, real-time alerts to Telegram and Slack with snoozes, `kelpie demo` and `kelpie selftest` are merged too. The release-safe part of the code-health pass and the security audit are done.
 
 **Left before 0.1.0a1:**
 
@@ -232,7 +232,7 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 - The owner creates the PyPI and TestPyPI accounts for trusted publishing.
 - Then the first tag. Its release notes say that `kelpie serve` stays on loopback, or behind a limiting reverse proxy, until audit item M5 is fixed. The tag's release ticks the publish item.
 
-The plan marks only multi-host and the audit as blocking the release. Several older P0 roadmap items are still open, and #285 asks whether any of them should block it:
+The plan marks only multi-host and the audit as blocking the release. Several older P0 roadmap items are still open. Whether any of them should block the release is an open question for the owner:
 
 - `kelpie status` as a farm view
 - ledger retention and status history in storage
@@ -253,7 +253,7 @@ The plan marks only multi-host and the audit as blocking the release. Several ol
 
 **After 0.1.0a1, next:**
 
-- the audit's remaining medium and low items: per-agent ingest tokens for M1, M4–M7
+- the audit's remaining medium and low items (M1 as the owner decides; M4–M7; L4, L5, L7–L11, L13, L14)
 - the rest of #248
 - the open P1 items in the roadmap backlog
 - 10 conversations with farm owners and the naming check
