@@ -40,7 +40,7 @@ from kelpie.core.ledger import (
     Suppression,
     subject,
 )
-from kelpie.core.model import Snapshot
+from kelpie.core.model import HostSleep, Snapshot
 from kelpie.core.ports import ActionConnector, Alerter, Deferred, PlatformAdapter
 from kelpie.core.rule import Rule
 from kelpie.core.states import MemoryStateStore, OpenState, StateStore, StateTracker, Transition
@@ -103,6 +103,8 @@ class Engine:
     # Finds suspends of this host between ticks (issue #296); its sleeps are added to every
     # snapshot's ``host_sleeps``. None: no clock watch (tests, one-off evaluations).
     sleep_watch: SleepWatch | None = None
+    # Stores each host sleep a snapshot carries once (the daily report lists them).
+    sleep_log: Callable[[Sequence[HostSleep]], object] | None = None
     _by_name: dict[str, Rule] = field(init=False, default_factory=dict)
     _detail: str | None = field(init=False, default=None)  # of the action being handled
     ledger: ActionLedger = field(init=False)
@@ -127,6 +129,7 @@ class Engine:
     # While an alert about a state is processed: what it says besides the rule's reason,
     # keyed by the alert's key.
     _transitions: dict[str, _StateNote] = field(init=False, default_factory=dict)
+    _logged: set[tuple[str | None, datetime, datetime]] = field(init=False, default_factory=set)
 
     def __post_init__(self) -> None:
         self.ledger = ActionLedger(
@@ -596,7 +599,22 @@ class Engine:
             mine = watch.sleeps(snapshot.now)
             if mine:
                 snapshot = replace(snapshot, host_sleeps=merge_sleeps(snapshot.host_sleeps, mine))
+        self._log_sleeps(snapshot.host_sleeps)
         return self.execute(self.evaluate(snapshot), snapshot)
+
+    def _log_sleeps(self, sleeps: Sequence[HostSleep]) -> None:
+        if self.sleep_log is None:
+            return
+        new = [s for s in sleeps if (s.agent, s.start, s.end) not in self._logged]
+        if not new:
+            return
+        try:
+            self.sleep_log(new)
+        except Exception:  # the report misses it; the rules still see it
+            log.exception("storing host sleeps failed")
+            return
+        # Only the sleeps a snapshot still carries: one that aged out never comes back.
+        self._logged = {(s.agent, s.start, s.end) for s in sleeps}
 
     def _handle(self, action: Action, mode: Mode, snapshot: Snapshot) -> Outcome:
         if self.config.dry_run:

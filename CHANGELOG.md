@@ -250,6 +250,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - An optional LLM root-cause section (`[report.llm]`, off by default). It sees only
   aggregates with anonymized ids, and its answer is escaped and marked as a hypothesis
   ([#95](https://github.com/ch8er/kelpie/pull/95)).
+- Host sleep is listed apart ("Host asleep: 47 min", per host) and never counted in the
+  hours lost: each host's sleep is taken out of the chaos states on its tasks ([#313](https://github.com/ch8er/kelpie/pull/313)).
 
 #### Alerts
 

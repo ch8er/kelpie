@@ -111,6 +111,7 @@ from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
 from kelpie.core.model import (
     Condition,
     Dependency,
+    HostSleep,
     InstructionDuplicate,
     InstructionFile,
     Owner,
@@ -343,6 +344,12 @@ class ReportInputs:
     bill_day: date | None = None  # the UTC day checked, when cost reports are configured
     # Stored snoozes that ended after the day began (#176): deliberate waits, not chaos.
     snoozes: Sequence[Snooze] = ()
+    # Stretches the farm's hosts slept that overlap the day (issue #296): listed apart,
+    # never counted as hours lost.
+    host_sleeps: Sequence[HostSleep] = ()
+    # The ``kelpie agent``s whose boards the farm has (task ids ``<agent>:...``): a task of
+    # one is on that agent's host, any other task on the host of kelpie serve.
+    agents: frozenset[str] = frozenset()
     # The instruction files each role loads, as the board measured them (``instructions_at``)
     # when the report was built ([instructions]; the section ``instructions``).
     instruction_files: Sequence[InstructionFile] = ()
@@ -489,6 +496,9 @@ class DailyReport:
     toolchain_causes: tuple[ToolchainCause, ...] = ()
     planned: PlannedWaits | None = None  # behind work planned for later: never counted
     snoozed: SnoozedWaits | None = None  # deliberate waits a person snoozed: never chaos
+    # Minutes each host slept within the day, by agent (None: the host of kelpie serve):
+    # never chaos (issue #296).
+    host_asleep: tuple[tuple[str | None, float], ...] = ()
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
     act_gaps: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
     # models without a price (billed, not on a subscription), most tokens first
@@ -612,6 +622,7 @@ def build_report(
         stuck_idle=_stuck_idle(inputs, start, end),
         planned=_planned_waits(inputs, start, end),
         snoozed=snoozed,
+        host_asleep=_host_asleep(inputs.host_sleeps, start, end),
         unpriced_models=pricer.unpriced(rows),
         reconciliations=_reconciled(inputs.reconciliations),
         reconcile_error=(
@@ -1084,6 +1095,9 @@ def _chaos_hours(
         a, b = max(counts_from(state), start), min(state.last_seen, end)
         if b <= a:
             continue
+        # A host that slept lost no hours (issue #296); a hold's idle agents and a person's
+        # inbox are counted as they are (agent-hours a hold kept, a person's time).
+        awake = _awake(inputs.host_sleeps, inputs.agents, state.task_id, a, b)
         cause = cause_of(state)
         if cause == HOLDS:
             agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
@@ -1098,13 +1112,48 @@ def _chaos_hours(
                 tasks[PEOPLE].update(ids)
             continue
         if state.task_id:
-            keyed[cause].append((state.task_id, a, b))
+            keyed[cause].extend((state.task_id, lo, hi) for lo, hi in awake)
             tasks[cause].add(state.task_id)
         else:
-            loose[cause] += (b - a).total_seconds() / 3600
+            loose[cause] += intervals.hours(awake)
         if on_state is not None:
             on_state(state, a, b)
     return _ChaosHours(keyed, loose, tasks)
+
+
+def _awake(
+    sleeps: Sequence[HostSleep],
+    known: frozenset[str],
+    task_id: str | None,
+    a: datetime,
+    b: datetime,
+) -> intervals.Spans:
+    """The parts of ``[a, b)`` the task's host was awake (issue #296): a host that slept
+    lost no hours. A task id ``<agent>:...`` of a known agent (or one with a sleep on
+    record) is on that agent's host, any other (and a state on no task) on the host of
+    kelpie serve."""
+    span = [(a, b)]
+    if not sleeps:
+        return span
+    agents = known | {s.agent for s in sleeps if s.agent is not None}
+    agent = next((x for x in agents if task_id and task_id.startswith(f"{x}:")), None)
+    mine = intervals.merged((s.start, s.end) for s in sleeps if s.agent == agent)
+    return intervals.minus(span, mine)
+
+
+def _host_asleep(
+    sleeps: Sequence[HostSleep], start: datetime, end: datetime
+) -> tuple[tuple[str | None, float], ...]:
+    """Minutes each host slept within ``[start, end)``, the server's host first."""
+    by_agent: dict[str | None, list[tuple[datetime, datetime]]] = defaultdict(list)
+    for s in sleeps:
+        lo, hi = max(s.start, start), min(s.end, end)
+        if hi > lo:
+            by_agent[s.agent].append((lo, hi))
+    return tuple(
+        (agent, intervals.hours(intervals.merged(spans)) * 60)
+        for agent, spans in sorted(by_agent.items(), key=lambda x: (x[0] is not None, x[0] or ""))
+    )
 
 
 def lost_hours(
@@ -1639,6 +1688,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             f"at most 20 ids per alert){listed}",
         ]
     lines += _snoozed_lines(report, tasks)
+    lines += _asleep_lines(report)
     lines += _board_lines(report)
     lines += ["", "## Spend", ""]
     note = " (as the board reports them now; adapters only look back so far)"
@@ -1849,6 +1899,26 @@ def _snoozed_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
     if len(found) > MAX_SNOOZED:
         out.append(f"- and {len(found) - MAX_SNOOZED} more")
     return out
+
+
+def _asleep_lines(report: DailyReport) -> list[str]:
+    """Host sleep (issue #296), listed apart: a host that slept is not a farm that waits."""
+    if not report.host_asleep:
+        return []
+    parts = [
+        f"{md.text(agent) + ' ' if agent else ''}{_slept_for(minutes)}"
+        for agent, minutes in report.host_asleep
+    ]
+    return [
+        "",
+        f"**Host asleep**: {', '.join(parts)}. A suspended host (a laptop lid closed): not "
+        "counted in the hours lost.",
+    ]
+
+
+def _slept_for(minutes: float) -> str:
+    whole = round(minutes)
+    return f"{whole} min" if whole < 120 else f"{whole / 60:.1f} h"
 
 
 def _snooze_end(at: datetime, report: DailyReport) -> str:
