@@ -5,11 +5,13 @@ and every age grows by the time it slept; on wake, sessions that were only aslee
 dead. The wall clock keeps counting through a suspend, the monotonic clock does not (Linux
 ``CLOCK_MONOTONIC``, macOS ``mach_absolute_time``): between two ticks, the wall clock
 running ahead of the monotonic one by more than ``min_gap`` is a suspend of that length.
-A forward step of the wall clock itself (a manual change, NTP stepping a badly drifted
-clock) looks the same; NTP slews small drifts, far below ``min_gap``. A long tick (a slow
-adapter) advances both clocks and is no suspend. On a platform whose monotonic clock
-keeps counting through a suspend no jump shows: sleeps found another way (an OS wake log)
-can be added with :meth:`SleepWatch.add`.
+A forward step of the wall clock itself (a manual change, NTP stepping the clock of a box
+without a real-time clock) looks the same: where the OS has a clock that counts through a
+suspend but never steps (Linux ``CLOCK_BOOTTIME``), the suspend is measured on it instead,
+and a wall-clock step without it is logged and ignored. NTP slews small drifts, far below
+``min_gap``. A long tick (a slow adapter) advances both clocks and is no suspend. On a
+platform whose monotonic clock keeps counting through a suspend no jump shows: sleeps found
+another way (an OS wake log) can be added with :meth:`SleepWatch.add`.
 
 The engine owns the clocks: :class:`SleepWatch` reads them, rules only see the
 ``HostSleep`` records in ``Snapshot.host_sleeps``.
@@ -44,9 +46,12 @@ class SleepWatch:
     keep: timedelta = DEFAULT_KEEP
     agent: str | None = None
     monotonic: Callable[[], float] = time.monotonic
+    # A clock that counts through a suspend and is never stepped, where the OS has one
+    # (Linux CLOCK_BOOTTIME); None: the wall clock stands in for it.
+    boottime: Callable[[], float] | None = field(default_factory=lambda: _boottime())
     on_sleep: Callable[[HostSleep], object] | None = None
-    _mark: float | None = field(init=False, default=None)
-    _last: tuple[datetime, float] | None = field(init=False, default=None)
+    _mark: tuple[float, float | None] | None = field(init=False, default=None)
+    _last: tuple[datetime, float, float | None] | None = field(init=False, default=None)
     _sleeps: list[HostSleep] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -54,20 +59,27 @@ class SleepWatch:
             raise ValueError("host sleep min_gap must be positive")
 
     def mark(self) -> None:
-        """Read the monotonic clock: the tick is about to read the wall clock."""
-        self._mark = self.monotonic()
+        """Read the monotonic clocks: the tick is about to read the wall clock."""
+        self._mark = self._read()
+
+    def _read(self) -> tuple[float, float | None]:
+        return self.monotonic(), None if self.boottime is None else self.boottime()
 
     def observe(self, now: datetime) -> HostSleep | None:
         """Compare ``now`` (the tick's wall clock) with the last tick; the sleep found, if
         any. Without a :meth:`mark` since the last call, the monotonic clock is read now."""
-        mono = self._mark if self._mark is not None else self.monotonic()
+        mono, boot = self._mark if self._mark is not None else self._read()
         self._mark = None
-        last, self._last = self._last, (now, mono)
+        last, self._last = self._last, (now, mono, boot)
         if last is None:
             return None
-        wall_gap = now - last[0]
         mono_gap = timedelta(seconds=mono - last[1])
-        asleep = wall_gap - mono_gap
+        asleep = now - last[0] - mono_gap
+        if boot is not None and last[2] is not None:
+            suspended = timedelta(seconds=boot - last[2]) - mono_gap
+            if asleep >= self.min_gap and suspended < self.min_gap:
+                log.info("the wall clock stepped %s ahead; not a suspend", _minutes(asleep))
+            asleep = suspended
         if asleep < self.min_gap:
             return None
         sleep = HostSleep(start=now - asleep, end=now, agent=self.agent)
@@ -106,6 +118,18 @@ def merge_sleeps(*groups: Iterable[HostSleep]) -> tuple[HostSleep, ...]:
         for s in group:
             seen.setdefault((s.agent, s.start, s.end), s)
     return tuple(sorted(seen.values(), key=lambda s: (s.end, s.agent or "")))
+
+
+def _boottime() -> Callable[[], float] | None:
+    """A reader of CLOCK_BOOTTIME where the OS has it (Linux), else None."""
+    clock = getattr(time, "CLOCK_BOOTTIME", None)
+    if clock is None:
+        return None
+    try:
+        time.clock_gettime(clock)
+    except OSError:
+        return None
+    return lambda: time.clock_gettime(clock)
 
 
 def _minutes(d: timedelta) -> str:

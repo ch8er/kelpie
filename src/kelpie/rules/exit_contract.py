@@ -89,6 +89,7 @@ from kelpie.rules._tasks import (
     last_exit,
     linked_conditions,
     slept_since,
+    task_awake,
     undeclared_exit,
 )
 
@@ -191,7 +192,9 @@ class ExitContract:
     def _check_done(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
         """Done without the configured evidence: back to the queue (or an alert)."""
         age = snapshot.now - task.status_since
-        if age > self.done_evidence_within or age < self.session_exit_grace:
+        if age > self.done_evidence_within or task_awake(task, task.status_since, snapshot) < (
+            self.session_exit_grace
+        ):
             return  # long done, or the platform may still be recording the evidence
         if task.subtasks:
             return  # a parent: the evidence is its subtasks'
@@ -278,7 +281,8 @@ class ExitContract:
         age = snapshot.now - task.status_since
         if task.status is Status.ACCEPTED and age <= within:
             return "it was accepted", False, task.status_since
-        if task.status is Status.DONE and self.session_exit_grace <= age <= within:
+        graced = task_awake(task, task.status_since, snapshot) >= self.session_exit_grace
+        if task.status is Status.DONE and graced and age <= within:
             return "it was moved to done", False, task.status_since
         return None
 

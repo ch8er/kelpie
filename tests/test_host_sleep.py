@@ -5,7 +5,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from kelpie.app import _sleep_watch, utc_now
 from kelpie.core.actions import Action
+from kelpie.core.config import EngineConfig
 from kelpie.core.engine import Engine
 from kelpie.core.host_sleep import SleepWatch, merge_sleeps
 from kelpie.core.model import (
@@ -33,22 +35,28 @@ class Clocks:
 
     wall: datetime = T0
     mono: float = 1000.0
+    boot: float = 5000.0
 
     def run(self, d: timedelta) -> None:
         self.wall += d
         self.mono += d.total_seconds()
+        self.boot += d.total_seconds()
 
     def sleep(self, d: timedelta) -> None:
         self.wall += d
+        self.boot += d.total_seconds()
 
     def monotonic(self) -> float:
         return self.mono
+
+    def boottime(self) -> float:
+        return self.boot
 
 
 def test_watch_finds_a_suspend_from_the_clocks() -> None:
     clocks = Clocks()
     found: list[HostSleep] = []
-    watch = SleepWatch(monotonic=clocks.monotonic, on_sleep=found.append)
+    watch = SleepWatch(monotonic=clocks.monotonic, boottime=None, on_sleep=found.append)
     assert watch.observe(clocks.wall) is None  # the first tick has nothing to compare
     clocks.run(30 * timedelta(seconds=1))
     assert watch.observe(clocks.wall) is None
@@ -68,7 +76,7 @@ def test_watch_finds_a_suspend_from_the_clocks() -> None:
 
 def test_watch_ignores_slow_ticks_small_steps_and_backward_jumps() -> None:
     clocks = Clocks()
-    watch = SleepWatch(monotonic=clocks.monotonic, agent="host-b")
+    watch = SleepWatch(monotonic=clocks.monotonic, boottime=None, agent="host-b")
     watch.observe(clocks.wall)
     clocks.run(20 * M)  # a tick stuck in a slow adapter: both clocks ran
     assert watch.observe(clocks.wall) is None
@@ -83,11 +91,25 @@ def test_watch_ignores_slow_ticks_small_steps_and_backward_jumps() -> None:
         SleepWatch(min_gap=timedelta(0))
 
 
+def test_watch_with_a_boot_clock_tells_a_suspend_from_a_clock_step() -> None:
+    clocks = Clocks()
+    watch = SleepWatch(monotonic=clocks.monotonic, boottime=clocks.boottime)
+    watch.observe(clocks.wall)
+    clocks.run(30 * timedelta(seconds=1))
+    clocks.wall += 3 * timedelta(hours=1)  # NTP steps an RTC-less box: no suspend
+    assert watch.observe(clocks.wall) is None
+    clocks.run(30 * timedelta(seconds=1))
+    clocks.sleep(47 * M)
+    sleep = watch.observe(clocks.wall)
+    assert sleep is not None and sleep.length == 47 * M
+    assert watch.sleeps(clocks.wall) == (sleep,)
+
+
 def test_watch_keeps_a_sleep_once_and_survives_a_failing_recorder() -> None:
     def boom(_: HostSleep) -> None:
         raise RuntimeError("disk full")
 
-    watch = SleepWatch(on_sleep=boom)
+    watch = SleepWatch(on_sleep=boom, boottime=None)
     watch.add(SLEEP)
     watch.add(SLEEP)
     assert watch.sleeps(SLEEP.end) == (SLEEP,)
@@ -179,7 +201,7 @@ def test_engine_adds_its_sleeps_to_the_snapshot() -> None:
     clocks = Clocks()
     rule = Seen()
     remote = HostSleep(T0, T0 + 5 * M, agent="host-b")
-    engine = Engine([rule], sleep_watch=SleepWatch(monotonic=clocks.monotonic))
+    engine = Engine([rule], sleep_watch=SleepWatch(monotonic=clocks.monotonic, boottime=None))
     engine.tick(lambda: Snapshot(now=clocks.wall, host_sleeps=(remote,)))
     clocks.run(30 * timedelta(seconds=1))
     clocks.sleep(47 * M)
@@ -189,3 +211,19 @@ def test_engine_adds_its_sleeps_to_the_snapshot() -> None:
     assert len(second.host_sleeps) == 2 and second.host_sleeps[0] == remote
     mine = second.host_sleeps[1]
     assert mine.agent is None and mine.length == 47 * M and mine.end == clocks.wall
+
+
+def test_engine_config_reads_the_min_gap() -> None:
+    assert EngineConfig.from_mapping({}).host_sleep_min_gap == 2 * M
+    assert EngineConfig.from_mapping({"host_sleep_min_gap": "5m"}).host_sleep_min_gap == 5 * M
+    off = EngineConfig.from_mapping({"host_sleep_min_gap": 0})
+    assert off.host_sleep_min_gap == timedelta(0)
+    with pytest.raises(ValueError, match="host_sleep_min_gap"):
+        EngineConfig.from_mapping({"host_sleep_min_gap": -60})
+
+
+def test_the_app_watches_only_the_real_clock() -> None:
+    on = _sleep_watch(EngineConfig(), utc_now)
+    assert on is not None and on.min_gap == 2 * M
+    assert _sleep_watch(EngineConfig(host_sleep_min_gap=timedelta(0)), utc_now) is None
+    assert _sleep_watch(EngineConfig(), lambda: T0) is None  # an injected clock

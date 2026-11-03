@@ -802,9 +802,9 @@ def _no_snoozes() -> Mapping[str, Snooze]:
 @dataclass(frozen=True, slots=True)
 class HostSleep:
     """A stretch when a machine running agents was suspended (a laptop lid closed), issue
-    #296. Found from a wall-clock jump against the monotonic clock between two ticks: the
-    engine's own (``agent`` None: the host ``kelpie serve`` runs on, whose local adapters
-    read their boards on it) or a ``kelpie agent``'s (``agent`` its name). ``start`` and
+    #296. Found from a wall-clock jump against the monotonic clock between two ticks of the
+    engine (``agent`` None: the host ``kelpie serve`` runs on, whose local adapters read
+    their boards on it); ``agent`` names a ``kelpie agent`` whose host slept. ``start`` and
     ``end`` are wall-clock times; where the jump falls inside its tick interval is not
     known, so they are exact in length and placed to within one interval. ``source`` is
     ``clock`` (the jump) or the name of a configured OS wake log."""
@@ -919,9 +919,9 @@ class Snapshot:
     # block reasons, a stored one winning over a marker. Active ones and those that expired
     # within the last 7 days; :func:`active_snooze` tells them apart.
     snoozes: Mapping[str, Snooze] = field(default_factory=_no_snoozes)
-    # Recent stretches when a host running agents slept (issue #296), the engine's own from
-    # its clocks and the agents' from their reports: rules count an age in awake time
-    # (``slept``), so a gap the host slept through raises no stale-session alert.
+    # Recent stretches when a host running agents slept (issue #296), found by the engine
+    # from its clocks: rules count an age in awake time (``slept``), so a gap the host slept
+    # through raises no stale-session alert.
     host_sleeps: tuple[HostSleep, ...] = ()
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
