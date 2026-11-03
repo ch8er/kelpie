@@ -5,9 +5,11 @@ Kelpie is one process, `kelpie serve`. It runs the control loop and serves `/met
 or as a container next to Prometheus and Grafana with docker compose. Both start safe:
 global dry-run on and every rule in `observe` mode, so nothing leaves Kelpie.
 
-Kelpie is pre-alpha. Both ways below build from the repository; once a version is
-released (see [release.md](release.md)), `pipx install kelpie-sre` and the image
-`ghcr.io/ch8er/kelpie:<version>` work too.
+Kelpie is an alpha. Released versions install with `pipx install kelpie-sre` (or
+`pip install kelpie-sre`), and the image is `ghcr.io/ch8er/kelpie:<version>`
+([release.md](release.md#using-a-published-version)); both ways below build from the
+repository, for `main`. Before a farm, read the release notes:
+[CHANGELOG.md](../CHANGELOG.md#before-you-install).
 
 - Configuration reference: [configuration.md](configuration.md)
 - First live run on a Hermes farm: [quickstart-hermes.md](quickstart-hermes.md)
@@ -95,6 +97,10 @@ docker compose --profile local-agents up -d   # also node_exporter, when agents 
 | `grafana` | `127.0.0.1:3000` | Prometheus data source and the **Kelpie** dashboard are provisioned from `deploy/grafana/`. Anonymous access is off. |
 | `node-exporter` | not published | Only with `--profile local-agents`. |
 
+What the dashboard shows, and how to run Prometheus and Grafana without compose (Homebrew
+on macOS, Linux packages): [dashboard.md](dashboard.md). Alerts about Kelpie itself:
+[runbook.md](runbook.md).
+
 Add the agent hosts' node_exporters to `deploy/prometheus/prometheus.yml`. Without the
 `local-agents` profile the `node` job shows as down, which is harmless.
 
@@ -166,10 +172,36 @@ to `[resources.prometheus] hosts`.
 
 **What grows.** The time-to-full alert names the fastest-growing directories when they are
 measured: copy `scripts/kelpie-path-sizes.sh` to `/usr/local/share/kelpie/` and run it every
-15 minutes with node_exporter's textfile directory and the directories that grow (simulator
-devices, Xcode DerivedData, caches, `~/.hermes`, Docker). `deploy/textfile/` has a launchd
-agent (`com.kelpie.path-sizes.plist`, macOS) and a systemd service and timer (Linux): edit the
-paths in them first. Pick a few directories, not the whole disk: `du` walks every file.
+hour with node_exporter's textfile directory and the directories that grow. `deploy/textfile/`
+has a launchd agent (`com.kelpie.path-sizes.plist`, macOS) and a systemd service and timer
+(Linux), both hourly: edit the paths in them first. The disk's own growth alert works without
+this script; the sizes only say what grows, and hourly is enough for that.
+
+Keep it cheap: `du` walks every file of each directory on every run, while builds are
+running. Point it at a few narrow directories that grow:
+
+- simulator devices (`~/Library/Developer/CoreSimulator/Devices`) and Xcode DerivedData
+  (`~/Library/Developer/Xcode/DerivedData`) on macOS;
+- build caches (`~/.cache`, `~/.gradle/caches`, a Bazel output base) and container volumes
+  (`/var/lib/docker/volumes`);
+- system caches (`~/Library/Caches`, `/var/cache`).
+
+Never point it at a worktree root, a whole agent home (`~/.hermes`, `~/.claude`) or the whole
+disk: they hold the agents' worktrees with `node_modules` and build output, hundreds of
+thousands of files, and one run then walks a large part of the disk (on a live farm, every 15
+minutes, at a load average of several hundred). The script has no exclude list (`du` options
+for that differ between macOS and Linux): measure the directories under such a root that grow
+instead. It writes how long each directory took (`kelpie_path_scan_seconds`), and
+`kelpie doctor` warns about one over a minute ("path scans cheap"), naming the directory. If you
+run it more or less often than hourly, set `[resources.prometheus] path_interval` to match.
+
+**What changed.** An outage that starts soon after a toolchain update names the update as
+its likely cause (incident 20: an automatic Xcode update broke every iOS build). Copy
+`scripts/kelpie-toolchain.sh` to `/usr/local/share/kelpie/` and run it every few minutes with
+node_exporter's textfile directory: on macOS it writes the active Xcode and CoreSimulator
+versions; elsewhere, or for other tools, pass `TOOL=COMMAND` arguments (`'node=node
+--version'`). `deploy/textfile/com.kelpie.toolchain.plist` is a launchd agent for it.
+Optional: without it Kelpie names no change.
 
 ## Hermes plugin
 
@@ -256,13 +288,14 @@ with a `pip` install, read them on GitHub.
 | Check | Passes when |
 | --- | --- |
 | config loads | The config parses and every configured rule is known. |
-| rule modes | Lists each mode with its rules and whether `[engine.rules.<name>] mode` or `default_mode` put them there, e.g. `dry_run off; act: loop_breaker (per rule); suggest: needs_you (per rule); observe: 14 rules (default_mode)`. Passes when the rules run as the config says, a deliberate `suggest` or `act` included. WARN when `dry_run = true` holds back rules configured to suggest or act (nothing acts); when a rule in `act` cannot act on this farm, because no adapter or connector carries out its actions (they become alerts) or because the startup check refuses it (`kelpie serve` refuses to start once `dry_run` is off); when `dispatch_gate`, or `conflict_warning` with `serialize`, parks tasks in `act` but `wait_condition` is not in `act` (nothing wakes them, as `kelpie serve` warns at startup); when `dry_run = false` and rules are in `suggest` or `act` but there is no `[[alerts.channels]]` (their alerts, suggestions and action notices are only logged and dropped); or when `act` comes only from `default_mode`. Fails only when `kelpie serve` would refuse to start: `dry_run = false` and a rule in `act` that the startup check refuses. The fixes point to [`act-checklist.md`](act-checklist.md). |
+| rule modes | Lists each mode with its rules and whether `[engine.rules.<name>] mode` or `default_mode` put them there, e.g. `dry_run off; act: loop_breaker (per rule); suggest: needs_you (per rule); observe: 14 rules (default_mode)`. Passes when the rules run as the config says, a deliberate `suggest` or `act` included. WARN when `dry_run = true` holds back rules configured to suggest or act (nothing acts); when a rule in `act` cannot act on this farm, because no adapter or connector carries out its actions (they become alerts) or because the startup check refuses it (`kelpie serve` refuses to start once `dry_run` is off); when a rule in `act` acts on some adapters' tasks but another adapter lacks its actions (there they become alerts); when `dispatch_gate`, or `conflict_warning` with `serialize`, parks tasks in `act` but `wait_condition` is not in `act` (nothing wakes them, as `kelpie serve` warns at startup); when `dry_run = false` and rules are in `suggest` or `act` but there is no `[[alerts.channels]]` (their alerts, suggestions and action notices are only logged and dropped); or when `act` comes only from `default_mode`. Fails only when `kelpie serve` would refuse to start: `dry_run = false` and a rule in `act` that the startup check refuses. The fixes point to [`act-checklist.md`](act-checklist.md). |
 | kanban.db | The Hermes board is readable (skipped without `[adapters.hermes]`). |
 | hooks fire | The spool has a line from the last hour. |
 | OTLP spans arrive | A span arrived in the last hour (skipped if none ever did: OTLP is optional). |
 | worktrees readable | git can read the workspaces of live tasks (skipped with `git_state = false`). |
 | PR blocks have conditions | No block reason on the board names a PR (`PR #12`, `owner/repo#12`, a `/pull/12` link, `#12` next to PR or merge wording; `guard:` blocks are left out), or every one that does matches a `[[block_conditions]]` pattern whose `pr` names a PR of `[connectors.github] repos`, as `kelpie serve` resolves it. Otherwise a WARN: those blocks would look like stuck tasks or questions for a person (on a live farm, most of the noise of a 24 h review). |
 | disk watched | Rule 7 is loaded and `[resources.prometheus]` is set, and that Prometheus has `node_filesystem_size_bytes` for every configured host (FAIL otherwise: incident 19, a disk filled with no node_exporter). WARN, with every cause at once, when the `disk_growth` query fails (when Prometheus rejects it: its subqueries need 2.7 or later), there is no `kelpie_path_bytes` for a host (the alert cannot say what grows) or the token goes over plain http; also when Prometheus does not answer (doctor may run where Prometheus is out of reach). A host with no growth rate yet is a note, not a warning: a new Prometheus or host has none for half of `growth_window`. |
+| path scans cheap | No directory measured by `scripts/kelpie-path-sizes.sh` on a configured host took over 60 s (`kelpie_path_scan_seconds`). WARN otherwise, slowest first with the host: point the script at narrower directories that grow. Skipped without rule 7, Prometheus, an answer or the metric (an older script, or none installed); it reads the metric name as shipped, whatever `[resources.prometheus.queries]` says. |
 | process counts fresh | Every macOS host (`node_uname_info`) among `[resources.prometheus] hosts` has a process count from `scripts/kelpie-process-limit.sh` written in the last 5 minutes. WARN otherwise, with when it was last written: rule 7 ignores an older file, so a stopped script leaves the process limit unwatched (keep the hosts' clocks in sync with Prometheus's). With a custom `processes` query the check judges by that query. Skipped without rule 7, Prometheus, a macOS host or an answer. |
 | claude code task lists | Every list in `[adapters.claude_code] task_lists` is readable (only with that section, like the next three). |
 | claude code hooks fire | The hook's spool has a line from the last hour, from a hook that can enforce stops (unless `stop_dir = false`). |
@@ -270,7 +303,7 @@ with a `pip` install, read them on GitHub.
 | claude code stop markers | `stop_dir` is a writable directory, or can be created. |
 | github ci `<repo>` | One line per repository of `[connectors.github]` (at most 20): which source CI is read from (statuses and check-runs, or the commit's Actions runs where those answer 403), and the permission a 403 means. Probes with the head of the newest pull request (else the newest workflow run; skipped if there is none). `WARN` when commit statuses are refused (Actions cannot see Jenkins, Buildkite or CircleCI). Fails when the Actions runs are refused (`Actions: read`), a rejected token, an organization policy (SAML, IP allow list) or an unknown repository. With `ci_workflows`, a further line `github ci_workflows <repo>` fails for an entry that matches no workflow (or only a disabled one) and warns for a name shared by several files. Only with that section. |
 | github pull requests `<repo>` | Fails with `Pull requests: read` when the pull requests answer 403: conditions read the PR first. Shown only then. |
-| Prometheus reachable | Prometheus answers on `/-/ready` (`--prometheus URL` or `$KELPIE_PROMETHEUS_URL`, else `localhost:9090` is tried and skipped if absent). |
+| Prometheus reachable | Prometheus answers on `/-/ready` (`--prometheus URL` or `$KELPIE_PROMETHEUS_URL`, else `localhost:9090` is tried and skipped if absent). A URL with credentials, a query or a fragment is refused without being printed; a redirect is not followed and fails the check. |
 
 "hooks fire", "claude code hooks fire" and "OTLP spans arrive" are skipped while no task is
 running (in progress, on Claude Code); run doctor while one is. Run it in the directory and with the `KELPIE_DB` that `kelpie serve` uses, because it
@@ -294,6 +327,9 @@ docker compose exec kelpie kelpie doctor --prometheus http://prometheus:9090
 
 `/metrics` and `/healthz` have no authentication. Keep the port on a loopback or private
 address, or put an authenticating proxy in front of it (see [SECURITY.md](../SECURITY.md)).
+Every listener of `kelpie serve` has a header deadline, a cap on connections not yet
+admitted, per-read and whole-body timeouts and a body size limit ([`[server]`](configuration.md#server),
+[security](security.md#listeners)), so a slow or flooding client cannot hold its threads.
 
 ## OTLP token and the exposure check
 

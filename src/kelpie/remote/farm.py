@@ -21,14 +21,16 @@ from typing import Any, Protocol
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import AlertEvent, Did, Transition
 from kelpie.core.executors import Executor
+from kelpie.core.host_sleep import DEFAULT_KEEP as SLEEPS_KEPT
 from kelpie.core.ledger import Outcome as LedgerOutcome
-from kelpie.core.model import Snapshot
+from kelpie.core.model import HostSleep, Snapshot
 from kelpie.core.ports import Alerter, Deferred
 from kelpie.remote.hub import AgentView, Hub
 from kelpie.remote.protocol import (
     TASK_REF_KINDS,
     Outcome,
     ProtocolError,
+    Report,
     WireAction,
     local,
     local_condition_id,
@@ -77,6 +79,7 @@ class _Health:
 
     last_fresh: datetime | None = None
     silent_told: bool = False
+    silent_since: datetime | None = None  # its last fresh report when it went silent
     skew_told: bool = False
 
 
@@ -94,6 +97,9 @@ class RemoteFarm:
     _fresh: set[str] = field(init=False, default_factory=set)
     _budgets: dict[str, _Budget] = field(init=False, default_factory=dict)
     _health: dict[str, _Health] = field(init=False, default_factory=dict)
+    # Sleeps of the agents' hosts (issue #296), kept for a day: a report carries a sleep
+    # only for a while after the wake.
+    _sleeps: dict[str, set[HostSleep]] = field(init=False, default_factory=dict)
     _failing: set[str] = field(init=False, default_factory=set)  # boards told unreadable
 
     def __post_init__(self) -> None:
@@ -115,6 +121,8 @@ class RemoteFarm:
                 continue
             assert report is not None
             fresh.add(view.name)
+            kept = self._sleeps.setdefault(view.name, set())
+            kept.update(HostSleep(a, b, agent=view.name) for a, b in report.sleeps)
             for part in report.adapters:
                 source = f"{view.name}/{part.name}"
                 self._register(view.name, part.name, part.actions)
@@ -170,7 +178,15 @@ class RemoteFarm:
             sessions=tuple(s for p in parts for s in p.sessions),
             spans=tuple(s for p in parts for s in p.spans),
             unobserved=tuple(unobserved),
+            host_sleeps=self._recent_sleeps(now),
         )
+
+    def _recent_sleeps(self, now: datetime) -> tuple[HostSleep, ...]:
+        """The agents' sleeps that ended within a day, by end."""
+        for agent, kept in self._sleeps.items():
+            self._sleeps[agent] = {x for x in kept if now - x.end <= SLEEPS_KEPT}
+        found = (x for kept in self._sleeps.values() for x in kept)
+        return tuple(sorted(found, key=lambda x: (x.end, x.agent or "")))
 
     def _usable(self, view: AgentView, now: datetime) -> bool:
         """Whether the agent's last report may be merged: young enough and from a clock in
@@ -210,6 +226,7 @@ class RemoteFarm:
         silent = not fresh and now - since > settings.silent_after
         if silent and not health.silent_told:
             health.silent_told = True
+            health.silent_since = since
             when = (
                 f"since {health.last_fresh.isoformat(timespec='seconds')}"
                 if health.last_fresh
@@ -226,7 +243,7 @@ class RemoteFarm:
             self._alert(
                 Severity.INFO,
                 f"agent {view.name} silent",
-                f"Agent {view.name} reports again.",
+                f"Agent {view.name} reports again.{_slept(report, health.silent_since)}",
                 transition=Transition.RESOLVED,
             )
         if self.observer is not None:
@@ -379,6 +396,16 @@ def _condition(agent: str, raw: object, others: Iterable[str] = ()) -> dict[str,
         "kind": raw.get("kind"),
         "params": params,
     }
+
+
+def _slept(report: Report | None, silent_since: datetime | None) -> str:
+    """Why an agent was silent, when its host slept during the silence (issue #296)."""
+    if report is None or not report.sleeps:
+        return ""
+    start, end = report.sleeps[-1]
+    if silent_since is not None and end <= silent_since:
+        return ""  # an earlier sleep: not why it was silent
+    return f" Its host slept {_age(end - start)} (until {end.isoformat(timespec='minutes')})."
 
 
 def _age(d: timedelta) -> str:

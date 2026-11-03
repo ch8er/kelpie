@@ -309,7 +309,7 @@ def test_build_rejects_bad_config(config: dict) -> None:
 def test_warns_when_window_is_longer_than_the_traces_window() -> None:
     traces = TraceSettings(window=30 * M)
     [warning] = trace_window_warnings([NoProgress(window=60 * M)], traces)
-    assert "1:00:00" in warning and "0:30:00" in warning and "no_progress" in warning
+    assert "window (1h)" in warning and "window (30m)" in warning and "no_progress" in warning
     assert trace_window_warnings([NoProgress(window=30 * M)], traces) == []
     assert trace_window_warnings([NoProgress(window=60 * M)], TraceSettings(enabled=False)) == []
     assert trace_window_warnings([], traces) == []

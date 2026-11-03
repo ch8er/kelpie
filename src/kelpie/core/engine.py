@@ -29,6 +29,7 @@ from kelpie.core.alerts import (
 from kelpie.core.alerts import Transition as AlertTransition
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
+from kelpie.core.host_sleep import SleepWatch, merge_sleeps
 from kelpie.core.incidents import FOLDED_UNDER, Outage, is_outage_state
 from kelpie.core.ledger import (
     ActionLedger,
@@ -39,7 +40,7 @@ from kelpie.core.ledger import (
     Suppression,
     subject,
 )
-from kelpie.core.model import Snapshot
+from kelpie.core.model import HostSleep, Snapshot
 from kelpie.core.ports import ActionConnector, Alerter, Deferred, PlatformAdapter
 from kelpie.core.rule import Rule
 from kelpie.core.states import MemoryStateStore, OpenState, StateStore, StateTracker, Transition
@@ -99,6 +100,11 @@ class Engine:
     ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
     state_store: StateStore = field(default_factory=MemoryStateStore)
     fallback: bool = True  # route to the only platform adapter when nothing else says where
+    # Finds suspends of this host between ticks (issue #296); its sleeps are added to every
+    # snapshot's ``host_sleeps``. None: no clock watch (tests, one-off evaluations).
+    sleep_watch: SleepWatch | None = None
+    # Stores each host sleep a snapshot carries once (the daily report lists them).
+    sleep_log: Callable[[Sequence[HostSleep]], object] | None = None
     _by_name: dict[str, Rule] = field(init=False, default_factory=dict)
     _detail: str | None = field(init=False, default=None)  # of the action being handled
     ledger: ActionLedger = field(init=False)
@@ -123,6 +129,7 @@ class Engine:
     # While an alert about a state is processed: what it says besides the rule's reason,
     # keyed by the alert's key.
     _transitions: dict[str, _StateNote] = field(init=False, default_factory=dict)
+    _logged: set[tuple[str | None, datetime, datetime]] = field(init=False, default_factory=set)
 
     def __post_init__(self) -> None:
         self.ledger = ActionLedger(
@@ -583,8 +590,31 @@ class Engine:
         return self._alert(action, snapshot, executed=executed, kind=kind, did=did)
 
     def tick(self, snapshot_source: Callable[[], Snapshot]) -> list[Dispatched]:
+        watch = self.sleep_watch
+        if watch is not None:
+            watch.mark()  # the source reads the wall clock first
         snapshot = snapshot_source()
+        if watch is not None:
+            watch.observe(snapshot.now)
+            mine = watch.sleeps(snapshot.now)
+            if mine:
+                snapshot = replace(snapshot, host_sleeps=merge_sleeps(snapshot.host_sleeps, mine))
+        self._log_sleeps(snapshot.host_sleeps)
         return self.execute(self.evaluate(snapshot), snapshot)
+
+    def _log_sleeps(self, sleeps: Sequence[HostSleep]) -> None:
+        if self.sleep_log is None:
+            return
+        new = [s for s in sleeps if (s.agent, s.start, s.end) not in self._logged]
+        if not new:
+            return
+        try:
+            self.sleep_log(new)
+        except Exception:  # the report misses it; the rules still see it
+            log.exception("storing host sleeps failed")
+            return
+        # Only the sleeps a snapshot still carries: one that aged out never comes back.
+        self._logged = {(s.agent, s.start, s.end) for s in sleeps}
 
     def _handle(self, action: Action, mode: Mode, snapshot: Snapshot) -> Outcome:
         if self.config.dry_run:
@@ -821,6 +851,7 @@ def _items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
             _start(since),
             _snooze_note(action.params.get("snooze")),
             _task_ref(action.params.get("snooze_task")),
+            task.board if task is not None else None,
         ),
     )
 
@@ -892,6 +923,7 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
         _start(since),
         _snooze_note(entry.get("snooze")),
         _task_ref(entry.get("snooze_task")),
+        _board(task_id, snapshot),
     )
 
 
@@ -931,6 +963,12 @@ def _count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _board(task_id: str, snapshot: Snapshot) -> str | None:
+    """The board the task is on when an adapter watches several (#283); None otherwise."""
+    task = snapshot.task(task_id)
+    return task.board if task is not None else None
 
 
 def _title(task_id: str, snapshot: Snapshot) -> str | None:

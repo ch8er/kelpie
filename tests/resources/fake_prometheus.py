@@ -26,6 +26,9 @@ def vector(*series: tuple[dict[str, str], str], ts: float = TS) -> dict[str, Any
     }
 
 
+MATRIX: dict[str, Any] = {"status": "success", "data": {"resultType": "matrix", "result": []}}
+
+
 class FakeProm:
     """Answers ``/api/v1/query`` from ``responses`` (PromQL text -> JSON body)."""
 
@@ -66,7 +69,9 @@ class FakeProm:
                     return
                 body = outer.raw
                 if body is None:
-                    body = json.dumps(outer.responses.get(promql, vector())).encode()
+                    # a subquery's answer is a matrix, even an empty one
+                    empty = MATRIX if promql.rstrip().endswith("]") else vector()
+                    body = json.dumps(outer.responses.get(promql, empty)).encode()
                 if outer.drip and outer.drip_headers:
                     self._drip(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n")
                     return

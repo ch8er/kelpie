@@ -25,7 +25,9 @@ launcher assigned) and ``KELPIE_AGENT`` (the agent's name on the farm).
 Task list updates. For a ``TaskUpdate`` tool call the line also carries the task id, the
 status and the owner the session set (``task``, ``task_status``, ``task_owner``), never the
 subject or description: that is how Kelpie knows which task a session works on and what it
-declared at the end.
+declared at the end. For a ``Skill`` call it carries the skill's name (``skill``, with its
+plugin's as ``plugin:name``), so Kelpie
+can count how often each skill is loaded (the instruction files' tokens a day).
 
 Stop. Kelpie stops a session by writing ``<stop dir>/<session_id>.json`` (``stop_dir``,
 default ``~/.claude/kelpie/stop``). While that marker holds (``KELPIE_CLAUDE_STOP_TTL``,
@@ -76,9 +78,13 @@ MAX_REASON = 500
 FUTURE_SKEW = 300  # seconds; a marker dated further ahead is ignored
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # used with fullmatch
 # Spool format version, in every line. 1: the hook enforces stop markers (PreToolUse).
-HOOK_VERSION = 1
+# 2: ``Skill`` calls carry the skill's name.
+HOOK_VERSION = 2
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 TASK_TOOL = "TaskUpdate"
+SKILL_TOOL = "Skill"
+# A skill's name, optionally after its plugin's (``plugin:name``); used with fullmatch.
+_SKILL_NAME = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}:)?[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 TASK_STATUSES = frozenset({"pending", "in_progress", "completed", "deleted"})
 
 EVENTS = {
@@ -385,6 +391,18 @@ def _task_update(args: Any) -> dict[str, str | None]:
     }
 
 
+def _skill(args: Any) -> str | None:
+    """The name of the skill a ``Skill`` call loads (``name``, or ``plugin:name`` for a
+    plugin's skill), never its arguments; None when it is not a skill name."""
+    if not isinstance(args, dict):
+        return None
+    name = args.get("skill", args.get("command"))  # older Claude Code: "command"
+    if not isinstance(name, str):
+        return None
+    name = name.strip().removeprefix("/")
+    return name if _SKILL_NAME.fullmatch(name) else None
+
+
 PROC = Path("/proc")
 CLAUDE_NAMES = ("claude",)  # process names of Claude Code (Linux /proc/<pid>/comm)
 MAX_ANCESTORS = 4
@@ -520,6 +538,8 @@ def record(data: dict[str, Any], now: float | None = None) -> dict[str, Any] | N
         )
         if tool == TASK_TOOL and not failed:
             rec.update(_task_update(args))
+        if tool == SKILL_TOOL and not failed:
+            rec["skill"] = _skill(args)
     elif kind == "turn_end":
         rec["error"] = _id(data.get("error")) if event == "StopFailure" else None
     elif kind == "session_end":

@@ -138,7 +138,7 @@ def test_a_missing_key_stops_the_start(tmp_path: Path, monkeypatch: pytest.Monke
 def test_status_describes_the_providers_without_the_key(tmp_path: Path) -> None:
     settings = settings_from(tmp_path, toml())
     text = render_status(settings, load_rules(settings.engine))
-    assert "providers: main (headers http://127.0.0.1:9/v1/models, every 0:05:00)" in text
+    assert "providers: main (headers http://127.0.0.1:9/v1/models, every 5m)" in text
     assert KEY not in text
 
 
@@ -158,7 +158,7 @@ def test_warns_when_the_probe_interval_outlasts_the_reading_age(tmp_path: Path) 
     settings = settings_from(tmp_path, toml(extra='interval = "15m"'))
     loaded = load_rules(settings.engine)
     (warning,) = provider_interval_warnings(loaded.rules, settings.llm_quotas)
-    assert "provider main interval (0:15:00)" in warning
+    assert "provider main interval (15m)" in warning
     fine = settings_from(tmp_path, toml())
     assert provider_interval_warnings(load_rules(fine.engine).rules, fine.llm_quotas) == []
     assert provider_interval_warnings(loaded.rules, None) == []

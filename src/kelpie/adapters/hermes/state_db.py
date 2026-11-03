@@ -28,6 +28,14 @@ command only waits, the time until its own result message (at most the ``sleep``
 when it only sleeps); otherwise the ``sleep`` arguments alone, or unknown. Only that shape
 and bucket are kept, never the command's other words or values, so the hooks spool's
 redaction still holds.
+
+**Skill loads** (issue #282, rule ``instruction_bloat``). A ``skill_view`` call that opens a
+skill's ``SKILL.md`` (no ``file_path``, or ``SKILL.md`` itself; a linked reference file is
+not the skill) becomes a :class:`Load`: the skill's name as the call gave it (its
+directory, with the categories above it when named: ``dev/release-notes``) and when. Calls
+are counted once in the same way as waits. A ``skill_view`` whose name Kelpie cannot read,
+or a profile with more sessions than ``MAX_SESSIONS`` in the window, makes the count
+incomplete: then no loads are reported at all.
 """
 
 from __future__ import annotations
@@ -109,6 +117,16 @@ class Wait:
 
 
 @dataclass(frozen=True, slots=True)
+class Load:
+    """One ``skill_view`` of a skill in a Hermes session (its name only)."""
+
+    profile: str
+    session: str  # Hermes' session id in that profile's state.db
+    at: datetime
+    skill: str
+
+
+@dataclass(frozen=True, slots=True)
 class Usage:
     """Token usage of one Hermes session and model, as ``state.db`` totals it."""
 
@@ -177,6 +195,92 @@ def read_usage(
         except Exception as exc:  # whatever a database holds must not stop the board's read
             warn_once((str(path), "usage"), "hermes: cannot read usage in %s: %s", path, exc)
     return usage
+
+
+def read_skill_loads(
+    home: Path, since: datetime, sources: Collection[str] = DEFAULT_SOURCES
+) -> list[Load] | None:
+    """The skills opened (``skill_view``) in sessions of every profile active since
+    ``since``, at or after it. None when nothing was counted: no ``state.db``, or one could
+    not be read (its loads would be missing, and a missing load reads as none)."""
+    dbs = state_dbs(home)
+    if not dbs:
+        return None
+    loads: list[Load] = []
+    for profile, path in dbs:
+        try:
+            found = _read_loads(profile, path, since, sources)
+        except Exception as exc:  # whatever a database holds must not stop the board's read
+            warn_once((str(path), "loads"), "hermes: cannot read skill loads in %s: %s", path, exc)
+            return None
+        if found is None:
+            return None
+        loads += found
+    return loads
+
+
+def _read_loads(
+    profile: str, path: Path, since: datetime, sources: Collection[str]
+) -> list[Load] | None:
+    """The loads of one profile; None when they cannot all be counted."""
+    conn = sqlite3.connect(
+        path.resolve().as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000
+    )
+    try:
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA query_only=1")
+        conn.execute("BEGIN")
+        start = since.timestamp()
+        sessions = _sessions(conn, start, sources)
+        if len(sessions) >= MAX_SESSIONS:
+            warn_once((str(path), "loads-cap"), "hermes: skill loads in %s not counted: "
+                      "over %d sessions a day", path, MAX_SESSIONS)  # fmt: skip
+            return None
+        rows = _tool_call_rows(conn, sessions, start)
+    finally:
+        conn.close()
+    seen: set[object] = set()
+    out = []
+    for sid, at, raw in rows:
+        views = _skill_views(raw)
+        if views is None:
+            warn_once((str(path), "loads-name"), "hermes: skill loads in %s not counted: a "
+                      "skill_view names no skill Kelpie can read", path)  # fmt: skip
+            return None
+        for call_id, skill in views:
+            key: object = (call_id.split("|", 1)[0], at) if call_id else (sid, at, skill)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(Load(profile, sid, datetime.fromtimestamp(at, UTC), skill))
+    return out
+
+
+SKILL_TOOL = "skill_view"
+SKILL_FILE = "SKILL.md"
+MAX_SKILL = 128  # characters of a skill name; a longer one is not counted
+# A skill name, with the categories above it: parts of letters, digits, ".", "_", "-", none
+# of them starting with a dot (no "..").
+_SKILL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
+
+
+def _skill_views(raw: Any) -> list[tuple[str, str]] | None:
+    """``(tool call id, skill name)`` of the ``skill_view`` calls in a message's
+    ``tool_calls`` that open a skill's own ``SKILL.md``; None when one names its skill in a
+    way Kelpie cannot read (a load it would miss)."""
+    out = []
+    for call_id, args in _calls(raw, SKILL_TOOL):
+        file_path = args.get("file_path")
+        if file_path not in (None, "", SKILL_FILE):
+            continue  # a reference file linked from the skill, not the skill
+        name = args.get("name")
+        if not isinstance(name, str) or len(name) > MAX_SKILL:
+            return None
+        skill = name.strip().strip("/")
+        if not _SKILL_NAME.fullmatch(skill):
+            return None
+        out.append((call_id, skill))
+    return out
 
 
 MAX_COUNT = 2**53  # a count beyond this is corrupt: Hermes' own bound
@@ -372,6 +476,28 @@ def _wait_calls(
 ) -> list[tuple[str, float, str, Shape]]:
     """``(session, at, call key, shape)`` of the terminal calls that wait, oldest first,
     each once (compaction copies a call; a compressed session's child carries it too)."""
+    rows = _tool_call_rows(conn, sessions, start)
+    seen: set[object] = set()
+    out = []
+    for sid, at, raw in rows:
+        for call_id, cmd in _terminal_commands(raw):
+            # A copy keeps the original's id and time; ids alone repeat (Hermes derives a
+            # missing one from the call's name and arguments). A Codex call's composite id
+            # ("call_x|fc_y") is kept whole only on the call.
+            key: object = (call_id.split("|", 1)[0], at) if call_id else (sid, at, cmd)
+            if key in seen:
+                continue
+            seen.add(key)
+            if (shape := wait_shape(cmd)) is not None:
+                out.append((sid, at, call_id, shape))
+    return out
+
+
+def _tool_call_rows(
+    conn: sqlite3.Connection, sessions: Collection[str], start: float
+) -> list[tuple[str, float, Any]]:
+    """``(session, at, tool_calls)`` of the assistant messages with tool calls of
+    ``sessions`` since ``start``, oldest first; a rewound message is left out."""
     live = ""
     if {"active", "compacted"} <= _columns(conn, "messages"):
         live = " AND NOT (active = 0 AND compacted = 0)"  # a rewound turn did not happen
@@ -387,20 +513,7 @@ def _wait_calls(
             if (when := _epoch(at)) is not None:
                 rows.append((str(sid), when, raw))
     rows.sort(key=lambda r: (r[1], r[0]))
-    seen: set[object] = set()
-    out = []
-    for sid, at, raw in rows:
-        for call_id, cmd in _terminal_commands(raw):
-            # A copy keeps the original's id and time; ids alone repeat (Hermes derives a
-            # missing one from the call's name and arguments). A Codex call's composite id
-            # ("call_x|fc_y") is kept whole only on the call.
-            key: object = (call_id.split("|", 1)[0], at) if call_id else (sid, at, cmd)
-            if key in seen:
-                continue
-            seen.add(key)
-            if (shape := wait_shape(cmd)) is not None:
-                out.append((sid, at, call_id, shape))
-    return out
+    return rows
 
 
 def _result_at(conn: sqlite3.Connection, sid: str, at: float, call_id: str) -> float | None:
@@ -431,6 +544,19 @@ def _chunks(items: Sequence[str]) -> Iterator[Sequence[str]]:
 def _terminal_commands(raw: Any) -> list[tuple[str, str]]:
     """``(tool call id, command)`` of the foreground terminal calls in a message's
     ``tool_calls`` (OpenAI's shape, ``{"function": {"name", "arguments"}}``, or flat)."""
+    out = []
+    for call_id, args in _calls(raw, TERMINAL_TOOL):
+        if args.get("background"):
+            continue  # a background command does not hold the session
+        cmd = args.get("command")
+        if isinstance(cmd, str) and cmd.strip() and len(cmd) <= MAX_COMMAND:
+            out.append((call_id, cmd))
+    return out
+
+
+def _calls(raw: Any, tool: str) -> list[tuple[str, dict[str, Any]]]:
+    """``(tool call id, arguments)`` of the calls of ``tool`` in a message's ``tool_calls``
+    (OpenAI's shape, ``{"function": {"name", "arguments"}}``, or flat)."""
     if isinstance(raw, str | bytes) and len(raw) > MAX_TOOL_CALLS:
         return []
     try:
@@ -444,7 +570,7 @@ def _terminal_commands(raw: Any) -> list[tuple[str, str]]:
         if not isinstance(call, dict):
             continue
         fn = call.get("function") if isinstance(call.get("function"), dict) else call
-        if fn.get("name") != TERMINAL_TOOL:
+        if fn.get("name") != tool:
             continue
         args = fn.get("arguments")
         if isinstance(args, str):
@@ -454,12 +580,9 @@ def _terminal_commands(raw: Any) -> list[tuple[str, str]]:
                 args = json.loads(args)
             except (ValueError, RecursionError):
                 continue
-        if not isinstance(args, dict) or args.get("background"):
-            continue  # a background command does not hold the session
-        cmd = args.get("command")
-        if isinstance(cmd, str) and cmd.strip() and len(cmd) <= MAX_COMMAND:
+        if isinstance(args, dict):
             # Hermes pairs a result with call_id first, then id.
-            out.append((str(call.get("call_id") or call.get("id") or ""), cmd))
+            out.append((str(call.get("call_id") or call.get("id") or ""), args))
     return out
 
 

@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kelpie.core.files import prepare_db
+
 log = logging.getLogger(__name__)
 
 MANUAL, CONFIG, MODE, FILTER = "manual", "config", "mode", "filter"
@@ -63,6 +65,7 @@ class FixStore:
     """Writer for ``kelpie fix`` and ``kelpie serve``; one short transaction per call."""
 
     def __init__(self, path: Path | str) -> None:
+        prepare_db(path)
         self._db = sqlite3.connect(str(path))
         self._db.execute("PRAGMA busy_timeout = 5000")
         self._db.executescript(_SCHEMA)

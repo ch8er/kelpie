@@ -14,6 +14,7 @@ from kelpie.app import (
     ConfigError,
     ControlLoop,
     Settings,
+    _span,
     build_app,
     dispatch_gate_warnings,
     find_config,
@@ -287,11 +288,30 @@ def test_render_status_lists_rules_with_modes() -> None:
     assert "warning: rule 'beta' is planned but not implemented yet" in text
 
 
+@pytest.mark.parametrize(
+    ("duration", "text"),
+    [
+        (timedelta(0), "0s"),
+        (timedelta(seconds=1.5), "1.5s"),
+        (timedelta(seconds=45), "45s"),
+        (timedelta(seconds=90), "90s"),
+        (timedelta(minutes=30), "30m"),
+        (timedelta(hours=36), "36h"),
+        (timedelta(days=7), "7d"),
+    ],
+)
+def test_span_writes_durations_as_the_config_does(duration: timedelta, text: str) -> None:
+    assert _span(duration) == text
+
+
 def test_cli_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path = write(tmp_path, '[engine.rules.stale_blocks]\nmode = "suggest"\n')
     assert main(["--config", str(path), "status"]) == 0
     out = capsys.readouterr().out
     assert "stale_blocks" in out and "loop_breaker" in out
+    # durations as the config writes them, not as timedeltas
+    assert "interval: 30s\n" in out
+    assert ", window 30m, retention 7d" in out
 
 
 def test_cli_rejects_unknown_rule(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -452,9 +472,9 @@ def test_a_silent_gap_before_rule_13_lists_a_wait_is_logged(
     }
     with caplog.at_level("WARNING"):
         load_rules(EngineConfig(rules=rules))
-    assert "needs_you.human_wait_alert_after (1 day, 6:00:00) is longer than" in caplog.text
-    assert "wait_condition.max_wait (1 day, 0:00:00)" in caplog.text
-    assert "a wait on a person's task is announced by neither rule for 6:00:00" in caplog.text
+    assert "needs_you.human_wait_alert_after (30h) is longer than" in caplog.text
+    assert "wait_condition.max_wait (1d)" in caplog.text
+    assert "a wait on a person's task is announced by neither rule for 6h" in caplog.text
     caplog.clear()
     with caplog.at_level("WARNING"):
         modes = {"wait_condition": Mode.SUGGEST}
@@ -475,10 +495,10 @@ def test_a_silent_gap_between_rule_13s_waits_and_rule_4s_is_logged(
     }
     with caplog.at_level("WARNING"):
         load_rules(EngineConfig(rules=rules))
-    assert "needs_you.approval_wait_after (6:00:00) is longer than" in caplog.text
-    assert "stale_blocks.unlinked_alert_after (4:00:00)" in caplog.text
-    assert "for 2:00:00 in between" in caplog.text
-    assert "needs_you.human_wait_alert_after (10:00:00)" in caplog.text
+    assert "needs_you.approval_wait_after (6h) is longer than" in caplog.text
+    assert "stale_blocks.unlinked_alert_after (4h)" in caplog.text
+    assert "for 2h in between" in caplog.text
+    assert "needs_you.human_wait_alert_after (10h)" in caplog.text
     caplog.clear()
     with caplog.at_level("WARNING"):
         load_rules(EngineConfig())

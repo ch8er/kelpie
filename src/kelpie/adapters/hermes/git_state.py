@@ -61,6 +61,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from kelpie.adapters._spool import open_regular
+
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 5.0  # seconds, per git call
@@ -96,6 +98,7 @@ MAX_ERR_CHARS = 4096  # stderr kept per call
 # Output is decoded as it is read, so these count characters (up to 4 bytes each).
 MAX_STATUS_CHARS = 8 << 20  # status output read per workspace (beyond: counts are lower bounds)
 MAX_DIFF_CHARS = 2 << 20  # diff-tree output read per merge-base
+MAX_POINTER = 4096  # bytes read of a .git file, commondir or gitdir
 MAX_BASES = 3  # merge-bases compared when the history has several
 
 _OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -397,8 +400,7 @@ def common_dir(path: Path) -> str | None:
                 return None  # would make git read objects and refs from elsewhere
             common = dotgit.resolve()
             return str(common) if _self_contained(common) else None
-        with dotgit.open("rb") as f:
-            raw = f.read(4096).decode("utf-8", "replace").strip()
+        raw = _read_small(dotgit)
         if not raw.startswith("gitdir:"):
             return None
         gitdir = Path(raw.removeprefix("gitdir:").strip())
@@ -409,10 +411,10 @@ def common_dir(path: Path) -> str | None:
         workspace = path.resolve()
         if common == workspace or workspace in common.parents:
             return None  # a fake repository inside the workspace itself
-        rel = Path((gitdir / "commondir").read_text("utf-8", "replace").strip())
+        rel = Path(_read_small(gitdir / "commondir"))
         if (rel if rel.is_absolute() else gitdir / rel).resolve() != common:
             return None
-        back = Path((gitdir / "gitdir").read_text("utf-8", "replace").strip())
+        back = Path(_read_small(gitdir / "gitdir"))
         if (back if back.is_absolute() else gitdir / back).resolve() != dotgit.resolve():
             return None
         if (gitdir / "HEAD").is_symlink() or not _self_contained(common):
@@ -420,6 +422,17 @@ def common_dir(path: Path) -> str | None:
         return str(common)
     except (OSError, ValueError):
         return None
+
+
+def _read_small(path: Path) -> str:
+    """The stripped text of a small regular file the agent may have written (``.git``,
+    ``commondir``, ``gitdir``): never through a symlink, never blocking on a FIFO, at most
+    :data:`MAX_POINTER` bytes. Raises OSError otherwise."""
+    fd = open_regular(path)
+    try:
+        return os.read(fd, MAX_POINTER).decode("utf-8", "replace").strip()
+    finally:
+        os.close(fd)
 
 
 def _self_contained(common: Path) -> bool:

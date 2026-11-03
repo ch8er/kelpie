@@ -10,73 +10,17 @@ no LLM in the loop, and every rule starts observe-only until you let it act.
 pip install kelpie-sre && kelpie demo
 ```
 
-> **Pre-release.** Kelpie is not on PyPI yet; the first alpha (0.1.0a1) follows a security
-> audit. Until then install from source: `pip install git+https://github.com/ch8er/kelpie`.
+`pip install kelpie-sre` installs the first alpha, 0.1.0a1: read
+[its release notes](https://github.com/ch8er/kelpie/blob/main/CHANGELOG.md#before-you-install)
+before you run it on a farm. For the latest `main`:
+`pip install git+https://github.com/ch8er/kelpie`.
 
 `kelpie demo` runs a simulated farm on your machine and shows Kelpie finding and fixing its
 problems. No farm, accounts or keys needed; Python 3.12 or newer. It replays a working day
 of real farm incidents on a simulated Hermes board, offline, then prints that day's report
-(`--web` also opens it as a web page, `--keep` keeps the farm and the full report). An
-excerpt:
+(`--web` also opens it as a web page, `--keep` keeps the farm and the full report):
 
-```console
-$ kelpie demo
-Kelpie demo: one working day on a simulated agent farm
-...
-── 2. A runaway loop ─────────────────────────────────────────────────────────
-...
-10:00  ops starts t_heartbeat. Every 30 seconds it calls the model, resending
-       80k tokens of context, and runs `heartbeat_check`.
-10:05  Kelpie notices (loop_breaker): identical consecutive calls, past the
-       limit.
-       ┌ alert, as Telegram shows it
-       │ 🔴 Runaway run on t_heartbeat: 10 identical consecutive
-       │ `heartbeat_check` calls
-       │ 
-       │ 1. Nightly maintenance heartbeat · t_heartbeat
-       │ Why: Runaway run: session hermes-run-4 (agent ops, task t_heartbeat)
-       │ made 10 identical consecutive `heartbeat_check` calls (limit 8 within
-       │ 10 minutes). Check the task before resuming it.
-       │ Kelpie did: Stopped run hermes-run-4; task t_heartbeat is blocked for
-       │ a human (hermes kanban unblock t_heartbeat); Kelpie did not end its
-       │ worker (the board records no worker process for the run).
-       │ Rule: loop_breaker
-       └
-10:05  Kelpie ran `hermes kanban block --kind needs_input -- t_heartbeat ...`:
-       t_heartbeat is blocked.
-       observe  records "stop run hermes-run-4"; the loop keeps burning tokens
-                until someone looks.
-       suggest  sends the alert, ending "Suggested: stop run hermes-run-4 (not
-                done, rule in suggest mode)."; the loop runs until a person
-                stops it.
-       act      stops the run through the platform (above) and says so: one
-                critical message, to every channel.
-
-       The stop came after 10 model calls: 0.8M tokens, $2.44 ($3 per million
-       input tokens, $15 per million output). Left alone for a night like on
-       that farm (900 calls) it is 72M input tokens, about $216.
-...
-── 5. The daily report: cost of chaos ────────────────────────────────────────
-Tokens burned counts the model calls of a stuck or looping session after
-Kelpie reported it. Kelpie stopped the runaway in that same tick, so nothing
-burned here; its calls before the stop are in the day's spend.
-
-$ kelpie report --date 2026-03-03
-
-Cost of chaos: 4.5 hours lost, $0.00 in 0 tokens burned + $11.25 in stuck
-hours. 5 tasks completed, $0.49 per completed task.
-
-...
-## Fixed by Kelpie
-
-- `loop_breaker`: stop x1 `t_heartbeat`
-
-Would have done in act mode (observe, suggest or dry-run):
-
-- `stale_blocks`: unblock x1 `t_review` (act mode is not available here:
-  Hermes can't clear blocks yet)
-...
-```
+![Recording of kelpie demo --fast: on a simulated Hermes farm Kelpie flags a block that outlived its cause, stops a runaway heartbeat loop after 10 identical calls, flags a forgotten merge hold and a human task gating five agent tasks, then prints the day's cost-of-chaos report](https://raw.githubusercontent.com/ch8er/kelpie/main/docs/assets/demo.svg)
 
 > **Alpha (0.1.0a1).** Config and storage formats may still change. Kelpie starts safe:
 > global dry-run on and every rule in `observe` mode, so it changes nothing until you let
@@ -104,6 +48,28 @@ stops.
 Kelpie also measures whether a fix worked. After one manual fix on that farm, review time
 dropped from 48 to 27 minutes and review failures from 9 of 29 to 1 of 11; the daily report
 now computes that before/after for every fix it knows about.
+
+## On a live farm
+
+Kelpie runs on that farm, mostly in observe mode. Measured there so far:
+
+- **A stop on macOS:** `kelpie selftest stop` on the farm's Mac stopped a looping test run
+  after 11 identical calls; its worker ended 0.0 s after SIGTERM and no model call followed
+  ([#231](https://github.com/ch8er/kelpie/issues/231#issuecomment-6479214426)). Before the
+  macOS backend, a stopped worker ran on for about 3 minutes.
+- **A ~12 h toolchain outage (incident 20):** to Kelpie it looked like seven independent
+  human waits; the report showed 221.5 h of "needs you" and 83.4 h of stale blocks. Kelpie
+  now reports a block storm, CI jobs that never start and correlated tool failures as one
+  outage; the report side is in progress ([#229](https://github.com/ch8er/kelpie/issues/229)).
+- **A token baseline:** 210.4M tokens in 24 h, 92% cache reads, 8.1M per completed task,
+  and 97 `sleep` calls inside sessions, which `wait_condition` now flags
+  ([#197](https://github.com/ch8er/kelpie/issues/197#issuecomment-6278901109)).
+- **Before/after of three fixes made within 72 minutes**, direction only (one farm, small
+  samples): tasks closed per active hour 2.0 → 4.1–4.8, returns per closed task 0.50 →
+  0.26–0.32, sessions ending failed or without a status 17–21% → 1–9%
+  ([#193](https://github.com/ch8er/kelpie/issues/193)).
+
+Every incident and what it cost: the [incident table](https://github.com/ch8er/kelpie/blob/main/docs/plan.md#requirements-from-a-real-farm).
 
 ## Quickstart
 
@@ -256,6 +222,10 @@ cp .env.example .env   # set GRAFANA_ADMIN_PASSWORD
 docker compose up      # Kelpie, Prometheus and Grafana with Kelpie's dashboard
 ```
 
+**Dashboard:** every metric on one Grafana dashboard, plus Prometheus alerts about Kelpie
+itself; with or without compose (Homebrew on macOS):
+[dashboard](https://github.com/ch8er/kelpie/blob/main/docs/dashboard.md).
+
 ## How it works
 
 - **A snapshot, then rules.** Every 30 seconds Kelpie builds one immutable snapshot of the
@@ -307,6 +277,7 @@ The incidents behind each rule, the design and the daily report in full:
 - [How Kelpie works](https://github.com/ch8er/kelpie/blob/main/docs/guide.md): rules, daily report, alerts, traces, budgets
 - [Install and run](https://github.com/ch8er/kelpie/blob/main/docs/install.md): uv, Docker, `kelpie doctor`, ports, tokens, data
 - [Several machines](https://github.com/ch8er/kelpie/blob/main/docs/deploy.md): `kelpie agent` on each, a central `kelpie serve` (laptop + cloud VM, two VMs)
+- [Dashboard and alerts](https://github.com/ch8er/kelpie/blob/main/docs/dashboard.md): Grafana and Prometheus with or without docker compose; the [runbook](https://github.com/ch8er/kelpie/blob/main/docs/runbook.md)
 - [Configuration reference](https://github.com/ch8er/kelpie/blob/main/docs/configuration.md): every section, rule and threshold
 - Quickstarts: [Hermes](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md), [Claude Code](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md), [OpenClaw](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-openclaw.md), [GitHub Issues](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-github-issues.md);
   the [observe-to-act checklist](https://github.com/ch8er/kelpie/blob/main/docs/act-checklist.md)

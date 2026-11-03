@@ -12,6 +12,7 @@ from kelpie.core.conditions import linked_conditions
 from kelpie.core.model import (
     Condition,
     ConditionKind,
+    HostSleep,
     KelpieMark,
     OwnerKind,
     PullRequest,
@@ -19,6 +20,8 @@ from kelpie.core.model import (
     Snapshot,
     Status,
     Task,
+    slept,
+    source_agent,
 )
 
 __all__ = ["linked_conditions"]  # defined in kelpie.core.conditions, re-exported for rules
@@ -248,8 +251,50 @@ def last_seen(session: Session) -> datetime:
     return session.ended_at or session.last_heartbeat or session.started_at
 
 
-def is_live(session: Session, now: datetime, stale_after: timedelta = DEFAULT_STALE_AFTER) -> bool:
-    return session.ended_at is None and now - last_seen(session) < stale_after
+def is_live(
+    session: Session,
+    now: datetime,
+    stale_after: timedelta = DEFAULT_STALE_AFTER,
+    sleeps: Sequence[HostSleep] = (),
+) -> bool:
+    """Open and heard from within ``stale_after`` of awake time: a gap its host slept
+    through (``sleeps``, ``Snapshot.host_sleeps``) does not make a session stale."""
+    if session.ended_at is not None:
+        return False
+    seen = last_seen(session)
+    return awake(seen, now, sleeps, source_agent(session.source)) < stale_after
+
+
+def awake(
+    since: datetime, now: datetime, sleeps: Sequence[HostSleep], agent: str | None = None
+) -> timedelta:
+    """The time from ``since`` to ``now`` that ``agent``'s host (None: the server's own) was
+    awake: an age that does not grow while the host sleeps (issue #296)."""
+    if not sleeps or since >= now:
+        return now - since
+    return now - since - slept(sleeps, since, now, agent)
+
+
+def task_agent(task: Task) -> str | None:
+    """The ``kelpie agent`` whose board holds the task; None for a local board."""
+    return source_agent(task.source)
+
+
+def task_awake(task: Task, since: datetime, snapshot: Snapshot) -> timedelta:
+    """The awake time since ``since`` on the host of the task's board."""
+    return awake(since, snapshot.now, snapshot.host_sleeps, task_agent(task))
+
+
+def slept_since(session: Session, snapshot: Snapshot, bar: timedelta) -> HostSleep | None:
+    """The sleep of the session's host that it ended in, if any: the first sleep after its
+    last sign of life that began less than ``bar`` of awake time after it (before the host
+    slept, Kelpie would not yet have called it over)."""
+    seen, agent = last_seen(session), source_agent(session.source)
+    sleeps = snapshot.host_sleeps
+    for s in sorted(sleeps, key=lambda s: s.start):
+        if s.agent == agent and s.end > seen and awake(seen, s.start, sleeps, agent) < bar:
+            return s
+    return None
 
 
 def live_session(
@@ -257,7 +302,11 @@ def live_session(
 ) -> Session | None:
     """A session currently working on the task, if any."""
     return next(
-        (s for s in snapshot.sessions_for(task_id) if is_live(s, snapshot.now, stale_after)),
+        (
+            s
+            for s in snapshot.sessions_for(task_id)
+            if is_live(s, snapshot.now, stale_after, snapshot.host_sleeps)
+        ),
         None,
     )
 
@@ -339,7 +388,7 @@ def last_exit(
     """The task's most recent session if it is over; None if a session is live or none ran."""
     exits: list[Exit] = []
     for s in snapshot.sessions_for(task.id):
-        if is_live(s, snapshot.now, stale_after):
+        if is_live(s, snapshot.now, stale_after, snapshot.host_sleeps):
             return None
         exits.append(Exit(s, last_seen(s), silent=s.ended_at is None))
     return max(exits, key=lambda e: (e.at, e.session.started_at), default=None)

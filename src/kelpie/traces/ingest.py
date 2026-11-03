@@ -254,12 +254,16 @@ class _TooLarge(ValueError):
     pass
 
 
+MAX_GZIP_MEMBERS = 64  # exporters send one; many tiny members would cost quadratic CPU
+
+
 def _gunzip(body: bytes, limit: int) -> bytes:
-    """Decompress a gzip body (all members) without ever holding more than ``limit``
-    bytes. Data after the last member that is not gzip is an error."""
+    """Decompress a gzip body (at most :data:`MAX_GZIP_MEMBERS` members) without ever
+    holding more than ``limit`` bytes. Data after the last member that is not gzip is an
+    error."""
     out = bytearray()
     data = body
-    while True:
+    for _ in range(MAX_GZIP_MEMBERS):
         inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
         out += inflater.decompress(data, limit + 1 - len(out))
         if len(out) > limit:
@@ -269,6 +273,7 @@ def _gunzip(body: bytes, limit: int) -> bytes:
         data = inflater.unused_data
         if not data:
             return bytes(out)
+    raise ValueError("too many gzip members")
 
 
 def _error(status: int, encoding: str, code: int, message: str, close: bool = True) -> Reply:

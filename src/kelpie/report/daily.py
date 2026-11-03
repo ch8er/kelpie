@@ -89,6 +89,10 @@ by dollars and the best by hours.
 task-hours waiting for conditions, with a suggestion (:mod:`kelpie.report.waits`); a known
 cause also competes for the top 3.
 
+**Per board** (#283). With several boards (``[[adapters.hermes.boards]]``), the cost of
+chaos, tasks completed and biggest wait of each board beside the farm total
+(:mod:`kelpie.report.boards`); nothing for one board.
+
 **Sections.** Analyses registered in :mod:`kelpie.report.sections` (token optimization,
 ...) add their own section after the top 3, and their advice competes for it; they follow
 the same rules: pure, deterministic, no clock and no LLM.
@@ -121,6 +125,9 @@ from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Outcome, Suppression
 from kelpie.core.model import (
     Condition,
     Dependency,
+    HostSleep,
+    InstructionDuplicate,
+    InstructionFile,
     Owner,
     OwnerKind,
     Reconciliation,
@@ -144,7 +151,9 @@ from kelpie.core.spans import (
 )
 from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
+from kelpie.core.storage import TokenRow
 from kelpie.report import farm, intervals, md
+from kelpie.report.boards import BoardLine, board_lines, rest_line
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.fixes import FixEvent
 from kelpie.report.sections import (
@@ -350,6 +359,8 @@ class ReportInputs:
     stuck_check: StuckCheck | None = None
     # Rules that cannot act on this farm, with what is missing (``kelpie.app.act_blockers``).
     act_blockers: Mapping[str, str] = field(default_factory=dict)
+    # Rules that act here, but not on every adapter's tasks (``kelpie.app.act_gaps``).
+    act_gaps: Mapping[str, str] = field(default_factory=dict)
     farm: FarmFacts = UNKNOWN_FARM  # what the farm already has: advice never repeats it
     # Providers' bills against the estimate from traces (``kelpie.app.read_reconciliations``,
     # for one settled UTC day: ``kelpie.report.run.bill_days``); a string says why they
@@ -358,6 +369,20 @@ class ReportInputs:
     bill_day: date | None = None  # the UTC day checked, when cost reports are configured
     # Stored snoozes that ended after the day began (#176): deliberate waits, not chaos.
     snoozes: Sequence[Snooze] = ()
+    # Stretches the farm's hosts slept that overlap the day (issue #296): listed apart,
+    # never counted as hours lost.
+    host_sleeps: Sequence[HostSleep] = ()
+    # The ``kelpie agent``s whose boards the farm has (task ids ``<agent>:...``): a task of
+    # one is on that agent's host, any other task on the host of kelpie serve.
+    agents: frozenset[str] = frozenset()
+    # The instruction files each role loads, as the board measured them (``instructions_at``)
+    # when the report was built ([instructions]; the section ``instructions``).
+    instruction_files: Sequence[InstructionFile] = ()
+    instruction_duplicates: Sequence[InstructionDuplicate] = ()
+    instructions_at: datetime | None = None
+    # Tokens a day on instructions per role, one sample per scan: the before/after of a
+    # split (a fix naming rule instruction_bloat).
+    instruction_tokens: Sequence[TokenRow] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +420,17 @@ class OutageLine:
     person: str | None = None  # who can end it
     observe_only: bool = False  # a check still in observe: listed, not counted
     back_in_observe: datetime | None = None  # counted, then its check switched back
+
+
+@dataclass(frozen=True, slots=True)
+class ToolchainCause:
+    """An outage of the day (any kind) whose alert named a toolchain change on a host
+    shortly before it began as its likely cause (incident 20, #284)."""
+
+    signature: str
+    kind: str
+    since: datetime
+    change: str  # the alert's own line: what changed, where, when
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,14 +524,22 @@ class DailyReport:
     stuck_idle: tuple[StuckCard, ...] = ()
     outages: tuple[OutageLine, ...] = ()  # the day's outages (kelpie.core.incidents)
     outage_wait_hours: float = 0.0  # the day's waiting time all of them explained
+    # outages of the day (any kind) whose alerts named a toolchain change as the likely cause
+    toolchain_causes: tuple[ToolchainCause, ...] = ()
     planned: PlannedWaits | None = None  # behind work planned for later: never counted
     snoozed: SnoozedWaits | None = None  # deliberate waits a person snoozed: never chaos
+    # Minutes each host slept within the day, by agent (None: the host of kelpie serve):
+    # never chaos (issue #296).
+    host_asleep: tuple[tuple[str | None, float], ...] = ()
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
+    act_gaps: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
     # models without a price (billed, not on a subscription), most tokens first
     unpriced_models: tuple[tuple[str | None, int], ...] = ()  # None: no model
     reconciliations: tuple[Reconciliation, ...] = ()  # as in ReportInputs
     reconcile_error: str | None = None  # why the bills could not be read
     bill_day: date | None = None  # as in ReportInputs
+    # several boards (#283): each board's day (kelpie.report.boards); () for one board
+    boards: tuple[BoardLine, ...] = ()
 
     @property
     def chaos_hours(self) -> float:
@@ -529,10 +573,13 @@ def build_report(
     inputs: ReportInputs,
     sections: Mapping[str, SectionBuilder] | None = None,
     section_keys: Mapping[str, frozenset[str]] | None = None,
+    *,
+    per_board: bool = True,
 ) -> DailyReport:
     """The day's report. ``sections`` are the extra section builders (default: every one
     registered in :mod:`kelpie.report.sections`), ``section_keys`` the config keys each
-    accepts (default: as registered)."""
+    accepts (default: as registered). With ``per_board`` and several boards, each board's
+    line is built too (:mod:`kelpie.report.boards`)."""
     start, end = day_bounds(inputs.day, inputs.tz)
     spans = [s for s in inputs.spans if start <= last_at(s) < end]
     index = {span_key(s): s for s in inputs.spans}
@@ -603,9 +650,11 @@ def build_report(
         biggest_wait=wait,
         outages=outage_lines,
         outage_wait_hours=outage_hours,
+        toolchain_causes=_toolchain_causes(inputs, start, end),
         stuck_idle=_stuck_idle(inputs, start, end),
         planned=_planned_waits(inputs, start, end),
         snoozed=snoozed,
+        host_asleep=_host_asleep(inputs.host_sleeps, start, end),
         unpriced_models=pricer.unpriced(rows),
         reconciliations=_reconciled(inputs.reconciliations),
         reconcile_error=(
@@ -613,7 +662,36 @@ def build_report(
         ),
         bill_day=inputs.bill_day,
         act_blockers=inputs.act_blockers,
+        boards=_boards(inputs, start, end, context.roles) if per_board else (),
+        act_gaps=inputs.act_gaps,
     )
+
+
+def _boards(
+    inputs: ReportInputs, start: datetime, end: datetime, roles: Mapping[str, str]
+) -> tuple[BoardLine, ...]:
+    """Each board's line (#283): its chaos and completed tasks counted over its part of the
+    inputs, its biggest wait classified with the farm's wait causes (a person's inbox, a CI
+    outage, a snooze name no board but say what a board's task waited for)."""
+    causes: list[WaitCauses] = []
+
+    def wait(part: ReportInputs) -> BiggestWait | None:
+        if not causes:
+            causes.append(wait_causes(inputs, start, end))
+        per_role = throughput(
+            part.tasks,
+            part.sessions,
+            inputs.owners,
+            [row.state for row in part.states],
+            start,
+            end,
+            inputs.review_roles,
+            roles,
+            causes[0].split,
+        )
+        return biggest_wait(per_role, part.tasks, causes[0], inputs.farm)
+
+    return board_lines(inputs, lambda part: build_report(part, {}, {}, per_board=False), wait)
 
 
 def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> PlannedWaits | None:
@@ -771,6 +849,30 @@ def _outage_lines(
     return tuple(out)
 
 
+def _toolchain_causes(
+    inputs: ReportInputs, start: datetime, end: datetime
+) -> tuple[ToolchainCause, ...]:
+    """Outages open within the day whose alerts (as of that occurrence) named a toolchain
+    change: the first such alert of each occurrence."""
+    named: dict[str, list[tuple[datetime, OutageParams]]] = {}
+    for e in inputs.actions:
+        if e.at < end and (o := OutageParams.from_params(e.params)) is not None and o.toolchain:
+            named.setdefault(o.state, []).append((e.at, o))
+    out: list[ToolchainCause] = []
+    for row in inputs.states:
+        st = row.state
+        if not is_outage_state(st.id) or st.since >= end or st.last_seen < start:
+            continue
+        found = sorted(
+            (x for x in named.get(st.id, ()) if st.since <= x[0] <= st.last_seen),
+            key=lambda x: x[0],
+        )
+        if found and (line := found[0][1].toolchain):
+            o = found[0][1]
+            out.append(ToolchainCause(o.signature, o.kind, st.since, line))
+    return tuple(sorted(out, key=lambda c: (c.since, c.signature)))
+
+
 def _reconciled(found: Sequence[Reconciliation] | str) -> tuple[Reconciliation, ...]:
     if isinstance(found, str):
         return ()
@@ -838,6 +940,8 @@ def _verifications(
         min_sample=inputs.min_sample,
         review_roles=inputs.review_roles,
         known_from=reach,
+        owners=inputs.owners,
+        instruction_tokens=inputs.instruction_tokens,
     )
     return verify_all(events, evidence, since)
 
@@ -1052,9 +1156,14 @@ def _chaos_hours(
         if cause == OUTAGE:
             spans = outage_spans(inputs.actions, state, a, b, inputs.tasks, after(state))
             for t, lo, hi in spans:
-                keyed[OUTAGE].append((t, lo, hi))
+                # a host that slept lost no hours (issue #296), under an outage too
+                for x, y in _awake(inputs.host_sleeps, inputs.agents, t, lo, hi):
+                    keyed[OUTAGE].append((t, x, y))
                 tasks[OUTAGE].add(t)
             continue
+        # A host that slept lost no hours (issue #296); a hold's idle agents and a person's
+        # inbox are counted as they are (agent-hours a hold kept, a person's time).
+        awake = _awake(inputs.host_sleeps, inputs.agents, state.task_id, a, b)
         if cause == HOLDS:
             agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
             loose[HOLDS] += agent_hours
@@ -1068,13 +1177,48 @@ def _chaos_hours(
                 tasks[PEOPLE].update(ids)
             continue
         if state.task_id:
-            keyed[cause].append((state.task_id, a, b))
+            keyed[cause].extend((state.task_id, lo, hi) for lo, hi in awake)
             tasks[cause].add(state.task_id)
         else:
-            loose[cause] += (b - a).total_seconds() / 3600
+            loose[cause] += intervals.hours(awake)
         if on_state is not None:
             on_state(state, a, b)
     return _ChaosHours(keyed, loose, tasks)
+
+
+def _awake(
+    sleeps: Sequence[HostSleep],
+    known: frozenset[str],
+    task_id: str | None,
+    a: datetime,
+    b: datetime,
+) -> intervals.Spans:
+    """The parts of ``[a, b)`` the task's host was awake (issue #296): a host that slept
+    lost no hours. A task id ``<agent>:...`` of a known agent (or one with a sleep on
+    record) is on that agent's host, any other (and a state on no task) on the host of
+    kelpie serve."""
+    span = [(a, b)]
+    if not sleeps:
+        return span
+    agents = known | {s.agent for s in sleeps if s.agent is not None}
+    agent = next((x for x in agents if task_id and task_id.startswith(f"{x}:")), None)
+    mine = intervals.merged((s.start, s.end) for s in sleeps if s.agent == agent)
+    return intervals.minus(span, mine)
+
+
+def _host_asleep(
+    sleeps: Sequence[HostSleep], start: datetime, end: datetime
+) -> tuple[tuple[str | None, float], ...]:
+    """Minutes each host slept within ``[start, end)``, the server's host first."""
+    by_agent: dict[str | None, list[tuple[datetime, datetime]]] = defaultdict(list)
+    for s in sleeps:
+        lo, hi = max(s.start, start), min(s.end, end)
+        if hi > lo:
+            by_agent[s.agent].append((lo, hi))
+    return tuple(
+        (agent, intervals.hours(intervals.merged(spans)) * 60)
+        for agent, spans in sorted(by_agent.items(), key=lambda x: (x[0] is not None, x[0] or ""))
+    )
 
 
 def lost_hours(
@@ -1584,6 +1728,8 @@ def _recommendations(
             )
             if inputs.farm.dry_run:
                 detail += " (Kelpie runs in dry-run: no rule acts until [engine] dry_run = false)"
+            if where := inputs.act_gaps.get(line.rule):
+                detail += f" (on some tasks it would alert instead: {md.text(where)})"
             tasks = fix.tasks or line.tasks
         else:
             title = f"Reduce {line.cause}"
@@ -1661,20 +1807,27 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
                 "",
                 f"Also seen, not added (the same tasks over the same hours): {seen}.",
             ]
+        # the outage's words only when an outage counted: a farm without one reads as before
+        outage = any(c.rule == OUTAGE for c in report.chaos)
         lines += [
             "",
             "Hours lost: task-hours, how long a task was stuck after Kelpie first reported "
             "it, each task-hour counted once: when several rules saw the same task at the "
-            "same time, under the first of a farm outage (from its first sighting), a "
-            "person's inbox, a stale block, an ownerless "
+            "same time, under the first of "
+            + ("a farm outage (from its first sighting), " if outage else "")
+            + "a person's inbox, a stale block, an ownerless "
             "task, a wait past its limit, an exit without a final status, review ping-pong, "
             "idle capacity, a card stuck before work, a runaway loop, activity without "
             "progress (a lower bound); for forgotten holds, idle agent-hours: the "
             "agents rule 6 saw idle behind the hold after its expiry, over time; for agents "
             "waiting on people, agent-hours: the agent tasks rule 13 saw waiting on a "
             "person's approval or human task, over time (a human gate rule 6 also reports "
-            "counts in both lines). `outage` is a cause, not a rule: the tasks the incidents "
-            "under Outages held.",
+            "counts in both lines)."
+            + (
+                " `outage` is a cause, not a rule: the tasks the incidents under Outages held."
+                if outage
+                else ""
+            ),
         ]
     else:
         lines.append("No hours lost and no tokens burned on loops, idle sessions or restarts.")
@@ -1717,6 +1870,18 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
                 f"- {label}{name} {when}: {o.scope} PR(s), {o.folded} alert(s) folded under "
                 f"it{what}"
             )
+    if report.toolchain_causes:
+        lines += [
+            "",
+            "**Toolchain changes before outages** (a version change on a host shortly before "
+            "the outage began: its likely cause, read from the textfile collector):",
+            "",
+        ]
+        for c in report.toolchain_causes:
+            lines.append(
+                f"- {md.text(c.kind.replace('_', ' '))} {md.code(c.signature)} since "
+                f"{_local(c.since, report)}: {md.text(c.change)}"
+            )
     if report.stuck_idle:
         lines += [
             "",
@@ -1743,6 +1908,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             f"at most 20 ids per alert){listed}",
         ]
     lines += _snoozed_lines(report, tasks)
+    lines += _asleep_lines(report)
+    lines += _board_lines(report)
     lines += ["", "## Spend", ""]
     note = " (as the board reports them now; adapters only look back so far)"
     if _plans_only(report.spend):
@@ -1766,7 +1933,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     lines += _fix_lines(report.fixed, tasks) or ["Nothing this day."]
     if report.would_fix:
         lines += ["", "Would have done in act mode (observe, suggest or dry-run):", ""]
-        lines += _fix_lines(report.would_fix, tasks, report.act_blockers)
+        lines += _fix_lines(report.would_fix, tasks, report.act_blockers, report.act_gaps)
     lines += ["", "## Needs a human", ""]
     needs = _needs_lines(report, tasks)
     lines += needs or ["Nothing open."]
@@ -1954,6 +2121,26 @@ def _snoozed_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
     return out
 
 
+def _asleep_lines(report: DailyReport) -> list[str]:
+    """Host sleep (issue #296), listed apart: a host that slept is not a farm that waits."""
+    if not report.host_asleep:
+        return []
+    parts = [
+        f"{md.text(agent) + ' ' if agent else ''}{_slept_for(minutes)}"
+        for agent, minutes in report.host_asleep
+    ]
+    return [
+        "",
+        f"**Host asleep**: {', '.join(parts)}. A suspended host (a laptop lid closed): not "
+        "counted in the hours lost.",
+    ]
+
+
+def _slept_for(minutes: float) -> str:
+    whole = round(minutes)
+    return f"{whole} min" if whole < 120 else f"{whole / 60:.1f} h"
+
+
 def _snooze_end(at: datetime, report: DailyReport) -> str:
     """ "through 2026-10-25" or "until 2026-10-25 09:00 UTC", as alerts word it."""
     when, through_day = snooze_end(at, report.tz)
@@ -2011,6 +2198,7 @@ def _single_lines(v: Verification, report: DailyReport) -> list[str]:
         f"{title}. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
         "",
         *_metric_table(v.metrics),
+        *_release_lines(v, report),
         *_excluded_lines(v, report),
     ]
 
@@ -2035,6 +2223,7 @@ def _group_lines(v: Verification, report: DailyReport) -> list[str]:
             f"Together. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
             "",
             *_metric_table(v.metrics),
+            *_release_lines(v, report),
         ]
     else:
         out.append(f"Together: no data on either side yet (after-window: {hours:.1f}h).")
@@ -2077,6 +2266,32 @@ def _metric_cells(m: Metric) -> str:
         f"{m.name}{small} | {_value(m.before, m.unit)} | {_value(m.after, m.unit)} "
         f"| {_change(m)} | {m.n_before} / {m.n_after} |"
     )
+
+
+def _release_lines(v: Verification, report: DailyReport) -> list[str]:
+    """A throughput spike right after the fix that came from released backlog (#193)."""
+    r = v.release
+    if r is None:
+        return []
+    burst = (r.end - r.start).total_seconds() / 3600
+    which = "fix" if not v.together else "last fix"
+    if r.full_day:
+        then = (
+            f"tasks done per hour compares the next full day "
+            f"({_local(r.steady[0], report)} to {_local(r.steady[1], report)}) instead"
+        )
+    else:
+        then = (
+            "the next full day is not in yet, so tasks done per hour compares the rest of "
+            f"the after-window from {_local(r.steady[0], report)} on, and a later report "
+            "settles it"
+        )
+    return [
+        "",
+        f"Backlog release: {r.tasks} of the {r.done} tasks done in the {burst:.1f}h after the "
+        f"{which} were ready or blocked before it, a burst of released backlog rather than a "
+        f"faster farm; {then}.",
+    ]
 
 
 def _excluded_lines(v: Verification, report: DailyReport) -> list[str]:
@@ -2189,6 +2404,62 @@ def _bill_line(r: Reconciliation) -> str:
     return line
 
 
+def _board_lines(report: DailyReport) -> list[str]:
+    """The "Per board" section (#283): nothing for a farm with one board."""
+    if not report.boards:
+        return []
+    est = _mark(report)
+    hours = (report.end - report.start).total_seconds() / 3600
+
+    def row(name: str, b: BoardLine) -> str:
+        burned = f"{b.chaos_tokens:,}" + (
+            f" + {b.chaos_plan_tokens:,} plan" if b.chaos_plan_tokens else ""
+        )
+        usd = f"${b.chaos_usd:,.2f}" if report.priced else "n/a"
+        done = f"{b.completed} ({b.completed / hours:.2f}/h)" if hours > 0 else str(b.completed)
+        w = b.biggest_wait
+        wait = (
+            f"{md.short_text(w.role)}: {md.text(w.label)}, {w.hours:.1f} task-h"
+            if w is not None
+            else "-"
+        )
+        return f"| {name} | {b.chaos_hours:.1f} | {burned} | {usd} | {done} | {wait} |"
+
+    lines = [
+        "",
+        "## Per board",
+        "",
+        f"| Board | Hours lost | Tokens burned | Cost of chaos, USD{est} | Tasks done | "
+        "Biggest wait |",
+        "|---|---:|---:|---:|---:|---|",
+    ]
+    lines += [row(md.code(b.board, cell=True), b) for b in report.boards]
+    if (rest := rest_line(report, report.boards)) is not None:
+        lines.append(row("not on one board", rest))
+    spend = report.chaos_spend
+    total = BoardLine(
+        board="",
+        chaos_hours=report.chaos_hours,
+        chaos_tokens=spend.billed_tokens,
+        chaos_plan_tokens=spend.plan_tokens,
+        chaos_usd=report.chaos_usd,
+        completed=len(report.completed),
+        biggest_wait=report.biggest_wait,
+    )
+    lines.append(row("**Farm total**", total))
+    stuck = (
+        f", plus stuck hours at ${report.hour_usd:,.2f}/hour" if report.hour_usd is not None else ""
+    )
+    lines += [
+        "",
+        "Each board counted as the farm is, over its own tasks, sessions and alerts: cost of "
+        f"chaos in tokens burned{stuck}; tasks that reached done (per hour of the day); the "
+        "role and cause its tasks waited longest for. What names no board (a forgotten hold, "
+        "a person's inbox, spans of no board's session) counts only in the farm total.",
+    ]
+    return lines
+
+
 def _usd(spend: Spend, report: DailyReport) -> str:
     if spend.plan_tokens and not spend.billed_tokens:
         return "-"  # a subscription's tokens: no dollars
@@ -2196,15 +2467,21 @@ def _usd(spend: Spend, report: DailyReport) -> str:
 
 
 def _fix_lines(
-    lines: Sequence[FixLine], tasks: _TaskLinks, blockers: Mapping[str, str] | None = None
+    lines: Sequence[FixLine],
+    tasks: _TaskLinks,
+    blockers: Mapping[str, str] | None = None,
+    gaps: Mapping[str, str] | None = None,
 ) -> list[str]:
     """One line per rule and action; with ``blockers``, a rule that cannot act on this farm
-    says what is missing."""
+    says what is missing; with ``gaps``, one that acts on only some adapters' tasks says
+    where its actions would be alerts."""
     out = []
     for f in lines:
         text = f"- `{f.rule}`: {f.kind} x{f.count} {tasks(f.tasks)}".rstrip()
         if blockers and (why := blockers.get(f.rule)):
             text += f" (act mode is not available here: {md.text(why)})"
+        elif gaps and (where := gaps.get(f.rule)):
+            text += f" (on some tasks act mode would alert instead: {md.text(where)})"
         out.append(text)
     return out
 

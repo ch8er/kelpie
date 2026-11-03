@@ -10,7 +10,7 @@ keep less. It describes the code as it is; the files named below are the referen
 | --- | --- | --- | --- | --- |
 | OTLP spans | ids, timing, model, token counts, tool name, outcome, allowlisted attributes, a hash of tool arguments, output size, a command prefix | message content, prompts, completions, reasoning, tool arguments and results, error messages, user identity | `kelpie.db`, table `spans` | `[traces] retention` (7 days), at most `max_rows` (1,000,000) |
 | Hermes hook records | tool name, ids, hash of arguments, a redacted command, outcome, duration, output size | raw arguments and results | spool file on the Hermes host | until rotated: one backup file at 20 MiB |
-| Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
+| Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls; skill name of `Skill` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
 | Claude Code task lists | task id, subject (200 characters), status, owner, `blockedBy` | descriptions | read in place, not copied | |
 | OpenClaw hook records | session id, session key (the part naming a chat peer or group replaced by a keyed hash), agent id, run id, session end reasons, the session id a session resumed or was replaced by; tool name, call id, hash of arguments, a redacted command, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
 | OpenClaw Workboard cards | card id, board, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, session key (reduced like the hook's) and run id, block reason (500 characters); every comment (2000 characters) and attempt error of the cards read is in memory for the tick, only the latest since a block is kept | claim tokens, attachments, proof, worker logs | read in place, not copied | |
@@ -198,7 +198,8 @@ writes a `stopped` line with only the session and subagent ids, the event and `v
 
 A tool-call line holds: the tool name, the tool use id, `args_hash`, a redacted `command`,
 the outcome, the duration and `output_chars`. For a `TaskUpdate` call it also holds the task
-id, the status and the owner that were set, never the subject or description. Tool inputs and
+id, the status and the owner that were set, never the subject or description; for a `Skill`
+call the skill's name (`skill`), never its arguments. Tool inputs and
 results, error messages, assistant messages, the transcript path and the working directory
 are never written.
 
@@ -284,6 +285,11 @@ platform defaults of its adapters) read-only (a file that is itself a symlink is
 a file's path, its sizes, and the `path:line` of copied sections and values, never their
 text. Kelpie never writes to these files.
 
+To count how often a skill is loaded, the Hermes adapter reads the `skill_view` calls of the
+last 24 hours from each profile's `state.db` (read-only, as for waits) and keeps the skill's
+name, the profile's role and the time in memory for one tick; the Claude Code adapter takes
+the same from the hook's `Skill` lines. No other argument of the call is read.
+
 ## Actions, alerts and reports
 
 - **Ledger and alert states** (`kelpie.db`, tables `actions` and `states`). Every action a
@@ -361,9 +367,13 @@ configured.
 | Reports | Kept in `[report] dir` until you delete them. |
 
 SQLite reuses the space of deleted rows but does not overwrite it at once; deleted spans can
-remain in the file's free pages until then. Kelpie creates `kelpie.db` with the default file
-permissions of its process (umask); keep the database directory readable only by the user
-that runs Kelpie. To remove everything Kelpie stored, stop it and delete `kelpie.db`,
+remain in the file's free pages until then. Kelpie creates `kelpie.db` (and SQLite its
+`-wal` and `-shm`) mode 0600, narrowed further by a stricter umask, and report files in
+`[report] dir` likewise (a missing report folder 0700); keep the database folder readable
+only by the user that runs Kelpie. Files and folders that already exist keep their mode:
+`kelpie doctor` warns about the ones others may read ("data files private") and never
+changes them ([security](security.md#files-kelpie-writes)). To remove everything Kelpie
+stored, stop it and delete `kelpie.db`,
 `kelpie.db-wal` and `kelpie.db-shm`; cooldowns and open alert states are lost with them.
 
 ## Keeping less

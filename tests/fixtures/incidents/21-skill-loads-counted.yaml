@@ -1,0 +1,46 @@
+id: "21-skill-loads-counted"
+incident: 21
+title: "A large stable skill opened many times a day, by counted loads"
+description: >
+  Two roles each have a large skill that has not changed in a week. The developer's skill is
+  on a platform that counts skill loads (Hermes skill_view calls from state.db): it was
+  opened 40 times in the last day, so reading it costs over a million tokens a day, and it is
+  reported with that cost "from counted loads". The reviewer's skill is just as large, but its
+  platform counts no loads: its tokens a day is only size times sessions, an upper bound for a
+  skill loaded on demand, so it has no cost to judge and stays silent.
+rule: instruction_bloat
+config:
+  max_chars: 40000
+  max_growth_per_week: 10000
+  max_tokens_per_day: 500000
+snapshot:
+  now: "2026-03-09T12:00:00+00:00"
+  instruction_files:
+    - path: "~/.hermes/profiles/dev/skills/build/SKILL.md"
+      role: developer
+      chars: 120000
+      tokens: 30000
+      sections: 40
+      loaded: on_demand
+      since: "2026-03-02T12:00:00+00:00"
+      chars_since: 120000
+      tokens_per_day: 1200000  # 40 counted loads
+      token_basis: loads
+    - path: "~/farm/review/skills/review/SKILL.md"
+      role: reviewer
+      chars: 120000
+      tokens: 30000
+      sections: 40
+      loaded: on_demand
+      since: "2026-03-02T12:00:00+00:00"
+      chars_since: 120000
+      tokens_per_day: 1500000  # 50 sessions: an upper bound, not a cost
+      token_basis: sessions
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "about 1,200,000 tokens a day (from counted loads)"
+    params: {path: "~/.hermes/profiles/dev/skills/build/SKILL.md", token_basis: loads}
+not_expected_actions:
+  - kind: alert
+    params: {path: "~/farm/review/skills/review/SKILL.md"}

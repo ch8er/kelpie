@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from kelpie.core.actions import Severity
-from kelpie.core.model import Owner, Session, Span, SpanKind, Status
+from kelpie.core.model import Owner, OwnerKind, Session, Span, SpanKind, Status, Task
 from kelpie.core.states import OpenState
 from kelpie.report.daily import ReportInputs, build_report, render_markdown
 from kelpie.report.fixes import CONFIG, MANUAL, FixEvent
@@ -337,3 +337,84 @@ def test_the_llm_digest_credits_a_group_to_no_one_fix() -> None:
     [check] = digest(report).data["fix_checks"]
     assert check["rule"] is None and check["kind"] == "group"
     assert check["fixes_together"] == 4
+
+
+F = datetime(2026, 10, 19, 12, tzinfo=UTC)  # the fix of the throughput cases
+PEOPLE = (*OWNERS, Owner("person-1", "developer", OwnerKind.HUMAN))
+
+
+def queue_runs_out(*extra: Task) -> dict[str, Any]:
+    """12 developer tasks done in the day before the fix, 3 after; the last ready task is
+    queued from f-23h on and blocked on a person from f+6h."""
+    queued = Task("Q", "q", Status.BLOCKED, F + 6 * H, role="developer", owner_id="dev-1")
+    sessions = [Session("q-run", "Q", "dev-1", F - 24 * H, F - 23 * H, Status.READY)]
+    done_at = [F - 23 * H + 2 * i * H for i in range(12)] + [F + H, F + 3 * H, F + 5 * H]
+    tasks = [queued]
+    for i, at in enumerate(done_at):
+        tasks.append(Task(f"D-{i}", "d", Status.DONE, at, role="developer", owner_id="dev-1"))
+        sessions.append(Session(f"d-{i}", f"D-{i}", "dev-1", at - H, at, Status.DONE))
+    return {"tasks": (*tasks, *extra), "sessions": sessions, "owners": PEOPLE, "min_sample": 3}
+
+
+def done_per_hour(report: Any) -> Any:
+    [v] = report.verifications
+    return next(m for m in v.metrics if m.name.startswith("tasks done per hour"))
+
+
+DEV_FIX = FixEvent(F, MANUAL, "x", role="developer")
+
+
+def test_throughput_counts_only_hours_with_work_available() -> None:
+    """The queue runs out after the fix (the rest waits on a person): fewer tasks a day,
+    but not slower work. Done per hour with work available stays the same."""
+    report = build_report(inputs(fixes=(DEV_FIX,), **queue_runs_out()))
+    m = done_per_hour(report)
+    assert m.name.endswith("(24 of 24h -> 6.0 of 24h with work)")
+    assert (m.n_before, m.n_after) == (12, 3)
+    assert m.before == pytest.approx(0.5) and m.after == pytest.approx(0.5)
+    assert m.improved is None and not m.small
+    markdown = render_markdown(report)
+    assert "| tasks done per hour with work available (developer) (24 of 24h" in markdown
+
+
+@pytest.mark.parametrize(
+    "idle",
+    [
+        # a person's task, by owner or by assignee, is not agent work
+        Task("P", "p", Status.READY, F - 30 * H, role="developer", owner_id="person-1"),
+        Task("A", "a", Status.READY, F - 30 * H, role="developer", assignee="person-1"),
+        # another role's ready work is not the developers'
+        Task("R", "r", Status.READY, F - 30 * H, role="reviewer", owner_id="rev-1"),
+    ],
+)
+def test_work_that_is_not_the_fix_roles_agents_does_not_count(idle: Task) -> None:
+    m = done_per_hour(build_report(inputs(fixes=(DEV_FIX,), **queue_runs_out(idle))))
+    assert m.name.endswith("(24 of 24h -> 6.0 of 24h with work)")
+
+
+def test_ownerless_work_counts_and_a_farm_wide_fix_counts_every_role() -> None:
+    orphan = Task("O", "o", Status.IN_PROGRESS, F + 10 * H, role="developer")  # no owner
+    m = done_per_hour(build_report(inputs(fixes=(DEV_FIX,), **queue_runs_out(orphan))))
+    assert m.name.endswith("(24 of 24h -> 20 of 24h with work)")
+    other = Task("R", "r", Status.READY, F - 30 * H, role="reviewer", owner_id="rev-1")
+    farm = FixEvent(F, MANUAL, "every role")
+    m = done_per_hour(build_report(inputs(fixes=(farm,), **queue_runs_out(other))))
+    assert m.name == "tasks done per hour with work available (24 of 24h -> 24 of 24h with work)"
+
+
+def test_few_hours_of_work_are_direction_only() -> None:
+    # after the fix, ready work for one hour only: 3 done in it would read as 3 per hour
+    case = queue_runs_out()
+    queued = Task("Q", "q", Status.BLOCKED, F + H, role="developer", owner_id="dev-1")
+    case["tasks"] = (queued, *case["tasks"][1:])
+    m = done_per_hour(build_report(inputs(fixes=(DEV_FIX,), **case)))
+    assert m.small and "(24 of 24h -> " in m.name
+
+
+def test_throughput_is_never_credited_to_one_fix_of_a_group() -> None:
+    rev = FixEvent(F + H, MANUAL, "reviews read the diff", role="reviewer")
+    report = build_report(inputs(fixes=(DEV_FIX, rev), **queue_runs_out()))
+    [v] = report.verifications
+    assert v.together
+    assert not any(c.metric.name.startswith("tasks done per hour") for c in v.own)
+    assert any(m.name.startswith("tasks done per hour") for m in v.metrics)

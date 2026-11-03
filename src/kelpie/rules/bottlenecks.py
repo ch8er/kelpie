@@ -160,7 +160,11 @@ _DISPATCHED = frozenset({Status.READY, Status.REVIEW})  # lanes a dispatcher han
 def queued_assigned(snapshot: Snapshot) -> set[str]:
     """Ready or review tasks assigned to an agent but with no live session: assigned, not
     started yet (platforms that report the assignee of an unstarted task as its owner)."""
-    live = {s.task_id for s in snapshot.sessions if is_live(s, snapshot.now)}
+    live = {
+        s.task_id
+        for s in snapshot.sessions
+        if is_live(s, snapshot.now, sleeps=snapshot.host_sleeps)
+    }
     agents = {o.id for o in snapshot.owners if o.kind is OwnerKind.AGENT}
     return {
         t.id
@@ -185,7 +189,7 @@ def role_loads(
     live_owners: set[str] = set()
     last_session: dict[str, datetime] = {}
     for s in snapshot.sessions:
-        if is_live(s, now):
+        if is_live(s, now, sleeps=snapshot.host_sleeps):
             live_owners.add(s.owner_id)
         seen = last_seen(s)
         if s.owner_id not in last_session or seen > last_session[s.owner_id]:
@@ -512,7 +516,8 @@ class Bottlenecks:
             {
                 s.task_id
                 for s in snapshot.sessions
-                if is_live(s, snapshot.now) and s.owner_id not in humans
+                if is_live(s, snapshot.now, sleeps=snapshot.host_sleeps)
+                and s.owner_id not in humans
             }
         )
 

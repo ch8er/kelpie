@@ -10,12 +10,15 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
 
 from kelpie.app import (
+    ConfigError,
     Settings,
     _rule_config,
     act_blockers,
+    act_gaps,
     build_adapters,
     connector_steps,
     hold_labels,
+    instruction_watch,
     merged_snapshot,
     read_reconciliations,
     utc_now,
@@ -43,6 +46,7 @@ MAX_LIST_DAYS = 3650
 def sources(settings: Settings) -> ReportSources:
     engine = settings.engine
     modes = {name: Mode.OBSERVE if engine.dry_run else engine.mode_for(name) for name in REGISTRY}
+    adapters = build_adapters(settings)
     return ReportSources(
         db_path=settings.db_path,
         report=settings.report,
@@ -61,9 +65,8 @@ def sources(settings: Settings) -> ReportSources:
         ),
         stuck_check=_stuck_check(engine),
         # What keeps a rule from acting here: never recommend a config kelpie serve refuses.
-        act_blockers={
-            rule: b.reason for rule, b in act_blockers(settings, build_adapters(settings)).items()
-        },
+        act_blockers={rule: b.reason for rule, b in act_blockers(settings, adapters).items()},
+        act_gaps=act_gaps(settings, adapters),
         farm=farm_facts(settings),
         reconcile=(
             (lambda since, until: read_reconciliations(settings, since, until))
@@ -130,10 +133,22 @@ def report_board(
     tasks from block reasons), so the report knows what more waiting tasks wait for. Like
     ``kelpie why`` without ``--refresh``, the report calls no network service of its own:
     a block reason ``[[block_conditions]]`` matches counts as a CI or merge wait without
-    a PR lookup (:class:`kelpie.report.waits.BlockKind`)."""
+    a PR lookup (:class:`kelpie.report.waits.BlockKind`). With ``[instructions]``, the
+    instruction files are measured too (read-only; the size history is read, never
+    written), for the section ``instructions``."""
     enrich, _ = connector_steps(settings, metrics, clock, network=False)
     adapters = build_adapters(report_settings(settings, day, clock()))
-    return merged_snapshot(adapters, metrics, clock, enrich=enrich)()
+    try:
+        # kelpie serve keeps the size history: the report only reads it.
+        instructions = instruction_watch(settings, adapters, record=False)
+    except ConfigError as exc:  # the report goes on without the section
+        log.error("instruction files not measured for the report: %s", exc)
+        instructions = None
+    try:
+        return merged_snapshot(adapters, metrics, clock, enrich=enrich, instructions=instructions)()
+    finally:
+        if instructions is not None:
+            instructions.store.close()
 
 
 def run(

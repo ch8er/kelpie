@@ -21,7 +21,17 @@ from kelpie.core.alerts import AlertEvent
 from kelpie.core.budgets import Price, PriceTable
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
-from kelpie.core.model import Owner, OwnerKind, Session, Snapshot, Span, SpanKind, Status, Task
+from kelpie.core.model import (
+    HostSleep,
+    Owner,
+    OwnerKind,
+    Session,
+    Snapshot,
+    Span,
+    SpanKind,
+    Status,
+    Task,
+)
 from kelpie.core.states import OpenState
 from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
 from kelpie.report.config import ReportSettings, load_report
@@ -1082,3 +1092,30 @@ def test_needs_a_human_names_the_advice_for_a_built_in_tool() -> None:
         in markdown
     )
     assert "- add xcbeautify for `xcodebuild` to the agents' instructions" in markdown
+
+
+def test_host_sleep_is_listed_apart_and_never_lost_hours() -> None:
+    """Issue #296: a 47-minute suspend inside a stale block is not chaos; the report lists
+    each host's sleep time apart. An agent's sleep counts only for its own tasks."""
+    states = [
+        StateRow(state("stale_blocks:T-1", "stale_blocks", at(10), at(14), "T-1")),
+        StateRow(state("stale_blocks:lap:T-2", "stale_blocks", at(10), at(14), "lap:T-2")),
+        StateRow(state("orphan_status:farm", "orphan_status", at(10), at(12))),
+        # an agent that never slept: the server's sleep is not its own
+        StateRow(state("stale_blocks:vm:T-3", "stale_blocks", at(10), at(14), "vm:T-3")),
+    ]
+    sleeps = [
+        HostSleep(at(11, 24), at(12, 11)),
+        HostSleep(at(23, 50), at(1, 30, day=3), agent="lap"),  # partly the next day
+    ]
+    base = ReportInputs(day=DAY, tz=UTC, states=states, agents=frozenset({"lap", "vm"}))
+    awake = build_report(replace(base, host_sleeps=sleeps), sections={})
+    plain = build_report(base, sections={})
+    assert plain.chaos_hours == pytest.approx(14.0)
+    # T-1 and the farm-wide state lose the server's 47 minutes; lap:T-2 and vm:T-3 are on
+    # other hosts
+    assert awake.chaos_hours == pytest.approx(14.0 - 47 / 60 - 36 / 60)
+    assert awake.host_asleep == ((None, pytest.approx(47.0)), ("lap", pytest.approx(10.0)))
+    markdown = render_markdown(awake)
+    assert "**Host asleep**: 47 min, lap 10 min." in markdown
+    assert "Host asleep" not in render_markdown(plain)

@@ -94,6 +94,7 @@ from kelpie.rules._alerts import count as counted
 from kelpie.rules._ci_not_started import STATE as NOT_STARTED
 from kelpie.rules._ci_not_started import not_started, ran_again
 from kelpie.rules._ci_outage import outages, passed_again
+from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
 
 NAME = "ci_economy"
 CATEGORIES = ("superseded", "already_verified", "docs_only", "draft", "wip")
@@ -141,6 +142,8 @@ class CiEconomy:
     # CI jobs that never start (#229): refused, or queued this long, across outage_min_prs.
     queued_after: timedelta = timedelta(minutes=30)
     not_started_mode: str = "observe"  # a new check: "observe", or "rule" (the rule's mode)
+    # A toolchain change on a host this long before an outage began is its likely cause.
+    toolchain_window: timedelta = TOOLCHAIN_WINDOW
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -154,11 +157,19 @@ class CiEconomy:
                 waste = replace(waste, params={**waste.params, ANNOUNCES: keys})
             actions.append(waste)
         actions.extend(self._quota(recent, snapshot))
-        actions.extend(outages(snapshot, NAME, self.outage_min_prs, self.outage_window))
+        actions.extend(
+            outages(snapshot, NAME, self.outage_min_prs, self.outage_window, self.toolchain_window)
+        )
         observe = self.not_started_mode == "observe"
         actions.extend(
             not_started(
-                snapshot, NAME, self.outage_min_prs, self.outage_window, self.queued_after, observe
+                snapshot,
+                NAME,
+                self.outage_min_prs,
+                self.outage_window,
+                self.queued_after,
+                observe,
+                self.toolchain_window,
             )
         )
         return actions
@@ -580,6 +591,7 @@ def build(config: dict[str, Any]) -> CiEconomy:
         "max_reading_age",
         "outage_window",
         "queued_after",
+        "toolchain_window",
     ):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)

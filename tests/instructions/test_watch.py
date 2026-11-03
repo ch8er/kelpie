@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from kelpie.core.model import Owner, Session, Snapshot
+from kelpie.core.model import Owner, Session, SkillLoad, Snapshot
 from kelpie.core.storage import SqliteInstructionStore
 from kelpie.instructions.config import InstructionSettings, Source
 from kelpie.instructions.watch import InstructionWatch
@@ -149,3 +150,164 @@ def test_role_from_a_path_with_doubled_separators(tmp_path: Path) -> None:
     w = InstructionWatch(SqliteInstructionStore(":memory:"), InstructionSettings(), (src,))
     (f,) = w.read(Snapshot(now=T0))[0]
     assert f.role == "ops"
+
+
+def test_skills_of_a_platform_counting_loads_cost_their_loads(farm: Path, tmp_path: Path) -> None:
+    store = SqliteInstructionStore(tmp_path / "k.db")
+    for role in ("reviewer", "dev-1"):
+        (farm / "profiles" / role / "skills" / "review" / "SKILL.md").write_text(lesson(1))
+    (farm / "profiles" / "dev-1" / "skills" / "unused").mkdir()
+    (farm / "profiles" / "dev-1" / "skills" / "unused" / "SKILL.md").write_text(lesson(2))
+    (farm / "AGENTS.md").write_text("# Core\n")
+    w = watch(farm, store)
+    owners = (Owner("reviewer", "reviewer"), Owner("dev-1", "dev"))
+
+    def load(role: str, hours: float, skill: str = "review", source: str = "hermes") -> SkillLoad:
+        return SkillLoad(skill, T0 - timedelta(hours=hours), "s", role, source)
+
+    loads = (
+        load("reviewer", 1),
+        load("reviewer", 2),
+        load("reviewer", 30),  # yesterday's
+        load("dev", 3),
+        load("dev", 3, source="claude-code"),  # another platform's skill of that name
+        load("ops", 3),  # a role with no such skill: no file of its own nor a shared one
+    )
+    snap = Snapshot(
+        now=T0,
+        owners=owners,
+        sessions=sessions(T0, 7),
+        skill_loads=loads,
+        skill_loads_counted=("hermes",),
+    )
+    files = {f.path: f for f in w.read(snap)[0]}
+    rev = files["~/profiles/reviewer/skills/review/SKILL.md"]
+    assert (rev.token_basis, rev.tokens_per_day) == ("loads", rev.tokens * 2)
+    dev = files["~/profiles/dev-1/skills/review/SKILL.md"]
+    assert (dev.role, dev.token_basis, dev.tokens_per_day) == ("dev", "loads", dev.tokens)
+    unused = files["~/profiles/dev-1/skills/unused/SKILL.md"]
+    assert (unused.token_basis, unused.tokens_per_day) == ("loads", 0)
+    agents = files["~/AGENTS.md"]  # always loaded: read into every session
+    assert (agents.token_basis, agents.tokens_per_day) == ("sessions", agents.tokens * 7)
+    # The platform did not count its loads this tick: sessions, an upper bound.
+    files = {f.path: f for f in w.read(replace(snap, skill_loads_counted=()))[0]}
+    rev = files["~/profiles/reviewer/skills/review/SKILL.md"]
+    assert (rev.token_basis, rev.tokens_per_day) == ("sessions", rev.tokens * 7)
+    store.close()
+
+
+def test_a_shared_skill_counts_the_loads_of_roles_without_their_own(tmp_path: Path) -> None:
+
+    for d in ("shared/a/review", "shared/b/review", "profiles/dev/skills/review"):
+        (tmp_path / d).mkdir(parents=True)
+        (tmp_path / d / "SKILL.md").write_text(lesson(1))
+    sources = (
+        Source((f"{tmp_path}/shared/**/SKILL.md",), loaded="on_demand", platform="hermes"),
+        Source(
+            (f"{tmp_path}/profiles/{{role}}/skills/*/SKILL.md",),
+            loaded="on_demand",
+            platform="hermes",
+        ),
+    )
+    store = SqliteInstructionStore(":memory:")
+    w = InstructionWatch(store, InstructionSettings(enabled=True), sources, home=str(tmp_path))
+    loads = tuple(
+        SkillLoad("review", T0 - timedelta(hours=1), "s", role, "hermes")
+        for role in ("dev", "ops", "qa")
+    )
+    snap = Snapshot(now=T0, skill_loads=loads, skill_loads_counted=("hermes",))
+    got = {f.path: f.tokens_per_day // f.tokens for f in w.read(snap)[0]}
+    assert got == {
+        "~/shared/a/review/SKILL.md": 2,  # the first of the shared skills of that name
+        "~/shared/b/review/SKILL.md": 0,
+        "~/profiles/dev/skills/review/SKILL.md": 1,
+    }
+    store.close()
+
+
+def test_loads_go_to_the_profile_they_were_opened_in(tmp_path: Path) -> None:
+    for d in ("profiles/dev-1", "profiles/dev-2", "profiles/Dev-3"):
+        (tmp_path / d / "skills" / "review").mkdir(parents=True)
+        (tmp_path / d / "skills" / "review" / "SKILL.md").write_text(lesson(1))
+    for d in ("shared/github/review", "shared/gitlab/review"):
+        (tmp_path / d).mkdir(parents=True)
+        (tmp_path / d / "SKILL.md").write_text(lesson(1))
+    sources = (
+        Source((f"{tmp_path}/shared/**/SKILL.md",), loaded="on_demand", platform="hermes"),
+        Source(
+            (f"{tmp_path}/profiles/{{role}}/skills/*/SKILL.md",),
+            loaded="on_demand",
+            platform="hermes",
+            role_of=lambda name: name.rsplit("-", 1)[0].lower(),
+        ),
+    )
+    store = SqliteInstructionStore(":memory:")
+    w = InstructionWatch(store, InstructionSettings(enabled=True), sources, home=str(tmp_path))
+
+    def load(skill: str, profile: str | None, role: str = "dev") -> SkillLoad:
+        return SkillLoad(skill, T0 - timedelta(hours=1), "s", role, "hermes", profile)
+
+    loads = (
+        load("review", "dev-2"),
+        load("review", "dev-2"),
+        load("review", "dev-3"),  # Hermes lowercases profiles; the directory is Dev-3
+        load("review", "dev-9"),  # a profile with no skill of its own: the shared one
+        load("gitlab/review", "dev-9"),  # categories named: that skill only
+        load("tools:review", "dev-1"),  # a plugin's skill: none of these files
+    )
+    snap = Snapshot(now=T0, skill_loads=loads, skill_loads_counted=("hermes",))
+    got = {f.path: f.tokens_per_day // f.tokens for f in w.read(snap)[0]}
+    assert got == {
+        "~/shared/github/review/SKILL.md": 1,
+        "~/shared/gitlab/review/SKILL.md": 1,
+        "~/profiles/Dev-3/skills/review/SKILL.md": 1,
+        "~/profiles/dev-1/skills/review/SKILL.md": 0,
+        "~/profiles/dev-2/skills/review/SKILL.md": 2,
+    }
+
+
+def test_each_scan_stores_one_sample_of_tokens_a_day_per_role(farm: Path, tmp_path: Path) -> None:
+    from kelpie.core.storage import read_instruction_tokens
+
+    store = SqliteInstructionStore(tmp_path / "k.db")
+    (farm / "profiles" / "reviewer" / "skills" / "review" / "SKILL.md").write_text(lesson(1))
+    (farm / "AGENTS.md").write_text("# Core\n")
+    w = watch(farm, store)
+    owners = (Owner("reviewer", "reviewer"),)
+    for minutes in (0, 30, 60):  # scans at 0 and 60 (every hour); 30 reuses the last
+        now = T0 + timedelta(minutes=minutes)
+        w.read(Snapshot(now=now, owners=owners, sessions=sessions(now, 2)))
+    rows = read_instruction_tokens(store._db, T0, T0 + timedelta(hours=2))
+    assert [(r.at, r.role, r.files) for r in rows] == [
+        (T0, None, 1), (T0, "reviewer", 1),
+        (T0 + timedelta(hours=1), None, 1), (T0 + timedelta(hours=1), "reviewer", 1),
+    ]  # fmt: skip
+    assert rows[1].tokens_per_day > 0
+    # No session in the day (the board may not have been read), part of the farm unseen:
+    # no sample.
+    w.read(Snapshot(now=T0 + timedelta(hours=2), owners=owners))
+    later = T0 + timedelta(hours=3)
+    w.read(Snapshot(now=later, owners=owners, sessions=sessions(later, 2), unobserved=("a",)))
+    ro = watch(farm, store)
+    ro.record = False  # kelpie report: reads, never writes
+    now = T0 + timedelta(hours=4)
+    ro.read(Snapshot(now=now, owners=owners, sessions=sessions(now, 2)))
+    assert len(read_instruction_tokens(store._db, T0, T0 + timedelta(days=1))) == 4
+
+
+def test_a_failed_sample_does_not_stop_the_read(
+    farm: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqliteInstructionStore(tmp_path / "k.db")
+    (farm / "AGENTS.md").write_text("# Core\n")
+
+    def boom(rows: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "record_tokens", boom)
+    files, _ = watch(farm, store).read(
+        Snapshot(now=T0, owners=(Owner("reviewer", "reviewer"),), sessions=sessions(T0, 1))
+    )
+    assert files
+    store.close()
+    store.close()

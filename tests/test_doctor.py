@@ -98,6 +98,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "kanban.db": "PASS",
         "hooks fire": "PASS",
         "OTLP spans arrive": "PASS",
+        "data files private": "PASS",
         "traces token kept private": "SKIP",
         "models have prices": "PASS",
         "providers have a spend mode": "SKIP",
@@ -106,6 +107,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "PR blocks have conditions": "PASS",
         "snooze markers parse": "SKIP",
         "disk watched": "PASS",
+        "path scans cheap": "SKIP",
         "process counts fresh": "SKIP",
         "Prometheus reachable": "SKIP",
     }
@@ -772,6 +774,45 @@ def test_a_mac_whose_process_count_stopped_is_a_warning(farm: Farm) -> None:
     assert check.status == "PASS" and "fresh process counts from mac-1" in check.detail
 
 
+SCANS = "max by (instance, path) (kelpie_path_scan_seconds)"
+
+
+def test_a_slow_directory_scan_is_named(farm: Farm) -> None:
+    """#281: a du over a worktree root walked half the disk every run on a loaded Mac."""
+    farm.make_healthy()
+    check = farm.checks()["path scans cheap"]
+    assert check.status == "SKIP" and "kelpie_path_scan_seconds" in check.detail
+    farm.prom.responses[SCANS] = vector(
+        ({"instance": "mac-1:9100", "path": "/Users/agent/Library/Caches"}, "3"),
+        ({"instance": "other:9100", "path": "/elsewhere"}, "900"),  # not a configured host
+    )
+    check = farm.checks()["path scans cheap"]
+    assert check.status == "PASS" and "1 directory, the slowest in 3s" in check.detail
+    farm.prom.responses[SCANS] = vector(
+        ({"instance": "mac-1:9100", "path": "/Users/agent/Library/Caches"}, "3"),
+        ({"instance": "mac-1:9100", "path": "/Users/agent/worktrees"}, "312"),
+        ({"instance": "mac-1:9100", "path": "/Users/agent/.hermes"}, "61"),
+    )
+    check = farm.checks()["path scans cheap"]
+    assert check.status == "WARN"
+    assert "2 directory scan(s) over 60s" in check.detail
+    # The slowest first, each with its host.
+    assert check.detail.index("/Users/agent/worktrees on mac-1 (312s)") < check.detail.index(
+        "/Users/agent/.hermes on mac-1 (61s)"
+    )
+    assert "Caches" not in check.detail
+    assert "narrower directories" in check.fix and "worktree root" in check.fix
+
+
+def test_path_scans_skip_without_resources_or_an_answer(farm: Farm) -> None:
+    farm.make_healthy()
+    farm.prom.status = 500
+    assert farm.checks()["path scans cheap"].status == "SKIP"
+    farm.prom.status = 200
+    farm.resources = ""
+    assert farm.checks()["path scans cheap"].status == "SKIP"
+
+
 def test_process_counts_skip_without_a_mac_or_an_answer(farm: Farm) -> None:
     farm.make_healthy()
     check = farm.checks()["process counts fresh"]
@@ -834,3 +875,68 @@ def test_two_boards_of_one_home_are_checked_one_by_one_without_a_failure(farm: F
     second.path.unlink()
     check = {c.name: c for c in run_checks(path, now=lambda: NOW, environ={})}["kanban.db (sign)"]
     assert check.status == "FAIL" and "board sign" in check.fix
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://admin:S3CRET-PW@127.0.0.1:9",
+        "http://127.0.0.1:9/?token=S3CRET-Q",
+        "http://127.0.0.1:9/#S3CRET-F",
+    ],
+)
+def test_prometheus_url_secrets_are_refused_and_never_printed(farm: Farm, url: str) -> None:
+    """The URL came from --prometheus or $KELPIE_PROMETHEUS_URL unchecked and was echoed
+    whole, password and token included (#275 L6)."""
+    check = farm.checks(url)["Prometheus reachable"]
+    assert check.status == "FAIL"
+    assert "S3CRET" not in check.detail and "S3CRET" not in check.fix
+    assert "credentials" in check.detail
+
+
+def test_prometheus_redirect_is_not_followed(farm: Farm, prometheus: str) -> None:
+    hits: list[str] = []
+
+    class Moved(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            hits.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", f"{prometheus}/-/ready")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Moved)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        check = farm.checks(f"http://127.0.0.1:{server.server_port}")["Prometheus reachable"]
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert hits == ["/-/ready"]
+    assert check.status == "FAIL"  # a redirect elsewhere is not "reachable"
+    assert "redirect not followed" in check.detail
+
+
+def test_prometheus_malformed_url_fails_cleanly(farm: Farm) -> None:
+    assert farm.checks("http://[::1")["Prometheus reachable"].status == "FAIL"
+
+
+def test_a_parking_rule_that_acts_on_some_adapters_still_warns_of_stranded_parks(
+    tmp_path: Path,
+) -> None:
+    """Hermes parks, Claude Code cannot: the gate acts on Hermes tasks, so parks that
+    nothing wakes are still a warning, and Claude Code's gap is said apart."""
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        "[adapters.hermes]\n[adapters.claude_code]\n"
+        '[engine]\ndry_run = false\n[engine.rules.dispatch_gate]\nmode = "act"\n'
+    )
+    check = {c.name: c for c in run_checks(path, environ={})}["rule modes"]
+    assert "parked tasks are not woken" in check.detail
+    assert "cannot act on this farm" not in check.detail
+    assert (
+        "in act, but on some adapters' tasks their actions become alerts: dispatch_gate "
+        "(Claude Code can't park tasks or wake tasks yet)"
+    ) in check.detail

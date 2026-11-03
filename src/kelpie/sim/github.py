@@ -34,8 +34,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 MAX_BODY = 256 * 1024  # a write's JSON body (an issue comment is the largest)
-TOKEN = "ghp_SimulatedFarmToken0123456789abcdef"
-BILLING_TOKEN = "ghp_SimulatedBillingToken0123456789ab"  # may read billing usage, nothing else
+TOKEN = "kelpie-sim-farm-token-0123456789abcdef"
+BILLING_TOKEN = "kelpie-sim-billing-token-0123456789ab"  # may read billing usage, nothing else
 
 
 def iso(dt: datetime) -> str:

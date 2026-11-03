@@ -61,7 +61,7 @@ TLS, size limits and authentication for agents do not change `/metrics`. Three c
 
 | Call | Body (agent → server) | Reply |
 | --- | --- | --- |
-| `/v1/agent/report` | protocol version, agent version, its `interval`, `sent_at`; per adapter: name, the action kinds it carries out, and its snapshot or the error it failed with, plus the boards it could not read (`unobserved`, only when there are some: several Hermes boards, listed as `<agent>:<board>` and alerted once) | `{}` |
+| `/v1/agent/report` | protocol version, agent version, its `interval`, `sent_at`; per adapter: name, the action kinds it carries out, and its snapshot or the error it failed with, plus the boards it could not read (`unobserved`, only when there are some: several Hermes boards, listed as `<agent>:<board>` and alerted once); the stretches its host slept (`sleeps`, start and end, only for 15 minutes after a wake: issue #296) | `{}` |
 | `/v1/agent/actions` | results of actions carried out since the last call | actions for this agent; held open up to 20 s until one is queued (long poll) |
 | `/v1/traces` | OTLP/HTTP, relayed by the agent from local exporters | as the OTLP endpoint |
 
@@ -111,8 +111,10 @@ namespace.
 
 - **Strangers:** connections that have not presented a valid token are capped at
   `[hub] max_connections` (default 64; when full, the oldest is cut to make room, since an
-  agent sends its token at once) and 16 per address (per /64 for IPv6), and get 3 seconds
-  in all, TLS handshake and headers included. A connection gives its slot back once its
+  agent sends its token at once) and `[server] max_connections_per_address` (default 16,
+  per /64 for IPv6), and get `[server] header_timeout` (default 3 seconds) in all, TLS
+  handshake and headers included; the main port has the same guards
+  ([configuration](configuration.md#server)). A connection gives its slot back once its
   token checks out. Someone with several addresses who opens connections faster than an
   agent completes its handshake can still crowd agents out; put the hub behind a firewall
   that admits only the agents' networks where that matters.
@@ -124,7 +126,8 @@ namespace.
 - **Bodies:** `Content-Length` required, at most `[hub] max_body_bytes` (default 16 MiB)
   before and after decompression. `Content-Encoding: gzip` is inflated with that bound, so
   a small compressed bomb is refused. 411/413/415 otherwise; one request per connection;
-  socket timeout and a whole-body deadline as on the OTLP endpoint (slowloris).
+  `[server] read_timeout` per socket read and `body_timeout` for the whole body, as on the
+  OTLP endpoint (slowloris).
 - **Counts:** per adapter at most 20,000 tasks, 50,000 sessions, 100,000 spans, 20,000
   conditions and dependencies; ids of at most 256 printable characters; JSON nesting is
   bounded by the decoder (a too-deep body is a 400).
@@ -272,6 +275,17 @@ and `requeue` are idempotent there; `comment` may repeat once.
   and owners. Both drop together, so capacity and demand stay consistent; the silence
   alert says the farm is partial.
 - Actions routed to a silent agent are deferred until it is back.
+- **A host that slept is not a farm that waits** (issue #296). Each agent watches its own
+  host as `kelpie serve` does (`[engine] host_sleep_min_gap`: the wall clock running ahead
+  of the monotonic clock between reports, measured on `CLOCK_BOOTTIME` where the OS has
+  it) and sends a sleep in its reports for 15 minutes after the wake (the field is left
+  out otherwise, so a hub of the release before refuses reports only then). The hub keeps
+  each agent's sleeps for a day in `Snapshot.host_sleeps` under the agent's name: the ages
+  of that agent's sessions and tasks count awake time, and its sessions that do not come
+  back are requeued once as "ended while the host slept". The resolve of its silence says
+  how long the host slept. A sleep of one host never touches another host's ages. The hub
+  keeps an agent's sleeps in memory: after a hub restart, the rules know only those
+  reported since (the daily report reads them from the database).
 
 ## Failure modes
 

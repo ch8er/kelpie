@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import time
+import urllib.error
 import urllib.request
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -38,6 +39,7 @@ from kelpie.app import (
     LoadedRules,
     Settings,
     act_blockers,
+    act_gaps,
     build_adapters,
     dispatch_gate_warnings,
     load_rules,
@@ -65,6 +67,7 @@ from kelpie.connectors.github.connector import (
     web_host,
 )
 from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.files import db_files, loose
 from kelpie.core.model import Status
 from kelpie.core.ports import PlatformAdapter
 from kelpie.core.snooze import marker_snooze
@@ -250,6 +253,16 @@ def check_rule_modes(
                 "use suggest for those rules, or configure what they need "
                 f"({CHECKLIST}, What can act today)"
             )
+    # Acting on some adapters' tasks, not on others': there its actions become alerts.
+    gaps = act_gaps(settings, adapters) if acting else {}
+    if gapped := [f"{r} ({gaps[r]})" for r in acting if r in gaps]:
+        problems.append(
+            f"in act, but on some adapters' tasks their actions become alerts: {_first(gapped)}"
+        )
+        fixes.append(
+            "expected while those adapters lack the actions; to act there too, see "
+            f"{CHECKLIST}, What can act today"
+        )
     # A parking rule that cannot act here parks nothing; "cannot act" already says so.
     if unwoken := [
         *(dispatch_gate_warnings(engine) if "dispatch_gate" not in blocked else []),
@@ -332,6 +345,36 @@ def _newest_span(path: Path) -> str | None:
         raise
     finally:
         conn.close()
+
+
+PRIVATE_CHECK = "data files private"
+
+
+def check_private_files(settings: Settings) -> Check:
+    """``kelpie.db`` (with ``-wal``/``-shm``) and the report files are readable by Kelpie's
+    user only. Kelpie creates them 0600; older or copied files keep their mode, and doctor
+    only names them: it never changes a mode."""
+    paths: list[Path] = []
+    if settings.db_path is not None:
+        paths += db_files(settings.db_path)  # as serve opens it (no ~ expansion)
+    folder = settings.report.dir
+    if folder is not None and folder.is_dir():
+        paths += sorted(folder.glob("kelpie-report-*.md"))
+    if not paths:
+        return _skip(PRIVATE_CHECK, "no database file and no report files")
+    found = loose(paths)
+    if found:
+        return _warn(
+            PRIVATE_CHECK,
+            f"{len(found)} file(s) others may read or write (task titles, block reasons): "
+            f"{_paths(found)}",
+            "chmod 600 them (and chmod 700 their folder) if other users of this machine "
+            "should not read them; Kelpie creates new ones 0600 and leaves these as they are",
+        )
+    present = [p for p in paths if p.exists()]
+    if not present:
+        return _skip(PRIVATE_CHECK, "no database file and no report files yet")
+    return _pass(PRIVATE_CHECK, f"{len(present)} file(s), none open to others")
 
 
 TOKEN_CHECK = "traces token kept private"
@@ -843,6 +886,55 @@ def check_resources_watched(
     return _pass(name, f"{where} reads the disks and directory sizes of {hosts}{note}")
 
 
+SLOW_SCAN = 60.0  # seconds: a du of one directory longer than this walks too much (#281)
+SCANS = "path scans cheap"
+
+
+def check_path_scans(
+    settings: Settings, loaded: LoadedRules, environ: Mapping[str, str] = os.environ
+) -> Check:
+    """``scripts/kelpie-path-sizes.sh`` must stay cheap: one ``du`` over a worktree root or a
+    whole agent home walks hundreds of thousands of files every run (a live farm with load
+    448). It writes how long each directory took; doctor names the slow ones."""
+    prometheus = settings.resources.prometheus
+    if not any(r.name == "resources" for r in loaded.rules) or prometheus is None:
+        return _skip(SCANS, "rule 7 reads no host resources")
+    try:
+        config = prometheus.build(environ=environ).config
+    except ValueError as exc:
+        return _skip(SCANS, str(exc))
+    client = PrometheusClient(config.url, min(config.timeout, 5), config.token)
+    label = config.host_label
+    try:
+        series = client.query(f"max by ({label}, path) (kelpie_path_scan_seconds)")
+    except QueryError as exc:
+        return _skip(SCANS, f"Prometheus did not answer ({exc.cause})")
+    hosts = {value: host for host, value in prometheus.hosts.items()}
+    scans = [
+        (hosts[s.labels.get(label, "")], s.labels.get("path", ""), s.value)
+        for s in series
+        if s.labels.get(label, "") in hosts
+    ]
+    if not scans:
+        return _skip(
+            SCANS,
+            "no kelpie_path_scan_seconds (kelpie-path-sizes.sh not installed, or older)",
+        )
+    slow = sorted((-seconds, host, path) for host, path, seconds in scans if seconds > SLOW_SCAN)
+    if slow:
+        shown = [f"{path} on {host} ({-neg:.0f}s)" for neg, host, path in slow]
+        return _warn(
+            SCANS,
+            f"{len(slow)} directory scan(s) over {SLOW_SCAN:.0f}s: {_first(shown)}",
+            "point kelpie-path-sizes.sh at narrower directories that grow (simulator "
+            "devices, DerivedData, build or system caches), not a worktree root or a whole "
+            "agent home (docs/install.md, Host resources)",
+        )
+    longest = max(seconds for _, _, seconds in scans)
+    count = f"{len(scans)} director{'y' if len(scans) == 1 else 'ies'}"
+    return _pass(SCANS, f"{count}, the slowest in {longest:.0f}s")
+
+
 # kelpie_processes.prom: the macOS process count rule 7 reads (scripts/kelpie-process-limit.sh).
 _PROCESS_FILE = 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_processes[.]prom"}'
 
@@ -912,22 +1004,41 @@ def _labels(client: PrometheusClient, promql: str, label: str) -> set[str]:
     return {s.labels.get(label, "") for s in client.query(promql)}
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        return None  # urllib then raises HTTPError with the 3xx code
+
+
 def check_prometheus(url: str | None, environ: Mapping[str, str]) -> Check:
     name = "Prometheus reachable"
     explicit = url or environ.get(PROMETHEUS_ENV)
     base = (explicit or DEFAULT_PROMETHEUS).rstrip("/")
     fix = "start Prometheus (docker compose up prometheus) or pass the right --prometheus URL"
-    if urlsplit(base).scheme not in ("http", "https"):
+    try:
+        parts = urlsplit(base)
+        parts.port  # noqa: B018 - raises on a bad port
+    except ValueError:
+        return _fail(name, "the URL is not valid", fix)
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        # Never echoed: the URL may hold a password or a token.
+        return _fail(name, "the URL must not contain credentials, a query or a fragment", fix)
+    if parts.scheme not in ("http", "https"):
         return _fail(name, f"{base}: only http and https URLs are supported", fix)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via a proxy
+    # Never via a proxy, never following a redirect (the check is about this URL).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    answered = False
     try:
         with opener.open(f"{base}/-/ready", timeout=3) as response:
             problem = "" if response.status == 200 else f"HTTP {response.status}"
+    except urllib.error.HTTPError as exc:
+        answered = 300 <= exc.code < 400  # something there sends us elsewhere: say so
+        redirect = " (redirect not followed)" if answered else ""
+        problem = f"HTTP {exc.code}{redirect}"
     except (OSError, ValueError) as exc:
         problem = str(getattr(exc, "reason", exc))
     if not problem:
         return _pass(name, f"{base}/-/ready")
-    if explicit is None:
+    if explicit is None and not answered:
         return _skip(name, f"nothing at {base}; pass --prometheus URL or set ${PROMETHEUS_ENV}")
     return _fail(name, f"{base}/-/ready: {problem}", fix)
 
@@ -1214,7 +1325,7 @@ def run_checks(
         return [_fail("config loads", str(exc), fix)]
     at = now().astimezone(UTC)
     try:  # built once: the modes check and the platform checks
-        adapters = build_adapters(settings)
+        adapters = build_adapters(settings, environ)
     except ConfigError as exc:  # e.g. an adapter's token_env names an unset variable
         fix = "export the variable it names, or fix the config"
         return [_fail("config loads", str(exc), fix)]
@@ -1280,6 +1391,7 @@ def run_checks(
     ]
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
     checks.append(check_traces_token(settings, environ))
+    checks.append(check_private_files(settings))
     checks.append(check_prices(settings, at))
     checks.append(check_spend_modes(settings, at))
     checks += check_cost_reports(settings, at, environ)
@@ -1297,6 +1409,7 @@ def run_checks(
     checks += check_github(settings, environ)
     checks += check_chat_buttons(settings, environ)
     checks.append(check_resources_watched(settings, loaded, environ))
+    checks.append(check_path_scans(settings, loaded, environ))
     checks.append(check_process_counts(settings, loaded, environ))
     checks.append(check_prometheus(prometheus, environ))
     return checks

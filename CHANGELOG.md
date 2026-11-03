@@ -6,11 +6,59 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [PEP 440](https://peps.python.org/pep-0440/), so a pre-release is written `0.1.0a1`, not
 `0.1.0-alpha.1`. The release process is in [docs/release.md](docs/release.md).
 
-## [0.1.0a1] - Unreleased
+## [Unreleased]
+
+### Changed
+
+- Every outage kind in the report (#229, incident 20): a block storm's waits count under "a
+  shared blocker" for the tasks it names, even when its reason names a person (a tool
+  failing for many tasks, under "a shared tool failure"), and in the cost of chaos an
+  outage's tasks (a CI outage's too; a finished one until it finished) count once, under
+  "farm outages", from the outage's first alert that counts, ahead of the person's inbox and
+  their stale blocks. The "Outages" list names each outage's kind, scope and who can end it;
+  an outage whose check is still in observe is listed, and its waits stay where they were
+  (until it is switched on; switched back to observe, it stops counting)
+  ([#270](https://github.com/ch8er/kelpie/pull/270)).
+
+## [0.1.0a1] - 2026-11-03
 
 First public pre-release, an alpha: interfaces and configuration keys may still
 change. It starts in global dry-run (`dry_run = true`) with every rule in `observe` mode,
 so a fresh install changes nothing on your farm until you turn it on, rule by rule.
+
+### Before you install
+
+These are the release notes for the tag, ahead of what changed.
+
+- **Think before exposing `kelpie serve` off loopback** (the default bind is `127.0.0.1`;
+  docker compose publishes on `127.0.0.1` only). Every listener now has connection guards
+  (header and body deadlines, connection caps, slow-client cutoff, body limits; `[server]`),
+  but `/metrics` and `/healthz` are unauthenticated and the guards cannot stop a fast flood
+  from many addresses: firewall the port to the networks that need it, or put an
+  authenticating proxy in front ([docs/security.md](docs/security.md#listeners)).
+- **Rule 10 in `act` trusts every holder of the traces token** (audit item M1). Spans and
+  hook spool lines say which run they belong to, and every agent holds the one ingest
+  token, so an agent can make `loop_breaker` stop another agent's run. If your agents are
+  untrusted or sandboxed and share one token, keep rule 10 in `observe` or `suggest`, or
+  give them separate farms. Fix: per-agent ingest tokens
+  ([#302](https://github.com/ch8er/kelpie/issues/302)). Details:
+  [docs/security.md](docs/security.md#known-residual-risks).
+- Other open medium findings of the security audit
+  ([#275](https://github.com/ch8er/kelpie/issues/275)), each fixed after this release:
+  - M4: the Linear client has no overall deadline; a server that answers a byte at a time
+    can stall the control loop (`[adapters.linear]` only). Follow-up on #275.
+  - M6: one authenticated `kelpie agent` can grow the hub's executors, metric series and
+    alerts by reporting new adapter names; give hub tokens only to agents you run.
+    Follow-up on #275.
+  - M7: only one Kelpie may act on a board, but nothing enforces it yet; two acting
+    instances duplicate comments and requeues. Follow-up on #275.
+- **Known limits.** Not verified before the release
+  ([#249](https://github.com/ch8er/kelpie/issues/249)): the Docker image (its build and
+  `kelpie demo` inside it; the release workflow builds and publishes it), live runs on real
+  Hermes, Claude Code and OpenClaw platforms with this version (the adapters are tested
+  against synthetic boards and spools, Hermes also against a simulated farm; plugin and
+  hook registration were not run), and GitHub Issues and Linear beyond the token check.
+  The wheel and sdist were installed and run on Python 3.12 and 3.13.
 
 ### Added
 
@@ -81,6 +129,17 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   for the report, not sent one per task ([#183](https://github.com/ch8er/kelpie/pull/183)).
 - An action that a platform cannot perform becomes an alert for a human instead of an error
   ([#66](https://github.com/ch8er/kelpie/pull/66)).
+- On a farm with several adapters, each rule's actions are judged per adapter: `kelpie
+  doctor` and the daily report say which adapters a rule cannot act on yet (there its actions
+  become alerts), and an adapter that declares its action kinds is sent no other
+  ([#219](https://github.com/ch8er/kelpie/pull/219)).
+- Host sleep and wake: a suspend (the wall clock running ahead of the monotonic clock
+  between ticks) of the host `kelpie serve` runs on is recorded, and session ages, rule 1's
+  grace and rule 3's ownerless and undriven checks count awake time, so a laptop that slept
+  raises no requeue or orphan alert for the gap; a session that does not come back after
+  the wake is requeued once as "ended while the host slept" ([#311](https://github.com/ch8er/kelpie/pull/311)).
+- `kelpie agent` watches its own host the same way and reports its sleeps; the hub counts
+  that agent's ages in awake time, never another host's ([#312](https://github.com/ch8er/kelpie/pull/312)).
 
 #### Platform adapters
 
@@ -173,15 +232,6 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - Waits inside an open CI outage (rule 9) count under "a shared CI failure", not CI or merges, and
   the report lists each outage of the day with its PRs and the alerts folded under it
   ([#182](https://github.com/ch8er/kelpie/pull/182), [#201](https://github.com/ch8er/kelpie/pull/201)).
-- Every outage kind in the report (#229, incident 20): a block storm's waits count under "a
-  shared blocker" for the tasks it names, even when its reason names a person (a tool
-  failing for many tasks, under "a shared tool failure"), and in the cost of chaos an
-  outage's tasks (a CI outage's too; a finished one until it finished) count once, under
-  "farm outages", from the outage's first alert that counts, ahead of the person's inbox and
-  their stale blocks. The "Outages" list names each outage's kind, scope and who can end it;
-  an outage whose check is still in observe is listed, and its waits stay where they were
-  (until it is switched on; switched back to observe, it stops counting)
-  ([#270](https://github.com/ch8er/kelpie/pull/270)).
 - Suggestions check what the farm already has (approvers, holds, block conditions, budgets,
   modes); merge automation is never advised ([#173](https://github.com/ch8er/kelpie/pull/173)).
 - Listed, never counted: cards stuck before work that block nothing, and agent tasks planned
@@ -193,10 +243,18 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   ([#54](https://github.com/ch8er/kelpie/pull/54), [#57](https://github.com/ch8er/kelpie/pull/57)).
 - `kelpie fix --at` takes `now` and times before now (`-30m`, `-2h`, `-1d2h`) as well as
   ISO times, and the confirmation gives the recorded time in UTC ([#235](https://github.com/ch8er/kelpie/pull/235)).
+- Toolchain versions per host from node_exporter's textfile collector (metric and labels
+  are config data; `scripts/kelpie-toolchain.sh` writes the active Xcode and CoreSimulator
+  on macOS, or any `TOOL=COMMAND`): an outage (rule 9's CI outages, rule 4's block storm,
+  rule 10's tool failures) that begins within `toolchain_window` after a version change names
+  the change as its likely cause, in the alert and the daily report (incident 20,
+  [#284](https://github.com/ch8er/kelpie/issues/284)).
 - Honest before/after: fixes less than a window apart are measured together and credited
   to none alone (per fix only its own role or command), per-day rates whose signal began
-  inside the window are listed as not compared, and small samples say *direction only*
-  ([#193](https://github.com/ch8er/kelpie/issues/193)).
+  inside the window are listed as not compared, throughput is compared only over hours
+  when agent work was available (a spike of released backlog right after a fix is named
+  and the next full day compared instead), and small samples say *direction only*
+  ([#193](https://github.com/ch8er/kelpie/issues/193), [#284](https://github.com/ch8er/kelpie/issues/284)).
 - Farm throughput per role, live gauges and Grafana panels; rework counted for the role that
   redid the work, not the reviewer ([#78](https://github.com/ch8er/kelpie/pull/78), [#116](https://github.com/ch8er/kelpie/pull/116)).
 - A sections extension point with per-section settings, and token sections that read them
@@ -206,6 +264,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - An optional LLM root-cause section (`[report.llm]`, off by default). It sees only
   aggregates with anonymized ids, and its answer is escaped and marked as a hypothesis
   ([#95](https://github.com/ch8er/kelpie/pull/95)).
+- Host sleep is listed apart ("Host asleep: 47 min", per host) and never counted in the
+  hours lost: each host's sleep is taken out of the chaos states on its tasks ([#313](https://github.com/ch8er/kelpie/pull/313)).
 
 #### Alerts
 
@@ -359,6 +419,13 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 ### Safety
 
+- `kelpie serve`'s main port (OTLP ingest, `/metrics`, `/healthz`) gets the hub's
+  connection guards: header deadline, connection caps per listener and per address,
+  slow-client cutoff, body deadline and size limits, configurable in `[server]` (audit M5,
+  [#309](https://github.com/ch8er/kelpie/pull/309)).
+- Kelpie's data directory is created `0700` and its database, reports and keys `0600`;
+  `kelpie doctor` names existing files that are readable by others and never changes them
+  itself (audit L5, [#314](https://github.com/ch8er/kelpie/pull/314)).
 - Dry-run is on by default and every rule starts in `observe`. `act` mode is refused at
   startup for rules whose actions the configured adapter cannot yet carry out ([#4](https://github.com/ch8er/kelpie/pull/4), [#13](https://github.com/ch8er/kelpie/pull/13)).
 - A failed or unexecutable action always alerts at warning or above, once per failure
@@ -382,6 +449,18 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   fails to load with an error naming `[report] task_url`. Both keys must also stay within
   600 characters once a 64-character id fills `{id}`: a longer `[alerts] task_url` used to
   load and then drop every "Open task" link.
+- The Hermes adapter reads its hook spool the way the Claude Code and OpenClaw adapters do:
+  never through a symlink, never blocking on a FIFO, with a byte cap and overlong lines
+  skipped. It also reads a worktree's `.git`, `commondir` and `gitdir` files that way. Before,
+  an agent that put a FIFO at the spool or at its worktree's `.git` stalled the control loop
+  until restart. The Hermes plugin no longer writes its spool through a symlink or blocks on
+  a FIFO, and creates a new spool folder with mode 0700
+  ([#275](https://github.com/ch8er/kelpie/issues/275)).
+- OTLP ingest refuses a gzip body of more than 64 members (exporters send one): many tiny
+  members cost quadratic CPU, minutes for one 8 MiB request. `[[traces.forward]]` never
+  sends plain http through a proxy from the environment (`http_proxy`), which saw the
+  forward headers and the spans in clear (use https to forward through a proxy); it reads at most
+  64 KiB of a collector's answer ([#275](https://github.com/ch8er/kelpie/issues/275)).
 
 ### Fixed
 
@@ -391,6 +470,12 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   that was not set (the GitHub Issues and Linear quickstarts before the token is exported);
   it now fails its `config loads` check and names the variable
   ([#249](https://github.com/ch8er/kelpie/issues/249)).
+- First-run rough edges ([#267](https://github.com/ch8er/kelpie/issues/267)): `kelpie
+  status` writes durations as the config does (`30s`, `30m`, `7d`) instead of
+  `7 days, 0:00:00`, and so do the startup warnings that compare durations; `kelpie serve` warns that checkpoints makes no WIP commits without
+  `[connectors.github.pulls]` only when a configured adapter makes WIP commits (or on a
+  hub), not on every farm; `kelpie doctor` builds the adapters from the environment it
+  checks. The package lists Python 3.13, which installs and runs.
 - A `kelpie serve` refused for its config (a missing token, header or admin key variable, an
   alert channel's token or buttons, a `[traces] token_file` others could have written, a
   `[hub]` TLS cert or key that does not load) no longer leaves an empty `kelpie.db` behind:
@@ -445,6 +530,13 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - Lasting-state alerts failed to read their escalation defaults from a slotted dataclass,
   found on the first live run ([#24](https://github.com/ch8er/kelpie/pull/24)).
 - Nested LLM spans were counted twice in token totals ([#29](https://github.com/ch8er/kelpie/pull/29)).
+- `kelpie doctor` refuses a `--prometheus` / `$KELPIE_PROMETHEUS_URL` with credentials, a
+  query or a fragment instead of printing it whole, and no longer follows a redirect.
+  Reading the store read-only (`kelpie status`, `why`, `snooze`) escapes the path: a `#`,
+  `?` or `%` in it used to open another file, read-write. The OpenClaw hook's peer key is
+  read only from a regular file, so a directory or FIFO there no longer fails every tick.
+  The simulator's fake GitHub tokens no longer look like real ones, and CI's actions are
+  pinned by commit like the release's ([#275](https://github.com/ch8er/kelpie/issues/275)).
 
 ### Internal
 
@@ -457,4 +549,4 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   mode and the daily report ([#62](https://github.com/ch8er/kelpie/pull/62), [#73](https://github.com/ch8er/kelpie/pull/73), [#74](https://github.com/ch8er/kelpie/pull/74), [#81](https://github.com/ch8er/kelpie/pull/81)).
 - A code health and security audit plan was written before the first release ([#92](https://github.com/ch8er/kelpie/pull/92)).
 
-[0.1.0a1]: https://github.com/ch8er/kelpie/commits/main
+[0.1.0a1]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a1

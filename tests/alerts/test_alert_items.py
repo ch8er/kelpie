@@ -209,3 +209,19 @@ def test_an_approval_in_rule_13s_digest_says_what_it_asks() -> None:
         event = AlertEvent(action.rule, "escalate", action.reason, action.severity, items=items)
         text = render.plain(event)
         assert "Blocking: none" in text and "(oldest " in text.splitlines()[0]
+
+
+def test_items_name_the_board_of_their_task() -> None:
+    """Three boards (#283): each item carries its task's board, which is not part of the
+    fingerprint; a task off the board, or of a one-board farm, has none."""
+    tasks = tuple(
+        Task(f"{b}:t_1", "t", Status.BLOCKED, NOW - H, board=b) for b in ("app-a", "app-b", "svc")
+    )
+    snapshot = Snapshot(now=NOW, tasks=(*tasks, *BOARD))
+    entries = [{"task_id": t.id} for t in tasks] + [{"task_id": "t_1"}, {"task_id": "gone"}]
+    found = alert_items(alert(params={"items": entries}), snapshot)
+    assert [i.board for i in found] == ["app-a", "app-b", "svc", None, None]
+    [own] = alert_items(alert(task_id="svc:t_1"), snapshot)
+    assert own.board == "svc"
+    assert own.fingerprint == AlertItem("svc:t_1", "t", own.age, since=own.since).fingerprint
+    assert "Board: svc" in render.plain(AlertEvent("r", "s", "Why.", Severity.INFO, items=(own,)))

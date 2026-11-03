@@ -207,7 +207,7 @@ def test_serve_needs_the_file_and_status_names_it(
     from kelpie.app import load_rules
 
     text = render_status(settings, load_rules(settings.engine))
-    assert f"bearer token from {tmp_path / 'traces.env'} (rotatable, grace 0:30:00)" in text
+    assert f"bearer token from {tmp_path / 'traces.env'} (rotatable, grace 30m)" in text
     assert OLD not in text and all(OLD not in r.message for r in caplog.records)
 
 

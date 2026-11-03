@@ -138,3 +138,22 @@ def test_a_check_that_breaks_is_a_fail_naming_only_its_type(
     monkeypatch.setattr(type(s), "build", boom)
     checks = by_name(doctor.run(s, NOW, ENV))
     assert checks[doctor.READ][0] == "SKIP" and "RuntimeError" in checks[doctor.READ][1]
+
+
+def test_doctor_reads_the_token_from_its_environ(
+    tmp_path: Path, gh: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The adapters are built from the environment doctor was given, not os.environ."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KELPIE_DB", str(tmp_path / "kelpie.db"))
+    monkeypatch.delenv("GH_ISSUES", raising=False)
+    config = tmp_path / "issues.toml"
+    config.write_text(
+        f'[engine]\ndry_run = true\n[adapters.github_issues]\nrepos = ["{REPO}"]\n'
+        f'api_url = "{gh.url}"\ntoken_env = "GH_ISSUES"\n'
+    )
+    checks = {c.name: c for c in run_checks(config, prometheus="http://127.0.0.1:9", environ=ENV)}
+    assert checks["config loads"].status == "PASS"
+    assert checks[doctor.TOKEN].status == "PASS"
+    unset = {c.name: c for c in run_checks(config, prometheus="http://127.0.0.1:9", environ={})}
+    assert unset["config loads"].status == "FAIL" and "$GH_ISSUES" in unset["config loads"].detail

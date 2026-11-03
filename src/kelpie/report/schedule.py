@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
+from kelpie.core.files import prepare_db
 from kelpie.report.config import ReportSettings
 
 log = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class RunLog:
         if self._path is None:
             return
         try:
+            prepare_db(self._path)  # recreated after a delete: still private
             with closing(sqlite3.connect(self._path)) as db, db:
                 db.executescript(_SCHEMA)
                 db.execute(

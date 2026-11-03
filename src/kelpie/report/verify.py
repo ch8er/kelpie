@@ -11,23 +11,26 @@ Each fix is measured over ``window`` before it and the same length after it (sho
 the report ends sooner): hours lost per day (chaos states counted exactly like the report's
 cost of chaos: task-hours, each once, and for forgotten holds idle agent-hours; only the
 fix's rule when it names one, its own task-hours whatever another rule also saw), tokens
-per day (the fix's
-role when it names one), returns per day, review time
-(mean session length of ``review_roles``), sessions that failed or ended without a final
-status, and for a command fix the output tokens per call of that command. A side with fewer
-than ``min_sample`` observations, or an after-window shorter than a quarter of the window,
-is a small sample, labelled *direction only*: it shows a direction, not a result. Metrics
-with no data on either side are left out.
+per day (the fix's role when it names one), returns per day, review time (mean session
+length of ``review_roles``), sessions that failed or ended without a final status, tasks
+done per hour while agent work was available (hours with an empty ready queue and nothing
+under way are left out, with how many there were; stages as in
+:mod:`kelpie.report.throughput`), for a command fix the output tokens per call of that
+command, and for a fix of rule ``instruction_bloat`` (a split) tokens a day on the role's
+instructions (the mean of the ``[instructions]`` samples) and tokens per completed task of
+the role. A side with fewer than ``min_sample`` observations, or an after-window shorter
+than a quarter of the window, is a small sample, labelled *direction only*: it shows a
+direction, not a result. Metrics with no data on either side are left out.
 
 What the report cannot separate, it does not credit (#193):
 
 - **Overlapping fixes.** A fix less than ``window`` after another joins its group
-  (:func:`overlapping`): the group is measured once, from ``window`` before its first fix
-  to ``window`` after its last, over the rule and role its fixes share (else all), and
-  credited to none of them alone. Only what one fix alone can explain is shown per fix:
-  its role's tokens, failures (and review time for a review role) when no other fix of
-  the group touches that role or the whole farm, and its command's output per call when
-  no other fix names the same command for the same role. Fixes are read from
+  (:func:`overlapping`): the group is measured once, from ``window`` before its first
+  fix to ``window`` after its last, over the rule and role its fixes share (else all),
+  and credited to none of them alone. Only what one fix alone can explain is shown per
+  fix: its role's tokens and failures (and review time for a review role) when no other
+  fix of the group touches that role or the whole farm, and its command's output per
+  call when no other fix names the same command for the same role. Fixes are read from
   ``Evidence.known_from`` on: a group that starts less than a window after it says an
   older fix may belong to it (``Verification.truncated``), and its before-window starts
   at ``known_from`` at the earliest (a side under a quarter of the window is *direction
@@ -47,23 +50,27 @@ the day before by itself (:func:`kelpie.report.cli.report_settings`).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Outcome
-from kelpie.core.model import Session, Span, Status, Task
+from kelpie.core.model import Owner, OwnerKind, Session, Span, Status, Task
 from kelpie.core.spans import SpanKey, last_at, span_key
 from kelpie.core.states import OpenState
+from kelpie.core.storage import TokenRow
 from kelpie.report import md
 from kelpie.report.fixes import CONFIG, FILTER, MODE, FixEvent
 from kelpie.report.store import StateRow
+from kelpie.report.throughput import stage_spans, state_windows, union_hours
 from kelpie.traces.outputs import Call, OutputSettings, filter_introductions
 
 DEFAULT_WINDOW = timedelta(days=1)
 DEFAULT_MIN_SAMPLE = 10
 DEFAULT_REVIEW_ROLES = ("reviewer",)
 DAY = timedelta(days=1)
+# A fix naming this rule changed instruction files (a split): measured on them too.
+INSTRUCTIONS_RULE = "instruction_bloat"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +133,9 @@ class Verification:
     min_sample: int = DEFAULT_MIN_SAMPLE
     # an older fix may belong to the group: fixes are known only from this time on
     truncated: datetime | None = None
+    # a throughput spike right after the fix(es) from released backlog (throughput then
+    # compares the next full day)
+    release: Release | None = None
 
     @property
     def event(self) -> FixEvent:
@@ -160,6 +170,9 @@ class Evidence:
     calls: Sequence[Call] = ()
     window: timedelta = DEFAULT_WINDOW
     min_sample: int = DEFAULT_MIN_SAMPLE
+    owners: Sequence[Owner] = ()  # people's tasks are not agent work (throughput)
+    # Tokens a day on instructions per role, one sample per scan ([instructions]).
+    instruction_tokens: Sequence[TokenRow] = ()
     # The earliest moment the loaded fixes, spans and states cover (None: unknown). A group
     # that starts less than a window after it may have lost an older fix to the cut.
     known_from: datetime | None = None
@@ -219,7 +232,11 @@ def verify_all(
     ``since``; ``events`` should reach back far enough to see the fixes a recent one
     overlaps."""
     groups = overlapping((e for e in events if e.at < ev.end), ev.window)
-    return tuple(verify_group(g, ev) for g in groups if g[-1].at >= since)
+    nexts: list[datetime | None] = [g[0].at for g in groups[1:]]
+    nexts.append(None)
+    return tuple(
+        verify_group(g, ev, n) for g, n in zip(groups, nexts, strict=True) if g[-1].at >= since
+    )
 
 
 def verify(event: FixEvent, ev: Evidence) -> Verification:
@@ -227,24 +244,36 @@ def verify(event: FixEvent, ev: Evidence) -> Verification:
     return verify_group((event,), ev)
 
 
-def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
+def verify_group(
+    events: Sequence[FixEvent], ev: Evidence, until: datetime | None = None
+) -> Verification:
     """A fix, or a group of overlapping fixes measured together: from ``window`` before the
     first to ``window`` after the last; the time between them is left out. Within a group,
     only a fix's own role (no other fix of the group touches it or the whole farm) and its
-    own command's output are credited to it alone."""
+    own command's output are credited to it alone. ``until``: the next fix after the group,
+    which a backlog release's steady comparison must not reach."""
     events = tuple(sorted(events, key=lambda e: (e.at, e.kind, e.note)))
     first, last = events[0], events[-1]
     before, after = _windows(first.at, last.at, ev)
     short = _short(before, after, ev)
     scope = _scope(events)
     excluded: list[Excluded] = []
+    released: list[Release] = []
     metrics = [
         _stuck(ev, scope, before, after, short, excluded, _config_at(events)),
         _tokens(ev, scope, before, after, short, excluded),
         _returns(ev, before, after, short),
         _review_time(ev, scope, before, after),
         _failures(ev, scope, before, after),
+        _done_per_work_hour(ev, scope, before, after, short, released, until),
     ]
+    if any(_is_split(e) for e in events):  # instruction files changed
+        # Over the group's role, else every role, whichever rule the other fixes name.
+        split = replace(scope, rule=INSTRUCTIONS_RULE)
+        metrics += [
+            _instruction_tokens(ev, split, before, after, short),
+            _tokens_per_task(ev, split, before, after, short, excluded),
+        ]
     own: list[Credited] = []
     shared: set[tuple[str, str | None]] = set()
     for e in events:
@@ -257,6 +286,8 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
             ]
             if e.role in ev.review_roles:
                 mine.append(_review_time(ev, e, b, a))
+            if _is_split(e):  # per task is never one fix's: a task goes through roles
+                mine.append(_instruction_tokens(ev, e, b, a, _short(b, a, ev)))
             own += [Credited(e, m) for m in mine if m is not None and _has_data(m)]
         if not e.command:
             continue
@@ -281,6 +312,7 @@ def verify_group(events: Sequence[FixEvent], ev: Evidence) -> Verification:
         tuple(dict.fromkeys(excluded)),
         ev.min_sample,
         ev.known_from if cut else None,
+        released[0] if released else None,
     )
 
 
@@ -457,19 +489,98 @@ def _tokens(
     (tb, nb), (ta, na) = per_day(b), per_day(a)
     who = f" ({md.text(event.role)})" if event.role else ""
     name = f"tokens per day{who}"
-    began = _traces_from(ev)
-    # Traces began late in the before-window, and (when known) after a whole loaded window
-    # with no span at all: an idle night at the start of the history is no signal turning on.
-    if (
-        began is not None
-        and (nb or na)
-        and began > b[0] + (b[1] - b[0]) / 4
-        and (ev.known_from is None or began - ev.known_from >= ev.window)
-    ):
+    if (began := _traces_began_late(ev, b)) is not None and (nb or na):
         excluded.append(Excluded(name, began, ta, "tokens/day"))
         return None
     small = short or min(nb, na) < ev.min_sample
     return Metric(name, "tokens/day", tb, ta, nb, na, small)
+
+
+def _traces_began_late(ev: Evidence, b: Window) -> datetime | None:
+    """When traces began, if late in the before-window and (when known) after a whole
+    loaded window with no span at all: an idle night at the start of the history is no
+    signal turning on. A token rate over that before-window would be partial."""
+    began = _traces_from(ev)
+    if (
+        began is not None
+        and began > b[0] + (b[1] - b[0]) / 4
+        and (ev.known_from is None or began - ev.known_from >= ev.window)
+    ):
+        return began
+    return None
+
+
+def _is_split(e: FixEvent) -> bool:
+    """A fix that changed instruction files: one recorded for rule ``instruction_bloat``
+    (``kelpie fix``, a config change), not that rule's own mode switch."""
+    return e.rule == INSTRUCTIONS_RULE and e.kind != MODE
+
+
+def _agent_task(t: Task, people: Collection[str]) -> bool:
+    """A task of an agent, not a person's (by owner or assignee)."""
+    return t.owner_id not in people and (t.assignee is None or t.assignee not in people)
+
+
+def _instruction_tokens(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) -> Metric:
+    """Tokens a day spent reading instructions, the mean of the samples in each window: the
+    fix's role's own files (all files without a role). One sample per scan."""
+
+    def mean(w: Window) -> tuple[float | None, int]:
+        per: dict[datetime, int] = {}
+        for r in ev.instruction_tokens:
+            if w[0] <= r.at < w[1] and (event.role is None or r.role == event.role):
+                per[r.at] = per.get(r.at, 0) + r.tokens_per_day
+        return (sum(per.values()) / len(per) if per else None), len(per)
+
+    (vb, nb), (va, na) = mean(b), mean(a)
+    who = f" ({md.text(event.role)})" if event.role else ""
+    small = short or min(nb, na) < ev.min_sample
+    return Metric(f"tokens a day on instructions{who}", "tokens/day", vb, va, nb, na, small)
+
+
+def _tokens_per_task(
+    ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool, excluded: list[Excluded]
+) -> Metric | None:
+    """Agent tokens of the fix's role (all agents, without one) per agent task of that role
+    done in the window: the reading a split saves should show per unit of work, not only
+    per day. A task counts under its role as the board reports it now. Left out (and listed
+    in ``excluded``) when traces began late in the before-window, as tokens per day."""
+    counted = ev.counted or {}
+    roles = ev.roles or {}
+    people = {o.id for o in ev.owners if o.kind is OwnerKind.HUMAN}
+    owner_role = {o.id: o.role for o in ev.owners}
+    theirs = {s.id for s in ev.sessions if s.owner_id in people}  # a person's own sessions
+
+    def side(w: Window) -> tuple[float | None, int]:
+        done = sum(
+            1
+            for t in ev.tasks
+            if t.status is Status.DONE
+            and w[0] <= t.status_since < w[1]
+            and _agent_task(t, people)
+            and (
+                event.role is None
+                or (t.role or (owner_role.get(t.owner_id) if t.owner_id else None)) == event.role
+            )
+        )
+        tokens = sum(
+            s.input_tokens + s.output_tokens
+            for s in ev.spans
+            if span_key(s) in counted
+            and w[0] <= last_at(s) < w[1]
+            and (s.session_id or "") not in theirs
+            and (event.role is None or roles.get(s.session_id or "") == event.role)
+        )
+        return (tokens / done if done else None), done
+
+    (vb, nb), (va, na) = side(b), side(a)
+    who = f" ({md.text(event.role)})" if event.role else ""
+    name = f"tokens per completed task{who}"
+    if (began := _traces_began_late(ev, b)) is not None and (nb or na):
+        excluded.append(Excluded(name, began, va, "tokens"))
+        return None
+    small = short or min(nb, na) < ev.min_sample
+    return Metric(name, "tokens", vb, va, nb, na, small)
 
 
 def _output(ev: Evidence, key: str, role: str | None, b: Window, a: Window, short: bool) -> Metric:
@@ -548,3 +659,185 @@ def _failures(ev: Evidence, event: FixEvent, b: Window, a: Window) -> Metric:
         na,
         small,
     )
+
+
+# Ready work, work under way, or work nobody owns (still work the farm should have done).
+WORK_STAGES = frozenset({"queue", "working", "review", "ownerless"})
+
+
+# A backlog release (#193, #284): right after a fix, at least RELEASE_MIN tasks that had
+# been ready or blocked for at least the burst window (``window / RELEASE_PART``) just before
+# it are done within that burst window, at more than RELEASE_FACTOR times the pace before the
+# fix and over the rest of the after-window. Both paces must be known: without the rest of
+# the after-window a faster farm cannot be told from a released backlog.
+RELEASE_PART = 4
+RELEASE_MIN = 4
+RELEASE_FACTOR = 2.0
+# What a task was doing just before the fix for it to count as released: ready (``queue``)
+# or blocked/waiting.
+RELEASED_STAGES = frozenset({"queue", "waiting"})
+
+
+@dataclass(frozen=True, slots=True)
+class Release:
+    """A throughput spike right after a fix that unblocked a queue: ``tasks`` of the ``done``
+    tasks done in the burst window (``start``, the fix, to ``end``) had been ready or
+    blocked before the fix: released backlog rather than a faster farm. Throughput is
+    compared over ``steady`` instead: the next full day after the burst (``full_day``),
+    else what is left of the after-window after the burst window."""
+
+    tasks: int
+    done: int  # all tasks done in the burst window, released or not
+    start: datetime
+    end: datetime
+    steady: tuple[datetime, datetime]
+    full_day: bool
+
+
+def _done_per_work_hour(
+    ev: Evidence,
+    event: FixEvent,
+    b: Window,
+    a: Window,
+    short: bool,
+    released: list[Release] | None = None,
+    until: datetime | None = None,
+) -> Metric | None:
+    """Tasks done per hour while agent work was available: some agent task (not a
+    person's) of the fix's role (all agent tasks without one) was ready, being worked on, in
+    review or ownerless. Hours with nothing to do are left out: an idle farm is not a
+    slower one, nor a farm that ran out of work. A task counts under its role as the board
+    reports it now (a task in review may carry the reviewer's role by then, as in
+    :mod:`kelpie.report.throughput`). Work hours are a lower bound for done tasks (queue
+    time before their first session is not known), so a side with under a quarter of the
+    window of work is *direction only*. Never credited to one fix of a group: a task gets
+    done through several roles. None without board tasks; no row when nothing was done on
+    either side (a stalled farm shows in hours lost instead).
+
+    A backlog release right after the fix (:class:`Release`, appended to ``released``) is
+    named, and the after side is measured over the next full day instead (else the rest of
+    the after-window, after the burst); ``until`` is the next fix after this one, which
+    that day must not reach."""
+    if not ev.tasks:
+        return None
+    people = {o.id for o in ev.owners if o.kind is OwnerKind.HUMAN}
+    owner_role = {o.id: o.role for o in ev.owners}
+    roles = ev.roles or {}
+    by_task: dict[str, list[Session]] = {}
+    for s in ev.sessions:
+        by_task.setdefault(s.task_id, []).append(s)
+    windows = state_windows(r.state for r in ev.states)
+
+    def role_of_session(s: Session) -> str | None:
+        # Only to tell review sessions from work (both count as work here); unlike
+        # throughput(), no fallback to the task's role is needed for that.
+        return owner_role.get(s.owner_id) or roles.get(s.id)
+
+    def task_role(t: Task) -> str | None:
+        return t.role or (owner_role.get(t.owner_id) if t.owner_id else None)
+
+    mine = [
+        t
+        for t in ev.tasks
+        if _agent_task(t, people) and (event.role is None or task_role(t) == event.role)
+    ]
+
+    def side(w: Window) -> tuple[float, float, int]:
+        busy: list[tuple[datetime, datetime]] = []
+        for t in mine:
+            own = sorted(by_task.get(t.id, ()), key=lambda s: (s.started_at, s.id))
+            for stage, lo, hi in stage_spans(
+                t, own, windows, w[0], w[1], ev.review_roles, role_of_session
+            ):
+                if stage in WORK_STAGES:
+                    busy.append((lo, hi))
+        done = sum(1 for t in mine if t.status is Status.DONE and w[0] <= t.status_since < w[1])
+        hours = union_hours(busy)
+        return hours, (w[1] - w[0]).total_seconds() / 3600, done
+
+    def waited_at(t: Task, at: datetime, enough: timedelta) -> bool:
+        """Whether the task had been ready or blocked for at least ``enough`` just before
+        ``at`` (a routine queue turns over faster than a backlog held back). A task is
+        known from its first session or alert state only: one held back before any agent
+        touched it is not seen, so a release can be missed, never invented."""
+        own = sorted(by_task.get(t.id, ()), key=lambda s: (s.started_at, s.id))
+        spans = stage_spans(t, own, windows, at - ev.window, at, ev.review_roles, role_of_session)
+        since = at
+        for stage, lo, hi in reversed(spans):
+            if hi != since or stage not in RELEASED_STAGES:
+                break
+            since = lo
+        return at - since >= enough
+
+    (hb, wb, nb) = side(b)
+    release = _release(ev, mine, waited_at, nb / wb if wb else 0.0, a, until)
+    if release is not None and released is not None:
+        released.append(release)
+    after = release.steady if release is not None else a
+    (ha, wa, na) = side(after)
+    if not (hb or ha or nb or na):
+        return None
+    who = f" ({md.text(event.role)})" if event.role else ""
+    steady = ""
+    if release is not None:
+        steady = ", after: the next full day" if release.full_day else ", after: past the burst"
+    return Metric(
+        f"tasks done per hour with work available{who} "
+        f"({_h(hb)} of {_h(wb)}h -> {_h(ha)} of {_h(wa)}h with work{steady})",
+        "/h",
+        nb / hb if hb else None,
+        na / ha if ha else None,
+        nb,
+        na,
+        short
+        or min(nb, na) < ev.min_sample
+        or min(hb, ha) < ev.window / HOUR / 4
+        or after[1] - after[0] < ev.window / 4,
+        lower_is_better=False,
+    )
+
+
+def _release(
+    ev: Evidence,
+    mine: Sequence[Task],
+    waited_at: Callable[[Task, datetime, timedelta], bool],
+    rate_before: float,
+    a: Window,
+    until: datetime | None = None,
+) -> Release | None:
+    """A backlog release right after the fix (``a[0]``), or None. Paces are tasks done per
+    wall-clock hour: over the burst window (the first ``window / RELEASE_PART`` after the
+    fix), the before-window, and the rest of the after-window, which must be at least as
+    long as the burst window (a farm that got faster stays fast; a released backlog runs
+    out). The steady comparison is the next full day after the last released task when it
+    is over and no later fix (``until``) falls in it, else the rest of the after-window."""
+    length = ev.window / RELEASE_PART
+    burst = (a[0], a[0] + length)
+    rest = (burst[1], a[1])
+    if rest[1] - rest[0] < length:
+        return None  # the pace after the burst is not known yet
+    done = [t for t in mine if t.status is Status.DONE and burst[0] <= t.status_since < burst[1]]
+    released = [t for t in done if waited_at(t, a[0], length)]
+    if len(released) < RELEASE_MIN or 2 * len(released) < len(done):
+        return None
+    rate = len(done) / (length / HOUR)
+    n = sum(1 for t in mine if t.status is Status.DONE and rest[0] <= t.status_since < rest[1])
+    if rate <= RELEASE_FACTOR * max(rate_before, n / ((rest[1] - rest[0]) / HOUR)):
+        return None
+    end = max(t.status_since for t in released)
+    # The next full day starting after the last released task: days end where the report's
+    # day does (``ev.end``), so they are the report's own days.
+    day = ev.end - ((ev.end - end - _TICK) // DAY) * DAY
+    if day + DAY <= ev.end and (until is None or until >= day + DAY):
+        return Release(len(released), len(done), a[0], burst[1], (day, day + DAY), True)
+    return Release(len(released), len(done), a[0], burst[1], rest, False)
+
+
+_TICK = timedelta(microseconds=1)
+
+
+HOUR = timedelta(hours=1)
+
+
+def _h(hours: float) -> str:
+    return f"{hours:.0f}" if hours >= 10 else f"{hours:.1f}"

@@ -1,6 +1,6 @@
 [project]
 name = "kelpie-sre"
-version = "0.0.1"
+version = "0.1.0a1"
 description = "Open-source SRE and throughput optimization for AI agent farms"
 readme = "README.md"
 license = "Apache-2.0"
@@ -9,8 +9,9 @@ requires-python = ">=3.12"
 authors = [{ name = "Kelpie contributors" }]
 keywords = ["ai-agents", "agent-farm", "sre", "observability", "llm", "opentelemetry"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Monitoring",
 ]
 dependencies = [
@@ -126,6 +127,7 @@ source_modules = [
     "kelpie.server",
     "kelpie.metrics",
     "kelpie.net",
+    "kelpie.httpguard",
     "kelpie.remote",
     "kelpie.doctor",
     "kelpie.why",
@@ -250,6 +252,25 @@ forbidden_modules = [
     "kelpie.server",
     "kelpie.cli",
     "kelpie.metrics",
+]
+
+[[tool.importlinter.contracts]]
+name = "The connection guards build on core only"
+type = "forbidden"
+source_modules = ["kelpie.httpguard"]
+forbidden_modules = [
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.rules",
+    "kelpie.traces",
+    "kelpie.resources",
+    "kelpie.alerts",
+    "kelpie.remote",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+    "kelpie.report",
 ]
 
 [tool.coverage.run]

@@ -206,7 +206,8 @@ farm throughput metrics from traces.
   ownerless), in the daily report's "Farm throughput" section. Live on `/metrics`:
   `kelpie_role_agents`, `kelpie_role_agents_with_work`, `kelpie_role_ownerless_queue_tasks`,
   `kelpie_role_tasks_done_24h`, `kelpie_role_returns_24h`, `kelpie_role_reopened_after_done_24h`
-  and `_ratio`, and `kelpie_tasks_by_stage`, with
+  and `_ratio`, and `kelpie_tasks_by_stage` (with a `board` label on a farm with several
+  boards: [configuration](configuration.md#adaptershermesboards)), with
   a Throughput row in the Grafana dashboard; these are snapshots of now (agents with any
   work, ownerless tasks only, returns per done task), not the report's day-long
   utilization, queue and rework rate. The board keeps no status history, so stages
@@ -219,6 +220,13 @@ farm throughput metrics from traces.
 report it now. It prints Markdown, writes `kelpie-report-<date>.md` to `[report] dir`, and
 with `--send` posts a short summary to the alert channels. The same data gives the same
 report; no LLM is involved.
+
+On a farm with several boards (`[[adapters.hermes.boards]]`) a **Per board** section shows,
+for each board and for the farm, the hours lost, tokens burned and cost of chaos, the tasks
+that reached done (and per hour), and the biggest wait. Each board is counted as the farm
+is, over its own tasks, sessions, alert states and spans; what names no board (a forgotten
+hold, a person's inbox, a state without a task) is a "not on one board" line. With one
+board the report is unchanged.
 
 - **Cost of chaos, hours**: long-lived alert states of the rules that describe stuck work
   (ownerless tasks, blocks that outlived their cause, waits past their limit, review
@@ -244,8 +252,12 @@ report; no LLM is involved.
   age, and not counted in the hours or dollars (it delays no work). Agent tasks planned
   for later (not started: a pre-work status or a planned label; incident 20) never count
   as waiting: rule 13 leaves them out of its count, and those behind a person's open inbox
-  are listed under "Planned waits" in agent-hours, never counted. Humans (owners of kind
-  `human`) never count as idle agents. `[report] hour_usd` prices them all.
+  are listed under "Planned waits" in agent-hours, never counted. A host that slept (a
+  laptop lid closed: issue #296, `[engine] host_sleep_min_gap`) lost no hours: the time
+  it slept is taken out of every state on its tasks (an agent's sleep out of that agent's
+  tasks only; a hold's idle agent-hours and a person's inbox are counted as they are) and
+  listed under "Host asleep" per host. Humans (owners of kind `human`) never count as idle
+  agents. `[report] hour_usd` prices them all.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
   flagged, and by every session `exit_contract` requeued (a restart). Spend follows each
   provider's spend mode (`[spend]`): with an API key, dollars (`[prices]` over Kelpie's
@@ -291,7 +303,10 @@ report; no LLM is involved.
   still in observe (`storm_mode`, `not_started_mode`) is listed as such, and its waits
   stay where they were until the check is switched on; its hours count from the first
   alert after that (until a check switched back to observe), and before/after lists them
-  apart, as a signal the config change turned on. The report makes no network calls: it
+  apart, as a signal the config change turned on. "Toolchain changes before outages" lists
+  each outage of the day, of any kind, whose alert named a toolchain version change on a
+  host shortly before it began as its likely cause (`[resources.prometheus]
+  toolchain_metric`, incident 20). The report makes no network calls: it
   runs the connector steps that read only the board (`task_status`, human tasks from block
   reasons), and a block reason a `[[block_conditions]]` pattern matches counts as a CI or
   merge wait by the pattern's kind, without a PR lookup. The "Farm throughput" section
@@ -326,35 +341,78 @@ report; no LLM is involved.
   resuming it. Each comes with a recommendation and its estimated saving, which competes
   for the top 3. Traces keep no prompt text, so a break is located by step and preceding
   tool, not by the line of the prompt that changed.
+- **Instruction files** (with `[instructions]`, incident 21): the files each role loads that
+  cost the most tokens a day, as measured when the report runs (the 24 hours before), with
+  where the figure comes from (counted skill loads, or size times sessions: an *estimate*,
+  for a skill loaded on demand an upper bound), size, growth over the `[instructions]`
+  window (and "only appends"), and how many copied sections and values each takes part in.
+  Paths and numbers only, never a file's text; rule `instruction_bloat` alerts on what
+  crosses its thresholds. `kelpie report` reads the size history and writes none of it; a report
+  built more than a day after its day ended (a past day, a catch-up) leaves the section out.
 
 **Before/after of fixes.** Every fix made on the report's day or the day before is measured
 over `[report] verify_window` (a day) before and after it: hours lost per day
 (each task-hour once, as the cost of chaos counts them; only the fix's rule's own
 task-hours when it names one, which can differ from its line in the table), tokens per day, task returns per day, review time
-(sessions of `review_roles`), sessions that failed or ended without a status, and for a
-command fix the output tokens per call. A side with fewer than `min_sample` observations,
-or an after-window under a quarter of the window, is labelled *direction only*; every row
+(sessions of `review_roles`), sessions that failed or ended without a status, tasks done
+per hour *with work available*, and for a command fix the output tokens per call. Work is
+available in an hour when an agent task of the fix's role (any role for a fix without one)
+was ready, being worked on, in review or ownerless; a person's tasks are not agent work.
+The row says how many hours had work on each side ("24 of 24h -> 6.0 of 24h with work"):
+an idle farm, or one that ran out of work, is not a slower one. Under a quarter of the
+window with work is *direction only*, and with nothing done on either side there is no row
+(a stalled farm shows in hours lost). A side with fewer than `min_sample` observations, or
+an after-window under a quarter of the window, is labelled *direction only*; every row
 shows its sample sizes. What the report cannot separate it does not credit:
 
 - *Overlapping fixes.* Fixes less than a window apart are one group ("3 fixes within 19.0h
   of each other"), measured once from a window before the first to a window after the
   last, and credited to none of them alone. Per fix it shows only what that fix alone can
   explain: its role's tokens and failures (and review time for a review role) when no
-  other fix of the group touches that role or the whole farm, and its command's output
-  per call when no other fix names the same command for the same role. A group that
-  starts less than a window after the oldest fix the report reads says that an older fix
-  may belong to it, and its before-window starts no earlier than the data the report
-  reads.
+  other fix of the group touches that role or the whole farm, and its command's output per
+  call when no other fix names the same command for the same role. A group that starts
+  less than a window after the oldest fix the report reads says that an older fix may
+  belong to it, and its before-window starts no earlier than the data the report reads.
 - *Newly enabled signals.* Tokens per day whose traces began after the first quarter of
   the before-window, and, with a config change in the group, a cause of hours lost first
   seen after it with nothing before (a connector or rule the change may have turned on),
   are listed under "Not compared" with their value after, never as "+900% worse".
+- *Backlog release.* Right after a fix, a burst of tasks that the fix let go is released
+  backlog, not a faster farm. It is named when, within the first quarter of the window
+  after the fix (the burst window), at least 4 tasks are done that had been ready or
+  blocked for at least that long just before it, they are at least half of the tasks done
+  then, and that pace (tasks per wall-clock hour) is more than twice the pace before the
+  fix and over the rest of the after-window. A fix less than half a window before the
+  report's end is not judged: what follows the burst is not known yet. A task counts as
+  ready only from its first known moment (a session or an alert state), so tasks held back
+  before any agent touched them are missed, and the release with them. The report
+  names the release ("Backlog release: 8 of the 11 tasks done in the 6.0h after the fix
+  were ready or blocked before it") and compares tasks done per hour over the next full day
+  after the burst instead. While that day is not over, or when a later fix falls in it, it
+  compares the rest of the after-window past the burst. For a group of fixes, the burst is
+  looked for after the last one.
 
 Fixes come from `kelpie fix "lifted the merge hold" [--rule R] [--command PREFIX]
 [--role ROLE] [--at TIME]` (check with `kelpie fix --list [--days N]`), from config
 changes (`kelpie serve` notes when its config file changed), from
 rule mode changes in the action ledger (observe to act, dry-run off) and from output
-filters that appear in traces (`rtk`, `| xcbeautify`). Board-based metrics (review time,
+filters that appear in traces (`rtk`, `| xcbeautify`). A split of instruction files is
+recorded as a fix of rule `instruction_bloat`, with the role whose files changed:
+`kelpie fix "split the review skill into a core and topics" --rule instruction_bloat
+--role reviewer`. It is also measured on *tokens a day on instructions* (the mean of the
+role's samples, one per `[instructions]` scan, so `kelpie serve` must have measured the
+files before the split) and *tokens per completed task* of that role (its traced tokens
+over its agent tasks done in the window; for the group when fixes overlap, since a task
+goes through several roles). A rule's own mode switch is not a split. Some limits of the
+first figure: a split of files every role loads (`SOUL.md`, a shared `AGENTS.md`) is
+measured without `--role`; a skill's linked reference files are not counted as reads, so
+after a split into a core and references it is a lower bound; a skill whose tokens a day
+are size times sessions (its platform counts no loads) counts every topic skill as read by
+every session, so a split into several skills shows little change until loads are
+counted; a scan whose snapshot had no session in the day, or missed part of the farm, is no
+sample; fewer than `min_sample` samples on a side (`[instructions] every` longer than about
+two hours) is *direction only*; samples are kept 30 days, enough for a `verify_window` of
+up to 9 days. Board-based metrics (review time,
 failures, returns) need the board as far back as the before-window of the day before's
 fixes: `kelpie report` widens the Hermes lookback to that by itself (about 97h for
 yesterday with the defaults: two windows, for an older fix a recent one overlaps; further
@@ -398,10 +456,14 @@ Transient failures (429, 5xx, network) are retried for `retry_horizon` (default 
 `[alerts]`) with a capped backoff; an alert that is still undelivered is lost and counted in
 `kelpie_alerts_failed_total`. The bundled Prometheus rule `KelpieAlertDeliveryFailed`
 (`deploy/prometheus/rules/kelpie.yml`) fires on it, and the Grafana dashboard has an Alerts
-row. Drops (full queue, duplicates, shutdown) are counted in `kelpie_alerts_dropped_total`.
-Alerts still waiting when Kelpie shuts down during a chat outage are counted as
+row. The same file has the other rules about Kelpie itself (down, not ticking, a silent
+agent host, a failing adapter or connector, a spend gap, an old traces token, dropped
+alerts); each links its section of the [runbook](runbook.md). Drops (full queue,
+duplicates, shutdown) are counted in `kelpie_alerts_dropped_total`. Alerts still waiting
+when Kelpie shuts down during a chat outage are counted as
 `kelpie_alerts_dropped_total{reason="shutdown"}`, not as failed, so `KelpieAlertDeliveryFailed`
-does not fire for them.
+does not fire for them; that count is taken after `/metrics` has stopped answering, so it
+shows in the log only.
 
 A connector step that fails (a bug or an unexpected error in it; GitHub's own outages are
 not failures, its step serves its last answers) keeps, for that tick, the conditions of waits
@@ -443,9 +505,9 @@ switches Kelpie's own words to Russian. See `kelpie.example.toml`.
 
 ## Running from source
 
-> While Kelpie is pre-alpha, `kelpie serve` runs the control loop and exposes `/metrics` and
-> `/healthz` on port 9464. Without an `[adapters.hermes]` section the snapshot is empty. It
-> starts safe: global dry-run on, every rule in observe mode.
+> `kelpie serve` runs the control loop and exposes `/metrics` and `/healthz` on port 9464.
+> Without an `[adapters.hermes]` section the snapshot is empty. It starts safe: global
+> dry-run on, every rule in observe mode.
 
 Requirements: Python 3.12 and [uv](https://docs.astral.sh/uv/).
 

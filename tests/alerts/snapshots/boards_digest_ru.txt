@@ -1,0 +1,10 @@
+🟡 Блок, который Kelpie не может снять: 3 задачи (самая давняя — 26 ч)
+
+1. Ship the login screen — 5,0 ч · app-a:t_1a
+   Доска: app-a · Блокирует: 2 задачи · Открыть задачу: https://board.example.org/tasks/app-a%3At_1a
+2. Store listing copy — 3,0 ч · app-b:t_1a
+   Доска: app-b · Блокирует: ничего · Открыть задачу: https://board.example.org/tasks/app-b%3At_1a
+3. Rotate the API keys — 26 ч · svc:t_77
+   Доска: svc · Открыть задачу: https://board.example.org/tasks/svc%3At_77
+Почему: 3 tasks blocked with no condition Kelpie can check.
+Правило: stale_blocks

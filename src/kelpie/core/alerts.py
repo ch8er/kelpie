@@ -107,7 +107,8 @@ class AlertItem:
     alert (held, or back because it expired or the work behind it grew). ``snooze_task`` is
     the task a person may snooze to quiet this item (the item's own, or the human task it
     waits on), set by a rule only where a snooze would hold the alert: chat channels offer
-    a snooze for it (#176). It names no new alert, so it is not part of the fingerprint."""
+    a snooze for it (#176). It names no new alert, so it is not part of the fingerprint;
+    nor is ``board``, the board the task is on when Kelpie watches several (#283)."""
 
     task_id: str
     title: str | None = None
@@ -117,6 +118,7 @@ class AlertItem:
     since: datetime | None = None
     snooze: SnoozeNote | None = None
     snooze_task: str | None = field(default=None, compare=False)
+    board: str | None = field(default=None, compare=False)
 
     @property
     def fingerprint(self) -> tuple[object, ...]:

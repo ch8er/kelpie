@@ -6,11 +6,27 @@ each file is read read-only (never through a symlink, at most ``max_bytes``), me
 and whenever its hash changes, with whether the change only appended; the growth window is
 read back from those rows. Between scans the last result is reused.
 
-Tokens a day spent reading a file: its estimated tokens times the sessions on this host of
-its role (of its platform, for the platform defaults; any, for a file every role loads)
-that started in the last 24 hours of the snapshot, ``token_basis = "sessions"``. For a file
-loaded on demand (a skill) that is an upper bound; counted loads (Hermes ``skill_view``
-calls, Claude Code skill loads) will replace it where a platform records them.
+Tokens a day spent reading a file: its estimated tokens times how often it was read in the
+last 24 hours of the snapshot.
+
+- ``token_basis = "loads"``: a skill (``<name>/SKILL.md``, loaded on demand) of a platform
+  that counted its skill loads this tick (``Snapshot.skill_loads_counted``: Hermes
+  ``skill_view`` calls from ``state.db``, Claude Code ``Skill`` calls from its hook) is read
+  as often as a skill of that name was opened (with its categories, when the call named
+  them: ``dev/release-notes`` is ``.../dev/release-notes/SKILL.md``) by: the profile whose
+  path it is under (what ``{role}`` matched), else its role, else any role when it is a
+  skill every role of the platform shares; the first by path wins where several fit. A
+  plugin's skill (``plugin:name``) is none of these files. A skill nobody opened costs
+  nothing.
+- ``token_basis = "sessions"``, otherwise: the sessions on this host of its role (of its
+  platform, for the platform defaults; any, for a file every role loads) that started in
+  the window. For an always-loaded file that is the cost; for a skill of a platform that
+  counts no loads it is an upper bound.
+
+After each scan, the tokens a day of each role's files are stored as one sample
+(``instruction_tokens``, :func:`role_tokens`), so the report can measure a split before and
+after (``kelpie fix --rule instruction_bloat``); not when the snapshot has no session in the
+day or misses part of the farm (the board may not have been read).
 
 Only files on this host are measured: a ``kelpie agent`` host's files are not (yet).
 """
@@ -25,8 +41,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from kelpie.core.model import InstructionDuplicate, InstructionFile, Snapshot
-from kelpie.core.storage import SizeRow, SqliteInstructionStore
+from kelpie.core.model import InstructionDuplicate, InstructionFile, Snapshot, TokenBasis
+from kelpie.core.storage import SizeRow, SqliteInstructionStore, TokenRow
 from kelpie.instructions.config import InstructionSettings, Source
 from kelpie.instructions.scan import Measure, Scanned, Unreadable, copies, measure, read_file
 
@@ -45,6 +61,7 @@ class Found:
     role: str | None
     source: Source
     measure: Measure
+    scope: str | None = None  # what ``{role}`` matched in its path (a Hermes profile)
 
 
 @dataclass(slots=True)
@@ -54,6 +71,9 @@ class InstructionWatch:
     sources: tuple[Source, ...]  # configured entries first: the first source of a path wins
     home: str = field(default_factory=lambda: os.path.expanduser("~"))
     retry_after: timedelta = RETRY_AFTER
+    # False: the store is only read (``kelpie report``: ``kelpie serve`` keeps the history,
+    # and a second writer would record each change twice).
+    record: bool = True
     skipped: dict[str, str] = field(default_factory=dict)  # shown path -> why (kelpie status)
     failed: bool = False  # the last scan failed: the result is the one before
     _found: tuple[Found, ...] = ()
@@ -66,6 +86,7 @@ class InstructionWatch:
     ) -> tuple[tuple[InstructionFile, ...], tuple[InstructionDuplicate, ...]]:
         now = snapshot.now
         every = self.settings.every
+        scanned = False
         if self._next is None or not (self._next - every <= now < self._next):
             try:
                 self._scan(now)
@@ -77,8 +98,19 @@ class InstructionWatch:
             else:
                 self._next = now + every
                 self.failed = False
+                scanned = True
         sessions = _sessions_per_day(snapshot)
-        return tuple(self._file(f, now, sessions) for f in self._found), self._copies
+        loads = _loads_per_file(self._found, snapshot)
+        files = tuple(self._file(f, now, sessions, loads) for f in self._found)
+        # No session in the day, or part of the farm unseen: the board may not have been
+        # read, and a sample of zero sessions would pass for a saving.
+        seen = not snapshot.unobserved and any(sessions.values())
+        if scanned and self.record and seen:
+            try:
+                self.store.record_tokens(role_tokens(files, now))
+            except Exception as exc:  # the before/after of a split loses one sample
+                log.error("instruction tokens could not be recorded: %s", type(exc).__name__)
+        return files, self._copies
 
     # --- scanning -------------------------------------------------------------------
 
@@ -90,7 +122,7 @@ class InstructionWatch:
         skipped: dict[str, str] = {}
         unread: set[str] = set()
         rows: list[SizeRow] = []
-        for source, path, role in self._paths():
+        for source, path, role, scope in self._paths():
             if path in seen:
                 continue
             seen.add(path)
@@ -107,17 +139,18 @@ class InstructionWatch:
                 skipped[shown] = str(exc)
                 unread.add(str(path))
                 continue
-            found.append(Found(path, shown, role, source, m))
+            found.append(Found(path, shown, role, source, m, scope))
             if previous is None or previous[1] != m.sha256:
                 row = SizeRow(str(path), now, m.bytes, m.chars, m.sha256, len(m.sections),
                               m.appended)  # fmt: skip
                 rows.append(row)
                 history.setdefault(str(path), []).append(row)
-        if rows:
+        if rows and self.record:
             self.store.record(rows)
         # A file no longer found (deleted, unconfigured) loses its history; one that could
         # not be read this time keeps it.
-        self.store.prune(window_start, keep={str(f.path) for f in found} | unread)
+        if self.record:
+            self.store.prune(window_start, keep={str(f.path) for f in found} | unread)
         for shown, why in skipped.items():
             if self.skipped.get(shown) != why:
                 log.warning("instruction file %s not measured: %s", shown, why)
@@ -125,19 +158,19 @@ class InstructionWatch:
         self._found, self._history = tuple(found), history
         self._copies = self._find_copies(found)
 
-    def _paths(self) -> Iterable[tuple[Source, Path, str | None]]:
+    def _paths(self) -> Iterable[tuple[Source, Path, str | None, str | None]]:
         for source in self.sources:
             for pattern in source.paths:
                 expanded = os.path.expanduser(pattern)
                 for match in sorted(glob.glob(expanded.replace("{role}", "*"), recursive=True)):
                     path = Path(match)
-                    role = source.role
+                    role, name = source.role, None
                     if "{role}" in expanded:
                         name = _role_part(expanded, match)
                         if name is None:
                             continue
                         role = source.role_of(name) if source.role_of else name
-                    yield source, path, role
+                    yield source, path, role, name
 
     def _shown(self, path: Path) -> str:
         text = str(path)
@@ -183,7 +216,11 @@ class InstructionWatch:
     # --- the snapshot's view --------------------------------------------------------
 
     def _file(
-        self, f: Found, now: datetime, sessions: dict[tuple[str | None, str | None], int]
+        self,
+        f: Found,
+        now: datetime,
+        sessions: dict[tuple[str | None, str | None], int],
+        loads: dict[Path, int],
     ) -> InstructionFile:
         start = now - self.settings.window
         rows = self._history.get(str(f.path), [])
@@ -193,7 +230,10 @@ class InstructionWatch:
         base = rows[0] if rows else None
         since = max(base.measured_at, start) if base else None
         later = rows[1:]
+        basis: TokenBasis = "sessions"
         n = sessions.get((f.source.platform, f.role), 0)
+        if f.path in loads:
+            basis, n = "loads", loads[f.path]
         tokens_per_day = f.measure.tokens * n
         return InstructionFile(
             path=f.shown,
@@ -207,9 +247,21 @@ class InstructionWatch:
             appends=sum(1 for r in later if r.appended is True),
             edits=sum(1 for r in later if r.appended is not True),
             tokens_per_day=tokens_per_day,
-            token_basis="sessions" if tokens_per_day is not None else None,
+            token_basis=basis,
             owner=f.source.owner,
         )
+
+
+def role_tokens(files: Sequence[InstructionFile], at: datetime) -> list[TokenRow]:
+    """Tokens a day on instructions per role (None: the files every role loads) at one
+    measurement, for the before/after of a split (``kelpie.report.verify``)."""
+    sums: dict[str | None, list[int]] = {}
+    for f in files:
+        row = sums.setdefault(f.role, [0, 0, 0])
+        row[0] += f.tokens_per_day or 0
+        row[1] += 1
+        row[2] += f.token_basis == "loads"
+    return [TokenRow(at, role, *sums[role]) for role in sorted(sums, key=lambda r: r or "")]
 
 
 def _role_part(pattern: str, match: str) -> str | None:
@@ -229,6 +281,44 @@ def _role_part(pattern: str, match: str) -> str | None:
 
 def _place_path(place: str) -> str:
     return place.rpartition(":")[0]
+
+
+SKILL_FILE = "SKILL.md"
+
+
+def skill_name(path: Path) -> str | None:
+    """The name a platform opens a skill by: the directory of its ``SKILL.md``."""
+    return (path.parent.name or None) if path.name == SKILL_FILE else None
+
+
+def _loads_per_file(found: Sequence[Found], snapshot: Snapshot) -> dict[Path, int]:
+    """Loads in the last 24 hours of each skill whose platform counted them this tick
+    (every such skill is a key, opened or not)."""
+    counted = set(snapshot.skill_loads_counted)
+    skills: dict[tuple[str, str], list[Found]] = {}  # (platform, name) -> its files
+    for f in found:
+        name = skill_name(f.path)
+        platform = f.source.platform
+        if f.source.loaded == "on_demand" and platform in counted and name is not None:
+            skills.setdefault((platform, name), []).append(f)
+    out = {f.path: 0 for files in skills.values() for f in files}
+    for load in snapshot.skill_loads:
+        if load.source is None or not snapshot.now - DAY <= load.at <= snapshot.now:
+            continue
+        name = load.skill.rpartition("/")[2]
+        files = sorted(skills.get((load.source, name), []), key=lambda f: f.shown)
+        if "/" in load.skill:  # categories named: only the skill under them
+            tail = f"/{load.skill}/{SKILL_FILE}"
+            files = [f for f in files if f.path.as_posix().endswith(tail)]
+        profile = load.profile.casefold() if load.profile else None
+        here = [f for f in files if profile and f.scope and f.scope.casefold() == profile]
+        own = [f for f in files if f.scope is None and f.role is not None and f.role == load.role]
+        if not profile:  # by role alone: any profile of the role
+            own += [f for f in files if f.scope is not None and f.role == load.role]
+        shared = [f for f in files if f.role is None]
+        if target := (here or own or shared)[:1]:
+            out[target[0].path] += 1
+    return out
 
 
 def _sessions_per_day(snapshot: Snapshot) -> dict[tuple[str | None, str | None], int]:

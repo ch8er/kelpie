@@ -346,7 +346,13 @@ So `GH_TOKEN=abc gh pr checks 5` is stored as `gh pr checks 5`. This is best eff
 `KELPIE_HERMES_SPOOL_COMMANDS=0` to record no command at all. A spool written by an older
 plugin (before ch8er/kelpie#82, which kept secrets such as `curl -u user:pass`) is cleaned
 with `kelpie spool scrub`, run as the spool's owner, after the new plugin is installed. The spool file is created with
-mode `0600`. Hooks never raise and do no network I/O.
+mode `0600` (a new spool folder with `0700`), never written through a symlink or into a FIFO.
+Hooks never raise and do no network I/O.
+
+Agents can write next to the spool, so Kelpie reads it defensively: regular files only (a
+symlinked or FIFO spool is not read; a symlinked *folder* is fine), at most 64 MiB per
+file, and lines over 16 KiB skipped. A worktree's `.git` file and a linked worktree's
+`commondir` and `gitdir` are read the same way, at most 4 KiB each.
 
 ## What Kelpie sees
 
@@ -369,6 +375,7 @@ mode `0600`. Hooks never raise and do no network I/O.
 | spool `tool` line of the `terminal` tool only (another tool's exit code, `process`'s, is some job's): `exit_code` (from the terminal result, an int), `background` (asked for with `background: true`, or promoted from the foreground for a long timeout: `promoted_from_foreground`, or a spawn's `session_id` and `pid`), `blocked` (Hermes did not run it: `status: "blocked"` or `"pending_approval"`), `command_whole` (the redacted `command` still ends where the command did: one line, the redaction reached its end, its last word kept), `command_complete` (one line, no separator glued to a word, and the redacted `command` shows every separator the line has: masked words aside, it ends where the command did), `command_multiline` (more lines than the one kept) | `kelpie.tool.exit_code`, `kelpie.tool.result`, `kelpie.tool.command_whole`, `kelpie.tool.command_complete` and `kelpie.tool.command_multiline` on the tool span. The result is `ok` (0), `error` (non-zero, the exit code is its class; -1 without a block is a degraded backend or a fatal error), `blocked` (the span keeps Hermes' `error` outcome, so rule 10's error streak still counts it), or `unknown` (a background call: 0 means started). A foreground exit code sets the span's `outcome`. The result's `error` key is never read: it is null on a failed build too (`kelpie.core.tools`, #229) |
 | a profile's `state.db`: a foreground `terminal` call that waits | `SessionWait` (see [Waits inside sessions](#waits-inside-sessions)) |
 | a profile's `state.db`: a session's tokens (`session_model_usage`, else `sessions` totals) | `SessionUsage` per session and model (see [Token usage](#token-usage)) |
+| a profile's `state.db`: a `skill_view` call that opens a skill | `SkillLoad` (see [Skill loads](#skill-loads)) |
 
 Blocks (`Block.reason`), from a `blocked` event at or after `status_since`:
 
@@ -459,6 +466,19 @@ fields follow `Span`: `input_tokens` is Hermes' uncached input plus cache reads 
 spend per role where traces carry no task (issue #197, item 1). Billing routes are summed
 per model: usage included in a subscription is not told apart from metered usage. Like the
 waits, usage stays on the host that reads it: `kelpie agent` does not relay it yet.
+
+### Skill loads
+
+The same `state.db` records each `skill_view` call. A call that opens a skill's `SKILL.md`
+(no `file_path`, or `SKILL.md`; a linked reference file is not a load) of a session of
+`state_sources` in the last 24 hours becomes a `SkillLoad`: the skill's name (the last part
+of `name`, as its directory is called), the time, the profile's role and
+`hermes-session-<profile>-<id>`; nothing else of the call is kept. A call is counted once
+however often compaction copied it, and a rewound one not at all. `[instructions]` uses
+them for the tokens a day of skills (`token_basis = "loads"`). When any profile's
+`state.db` cannot be read, no loads are reported for that snapshot (a missing load would
+read as a skill nobody opens), and the skills fall back to sessions. Read at most once a
+minute, like the waits; `kelpie agent` does not relay them yet.
 
 ### Progress note and git state
 

@@ -37,6 +37,7 @@ configure what exists.
 - [[alerts]](#alerts), [snoozing from the alert](#snoozing-from-the-alert)
 - [[report]](#report), [report sections](#report-sections)
 - [[agent]](#agent) and [[hub]](#hub): multi-host
+- [[server]](#server): connection guards of every listener
 - [Checks across sections](#checks-across-sections)
 
 ## How the config is read
@@ -45,8 +46,8 @@ configure what exists.
   else defaults only. Read once at startup. `--config` goes before the command:
   `kelpie --config kelpie.toml status`.
 - **Top-level sections:** `engine`, `storage`, `adapters`, `traces`, `budgets`, `prices`,
-  `spend`, `resources`, `connectors`, `block_conditions`, `alerts`, `report`. Anything else stops
-  Kelpie at startup.
+  `spend`, `resources`, `instructions`, `connectors`, `block_conditions`, `alerts`, `report`,
+  `agent`, `hub`, `snooze`, `server`. Anything else stops Kelpie at startup.
 - **Unknown keys** in any table stop Kelpie at startup with the key named. Rule names are
   checked against the plan's rule list (`kelpie.rules.PLANNED`).
 - **Optional.** Every key is optional unless marked *required*. A section that is absent is
@@ -110,6 +111,7 @@ Variables named by `token_env`, `webhook_env`, `headers_env`, `cancel_token_env`
 | `once_attempts` | `3` | count, >= 1 | A one-off action is given up after this many failed attempts. |
 | `state_escalations` | `["4h", "12h", "24h"]` | list of durations, increasing | Alerts about a lasting condition are sent again when its age passes each of these. |
 | `state_resolve_after` | `"10m"` | duration, >= 0 | A lasting condition no rule reported for this long is resolved, and a short "resolved" alert goes out: what is true now, from the rule (rule 7: the current reading, "disk h:/ is 80% full, ..."), or, quoted as the past, what the rule no longer reports ('task T-1 (...): no longer reported: "..."'). |
+| `host_sleep_min_gap` | `"2m"` | duration, >= 0 (0: off) | A suspend of the host (a laptop lid closed) is the wall clock running ahead of the monotonic clock by at least this between two ticks. Kelpie records it (`Snapshot.host_sleeps`) and counts session ages and the ages rule 1, the ownerless/no-next-action/undriven-review checks of rule 3 and commit reminders compare in awake time: a gap the host slept through raises none of them, and a session that does not come back within its stale bar of awake time after the wake is requeued once as "ended while the host slept" (issue #296). Where the OS has `CLOCK_BOOTTIME` (Linux) the suspend is measured on it, so a wall-clock step is not taken for one. Watches the host `kelpie serve` runs on, for its local adapters; `kelpie agent` watches its own host with the same key of its `[engine]` table and reports its sleeps to the hub ([multi-host](multi-host.md)). |
 | `rules` | `{}` | tables | One table per rule, `[engine.rules.<name>]`; see [Rules](#rules). |
 
 ## Modes and dry-run
@@ -204,7 +206,7 @@ The resume note goes out with the commit and says where the changes are if it fa
 | `tool_long_after` | `"5m"` | duration, > 0 | An open TOOL span holds reminders once it has run this long: short calls do not. An adapter's `running_tool` holds from its start (it is long by what it is). |
 | `wip_ci` | `"skip_ci"` | `skip_ci` \| `draft_pr` | How the WIP commit avoids CI: `[skip ci]` in the message, or a push to a draft PR. Never onto an open PR (drafts included, so with `draft_pr` the draft of a first WIP commit refuses the next ones), nor onto a branch whose PR closed after the session started: none whose head is the session's or task's branch or that belongs to the task, and not without a known branch. A person gets an alert about the uncommitted changes instead. |
 | `wip_pr_margin` | `"1m"` | duration, > 0, < `act_within` | A WIP commit waits until `[connectors.github.pulls]` read the open PRs in full at least this long after the exit (an agent's last act may be opening a PR); until then nothing is said, not even the resume note. A PR someone else opens between that scan and the commit (up to `poll_interval`) is not seen. |
-| `wip_without_pr_check` | `false` | bool | WIP commits without that wait, for a farm whose task branches never carry PRs. Without it and without `[connectors.github.pulls]`, there are no WIP commits (warned at startup). A fork's PR, or one in a repository not in `[connectors.github] repos`, is not seen. |
+| `wip_without_pr_check` | `false` | bool | WIP commits without that wait, for a farm whose task branches never carry PRs. Without it and without `[connectors.github.pulls]`, there are no WIP commits (warned at startup when a configured adapter makes WIP commits, or on a hub). A fork's PR, or one in a repository not in `[connectors.github] repos`, is not seen. |
 | `session_stale_after` | `"30m"` | duration, > 0 | See [live session](#rules). |
 | `act_within` | `"24h"` | duration, > 0 | WIP commit and resume note only this long after the exit; a decision never made by then gets one alert. Keep it plus 1h shorter than `[engine] once_window`, and no longer than `[connectors.github.pulls] closed_lookback` (Kelpie warns at startup). |
 
@@ -328,6 +330,7 @@ that came due during the outage is sent when it ends.
 | `stale_evidence_after` | `"1h"` | duration or `false` | Alert when the connector has not checked a linked condition for this long. `false`: off. |
 | `storm_min_tasks` | `5` | count, 0 (off) or 2–1000 | A block storm (#229): this many tasks blocked on the same reason (the task's own id, dates, times and hashes stripped; the PRs, URLs and other tasks it names kept apart; more than a kind of wait; blocks without a condition Kelpie can check, not snoozed)... |
 | `storm_window` | `"2h"` | duration, > 0 | ...within this of each other are one outage: one alert with the shared reason, the person it names and the tasks. Once open it stays open while half of `storm_min_tasks` (at least 2) are still blocked on the reason. |
+| `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes. Text only: it changes no action. |
 | `storm_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its alert (and its "resolved" notice) is only logged until set to `"rule"`, which follows the rule's mode and folds this rule's no-condition and overdue alerts of its tasks under it (not rule 13's inbox items). |
 
 A condition that can never be met (a PR closed without merging, a human task cancelled)
@@ -440,7 +443,7 @@ set `[resources.prometheus.queries] processes_max` to a real ceiling.
 | `time_to_full_release` | warning × 7/6 (`"84h"`; critical × 7/6 with the warning off) | duration, not shorter than the warning; `false`: no hold | A disk's open alert (opened by the forecast or by its utilization: one condition per disk) stays open, a warning, until the disk would fill later than this, so a growth rate near the warning does not open and resolve it again and again. |
 | `min_growth_per_day` | `0.1` | GB per day | Slower growth forecasts nothing. |
 | `growing_paths_shown` | `3` | count, 0 to 20 | Directories named in the alert. |
-| `path_max_age` | `"1h"` | duration | Directory sizes older than this are not named; the alert asks whether the script still runs. |
+| `path_max_age` | `"3h"` | duration | Directory sizes older than this are not named; the alert asks whether the script still runs. The script runs hourly: keep this above `[resources.prometheus] path_interval` plus a missed run. |
 | `quota_warning` | `0.1` | ratio or `false` | Warn when `remaining / limit` of a provider quota is at or below this. |
 | `rate_limit_events_warning` | `20` | count or `false` | Warn at this many limit hits per provider... |
 | `rate_limit_window` | `"24h"` | duration, > 0 | ...within this window. |
@@ -473,6 +476,7 @@ forecasts the CI minutes quota, and reports a CI outage as one incident. Needs b
 | `outage_min_prs` | `3` | count, 0 (off) or 2–1000 | A CI outage: some window holds failures of this many change requests (repository and branch; retries count) at the same workflow, job and step, with evidence that the environment broke; twice as many without it... |
 | `outage_window` | `"2h"` | duration, > 0 | ...that window's length; a failure counts until the job passes again in its repository. |
 | `queued_after` | `"30m"` | duration, > 0 | CI jobs not starting: a build still queued this long while no runner on the farm takes work is a sign, as is a job the CI refused (no runner, no step) that used to run, or a whole run refused; signs of `outage_min_prs` change requests within `outage_window` → one outage. |
+| `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes. Text only: it changes no action. |
 | `not_started_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"` (then it follows the rule's mode and folds the tasks' own alerts). |
 
 Waste categories, each build counted once in this order: superseded, already verified
@@ -556,6 +560,7 @@ Other keys:
 | `tool_outage_tools` | `[]` (off) | list of non-empty strings | Correlated tool failures: the farm's build and test runners (e.g. `["ios_sim.sh", "xcodebuild"]`), matched as the command of a tool call's last segment, path aside (see below). |
 | `tool_outage_min_tasks` | `3` | 2 to 1000 | Distinct tasks (a session tied to no task counts as one) failing one tool with one exit code within `tool_outage_window` → one outage. |
 | `tool_outage_window` | `"30m"` | duration, > 0 | How close together those failures must be; the `[traces] window` at most, whose spans the snapshot holds. |
+| `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes; a change on the tool's own host comes first. Text only: it changes no action. |
 | `tool_outage_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"`. |
 
 ```toml
@@ -895,8 +900,21 @@ db_path = "~/.hermes/kanban/boards/sign/kanban.db"
   prefix, through `hermes` with that board's `HERMES_KANBAN_DB`; an id of no board is
   refused before anything runs.
 - **A board that cannot be read** is left out of that tick and listed as unobserved: its
-  open alerts are held, not resolved, and `kelpie_adapter_errors_total{adapter="hermes/<name>"}`
-  counts it. The other boards go on. If none can be read, the adapter fails as one board would.
+  open alerts are held, not resolved, and
+  `kelpie_adapter_errors_total{adapter="hermes",board="<name>"}` counts it (it was
+  `adapter="hermes/<name>"` before #283). The other boards go on. If none can be read, the
+  adapter fails as one board would and only `{adapter="hermes"}` counts it.
+- **Metrics** carry a `board` label (#283) on the per-task gauges: `kelpie_tasks`,
+  `kelpie_prework_tasks`, `kelpie_prework_oldest_seconds`, `kelpie_tasks_by_stage`,
+  `kelpie_role_tasks_done_24h`, `kelpie_role_returns_24h`,
+  `kelpie_role_reopened_after_done_24h` and `_ratio`. Its values are the configured board
+  names only, never a value from the data: a task on no configured board (another adapter's,
+  or an agent's on a hub) has `board=""`, shown only while such a task exists. Agent gauges (`kelpie_role_agents`,
+  `kelpie_idle_agents`, ...) have no board label: the home's profiles work on every board.
+  The Grafana dashboard sums over the boards picked in its **Board** variable (All by
+  default); `sum by (board) (...)` splits a panel.
+- **Alerts** name each task's board ("Board: qr" beside "Blocking"), and so does `kelpie why`
+  (a `board` line, and `board` in `--json`).
 - `kelpie status` lists each board (`board qr: <path>`); `kelpie doctor` checks each
   (`kanban.db (qr)`, `worktrees readable (qr)`, `PR blocks have conditions (qr)`); the hooks,
   worker-stop and host checks run once.
@@ -1049,7 +1067,7 @@ What is kept from each span: [privacy.md](privacy.md).
 | `totals_window` | `"24h"` | duration, > 0 | Per-session totals (calls, errors, tokens) in each tick. |
 | `retention` | `"7d"` | duration, > 0, <= 3650d | Spans older than this are pruned, hourly. Must be at least `window` and `totals_window`. |
 | `max_rows` | `1000000` | count, >= 1 | ...and the oldest beyond this row count. |
-| `max_body_bytes` | `8388608` | bytes, >= 1 | Larger requests (also after gunzip) get 413. |
+| `max_body_bytes` | `8388608` | bytes, >= 1 | Larger requests (also after gunzip) get 413. A gzip body of more than 64 members gets 400 (exporters send one). |
 | `max_snapshot_spans` | `50000` | count, >= 1 | At most this many stored spans per tick, newest first. |
 | `max_concurrent_requests` | `4` | count, >= 1 | Requests decoded at once; more get 503 and are retried by the exporter. |
 | `task_attribute` | `"kelpie.task_id"` | attribute name | Span or resource attribute naming the task. |
@@ -1090,6 +1108,12 @@ destination. Needs `[traces]` enabled. The global dry-run does not stop forwardi
 | `queue_size` | `1000` | requests, >= 1 | Requests waiting per destination; beyond that they are dropped. |
 | `queue_bytes` | `67108864` | bytes, >= 1 | Bytes waiting per destination (64 MiB). |
 | `retries` | `3` | count, 0 to 10 | Retries on network errors, 429 and 5xx. |
+
+An `http://` endpoint is always reached directly, never through `http_proxy` or
+`all_proxy`: a proxy would see the `headers_env` secrets and the spans in clear. An
+`https://` endpoint follows `https_proxy` and `no_proxy` (a CONNECT tunnel), so use https to
+reach a collector through an egress proxy. Kelpie reads at most 64 KiB of a collector's
+answer.
 
 Examples for Langfuse, Phoenix and Datadog are in [How Kelpie works, "Forwarding"](guide.md#forwarding-to-langfuse-phoenix-or-datadog).
 
@@ -1285,10 +1309,26 @@ and `skills/*/SKILL.md` (on demand) in `<state_dir>/workspace` and `<state_dir>/
 A project's own `CLAUDE.md` and `.claude/skills` live in its checkout: list them under
 `[[instructions.files]]`.
 
-Tokens a day spent reading a file are its estimated tokens (characters / 4) times the
-sessions of its role (on its platform, for the defaults) that started in the last 24 hours
-(`token_basis = "sessions"`; for an on-demand file an upper bound). Counting real skill
-loads (Hermes `skill_view` calls, Claude Code skill loads) is not done yet.
+Tokens a day spent reading a file are its estimated tokens (characters / 4) times how often
+it was read in the last 24 hours, and `token_basis` says which count that is:
+
+- `loads`: a skill (`<name>/SKILL.md`, on demand) of a platform that counts skill loads, times
+  the loads of a skill of that name (with its categories, when the call named them) in the
+  profile whose files it is in, else by its role, else, for a skill every role shares, by
+  any role. Hermes counts `skill_view` calls from each profile's `state.db`
+  (`[adapters.hermes] state_home`; a view of a linked reference file is not a load), Claude
+  Code its `Skill` calls from the hook (version 2 of `hook.py` or later, a `lookback` of at
+  least 24 hours, and a spool that still holds the day: not rotated away). A plugin's skill
+  (`plugin:name`) matches none of these files. A skill nobody opened costs nothing. When a
+  platform cannot count every load (a `state.db` it cannot read, a call it cannot parse,
+  over 2,000 sessions a day in a profile), it counts none that time.
+- `sessions`, otherwise: the sessions of its role (on its platform, for the defaults) that
+  started in the last 24 hours. The cost of an always-loaded file; for an on-demand file of
+  a platform whose loads could not be counted this time (no `state.db`, one that cannot be
+  read, an older hook) an upper bound.
+
+A file listed under `[[instructions.files]]` names no platform, so it is always on
+`sessions`.
 
 ## [resources.prometheus]
 
@@ -1304,9 +1344,13 @@ present.
 | `interval` | `"60s"` | duration, >= 5s | At most one fetch this often. Keep it at most rule 7's `max_reading_age`. |
 | `token_env` | `"KELPIE_PROMETHEUS_TOKEN"` | variable name | Bearer token, sent only to `url`. Written here, the variable must be set. |
 | `queries` | built-in | table | PromQL overrides, one per reading, see below. |
-| `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. |
+| `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. Directories use at least `{path_window}` (see `path_interval`). |
 | `growth_sustain` | `"1h"`, or `growth_window` when that is shorter | duration, 5m to 24h and at most `growth_window` | How long growth must go on to count. The growth rate is the rate over `growth_window`, capped at the first quartile of the rates in the slices (`growth_sustain` / 4, at least 1m, aligned to the clock) of the last `growth_sustain`, a slice that shrank counting as 0. So a burst within about half of `growth_sustain` adds a few GB a day at most, for about one slice (5 GB written in 17 minutes reads at most about 5 GB a day on a flat disk, 35 on one growing 30 GB a day), then nothing; a cleanup of less than a few hours' growth leaves about the rate (an open forecast does not resolve), while a larger one turns the window's trend negative, so an open forecast resolves until the cleanup leaves the window (about 4 to 5 hours with the 6h default); a longer burst counts in part (5 GB in 40 to 50 minutes reads up to about 15 to 18 GB a day). Growth that comes in bursts with gaps longer than a slice (a build every 30 minutes, nothing written in between) reads as no growth. A shrinking trend stays negative: no forecast. |
+| `path_interval` | `"1h"` | duration, 1m to 6h | How often `scripts/kelpie-path-sizes.sh` runs (the shipped launchd agent and systemd timer: hourly). Its sizes change in steps, so directory growth is sustained over slices of at least two runs (`{path_slice}`, at least the disk's slice), three of them (`{path_sustain}`, at least `growth_sustain`), and its trend spans at least that too (`{path_window}`, at least `growth_window`); with quarter-hour slices most would see no change and no directory would be named. So with the defaults a directory is named once it was measured for 6 hours and grew for about 4 of them; a disk forecast that comes sooner says that none of the measured directories grew yet. Set rule 7's `path_max_age` above `path_interval` plus one run when you raise it. |
 | `load_on_macos` | `false` | bool | macOS counts threads waiting on I/O in its load average (300 to 800 on a healthy farm Mac), so hosts whose `node_uname_info` says Darwin get no load reading unless this is true. Needs node_exporter's uname collector (on by default), as does leaving out macOS's read-only volumes; a host once seen as macOS stays so when that query fails, and until it first answers no host gets a load reading. |
+| `toolchain_metric` | `"kelpie_toolchain_info"` | a metric name | Toolchain versions per host (incident 20), one series per tool with its version in a label, e.g. from `scripts/kelpie-toolchain.sh` (the active Xcode and CoreSimulator on macOS, or any `TOOL=COMMAND`). A version seen within `toolchain_lookback` right after another version of the same tool on the same host is a change; the first version a host reports is none. Report one version per tool. An outage that begins soon after a change names it as its likely cause in its alert (rules 4, 9 and 10, `toolchain_window`) and in the daily report. Absent metric: no changes, nothing else changes. |
+| `toolchain_tool_label`, `toolchain_version_label` | `"tool"`, `"version"` | label names, different, not `host_label` | The labels holding the tool's name and its version. |
+| `toolchain_lookback` | `"48h"` | duration, 1h to 7d | How far back changes are read: one subquery, the versions scraped at each 5m step, read as a timeline (a rollback is a change too). A change spans from the old version's last scrape to the new one's first, so a tool that reported nothing while it was replaced still matches an outage in between. Keep it longer than the rules' `toolchain_window` plus how long an outage may stay open: a change that leaves the lookback is no longer named in that outage's later alerts. |
 
 `[resources.prometheus.queries]` keys: `disk_size`, `disk_avail`, `memory_total`,
 `memory_available`, `load1`, `cores`, `cpu_busy`, `processes`, `processes_max`, `os`,
@@ -1320,20 +1364,26 @@ system volumes, so a Mac shows its data volume, `/System/Volumes/Data`. Each res
 names the filesystem they are on). `path_bytes` and `path_growth` read `kelpie_path_bytes`
 from `scripts/kelpie-path-sizes.sh` (install.md, Host resources); `path_written` is when
 node_exporter last saw that file change, so sizes from a script that stopped count as old.
+`toolchain` reads `toolchain_metric` from `scripts/kelpie-toolchain.sh` (install.md): an
+override must stay a subquery (`[...:...]`) answering a matrix, the versions scraped at each
+step with `toolchain_tool_label` and `toolchain_version_label`; an instant query fails, logged
+once, and no change is read.
 The growth queries take the lower of two rates (`deriv`, in bytes per day): over
 `growth_window` (the trend) and the first quartile over the slices of the last
 `growth_sustain`, each at least 0 (`quantile_over_time` of a subquery, Prometheus 2.7 or
 later; doctor warns when the query fails). The trend is not clamped: a disk that shrinks
 over the window reads negative and forecasts nothing. A slice needs at least two scrapes, or
 the query answers nothing: keep `growth_sustain` at least 8 scrape intervals long (doctor
-notes a host with no growth rate). The growth queries only answer for series
-that existed half a window ago, so a new Prometheus or host forecasts nothing at first. The
+notes a host with no growth rate). The disk growth query only answers for series that
+existed half a window ago, the directory one for directories measured for all of
+`{path_sustain}` (6h), so a new Prometheus, host or directory forecasts nothing at first. The
 growth and directory queries may fail or be empty without costing the other readings (each
 failure is counted in `kelpie_resource_read_failures_total`, cause `<query>_<cause>`). In
 every query, custom ones too, `{host_label}`, `{window}` (`growth_window`), `{half_window}`,
-`{sustain}` (`growth_sustain`) and `{slice}` (a quarter of it, at least 1m) are filled in; a
-custom `disk_growth` or `path_growth` is sustained only if it uses `{sustain}` and `{slice}`
-itself. The defaults are in `kelpie.example.toml`. `processes` needs node_exporter's
+`{sustain}` (`growth_sustain`), `{slice}` (a quarter of it, at least 1m), `{path_slice}`,
+`{path_sustain}` and `{path_window}` (the same for directory sizes, see `path_interval`) are
+filled in; a custom `disk_growth` or `path_growth` is sustained only if it uses those itself.
+The defaults are in `kelpie.example.toml`. `processes` needs node_exporter's
 `--collector.processes`.
 
 ## [connectors.github]
@@ -1844,7 +1894,7 @@ once a day when `at` is set.
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `timezone` | `"UTC"` | IANA name | Where a day starts and ends. |
-| `dir` | unset | path | Writes `kelpie-report-<date>.md` there. Unset: stdout only. |
+| `dir` | unset | path | Writes `kelpie-report-<date>.md` there (new files 0600, a new folder 0700). Unset: stdout only. |
 | `task_url` | unset | http(s) URL with `{id}` | Links task ids in the Markdown; the id is URL-quoted into `{id}`, which must not be in the host. No credentials, and at most 600 characters once a 64-character id fills `{id}`. Anything else stops startup. |
 | `url` | unset | http(s) URL with `{date}` | Where the full report of a day can be read (e.g. where `dir` is served); the chat summary links it as "Open report", with the day (YYYY-MM-DD) in `{date}`, which must not be in the host. Unset: no link. |
 | `hour_usd` | unset | dollars, > 0 | What an hour lost costs: a stuck task-hour, or an agent-hour idle behind a hold or waiting on a person. Unset: hours stay hours. |
@@ -1903,9 +1953,10 @@ model = "claude-sonnet-5-5"
 
 ### Report sections
 
-`[report.sections.tokens]` (token optimization, `kelpie.traces.tokens`) and
-`[report.sections.tokens_fit]` (context and model fit, `kelpie.traces.fit`) accept the
-fields of `TokenSettings` and `FitSettings`. Durations are strings (`"5m"`), counts whole
+`[report.sections.tokens]` (token optimization, `kelpie.traces.tokens`),
+`[report.sections.tokens_fit]` (context and model fit, `kelpie.traces.fit`) and
+`[report.sections.instructions]` (instruction files) accept the fields of `TokenSettings`,
+`FitSettings` and the section's own settings. Durations are strings (`"5m"`), counts whole
 numbers >= 0, ratios, shares and tolerances numbers between 0 and 1, lists lists of names;
 any other value fails that section (noted in the report).
 
@@ -1920,6 +1971,7 @@ any other value fails that section (noted in the report).
 | `tokens_fit.routine_min_calls` / `routine_output_tokens` / `routine_max_tool_tokens` | `20` / `400` / `1000` | Routine work: at least this many calls a day, at most this median output and mean tool output per call. |
 | `tokens_fit.min_after` | `"12h"` | After a model switch, how long before its quality is judged. |
 | `tokens_fit.min_saving_tokens` | `50000` | A recommendation needs at least this many tokens a day. |
+| `instructions.top` | `10` | Instruction files listed, the costliest first (`0`: no section). |
 
 The other fields (`break_ratio`, `fragment_min_sessions`, `review_reads`, ...) are
 documented in those modules.
@@ -1960,7 +2012,7 @@ the agents' relays).
 | `action_timeout` | `30s` | How long an action waits for the agent's result, and each agent's total per tick (1s–2m). |
 | `max_clock_skew` | `2m` | A report whose clock is further off is not merged, and a human is told (5s–1h). |
 | `max_body_bytes` | 16 MiB | Largest request body, also after gzip. |
-| `max_connections` | `64` | Connections not yet authenticated (8–10000; also at most 16 per address, per /64 for IPv6); each has 3s to present its token, and when all are taken the oldest is cut. |
+| `max_connections` | `64` | Connections not yet authenticated (8–10000); when all are taken the oldest is cut. Per address, the header deadline and the timeouts come from [`[server]`](#server). |
 
 `[[hub.agents]]`: one entry per machine, `name` (as in its `[agent] name`) and `token_env`
 (the variable holding its token on the server). Names and variables must be distinct, and
@@ -1969,6 +2021,30 @@ so must the tokens.
 `/metrics` gains `kelpie_agent_up{agent}` and
 `kelpie_agent_last_report_timestamp_seconds{agent}`; adapter errors on an agent are counted
 as `kelpie_adapter_errors_total{adapter="<agent>/<adapter>"}`.
+
+## [server]
+
+The connection guards of every listener of `kelpie serve`: the main port (`/v1/traces`,
+`/metrics`, `/healthz`) and the hub (`[hub] listen`), one implementation for both. A
+connection is *pending* from accept until it is admitted: an OTLP export or a hub request
+once its token checks out (before its body is read). A `GET` (`/metrics`, `/healthz`) is
+never admitted: its reply too must be written within `header_timeout`, so a client that
+asks and never reads cannot keep a slot. The defaults are safe off loopback; change them
+only when a client is known to be slower.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `max_connections` | `64` | Pending connections on the main port at once (8–10000; the hub has `[hub] max_connections`). When all are taken, the oldest pending one is cut to make room. |
+| `max_connections_per_address` | `16` | Pending connections from one address (an IPv6 /64), on each listener (1–10000). More are closed at accept, before a thread is started. At most `max_connections` (checked against the main port's cap even when only the hub needs more); on the hub it is lowered to `[hub] max_connections` if larger. Every exporter and scraper on the Kelpie host shares `127.0.0.1`'s share, and behind a reverse proxy or NAT every client shares the proxy's; an export is pending only until its token is checked, so raise this when such a setup logs refusals. |
+| `header_timeout` | `3s` | From accept to the end of the headers (TLS handshake included on the hub) and, for a `GET`, to the end of the reply, however slowly they come; then the socket is shut down (1s–1m). A scrape that cannot read `/metrics` within it gets a cut-off reply and Prometheus records a failed scrape: raise it for a scraper on a slow or distant link. |
+| `read_timeout` | `30s` | Each socket read or write, for every connection (1s–5m). |
+| `body_timeout` | `60s` | A whole request body (read only after the token checks out, when one is configured); past it the connection is closed (an OTLP export counts as 408). Not shorter than `read_timeout`, at most 10m. |
+
+Body sizes are each endpoint's own limit: `[traces] max_body_bytes` (8 MiB) and
+`[traces] max_concurrent_requests` on the main port, `[hub] max_body_bytes` (16 MiB) on the
+hub; both are checked against `Content-Length` before the body is read, and again after
+gzip. One request per connection. Refused and cut connections are logged at most once a
+minute per address. See [security.md](security.md#listeners).
 
 ## Checks across sections
 

@@ -17,8 +17,10 @@ from typing import Protocol
 
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.model import Reconciliation, Snapshot, Snooze
+from kelpie.core.files import write_private
+from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze, source_agent
 from kelpie.core.spend import SpendConfig
+from kelpie.core.storage import TokenRow
 from kelpie.report.config import ReportSettings
 from kelpie.report.daily import (
     DailyReport,
@@ -67,6 +69,7 @@ class ReportSources:
     block_kinds: tuple[BlockKind, ...] = ()  # [[block_conditions]], matched offline
     stuck_check: StuckCheck | None = None  # rule 3's, as configured (None: its defaults)
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # rule -> what is missing
+    act_gaps: Mapping[str, str] = field(default_factory=dict)  # rule -> where it only alerts
     farm: FarmFacts = UNKNOWN_FARM  # what the farm already has (from config)
     # Providers' bills against the estimate for UTC days ``since`` to ``until``
     # (``kelpie.app.read_reconciliations``); None: no cost reports configured.
@@ -94,6 +97,8 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
     ) - timedelta(hours=1)
     actions, states, spans, fixes, attribution = [], [], [], [], None
     snoozes: list[Snooze] = []
+    tokens: list[TokenRow] = []
+    sleeps: list[HostSleep] = []
     if sources.db_path is not None and sources.db_path.exists():
         with ReportStore(sources.db_path) as store:
             actions = store.actions(history, end)
@@ -102,6 +107,8 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
             fixes = store.fixes(reach - sources.report.verify_window, end)
             attribution = store.attribution()
             snoozes = store.snoozes(start)
+            tokens = store.instruction_tokens(history, end)
+            sleeps = store.host_sleeps(history, end)
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same
     # call reported both ways is kept once.
     merged = merge_hook_spans(
@@ -136,8 +143,15 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         dependencies=board.dependencies,
         stuck_check=sources.stuck_check,
         act_blockers=sources.act_blockers,
+        act_gaps=sources.act_gaps,
         farm=sources.farm,
         snoozes=snoozes,
+        instruction_files=board.instruction_files,
+        instruction_duplicates=board.instruction_duplicates,
+        instructions_at=board.now if board.instruction_files else None,
+        instruction_tokens=tokens,
+        host_sleeps=sleeps,
+        agents=frozenset(a for t in board.tasks if (a := source_agent(t.source)) is not None),
     )
 
 
@@ -167,9 +181,8 @@ def write(markdown: str, settings: ReportSettings, day: date) -> Path | None:
     """Write the report to ``[report] dir``; None when no directory is configured."""
     if settings.dir is None:
         return None
-    settings.dir.mkdir(parents=True, exist_ok=True)
     path = settings.dir / f"kelpie-report-{day.isoformat()}.md"
-    path.write_text(markdown, encoding="utf-8")
+    write_private(path, markdown)  # a new report 0600, a new folder 0700
     return path
 
 

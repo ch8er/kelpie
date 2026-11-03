@@ -85,7 +85,11 @@ class BlockerGraph:
     def __init__(self, snapshot: Snapshot, stale_after: timedelta = DEFAULT_STALE_AFTER) -> None:
         self.snapshot = snapshot
         self.by_id = {t.id: t for t in snapshot.tasks}
-        live = {s.task_id for s in snapshot.sessions if is_live(s, snapshot.now, stale_after)}
+        live = {
+            s.task_id
+            for s in snapshot.sessions
+            if is_live(s, snapshot.now, stale_after, snapshot.host_sleeps)
+        }
         parents: dict[str, set[str]] = {}
         for d in snapshot.dependencies:
             parents.setdefault(d.task_id, set()).add(d.depends_on)

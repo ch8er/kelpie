@@ -143,7 +143,7 @@ class HermesBoards:
         )
         if self.state is not None and self.state.state_home is not None:
             waits, usage = self.state._state(self.state.state_home, now, merged.sessions, rows)
-            merged = replace(merged, waits=waits, usage=usage)
+            merged = replace(merged, waits=waits, usage=usage, **self.state.loads(now))
         if self.host is None or self.host.tools is None:
             return merged
         # A workspace pattern matches a task's id on its board: the namespaced id it stands

@@ -108,6 +108,7 @@ from kelpie.rules._tasks import (
     linked_conditions,
     live_session,
     responsible,
+    task_awake,
     undeclared_exit,
 )
 
@@ -204,7 +205,7 @@ class OrphanStatus:
         gone = who is not None and bool(known) and who not in known
         if who is not None and not gone:
             return None
-        if snapshot.now - task.status_since < after:
+        if task_awake(task, task.status_since, snapshot) < after:
             return None
         if live_session(task.id, snapshot, self.session_stale_after) is not None:
             return None  # someone is on it, whatever the owner field says
@@ -463,7 +464,7 @@ class OrphanStatus:
         declared = end.session.final_status
         if declared is None or declared not in _SUCCESS or declared == task.status:
             return None
-        if task.status_since > end.at or snapshot.now - end.at < after:
+        if task.status_since > end.at or task_awake(task, end.at, snapshot) < after:
             return None
         return self._stop_alert(
             "no-next-action",
@@ -499,7 +500,7 @@ class OrphanStatus:
             return None  # rule 1 (exit contract) requeues it
         end = last_exit(task, snapshot, self.session_stale_after)
         quiet_since = max(task.status_since, end.at) if end is not None else task.status_since
-        if snapshot.now - quiet_since < after:
+        if task_awake(task, quiet_since, snapshot) < after:
             return None
         conditions, _ = linked_conditions(task, snapshot)
         if any(_open(c) for c in conditions):
@@ -800,7 +801,11 @@ def _open_dependents(task_id: str, snapshot: Snapshot) -> list[str]:
 def _idle_agents(snapshot: Snapshot, stale_after: timedelta) -> list[Owner]:
     """Agents with nothing in progress or review and no live session, by id."""
     busy = {t.owner_id for t in snapshot.tasks if t.status in _BUSY}
-    busy |= {s.owner_id for s in snapshot.sessions if is_live(s, snapshot.now, stale_after)}
+    busy |= {
+        s.owner_id
+        for s in snapshot.sessions
+        if is_live(s, snapshot.now, stale_after, snapshot.host_sleeps)
+    }
     idle = [o for o in snapshot.owners if o.kind is OwnerKind.AGENT and o.id not in busy]
     return sorted(idle, key=lambda o: o.id)
 

@@ -73,6 +73,7 @@ from kelpie.core.conditions import (
 )
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
+from kelpie.core.host_sleep import SleepWatch
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
 from kelpie.core.model import (
     Owner,
@@ -96,6 +97,9 @@ from kelpie.core.ports import (
     SupportsReassign,
     SupportsStop,
     SupportsWait,
+    ToolchainReader,
+    declared_actions,
+    inapplicable_actions,
 )
 from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
 from kelpie.core.rule import Rule
@@ -124,6 +128,7 @@ from kelpie.core.storage import (
     SqliteLedgerStore,
     SqliteSpanStore,
 )
+from kelpie.httpguard import Limits, load_server
 from kelpie.instructions.config import InstructionSettings, load_instructions, platform_sources
 from kelpie.instructions.watch import InstructionWatch
 from kelpie.metrics import Metrics
@@ -288,6 +293,7 @@ class Settings:
     agent: AgentSettings | None = None  # [agent]: this host runs ``kelpie agent``
     hub: HubSettings | None = None  # [hub]: ``kelpie serve`` takes reports from agents
     snooze: SnoozeSettings = field(default_factory=SnoozeSettings)  # [snooze]
+    server: Limits = field(default_factory=Limits)  # [server]: every listener's guards
 
     @property
     def spend(self) -> SpendConfig:
@@ -330,6 +336,7 @@ def load_settings(path: Path | None) -> Settings:
         "agent",
         "hub",
         "snooze",
+        "server",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -371,6 +378,7 @@ def load_settings(path: Path | None) -> Settings:
         agent = load_agent(data.get("agent"))
         hub = load_hub(data.get("hub"))
         snooze = load_snooze(data.get("snooze"), report.tz)
+        server = load_server(data.get("server"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     return Settings(
@@ -397,6 +405,7 @@ def load_settings(path: Path | None) -> Settings:
         agent=agent,
         hub=hub,
         snooze=snooze,
+        server=server,
     )
 
 
@@ -1012,12 +1021,12 @@ def _warn_inbox_gaps(rules: Sequence[Rule]) -> None:
                     "needs_you.%s (%s) is longer than %s.%s (%s): %s is announced by neither "
                     "rule for %s in between",
                     thirteen,
-                    theirs,
+                    _span(theirs),
                     rule.name,
                     own,
-                    mine,
+                    _span(mine),
                     what,
-                    theirs - mine,
+                    _span(theirs - mine),
                 )
 
 
@@ -1049,6 +1058,16 @@ def _normalized(patterns: Any) -> Any:
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def sleep_watch(
+    config: EngineConfig, clock: Callable[[], datetime], agent: str | None = None
+) -> SleepWatch | None:
+    """The host sleep watch (issue #296): off when ``host_sleep_min_gap`` is 0, and with an
+    injected clock (tests, simulations), whose jumps the monotonic clock never sees."""
+    if config.host_sleep_min_gap <= timedelta(0) or clock is not utc_now:
+        return None
+    return SleepWatch(min_gap=config.host_sleep_min_gap, agent=agent)
 
 
 def empty_snapshot(clock: Callable[[], datetime] = utc_now) -> Callable[[], Snapshot]:
@@ -1134,13 +1153,15 @@ def merged_snapshot(
                 spans=merged.spans + part.spans,
                 waits=merged.waits + part.waits,
                 usage=merged.usage + part.usage,
+                skill_loads=merged.skill_loads + part.skill_loads,
+                skill_loads_counted=merged.skill_loads_counted + part.skill_loads_counted,
                 limit_hits=merged.limit_hits + part.limit_hits,
                 providers=merged.providers + part.providers,
                 builds=merged.builds + part.builds,
                 unobserved=merged.unobserved + part.unobserved,  # boards of a Hermes home
             )
             for board in part.unobserved:  # one board of several could not be read
-                metrics.adapter_failed(f"{adapter.name}/{board}")
+                metrics.adapter_failed(adapter.name, board)
                 complete = False
         if remote is not None:
             try:
@@ -1158,6 +1179,7 @@ def merged_snapshot(
                     sessions=merged.sessions + part.sessions,
                     spans=merged.spans + part.spans,
                     unobserved=merged.unobserved + part.unobserved,
+                    host_sleeps=merged.host_sleeps + part.host_sleeps,
                 )
         partial = not complete or bool(merged.unobserved)  # part of the farm not seen
         for name, step in enrich:
@@ -1193,6 +1215,12 @@ def merged_snapshot(
         if resources is not None:
             try:
                 merged = replace(merged, resources=merged.resources + tuple(resources.read(now)))
+                if isinstance(resources, ToolchainReader):
+                    merged = replace(
+                        merged,
+                        toolchain_changes=merged.toolchain_changes
+                        + tuple(resources.toolchain_changes(now)),
+                    )
             except Exception as exc:
                 log.error("resource source failed: %s", type(exc).__name__)
                 metrics.resource_failed("unexpected")
@@ -1462,7 +1490,10 @@ def _unique_owners(owners: tuple[Owner, ...]) -> tuple[Owner, ...]:
     )
 
 
-def build_adapters(settings: Settings) -> list[PlatformAdapter]:
+def build_adapters(
+    settings: Settings, environ: Mapping[str, str] = os.environ
+) -> list[PlatformAdapter]:
+    """The enabled platform adapters; tokens are read from ``environ``."""
     adapters: list[PlatformAdapter] = []
     if settings.hermes is not None and settings.hermes.enabled:
         adapters.append(settings.hermes.build())
@@ -1473,7 +1504,7 @@ def build_adapters(settings: Settings) -> list[PlatformAdapter]:
     for issues in (settings.github_issues, settings.linear):
         if issues is not None and issues.enabled:
             try:
-                adapters.append(issues.build())
+                adapters.append(issues.build(environ))
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
     return adapters
@@ -1597,8 +1628,8 @@ def trace_window_warnings(rules: Sequence[Rule], traces: TraceSettings) -> list[
     if not traces.enabled:
         return []
     return [
-        f"rule 'no_progress' window ({rule.window}) is longer than [traces] window "
-        f"({traces.window}): it sees only the newest spans and undercounts tokens"
+        f"rule 'no_progress' window ({_span(rule.window)}) is longer than [traces] window "
+        f"({_span(traces.window)}): it sees only the newest spans and undercounts tokens"
         for rule in rules
         if isinstance(rule, NoProgress) and rule.window > traces.window
     ]
@@ -1636,8 +1667,8 @@ def ci_window_errors(rules: Sequence[Rule], settings: Settings) -> list[str]:
     if ci is None or not ci.enabled:
         return []
     return [
-        f"rule 'ci_economy' window ({rule.window}) is longer than [connectors.github.ci] "
-        f"window ({ci.window}): it would undercount builds and burn"
+        f"rule 'ci_economy' window ({_span(rule.window)}) is longer than [connectors.github.ci] "
+        f"window ({_span(ci.window)}): it would undercount builds and burn"
         for rule in rules
         if isinstance(rule, CiEconomy) and rule.window > ci.window
     ]
@@ -1652,10 +1683,10 @@ def billing_interval_warnings(rules: Sequence[Rule], settings: Settings) -> list
         return []
     kept = ci.billing_interval * KEEP_FOR
     return [
-        f"[connectors.github.ci] billing_interval ({ci.billing_interval}) keeps a reading for "
-        f"up to {kept}, longer than rule 'ci_economy' max_reading_age "
-        f"({rule.max_reading_age}): when reads fail, the CI minutes quota would go unwatched "
-        "until the reading expires"
+        f"[connectors.github.ci] billing_interval ({_span(ci.billing_interval)}) keeps a "
+        f"reading for up to {_span(kept)}, longer than rule 'ci_economy' max_reading_age "
+        f"({_span(rule.max_reading_age)}): when reads fail, the CI minutes quota would go "
+        "unwatched until the reading expires"
         for rule in rules
         if isinstance(rule, CiEconomy) and kept > rule.max_reading_age
     ]
@@ -1668,8 +1699,8 @@ def resource_interval_warnings(rules: Sequence[Rule], resources: ResourceSetting
     if prometheus is None:
         return []
     return [
-        f"[resources.prometheus] interval ({prometheus.interval}) is longer than rule "
-        f"'resources' max_reading_age ({rule.max_reading_age}): host readings would be "
+        f"[resources.prometheus] interval ({_span(prometheus.interval)}) is longer than rule "
+        f"'resources' max_reading_age ({_span(rule.max_reading_age)}): host readings would be "
         "ignored as stale between fetches"
         for rule in rules
         if isinstance(rule, Resources) and prometheus.interval > rule.max_reading_age
@@ -1694,9 +1725,9 @@ def provider_interval_warnings(rules: Sequence[Rule], quotas: LlmQuotaSettings |
     if quotas is None:
         return []
     return [
-        f"[connectors.llm_quotas] provider {p.name} interval ({p.interval}) is longer than "
-        f"rule 'resources' max_reading_age ({rule.max_reading_age}): its readings would be "
-        "ignored between probes"
+        f"[connectors.llm_quotas] provider {p.name} interval ({_span(p.interval)}) is longer "
+        f"than rule 'resources' max_reading_age ({_span(rule.max_reading_age)}): its readings "
+        "would be ignored between probes"
         for rule in rules
         if isinstance(rule, Resources)
         for p in quotas.providers
@@ -1713,16 +1744,11 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     pulls = (
         github is not None and github.enabled and github.pulls is not None and github.pulls.enabled
     )
-    if (
+    needs_pulls = (
         checkpoints is not None
         and not getattr(checkpoints, "wip_without_pr_check", True)
         and not pulls
-    ):
-        log.warning(
-            "checkpoints makes no WIP commits: it needs [connectors.github.pulls] to see "
-            "that a branch has no open PR (or set wip_without_pr_check = true where task "
-            "branches never carry PRs)"
-        )
+    )
     act_within = getattr(checkpoints, "act_within", None)
     if act_within is not None:
         if act_within + timedelta(hours=1) >= settings.engine.once_window:
@@ -1778,6 +1804,16 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     # Without [[alerts.channels]] there is no alerter: an effect nobody can carry out turns
     # into an alert that is only logged. The defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
+    # Only where something would make WIP commits: an adapter that carries them out, or a
+    # hub, whose agents' adapters are known only once they report.
+    if needs_pulls and (
+        settings.hub is not None or any(ActionKind.WIP_COMMIT in _declared(a) for a in adapters)
+    ):
+        log.warning(
+            "checkpoints makes no WIP commits: it needs [connectors.github.pulls] to see "
+            "that a branch has no open PR (or set wip_without_pr_check = true where task "
+            "branches never carry PRs)"
+        )
     for adapter in adapters:  # Kelpie's park and stop markers are issued on the app's clock
         if isinstance(adapter, hermes.HermesAdapter | HermesBoards):
             adapter.clock = clock
@@ -1821,6 +1857,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         ledger_store=store,
         state_store=states,
         fallback=hub is None,
+        sleep_watch=sleep_watch(settings.engine, clock),
+        sleep_log=store.record_sleeps if isinstance(store, SqliteLedgerStore) else None,
     )
     farm = None
     if hub is not None:
@@ -1836,6 +1874,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     remote = farm.snapshot if farm is not None else None
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     metrics.set_adapters(a.name for a in adapters)
+    for a in adapters:  # several boards: a ``board`` label of their names (#283)
+        if isinstance(a, HermesBoards):
+            metrics.set_boards(a.name, a.board_names)
     metrics.set_budgets_enabled(bool(settings.budgets.budgets))
     if reader is not None:
         reader.observer = metrics
@@ -1981,7 +2022,7 @@ def _with_hub(app: App, hub: Hub | None, traces: TraceIngest | None = None) -> A
     if hub is None:
         return app
     try:
-        server = HubServer(hub, traces)
+        server = HubServer(hub, traces, app.settings.server)
     except (OSError, ValueError) as exc:
         app.close()
         raise ConfigError(
@@ -2363,10 +2404,11 @@ def check_exposure(settings: Settings, host: str) -> None:
 
 
 def instruction_watch(
-    settings: Settings, adapters: Sequence[PlatformAdapter]
+    settings: Settings, adapters: Sequence[PlatformAdapter], record: bool = True
 ) -> InstructionWatch | None:
     """The instruction files to measure ([instructions]): the configured ones first, then
-    the defaults of the platforms whose adapters run here. None without the section."""
+    the defaults of the platforms whose adapters run here. None without the section.
+    ``record``: False to only read the size history (``kelpie report``)."""
     s = settings.instructions
     if not s.enabled:
         return None
@@ -2375,6 +2417,8 @@ def instruction_watch(
         for adapter in adapters:
             if isinstance(adapter, hermes.HermesAdapter):
                 sources += platform_sources(adapter.name, role_of=adapter.role_of)
+            elif isinstance(adapter, HermesBoards):  # the boards share the home's profiles
+                sources += platform_sources(adapter.name, role_of=adapter.boards[0].role_of)
             elif isinstance(adapter, OpenClawAdapter):
                 sources += platform_sources(adapter.name, str(adapter.state_dir))
             else:
@@ -2383,7 +2427,7 @@ def instruction_watch(
         store = SqliteInstructionStore(settings.db_path or ":memory:")
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open {settings.db_path}: {exc}") from exc
-    return InstructionWatch(store, s, tuple(sources))
+    return InstructionWatch(store, s, tuple(sources), record=record)
 
 
 def _open_span_store(db_path: Path | None) -> SpanStore:
@@ -2456,13 +2500,61 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
             found[name] = ActBlocker(_no_cancel(settings), refused=has_hermes)
         elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
             found[name] = ActBlocker(_hermes_gap(name, platform), refused=True)
-        elif (
-            platform
-            and settings.hub is None
-            and not platform <= frozenset().union(*(_declared(a) for a in adapters))
-        ):
+        elif platform and settings.hub is None and platform - _carried(adapters):
             found[name] = ActBlocker(_platform_gap(adapters, platform), refused=False)
     return found
+
+
+def act_gaps(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dict[str, str]:
+    """The rules that can act here, yet not on every adapter's tasks: some adapter lacks
+    kinds its tasks can draw (all but its ``inapplicable``) that another adapter carries out
+    (judged per adapter: one adapter's requeue does not requeue another's tasks). On those
+    tasks the rule's actions become alerts; on the others it acts. Rules in
+    :func:`act_blockers` are left out (they cannot act here at all)."""
+    if settings.hub is not None:
+        return {}
+    blocked = act_blockers(settings, adapters)
+    gaps: dict[str, str] = {}
+    for planned in PLANNED:
+        if planned.name not in REGISTRY or planned.name in blocked:
+            continue
+        platform = planned.effects - {ActionKind.CANCEL_BUILD}
+        if platform and (said := _gaps(adapters, platform)):
+            gaps[planned.name] = said
+    return gaps
+
+
+def _carried(adapters: Sequence[PlatformAdapter]) -> frozenset[ActionKind]:
+    return frozenset().union(*(_declared(a) for a in adapters))
+
+
+def _gaps(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) -> str:
+    """Per adapter, what of ``platform`` its tasks can draw and it does not carry out:
+    "Claude Code can't requeue tasks yet"; the same gap on several adapters reads "neither
+    A nor B can ..."; different gaps are joined with "and"."""
+    by_gap: dict[frozenset[ActionKind], list[str]] = {}
+    for adapter in adapters:
+        lacking = platform - _declared(adapter) - inapplicable_actions(adapter)
+        name = _PLATFORMS.get(adapter.name, adapter.name)
+        if lacking and name not in (names := by_gap.setdefault(lacking, [])):
+            names.append(name)
+    said = []
+    for lacking, names in by_gap.items():
+        if not names:
+            continue
+        names.sort()
+        off = sorted(
+            _PLATFORMS.get(a.name, a.name)
+            for a in adapters
+            if _stop_off(a) and _PLATFORMS.get(a.name, a.name) in names
+        )
+        if lacking == {ActionKind.STOP} and off:
+            said.append(f"stop is turned off (stop_dir = false) for {' and '.join(off)}")
+        elif len(names) == 1:
+            said.append(f"{names[0]} can't {_verbs(lacking)} yet")
+        else:
+            said.append(f"neither {' nor '.join(names)} can {_verbs(lacking)} yet")
+    return " and ".join(sorted(said))
 
 
 def _no_cancel(settings: Settings) -> str:
@@ -2485,7 +2577,7 @@ def _hermes_gap(rule: str, platform: frozenset[ActionKind]) -> str:
 
 
 def _platform_gap(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) -> str:
-    lacking = platform - frozenset().union(*(_declared(a) for a in adapters))
+    lacking = platform - _carried(adapters)
     names = sorted({_PLATFORMS.get(a.name, a.name) for a in adapters})
     if not names:
         return f"no platform adapter is configured to {_verbs(lacking)}"
@@ -2493,6 +2585,9 @@ def _platform_gap(adapters: Sequence[PlatformAdapter], platform: frozenset[Actio
         off := sorted(_PLATFORMS.get(a.name, a.name) for a in adapters if _stop_off(a))
     ):
         return f"stop is turned off (stop_dir = false) for {' and '.join(off)}"
+    if all(lacking <= inapplicable_actions(a) for a in adapters):
+        # Nothing to do, not something missing: e.g. issue tasks have no runs to stop.
+        return f"{' and '.join(names)} tasks never need to {_verbs(lacking)}"
     if len(names) == 1:
         return f"{names[0]} can't {_verbs(lacking)} yet"
     return f"neither {' nor '.join(names)} can {_verbs(lacking)} yet"
@@ -2509,9 +2604,8 @@ _CAPABILITY_KINDS: tuple[tuple[type, ActionKind], ...] = (
 
 
 def _declared(adapter: PlatformAdapter) -> frozenset[ActionKind]:
-    actions = getattr(adapter, "actions", None)
-    if isinstance(actions, frozenset | set):
-        kinds = frozenset(actions)
+    if (actions := declared_actions(adapter)) is not None:
+        kinds = actions
     else:
         kinds = frozenset(k for protocol, k in _CAPABILITY_KINDS if isinstance(adapter, protocol))
     return kinds - {ActionKind.STOP} if _stop_off(adapter) else kinds
@@ -2587,13 +2681,15 @@ def _traces_status(traces: TraceSettings, hub: bool = False) -> str:
     except ValueError as exc:
         return f"NOT ready: {exc}"
     if traces.token_file is not None:
-        auth = f"bearer token from {traces.token_file} (rotatable, grace {traces.token_grace})"
+        grace = _span(traces.token_grace)
+        auth = f"bearer token from {traces.token_file} (rotatable, grace {grace})"
     elif token:
         auth = f"bearer token from ${traces.token_env}"
     else:
         auth = f"open (${traces.token_env} unset)"
     forward = "".join(f", forward to {f.name} ({f.display_endpoint})" for f in traces.forward)
-    return f"POST /v1/traces, {auth}, window {traces.window}, retention {traces.retention}{forward}"
+    window, retention = _span(traces.window), _span(traces.retention)
+    return f"POST /v1/traces, {auth}, window {window}, retention {retention}{forward}"
 
 
 def read_budgets(
@@ -2824,8 +2920,8 @@ def render_budgets(
             if v is not None
         )
         lines.append(
-            f"  {b.name}: {b.scope}{match}, {b.unit}, {b.mode}, window {b.window}"
-            f" (burn rate over {b.burn_window}), {limits}"
+            f"  {b.name}: {b.scope}{match}, {b.unit}, {b.mode}, window {_span(b.window)}"
+            f" (burn rate over {_span(b.burn_window)}), {limits}"
         )
         if isinstance(statuses, str):
             lines.append(f"    spend unavailable: {statuses}")
@@ -2861,7 +2957,7 @@ def _resources_status(resources: ResourceSettings) -> str:
     auth = f"bearer token from ${p.token_env}" if token else "no token"
     return (
         f"Prometheus {p.display_url}, {len(p.hosts)} host(s) by label {p.host_label}, "
-        f"every {p.interval}, {auth}"
+        f"every {_span(p.interval)}, {auth}"
     )
 
 
@@ -2902,7 +2998,7 @@ def _github_status(settings: Settings) -> list[str]:
                 auth = f"NOT ready: {exc}"
             lines.append(
                 f"github ci: minutes used from the billing usage of {kind} "
-                f"{ci.billing_account}, every {ci.billing_interval} ({auth})"
+                f"{ci.billing_account}, every {_span(ci.billing_interval)} ({auth})"
             )
     return lines
 
@@ -2961,7 +3057,7 @@ def _providers_status(quotas: LlmQuotaSettings | None) -> str:
         except ValueError as exc:
             return f"NOT ready: {exc}"
         parts.append(
-            f"{p.name} ({p.kind} {p.display_url}{p.path.split('?')[0]}, every {p.interval})"
+            f"{p.name} ({p.kind} {p.display_url}{p.path.split('?')[0]}, every {_span(p.interval)})"
         )
     return ", ".join(parts)
 
@@ -2990,7 +3086,7 @@ def render_status(
     lines = [
         f"config:   {settings.source or '(defaults)'}",
         f"dry-run:  {_dry_run_status(settings)}",
-        f"interval: {engine.interval}",
+        f"interval: {_span(engine.interval)}",
         f"ledger:   {settings.db_path or '(in memory)'}",
         f"traces:   {_traces_status(settings.traces, settings.hub is not None)}",
         *render_prices(settings, unpriced),
@@ -3021,7 +3117,10 @@ def render_status(
 
 def _span(d: timedelta) -> str:
     """A config duration as it is written, e.g. ``7d``, ``36h``, ``90m``."""
-    seconds = int(d.total_seconds())
+    total = d.total_seconds()
+    seconds = int(total)
+    if seconds != total or seconds == 0:  # a fraction of a second, or none
+        return f"{total:g}s"
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
         if seconds % size == 0:
             return f"{seconds // size}{unit}"

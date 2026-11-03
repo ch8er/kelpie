@@ -707,3 +707,23 @@ def test_an_occurrence_is_bounded_by_the_previous_close_only() -> None:
     assert [after(r.state) for r in (first, second, third)] == [None, h(3), h(7)]
     alone = occurrence_after([(third.state, None)])  # the earlier closes not loaded
     assert alone(third.state) is None
+
+
+def test_a_host_that_slept_lost_no_outage_hours() -> None:
+    """Issue #296 under an outage: the time the farm's host slept is taken out of the
+    outage's task-hours, as it is out of a stale block's."""
+    from dataclasses import replace
+
+    from kelpie.core.model import HostSleep
+
+    inputs = storm_day()
+    nap = HostSleep(
+        datetime.fromisoformat("2026-03-02T12:00:00+00:00"),
+        datetime.fromisoformat("2026-03-02T13:00:00+00:00"),
+    )
+    report = build_report(replace(inputs, host_sleeps=(nap,)), sections={})
+    lines = {c.rule: c for c in report.chaos}
+    assert lines[OUTAGE].hours == pytest.approx(7 * 5)  # 11:00-17:00 less the hour asleep
+    # a person's inbox is counted as it is (a person's time, issue #296), so the hour the
+    # host slept goes to the person: 10:00-11:00 and 12:00-13:00
+    assert lines[PEOPLE].hours == pytest.approx(7 * 2)

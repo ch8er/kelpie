@@ -14,7 +14,7 @@ from pathlib import Path
 
 from kelpie.core.incidents import is_outage_state
 from kelpie.core.ledger import LedgerEntry
-from kelpie.core.model import Snooze, Span
+from kelpie.core.model import HostSleep, Snooze, Span
 from kelpie.core.spans import Attribution
 from kelpie.core.states import OpenState
 
@@ -23,8 +23,11 @@ from kelpie.core.storage import (
     SCHEMA_VERSION,
     SchemaOutdated,
     SqliteSpanStore,
+    TokenRow,
     _entry,
     _state,
+    read_host_sleeps,
+    read_instruction_tokens,
     read_snoozes,
 )
 from kelpie.report.fixes import FixEvent, read_fixes
@@ -100,6 +103,14 @@ class ReportStore:
 
     def fixes(self, start: datetime, end: datetime) -> list[FixEvent]:
         return read_fixes(self._db, start, end)
+
+    def instruction_tokens(self, start: datetime, end: datetime) -> list[TokenRow]:
+        """Tokens a day on instructions per role, sampled per scan ([instructions])."""
+        return read_instruction_tokens(self._db, start, end)
+
+    def host_sleeps(self, start: datetime, end: datetime) -> list[HostSleep]:
+        """Stretches the farm's hosts slept that overlap ``[start, end)`` (issue #296)."""
+        return read_host_sleeps(self._db, start, end)
 
     def snoozes(self, after: datetime) -> list[Snooze]:
         """Stored snoozes that ended after ``after`` (#176)."""

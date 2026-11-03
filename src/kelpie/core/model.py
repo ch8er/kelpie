@@ -6,7 +6,7 @@ read-only input; they never mutate it and never perform I/O.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import StrEnum
@@ -474,6 +474,22 @@ class BudgetStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolchainChange:
+    """A host's toolchain version changed (incident 20: an Xcode update broke every iOS
+    build): ``tool`` (a name from config data, e.g. ``xcode``) went from ``before`` to
+    ``after``, first seen at ``at``. ``last_before`` is when ``before`` was last seen: the
+    change happened between the two (a tool that could not report a version while it was
+    being replaced leaves a gap). ``before`` is None when the old version is not known."""
+
+    host: str
+    tool: str
+    after: str
+    at: datetime
+    before: str | None = None
+    last_before: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LimitHit:
     """A provider usage limit was reached: the run was refused until ``resets_at``.
     ``limit`` names the limit (e.g. a rolling 5-hour or a weekly window; the LLM quota
@@ -677,6 +693,25 @@ TokenBasis = Literal["loads", "sessions"]
 
 
 @dataclass(frozen=True, slots=True)
+class SkillLoad:
+    """One time an agent opened a skill (an instruction file loaded on demand), as its
+    platform recorded it (Hermes ``skill_view``, a Claude Code ``Skill`` call): the skill's
+    name and who opened it when, never the skill's text or the call's other arguments."""
+
+    # The name it was opened by: its directory (the parent of SKILL.md), with the categories
+    # above it when the call named them (``dev/release-notes``), or ``plugin:name`` for a
+    # plugin's skill (Claude Code).
+    skill: str
+    at: datetime
+    session_id: str  # the platform's own session id
+    role: str | None = None
+    source: str | None = None  # name of the platform adapter that reported it
+    # Where the session ran on its platform, as an instruction path's ``{role}`` part names
+    # it (Hermes: the profile, of which a role may have several); None: by role alone.
+    profile: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class InstructionFile:
     """One instruction file a role loads (a skill, CLAUDE.md, AGENTS.md, a role prompt),
     measured read-only when the snapshot is assembled (``kelpie.instructions``): sizes,
@@ -765,6 +800,54 @@ def _no_snoozes() -> Mapping[str, Snooze]:
 
 
 @dataclass(frozen=True, slots=True)
+class HostSleep:
+    """A stretch when a machine running agents was suspended (a laptop lid closed), issue
+    #296. Found from a wall-clock jump against the monotonic clock between two ticks of the
+    engine (``agent`` None: the host ``kelpie serve`` runs on, whose local adapters read
+    their boards on it); ``agent`` names a ``kelpie agent`` whose host slept. ``start`` and
+    ``end`` are wall-clock times; where the jump falls inside its tick interval is not
+    known, so they are exact in length and placed to within one interval. ``source`` is
+    ``clock`` (the jump) or the name of a configured OS wake log."""
+
+    start: datetime
+    end: datetime
+    agent: str | None = None
+    source: str = "clock"
+
+    @property
+    def length(self) -> timedelta:
+        return max(self.end - self.start, timedelta(0))
+
+
+def source_agent(source: str | None) -> str | None:
+    """The ``kelpie agent`` behind a board or session ``source`` (``<agent>/<adapter>`` on a
+    multi-host farm); None for an adapter that runs inside ``kelpie serve``."""
+    if source is None or "/" not in source:
+        return None
+    return source.split("/", 1)[0]
+
+
+def slept(
+    sleeps: Iterable[HostSleep], start: datetime, end: datetime, agent: str | None
+) -> timedelta:
+    """How long ``agent``'s host (None: the server's own) slept between ``start`` and
+    ``end``; overlapping records of one sleep count once."""
+    spans = sorted(
+        (max(s.start, start), min(s.end, end))
+        for s in sleeps
+        if s.agent == agent and s.start < end and s.end > start
+    )
+    total = timedelta(0)
+    cursor = start
+    for a, b in spans:
+        a = max(a, cursor)
+        if b > a:
+            total += b - a
+            cursor = b
+    return total
+
+
+@dataclass(frozen=True, slots=True)
 class Snapshot:
     """Everything a rule may look at, captured at ``now``."""
 
@@ -790,6 +873,9 @@ class Snapshot:
     # statuses (stale), so a rule should neither resolve nor raise budget alerts on them.
     budgets_ok: bool = True
     limit_hits: tuple[LimitHit, ...] = ()  # observed provider limits (budgets forecast them)
+    # Toolchain version changes per host within the source's lookback (an outage that starts
+    # soon after one names it as the likely cause).
+    toolchain_changes: tuple[ToolchainChange, ...] = ()
     providers: tuple[ProviderStatus, ...] = ()  # LLM provider quota and auth probes
     # Trace-based spend against providers' cost reports, per provider and closed UTC day
     # ([connectors.cost_reports]); the newest day first.
@@ -814,6 +900,10 @@ class Snapshot:
     # The instruction files each role loads and the copies found in them ([instructions]).
     instruction_files: tuple[InstructionFile, ...] = ()
     instruction_duplicates: tuple[InstructionDuplicate, ...] = ()
+    # Skills opened in the last 24 hours (Hermes ``skill_view``, Claude Code ``Skill``), and
+    # the adapters that counted them this tick: for their skills, no load means none.
+    skill_loads: tuple[SkillLoad, ...] = ()
+    skill_loads_counted: tuple[str, ...] = ()
     # Parts of the farm that are not in this snapshot (multi-host: agents and
     # ``<agent>/<adapter>`` boards that are silent, stale or failed, whose task ids start
     # with ``<agent>:``; ``hub`` when no agent board could be read). A rule that stops
@@ -829,6 +919,10 @@ class Snapshot:
     # block reasons, a stored one winning over a marker. Active ones and those that expired
     # within the last 7 days; :func:`active_snooze` tells them apart.
     snoozes: Mapping[str, Snooze] = field(default_factory=_no_snoozes)
+    # Recent stretches when a host running agents slept (issue #296), the engine's own from
+    # its clocks and the agents' from their reports: rules count an age in awake time
+    # (``slept``), so a gap the host slept through raises no stale-session alert.
+    host_sleeps: tuple[HostSleep, ...] = ()
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )

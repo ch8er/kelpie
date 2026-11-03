@@ -1,21 +1,191 @@
 # Prometheus alerting rules for Kelpie itself. Loaded by deploy/prometheus/prometheus.yml
 # (rule_files); the compose file mounts this directory at /etc/prometheus/rules.
 #
-# Kelpie retries a transient chat-service failure (429, 5xx, network) for `[alerts]
-# retry_horizon` (15 minutes by default) before it gives an alert up. That is the only place
-# an alert is lost, and it is counted in kelpie_alerts_failed_total{channel,cause}: this
-# rule is the "alert about the alerter", so route it to a channel that does not depend on
-# the one that failed (an Alertmanager receiver, email, a pager).
+# These watch the watchdog: Kelpie down or stuck, a part of the farm it cannot see, and
+# the alerts it could not deliver. Route them through an Alertmanager of your own (add an
+# `alerting:` section to prometheus.yml) to a receiver that does not depend on Kelpie's own
+# chat channels. Every alert links its runbook in docs/runbook.md.
+#
+# Checked in CI: `promtool check rules` and `promtool test rules deploy/prometheus/tests/*.yml`.
+#
+# Counters that appear with their first event (no earlier sample) are invisible to
+# increase(): the `unless ... offset` branches catch a series that is new in the window.
 groups:
+  - name: kelpie-server
+    rules:
+      - alert: KelpieDown
+        expr: up{job="kelpie"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kelpie's /metrics on {{ $labels.instance }} has not answered for 2 minutes"
+          description: >-
+            Prometheus cannot scrape kelpie serve: the process is down, restarting in a loop
+            or its port is not reachable. Nothing watches the farm meanwhile: no rule runs and
+            no alert is sent.
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiedown
+
+      - alert: KelpieNotTicking
+        # The last completed tick, or the start time before the first one. Ten minutes is
+        # 20 ticks at the default [engine] interval (30s): raise it for a long interval. Ticks
+        # that start and raise are KelpieTicksFailing instead, not paged twice.
+        expr: |
+          time() - (kelpie_engine_last_tick_timestamp_seconds > 0 or kelpie_start_time_seconds)
+            > 600
+          unless on (instance) increase(kelpie_engine_tick_failures_total[10m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kelpie on {{ $labels.instance }} has not completed a tick for {{ $value | humanizeDuration }}"
+          description: >-
+            kelpie serve answers /metrics but its control loop has not finished a tick: it is
+            hung in a tick (an adapter, connector or the ledger blocking), or every tick
+            raises. Rules are not evaluated.
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpienotticking
+
+      - alert: KelpieTicksFailing
+        expr: |
+          increase(kelpie_engine_tick_failures_total[10m]) > 0
+          and
+          increase(kelpie_engine_ticks_total[10m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Every Kelpie tick on {{ $labels.instance }} has failed for 15 minutes"
+          description: >-
+            Ticks start but raise before they finish (kelpie_engine_tick_failures_total
+            grows, kelpie_engine_ticks_total does not). See kelpie's log ("tick failed").
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieticksfailing
+
+  - name: kelpie-farm
+    rules:
+      - alert: KelpieAgentHostSilent
+        # The hub alerts once through Kelpie's own channels when an agent goes silent
+        # ([hub] silent_after, 90s); this is the copy that does not depend on them.
+        expr: kelpie_agent_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "kelpie agent {{ $labels.agent }} has been silent for over 5 minutes"
+          description: >-
+            The hub has no fresh report from {{ $labels.agent }}: the host is down or
+            asleep, the agent stopped, the network is split or its clock is off. Its tasks
+            are left out of the farm and not evaluated until it is back.
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieagenthostsilent
+
+      - alert: KelpieAdapterFailing
+        # Errors in more than half of the ticks: the adapter (or one board of it) is left
+        # out of most snapshots, and its tasks are not evaluated.
+        expr: |
+          sum by (instance, adapter, board) (rate(kelpie_adapter_errors_total[10m]))
+            > on (instance) group_left
+          0.5 * sum by (instance) (rate(kelpie_engine_ticks_total[10m]))
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kelpie adapter {{ $labels.adapter }}{{ with $labels.board }} (board {{ . }}){{ end }} fails most ticks"
+          description: >-
+            The {{ $labels.adapter }} snapshot{{ with $labels.board }} of board {{ . }}{{ end }}
+            raised in more than half of the ticks for 10 minutes. Kelpie skips it on those ticks, so its
+            tasks and sessions look unchanged or missing to the rules. See kelpie's log
+            ("adapter {{ $labels.adapter }} failed") and `kelpie doctor`.
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieadapterfailing
+
+      - alert: KelpieConnectorFailing
+        # A connector step that fails keeps the conditions it last found unmet or unknown,
+        # with their check times; past a rule's max_condition_age (15m by default) no rule
+        # acts on them. 900 is that default: lower it if you configured a shorter age.
+        expr: max by (instance, connector) (kelpie_connector_failing_seconds) > 900
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kelpie connector {{ $labels.connector }} has failed for over 15 minutes"
+          description: >-
+            The {{ $labels.connector }} connector step has not read fine for
+            {{ $value | humanizeDuration }}. The conditions it checked are now stale: no
+            rule acts on them, waits on them alert as unchecked and blocks as stale evidence. See
+            kelpie's log ("connector {{ $labels.connector }} failed").
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieconnectorfailing
+
+  - name: kelpie-spend
+    rules:
+      - alert: KelpieSpendGapLarge
+        # The defaults of [[connectors.cost_reports]], as rule 10 judges the same day through
+        # Kelpie's channels: a gap of at least warn_gap (0.25) of the bill and at least
+        # warn_min_usd ($5). Change both numbers if you changed them. The metric changes once
+        # a day: `for` only rides out a restart.
+        expr: |
+          abs(kelpie_spend_gap_ratio) >= 0.25
+          and
+          abs(kelpie_spend_estimated_usd - kelpie_spend_reported_usd) >= 5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spend from traces and the {{ $labels.provider }} bill differ by {{ $value | humanizePercentage }}"
+          description: >-
+            For its newest reconciled day, the {{ $labels.provider }} cost report and what
+            Kelpie priced from traces disagree by more than 25% of the bill. Dollar budgets of
+            this provider follow the traces, so they are off by as much.
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiespendgaplarge
+
+  - name: kelpie-traces
+    rules:
+      - alert: KelpieOldTracesTokenAfterGrace
+        # Exporters were on a rotated-out token in the last 6 hours, no previous token is
+        # accepted any more, and OTLP requests are refused: the ones still on the old token
+        # lose their spans.
+        expr: |
+          (
+            sum by (instance) (increase(kelpie_traces_requests_total{code="401"}[15m])) > 0
+            or
+            sum by (instance) (
+              kelpie_traces_requests_total{code="401"}
+              unless kelpie_traces_requests_total{code="401"} offset 15m
+            ) > 0
+          )
+          and on (instance) (max by (instance) (kelpie_traces_grace_tokens) == 0)
+          and on (instance) (sum by (instance) (increase(kelpie_traces_grace_requests_total[6h])) > 0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OTLP exporters still send a rotated-out traces token after its grace period"
+          description: >-
+            Requests came with a previous token within the last 6 hours, the grace period
+            ([traces] token_grace) is over and Kelpie now answers 401: their spans are lost.
+            Restart those exporters (sessions) so they read the new token.
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieoldtracestokenaftergrace
+
+      - alert: KelpieTracesTokenFileUnreadable
+        expr: kelpie_traces_token_file_ok == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "kelpie serve cannot read or trust [traces] token_file"
+          description: >-
+            Kelpie keeps the tokens it read before: a rotation or revocation has not taken
+            effect. See kelpie's log for why (owner, mode, a symlink, a folder others may
+            write to).
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpietracestokenfileunreadable
+
   - name: kelpie-alerts
     rules:
       - alert: KelpieAlertDeliveryFailed
-        # A series appears with its first failure (no earlier sample), where increase()
-        # sees nothing: the second branch catches a series that is new within the window.
+        # Kelpie retries a transient chat-service failure (429, 5xx, network) for `[alerts]
+        # retry_horizon` (15 minutes by default) before it gives an alert up; this is the
+        # "alert about the alerter".
         expr: |
-          sum by (channel, cause) (increase(kelpie_alerts_failed_total[15m])) > 0
+          sum by (instance, channel, cause) (increase(kelpie_alerts_failed_total[15m])) > 0
           or
-          sum by (channel, cause) (
+          sum by (instance, channel, cause) (
             kelpie_alerts_failed_total unless kelpie_alerts_failed_total offset 15m
           ) > 0
         labels:
@@ -26,17 +196,24 @@ groups:
             Kelpie could not deliver an alert to {{ $labels.channel }} after retrying
             (cause: {{ $labels.cause }}). A human may have missed it: check the channel's
             token or webhook and the chat service, and kelpie's log ("delivery failed").
-      - alert: KelpieConnectorFailing
-        # A connector step that fails keeps the conditions it last found unmet or unknown,
-        # with their check times; past a rule's max_condition_age (15m by default) no rule
-        # acts on them. 900 is that default: lower it if you configured a shorter age.
-        expr: max by (connector) (kelpie_connector_failing_seconds) > 900
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiealertdeliveryfailed
+
+      - alert: KelpieAlertsDropped
+        # Dropped before any delivery attempt because the send queue was full. A duplicate
+        # merged into an alert already sent is not a loss. Drops at shutdown are counted after
+        # /metrics stops answering, so they show in the log only.
+        expr: |
+          sum by (instance, channel, reason) (increase(kelpie_alerts_dropped_total{reason!="duplicate"}[15m])) > 0
+          or
+          sum by (instance, channel, reason) (
+            kelpie_alerts_dropped_total{reason!="duplicate"}
+            unless kelpie_alerts_dropped_total{reason!="duplicate"} offset 15m
+          ) > 0
         labels:
           severity: warning
         annotations:
-          summary: "Kelpie connector {{ $labels.connector }} has failed for over 15 minutes"
+          summary: "Kelpie dropped alerts for channel {{ $labels.channel }} ({{ $labels.reason }})"
           description: >-
-            The {{ $labels.connector }} connector step has not read fine for
-            {{ $value | humanizeDuration }}. The conditions it checked are now stale: no
-            rule acts on them, waits on them alert as unchecked and blocks as stale evidence. See
-            kelpie's log ("connector {{ $labels.connector }} failed").
+            Alerts for {{ $labels.channel }} were dropped without a delivery attempt (reason:
+            {{ $labels.reason }}). A human may have missed them; see kelpie's log.
+          runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiealertsdropped

@@ -15,6 +15,7 @@ from kelpie.core.model import (
     Condition,
     ConditionKind,
     Dependency,
+    HostSleep,
     Owner,
     OwnerKind,
     Session,
@@ -212,11 +213,18 @@ class Rig:
         agent: str = "laptop",
         *parts: AdapterReport,
         sent_at: datetime | None = None,
+        sleeps: tuple[tuple[datetime, datetime], ...] = (),
     ) -> None:
         parts = parts or (AdapterReport("hermes", KINDS, board(self.clock.now)),)
         self.seq += 1
         report = Report(
-            "0.0.1", sent_at or self.clock.now, timedelta(seconds=15), parts, "c0ffee00", self.seq
+            "0.0.1",
+            sent_at or self.clock.now,
+            timedelta(seconds=15),
+            parts,
+            "c0ffee00",
+            self.seq,
+            sleeps,
         )
         self.hub.receive_report(agent, report)
 
@@ -760,3 +768,30 @@ def test_a_board_an_agent_cannot_read_is_unobserved_and_told_once() -> None:
     rig.report("vm-1")
     assert rig.tick().unobserved == ()
     assert "Resolved" in rig.alerter.sent[-1][1]
+
+
+def test_an_agents_sleep_is_kept_and_named_when_it_reports_again() -> None:
+    """Issue #296: a laptop agent's host slept; its sleep reaches the rules for a day, under
+    its own name, and the end of its silence says why it was silent."""
+    rig = Rig()
+    rig.report("laptop")
+    rig.report("vm-1")
+    rig.tick()
+    asleep = rig.clock.now + timedelta(seconds=10)
+    for _ in range(47):
+        rig.clock.now += timedelta(minutes=1)
+        rig.report("vm-1")
+        rig.tick()
+    rig.report("laptop", sleeps=((asleep, rig.clock.now),))
+    snap = rig.tick()
+    assert snap.host_sleeps == (HostSleep(asleep, rig.clock.now, agent="laptop"),)
+    assert "Resolved" in rig.alerter.sent[-1][1]
+    assert "Its host slept 47 min" in rig.alerter.sent[-1][1]
+    rig.clock.now += timedelta(minutes=20)
+    rig.report("laptop")  # the sleep is no longer in the report: the farm kept it
+    rig.report("vm-1")
+    assert len(rig.tick().host_sleeps) == 1
+    rig.clock.now += timedelta(days=1)
+    rig.report("laptop")
+    rig.report("vm-1")
+    assert rig.tick().host_sleeps == ()
