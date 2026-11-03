@@ -51,6 +51,13 @@ jobs:
       - run: uv run ruff format --check .
       - name: Import contracts (core must not import adapters/connectors)
         run: uv run lint-imports
+      # The image docker-compose.yml runs, so the rules are checked by the promtool that
+      # will load them.
+      - name: Prometheus rules (promtool check and unit tests)
+        run: >-
+          docker run --rm --entrypoint /bin/sh -v "$PWD/deploy/prometheus:/rules:ro" -w /rules
+          prom/prometheus:v3.5.0 -c
+          'promtool check rules rules/*.yml && promtool test rules tests/*.yml'
 
   test:
     needs: changes

@@ -1,0 +1,280 @@
+# Unit tests of deploy/prometheus/rules/kelpie.yml (synthetic series):
+#   promtool test rules deploy/prometheus/tests/kelpie_test.yml
+# Series use the labels Prometheus adds when it scrapes the "kelpie" job.
+rule_files:
+- ../rules/kelpie.yml
+evaluation_interval: 1m
+tests:
+- name: down after two minutes without a scrape
+  interval: 1m
+  input_series:
+  - series: up{job="kelpie", instance="kelpie:9464"}
+    values: 1 1 0 0 0 0
+  alert_rule_test:
+  - eval_time: 3m
+    alertname: KelpieDown
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: KelpieDown
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: kelpie
+        instance: kelpie:9464
+      exp_annotations:
+        summary: Kelpie's /metrics on kelpie:9464 has not answered for 2 minutes
+        description: 'Prometheus cannot scrape kelpie serve: the process is down, restarting in a loop
+          or its port is not reachable. Nothing watches the farm meanwhile: no rule runs and no alert
+          is sent.'
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiedown
+- name: not ticking, before and after the first tick
+  interval: 1m
+  input_series:
+  - series: kelpie_engine_last_tick_timestamp_seconds{job="kelpie", instance="a"}
+    values: '0x20'
+  - series: kelpie_start_time_seconds{job="kelpie", instance="a"}
+    values: '0x20'
+  - series: kelpie_engine_last_tick_timestamp_seconds{job="kelpie", instance="b"}
+    values: 0+60x20
+  - series: kelpie_start_time_seconds{job="kelpie", instance="b"}
+    values: '0x20'
+  alert_rule_test:
+  - eval_time: 11m
+    alertname: KelpieNotTicking
+    exp_alerts: []
+  - eval_time: 13m
+    alertname: KelpieNotTicking
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: kelpie
+        instance: a
+      exp_annotations:
+        description: 'kelpie serve answers /metrics but its control loop has not finished a tick: it is
+          hung in a tick (an adapter, connector or the ledger blocking), or every tick raises. Rules are
+          not evaluated.'
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpienotticking
+        summary: Kelpie on a has not completed a tick for 13m 0s
+- name: ticks failing while none completes
+  interval: 1m
+  input_series:
+  - series: kelpie_engine_tick_failures_total{job="kelpie", instance="a"}
+    values: 0+2x30
+  - series: kelpie_engine_ticks_total{job="kelpie", instance="a"}
+    values: 5x30
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: KelpieTicksFailing
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: kelpie
+        instance: a
+      exp_annotations:
+        description: Ticks start but raise before they finish (kelpie_engine_tick_failures_total grows,
+          kelpie_engine_ticks_total does not). See kelpie's log ("tick failed").
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieticksfailing
+        summary: Every Kelpie tick on a has failed for 15 minutes
+- name: an agent host silent for five minutes, another one fine
+  interval: 1m
+  input_series:
+  - series: kelpie_agent_up{job="kelpie", instance="a", agent="host-a"}
+    values: 1 1 0 0 0 0 0 0
+  - series: kelpie_agent_up{job="kelpie", instance="a", agent="host-b"}
+    values: 1x8
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: KelpieAgentHostSilent
+    exp_alerts: []
+  - eval_time: 8m
+    alertname: KelpieAgentHostSilent
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: kelpie
+        instance: a
+        agent: host-a
+      exp_annotations:
+        description: 'The hub has no fresh report from host-a: the host is down or asleep, the agent stopped,
+          the network is split or its clock is off. Its tasks are left out of the farm and not evaluated
+          until it is back.'
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieagenthostsilent
+        summary: kelpie agent host-a has been silent for over 5 minutes
+- name: an adapter failing most ticks, a board failing once
+  interval: 1m
+  input_series:
+  - series: kelpie_engine_ticks_total{job="kelpie", instance="a"}
+    values: 0+2x40
+  - series: kelpie_adapter_errors_total{job="kelpie", instance="a", adapter="hermes"}
+    values: 0+2x40
+  - series: kelpie_adapter_errors_total{job="kelpie", instance="a", adapter="hermes", board="board-a"}
+    values: 0 1x40
+  alert_rule_test:
+  - eval_time: 25m
+    alertname: KelpieAdapterFailing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        instance: a
+        adapter: hermes
+      exp_annotations:
+        description: The hermes snapshot raised in more than half of the ticks for 10 minutes. Kelpie
+          skips it on those ticks, so its tasks and sessions look unchanged or missing to the rules. See
+          kelpie's log ("adapter hermes failed") and `kelpie doctor`.
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieadapterfailing
+        summary: Kelpie adapter hermes fails most ticks
+- name: connector failing past the condition age
+  interval: 1m
+  input_series:
+  - series: kelpie_connector_failing_seconds{job="kelpie", instance="a", connector="github"}
+    values: 0+60x20
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: KelpieConnectorFailing
+    exp_alerts: []
+  - eval_time: 18m
+    alertname: KelpieConnectorFailing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        instance: a
+        connector: github
+      exp_annotations:
+        description: 'The github connector step has not read fine for 18m 0s. The conditions it checked
+          are now stale: no rule acts on them, waits on them alert as unchecked and blocks as stale evidence.
+          See kelpie''s log ("connector github failed").'
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieconnectorfailing
+        summary: Kelpie connector github has failed for over 15 minutes
+- name: spend gap past warn_gap, small bills and small gaps left out
+  interval: 1m
+  input_series:
+  - series: kelpie_spend_gap_ratio{job="kelpie", instance="a", provider="provider-a"}
+    values: -0.4x40
+  - series: kelpie_spend_reported_usd{job="kelpie", instance="a", provider="provider-a"}
+    values: 120x40
+  - series: kelpie_spend_gap_ratio{job="kelpie", instance="a", provider="provider-b"}
+    values: 0.5x40
+  - series: kelpie_spend_reported_usd{job="kelpie", instance="a", provider="provider-b"}
+    values: 0.2x40
+  - series: kelpie_spend_gap_ratio{job="kelpie", instance="a", provider="provider-c"}
+    values: 0.1x40
+  - series: kelpie_spend_reported_usd{job="kelpie", instance="a", provider="provider-c"}
+    values: 50x40
+  alert_rule_test:
+  - eval_time: 35m
+    alertname: KelpieSpendGapLarge
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: kelpie
+        instance: a
+        provider: provider-a
+      exp_annotations:
+        description: For its newest reconciled day, the provider-a cost report and what Kelpie priced
+          from traces disagree by more than 25% of the bill. Dollar budgets of this provider follow the
+          traces, so they are off by as much.
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiespendgaplarge
+        summary: Spend from traces and the provider-a bill differ by 40%
+- name: an old traces token refused after the grace period
+  interval: 1m
+  input_series:
+  - series: kelpie_traces_grace_requests_total{job="kelpie", instance="a"}
+    values: 0+5x20 100x30
+  - series: kelpie_traces_grace_tokens{job="kelpie", instance="a"}
+    values: 1x30 0x20
+  - series: kelpie_traces_requests_total{job="kelpie", instance="a", code="200"}
+    values: 0+10x50
+  - series: kelpie_traces_requests_total{job="kelpie", instance="a", code="401"}
+    values: _x32 1+3x18
+  alert_rule_test:
+  - eval_time: 29m
+    alertname: KelpieOldTracesTokenAfterGrace
+    exp_alerts: []
+  - eval_time: 40m
+    alertname: KelpieOldTracesTokenAfterGrace
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        instance: a
+      exp_annotations:
+        description: 'Requests came with a previous token within the last 6 hours, the grace period ([traces]
+          token_grace) is over and Kelpie now answers 401: their spans are lost. Restart those exporters
+          (sessions) so they read the new token.'
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieoldtracestokenaftergrace
+        summary: OTLP exporters still send a rotated-out traces token after its grace period
+- name: 401s without a recent rotation are not this alert
+  interval: 1m
+  input_series:
+  - series: kelpie_traces_grace_requests_total{job="kelpie", instance="a"}
+    values: '0x40'
+  - series: kelpie_traces_grace_tokens{job="kelpie", instance="a"}
+    values: '0x40'
+  - series: kelpie_traces_requests_total{job="kelpie", instance="a", code="401"}
+    values: 0+3x40
+  alert_rule_test:
+  - eval_time: 30m
+    alertname: KelpieOldTracesTokenAfterGrace
+    exp_alerts: []
+- name: token file unreadable
+  interval: 1m
+  input_series:
+  - series: kelpie_traces_token_file_ok{job="kelpie", instance="a"}
+    values: 1 0x20
+  alert_rule_test:
+  - eval_time: 18m
+    alertname: KelpieTracesTokenFileUnreadable
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: kelpie
+        instance: a
+      exp_annotations:
+        description: 'Kelpie keeps the tokens it read before: a rotation or revocation has not taken effect.
+          See kelpie''s log for why (owner, mode, a symlink, a folder others may write to).'
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpietracestokenfileunreadable
+        summary: kelpie serve cannot read or trust [traces] token_file
+- name: a lost alert, including the first failure of a new series
+  interval: 1m
+  input_series:
+  - series: kelpie_alerts_failed_total{job="kelpie", instance="a", channel="chat", cause="timeout"}
+    values: _x5 1x10
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: KelpieAlertDeliveryFailed
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        instance: a
+        channel: chat
+        cause: timeout
+      exp_annotations:
+        description: 'Kelpie could not deliver an alert to chat after retrying (cause: timeout). A human
+          may have missed it: check the channel''s token or webhook and the chat service, and kelpie''s
+          log ("delivery failed").'
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiealertdeliveryfailed
+        summary: Kelpie lost an alert on channel chat (timeout)
+  - eval_time: 25m
+    alertname: KelpieAlertDeliveryFailed
+    exp_alerts: []
+- name: dropped alerts, duplicates are not a loss
+  interval: 1m
+  input_series:
+  - series: kelpie_alerts_dropped_total{job="kelpie", instance="a", channel="chat", reason="queue_full"}
+    values: 0 0 3x10
+  - series: kelpie_alerts_dropped_total{job="kelpie", instance="a", channel="chat", reason="duplicate"}
+    values: 0 0 9x10
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: KelpieAlertsDropped
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        instance: a
+        channel: chat
+        reason: queue_full
+      exp_annotations:
+        description: 'Alerts for chat were dropped without a delivery attempt (reason: queue_full). A
+          human may have missed them; see kelpie''s log.'
+        runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiealertsdropped
+        summary: Kelpie dropped alerts for channel chat (queue_full)
+
