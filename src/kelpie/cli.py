@@ -358,7 +358,7 @@ def _agent(settings: Settings) -> int:
     import signal
     import threading
 
-    from kelpie.app import utc_now
+    from kelpie.app import sleep_watch, utc_now
     from kelpie.remote.agent import Agent, tls_context
     from kelpie.remote.relay import Relay
 
@@ -370,7 +370,14 @@ def _agent(settings: Settings) -> int:
         token = config.token()
         config.check_server()
         context = tls_context(config)
-        agent = Agent(config, build_adapters(settings), token, clock=utc_now, context=context)
+        agent = Agent(
+            config,
+            build_adapters(settings),
+            token,
+            clock=utc_now,
+            context=context,
+            sleep_watch=sleep_watch(settings.engine, utc_now),
+        )
         if config.relay is not None:
             relay = Relay(
                 config.relay, config.server, token, config.max_body_bytes, context=context

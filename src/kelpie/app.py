@@ -1060,7 +1060,7 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _sleep_watch(
+def sleep_watch(
     config: EngineConfig, clock: Callable[[], datetime], agent: str | None = None
 ) -> SleepWatch | None:
     """The host sleep watch (issue #296): off when ``host_sleep_min_gap`` is 0, and with an
@@ -1179,6 +1179,7 @@ def merged_snapshot(
                     sessions=merged.sessions + part.sessions,
                     spans=merged.spans + part.spans,
                     unobserved=merged.unobserved + part.unobserved,
+                    host_sleeps=merged.host_sleeps + part.host_sleeps,
                 )
         partial = not complete or bool(merged.unobserved)  # part of the farm not seen
         for name, step in enrich:
@@ -1856,7 +1857,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         ledger_store=store,
         state_store=states,
         fallback=hub is None,
-        sleep_watch=_sleep_watch(settings.engine, clock),
+        sleep_watch=sleep_watch(settings.engine, clock),
     )
     farm = None
     if hub is not None:

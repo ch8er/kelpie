@@ -275,6 +275,15 @@ and `requeue` are idempotent there; `comment` may repeat once.
   and owners. Both drop together, so capacity and demand stay consistent; the silence
   alert says the farm is partial.
 - Actions routed to a silent agent are deferred until it is back.
+- **A host that slept is not a farm that waits** (issue #296). Each agent watches its own
+  host as `kelpie serve` does (`[engine] host_sleep_min_gap`: the wall clock running ahead
+  of the monotonic clock between reports, measured on `CLOCK_BOOTTIME` where the OS has
+  it) and sends a sleep in its reports for 15 minutes after the wake (the field is left
+  out otherwise, so a hub of the release before refuses reports only then). The hub keeps
+  each agent's sleeps for a day in `Snapshot.host_sleeps` under the agent's name: the ages
+  of that agent's sessions and tasks count awake time, and its sessions that do not come
+  back are requeued once as "ended while the host slept". The resolve of its silence says
+  how long the host slept. A sleep of one host never touches another host's ages.
 
 ## Failure modes
 

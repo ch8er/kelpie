@@ -413,3 +413,23 @@ def test_a_report_carries_the_boards_an_adapter_could_not_read() -> None:
         body["adapters"][0]["unobserved"] = bad
         with pytest.raises(ProtocolError, match="unobserved"):
             decode_report(body)
+
+
+def test_a_report_carries_the_hosts_sleeps() -> None:
+    """Issue #296: sleeps go in a report only when there are some (a hub of the release
+    before reads every other report), and malformed ones are refused."""
+    parts = [AdapterReport("hermes", frozenset({ActionKind.STOP}), Snapshot(now=NOW))]
+    plain = encode_report("0.0.1", NOW, timedelta(seconds=15), parts, "c0ffee00", 1)
+    assert "sleeps" not in plain
+    slept = (NOW - timedelta(minutes=47), NOW)
+    body = encode_report("0.0.1", NOW, timedelta(seconds=15), parts, "c0ffee00", 2, [slept])
+    assert decode_report(body).sleeps == (slept,)
+    for bad in (
+        "nope",
+        [{"start": NOW.isoformat()}],
+        [{"start": NOW.isoformat(), "end": (NOW - timedelta(minutes=1)).isoformat()}],
+        [{"start": "2026-01-01T00:00:00", "end": NOW.isoformat()}],
+        [{"start": slept[0].isoformat(), "end": NOW.isoformat()}] * 17,
+    ):
+        with pytest.raises(ProtocolError):
+            decode_report({**body, "sleeps": bad})

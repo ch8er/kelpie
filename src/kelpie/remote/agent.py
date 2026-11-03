@@ -20,12 +20,13 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie import __version__, net
 from kelpie.core.alerts import failure_reason
 from kelpie.core.executors import PlatformExecutor
+from kelpie.core.host_sleep import SleepWatch
 from kelpie.core.ledger import Outcome as LedgerOutcome
 from kelpie.core.ports import PlatformAdapter, SnapshotSource
 from kelpie.remote.config import AgentSettings
@@ -63,6 +64,11 @@ _BACKOFF_MIN, _BACKOFF_MAX = 1.0, 60.0
 
 Post = Callable[..., net.Response]
 
+# A sleep of this host goes in the reports for this long after the wake (issue #296): the
+# hub keeps what it got, so a lost report loses nothing, and a hub of the release before,
+# which refuses the field, refuses reports only that long.
+SEND_SLEEPS_FOR = timedelta(minutes=15)
+
 
 class AgentError(Exception):
     """A request to the hub that failed; the text is safe to log. ``status``: the hub's
@@ -85,6 +91,7 @@ class Agent:
         clock: Callable[[], datetime],
         post: Post = net.post,
         context: ssl.SSLContext | None = None,
+        sleep_watch: SleepWatch | None = None,
     ) -> None:
         if not adapters:
             raise ValueError("kelpie agent needs at least one enabled [adapters.*] section")
@@ -102,6 +109,8 @@ class Agent:
         self._batch_bytes = MAX_BATCH_BYTES  # halved after a 413
         self._boot = secrets.token_hex(8)  # orders this process's reports at the hub
         self._seq = 0
+        # Finds suspends of this host between reports (issue #296); None: not watched.
+        self._sleep_watch = sleep_watch
 
     # --- reports --------------------------------------------------------------------------
 
@@ -109,7 +118,14 @@ class Agent:
         """Snapshot every adapter and send one report. An adapter that fails is reported
         with its error, so the hub knows its tasks are not observed; AgentError when the
         hub cannot be reached or refuses the report."""
+        watch = self._sleep_watch
+        if watch is not None:
+            watch.mark()
         now = self._clock()
+        sleeps: list[tuple[datetime, datetime]] = []
+        if watch is not None:
+            watch.observe(now)
+            sleeps = [(s.start, s.end) for s in watch.sleeps(now) if now - s.end <= SEND_SLEEPS_FOR]
         parts: list[AdapterReport] = []
         for adapter in self.adapters:
             kinds = self.offered[adapter.name]
@@ -123,7 +139,9 @@ class Agent:
                 log.error("adapter %s failed to snapshot: %s", adapter.name, exc)
                 parts.append(AdapterReport(adapter.name, kinds, error=type(exc).__name__))
         self._seq += 1
-        body = encode_report(__version__, now, self.settings.interval, parts, self._boot, self._seq)
+        body = encode_report(
+            __version__, now, self.settings.interval, parts, self._boot, self._seq, sleeps
+        )
         self._send(REPORT_PATH, body, self.settings.timeout.total_seconds())
 
     # --- actions --------------------------------------------------------------------------
