@@ -83,7 +83,13 @@ from typing import Any
 
 from kelpie.core.model import Span, SpanKind
 from kelpie.traces.args import args_hash, args_hash_of_attribute
-from kelpie.traces.command import command_of, command_prefix, detect_filter, redact_command
+from kelpie.traces.command import (
+    command_of,
+    command_prefix,
+    detect_filter,
+    redact_command,
+    runners_of,
+)
 from kelpie.traces.otlp import RawSpan
 
 log = logging.getLogger(__name__)
@@ -137,8 +143,17 @@ OUTPUT_TOKENS_ATTRIBUTE = "kelpie.tool.output_tokens"
 OUTPUT_CHARS_ATTRIBUTE = "kelpie.tool.output_chars"
 FILTER_ATTRIBUTE = "kelpie.tool.filter"
 COMMAND_ATTRIBUTE = "kelpie.tool.command_prefix"
+# Configured runner names a command names anywhere (#197 part 2b): ``[traces] known_runners``
+# for OTLP spans, the hook's ``runners`` (``KELPIE_KNOWN_RUNNERS``) for hook spans.
+RUNNERS_ATTRIBUTE = "kelpie.tool.runners"
 TOOL_DETAILS = frozenset(
-    {OUTPUT_TOKENS_ATTRIBUTE, OUTPUT_CHARS_ATTRIBUTE, FILTER_ATTRIBUTE, COMMAND_ATTRIBUTE}
+    {
+        OUTPUT_TOKENS_ATTRIBUTE,
+        OUTPUT_CHARS_ATTRIBUTE,
+        FILTER_ATTRIBUTE,
+        COMMAND_ATTRIBUTE,
+        RUNNERS_ATTRIBUTE,
+    }
 )
 
 MAX_ATTRIBUTES = 64
@@ -231,6 +246,7 @@ class MappingOptions:
     task_attribute: str = DEFAULT_TASK_ATTRIBUTE
     session_attribute: str = DEFAULT_SESSION_ATTRIBUTE
     commands: bool = True  # keep a redacted prefix of shell commands on tool spans
+    known_runners: tuple[str, ...] = ()  # [traces] known_runners: names found in commands
 
 
 @dataclass(slots=True)
@@ -285,10 +301,11 @@ def map_spans(raw: Sequence[RawSpan], options: MappingOptions | None = None) -> 
         return links[(r.trace_id, r.span_id)]
 
     out = Mapped()
+    runners = opts.known_runners if opts.commands else ()  # commands = false: no names
     for r in raw:
         try:
             task_id, session_id = link(r)
-            span = _span(r, task_id, session_id)
+            span = _span(r, task_id, session_id, runners)
         except OverflowError:
             out.rejected["invalid_time"] += 1
             continue
@@ -374,7 +391,9 @@ def _args_hash(attrs: Mapping[str, Any], claude_code: bool) -> str | None:
     return args_hash(details) if details else None
 
 
-def _span(r: RawSpan, task_id: str | None, session_id: str | None) -> Span | None:
+def _span(
+    r: RawSpan, task_id: str | None, session_id: str | None, runners: tuple[str, ...] = ()
+) -> Span | None:
     claude_code = r.name.startswith("claude_code.")
     kind = _kind(r, claude_code)
     if kind is None:
@@ -406,7 +425,7 @@ def _span(r: RawSpan, task_id: str | None, session_id: str | None) -> Span | Non
     consumed.update(CACHED_TOKENS)
     attributes = _kept(attrs, consumed, claude_code)
     if kind is SpanKind.TOOL:
-        attributes.update(_tool_details(attrs, claude_code))
+        attributes.update(_tool_details(attrs, claude_code, runners))
     if claude_code and (call_id := attrs.get(CC_TOOL_CALL_ID)) not in (None, ""):
         attributes.setdefault(TOOL_CALL_ID, str(call_id)[:MAX_VALUE_CHARS])
     for key in KEPT_RESOURCE:
@@ -439,7 +458,9 @@ def _span(r: RawSpan, task_id: str | None, session_id: str | None) -> Span | Non
     )
 
 
-def _tool_details(attrs: Mapping[str, Any], claude_code: bool) -> dict[str, Any]:
+def _tool_details(
+    attrs: Mapping[str, Any], claude_code: bool, known: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """Output size, redacted command and filter of a tool call (see the module docs)."""
     out: dict[str, Any] = {}
     if claude_code and (tokens := _count(attrs.get(CC_RESULT_TOKENS))) is not None:
@@ -453,6 +474,8 @@ def _tool_details(attrs: Mapping[str, Any], claude_code: bool) -> dict[str, Any]
             out[COMMAND_ATTRIBUTE] = prefix
         if (used := detect_filter(raw)) is not None:
             out[FILTER_ATTRIBUTE] = used
+        if known and (found := runners_of(raw, known)):
+            out[RUNNERS_ATTRIBUTE] = found
     return out
 
 

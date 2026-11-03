@@ -316,6 +316,7 @@ Environment (all optional):
 | `KELPIE_HERMES_SPOOL` | `~/.hermes/kelpie/spool.jsonl` | spool file |
 | `KELPIE_HERMES_SPOOL_MAX_BYTES` | `20971520` | at this size the spool moves to `<spool>.1` |
 | `KELPIE_HERMES_SPOOL_COMMANDS` | `1` | `0` stops recording the command prefix |
+| `KELPIE_KNOWN_RUNNERS` | unset | comma-separated runner names recorded when a command names them anywhere (`ios_sim.sh,xcodebuild,npm test`); names only |
 
 Task and run ids come from the worker environment that the Hermes dispatcher sets
 (`HERMES_KANBAN_TASK`, `HERMES_KANBAN_RUN_ID`). Outside a kanban worker `task_id` is `null`
@@ -328,6 +329,8 @@ not tied to a run.
 {"type":"tool","at":1772463000.5,"task_id":"t_1","run_id":"42","session_id":"...","tool":"terminal","tool_call_id":"call_1","args_hash":"3f2a9c01d4e5b678","command":"gh pr checks 5","outcome":"ok","duration_ms":250}
 {"type":"session_end","at":1772463100.1,"task_id":"t_1","run_id":"42","session_id":"...","completed":true,"interrupted":false}
 ```
+
+A tool line may also hold `runners`: the known runners its command names anywhere, when `KELPIE_KNOWN_RUNNERS` is set in the hook's environment (comma-separated: `KELPIE_KNOWN_RUNNERS=ios_sim.sh,xcodebuild,npm test`). Only names from that list are written, never a word of the command, and none when commands are not recorded; see [known runners](../../../../docs/privacy.md#known-runners).
 
 ### Privacy
 

@@ -20,6 +20,12 @@ from kelpie.traces.auth import (
     read_token_file,
     valid_name,
 )
+from kelpie.traces.command import (
+    MAX_KNOWN_RUNNERS,
+    RUNNER_NAME,
+    command_prefix,
+    parse_runners,
+)
 from kelpie.traces.forward import (
     DEFAULT_QUEUE_BYTES,
     DEFAULT_QUEUE_SIZE,
@@ -57,6 +63,7 @@ KEYS = frozenset(
         "allow_unauthenticated",
         "forward",
         "commands",
+        "known_runners",
         "outputs",
     }
 )
@@ -157,11 +164,15 @@ class TraceSettings:
     allow_unauthenticated: bool = False
     forward: tuple[ForwardSettings, ...] = ()  # empty: forwarding disabled
     commands: bool = True  # keep the grouping prefix of shell commands on tool spans
+    # Runner names recorded when a command names them anywhere (#197 part 2b); empty: none.
+    known_runners: tuple[str, ...] = ()
     outputs: OutputSettings = field(default_factory=OutputSettings)
 
     @property
     def options(self) -> MappingOptions:
-        return MappingOptions(self.task_attribute, self.session_attribute, self.commands)
+        return MappingOptions(
+            self.task_attribute, self.session_attribute, self.commands, self.known_runners
+        )
 
     def token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The bearer token ingest requires, or None when it is open.
@@ -346,8 +357,31 @@ def load_traces(section: Any) -> TraceSettings:
         allow_unauthenticated=_flag(section, "allow_unauthenticated"),
         forward=forward,
         commands=_flag_default(section, "commands"),
+        known_runners=_known_runners(section.get("known_runners", [])),
         outputs=outputs,
     )
+
+
+def _known_runners(value: object) -> tuple[str, ...]:
+    """``[traces] known_runners``: names of build and test runners, an executable's name and
+    up to two plain words (``ios_sim.sh``, ``npm test``)."""
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError("[traces] known_runners must be a list of strings")
+    if len(value) > MAX_KNOWN_RUNNERS:
+        raise ValueError(f"[traces] known_runners: at most {MAX_KNOWN_RUNNERS} names")
+    for v in value:
+        name = " ".join(v.split())
+        if not RUNNER_NAME.match(name):
+            raise ValueError(
+                f"[traces] known_runners: {v[:80]!r} is not a runner name (an executable's"
+                " name, then up to two lowercase words: 'ios_sim.sh', 'npm test')"
+            )
+        if command_prefix(name) != name:  # hook lines are read as their prefix: keep in step
+            raise ValueError(
+                f"[traces] known_runners: {v[:80]!r} has words a command prefix does not keep"
+                f" (it would group as {command_prefix(name)!r}); use that name"
+            )
+    return parse_runners(value)
 
 
 def _flag(section: Mapping[str, Any], key: str) -> bool:

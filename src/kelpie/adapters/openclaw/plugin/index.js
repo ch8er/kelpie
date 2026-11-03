@@ -163,6 +163,16 @@ export function createForwarder(settings, logger, run = spawn) {
   for (const key of ENV_KEEP) if (process.env[key] !== undefined) env[key] = process.env[key];
   if (settings.spool) env.KELPIE_OPENCLAW_SPOOL = expand(settings.spool);
   if (settings.commands === false) env.KELPIE_OPENCLAW_SPOOL_COMMANDS = "0";
+  // Known runners (#197): names only, from the plugin config, else the Gateway's environment.
+  if (Array.isArray(settings.knownRunners)) {
+    // A bad entry (a NUL, a huge string) would make every spawn fail: names only, bounded.
+    env.KELPIE_KNOWN_RUNNERS = settings.knownRunners
+      .filter((r) => typeof r === "string" && r.length <= 160 && !/[\u0000-\u001f\u007f]/.test(r))
+      .slice(0, 64)
+      .join(",");
+  } else if (typeof process.env.KELPIE_KNOWN_RUNNERS === "string") {
+    env.KELPIE_KNOWN_RUNNERS = process.env.KELPIE_KNOWN_RUNNERS.slice(0, 16384);
+  }
   if (Number.isInteger(settings.maxBytes) && settings.maxBytes > 0) {
     env.KELPIE_OPENCLAW_SPOOL_MAX_BYTES = String(settings.maxBytes);
   }

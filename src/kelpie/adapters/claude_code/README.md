@@ -78,6 +78,7 @@ optional), read from the session's environment, which hooks inherit:
 | `KELPIE_CLAUDE_SPOOL` | `~/.claude/kelpie/spool.jsonl` | spool file |
 | `KELPIE_CLAUDE_SPOOL_MAX_BYTES` | `20971520` | at this size the spool moves to `<spool>.1` |
 | `KELPIE_CLAUDE_SPOOL_COMMANDS` | `1` | `0` stops recording the command prefix |
+| `KELPIE_KNOWN_RUNNERS` | unset | comma-separated runner names recorded when a command names them anywhere (`ios_sim.sh,xcodebuild,npm test`); names only |
 | `KELPIE_CLAUDE_STOP_DIR` | `~/.claude/kelpie/stop` | where the hook looks for stop markers; must match `stop_dir` |
 | `KELPIE_CLAUDE_STOP_TTL` | `86400` | seconds a stop marker holds |
 | `CLAUDE_CODE_TASK_LIST_ID` | (none) | the shared task list (see above) |
@@ -91,6 +92,8 @@ optional), read from the session's environment, which hooks inherit:
 {"type":"tool","at":1772463010.5,"session_id":"0b5c…","agent_id":null,"task_list":"farm","kelpie_task":null,"agent":"builder-1","tool":"TaskUpdate","tool_call_id":"toolu_01…","args_hash":"3f2a9c01d4e5b678","command":null,"outcome":"ok","duration_ms":12,"output_chars":17,"task":"3","task_status":"in_progress","task_owner":"builder-1"}
 {"type":"session_end","at":1772463100.1,"session_id":"0b5c…","agent_id":null,"task_list":"farm","kelpie_task":null,"agent":"builder-1","reason":"other"}
 ```
+
+A tool line may also hold `runners`: the known runners its command names anywhere, when `KELPIE_KNOWN_RUNNERS` is set in the hook's environment (comma-separated: `KELPIE_KNOWN_RUNNERS=ios_sim.sh,xcodebuild,npm test`). Only names from that list are written, never a word of the command, and none when commands are not recorded; see [known runners](../../../../docs/privacy.md#known-runners).
 
 Other types: `prompt` (`UserPromptSubmit`, with its `source`), `turn_end` (`Stop`, and
 `StopFailure` with its `error` kind), `stopped` (the hook refused a tool call or prompt because

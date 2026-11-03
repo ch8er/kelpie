@@ -203,8 +203,9 @@ from kelpie.core.tools import (
     RESULT_ATTRIBUTE,
     tool_result,
 )
+from kelpie.traces.command import spool_runners
 from kelpie.traces.hooks import SESSION_END, TOOL, HookEvent, spans_from_hook_events
-from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE
+from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE, RUNNERS_ATTRIBUTE
 
 log = logging.getLogger(__name__)
 
@@ -1832,6 +1833,8 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
         attributes: dict[str, Any] = {}
         if isinstance(rec.get("command"), str):
             attributes["command"] = rec["command"]
+        if runners := spool_runners(rec.get("runners")):
+            attributes[RUNNERS_ATTRIBUTE] = list(runners)
         chars = rec.get("output_chars")
         if isinstance(chars, int) and not isinstance(chars, bool) and chars >= 0:
             attributes[OUTPUT_CHARS_ATTRIBUTE] = chars

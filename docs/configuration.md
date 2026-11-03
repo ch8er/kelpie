@@ -91,6 +91,7 @@ configure what exists.
 | `KELPIE_CLAUDE_SPOOL_MAX_BYTES` | Claude Code hook | Spool size that triggers rotation (default 20 MiB). |
 | `KELPIE_CLAUDE_STOP_DIR` | Claude Code hook | Where the hook looks for stop markers; must match `[adapters.claude_code] stop_dir`. |
 | `KELPIE_CLAUDE_STOP_TTL` | Claude Code hook | Seconds a stop marker holds (default 86400). |
+| `KELPIE_KNOWN_RUNNERS` | Hermes plugin, Claude Code hook, OpenClaw Gateway | Comma-separated runner names recorded when a command names them anywhere (`ios_sim.sh,xcodebuild,npm test`), like `[traces] known_runners`; unset: none. On OpenClaw the plugin's `knownRunners` wins, `[]` included. |
 | `CLAUDE_CODE_TASK_LIST_ID`, `KELPIE_TASK_ID`, `KELPIE_AGENT` | Claude Code sessions | The shared task list; a task id from a launcher; the agent's name. Read by the hook. |
 | `KELPIE_OPENCLAW_SPOOL`, `KELPIE_OPENCLAW_SPOOL_COMMANDS`, `KELPIE_OPENCLAW_SPOOL_MAX_BYTES` | OpenClaw hook | Spool path, `0` for no command prefix, rotation size. Not read from the Gateway's environment: the plugin sets them from its own settings `spool`, `commands` and `maxBytes` (`plugins.entries.kelpie.config`). |
 
@@ -1125,7 +1126,8 @@ What is kept from each span: [privacy.md](privacy.md).
 | `max_concurrent_requests` | `4` | count, >= 1 | Requests decoded at once; more get 503 and are retried by the exporter. |
 | `task_attribute` | `"kelpie.task_id"` | attribute name | Span or resource attribute naming the task. |
 | `session_attribute` | `"kelpie.session_id"` | attribute name | Attribute naming the session; else `gen_ai.conversation.id`, else `session.id`. |
-| `commands` | `true` | bool | Keep a grouping prefix of shell commands on tool spans (`kelpie.tool.command_prefix`). `false`: drop it. |
+| `commands` | `true` | bool | Keep a grouping prefix of shell commands on tool spans (`kelpie.tool.command_prefix`). `false`: drop it, and `known_runners` is not used. |
+| `known_runners` | `[]` | list of names, at most 64 | Build and test runners recognised anywhere in a shell command of an OTLP tool span (after `cd … &&`, `export …`, `env …`, in a pipe, inside `bash -c`), each an executable's name and up to two lowercase words that its command prefix keeps: `["ios_sim.sh", "xcodebuild", "npm test"]`. The names found are kept (`kelpie.tool.runners`, never a word of the command), and the largest tool outputs group a call by its runner. Agent hosts set `KELPIE_KNOWN_RUNNERS` for the hooks ([privacy.md](privacy.md#known-runners)). Empty: nothing changes. |
 
 **Rotating the token.** With `token_file` set, `kelpie traces rotate-token [--grace 2h]`
 writes a new token to the file (mode 600, replaced atomically under a lock; other lines

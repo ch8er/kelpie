@@ -314,6 +314,67 @@ def redact_command(command: str) -> str | None:
 # --- shared redaction: end ---
 
 
+# --- shared runners: begin ---
+# Byte-for-byte identical in kelpie.traces.command and the three hooks, like the redaction
+# above (tests/traces/test_runners.py compares them). Known runners (#197 part 2b): the
+# names of build and test runners an operator configures (``ios_sim.sh``, ``xcodebuild``,
+# ``npm test``), found anywhere in a command. The result holds only names from the
+# configured list, never a word of the command itself.
+RUNNERS_ENV = "KELPIE_KNOWN_RUNNERS"  # comma-separated, on agent hosts
+MAX_RUNNERS = 8  # names kept per command
+MAX_KNOWN_RUNNERS = 64  # names configured
+_RUNNER_LIMIT = 16384  # characters of a command that are searched
+# An executable's name, then up to two plain words (``npm test``, ``npm run build``).
+RUNNER_NAME = re.compile(r"^[A-Za-z0-9_][\w.+-]{0,63}(?: [a-z][a-z0-9:_-]{0,31}){0,2}\Z")
+# Words, and the separators between commands as words of their own, so that the words of
+# one runner (``npm test``) never match across ``npm; test`` or two lines.
+_RUNNER_WORDS = re.compile(r"[;&|()\n\r\v\f]|[^ \t\n\r\v\f;&|()<>`'\"\\$={}]+")  # as bash
+
+
+def parse_runners(value: object) -> tuple[str, ...]:
+    """Known runner names from ``KELPIE_KNOWN_RUNNERS`` (comma-separated) or a list, in
+    order, without repeats; an entry that is not a runner name is skipped."""
+    if isinstance(value, str):
+        items: object = value.split(",")
+    else:
+        items = value
+    if not isinstance(items, (list, tuple)):
+        return ()
+    out: list[str] = []
+    for item in items:
+        name = " ".join(item.split()) if isinstance(item, str) else ""
+        if RUNNER_NAME.match(name) and name not in out:
+            out.append(name)
+            if len(out) >= MAX_KNOWN_RUNNERS:
+                break
+    return tuple(out)
+
+
+def runners_of(command: object, known: tuple[str, ...]) -> list[str]:
+    """The known runners a command names anywhere in it (after ``cd … &&``, ``env …``, a
+    pipe, inside ``bash -c '…'``), each once, in order of first appearance, at most
+    MAX_RUNNERS. A word matches by its name without directory (``./scripts/ios_sim.sh``);
+    a runner of several words matches those words in a row (``npm test``)."""
+    if not known or not isinstance(command, str):
+        return []
+    words = [w.rsplit("/", 1)[-1] for w in _RUNNER_WORDS.findall(command[:_RUNNER_LIMIT])]
+    by_first: dict[str, list[tuple[str, list[str]]]] = {}
+    for name in known:
+        first, *rest = name.split(" ")
+        by_first.setdefault(first, []).append((name, rest))
+    found: list[str] = []
+    for k, word in enumerate(words):
+        for name, rest in by_first.get(word, ()):
+            if name not in found and words[k + 1 : k + 1 + len(rest)] == rest:
+                found.append(name)
+                if len(found) >= MAX_RUNNERS:
+                    return found
+    return found
+
+
+# --- shared runners: end ---
+
+
 def _command(args: Any) -> str | None:
     if os.environ.get(COMMANDS_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
         return None
@@ -324,6 +385,22 @@ def _command(args: Any) -> str | None:
         if isinstance(value, str) and value:
             return redact_command(value)
     return None
+
+
+def _runners(args: Any) -> dict[str, Any]:
+    """``{"runners": [...]}``: the known runners (``KELPIE_KNOWN_RUNNERS``) the command
+    names, only while commands are recorded; nothing when none is configured or found."""
+    if os.environ.get(COMMANDS_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
+        return {}
+    known = parse_runners(os.environ.get(RUNNERS_ENV, ""))
+    if not known or not isinstance(args, dict):
+        return {}
+    for key in _COMMAND_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value:
+            found = runners_of(value, known)
+            return {"runners": found} if found else {}
+    return {}
 
 
 def _shape(args: dict[str, Any]) -> dict[str, bool]:
@@ -522,6 +599,7 @@ def post_tool_call(**kwargs: Any) -> None:
             "outcome": "error" if status in {"error", "failed", "failure"} else "ok",
             "duration_ms": _duration_ms(kwargs.get("duration_ms")),
             "output_chars": _output_chars(kwargs.get("result")),
+            **_runners(args),
         }
         record.update(_result_fields(record["tool"], args, kwargs.get("result")))
         append(record)

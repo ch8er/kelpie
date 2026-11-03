@@ -92,6 +92,7 @@ Plugin settings (`plugins.entries.kelpie.config`, all optional):
 | `spool` | `~/.openclaw/kelpie/spool.jsonl` | spool file; must match `[adapters.openclaw] spool` |
 | `commands` | `true` | `false` records no command prefix |
 | `maxBytes` | `20971520` | spool size that moves it to `<spool>.1` |
+| `knownRunners` | `KELPIE_KNOWN_RUNNERS` of the Gateway, else none | runner names recorded when an exec command names them anywhere; `[]` records none |
 | `stopDir` | `~/.openclaw/kelpie/stop` | where Kelpie's stop markers are; must match `[adapters.openclaw] stop_dir` |
 | `stopTtl` | `86400` | seconds a stop marker holds; must match `[adapters.openclaw] stop_ttl` |
 
@@ -118,6 +119,8 @@ identical calls is still one streak.
 `v` is the hook's format, `plugin` the version of `index.js` the Gateway has loaded (2 enforces
 stops) and `gate` whether its `before_agent_run` has run (conversation access). `stopped` lines
 record a refusal (`event`: the hook that refused), `resumed` lines a lifted stop.
+
+A tool line may also hold `runners`: the known runners its command names anywhere, when `knownRunners` is set in `plugins.entries.kelpie.config` (a list) or `KELPIE_KNOWN_RUNNERS` in the Gateway's environment (comma-separated: `KELPIE_KNOWN_RUNNERS=ios_sim.sh,xcodebuild,npm test`). Only names from that list are written, never a word of the command, and none when commands are not recorded; see [known runners](../../../../docs/privacy.md#known-runners).
 
 ### Privacy
 

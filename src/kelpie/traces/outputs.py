@@ -14,10 +14,13 @@ from it are a lower bound.
 **Grouping.** Calls are grouped per role and *key*: the command prefix
 (``kelpie.tool.command_prefix`` from OTLP, or the prefix of the hook's redacted
 ``command``; see :func:`kelpie.traces.command.command_prefix`), else ``tool:<name>`` for
-tools that are not shell commands (file reads, searches). ``rtk git status`` groups with
-``git status``; calls that already run through a filter (``kelpie.tool.filter``) are
-counted apart, so a group's recommendation is about its unfiltered calls only, and a group
-whose latest call is filtered has adopted a filter and gets none.
+tools that are not shell commands (file reads, searches). A call whose command names a
+configured known runner anywhere (``kelpie.tool.runners``: ``[traces] known_runners``, or
+``KELPIE_KNOWN_RUNNERS`` on the agent hosts) is grouped by that runner instead, unless its
+prefix already is it: ``export X=… && ./ios_sim.sh test`` groups as ``ios_sim.sh``.
+``rtk git status`` groups with ``git status``; calls that already run through a filter
+(``kelpie.tool.filter``) are counted apart, so a group's recommendation is about its
+unfiltered calls only, and a group whose latest call is filtered has adopted a filter and gets none.
 
 **Recommendation.** A group whose unfiltered calls average at least ``threshold_tokens``
 over at least ``min_calls`` calls gets the first filter of the table (:class:`Filter`,
@@ -51,12 +54,13 @@ from fnmatch import fnmatchcase
 
 from kelpie.core.model import OutputOffender, Snapshot, Span, SpanKind
 from kelpie.core.spans import Attribution
-from kelpie.traces.command import command_prefix, detect_filter
+from kelpie.traces.command import RUNNER_NAME, command_prefix, detect_filter
 from kelpie.traces.semconv import (
     COMMAND_ATTRIBUTE,
     FILTER_ATTRIBUTE,
     OUTPUT_CHARS_ATTRIBUTE,
     OUTPUT_TOKENS_ATTRIBUTE,
+    RUNNERS_ATTRIBUTE,
 )
 
 CHARS_PER_TOKEN = 4
@@ -408,7 +412,25 @@ def call_key(span: Span) -> str:
     if not isinstance(prefix, str) or not prefix:
         hook = span.attributes.get(HOOK_COMMAND)
         prefix = command_prefix(hook) if isinstance(hook, str) else None
-    return prefix or f"{TOOL_KEY}{span.tool or span.name}"
+    return runner_key(span, prefix) or prefix or f"{TOOL_KEY}{span.tool or span.name}"
+
+
+def runner_key(span: Span, prefix: str | None) -> str | None:
+    """The known runner a call is grouped by (#197 part 2b): the first one its command
+    names, unless the prefix already is that runner (``npm test`` stays ``npm test`` for
+    the runner ``npm``); None without known runners, so nothing changes then."""
+    found = span.attributes.get(RUNNERS_ATTRIBUTE)
+    if not isinstance(found, list | tuple):
+        return None
+    # As a reader keeps them: spans from a remote agent arrive as it sent them.
+    names = [
+        p for r in found if isinstance(r, str) and RUNNER_NAME.match(r) and (p := command_prefix(r))
+    ]
+    if not names:
+        return None
+    if prefix and any(prefix == r or prefix.startswith(f"{r} ") for r in names):
+        return prefix
+    return names[0]
 
 
 def filter_of(span: Span) -> str | None:

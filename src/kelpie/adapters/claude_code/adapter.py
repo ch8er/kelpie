@@ -99,8 +99,9 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
+from kelpie.traces.command import spool_runners
 from kelpie.traces.hooks import SESSION_END, SESSION_START, TOOL, HookEvent, spans_from_hook_events
-from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE
+from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE, RUNNERS_ATTRIBUTE
 
 log = logging.getLogger(__name__)
 
@@ -204,6 +205,7 @@ class SpoolEvent:
     tool_call_id: str | None = None
     args_hash: str | None = None
     command: str | None = None
+    runners: tuple[str, ...] = ()  # known runners the command names (#197)
     outcome: str | None = None
     duration_ms: int = 0
     output_chars: int | None = None
@@ -263,6 +265,7 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         tool_call_id=_text(rec.get("tool_call_id")),
         args_hash=_text(rec.get("args_hash")),
         command=_text(rec.get("command")),
+        runners=spool_runners(rec.get("runners")),
         outcome=outcome if outcome in ("ok", "error") else None,
         duration_ms=duration
         if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0
@@ -740,6 +743,8 @@ class ClaudeCodeAdapter:
             attributes: dict[str, Any] = {}
             if e.command is not None:
                 attributes["command"] = e.command
+            if e.runners:
+                attributes[RUNNERS_ATTRIBUTE] = list(e.runners)
             if e.output_chars is not None:
                 attributes[OUTPUT_CHARS_ATTRIBUTE] = e.output_chars
             hook_events.append(

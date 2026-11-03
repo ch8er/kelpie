@@ -278,6 +278,9 @@ task_attribute = "kelpie.task_id"        # span or resource attribute naming the
 session_attribute = "kelpie.session_id"  # else gen_ai.conversation.id, else session.id
 commands = true           # keep the prefix of shell commands on tool spans ("make test",
                           # "xcodebuild"), redacted; the command itself is never stored
+# known_runners = ["ios_sim.sh", "xcodebuild", "npm test"]  # found anywhere in a command
+                          # (after cd … &&, env …, a pipe); names only. Agent hosts:
+                          # KELPIE_KNOWN_RUNNERS=ios_sim.sh,xcodebuild,npm test for the hooks
 
 # Forward accepted OTLP requests, unchanged, to other backends (off unless configured; one
 # table per destination; secret header values come from env vars). See docs/guide.md, "Traces".

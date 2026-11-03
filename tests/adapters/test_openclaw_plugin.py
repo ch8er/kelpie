@@ -208,3 +208,42 @@ def test_commands_off_and_a_missing_python(tmp_path: Path) -> None:
     assert all(json.loads(x).get("command") is None for x in spool.read_text().splitlines())
     out = run_plugin(tmp_path, {"python": str(tmp_path / "no-python"), "spool": str(spool)})
     assert len(out["warnings"]) == 1 and "cannot run" in out["warnings"][0]
+
+
+def _tool_runners(spool: Path) -> list[object]:
+    recs = [json.loads(x) for x in spool.read_text().splitlines()]
+    tools = [r for r in recs if r.get("type") == "tool"]
+    (exec_call,) = [r for r in tools if r["tool"] == "exec"]  # forwarded in any order
+    assert all("runners" not in r for r in tools if r["tool"] != "exec")
+    return [exec_call.get("runners")]
+
+
+def test_known_runners_from_the_config_or_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#197 part 2b: names from the list only, on the exec call that names one."""
+    spool = tmp_path / "spool.jsonl"
+    config = {"python": sys.executable, "spool": str(spool)}
+    run_plugin(tmp_path, {**config, "knownRunners": ["curl", 7, "x"]})
+    assert _tool_runners(spool) == [["curl"]]
+    assert "hunter2" not in spool.read_text()
+    spool.unlink()
+    monkeypatch.setenv("KELPIE_KNOWN_RUNNERS", "npm test,curl")
+    run_plugin(tmp_path, config)
+    assert _tool_runners(spool) == [["curl"]]
+    spool.unlink()
+    run_plugin(tmp_path, {**config, "knownRunners": []})  # the config wins: none
+    assert _tool_runners(spool) == [None]
+
+
+def test_bad_known_runners_never_stop_the_spool(tmp_path: Path) -> None:
+    """A NUL or a huge entry would make every spawn fail: such entries are left out."""
+    spool = tmp_path / "spool.jsonl"
+    config = {"python": sys.executable, "spool": str(spool)}
+    bad = ["a\u0000b", "x" * 200_000, "\u001b[31m", *(f"r{i}" for i in range(100)), "curl"]
+    out = run_plugin(tmp_path, {**config, "knownRunners": bad})
+    assert out["warnings"] == []
+    assert _tool_runners(spool) == [None]  # curl is beyond the first 64 names
+    spool.unlink()
+    run_plugin(tmp_path, {**config, "knownRunners": ["a\u0000b", "curl"]})
+    assert _tool_runners(spool) == [["curl"]]
