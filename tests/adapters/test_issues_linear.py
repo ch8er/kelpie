@@ -1112,3 +1112,216 @@ def test_an_action_whose_lookups_fail_keeps_the_agents_known(lin: FakeLinear, br
     assert "KelpieUpdate" not in lin.ops()
     t = {x.id: x for x in a.snapshot(NOW + timedelta(minutes=3)).tasks}
     assert t["ENG-2"].owner_id == "codex"
+
+
+# --- audit M4: one deadline per request, one budget per refresh ------------------------------
+
+
+def test_a_server_that_drips_bytes_is_cut_at_the_timeout() -> None:
+    """Audit M4: the client had only a per-socket-operation timeout, so a server sending a
+    byte every few seconds held the control loop until 4 MiB or EOF."""
+    import socket
+    import threading
+    import time
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    stop = threading.Event()
+
+    def drip() -> None:
+        conn, _ = listener.accept()
+        with conn:
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+            while not stop.is_set():
+                try:
+                    conn.sendall(b"{")
+                except OSError:
+                    return
+                stop.wait(0.3)  # under the timeout: every socket read gets a byte in time
+
+    threading.Thread(target=drip, daemon=True).start()
+    port = listener.getsockname()[1]
+    client = LinearClient(f"http://127.0.0.1:{port}/graphql", KEY, timeout=timedelta(seconds=1))
+    started = time.monotonic()
+    try:
+        with pytest.raises(LinearError) as exc:
+            client.query("Viewer", "query Viewer { viewer { id } }", {})
+    finally:
+        stop.set()
+        listener.close()
+    assert exc.value.kind == "network"
+    assert time.monotonic() - started < 5.0  # 1s timeout; on main it never returns
+    assert client.backing_off()  # and the next tick does not ask again at once
+
+
+def test_a_refresh_stops_asking_once_its_time_budget_is_spent(lin: FakeLinear) -> None:
+    """Audit M4: every read of one refresh together takes at most tick_budget; past it no
+    request is sent and a team keeps its last good read."""
+    for n in range(1, 4):
+        lin.issue(f"ENG-{n}", f"issue {n}", ago(days=1), assignee="dana", updated=ago(minutes=1))
+    a = adapter(lin)
+    reader = a.tracker
+    assert isinstance(reader, LinearIssues)
+    clock = [0.0]
+    reader.client.monotonic = lambda: clock[0]
+    sent: list[str] = []
+    real_post = reader.client.post
+
+    def slow_post(*args: Any, **kwargs: Any) -> Any:
+        sent.append(kwargs.get("timeout", args[4] if len(args) > 4 else None))
+        clock[0] += 8.0  # each request takes 8s of the 30s budget
+        return real_post(*args, **kwargs)
+
+    reader.client.post = slow_post
+    first = tasks(a)
+    assert set(first) == {"ENG-1", "ENG-2", "ENG-3"}
+    assert len(sent) <= 4  # 30s / 8s, rounded up: then the budget is spent
+    assert all(t is not None and t <= 10 for t in sent)  # never past the timeout
+    assert reader.client.read_deadline is None  # only during a refresh
+
+    # The next refresh starts with its budget spent at once: nothing is asked, the team is
+    # served from its last good read.
+    reader._next, reader.tick_budget, before = None, timedelta(seconds=1), len(sent)
+
+    def ticking() -> float:  # every look at the clock is 2s later: past the 1s budget
+        clock[0] += 2.0
+        return clock[0]
+
+    reader.client.monotonic = ticking
+    assert set(tasks(a)) == {"ENG-1", "ENG-2", "ENG-3"}
+    assert len(sent) == before
+
+
+TEAMS_QUERY = "query KelpieTeams { teams { nodes { key } } }"
+
+
+def test_the_last_request_of_a_refresh_gets_only_the_time_left(lin: FakeLinear) -> None:
+    client = LinearClient(lin.url, KEY, timeout=timedelta(seconds=10))
+    timeouts: list[float] = []
+    real_post = client.post
+    client.post = lambda *a, **k: timeouts.append(a[4]) or real_post(*a, **k)
+    client.monotonic = lambda: 100.0
+    client.read_deadline = 102.5
+    client.query("KelpieTeams", TEAMS_QUERY, {"keys": ["ENG"]})
+    assert timeouts == [2.5]
+    client.read_deadline = 100.0
+    with pytest.raises(LinearError) as exc:
+        client.query("KelpieTeams", TEAMS_QUERY, {"keys": ["ENG"]})
+    assert exc.value.kind == "budget" and timeouts == [2.5]
+
+
+def test_tick_budget_is_configured_and_bounded() -> None:
+    base = {"teams": ["ENG"]}
+    assert load_linear(base).tick_budget == timedelta(seconds=30)
+    assert load_linear({**base, "tick_budget": "45s"}).tick_budget == timedelta(seconds=45)
+    for bad in ("0s", "5s", "2m"):  # 5s: under the 10s timeout
+        with pytest.raises(ValueError, match="tick_budget"):
+            load_linear({**base, "tick_budget": bad})
+
+
+def test_a_request_cut_short_by_the_budget_is_no_fault_of_linear(lin: FakeLinear) -> None:
+    """A timeout on a request that only had the refresh's last moments is the budget: no
+    back-off, which would defer the actions' writes for a minute."""
+    from kelpie import net
+
+    client = LinearClient(lin.url, KEY, timeout=timedelta(seconds=10))
+
+    def timed_out(*a: Any, **k: Any) -> Any:
+        raise net.RequestError("timeout", "timed out")
+
+    client.post = timed_out
+    client.monotonic = lambda: 100.0
+    client.read_deadline = 100.2
+    with pytest.raises(LinearError) as exc:
+        client.query("KelpieTeams", TEAMS_QUERY, {"keys": ["ENG"]})
+    assert exc.value.kind == "budget" and not client.backing_off()
+    client.read_deadline = None  # a full-length request that times out is Linear's
+    with pytest.raises(LinearError) as exc:
+        client.query("KelpieTeams", TEAMS_QUERY, {"keys": ["ENG"]})
+    assert exc.value.kind == "network" and client.backing_off()
+
+
+def test_a_refresh_deadline_never_reaches_writes_or_another_thread(lin: FakeLinear) -> None:
+    """Under kelpie agent, actions run on another thread than the reads."""
+    import threading
+
+    lin.issue("ENG-1", "one", ago(days=1))
+    a = adapter(lin)
+    reader = a.tracker
+    assert isinstance(reader, LinearIssues)
+    tasks(a)
+    timeouts: list[float] = []
+    real_post = reader.client.post
+    reader.client.post = lambda *x, **k: timeouts.append(x[4]) or real_post(*x, **k)
+    reader.client.read_deadline = reader.client.monotonic() - 1  # spent, on this thread
+    reader.client.requests_left = 0
+    seen: list[object] = []
+    errors: list[BaseException] = []
+
+    def act() -> None:  # the agent's poll thread
+        try:
+            seen.append((reader.client.read_deadline, reader.client.requests_left))
+            reader.fetch("ENG-1")  # the re-check before a write
+            reader.reserve(1)
+            reader.comment("ENG-1", "hello")
+        except BaseException as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    t = threading.Thread(target=act)
+    t.start()
+    t.join()
+    assert errors == [] and seen == [(None, None)]
+    assert lin.issues["ENG-1"].comments == ["hello"]
+    assert timeouts and all(t == 10.0 for t in timeouts)
+    assert reader.client.requests_left == 0  # this thread's budget untouched
+
+
+def test_each_refresh_starts_with_the_next_team(lin: FakeLinear) -> None:
+    lin.team("OPS")
+    lin.issue("ENG-1", "one", ago(days=1))
+    lin.issue("OPS-1", "two", ago(days=1))
+    boards = (Board("ENG"), Board("OPS"))
+    a = adapter(lin, boards)
+    reader = a.tracker
+    assert isinstance(reader, LinearIssues)
+    firsts: list[str] = []
+    real_post = reader.client.post
+
+    def post(*x: Any, **k: Any) -> Any:
+        body = x[3].decode()
+        if "KelpieIssues" in body and len(firsts) < 3:
+            firsts.append("ENG" if '"ENG"' in body else "OPS")
+        return real_post(*x, **k)
+
+    reader.client.post = post
+    started: list[str] = []
+    for _ in range(2):
+        reader._next = None
+        firsts.clear()
+        tasks(a)
+        started.append(firsts[0])
+    assert sorted(started) == ["ENG", "OPS"]
+    assert [t.split("-")[0] for t in tasks(a)] == ["ENG", "OPS"]  # items in configured order
+
+
+def test_the_agents_user_lookup_of_a_refresh_is_within_its_budget(lin: FakeLinear) -> None:
+    lin.issue("ENG-1", "one", ago(days=1))
+    a = adapter(lin)
+    reader = a.tracker
+    assert isinstance(reader, LinearIssues)
+    tasks(a)  # users looked up, lists read
+    reader._looked_up = None  # the hourly lookup is due
+    reader._users.clear()
+    reader._next, reader.tick_budget = None, timedelta(seconds=10)
+    sent: list[str] = []
+    real_post = reader.client.post
+    reader.client.post = lambda *x, **k: sent.append(x[3].decode()) or real_post(*x, **k)
+    clock = [0.0]
+
+    def ticking() -> float:
+        clock[0] += 20.0  # past the budget at the first request
+        return clock[0]
+
+    reader.client.monotonic = ticking
+    assert set(tasks(a)) == {"ENG-1"}  # served from the last good read
+    assert sent == []  # not even the users' lookup went out

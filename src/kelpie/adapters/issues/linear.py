@@ -36,8 +36,12 @@ only those labels; ``assigneeId`` / ``delegateId``; ``stateId`` to reopen) and
 (labels, users, the state to reopen to) is looked up when the action reserves its writes,
 before the first, and kept for ``LOOKUP_TTL``.
 
-The HTTP client keeps to one origin (https, or http on loopback), follows no redirect, reads
-at most ``MAX_BODY`` bytes, and backs off when Linear says it is rate limited (HTTP 429 or a
+The HTTP client is :mod:`kelpie.net`: it keeps to one origin (https, or http on loopback,
+never through a proxy), follows no redirect, reads at most ``MAX_BODY`` bytes, and gives
+each request one deadline (``timeout``) however slowly Linear answers. A refresh's reads
+together take at most ``tick_budget``: past it the rest is left for the next refresh (a
+team not read keeps its last read for ``BOARD_GRACE``), so a slow server cannot stall the
+control loop (audit M4). It backs off when Linear says it is rate limited (HTTP 429 or a
 ``RATELIMITED`` error) until the reset it gives, at most ``MAX_BACKOFF``. The API key goes
 only in the ``Authorization`` header and never into a message.
 """
@@ -47,14 +51,15 @@ from __future__ import annotations
 import json
 import logging
 import re
-import urllib.error
-import urllib.request
+import threading
+import time
+import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from kelpie import __version__
+from kelpie import __version__, net
 from kelpie.adapters.issues.mapping import (
     Agent,
     Board,
@@ -79,6 +84,8 @@ MAX_COMPLEXITY = 10_000
 DETAIL_TTL = timedelta(minutes=10)
 DEFAULT_REFRESH = timedelta(minutes=2)
 DEFAULT_MAX_REQUESTS = 20  # history reads per refresh
+DEFAULT_TICK_BUDGET = timedelta(seconds=30)  # all of a refresh's reads, in wall-clock time
+MAX_TICK_BUDGET = timedelta(seconds=60)
 BOARD_GRACE = timedelta(minutes=10)  # a team that cannot be read keeps its last read this long
 LOOKUP_TTL = timedelta(hours=1)  # label, user and state ids are looked up again after this
 # Reads stop while less than this (plus what a team's last read took, before that team's
@@ -211,11 +218,6 @@ class LinearError(Exception):
         self.kind = kind
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-
 def _time(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -232,14 +234,15 @@ def _iso(at: datetime) -> str:
 
 @dataclass(slots=True)
 class LinearClient:
-    """POST GraphQL to Linear. Not thread-safe: the control loop owns it."""
+    """POST GraphQL to Linear. One thread reads (the control loop, or ``kelpie agent``'s
+    reports) while another may carry out actions: the refresh's budgets (``read_deadline``,
+    ``requests_left``) are per thread."""
 
     api_url: str = DEFAULT_API_URL
     token: str | None = field(default=None, repr=False)
     timeout: timedelta = timedelta(seconds=10)
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     backoff_until: datetime | None = None
-    requests_left: int | None = None  # this refresh's budget; None: no limit
     # From Linear's last answer: what is left of the hour's requests and complexity, the
     # hour's complexity limit; and the complexity spent since the client was made.
     hour_requests: int | None = None
@@ -249,17 +252,39 @@ class LinearClient:
     requests_made: int = 0  # since the client was made
     # Until when the hour_* figures hold: their reset, at most LIMITS_TTL after they came.
     limits_until: datetime | None = None
-    _opener: Any = field(default=None, init=False, repr=False)
+    monotonic: Callable[[], float] = field(default=time.monotonic, repr=False)
+    post: Callable[..., net.Response] = field(default=net.post, repr=False)
+    _path: str = field(default="/", init=False, repr=False)
+    # Per thread: under ``kelpie agent`` actions run on another thread than the reads, and a
+    # refresh's deadline must not cut their writes short.
+    _local: threading.local = field(default_factory=threading.local, init=False, repr=False)
+
+    @property
+    def read_deadline(self) -> float | None:
+        """The end of this thread's refresh (``monotonic`` seconds); None: not in a refresh."""
+        deadline: float | None = getattr(self._local, "deadline", None)
+        return deadline
+
+    @read_deadline.setter
+    def read_deadline(self, value: float | None) -> None:
+        self._local.deadline = value
+
+    @property
+    def requests_left(self) -> int | None:
+        """This thread's request budget for the refresh; None: no limit."""
+        left: int | None = getattr(self._local, "requests_left", None)
+        return left
+
+    @requests_left.setter
+    def requests_left(self, value: int | None) -> None:
+        self._local.requests_left = value
 
     def __post_init__(self) -> None:
         self.api_url = check_api_url(self.api_url)
         if self.token is not None and not valid_token(self.token):
             raise ValueError("Linear API key contains characters not allowed in a header")
-        handlers: list[Any] = [_NoRedirect()]
-        if self.api_url.startswith("http://"):
-            # Plain http (loopback only): never through a proxy, which would see the key.
-            handlers.append(urllib.request.ProxyHandler({}))
-        self._opener = urllib.request.build_opener(*handlers)
+        parts = urllib.parse.urlsplit(self.api_url)
+        self._path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
 
     def __repr__(self) -> str:
         auth = "key" if self.token else "anonymous"
@@ -292,6 +317,12 @@ class LinearClient:
             raise LinearError("backoff", f"{op}: backing off")
         if read and not self.may_read():
             raise LinearError("reserve", f"{op}: the rest of the hour's limit is kept for writes")
+        timeout = full = self.timeout.total_seconds()
+        if (deadline := self.read_deadline) is not None:
+            left = deadline - self.monotonic()
+            if left <= 0:
+                raise LinearError("budget", f"{op}: the refresh's time budget is spent")
+            timeout = min(timeout, left)
         if self.requests_left is not None:
             if self.requests_left <= 0:
                 raise LinearError("budget", f"{op}: request budget spent")
@@ -300,26 +331,32 @@ class LinearClient:
         payload = json.dumps(
             {"query": document, "variables": dict(variables), "operationName": op}
         ).encode()
-        request = urllib.request.Request(self.api_url, data=payload, method="POST")
-        request.add_header("Content-Type", "application/json")
-        request.add_header("User-Agent", f"kelpie/{__version__}")
+        headers = {"Content-Type": "application/json", "User-Agent": f"kelpie/{__version__}"}
         if self.token:
             # Personal API keys go as they are; OAuth access tokens as Bearer.
             auth = self.token if self.token.startswith("lin_api_") else f"Bearer {self.token}"
-            request.add_header("Authorization", auth)
+            headers["Authorization"] = auth
         try:
-            with self._opener.open(request, timeout=self.timeout.total_seconds()) as answer:
-                status, headers = answer.status, answer.headers
-                raw = answer.read(MAX_BODY + 1)
-        except urllib.error.HTTPError as exc:
-            status, headers = exc.code, exc.headers
-            raw = exc.read(64 * 1024)
-        except (OSError, ValueError) as exc:
+            # One deadline for the whole request (connect, TLS, headers and body), however
+            # slowly the server drips bytes; an https proxy only as a CONNECT tunnel.
+            answer = self.post(
+                self.api_url, self._path, headers, payload, timeout, MAX_BODY, proxy=True
+            )
+        except net.RequestError as exc:
+            if exc.cause == "too_large":
+                raise LinearError("bad_response", f"{op}: answer too large") from None
+            if exc.cause == "redirect":
+                raise LinearError("redirect", f"{op}: {exc.detail}") from None
+            if exc.cause in ("invalid_header", "invalid_request"):
+                raise LinearError("invalid_request", f"{op}: {exc.detail}") from None
+            if exc.cause == "timeout" and timeout < full:
+                # Cut short by the refresh's own budget, not Linear's fault: no back-off.
+                raise LinearError("budget", f"{op}: the refresh's time budget is spent") from None
             self._back_off(now + ERROR_BACKOFF, now)
-            raise LinearError("network", f"{op}: {type(exc).__name__}") from None
+            raise LinearError("network", f"{op}: {exc.detail}") from None
+        status, raw = answer.status, answer.body
+        headers = answer.headers  # names in lower case
         self._note_limits(headers, now)
-        if len(raw) > MAX_BODY:
-            raise LinearError("bad_response", f"{op}: answer too large")
         try:
             body = json.loads(raw) if raw else {}
         except (ValueError, RecursionError):
@@ -336,8 +373,6 @@ class LinearClient:
         if status >= 500:
             self._back_off(now + ERROR_BACKOFF, now)
             raise LinearError("server", f"{op}: HTTP {status}")
-        if status >= 300 and status < 400:
-            raise LinearError("redirect", f"{op}: HTTP {status} redirect (not followed)")
         if not isinstance(body, Mapping):
             raise LinearError("bad_response", f"{op}: not JSON")
         if codes or status >= 400:
@@ -401,7 +436,11 @@ def _code(error: Any) -> str:
 
 
 def _header_int(headers: Any, name: str) -> int | None:
-    value = headers.get(name) if headers is not None else None
+    if headers is None:
+        return None
+    value = headers.get(name.lower())  # kelpie.net gives names in lower case
+    if value is None:
+        value = headers.get(name)
     if isinstance(value, str) and _HEADER_INT.fullmatch(value.strip()):
         return int(value.strip())
     return None
@@ -477,6 +516,7 @@ class LinearIssues:
     lookback: timedelta
     refresh: timedelta = DEFAULT_REFRESH
     max_requests: int = DEFAULT_MAX_REQUESTS  # history reads per refresh
+    tick_budget: timedelta = DEFAULT_TICK_BUDGET  # every read of one refresh, in all
     # Repositories whose pull requests count when attached by Linear's GitHub integration,
     # as "host/owner/repo" in lower case; empty: any repository on github.com.
     pull_repos: frozenset[str] = frozenset()
@@ -502,6 +542,7 @@ class LinearIssues:
     _last_fetch: str | None = field(default=None, init=False, repr=False)  # an item id
     _stale: bool = field(default=False, init=False, repr=False)  # written since the last read
     _stretched: bool = field(default=False, init=False, repr=False)  # refresh > ``refresh``
+    _rotation: int = field(default=0, init=False, repr=False)  # the team a refresh starts with
 
     # --- reading -------------------------------------------------------------------------
 
@@ -522,6 +563,15 @@ class LinearIssues:
             if self._failed is not None:
                 raise self._failed
         self.problem = None
+        # One deadline for every read of this refresh (audit M4): past it no request is
+        # sent, and what was not read is served from the last good read.
+        self.client.read_deadline = self.client.monotonic() + self.tick_budget.total_seconds()
+        try:
+            return self._read(now)
+        finally:
+            self.client.read_deadline = None
+
+    def _read(self, now: datetime) -> list[Item]:
         before = self.client.complexity_spent
         self._agents_known()
         lists: list[tuple[Board, list[Any]]] = []
@@ -529,7 +579,12 @@ class LinearIssues:
         # Lists are bounded by their page caps, not by max_requests (cutting them would drop
         # teams); that budget is for history.
         self.client.requests_left = None
-        for board in self.boards:
+        # Each refresh starts with the next team, so when the time budget runs out it is not
+        # always the same teams that go unread (and drop out after BOARD_GRACE).
+        boards = list(self.boards)
+        start = self._rotation % len(boards) if boards else 0
+        self._rotation += 1
+        for board in boards[start:] + boards[:start]:
             try:
                 raw = self._lists(board, now)
             except IssuesError as exc:
@@ -543,16 +598,20 @@ class LinearIssues:
             else:
                 self._good[board.key] = (now, raw)
             lists.append((board, raw))
+        order = {b.key: i for i, b in enumerate(boards)}
+        lists.sort(key=lambda pair: order[pair[0].key])  # items in the configured order
         self._stale = False
         if not lists and failures:
             self._last, self._failed = None, failures[0]
             self._next = now + self.refresh
             raise failures[0]
         self.client.requests_left = self.max_requests
-        try:
-            items = [i for board, raw in lists for i in self._items(board, raw)]
+        try:  # history in the refresh's order too, so no team's always goes unread
+            turn = sorted(lists, key=lambda pair: (order[pair[0].key] - start) % len(boards))
+            read = {board.key: self._items(board, raw) for board, raw in turn}
         finally:
             self.client.requests_left = None
+        items = [i for board, _ in lists for i in read[board.key]]
         interval = self._interval(self.client.complexity_spent - before)
         self._next, self._stretched = now + interval, interval > self.refresh
         self._last, self._failed = (now, items), None
@@ -970,6 +1029,8 @@ class LinearIssues:
 
     def _lookup(self, op: str, document: str, variables: Mapping[str, Any]) -> Any:
         """A read an action makes: outside the reads' request budget and reserve."""
+        # The read deadline stays: it is per thread, so it is set here only when a refresh
+        # makes this lookup (the agents' users); an action's lookups never see it.
         saved, self.client.requests_left = self.client.requests_left, None
         try:
             return self._query(op, document, variables)
@@ -979,6 +1040,7 @@ class LinearIssues:
     def _write(self, op: str, document: str, variables: Mapping[str, Any]) -> Any:
         first = self.gate.begin()
         saved, self.client.requests_left = self.client.requests_left, None  # outside reads' budget
+        deadline, self.client.read_deadline = self.client.read_deadline, None
         try:
             return self.client.query(op, document, variables)
         except LinearError as exc:
@@ -990,6 +1052,7 @@ class LinearIssues:
             ) from exc
         finally:
             self.client.requests_left = saved
+            self.client.read_deadline = deadline
             self.gate.done()
             self._stale = True
 
