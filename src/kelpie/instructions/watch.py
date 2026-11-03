@@ -23,6 +23,11 @@ last 24 hours of the snapshot.
   the window. For an always-loaded file that is the cost; for a skill of a platform that
   counts no loads it is an upper bound.
 
+After each scan, the tokens a day of each role's files are stored as one sample
+(``instruction_tokens``, :func:`role_tokens`), so the report can measure a split before and
+after (``kelpie fix --rule instruction_bloat``); not when the snapshot has no session in the
+day or misses part of the farm (the board may not have been read).
+
 Only files on this host are measured: a ``kelpie agent`` host's files are not (yet).
 """
 
@@ -37,7 +42,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from kelpie.core.model import InstructionDuplicate, InstructionFile, Snapshot, TokenBasis
-from kelpie.core.storage import SizeRow, SqliteInstructionStore
+from kelpie.core.storage import SizeRow, SqliteInstructionStore, TokenRow
 from kelpie.instructions.config import InstructionSettings, Source
 from kelpie.instructions.scan import Measure, Scanned, Unreadable, copies, measure, read_file
 
@@ -81,6 +86,7 @@ class InstructionWatch:
     ) -> tuple[tuple[InstructionFile, ...], tuple[InstructionDuplicate, ...]]:
         now = snapshot.now
         every = self.settings.every
+        scanned = False
         if self._next is None or not (self._next - every <= now < self._next):
             try:
                 self._scan(now)
@@ -92,9 +98,19 @@ class InstructionWatch:
             else:
                 self._next = now + every
                 self.failed = False
+                scanned = True
         sessions = _sessions_per_day(snapshot)
         loads = _loads_per_file(self._found, snapshot)
-        return tuple(self._file(f, now, sessions, loads) for f in self._found), self._copies
+        files = tuple(self._file(f, now, sessions, loads) for f in self._found)
+        # No session in the day, or part of the farm unseen: the board may not have been
+        # read, and a sample of zero sessions would pass for a saving.
+        seen = not snapshot.unobserved and any(sessions.values())
+        if scanned and self.record and seen:
+            try:
+                self.store.record_tokens(role_tokens(files, now))
+            except Exception as exc:  # the before/after of a split loses one sample
+                log.error("instruction tokens could not be recorded: %s", type(exc).__name__)
+        return files, self._copies
 
     # --- scanning -------------------------------------------------------------------
 
@@ -234,6 +250,18 @@ class InstructionWatch:
             token_basis=basis,
             owner=f.source.owner,
         )
+
+
+def role_tokens(files: Sequence[InstructionFile], at: datetime) -> list[TokenRow]:
+    """Tokens a day on instructions per role (None: the files every role loads) at one
+    measurement, for the before/after of a split (``kelpie.report.verify``)."""
+    sums: dict[str | None, list[int]] = {}
+    for f in files:
+        row = sums.setdefault(f.role, [0, 0, 0])
+        row[0] += f.tokens_per_day or 0
+        row[1] += 1
+        row[2] += f.token_basis == "loads"
+    return [TokenRow(at, role, *sums[role]) for role in sorted(sums, key=lambda r: r or "")]
 
 
 def _role_part(pattern: str, match: str) -> str | None:

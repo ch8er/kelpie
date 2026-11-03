@@ -135,6 +135,7 @@ from kelpie.core.spans import (
 )
 from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
+from kelpie.core.storage import TokenRow
 from kelpie.report import farm, intervals, md
 from kelpie.report.boards import BoardLine, board_lines, rest_line
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
@@ -344,6 +345,9 @@ class ReportInputs:
     instruction_files: Sequence[InstructionFile] = ()
     instruction_duplicates: Sequence[InstructionDuplicate] = ()
     instructions_at: datetime | None = None
+    # Tokens a day on instructions per role, one sample per scan: the before/after of a
+    # split (a fix naming rule instruction_bloat).
+    instruction_tokens: Sequence[TokenRow] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -829,6 +833,7 @@ def _verifications(
         review_roles=inputs.review_roles,
         known_from=reach,
         owners=inputs.owners,
+        instruction_tokens=inputs.instruction_tokens,
     )
     return verify_all(events, evidence, since)
 

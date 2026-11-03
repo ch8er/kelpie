@@ -373,7 +373,23 @@ Fixes come from `kelpie fix "lifted the merge hold" [--rule R] [--command PREFIX
 [--role ROLE] [--at TIME]` (check with `kelpie fix --list [--days N]`), from config
 changes (`kelpie serve` notes when its config file changed), from
 rule mode changes in the action ledger (observe to act, dry-run off) and from output
-filters that appear in traces (`rtk`, `| xcbeautify`). Board-based metrics (review time,
+filters that appear in traces (`rtk`, `| xcbeautify`). A split of instruction files is
+recorded as a fix of rule `instruction_bloat`, with the role whose files changed:
+`kelpie fix "split the review skill into a core and topics" --rule instruction_bloat
+--role reviewer`. It is also measured on *tokens a day on instructions* (the mean of the
+role's samples, one per `[instructions]` scan, so `kelpie serve` must have measured the
+files before the split) and *tokens per completed task* of that role (its traced tokens
+over its agent tasks done in the window; for the group when fixes overlap, since a task
+goes through several roles). A rule's own mode switch is not a split. Some limits of the
+first figure: a split of files every role loads (`SOUL.md`, a shared `AGENTS.md`) is
+measured without `--role`; a skill's linked reference files are not counted as reads, so
+after a split into a core and references it is a lower bound; a skill whose tokens a day
+are size times sessions (its platform counts no loads) counts every topic skill as read by
+every session, so a split into several skills shows little change until loads are
+counted; a scan whose snapshot had no session in the day, or missed part of the farm, is no
+sample; fewer than `min_sample` samples on a side (`[instructions] every` longer than about
+two hours) is *direction only*; samples are kept 30 days, enough for a `verify_window` of
+up to 9 days. Board-based metrics (review time,
 failures, returns) need the board as far back as the before-window of the day before's
 fixes: `kelpie report` widens the Hermes lookback to that by itself (about 97h for
 yesterday with the defaults: two windows, for an older fix a recent one overlaps; further

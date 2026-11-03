@@ -15,8 +15,10 @@ per day (the fix's role when it names one), returns per day, review time (mean s
 length of ``review_roles``), sessions that failed or ended without a final status, tasks
 done per hour while agent work was available (hours with an empty ready queue and nothing
 under way are left out, with how many there were; stages as in
-:mod:`kelpie.report.throughput`), and for a command fix the output tokens per call of that
-command. A side with fewer than ``min_sample`` observations, or an after-window shorter
+:mod:`kelpie.report.throughput`), for a command fix the output tokens per call of that
+command, and for a fix of rule ``instruction_bloat`` (a split) tokens a day on the role's
+instructions (the mean of the ``[instructions]`` samples) and tokens per completed task of
+the role. A side with fewer than ``min_sample`` observations, or an after-window shorter
 than a quarter of the window, is a small sample, labelled *direction only*: it shows a
 direction, not a result. Metrics with no data on either side are left out.
 
@@ -48,14 +50,15 @@ the day before by itself (:func:`kelpie.report.cli.report_settings`).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Outcome
 from kelpie.core.model import Owner, OwnerKind, Session, Span, Status, Task
 from kelpie.core.spans import SpanKey, last_at, span_key
 from kelpie.core.states import OpenState
+from kelpie.core.storage import TokenRow
 from kelpie.report import md
 from kelpie.report.fixes import CONFIG, FILTER, MODE, FixEvent
 from kelpie.report.store import StateRow
@@ -66,6 +69,8 @@ DEFAULT_WINDOW = timedelta(days=1)
 DEFAULT_MIN_SAMPLE = 10
 DEFAULT_REVIEW_ROLES = ("reviewer",)
 DAY = timedelta(days=1)
+# A fix naming this rule changed instruction files (a split): measured on them too.
+INSTRUCTIONS_RULE = "instruction_bloat"
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +171,8 @@ class Evidence:
     window: timedelta = DEFAULT_WINDOW
     min_sample: int = DEFAULT_MIN_SAMPLE
     owners: Sequence[Owner] = ()  # people's tasks are not agent work (throughput)
+    # Tokens a day on instructions per role, one sample per scan ([instructions]).
+    instruction_tokens: Sequence[TokenRow] = ()
     # The earliest moment the loaded fixes, spans and states cover (None: unknown). A group
     # that starts less than a window after it may have lost an older fix to the cut.
     known_from: datetime | None = None
@@ -260,6 +267,13 @@ def verify_group(
         _failures(ev, scope, before, after),
         _done_per_work_hour(ev, scope, before, after, short, released, until),
     ]
+    if any(_is_split(e) for e in events):  # instruction files changed
+        # Over the group's role, else every role, whichever rule the other fixes name.
+        split = replace(scope, rule=INSTRUCTIONS_RULE)
+        metrics += [
+            _instruction_tokens(ev, split, before, after, short),
+            _tokens_per_task(ev, split, before, after, short, excluded),
+        ]
     own: list[Credited] = []
     shared: set[tuple[str, str | None]] = set()
     for e in events:
@@ -272,6 +286,8 @@ def verify_group(
             ]
             if e.role in ev.review_roles:
                 mine.append(_review_time(ev, e, b, a))
+            if _is_split(e):  # per task is never one fix's: a task goes through roles
+                mine.append(_instruction_tokens(ev, e, b, a, _short(b, a, ev)))
             own += [Credited(e, m) for m in mine if m is not None and _has_data(m)]
         if not e.command:
             continue
@@ -457,19 +473,98 @@ def _tokens(
     (tb, nb), (ta, na) = per_day(b), per_day(a)
     who = f" ({md.text(event.role)})" if event.role else ""
     name = f"tokens per day{who}"
-    began = _traces_from(ev)
-    # Traces began late in the before-window, and (when known) after a whole loaded window
-    # with no span at all: an idle night at the start of the history is no signal turning on.
-    if (
-        began is not None
-        and (nb or na)
-        and began > b[0] + (b[1] - b[0]) / 4
-        and (ev.known_from is None or began - ev.known_from >= ev.window)
-    ):
+    if (began := _traces_began_late(ev, b)) is not None and (nb or na):
         excluded.append(Excluded(name, began, ta, "tokens/day"))
         return None
     small = short or min(nb, na) < ev.min_sample
     return Metric(name, "tokens/day", tb, ta, nb, na, small)
+
+
+def _traces_began_late(ev: Evidence, b: Window) -> datetime | None:
+    """When traces began, if late in the before-window and (when known) after a whole
+    loaded window with no span at all: an idle night at the start of the history is no
+    signal turning on. A token rate over that before-window would be partial."""
+    began = _traces_from(ev)
+    if (
+        began is not None
+        and began > b[0] + (b[1] - b[0]) / 4
+        and (ev.known_from is None or began - ev.known_from >= ev.window)
+    ):
+        return began
+    return None
+
+
+def _is_split(e: FixEvent) -> bool:
+    """A fix that changed instruction files: one recorded for rule ``instruction_bloat``
+    (``kelpie fix``, a config change), not that rule's own mode switch."""
+    return e.rule == INSTRUCTIONS_RULE and e.kind != MODE
+
+
+def _agent_task(t: Task, people: Collection[str]) -> bool:
+    """A task of an agent, not a person's (by owner or assignee)."""
+    return t.owner_id not in people and (t.assignee is None or t.assignee not in people)
+
+
+def _instruction_tokens(ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool) -> Metric:
+    """Tokens a day spent reading instructions, the mean of the samples in each window: the
+    fix's role's own files (all files without a role). One sample per scan."""
+
+    def mean(w: Window) -> tuple[float | None, int]:
+        per: dict[datetime, int] = {}
+        for r in ev.instruction_tokens:
+            if w[0] <= r.at < w[1] and (event.role is None or r.role == event.role):
+                per[r.at] = per.get(r.at, 0) + r.tokens_per_day
+        return (sum(per.values()) / len(per) if per else None), len(per)
+
+    (vb, nb), (va, na) = mean(b), mean(a)
+    who = f" ({md.text(event.role)})" if event.role else ""
+    small = short or min(nb, na) < ev.min_sample
+    return Metric(f"tokens a day on instructions{who}", "tokens/day", vb, va, nb, na, small)
+
+
+def _tokens_per_task(
+    ev: Evidence, event: FixEvent, b: Window, a: Window, short: bool, excluded: list[Excluded]
+) -> Metric | None:
+    """Agent tokens of the fix's role (all agents, without one) per agent task of that role
+    done in the window: the reading a split saves should show per unit of work, not only
+    per day. A task counts under its role as the board reports it now. Left out (and listed
+    in ``excluded``) when traces began late in the before-window, as tokens per day."""
+    counted = ev.counted or {}
+    roles = ev.roles or {}
+    people = {o.id for o in ev.owners if o.kind is OwnerKind.HUMAN}
+    owner_role = {o.id: o.role for o in ev.owners}
+    theirs = {s.id for s in ev.sessions if s.owner_id in people}  # a person's own sessions
+
+    def side(w: Window) -> tuple[float | None, int]:
+        done = sum(
+            1
+            for t in ev.tasks
+            if t.status is Status.DONE
+            and w[0] <= t.status_since < w[1]
+            and _agent_task(t, people)
+            and (
+                event.role is None
+                or (t.role or (owner_role.get(t.owner_id) if t.owner_id else None)) == event.role
+            )
+        )
+        tokens = sum(
+            s.input_tokens + s.output_tokens
+            for s in ev.spans
+            if span_key(s) in counted
+            and w[0] <= last_at(s) < w[1]
+            and (s.session_id or "") not in theirs
+            and (event.role is None or roles.get(s.session_id or "") == event.role)
+        )
+        return (tokens / done if done else None), done
+
+    (vb, nb), (va, na) = side(b), side(a)
+    who = f" ({md.text(event.role)})" if event.role else ""
+    name = f"tokens per completed task{who}"
+    if (began := _traces_began_late(ev, b)) is not None and (nb or na):
+        excluded.append(Excluded(name, began, va, "tokens"))
+        return None
+    small = short or min(nb, na) < ev.min_sample
+    return Metric(name, "tokens", vb, va, nb, na, small)
 
 
 def _output(ev: Evidence, key: str, role: str | None, b: Window, a: Window, short: bool) -> Metric:
@@ -628,9 +723,7 @@ def _done_per_work_hour(
     mine = [
         t
         for t in ev.tasks
-        if t.owner_id not in people
-        and (t.assignee is None or t.assignee not in people)
-        and (event.role is None or task_role(t) == event.role)
+        if _agent_task(t, people) and (event.role is None or task_role(t) == event.role)
     ]
 
     def side(w: Window) -> tuple[float, float, int]:
