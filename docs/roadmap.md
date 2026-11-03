@@ -913,7 +913,7 @@ notes say `kelpie serve` stays on loopback or behind a limiting proxy until M5 i
 - [x] No SQL built from strings with untrusted data (#275; L1, the read-only URI, fixed in #280)
 - [ ] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section (audited in #275; L6 fixed in #280; open: L7, L8, command-redaction gaps)
 - [x] Outbound HTTP: no redirects with credentials, TLS verified, response size limits (#275; M3 and L12 fixed in #279; M4, the Linear client's deadline, open)
-- [ ] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279; open: M1, M5, L10, L11)
+- [ ] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279, M5 in #309; M1 documented, fix in #302; open: L10, L11)
 - [x] File paths from config and data: no traversal, safe symlink handling (H1, H2 fixed in #278)
 - [x] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host (#275; L9, no length cap on agent reasons, open)
 - [ ] Clear fixes as small PRs (#278, #279, #280); design questions as issues (M1 and the open findings are listed on #275, not filed as issues)
@@ -939,7 +939,7 @@ Publish the open core: first public pre-release on PyPI and a container image.
 - [ ] Release workflow builds and publishes with trusted publishing (workflow and `docs/release.md` in place, #105, #260; ticked after the first tag, which also needs the PyPI and TestPyPI accounts the owner creates)
 - [ ] `pip install kelpie-sre` provides a working `kelpie` CLI
 - [ ] Container image published and referenced by docker-compose.yml (the workflow pushes it to GHCR; compose takes it through `KELPIE_IMAGE`)
-- [ ] Changelog and release notes (`CHANGELOG.md` has `[0.1.0a1] - Unreleased`, #143; release notes at the tag must say serve stays on loopback until #275 M5 is fixed)
+- [ ] Changelog and release notes (`CHANGELOG.md` `[0.1.0a1]` with "Before you install" as the release notes, #306; M5 fixed in #309)
 
 ### project: 10 conversations with farm owners
 labels: P1, week-3, area:project
