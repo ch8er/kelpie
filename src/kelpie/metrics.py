@@ -101,6 +101,8 @@ class Metrics:
         self.boards: tuple[str, ...] = ()
         # multi-host: agent -> (up, unix time of its last report or 0)
         self.agents: dict[str, tuple[bool, float]] = {}
+        # (agent, adapter | board) -> names refused from its reports (audit M6)
+        self.hub_refused: dict[tuple[str, str], int] = {}
         self.ledger_up = True
         self.open_states: Counter[str] = Counter()
         self.tasks: Counter[tuple[BoardKey, str]] = Counter()
@@ -421,6 +423,12 @@ class Metrics:
         with self._lock:
             self.agents[agent] = (up, last_report.timestamp() if last_report else 0.0)
 
+    def refused(self, agent: str, kind: str, total: int) -> None:
+        """``total`` adapter parts (``kind`` adapter) or board names (``board``) the hub
+        refused from ``agent``'s reports so far. Agents and kinds are bounded by config."""
+        with self._lock:
+            self.hub_refused[(agent, kind)] = total
+
     def observe_tick(
         self,
         seconds: float,
@@ -663,6 +671,20 @@ class Metrics:
                     [
                         f"kelpie_agent_last_report_timestamp_seconds{_labels(agent=a)} {ts:.3f}"
                         for a, (_, ts) in sorted(self.agents.items())
+                    ],
+                )
+                metric(
+                    "kelpie_hub_refused_total",
+                    "counter",
+                    "Parts the hub refused from the agent's reports, counted once per report: "
+                    "adapters that are not Kelpie's or not in [[hub.agents]] adapters (kind "
+                    "adapter), unreadable boards past the first 16 names of an adapter (kind "
+                    "board).",
+                    [
+                        f"kelpie_hub_refused_total{_labels(agent=a, kind=k)} "
+                        f"{self.hub_refused.get((a, k), 0)}"
+                        for a in sorted(self.agents)
+                        for k in ("adapter", "board")
                     ],
                 )
             metric(

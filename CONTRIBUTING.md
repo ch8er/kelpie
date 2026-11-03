@@ -254,9 +254,10 @@ An adapter carries out what the platform allows and refuses the rest.
   `...Settings` dataclass with `build()` and a `load_...` function that rejects unknown
   keys, validates types and raises `ValueError` naming the key; if the platform needs
   secrets, read them from environment variables, never from the config file. Wire it in `src/kelpie/app.py`: a field on `Settings`, a loader
-  called from `load_settings` (`_load_claude_code`), the new name in the allowed
-  `[adapters]` entries (the check at the top of `_load_hermes`) and a branch in
-  `build_adapters`. Document the section in [docs/configuration.md](docs/configuration.md)
+  called from `load_settings` (`_load_claude_code`), the new section in `ADAPTER_SECTIONS`
+  and a branch in `build_adapters`. Add the adapter's `name` to `ADAPTER_NAMES` in
+  `src/kelpie/remote/protocol.py`, or a multi-host hub refuses its boards
+  (`tests/remote/test_config.py` checks both lists). Document the section in [docs/configuration.md](docs/configuration.md)
   and `kelpie.example.toml`.
 
 ### 7. Tests and fixtures

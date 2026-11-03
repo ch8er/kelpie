@@ -154,6 +154,10 @@ from kelpie.traces.store import OffenderWatch, SpanRetention, SpanWindow, merge_
 
 log = logging.getLogger(__name__)
 
+# The [adapters.*] sections Kelpie knows; each builds one adapter, whose name a hub takes
+# from agents only when it is in kelpie.remote.protocol.ADAPTER_NAMES (tests/remote).
+ADAPTER_SECTIONS = frozenset({"hermes", "claude_code", "openclaw", "github_issues", "linear"})
+
 # [adapters.hermes] author: a name as Hermes writes profile names.
 _AUTHOR = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 # Names a Hermes home already writes comments as: the default profile, the CLI's fallback
@@ -444,7 +448,7 @@ def _load_connectors(
 def _load_hermes(adapters: Any) -> HermesSettings | None:
     if not isinstance(adapters, Mapping):
         raise ConfigError("[adapters] must be a table")
-    if extra := set(adapters) - {"hermes", "claude_code", "openclaw", "github_issues", "linear"}:
+    if extra := set(adapters) - ADAPTER_SECTIONS:
         raise ConfigError(f"unknown [adapters] entries: {sorted(extra)}")
     if "hermes" not in adapters:
         return None

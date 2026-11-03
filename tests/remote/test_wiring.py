@@ -79,7 +79,7 @@ def test_an_agents_board_is_merged_and_actions_route_back(
         snapshot = app.loop.snapshot_source()
         assert [t.id for t in snapshot.tasks] == ["laptop:t_1a"]
         assert snapshot.unobserved == ()
-        assert "laptop/fake" in app.engine.executors
+        assert "laptop/hermes" in app.engine.executors
         assert "kelpie_agent_up" in app.metrics.render()
     finally:
         app.close()
