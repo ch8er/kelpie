@@ -67,6 +67,7 @@ from kelpie.connectors.github.connector import (
     web_host,
 )
 from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.files import db_files, loose
 from kelpie.core.model import Status
 from kelpie.core.ports import PlatformAdapter
 from kelpie.core.snooze import marker_snooze
@@ -344,6 +345,35 @@ def _newest_span(path: Path) -> str | None:
         raise
     finally:
         conn.close()
+
+
+PRIVATE_CHECK = "data files private"
+
+
+def check_private_files(settings: Settings) -> Check:
+    """``kelpie.db`` (with ``-wal``/``-shm``) and the report files are readable by Kelpie's
+    user only. Kelpie creates them 0600; older or copied files keep their mode, and doctor
+    only names them: it never changes a mode."""
+    paths: list[Path] = []
+    if settings.db_path is not None:
+        paths += db_files(settings.db_path.expanduser())
+    folder = settings.report.dir
+    if folder is not None and folder.expanduser().is_dir():
+        paths += sorted(folder.expanduser().glob("kelpie-report-*.md"))
+    if not paths:
+        return _skip(PRIVATE_CHECK, "no database file and no report files")
+    found = loose(paths)
+    if found:
+        return _warn(
+            PRIVATE_CHECK,
+            f"{len(found)} file(s) others may read (task titles, block reasons): {_paths(found)}",
+            "chmod 600 them (and chmod 700 their folder) if other users of this machine "
+            "should not read them; Kelpie creates new ones 0600 and leaves these as they are",
+        )
+    present = [p for p in paths if p.exists()]
+    if not present:
+        return _skip(PRIVATE_CHECK, "no database file and no report files yet")
+    return _pass(PRIVATE_CHECK, f"{len(present)} file(s), none readable by others")
 
 
 TOKEN_CHECK = "traces token kept private"
@@ -1311,6 +1341,7 @@ def run_checks(
     ]
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
     checks.append(check_traces_token(settings, environ))
+    checks.append(check_private_files(settings))
     checks.append(check_prices(settings, at))
     checks.append(check_spend_modes(settings, at))
     checks += check_cost_reports(settings, at, environ)

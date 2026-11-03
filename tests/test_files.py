@@ -1,0 +1,150 @@
+"""Private files (#304, audit #275 L5): Kelpie's database, its -wal/-shm and the report
+files are created for its own user only; existing files keep their mode, and doctor names
+the ones others may read."""
+
+from __future__ import annotations
+
+import os
+import stat
+from collections.abc import Iterator
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from kelpie.app import Settings
+from kelpie.core.files import create_private, db_files, loose, private_dir, write_private
+from kelpie.core.storage import SqliteLedgerStore
+from kelpie.doctor import PRIVATE_CHECK, check_private_files
+from kelpie.report.config import ReportSettings
+from kelpie.report.fixes import FixStore
+from kelpie.report.run import write
+
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+
+
+def mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+@pytest.fixture
+def umask(request: pytest.FixtureRequest) -> Iterator[int]:
+    value = getattr(request, "param", 0o022)
+    old = os.umask(value)
+    try:
+        yield value
+    finally:
+        os.umask(old)
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o002, 0o000, 0o077], indirect=True)
+def test_a_new_database_and_its_folders_are_private(tmp_path: Path, umask: int) -> None:
+    db = tmp_path / "data" / "kelpie" / "kelpie.db"
+    store = SqliteLedgerStore(db)
+    try:
+        store._db.execute("CREATE TABLE IF NOT EXISTS probe (x)")  # the WAL now exists
+        store._db.execute("INSERT INTO probe VALUES (1)")
+        store._db.commit()
+        assert mode(tmp_path / "data") == 0o700
+        assert mode(tmp_path / "data" / "kelpie") == 0o700
+        files = [p for p in db_files(db) if p.exists()]
+        assert len(files) == 3  # kelpie.db, -wal, -shm
+        assert {mode(p) for p in files} == {0o600}
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("umask", [0o277], indirect=True)
+def test_a_stricter_umask_is_respected(tmp_path: Path, umask: int) -> None:
+    target = tmp_path / "new" / "key"
+    assert create_private(target)
+    assert mode(target) == 0o400
+    assert mode(tmp_path / "new") == 0o500
+
+
+def test_an_existing_folder_and_database_keep_their_mode(tmp_path: Path, umask: int) -> None:
+    folder = tmp_path / "shared"
+    folder.mkdir(mode=0o755)
+    folder.chmod(0o755)
+    db = folder / "kelpie.db"
+    db.touch()
+    db.chmod(0o644)
+    SqliteLedgerStore(db).close()
+    assert mode(folder) == 0o755
+    assert mode(db) == 0o644  # never chmodded: doctor names it instead
+    assert loose(db_files(db)) == [p for p in db_files(db) if p.exists()]
+
+
+def test_the_fix_log_creates_a_private_database(tmp_path: Path, umask: int) -> None:
+    db = tmp_path / "state" / "kelpie.db"
+    FixStore(db).close()
+    assert mode(db) == 0o600
+    assert mode(db.parent) == 0o700
+
+
+def test_report_files_are_private(tmp_path: Path, umask: int) -> None:
+    settings = ReportSettings(dir=tmp_path / "reports")
+    path = write("# day\n", settings, date(2026, 11, 2))
+    assert path is not None
+    assert mode(path) == 0o600
+    assert mode(tmp_path / "reports") == 0o700
+    assert path.read_text(encoding="utf-8") == "# day\n"
+    # A report written again keeps its file (and whatever mode the operator gave it).
+    path.chmod(0o640)
+    write("# day, again\n", settings, date(2026, 11, 2))
+    assert mode(path) == 0o640
+    assert path.read_text(encoding="utf-8") == "# day, again\n"
+
+
+def test_a_report_is_never_written_through_a_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.write_text("keep\n")
+    link = tmp_path / "report.md"
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        write_private(link, "x")
+    assert target.read_text() == "keep\n"
+
+
+def test_private_dir_leaves_existing_folders_alone(tmp_path: Path, umask: int) -> None:
+    tmp_path.chmod(0o755)
+    private_dir(tmp_path / "a" / "b")
+    assert mode(tmp_path) == 0o755
+    assert mode(tmp_path / "a") == 0o700
+    private_dir(tmp_path / "a" / "b")  # again: nothing to do
+
+
+def test_loose_skips_symlinks_and_folders(tmp_path: Path) -> None:
+    target = tmp_path / "t"
+    target.write_text("x")
+    target.chmod(0o644)
+    link = tmp_path / "l"
+    link.symlink_to(target)
+    folder = tmp_path / "d"
+    folder.mkdir(mode=0o755)
+    assert loose([target, link, folder, tmp_path / "missing"]) == [target]
+
+
+def test_doctor_names_loose_files_and_changes_nothing(tmp_path: Path, umask: int) -> None:
+    db = tmp_path / "kelpie.db"
+    SqliteLedgerStore(db).close()
+    reports = tmp_path / "reports"
+    settings = Settings(db_path=db, report=ReportSettings(dir=reports))
+    write("# day\n", settings.report, date(2026, 11, 2))
+    check = check_private_files(settings)
+    assert (check.status, check.name) == ("PASS", PRIVATE_CHECK)
+
+    report = reports / "kelpie-report-2026-11-02.md"
+    report.chmod(0o644)
+    db.chmod(0o640)
+    check = check_private_files(settings)
+    assert check.status == "WARN"
+    assert str(db) in check.detail and str(report) in check.detail
+    assert "chmod 600" in (check.fix or "")
+    assert mode(db) == 0o640 and mode(report) == 0o644  # doctor never chmods
+
+
+def test_doctor_skips_without_files(tmp_path: Path) -> None:
+    check = check_private_files(Settings(db_path=tmp_path / "none.db"))
+    assert check.status == "SKIP"
+    assert check_private_files(Settings(db_path=None)).status == "SKIP"

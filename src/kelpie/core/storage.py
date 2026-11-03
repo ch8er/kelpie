@@ -23,6 +23,7 @@ from typing import NamedTuple, cast
 
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
+from kelpie.core.files import prepare_db
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
 from kelpie.core.model import ReportedCost, Snooze, SnoozeSource, Span, SpanKind, SpanTotals
 from kelpie.core.snooze import EXPIRED_KEPT, MAX_BY, MAX_REASON, PRUNE_AFTER
@@ -268,6 +269,7 @@ def ledger_entry(row: sqlite3.Row) -> LedgerEntry:
 
 
 def _open(path: Path | str, busy_timeout_ms: int) -> sqlite3.Connection:
+    prepare_db(path)  # a new database (and its -wal/-shm) is private: 0600 in a 0700 folder
     db = sqlite3.connect(str(path), check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")

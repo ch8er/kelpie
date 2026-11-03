@@ -367,9 +367,11 @@ configured.
 | Reports | Kept in `[report] dir` until you delete them. |
 
 SQLite reuses the space of deleted rows but does not overwrite it at once; deleted spans can
-remain in the file's free pages until then. Kelpie creates `kelpie.db` with the default file
-permissions of its process (umask); keep the database directory readable only by the user
-that runs Kelpie. To remove everything Kelpie stored, stop it and delete `kelpie.db`,
+remain in the file's free pages until then. Kelpie creates `kelpie.db` (and SQLite its `-wal` and
+`-shm`) mode 0600 and a missing database folder 0700, narrowed further by a stricter umask;
+report files in `[report] dir` likewise. Files and folders that already exist keep their
+mode: `kelpie doctor` warns about the ones others may read ("data files private") and
+never changes them ([security](security.md#files-kelpie-writes)). To remove everything Kelpie stored, stop it and delete `kelpie.db`,
 `kelpie.db-wal` and `kelpie.db-shm`; cooldowns and open alert states are lost with them.
 
 ## Keeping less

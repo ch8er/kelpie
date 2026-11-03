@@ -17,6 +17,7 @@ from typing import Protocol
 
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
+from kelpie.core.files import write_private
 from kelpie.core.model import Reconciliation, Snapshot, Snooze
 from kelpie.core.spend import SpendConfig
 from kelpie.core.storage import TokenRow
@@ -176,9 +177,8 @@ def write(markdown: str, settings: ReportSettings, day: date) -> Path | None:
     """Write the report to ``[report] dir``; None when no directory is configured."""
     if settings.dir is None:
         return None
-    settings.dir.mkdir(parents=True, exist_ok=True)
     path = settings.dir / f"kelpie-report-{day.isoformat()}.md"
-    path.write_text(markdown, encoding="utf-8")
+    write_private(path, markdown)  # a new report 0600, a new folder 0700
     return path
 
 
