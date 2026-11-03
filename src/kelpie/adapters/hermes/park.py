@@ -119,6 +119,13 @@ WAIT_KEY_NAME = "hermes-wait.key"
 DEFAULT_WAIT_KEY = Path("~/.kelpie") / WAIT_KEY_NAME
 CLOCK_SKEW = timedelta(seconds=5)  # between Kelpie's clock and the time Hermes records
 _DOMAIN = "kelpie-wait:v2"
+
+
+def board_key(board: str) -> str:
+    """The file name of a board's own wait key ([[adapters.hermes.boards]])."""
+    return f"hermes-wait-{board}.key"
+
+
 # The marker is the reason's last word: "[kelpie-wait:v2:<issued>:<nonce>:<blob>.<mac>]".
 _MARKER = re.compile(
     r"\[kelpie-wait:v2:([0-9]{1,12}):([0-9a-f]{16}):([A-Za-z0-9_-]+=*)\.([0-9a-f]{64})\]\s*\Z"

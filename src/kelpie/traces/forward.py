@@ -98,6 +98,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
+# Plain http never goes through a proxy from the environment: the proxy would see the
+# headers (secrets) and the spans in clear. https may (a CONNECT tunnel).
+_DIRECT = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
+MAX_RESPONSE = 64 * 1024  # bytes of a collector's answer read (its body is not used)
 
 
 def send_http(destination: Destination, export: Export) -> None:
@@ -110,8 +114,9 @@ def send_http(destination: Destination, export: Export) -> None:
     if export.content_encoding:
         request.add_header("Content-Encoding", export.content_encoding)
     try:
-        with _OPENER.open(request, timeout=destination.timeout) as response:
-            response.read()
+        opener = _DIRECT if request.type == "http" else _OPENER
+        with opener.open(request, timeout=destination.timeout) as response:
+            response.read(MAX_RESPONSE)
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             raise SendError(f"HTTP {exc.code} redirect (not followed)", False) from None

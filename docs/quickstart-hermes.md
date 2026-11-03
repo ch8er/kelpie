@@ -81,27 +81,72 @@ profiles need the plugin in each profile's `HERMES_HOME`; point them all at one 
 
 Skip this if you do not use the hermes-otel plugin; the hooks already give Kelpie tool
 calls. When a tool call arrives both ways Kelpie keeps it once (matched by tool call id).
-Otherwise start Kelpie with a token:
+Otherwise keep the token in one file, so it can be rotated in one place. In
+`kelpie.toml`:
+
+```toml
+[traces]
+token_file = "~/.config/kelpie/traces.env"   # holds KELPIE_TRACES_TOKEN=...
+```
+
+and create the file as the user `kelpie serve` runs as (mode 600; the command prints no
+token):
 
 ```bash
-export KELPIE_TRACES_TOKEN=$(openssl rand -hex 24)
+uv run kelpie traces rotate-token
 uv run kelpie serve        # 127.0.0.1:9464; POST /v1/traces, /metrics, /healthz
 ```
 
-and add an OTLP backend to `~/.hermes/hermes_otel.yaml` (OTLP over HTTP; use the same token):
+Then add an OTLP backend to `~/.hermes/hermes_otel.yaml` (OTLP over HTTP). When Kelpie is
+the only OTLP backend there that sets no headers of its own, you can give hermes-otel the
+token through the environment, read from the same file, so no profile holds a copy:
+OpenTelemetry's Python exporters read `OTEL_EXPORTER_OTLP_TRACES_HEADERS` when a backend
+sets no headers. Start the Hermes gateway or dispatcher with only that variable set, read
+in a subshell so the token itself is not exported (this needs Hermes to run as the same
+user as `kelpie serve`, since the file is mode 600):
+
+```bash
+if t=$(. ~/.config/kelpie/traces.env && printf %s "$KELPIE_TRACES_TOKEN") && [ -n "$t" ]; then
+  export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer%20$t"
+else
+  echo "no traces token in ~/.config/kelpie/traces.env" >&2
+fi
+unset t
+```
+
+Every OTLP exporter in that process without headers of its own sends this header, and the
+agents Hermes starts inherit the variable (an agent that prints its environment prints the
+token). If another backend (Langfuse, Phoenix) has no headers set, or your agents run
+untrusted tools, give each backend its own `headers` instead and keep the list of files
+that hold the token short (`kelpie doctor` lists them). Leave `headers` out of the Kelpie
+backend when using the variable:
 
 ```yaml
 backends:
   - type: otlp
     endpoint: http://127.0.0.1:9464/v1/traces
-    headers:
-      Authorization: "Bearer <the KELPIE_TRACES_TOKEN value>"
     metrics: false
     logs: false
 ```
 
-Restart the Hermes gateway or dispatcher afterwards. The key layout above follows the
-hermes-otel source; check it against the version you installed.
+Whether your hermes-otel version leaves headers to the environment is **unverified**; if
+it does not, the backend needs `headers: {Authorization: "Bearer <token>"}` in each
+profile's `hermes_otel.yaml`, and a rotation has to update each of them (`kelpie doctor`
+lists the files that hold the token). Restart the Hermes gateway or dispatcher afterwards.
+The key layout above follows the hermes-otel source; check it against the version you
+installed.
+
+**Rotating the token** (for example after it was printed into a tool output): run
+`uv run kelpie traces rotate-token` as the user `kelpie serve` runs as, who owns the
+file and its folder (`sudo -u <that user>`, never as root on someone else's folder). It
+writes a new token and keeps the old one valid for
+`[traces] token_grace` (2h), so running sessions keep reporting; restart Hermes so new
+sessions start with the new one, and update any profile that holds the token itself.
+`kelpie_traces_grace_requests_total` on `/metrics` shows who still uses the old one; when
+it stops growing, or at once if the old token must stop working now,
+`kelpie traces rotate-token --grace 0s` rotates again and accepts no previous token.
+Delete backups of the configs (`*.bak*`): they keep old tokens, and `kelpie doctor` warns
+about backups that hold the token or a `KELPIE_TRACES_TOKEN=` line.
 
 ## 5. Run and check
 
@@ -112,14 +157,22 @@ uv run kelpie status               # rules, their mode, board readable, spool ag
 curl -s localhost:9464/metrics | grep -E '^kelpie_(dry_run|engine_ticks_total|actions_total|snapshot_spans)'
 ```
 
+With the config of step 2 alone and without step 4, `kelpie serve` logs one warning at
+start, expected in observe mode: OTLP ingest accepts spans without a token (it listens on
+`127.0.0.1` only).
+
 `kelpie doctor` checks: config and rules load; each rule's mode is what the config says
 (all observe, dry-run on, after this quickstart); the board
 is readable; the spool has a line from the last hour; spans arrived in the last hour (SKIP if
-none ever did: OTLP is optional); worktrees of live tasks are readable by git; block
+none ever did: OTLP is optional); worktrees of live tasks are readable by git; a stop can
+end the stopped run's worker on this host (`/proc` on Linux, libproc on macOS; a WARN when
+neither, or with `end_worker = false`); block
 reasons that name a PR can be checked by `[[block_conditions]]` (a WARN, not a failure,
 when not: those blocks would look stuck); Prometheus
 answers (`--prometheus URL` or `KELPIE_PROMETHEUS_URL`, otherwise `localhost:9090` is tried
-and skipped if absent). "hooks fire" and "OTLP spans arrive" are SKIP while no task is
+and skipped if absent). It also FAILs `disk watched` until rule 7 reads the disks from
+Prometheus (`[resources.prometheus]`, step 6 and install.md, "Host resources"): on a live farm
+a disk filled unseen without it (incident 19). "hooks fire" and "OTLP spans arrive" are SKIP while no task is
 running; run doctor while one is, to make them count.
 Run it in the directory (and with the `KELPIE_DB`) that `kelpie serve` uses: it reads the span
 store from there.
@@ -163,9 +216,11 @@ docker compose exec kelpie kelpie doctor --prometheus http://prometheus:9090
 Prometheus has a ready `kelpie` scrape job; the `node` job targets `node-exporter:9100`
 (`docker compose --profile local-agents up`), otherwise it shows as down, which is harmless.
 
-Optional: to get disk and memory alerts and a heavy-task limit, point Kelpie at that
-Prometheus with `[resources.prometheus]` and `[engine.rules.resources]` (see
-`kelpie.example.toml`); without them the `resources` rule has no data and stays silent.
+Disk and memory alerts and a heavy-task limit: point Kelpie at that Prometheus with
+`[resources.prometheus]` and `[engine.rules.resources]` (see `kelpie.example.toml` and
+[install.md, Host resources](install.md#host-resources-node_exporter-prometheus-and-directory-sizes)).
+Without them the `resources` rule has no data and stays silent, and `kelpie doctor` fails
+`disk watched`.
 
 Optional: real-time alerts to Telegram with `[[alerts.channels]]` (`type = "telegram"`,
 bot token from an environment variable, see `kelpie.example.toml`); `kelpie status` shows the

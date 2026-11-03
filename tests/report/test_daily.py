@@ -481,6 +481,8 @@ def test_report_config() -> None:
     assert settings.hour_usd == 4.0 and settings.channels == ("ops",)
     assert settings.dir is not None and "~" not in str(settings.dir)
     assert load_report(None) == ReportSettings()
+    longest = "https://board.example.org/" + "a" * 510 + "{id}"  # 600 once a 64-char id fills it
+    assert load_report({"task_url": longest}).task_url == longest
     tables = load_report({"sections": {"model-fit": {"routine_roles": ["reviewer"]}}})
     assert tables.sections == {"model-fit": {"routine_roles": ["reviewer"]}}
 
@@ -494,6 +496,12 @@ def test_report_config() -> None:
         {"timezone": ""},
         {"dir": ""},
         {"task_url": "https://no-placeholder"},
+        {"task_url": "javascript:{id}"},  # not http(s)
+        {"task_url": "https://{id}.board.example.org/"},  # {id} in the host
+        {"task_url": "https://user:secret@board.example.org/t/{id}"},  # credentials
+        {"task_url": "board://t/{id}"},  # not http(s)
+        {"task_url": 3},
+        {"task_url": "https://board.example.org/" + "a" * 511 + "{id}"},  # 601 once filled
         {"url": "https://reports.example.org/latest.md"},  # no {date}
         {"url": "file:///srv/reports/kelpie-report-{date}.md"},  # not http(s)
         {"url": "https://{date}.reports.example.org/"},  # {date} in the host
@@ -520,8 +528,10 @@ def test_report_config_errors(section: Any) -> None:
 # --- accounting edge cases (review findings) ------------------------------------------
 
 
-def opened(sid: str, rule: str, since: datetime, opened_at: datetime, last: datetime) -> StateRow:
-    return StateRow(OpenState(sid, rule, since, opened_at, last, 0, Severity.WARNING, "s", "T-9"))
+def opened(
+    sid: str, rule: str, since: datetime, opened_at: datetime, last: datetime, task: str = "T-9"
+) -> StateRow:
+    return StateRow(OpenState(sid, rule, since, opened_at, last, 0, Severity.WARNING, "s", task))
 
 
 def day_inputs(**kw: Any) -> ReportInputs:
@@ -782,8 +792,9 @@ def test_cards_stuck_before_work_are_their_own_line() -> None:
         at(6),
         at(8),
         at(12),
+        "T-5",
     )
-    ownerless = opened("orphan_status:T-3", "orphan_status", at(9), at(9), at(10))
+    ownerless = opened("orphan_status:T-3", "orphan_status", at(9), at(9), at(10), "T-3")
     chaos = {c.rule: c for c in build_report(day_inputs(states=[stuck, ownerless])).chaos}
     assert chaos["orphan_status:prework"].hours == pytest.approx(4.0)
     assert chaos["orphan_status:prework"].cause == "cards stuck before work (triage, scheduled)"
@@ -985,3 +996,89 @@ def test_every_date_placeholder_is_filled(db: Path) -> None:
     link = summary_items(report, settings.url)[2]
     assert link == "https://reports.example.org/2026-03-02/report.md?day=2026-03-02"
     assert load_report({}).url is None
+
+
+def test_an_outage_s_state_is_no_lost_work_of_its_own() -> None:
+    """A block storm is rule 4's state, but its hours are its tasks' own blocks' (#252)."""
+    from kelpie.core.actions import Severity
+    from kelpie.core.incidents import incident_state_id
+    from kelpie.core.states import OpenState
+    from kelpie.report.daily import is_chaos
+
+    t = datetime(2026, 3, 2, tzinfo=UTC)
+    storm = OpenState(incident_state_id("stale_blocks", "x"), "stale_blocks", t, t, t, 0,
+                      Severity.WARNING, "s")  # fmt: skip
+    assert not is_chaos(storm)
+    assert is_chaos(
+        OpenState("stale_blocks:T-1:b", "stale_blocks", t, t, t, 0, Severity.WARNING, "s")
+    )
+
+
+def test_a_runaway_context_is_no_lost_work() -> None:
+    from kelpie.core.actions import Severity
+    from kelpie.core.states import OpenState
+    from kelpie.report.daily import is_chaos
+
+    at = datetime(2026, 3, 2, 9, tzinfo=UTC)
+
+    def state(sid: str) -> OpenState:
+        return OpenState(sid, "no_progress", at, at, at, 0, Severity.INFO, "x", task_id="T-9")
+
+    assert is_chaos(state("no_progress:S-1"))  # tokens without progress: lost work
+    assert not is_chaos(state("no_progress/context:S-1"))  # re-read context: not idle work
+
+
+def test_a_built_in_tools_advice_is_its_title_not_a_filter() -> None:
+    from kelpie.core.budgets import PriceTable
+    from kelpie.report.daily import _Pricer, _recommendations
+    from kelpie.traces.outputs import DEFAULT_FILTERS, OutputGroup, Recommendation
+
+    by_name = {f.name: f for f in DEFAULT_FILTERS}
+    group = OutputGroup("developer", "tool:vision_analyze", 40, 400_000, 20_000, False)
+    image = Recommendation(group, by_name["downscale-images"], 200_000, False, None, True)
+    shell = OutputGroup("developer", "xcodebuild", 4, 160_000, 40_000, False)
+    filtered = Recommendation(shell, by_name["xcbeautify"], 112_000, False, None, True)
+    advice = _recommendations(
+        ReportInputs(day=DAY, tz=UTC), (), (), [image, filtered], _Pricer(PriceTable()), {}
+    )
+    titles = [a.title for a in advice]
+    assert "Downscale images: `tool:vision_analyze` output (developer)" in titles
+    assert "Filter `xcodebuild` output (developer) with xcbeautify" in titles
+    assert not any("with downscale-images" in t for t in titles)
+    [image_advice] = [a for a in advice if a.title.startswith("Downscale images")]
+    assert "once noted with `kelpie fix`" in image_advice.detail
+    # an advice row the farm's spans already name is still advice, not "route it through"
+    in_use = _recommendations(
+        ReportInputs(day=DAY, tz=UTC), (), (), [image], _Pricer(PriceTable()), {},
+        filters_in_use=frozenset({("downscale-images", None)}),
+    )  # fmt: skip
+    [again] = in_use
+    assert by_name["downscale-images"].how in again.detail
+    assert "route it through" not in again.detail
+
+
+def test_needs_a_human_names_the_advice_for_a_built_in_tool() -> None:
+    from dataclasses import replace
+
+    from kelpie.traces.outputs import DEFAULT_FILTERS, OutputGroup, Recommendation
+
+    by_name = {f.name: f for f in DEFAULT_FILTERS}
+    day = datetime(2026, 3, 1, tzinfo=UTC).date()
+    hot = (day, day)
+    image = OutputGroup(
+        "developer", "tool:vision_analyze", 40, 400_000, 20_000, False, hot_days=hot
+    )
+    shell = OutputGroup(None, "xcodebuild", 4, 160_000, 40_000, False, hot_days=hot)
+    report = replace(
+        build_report(ReportInputs(day=DAY, tz=UTC)),
+        offenders=(
+            Recommendation(image, by_name["downscale-images"], 1, True, None, True),
+            Recommendation(shell, by_name["xcbeautify"], 1, True, None, True),
+        ),
+    )
+    markdown = render_markdown(report)
+    assert (
+        '- add "Downscale images" for `tool:vision_analyze` to the developer\'s instructions'
+        in markdown
+    )
+    assert "- add xcbeautify for `xcodebuild` to the agents' instructions" in markdown

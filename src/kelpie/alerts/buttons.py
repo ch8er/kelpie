@@ -1,0 +1,1196 @@
+"""Snoozing from the alert itself: Telegram buttons and the poller that takes presses (#176).
+
+This is an inbound control channel, so it is built to do one small thing and refuse the
+rest. Off by default (``buttons = true`` on a Telegram channel turns it on).
+
+**What a press can do.** Snooze one task for 1, 3 or 7 days, nothing else: the only action
+code is ``s`` (snooze) and the only durations are :data:`~kelpie.core.snooze.CHAT_DAYS`. A
+press can never unblock, close, stop or requeue a task, or change a mode. The snooze is
+stored like ``kelpie snooze``'s with ``source = "chat"``
+(:func:`kelpie.core.snooze.chat_snooze`, written through the ``on_snooze`` callback the app
+wires to its store), so it ends early when more work is blocked behind the task, and every
+press is recorded in the ledger (who, what, until), in the same transaction as the snooze.
+A press never shortens a snooze from another source (``kelpie snooze``) that ends later:
+it is refused (``already_snoozed``) and the person is told until when the task is snoozed.
+Like ``kelpie snooze``'s, a chat snooze is stored under the global dry-run too (it only
+quiets alerts); its ledger entry then says so.
+
+**Who may press.** A ``callback_query`` is taken only when its sender's user id is in
+``allowed_user_ids`` **and** the message it came from is in the configured ``chat_id``.
+Everything else is ignored and counted (``kelpie_chat_rejected_total{reason}``):
+``unknown_user``, ``wrong_chat``, ``bad_ref`` (unknown, forged, truncated, for another chat
+or another message), ``expired_ref``, ``used_ref``, ``already_snoozed``, ``rate_limited``
+(more than :data:`RATE_LIMIT` presses by one user within :data:`RATE_WINDOW` seconds),
+``malformed`` and ``not_callback`` (any other update type, which Telegram should not even
+send: ``allowed_updates`` asks for callback queries only). A press from someone not
+allowed, from another chat, malformed or rate limited gets no answer at all; a refused
+press of an allowed person in the chat gets the same neutral toast, "Not allowed." (for
+``already_snoozed``, until when the task is snoozed; for ``expired_ref``, that the button
+has expired and the ``kelpie snooze`` command that still works, and that message's buttons
+are taken off).
+
+**The reference.** ``callback_data`` never carries task text, only a short signed
+reference to a record Kelpie keeps (``refs``: the channel, chat, alert, task, item number,
+when it was issued and the message it went out in)::
+
+    s<days>.<record id, hex>.<HMAC-SHA256, first 16 bytes, base64url>
+    s3.1f.Yj1u6p0mJ8b0KQ3x9qTgZw            # 25 bytes; at most 41 (Telegram allows 64)
+
+The MAC covers a version tag, the chat id, the days and the record id, under a 32-byte key
+Kelpie generates on first use and keeps in the button store (never in config, never
+logged). It is compared with :func:`hmac.compare_digest`. Record ids are never reused
+(``AUTOINCREMENT``), so an old reference can never name a newer record.
+
+**Expiry.** A reference is good for :data:`REF_TTL` (24 hours, the longest escalation step)
+after it was issued, and only while it is on the latest message of its alert in that chat:
+every message the channel delivers is recorded as its alert's latest (with buttons or
+without: a "resolved" message, a digest with nothing to snooze), so any newer message of
+the same alert makes the older buttons expire. A resolve the channel does not show (it is
+``info``, below the default ``min_severity``) expires them too (the delivery layer hands it
+to :meth:`~kelpie.alerts.telegram.TelegramChannel.expire`). The channel then also removes
+the older message's buttons (``editMessageReplyMarkup``, best effort). An alert is its
+long-lived state (``AlertEvent.state``, the same across escalation steps and on the resolve
+notice), else its rule and subject.
+A reference is used once: it is claimed atomically before the snooze is written, and the
+claim is released when the write fails.
+
+**Replay.** The poller uses ``getUpdates`` long polling only (no webhook) and persists the
+update offset, moving it past an update *before* acting on it: a press is taken at most
+once, also across restarts. An update below the stored offset is skipped, and the offset
+moves past every update Telegram returned, including those dropped as malformed.
+
+**The store** is a small SQLite file next to Kelpie's database
+(:func:`button_store_path`, ``kelpie.buttons.db`` beside ``kelpie.db``), created ``0600``,
+owned by Kelpie's user and never through a symlink (the file SQLite opened must be the one
+checked, or the store refuses to open; a directory others can write is warned about): the
+HMAC key, the update offset, the references, each alert's latest message and Kelpie's copy
+of each message with buttons. Kept apart from ``kelpie.db``, which other commands read and
+people share to debug.
+
+**The acknowledgement.** After a press the poller answers the callback (a short toast) and
+edits the alert in the configured chat, from Kelpie's own copy of the message (the text and
+entities Telegram answered ``sendMessage`` with, then as Kelpie last edited it; never the
+copy the press carries, which predates the edits of presses taken just before): the same
+entities (so no markup is parsed), every acknowledgement line so far plus "✅ 1. Snoozed
+T-101 until 2026-10-22 14:05 UTC by Alice", and the keyboard Kelpie sent without the
+buttons of any reference used on that message. The person's name is untrusted text: it is
+cleaned and its ``@`` broken (:func:`kelpie.alerts.render.one_line`), set in a ``code``
+entity (so Telegram links nothing in it) and, being plain text with explicit entities, never
+parsed as HTML. When the line would not fit Telegram's limit (or the message has no text),
+the buttons go and the line is sent as a reply to the message.
+
+**The poller** runs in its own thread, never in the engine's tick: a poll that returns
+early is followed by a pause (:data:`MIN_POLL_INTERVAL` from its start), errors back off
+exponentially (from 1 second to :data:`MAX_BACKOFF`, longer when Telegram says how long to
+wait), and ``stop`` plus ``join`` hold a deadline: a long poll still in flight then is
+abandoned and whatever it returns is ignored.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import logging
+import os
+import re
+import secrets
+import sqlite3
+import stat
+import threading
+import time
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Protocol
+
+from kelpie.alerts import i18n, render
+from kelpie.alerts.render import (
+    DEFAULT_RENDERING,
+    MAX_BUTTON,
+    MAX_ID,
+    MAX_TEXT,
+    RenderSettings,
+    SnoozeTarget,
+    one_line,
+    utf16_len,
+)
+from kelpie.core.alerts import AlertEvent
+from kelpie.core.snooze import CHAT_DAYS
+
+log = logging.getLogger(__name__)
+
+REF_TTL = timedelta(hours=24)  # a reference's life: the longest escalation step (4h, 12h, 24h)
+PRUNE_AFTER = timedelta(days=7)  # references kept after issue (expired ones say so till then)
+PRUNE_EVERY = 3600.0  # seconds between two prunes by the poller
+RATE_LIMIT = 10  # presses one user may make...
+RATE_WINDOW = 60.0  # ...within this many seconds; more are dropped without an answer
+POLL_TIMEOUT = 25  # seconds Telegram holds a getUpdates open
+MIN_POLL_INTERVAL = 1.0  # seconds from one getUpdates to the next, at the least
+UPDATES_LIMIT = 10  # updates per getUpdates
+MAX_UPDATES_BYTES = 1024 * 1024
+MAX_BACKOFF = 300.0
+ANSWER_TIMEOUT = 5.0  # seconds for an answerCallbackQuery (a toast is useless when late)
+MAX_ALERT_KEY = 200
+MAX_NAME = 40  # characters of a person's name shown in the acknowledgement
+MAX_TOAST = 200  # Telegram's limit for an answerCallbackQuery text
+ACTION = "s"  # the only action a button carries: snooze
+_TAG = b"kelpie/telegram-snooze/v1"
+_DATA = re.compile(rf"{ACTION}([0-9])\.([1-9a-f][0-9a-f]{{0,14}})\.([A-Za-z0-9_-]{{22}})")
+_ENTITY_TYPES = frozenset(
+    {"bold", "italic", "underline", "strikethrough", "code", "pre", "text_link", "url"}
+)
+OUTCOMES = ("snoozed", "rejected", "failed")
+REASONS = (
+    "unknown_user",
+    "wrong_chat",
+    "bad_ref",
+    "expired_ref",
+    "used_ref",
+    "already_snoozed",
+    "rate_limited",
+    "malformed",
+    "not_callback",
+)
+
+
+# --- the signed reference ------------------------------------------------------------------
+
+
+def _mac(key: bytes, chat_id: str, days: int, ref_id: int) -> str:
+    message = b"\n".join((_TAG, chat_id.encode(), str(days).encode(), str(ref_id).encode()))
+    digest = hmac.new(key, message, hashlib.sha256).digest()[:16]
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def callback_data(key: bytes, chat_id: str, days: int, ref_id: int) -> str:
+    """The ``callback_data`` of a snooze button: ``s<days>.<id hex>.<mac>``, at most 41
+    bytes."""
+    if days not in CHAT_DAYS or ref_id < 1:
+        raise ValueError("a snooze button is 1, 3 or 7 days on a stored reference")
+    return f"{ACTION}{days}.{ref_id:x}.{_mac(key, chat_id, days, ref_id)}"
+
+
+def parse_callback(data: object, key: bytes, chat_id: str) -> tuple[int, int] | None:
+    """The reference id and the days of a button's ``callback_data``, or None when it is not
+    one Kelpie signed for this chat (malformed, truncated, forged, another chat's)."""
+    if not isinstance(data, str):
+        return None
+    m = _DATA.fullmatch(data)
+    if m is None:
+        return None
+    days, ref_id = int(m[1]), int(m[2], 16)
+    if days not in CHAT_DAYS:
+        return None
+    if not hmac.compare_digest(m[3].encode("ascii"), _mac(key, chat_id, days, ref_id).encode()):
+        return None
+    return ref_id, days
+
+
+def _ref_id(data: object) -> int | None:
+    """The record id of what looks like a Kelpie button (signature not checked)."""
+    m = _DATA.fullmatch(data) if isinstance(data, str) else None
+    return int(m[2], 16) if m else None
+
+
+def alert_key(event: AlertEvent) -> str:
+    """What identifies an alert across its escalation steps: its long-lived state, else its
+    rule and subject."""
+    key = event.state or f"{event.rule}|{event.subject}"
+    return key[:MAX_ALERT_KEY]
+
+
+# --- the store -----------------------------------------------------------------------------
+
+
+def button_store_path(db_path: Path) -> Path:
+    """Where the button store lives: beside Kelpie's database (``kelpie.buttons.db`` next to
+    ``kelpie.db``)."""
+    return db_path.with_name(f"{db_path.stem}.buttons.db")
+
+
+@dataclass(frozen=True, slots=True)
+class Ref:
+    """A stored reference: what a button press would snooze."""
+
+    id: int
+    channel: str
+    chat_id: str
+    alert: str
+    task_id: str
+    item: int
+    issued_at: datetime
+    message_id: int | None
+    used_at: datetime | None
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS refs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel    TEXT NOT NULL,
+    chat_id    TEXT NOT NULL,
+    alert      TEXT NOT NULL,
+    task_id    TEXT NOT NULL,
+    item       INTEGER NOT NULL,
+    issued_at  TEXT NOT NULL,
+    message_id INTEGER,
+    used_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS refs_alert ON refs (channel, chat_id, alert, issued_at);
+CREATE INDEX IF NOT EXISTS refs_issued ON refs (issued_at);
+CREATE TABLE IF NOT EXISTS latest (
+    channel    TEXT NOT NULL,
+    chat_id    TEXT NOT NULL,
+    alert      TEXT NOT NULL,
+    message_id INTEGER,
+    sent_at    TEXT NOT NULL,
+    PRIMARY KEY (channel, chat_id, alert)
+);
+CREATE TABLE IF NOT EXISTS messages (
+    channel    TEXT NOT NULL,
+    chat_id    TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    entities   TEXT NOT NULL,
+    markup     TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (channel, chat_id, message_id)
+);
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Shown:
+    """Kelpie's copy of a message with buttons, as it stands: the text and entities
+    Telegram answered ``sendMessage`` (or Kelpie's last edit) with, and the keyboard sent."""
+
+    text: str
+    entities: list[dict[str, Any]]
+    markup: dict[str, Any]
+
+
+_KEY = "hmac_key"
+
+
+def _ts(at: datetime) -> str:
+    if at.tzinfo is None:
+        raise ValueError("button store times must be timezone-aware")
+    return at.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def _private_file(path: Path) -> tuple[int, int]:
+    """Create ``path`` with mode 0600 (or tighten it), never through a symlink; its
+    ``(st_dev, st_ino)``. ValueError when it is not a regular file or another user owns it;
+    a warning when its directory is writable by others (they could replace it)."""
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"{path} is not a regular file")
+        if hasattr(os, "geteuid") and st.st_uid != os.geteuid():
+            raise ValueError(f"{path} belongs to another user (uid {st.st_uid})")
+        if st.st_mode & 0o077:
+            os.fchmod(fd, 0o600)
+            log.warning("button store %s was readable by others; set to 0600", path)
+        identity = st.st_dev, st.st_ino
+    finally:
+        os.close(fd)
+    try:
+        parent = os.stat(path.parent)
+    except OSError:
+        return identity
+    if parent.st_mode & 0o022:
+        log.warning(
+            "button store %s: its directory is writable by others, who could replace the "
+            "file; keep it in a directory only Kelpie's user can write",
+            path,
+        )
+    return identity
+
+
+def _same_file(path: Path, identity: tuple[int, int]) -> bool:
+    """Whether ``path`` itself (not a symlink) is still the file with ``identity``."""
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == identity
+
+
+def _held_open(identity: tuple[int, int]) -> bool | None:
+    """Whether one of this process's open descriptors is the file with ``identity`` (the
+    one SQLite opened, once it has read the database: :func:`_private_file` closed its own),
+    read from ``/proc/self/fd`` or ``/dev/fd``; None where neither can be listed."""
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            try:
+                st = os.fstat(int(name))
+            except (OSError, ValueError):
+                continue  # the listing's own descriptor, closed by now
+            if (st.st_dev, st.st_ino) == identity:
+                return True
+        return False
+    return None
+
+
+class ButtonStore:
+    """The HMAC key, the update offsets, the references and each alert's latest message,
+    in one SQLite file (or in memory with ``":memory:"``). Thread-safe: the alert worker
+    issues references while the poller reads them."""
+
+    def __init__(self, path: Path | str) -> None:
+        identity = None if str(path) == ":memory:" else _private_file(Path(path))
+        self._lock = threading.Lock()
+        self._db = sqlite3.connect(str(path), check_same_thread=False)
+        if identity is not None:
+            self._db.execute("PRAGMA schema_version").fetchone()  # SQLite opens the file now
+            if not _same_file(Path(path), identity) or _held_open(identity) is False:
+                # Swapped between the check and the open (a symlink, another file): the
+                # file SQLite has open is not the one checked. Fail closed.
+                self._db.close()
+                raise ValueError(f"{path} changed while it was opened")
+        self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA busy_timeout = 5000")
+        with self._db:
+            self._db.executescript(_SCHEMA)
+        self._key: bytes | None = None
+
+    def __repr__(self) -> str:  # never the key
+        return "ButtonStore()"
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    def key(self) -> bytes:
+        """The HMAC key, generated on first use (32 random bytes) and kept."""
+        if self._key is None:
+            with self._lock, self._db:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO meta (name, value) VALUES (?, ?)",
+                    (_KEY, secrets.token_hex(32)),
+                )
+                row = self._db.execute("SELECT value FROM meta WHERE name = ?", (_KEY,)).fetchone()
+            self._key = bytes.fromhex(row["value"])
+        return self._key
+
+    def offset(self, channel: str) -> int:
+        """The next update id to ask for (0: none taken yet)."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT value FROM meta WHERE name = ?", (f"offset:{channel}",)
+            ).fetchone()
+        try:
+            return max(int(row["value"]), 0) if row is not None else 0
+        except ValueError:
+            return 0
+
+    def set_offset(self, channel: str, offset: int) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO meta (name, value) VALUES (?, ?)",
+                (f"offset:{channel}", str(offset)),
+            )
+
+    def prune(self, at: datetime) -> int:
+        """Delete references, latest-message records and message copies older than
+        :data:`PRUNE_AFTER` at ``at`` (issued, sent or last edited); how many rows went."""
+        with self._lock, self._db:
+            return self._prune(at)
+
+    def _prune(self, at: datetime) -> int:
+        cutoff = _ts(at - PRUNE_AFTER)
+        return sum(
+            self._db.execute(sql, (cutoff,)).rowcount
+            for sql in (
+                "DELETE FROM refs WHERE issued_at < ?",
+                "DELETE FROM latest WHERE sent_at < ?",
+                "DELETE FROM messages WHERE updated_at < ?",
+            )
+        )
+
+    def issue(
+        self,
+        channel: str,
+        chat_id: str,
+        alert: str,
+        targets: Sequence[SnoozeTarget],
+        at: datetime,
+    ) -> list[int]:
+        """Store a reference per target (issued ``at``) and return their ids; what is older
+        than :data:`PRUNE_AFTER` is deleted (:meth:`prune`)."""
+        ids = []
+        with self._lock, self._db:
+            self._prune(at)
+            for t in targets:
+                cur = self._db.execute(
+                    "INSERT INTO refs (channel, chat_id, alert, task_id, item, issued_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (channel, chat_id, alert, t.task_id, t.number, _ts(at)),
+                )
+                ids.append(int(cur.lastrowid or 0))
+        return ids
+
+    def delivered(
+        self,
+        channel: str,
+        chat_id: str,
+        alert: str,
+        ids: Sequence[int],
+        message_id: int | None,
+        at: datetime,
+        shown: Shown | None = None,
+    ) -> int | None:
+        """A message of ``alert`` went out (``at``), with the references ``ids`` (or none):
+        bind them to it and record it as the alert's latest message in that chat, which
+        expires the buttons of every older one, and keep Kelpie's copy of it (``shown``),
+        which the acknowledgements edit. ``message_id`` None (Telegram did not say, or
+        nothing was sent: the alert resolved unseen) expires them too. Returns the previous
+        latest message when it carried buttons, so the caller may remove them."""
+        key = (channel, chat_id, alert)
+        if message_id is not None and ids and shown is not None:
+            self.set_shown(channel, chat_id, message_id, shown, at)
+        with self._lock, self._db:
+            self._prune(at)
+            row = self._db.execute(
+                "SELECT message_id FROM latest WHERE channel = ? AND chat_id = ? AND alert = ?",
+                key,
+            ).fetchone()
+            previous = None if row is None else row["message_id"]
+            if message_id is not None:
+                self._db.executemany(
+                    "UPDATE refs SET message_id = ? WHERE id = ? AND message_id IS NULL",
+                    [(message_id, i) for i in ids],
+                )
+            self._db.execute(
+                "INSERT OR REPLACE INTO latest (channel, chat_id, alert, message_id, sent_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (*key, message_id, _ts(at)),
+            )
+            if previous is None or previous == message_id:
+                return None
+            had = self._db.execute(
+                "SELECT 1 FROM refs WHERE channel = ? AND chat_id = ? AND alert = ?"
+                " AND message_id = ? LIMIT 1",
+                (*key, previous),
+            ).fetchone()
+        return int(previous) if had is not None else None
+
+    def is_latest(self, ref: Ref) -> bool:
+        """Whether the message ``ref`` went out in is still the latest of its alert in its
+        chat (False when it is not known)."""
+        if ref.message_id is None:
+            return False
+        with self._lock:
+            row = self._db.execute(
+                "SELECT message_id FROM latest WHERE channel = ? AND chat_id = ? AND alert = ?",
+                (ref.channel, ref.chat_id, ref.alert),
+            ).fetchone()
+        return row is not None and row["message_id"] == ref.message_id
+
+    def get(self, ref_id: int) -> Ref | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM refs WHERE id = ?", (ref_id,)).fetchone()
+        if row is None:
+            return None
+        return Ref(
+            row["id"],
+            row["channel"],
+            row["chat_id"],
+            row["alert"],
+            row["task_id"],
+            row["item"],
+            datetime.fromisoformat(row["issued_at"]),
+            row["message_id"],
+            None if row["used_at"] is None else datetime.fromisoformat(row["used_at"]),
+        )
+
+    def used_on(self, channel: str, chat_id: str, message_id: int) -> set[int]:
+        """The references of a message that were used (pressed and written)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id FROM refs WHERE channel = ? AND chat_id = ? AND message_id = ?"
+                " AND used_at IS NOT NULL",
+                (channel, chat_id, message_id),
+            ).fetchall()
+        return {int(r["id"]) for r in rows}
+
+    def shown(self, channel: str, chat_id: str, message_id: int) -> Shown | None:
+        """Kelpie's copy of a message with buttons, or None when it has none."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT text, entities, markup FROM messages WHERE channel = ? AND chat_id = ?"
+                " AND message_id = ?",
+                (channel, chat_id, message_id),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            entities, markup = json.loads(row["entities"]), json.loads(row["markup"])
+        except ValueError:
+            return None
+        if not isinstance(entities, list) or not isinstance(markup, dict):
+            return None
+        return Shown(row["text"], entities, markup)
+
+    def set_shown(
+        self, channel: str, chat_id: str, message_id: int, shown: Shown, at: datetime
+    ) -> None:
+        """Record Kelpie's copy of a message (sent, or as Kelpie last edited it)."""
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO messages"
+                " (channel, chat_id, message_id, text, entities, markup, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    channel,
+                    chat_id,
+                    message_id,
+                    shown.text,
+                    json.dumps(shown.entities),
+                    json.dumps(shown.markup),
+                    _ts(at),
+                ),
+            )
+
+    def use(self, ref_id: int, at: datetime) -> bool:
+        """Claim a reference (mark it used ``at``), atomically; False when it already was
+        (or is gone)."""
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "UPDATE refs SET used_at = ? WHERE id = ? AND used_at IS NULL", (_ts(at), ref_id)
+            )
+        return cur.rowcount > 0
+
+    def release(self, ref_id: int, at: datetime) -> bool:
+        """Undo the claim :meth:`use` made ``at`` (the snooze was not written); False when
+        the reference is not claimed so."""
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "UPDATE refs SET used_at = NULL WHERE id = ? AND used_at = ?", (ref_id, _ts(at))
+            )
+        return cur.rowcount > 0
+
+
+# --- the buttons on an alert ---------------------------------------------------------------
+
+
+class Buttons:
+    """Puts snooze buttons on a Telegram alert: one stored, signed reference per item a
+    snooze would quiet, three buttons each (1, 3, 7 days)."""
+
+    def __init__(
+        self,
+        store: ButtonStore,
+        channel: str,
+        chat_id: str,
+        clock: Callable[[], datetime],
+        language: str = i18n.DEFAULT,
+    ) -> None:
+        self.store = store
+        self.channel = channel
+        self.chat_id = chat_id
+        self.clock = clock
+        self.language = language
+
+    def attach(
+        self, event: AlertEvent, targets: Sequence[SnoozeTarget]
+    ) -> tuple[dict[str, Any] | None, list[int]]:
+        """The ``reply_markup`` for ``targets`` and the reference ids to bind once sent."""
+        if not targets:
+            return None, []
+        ids = self.store.issue(self.channel, self.chat_id, alert_key(event), targets, self.clock())
+        key = self.store.key()
+        rows = [
+            (t, [(d, callback_data(key, self.chat_id, d, i)) for d in CHAT_DAYS])
+            for t, i in zip(targets, ids, strict=True)
+        ]
+        return render.keyboard(rows, self.language), ids
+
+    def delivered(
+        self,
+        event: AlertEvent,
+        ids: Sequence[int],
+        message_id: int | None,
+        sent: Mapping[str, Any] | None = None,
+        markup: Mapping[str, Any] | None = None,
+    ) -> int | None:
+        """Record a delivered message of ``event`` (every one, with buttons or without) as
+        its alert's latest, with Kelpie's copy of it (``sent``: the message Telegram
+        answered with; ``markup``: the keyboard sent); returns the previous one when its
+        buttons should be removed."""
+        shown = None
+        if sent is not None and markup is not None:
+            text = sent.get("text")
+            shown = Shown(
+                text if isinstance(text, str) else "",
+                _entities(sent.get("entities")),
+                dict(markup),
+            )
+        return self.store.delivered(
+            self.channel, self.chat_id, alert_key(event), ids, message_id, self.clock(), shown
+        )
+
+
+# --- the poller ----------------------------------------------------------------------------
+
+
+class ApiError(Exception):
+    """A Bot API call that failed. ``cause`` is a short metric label; the text is safe to
+    log (never the token); ``retry_after`` is what Telegram asked for, in seconds."""
+
+    def __init__(self, cause: str, detail: str = "", retry_after: float | None = None) -> None:
+        super().__init__(detail or cause)
+        self.cause = cause
+        self.retry_after = retry_after
+
+
+class BotApi(Protocol):
+    """A Telegram Bot API method call: its ``result``, or :class:`ApiError`."""
+
+    def call(
+        self,
+        method: str,
+        body: Mapping[str, Any],
+        timeout: float | None = None,
+        max_bytes: int | None = None,
+    ) -> Any: ...
+
+
+class ChatObserver(Protocol):
+    def chat_action(self, channel: str, outcome: str) -> None: ...
+
+    def chat_rejected(self, channel: str, reason: str) -> None: ...
+
+    def chat_api_error(self, channel: str, call: str, cause: str) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class Press:
+    """An accepted press: snooze ``task_id`` for ``days``, by the person with ``user_id``
+    (``name``: their chat name, cleaned)."""
+
+    channel: str
+    task_id: str
+    days: int
+    user_id: int
+    name: str
+
+
+class AlreadySnoozed(Exception):
+    """Raised by a :data:`SnoozeSink` when the task has a snooze from another source that
+    ends later (``until``): nothing was written."""
+
+    def __init__(self, until: datetime) -> None:
+        super().__init__(until.isoformat())
+        self.until = until
+
+
+# Writes the snooze and its ledger entry at ``now`` (both or neither); returns when it ends.
+# Raises AlreadySnoozed when a longer snooze from another source holds, anything on failure.
+SnoozeSink = Callable[[Press, datetime], datetime]
+
+
+@dataclass(slots=True)
+class ChatControl:
+    """What the app hands the alert layer to take presses: the button store, the callback
+    that writes a snooze (to Kelpie's store and ledger), the clock and the metrics."""
+
+    store: ButtonStore
+    on_snooze: SnoozeSink
+    clock: Callable[[], datetime]
+    observer: ChatObserver | None = None
+    poll_timeout: int = POLL_TIMEOUT
+    backoff: float = 1.0
+    min_interval: float = MIN_POLL_INTERVAL
+
+
+class _RateLimit:
+    """At most ``limit`` events per key within ``window`` seconds."""
+
+    def __init__(
+        self, limit: int, window: float, clock: Callable[[], float], max_keys: int = 1000
+    ) -> None:
+        self.limit, self.window, self.clock, self.max_keys = limit, window, clock, max_keys
+        self._seen: dict[int, deque[float]] = {}
+
+    def allow(self, key: int) -> bool:
+        now = self.clock()
+        seen = self._seen.setdefault(key, deque())
+        while seen and now - seen[0] >= self.window:
+            seen.popleft()
+        if len(seen) >= self.limit:
+            return False
+        seen.append(now)
+        if len(self._seen) > self.max_keys:  # forget the idle ones
+            for k in [k for k, v in self._seen.items() if not v or now - v[-1] >= self.window]:
+                del self._seen[k]
+        return True
+
+
+class _Rejected(Exception):
+    """A refused press: why, whether to answer it, and (expired) the genuine reference."""
+
+    def __init__(self, reason: str, answer: bool = True, ref: Ref | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.answer = answer
+        self.ref = ref
+
+
+def _int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+class ButtonPoller:
+    """Takes button presses for one Telegram channel with ``getUpdates`` long polling, in
+    its own thread (see the module docstring for the rules it enforces)."""
+
+    def __init__(
+        self,
+        api: BotApi,
+        control: ChatControl,
+        *,
+        channel: str,
+        chat_id: str,
+        allowed: frozenset[int],
+        rendering: RenderSettings = DEFAULT_RENDERING,
+        request_timeout: float = 10.0,
+        max_backoff: float = MAX_BACKOFF,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.api = api
+        self.control = control
+        self.store = control.store
+        self.channel = channel
+        self.chat_id = chat_id
+        self.allowed = allowed
+        self.rendering = rendering
+        self.request_timeout = request_timeout
+        self.max_backoff = max_backoff
+        self.monotonic = monotonic
+        self.limiter = _RateLimit(RATE_LIMIT, RATE_WINDOW, monotonic)
+        self._stopping = threading.Event()
+        # How the poller pauses (seconds): returns early when it is told to stop. A test may
+        # replace it before start.
+        self.sleep: Callable[[float], object] = self._stopping.wait
+        self._thread: threading.Thread | None = None
+        self.abandoned = False
+        self._next_prune: float | None = None  # monotonic; None: at the first loop
+
+    def __repr__(self) -> str:
+        return f"ButtonPoller(channel={self.channel!r}, chat_id={self.chat_id!r})"
+
+    # --- lifecycle -------------------------------------------------------------------------
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(
+                target=self._run, name=f"kelpie-buttons-{self.channel}", daemon=True
+            )
+            self._thread.start()
+
+    def stop(self) -> None:
+        """Ask the poller to stop; it takes no new press from now on."""
+        self._stopping.set()
+
+    def join(self, deadline: float) -> None:
+        """Wait for the thread until ``deadline`` (monotonic); a long poll still in flight
+        then is abandoned and whatever it returns is ignored."""
+        self._stopping.set()
+        thread = self._thread
+        if thread is None:
+            return
+        thread.join(max(deadline - time.monotonic(), 0.0))
+        if thread.is_alive():
+            self.abandoned = True
+            log.info("button poller %s: a long poll was still open at shutdown", self.channel)
+
+    def close(self) -> None:
+        self.store.close()
+
+    def _prune(self) -> None:
+        """Delete what the store keeps past :data:`PRUNE_AFTER`: at start, then every
+        :data:`PRUNE_EVERY` seconds, so nothing outlives it even while no alert goes out."""
+        self._next_prune = self.monotonic() + PRUNE_EVERY
+        try:
+            gone = self.store.prune(self.control.clock())
+        except Exception as exc:
+            log.error("button store: pruning failed: %s", type(exc).__name__)
+            return
+        if gone:
+            log.info("button store: %d old row(s) pruned", gone)
+
+    def _run(self) -> None:
+        failures = 0
+        while not self._stopping.is_set():
+            started = self.monotonic()
+            if self._next_prune is None or started >= self._next_prune:
+                self._prune()
+            try:
+                updates, dropped, highest = self._fetch()
+                failures = 0
+                for update in updates:
+                    if self._stopping.is_set():
+                        return
+                    self._take(update)
+                if self._stopping.is_set() or self.abandoned:
+                    return
+                for _ in range(dropped):
+                    self._reject("malformed")
+                if highest is not None and highest >= self.store.offset(self.channel):
+                    # Past what Telegram returned but nobody could take (update id 0, ...):
+                    # it would come back on every poll.
+                    self.store.set_offset(self.channel, highest + 1)
+                rest = self.control.min_interval - (self.monotonic() - started)
+                if rest > 0:  # a poll that returned early: no busy loop
+                    self.sleep(rest)
+            except ApiError as exc:
+                if self._stopping.is_set():
+                    return
+                failures += 1
+                self._api_error("getUpdates", exc)
+                wait = min(self.control.backoff * 2 ** min(failures - 1, 20), self.max_backoff)
+                if exc.retry_after is not None:
+                    wait = max(wait, min(exc.retry_after, 3600.0))
+                self.sleep(wait)
+            except Exception as exc:  # a store failure or a bug: back off, never die quietly
+                if self._stopping.is_set():
+                    return
+                failures += 1
+                log.error("button poller %s failed: %s", self.channel, type(exc).__name__)
+                self._notify("chat_api_error", self.channel, "poller", "error")
+                self.sleep(min(self.control.backoff * 2 ** min(failures - 1, 20), self.max_backoff))
+
+    def _fetch(self) -> tuple[list[Mapping[str, Any]], int, int | None]:
+        """One ``getUpdates``: the updates to take (ascending ids), how many were dropped as
+        malformed, and the highest update id seen in the answer (also a dropped one's)."""
+        body: dict[str, Any] = {
+            "timeout": self.control.poll_timeout,
+            "allowed_updates": ["callback_query"],
+            "limit": UPDATES_LIMIT,
+        }
+        offset = self.store.offset(self.channel)
+        if offset:
+            body["offset"] = offset
+        timeout = self.control.poll_timeout + self.request_timeout
+        result = self.api.call("getUpdates", body, timeout, MAX_UPDATES_BYTES)
+        if not isinstance(result, list):
+            raise ApiError("malformed", "getUpdates did not return a list")
+        ids = [
+            i
+            for u in result
+            if isinstance(u, Mapping) and (i := _int(u.get("update_id"))) is not None
+        ]
+        found = [u for u in result if isinstance(u, Mapping) and _int(u.get("update_id"))]
+        found.sort(key=lambda u: u["update_id"])
+        return found, len(result) - len(found), max(ids, default=None)
+
+    # --- one update ------------------------------------------------------------------------
+
+    def _take(self, update: Mapping[str, Any]) -> None:
+        update_id = update["update_id"]
+        if self.abandoned or self._stopping.is_set():
+            return  # shutting down: left for the next start, which asks for it again
+        if update_id < self.store.offset(self.channel):
+            return  # taken before (a replay): never twice
+        # Past it before acting: a press is taken at most once, also across a restart.
+        self.store.set_offset(self.channel, update_id + 1)
+        query = update.get("callback_query")
+        if not isinstance(query, Mapping):
+            self._reject("not_callback")
+            return
+        query_id = query.get("id")
+        try:
+            press, ref = self._check(query)
+        except _Rejected as exc:
+            if exc.reason == "expired_ref" and exc.ref is not None:
+                self._expired(query_id, exc.ref)
+            else:
+                self._reject(exc.reason, query_id if exc.answer else None)
+            return
+        self._snooze(query_id, press, ref)
+
+    def _expired(self, query_id: object, ref: Ref) -> None:
+        """A genuine button that has expired (too old, or its alert moved on): say so, with
+        the command that still works, and take that message's buttons off (best effort):
+        none of them works any more."""
+        now = self.control.clock()
+        task = one_line(ref.task_id, MAX_ID)
+        command = render.snooze_command(ref.task_id, now, self.rendering)
+        lang = self.rendering.language
+        if command is None:
+            text = i18n.text(lang, "chat.expired")
+        else:
+            text = i18n.text(lang, "chat.expired.command", task=task, command=command)
+        assert ref.message_id is not None  # expiry is checked after the message is matched
+        body = {
+            "chat_id": self.chat_id,
+            "message_id": ref.message_id,
+            "reply_markup": {"inline_keyboard": []},
+        }
+        self._call("editMessageReplyMarkup", body)
+        self._reject("expired_ref", query_id, text)  # answered, then counted once handled
+
+    def _call(self, method: str, body: Mapping[str, Any]) -> Any:
+        """A Bot API call whose failure is only counted and logged (None then)."""
+        try:
+            return self.api.call(method, body)
+        except ApiError as exc:
+            self._api_error(method, exc)
+            return None
+
+    def _check(self, query: Mapping[str, Any]) -> tuple[Press, Ref]:
+        """The press and its reference, or :class:`_Rejected` with why."""
+        sender = query.get("from")
+        user_id = _int(sender.get("id")) if isinstance(sender, Mapping) else None
+        if user_id is None or not isinstance(query.get("id"), str):
+            raise _Rejected("malformed", answer=False)
+        if not self.limiter.allow(user_id):
+            raise _Rejected("rate_limited", answer=False)
+        # Nobody outside the allow-list or the chat hears back, not even "Not allowed."
+        if user_id not in self.allowed:
+            raise _Rejected("unknown_user", answer=False)
+        message = query.get("message")
+        chat = message.get("chat") if isinstance(message, Mapping) else None
+        if not isinstance(message, Mapping) or not isinstance(chat, Mapping):
+            raise _Rejected("wrong_chat", answer=False)
+        if not self._our_chat(chat):
+            raise _Rejected("wrong_chat", answer=False)
+        parsed = parse_callback(query.get("data"), self.store.key(), self.chat_id)
+        if parsed is None:
+            raise _Rejected("bad_ref")
+        ref_id, days = parsed
+        ref = self.store.get(ref_id)
+        if ref is None or ref.channel != self.channel or ref.chat_id != self.chat_id:
+            raise _Rejected("bad_ref")
+        message_id = _int(message.get("message_id"))
+        if ref.message_id is None or ref.message_id != message_id:
+            raise _Rejected("bad_ref")  # not the message it went out in (or none known)
+        now = self.control.clock()
+        if not ref.issued_at <= now + timedelta(minutes=5) or now - ref.issued_at > REF_TTL:
+            raise _Rejected("expired_ref", ref=ref)
+        if not self.store.is_latest(ref):
+            raise _Rejected("expired_ref", ref=ref)  # its alert moved on, or resolved
+        if ref.used_at is not None:
+            raise _Rejected("used_ref")
+        assert isinstance(sender, Mapping)  # its id was read above
+        name = _name(sender) or f"user {user_id}"
+        return Press(self.channel, ref.task_id, days, user_id, name), ref
+
+    def _our_chat(self, chat: Mapping[str, Any]) -> bool:
+        chat_id = _int(chat.get("id"))
+        if chat_id is not None and str(chat_id) == self.chat_id:
+            return True
+        username = chat.get("username")
+        return (
+            self.chat_id.startswith("@")
+            and isinstance(username, str)
+            and f"@{username}".casefold() == self.chat_id.casefold()
+        )
+
+    def _snooze(self, query_id: object, press: Press, ref: Ref) -> None:
+        now = self.control.clock()
+        lang = self.rendering.language
+        task = one_line(press.task_id, MAX_ID)
+        try:
+            claimed = self.store.use(ref.id, now)  # first: two presses can never both write
+        except Exception as exc:
+            self._failed(query_id, press, exc)
+            return
+        if not claimed:
+            self._reject("used_ref", query_id)
+            return
+        try:
+            until = self.control.on_snooze(press, now)
+        except AlreadySnoozed as exc:
+            self._release(ref, now)
+            log.info(
+                "telegram button: %s is already snoozed until %s; press of user id %d refused",
+                task,
+                exc.until.isoformat(),
+                press.user_id,
+            )
+            span = render.snooze_span(lang, exc.until, self.rendering.tz)
+            already = i18n.text(lang, "chat.already", task=task, span=span)
+            self._reject("already_snoozed", query_id, already)
+            return
+        except Exception as exc:
+            self._release(ref, now)
+            self._failed(query_id, press, exc)
+            return
+        log.info(
+            "telegram button: user id %d snoozed %s until %s",
+            press.user_id,
+            task,
+            until.isoformat(),
+        )
+        span = render.snooze_span(lang, until, self.rendering.tz)
+        try:  # the snooze is written: an acknowledgement that fails changes nothing about it
+            self._answer(query_id, i18n.text(lang, "chat.toast", task=task, span=span))
+            self._acknowledge(ref, task, span, press.name)
+        except Exception as exc:
+            log.error("telegram button: acknowledgement failed: %s", type(exc).__name__)
+        self._notify("chat_action", self.channel, "snoozed")  # counted once fully handled
+
+    def _release(self, ref: Ref, at: datetime) -> None:
+        """Give a claimed reference back: nothing was written, it may be pressed again."""
+        try:
+            released = self.store.release(ref.id, at)
+        except Exception as exc:
+            log.error("telegram button: reference not released: %s", type(exc).__name__)
+            return
+        if not released:
+            log.warning("telegram button: reference %d was not claimed any more", ref.id)
+
+    def _failed(self, query_id: object, press: Press, exc: Exception) -> None:
+        log.error(
+            "telegram button: snoozing %s for user id %d failed: %s",
+            one_line(press.task_id, MAX_ID),
+            press.user_id,
+            type(exc).__name__,
+        )
+        self._answer(query_id, i18n.text(self.rendering.language, "chat.failed"))
+        self._notify("chat_action", self.channel, "failed")
+
+    def _answer(self, query_id: object, text: str) -> None:
+        if not isinstance(query_id, str):
+            return
+        body = {"callback_query_id": query_id, "text": text[:MAX_TOAST]}
+        try:
+            self.api.call("answerCallbackQuery", body, min(self.request_timeout, ANSWER_TIMEOUT))
+        except ApiError as exc:
+            self._api_error("answerCallbackQuery", exc)
+
+    def _acknowledge(self, ref: Ref, task: str, span: str, who: str) -> None:
+        """The alert, acknowledged, built from Kelpie's own copy of the message (never from
+        the copy a press carries, which predates the edits of presses taken just before):
+        its text with every acknowledgement so far plus this one, the same entities (nothing
+        parsed; the person's name in a ``code`` entity, so nothing in it becomes a link),
+        and the keyboard without the buttons of any reference used on it. When the line
+        does not fit (or there is no text), the buttons go and the line is sent as a reply
+        to the message."""
+        assert ref.message_id is not None  # a press is only taken on its bound message
+        message_id = ref.message_id
+        lang = self.rendering.language
+        line = i18n.text(lang, "chat.snoozed", task=task, span=span, who="\0")
+        before, _, after = f"✅ {ref.item}. {line}".partition("\0")
+        target = {"chat_id": self.chat_id, "message_id": message_id}
+        shown = self.store.shown(self.channel, self.chat_id, message_id)
+        used = self.store.used_on(self.channel, self.chat_id, message_id)
+        markup = _remaining(None if shown is None else shown.markup, used)
+        if not self.store.is_latest(ref):  # a newer message went out meanwhile: none left
+            markup = {"inline_keyboard": []}
+        if shown is not None and shown.text:
+            head = f"{shown.text}\n{before}"
+            full = f"{head}{who}{after}"
+            if utf16_len(full) <= MAX_TEXT:
+                name = {"type": "code", "offset": utf16_len(head), "length": utf16_len(who)}
+                edited = Shown(full, [*shown.entities, name], shown.markup)
+                body: dict[str, Any] = {
+                    **target,
+                    "text": full,
+                    "entities": edited.entities,
+                    "link_preview_options": {"is_disabled": True},
+                }
+                if markup["inline_keyboard"]:
+                    body["reply_markup"] = markup
+                if self._call("editMessageText", body) is not None:
+                    now = self.control.clock()
+                    self.store.set_shown(self.channel, self.chat_id, message_id, edited, now)
+                    return
+        self._call("editMessageReplyMarkup", {**target, "reply_markup": markup})
+        name = {"type": "code", "offset": utf16_len(before), "length": utf16_len(who)}
+        reply = {
+            "chat_id": self.chat_id,
+            "text": f"{before}{who}{after}",
+            "entities": [name],
+            "reply_parameters": {"message_id": message_id, "allow_sending_without_reply": True},
+            "link_preview_options": {"is_disabled": True},
+            "disable_notification": True,
+        }
+        self._call("sendMessage", reply)
+
+    # --- counting --------------------------------------------------------------------------
+
+    def _reject(self, reason: str, query_id: object = None, answer: str | None = None) -> None:
+        """Count a refused press, after answering it when ``query_id`` is given: ``answer``,
+        else "Not allowed."."""
+        log.info("telegram button press ignored (%s)", reason)
+        if query_id is not None:
+            text = answer or i18n.text(self.rendering.language, "chat.not_allowed")
+            self._answer(query_id, text)
+        self._notify("chat_rejected", self.channel, reason)
+        self._notify("chat_action", self.channel, "rejected")  # counted once fully handled
+
+    def _api_error(self, call: str, exc: ApiError) -> None:
+        log.warning("telegram %s failed for channel %s: %s", call, self.channel, exc)
+        self._notify("chat_api_error", self.channel, call, exc.cause)
+
+    def _notify(self, method: str, *args: str) -> None:
+        observer = self.control.observer
+        if observer is None:
+            return
+        try:
+            getattr(observer, method)(*args)
+        except Exception:
+            log.exception("chat observer failed")
+
+
+def _name(sender: Mapping[str, Any]) -> str:
+    """The sender's name as the acknowledgement shows it: untrusted, so cleaned, with ``@``
+    broken (no mention) and cut."""
+    parts = [sender.get(k) for k in ("first_name", "last_name")]
+    name = " ".join(p for p in parts if isinstance(p, str) and p.strip())
+    if not name and isinstance(user := sender.get("username"), str):
+        name = user
+    return one_line(name, MAX_NAME) if name else ""
+
+
+def _remaining(markup: object, used: set[int]) -> dict[str, Any]:
+    """The keyboard Kelpie sent without the buttons of the references in ``used``; only
+    buttons that look like Kelpie's are kept."""
+    rows = markup.get("inline_keyboard") if isinstance(markup, Mapping) else None
+    out: list[list[dict[str, str]]] = []
+    for row in rows if isinstance(rows, list) else ():
+        kept = []
+        for button in row if isinstance(row, list) else ():
+            if not isinstance(button, Mapping):
+                continue
+            data, label = button.get("callback_data"), button.get("text")
+            found = _ref_id(data)
+            if found is None or found in used or not isinstance(label, str):
+                continue
+            kept.append({"text": label[:MAX_BUTTON], "callback_data": str(data)})
+        if kept:
+            out.append(kept)
+    return {"inline_keyboard": out}
+
+
+def _entities(raw: object) -> list[dict[str, Any]]:
+    """The message's formatting entities as Telegram reported them, only the kinds Kelpie's
+    alerts use, with their known fields."""
+    out = []
+    for e in raw if isinstance(raw, list) else ():
+        if not isinstance(e, Mapping) or e.get("type") not in _ENTITY_TYPES:
+            continue
+        offset, length = _int(e.get("offset")), _int(e.get("length"))
+        if offset is None or length is None or offset < 0 or length <= 0:
+            continue
+        entity: dict[str, Any] = {"type": e["type"], "offset": offset, "length": length}
+        if e["type"] == "text_link":
+            url = render.plain_http_url(e.get("url"))
+            if url is None:
+                continue
+            entity["url"] = url
+        out.append(entity)
+    return out

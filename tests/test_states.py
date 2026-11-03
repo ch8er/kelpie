@@ -488,6 +488,41 @@ def test_the_resolve_notice_says_what_changed() -> None:
     assert plain_alerter.events[-1].reason == 'task T-1: no longer reported: "T-1 is stuck".'
 
 
+def test_a_resolved_hook_that_asks_for_last_key_is_given_the_key_of_the_last_alert() -> None:
+    """The hook of a rule whose one state has several kinds of alert can tell which one closed
+    it; a hook that does not declare ``last_key`` is called as before, with two arguments."""
+    calls: list[tuple[str, tuple[str, ...], dict[str, object]]] = []
+
+    class Asking(Toggle):
+        def resolved(self, state_id: str, snapshot: Snapshot, last_key: str | None = None) -> str:
+            calls.append(("asking", (state_id,), {"last_key": last_key}))
+            return f"closed after {last_key}."
+
+    class Plain(Toggle):
+        def resolved(self, state_id: str, snapshot: Snapshot) -> str:
+            calls.append(("plain", (state_id,), {}))
+            return "closed."
+
+    for rule in (Asking(alert()), Plain(alert())):
+        alerter = FakeAlerter()
+        e = engine(rule, alerter)
+        tick(e, T0)
+        rule.on = False
+        tick(e, T0 + H)
+    assert calls == [("asking", ("s1",), {"last_key": "k"}), ("plain", ("s1",), {})]
+    assert alerter.events[-1].reason == "closed."  # the plain hook's own text
+    # a restart: the key comes from the stored state, not from this process
+    store = SqliteLedgerStore(":memory:")
+    rule = Asking(alert())
+    alerter = FakeAlerter()
+    e = engine(rule, alerter, ledger_store=store, state_store=store)
+    tick(e, T0)
+    rule.on = False
+    e = engine(rule, alerter, ledger_store=store, state_store=store)
+    tick(e, T0 + H)
+    assert alerter.events[-1].reason == "closed after k."
+
+
 def test_a_failing_resolved_hook_falls_back() -> None:
     class Broken(Toggle):
         def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:

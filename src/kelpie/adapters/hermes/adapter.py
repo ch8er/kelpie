@@ -86,6 +86,14 @@ Each path is read at most once per snapshot, by up to ``GIT_WORKERS`` threads, a
 ``GIT_BUDGET_FACTOR * git_timeout``; a path whose git call timed out is skipped for
 ``GIT_BACKOFF`` (by snapshot time).
 
+Waits inside sessions. With ``state_home``, each profile's ``state.db`` (Hermes' own
+session store, read-only, see :mod:`kelpie.adapters.hermes.state_db`) gives the commands
+that waited inside a session (``sleep``, a CI watch, a loop over them) as
+:class:`~kelpie.core.model.SessionWait`, on the run of the task whose workspace the
+session worked in (:meth:`HermesAdapter._waits`). The same ``state.db`` gives the skills
+opened in the last 24 hours (``skill_view``) as :class:`~kelpie.core.model.SkillLoad`, for
+the instruction files' tokens a day (``Snapshot.skill_loads``).
+
 Liveness. ``Session.last_heartbeat`` is the latest of the run's ``last_heartbeat_at``, the
 task's ``last_heartbeat_at`` (when the run is the task's ``current_run_id``) and the newest
 spool tool call of the run. A valid Hermes claim counts as a heartbeat: an open run that is the
@@ -111,6 +119,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
+from kelpie.adapters import _spool
 from kelpie.adapters.hermes.git_state import (
     DEFAULT_TIMEOUT,
     GitState,
@@ -132,7 +141,16 @@ from kelpie.adapters.hermes.park import (
     schedule_args,
     unblock_args,
 )
-from kelpie.adapters.hermes.processes import HostTools, ToolProcesses, read_host, resolve
+from kelpie.adapters.hermes.processes import HostTools, ToolProcesses, read_host, resolve, task_at
+from kelpie.adapters.hermes.state_db import (
+    DEFAULT_SOURCES,
+    TERMINAL_TOOL,
+    Usage,
+    Wait,
+    read_skill_loads,
+    read_usage,
+    read_waits,
+)
 from kelpie.adapters.hermes.stop import (
     CLI_TIMEOUT,
     DEFAULT_CLI,
@@ -163,6 +181,9 @@ from kelpie.core.model import (
     ResourceKind,
     Return,
     Session,
+    SessionUsage,
+    SessionWait,
+    SkillLoad,
     Snapshot,
     Span,
     SpanKind,
@@ -170,6 +191,16 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
+from kelpie.core.tools import (
+    COMMAND_COMPLETE_ATTRIBUTE,
+    COMMAND_MULTILINE_ATTRIBUTE,
+    COMMAND_WHOLE_ATTRIBUTE,
+    ERROR,
+    EXIT_CODE_ATTRIBUTE,
+    OK,
+    RESULT_ATTRIBUTE,
+    tool_result,
+)
 from kelpie.traces.hooks import SESSION_END, TOOL, HookEvent, spans_from_hook_events
 from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE
 
@@ -177,6 +208,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_DB = Path("~/.hermes/kanban.db")
 DEFAULT_SPOOL = Path("~/.hermes/kelpie/spool.jsonl")
+SPOOL_TAIL = 65536  # bytes read from the end of the spool to find its newest line
+MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
+MAX_SPOOL_LINE = 16 * 1024  # a longer spool line is skipped (the plugin writes under 2 KB)
 DEFAULT_LOOKBACK = timedelta(hours=24)
 DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
 # Branches task work starts from: a task's files are what it changed since its newest
@@ -195,6 +229,12 @@ GIT_WORKERS = 4  # workspaces read in parallel
 GIT_BUDGET_FACTOR = 2  # all git calls of one snapshot end within this many git_timeouts
 GIT_BACKOFF = timedelta(minutes=5)  # a workspace whose git timed out is skipped this long
 HOST_READ_KEPT = timedelta(minutes=5)  # a failed read of tool runs reuses the last good one
+DEFAULT_HOME = Path("~/.hermes")  # Hermes' home: its profiles' state.db (state_db.py)
+DEFAULT_STATE_WINDOW = timedelta(hours=6)  # waits in sessions active this long ago
+STATE_EVERY = timedelta(minutes=1)  # state.db is read at most this often (snapshot time)
+LOADS_WINDOW = timedelta(hours=24)  # skill loads counted over this (tokens a day)
+# The workspace kinds whose directory is one task's: a session working there is the task's.
+TASK_DIR_KINDS = ("worktree", "scratch")
 
 NOT_IMPLEMENTED = (
     "this Hermes action is not implemented yet (only stop is); "
@@ -594,12 +634,19 @@ class HermesAdapter:
     # Long tool runs (a build, a simulator) and tool slots read from the host's processes
     # ([adapters.hermes.tools]); None: not read.
     tools: ToolProcesses | None = None
+    # Hermes' home, whose profiles' state.db record their sessions' commands: waits inside
+    # sessions (state_db.py). None: not read.
+    state_home: Path | None = None
+    state_window: timedelta = DEFAULT_STATE_WINDOW
+    state_sources: tuple[str, ...] = DEFAULT_SOURCES  # Hermes session sources read
     prework_statuses: Collection[str] = DEFAULT_PREWORK
     # Profile -> role (Hermes lowercases profiles). Others: the profile without a trailing
     # "-<number>" (dev-1 -> dev), else the profile itself.
     roles: Mapping[str, str] = field(default_factory=dict)
     role_from_name: bool = True  # dev-1, dev-2 -> dev; false: a profile is its own role
     name: str = "hermes"
+    # The board's name when it is one of several of the home (boards.py); None: the only one.
+    board: str | None = None
     # The action kinds it carries out (``kelpie agent`` offers only these): stop, park, wake
     # of a task Kelpie parked (requeue), comment. unblock and wip_commit are not implemented.
     actions: ClassVar[frozenset[ActionKind]] = frozenset(
@@ -612,6 +659,14 @@ class HermesAdapter:
     # the last good read of the host's tool runs and slots, with its time: one failed read
     # (a slow lsof under a build) must not drop running_tool and remind mid-build
     _host_seen: tuple[datetime, HostTools] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    # the last read of the profiles' state.db, with its time (read at most every STATE_EVERY)
+    _state_seen: tuple[datetime, tuple[Wait, ...], tuple[Usage, ...]] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    # the last count of skill loads (None: not counted), with its time (STATE_EVERY)
+    _loads_seen: tuple[datetime, tuple[SkillLoad, ...] | None] | None = field(
         default=None, init=False, repr=False, compare=False
     )
     wait_key: Path = DEFAULT_WAIT_KEY  # signs park and stop markers (park.py, stop.py)
@@ -635,6 +690,8 @@ class HermesAdapter:
         self.roles = {k.strip().casefold(): v.strip().casefold() for k, v in self.roles.items()}
         if self.spool is not None:
             self.spool = Path(self.spool).expanduser()
+        if self.state_home is not None:
+            self.state_home = Path(self.state_home).expanduser()
         self.wait_key = Path(self.wait_key).expanduser()
 
     def role_of(self, profile: str) -> str:
@@ -686,12 +743,8 @@ class HermesAdapter:
     def last_spool_at(self) -> datetime | None:
         if self.spool is None:
             return None
-        try:
-            with self.spool.open("rb") as f:
-                f.seek(0, 2)
-                f.seek(max(0, f.tell() - 65536))
-                tail = f.read().decode("utf-8", "replace").splitlines()
-        except OSError:
+        tail = _spool.tail_lines(self.spool, SPOOL_TAIL)
+        if tail is None:
             return None
         for line in reversed(tail):
             try:
@@ -722,14 +775,65 @@ class HermesAdapter:
     def snapshot(self, now: datetime) -> Snapshot:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
+        part, rows = self.read_board(now, self._spans(now - self.lookback))
+        if self.tools is not None:
+            sessions, slots = self._with_tools(self.tools, part.sessions, part.tasks, rows, now)
+            part = replace(part, sessions=sessions, resources=slots)
+        if self.state_home is not None:
+            waits, usage = self._state(self.state_home, now, part.sessions, rows)
+            part = replace(part, waits=waits, usage=usage, **self.loads(now))
+        return part
+
+    def loads(self, now: datetime) -> dict[str, Any]:
+        """``Snapshot`` fields of the skills opened in the last ``LOADS_WINDOW``: the loads,
+        and this adapter in ``skill_loads_counted`` when every profile's ``state.db`` was
+        read (else none: a missing load must not read as a skill nobody opens)."""
+        if self.state_home is None:
+            return {}
+        seen = self._loads_seen
+        if seen is not None and timedelta(0) <= now - seen[0] < STATE_EVERY:
+            loads = seen[1]
+        else:
+            try:
+                found = read_skill_loads(self.state_home, now - LOADS_WINDOW, self.state_sources)
+            except Exception as exc:  # an extra: the board is read without them
+                warn_once((str(self.state_home), "loads"), "hermes: skills not counted: %s", exc)
+                found = None
+            loads = None
+            if found is not None:
+                loads = tuple(
+                    SkillLoad(
+                        skill=x.skill,
+                        at=x.at,
+                        session_id=f"hermes-session-{x.profile}-{x.session}",
+                        role=self.role_of(x.profile),
+                        source=self.name,
+                        profile=x.profile,
+                    )
+                    for x in sorted(found, key=lambda x: (x.at, x.profile, x.session))
+                    if now - LOADS_WINDOW <= x.at <= now
+                )
+            self._loads_seen = (now, loads)
+        if loads is None:
+            return {}
+        return {"skill_loads": loads, "skill_loads_counted": (self.name,)}
+
+    def read_board(
+        self, now: datetime, spans: tuple[Span, ...], own_spans: bool = False
+    ) -> tuple[Snapshot, dict[str, sqlite3.Row]]:
+        """The board as of ``now`` without the host's tool processes, and its task rows (for
+        :meth:`_with_tools`). ``spans`` are the hook spool's; ``own_spans``: keep only those
+        of this board's tasks and runs (a spool several boards share, see boards.py)."""
         cutoff = now - self.lookback
-        spans = self._spans(cutoff)
-        beats: dict[str, datetime] = {}
-        for span in spans:
-            if span.kind is SpanKind.TOOL and span.session_id and span.end is not None:
-                beats[span.session_id] = max(span.end, beats.get(span.session_id, span.end))
         try:
             with self._connect() as conn:  # one read transaction: a consistent view
+                if own_spans:
+                    spans = _own_spans(conn, spans)
+                beats: dict[str, datetime] = {}
+                for span in spans:
+                    if span.kind is SpanKind.TOOL and span.session_id and span.end is not None:
+                        end = span.end
+                        beats[span.session_id] = max(end, beats.get(span.session_id, end))
                 tasks, owner_ids, rows, waits = self._tasks(conn, cutoff)
                 ids = {t.id for t in tasks}
                 dependencies = self._dependencies(conn, ids)
@@ -740,9 +844,6 @@ class HermesAdapter:
         if self.git_state:  # outside the read transaction: git may be slow
             sessions, states = self._with_git_state(sessions, tasks, rows, now)
             tasks = tuple(_with_files(t, states.get(t.id)) for t in tasks)
-        slots: tuple[Resource, ...] = ()
-        if self.tools is not None:
-            sessions, slots = self._with_tools(self.tools, sessions, tasks, rows, now)
         owners = tuple(
             Owner(
                 id=p,
@@ -759,7 +860,112 @@ class HermesAdapter:
             conditions=waits,
             sessions=tuple(replace(s, source=self.name) for s in sessions),
             spans=spans,
-            resources=slots,
+        ), rows
+
+    def _state(
+        self,
+        home: Path,
+        now: datetime,
+        sessions: Sequence[Session],
+        rows: Mapping[str, sqlite3.Row],
+    ) -> tuple[tuple[SessionWait, ...], tuple[SessionUsage, ...]]:
+        """Waits inside sessions and token usage per session and model, from the profiles'
+        ``state.db`` (state_db.py), each Hermes session's on one id: the run it worked in
+        (the run of the task whose workspace is the session's directory, by the session's
+        profile, open while it was), else the Hermes session's own
+        (``hermes-session-<profile>-<id>``), with the task if known. A workspace path
+        several tasks share belongs to none of them. Waits are of the last ``state_window``,
+        usage of the sessions active within ``lookback``. Nothing that goes wrong here stops
+        the board's snapshot: both are left out."""
+        try:
+            return self._read_state(home, now, sessions, rows)
+        except Exception as exc:  # an extra: the board is read without them
+            warn_once((str(home), "state"), "hermes: state.db not read: %s", exc)
+            return (), ()
+
+    def _read_state(
+        self,
+        home: Path,
+        now: datetime,
+        sessions: Sequence[Session],
+        rows: Mapping[str, sqlite3.Row],
+    ) -> tuple[tuple[SessionWait, ...], tuple[SessionUsage, ...]]:
+        seen = self._state_seen
+        if seen is not None and timedelta(0) <= now - seen[0] < STATE_EVERY:
+            found, used = seen[1], seen[2]
+        else:
+            found = tuple(read_waits(home, now - self.state_window, self.state_sources))
+            used = tuple(read_usage(home, now - self.lookback, self.state_sources))
+            self._state_seen = (now, found, used)
+        users: dict[str, list[str]] = {}
+        for tid, row in rows.items():
+            raw = str(_col(row, "workspace_path") or "").strip()
+            if _col(row, "workspace_kind") in TASK_DIR_KINDS and Path(raw).is_absolute():
+                users.setdefault(resolve(raw), []).append(tid)
+        workspaces = {path: ids[0] if len(ids) == 1 else None for path, ids in users.items()}
+        runs: dict[tuple[str, str], list[Session]] = {}
+        for s in sessions:
+            runs.setdefault((s.task_id, s.owner_id.casefold()), []).append(s)
+        recent = [w for w in found if w.at >= now - self.state_window]
+        # A wait belongs to the run its session started in, as the session's usage does.
+        spans = [(w.profile, w.session, w.cwd, w.started or w.at, w.at) for w in recent]
+        spans += [(u.profile, u.session, u.cwd, u.started, u.last) for u in used]
+        tasks: dict[str, str | None] = {}  # cwd -> task
+        for _, _, cwd, _, _ in spans:
+            if cwd and cwd not in tasks:
+                tasks[cwd] = task_at(resolve(cwd), workspaces)
+        homes: dict[tuple[str, str], tuple[str, str | None]] = {}  # Hermes session -> id, task
+        for profile, sid, cwd, start, end in spans:
+            task = tasks.get(cwd) if cwd else None
+            mine = runs.get((task, profile), []) if task is not None else []
+            open_then = [s for s in mine if s.started_at <= end and start <= (s.ended_at or now)]
+            # The latest run started by then: a never-closed older run takes no later session.
+            # None started by then (clocks apart): the earliest.
+            run = max(
+                (s for s in open_then if s.started_at <= start),
+                key=lambda s: s.started_at,
+                default=min(open_then, key=lambda s: s.started_at, default=None),
+            )
+            if run is not None:
+                homes[profile, sid] = (run.id, task)
+            else:
+                homes.setdefault((profile, sid), (f"hermes-session-{profile}-{sid}", task))
+        waits = [
+            SessionWait(
+                session_id=homes[w.profile, w.session][0],
+                at=w.at,
+                shape=w.shape,
+                waited=w.waited,
+                task_id=homes[w.profile, w.session][1],
+                role=self.role_of(w.profile),
+                source=self.name,
+            )
+            for w in recent
+        ]
+        usage = [
+            SessionUsage(
+                session_id=homes[u.profile, u.session][0],
+                platform_session_id=u.session,
+                started_at=u.started,
+                last_at=u.last,
+                model=u.model,
+                ended_at=u.ended,
+                task_id=homes[u.profile, u.session][1],
+                role=self.role_of(u.profile),
+                owner_id=u.profile,
+                input_tokens=u.input_tokens + u.cache_read_tokens + u.cache_write_tokens,
+                output_tokens=u.output_tokens,
+                cached_tokens=u.cache_read_tokens,
+                cache_write_tokens=u.cache_write_tokens,
+                reasoning_tokens=u.reasoning_tokens,
+                calls=u.calls,
+                source=self.name,
+            )
+            for u in used
+        ]
+        return (
+            tuple(sorted(waits, key=lambda w: (w.at, w.session_id))),
+            tuple(sorted(usage, key=lambda u: (u.last_at, u.session_id, u.model or ""))),
         )
 
     def _with_tools(
@@ -769,6 +975,7 @@ class HermesAdapter:
         tasks: Sequence[Task],
         rows: Mapping[str, sqlite3.Row],
         now: datetime,
+        aliases: Mapping[str, str | None] | None = None,
     ) -> tuple[tuple[Session, ...], tuple[Resource, ...]]:
         """The long tool run of each unfinished task, on its live session (rule 9 holds its
         commit reminders meanwhile), and the use of each slot pool (see processes.py). A
@@ -791,7 +998,7 @@ class HermesAdapter:
         workspaces = {path: found[0] if len(found) == 1 else None for path, found in users.items()}
         shared = {t for found in users.values() if len(found) > 1 for t in found}
         mine = open_ids - shared
-        host = read_host(tools, now, mine, workspaces)
+        host = read_host(tools, now, mine, workspaces, aliases)
         read_at = now
         if host is not None:
             self._host_seen = (now, host)
@@ -1311,17 +1518,8 @@ class HermesAdapter:
     # --- hooks spool ---------------------------------------------------------------------
 
     def _spool_lines(self, cutoff: datetime) -> Iterator[str]:
-        if self.spool is None:
-            return
-        rotated = self.spool.with_name(self.spool.name + ".1")
-        for path in (rotated, self.spool):
-            try:
-                if path is rotated and path.stat().st_mtime < cutoff.timestamp():
-                    continue  # nothing in it can be inside the lookback
-                with path.open(encoding="utf-8", errors="replace") as f:
-                    yield from f
-            except OSError:
-                continue
+        # Agents write next to the spool: no symlink, no FIFO, a byte and a line cap.
+        return _spool.spool_lines(self.spool, cutoff, MAX_SPOOL_READ, MAX_SPOOL_LINE)
 
     def _spans(self, cutoff: datetime) -> tuple[Span, ...]:
         events = (_event_from_line(line, cutoff) for line in self._spool_lines(cutoff))
@@ -1576,6 +1774,38 @@ class HermesAdapter:
         raise NotImplementedError(NOT_IMPLEMENTED)
 
 
+def _own_spans(conn: _Connection, spans: tuple[Span, ...]) -> tuple[Span, ...]:
+    """The spans of a shared spool that belong to this board: their task is on it and their
+    run, if any, is a run of that task here. Spans naming no task belong to no board."""
+    task_ids = sorted({s.task_id for s in spans if s.task_id})
+    if not task_ids:
+        return ()
+    known: set[str] = set()
+    runs: dict[int, str] = {}
+    for chunk in range(0, len(task_ids), 500):  # SQLite's host parameter limit
+        part = task_ids[chunk : chunk + 500]
+        marks = f"({_in_clause(part)})"
+        known.update(
+            str(r["id"]) for r in conn.execute(f"SELECT id FROM tasks WHERE id IN {marks}", part)
+        )
+        runs.update(
+            (int(r["id"]), str(r["task_id"]))
+            for r in conn.execute(
+                f"SELECT id, task_id FROM task_runs WHERE task_id IN {marks}", part
+            )
+        )
+
+    def mine(span: Span) -> bool:
+        if span.task_id not in known:
+            return False
+        if span.session_id is None:
+            return True
+        rid = run_id(span.session_id)
+        return rid is not None and runs.get(rid) == span.task_id
+
+    return tuple(s for s in spans if mine(s))
+
+
 def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
     """One spool line to a hook event; malformed, foreign or old lines give ``None``."""
     try:
@@ -1597,6 +1827,27 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
         chars = rec.get("output_chars")
         if isinstance(chars, int) and not isinstance(chars, bool) and chars >= 0:
             attributes[OUTPUT_CHARS_ATTRIBUTE] = chars
+        outcome = str(rec["outcome"]) if rec.get("outcome") else None
+        code = rec.get("exit_code")
+        ok_code = isinstance(code, int) and not isinstance(code, bool) and abs(code) <= 2**31
+        code = code if ok_code else None
+        background, blocked = rec.get("background") is True, rec.get("blocked") is True
+        known = code is not None or background or blocked
+        if rec["type"] == TOOL and tool == TERMINAL_TOOL and known:
+            result = tool_result(code, background=background, blocked=blocked)
+            attributes[RESULT_ATTRIBUTE] = result
+            if code is not None:
+                attributes[EXIT_CODE_ATTRIBUTE] = code
+            if rec.get("command_whole") is True:
+                attributes[COMMAND_WHOLE_ATTRIBUTE] = True
+            if rec.get("command_complete") is True:
+                attributes[COMMAND_COMPLETE_ATTRIBUTE] = True
+            if rec.get("command_multiline") is True:
+                attributes[COMMAND_MULTILINE_ATTRIBUTE] = True
+            if result in (OK, ERROR):  # a foreground exit code is the call's own account
+                outcome = result
+            # A blocked call keeps Hermes' outcome (error): rule 10's error streak counts
+            # an agent cycling through refused commands; its result says it never ran.
         return HookEvent(
             kind=rec["type"],
             at=at,
@@ -1606,7 +1857,7 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
             tool=str(tool) if tool else None,
             args_hash=str(rec["args_hash"]) if rec.get("args_hash") else None,
             duration=timedelta(milliseconds=millis),
-            outcome=str(rec["outcome"]) if rec.get("outcome") else None,
+            outcome=outcome,
             tool_call_id=str(call_id) if call_id else None,
             attributes=attributes,
         )

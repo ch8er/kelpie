@@ -27,6 +27,9 @@ worker_grace = "5s"                      # SIGTERM, then SIGKILL after this (at 
 author = "kelpie"                        # what Kelpie's comments, blocks, parks and wakes are signed with
 # wait_key = "/data/hermes-wait.key"     # signs Kelpie's parks and stops; default: next to the ledger
 human_owners = ["alice"]                 # assignees that are people, not agents (optional)
+state_home = "~/.hermes"                 # profiles' state.db: waits in sessions (default: Hermes'
+                                         # home of db_path); false = do not read
+state_sources = ["kanban", "subagent", "cron"]  # whose sessions: agents at work, not people's chats
 
 # Hermes tolerates heartbeats up to an hour old; Kelpie's default is 30 minutes.
 [engine.rules.exit_contract]
@@ -39,7 +42,11 @@ session_stale_after = "60m"
 
 Unknown keys stop Kelpie at startup. `kelpie status` lists the adapter, whether the database
 is readable and how old the last spool line is (or that the spool is missing). One section
-watches one board. Kelpie opens `kanban.db` read-only (`mode=ro`, `query_only`), one short
+watches one Hermes home: one board with `db_path`, or several with `[[adapters.hermes.boards]]`
+(`name`, `db_path`, optional `wait_key`; ids then become `<name>:<id>`, the spool is split
+by task and run, tool processes are read once, actions go to the board in the id's prefix:
+[configuration.md](../../../../docs/configuration.md#adaptershermesboards), code in
+`boards.py`). Kelpie opens `kanban.db` read-only (`mode=ro`, `query_only`), one short
 read transaction per snapshot, and never writes to it; Hermes writers in WAL mode are not
 blocked and uncommitted rows are not seen.
 
@@ -145,19 +152,25 @@ proof of identity Hermes' reaper uses:
   descendant of the agent (tool commands start their own sessions and would outlive it).
   Nothing else: not the submitter's children (a submitter starts the profile's gateway when
   none runs, and that gateway serves the profile's other runs).
-- **Proof.** Each recorded pid must still carry the start fingerprint Hermes recorded for it
-  (`"<boot_id>:<pid 1 start>|<process start>"`, computed the same way from `/proc`): a reused
-  pid or a reboot never matches. The run's claim lock must name this host, every process must
+- **Proof.** Each recorded pid must still carry the start fingerprint Hermes recorded for it,
+  computed the same way: on Linux `"<boot_id>:<pid 1 start>|<process start>"` from `/proc`; on
+  macOS `"|<process start>"`, the kernel's start in centiseconds, read with libproc (as Hermes
+  reads it through psutil; a macOS Hermes without psutil records `unverified`). A reused pid or
+  a reboot never matches. The run's claim lock must name this host, every process must
   belong to the user Kelpie runs as, and Kelpie never signals itself or its ancestors (when
   Kelpie runs inside the run's worker, nothing is signalled). A process recorded without a
   fingerprint (older Hermes, or `unverified`) is not signalled. Right before each signal the
   process's start time is checked again, through a pidfd where the kernel has one (within one
-  boot and PID namespace, the same start time on the same pid is the same process).
+  boot and PID namespace, the same start time on the same pid is the same process). macOS has
+  no pidfd: a pid that is another process by the time of the signal is skipped, and the alert
+  names it.
 - **Gone or not Kelpie's to end.** A worker counts as gone only when Kelpie can tell: no such
-  pid, a dead one, another start time, another boot. When it cannot tell or may not signal it,
-  nothing is signalled and the alert says why: the worker runs as another user, Hermes runs in
-  another PID namespace (Kelpie in a container of its own), `/proc` hides other users'
-  processes (`hidepid`) or cannot be read.
+  pid, a dead one, another start time (Linux), another boot. When it cannot tell or may not
+  signal it, nothing is signalled and the alert says why: the worker runs as another user,
+  Hermes runs in another PID namespace (Kelpie in a container of its own), `/proc` hides other
+  users' processes (`hidepid`) or a process cannot be read. On macOS another start time is not
+  "gone" either: a Hermes whose psutil predates the unadjusted start read recorded a start
+  shifted by the last clock step, so Kelpie cannot tell a reused pid from its worker.
 - **How.** SIGTERM to all of them, SIGKILL to those still running after `worker_grace`
   (default 5 s). Kelpie never writes `kanban.db`: the reaper later finds the processes gone.
 - **What it says.** The alert and the ledger (`kelpie why`) carry what actually happened: "its
@@ -178,11 +191,11 @@ proof of identity Hermes' reaper uses:
   pid only. Nothing beyond what that user can do anyway, but with `end_worker` the board is
   trusted to name processes, so keep it writable by Hermes' user only.
 
-Without `/proc` (macOS) nothing is signalled and the stop says so. With `end_worker = false` a
-stop is "block the task now, reap the worker after about two minutes, and never without a
-dispatcher", as before; a budget hard-stop (`[[budgets]]`) then ends the *task* at once but the
-spend of a still-running worker only when the dispatcher reaps it. In multi-host mode the
-worker is ended by the `kelpie agent` on the host that claimed the run.
+On a system with neither `/proc` nor libproc nothing is signalled and the stop says so. With
+`end_worker = false` a stop is "block the task now, reap the worker after about two minutes,
+and never without a dispatcher", as before; a budget hard-stop (`[[budgets]]`) then ends the
+*task* at once but the spend of a still-running worker only when the dispatcher reaps it. In
+multi-host mode the worker is ended by the `kelpie agent` on the host that claimed the run.
 
 Why not `hermes kanban reclaim`: it terminates the worker but puts the task back in the queue,
 where the dispatcher can respawn it before a second command blocks it. `archive` is terminal.
@@ -199,10 +212,10 @@ re-queued. The CLI contract was read from the Hermes sources (`hermes_cli/kanban
 
 ### Self-test: `kelpie selftest stop --adapter hermes`
 
-Before rule 10 runs in `act`, run it on the Hermes host, as the user Kelpie runs as (Linux:
-it needs `/proc`; not inside Hermes' own Docker image, where Hermes hands gateway and profile
-commands to the container's s6 supervisor whatever `HERMES_HOME` says, so the self-test
-refuses to run there):
+Before rule 10 runs in `act`, run it on the Hermes host, as the user Kelpie runs as (Linux or
+macOS; not inside Hermes' own Docker image, where Hermes hands gateway and profile commands to
+the container's s6 supervisor whatever `HERMES_HOME` says, so the self-test refuses to run
+there):
 
 ```bash
 kelpie selftest stop --adapter hermes     # about a minute; --keep keeps the directory
@@ -226,6 +239,9 @@ throwaway directory (the gateway Hermes
 started for it, a runaway left by a failed step; never `hermes gateway stop`, which a service
 manager could route to a real gateway), deletes the directory, and exits 0 only if every step
 passed. SIGTERM to the self-test cleans up the same way.
+
+`kelpie doctor` shows the same in one line, without running anything: "stop ends workers: via
+Linux /proc" (or "via macOS libproc"), or a WARN with the reason when this host cannot.
 
 What it does not cover: your real home's configuration (its `kanban.dispatch_profiles`, the
 plugin in your profiles, your gateway), and whether rule 10's thresholds fit your farm. The
@@ -330,7 +346,13 @@ So `GH_TOKEN=abc gh pr checks 5` is stored as `gh pr checks 5`. This is best eff
 `KELPIE_HERMES_SPOOL_COMMANDS=0` to record no command at all. A spool written by an older
 plugin (before ch8er/kelpie#82, which kept secrets such as `curl -u user:pass`) is cleaned
 with `kelpie spool scrub`, run as the spool's owner, after the new plugin is installed. The spool file is created with
-mode `0600`. Hooks never raise and do no network I/O.
+mode `0600` (a new spool folder with `0700`), never written through a symlink or into a FIFO.
+Hooks never raise and do no network I/O.
+
+Agents can write next to the spool, so Kelpie reads it defensively: regular files only (a
+symlinked or FIFO spool is not read; a symlinked *folder* is fine), at most 64 MiB per
+file, and lines over 16 KiB skipped. A worktree's `.git` file and a linked worktree's
+`commondir` and `gitdir` are read the same way, at most 4 KiB each.
 
 ## What Kelpie sees
 
@@ -350,6 +372,10 @@ mode `0600`. Hooks never raise and do no network I/O.
 | `task_links` (parent, child) | `Dependency(child, depends_on=parent)` (links to archived parents dropped) |
 | `task_runs` row | `Session` `hermes-run-<id>` |
 | spool `tool` lines | `Span(kind=tool)` linked to the session and task, built by `kelpie.traces.hooks` with a task span and a session span around them; `tool_call_id` kept as `gen_ai.tool.call.id` |
+| spool `tool` line of the `terminal` tool only (another tool's exit code, `process`'s, is some job's): `exit_code` (from the terminal result, an int), `background` (asked for with `background: true`, or promoted from the foreground for a long timeout: `promoted_from_foreground`, or a spawn's `session_id` and `pid`), `blocked` (Hermes did not run it: `status: "blocked"` or `"pending_approval"`), `command_whole` (the redacted `command` still ends where the command did: one line, the redaction reached its end, its last word kept), `command_complete` (one line, no separator glued to a word, and the redacted `command` shows every separator the line has: masked words aside, it ends where the command did), `command_multiline` (more lines than the one kept) | `kelpie.tool.exit_code`, `kelpie.tool.result`, `kelpie.tool.command_whole`, `kelpie.tool.command_complete` and `kelpie.tool.command_multiline` on the tool span. The result is `ok` (0), `error` (non-zero, the exit code is its class; -1 without a block is a degraded backend or a fatal error), `blocked` (the span keeps Hermes' `error` outcome, so rule 10's error streak still counts it), or `unknown` (a background call: 0 means started). A foreground exit code sets the span's `outcome`. The result's `error` key is never read: it is null on a failed build too (`kelpie.core.tools`, #229) |
+| a profile's `state.db`: a foreground `terminal` call that waits | `SessionWait` (see [Waits inside sessions](#waits-inside-sessions)) |
+| a profile's `state.db`: a session's tokens (`session_model_usage`, else `sessions` totals) | `SessionUsage` per session and model (see [Token usage](#token-usage)) |
+| a profile's `state.db`: a `skill_view` call that opens a skill | `SkillLoad` (see [Skill loads](#skill-loads)) |
 
 Blocks (`Block.reason`), from a `blocked` event at or after `status_since`:
 
@@ -383,6 +409,76 @@ Liveness (`Session.last_heartbeat`): the latest of the run's `last_heartbeat_at`
 `last_heartbeat_at` (for the task's current run) and the newest spool tool call of the run. A
 valid Hermes claim counts as a heartbeat: an open run that is the task's `current_run_id` with
 `claim_expires` in the future is alive as of the snapshot.
+
+### Waits inside sessions
+
+Hermes keeps each profile's sessions and messages in a `state.db` of its own: `state.db` in
+Hermes' home for the `default` profile, `profiles/<name>/state.db` for the others
+(`state_home`, default Hermes' home of `db_path`). Kelpie opens each read-only, at most once
+a minute, and reads the sessions of `state_sources` by `source` or `created_source` (Kanban workers, subagents, cron jobs)
+active in the last 6 hours (`last_activity_at`, else their start) and their assistant
+messages' tool calls, on Hermes' own indexes. A rewound turn is left out, and a call that
+compaction copied counts once. A foreground `terminal` call (not `background`, not `… &`)
+whose command waits becomes a `SessionWait`, and nothing else of it is kept:
+
+| Command | Shape |
+| --- | --- |
+| `sleep N` (a simple command anywhere in the script: past `cd … &&`, assignments, pipes, new lines, `timeout`, `env`, `nohup`, `bash -c '…'`) | `sleep` |
+| `gh run watch …` (also `gh -R o/r run watch`) | `gh run watch` |
+| `gh pr checks … --watch` | `gh pr checks --watch` |
+| a `while`, `until` or `for` loop over one of them | `<shape> loop` |
+
+A heredoc's body is text, not commands; a group or loop sent to the background (`( … ) &`,
+`done &`) waits for nothing (what follows it still counts; `&>` is a redirection), and nor
+does a loop of sleeps under 10 seconds that runs no `gh` inside a larger script (waiting for a
+server to start). How long it waited: when the command does nothing
+but wait, the time until its own result message (at most the `sleep` arguments when it only
+sleeps); else the `sleep` arguments alone (`sleep 1 && make build` waited a second), or
+unknown. It is kept as the lower bound of its bucket (under 30s, 30s, 1m, 5m, 15m, 30m, 1h).
+
+A Hermes session's waits are all on one id: the run (`hermes-run-<id>`) of the task whose
+workspace (`worktree` or `scratch`) holds the session's directory, by the session's
+profile, open at the time of one of its waits; else the Hermes session's own
+(`hermes-session-<profile>-<id>`), with the task when the directory names one. The role is
+the profile's (`roles`, `role_from_name`). Rule 2 (`session_waits`) reads them. A
+`state.db` Kelpie cannot read, or whose rows it cannot make sense of, is logged once and
+skipped; the board is read all the same.
+With several boards of one home (`[[adapters.hermes.boards]]`) the profiles' `state.db` are
+read once per snapshot, for every board's tasks and runs. On a multi-host farm the waits stay on the host that reads them: `kelpie agent` does not
+relay them to the hub yet.
+
+### Token usage
+
+The same `state.db` totals each session's tokens: per model in `session_model_usage`
+(summed over its billing and task rows), plus what the session's own columns hold beyond
+those rows on its own `model` (cumulative updates and sessions from before that table write
+no rows; Hermes' Insights reconciles them the same way, except that Kelpie keeps the
+reasoning part). Each count is the larger of the two sources, so auxiliary calls of a
+session whose main loop wrote no rows are undercounted, as in Insights. A model Hermes records as
+`unknown` reads as none. Kelpie
+reads the sessions of `state_sources` active within `lookback`, read-only, with the waits,
+and gives one `SessionUsage` per session and model: on the same id as its waits (the run
+it worked in, else `hermes-session-<profile>-<id>`), with `platform_session_id` (Hermes' id,
+for spans of the same session), the task, the profile as `owner_id` and its role. Token
+fields follow `Span`: `input_tokens` is Hermes' uncached input plus cache reads and writes,
+`cached_tokens` the reads. A record is the session's total up to `last_at`
+(`per_session_total`): Hermes keeps no per-call counts. The daily report uses them for
+spend per role where traces carry no task (issue #197, item 1). Billing routes are summed
+per model: usage included in a subscription is not told apart from metered usage. Like the
+waits, usage stays on the host that reads it: `kelpie agent` does not relay it yet.
+
+### Skill loads
+
+The same `state.db` records each `skill_view` call. A call that opens a skill's `SKILL.md`
+(no `file_path`, or `SKILL.md`; a linked reference file is not a load) of a session of
+`state_sources` in the last 24 hours becomes a `SkillLoad`: the skill's name (the last part
+of `name`, as its directory is called), the time, the profile's role and
+`hermes-session-<profile>-<id>`; nothing else of the call is kept. A call is counted once
+however often compaction copied it, and a rewound one not at all. `[instructions]` uses
+them for the tokens a day of skills (`token_basis = "loads"`). When any profile's
+`state.db` cannot be read, no loads are reported for that snapshot (a missing load would
+read as a skill nobody opens), and the skills fall back to sessions. Read at most once a
+minute, like the waits; `kelpie agent` does not relay them yet.
 
 ### Progress note and git state
 

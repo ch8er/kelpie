@@ -34,8 +34,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 MAX_BODY = 256 * 1024  # a write's JSON body (an issue comment is the largest)
-TOKEN = "ghp_SimulatedFarmToken0123456789abcdef"
-BILLING_TOKEN = "ghp_SimulatedBillingToken0123456789ab"  # may read billing usage, nothing else
+TOKEN = "kelpie-sim-farm-token-0123456789abcdef"
+BILLING_TOKEN = "kelpie-sim-billing-token-0123456789ab"  # may read billing usage, nothing else
 
 
 def iso(dt: datetime) -> str:
@@ -392,6 +392,9 @@ class FakeGitHub:
                 "started_at": iso(run.created),
                 "completed_at": iso(done) if run.status == "completed" else None,
                 "conclusion": run.conclusion,
+                # a job a runner took: the CI started it (one with neither was refused)
+                "runner_name": "sim-runner",
+                "steps": [{"name": "Build", "conclusion": run.conclusion}],
             }
             return 200, {"total_count": 1, "jobs": [job]}
         return 404, {"message": "Not Found"}

@@ -50,6 +50,14 @@ Sessions: one per Claude Code ``session_id`` seen in the spool within ``lookback
 A ``TaskUpdate`` counts only on a watched list: the hook records the session's list
 (``CLAUDE_CODE_TASK_LIST_ID``, else its own session id), so private tasks stay private.
 
+Skill loads: each ``Skill`` call of the last 24 hours is a
+:class:`~kelpie.core.model.SkillLoad` (the skill's name, the session's owner as its role),
+for the instruction files' tokens a day. They are counted only when every tool line of the
+window comes from a hook that records them (version 2), the spool still holds a line from
+the window's first hour (``lookback`` covers it and no rotation dropped it), and every
+``Skill`` call names its skill; otherwise none are reported and those files fall back to
+sessions. A skill a person invokes with a slash command runs no tool and is not counted.
+
 Liveness: an interactive session waiting at its prompt fires no hooks, so its last line ages
 like a crashed session's. For a session without ``SessionEnd`` the Claude Code process the
 hook recorded is checked (:mod:`kelpie.adapters.claude_code.process`: Linux only, and only
@@ -74,6 +82,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
+from kelpie.adapters import _spool
 from kelpie.adapters.claude_code import hook
 from kelpie.adapters.claude_code.process import process_state
 from kelpie.core.actions import ActionKind, ActionResult
@@ -81,6 +90,7 @@ from kelpie.core.model import (
     Dependency,
     Owner,
     Session,
+    SkillLoad,
     Snapshot,
     Span,
     Status,
@@ -97,6 +107,12 @@ DEFAULT_TASKS_DIR = Path("~/.claude/tasks")
 DEFAULT_SPOOL = Path("~/.claude/kelpie/spool.jsonl")
 DEFAULT_STOP_DIR = Path(hook.DEFAULT_STOP_DIR)
 DEFAULT_LOOKBACK = timedelta(hours=24)
+LOADS_WINDOW = timedelta(hours=24)  # skill loads counted over this (tokens a day)
+SKILL_VERSION = 2  # the hook version that records the skill of a Skill call
+SKILL_TOOL = "Skill"
+# The spool covers the loads window when it still holds a line from its first hour (older
+# lines are cut at ``lookback``): not rotated away, not a fresh install.
+COVERED_FROM = timedelta(hours=1)
 DEFAULT_OWNER = "claude-code"
 NO_TASK_PREFIX = "session:"
 MAX_TASK_FILE = 1024 * 1024  # bytes; a larger task file is skipped
@@ -192,6 +208,7 @@ class SpoolEvent:
     task: str | None = None
     task_status: str | None = None
     task_owner: str | None = None
+    skill: str | None = None  # the skill a Skill call loaded (hook version 2)
     version: int = 0  # the hook's spool format version (``v``); 0 before stop support
     pid: int | None = None  # the Claude Code process the hook ran under
     pid_start: str | None = None  # its start time (Linux clock ticks since boot)
@@ -254,6 +271,7 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         task=_text(rec.get("task")),
         task_status=_text(rec.get("task_status")),
         task_owner=_text(rec.get("task_owner")),
+        skill=_text(rec.get("skill")),
         version=rec["v"] if isinstance(rec.get("v"), int) and not isinstance(rec["v"], bool) else 0,
         pid=rec["pid"]
         if isinstance(rec.get("pid"), int) and not isinstance(rec["pid"], bool) and rec["pid"] > 1
@@ -357,18 +375,9 @@ class ClaudeCodeAdapter:
         dated after ``until``."""
         if self.spool is None:
             return None
-        try:
-            fd = _open_regular(self.spool)
-        except OSError:
+        tail = _spool.tail_lines(self.spool, SPOOL_TAIL)
+        if tail is None:
             return None
-        try:
-            size = os.fstat(fd).st_size
-            os.lseek(fd, max(0, size - SPOOL_TAIL), os.SEEK_SET)
-            tail = os.read(fd, SPOOL_TAIL).decode("utf-8", "replace").splitlines()
-        except OSError:
-            return None
-        finally:
-            os.close(fd)
         oldest = datetime.min.replace(tzinfo=UTC)
         for line in reversed(tail):
             if (event := parse_line(line, oldest, until)) is not None:
@@ -396,7 +405,41 @@ class ClaudeCodeAdapter:
             dependencies=dependencies,
             sessions=sessions,
             spans=self._spans(events, sessions),
+            **self._skill_loads(events, sessions, now),
         )
+
+    def _skill_loads(
+        self, events: Sequence[SpoolEvent], sessions: Sequence[Session], now: datetime
+    ) -> dict[str, Any]:
+        """``Snapshot`` fields of the skills loaded (``Skill`` calls) in the last
+        ``LOADS_WINDOW``, counted only when the spool covers the whole window (it holds a
+        line from the window's first hour: not rotated away, not a fresh install) with a hook
+        that records them (every tool line of the window from version 2 on) and every
+        ``Skill`` call names its skill."""
+        start = now - LOADS_WINDOW
+        recent = [e for e in events if e.type == "tool" and start <= e.at <= now]
+        if (
+            self.spool is None
+            or self.lookback < LOADS_WINDOW
+            or not recent
+            or min(e.at for e in events) > start + COVERED_FROM
+            or any(e.version < SKILL_VERSION for e in recent)
+            or any(e.tool == SKILL_TOOL and e.outcome != "error" and not e.skill for e in recent)
+        ):
+            return {}
+        owner = {s.id: s.owner_id for s in sessions}
+        loads = tuple(
+            SkillLoad(
+                skill=e.skill,
+                at=e.at,
+                session_id=e.session_id,
+                role=owner.get(e.session_id),
+                source=self.name,
+            )
+            for e in recent
+            if e.tool == SKILL_TOOL and e.skill is not None and e.outcome != "error"
+        )
+        return {"skill_loads": loads, "skill_loads_counted": (self.name,)}
 
     def _read_list(self, task_list: str, strict: bool = False) -> list[_TaskFile]:
         path = self.tasks_dir / list_dir_name(task_list)
@@ -705,16 +748,7 @@ class ClaudeCodeAdapter:
         return spans_from_hook_events(hook_events, prefix=self.name)
 
     def _spool_lines(self, cutoff: datetime) -> Iterator[str]:
-        if self.spool is None:
-            return
-        rotated = self.spool.with_name(self.spool.name + ".1")
-        for path in (rotated, self.spool):
-            try:
-                if path is rotated and path.stat().st_mtime < cutoff.timestamp():
-                    continue  # nothing in it can be inside the lookback
-                yield from _read_lines(path, MAX_SPOOL_READ)
-            except OSError:
-                continue
+        return _spool.spool_lines(self.spool, cutoff, MAX_SPOOL_READ, MAX_LINE)
 
     def _events(self, cutoff: datetime, until: datetime | None = None) -> Iterator[SpoolEvent]:
         for line in self._spool_lines(cutoff):
@@ -805,37 +839,6 @@ class ClaudeCodeAdapter:
         raise UnsupportedAction(UNSUPPORTED)
 
 
-def _open_regular(path: Path) -> int:
-    """A descriptor for a regular file at ``path``, opened without following a symlink or
-    blocking on a FIFO (agents can write next to the spool). Raises OSError otherwise."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{path} is not a regular file")
-    except OSError:
-        os.close(fd)
-        raise
-    return fd
-
-
-def _read_lines(path: Path, limit: int) -> Iterator[str]:
-    """Lines of a regular file, reading at most ``limit`` bytes; overlong lines skipped."""
-    fd = _open_regular(path)
-    with os.fdopen(fd, "rb") as f:
-        left = limit
-        while left > 0:
-            line = f.readline(min(MAX_LINE + 1, left))
-            if not line:
-                return
-            left -= len(line)
-            if len(line) > MAX_LINE:
-                while line and not line.endswith(b"\n") and left > 0:  # skip its rest
-                    line = f.readline(min(MAX_LINE + 1, left))
-                    left -= len(line)
-                continue
-            yield line.decode("utf-8", "replace")
-
-
 def write_marker(directory: Path, session_id: str, reason: str, at: float) -> Path:
     """Write ``<directory>/<session_id>.json`` atomically (mode 0600), replacing an older one."""
     if not hook._SESSION_ID.fullmatch(session_id):
@@ -859,7 +862,7 @@ def write_marker(directory: Path, session_id: str, reason: str, at: float) -> Pa
 def read_marker(directory: Path, session_id: str) -> datetime | None:
     """When the session's stop marker was written; None if there is no usable one."""
     try:
-        fd = _open_regular(directory / f"{session_id}.json")
+        fd = _spool.open_regular(directory / f"{session_id}.json")
     except OSError:
         return None
     try:

@@ -242,3 +242,63 @@ def test_a_state_store_error_stops_folding_under_an_unreported_outage() -> None:
 
     engine.states.store = Broken(states=dict(engine.states.store.states))  # type: ignore[attr-defined]
     assert tick(engine, T0 + M)["T-1"] is not Outcome.SUPPRESSED
+
+
+def test_an_outage_from_another_rule_folds_the_same_way() -> None:
+    """A block storm (rule 4) has no CI job: it folds the alerts of the tasks it explains."""
+    from kelpie.core.incidents import BLOCK_STORM, Outage, incident_state_id
+
+    state = incident_state_id("stale_blocks", "waiting for ceo")
+    storm = Outage(state=state, signature="waiting for CEO", kind=BLOCK_STORM, tasks=("T-1",))
+    engine, ci, blocks, _ = farm()
+    ci.actions = [
+        Action(
+            ActionKind.ALERT, "ci_economy", "Block storm", severity=Severity.WARNING,
+            key=state, state=state, since=T0, params=storm.to_params(),
+        )
+    ]  # fmt: skip
+    blocks.actions = [wait_alert("T-1"), wait_alert("T-2")]
+    outcomes = tick(engine, T0)
+    assert outcomes["T-1"] is Outcome.SUPPRESSED and outcomes["T-2"] is Outcome.ALERTED
+    [folded] = [e for e in entries(engine, "T-1")]
+    assert folded.params[FOLDED_UNDER] == state
+
+
+def test_an_observe_only_outage_is_logged_folds_nothing_and_resolves_quietly() -> None:
+    """A new check (``Action.observe_only``) stays in observe whatever its rule's mode: it
+    hides no alert people get, and people never hear it ended either (#252)."""
+    from kelpie.core.ledger import OBSERVE_ONLY
+    from kelpie.report.verify import mode_events
+
+    engine, ci, blocks, alerter = farm()
+    quiet = replace(outage_alert(("T-1",)), observe_only=True)
+    ci.actions, blocks.actions = [quiet], [wait_alert("T-1")]
+    assert tick(engine, T0) == {"ci_economy": Outcome.OBSERVED, "T-1": Outcome.ALERTED}
+    assert [e.reason for e in alerter.events] == ["T-1 is blocked"]
+    # The rule's other alerts stay in its mode; the ledger marks which are observe-only.
+    ci.actions = [quiet, replace(wait_alert("T-9"), rule="ci_economy", about_wait=False)]
+    tick(engine, T0 + 2 * H)
+    ci.actions = []
+    done = engine.tick(lambda: Snapshot(now=T0 + 3 * H))
+    [notice] = [d for d in done if d.action.params.get("state") == STATE]
+    assert notice.outcome is Outcome.OBSERVED
+    assert not [e for e in alerter.events if e.state == STATE]  # no "resolved" either
+    log = engine.ledger.store.entries  # type: ignore[attr-defined]
+    assert {e.params.get(OBSERVE_ONLY) for e in log if e.rule == "ci_economy"} == {True, None}
+    assert mode_events(log) == []  # an observe-only entry is no switch of the rule's mode
+
+
+def test_an_outage_switched_on_while_open_is_announced_then() -> None:
+    engine, ci, blocks, alerter = farm()
+    ci.actions, blocks.actions = [replace(outage_alert(("T-1",)), observe_only=True)], []
+    tick(engine, T0)
+    ci.actions, blocks.actions = [outage_alert(("T-1",))], [wait_alert("T-1")]
+    assert tick(engine, T0 + M) == {"ci_economy": Outcome.ALERTED, "T-1": Outcome.SUPPRESSED}
+    assert [e.transition for e in alerter.events] == [Transition.NEW]
+
+
+def test_dry_run_folds_nothing_under_an_observe_only_outage() -> None:
+    engine, ci, blocks, _ = farm(replace(LIVE, dry_run=True))
+    ci.actions = [replace(outage_alert(("T-1",)), observe_only=True)]
+    blocks.actions = [wait_alert("T-1")]
+    assert tick(engine, T0)["T-1"] is Outcome.DRY_RUN  # live, people would get T-1's alert

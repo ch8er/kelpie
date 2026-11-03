@@ -154,6 +154,13 @@ PLANNED: tuple[PlannedRule, ...] = (
         "Repeated huge tool outputs -> comment to instructions owner",
         effects=_fx(_K.COMMENT),
     ),
+    PlannedRule(
+        "instruction_bloat",
+        None,
+        _P1,
+        "Instruction files that only grow or cross a size -> split recommendation",
+        incidents=(21,),
+    ),
 )
 
 

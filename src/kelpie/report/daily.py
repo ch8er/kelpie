@@ -8,16 +8,23 @@ same report. No LLM: an optional root-cause section is a later, separate step.
 **Cost of chaos, hours.** Long-lived alert states (``kelpie.core.states``) of the rules in
 :data:`CHAOS_CAUSES` describe work that is stuck: an ownerless task, a block that outlived
 its cause, a runaway loop (``loop_breaker``'s budget and forecast states are spend, not
-chaos, and are left out). Each counts from when Kelpie first reported it (``opened_at``:
-a grace period or an allowed wait before the threshold is not lost) to its ``last_seen``
-(the last tick that still saw it), clipped to the day; a lower bound, since a rule going
-live re-opens its states. Two conditions on one task both count: the unit is
-*condition-hours*, not wall-clock hours. A forgotten hold (rule 6, ``bottlenecks:hold:*``)
-is its own cause and counts idle agent-hours instead (:func:`hold_agent_hours`); so is a
-person's inbox (rule 13, ``needs_you:*``): the agent-hours of the agent tasks waiting on
-them (:func:`people_agent_hours`). A card stuck in a pre-work status with work behind it
-(rule 3, ``orphan_status:stuck-before-work:*``) is its own cause too, in card-hours. All
-are "hours lost"; ``[report] hour_usd`` turns them into dollars. A card in a pre-work status
+chaos, and are left out). Each counts from when Kelpie first reported it (``opened_at``: a
+grace period or an allowed wait before the threshold is not lost) to its ``last_seen`` (the
+last tick that still saw it), clipped to the day; a lower bound, since a rule going live
+re-opens its states. The unit is *task-hours*, each counted once (#228): when several
+states cover the same task at the same time (rule 13 listing it as waiting on a person,
+rule 4's stale block on it, two conditions of one rule), the hour counts under the first
+cause in :data:`CHAOS_PRECEDENCE` (a person's inbox, then a stale block, then the rest in
+:data:`CHAOS_CAUSES` order), and the others' overlapping hours are shown as "also seen",
+never added. What names no task adds up as it is: idle agents behind a hold, the waiting
+tasks rule 13 counts past the 20 ids it lists, a state without a task. A session's state
+counts on its task, and a task waiting behind two people's tasks counts once when rule 13
+names it. A forgotten hold (rule 6, ``bottlenecks:hold:*``) is its own cause and counts
+idle agent-hours instead (:func:`hold_agent_hours`); so is a person's inbox (rule 13,
+``needs_you:*``): the agent- hours of the agent tasks waiting on them
+(:func:`people_agent_hours`). A card stuck in a pre-work status with work behind it (rule
+3, ``orphan_status:stuck-before-work:*``) is its own cause too, in card-hours. All are
+"hours lost"; ``[report] hour_usd`` turns them into dollars. A card in a pre-work status
 that rule 3 finds stuck (past ``prework_after``, not held, ignored or queued behind its own
 parent) but that no open task depends on, so rule 3 never reported it, is listed under
 "Stuck, blocking nothing" with its age, and counts nowhere: it delays no work.
@@ -74,6 +81,10 @@ by dollars and the best by hours.
 task-hours waiting for conditions, with a suggestion (:mod:`kelpie.report.waits`); a known
 cause also competes for the top 3.
 
+**Per board** (#283). With several boards (``[[adapters.hermes.boards]]``), the cost of
+chaos, tasks completed and biggest wait of each board beside the farm total
+(:mod:`kelpie.report.boards`); nothing for one board.
+
 **Sections.** Analyses registered in :mod:`kelpie.report.sections` (token optimization,
 ...) add their own section after the top 3, and their advice competes for it; they follow
 the same rules: pure, deterministic, no clock and no LLM.
@@ -94,10 +105,14 @@ from typing import Any
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
+from kelpie.core.incidents import Outage as OutageParams
+from kelpie.core.incidents import is_outage_state
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression
 from kelpie.core.model import (
     Condition,
     Dependency,
+    InstructionDuplicate,
+    InstructionFile,
     Owner,
     OwnerKind,
     Reconciliation,
@@ -121,7 +136,9 @@ from kelpie.core.spans import (
 )
 from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
-from kelpie.report import farm, md
+from kelpie.core.storage import TokenRow
+from kelpie.report import farm, intervals, md
+from kelpie.report.boards import BoardLine, board_lines, rest_line
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.fixes import FixEvent
 from kelpie.report.sections import (
@@ -144,7 +161,7 @@ from kelpie.report.verify import (
     Verification,
     filter_events,
     mode_events,
-    verify,
+    verify_all,
 )
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
 from kelpie.report.waits import (
@@ -202,6 +219,13 @@ CHAOS_CAUSES: Mapping[str, str] = {
     "loop_breaker": "runaway loops",
     "no_progress": "activity without progress",
 }
+# Which cause counts a task-hour that several chaos states cover (#228): a person's inbox
+# (the wait has a name), then a stale block, then the rest in CHAOS_CAUSES order.
+CHAOS_PRECEDENCE: tuple[str, ...] = (
+    PEOPLE,
+    "stale_blocks",
+    *(c for c in CHAOS_CAUSES if c not in (PEOPLE, "stale_blocks")),
+)
 # What a human can do about a cause when no rule could have fixed it by itself.
 REMEDIES: Mapping[str, str] = {
     "orphan_status": "give ownerless statuses an owner: route them to a role or let "
@@ -319,6 +343,14 @@ class ReportInputs:
     bill_day: date | None = None  # the UTC day checked, when cost reports are configured
     # Stored snoozes that ended after the day began (#176): deliberate waits, not chaos.
     snoozes: Sequence[Snooze] = ()
+    # The instruction files each role loads, as the board measured them (``instructions_at``)
+    # when the report was built ([instructions]; the section ``instructions``).
+    instruction_files: Sequence[InstructionFile] = ()
+    instruction_duplicates: Sequence[InstructionDuplicate] = ()
+    instructions_at: datetime | None = None
+    # Tokens a day on instructions per role, one sample per scan: the before/after of a
+    # split (a fix naming rule instruction_bloat).
+    instruction_tokens: Sequence[TokenRow] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +385,17 @@ class OutageLine:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolchainCause:
+    """An outage of the day (any kind) whose alert named a toolchain change on a host
+    shortly before it began as its likely cause (incident 20, #284)."""
+
+    signature: str
+    kind: str
+    since: datetime
+    change: str  # the alert's own line: what changed, where, when
+
+
+@dataclass(frozen=True, slots=True)
 class PlannedWaits:
     """Agent tasks planned for later behind a person's open inbox (rule 13's ``planned``):
     not waiting, so listed and never counted as hours lost. Planned work behind a human task
@@ -378,9 +421,13 @@ class StuckCard:
 class ChaosLine:
     rule: str
     cause: str
-    hours: float
+    hours: float  # counted once: hours an earlier cause already counted are in also_hours
     spend: Spend
     tasks: tuple[str, ...]
+    # the rule's own hours on tasks an earlier cause (CHAOS_PRECEDENCE) already counted then,
+    # and those causes: shown for review, never added to the hours lost
+    also_hours: float = 0.0
+    also_under: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,6 +485,8 @@ class DailyReport:
     stuck_idle: tuple[StuckCard, ...] = ()
     outages: tuple[OutageLine, ...] = ()  # rule 9's CI outages of the day
     outage_wait_hours: float = 0.0  # the day's waiting time all of them explained
+    # outages of the day (any kind) whose alerts named a toolchain change as the likely cause
+    toolchain_causes: tuple[ToolchainCause, ...] = ()
     planned: PlannedWaits | None = None  # behind work planned for later: never counted
     snoozed: SnoozedWaits | None = None  # deliberate waits a person snoozed: never chaos
     act_blockers: Mapping[str, str] = field(default_factory=dict)  # as in ReportInputs
@@ -447,6 +496,8 @@ class DailyReport:
     reconciliations: tuple[Reconciliation, ...] = ()  # as in ReportInputs
     reconcile_error: str | None = None  # why the bills could not be read
     bill_day: date | None = None  # as in ReportInputs
+    # several boards (#283): each board's day (kelpie.report.boards); () for one board
+    boards: tuple[BoardLine, ...] = ()
 
     @property
     def chaos_hours(self) -> float:
@@ -480,10 +531,13 @@ def build_report(
     inputs: ReportInputs,
     sections: Mapping[str, SectionBuilder] | None = None,
     section_keys: Mapping[str, frozenset[str]] | None = None,
+    *,
+    per_board: bool = True,
 ) -> DailyReport:
     """The day's report. ``sections`` are the extra section builders (default: every one
     registered in :mod:`kelpie.report.sections`), ``section_keys`` the config keys each
-    accepts (default: as registered)."""
+    accepts (default: as registered). With ``per_board`` and several boards, each board's
+    line is built too (:mod:`kelpie.report.boards`)."""
     start, end = day_bounds(inputs.day, inputs.tz)
     spans = [s for s in inputs.spans if start <= last_at(s) < end]
     index = {span_key(s): s for s in inputs.spans}
@@ -554,6 +608,7 @@ def build_report(
         biggest_wait=wait,
         outages=outage_lines,
         outage_wait_hours=outage_hours,
+        toolchain_causes=_toolchain_causes(inputs, start, end),
         stuck_idle=_stuck_idle(inputs, start, end),
         planned=_planned_waits(inputs, start, end),
         snoozed=snoozed,
@@ -564,8 +619,36 @@ def build_report(
         ),
         bill_day=inputs.bill_day,
         act_blockers=inputs.act_blockers,
+        boards=_boards(inputs, start, end, context.roles) if per_board else (),
         act_gaps=inputs.act_gaps,
     )
+
+
+def _boards(
+    inputs: ReportInputs, start: datetime, end: datetime, roles: Mapping[str, str]
+) -> tuple[BoardLine, ...]:
+    """Each board's line (#283): its chaos and completed tasks counted over its part of the
+    inputs, its biggest wait classified with the farm's wait causes (a person's inbox, a CI
+    outage, a snooze name no board but say what a board's task waited for)."""
+    causes: list[WaitCauses] = []
+
+    def wait(part: ReportInputs) -> BiggestWait | None:
+        if not causes:
+            causes.append(wait_causes(inputs, start, end))
+        per_role = throughput(
+            part.tasks,
+            part.sessions,
+            inputs.owners,
+            [row.state for row in part.states],
+            start,
+            end,
+            inputs.review_roles,
+            roles,
+            causes[0].split,
+        )
+        return biggest_wait(per_role, part.tasks, causes[0], inputs.farm)
+
+    return board_lines(inputs, lambda part: build_report(part, {}, {}, per_board=False), wait)
 
 
 def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> PlannedWaits | None:
@@ -709,6 +792,30 @@ def _outage_lines(
     return tuple(out)
 
 
+def _toolchain_causes(
+    inputs: ReportInputs, start: datetime, end: datetime
+) -> tuple[ToolchainCause, ...]:
+    """Outages open within the day whose alerts (as of that occurrence) named a toolchain
+    change: the first such alert of each occurrence."""
+    named: dict[str, list[tuple[datetime, OutageParams]]] = {}
+    for e in inputs.actions:
+        if e.at < end and (o := OutageParams.from_params(e.params)) is not None and o.toolchain:
+            named.setdefault(o.state, []).append((e.at, o))
+    out: list[ToolchainCause] = []
+    for row in inputs.states:
+        st = row.state
+        if not is_outage_state(st.id) or st.since >= end or st.last_seen < start:
+            continue
+        found = sorted(
+            (x for x in named.get(st.id, ()) if st.since <= x[0] <= st.last_seen),
+            key=lambda x: x[0],
+        )
+        if found and (line := found[0][1].toolchain):
+            o = found[0][1]
+            out.append(ToolchainCause(o.signature, o.kind, st.since, line))
+    return tuple(sorted(out, key=lambda c: (c.since, c.signature)))
+
+
 def _reconciled(found: Sequence[Reconciliation] | str) -> tuple[Reconciliation, ...]:
     if isinstance(found, str):
         return ()
@@ -739,15 +846,16 @@ def _verifications(
     roles, platforms = session_context(board, inputs.attribution)
     found = calls(known, roles, platforms)
     since, _ = day_bounds(inputs.day - timedelta(days=1), inputs.tz)
+    # Fixes from two windows before the day before on (as far as ``load_inputs`` reads): a
+    # recent fix may overlap an older one, which may overlap one older still.
+    reach = since - 2 * inputs.verify_window
     events = [
         *inputs.fixes,
         *mode_events(e for e in inputs.actions if e.at < end),
         *filter_events(found, replace(inputs.outputs, window=inputs.verify_window)),
     ]
-    events = sorted(
-        (e for e in events if since <= e.at < end), key=lambda e: (e.at, e.kind, e.note)
-    )
-    if not events:
+    events = [e for e in events if reach <= e.at < end]
+    if not any(e.at >= since for e in events):
         return ()
     evidence = Evidence(
         end=end,
@@ -755,6 +863,7 @@ def _verifications(
         cause=cause_of,
         start=counts_from,
         hours=lambda st, lo, hi: state_hours(inputs.actions, st, lo, hi, _humans(inputs)),
+        lost=lambda found, lo, hi: lost_hours(inputs, found, lo, hi),
         chaos_rules=frozenset(CHAOS_CAUSES),
         spans=known,
         counted=counted_llm(index, known),
@@ -765,8 +874,11 @@ def _verifications(
         window=inputs.verify_window,
         min_sample=inputs.min_sample,
         review_roles=inputs.review_roles,
+        known_from=reach,
+        owners=inputs.owners,
+        instruction_tokens=inputs.instruction_tokens,
     )
-    return tuple(verify(e, evidence) for e in events)
+    return verify_all(events, evidence, since)
 
 
 def _priced(inputs: ReportInputs, spend: Spend) -> bool:
@@ -894,35 +1006,13 @@ def _chaos(
             if a <= last_at(span) < b:
                 burned.setdefault(span_key(span), rule)
 
-    hours: dict[str, float] = defaultdict(float)
-    tasks: dict[str, set[str]] = defaultdict(set)
-    rank_ = {rule: i for i, rule in enumerate(CHAOS_CAUSES)}
-    chaos = sorted(
-        (r.state for r in inputs.states if is_chaos(r.state)),
-        key=lambda s: (rank_[cause_of(s)], s.opened_at, s.id),
-    )
-    for state in chaos:
-        # From when Kelpie first reported it: a grace period or an allowed wait before the
-        # threshold is not lost time. A lower bound (a rule going live re-opens a state).
-        a, b = max(counts_from(state), start), min(state.last_seen, end)
-        if b <= a:
-            continue
-        cause = cause_of(state)
-        if cause == HOLDS:
-            agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
-            hours[HOLDS] += agent_hours
-            tasks[HOLDS].update(held)
-            continue
-        if cause == PEOPLE:
-            agent_hours, waiting = people_agent_hours(inputs.actions, state, a, b)
-            hours[PEOPLE] += agent_hours
-            tasks[PEOPLE].update(waiting)
-            continue
-        hours[cause] += (b - a).total_seconds() / 3600
-        if state.task_id:
-            tasks[cause].add(state.task_id)
+    def on_state(state: OpenState, a: datetime, b: datetime) -> None:
         if (session := session_of(state)) is not None:
             burn(state.rule, session, a, b)
+
+    chaos = [r.state for r in inputs.states if is_chaos(r.state)]
+    found = _chaos_hours(inputs, chaos, start, end, on_state)
+    keyed, loose, tasks = found.keyed, found.loose, found.tasks
     for entry in actions:
         if entry.rule != "exit_contract" or entry.kind is not ActionKind.REQUEUE:
             continue
@@ -941,19 +1031,117 @@ def _chaos(
         rule: pricer.price(usage(found, {span_key(s): counted[span_key(s)] for s in found}))
         for rule, found in by_rule.items()
     }
+    hours, also = _count_once(keyed)
     lines = [
         ChaosLine(
             rule,
             CHAOS_CAUSES[rule],
-            hours[rule],
+            hours.get(rule, 0.0) + loose[rule],
             money.get(rule, Spend()),
             tuple(sorted(tasks[rule])),
+            sum(also.get(rule, {}).values()),
+            tuple(c for c in CHAOS_PRECEDENCE if c in also.get(rule, {})),
         )
         for rule in CHAOS_CAUSES
-        if hours[rule] > 0 or money.get(rule, Spend()).tokens > 0
+        if hours.get(rule, 0.0) + loose[rule] > 0
+        or money.get(rule, Spend()).tokens > 0
+        or also.get(rule)
     ]
     lines.sort(key=lambda c: (-c.spend.usd, -c.hours, c.rule))
     return tuple(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class _ChaosHours:
+    """What chaos states saw in a window, before a task-hour is counted once: per cause,
+    ``keyed`` spans on a task, ``loose`` hours that name no task, and the tasks named."""
+
+    keyed: defaultdict[str, list[tuple[str, datetime, datetime]]]
+    loose: defaultdict[str, float]
+    tasks: defaultdict[str, set[str]]
+
+
+def _chaos_hours(
+    inputs: ReportInputs,
+    states: Iterable[OpenState],
+    start: datetime,
+    end: datetime,
+    on_state: Callable[[OpenState, datetime, datetime], None] | None = None,
+) -> _ChaosHours:
+    """Each chaos state in ``[start, end)``, from when Kelpie first reported it (a grace
+    period or an allowed wait before the threshold is not lost time; a lower bound, since a
+    rule going live re-opens a state) to its last sighting. A task-hour counts once (#228):
+    per task, the spans each cause saw (a state on a session counts on its task); what names
+    no task adds up as it is: idle agents behind a hold, waiting tasks rule 13 counted past
+    the ids it lists, a state without a task. ``tasks`` are the tasks counted: for a
+    person's inbox, those rule 13 named as waiting during the window (up to its count).
+    ``on_state`` sees each state's window."""
+    keyed: dict[str, list[tuple[str, datetime, datetime]]] = defaultdict(list)
+    loose: dict[str, float] = defaultdict(float)
+    tasks: dict[str, set[str]] = defaultdict(set)
+    rank_ = {rule: i for i, rule in enumerate(CHAOS_CAUSES)}
+    for state in sorted(states, key=lambda s: (rank_[cause_of(s)], s.opened_at, s.id)):
+        a, b = max(counts_from(state), start), min(state.last_seen, end)
+        if b <= a:
+            continue
+        cause = cause_of(state)
+        if cause == HOLDS:
+            agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
+            loose[HOLDS] += agent_hours
+            tasks[HOLDS].update(held)
+            continue
+        if cause == PEOPLE:
+            for lo, hi, count, listed in people_steps(inputs.actions, state, a, b):
+                ids = listed[:count]  # an alert without the count counts 0, as before
+                keyed[PEOPLE].extend((t, lo, hi) for t in ids)
+                loose[PEOPLE] += max(count - len(ids), 0) * (hi - lo).total_seconds() / 3600
+                tasks[PEOPLE].update(ids)
+            continue
+        if state.task_id:
+            keyed[cause].append((state.task_id, a, b))
+            tasks[cause].add(state.task_id)
+        else:
+            loose[cause] += (b - a).total_seconds() / 3600
+        if on_state is not None:
+            on_state(state, a, b)
+    return _ChaosHours(keyed, loose, tasks)
+
+
+def lost_hours(
+    inputs: ReportInputs, states: Iterable[OpenState], start: datetime, end: datetime
+) -> float:
+    """The hours lost ``states`` cost in ``[start, end)``, each task-hour once, as the cost
+    of chaos counts them (for before/after verification, :mod:`kelpie.report.verify`)."""
+    found = _chaos_hours(inputs, states, start, end)
+    return sum(_count_once(found.keyed)[0].values()) + sum(found.loose.values())
+
+
+def _count_once(
+    keyed: Mapping[str, Sequence[tuple[str, datetime, datetime]]],
+) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """Each cause's task-hours, a task-hour counted once: by the first cause in
+    :data:`CHAOS_PRECEDENCE` that saw the task then (two states of one cause on one task
+    count once too). Also, per cause, the hours of its own that an earlier cause had
+    already counted, by that cause."""
+    claimed: dict[str, list[tuple[str, intervals.Spans]]] = defaultdict(list)
+    hours: dict[str, float] = {}
+    also: dict[str, dict[str, float]] = {}
+    for cause in CHAOS_PRECEDENCE:
+        by_task: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
+        for task, a, b in keyed.get(cause, ()):
+            by_task[task].append((a, b))
+        for task, spans in by_task.items():
+            own = intervals.merged(spans)
+            new = own
+            for earlier, seen in claimed[task]:
+                rest = intervals.minus(new, seen)
+                if (lost := intervals.hours(new) - intervals.hours(rest)) > 1e-9:
+                    also.setdefault(cause, {})
+                    also[cause][earlier] = also[cause].get(earlier, 0.0) + lost
+                new = rest
+            hours[cause] = hours.get(cause, 0.0) + intervals.hours(new)
+            claimed[task].append((cause, own))
+    return hours, also
 
 
 def counts_from(state: OpenState) -> datetime:
@@ -1013,6 +1201,22 @@ def people_agent_hours(
     planned for later are not waiting (incident 20): rule 13 leaves them out of that count
     and reports them apart (``planned_agent_tasks``, ``planned``), which ``planned`` reads
     instead; they never count as hours lost."""
+    return _sampled_hours(entries, state.opened_at, a, b, _inbox_sampler(state, planned))
+
+
+def people_steps(
+    entries: Sequence[LedgerEntry], state: OpenState, a: datetime, b: datetime
+) -> list[tuple[datetime, datetime, int, tuple[str, ...]]]:
+    """:func:`people_agent_hours` as steps: ``(start, end, waiting count, the ids rule 13
+    listed then)`` over ``[a, b)``; the count may exceed the ids (rule 13 lists at most 20)."""
+    return _sampled_steps(entries, state.opened_at, a, b, _inbox_sampler(state, False))
+
+
+def _inbox_sampler(
+    state: OpenState, planned: bool
+) -> Callable[[LedgerEntry], tuple[int, list[object]] | None]:
+    """What one of rule 13's escalations of this inbox says: how many agent tasks wait (or
+    are planned, with ``planned``) on the person, and their ids."""
     person = state.id[len(PEOPLE_STATE) :]
     count_key, ids_key = (
         (PLANNED_AGENT_TASKS, PLANNED_TASKS) if planned else ("waiting_agent_tasks", "waiting")
@@ -1029,7 +1233,55 @@ def people_agent_hours(
         n = count if isinstance(count, int) and not isinstance(count, bool) else 0
         return max(n, 0), waiting if isinstance(waiting, list) else []
 
-    return _sampled_hours(entries, state.opened_at, a, b, sample)
+    return sample
+
+
+def _samples(
+    entries: Sequence[LedgerEntry],
+    first: datetime,
+    b: datetime,
+    sample: Callable[[LedgerEntry], tuple[int, list[object]] | None],
+) -> list[tuple[datetime, int, list[object]]]:
+    return sorted(
+        (
+            (e.at, found[0], found[1])
+            for e in entries
+            if first <= e.at < b and (found := sample(e)) is not None
+        ),
+        key=lambda x: (x[0], x[1]),
+    )
+
+
+def _sampled_steps(
+    entries: Sequence[LedgerEntry],
+    first: datetime,
+    a: datetime,
+    b: datetime,
+    sample: Callable[[LedgerEntry], tuple[int, list[object]] | None],
+) -> list[tuple[datetime, datetime, int, tuple[str, ...]]]:
+    """A count a state's alerts report (idle agents, waiting tasks) as a step function over
+    ``[a, b)``: ``(start, end, count, ids)`` per step. Each sample of this episode of the
+    state (at or after ``first``) holds until the next one; before the first sample in the
+    window, the latest earlier sample applies, else the first one. No sample at all: no
+    step. ``ids`` are the strings that sample names, once each."""
+    samples = _samples(entries, first, b, sample)
+    if not samples:
+        return []
+
+    def ids(raw: list[object]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(t for t in raw if isinstance(t, str)))
+
+    before = [x for x in samples if x[0] <= a]
+    _, level, named = before[-1] if before else samples[0]
+    out: list[tuple[datetime, datetime, int, tuple[str, ...]]] = []
+    at = a
+    for when, count, raw in samples:
+        if when <= a:
+            continue
+        out.append((at, when, level, ids(named)))
+        at, level, named = when, count, raw
+    out.append((at, b, level, ids(named)))
+    return [x for x in out if x[1] > x[0]]
 
 
 def _sampled_hours(
@@ -1039,32 +1291,14 @@ def _sampled_hours(
     b: datetime,
     sample: Callable[[LedgerEntry], tuple[int, list[object]] | None],
 ) -> tuple[float, tuple[str, ...]]:
-    """Integrate a count a state's alerts report (idle agents, waiting tasks) over
-    ``[a, b)``: each sample of this episode of the state (at or after ``first``) holds
-    until the next one, a step function. Before the first sample in the window, the latest
-    earlier sample applies, else the first one. No sample at all: 0. Also the task ids the
-    samples name."""
-    samples = sorted(
-        (
-            (e.at, found[0], found[1])
-            for e in entries
-            if first <= e.at < b and (found := sample(e)) is not None
-        ),
-        key=lambda x: (x[0], x[1]),
+    """The step function of :func:`_sampled_steps` integrated over ``[a, b)``, and the task
+    ids every sample of the episode up to ``b`` names."""
+    total = sum(
+        n * (hi - lo).total_seconds() / 3600
+        for lo, hi, n, _ in _sampled_steps(entries, first, a, b, sample)
     )
-    if not samples:
-        return 0.0, ()
-    before = [x for x in samples if x[0] <= a]
-    level = (before[-1] if before else samples[0])[1]
-    total, at = 0.0, a
-    for when, count, _ in samples:
-        if when <= a:
-            continue
-        total += level * (when - at).total_seconds() / 3600
-        at, level = when, count
-    total += level * (b - at).total_seconds() / 3600
-    named = sorted({t for _, _, ids in samples for t in ids if isinstance(t, str)})
-    return total, tuple(named)
+    named = {t for _, _, raw in _samples(entries, first, b, sample) for t in raw}
+    return total, tuple(sorted(t for t in named if isinstance(t, str)))
 
 
 def _held(params: Mapping[str, object]) -> list[object]:
@@ -1082,7 +1316,7 @@ def state_hours(
     b: datetime,
     humans: frozenset[str] = frozenset(),
 ) -> float:
-    """What a chaos state costs in ``[a, b)``: its condition-hours, for a forgotten hold
+    """What a chaos state costs in ``[a, b)`` on its own: its hours, for a forgotten hold
     the idle agent-hours behind it (:func:`hold_agent_hours`), for a person's inbox the
     agent-hours waiting on them (:func:`people_agent_hours`)."""
     if state.id.startswith(HOLD_STATE):
@@ -1098,9 +1332,17 @@ def _humans(inputs: ReportInputs) -> frozenset[str]:
 
 def is_chaos(state: OpenState) -> bool:
     """A state that is lost work: a chaos rule's, except loop_breaker's budget and
-    forecast states (spend against a budget, not a loop)."""
+    forecast states (spend against a budget, not a loop) and outages: a block storm is
+    rule 4's, but its hours are its tasks' (their own states, or rule 13's inbox when it
+    takes their blocks), never the storm's on top. Once a storm folds its tasks' alerts
+    they open no state of their own: those hours are missing until the report attributes
+    outages by kind (#229, track C)."""
+    if is_outage_state(state.id):
+        return False
     if state.rule == "loop_breaker":
         return session_of(state) is not None
+    if state.id.startswith("no_progress/context:"):
+        return False  # a runaway context: tokens re-read, the session may well progress
     return state.rule in CHAOS_CAUSES
 
 
@@ -1184,7 +1426,7 @@ def _recommendations(
     if wait is not None and wait.cause != UNKNOWN_WAIT:  # the headline covers that one
         candidates.append(
             Advice(
-                title=f"Cut the {md.text(wait.role)} wait for {wait.label}",
+                title=f"Cut the {md.short_text(wait.role)} wait for {wait.label}",
                 detail=(
                     f"{len(wait.tasks)} task(s) of the role waited {wait.hours:.1f} task-hours "
                     f"for {wait.label} (time the work stood still, valued like hours lost), "
@@ -1197,24 +1439,35 @@ def _recommendations(
     for rec in filters:
         group = rec.group
         model = next((models[s] for s in group.sessions if models.get(s)), None)
-        role = f" ({md.text(group.role)})" if group.role else ""
+        role = f" ({md.short_text(group.role)})" if group.role else ""
         # other commands of the same platform already run through it
         in_use = (rec.filter.name, group.platform) in filters_in_use
         maybe = "" if rec.platform_known or in_use else " if RTK supports your agent platform"
         how = (
             f"route it through {rec.filter.name} like the farm's other commands that already run "
             "through it"
-            if in_use
+            if in_use and rec.filter.advice is None
             else rec.filter.how
+        )
+        # A built-in tool's advice is a way to call it, not a filter to put it through; it
+        # carries no platform caveat (the default advice rows work on any platform).
+        title = (
+            f"{md.text(rec.filter.advice)}: {md.code(group.key)} output{role}"
+            if rec.filter.advice is not None
+            else f"Filter {md.code(group.key)} output{role} with {rec.filter.name}{maybe}"
         )
         candidates.append(
             Advice(
-                title=f"Filter {md.code(group.key)} output{role} with {rec.filter.name}{maybe}",
+                title=title,
                 detail=(
                     f"{group.calls} calls put {group.tokens:,} tokens into the context, "
                     f"{round(group.mean):,} per call; {how}. Expected saving: about "
                     f"{rec.saved_tokens:,} tokens a day (assumed {rec.filter.reduction:.0%}; "
-                    "verified before/after once it is in place)"
+                    + (
+                        "verified before/after once noted with `kelpie fix`)"
+                        if rec.filter.advice is not None
+                        else "verified before/after once it is in place)"
+                    )
                 ),
                 usd=pricer.input_usd(rec.saved_tokens, model),
                 tasks=group.tasks,
@@ -1225,6 +1478,8 @@ def _recommendations(
     for f in would_fix:  # most subjects first: describe a rule by its main action
         acting.setdefault(f.rule, f)
     for line in chaos:
+        if line.hours <= 0 and not line.spend.tokens:
+            continue  # all its hours were counted under an earlier cause (#228)
         mode = inputs.modes.get(line.rule, Mode.OBSERVE)
         fix = acting.get(line.rule)
         blocked = inputs.act_blockers.get(line.rule)
@@ -1233,7 +1488,8 @@ def _recommendations(
             title = f"Let {line.rule} act"
             detail = (
                 f"in {mode} mode it would have done {fix.kind} on {fix.count} "
-                f"subject(s); {line.cause} lasted {line.hours:.1f} condition-hours"
+                f"subject(s); {line.cause} lasted {line.hours + line.also_hours:.1f} "
+                "task-hours"
             )
             if inputs.farm.dry_run:
                 detail += " (Kelpie runs in dry-run: no rule acts until [engine] dry_run = false)"
@@ -1305,14 +1561,29 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
                 f"Stuck hours at ${report.hour_usd:,.2f}/hour: "
                 f"${report.chaos_hours * report.hour_usd:,.2f}.",
             ]
+        overlap = [c for c in report.chaos if c.also_hours > 0]
+        if overlap:
+            seen = "; ".join(
+                f"`{c.rule}` {c.also_hours:.1f} h (counted under "
+                f"{', '.join(f'`{u}`' for u in c.also_under)})"
+                for c in overlap
+            )
+            lines += [
+                "",
+                f"Also seen, not added (the same tasks over the same hours): {seen}.",
+            ]
         lines += [
             "",
-            "Hours lost: condition-hours, how long each condition lasted after Kelpie first "
-            "reported it, summed over conditions (two on one task both count; a lower bound); "
-            "for forgotten holds, idle agent-hours: the agents rule 6 saw idle behind the hold "
-            "after its expiry, over time; for agents waiting on people, agent-hours: the agent "
-            "tasks rule 13 saw waiting on a person's approval or human task, over time (a "
-            "human gate rule 6 also reports counts in both lines).",
+            "Hours lost: task-hours, how long a task was stuck after Kelpie first reported "
+            "it, each task-hour counted once: when several rules saw the same task at the "
+            "same time, under the first of a person's inbox, a stale block, an ownerless "
+            "task, a wait past its limit, an exit without a final status, review ping-pong, "
+            "idle capacity, a card stuck before work, a runaway loop, activity without "
+            "progress (a lower bound); for forgotten holds, idle agent-hours: the "
+            "agents rule 6 saw idle behind the hold after its expiry, over time; for agents "
+            "waiting on people, agent-hours: the agent tasks rule 13 saw waiting on a "
+            "person's approval or human task, over time (a human gate rule 6 also reports "
+            "counts in both lines).",
         ]
     else:
         lines.append("No hours lost and no tokens burned on loops, idle sessions or restarts.")
@@ -1329,6 +1600,18 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             lines.append(
                 f"- {md.code(o.signature)} since {_local(o.since, report)}, {until}: "
                 f"{o.prs} PR(s), {o.folded} alert(s) folded under it"
+            )
+    if report.toolchain_causes:
+        lines += [
+            "",
+            "**Toolchain changes before outages** (a version change on a host shortly before "
+            "the outage began: its likely cause, read from the textfile collector):",
+            "",
+        ]
+        for c in report.toolchain_causes:
+            lines.append(
+                f"- {md.text(c.kind.replace('_', ' '))} {md.code(c.signature)} since "
+                f"{_local(c.since, report)}: {md.text(c.change)}"
             )
     if report.stuck_idle:
         lines += [
@@ -1356,6 +1639,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             f"at most 20 ids per alert){listed}",
         ]
     lines += _snoozed_lines(report, tasks)
+    lines += _board_lines(report)
     lines += ["", "## Spend", ""]
     note = " (as the board reports them now; adapters only look back so far)"
     if _plans_only(report.spend):
@@ -1577,37 +1861,160 @@ def _local(at: datetime, report: DailyReport) -> str:
     return at.astimezone(report.tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
+_SHOWN_FIXES = 8  # fixes listed by name in a group; the rest are counted
+
+
 def _verification_lines(report: DailyReport) -> list[str]:
     out: list[str] = []
     for v in report.verifications:
-        e = v.event
-        scope = ", ".join(
-            x
-            for x in (e.rule and f"rule {md.text(e.rule)}", e.role and f"role {md.text(e.role)}")
-            if x
-        )
-        hours = v.after.total_seconds() / 3600
-        title = f"**{_local(e.at, report)}, {e.kind}**: {_inline(e.note)}" + (
-            f" ({scope})" if scope else ""
-        )
-        if not v.metrics:
-            out += [f"{title}. No data on either side yet (after-window: {hours:.1f}h).", ""]
-            continue
-        out += [
-            f"{title}. After-window: {hours:.1f}h"
-            + (", small sample: a direction, not a result." if v.small_sample else "."),
-            "",
-            "| Metric | Before | After | Change | n before / after |",
-            "|---|---:|---:|---:|---:|",
-        ]
-        for m in v.metrics:
-            small = " (small sample)" if m.small else ""
-            out.append(
-                f"| {m.name}{small} | {_value(m.before, m.unit)} | {_value(m.after, m.unit)} "
-                f"| {_change(m)} | {m.n_before} / {m.n_after} |"
-            )
+        out += _group_lines(v, report) if v.together else _single_lines(v, report)
         out.append("")
     return out[:-1] if out else out
+
+
+def _fix_title(e: FixEvent, report: DailyReport) -> str:
+    scope = ", ".join(
+        x
+        for x in (
+            e.rule and f"rule {md.text(e.rule)}",
+            e.role and f"role {md.text(e.role)}",
+            e.command and f"command {md.code(e.command)}",
+        )
+        if x
+    )
+    return f"**{_local(e.at, report)}, {e.kind}**: {_inline(e.note)}" + (
+        f" ({scope})" if scope else ""
+    )
+
+
+def _direction_only(v: Verification, metrics: Iterable[Metric]) -> str:
+    return (
+        f" Rows marked *direction only* have fewer than {v.min_sample} observations on a side"
+        " or a short after-window: a direction, not a result."
+        if any(m.small for m in metrics)
+        else ""
+    )
+
+
+def _single_lines(v: Verification, report: DailyReport) -> list[str]:
+    hours = v.after.total_seconds() / 3600
+    title = _fix_title(v.event, report)
+    if not v.metrics:
+        return [
+            f"{title}. No data on either side yet (after-window: {hours:.1f}h).",
+            *_excluded_lines(v, report),
+        ]
+    return [
+        f"{title}. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
+        "",
+        *_metric_table(v.metrics),
+        *_release_lines(v, report),
+        *_excluded_lines(v, report),
+    ]
+
+
+def _group_lines(v: Verification, report: DailyReport) -> list[str]:
+    """Overlapping fixes: one comparison credited to none of them alone, then what one
+    fix alone can explain."""
+    hours = v.after.total_seconds() / 3600
+    span = v.span.total_seconds() / 3600
+    out = [
+        f"**{len(v.events)} fixes within {span:.1f}h of each other**: their effects cannot be "
+        "separated, so they are measured together, from a window before the first to a "
+        "window after the last, and credited to none of them alone.",
+        "",
+    ]
+    out += [f"- {_fix_title(e, report)}" for e in v.events[:_SHOWN_FIXES]]
+    if len(v.events) > _SHOWN_FIXES:
+        out.append(f"- and {len(v.events) - _SHOWN_FIXES} more")
+    out.append("")
+    if v.metrics:
+        out += [
+            f"Together. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
+            "",
+            *_metric_table(v.metrics),
+            *_release_lines(v, report),
+        ]
+    else:
+        out.append(f"Together: no data on either side yet (after-window: {hours:.1f}h).")
+    if v.own:
+        out += [
+            "",
+            "Per fix, only where one fix alone can explain it (its own role or command, "
+            "each over its own window)." + _direction_only(v, (c.metric for c in v.own)),
+            "",
+            "| Fix | Metric | Before | After | Change | n before / after |",
+            "|---|---|---:|---:|---:|---:|",
+        ]
+        for c in v.own:
+            m = c.metric
+            e = c.event
+            about = (e.command and md.code(e.command, cell=True)) or md.text(e.role or "")
+            fix = f"{_local(e.at, report)} {md.text(e.kind)}" + (f": {about}" if about else "")
+            out.append(f"| {fix} | {_metric_cells(m)}")
+    if v.truncated is not None:
+        out += [
+            "",
+            f"Fixes and data are read from {_local(v.truncated, report)} on: an older fix "
+            "may belong to this group, and its before-window starts there at the earliest "
+            "(shorter than a window, so per-day rates cover only that part).",
+        ]
+    return out + _excluded_lines(v, report)
+
+
+def _metric_table(metrics: Sequence[Metric]) -> list[str]:
+    return [
+        "| Metric | Before | After | Change | n before / after |",
+        "|---|---:|---:|---:|---:|",
+        *(f"| {_metric_cells(m)}" for m in metrics),
+    ]
+
+
+def _metric_cells(m: Metric) -> str:
+    small = " (direction only)" if m.small else ""
+    return (
+        f"{m.name}{small} | {_value(m.before, m.unit)} | {_value(m.after, m.unit)} "
+        f"| {_change(m)} | {m.n_before} / {m.n_after} |"
+    )
+
+
+def _release_lines(v: Verification, report: DailyReport) -> list[str]:
+    """A throughput spike right after the fix that came from released backlog (#193)."""
+    r = v.release
+    if r is None:
+        return []
+    burst = (r.end - r.start).total_seconds() / 3600
+    which = "fix" if not v.together else "last fix"
+    if r.full_day:
+        then = (
+            f"tasks done per hour compares the next full day "
+            f"({_local(r.steady[0], report)} to {_local(r.steady[1], report)}) instead"
+        )
+    else:
+        then = (
+            "the next full day is not in yet, so tasks done per hour compares the rest of "
+            f"the after-window from {_local(r.steady[0], report)} on, and a later report "
+            "settles it"
+        )
+    return [
+        "",
+        f"Backlog release: {r.tasks} of the {r.done} tasks done in the {burst:.1f}h after the "
+        f"{which} were ready or blocked before it, a burst of released backlog rather than a "
+        f"faster farm; {then}.",
+    ]
+
+
+def _excluded_lines(v: Verification, report: DailyReport) -> list[str]:
+    if not v.excluded:
+        return []
+    out = ["", "Not compared (no full before to compare with):", ""]
+    for x in v.excluded:
+        after = f"; after: {_value(x.after, x.unit)}" if x.after is not None else ""
+        out.append(
+            f"- {x.name}: its data starts at {_local(x.first, report)}, after the "
+            f"before-window began: a newly enabled signal, or something new{after}."
+        )
+    return out
 
 
 def _inline(text: str) -> str:
@@ -1707,6 +2114,62 @@ def _bill_line(r: Reconciliation) -> str:
     return line
 
 
+def _board_lines(report: DailyReport) -> list[str]:
+    """The "Per board" section (#283): nothing for a farm with one board."""
+    if not report.boards:
+        return []
+    est = _mark(report)
+    hours = (report.end - report.start).total_seconds() / 3600
+
+    def row(name: str, b: BoardLine) -> str:
+        burned = f"{b.chaos_tokens:,}" + (
+            f" + {b.chaos_plan_tokens:,} plan" if b.chaos_plan_tokens else ""
+        )
+        usd = f"${b.chaos_usd:,.2f}" if report.priced else "n/a"
+        done = f"{b.completed} ({b.completed / hours:.2f}/h)" if hours > 0 else str(b.completed)
+        w = b.biggest_wait
+        wait = (
+            f"{md.short_text(w.role)}: {md.text(w.label)}, {w.hours:.1f} task-h"
+            if w is not None
+            else "-"
+        )
+        return f"| {name} | {b.chaos_hours:.1f} | {burned} | {usd} | {done} | {wait} |"
+
+    lines = [
+        "",
+        "## Per board",
+        "",
+        f"| Board | Hours lost | Tokens burned | Cost of chaos, USD{est} | Tasks done | "
+        "Biggest wait |",
+        "|---|---:|---:|---:|---:|---|",
+    ]
+    lines += [row(md.code(b.board, cell=True), b) for b in report.boards]
+    if (rest := rest_line(report, report.boards)) is not None:
+        lines.append(row("not on one board", rest))
+    spend = report.chaos_spend
+    total = BoardLine(
+        board="",
+        chaos_hours=report.chaos_hours,
+        chaos_tokens=spend.billed_tokens,
+        chaos_plan_tokens=spend.plan_tokens,
+        chaos_usd=report.chaos_usd,
+        completed=len(report.completed),
+        biggest_wait=report.biggest_wait,
+    )
+    lines.append(row("**Farm total**", total))
+    stuck = (
+        f", plus stuck hours at ${report.hour_usd:,.2f}/hour" if report.hour_usd is not None else ""
+    )
+    lines += [
+        "",
+        "Each board counted as the farm is, over its own tasks, sessions and alerts: cost of "
+        f"chaos in tokens burned{stuck}; tasks that reached done (per hour of the day); the "
+        "role and cause its tasks waited longest for. What names no board (a forgotten hold, "
+        "a person's inbox, spans of no board's session) counts only in the farm total.",
+    ]
+    return lines
+
+
 def _usd(spend: Spend, report: DailyReport) -> str:
     if spend.plan_tokens and not spend.billed_tokens:
         return "-"  # a subscription's tokens: no dollars
@@ -1804,11 +2267,15 @@ def _needs_lines(report: DailyReport, tasks: _TaskLinks) -> list[str]:
     for r in report.offenders:
         owner = f"{md.text(r.owner)}: " if r.owner else ""
         g = r.group
-        role = md.text(g.role or "agents")
+        whose = f"{md.text(g.role)}'s" if g.role else "agents'"
+        what = (
+            f'"{md.text(r.filter.advice)}" for {md.code(g.key)}'  # a way to call a built-in tool
+            if r.filter.advice is not None
+            else f"{md.text(r.filter.name)} for {md.code(g.key)}"
+        )
         out.append(
-            f"- {owner}add {r.filter.name} for {md.code(g.key)} to the {role}' "
-            f"instructions: above the threshold on {len(g.hot_days)} days "
-            f"{tasks(g.tasks)}".rstrip()
+            f"- {owner}add {what} to the {whose} instructions: above the threshold on "
+            f"{len(g.hot_days)} days {tasks(g.tasks)}".rstrip()
         )
     return out
 

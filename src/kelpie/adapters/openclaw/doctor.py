@@ -22,13 +22,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from kelpie.adapters._spool import open_regular
 from kelpie.adapters.openclaw import workboard
 from kelpie.adapters.openclaw.adapter import (
     FUTURE_SKEW,
     STOP_VERSION,
     OpenClawAdapter,
     OpenClawError,
-    _open_regular,
     format_age,
 )
 from kelpie.adapters.openclaw.plugin import kelpie_hook
@@ -154,7 +154,7 @@ def check_hooks(adapter: OpenClawAdapter, now: datetime, running: int | None) ->
 def _read(path: Path) -> bytes:
     """A regular file (not through a symlink, agents can write there), bounded. Raises
     OSError or ValueError; the message never holds the content."""
-    fd = _open_regular(path)
+    fd = open_regular(path)
     try:
         raw = os.read(fd, MAX_FILE + 1)
     finally:

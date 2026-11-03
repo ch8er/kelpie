@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import time
+import urllib.error
 import urllib.request
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -24,10 +25,14 @@ from kelpie import net
 from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.claude_code.adapter import ClaudeCodeAdapter
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
+from kelpie.adapters.hermes.boards import HermesBoards
 from kelpie.adapters.hermes.git_state import read_git_state
+from kelpie.adapters.hermes.proctable import ProcessTable, Procfs, host_table
 from kelpie.adapters.issues import doctor as github_issues
 from kelpie.adapters.openclaw import doctor as openclaw
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
+from kelpie.alerts.buttons import ApiError
+from kelpie.alerts.telegram import TelegramApi, TelegramSettings
 from kelpie.app import (
     UNPRICED_WINDOW,
     ConfigError,
@@ -68,6 +73,7 @@ from kelpie.core.snooze import marker_snooze
 from kelpie.core.spend import SpendMode
 from kelpie.resources.prometheus import PrometheusClient, QueryError
 from kelpie.snooze import local_board
+from kelpie.traces.auth import loose_mode, token_copies, trust_problem
 
 FRESH = timedelta(hours=1)  # newest spool line or span must be younger than this
 MAX_WORKTREES = 20  # git is asked about at most this many workspaces
@@ -286,10 +292,16 @@ def check_rule_modes(
     return _pass(name, summary)
 
 
+def _board(name: str, adapter: HermesAdapter) -> str:
+    """A check's name, with the board when it is one of several (``kanban.db (qr)``)."""
+    return name if adapter.board is None else f"{name} ({adapter.board})"
+
+
 def check_board(adapter: HermesAdapter) -> tuple[Check, int | None]:
     """The check, and the number of running tasks (None when the board cannot be read)."""
-    name = "kanban.db"
-    fix = f"set db_path in [adapters.hermes] to the board's kanban.db (now {adapter.db_path})"
+    name = _board("kanban.db", adapter)
+    where = "[adapters.hermes]" if adapter.board is None else f"board {adapter.board}"
+    fix = f"set db_path in {where} to the board's kanban.db (now {adapter.db_path})"
     try:
         total, running = adapter.board_counts()
     except (HermesError, sqlite3.Error) as exc:
@@ -298,7 +310,7 @@ def check_board(adapter: HermesAdapter) -> tuple[Check, int | None]:
     return _pass(name, detail), running
 
 
-def check_hooks(adapter: HermesAdapter, now: datetime, running: int | None) -> Check:
+def check_hooks(adapter: HermesAdapter | HermesBoards, now: datetime, running: int | None) -> Check:
     name = "hooks fire"
     spool = adapter.spool
     if spool is None:
@@ -334,6 +346,86 @@ def _newest_span(path: Path) -> str | None:
         conn.close()
 
 
+TOKEN_CHECK = "traces token kept private"
+
+
+def check_traces_token(settings: Settings, environ: Mapping[str, str]) -> Check:
+    """The traces ingest token is in no backup and no file others can read: the token
+    file (mode 600), the Hermes home (``hermes_otel.yaml`` of every profile) and
+    ``~/.claude`` are scanned for it, and for backups with a ``<token_env>=`` line (an older
+    token is known only by its hash). Paths only, never the token. With ``[hub]`` this
+    port takes no spans."""
+    traces = settings.traces
+    if not traces.enabled:
+        return _skip(TOKEN_CHECK, "[traces] disabled")
+    if settings.hub is not None:
+        return _skip(TOKEN_CHECK, "[hub] is set: agents send spans with their own tokens")
+    try:
+        token = traces.token(environ)
+    except ValueError as exc:
+        return _fail(TOKEN_CHECK, str(exc), "fix [traces] token_env or token_file")
+    if token is None:
+        return _skip(TOKEN_CHECK, f"no token (${traces.token_env} unset)")
+    problems: list[str] = []
+    fixes: list[str] = []
+    roots: list[Path] = []
+    if traces.token_file is not None:
+        roots.append(traces.token_file.parent)
+        try:
+            if (why := trust_problem(traces.token_file)) is not None:
+                problems.append(f"kelpie serve will not trust it: {why}")
+                fixes.append("fix the owner or mode")
+            elif loose_mode(traces.token_file):
+                problems.append(f"{traces.token_file} can be read by others")
+                fixes.append(f"chmod 600 {traces.token_file}")
+        except OSError as exc:
+            problems.append(f"cannot check {traces.token_file} ({exc.strerror})")
+            fixes.append("run doctor as the user kelpie serve runs as")
+    home = Path(environ.get("HOME") or Path.home())
+    hermes = settings.hermes
+    if hermes is not None:
+        dbs = [b.db_path for b in hermes.boards] or [hermes.db_path]
+        for db in (d.expanduser() for d in dbs):
+            # a named board (<home>/kanban/boards/<slug>/kanban.db): its home holds the profiles
+            named = len(db.parents) > 3 and (db.parents[1].name, db.parents[2].name) == (
+                "boards",
+                "kanban",
+            )
+            roots += [db.parents[3] if named else db.parent]
+    roots += [home / ".hermes", home / ".claude"]
+    roots = list(dict.fromkeys(r for r in roots if r.is_dir()))
+    marker = f"{traces.token_env}="
+    skip = traces.token_file.absolute() if traces.token_file is not None else None
+    copies, limit = token_copies(token, roots, skip=skip, marker=marker)
+    backups = [c.path for c in copies if c.backup and not c.marker]
+    older = [c.path for c in copies if c.marker]
+    loose = [c.path for c in copies if c.loose and not c.backup]
+    if backups:
+        problems.append(f"{len(backups)} backup file(s) hold it: {_paths(backups)}")
+        fixes.append("delete the backups (they keep the token after a rotation)")
+    if older:
+        problems.append(
+            f"{len(older)} backup file(s) have a {marker} line (maybe an older token): "
+            f"{_paths(older)}"
+        )
+        fixes.append("delete them")
+    if loose:
+        problems.append(f"{len(loose)} file(s) others may read hold it: {_paths(loose)}")
+        fixes.append("chmod 600 them, or read the token from the token file instead")
+    if problems:
+        fixes.append("then `kelpie traces rotate-token` if it may have leaked")
+        return _warn(TOKEN_CHECK, "; ".join(problems), "; ".join(fixes))
+    inline = [c.path for c in copies if not c.marker]
+    where = f"; also in {_paths(inline)} (a rotation must update them)" if inline else ""
+    more = f" ({limit})" if limit else ""
+    return _pass(TOKEN_CHECK, f"no backup or readable copy in {len(roots)} folder(s){more}{where}")
+
+
+def _paths(paths: list[Path], limit: int = 5) -> str:
+    shown = ", ".join(str(p) for p in paths[:limit])
+    return shown + (f" and {len(paths) - limit} more" if len(paths) > limit else "")
+
+
 def check_spans(
     settings: Settings,
     now: datetime,
@@ -346,10 +438,16 @@ def check_spans(
     path = settings.db_path
     if path is None:
         return _skip(name, "storage is in memory; nothing to read from outside")
+    traces = settings.traces
+    token = (
+        f"${traces.token_env} from {traces.token_file}"
+        if traces.token_file is not None
+        else f"${traces.token_env}"
+    )
     fix = (
         f"check the exporter ({exporter}): endpoint http://<kelpie>:9464/v1/traces, "
-        f"Authorization bearer token = ${settings.traces.token_env}; run doctor with the same "
-        "KELPIE_DB as kelpie serve"
+        f"Authorization bearer token = {token}; run doctor with the same KELPIE_DB as "
+        "kelpie serve"
     )
     try:
         newest = _newest_span(path)
@@ -475,7 +573,7 @@ def check_pr_blocks(settings: Settings, adapter: HermesAdapter, now: datetime) -
     serve`` does: a block pattern must match, its ``pr`` group must name a PR of a repository
     in ``[connectors.github] repos``. Links other connectors add (human tasks) are not
     considered."""
-    name = "PR blocks have conditions"
+    name = _board("PR blocks have conditions", adapter)
     try:
         # The board only: no spool, no git (worktrees readable already asked git), no ps.
         tasks = replace(adapter, git_state=False, spool=None, tools=None).snapshot(now).tasks
@@ -591,8 +689,40 @@ def _natural(text: str) -> list[object]:
     return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", text)]
 
 
+WORKERS = "stop ends workers"
+
+
+def check_worker_stop(adapter: HermesAdapter, table: ProcessTable | None = None) -> Check:
+    """Can a stop end the run's worker on this host (adapters/hermes/worker.py)?"""
+    if not adapter.end_worker:
+        return _warn(
+            WORKERS,
+            "end_worker = false: a stopped run's worker is left to Hermes' reaper (2 minutes "
+            "or more, never without a dispatcher)",
+            "set [adapters.hermes] end_worker = true",
+        )
+    table = host_table() if table is None else table
+    if (why := table.unavailable()) is not None:
+        return _warn(
+            WORKERS,
+            f"{why}: a stop blocks the task but leaves its worker to Hermes' reaper",
+            "run Kelpie (or its kelpie agent) on the Hermes host, on Linux or macOS",
+        )
+    if isinstance(table, Procfs) and table.hidepid():
+        return _warn(
+            WORKERS,
+            f"via {table.name}, but /proc hides other users' processes (hidepid): Kelpie cannot "
+            "tell a worker that ended from another user's, and leaves both to Hermes' reaper",
+            "mount /proc without hidepid for Kelpie's user (or add it to the gid= group)",
+        )
+    return _pass(
+        WORKERS,
+        f"via {table.name}; check it end to end with kelpie selftest stop --adapter hermes",
+    )
+
+
 def check_worktrees(adapter: HermesAdapter) -> Check:
-    name = "worktrees readable"
+    name = _board("worktrees readable", adapter)
     if not adapter.git_state:
         return _skip(name, "git_state = false")
     try:
@@ -794,24 +924,111 @@ def _labels(client: PrometheusClient, promql: str, label: str) -> set[str]:
     return {s.labels.get(label, "") for s in client.query(promql)}
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: object, **kwargs: object) -> None:
+        return None  # urllib then raises HTTPError with the 3xx code
+
+
 def check_prometheus(url: str | None, environ: Mapping[str, str]) -> Check:
     name = "Prometheus reachable"
     explicit = url or environ.get(PROMETHEUS_ENV)
     base = (explicit or DEFAULT_PROMETHEUS).rstrip("/")
     fix = "start Prometheus (docker compose up prometheus) or pass the right --prometheus URL"
-    if urlsplit(base).scheme not in ("http", "https"):
+    try:
+        parts = urlsplit(base)
+        parts.port  # noqa: B018 - raises on a bad port
+    except ValueError:
+        return _fail(name, "the URL is not valid", fix)
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        # Never echoed: the URL may hold a password or a token.
+        return _fail(name, "the URL must not contain credentials, a query or a fragment", fix)
+    if parts.scheme not in ("http", "https"):
         return _fail(name, f"{base}: only http and https URLs are supported", fix)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via a proxy
+    # Never via a proxy, never following a redirect (the check is about this URL).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    answered = False
     try:
         with opener.open(f"{base}/-/ready", timeout=3) as response:
             problem = "" if response.status == 200 else f"HTTP {response.status}"
+    except urllib.error.HTTPError as exc:
+        answered = 300 <= exc.code < 400  # something there sends us elsewhere: say so
+        redirect = " (redirect not followed)" if answered else ""
+        problem = f"HTTP {exc.code}{redirect}"
     except (OSError, ValueError) as exc:
         problem = str(getattr(exc, "reason", exc))
     if not problem:
         return _pass(name, f"{base}/-/ready")
-    if explicit is None:
+    if explicit is None and not answered:
         return _skip(name, f"nothing at {base}; pass --prometheus URL or set ${PROMETHEUS_ENV}")
     return _fail(name, f"{base}/-/ready: {problem}", fix)
+
+
+def check_chat_buttons(
+    settings: Settings,
+    environ: Mapping[str, str],
+    api: Callable[[TelegramSettings, str], TelegramApi] = TelegramApi,
+) -> list[Check]:
+    """Snooze buttons (#176), per Telegram channel with ``buttons = true``: someone may press
+    them (``allowed_user_ids``), there is a database for the snoozes, and the bot has no
+    webhook (``getWebhookInfo``): Telegram refuses ``getUpdates`` while one is set, and the
+    presses would go to whoever runs it. Empty when no channel has buttons."""
+    checks: list[Check] = []
+    for channel in settings.alerts.button_channels:
+        name = f"snooze buttons {channel.name}"
+        if not channel.allowed_user_ids:
+            checks.append(
+                _fail(
+                    name,
+                    "buttons = true but allowed_user_ids is empty: kelpie serve will not start",
+                    "list the Telegram user ids that may snooze in allowed_user_ids "
+                    "(a person can learn theirs from @userinfobot), or set buttons = false",
+                )
+            )
+            continue
+        if settings.db_path is None:
+            checks.append(
+                _fail(
+                    name,
+                    "buttons need a database, and [storage] path is :memory:",
+                    "set [storage] path to a file on a persistent volume",
+                )
+            )
+            continue
+        try:
+            token = channel.token(environ)
+        except ValueError as exc:
+            checks.append(_fail(name, str(exc), f"export ${channel.token_env} before doctor"))
+            continue
+        try:
+            info = api(channel, token).call("getWebhookInfo", {})
+        except ApiError as exc:
+            checks.append(
+                _fail(
+                    name,
+                    f"Telegram did not answer getWebhookInfo ({exc.cause})",
+                    "check the network, the proxy, api_url and the bot token",
+                )
+            )
+            continue
+        if not isinstance(info, Mapping):
+            checks.append(
+                _fail(name, "getWebhookInfo answered something unexpected", "check api_url")
+            )
+        elif info.get("url"):
+            checks.append(
+                _fail(
+                    name,
+                    "the bot has a webhook set: Telegram refuses getUpdates while one is, so "
+                    "no press would reach Kelpie",
+                    "use a bot dedicated to Kelpie, or delete the webhook (deleteWebhook)",
+                )
+            )
+        else:
+            people = len(channel.allowed_user_ids)
+            checks.append(
+                _pass(name, f"no webhook; {people} user(s) may snooze in chat {channel.chat_id}")
+            )
+    return checks
 
 
 def check_github(settings: Settings, environ: Mapping[str, str]) -> list[Check]:
@@ -1010,6 +1227,10 @@ def _one[T](adapters: Sequence[PlatformAdapter], kind: type[T]) -> T:
     return next(a for a in adapters if isinstance(a, kind))
 
 
+def _boards_of(adapter: HermesAdapter | HermesBoards) -> list[HermesAdapter]:
+    return list(adapter.boards) if isinstance(adapter, HermesBoards) else [adapter]
+
+
 def run_checks(
     config: Path | None,
     prometheus: str | None = None,
@@ -1023,22 +1244,29 @@ def run_checks(
         fix = "fix the config; kelpie status shows what it parsed"
         return [_fail("config loads", str(exc), fix)]
     at = now().astimezone(UTC)
-    adapters = build_adapters(settings)  # built once: the modes check and the platform checks
+    try:  # built once: the modes check and the platform checks
+        adapters = build_adapters(settings, environ)
+    except ConfigError as exc:  # e.g. an adapter's token_env names an unset variable
+        fix = "export the variable it names, or fix the config"
+        return [_fail("config loads", str(exc), fix)]
     checks = [
         _pass("config loads", f"{settings.source or 'defaults'}, {len(loaded.rules)} rules"),
         check_rule_modes(settings, loaded, adapters),
     ]
     hermes = settings.hermes
-    adapter = next((a for a in adapters if isinstance(a, HermesAdapter)), None)
+    adapter = next((a for a in adapters if isinstance(a, HermesAdapter | HermesBoards)), None)
+    # The boards read one by one: one, or each of a Hermes home's [[adapters.hermes.boards]]
+    boards = [] if adapter is None else _boards_of(adapter)
     why = "no [adapters.hermes] section" if hermes is None else "adapter disabled"
     # Tasks in progress per enabled platform (None: unknown); spans are only expected then.
     counts: list[int | None] = []
     if adapter is None:
         checks += [_skip("kanban.db", why), _skip("hooks fire", why)]
     else:
-        board, running = check_board(adapter)
+        found = [check_board(b) for b in boards]
+        running = None if any(n is None for _, n in found) else sum(n or 0 for _, n in found)
         counts.append(running)
-        checks += [board, check_hooks(adapter, at, running)]
+        checks += [c for c, _ in found] + [check_hooks(adapter, at, running)]
     cc = settings.claude_code
     cc_checks: list[Check] = []
     if cc is not None:  # only when configured, so Hermes-only output stays as it was
@@ -1082,19 +1310,23 @@ def run_checks(
         if on
     ]
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
+    checks.append(check_traces_token(settings, environ))
     checks.append(check_prices(settings, at))
     checks.append(check_spend_modes(settings, at))
     checks += check_cost_reports(settings, at, environ)
-    checks.append(_skip("worktrees readable", why) if adapter is None else check_worktrees(adapter))
-    pr_blocks = "PR blocks have conditions"
-    checks.append(
-        _skip(pr_blocks, why) if adapter is None else check_pr_blocks(settings, adapter, at)
-    )
+    if adapter is None:
+        checks.append(_skip("worktrees readable", why))
+    checks += [check_worktrees(b) for b in boards]
+    checks.append(_skip(WORKERS, why) if not boards else check_worker_stop(boards[0]))
+    if adapter is None:
+        checks.append(_skip("PR blocks have conditions", why))
+    checks += [check_pr_blocks(settings, b, at) for b in boards]
     checks.append(check_snooze_markers(settings, at))
     checks += cc_checks
     checks += oc_checks
     checks += gi_checks
     checks += check_github(settings, environ)
+    checks += check_chat_buttons(settings, environ)
     checks.append(check_resources_watched(settings, loaded, environ))
     checks.append(check_process_counts(settings, loaded, environ))
     checks.append(check_prometheus(prometheus, environ))

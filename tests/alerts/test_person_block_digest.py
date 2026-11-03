@@ -1,5 +1,6 @@
-"""A block that asks a person reaches them once, in rule 13's digest (#169), end to end: the
-fixture's farm, rules 4 and 13 as Kelpie loads them, the engine, the rendered message."""
+"""A block that asks a person reaches them once, in rule 13's digest (#169), and so does a
+wait on a person's task (#213), end to end: the fixture's farm, rules 2, 4 and 13 as Kelpie
+loads them, the engine, the rendered message."""
 
 from __future__ import annotations
 
@@ -26,26 +27,38 @@ RULE_13 = load(FIXTURES / "13-person-block-in-inbox.yaml")
 NOT_LISTED = load(FIXTURES / "13-person-block-not-listed.yaml")
 BY_TASK = load(FIXTURES / "13-person-block-listed-by-task.yaml")
 BROKEN = load(FIXTURES / "13-person-block-broken.yaml")
+WAIT_2 = load(FIXTURES / "13-wait-left-to-inbox.yaml")
+WAIT_13 = load(FIXTURES / "13-wait-in-inbox.yaml")
+WAIT_OFF = load(FIXTURES / "13-wait-inbox-off.yaml")
+UNCHECKED = load(FIXTURES / "13-wait-unchecked-kept.yaml")
 URL = "https://board.example.org/tasks/{id}"
 NY = "needs_you"
 QUESTION = "t_a1b2c3d4"  # 'waiting_human: needs_input: CEO: …', no condition
 PARKED = "t_e5f6a7b9"  # parked on the CEO's task by a human_task condition
+RULES = {"wait_condition", "stale_blocks", "needs_you"}
 
 
-def config(stale_blocks: Mode, needs_you: Mode) -> EngineConfig:
-    """The fixtures' settings as a farm writes them: rule 4 states none of what it reads
-    from rule 13 (``kelpie.app`` hands it over)."""
+def config(
+    stale_blocks: Mode, needs_you: Mode, wait_condition: Mode = Mode.SUGGEST
+) -> EngineConfig:
+    """The fixtures' settings as a farm writes them: rules 2 and 4 state none of what they
+    read from rule 13 (``kelpie.app`` hands it over)."""
     own = {k: v for k, v in RULE_4.config.items() if k != "needs_you"}
+    wait = {k: v for k, v in WAIT_2.config.items() if k != "needs_you"}
     return EngineConfig(
         dry_run=False,
-        modes={"stale_blocks": stale_blocks, "needs_you": needs_you},
-        rules={"stale_blocks": own, "needs_you": dict(RULE_13.config)},
+        modes={
+            "stale_blocks": stale_blocks,
+            "needs_you": needs_you,
+            "wait_condition": wait_condition,
+        },
+        rules={"stale_blocks": own, "wait_condition": wait, "needs_you": dict(RULE_13.config)},
     )
 
 
 def events(engine_config: EngineConfig, snapshot: Snapshot = RULE_4.snapshot) -> list[AlertEvent]:
     loaded = load_rules(engine_config)
-    rules = [r for r in loaded.rules if r.name in {"stale_blocks", "needs_you"}]
+    rules = [r for r in loaded.rules if r.name in RULES]
     alerter = FakeAlerter()
     engine = Engine(rules, adapters=[FakeAdapter()], alerter=alerter, config=engine_config)
     engine.tick(lambda: snapshot)
@@ -59,29 +72,50 @@ def about(event: AlertEvent) -> set[str]:
 def test_the_fixtures_show_one_farm() -> None:
     assert RULE_4.snapshot == RULE_13.snapshot
     assert RULE_4.config["needs_you"] == RULE_13.config  # as kelpie.app hands it over
+    assert WAIT_2.snapshot == WAIT_13.snapshot == WAIT_OFF.snapshot
+    assert WAIT_2.config["needs_you"] == WAIT_13.config
 
 
-@pytest.mark.parametrize("farm", [RULE_4, NOT_LISTED, BY_TASK, BROKEN], ids=lambda f: f.id)
-def test_every_blocked_task_reaches_a_person_through_exactly_one_rule(farm: Incident) -> None:
-    """No double message, and no block both rules leave to the other (#169 review). Rule 13
-    reaches a task as an item (an approval, a person's own blocked task) or among the tasks
-    waiting on a listed human task. People's blocked tasks count too."""
+@pytest.mark.parametrize(
+    "farm", [RULE_4, NOT_LISTED, BY_TASK, BROKEN, WAIT_2, UNCHECKED], ids=lambda f: f.id
+)
+def test_every_blocked_or_waiting_task_reaches_a_person_through_exactly_one_rule(
+    farm: Incident,
+) -> None:
+    """No double message, and no block or wait both rules leave to the other (#169 review,
+    #213). Rule 13 reaches a task as an item (an approval, a person's own blocked task) or
+    among the tasks waiting on a listed human task. People's blocked tasks count too. A task
+    waiting within ``max_wait`` of rule 2 (W-7) is told by rule 13 alone, as it is parked
+    on a listed human task. A wait Kelpie cannot check keeps rule 2's alert about the
+    connector, which says what the digest cannot: it is counted apart, and when a snooze
+    holds the human task (the digest's footer) it is the only message."""
     engine_config = config(Mode.SUGGEST, Mode.SUGGEST)
     told: dict[str, list[str]] = {}
+    plumbing: dict[str, int] = {}
     for rule in load_rules(engine_config).rules:
-        if rule.name not in {"stale_blocks", "needs_you"}:
+        if rule.name not in RULES:
             continue
         for action in rule.evaluate(farm.snapshot):
             if action.kind is ActionKind.ESCALATE:
                 params = action.params
                 reached = {*params["waiting"], *params["approvals"], *params["human_tasks"]}
+            elif "unchecked_conditions" in action.params:
+                assert action.task_id and "connector" in action.reason
+                plumbing[action.task_id] = plumbing.get(action.task_id, 0) + 1
+                continue
             else:
                 reached = {action.task_id} if action.task_id else set()
             for task_id in reached:
                 told.setdefault(task_id, []).append(rule.name)
-    for task in farm.snapshot.tasks:
-        if task.status is Status.BLOCKED:
-            assert len(told.get(task.id, [])) == 1, (task.id, told.get(task.id))
+    snapshot = farm.snapshot
+    snoozed = {c.task_id for c in snapshot.conditions if c.params.get("task") in snapshot.snoozes}
+    for task in snapshot.tasks:
+        if task.status in {Status.BLOCKED, Status.WAITING}:
+            expected = 0 if task.id in snoozed else 1
+            assert len(told.get(task.id, [])) == expected, (task.id, told.get(task.id))
+    assert (farm is UNCHECKED) == bool(plumbing)
+    if farm is UNCHECKED:
+        assert plumbing == {"W-1": 1, "W-2": 1, "W-3": 1}  # W-4 is in the digest alone
 
 
 def inbox(farm: Incident) -> list[Action]:
@@ -128,6 +162,25 @@ def test_without_rule_13_reaching_people_rule_4_alerts_as_before() -> None:
     assert not [e for e in sent if e.rule == "needs_you"]
     four = {i for e in sent if e.rule == "stale_blocks" for i in about(e)}
     assert {QUESTION, PARKED} <= four
+
+
+def test_a_wait_on_a_persons_task_reaches_them_once_in_the_digest() -> None:
+    """W-1 waited 30h past rule 2's limit on the CEO's ready task: rule 13 lists it, rule 2
+    leaves it; everything else rule 2 knew about the farm it still says."""
+    sent = events(config(Mode.SUGGEST, Mode.SUGGEST), WAIT_2.snapshot)
+    two = {i for e in sent if e.rule == "wait_condition" for i in about(e)}
+    assert two == {"W-2", "W-3", "W-4", "W-5", "W-6"}
+    [digest] = [e for e in sent if e.rule == NY]
+    assert about(digest) == {"H-1"}
+    assert digest.items[0].task_id == "H-1"
+    assert "W-1" not in {i for e in sent if e.rule != NY for i in about(e)}
+
+
+def test_without_rule_13_reaching_people_rule_2_alerts_as_before() -> None:
+    sent = events(config(Mode.SUGGEST, Mode.OBSERVE), WAIT_OFF.snapshot)
+    assert not [e for e in sent if e.rule == NY]
+    two = {i for e in sent if e.rule == "wait_condition" for i in about(e)}
+    assert two == {"W-1", "W-2", "W-3", "W-4", "W-5", "W-6"}
 
 
 @pytest.mark.parametrize("language", ["en", "ru"])

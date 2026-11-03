@@ -1,0 +1,17 @@
+Task T-1: Ship it
+  status   blocked for 2h 00m (since 2026-03-02 08:00 UTC)
+  owner    dev (agent, role coder); role coder; source hermes
+  block    'waiting_ci' for 2h 00m
+  session  none live
+    S-1 by dev: ended 2h 00m ago, no final status
+Conditions
+  none
+Waits for
+  nothing Kelpie can see
+  behind it: 1 task(s): T-2
+Rules on this snapshot
+  no rule acts on this task
+Open alert states
+  none
+Ledger (latest first)
+  none

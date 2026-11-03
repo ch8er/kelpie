@@ -205,14 +205,15 @@ def test_the_report_looks_back_as_far_as_its_day_needs(
     hermes = f'[adapters.hermes]\ndb_path = "{tmp_path / "kanban.db"}"\nspool = false\n'
     settings = load_settings(config(tmp_path, hermes))  # [report] timezone = Europe/Berlin
     assert settings.hermes is not None and settings.hermes.lookback == timedelta(hours=24)
-    # report of Mar 2 at 00:05 on Mar 3 (Berlin): back to Mar 1 00:00 minus a 1d window
+    # report of Mar 2 at 00:05 on Mar 3 (Berlin): back to Mar 1 00:00 minus two 1d windows
+    # (a fix of Mar 1 may overlap one of Feb 28, measured from a window before that)
     now = datetime(2026, 3, 2, 23, 5, tzinfo=UTC)
     wide = report_settings(settings, date(2026, 3, 2), now)
     assert wide.hermes is not None
     assert wide.hermes.lookback == now - datetime(
-        2026, 2, 28, 0, tzinfo=ZoneInfo("Europe/Berlin")
+        2026, 2, 27, 0, tzinfo=ZoneInfo("Europe/Berlin")
     ) + timedelta(hours=1)
-    assert timedelta(hours=73) < wide.hermes.lookback < timedelta(hours=74)
+    assert timedelta(hours=97) < wide.hermes.lookback < timedelta(hours=98)
     # an older --date reaches further; a longer configured lookback is kept
     older = report_settings(settings, date(2026, 2, 20), now)
     assert older.hermes is not None and older.hermes.lookback > timedelta(days=11)
@@ -255,3 +256,45 @@ def test_sources_read_the_bills_through_the_app(
     assert src.reconcile is not None
     assert src.reconcile(date(2026, 3, 1), date(2026, 3, 1)) == "no cost reports"
     assert asked == [(settings, date(2026, 3, 1), date(2026, 3, 1))]
+
+
+def test_the_report_board_measures_instruction_files_without_writing_their_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sqlite3
+
+    import kelpie.report.cli as report_cli
+
+    skill = tmp_path / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Review\n" + "x" * 100)
+    monkeypatch.setattr(report_cli, "build_adapters", lambda settings: [])
+    extra = (
+        f"[instructions]\ndefaults = false\n[[instructions.files]]\n"
+        f'paths = ["{tmp_path}/skills/*/SKILL.md"]\nloaded = "on_demand"\n'
+    )
+    settings = load_settings(config(tmp_path, extra))
+    now = datetime(2026, 3, 3, 1, tzinfo=UTC)
+    board = report_cli.report_board(settings, date(2026, 3, 2), lambda: now, Metrics())
+    (f,) = board.instruction_files
+    assert f.chars == 109 and f.token_basis == "sessions"
+    assert settings.db_path is not None
+    with sqlite3.connect(settings.db_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM instruction_sizes").fetchone() == (0,)
+
+
+def test_the_report_goes_on_when_the_instruction_store_cannot_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import kelpie.report.cli as report_cli
+
+    def broken(*args: Any, **kw: Any) -> Any:
+        raise ConfigError("cannot open the database")
+
+    monkeypatch.setattr(report_cli, "build_adapters", lambda settings: [])
+    monkeypatch.setattr(report_cli, "instruction_watch", broken)
+    settings = load_settings(config(tmp_path, "[instructions]\n"))
+    now = datetime(2026, 3, 3, 1, tzinfo=UTC)
+    board = report_cli.report_board(settings, date(2026, 3, 2), lambda: now, Metrics())
+    assert board.instruction_files == ()
+    assert "instruction files not measured" in caplog.text

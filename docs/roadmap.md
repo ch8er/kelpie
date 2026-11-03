@@ -63,7 +63,7 @@ same records power alert deduplication and the before/after report.
 - [x] Fingerprint = rule, kind, target and the params that matter; identical actions within the cooldown (config) are suppressed and counted
 - [x] Max actions per task per hour (config); excess actions are dropped and reported once as an alert
 - [x] Ledger persisted through the storage protocol (an in-memory implementation until the SQLite storage issue lands); survives a restart
-- [ ] The alert pipeline and the before/after report read the ledger instead of keeping their own history
+- [x] The alert pipeline and the before/after report read the ledger instead of keeping their own history (#5, #52, #54; alert states in the ledger's storage, table `states`, #12)
 - [x] Unit tests with a fake clock
 
 ### core: action routing — task source, executor targets, executor registry
@@ -102,6 +102,8 @@ project dependencies so that ruff, import-linter and pytest can run right away.
 - [ ] Script is idempotent and safe to re-run
 - [ ] Documented in `CONTRIBUTING.md`
 
+Not started: there is no setup script; `CONTRIBUTING.md` documents `uv sync` and the checks by hand.
+
 ### core: engine loop with configurable interval and dry-run
 labels: P0, week-1, area:core
 Run `Engine.tick` every N seconds (config, default 30 s) with a snapshot provider assembled
@@ -120,12 +122,12 @@ Persist what Kelpie saw and did so that the report and before/after comparisons 
 SQLite by default; keep the schema DuckDB-compatible for analytics.
 
 **Acceptance criteria**
-- [ ] Tables for tasks (status history), sessions and conditions (the action ledger table and versioned migrations landed with engine item A)
+- [ ] Tables for tasks (status history), sessions and conditions (the action ledger table and versioned migrations landed with engine item A; the `states` table with #12). Status history is the same work as #157 and the model-gaps criterion on status history
 - [ ] Retention for raw action-ledger rows: 30 days by default plus a size cap, both configurable; the in-memory ledger store is bounded too
 - [ ] Closed alert states (table `states`) pruned with the raw ledger rows
 - [ ] Daily aggregates kept indefinitely (per rule, action kind and mode; executed / suppressed / failed counts), because rule 8's before/after verification needs history; aggregates are written before raw rows are pruned
 - [ ] Pruning runs inside `kelpie serve` on a schedule and never blocks action dispatch (separate thread or short batched transactions; WAL)
-- [ ] The trace store will follow the same policy shape (raw rows with age + size limits, aggregates kept); note only, not built here
+- [ ] The trace store will follow the same policy shape (raw rows with age + size limits, aggregates kept); note only, not built here. Raw part done for spans (`[traces] retention`, `max_rows`, pruned in a background thread, #16); no aggregates
 - [x] Storage lives behind a protocol in `kelpie.core`; no adapter imports
 - [x] Tests run against a temporary database file
 
@@ -136,7 +138,7 @@ and a `kelpie` CLI with `serve`, `check-config` and `run-once --dry-run`.
 
 **Acceptance criteria**
 - [x] `uv run kelpie serve` starts the loop with the configured adapter
-- [ ] `kelpie run-once --dry-run` prints the actions for a single snapshot and exits
+- [ ] `kelpie run-once --dry-run` prints the actions for a single snapshot and exits (not built; `kelpie why <task>` explains one task, `kelpie status` lists rules and modes)
 - [x] Secrets can be supplied via environment variables, never only in the file
 - [x] Invalid config fails fast with a readable error
 
@@ -146,12 +148,14 @@ Writing the 13 incident fixtures forced several facts into free text or `params`
 the ones rules actually need to typed fields before implementing those rules.
 
 **Acceptance criteria**
-- [ ] `Condition` can be shared by several tasks and references what it waits on (task, person, PR)
-- [ ] `Return` records its cause category and conflicting files; `Task` can reference repo/PR
-- [ ] `Session` and heavy tasks can be tied to a host; `Owner` exposes availability/capacity
+- [ ] `Condition` can be shared by several tasks and references what it waits on (task, person, PR) (today one `task_id`; the target is in untyped `params`)
+- [x] `Return` records its cause category (#110, #174); `Task` has `repo` and `branch`, and a PR links to tasks through `PullRequest.task_ids` (#90, #103)
+- [ ] `Return` records its conflicting files (still in `params`)
+- [x] Tasks and owners can be tied to a host (`Task.host`, `Owner.host`, #127)
+- [ ] `Session` tied to a host; `Owner` exposes availability/capacity
 - [ ] `Block` has a category so allowed-reason checks do not parse free text
-- [ ] `Resource` has `sampled_at` and a window for event counts (e.g. hits per day)
-- [ ] Task status history is available to rules (time-to-accept, bounce count)
+- [ ] `Resource` has `sampled_at` and a window for event counts (e.g. hits per day) (the sample time is `Resource.at`; `events` has no window)
+- [ ] Task status history is available to rules (time-to-accept, bounce count) (rules see `status_since`, `returns`, `reopened_at`, `review_rounds`; no history, see #157)
 - [x] CI build/run records in the snapshot, supplied by the CI connector (fixture 05 today only
       has the `ci_minutes` quota resource): commit sha, branch, trigger event, draft flag,
       changed paths, duration/minutes, status, `superseded_by`. Field names stay CI-agnostic
@@ -163,10 +167,10 @@ Real-time alerts must be worth reading. Every alert is actionable and states wha
 already did by itself; duplicates are merged instead of repeated.
 
 **Acceptance criteria**
-- [ ] Alert payload carries severity, the affected tasks/hosts, the action Kelpie already took (or "dry-run: would …") and what a human should do
-- [ ] Alerts with nothing for a human to do are not sent in real time (they go to the daily report)
-- [ ] Identical or overlapping alerts within a configurable window are merged into one with a count, using the action ledger's fingerprints and cooldown (no separate dedup store)
-- [ ] Untrusted task text is escaped before it reaches any alerter
+- [x] Alert payload carries severity, the affected tasks/hosts, the action Kelpie already took (or "dry-run: would …") and what a human should do (`AlertEvent`: severity, items with `needed` and `blocking`, `did`; a host only as the subject; #97, #135, #187, #212)
+- [x] Alerts with nothing for a human to do are not sent in real time (they go to the daily report) (info alerts, which carry nothing to do, stay out of chat by default: per-channel `min_severity`, default warning; open states are listed in the report; #47, #206)
+- [ ] Identical or overlapping alerts within a configurable window are merged into one with a count, using the action ledger's fingerprints and cooldown (no separate dedup store). Done except the count: repeats are suppressed and counted in the ledger (#5), lasting states alert on transitions (#12), per-task alerts fold under an open outage (#183, #247); the message never shows the count
+- [x] Untrusted task text is escaped before it reaches any alerter (#64, #187)
 
 ### core: Slack alerter
 labels: P0, area:core
@@ -206,11 +210,16 @@ labels: P0, week-1, area:core
 HTTP endpoint (and a helper in the Hermes plugin) for an agent to register a condition for
 its task before exiting. Needed by the wait-for-condition rule.
 
+Built in another shape: Kelpie, not the agent, registers the condition. A block reason that
+matches `[[block_conditions]]` gets its condition from a connector (#31), and the dispatch
+gate parks a task with `SupportsWait` (Hermes: `scheduled` with a signed marker, #75, #189).
+There is no endpoint and no agent-side helper; the first criterion stays open for that.
+
 **Acceptance criteria**
-- [ ] `POST /conditions` with kind, params and task id
-- [ ] Authentication required
-- [ ] Duplicate registrations are idempotent
-- [ ] Registering a condition puts the task into a "waiting" state visible to rules
+- [ ] `POST /conditions` with kind, params and task id (no endpoint; conditions come from block reasons and parks)
+- [ ] Authentication required (no endpoint; park markers are HMAC-signed, so forged or replayed parks are not trusted, #75, #189)
+- [ ] Duplicate registrations are idempotent (the ledger stops repeat parks; a second park of a parked task raises `UnsupportedAction` instead of being a no-op)
+- [x] Registering a condition puts the task into a "waiting" state visible to rules (for parks: a parked task reads back as `waiting`, #75)
 
 ### traces: OTLP ingest with GenAI semantic conventions
 labels: P0, week-1, area:traces
@@ -275,8 +284,8 @@ labels: P0, week-1, area:rules
 A restarted task continues from the last commit instead of starting from zero.
 
 **Acceptance criteria**
-- [ ] Requeued tasks carry the last commit reference, the progress note and a short git log
-- [ ] The adapter passes them into the next session's prompt
+- [ ] Requeued tasks carry the last commit reference, the progress note and a short git log (commit, branch and note done, #14, #136; no git log)
+- [ ] The adapter passes them into the next session's prompt (today a `comment` on the task the next agent has to read)
 - [x] Restarts from zero are counted (input for the daily report and token optimization)
 - [x] New fixture `16-checkpoint-resume-from-commit.yaml` (`rule: checkpoints`, `incident: null`)
 
@@ -296,17 +305,18 @@ labels: P0, week-1, area:adapters
 Implement `requeue`, `unblock`, `comment`, `wake`, `reassign` and `wip_commit` for Hermes.
 
 **Acceptance criteria**
-- [ ] Every action leaves a comment on the task explaining what Kelpie did and why
-- [ ] Actions are idempotent (re-running the same action is a no-op)
-- [ ] Concurrent writes with Hermes handled safely (transactions, retry on lock)
-- [ ] Tasks in Kelpie's `waiting` status are reported to the Hermes dispatcher as waiting and alive, never as dead (the "waiting" heartbeat of rule 2); fixture `10-waiting-heartbeat` in the adapter tests
+- [x] Every action leaves a comment on the task explaining what Kelpie did and why (stop, park, wake and comment each record their reason on the board, signed `kelpie`; #36, #75, #189)
+- [ ] Actions are idempotent (re-running the same action is a no-op) (waking an awake task is quiet, #75, and the ledger stops repeats; but a second park of a parked task, or a requeue of a task Kelpie did not park, raises `UnsupportedAction`)
+- [x] Concurrent writes with Hermes handled safely (transactions, retry on lock) (Kelpie never writes `kanban.db`: every write goes through the `hermes kanban` CLI; reads are read-only with a busy timeout; #13, #75)
+- [x] Tasks in Kelpie's `waiting` status are reported to the Hermes dispatcher as waiting and alive, never as dead (the "waiting" heartbeat of rule 2) (a parked task sits in Hermes `scheduled`, which the dispatcher does not treat as dead; `test_a_parked_ready_task_does_not_make_its_assignee_look_active`, #75)
+- [ ] `unblock`, `reassign` and `wip_commit` for Hermes (today `unblock` and `wip_commit` raise `NotImplementedError` and are not declared; `reassign` is not implemented)
 
 ### adapters: Hermes plugin for post_tool_call and on_session_end
 labels: P0, week-1, area:adapters
 A Hermes plugin that runs on the agent host and sends session events and spans to Kelpie.
 
 **Acceptance criteria**
-- [ ] `on_session_end` sends final status, exit reason and worktree state
+- [x] `on_session_end` sends final status, exit reason and worktree state (the hook sends the end; final status and exit reason come from the run outcomes in `kanban.db`, worktree state from git; #13, #15)
 - [x] `post_tool_call` sends heartbeat and tool span (via the hooks-to-spans helper)
 - [x] Plugin never blocks the agent if Kelpie is unreachable (buffer and drop)
 - [x] Install instructions in docs
@@ -347,6 +357,7 @@ thresholds: 8 repeats in 10 minutes, 5 errors in a row.
 - [x] Polled commands map to condition kinds via config (`poll_patterns`), never hard-coded CI commands
 - [x] Repeated-call detection lives in one helper in `kelpie.rules`, reused later by `loop_breaker` (rule 10)
 - [x] Fixtures: existing `10-reviewer-polls-ci.yaml`; new `10-productive-long-session.yaml`
+- [x] Waits inside a session (`sleep`, CI watches, loops over them) from the platform's own record of its commands (Hermes: each profile's `state.db`, shape and duration bucket only), however the session ends (#197); fixture `10-reviewer-sleeps-before-block.yaml`
 
 ### rules: orphan_status (rule 3, incident 11)
 labels: P0, week-1, area:rules
@@ -397,7 +408,8 @@ alert with a rebalancing suggestion.
 - [x] Long sequential chains with idle agents → `alert` suggesting parallelization, with `critical_path_length`
 - [x] Overloaded role with idle roles elsewhere → `alert` with a rebalancing suggestion
 - [x] Farm or role idle longer than N minutes (config) while ready work waits (queued tasks, mergeable PRs from the GitHub connector) → `alert` with the idle time, the waiting work and the likely cause (an active hold, an empty queue upstream)
-- [ ] Holds are first-class: a hold (a label, flag or pause, matched by config) has an owner and an expiry (default from config); expired hold → `alert`; in act mode the executor that owns it lifts it
+- [x] Holds have an owner and an expiry (default from config); expired hold → `alert` with the owner and the idle cost (#48, #90)
+- [ ] Holds matched by flag or pause, not only by PR label; in act mode the executor that owns a hold lifts it (no executor owns a label yet)
 - [x] Idle hours caused by holds go to the cost-of-chaos report
 - [x] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`, `14-forgotten-merge-hold.yaml` (hold set, promised lift missed, ready PRs waiting about 5 h)
 
@@ -463,6 +475,17 @@ blocked task and the report blamed "waiting for merges".
 - [x] While an outage is open, per-task block and wait alerts that it explains are folded under it (no separate alerts); the report attributes their waiting time to "CI outage"
 - [x] The error signature comes from the Actions runs/jobs API the connector already reads (job and step names, conclusion); no log scraping in the first version
 - [x] Fixtures: new `20-ci-outage.yaml` (synthetic), with an unrelated single red PR as the negative case
+
+### rules: outages beyond failing PR checks — follow-ups (#229)
+labels: P1, week-3, area:rules
+Block storms (#252) and CI jobs that never start (#254) are observe-only checks. Before
+recommending `storm_mode = "rule"` or `not_started_mode = "rule"`:
+
+**Acceptance criteria**
+- [ ] Rule 13 folds its "needs you" items for a block storm's tasks under the storm (today the person gets both once the storm is switched on, and for the incident-20 shape, "waiting for CEO", rule 4 hands those blocks to rule 13, so the storm folds nothing there)
+- [ ] The report attributes a storm's, a not-started outage's and a tool outage's waits by `Outage.kind` (track C, #228, #264); until then a switched-on storm's or tool outage's folded tasks open no state, and their hours are missing from the cost of chaos. In progress in draft #270
+- [ ] A storm-specific "resolved" text ("N of M tasks unblocked")
+- [x] Correlated tool failures (signal 2), on the farm's sample of what Hermes records for a failing command (observe-only, `tool_outage_mode`; before `"rule"`, check its outages on the live farm)
 
 ### rules: needs_you and bottlenecks — planned waits are not waiting (incident 20)
 labels: P0, week-3, area:rules
@@ -554,7 +577,7 @@ quotas run out or logins expire, and suggest a concurrency level tuned to the pr
 
 **Acceptance criteria**
 - [x] Repeated limit hits aggregated into one alert with counts per provider
-- [ ] Suggested concurrency per provider derived from the observed limit
+- [ ] Suggested concurrency per provider derived from the observed limit (not started)
 - [x] Credentials expired or expiring within a window → `alert` (critical when expired)
 - [x] Fixtures: existing `06-llm-quota-and-expired-auth.yaml`
 
@@ -569,7 +592,7 @@ how long the quota will last. The rule stays CI-agnostic; CI specifics live in a
 - [x] Depends on CI build/run records in the snapshot (see "close model gaps"): commit sha, branch, trigger event, draft flag, changed paths, duration/minutes, status, `superseded_by`
 - [x] Each wasted build is classified (draft/WIP, superseded, docs-only, already verified) with the minutes it burned
 - [x] Superseded running builds → `cancel_build`, executed by the CI connector (not the platform adapter) through action routing (see "action routing")
-- [ ] Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check)
+- [ ] (not started) Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check)
 - [x] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks` (minutes used from GitHub's billing usage report, #107)
 - [x] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
 
@@ -608,7 +631,8 @@ block (incident 10 in another form). Turn such blocks into conditions instead of
 - [x] Matched blocks count as waiting: no "block without condition" alert
 - [x] A condition is bound to the exact target the task waits for: repo, PR number and the PR's head SHA. `ci_green` means the required checks on that head are green; green CI on `main` or on another PR never satisfies it; a new push to the PR resets it. When a task waits for a PR to land, the condition is `pr_merged`, not `ci_green` (field case: a duty agent unblocked a task because CI on `main` was green while the PR it waited for was still red)
 - [x] Unmatched blocks, and matched ones whose PR cannot be resolved, keep the current behaviour
-- [ ] Fixtures: new `15-review-block-waiting-merge.yaml` (synthetic names), with a 13 h unmatched block as the true positive; new `15-green-main-red-pr.yaml` (main green, the awaited PR head red → the block stays)
+- [x] Fixture for a review block waiting on a merge, with a 13 h unmatched block as the true positive: `10-block-waits-on-pr-merge.yaml` (#31)
+- [ ] Fixture `15-green-main-red-pr.yaml` (main green, the awaited PR head red → the block stays); today the head binding is tested only in `tests/connectors/test_github_blocks.py`
 
 ### connectors: LLM provider quotas and auth health
 labels: P0, week-2, area:connectors
@@ -616,10 +640,10 @@ Read rate-limit and quota state and credential expiry for configured LLM provide
 provider APIs where available and from trace errors otherwise.
 
 **Acceptance criteria**
-- [ ] `quota_reset` conditions evaluated
-- [ ] Limit hits from spans counted per provider
-- [ ] Credential expiry exposed as a resource
-- [ ] Provider usage and cost APIs read where they exist (API keys) and fed to budgets as a spend source
+- [ ] `quota_reset` conditions evaluated (the kind exists; no connector evaluates it)
+- [ ] Limit hits from spans counted per provider (hits come from the status probes and are counted per provider, #35; none from spans)
+- [x] Credential expiry exposed in the snapshot (`ProviderStatus.expires_at` from the status probe, not a `Resource`; alerted by rule 7; #35)
+- [ ] Provider usage and cost APIs fed to budgets as a spend source: the same criterion as "Spend sources" in "core: budgets and spend" and tracked there (the cost reports are read and reconciled, #204, #205)
 - [x] No provider SDK is required by core
 
 ### connectors: human tasks
@@ -636,10 +660,11 @@ labels: P0, week-2, area:report
 No custom UI in the MVP. Kelpie exposes Prometheus metrics, Grafana shows them, and traces
 open in Langfuse.
 
-- [ ] `/metrics` in Prometheus text format: tick duration, actions per rule, tasks per status, idle time per role
+- [x] `/metrics` in Prometheus text format: tick duration, actions per rule, tasks per status (#7)
+- [ ] `/metrics`: idle time per role (only the idle-agent count exists)
 - [x] `/metrics`: idle agents per role (count)
 - [x] Grafana dashboard JSON provisioned by docker compose
-- [ ] Dashboard links to traces in Langfuse when configured
+- [ ] Dashboard links to traces in Langfuse when configured (not started)
 
 ### core: budgets and spend — thresholds, burn-rate forecast, spend sources
 labels: P0, week-2, area:core
@@ -651,7 +676,8 @@ are limits.
 - [x] Budget config objects: scope (day, task, agent, project), window, soft and hard thresholds; strict validation like the rest of the config
 - [x] Soft threshold → `alert`; hard threshold → `stop` through `SupportsStop` (act mode only, alert fallback otherwise); transition-based alerts like other lasting states
 - [x] Burn-rate forecast: "budget runs out at <time>"; in subscription mode, time to the next limit from observed limit hits
-- [ ] Spend sources: traces (tokens × price table in config, cached tokens priced separately); Claude Code's OpenTelemetry cost and token metrics via OTLP ingest; provider cost APIs via the provider quota connector
+- [x] Spend from traces: tokens × price table, cached tokens and cache writes priced separately (#29, #184, #196)
+- [ ] Spend sources: Claude Code's OpenTelemetry cost and token metrics via OTLP ingest (ingest takes `/v1/traces` only); provider cost APIs as a budget source (today they only check the bill, #205)
 - [x] Spend and remaining budget exported on `/metrics`; shown in `kelpie status`
 - [x] `loop_breaker` (rule 10) reads budgets from here instead of its own config
 - [x] No double counting of nested LLM spans in spend sums (see the double-count issue)
@@ -671,6 +697,9 @@ who cannot see inside the cloud session.
 labels: P0, week-2, area:deploy
 Run Kelpie against the real Hermes farm: every rule in `observe` mode first, then `suggest`
 and `act` rule by rule. Record every rule trigger so each one can be checked by hand.
+
+The first live runs in observe produced incidents 14–20 in the plan and the fixes that
+followed; the criteria below were never recorded as such.
 
 **Acceptance criteria**
 - [ ] 24 h in `observe` mode with every rule trigger logged and reviewed
@@ -716,6 +745,7 @@ context on every run. Find them in traces and recommend a filter.
 - [x] Repeated offenders → `comment` addressed to the owner of the role's instructions (listed under "needs a human" in the daily report; rule `output_offenders`)
 - [x] Estimated savings in the daily report
 - [x] Fixtures: new `field-05-build-log-flood.yaml`
+- [x] Built-in tools too, not only shell commands (#197): advice for their kind (images downscaled, a record in a compact view and not re-read, a file in a range, any other tool asked for less)
 
 ### report: daily cost-of-chaos report
 labels: P0, week-3, area:report
@@ -745,6 +775,9 @@ fix, review time dropped from 48 to 27 minutes, and failures from 9 of 29 to 1 o
 labels: P0, week-3, area:core
 A quick terminal view of the farm from Kelpie's storage, without a custom UI.
 
+Today `kelpie status` (#7) shows the config, the rules it would load with their mode, the
+adapters, budgets and prices; none of the criteria below.
+
 **Acceptance criteria**
 - [ ] Shows tasks per status, waiting conditions, open alerts and the last actions per rule
 - [ ] Works against a running server or directly against the storage file
@@ -758,8 +791,28 @@ context growth per step, restarts from zero.
 **Acceptance criteria**
 - [x] Cache hit rate per role and model, with the steps where the cache breaks
 - [x] Context growth per step; sessions with runaway context flagged
+- [x] Runaway context as a live alert per session (rule 11: `context_alert_tokens`, `context_min_steps`), not only a report line (#197); fixture `field-07-runaway-context.yaml`
 - [x] Tokens burned on restarts from zero (feeds the cost of chaos)
 - [x] Recommendations with estimated savings in the daily report
+
+### traces: instruction bloat — skills and role instructions that only grow (incident 21)
+labels: P1, area:traces
+Agents append a section to their own skills after every case and nobody prunes them: on a
+live farm three roles' skills reached the platform's ~100K-character cap, with duplicated
+sections and one fact copied into eight files. Kelpie measures and recommends; it never edits
+instruction files.
+
+**Acceptance criteria**
+- [x] Instruction files per role are config data (`[instructions]` globs per role or platform defaults: Hermes profile skills, Claude Code `CLAUDE.md` / `.claude/skills`, OpenClaw `AGENTS.md`); read-only, sizes and hashes only stored, never contents (#269)
+- [x] Size (characters, estimated tokens) and growth per week per file; a file that only grows is named (#261, #269)
+- [x] Tokens a day spent reading them, as size × sessions of the role, saying which (#269); counted loads moved to the follow-up item below (#282)
+- [x] Near-duplicate sections within and across a role's files (normalised heading and body similarity), and a value repeated in several files (one fact, one place) (#269)
+- [x] An alert (observe by default) when a file crosses `max_chars` or grows faster than `max_growth_per_week`, recommending a short core plus topic references (#261); the report section moved to the follow-up item below (#282)
+- [x] Fixtures: a synthetic skill growing append-only past the threshold → alert; a large but stable built-in skill loaded rarely → no alert (`21-skill-grows-append-only.yaml`, `21-stable-builtin-skill.yaml`, #261)
+
+The rest (counted loads, the report section, `kelpie fix` before/after for a split) is the
+follow-up item "instructions: counted skill loads, a report section and before/after for a
+split" (#282).
 
 ### traces: token optimization — repeated fragments, unused tools, model fit, diff-only review
 labels: P1, week-3, area:traces
@@ -789,6 +842,9 @@ labels: P1, week-3, area:report
 Turn throughput metrics into recommendations following the theory of constraints: find the
 bottleneck, relieve it, subordinate the rest, elevate it.
 
+Not started. The inputs exist: time per stage and role (#78), the top-3 list in the daily
+report (#52) and `kelpie fix` before/after (#54, #258).
+
 **Acceptance criteria**
 - [ ] The current bottleneck role or stage identified each day
 - [ ] Recommendations ranked and fed into the top 3 of the daily report
@@ -815,7 +871,7 @@ cloud VM, several VMs). Blocks the release.
 - [x] Transport: HTTPS or a configured plain-HTTP bind on a private network, per-agent token, request size limits, agent heartbeats; a silent agent → alert, and its tasks are not treated as abandoned while it is silent
 - [x] Single-host mode (adapters in-process) stays the default and unchanged
 - [x] Prometheus/node_exporter and OTLP already work over the network; document one setup per case: laptop only, laptop + cloud VM, two VMs
-- [x] e2e: two simulated hosts, one farm; an agent going silent; an action routed to the right host
+- [x] e2e: two simulated hosts, one farm; an agent going silent (on a driven clock, `tests/remote/test_silent_agent.py`); an action routed to the right host
 - [x] Security: the agent never accepts arbitrary commands, only the action kinds its adapters implement
 
 ### project: code health — performance, duplication, refactoring
@@ -824,12 +880,16 @@ Five tracks wrote code in parallel, so helpers are likely duplicated (git calls,
 windows, block-reason parsing, condition binding, alert text). Do this after the live farm
 run is debugged and before the security audit, so the audit covers the final code.
 
+Tracked as #248. Its survey (comment on #248) lists every finding; #262 and #263 landed, and
+the rest was left until after the release on purpose (modules in active PRs, rows D6/D7 that
+change user-facing messages).
+
 **Acceptance criteria**
-- [ ] Profile a tick and the daily report on a large synthetic farm (e.g. 2,000 tasks, 1M spans, 6 months of ledger); publish the numbers in the PR; fix the top hotspots
+- [ ] Profile a tick and the daily report on a large synthetic farm (e.g. 2,000 tasks, 1M spans, 6 months of ledger); publish the numbers in the PR; fix the top hotspots (rules on boards of 1k and 4k tasks profiled and the top hotspot fixed, #262; not the report, spans or ledger)
 - [ ] Per-tick time budget as a test (fails if a tick on the large farm exceeds it)
-- [ ] Duplicate-code report (e.g. pylint duplicate-code or jscpd) before and after; shared helpers consolidated in core/ or the owning package
-- [ ] No behaviour change: unit and e2e suites pass unchanged; one refactor per PR, each small enough to review
-- [ ] Dead code and unused config keys removed; CLAUDE.md layout updated if modules move
+- [ ] Duplicate-code report (e.g. pylint duplicate-code or jscpd) before and after; shared helpers consolidated in core/ or the owning package (survey by AST pass; one helper consolidated, #263)
+- [x] No behaviour change: unit and e2e suites pass unchanged; one refactor per PR, each small enough to review (#262, #263)
+- [ ] Dead code and unused config keys removed; CLAUDE.md layout updated if modules move (found in the survey, X1–X4; not removed)
 
 ### project: whole-codebase security audit before the first public release
 labels: P0, week-3, area:project
@@ -841,16 +901,23 @@ Threat model: agents on the farm are untrusted — they control task titles and 
 block reasons, git config in worktrees, spool contents and tool output sizes. Kelpie holds
 GitHub, Telegram, Slack and LLM provider tokens.
 
+Done as #275 on main @ a56d4c6: 0 critical, 2 high, 7 medium, 14 low. Both high findings
+and the clear fixes landed (#278, #279, #280). Still open, after the release unless the owner
+decides otherwise: M1 (forged spans or spool lines can make rule 10 stop another agent's run;
+a decision for the owner, see #275), M4–M7 and L4, L5, L7–L11, L13, L14 (Dockerfile digests,
+the release job's checkout). Verdict: safe to tag 0.1.0a1 once M1 is decided and the release
+notes say `kelpie serve` stays on loopback or behind a limiting proxy until M5 is fixed.
+
 **Acceptance criteria**
-- [ ] Subprocess calls (Hermes CLI, git): no injection, minimal environment, no token leakage
-- [ ] No SQL built from strings with untrusted data
-- [ ] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section
-- [ ] Outbound HTTP: no redirects with credentials, TLS verified, response size limits
-- [ ] OTLP and `/metrics` endpoints: auth, bind address, body limits
-- [ ] File paths from config and data: no traversal, safe symlink handling
-- [ ] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host
-- [ ] Clear fixes as small PRs; design questions as issues
-- [ ] `docs/security.md`: threat model, what Kelpie trusts, what it never stores
+- [x] Subprocess calls (Hermes CLI, git): no injection, minimal environment, no token leakage (#275)
+- [x] No SQL built from strings with untrusted data (#275; L1, the read-only URI, fixed in #280)
+- [ ] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section (audited in #275; L6 fixed in #280; open: L7, L8, command-redaction gaps)
+- [x] Outbound HTTP: no redirects with credentials, TLS verified, response size limits (#275; M3 and L12 fixed in #279; M4, the Linear client's deadline, open)
+- [ ] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279; open: M1, M5, L10, L11)
+- [x] File paths from config and data: no traversal, safe symlink handling (H1, H2 fixed in #278)
+- [x] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host (#275; L9, no length cap on agent reasons, open)
+- [ ] Clear fixes as small PRs (#278, #279, #280); design questions as issues (M1 and the open findings are listed on #275, not filed as issues)
+- [x] `docs/security.md`: threat model, what Kelpie trusts, what it never stores (in place; updated by the audit in #279)
 
 ### deploy: `kelpie demo` — see Kelpie work without a farm
 labels: P0, week-3, area:deploy
@@ -869,10 +936,10 @@ labels: P0, week-3, area:deploy
 Publish the open core: first public pre-release on PyPI and a container image.
 
 **Acceptance criteria**
-- [ ] Release workflow builds and publishes with trusted publishing (workflow and `docs/release.md` in place; ticked after the first tag)
+- [ ] Release workflow builds and publishes with trusted publishing (workflow and `docs/release.md` in place, #105, #260; ticked after the first tag, which also needs the PyPI and TestPyPI accounts the owner creates)
 - [ ] `pip install kelpie-sre` provides a working `kelpie` CLI
 - [ ] Container image published and referenced by docker-compose.yml (the workflow pushes it to GHCR; compose takes it through `KELPIE_IMAGE`)
-- [ ] Changelog and release notes
+- [ ] Changelog and release notes (`CHANGELOG.md` has `[0.1.0a1] - Unreleased`, #143; release notes at the tag must say serve stays on loopback until #275 M5 is fixed)
 
 ### project: 10 conversations with farm owners
 labels: P1, week-3, area:project
@@ -896,9 +963,11 @@ better CI configuration (skip drafts, path filters for docs-only changes, cancel
 progress on new pushes, skip already verified commits).
 
 **Acceptance criteria**
-- [ ] Recommendation lists each suggested change with the minutes it would have saved
-- [ ] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff)
-- [ ] No CI-specific syntax in `kelpie.rules`
+- [x] Recommendation lists each suggested change with the minutes it would have saved
+- [ ] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff) (in progress in draft #237)
+- [x] No CI-specific syntax in `kelpie.rules`
+
+The recommendation is in #227 (the waste summary and its `params.pipelines`); rendering and opening the PR are the next step.
 
 ### rules: return_causes — root causes of task returns (incident 7)
 labels: P1, area:rules
@@ -931,9 +1000,9 @@ Before publishing, check that the name is usable. The PyPI package is `kelpie-sr
 `kelpie` is taken.
 
 **Acceptance criteria**
-- [ ] Domain availability checked and the result recorded
-- [ ] USPTO search for conflicting marks in software classes recorded
-- [ ] Decision: keep the name or pick an alternative before the release
+- [x] Domain availability checked and the result recorded (kelpie.dev/.io/.sh/.app taken; no domain needed for the open-source release)
+- [ ] USPTO search for conflicting marks in software classes recorded (manual; before any commercial use)
+- [x] Decision: keep the name or pick an alternative before the release (keep Kelpie, package `kelpie-sre`, owner decision Nov 2)
 
 ### report: optional LLM root-cause section
 labels: P1, area:report
@@ -1042,6 +1111,8 @@ and the daily report's act advice. And `PlatformExecutor` routes `wake` to
 `adapter.requeue` whatever the adapter declares: the issues adapter leaves `wake` out on
 purpose, yet a wake on one of its tasks would restart the agent.
 
+In progress in #219.
+
 **Acceptance criteria**
 - [x] `kelpie doctor` and the daily report judge each rule's actions per adapter whose tasks it can target, telling "acts on some adapters' tasks" from "cannot act here"
 - [x] `PlatformExecutor` does not run an action kind an adapter's declared `actions` leaves out (the engine alerts instead)
@@ -1060,6 +1131,42 @@ fixes.
 - [ ] Codex cloud and OpenHands: the accounts their pull requests come from; whether a label put back within a second restarts a label-triggered agent; whether comments from a `GITHUB_TOKEN` trigger agents
 - [ ] GitHub: the `dependencies/blocked_by` and `sub_issues` answers, and `labels=` scoping, on a real repository
 - [ ] Linear: one `kelpie doctor` run on a workspace; `X-Complexity` of the issue page and history queries; history order; attachment metadata `status`/`draft`; how fenced notes render; whether delegating again or a mention restarts an agent; whether a parent team's labels show on a sub-team's issues
+
+### instructions: counted skill loads, a report section and before/after for a split (#241 follow-up)
+labels: P1, area:traces
+#241 shipped sizes, growth and duplicates with tokens a day estimated as size × sessions.
+The Hermes state.db reader (#271) is on main now, so loads can be counted.
+
+**Acceptance criteria**
+- [ ] Tokens a day from counted loads (Hermes `skill_view`, Claude Code skill loads), `token_basis = "loads"`, falling back to sessions and saying which
+- [ ] Daily report section: the top instruction files by tokens a day, with growth and copies
+- [ ] `kelpie fix` before/after for a split: tokens a day on instructions and tokens per completed task for that role
+- [ ] Files on `kelpie agent` hosts measured and their sessions counted
+
+### hermes boards: the board in metrics and the report (#198 follow-up)
+labels: P1, adapter
+One Kelpie now watches several boards (#198), but metrics carry no board label and the report
+has no per-board view, so two projects on one farm read as one.
+
+**Acceptance criteria**
+- [ ] A `board` label on per-task and per-adapter metrics (bounded: configured board names only)
+- [ ] Daily report: cost of chaos, throughput and biggest wait per board, plus the farm total
+- [ ] Alerts and `kelpie why` show the board name, not only the id prefix
+
+### report: backlog-release spike and toolchain version in outages (#193 follow-up)
+labels: P1, area:core
+**Acceptance criteria**
+- [ ] A throughput spike right after a fix that unblocked a queue is named as a backlog release, and the next full day is preferred for the comparison
+- [ ] Toolchain version (e.g. Xcode / CoreSimulator, read through the textfile collector as config data) recorded per host; an outage that starts when it changes names the change as the likely cause (incident 20)
+
+### docs: reconcile the roadmap with what is merged
+labels: P1, documentation
+Many items here were finished by parallel sessions without ticking their criteria, so the
+roadmap no longer says what is left. In progress (#285).
+
+**Acceptance criteria**
+- [ ] Every item's criteria ticked or left open against main, with the PR that did it
+- [ ] Finished items with every criterion ticked; duplicates merged; the plan's "Plan and status" agrees
 
 ## Later (P2, on signal)
 
@@ -1098,5 +1205,7 @@ labels: P2, area:adapters
 Follow-up of the Linear tracker (#203), from its reviews; both minor.
 
 **Acceptance criteria**
-- [ ] A team's read starts only while the hour's complexity left covers the reserve kept for writes plus that team's last read cost
-- [ ] History events (assigned, unassigned, delegated) match agents by user id, as the issue's slots do, not by display name
+- [x] A team's read starts only while the hour's complexity left covers the reserve kept for writes plus that team's last read cost
+- [x] History events (assigned, unassigned, delegated) match agents by user id, as the issue's slots do, not by display name
+
+Done in #221, which also keeps the history raw and names it each time an item is built, and counts a team's requests against the request reserve. Left open: once Linear's figures are older than `LIMITS_TTL`, the next read is not checked against them.

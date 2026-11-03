@@ -9,6 +9,8 @@ status and human task conditions); ``--refresh`` adds the network ones (GitHub P
 block conditions), as one tick of ``kelpie serve`` would, and a note says when they were
 skipped.
 
+- the task's board when one adapter watches several (``board``, also in ``--json``; left
+  out for a single board);
 - the task's status and how long it has been there (with the platform's own status when it
   differs, such as Hermes ``triage`` or ``scheduled`` behind ``backlog``), owner, labels
   (held ones flagged), block and sessions;
@@ -314,7 +316,8 @@ def evaluate_rules(
             continue
         for a in actions:
             if a.task_id == task_id or _mentions(a.params, task_id):
-                findings.append(Finding(a, modes.get(rule.name, Mode.OBSERVE)))
+                mode = Mode.OBSERVE if a.observe_only else modes.get(rule.name, Mode.OBSERVE)
+                findings.append(Finding(a, mode))  # a new check stays in observe
     return findings, problems
 
 
@@ -687,6 +690,8 @@ def render(ex: Explanation) -> str:
         f"(since {_when(t.status_since)})",
         f"  owner    {who}; role {t.role or 'none'}" + (f"; source {t.source}" if t.source else ""),
     ]
+    if t.board:  # one of several boards (#283): named, not only the id's prefix
+        lines.insert(1, f"  board    {_text(t.board)}")
     if t.labels:
         mark = f" (held: {', '.join(held)}; stop patterns skip it)" if held else ""
         lines.append(f"  labels   {', '.join(t.labels)}{mark}")
@@ -874,7 +879,8 @@ def as_json(ex: Explanation) -> dict[str, Any]:
                 "since": t.block.since.isoformat(),
                 "condition_id": t.block.condition_id,
             },
-        },
+        }
+        | ({"board": t.board} if t.board else {}),  # several boards only (#283)
         "sessions": [
             {
                 "id": s.id,

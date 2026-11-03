@@ -98,9 +98,11 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "kanban.db": "PASS",
         "hooks fire": "PASS",
         "OTLP spans arrive": "PASS",
+        "traces token kept private": "SKIP",
         "models have prices": "PASS",
         "providers have a spend mode": "SKIP",
         "worktrees readable": "SKIP",
+        "stop ends workers": "PASS",
         "PR blocks have conditions": "PASS",
         "snooze markers parse": "SKIP",
         "disk watched": "PASS",
@@ -120,10 +122,32 @@ def test_bad_config_is_one_failure(tmp_path: Path) -> None:
     assert check.render().splitlines()[1].startswith("  fix: ")
 
 
+@pytest.mark.parametrize(
+    ("section", "variable"),
+    [
+        (
+            '[adapters.github_issues]\nrepos = ["example/repo"]\ntoken_env = "KELPIE_X_TOKEN"\n',
+            "KELPIE_X_TOKEN",
+        ),
+        ('[adapters.linear]\nteams = ["ENG"]\ntoken_env = "KELPIE_X_KEY"\n', "KELPIE_X_KEY"),
+    ],
+)
+def test_an_adapter_token_that_is_not_set_is_one_failure_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str, variable: str
+) -> None:
+    monkeypatch.delenv(variable, raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text(section)
+    (check,) = run_checks(path, environ={})
+    assert (check.status, check.name) == ("FAIL", "config loads")
+    assert f"${variable} is not set" in check.detail
+    assert "export the variable" in check.fix
+
+
 def test_no_hermes_section_skips_the_board_checks() -> None:
     checks = {c.name: c.status for c in run_checks(None, environ={})}
     assert checks["kanban.db"] == checks["hooks fire"] == checks["worktrees readable"] == "SKIP"
-    assert checks["PR blocks have conditions"] == "SKIP"
+    assert checks["PR blocks have conditions"] == checks["stop ends workers"] == "SKIP"
     assert checks["rule modes"] == "PASS"
 
 
@@ -757,6 +781,105 @@ def test_process_counts_skip_without_a_mac_or_an_answer(farm: Farm) -> None:
     farm.prom.status = 200
     farm.resources = ""
     assert farm.checks()["process counts fresh"].status == "SKIP"
+
+
+def test_stop_ends_workers_names_the_backend_or_why_not(tmp_path: Path) -> None:
+    from kelpie.adapters.hermes import HermesAdapter
+    from kelpie.adapters.hermes.proctable import Libproc, Procfs, host_table
+    from kelpie.doctor import check_worker_stop
+
+    adapter = HermesAdapter(db_path=tmp_path / "kanban.db", spool=None)
+    linux = check_worker_stop(adapter, Procfs())
+    assert (linux.status, linux.name) == ("PASS", "stop ends workers")
+    assert linux.detail.startswith("via Linux /proc;")
+    nolib = check_worker_stop(adapter, Libproc(error="libproc cannot be loaded (x)"))
+    assert nolib.status == "WARN" and nolib.detail.startswith("libproc cannot be loaded (x):")
+    other = check_worker_stop(adapter, host_table("win32"))
+    assert other.status == "WARN" and "on Linux or macOS" in other.fix
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self" / "stat").write_text("1 (x) S 0\n")
+    (proc / "self" / "mountinfo").write_text("22 1 0:21 / /proc rw - proc proc rw,hidepid=2\n")
+    hidden = check_worker_stop(adapter, Procfs(proc))
+    assert hidden.status == "WARN" and "hidepid" in hidden.detail
+    adapter.end_worker = False
+    off = check_worker_stop(adapter, Procfs())
+    assert off.status == "WARN" and off.fix == "set [adapters.hermes] end_worker = true"
+
+
+def test_two_boards_of_one_home_are_checked_one_by_one_without_a_failure(farm: Farm) -> None:
+    """#198: one Kelpie for two boards; host-level checks run once."""
+    farm.make_healthy()
+    second = Board(farm.root / "sign.db")
+    second.task("t_2", "running", NOW - timedelta(hours=1))
+    second.close()
+    path = farm.root / "kelpie.toml"
+    path.write_text(
+        f'[storage]\npath = "{farm.db}"\n[adapters.hermes]\nspool = "{farm.spool}"\n'
+        f'[[adapters.hermes.boards]]\nname = "qr"\ndb_path = "{farm.board.path}"\n'
+        f'[[adapters.hermes.boards]]\nname = "sign"\ndb_path = "{second.path}"\n'
+        f"{farm.resources}"
+    )
+    found = run_checks(path, now=lambda: NOW, environ={})
+    names = [c.name for c in found]
+    for name in ("kanban.db", "worktrees readable", "PR blocks have conditions"):
+        assert names.count(f"{name} (qr)") == names.count(f"{name} (sign)") == 1
+        assert name not in names
+    for name in ("hooks fire", "stop ends workers", "disk watched", "OTLP spans arrive"):
+        assert names.count(name) == 1  # the host's, once
+    checks = {c.name: c for c in found}
+    assert "1 running" in checks["kanban.db (sign)"].detail
+    assert checks["hooks fire"].status == "PASS"
+    assert not [c.name for c in found if c.status == "FAIL"]
+    second.path.unlink()
+    check = {c.name: c for c in run_checks(path, now=lambda: NOW, environ={})}["kanban.db (sign)"]
+    assert check.status == "FAIL" and "board sign" in check.fix
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://admin:S3CRET-PW@127.0.0.1:9",
+        "http://127.0.0.1:9/?token=S3CRET-Q",
+        "http://127.0.0.1:9/#S3CRET-F",
+    ],
+)
+def test_prometheus_url_secrets_are_refused_and_never_printed(farm: Farm, url: str) -> None:
+    """The URL came from --prometheus or $KELPIE_PROMETHEUS_URL unchecked and was echoed
+    whole, password and token included (#275 L6)."""
+    check = farm.checks(url)["Prometheus reachable"]
+    assert check.status == "FAIL"
+    assert "S3CRET" not in check.detail and "S3CRET" not in check.fix
+    assert "credentials" in check.detail
+
+
+def test_prometheus_redirect_is_not_followed(farm: Farm, prometheus: str) -> None:
+    hits: list[str] = []
+
+    class Moved(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            hits.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", f"{prometheus}/-/ready")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Moved)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        check = farm.checks(f"http://127.0.0.1:{server.server_port}")["Prometheus reachable"]
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert hits == ["/-/ready"]
+    assert check.status == "FAIL"  # a redirect elsewhere is not "reachable"
+    assert "redirect not followed" in check.detail
+
+
+def test_prometheus_malformed_url_fails_cleanly(farm: Farm) -> None:
+    assert farm.checks("http://[::1")["Prometheus reachable"].status == "FAIL"
 
 
 def test_a_parking_rule_that_acts_on_some_adapters_still_warns_of_stranded_parks(

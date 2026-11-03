@@ -1,0 +1,56 @@
+id: "13-wait-inbox-off"
+incident: 13
+title: "Without the needs-you inbox, rule 2 still alerts on a wait on a person's task"
+description: >
+  The hand-off of 13-wait-left-to-inbox holds only while rule 13 reaches people. When it
+  does not (it is not loaded, or it runs in observe while rule 2 alerts: needs_you is
+  false), rule 2 sends its overdue alert for W-1 as before, so nothing goes silent. A wait
+  within max_wait (W-7) is still not alerted on.
+rule: wait_condition
+config:
+  max_wait: "24h"
+  needs_you: false
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # The person can do H-1 now (ready, nothing open before it): the inbox lists it.
+    - {id: H-1, title: "Sign the vendor contract", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    # Still in triage: only a person moves it out of there, so the inbox lists nothing under it.
+    - {id: H-2, title: "Pick the price tier", status: backlog, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo, prework: true}
+    - {id: H-3, title: "Approve the listing", status: cancelled, status_since: "2026-10-18T09:00:00+00:00", role: owner, owner_id: ceo}
+    # W-1: parked on H-1 by a human_task condition for 30h, past max_wait.
+    - {id: W-1, title: "Integrate the vendor API", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-2: the same wait, but on a task the person cannot move yet.
+    - {id: W-2, title: "Set the prices", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-3: waits on H-1 and on a PR: it waits on the PR first, so the inbox does not list it.
+    - {id: W-3, title: "Vendor webhooks", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-4: its human task was cancelled: nothing will ever wake it.
+    - {id: W-4, title: "Publish the listing", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    # W-5: waiting on nothing at all.
+    - {id: W-5, title: "Update the docs", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - id: W-6
+      title: "Rotate the keys"
+      status: waiting
+      status_since: "2026-10-18T04:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "waiting for C-6", since: "2026-10-18T04:00:00+00:00", condition_id: C-6}
+    # Look-alike: parked on H-1 for 2h, well within max_wait.
+    - {id: W-7, title: "Vendor onboarding", status: waiting, status_since: "2026-10-19T08:00:00+00:00", role: developer, owner_id: agent-dev-1}
+  conditions:
+    - {id: C-1, kind: human_task, task_id: W-1, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-2, kind: human_task, task_id: W-2, params: {task: H-2}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-3a, kind: human_task, task_id: W-3, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-3b, kind: pr_merged, task_id: W-3, params: {pr: 7}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-4, kind: human_task, task_id: W-4, params: {task: H-3, terminal: true}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-7, kind: human_task, task_id: W-7, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-19T08:00:00+00:00"}
+expected_actions:
+  - {kind: alert, task_id: W-1, reason_contains: "limit 24.0h"}
+  - {kind: alert, task_id: W-2, reason_contains: "limit 24.0h"}
+  - {kind: alert, task_id: W-3, reason_contains: "limit 24.0h"}
+  - {kind: alert, task_id: W-4, reason_contains: "nothing will ever wake it"}
+not_expected_actions:
+  - {kind: alert, task_id: W-7}

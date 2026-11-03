@@ -135,8 +135,10 @@ class Hub:
         settings: HubSettings,
         tokens: Mapping[str, str],
         clock: Callable[[], datetime],
+        tls: ssl.SSLContext | None = None,
     ) -> None:
         self.settings = settings
+        self.tls = tls  # loaded once by whoever checked the config; else when listening
         self._tokens = [(name, token.encode()) for name, token in tokens.items()]
         self._clock = clock
         self._agents = {a.name: _Agent(a.name) for a in settings.agents}
@@ -426,7 +428,7 @@ class HubServer(ThreadingHTTPServer):
         settings = hub.settings
         self.hub = hub
         self.traces = traces  # OTLP exports agents relay; None: refused (404)
-        self.tls = _server_context(settings) if settings.tls else None
+        self.tls = hub.tls or (server_context(settings) if settings.tls else None)
         if ":" in settings.host:
             self.address_family = socket.AF_INET6
         # Connections not yet authenticated: at most max_connections (when full, the oldest
@@ -565,7 +567,8 @@ class HubService:
         self.server.server_close()
 
 
-def _server_context(settings: HubSettings) -> ssl.SSLContext:
+def server_context(settings: HubSettings) -> ssl.SSLContext:
+    """The hub's TLS context; ValueError when ``tls_cert``/``tls_key`` do not load."""
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     try:

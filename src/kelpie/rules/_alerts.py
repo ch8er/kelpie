@@ -17,6 +17,7 @@ fixed words only, as it passes agents' text through as is.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 MAX_HEADLINE = 100  # what the renderer shows of a rule's headline (kelpie.alerts.render)
@@ -45,3 +46,13 @@ def count(n: int, noun: str, verb: str = "") -> str:
     if not verb:
         return words
     return f"{words} {_SINGULAR_VERBS.get(verb, verb + 's') if n == 1 else verb}"
+
+
+def check_connectors(kinds: Sequence[str]) -> str:
+    """The ask for evidence nobody is gathering, by condition kind: which connector checks a
+    kind is the deployment's business (a rule cannot know); the doctor lists the connectors."""
+    names = kinds[0] if len(kinds) == 1 else f"{', '.join(kinds[:-1])} and {kinds[-1]}"
+    return (
+        f"Check that whatever checks {names} conditions is running "
+        "(kelpie doctor shows the connectors)"
+    )

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import html
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -52,7 +52,8 @@ class Channels:
     slack: FakeSlack
 
     def telegram_texts(self) -> list[str]:
-        return [_shown(body) for _, _, body in list(self.telegram.requests)]
+        """The messages sent (not the button poller's calls), as a person sees them."""
+        return [_shown(body) for body in self.telegram.calls("sendMessage")]
 
     def slack_texts(self) -> list[str]:
         return [_slack_shown(body) for _, _, body in list(self.slack.requests)]
@@ -71,19 +72,29 @@ class Channels:
             SLACK_WEBHOOK_ENV: self.slack.origin + SLACK_PATH,
         }
 
-    def config(self, telegram_min: str = "info", slack_min: str = "warning") -> dict[str, Any]:
-        """The ``[alerts]`` section for both fakes."""
+    def config(
+        self,
+        telegram_min: str = "info",
+        slack_min: str = "warning",
+        buttons: Sequence[int] = (),
+    ) -> dict[str, Any]:
+        """The ``[alerts]`` section for both fakes; ``buttons``: the Telegram user ids that
+        may snooze from the alert (snooze buttons on, the fake answering as a bot)."""
+        telegram: dict[str, Any] = {
+            "type": "telegram",
+            "token_env": TELEGRAM_TOKEN_ENV,
+            "chat_id": CHAT_ID,
+            "api_url": self.telegram.url,
+            "min_severity": telegram_min,
+            "timeout": "5s",
+        }
+        if buttons:
+            self.telegram.bot()
+            telegram.update(buttons=True, allowed_user_ids=list(buttons))
         return {
             "dedup_window": "10m",
             "channels": [
-                {
-                    "type": "telegram",
-                    "token_env": TELEGRAM_TOKEN_ENV,
-                    "chat_id": CHAT_ID,
-                    "api_url": self.telegram.url,
-                    "min_severity": telegram_min,
-                    "timeout": "5s",
-                },
+                telegram,
                 {
                     "type": "slack",
                     "webhook_env": SLACK_WEBHOOK_ENV,

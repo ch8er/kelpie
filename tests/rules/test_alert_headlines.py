@@ -17,6 +17,7 @@ from kelpie.alerts import render
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import AlertEvent
 from kelpie.core.engine import alert_items
+from kelpie.core.incidents import is_outage_state
 from kelpie.core.model import (
     Block,
     BudgetScope,
@@ -29,6 +30,7 @@ from kelpie.core.model import (
     ProviderStatus,
     Resource,
     ResourceKind,
+    SessionWait,
     Snapshot,
     Status,
     Task,
@@ -415,6 +417,13 @@ KINDS = {
         "Replace the blocker that can never clear",
         1,
     ),
+    # no_progress
+    "runaway context": Kind(
+        "no_progress",
+        from_fixture("field-07-runaway-context"),
+        "Session S-F701: 190k-token context, +10,000 per step",
+        "Compact the context or bound the session",
+    ),
     # wait_condition
     "overdue": Kind(
         "wait_condition",
@@ -459,6 +468,19 @@ KINDS = {
         "Nothing will wake T-1: its condition C-1 can never be met",
         "Replace the condition, or move the task on",
         1,
+    ),
+    "waits inside sessions": Kind(
+        "wait_condition",
+        built(
+            Snapshot(
+                now=NOW,
+                waits=tuple(
+                    SessionWait(f"S-{i}", NOW - i * M, "sleep", waited=20 * M, role="architect")
+                    for i in (1, 2)
+                ),
+            )
+        ),
+        "architect agents waited inside 2 sessions",
     ),
     # stale_blocks
     "block, nothing to check": Kind(
@@ -717,8 +739,8 @@ def test_stale_blocks_counts_what_waits_as_rules_2_3_and_13_do(path: Path) -> No
     behind = behind_lookup(snapshot)
     config = incident.config if incident.rule == "stale_blocks" else {}
     for action in evaluate("stale_blocks", snapshot, config):
-        if action.kind is not ActionKind.ALERT:
-            continue
+        if action.kind is not ActionKind.ALERT or is_outage_state(action.state or ""):
+            continue  # a block storm is about many tasks (tests/rules/test_block_storm.py)
         assert action.task_id is not None
         waiting = behind(action.task_id)
         assert action.params["blocking"] == len(waiting), action

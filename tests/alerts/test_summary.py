@@ -311,6 +311,7 @@ def test_the_urls_of_alerts_and_summaries_share_one_check() -> None:
         ("ftp://board.example.org/{id}", "http"),
         ('https://board.example.org/{id}"x', "plain URL"),
         ("https://board.example.org/" + "x" * 700 + "{id}", "plain URL"),
+        ("https://board.example.org/" + "x" * 511 + "{id}", "too long"),  # 601 once filled
         ("https://{id}.example.org/", "host"),
         ("https://board.example.org/", "{id}"),
     ):

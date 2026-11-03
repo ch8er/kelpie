@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import pytest
 
 from kelpie.adapters.hermes import HermesAdapter
 from kelpie.adapters.hermes.adapter import MAX_BODY, HermesError
-from kelpie.core.model import OwnerKind, Session, SpanKind, Status
+from kelpie.core.model import OwnerKind, Session, Snapshot, SpanKind, Status
 from kelpie.core.ports import PlatformAdapter, SnapshotSource
 from tests.adapters.kanban import Board
 
@@ -267,7 +268,7 @@ def test_a_live_tool_run_marks_the_session_and_slots_are_readings(
     board.task("t_3", "done", ago(hours=1), assignee="dev-3")
     seen: dict[str, object] = {}
 
-    def host(config, now, tasks, workspaces):  # type: ignore[no-untyped-def]
+    def host(config, now, tasks, workspaces, aliases=None):  # type: ignore[no-untyped-def]
         seen["tasks"] = set(tasks)
         seen["workspaces"] = dict(workspaces)
         runs = {"t_1": ToolRun("xcodebuild", ago(minutes=12)), "t_2": ToolRun("x", ago(hours=1))}
@@ -312,7 +313,7 @@ def test_a_shared_workspace_is_no_task_workspace(
         board.update(tid, workspace_kind="worktree", workspace_path=str(path))
     seen: dict[str, object] = {}
 
-    def host(config, now, tasks, workspaces):  # type: ignore[no-untyped-def]
+    def host(config, now, tasks, workspaces, aliases=None):  # type: ignore[no-untyped-def]
         seen.update(tasks=set(tasks), workspaces=dict(workspaces))
         return HostTools()
 
@@ -1109,3 +1110,97 @@ def test_a_marker_with_full_width_punctuation_matches_itself() -> None:
     d = HumanDecision("решение\uff08CEO\uff09", frozenset({"partner"}))  # full-width ( )
     assert d.recorded("partner", "Решение(CEO): 20 runs")  # NFKC, then escaped
     assert not d.recorded("partner", "Решение CEO: 20 runs")
+
+
+@pytest.mark.parametrize(
+    ("fields", "outcome", "result", "code"),
+    [
+        # The farm's sample (#229): what each kind of call becomes on its span.
+        ({"exit_code": 0}, "ok", "ok", 0),
+        ({"exit_code": 127}, "error", "error", 127),
+        ({"exit_code": 1, "outcome": "ok"}, "error", "error", 1),  # the exit code wins
+        ({"exit_code": 124}, "error", "error", 124),
+        ({"exit_code": 0, "background": True}, "ok", "unknown", 0),  # started, not done
+        # Refused: its result says so; it keeps Hermes' outcome (rule 10's error streak).
+        ({"exit_code": -1, "blocked": True, "outcome": "error"}, "error", "blocked", -1),
+        ({"exit_code": 2**40}, "ok", None, None),  # no exit code
+        ({"exit_code": -1}, "error", "error", -1),  # a degraded backend, a fatal error
+        ({"exit_code": -15, "tool": "process"}, "ok", None, None),  # another job's code
+        ({"exit_code": "1"}, "ok", None, None),  # not an int: no result known
+        ({"exit_code": True}, "ok", None, None),
+        ({}, "ok", None, None),  # an older plugin, or a tool without an exit code
+        ({"outcome": "error"}, "error", None, None),
+    ],
+)  # fmt: skip
+def test_a_spool_exit_code_becomes_the_calls_result(
+    board: Board,
+    tmp_path: Path,
+    fields: dict[str, object],
+    outcome: str | None,
+    result: str | None,
+    code: int | None,
+) -> None:
+    from kelpie.core.tools import exit_code_of, result_of
+
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(tool_line(ago(minutes=5), **fields) + "\n")
+    [tool] = [s for s in adapter(board, spool).snapshot(NOW).spans if s.kind is SpanKind.TOOL]
+    assert (tool.outcome, result_of(tool), exit_code_of(tool)) == (outcome, result, code)
+
+
+def test_the_command_s_shape_reaches_the_span(board: Board, tmp_path: Path) -> None:
+    from kelpie.core.tools import command_complete, command_multiline, command_whole
+
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(
+        tool_line(ago(minutes=5), exit_code=0, command_whole=True)
+        + "\n"
+        + tool_line(ago(minutes=4), exit_code=1, command_multiline=True, tool_call_id="c2")
+        + "\n"
+        + tool_line(ago(minutes=3), exit_code=1, command_complete=True, tool_call_id="c3")
+        + "\n"
+    )
+    spans = [s for s in adapter(board, spool).snapshot(NOW).spans if s.kind is SpanKind.TOOL]
+    found = [(command_whole(s), command_complete(s), command_multiline(s)) for s in spans]
+    assert found == [(True, True, False), (False, False, True), (False, True, False)]
+
+
+# --- an agent-written spool is read safely (#275 H1) ------------------------------------
+
+
+def _returns_within(fn: Callable[[], object], seconds: float = 5.0) -> object:
+    """``fn()``'s result, failing the test (not hanging it) when it blocks."""
+    out: list[object] = []
+    worker = threading.Thread(target=lambda: out.append(fn()), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), "blocked"
+    return out[0]
+
+
+def test_a_fifo_spool_does_not_block_the_snapshot(board: Board, tmp_path: Path) -> None:
+    spool = tmp_path / "spool.jsonl"
+    os.mkfifo(spool, 0o600)
+    os.mkfifo(tmp_path / "spool.jsonl.1", 0o600)
+    a = adapter(board, spool)
+    snap = _returns_within(lambda: a.snapshot(NOW))
+    assert isinstance(snap, Snapshot) and snap.spans == ()
+    assert _returns_within(a.last_spool_at) is None
+
+
+def test_a_symlinked_spool_is_not_followed(board: Board, tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text(tool_line(ago(minutes=1), tool="a") + "\n")
+    spool = tmp_path / "spool.jsonl"
+    spool.symlink_to(target)
+    a = adapter(board, spool)
+    assert a.snapshot(NOW).spans == ()
+    assert a.last_spool_at() is None
+
+
+def test_an_overlong_spool_line_is_skipped(board: Board, tmp_path: Path) -> None:
+    spool = tmp_path / "spool.jsonl"
+    big = json.dumps({"type": "tool", "at": ago(minutes=2).timestamp(), "pad": "x" * 100_000})
+    spool.write_text(big + "\n" + tool_line(ago(minutes=1), tool="b") + "\n")
+    spans = adapter(board, spool).snapshot(NOW).spans
+    assert [s.tool for s in spans if s.kind is SpanKind.TOOL] == ["b"]

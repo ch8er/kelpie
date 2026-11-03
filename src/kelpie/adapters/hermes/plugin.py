@@ -20,7 +20,10 @@ Kanban workers get ``HERMES_KANBAN_TASK`` and ``HERMES_KANBAN_RUN_ID`` in their 
 Privacy: raw arguments and results are never written. A tool call is recorded as the tool
 name, a hash of its canonical arguments and, for shell-like tools, a redacted prefix of the
 command (see :func:`redact_command`; disable with ``KELPIE_HERMES_SPOOL_COMMANDS=0``), and
-the size of its result in characters (``output_chars``), never the result itself.
+the size of its result in characters (``output_chars``), never the result itself. For the
+terminal tool also its exit code (an int), whether it went to the background or Hermes
+refused it, and whether the redacted prefix still ends where the command did
+(``command_whole``): booleans and a number, nothing of the output.
 
 Hooks are fire-and-forget: nothing here raises, blocks on the network or returns a value.
 """
@@ -32,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -123,6 +127,14 @@ _WRAPPERS = {
     "rtk": (frozenset(), frozenset()),
 }
 _MAX_WRAPPED = 8  # wrapper tokens kept on top of _MAX_TOKENS
+# Shell builtins that only set up for the command after them (``export X=… && make``,
+# ``cd dir && make``): kept as a name with every argument masked, and, like a wrapper's
+# tokens, not counted against _MAX_TOKENS, so the command after the separator is kept.
+_SETUP = frozenset({"export", "cd", "pushd", "set", "source", ".", "unset", "umask", "ulimit"})
+# A setup builtin's argument Kelpie can read for sure (an allowlist): letters, digits and
+# ``_ . / ~ : = + , @ % $ -``, no quote, escape, bracket, comment or operator in it. With any
+# other argument, where bash ends the builtin's arguments is not clear: the rest is masked.
+_SIMPLE_ARG = re.compile(r"^[\w./~:=+,@%$-]*$")
 _BLANKS = re.compile(r"[ \t]+")  # what bash splits words on
 
 
@@ -132,10 +144,15 @@ def _quoted_span(tokens: list[str], i: int) -> int:
     tok = tokens[i]
     if "\\" in tok and any(q in tok for q in _QUOTES):
         return len(tokens)  # an escaped quote: where the argument ends is not clear
-    quote = next((c for c in tok if c in _QUOTES), None)
+    kinds = {c for c in tok if c in _QUOTES}
+    if len(kinds) > 1:
+        return len(tokens)  # 'x'"y: counting one kind would end it in the wrong place
+    quote = next(iter(kinds), None)
     if quote is None or tok.count(quote) % 2 == 0:
         return i + 1
     for j in range(i + 1, len(tokens)):
+        if any(q in tokens[j] for q in _QUOTES if q != quote):
+            return len(tokens)  # another kind of quote inside: not clear either
         if tokens[j].count(quote) % 2 == 1:
             return j + 1
     return len(tokens)
@@ -174,7 +191,10 @@ def redact_command(command: str) -> str | None:
     ``--flag=value`` values, paths, URLs, hosts, ``user:pass``, quoted text, variables. Once
     a flag or a masked argument appears, later plain words are masked too: they may be its
     value. A secret passed as a lowercase word right after the executable
-    (``redis-cli auth hunter2``) is still kept.
+    (``redis-cli auth hunter2``) is still kept. A setup builtin (``export``, ``cd``,
+    ``source``, ``set``, ...) keeps its name and one ``***`` for all its arguments, and its
+    tokens do not count against the four, so ``export X=… && ./sim.sh test`` keeps the
+    command it sets up: ``export *** && sim.sh test``.
     """
     lines = command.strip().splitlines()
     if not lines:
@@ -189,7 +209,8 @@ def redact_command(command: str) -> str | None:
     exe = True  # the next argument is an executable
     words = False  # plain words are still kept (right after the executable)
     wrapper = None  # flags of the wrapper whose options come next (sudo -u x make)
-    extra = 0  # wrapper tokens, not counted against _MAX_TOKENS
+    setup = False  # in a setup builtin's arguments (export X=… &&): all masked
+    extra = 0  # wrapper and setup tokens, not counted against _MAX_TOKENS
     while i < len(tokens) and len(out) < _MAX_TOKENS + extra:
         tok = tokens[i]
         end = _quoted_span(tokens, i)
@@ -218,19 +239,36 @@ def redact_command(command: str) -> str | None:
             continue
         if tok.startswith("#"):
             break
-        if end > i + 1 or any(q in tok for q in _QUOTES):
+        if tok in _SEPARATORS and end == i + 1:
+            out.append(tok)
+            if setup:  # the separator after a setup builtin is its own, too
+                extra = min(extra + 1, _MAX_WRAPPED)
+            exe, words, setup = True, False, False
+        elif setup:
+            if out[-1] != _MASK:  # one mask for all its arguments
+                out.append(_MASK)
+                extra = min(extra + 1, _MAX_WRAPPED)
+            glued = tok.endswith(";")  # export X=1; make: the separator glued to it
+            arg = tok[:-1] if glued else tok
+            if end != i + 1 or not (arg == _MASK or _SIMPLE_ARG.match(arg)):  # *** redacted
+                break  # $(…), 'x'"y", x\;, ;#: where its arguments end is not clear
+            if glued and len(out) < _MAX_TOKENS + extra:  # within the cap, as any token
+                out.append(";")
+                extra = min(extra + 1, _MAX_WRAPPED)
+                exe, setup = True, False
+        elif end > i + 1 or any(q in tok for q in _QUOTES):
             out.append(_MASK)
             exe = words = False
-        elif tok in _SEPARATORS:
-            out.append(tok)
-            exe, words = True, False
         elif exe:
             base = tok.rstrip("/").rsplit("/", 1)[-1]
-            ok = bool(_EXE.match(base)) and not _ASSIGN.match(base)
+            ok = (bool(_EXE.match(base)) and not _ASSIGN.match(base)) or base == "."
             out.append(base if ok else _MASK)
             exe, words = False, ok
             if ok and base in _WRAPPERS:
                 wrapper = _WRAPPERS[base]
+                extra = min(extra + 1, _MAX_WRAPPED)
+            elif ok and base in _SETUP:
+                setup, words = True, False
                 extra = min(extra + 1, _MAX_WRAPPED)
         elif _FLAG.match(tok):
             out.append(tok)
@@ -265,6 +303,73 @@ def _command(args: Any) -> str | None:
         if isinstance(value, str) and value:
             return redact_command(value)
     return None
+
+
+def _shape(args: dict[str, Any]) -> dict[str, bool]:
+    """How far the redacted command (a prefix) speaks for the command's exit code:
+    ``command_complete`` when the command is one line, no separator is glued to a word
+    (``test;swiftlint`` masks it) and the prefix shows every separator the line has (none
+    was dropped with the words after it); ``command_whole`` when the redaction also reached
+    the line's end (a separator after it would be kept too) and its last word is not masked;
+    ``command_multiline`` when the command has more lines (the last decides the exit code,
+    and only the first is kept)."""
+    for key in _COMMAND_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            lines = value.strip().splitlines()
+            if len(lines) > 1:
+                return {"command_multiline": True}
+            line = lines[0]
+            kept = redact_command(value)
+            if not kept or len(line) > _MAX_LINE - 2 or _glued(line) or _substituted(line):
+                return {}
+            words, shown = _words(line), kept.split()
+            if _separators(words) != _separators(shown):
+                return {}
+            if shown[-1] in _SEPARATOR_WORDS and words[-1] != shown[-1]:
+                return {}  # cut right after a separator: the command after it was dropped
+            out = {"command_complete": True}
+            if _MASK not in kept.split()[-1] and redact_command(f"{line} ;") == f"{kept} ;":
+                out["command_whole"] = True
+            return out
+    return {}
+
+
+def _words(line: str) -> list[str]:
+    """A line's words, a plain word's glued ``;`` (``cd ios;``) as a word of its own, as the
+    redaction reads it."""
+    out = []
+    for word in line.split():
+        if len(word) > 1 and word.endswith(";") and _SIMPLE_ARG.match(word[:-1]):
+            out += [word[:-1], ";"]
+        else:
+            out.append(word)
+    return out
+
+
+def _separators(words: list[str]) -> list[str]:
+    return [w for w in words if w in _SEPARATOR_WORDS]
+
+
+def _substituted(line: str) -> bool:
+    """Whether a separator may be inside a command substitution (``$(ls | head)``)."""
+    return any(s in line for s in ("$(", "<(", ">(", "`")) and bool(_SEPARATOR_CHARS.search(line))
+
+
+_SEPARATOR_CHARS = re.compile(r"[;|&]")
+_SEPARATOR_WORDS = frozenset({";", "|", "||", "&", "&&", "|&"})
+_REDIRECT = re.compile(r"\d*>&\d*|&>>?|\d*>\|")  # 2>&1, &>log, >| : not separators
+
+
+def _glued(line: str) -> bool:
+    """Whether a separator character is part of a word (``a;b``, ``test;swiftlint``,
+    ``'x|y'``); a plain word's trailing ``;`` is a separator of its own (:func:`_words`)."""
+    for word in _words(line):
+        if word in _SEPARATOR_WORDS:
+            continue
+        if _SEPARATOR_CHARS.search(_REDIRECT.sub("", word)):
+            return True
+    return False
 
 
 def _text(value: Any) -> str | None:
@@ -304,13 +409,16 @@ def _rotate(path: Path, limit: int) -> None:
 def append(record: dict[str, Any]) -> None:
     """Append one line to the spool, rotating it to ``<spool>.1`` at the size cap."""
     path = spool_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     _rotate(path, _max_bytes())
     line = json.dumps(record, separators=(",", ":"), default=str) + "\n"
-    # One O_APPEND write per line: concurrent workers do not interleave short lines.
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    # One O_APPEND write per line: concurrent workers do not interleave short lines. Never
+    # through a symlink, never blocking on a FIFO (with no reader, opening one fails).
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
     try:
-        os.write(fd, line.encode("utf-8"))
+        if stat.S_ISREG(os.fstat(fd).st_mode):  # not into a FIFO someone reads
+            os.write(fd, line.encode("utf-8"))
     finally:
         os.close(fd)
 
@@ -333,6 +441,51 @@ def _output_chars(result: Any) -> int | None:
         return len(str(result))
 
 
+MAX_RESULT_PARSE = 1 << 20  # characters of a tool result read for its exit code
+
+
+TERMINAL_TOOL = "terminal"  # Hermes' shell tool: its exit code is the command's
+MAX_EXIT_CODE = 2**31  # a larger one is no exit code
+
+
+def _result_fields(tool: str | None, args: Any, result: Any) -> dict[str, Any]:
+    """For the terminal tool only (other tools' exit codes are not the call's: ``process``
+    reports the code of the job it polls or kills): the exit code its result reports
+    (``exit_code``, an int), whether Hermes refused the call (``status: "blocked"``, or
+    ``"pending_approval"``: it never ran; an exit code -1 alone is also a degraded backend or
+    a fatal error, a failure), whether the command went to the background (asked for, or
+    promoted from the foreground for a long timeout: its 0 means started), and whether the
+    redacted command still ends where the command did (:func:`_shape`: a pipe or a second
+    line the redaction dropped decides the exit code). The
+    result's ``error`` key is not read: it is null on a failed build too. Nothing of the
+    output is kept."""
+    if tool != TERMINAL_TOOL:
+        return {}
+    out: dict[str, Any] = {}
+    if isinstance(args, dict):
+        if args.get("background") is True:
+            out["background"] = True
+        out.update(_shape(args))
+    data = result
+    if isinstance(result, str):
+        if len(result) > MAX_RESULT_PARSE or not result.lstrip().startswith("{"):
+            return out
+        try:
+            data = json.loads(result)
+        except (ValueError, RecursionError):
+            return out
+    if not isinstance(data, dict):
+        return out
+    code = data.get("exit_code")
+    if isinstance(code, int) and not isinstance(code, bool) and abs(code) <= MAX_EXIT_CODE:
+        out["exit_code"] = code
+    if data.get("status") in ("blocked", "pending_approval"):
+        out["blocked"] = True
+    if data.get("promoted_from_foreground") or ("pid" in data and "session_id" in data):
+        out["background"] = True  # a background spawn: started, not done
+    return out
+
+
 def post_tool_call(**kwargs: Any) -> None:
     try:
         args = kwargs.get("args", kwargs.get("params"))
@@ -349,6 +502,7 @@ def post_tool_call(**kwargs: Any) -> None:
             "duration_ms": _duration_ms(kwargs.get("duration_ms")),
             "output_chars": _output_chars(kwargs.get("result")),
         }
+        record.update(_result_fields(record["tool"], args, kwargs.get("result")))
         append(record)
     except Exception:  # hooks must never break the agent
         return

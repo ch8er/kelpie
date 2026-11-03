@@ -3,6 +3,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
+import stat
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -241,3 +244,183 @@ def test_plugin_is_standalone() -> None:
         for a in (n.names if isinstance(n, ast.Import) else [n])
     }
     assert not {m for m in modules if m and m.startswith("kelpie")}
+
+
+@pytest.mark.parametrize(
+    ("result", "args", "expected"),
+    [
+        # The farm's sample (#229): Hermes' terminal result, failed and successful alike.
+        ('{"output": "BUILD OK", "exit_code": 0, "error": null}', {}, {"exit_code": 0}),
+        ('{"output": "x: not found", "exit_code": 127, "error": null}', {}, {"exit_code": 127}),
+        ({"output": "timed out", "exit_code": 124, "error": None}, {}, {"exit_code": 124}),
+        (
+            '{"output": "", "exit_code": -1, "status": "blocked", "error": "refused"}',
+            {},
+            {"exit_code": -1, "blocked": True},
+        ),
+        (
+            '{"output": "started", "exit_code": 0, "error": null}',
+            {"command": "make serve", "background": True},
+            {"exit_code": 0, "background": True},
+        ),
+        # A degraded backend or a fatal error: -1 without a block is a failure.
+        (
+            '{"output": "", "exit_code": -1, "status": "degraded", "error": "SSH host down"}',
+            {},
+            {"exit_code": -1},
+        ),
+        # A long foreground call Hermes promoted to the background: started, not done.
+        (
+            '{"output": "Background process started", "session_id": "p1", "pid": 42,'
+            ' "exit_code": 0, "promoted_from_foreground": true}',
+            {"command": "xcodebuild test", "timeout": 3600},
+            {"exit_code": 0, "background": True},
+        ),
+        ('{"exit_code": 0}', {"command": "x", "background": "false"}, {"exit_code": 0}),
+        # Waiting for an approval: it never ran.
+        (
+            '{"output": "", "exit_code": -1, "status": "pending_approval"}',
+            {},
+            {"exit_code": -1, "blocked": True},
+        ),
+        # Yielded to the background while it ran: no exit code yet.
+        ('{"exit_code": null, "session_id": "p1", "pid": 7}', {}, {"background": True}),
+        ('{"exit_code": 10000000000000}', {}, {}),  # no exit code
+        # Nothing to read: the error key alone, odd types, not JSON, too large.
+        ('{"output": "x", "error": "boom"}', {}, {}),
+        ('{"exit_code": "1"}', {}, {}),
+        ('{"exit_code": true}', {}, {}),
+        ("plain text output", {}, {}),
+        ("[1, 2]", {}, {}),
+        ("{" + " " * plugin.MAX_RESULT_PARSE + "}", {}, {}),
+        ('{"exit_code": 1' , {}, {}),
+    ],
+)  # fmt: skip
+def test_exit_code_and_background_from_the_result(
+    spool: Path, result: object, args: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    plugin.post_tool_call(tool_name="terminal", args=args, result=result, status="ok")
+    (rec,) = lines(spool)
+    found = {k: rec[k] for k in ("exit_code", "blocked", "background") if k in rec}
+    assert found == expected
+    text = spool.read_text()
+    assert "BUILD OK" not in text and "refused" not in text and "not found" not in text
+    assert "SSH host" not in text
+
+
+def test_only_the_terminal_tool_reports_an_exit_code(spool: Path) -> None:
+    """``process`` reports the exit code of the job it polls or kills, not its own."""
+    for result in (
+        '{"status": "exited", "exit_code": 1}',
+        '{"status": "killed", "exit_code": -15}',
+    ):
+        plugin.post_tool_call(tool_name="process", args={"action": "poll"}, result=result)
+    assert [
+        {k for k in ("exit_code", "blocked", "background") if k in r} for r in lines(spool)
+    ] == [
+        set(),
+        set(),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "whole"),
+    [
+        ("./scripts/ios_sim.sh test", True),
+        ("cd app && ./scripts/ios_sim.sh test", True),
+        ("rtk xcodebuild test", True),
+        ("xcodebuild clean build test | xcbeautify", False),  # the pipe was dropped
+        ('./scripts/ios_sim.sh test\necho "exit: $?"', False),  # a second line
+        ("ios_sim.sh test --device x", False),  # masked last word
+        ("make test;", False),
+        # Cut at the redaction's four words, ending on the same word as the command.
+        ("xcodebuild clean build test | grep -v test", False),
+        ("ios_sim.sh boot build test 2>&1 | tee test", False),
+        ("xcodebuild clean build test", False),  # four words: cut or not, it cannot tell
+        ("ios_sim.sh test  \n", True),
+    ],
+)
+def test_whether_the_redacted_command_is_whole(spool: Path, command: str, whole: bool) -> None:
+    plugin.post_tool_call(
+        tool_name="terminal", args={"command": command}, result='{"exit_code": 0}'
+    )
+    (rec,) = lines(spool)
+    assert rec.get("command_whole", False) is whole
+    assert rec.get("command_multiline", False) is ("\n" in command.strip())
+    if whole:
+        assert rec["command_complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("command", "complete"),
+    [
+        ("xcodebuild -scheme App test", True),  # masked words, but it ends there
+        ("ios_sim.sh test --device x", True),
+        ("xcodebuild test 2>&1 | xcbeautify", False),  # kept up to the pipe, not after it
+        ("xcodebuild -scheme App && swiftlint", False),
+        ("xcodebuild -scheme App ; swiftlint", False),
+        ("ios_sim.sh test &", True),
+        ("cd ios; ./ios_sim.sh test", True),  # a glued ; the redaction reads
+        ("export DEVELOPER_DIR=/x; xcodebuild test", True),
+        ("ios_sim.sh $(ls | head )", False),  # a pipe inside a substitution
+        ("ios_sim.sh $(date)", True),
+        ("ios_sim.sh test; swiftlint", False),  # glued: the ; is masked
+        ("ios_sim.sh a;b", False),
+        ("ios_sim.sh 'a b'; swiftlint", False),
+        ("xcodebuild clean build test && swiftlint", False),  # cut at four words
+        ("ios_sim.sh test # note", True),  # a comment runs nothing
+        ("xcodebuild -scheme App test | xcbeautify", False),  # the pipe was dropped
+    ],
+)
+def test_whether_the_redacted_command_reaches_its_end(
+    spool: Path, command: str, complete: bool
+) -> None:
+    plugin.post_tool_call(
+        tool_name="terminal", args={"command": command}, result='{"exit_code": 1}'
+    )
+    (rec,) = lines(spool)
+    assert rec.get("command_complete", False) is complete
+
+
+# --- the spool is never written through a symlink or a FIFO (#275 L2) -------------------
+
+
+def test_never_writes_through_a_symlinked_spool(spool: Path, tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("keep\n")
+    spool.parent.mkdir(parents=True)
+    spool.symlink_to(target)
+    plugin.post_tool_call(tool_name="t", args={})
+    assert target.read_text() == "keep\n"
+
+
+def test_never_blocks_on_a_fifo_spool(spool: Path) -> None:
+    spool.parent.mkdir(parents=True)
+    os.mkfifo(spool, 0o600)
+    worker = threading.Thread(target=lambda: plugin.post_tool_call(tool_name="t", args={}))
+    worker.daemon = True
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive()
+
+
+def test_spool_folder_is_private(spool: Path) -> None:
+    plugin.post_tool_call(tool_name="t", args={})
+    assert stat.S_IMODE(spool.parent.stat().st_mode) == 0o700
+
+
+def test_never_writes_into_a_fifo_someone_reads(spool: Path) -> None:
+    spool.parent.mkdir(parents=True)
+    os.mkfifo(spool, 0o600)
+    reader = os.open(spool, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        plugin.post_tool_call(tool_name="t", args={})
+        assert os.read(reader, 4096) == b""  # nothing went into the pipe (no writer left)
+    finally:
+        os.close(reader)
+
+
+def test_a_regular_spool_is_still_written(spool: Path) -> None:
+    plugin.post_tool_call(tool_name="t", args={})
+    plugin.post_tool_call(tool_name="u", args={})
+    assert [r["tool"] for r in lines(spool)] == ["t", "u"]

@@ -19,12 +19,23 @@ connector's business.
      skip marker; a skipped build would not be here).
 
    Once the wasted minutes in the window reach ``waste_min_minutes``, one ``info`` alert
-   summarizes them per category. It is a lasting state keyed by the doubling level of the
-   wasted minutes: announced when it opens and again whenever the level changes, which
-   happens when the waste doubles and also when it halves as old builds leave the window
-   (a "Changed:" notice); resolved when the window no longer holds that much waste. Build
-   minutes are the connector's estimate (see its docs: billable job minutes where known,
-   otherwise wall-clock time), so treat the totals as an order of magnitude.
+   summarizes them and recommends the CI configuration change that would have saved each
+   category's minutes, the most saved first: ``cancel_in_progress`` (superseded; it saves
+   only the part of a build after its newer build started, pro rata), ``skip_verified``
+   (already verified), ``ignore_docs_paths`` (docs-only), ``skip_drafts`` and ``skip_wip``.
+   The changes are named, never written in a CI's syntax: rendering them is the CI
+   connector's business. ``params.pipelines`` has them per pipeline (CI ``source``,
+   ``repo``, ``workflow``; the most minutes saved first, at most ten; ``pipelines_total``
+   counts them all): its ``minutes`` and ``changes``, each ``{change, minutes, builds}``,
+   with ``paths`` for ``ignore_docs_paths`` (the ``docs_globs``, fnmatch: ``*`` crosses
+   ``/``) and ``patterns`` with ``case_insensitive: true`` for ``skip_wip`` (the
+   ``wip_patterns``, matched ignoring case): a connector translates both. It is a lasting
+   state keyed by the doubling level of the wasted minutes: announced when it opens and
+   again whenever the level changes, which happens when the waste doubles and also when it
+   halves as old builds leave the window (a "Changed:" notice); resolved when the window no
+   longer holds that much waste. Build minutes are the connector's estimate (see its docs:
+   billable job minutes where known, otherwise wall-clock time), so treat the totals as an
+   order of magnitude.
 
 2. **Superseded builds still running** → ``cancel_build`` (``cancel_superseded``), only
    for builds the connector marked ``cancellable`` (within its cancel policy), routed to
@@ -45,6 +56,12 @@ connector's business.
    (repositories, workflows, runners, PRs) and the tasks it explains, open until a build
    passes that job again. See :mod:`kelpie.rules._ci_outage`; the params are the contract
    in :mod:`kelpie.core.incidents`. ``outage_min_prs = 0`` turns it off.
+
+5. **CI jobs that never start** (#229): builds the CI refused (no runner, no step: a spending
+   limit, a failed payment) or left queued for ``queued_after``, across ``outage_min_prs``
+   change requests → one ``warning`` outage that says which. A new check: only logged
+   (``not_started_mode = "observe"``) until set to ``"rule"``. See
+   :mod:`kelpie.rules._ci_not_started`.
 """
 
 from __future__ import annotations
@@ -74,7 +91,10 @@ from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
 from kelpie.rules._alerts import count as counted
+from kelpie.rules._ci_not_started import STATE as NOT_STARTED
+from kelpie.rules._ci_not_started import not_started, ran_again
 from kelpie.rules._ci_outage import outages, passed_again
+from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
 
 NAME = "ci_economy"
 CATEGORIES = ("superseded", "already_verified", "docs_only", "draft", "wip")
@@ -88,6 +108,19 @@ _LABELS = {
 _MAX_LISTED = 20
 DEFAULT_DOCS_GLOBS = ("docs/*", "*.md", "*.rst")
 DEFAULT_WIP_PATTERNS = (r"^\s*\[?wip\b", r"^\s*(fixup|squash)!")
+# The configuration change that would have saved the minutes of each waste category, and
+# what it does, in no CI's syntax.
+CHANGES = {
+    "superseded": ("cancel_in_progress", "cancel a running build when a newer commit is pushed"),
+    "already_verified": (
+        "skip_verified",
+        "skip a build of a commit that already passed this pipeline for the same trigger",
+    ),
+    "docs_only": ("ignore_docs_paths", "skip changes that touch only docs"),
+    "draft": ("skip_drafts", "skip draft change requests"),
+    "wip": ("skip_wip", "skip WIP commits"),
+}
+_MAX_PIPELINES = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +139,11 @@ class CiEconomy:
     max_reading_age: timedelta = timedelta(hours=1)
     outage_min_prs: int = 3
     outage_window: timedelta = timedelta(hours=2)
+    # CI jobs that never start (#229): refused, or queued this long, across outage_min_prs.
+    queued_after: timedelta = timedelta(minutes=30)
+    not_started_mode: str = "observe"  # a new check: "observe", or "rule" (the rule's mode)
+    # A toolchain change on a host this long before an outage began is its likely cause.
+    toolchain_window: timedelta = TOOLCHAIN_WINDOW
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -119,11 +157,30 @@ class CiEconomy:
                 waste = replace(waste, params={**waste.params, ANNOUNCES: keys})
             actions.append(waste)
         actions.extend(self._quota(recent, snapshot))
-        actions.extend(outages(snapshot, NAME, self.outage_min_prs, self.outage_window))
+        actions.extend(
+            outages(snapshot, NAME, self.outage_min_prs, self.outage_window, self.toolchain_window)
+        )
+        observe = self.not_started_mode == "observe"
+        actions.extend(
+            not_started(
+                snapshot,
+                NAME,
+                self.outage_min_prs,
+                self.outage_window,
+                self.queued_after,
+                observe,
+                self.toolchain_window,
+            )
+        )
         return actions
 
-    def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
-        """An outage resolves when its job passes again: say where. None for the others."""
+    def resolved(
+        self, state_id: str, snapshot: Snapshot, since: datetime | None = None
+    ) -> str | None:
+        """An outage resolves when its job passes again (CI starts jobs again): say where.
+        None for the others."""
+        if state_id == NOT_STARTED:
+            return ran_again(snapshot, since)
         if not is_outage_state(state_id):
             return None
         return passed_again(state_id, snapshot, self.outage_min_prs, self.outage_window)
@@ -179,17 +236,26 @@ class CiEconomy:
             return None
         total = sum(b.minutes for b in recent)
         count = sum(len(found) for found in wasted.values())
-        parts = [
-            f"{_LABELS[c]} {len(found)} ({_minutes(sum(b.minutes for b in found))})"
-            for c, found in wasted.items()
-            if found
-        ]
         hours = self.window.total_seconds() / 3600
+        saved = {c: self._saved(c, found, index, snapshot.now) for c, found in wasted.items()}
+        advice = [
+            f"{CHANGES[c][1]} ({_LABELS[c]} {len(found)}, "
+            + (
+                f"{_minutes(saved[c])} of {_minutes(sum(b.minutes for b in found))})"
+                if round(saved[c]) != round(sum(b.minutes for b in found))
+                else f"{_minutes(saved[c])})"
+            )
+            for c, found in _most_first(wasted, saved)
+        ]
         reason = (
             f"CI waste in the last {hours:g}h: {count} of {len(recent)} builds burned "
-            f"{_minutes(minutes)} of {_minutes(total)} for nothing — {'; '.join(parts)}. "
-            "Skip CI for drafts, WIP and docs-only changes, and cancel superseded builds "
-            "early (rule 9 does it in act mode)."
+            f"{_minutes(minutes)} of {_minutes(total)} for nothing. A CI configuration would "
+            f"have saved {_minutes(sum(saved.values()))}: {'; '.join(advice)}."
+            + (
+                " Rule 9 cancels superseded builds in act mode."
+                if wasted["superseded"] and self.cancel_superseded
+                else ""
+            )
         )
         params: dict[str, Any] = {
             "wasted_minutes": round(minutes, 1),
@@ -204,6 +270,9 @@ class CiEconomy:
         for c, found in wasted.items():
             if found:
                 params[f"{c}_builds"] = [b.id for b in found[:_MAX_LISTED]]
+        params["pipelines"], params["pipelines_total"] = self._pipelines(
+            wasted, index, snapshot.now
+        )
         params.update(
             alert_params(
                 f"CI waste: {count} of {counted(len(recent), 'build')} burned {_minutes(minutes)} "
@@ -224,6 +293,65 @@ class CiEconomy:
             since=since,
             params=params,
         )
+
+    def _saved(self, category: str, builds: Sequence[Build], index: _Index, now: datetime) -> float:
+        """The minutes ``category``'s configuration change would have saved on ``builds``:
+        all of them, except for a superseded build, where cancelling in progress saves only
+        the part after its newer build started (pro rata over its run)."""
+        if category != "superseded":
+            return float(sum(b.minutes for b in builds))
+        total = 0.0
+        for b in builds:
+            newer = index.by_id.get(b.superseded_by or "")
+            end = b.finished_at or now
+            if newer is None or newer.started_at is None or b.started_at is None:
+                total += b.minutes  # its successor unknown: at most all of it
+            elif end > b.started_at:
+                share = (end - newer.started_at) / (end - b.started_at)
+                total += b.minutes * min(max(share, 0.0), 1.0)
+        return total
+
+    def _pipelines(
+        self, wasted: dict[str, list[Build]], index: _Index, now: datetime
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Per pipeline (CI source, repository and workflow), the configuration changes that
+        would have saved its minutes, each with those minutes and builds; the pipeline with
+        the most to save first, at most ``_MAX_PIPELINES``; and how many pipelines there
+        were."""
+        by_pipeline: dict[tuple[str, str, str], dict[str, list[Build]]] = {}
+        for category, found in wasted.items():
+            for b in found:
+                key = (b.source or "", b.repo or "", b.workflow or "")
+                by_pipeline.setdefault(key, {}).setdefault(category, []).append(b)
+        out: list[dict[str, Any]] = []
+        for (source, repo, workflow), categories in by_pipeline.items():
+            saved = {c: self._saved(c, found, index, now) for c, found in categories.items()}
+            changes: list[dict[str, Any]] = []
+            for category, found in _most_first(categories, saved):
+                change: dict[str, Any] = {
+                    "change": CHANGES[category][0],
+                    "minutes": round(saved[category], 1),
+                    "builds": len(found),
+                }
+                if category == "docs_only":
+                    change["paths"] = list(self.docs_globs)  # fnmatch: * crosses /
+                elif category == "wip":
+                    change["patterns"] = [p.pattern for p in self.wip_patterns]
+                    change["case_insensitive"] = True
+                changes.append(change)
+            out.append(
+                {
+                    "repo": repo or None,
+                    "workflow": workflow or None,
+                    "source": source or None,
+                    "minutes": round(sum(saved.values()), 1),
+                    "changes": changes,
+                }
+            )
+        out.sort(
+            key=lambda p: (-p["minutes"], str(p["repo"]), str(p["workflow"]), str(p["source"]))
+        )
+        return out[:_MAX_PIPELINES], len(out)
 
     # --- 2. cancel superseded builds ----------------------------------------------------
 
@@ -394,6 +522,16 @@ class _Index:
         return any(at <= started and bid != build.id for at, bid in passed)
 
 
+def _most_first(
+    wasted: dict[str, list[Build]], saved: dict[str, float]
+) -> list[tuple[str, list[Build]]]:
+    """The categories with builds, the most minutes saved first (ties by name)."""
+    return sorted(
+        ((c, found) for c, found in wasted.items() if found),
+        key=lambda item: (-saved[item[0]], item[0]),
+    )
+
+
 def _waiting_on_ci(snapshot: Snapshot) -> list[str]:
     """Live tasks blocked or waiting on a CI condition that has not been met."""
     ids: list[str] = []
@@ -446,7 +584,15 @@ def _number(value: Any, name: str, *, top: float | None = None, zero: bool = Fal
 def build(config: dict[str, Any]) -> CiEconomy:
     config = dict(config)
     kwargs: dict[str, Any] = {}
-    for key in ("window", "forecast_horizon", "quota_period", "max_reading_age", "outage_window"):
+    for key in (
+        "window",
+        "forecast_horizon",
+        "quota_period",
+        "max_reading_age",
+        "outage_window",
+        "queued_after",
+        "toolchain_window",
+    ):
         if key in config:
             kwargs[key] = _duration(config.pop(key), key)
     if "docs_globs" in config:
@@ -461,6 +607,11 @@ def build(config: dict[str, Any]) -> CiEconomy:
         kwargs["waste_min_minutes"] = _number(
             config.pop("waste_min_minutes"), "waste_min_minutes", zero=True
         )
+    if "not_started_mode" in config:
+        mode = config.pop("not_started_mode")
+        if mode not in ("observe", "rule"):
+            raise ValueError('not_started_mode must be "observe" or "rule" (the rule\'s own mode)')
+        kwargs["not_started_mode"] = mode
     if "outage_min_prs" in config:
         value = config.pop("outage_min_prs")
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1000:

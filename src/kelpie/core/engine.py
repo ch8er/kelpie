@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import (
@@ -26,7 +29,7 @@ from kelpie.core.alerts import (
 from kelpie.core.alerts import Transition as AlertTransition
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
-from kelpie.core.incidents import FOLDED_UNDER, CiOutage, is_outage_state
+from kelpie.core.incidents import FOLDED_UNDER, Outage, is_outage_state
 from kelpie.core.ledger import (
     ActionLedger,
     Dispatched,
@@ -237,14 +240,14 @@ class Engine:
             if state is None or now - state.last_seen >= self.states.resolve_after:
                 del self._incidents[state_id]
 
-    def _note_incident(self, action: Action, outage: CiOutage, dispatched: Dispatched) -> None:
+    def _note_incident(self, action: Action, outage: Outage, dispatched: Dispatched) -> None:
         """Remember what an incident alert folds, by whether people got it: delivered now, or
         announced live before (its state is committed only once handled live, so a failed
         escalation of an outage people already know of keeps folding; a failed first
         announcement folds nothing). Under dry-run, what live mode would do (the rules'
         configured modes)."""
         if self.config.dry_run:
-            reaches = self.config.mode_for(action.rule) is not Mode.OBSERVE
+            reaches = self._configured(action) is not Mode.OBSERVE
             logged = not reaches
         else:
             known = self._safe_get_state(outage.state)
@@ -278,7 +281,7 @@ class Engine:
             or action.task_id is None
         ):
             return None
-        quiet = self.config.mode_for(action.rule) is Mode.OBSERVE
+        quiet = self._configured(action) is Mode.OBSERVE
         for state_id, incident in sorted(self._incidents.items()):
             if (
                 action.task_id in incident.tasks
@@ -299,7 +302,7 @@ class Engine:
             state_id, now = action.state, snapshot.now
             self._safe_state(lambda: self.states.touch(self.states.store.get_state(state_id), now))
         dispatched = Dispatched(
-            folded, self._mode(action.rule), Outcome.SUPPRESSED, Suppression.INCIDENT
+            folded, self._mode(action), Outcome.SUPPRESSED, Suppression.INCIDENT
         )
         self._record(dispatched, snapshot.now)
         return dispatched
@@ -318,7 +321,7 @@ class Engine:
         self._announcer_severity = {}
 
     def _process(self, action: Action, snapshot: Snapshot) -> Dispatched:
-        mode = Mode.OBSERVE if self.config.dry_run else self.config.mode_for(action.rule)
+        mode = self._mode(action)
         try:
             hit = self.ledger.check(action, mode, snapshot.now)
             self._ledger_down_since = None
@@ -383,13 +386,19 @@ class Engine:
 
     # --- long-lived states --------------------------------------------------------------
 
-    def _mode(self, rule: str) -> Mode:
-        return Mode.OBSERVE if self.config.dry_run else self.config.mode_for(rule)
+    def _configured(self, action: Action) -> Mode:
+        """The action's mode as configured: its rule's, or observe for an action its rule
+        marks ``observe_only`` (a new check that stays in observe until switched on)."""
+        return Mode.OBSERVE if action.observe_only else self.config.mode_for(action.rule)
+
+    def _mode(self, action: Action) -> Mode:
+        """The effective mode: observe under dry-run, else as configured."""
+        return Mode.OBSERVE if self.config.dry_run else self._configured(action)
 
     def _state_alert(self, action: Action, snapshot: Snapshot) -> Dispatched:
         """Deliver an alert about a long-lived state only on a transition."""
         assert action.state is not None
-        now, mode = snapshot.now, self._mode(action.rule)
+        now, mode = snapshot.now, self._mode(action)
         try:
             transition, new, current = self.states.peek(action, now, mode)
         except Exception:
@@ -436,7 +445,7 @@ class Engine:
         for state in gone:
             now_true = self._resolved_text(state, snapshot)
             age = snapshot.now - state.since
-            note = _StateNote(AlertTransition.RESOLVED, age, now_true)
+            note = _StateNote(AlertTransition.RESOLVED, age, now_true, closes=state.id)
             notice = Action(
                 ActionKind.ALERT,
                 state.rule,
@@ -444,6 +453,9 @@ class Engine:
                 task_id=state.task_id,
                 key=f"resolved:{state.id}|{state.opened_at.isoformat()}",
                 params={"state": state.id},
+                # told in the mode it was announced in: no live "resolved" for a state
+                # people were never told about (an observe-only check's)
+                observe_only=state.mode is Mode.OBSERVE,
             )
             dispatched = self._process_noted(notice, snapshot, note)
             results.append(dispatched)
@@ -458,7 +470,15 @@ class Engine:
         hook = getattr(self._by_name.get(state.rule), "resolved", None)
         if callable(hook):
             try:
-                text = hook(state.id, snapshot)
+                # a hook that takes ``last_key`` also learns which alert last announced it,
+                # one that takes ``since`` when the state began
+                wants = inspect.signature(hook).parameters
+                extra: dict[str, Any] = {}
+                if "last_key" in wants:
+                    extra["last_key"] = state.key
+                if "since" in wants:
+                    extra["since"] = state.since
+                text = hook(state.id, snapshot, **extra)
             except Exception:
                 log.exception("rule %s failed to describe resolved state %s", state.rule, state.id)
                 text = None
@@ -682,6 +702,9 @@ class Engine:
                 items=alert_items(action, snapshot, effects_done=effects_done),
                 snoozed=snoozed_items(action, snapshot),
                 snoozed_total=_count(action.params.get("snoozed_total")),
+                at=snapshot.now,
+                # a resolve notice names the state it closes (its Action.state stays None)
+                state=action.state if note is None or note.closes is None else note.closes,
             )
         )
         return True
@@ -694,6 +717,9 @@ class _StateNote:
     transition: AlertTransition
     age: timedelta | None  # how long the condition has been open (escalated, resolved)
     reason: str  # the rule's own reason, without the wording of the transition
+    # a resolve notice: the state it closes, which its event names (never Action.state,
+    # which would keep the state open)
+    closes: str | None = None
 
 
 _TRANSITIONS = {
@@ -737,13 +763,14 @@ class _Incident:
     reaches: bool  # people got its alert; else it was only logged
 
 
-def _incident(action: Action) -> CiOutage | None:
-    """The CI outage an alert reports, if it is one (its params name its own state)."""
+def _incident(action: Action) -> Outage | None:
+    """The outage an alert reports, whichever rule found it (its params name its own
+    state)."""
     if action.kind is not ActionKind.ALERT or action.state is None:
         return None
     if not is_outage_state(action.state):
         return None
-    outage = CiOutage.from_params(action.params)
+    outage = Outage.from_params(action.params)
     return outage if outage is not None and outage.state == action.state else None
 
 
@@ -760,11 +787,11 @@ def alert_items(
     action: Action, snapshot: Snapshot, *, effects_done: bool = False
 ) -> tuple[AlertItem, ...]:
     """The tasks an alert is about: ``params.items`` (mappings with ``task_id`` and optional
-    ``title``, ``needed``, ``since``, ``blocking`` and ``snooze``; other keys are the rule's
-    own and are ignored; malformed entries are skipped), else the action's own task (with
-    ``params.snooze``). A ``snooze`` is a mapping (:func:`_snooze_note`); a malformed one is
-    dropped, the item kept. Titles come from
-    the entry, else the snapshot; ages are counted to ``snapshot.now``. Only the actions of
+    ``title``, ``needed``, ``since``, ``blocking``, ``snooze`` and ``snooze_task``; other
+    keys are the rule's own and are ignored; malformed entries are skipped), else the
+    action's own task (with ``params.snooze`` and ``params.snooze_task``). A ``snooze`` is a
+    mapping (:func:`_snooze_note`); a malformed one is dropped, the item kept. Titles come
+    from the entry, else the snapshot; ages are counted to ``snapshot.now``. Only the actions of
     the current tick are rendered, never ledger rows. With ``effects_done`` (the alert
     announces effects Kelpie carried out: a stop, a close) no item says what is needed: the
     rule's ask is what Kelpie already did; a suggested, failed or not executed effect keeps
@@ -793,6 +820,8 @@ def _items(action: Action, snapshot: Snapshot) -> tuple[AlertItem, ...]:
             _count(action.params.get("blocking")),
             _start(since),
             _snooze_note(action.params.get("snooze")),
+            _task_ref(action.params.get("snooze_task")),
+            task.board if task is not None else None,
         ),
     )
 
@@ -863,7 +892,27 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
         _count(blocking),
         _start(since),
         _snooze_note(entry.get("snooze")),
+        _task_ref(entry.get("snooze_task")),
+        _board(task_id, snapshot),
     )
+
+
+MAX_TASK_REF = 200  # characters of a ``snooze_task``; a longer one is dropped
+_UNPRINTABLE = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})  # never in a task id
+
+
+def _task_ref(value: object) -> str | None:
+    """A task id a rule names (``snooze_task``), or None when it is absent or malformed: too
+    long, or with a control or format character (it may come from a condition an agent
+    registered, and ends up in logs and chat buttons)."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > MAX_TASK_REF:
+        return None
+    if any(unicodedata.category(ch) in _UNPRINTABLE for ch in value):
+        return None
+    return value
 
 
 def _since(value: object) -> tuple[bool, datetime | None]:
@@ -884,6 +933,12 @@ def _count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _board(task_id: str, snapshot: Snapshot) -> str | None:
+    """The board the task is on when an adapter watches several (#283); None otherwise."""
+    task = snapshot.task(task_id)
+    return task.board if task is not None else None
 
 
 def _title(task_id: str, snapshot: Snapshot) -> str | None:

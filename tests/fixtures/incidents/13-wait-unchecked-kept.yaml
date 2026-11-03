@@ -1,0 +1,46 @@
+id: "13-wait-unchecked-kept"
+incident: 13
+title: "A wait rule 13 lists but Kelpie cannot check keeps rule 2's overdue alert"
+description: >
+  The hand-off of 13-wait-left-to-inbox holds only for a wait whose conditions are all
+  known unmet. W-1 waits on the CEO's ready task H-1 with a human_task condition nobody has
+  checked; W-2 and W-3 wait on tasks the CEO snoozed (H-4, H-5), one with an unchecked
+  condition and one the connector reports an error for. The digest cannot say what Kelpie
+  does not know, and a snooze holds nothing for it, so rule 2 alerts on all three, naming
+  the connector problem. W-4 waits on H-1 too with a condition checked unmet: it is in the
+  digest, and rule 2 stays silent.
+rule: wait_condition
+config:
+  max_wait: "24h"
+  needs_you: {approval_wait_after: "30m", human_wait_alert_after: "1h", default_approver: ceo}
+snapshot:
+  now: "2026-10-19T10:00:00+00:00"
+  owners:
+    - {id: ceo, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: H-1, title: "Sign the vendor contract", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    - {id: H-4, title: "Approve the budget", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    - {id: H-5, title: "Pick the price tier", status: ready, status_since: "2026-10-15T09:00:00+00:00", role: owner, owner_id: ceo}
+    - {id: W-1, title: "Integrate the vendor API", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: W-2, title: "Plan the budget", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: W-3, title: "Set the prices", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: W-4, title: "Vendor webhooks", status: waiting, status_since: "2026-10-18T04:00:00+00:00", role: developer, owner_id: agent-dev-1}
+  conditions:
+    # never checked: no result, no check time
+    - {id: C-1, kind: human_task, task_id: W-1, params: {task: H-1}, registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-2, kind: human_task, task_id: W-2, params: {task: H-4}, registered_at: "2026-10-18T04:00:00+00:00"}
+    # the connector could not tell
+    - {id: C-3, kind: human_task, task_id: W-3, params: {task: H-5, error: not_found}, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+    - {id: C-4, kind: human_task, task_id: W-4, params: {task: H-1}, satisfied: false, checked_at: "2026-10-19T09:58:00+00:00", registered_at: "2026-10-18T04:00:00+00:00"}
+  snoozes:
+    H-4: {task_id: H-4, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo,
+          created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 1}
+    H-5: {task_id: H-5, until: "2026-10-26T00:00:00+00:00", reason: "after the release", by: ceo,
+          created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 1}
+expected_actions:
+  - {kind: alert, task_id: W-1, reason_contains: "C-1 was not checked on this pass"}
+  - {kind: alert, task_id: W-2, reason_contains: "C-2 was not checked on this pass"}
+  - {kind: alert, task_id: W-3, reason_contains: "the connector reports not_found for C-3"}
+not_expected_actions:
+  - {kind: alert, task_id: W-4}

@@ -1,5 +1,5 @@
 {
-  "text": "🟡 T-1022 blocked 10h, past the 8h limit: waiting for pr_merged\n\n1. Review: split config loader — 10 h · T-1022\n   Needed: Check why the condition has not cleared, or clear the block\n   Blocking: none · Open task: https://board.example.org/tasks/T-1022\nWhy: Task T-1022 has been blocked for 10h (limit 8h) waiting for block:T-1022:pr_merged:example/repo#124 (pr_merged).\nRule: stale_blocks",
+  "text": "🟡 T-1022 blocked 10h, past the 8h limit: waiting for pr_merged\n\n1. Review: split config loader — 10 h · T-1022\n   Needed: Check why the condition has not cleared, or clear the block\n   Blocking: none · Open task: https://board.example.org/tasks/T-1022\n   kelpie snooze T-1022 --until 2026-03-05\nWhy: Task T-1022 has been blocked for 10h (limit 8h) waiting for block:T-1022:pr_merged:example/repo#124 (pr_merged).\nRule: stale_blocks",
   "mrkdwn": false,
   "blocks": [
     {
@@ -75,6 +75,14 @@
               "type": "link",
               "url": "https://board.example.org/tasks/T-1022",
               "text": "Open task"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "kelpie snooze T-1022 --until 2026-03-05"
             }
           ]
         }

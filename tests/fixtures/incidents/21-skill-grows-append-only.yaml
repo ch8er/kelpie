@@ -1,0 +1,70 @@
+id: "21-skill-grows-append-only"
+incident: 21
+title: "A reviewer's self-written skill grows append-only past the size threshold"
+description: >
+  The reviewer role appended a write-up to its own review skill after every case: in a week
+  it went from about 31,000 to 96,000 characters and 46 sections, nothing ever removed, two
+  sections near-identical. Its built-in documentation skill is larger still but has not
+  changed: it was already that size when first measured, and is opened on demand. Only the
+  growing skill is reported, with its copies and a split recommendation.
+rule: instruction_bloat
+config:
+  max_chars: 40000
+  max_growth_per_week: 10000
+  max_tokens_per_day: 500000
+  min_span: "1d"
+snapshot:
+  now: "2026-03-09T12:00:00+00:00"
+  instruction_files:
+    # As kelpie.instructions measures them: sizes and counts, never the text.
+    - path: "~/.hermes/profiles/reviewer/skills/pr-review/SKILL.md"
+      role: reviewer
+      chars: 96000
+      tokens: 24000
+      sections: 46
+      loaded: on_demand
+      since: "2026-03-02T12:00:00+00:00"
+      chars_since: 31000
+      appends: 38
+      edits: 0
+      tokens_per_day: 480000
+      token_basis: sessions
+      owner: human-owner
+    - path: "~/.hermes/profiles/reviewer/skills/builtin-docs/SKILL.md"
+      role: reviewer
+      chars: 120000
+      tokens: 30000
+      sections: 60
+      loaded: on_demand
+      since: "2026-03-02T12:00:00+00:00"
+      chars_since: 120000
+      tokens_per_day: 600000  # size x sessions: an upper bound, not loads
+      token_basis: sessions
+  instruction_duplicates:
+    - role: reviewer
+      kind: section
+      places:
+        - "~/.hermes/profiles/reviewer/skills/pr-review/SKILL.md:120"
+        - "~/.hermes/profiles/reviewer/skills/pr-review/SKILL.md:1480"
+      similarity: 0.93
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "It only grows: 38 appends and nothing removed"
+    params:
+      path: "~/.hermes/profiles/reviewer/skills/pr-review/SKILL.md"
+      role: reviewer
+      only_grows: true
+      growth_per_week: 65000
+      duplicate_sections: 1
+      token_basis: sessions
+  - kind: alert
+    reason_contains: "short core plus topic references"
+    params: {path: "~/.hermes/profiles/reviewer/skills/pr-review/SKILL.md"}
+not_expected_actions:
+  # large but stable and loaded on demand: no cost to judge, no alert
+  - kind: alert
+    params: {path: "~/.hermes/profiles/reviewer/skills/builtin-docs/SKILL.md"}
+  # the copies are in the alerted file: no second alert for the role
+  - kind: alert
+    reason_contains: "repeat themselves"

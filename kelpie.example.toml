@@ -103,6 +103,25 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # [engine.rules.output_offenders]  # no parameters: thresholds and owners are in
 #                                  # [traces.outputs]; needs [traces] enabled
 #
+# Instruction files per role, for rule instruction_bloat (incident 21). Off unless present;
+# read-only, sizes and hashes only. See docs/configuration.md, "[instructions]".
+# [instructions]
+# defaults = true            # also the platform defaults of the adapters configured here
+# every = "1h"
+# window = "7d"              # growth, appends and edits counted over this
+# [[instructions.files]]
+# role = "developer"         # omit: every role; or {role} in a path
+# paths = ["~/farm/dev/CLAUDE.md", "~/farm/dev/.claude/skills/*/SKILL.md"]
+# loaded = "always"          # or "on_demand" (skills)
+# owner = "human-owner"
+#
+# [engine.rules.instruction_bloat]  # incident 21; the files are in [instructions]
+# max_chars = 40000          # size threshold (about 10,000 tokens)
+# max_growth_per_week = 10000  # characters added a week
+# max_tokens_per_day = 500000  # a file over max_chars read for this much a day (always
+#                            # loaded, or counted loads) is worth splitting even if stable
+# min_span = "1d"            # growth judged over at least this much history
+#
 # [engine.rules.return_causes]
 # window = "24h"            # returns counted
 # min_returns = 5           # ...at least this many for a finding
@@ -240,6 +259,10 @@ enabled = true
 # token_env = "KELPIE_TRACES_TOKEN"  # env var with the bearer token exporters must send.
 #   Default: used when set, else the endpoint is open (a warning is logged). Uncommented,
 #   the variable must be set or Kelpie refuses to start.
+# token_file = "~/.config/kelpie/traces.env"  # an env file (mode 600) holding
+#   KELPIE_TRACES_TOKEN=...: read instead of the environment, again when it changes.
+#   `kelpie traces rotate-token` creates it and rotates the token without a restart.
+# token_grace = "2h"      # how long a rotated-out token stays valid (0s to 7d)
 window = "30m"            # stored spans each control-loop tick sees (rules look back
                           # about 10 minutes)
 totals_window = "24h"     # per-session totals (calls, errors, tokens) in each tick
@@ -378,6 +401,11 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # growth_window = "6h"                # disk and directory growth rates (rule 7's time-to-full)
 # growth_sustain = "1h"               # ...capped at what held in most quarters of this (5m-24h)
 # load_on_macos = false               # macOS load counts waiting threads (300-800 when healthy)
+# toolchain_metric = "kelpie_toolchain_info"  # toolchain versions per host (incident 20), e.g.
+#                                     # from scripts/kelpie-toolchain.sh; absent: no changes
+# toolchain_tool_label = "tool"       # the label naming the tool (xcode, coresimulator, ...)
+# toolchain_version_label = "version" # the label holding its version
+# toolchain_lookback = "48h"          # how far back a version change is found (1h-7d)
 # token_env = "KELPIE_PROMETHEUS_TOKEN"  # bearer token from this env var. Used when set; when
 #                                     # written here the variable must be set or Kelpie refuses to start
 #
@@ -399,9 +427,11 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # path_bytes = "kelpie_path_bytes"   # from scripts/kelpie-path-sizes.sh
 # path_growth = "((deriv(kelpie_path_bytes[{window}]) * 86400 < quantile_over_time(0.25, clamp_min(deriv(kelpie_path_bytes[{slice}]) * 86400, 0)[{sustain}:{slice}])) or quantile_over_time(0.25, clamp_min(deriv(kelpie_path_bytes[{slice}]) * 86400, 0)[{sustain}:{slice}])) and kelpie_path_bytes offset {half_window}"
 # path_written = 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}'
+# toolchain = "max by (instance, {tool_label}, {version_label}) (timestamp({toolchain_metric}))[{lookback}:{step}]"   # a timeline (subquery)
 # ({host_label}, written here as instance, {window} = growth_window, {half_window},
 # {sustain} = growth_sustain and {slice} = a quarter of it are filled in, in custom queries
-# too.)
+# too; so are {toolchain_metric}, {tool_label}, {version_label}, {lookback} =
+# toolchain_lookback and {step} = 5m.)
 
 # LLM provider quotas and key health, for rule 7. Off unless providers are listed. Each
 # provider is probed with one GET of `path` at most once per `interval`. Probes must cost
@@ -458,6 +488,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 #
 # [adapters.hermes]
 # db_path = "~/.hermes/kanban.db"   # named boards: ~/.hermes/kanban/boards/<slug>/kanban.db
+#                                    (several boards of one home: [[adapters.hermes.boards]] below)
 # spool = "~/.hermes/kelpie/spool.jsonl"  # tool-call spans from the Hermes plugin; false = off
 # lookback = "24h"                  # runs, spans and finished tasks older than this are left out
 #                                    (the rules' window; kelpie report reads as far back as its day needs)
@@ -494,6 +525,16 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # [adapters.hermes.roles]
 # reviewer-bot = "reviewer"
 # merger = "reviewer"
+#
+# Several boards of one Hermes home in one Kelpie (instead of db_path and wait_key above):
+# ids become <name>:<id>; spool, profiles and tools stay in [adapters.hermes].
+# [[adapters.hermes.boards]]
+# name = "qr"
+# db_path = "~/.hermes/kanban/boards/qr/kanban.db"
+# wait_key = "/data/hermes-wait-qr.key"   # default: hermes-wait-<name>.key next to the ledger
+# [[adapters.hermes.boards]]
+# name = "sign"
+# db_path = "~/.hermes/kanban/boards/sign/kanban.db"
 #
 # Long tool runs and simulator slots, from the host's processes (ps, lsof): a task is busy
 # while one of names runs in its workspace, so rule 9 holds its commit reminders; slot
@@ -702,7 +743,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # retry_horizon = "15m"     # how long a transient failure is retried before the alert is lost
 # language = "en"           # en | ru: Kelpie's own words in alerts; agents' text is shown as is
 # task_url = "https://board.example.org/tasks/{id}"  # "Open task" link per task; http(s) and
-#                           # {id} required. Unset: [report] task_url, if it is an http(s) URL
+#                           # {id} required, not in the host. Unset: [report] task_url
 #
 # [[alerts.channels]]
 # type = "telegram"
@@ -715,6 +756,11 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # #                                    # cannot parse it)
 # # name = "telegram"                  # only needed with two telegram channels
 # # api_url = "https://api.telegram.org"  # e.g. a local Bot API server (http only on loopback)
+# # Snooze buttons (1d, 3d, 7d) on the items a snooze would quiet; presses are read with
+# # getUpdates long polling (use a bot dedicated to Kelpie, without a webhook). Only these
+# # Telegram user ids, in this chat, may press them. Needs [storage] path.
+# # buttons = true
+# # allowed_user_ids = [123456789]
 #
 # [[alerts.channels]]
 # type = "slack"
@@ -735,6 +781,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # at = "00:15"                     # kelpie serve runs yesterday's report at this local time
 # dir = "/var/lib/kelpie/reports"  # writes kelpie-report-<date>.md; unset: stdout only
 # task_url = "https://board.example.org/tasks/{id}"  # links task ids in the Markdown
+#                                  # (http(s), {id} required, not in the host)
 # url = "https://reports.example.org/kelpie-report-{date}.md"  # the summary's "Open report"
 #                                  # link (http(s), {date} = YYYY-MM-DD); unset: no link
 # hour_usd = 2.5                   # what a stuck task-hour costs; unset: hours stay hours

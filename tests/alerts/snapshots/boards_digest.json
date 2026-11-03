@@ -1,0 +1,216 @@
+{
+  "text": "🟡 Block Kelpie cannot clear: 3 tasks (oldest 26 h)\n\n1. Ship the login screen — 5.0 h · app-a:t_1a\n   Board: app-a · Blocking: 2 tasks · Open task: https://board.example.org/tasks/app-a%3At_1a\n2. Store listing copy — 3.0 h · app-b:t_1a\n   Board: app-b · Blocking: none · Open task: https://board.example.org/tasks/app-b%3At_1a\n3. Rotate the API keys — 26 h · svc:t_77\n   Board: svc · Open task: https://board.example.org/tasks/svc%3At_77\nWhy: 3 tasks blocked with no condition Kelpie can check.\nRule: stale_blocks",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Block Kelpie cannot clear: 3 tasks (oldest 26 h)",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Ship the login screen",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 5.0 h · "
+            },
+            {
+              "type": "text",
+              "text": "app-a:t_1a",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Board: app-a · Blocking: 2 tasks"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/app-a%3At_1a",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "2. "
+            },
+            {
+              "type": "text",
+              "text": "Store listing copy",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 3.0 h · "
+            },
+            {
+              "type": "text",
+              "text": "app-b:t_1a",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Board: app-b · Blocking: none"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/app-b%3At_1a",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "3. "
+            },
+            {
+              "type": "text",
+              "text": "Rotate the API keys",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 26 h · "
+            },
+            {
+              "type": "text",
+              "text": "svc:t_77",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Board: svc"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/svc%3At_77",
+              "text": "Open task"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Why: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "3 tasks blocked with no condition Kelpie can check."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Rule: "
+            },
+            {
+              "type": "text",
+              "text": "stale_blocks",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

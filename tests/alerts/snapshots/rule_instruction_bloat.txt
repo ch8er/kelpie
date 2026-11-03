@@ -1,0 +1,4 @@
+🟡 `pr-review/SKILL.md` (reviewer): 96,000 characters, +65,000 a week
+
+human-owner: `~/.hermes/profiles/reviewer/skills/pr-review/SKILL.md` (reviewer) is 96,000 characters, about 24,000 tokens, in 46 sections: it crossed 40,000 characters; it grows 65,000 characters a week (over 10,000). It only grows: 38 appends and nothing removed since 2026-03-02 (+65,000 characters). Reading it costs about 480,000 tokens a day (estimated as its size times the role's sessions, an upper bound for a file loaded on demand). Copies: near-duplicate sections (93% alike): ~/.hermes/profiles/reviewer/skills/pr-review/SKILL.md:120, ~/.hermes/profiles/reviewer/skills/pr-review/SKILL.md:1480. Split it into a short core plus topic references: keep in the file only what every case needs, move case write-ups and reference material into topic files the core names (loaded when the case comes up), merge the duplicated sections and keep each value in one place.
+Rule: instruction_bloat

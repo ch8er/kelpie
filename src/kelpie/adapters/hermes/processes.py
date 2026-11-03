@@ -99,20 +99,24 @@ class ToolProcesses:
         object.__setattr__(self, "_patterns", tuple(compiled))
 
     def task_of(
-        self, cwd: str, tasks: Collection[str], workspaces: Mapping[str, str | None]
+        self,
+        cwd: str,
+        tasks: Collection[str],
+        workspaces: Mapping[str, str | None],
+        aliases: Mapping[str, str | None] | None = None,
     ) -> str | None:
         """The task whose workspace ``cwd`` is in: Hermes' own path for it (the longest
         that contains it; a shared path, mapped to None, belongs to no task and stops the
-        search), else a ``workspace_patterns`` match naming a task on the board."""
-        for root, task in sorted(workspaces.items(), key=lambda kv: (-len(kv[0]), kv[0])):
-            if cwd == root or cwd.startswith(root.rstrip("/") + "/"):
-                if task is not None:
-                    return task
-                break  # shared: no shorter root claims it; a pattern still may
+        search), else a ``workspace_patterns`` match naming a task on the board.
+        ``aliases``: the task a matched id on its board stands for (several boards: the
+        board-namespaced id, None when more than one board has it)."""
+        if (task := task_at(cwd, workspaces)) is not None:
+            return task
         for p in self._patterns:
             for m in p.finditer(cwd):
-                if m["task"] in tasks:
-                    return m["task"]
+                found = m["task"] if aliases is None else aliases.get(m["task"])
+                if found is not None and found in tasks:
+                    return found
         return None
 
 
@@ -150,6 +154,7 @@ def read_host(
     now: datetime,
     tasks: Collection[str],
     workspaces: Mapping[str, str],
+    aliases: Mapping[str, str | None] | None = None,
 ) -> HostTools | None:
     """Tool runs and slot use on this host; None when the process table cannot be read."""
     budget = _Budget(config.timeout)
@@ -177,7 +182,7 @@ def read_host(
     def owner(pid: int) -> str | None:
         for ancestor in chains[pid]:
             if (cwd := cwds.get(ancestor)) is not None and (
-                task := config.task_of(cwd, tasks, workspaces)
+                task := config.task_of(cwd, tasks, workspaces, aliases)
             ) is not None:
                 return task
         return None
@@ -353,6 +358,15 @@ def _run(argv: list[str], budget: _Budget, ok: tuple[int, ...] = (0,)) -> str | 
         warn_once((argv[0], "output"), "hermes: tool runs not read: %s wrote too much", argv[0])
         return None
     return done.stdout
+
+
+def task_at(cwd: str, workspaces: Mapping[str, str | None]) -> str | None:
+    """The task of the longest of Hermes' workspace paths that holds ``cwd``; None when
+    none does, or that path is shared (mapped to None: no shorter one claims it)."""
+    for root, task in sorted(workspaces.items(), key=lambda kv: (-len(kv[0]), kv[0])):
+        if cwd == root or cwd.startswith(root.rstrip("/") + "/"):
+            return task
+    return None
 
 
 def resolve(path: str | Path) -> str:

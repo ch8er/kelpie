@@ -10,15 +10,17 @@ keep less. It describes the code as it is; the files named below are the referen
 | --- | --- | --- | --- | --- |
 | OTLP spans | ids, timing, model, token counts, tool name, outcome, allowlisted attributes, a hash of tool arguments, output size, a command prefix | message content, prompts, completions, reasoning, tool arguments and results, error messages, user identity | `kelpie.db`, table `spans` | `[traces] retention` (7 days), at most `max_rows` (1,000,000) |
 | Hermes hook records | tool name, ids, hash of arguments, a redacted command, outcome, duration, output size | raw arguments and results | spool file on the Hermes host | until rotated: one backup file at 20 MiB |
-| Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
+| Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls; skill name of `Skill` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
 | Claude Code task lists | task id, subject (200 characters), status, owner, `blockedBy` | descriptions | read in place, not copied | |
 | OpenClaw hook records | session id, session key (the part naming a chat peer or group replaced by a keyed hash), agent id, run id, session end reasons, the session id a session resumed or was replaced by; tool name, call id, hash of arguments, a redacted command, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
 | OpenClaw Workboard cards | card id, board, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, session key (reduced like the hook's) and run id, block reason (500 characters); every comment (2000 characters) and attempt error of the cards read is in memory for the tick, only the latest since a block is kept | claim tokens, attachments, proof, worker logs | read in place, not copied | |
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
+| Instruction file sizes (optional, `[instructions]`) | per file: its path, when measured, size in bytes and characters, SHA-256, section count, whether a change only appended; in memory for one scan only, hashed word shingles per section and hashed `key: value` facts, to find copies | the files' text, headings and values | `kelpie.db`, table `instruction_sizes`: a row when a file is first measured and when its hash changes | the growth window (`[instructions] window`, 7 days) plus each file's last row before it; all rows of a file once it is no longer found |
 | Provider cost reports (optional) | per provider and UTC day: the token cost per model (Anthropic) or the day's total (OpenAI), in USD | workspaces, projects, API keys, users, line items | `kelpie.db`, table `cost_reports` | 90 days |
-| Action ledger, alert states | each action Kelpie proposed or took, with its reason text | | `kelpie.db` | not pruned |
+| Action ledger, alert states | each action Kelpie proposed or took, with its reason text; each snooze button press with the person's Telegram user id and name | | `kelpie.db` | not pruned |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
-| Snoozes | task id, until, the reason (500 characters) and who set it (`--by`, default the OS user name; 100 characters) of `kelpie snooze` | | `kelpie.db`, table `snoozes` | 30 days after it expires |
+| Snoozes | task id, until, the reason (500 characters) and who set it (`--by`, default the OS user name; 100 characters) of `kelpie snooze`; for a Telegram button press, the person's Telegram name (40 characters) | | `kelpie.db`, table `snoozes` | 30 days after it expires |
+| Snooze buttons (optional) | the HMAC key, the Telegram update offset, and per button reference the alert, the task id, the item number, the message id and when it was issued and used; per alert, the id of its latest message; per message with buttons, its text and formatting as Telegram answered Kelpie (the alert as sent, then with each acknowledgement line, which names the person who pressed) and the keyboard sent | user ids | `kelpie.buttons.db` beside `kelpie.db` (mode 0600) | references, latest messages and message copies 7 days after issue or last edit; the key and offset until the file is deleted |
 | Daily reports | the report as Markdown | | `[report] dir` | not pruned |
 | LLM root-cause section (optional) | the report's aggregates, sent to the configured model (tasks and people as pseudonyms) | titles, task ids, block reasons, alert texts, commands, tool output, fix notes, roles, names | the provider (or `base_url`) | the provider's terms |
 | Forwarded traces | nothing; requests pass through memory | | queue in memory | until sent or dropped |
@@ -196,7 +198,8 @@ writes a `stopped` line with only the session and subagent ids, the event and `v
 
 A tool-call line holds: the tool name, the tool use id, `args_hash`, a redacted `command`,
 the outcome, the duration and `output_chars`. For a `TaskUpdate` call it also holds the task
-id, the status and the owner that were set, never the subject or description. Tool inputs and
+id, the status and the owner that were set, never the subject or description; for a `Skill`
+call the skill's name (`skill`), never its arguments. Tool inputs and
 results, error messages, assistant messages, the transcript path and the working directory
 are never written.
 
@@ -274,6 +277,19 @@ tick: tasks, titles, assignees, statuses, block reasons, links, runs and run sum
 of changed files of live task worktrees. None of this is stored as such, but rule actions
 quote parts of it (see the next section).
 
+## Instruction files
+
+With `[instructions]`, Kelpie opens the instruction files it is pointed at (and the
+platform defaults of its adapters) read-only (a file that is itself a symlink is skipped) and at most
+`max_bytes` each, measures them and drops the text. Alerts of rule `instruction_bloat` name
+a file's path, its sizes, and the `path:line` of copied sections and values, never their
+text. Kelpie never writes to these files.
+
+To count how often a skill is loaded, the Hermes adapter reads the `skill_view` calls of the
+last 24 hours from each profile's `state.db` (read-only, as for waits) and keeps the skill's
+name, the profile's role and the time in memory for one tick; the Claude Code adapter takes
+the same from the hook's `Skill` lines. No other argument of the call is read.
+
 ## Actions, alerts and reports
 
 - **Ledger and alert states** (`kelpie.db`, tables `actions` and `states`). Every action a
@@ -289,6 +305,21 @@ quote parts of it (see the next section).
 - **Recorded fixes** (`kelpie fix`) keep the note you type.
 - **Snoozes** (`kelpie snooze`) keep the reason you type and who set it (`--by`, by default
   the OS user name), until 30 days after they expire.
+- **Snooze buttons** (`buttons = true` on a Telegram channel, off by default). A press
+  stores a snooze whose "by" is the person's Telegram name (first and last name, else the
+  username; cleaned, at most 40 characters), and a ledger entry with that name and their
+  Telegram **user id**, the task and until when. The ledger is not pruned, so these user
+  ids stay in `kelpie.db` until you delete the rows. Presses that are refused are counted
+  in metrics by reason only; Kelpie's log names the reason, and the user id of a press it
+  took (snoozed, refused for a longer snooze, or failed to write). The button store (`kelpie.buttons.db`) holds no user ids. It keeps what a button
+  refers to and a copy of each alert message with buttons, as Kelpie sent it and then
+  with the acknowledgement lines it added (these name the person who pressed, as the chat
+  shows them), because each acknowledgement edits Kelpie's own copy rather than the one a
+  press carries. `kelpie serve` deletes references, copies and latest-message records 7
+  days after they were issued, last edited or sent: when it starts, every hour while it
+  runs, and whenever an alert goes out. After you turn the buttons off, nothing reads
+  `kelpie.buttons.db` any more: delete it (with `kelpie serve` stopped). Telegram keeps the
+  messages, the presses and the edits under its own terms.
 
 ## LLM root-cause section
 

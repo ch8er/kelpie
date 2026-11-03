@@ -401,3 +401,15 @@ def test_unhashable_kinds_are_a_protocol_error() -> None:
     body["adapters"] = [{"name": "h", "actions": [["stop"]], "error": "x"}]
     with pytest.raises(ProtocolError):
         decode_report(body)
+
+
+def test_a_report_carries_the_boards_an_adapter_could_not_read() -> None:
+    part = AdapterReport("hermes", frozenset({ActionKind.STOP}), board(), unobserved=("sign",))
+    body = encode_report("0.0.1", NOW, timedelta(seconds=15), [part], "c0ffee00", 1)
+    assert decode_report(body).adapters[0].unobserved == ("sign",)
+    plain = encode_report("0.0.1", NOW, timedelta(seconds=15), [replace(part, unobserved=())])
+    assert "unobserved" not in plain["adapters"][0]  # as a hub of the release before reads it
+    for bad in ("sign", ["Sign:"], ["x"] * 17):
+        body["adapters"][0]["unobserved"] = bad
+        with pytest.raises(ProtocolError, match="unobserved"):
+            decode_report(body)

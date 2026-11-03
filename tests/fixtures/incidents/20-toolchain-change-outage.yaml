@@ -1,0 +1,39 @@
+id: "20-toolchain-change-outage"
+incident: 20
+title: "An outage that starts right after a toolchain update names the update as the likely cause"
+description: >
+  An automatic update replaced the active Xcode on the farm's macOS host at 01:41. From
+  02:00 every iOS build failed, and the agents blocked their tasks one after another on the
+  same words. Rule 4 reports one block storm, and since node_exporter's textfile collector
+  showed the Xcode version change on that host 19 minutes before the storm began, the alert
+  names the change as the likely cause. A CoreSimulator change on the same host the day
+  before, far outside the window, is not named.
+rule: stale_blocks
+config:
+  storm_min_tasks: 3
+  storm_window: "2h"
+  toolchain_window: "6h"
+snapshot:
+  now: "2026-03-02T03:00:00+00:00"
+  owners:
+    - {id: agent-ios-1, role: developer}
+    - {id: agent-ios-2, role: developer}
+    - {id: agent-ios-3, role: developer}
+  tasks:
+    - {id: T-701, title: "iOS task 1", status: blocked, status_since: "2026-03-02T02:00:00+00:00", owner_id: agent-ios-1, block: {reason: "xcodebuild fails: unable to boot the simulator", since: "2026-03-02T02:00:00+00:00"}}
+    - {id: T-702, title: "iOS task 2", status: blocked, status_since: "2026-03-02T02:12:00+00:00", owner_id: agent-ios-2, block: {reason: "xcodebuild fails: Unable to boot the simulator.", since: "2026-03-02T02:12:00+00:00"}}
+    - {id: T-703, title: "iOS task 3", status: blocked, status_since: "2026-03-02T02:25:00+00:00", owner_id: agent-ios-3, block: {reason: "xcodebuild fails: unable to boot the simulator [T-703]", since: "2026-03-02T02:25:00+00:00"}}
+  toolchain_changes:
+    - {host: mac-ios-1, tool: xcode, before: "16.0 (16A242d)", after: "16.1 (16B40)", at: "2026-03-02T01:41:00+00:00"}
+    - {host: mac-ios-1, tool: coresimulator, before: "1009.2", after: "1010.10", at: "2026-03-01T09:00:00+00:00"}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "Likely cause: xcode changed from 16.0 (16A242d) to 16.1 (16B40) on mac-ios-1 at 2026-03-02 01:41 UTC, 19 min before it began."
+    params:
+      kind: block_storm
+      tasks: [T-701, T-702, T-703]
+      toolchain: "xcode changed from 16.0 (16A242d) to 16.1 (16B40) on mac-ios-1 at 2026-03-02 01:41 UTC, 19 min before it began"
+not_expected_actions:
+  - kind: alert
+    reason_contains: "coresimulator"

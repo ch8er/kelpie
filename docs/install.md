@@ -57,8 +57,12 @@ restart `kelpie serve` after a change. Unknown sections or keys stop Kelpie with
 | `kelpie doctor [--prometheus URL]` | Checks a first live run (see below). |
 | `kelpie why <task> [--json] [--entries N] [--refresh]` | Why one task is not moving: status and age, owner, labels, sessions, conditions, what it waits for up to the first dead end, the rule findings, open alert states and latest ledger entries. Read-only and offline: `--refresh` also reads network connectors (GitHub). Offline, a block reason that matches `[[block_conditions]]` shows the condition it would attach, marked "not checked"; `--refresh` resolves the PR and shows repo, PR, head commit, last check and result. A `parent-unverified` finding carries a `note` when `[connectors.github.pulls]` is set and serve may judge the parent differently: serve knows the PR lists in full only after two scans in a row, while `why` reads them once or, offline, not at all. Exit 1: not on the board; 3: an adapter could not read its board. `--json` always prints one object (`schema_version`, or `error`). |
 | `kelpie report [--date YYYY-MM-DD] [--send]` | The daily report (see [How Kelpie works, "Daily report"](guide.md#daily-report)). |
-| `kelpie fix "note" [--rule R] [--command PREFIX] [--role ROLE] [--at TIME]` | Records a fix so the daily report measures its effect; `kelpie fix --list [--days N]` lists them. |
+| `kelpie fix "note" [--rule R] [--command PREFIX] [--role ROLE] [--at TIME]` | Records a fix so the daily report measures its effect; `kelpie fix --list [--days N]` lists them. `--at` (default `now`) takes `now`; `-` then a duration, that long ago (`-30m`, `-2h`, `-1d2h`: whole numbers with `d`, `h`, `m`, `s` in that order; `--at -2h` and `--at=-2h` both work); or an ISO date and time (`2026-10-19T09:00`) or date (`2026-10-19`: its midnight), in `[report] timezone` unless an offset such as `+02:00` or `Z` follows (a wall time that a DST change skips or repeats is taken as the first). It may not lie in the future. Prints the time it recorded in UTC and in `[report] timezone`; errors go to stderr. Exit 2: a bad or out-of-range `--at`, an unknown rule, no database yet or `:memory:`; 1: the database cannot be written. |
 | `kelpie snooze <task> --until <date\|datetime\|duration> [--reason TEXT] [--by NAME]` | Records that the task waits on purpose until then (a decision deferred to a release): a date (`2026-10-25`: through that day, until the next one starts), a date and time (`2026-10-25T09:00`), both in `[report] timezone` unless an offset such as `+02:00` or `Z` follows, or a duration from now (`3d`, `1d12h`). It must lie in the future and at most `[snooze] max_days` (90) ahead. One snooze per task: a new one replaces the old. `--by` defaults to the OS user. The task need not be on the board; when the local boards can be read cheaply (no hub, no issue tracker: GitHub issues, Linear), an unknown task is warned about and snoozed anyway, and so is a task only parked behind a person's human task (that snooze holds nothing: snooze the human task). The work behind the task, against which growth re-alerts, is counted by `kelpie serve` on its first tick with the snooze. Prints the stored snooze in `[report] timezone` and UTC. Exit 2: a config error, a bad or out-of-range `--until`, no database yet (`kelpie serve` creates it) or `[storage] path = ":memory:"`; 1: the database cannot be written. See [[snooze]](configuration.md#snooze). |
+| `kelpie traces rotate-token [--grace D]` | Writes a new OTLP ingest token to `[traces] token_file` (mode 600; run it as the user `kelpie serve` runs as, who owns the file's folder) and keeps the old one valid for `--grace` (default `[traces] token_grace`, 2h) so running sessions keep reporting; `--grace 0s` accepts no previous token at all. `kelpie serve` picks it up within a second. Prints what it did and how many previous tokens are still accepted, never a token. Exit 2: no `token_file` configured, a bad `--grace`, a token file it cannot read, a symlink, another user's file or folder, or a folder others may write to; 1: the file cannot be written. |
+| `kelpie agent` | On a machine with agents, when the central `kelpie serve` runs elsewhere: reads this machine's boards for it and carries out the actions it routes here (`[agent]`; see [deploy.md](deploy.md)). |
+| `kelpie selftest stop --adapter hermes` | Runs rule 10's stop end to end on a throwaway Hermes home and board with a local mock model, and reports each step; the gate before `loop_breaker` acts ([act-checklist.md](act-checklist.md)). |
+| `kelpie spool scrub` | Re-redacts the commands in existing hook spools written by an older hook ([privacy.md](privacy.md)). |
 | `kelpie unsnooze <task>` | Removes the task's snooze. Exit 1: it had none, or the database cannot be written; 2: a config error, no database yet or `:memory:`. |
 | `kelpie snoozes [--json] [--all]` | The active snoozes, soonest first; `--all` also lists the expired ones not pruned yet (30 days). Read-only: on a database older than snoozes it prints "no snoozes (the database predates snoozes; kelpie serve upgrades it)" and exits 0. `until:` markers in block reasons are not listed: `kelpie why <task>` shows them. `--json` prints one object (`schema_version`, `snoozes`, and `note` when there is one). Exit 1: the database cannot be read; 2: a config error or `:memory:`. |
 
@@ -167,6 +171,14 @@ devices, Xcode DerivedData, caches, `~/.hermes`, Docker). `deploy/textfile/` has
 agent (`com.kelpie.path-sizes.plist`, macOS) and a systemd service and timer (Linux): edit the
 paths in them first. Pick a few directories, not the whole disk: `du` walks every file.
 
+**What changed.** An outage that starts soon after a toolchain update names the update as
+its likely cause (incident 20: an automatic Xcode update broke every iOS build). Copy
+`scripts/kelpie-toolchain.sh` to `/usr/local/share/kelpie/` and run it every few minutes with
+node_exporter's textfile directory: on macOS it writes the active Xcode and CoreSimulator
+versions; elsewhere, or for other tools, pass `TOOL=COMMAND` arguments (`'node=node
+--version'`). `deploy/textfile/com.kelpie.toolchain.plist` is a launchd agent for it.
+Optional: without it Kelpie names no change.
+
 ## Hermes plugin
 
 On a Hermes farm Kelpie needs the `[adapters.hermes]` section and the Kelpie hooks plugin on
@@ -183,12 +195,71 @@ Adapter details (status mapping, blocks, git state, `stop`): the
 [Hermes adapter README](../src/kelpie/adapters/hermes/README.md). What the plugin records:
 [privacy.md](privacy.md#hermes-hooks-plugin).
 
+### Two Hermes boards on one host
+
+One `kelpie serve` watches every board of a Hermes home: list them under
+`[[adapters.hermes.boards]]` ([configuration.md](configuration.md#adaptershermesboards)).
+Run one Kelpie per Hermes home, not one per board: two instances read the same spool and
+host, ingest the same spans twice and alert twice per disk. Run ids restart on every board,
+and an instance watching one board cannot tell the other board's spool lines from its own,
+so another board's run 42 counts as activity of its run 42 (a stuck run looks alive, and
+rule 10 can count another run's calls). Only one Kelpie may act on a board.
+
+```toml
+[adapters.hermes]
+spool = "~/.hermes/kelpie/spool.jsonl"
+
+[[adapters.hermes.boards]]
+name = "qr"
+db_path = "~/.hermes/kanban/boards/qr/kanban.db"
+
+[[adapters.hermes.boards]]
+name = "sign"
+db_path = "~/.hermes/kanban/boards/sign/kanban.db"
+```
+
+**Migrating from two instances (one per board).** The two `kelpie.db` files are **not
+merged: the merged Kelpie starts with a fresh database.** Task and session ids gain the board
+prefix (`t_1a` becomes `qr:t_1a`), so the old ledger, alert states and snoozes would match no
+task, and resolving the old alert states would send a "resolved" for each of them. What a
+fresh database loses: stored OTLP spans, so spend and budget windows start at zero (a
+rolling window under-counts until one full window has passed, task budgets lose their
+history) and so do output-offender counts; cooldowns and alert states, so every current
+problem alerts once more on the first ticks, and the old instances' open alerts never get a
+"resolved"; snoozes and recorded fixes. Steps:
+
+1. Stop both instances (their LaunchAgents or services). If either is in `act` mode, wake or
+   finish the tasks it parked first, or carry its key over (step 2).
+2. Keep both old configs. Write one new config: the sections both had (`[adapters.hermes]`
+   without `db_path`, one `[[adapters.hermes.boards]]` per board, `[resources.prometheus]`,
+   `[traces]` and alert channels once) and a new `[storage] path`. To keep Kelpie's parks
+   and stops recognised, set each board's `wait_key` to its old instance's key: its
+   `[adapters.hermes] wait_key`, by default `hermes-wait.key` next to its old `kelpie.db`
+   (`~/.kelpie/` with an in-memory ledger). If both instances used the same file, copy it to
+   two files (mode 600), one per board: two boards may not share a key.
+3. In every profile's `hermes_otel.yaml` keep one Kelpie OTLP backend (the merged
+   instance's port and token) and remove the other.
+4. List the snoozes still active on each old instance
+   (`kelpie --config <old kelpie.toml> snoozes`), then run `kelpie doctor` and
+   `kelpie serve` with the new config, and re-apply the snoozes you still want
+   (`kelpie snooze`, with the prefixed ids). Consider the first hours in dry-run or
+   observe: every open problem alerts again.
+5. Keep the old databases and configs, unchanged, for the days before the switch:
+   `kelpie --config <old kelpie.toml> report --date <day>` reads that instance's own
+   database, board and report dir (with the new config it would read the old ledger against
+   today's prefixed ids, and write over the new instance's report file for that day). The
+   switch day is split across the three databases; the merged report is complete from the
+   first full day after it.
+
 ## kelpie doctor
 
 `kelpie doctor` checks a first live run and prints one line per check, `PASS`, `WARN`,
 `FAIL` or `SKIP`, with a `fix:` line under each failure or warning. It exits 1 if any check
 failed; a warning does not fail it. It opens the
-board and the database read-only and writes nothing.
+board and the database read-only and writes nothing. On a new machine it fails `disk watched`
+until [host resources](#host-resources-node_exporter-prometheus-and-directory-sizes) are set
+up. The paths its `fix:` lines name (`docs/...`, `src/...`) are relative to the repository;
+with a `pip` install, read them on GitHub.
 
 | Check | Passes when |
 | --- | --- |
@@ -207,7 +278,7 @@ board and the database read-only and writes nothing.
 | claude code stop markers | `stop_dir` is a writable directory, or can be created. |
 | github ci `<repo>` | One line per repository of `[connectors.github]` (at most 20): which source CI is read from (statuses and check-runs, or the commit's Actions runs where those answer 403), and the permission a 403 means. Probes with the head of the newest pull request (else the newest workflow run; skipped if there is none). `WARN` when commit statuses are refused (Actions cannot see Jenkins, Buildkite or CircleCI). Fails when the Actions runs are refused (`Actions: read`), a rejected token, an organization policy (SAML, IP allow list) or an unknown repository. With `ci_workflows`, a further line `github ci_workflows <repo>` fails for an entry that matches no workflow (or only a disabled one) and warns for a name shared by several files. Only with that section. |
 | github pull requests `<repo>` | Fails with `Pull requests: read` when the pull requests answer 403: conditions read the PR first. Shown only then. |
-| Prometheus reachable | Prometheus answers on `/-/ready` (`--prometheus URL` or `$KELPIE_PROMETHEUS_URL`, else `localhost:9090` is tried and skipped if absent). |
+| Prometheus reachable | Prometheus answers on `/-/ready` (`--prometheus URL` or `$KELPIE_PROMETHEUS_URL`, else `localhost:9090` is tried and skipped if absent). A URL with credentials, a query or a fragment is refused without being printed; a redirect is not followed and fails the check. |
 
 "hooks fire", "claude code hooks fire" and "OTLP spans arrive" are skipped while no task is
 running (in progress, on Claude Code); run doctor while one is. Run it in the directory and with the `KELPIE_DB` that `kelpie serve` uses, because it
@@ -241,6 +312,9 @@ Trace ingest is on by default (`[traces] enabled = true`).
   before the body is read.
 - When `token_env` is written in the config, the variable must be set, or Kelpie refuses to
   start.
+- With `[traces] token_file`, the token comes from that file instead, and
+  `kelpie traces rotate-token` replaces it without a restart while the old one stays valid
+  for `token_grace` ([configuration](configuration.md#traces), [security](security.md#traces-token)).
 - Without a token, the endpoint accepts spans from anyone who can reach it, and Kelpie logs a
   warning.
 
@@ -282,6 +356,7 @@ rather than copying the file.
 
 ## Next steps
 
-1. Point Kelpie at your platform (`[adapters.hermes]`) and check it with `kelpie doctor`.
+1. Point Kelpie at your platform (`[adapters.hermes]`, several boards:
+   `[[adapters.hermes.boards]]`) and check it with `kelpie doctor`.
 2. Add connectors and alert channels as needed: [configuration.md](configuration.md).
 3. Let it run in observe mode for a day, then follow the [act checklist](act-checklist.md).

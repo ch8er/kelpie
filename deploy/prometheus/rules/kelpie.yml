@@ -26,3 +26,17 @@ groups:
             Kelpie could not deliver an alert to {{ $labels.channel }} after retrying
             (cause: {{ $labels.cause }}). A human may have missed it: check the channel's
             token or webhook and the chat service, and kelpie's log ("delivery failed").
+      - alert: KelpieConnectorFailing
+        # A connector step that fails keeps the conditions it last found unmet or unknown,
+        # with their check times; past a rule's max_condition_age (15m by default) no rule
+        # acts on them. 900 is that default: lower it if you configured a shorter age.
+        expr: max by (connector) (kelpie_connector_failing_seconds) > 900
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kelpie connector {{ $labels.connector }} has failed for over 15 minutes"
+          description: >-
+            The {{ $labels.connector }} connector step has not read fine for
+            {{ $value | humanizeDuration }}. The conditions it checked are now stale: no
+            rule acts on them, waits on them alert as unchecked and blocks as stale evidence. See
+            kelpie's log ("connector {{ $labels.connector }} failed").

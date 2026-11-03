@@ -1,0 +1,47 @@
+{
+  "behind": [
+    "T-2"
+  ],
+  "chains": [],
+  "conditions": [],
+  "dry_run": true,
+  "expected_conditions": [],
+  "findings": [],
+  "ledger": [],
+  "missing_condition": null,
+  "problems": [],
+  "refreshed": false,
+  "schema_version": 1,
+  "sessions": [
+    {
+      "ended_at": "2026-03-02T08:00:00+00:00",
+      "final_status": null,
+      "id": "S-1",
+      "live": false,
+      "owner_id": "dev",
+      "started_at": "2026-03-02T07:00:00+00:00"
+    }
+  ],
+  "sessions_total": 1,
+  "snooze": null,
+  "states": [],
+  "task": {
+    "age_seconds": 7200,
+    "assignee": null,
+    "block": {
+      "condition_id": null,
+      "reason": "waiting_ci",
+      "since": "2026-03-02T08:00:00+00:00"
+    },
+    "held_by": [],
+    "id": "T-1",
+    "labels": [],
+    "owner_id": "dev",
+    "platform_status": null,
+    "prework": false,
+    "role": "coder",
+    "status": "blocked",
+    "status_since": "2026-03-02T08:00:00+00:00",
+    "title": "Ship it"
+  }
+}

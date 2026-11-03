@@ -97,7 +97,9 @@ def test_bad_config(tmp_path: Path, text: str) -> None:
         load_settings(write(tmp_path, text))
 
 
-def test_explicit_token_env_must_be_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_token_env_must_be_set(
+    tmp_path: Path, tmp_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("FARM_TOKEN", raising=False)
     settings = load_settings(write(tmp_path, '[traces]\ntoken_env = "FARM_TOKEN"\n'))
     with pytest.raises(ConfigError, match="FARM_TOKEN is not set"):

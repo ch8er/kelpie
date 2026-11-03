@@ -354,8 +354,43 @@ def test_custom_service_name_is_an_unknown_platform() -> None:
 
 def test_range_filter_is_for_file_reads_only() -> None:
     reads = [_call("tool:read_file", 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
-    search = [_call("tool:web_search", 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
-    assert [r.filter.name for r in recommend(rank(reads + search))] == ["range"]
+    search = [_call("tool:web_search", 10_000, T0 + timedelta(minutes=i)) for i in range(3)]
+    assert [r.filter.name for r in recommend(rank(reads + search))] == ["range", "ask-less"]
+
+
+def test_every_tool_gets_advice_for_its_kind() -> None:
+    def advice(key: str) -> str:
+        found = [_call(key, 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
+        (rec,) = recommend(rank(found))
+        return rec.filter.name
+
+    def nothing(key: str) -> bool:
+        found = [_call(key, 20_000, T0 + timedelta(minutes=i)) for i in range(3)]
+        return recommend(rank(found)) == []
+
+    assert advice("tool:vision_analyze") == "downscale-images"
+    assert advice("tool:browser_screenshot") == "downscale-images"
+    assert advice("tool:TakeScreenshot") == "downscale-images"
+    assert advice("tool:ViewImage") == "downscale-images"  # not a file range
+    assert advice("tool:kanban_show") == "compact-view"
+    assert advice("tool:read_file") == "range"
+    assert advice("tool:mcp_fs_read_file") == "range"
+    assert advice("tool:web_search") == "ask-less"
+    assert advice("xcodebuild") == "xcbeautify"  # shell commands as before
+    # Word boundaries: "revision" is no vision, "thread" no read, image lists no image.
+    assert advice("tool:get_revision") == "ask-less"
+    assert advice("tool:revision_show") == "compact-view"
+    assert advice("tool:get_thread") == "ask-less"
+    assert advice("tool:list_images") == "ask-less"
+    titles = {f.name: f.advice for f in DEFAULT_FILTERS}
+    assert titles["downscale-images"] == "Downscale images" and titles["xcbeautify"] is None
+    # A shell tool's calls without a command group every command: no advice fits them.
+    shells = ("tool:terminal", "tool:Bash", "tool:run_terminal_cmd", "tool:run_shell_command",
+              "tool:run_in_terminal", "tool:run_command", "tool:execute_command",
+              "tool:local_shell", "tool:exec_command")  # fmt: skip
+    assert all(nothing(s) for s in shells)
+    assert advice("tool:fs-read-file") == "range" and advice("tool:mcp__x__ReadResource") == "range"
+    assert advice("tool:image") == "downscale-images"  # OpenClaw's image analysis
 
 
 def test_filter_introduction_needs_earlier_unfiltered_calls() -> None:
@@ -364,7 +399,17 @@ def test_filter_introduction_needs_earlier_unfiltered_calls() -> None:
 
 
 def test_default_filter_table_order() -> None:
-    assert [f.name for f in DEFAULT_FILTERS] == ["rtk", "xcbeautify", "errors-only", "range"]
+    assert [f.name for f in DEFAULT_FILTERS] == [
+        "rtk",
+        "xcbeautify",
+        "errors-only",
+        "downscale-images",
+        "range",
+        "compact-view",
+        "ask-less",
+    ]
+    assert not any(f.matches("tool:kanban_show") for f in DEFAULT_FILTERS[:3])  # shell only
+    assert not DEFAULT_FILTERS[-1].matches("make test")
     assert not DEFAULT_FILTERS[0].matches("xcodebuild")
     assert DEFAULT_FILTERS[0].matches("python3 -m pytest")
 
@@ -459,3 +504,15 @@ def test_hot_days_are_local_dates() -> None:
     found = [_call("npm test", 9000, late + timedelta(hours=i)) for i in range(2)]
     assert len(rank(found)[0].hot_days) == 2
     assert len(rank(found, tz=ZoneInfo("America/New_York"))[0].hot_days) == 1
+
+
+def test_a_configured_filter_may_carry_advice() -> None:
+    from kelpie.traces.config import load_outputs
+
+    row = {"name": "cut", "how": "ask for less", "commands": ["tool:*"], "reduction": 0.3}
+    (plain,) = load_outputs({"filters": [row]}).filters
+    assert plain.advice is None
+    (titled,) = load_outputs({"filters": [{**row, "advice": " Ask for less "}]}).filters
+    assert titled.advice == "Ask for less"
+    with pytest.raises(ValueError, match="advice"):
+        load_outputs({"filters": [{**row, "advice": ""}]})

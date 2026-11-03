@@ -1,5 +1,5 @@
 {
-  "text": "🟡 Waiting for you: 2 tasks (oldest 46 h)\n\n1. Approve the store listing — 46 h · t_e5f6a7b8\n   Blocking: 2 tasks · Open task: https://board.example.org/tasks/t_e5f6a7b8\n2. Nightly backup to R2 — 44 h · t_a1b2c3d4\n   Needed: CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2 through the Cloudflare dashboard.»\n   Blocking: none · Open task: https://board.example.org/tasks/t_a1b2c3d4\nWhy: Needs you (ceo): 2 item(s) hold 3 agent task(s), 90.0 agent-hours waited so far. By cost of delay: t_e5f6a7b8 ('Approve the store listing') holds 2 agent task(s) (t_e5f6a7b9, t_e5f6a7ba): 46.0 agent-hours; t_a1b2c3d4 ('Nightly backup to R2') waits for your input: 44.0 agent-hours.\nRule: needs_you",
+  "text": "🟡 Waiting for you: 2 tasks (oldest 46 h)\n\n1. Approve the store listing — 46 h · t_e5f6a7b8\n   Blocking: 2 tasks · Open task: https://board.example.org/tasks/t_e5f6a7b8\n   kelpie snooze t_e5f6a7b8 --until 2026-03-07\n2. Nightly backup to R2 — 44 h · t_a1b2c3d4\n   Needed: CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2 through the Cloudflare dashboard.»\n   Blocking: none · Open task: https://board.example.org/tasks/t_a1b2c3d4\n   kelpie snooze t_a1b2c3d4 --until 2026-03-07\nWhy: Needs you (ceo): 2 item(s) hold 3 agent task(s), 90.0 agent-hours waited so far. By cost of delay: t_e5f6a7b8 ('Approve the store listing') holds 2 agent task(s) (t_e5f6a7b9, t_e5f6a7ba): 46.0 agent-hours; t_a1b2c3d4 ('Nightly backup to R2') waits for your input: 44.0 agent-hours.\nRule: needs_you",
   "mrkdwn": false,
   "blocks": [
     {
@@ -67,6 +67,14 @@
               "type": "link",
               "url": "https://board.example.org/tasks/t_e5f6a7b8",
               "text": "Open task"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "kelpie snooze t_e5f6a7b8 --until 2026-03-07"
             }
           ]
         }
@@ -124,6 +132,14 @@
               "type": "link",
               "url": "https://board.example.org/tasks/t_a1b2c3d4",
               "text": "Open task"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "kelpie snooze t_a1b2c3d4 --until 2026-03-07"
             }
           ]
         }

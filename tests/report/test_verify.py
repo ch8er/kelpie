@@ -17,7 +17,7 @@ from kelpie.core.ledger import LedgerEntry, Outcome
 from kelpie.core.model import Owner, Return, Session, Span, SpanKind, Status, Task
 from kelpie.core.states import OpenState
 from kelpie.core.storage import SqliteLedgerStore
-from kelpie.report.cli import note_fix
+from kelpie.report.cli import list_fixes, note_fix
 from kelpie.report.config import load_report
 from kelpie.report.daily import ReportInputs, build_report, render_markdown
 from kelpie.report.fixes import CONFIG, MANUAL, FixEvent, FixStore, read_fixes, record_config_change
@@ -89,7 +89,9 @@ def test_small_samples_are_labelled() -> None:
     report = build_report(inputs(min_sample=20))
     assert metric(report, "review time").small
     assert report.verifications[0].small_sample
-    assert "small sample: a direction, not a result" in render_markdown(report)
+    markdown = render_markdown(report)
+    assert "fewer than 20 observations on a side" in markdown
+    assert "| review time (direction only) | 48.0 min | 27.0 min |" in markdown
 
 
 def test_short_after_window_is_a_small_sample() -> None:
@@ -97,7 +99,8 @@ def test_short_after_window_is_a_small_sample() -> None:
     spans = [
         Span("tr", f"s{i}", "chat", SpanKind.LLM, at, at, session_id="D-1", model="m",
              input_tokens=100)
-        for i, at in enumerate((late - timedelta(hours=1), late + timedelta(hours=1)))
+        for i, at in enumerate((late - timedelta(hours=23), late - timedelta(hours=1),
+                                late + timedelta(hours=1)))
     ]  # fmt: skip
     report = build_report(inputs(fixes=(FixEvent(late, MANUAL, "late fix"),), spans=spans))
     [v] = report.verifications
@@ -133,9 +136,9 @@ def test_mode_changes_come_from_the_ledger() -> None:
     )
 
 
-def _state(rule: str, since: datetime, last: datetime) -> StateRow:
+def _state(rule: str, since: datetime, last: datetime, task: str = "T-1") -> StateRow:
     return StateRow(
-        OpenState(f"{rule}:x{since:%H}", rule, since, since, last, 0, Severity.WARNING, "s", "T-1")
+        OpenState(f"{rule}:x{since:%H}", rule, since, since, last, 0, Severity.WARNING, "s", task)
     )
 
 
@@ -143,7 +146,7 @@ def test_stuck_hours_of_the_fixed_rule() -> None:
     states = (
         _state("stale_blocks", FIX - timedelta(hours=12), FIX),  # 12h before
         _state("stale_blocks", FIX + timedelta(hours=2), FIX + timedelta(hours=3)),  # 1h after
-        _state("orphan_status", FIX + timedelta(hours=1), FIX + timedelta(hours=9)),
+        _state("orphan_status", FIX + timedelta(hours=1), FIX + timedelta(hours=9), "T-2"),
     )
     event = FixEvent(FIX, MANUAL, "conditions for CI blocks", rule="stale_blocks")
     report = build_report(inputs(fixes=(event,), states=states))
@@ -162,6 +165,7 @@ def test_tokens_returns_and_command_output() -> None:
         )  # fmt: skip
 
     spans = [
+        chat(0, FIX - timedelta(hours=23), 0),  # traces cover the before-window
         chat(1, FIX - timedelta(hours=3), 10_000),
         chat(2, FIX + timedelta(hours=3), 4_000),
     ]
@@ -273,9 +277,9 @@ def test_kelpie_fix_command(
     assert main([*args, "--at", "2026-03-01T08:00:00+00:00", "--command", "make test"]) == 0
     assert "fix noted at 2026-03-01T08:00+00:00" in capsys.readouterr().out
     settings = load_settings(path)
-    assert note_fix(settings, "x", rule="no_such_rule")[1] == 2
-    assert note_fix(settings, "x", when="yesterday")[1] == 2
-    assert note_fix(settings, " ")[1] == 2
+    assert note_fix(settings, "x", rule="no_such_rule")[2] == 2
+    assert note_fix(settings, "x", when="yesterday")[2] == 2
+    assert note_fix(settings, " ")[2] == 2
     with ReportStore(tmp_path / "kelpie.db") as store:
         [fix] = store.fixes(FIX - timedelta(hours=1), FIX + timedelta(hours=1))
     assert (fix.rule, fix.command, fix.note) == (
@@ -285,7 +289,7 @@ def test_kelpie_fix_command(
     )
     memory = tmp_path / "memory.toml"
     memory.write_text('[storage]\npath = ":memory:"\n')
-    assert note_fix(load_settings(memory), "x")[1] == 2
+    assert note_fix(load_settings(memory), "x")[2] == 2
 
 
 def test_verify_config() -> None:
@@ -397,12 +401,12 @@ def test_kelpie_fix_times_and_order(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n[report]\ntimezone = "Asia/Tokyo"\n'
     )
     settings = load_settings(path)
-    text, code = note_fix(settings, "too early")
+    _, text, code = note_fix(settings, "too early")
     assert code == 2 and "run kelpie serve first" in text
     SqliteLedgerStore(tmp_path / "kelpie.db").close()
     now = lambda: datetime(2026, 3, 1, 12, tzinfo=UTC)  # noqa: E731
-    assert note_fix(settings, "naive", when="2026-03-01T09:00", clock=now)[1] == 0
-    text, code = note_fix(settings, "later", when="2026-03-02T09:00+00:00", clock=now)
+    assert note_fix(settings, "naive", when="2026-03-01T09:00", clock=now)[2] == 0
+    _, text, code = note_fix(settings, "later", when="2026-03-02T09:00+00:00", clock=now)
     assert code == 2 and "future" in text
     with ReportStore(tmp_path / "kelpie.db") as store:
         [fix] = store.fixes(FIX - timedelta(days=1), FIX + timedelta(days=1))
@@ -438,18 +442,18 @@ def test_kelpie_fix_list(
         f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n[report]\ntimezone = "Europe/Berlin"\n'
     )
     settings = load_settings(path)
-    assert list_fixes(settings) == ("no fixes recorded (no database yet)\n", 0)
+    assert list_fixes(settings) == ("no fixes recorded (no database yet)\n", "", 0)
     SqliteLedgerStore(tmp_path / "kelpie.db").close()
     now = lambda: datetime(2026, 3, 2, 12, tzinfo=UTC)  # noqa: E731
     assert list_fixes(settings, clock=now)[0].startswith("no fixes recorded in the last 7")
     for when, note in (("2026-03-01T09:00", "lifted the merge hold"), ("2026-02-01T09:00", "old")):
-        assert note_fix(settings, note, rule="bottlenecks", when=when, clock=now)[1] == 0
-    text, code = list_fixes(settings, clock=now)
+        assert note_fix(settings, note, rule="bottlenecks", when=when, clock=now)[2] == 0
+    text, _, code = list_fixes(settings, clock=now)
     assert code == 0 and text.splitlines() == [
         "2026-03-01 09:00 CET  manual  lifted the merge hold  [rule=bottlenecks]"
     ]
-    assert list_fixes(settings, days=0)[1] == 2
-    assert list_fixes(settings, days=10**9)[1] == 2
+    assert list_fixes(settings, days=0)[2] == 2
+    assert list_fixes(settings, days=10**9)[2] == 2
     args = ["--config", str(path), "fix"]
     for bad, why in (
         ([], "note is required"),
@@ -462,3 +466,115 @@ def test_kelpie_fix_list(
         assert exc.value.code == 2 and why in capsys.readouterr().err
     assert main([*args, "--list", "--days", "3650"]) == 0
     assert "old" in capsys.readouterr().out
+
+
+def test_kelpie_fix_at_now_and_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n[report]\ntimezone = "Asia/Tokyo"\n'
+    )
+    SqliteLedgerStore(tmp_path / "kelpie.db").close()
+    args = ["--config", str(path), "fix"]
+    assert main([*args, "one", "--at", "now"]) == 0
+    assert main([*args, "two", "--at", "-2h"]) == 0  # not taken for an option
+    assert main([*args, "three", "--at=-1d2h", "--rule", "bottlenecks"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert all(line.startswith("fix noted at ") and "+00:00 (" in line for line in out), out
+    stamps = [datetime.fromisoformat(line.split()[3].rstrip(":")) for line in out]
+    assert stamps[0] - stamps[1] == pytest.approx(timedelta(hours=2), abs=timedelta(minutes=1))
+    assert stamps[0] - stamps[2] == pytest.approx(timedelta(hours=26), abs=timedelta(minutes=1))
+    settings = load_settings(path)
+    _, text, code = note_fix(settings, "x", when="2h")
+    assert code == 2 and "--at: invalid time '2h'" in text
+    assert note_fix(settings, "x", when="")[2] == 2  # --at= is not "now"
+    _, text, code = note_fix(settings, "x", when="-800000d")
+    assert code == 2 and "out of range" in text
+    assert main([*args, "four", "--at", "-2H"]) == 0
+    assert "Asia/Tokyo)" in capsys.readouterr().out  # UTC, then the clock there
+    with pytest.raises(SystemExit):  # after --: a second note, refused by argparse
+        main([*args, "five", "--", "--at", "-2h"])
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["fix", "n", "--at", "-2h"], ["fix", "n", "--at=-2h"]),
+        (["--config", "fix", "fix", "--at", "-1D2h"], ["--config", "fix", "fix", "--at=-1D2h"]),
+        (["fix", "--", "--at", "-2h"], ["fix", "--", "--at", "-2h"]),
+        (["spool", "scrub", "--at", "-2h"], ["spool", "scrub", "--at", "-2h"]),
+        (["--config=x.toml", "fix", "--at", "now"], ["--config=x.toml", "fix", "--at", "now"]),
+        (["fix", "--at", "-2x"], ["fix", "--at", "-2x"]),
+    ],
+)
+def test_relative_at_is_joined_for_fix_only(argv: list[str], expected: list[str]) -> None:
+    from kelpie.cli import _relative_at
+
+    assert _relative_at(argv) == expected
+
+
+def test_kelpie_fix_errors_go_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text(f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n')
+    SqliteLedgerStore(tmp_path / "kelpie.db").close()
+    args = ["--config", str(path), "fix"]
+    for extra in (["x", "--rule", "no_such_rule"], ["x", "--at", "2h"], ["--list", "--days", "0"]):
+        assert main([*args, *extra]) == 2
+        got = capsys.readouterr()
+        assert got.out == "" and got.err.startswith("kelpie: ")
+    assert main([*args, "ok"]) == 0
+    got = capsys.readouterr()
+    assert got.out.startswith("fix noted at ") and got.err == ""
+
+
+def test_every_kelpie_fix_error_leaves_stdout_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    now = datetime(2026, 3, 2, 12, tzinfo=UTC)
+
+    def settings(db: str) -> Any:
+        path = tmp_path / "kelpie.toml"
+        path.write_text(f'[storage]\npath = "{db}"\n')
+        return load_settings(path)
+
+    memory, missing = settings(":memory:"), settings(str(tmp_path / "none.db"))
+    (tmp_path / "dir.db").mkdir()  # exists, but sqlite cannot open it
+    broken = settings(str(tmp_path / "dir.db"))
+    SqliteLedgerStore(tmp_path / "kelpie.db").close()
+    good = settings(str(tmp_path / "kelpie.db"))
+    clock = lambda: now  # noqa: E731
+    results = [
+        (note_fix(memory, "n", clock=clock), 2),
+        (list_fixes(memory, clock=clock), 2),
+        (note_fix(missing, "n", clock=clock), 2),
+        (note_fix(good, "n", when="2026-03-03T12:00+00:00", clock=clock), 2),  # future
+        (note_fix(good, "n", when="2h", clock=clock), 2),
+        (note_fix(good, "n", rule="no_such_rule", clock=clock), 2),
+        (note_fix(good, "   ", clock=clock), 2),  # an empty note
+        (list_fixes(good, days=0, clock=clock), 2),
+        (note_fix(broken, "n", clock=clock), 1),
+        (list_fixes(broken, clock=clock), 1),
+    ]
+    for (out, err, code), expected in results:
+        assert (out, code) == ("", expected), err
+        assert err.startswith("kelpie: ") and err.endswith("\n")
+
+
+def test_hours_lost_count_a_task_hour_once_like_the_report() -> None:
+    # T-1 ownerless 1h-9h after the fix, its block stale 2h-3h: 8 task-hours, not 9 (#228)
+    states = (
+        _state("stale_blocks", FIX + timedelta(hours=2), FIX + timedelta(hours=3)),
+        _state("orphan_status", FIX + timedelta(hours=1), FIX + timedelta(hours=9)),
+    )
+    everything = build_report(inputs(states=states))
+    assert metric(everything, "hours lost").after == pytest.approx(8)
+    # the fixed rule's own hours, whatever another rule also saw
+    event = FixEvent(FIX, MANUAL, "conditions for CI blocks", rule="stale_blocks")
+    scoped = build_report(inputs(fixes=(event,), states=states))
+    assert metric(scoped, "hours lost").after == pytest.approx(1)

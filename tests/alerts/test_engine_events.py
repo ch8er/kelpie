@@ -76,6 +76,20 @@ def test_a_state_alert_carries_each_transition_as_a_field() -> None:
     assert resolved.severity is Severity.INFO and resolved.did is Did.NOTIFIED
 
 
+def test_every_event_of_a_state_names_the_state_the_resolve_notice_too() -> None:
+    """A channel keys what it showed for an alert by its state (Telegram's snooze buttons,
+    #176): the resolve notice must name the same state as the alerts it ends."""
+    events = run_lifecycle("stale_blocks", "T-1 is stuck.")
+    assert [e.state for e in events] == ["s1"] * 4
+    assert events[-1].transition is Transition.RESOLVED
+    plain = Action(ActionKind.ALERT, "orphans", "x", params={"state": "s9"})  # not a notice
+    alerter = FakeAlerter()
+    engine = Engine([Toggle("orphans", plain)], adapters=[FakeAdapter()], alerter=alerter,
+                    config=LIVE)  # type: ignore[list-item]  # fmt: skip
+    engine.tick(lambda: Snapshot(now=T0))
+    assert [e.state for e in alerter.events] == [None]
+
+
 def test_the_ledger_still_records_the_transition_in_front_of_the_reason() -> None:
     toggle = Toggle("orphans", state_alert("orphans", "T-1 has no owner."))
     engine = Engine([toggle], adapters=[FakeAdapter()], alerter=FakeAlerter(), config=LIVE)  # type: ignore[list-item]

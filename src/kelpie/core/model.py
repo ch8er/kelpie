@@ -166,6 +166,22 @@ class Task:
     comments: tuple[Comment, ...] = ()
     body_author: str | None = None
     created_at: datetime | None = None
+    # The board the task is on when one adapter watches several (Hermes named boards): its
+    # id is then ``<board>:<id on the board>``, after the host's prefix on a multi-host farm
+    # (``<host>:<board>:<id>``). None: the adapter watches one board.
+    board: str | None = None
+
+    @property
+    def local_id(self) -> str | None:
+        """The id on the task's own board when the id is namespaced by its host
+        (``<host>:``) and/or its board (``<board>:``); None when it is not."""
+        rest = self.id
+        for prefix in (self.host, self.board):
+            if prefix and rest.startswith(f"{prefix}:") and len(rest) > len(prefix) + 1:
+                rest = rest[len(prefix) + 1 :]
+            elif prefix and prefix == self.board:
+                return None  # a board's task always carries its board's prefix
+        return None if rest == self.id else rest
 
 
 class ResourceKind(StrEnum):
@@ -251,6 +267,60 @@ class Session:
     # (an adapter must not set it for every call; open TOOL spans are every call).
     running_tool: str | None = None
     running_tool_since: datetime | None = None
+
+
+# Lower bounds of the buckets a wait inside a session is kept in (SessionWait.waited).
+WAIT_BUCKETS = tuple(timedelta(seconds=s) for s in (0, 30, 60, 5 * 60, 15 * 60, 30 * 60, 60 * 60))
+
+
+def wait_bucket(waited: timedelta) -> timedelta:
+    """The lower bound of the :data:`WAIT_BUCKETS` bucket ``waited`` falls in."""
+    return max((b for b in WAIT_BUCKETS if b <= waited), default=WAIT_BUCKETS[0])
+
+
+@dataclass(frozen=True, slots=True)
+class SessionWait:
+    """A command an agent ran to wait inside its session (``sleep``, a CI watch, a loop
+    over them), as its platform recorded it (issue #197, rule 2). Only the command's shape
+    and how long it waited, bucketed, are kept: never its arguments."""
+
+    # The Snapshot session it ran in when the adapter matched one, else the platform's own
+    # session id (then no Snapshot session has it).
+    session_id: str
+    at: datetime
+    shape: str  # "sleep", "gh run watch", "gh pr checks --watch", "<shape> loop"
+    waited: timedelta | None = None  # the lower bound of its bucket (WAIT_BUCKETS); None: unknown
+    task_id: str | None = None
+    role: str | None = None
+    source: str | None = None  # name of the platform adapter that reported it
+
+
+@dataclass(frozen=True, slots=True)
+class SessionUsage:
+    """Token usage of one agent session and model, as its platform recorded it (item 1 of
+    #197: on Hermes, each profile's state.db). Totals of the whole session up to ``last_at``,
+    not of a day (``per_session_total``); token fields follow :class:`Span`: input includes
+    the cached tokens."""
+
+    # A Snapshot session's id when matched (the run it worked in), else the platform's
+    # (Hermes: hermes-session-<profile>-<id>), as for SessionWait.
+    session_id: str
+    platform_session_id: str  # the platform's own id: spans with this session_id are the same
+    started_at: datetime
+    last_at: datetime  # last activity (else the end, else the start)
+    model: str | None = None
+    ended_at: datetime | None = None
+    task_id: str | None = None
+    role: str | None = None  # the agent's role (Hermes: the profile's)
+    owner_id: str | None = None  # the agent (Hermes: the profile)
+    input_tokens: int = 0  # cached ones included, as Span.input_tokens
+    output_tokens: int = 0
+    cached_tokens: int = 0  # cache reads
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0  # part of output_tokens: never add it again
+    calls: int = 0  # model API calls
+    per_session_total: bool = True  # the session's total, not split by time
+    source: str | None = None  # name of the platform adapter that reported it
 
 
 class SpanKind(StrEnum):
@@ -404,6 +474,22 @@ class BudgetStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolchainChange:
+    """A host's toolchain version changed (incident 20: an Xcode update broke every iOS
+    build): ``tool`` (a name from config data, e.g. ``xcode``) went from ``before`` to
+    ``after``, first seen at ``at``. ``last_before`` is when ``before`` was last seen: the
+    change happened between the two (a tool that could not report a version while it was
+    being replaced leaves a gap). ``before`` is None when the old version is not known."""
+
+    host: str
+    tool: str
+    after: str
+    at: datetime
+    before: str | None = None
+    last_before: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LimitHit:
     """A provider usage limit was reached: the run was refused until ``resets_at``.
     ``limit`` names the limit (e.g. a rolling 5-hour or a weekly window; the LLM quota
@@ -436,17 +522,26 @@ class Job:
     connector like ``Build.status``. ``step`` is the first named step that did not succeed in
     a job that did not succeed, when the CI names one. ``runner`` is the machine a job that
     did not succeed ran on (None for a CI's shared hosted pool, whose names do not identify a
-    machine) and ``labels`` the runner labels it asked for (e.g. ``self-hosted``, an OS)."""
+    machine) and ``labels`` the runner labels it asked for (e.g. ``self-hosted``, an OS).
+    ``started`` is False for a job the CI never started: no runner took it and it ran no step
+    (on GitHub, a spending limit or a failed payment); such a job is not ``failed``, it never
+    ran."""
 
     name: str
     conclusion: BuildStatus
     step: str | None = None
     runner: str | None = None
     labels: tuple[str, ...] = ()
+    started: bool = True
 
     @property
     def failed(self) -> bool:
-        return self.conclusion is BuildStatus.FAILURE
+        return self.conclusion is BuildStatus.FAILURE and self.started
+
+    @property
+    def refused(self) -> bool:
+        """The CI ended it without starting it (no runner, no step)."""
+        return self.conclusion is BuildStatus.FAILURE and not self.started
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,7 +560,9 @@ class Build:
     configured to cancel; rules only ask to cancel such builds. ``jobs`` are the build's
     jobs once it finished (jobs the connector could not read left out; empty: none
     listed). None means not read: an active, queued or skipped build, a partial job list, a
-    failed request or no request budget left. None never means "nothing failed".
+    failed request or no request budget left. None never means "nothing failed". ``held``:
+    a queued build the CI holds on purpose (a deployment approval, a concurrency group), not
+    one waiting for a runner.
     """
 
     id: str
@@ -486,6 +583,7 @@ class Build:
     superseded_by: str | None = None
     cancellable: bool = False
     jobs: tuple[Job, ...] | None = None
+    held: bool = False  # queued on purpose: an approval or a concurrency group holds it
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,6 +683,82 @@ class OutputOffender:
     recent_tasks: tuple[str, ...] = ()  # tasks of its unfiltered calls, the latest first
 
 
+# How a platform loads an instruction file: into every session of its role (CLAUDE.md,
+# AGENTS.md, a role prompt), or on demand when the agent opens it (a skill).
+InstructionLoad = Literal["always", "on_demand"]
+# Where an instruction file's tokens a day come from: counted loads of it (tool calls or
+# spans that open a skill), or its size times the sessions of its role (an estimate; for an
+# on-demand file an upper bound).
+TokenBasis = Literal["loads", "sessions"]
+
+
+@dataclass(frozen=True, slots=True)
+class SkillLoad:
+    """One time an agent opened a skill (an instruction file loaded on demand), as its
+    platform recorded it (Hermes ``skill_view``, a Claude Code ``Skill`` call): the skill's
+    name and who opened it when, never the skill's text or the call's other arguments."""
+
+    # The name it was opened by: its directory (the parent of SKILL.md), with the categories
+    # above it when the call named them (``dev/release-notes``), or ``plugin:name`` for a
+    # plugin's skill (Claude Code).
+    skill: str
+    at: datetime
+    session_id: str  # the platform's own session id
+    role: str | None = None
+    source: str | None = None  # name of the platform adapter that reported it
+    # Where the session ran on its platform, as an instruction path's ``{role}`` part names
+    # it (Hermes: the profile, of which a role may have several); None: by role alone.
+    profile: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionFile:
+    """One instruction file a role loads (a skill, CLAUDE.md, AGENTS.md, a role prompt),
+    measured read-only when the snapshot is assembled (``kelpie.instructions``): sizes,
+    counts and hashes only, never its text. ``since`` is the oldest measurement kept within
+    the growth window (or the first one ever, when the file is younger), ``chars_since`` its
+    size then; ``appends`` and ``edits`` count the changes seen since, those that only added
+    text at the end and those that changed or removed some."""
+
+    path: str  # as shown to people, the home directory as ~
+    role: str | None  # None: every role of its platform loads it
+    chars: int
+    tokens: int  # estimated from chars
+    sections: int  # headings
+    loaded: InstructionLoad = "always"
+    since: datetime | None = None
+    chars_since: int | None = None
+    appends: int = 0
+    edits: int = 0
+    tokens_per_day: int | None = None
+    token_basis: TokenBasis | None = None
+    owner: str | None = None  # who owns the role's instructions
+
+    @property
+    def only_grows(self) -> bool:
+        """Changed since ``since``, and only ever by appending."""
+        return self.appends > 0 and self.edits == 0
+
+    def growth_per_week(self, now: datetime, min_span: timedelta) -> float | None:
+        """Characters added per week since ``since``; None over less than ``min_span``."""
+        if self.since is None or self.chars_since is None or now - self.since < min_span:
+            return None
+        return (self.chars - self.chars_since) * timedelta(days=7) / (now - self.since)
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionDuplicate:
+    """Copies of one thing within or across a role's instruction files: a section whose
+    normalised heading and body are near-identical (``similarity``, 0..1), or a value (one
+    ``key: value`` fact) written in several files. ``places`` are ``path:line`` of each
+    copy; the text itself is never kept."""
+
+    role: str | None
+    kind: Literal["section", "value"]
+    places: tuple[str, ...]
+    similarity: float = 1.0
+
+
 # Where a snooze came from: ``kelpie snooze`` (cli), a reply to an alert (chat), or an
 # ``until:`` marker in the block reason (marker; read from the board, never stored).
 SnoozeSource = Literal["cli", "chat", "marker"]
@@ -637,6 +811,11 @@ class Snapshot:
     resources: tuple[Resource, ...] = ()
     sessions: tuple[Session, ...] = ()
     spans: tuple[Span, ...] = ()
+    # Waits inside sessions, from the platform's own record of its commands (rule 2).
+    waits: tuple[SessionWait, ...] = ()
+    # Token usage per agent session and model, from the platform's own record (the report's
+    # per-role spend where traces carry no task).
+    usage: tuple[SessionUsage, ...] = ()
     # Aggregates over a longer window than ``spans`` (see ``[traces] totals_window``).
     span_totals: tuple[SpanTotals, ...] = ()
     # Budget state per budget and subject ([[budgets]]), computed when the snapshot is
@@ -646,6 +825,9 @@ class Snapshot:
     # statuses (stale), so a rule should neither resolve nor raise budget alerts on them.
     budgets_ok: bool = True
     limit_hits: tuple[LimitHit, ...] = ()  # observed provider limits (budgets forecast them)
+    # Toolchain version changes per host within the source's lookback (an outage that starts
+    # soon after one names it as the likely cause).
+    toolchain_changes: tuple[ToolchainChange, ...] = ()
     providers: tuple[ProviderStatus, ...] = ()  # LLM provider quota and auth probes
     # Trace-based spend against providers' cost reports, per provider and closed UTC day
     # ([connectors.cost_reports]); the newest day first.
@@ -667,6 +849,13 @@ class Snapshot:
     closed_pull_requests_since: datetime | None = None
     # Repeated huge-output offenders over [traces.outputs] repeat_days (span store).
     output_offenders: tuple[OutputOffender, ...] = ()
+    # The instruction files each role loads and the copies found in them ([instructions]).
+    instruction_files: tuple[InstructionFile, ...] = ()
+    instruction_duplicates: tuple[InstructionDuplicate, ...] = ()
+    # Skills opened in the last 24 hours (Hermes ``skill_view``, Claude Code ``Skill``), and
+    # the adapters that counted them this tick: for their skills, no load means none.
+    skill_loads: tuple[SkillLoad, ...] = ()
+    skill_loads_counted: tuple[str, ...] = ()
     # Parts of the farm that are not in this snapshot (multi-host: agents and
     # ``<agent>/<adapter>`` boards that are silent, stale or failed, whose task ids start
     # with ``<agent>:``; ``hub`` when no agent board could be read). A rule that stops
@@ -685,29 +874,39 @@ class Snapshot:
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _index: _Index | None = field(default=None, init=False, repr=False, compare=False)
+
+    # The lookups below are indexed on first use: rules ask per task, so a linear scan per
+    # call made a tick quadratic in the board's size. The indexes are derived data, not a
+    # change to the snapshot, and give the same answers a scan would (the first match by id;
+    # tasks and sessions in snapshot order).
+
+    def _lookups(self) -> _Index:
+        index = self._index
+        if index is None:
+            index = _Index.of(self)
+            object.__setattr__(self, "_index", index)
+        return index
 
     def task(self, task_id: str) -> Task | None:
-        return next((t for t in self.tasks if t.id == task_id), None)
+        return self._lookups().tasks.get(task_id)
 
     def owner(self, owner_id: str) -> Owner | None:
-        return next((o for o in self.owners if o.id == owner_id), None)
+        return self._lookups().owners.get(owner_id)
 
     def condition(self, condition_id: str) -> Condition | None:
-        return next((c for c in self.conditions if c.id == condition_id), None)
+        return self._lookups().conditions.get(condition_id)
 
     def dependents(self, task_id: str) -> tuple[Task, ...]:
-        ids = {d.task_id for d in self.dependencies if d.depends_on == task_id}
-        return tuple(t for t in self.tasks if t.id in ids)
+        return self._lookups().dependents.get(task_id, ())
 
     def build(self, build_id: str) -> Build | None:
-        return next((b for b in self.builds if b.id == build_id), None)
+        return self._lookups().builds.get(build_id)
 
     def sessions_for(self, task_id: str) -> tuple[Session, ...]:
-        return tuple(s for s in self.sessions if s.task_id == task_id)
+        return self._lookups().sessions.get(task_id, ())
 
     def spans_for_session(self, session_id: str) -> tuple[Span, ...]:
-        # Indexed on first use: rules ask per session, and a snapshot can hold many spans.
-        # The cache is derived data, not a change to the snapshot.
         index = self._spans_by_session
         if index is None:
             grouped: dict[str, list[Span]] = {}
@@ -717,6 +916,47 @@ class Snapshot:
             index = {k: tuple(v) for k, v in grouped.items()}
             object.__setattr__(self, "_spans_by_session", index)
         return index.get(session_id, ())
+
+
+def _first_by_id[T: (Task, Owner, Condition, Build)](items: tuple[T, ...]) -> dict[str, T]:
+    """Items by id; with a repeated id, the first one (as a scan from the start finds)."""
+    by_id: dict[str, T] = {}
+    for item in items:
+        by_id.setdefault(item.id, item)
+    return by_id
+
+
+@dataclass(frozen=True, slots=True)
+class _Index:
+    """A snapshot's lookups by id, built once (:meth:`Snapshot._lookups`)."""
+
+    tasks: dict[str, Task]
+    owners: dict[str, Owner]
+    conditions: dict[str, Condition]
+    builds: dict[str, Build]
+    dependents: dict[str, tuple[Task, ...]]  # by the id they depend on, in task order
+    sessions: dict[str, tuple[Session, ...]]  # by task id, in session order
+
+    @classmethod
+    def of(cls, snapshot: Snapshot) -> _Index:
+        depends_on: dict[str, set[str]] = {}  # dependent task id -> the ids it depends on
+        for d in snapshot.dependencies:
+            depends_on.setdefault(d.task_id, set()).add(d.depends_on)
+        dependents: dict[str, list[Task]] = {}
+        for t in snapshot.tasks:  # every task with that id, as the scan returned them
+            for target in depends_on.get(t.id, ()):
+                dependents.setdefault(target, []).append(t)
+        sessions: dict[str, list[Session]] = {}
+        for s in snapshot.sessions:
+            sessions.setdefault(s.task_id, []).append(s)
+        return cls(
+            tasks=_first_by_id(snapshot.tasks),
+            owners=_first_by_id(snapshot.owners),
+            conditions=_first_by_id(snapshot.conditions),
+            builds=_first_by_id(snapshot.builds),
+            dependents={k: tuple(v) for k, v in dependents.items()},
+            sessions={k: tuple(v) for k, v in sessions.items()},
+        )
 
 
 def active_snooze(snapshot: Snapshot, task_id: str) -> Snooze | None:

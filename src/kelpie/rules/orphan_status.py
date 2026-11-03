@@ -781,7 +781,7 @@ def _human(d: timedelta) -> str:
 
 def _finished(task_id: str, snapshot: Snapshot) -> bool:
     """A dependency on a task off the board, or finished, is met."""
-    task = next((t for t in snapshot.tasks if t.id == task_id), None)
+    task = snapshot.task(task_id)
     return task is None or task.status.is_terminal
 
 

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Toolchain versions for Kelpie's outage alerts (incident 20), every 5 minutes (macOS):
+  the active Xcode and CoreSimulator. Use /usr/local instead of /opt/homebrew on an Intel
+  Mac, copy to ~/Library/LaunchAgents/ and load it with:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kelpie.toolchain.plist
+  The output directory is node_exporter's textfile directory (see docs/install.md). Add
+  TOOL=COMMAND arguments after it to report other tools instead (see the script).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kelpie.toolchain</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/share/kelpie/kelpie-toolchain.sh</string>
+    <string>/opt/homebrew/var/node_exporter/textfile</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+</dict>
+</plist>

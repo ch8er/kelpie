@@ -1,0 +1,82 @@
+# HELP kelpie_adapter_errors_total Adapter snapshots that raised; the adapter is skipped for that tick.
+# TYPE kelpie_adapter_errors_total counter
+kelpie_adapter_errors_total{adapter="hermes"} 1
+# HELP kelpie_tasks Tasks in the last snapshot, by normalized status.
+# TYPE kelpie_tasks gauge
+kelpie_tasks{status="backlog"} 1
+kelpie_tasks{status="ready"} 1
+kelpie_tasks{status="in_progress"} 2
+kelpie_tasks{status="review"} 0
+kelpie_tasks{status="blocked"} 0
+kelpie_tasks{status="waiting"} 1
+kelpie_tasks{status="accepted"} 0
+kelpie_tasks{status="done"} 2
+kelpie_tasks{status="failed"} 0
+kelpie_tasks{status="cancelled"} 0
+# HELP kelpie_prework_tasks Cards in a status before any work starts (Hermes triage, scheduled), by the platform's own status (incident 17); also those still waiting for parents of their own. A status shows only while a card is in it.
+# TYPE kelpie_prework_tasks gauge
+kelpie_prework_tasks{platform_status="triage"} 1
+# HELP kelpie_prework_oldest_seconds How long the oldest card in each pre-work status has sat there.
+# TYPE kelpie_prework_oldest_seconds gauge
+kelpie_prework_oldest_seconds{platform_status="triage"} 10800
+# HELP kelpie_idle_agents Agent owners with no live session and no open task, by role.
+# TYPE kelpie_idle_agents gauge
+kelpie_idle_agents{role="coder"} 2
+kelpie_idle_agents{role="reviewer"} 2
+kelpie_idle_agents{role="tester"} 1
+# HELP kelpie_role_agents Agent owners per role.
+# TYPE kelpie_role_agents gauge
+kelpie_role_agents{role="coder"} 4
+kelpie_role_agents{role="reviewer"} 2
+kelpie_role_agents{role="tester"} 1
+# HELP kelpie_role_agents_with_work Agents with a live session or an open task, by role.
+# TYPE kelpie_role_agents_with_work gauge
+kelpie_role_agents_with_work{role="coder"} 2
+kelpie_role_agents_with_work{role="reviewer"} 0
+kelpie_role_agents_with_work{role="tester"} 0
+# HELP kelpie_role_ownerless_queue_tasks Ownerless tasks waiting for the role (ready, review, accepted).
+# TYPE kelpie_role_ownerless_queue_tasks gauge
+kelpie_role_ownerless_queue_tasks{role="coder"} 0
+kelpie_role_ownerless_queue_tasks{role="reviewer"} 0
+kelpie_role_ownerless_queue_tasks{role="tester"} 0
+# HELP kelpie_role_tasks_done_24h Tasks of the role that reached done in the last 24h.
+# TYPE kelpie_role_tasks_done_24h gauge
+kelpie_role_tasks_done_24h{role="coder"} 1
+kelpie_role_tasks_done_24h{role="reviewer"} 1
+kelpie_role_tasks_done_24h{role="tester"} 0
+# HELP kelpie_role_returns_24h Returns (sent back) in the last 24h, counted for the role that redoes the work.
+# TYPE kelpie_role_returns_24h gauge
+kelpie_role_returns_24h{role="coder"} 0
+kelpie_role_returns_24h{role="reviewer"} 0
+kelpie_role_returns_24h{role="tester"} 0
+# HELP kelpie_role_reopened_after_done_24h Done tasks of the role moved back out of done in the last 24h.
+# TYPE kelpie_role_reopened_after_done_24h gauge
+kelpie_role_reopened_after_done_24h{role="coder"} 0
+kelpie_role_reopened_after_done_24h{role="reviewer"} 0
+kelpie_role_reopened_after_done_24h{role="tester"} 0
+# HELP kelpie_role_reopened_after_done_ratio Of the role's completions in the last 24h (tasks still done, plus those reopened since), the share reopened; roles with a completion only.
+# TYPE kelpie_role_reopened_after_done_ratio gauge
+kelpie_role_reopened_after_done_ratio{role="coder"} 0
+kelpie_role_reopened_after_done_ratio{role="reviewer"} 0
+# HELP kelpie_tasks_by_stage Open tasks now per stage (working, queue, review, waiting, ownerless) and role.
+# TYPE kelpie_tasks_by_stage gauge
+kelpie_tasks_by_stage{role="coder",stage="ownerless"} 0
+kelpie_tasks_by_stage{role="coder",stage="queue"} 0
+kelpie_tasks_by_stage{role="coder",stage="review"} 0
+kelpie_tasks_by_stage{role="coder",stage="waiting"} 1
+kelpie_tasks_by_stage{role="coder",stage="working"} 1
+kelpie_tasks_by_stage{role="reviewer",stage="ownerless"} 0
+kelpie_tasks_by_stage{role="reviewer",stage="queue"} 0
+kelpie_tasks_by_stage{role="reviewer",stage="review"} 0
+kelpie_tasks_by_stage{role="reviewer",stage="waiting"} 0
+kelpie_tasks_by_stage{role="reviewer",stage="working"} 0
+kelpie_tasks_by_stage{role="tester",stage="ownerless"} 0
+kelpie_tasks_by_stage{role="tester",stage="queue"} 0
+kelpie_tasks_by_stage{role="tester",stage="review"} 0
+kelpie_tasks_by_stage{role="tester",stage="waiting"} 0
+kelpie_tasks_by_stage{role="tester",stage="working"} 0
+kelpie_tasks_by_stage{role="unknown",stage="ownerless"} 1
+kelpie_tasks_by_stage{role="unknown",stage="queue"} 1
+kelpie_tasks_by_stage{role="unknown",stage="review"} 0
+kelpie_tasks_by_stage{role="unknown",stage="waiting"} 0
+kelpie_tasks_by_stage{role="unknown",stage="working"} 0

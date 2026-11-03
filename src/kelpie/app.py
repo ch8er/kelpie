@@ -21,8 +21,9 @@ from typing import Any, Protocol
 
 from kelpie.adapters.claude_code.config import ClaudeCodeSettings, load_claude_code
 from kelpie.adapters.hermes import adapter as hermes
+from kelpie.adapters.hermes.boards import HermesBoards
 from kelpie.adapters.hermes.git_state import valid_base_ref
-from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME
+from kelpie.adapters.hermes.park import AUTHOR, DEFAULT_WAIT_KEY, WAIT_KEY_NAME, board_key
 from kelpie.adapters.hermes.processes import (
     DEFAULT_TIMEOUT as DEFAULT_TOOL_TIMEOUT,
 )
@@ -36,6 +37,13 @@ from kelpie.adapters.issues.config import (
 )
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
+from kelpie.alerts.buttons import (
+    AlreadySnoozed,
+    ButtonStore,
+    ChatControl,
+    Press,
+    button_store_path,
+)
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
 from kelpie.connectors.cost_reports import CostReportsSettings, load_cost_reports
@@ -56,7 +64,13 @@ from kelpie.connectors.human_tasks import (
 from kelpie.connectors.llm_quotas import LlmQuotaSettings, load_llm_quotas
 from kelpie.core.actions import ActionKind
 from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
-from kelpie.core.conditions import check_task_status
+from kelpie.core.conditions import (
+    Contribution,
+    carry_forward,
+    check_task_status,
+    contribution,
+    widen,
+)
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
@@ -67,7 +81,9 @@ from kelpie.core.model import (
     ReportedCost,
     Snapshot,
     Snooze,
+    Span,
     SpanKind,
+    Task,
 )
 from kelpie.core.ports import (
     ActionConnector,
@@ -80,13 +96,20 @@ from kelpie.core.ports import (
     SupportsReassign,
     SupportsStop,
     SupportsWait,
+    ToolchainReader,
     declared_actions,
     inapplicable_actions,
 )
 from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
-from kelpie.core.snooze import MarkerProblem, SnoozeSettings, load_snooze, with_snoozes
+from kelpie.core.snooze import (
+    MarkerProblem,
+    SnoozeSettings,
+    chat_snooze,
+    load_snooze,
+    with_snoozes,
+)
 from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.spend import (
     Estimate,
@@ -100,13 +123,16 @@ from kelpie.core.states import MemoryStateStore, StateStore
 from kelpie.core.storage import (
     SchemaOutdated,
     SqliteCostReports,
+    SqliteInstructionStore,
     SqliteLedgerStore,
     SqliteSpanStore,
 )
+from kelpie.instructions.config import InstructionSettings, load_instructions, platform_sources
+from kelpie.instructions.watch import InstructionWatch
 from kelpie.metrics import Metrics
 from kelpie.remote.config import AgentSettings, HubSettings, load_agent, load_hub
 from kelpie.remote.farm import RemoteFarm
-from kelpie.remote.hub import Hub, HubServer, HubService
+from kelpie.remote.hub import Hub, HubServer, HubService, server_context
 from kelpie.report.config import ReportSettings, load_report
 from kelpie.resources.config import ResourceSettings, load_resources
 from kelpie.rules import PLANNED, REGISTRY, PlannedRule, RuleFactory
@@ -115,6 +141,7 @@ from kelpie.rules.ci_economy import CiEconomy
 from kelpie.rules.conflict_warning import ConflictWarning
 from kelpie.rules.no_progress import NoProgress
 from kelpie.rules.resources import Resources
+from kelpie.traces.auth import TokenFile, TokenFileError, loose_mode
 from kelpie.traces.config import TraceSettings, load_traces
 from kelpie.traces.forward import Forwarder
 from kelpie.traces.hooks import merge_hook_spans
@@ -137,9 +164,26 @@ class ConfigError(ValueError):
     """The configuration cannot be used; Kelpie refuses to start."""
 
 
+# [[adapters.hermes.boards]] name: the prefix of the board's task ids (``<name>:t_1a``).
+_BOARD_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+@dataclass(frozen=True, slots=True)
+class HermesBoardSettings:
+    """``[[adapters.hermes.boards]]``: one Kanban board of the Hermes home. Profiles, the
+    spool, the CLI and the host's tool processes belong to the home, so they stay in
+    ``[adapters.hermes]``; a board has its database and its own park-signing key."""
+
+    name: str  # prefixes the board's task and session ids: <name>:t_1a
+    db_path: Path
+    # Signs Kelpie's parks and stops on this board; None: hermes-wait-<name>.key next to
+    # the ledger (see _with_wait_key).
+    wait_key: Path | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class HermesSettings:
-    """``[adapters.hermes]``: where the Kanban board and the hooks spool live."""
+    """``[adapters.hermes]``: where the Kanban board (or boards) and the hooks spool live."""
 
     db_path: Path = hermes.DEFAULT_DB
     spool: Path | None = hermes.DEFAULT_SPOOL  # None: spool reading disabled
@@ -166,11 +210,39 @@ class HermesSettings:
     # Long tool runs and tool slots read from the host's processes ([adapters.hermes.tools])
     tools: ToolProcesses | None = None
     author: str = AUTHOR  # the name Kelpie signs its blocks, parks, wakes and comments with
+    # [[adapters.hermes.boards]]: several boards of this Hermes home, each with its own
+    # db_path (then ``db_path`` and ``wait_key`` above are unused). (): one board, db_path.
+    boards: tuple[HermesBoardSettings, ...] = ()
+    # Hermes' home: its profiles' state.db (waits inside sessions); None: not read
+    state_home: Path | None = hermes.DEFAULT_HOME
+    state_sources: tuple[str, ...] = hermes.DEFAULT_SOURCES  # Hermes session sources read
 
-    def build(self) -> hermes.HermesAdapter:
-        return hermes.HermesAdapter(
-            db_path=self.db_path,
-            spool=self.spool,
+    def build(self) -> hermes.HermesAdapter | HermesBoards:
+        if not self.boards:
+            return self._adapter(db_path=self.db_path, spool=self.spool, tools=self.tools)
+        boards = [
+            self._adapter(
+                db_path=b.db_path,
+                spool=None,
+                tools=None,
+                board=b.name,
+                name=f"hermes:{b.name}",
+                wait_key=b.wait_key or DEFAULT_WAIT_KEY.parent / board_key(b.name),
+                state_home=None,
+            )
+            for b in self.boards
+        ]
+        first = self.boards[0].db_path
+        host = None
+        if self.tools is not None:  # the host's tool processes, read once for every board
+            host = self._adapter(db_path=first, spool=None, tools=self.tools, state_home=None)
+        state = None
+        if self.state_home is not None:  # the profiles' state.db, read once for every board
+            state = self._adapter(db_path=first, spool=None, tools=None)
+        return HermesBoards(boards, spool=self.spool, host=host, state=state)
+
+    def _adapter(self, **kw: Any) -> hermes.HermesAdapter:
+        settings: dict[str, Any] = dict(
             lookback=self.lookback,
             git_state=self.git_state,
             git_timeout=self.git_timeout,
@@ -187,9 +259,11 @@ class HermesSettings:
             prework_statuses=self.prework_statuses,
             end_worker=self.end_worker,
             worker_grace=self.worker_grace.total_seconds(),
-            tools=self.tools,
             author=self.author,
+            state_home=self.state_home,
+            state_sources=self.state_sources,
         )
+        return hermes.HermesAdapter(**{**settings, **kw})
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +280,7 @@ class Settings:
     budgets: BudgetConfig = field(default_factory=BudgetConfig)  # [[budgets]], [prices]
     spend_settings: SpendSettings = field(default_factory=SpendSettings)  # [spend]
     resources: ResourceSettings = field(default_factory=ResourceSettings)
+    instructions: InstructionSettings = field(default_factory=InstructionSettings)
     github: GitHubSettings | None = None  # None: no [connectors.github] section
     block_conditions: tuple[BlockConditionPattern, ...] = ()
     human_tasks: HumanTaskSettings | None = None  # None: no [connectors.human_tasks]
@@ -250,6 +325,7 @@ def load_settings(path: Path | None) -> Settings:
         "prices",
         "spend",
         "resources",
+        "instructions",
         "connectors",
         "block_conditions",
         "alerts",
@@ -276,6 +352,7 @@ def load_settings(path: Path | None) -> Settings:
     try:
         traces = load_traces(data.get("traces"))
         resources = load_resources(data.get("resources"))
+        instructions = load_instructions(data.get("instructions"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     try:
@@ -315,6 +392,7 @@ def load_settings(path: Path | None) -> Settings:
         budgets=budgets,
         spend_settings=spend_settings,
         resources=resources,
+        instructions=instructions,
         llm_quotas=llm_quotas,
         cost_reports=cost_reports,
         alerts=alerts,
@@ -385,8 +463,12 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "worker_grace",
         "tools",
         "author",
+        "boards",
+        "state_home",
+        "state_sources",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
+    boards = _hermes_boards(section)
     paths: dict[str, Path | None] = {}
     for key, default in (("db_path", hermes.DEFAULT_DB), ("spool", hermes.DEFAULT_SPOOL)):
         value = section.get(key, str(default))
@@ -399,6 +481,23 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
             paths[key] = Path(value)
     db_path = paths["db_path"]
     assert db_path is not None
+    # The profiles' state.db are in Hermes' home: kanban.db's directory, or the home of a
+    # named board (<home>/kanban/boards/<slug>/kanban.db).
+    named = db_path.parent.parent
+    home = named.parent.parent if (named.name, named.parent.name) == ("boards", "kanban") else None
+    state_home = section.get("state_home", str(home or db_path.parent))
+    if state_home is not False and (not isinstance(state_home, str) or not state_home.strip()):
+        raise ConfigError("[adapters.hermes] state_home must be a non-empty string or false")
+    sources = section.get("state_sources", list(hermes.DEFAULT_SOURCES))
+    if (
+        not isinstance(sources, list)
+        or not sources
+        or not all(isinstance(x, str) and x.strip() for x in sources)
+    ):
+        raise ConfigError(
+            "[adapters.hermes] state_sources must be a non-empty list of Hermes session "
+            'sources (e.g. ["kanban", "subagent", "cron"])'
+        )
     try:
         lookback = parse_duration(section.get("lookback", hermes.DEFAULT_LOOKBACK))
     except (ValueError, TypeError, AttributeError) as exc:
@@ -550,7 +649,56 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         worker_grace,
         _hermes_tools(section.get("tools")),
         author,
+        boards,
+        None if state_home is False else Path(state_home),
+        tuple(dict.fromkeys(x.strip() for x in sources)),
     )
+
+
+def _hermes_boards(section: Mapping[str, Any]) -> tuple[HermesBoardSettings, ...]:
+    """``[[adapters.hermes.boards]]``: names and databases distinct (paths compared after
+    ``~`` expansion and resolving symlinks), none of the one-board keys (``db_path``,
+    ``wait_key``) beside them. Keys are checked distinct once defaulted (_with_wait_key)."""
+    if "boards" not in section:
+        return ()
+    where = "[[adapters.hermes.boards]]"
+    raw = section["boards"]
+    if not isinstance(raw, list) or not raw or not all(isinstance(b, Mapping) for b in raw):
+        raise ConfigError(f"{where} must be one or more tables")
+    if both := sorted({"db_path", "wait_key"} & set(section)):
+        raise ConfigError(
+            f"[adapters.hermes] {', '.join(both)} cannot be set beside {where}: set "
+            f"{'it' if len(both) == 1 else 'them'} on each board"
+        )
+    boards: list[HermesBoardSettings] = []
+    for entry in raw:
+        if extra := set(entry) - {"name", "db_path", "wait_key"}:
+            raise ConfigError(f"unknown {where} keys: {sorted(extra)}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not _BOARD_NAME.fullmatch(name):
+            raise ConfigError(
+                f"{where} entries need a name of 1-32 lowercase letters, digits, '-' or '_' "
+                "(it prefixes the board's task ids)"
+            )
+        values: dict[str, Path | None] = {}
+        for key in ("db_path", "wait_key"):
+            value = entry.get(key)
+            if value is None and key == "wait_key":
+                values[key] = None
+            elif not isinstance(value, str) or not value.strip():
+                raise ConfigError(f"{where} {name}: {key} must be a non-empty path")
+            else:
+                values[key] = Path(value)
+        db_path = values["db_path"]
+        assert db_path is not None
+        boards.append(HermesBoardSettings(name, db_path, values["wait_key"]))
+    names = [b.name for b in boards]
+    if twice := sorted({n for n in names if names.count(n) > 1}):
+        raise ConfigError(f"{where} names {', '.join(twice)} twice")
+    dbs = [b.db_path.expanduser().resolve() for b in boards]
+    if len(set(dbs)) < len(dbs):
+        raise ConfigError(f"{where} lists a db_path twice: one board is one entry")
+    return tuple(boards)
 
 
 def _hermes_tools(raw: Any) -> ToolProcesses | None:
@@ -625,9 +773,23 @@ def _with_wait_key(hermes: HermesSettings | None, db: Path | None) -> HermesSett
     """The park-signing key defaults next to the ledger, which a deployment keeps (a
     container's data volume): losing the key leaves Kelpie's parks unrecognised. With an
     in-memory ledger it is ``~/.kelpie/hermes-wait.key``."""
-    if hermes is None or hermes.wait_key is not None:
+    if hermes is None:
         return hermes
-    return replace(hermes, wait_key=DEFAULT_WAIT_KEY if db is None else db.parent / WAIT_KEY_NAME)
+    where = DEFAULT_WAIT_KEY.parent if db is None else db.parent
+    if hermes.boards:  # a key per board: a marker of one board never verifies on another
+        boards = tuple(
+            b if b.wait_key is not None else replace(b, wait_key=where / board_key(b.name))
+            for b in hermes.boards
+        )
+        keys = [b.wait_key.expanduser().resolve() for b in boards if b.wait_key is not None]
+        if len(set(keys)) < len(keys):  # compared after the defaults, ~ and symlinks
+            raise ConfigError(
+                "[[adapters.hermes.boards]] share a wait_key: each board signs with its own"
+            )
+        return replace(hermes, boards=boards)
+    if hermes.wait_key is not None:
+        return hermes
+    return replace(hermes, wait_key=where / WAIT_KEY_NAME)
 
 
 def _load_claude_code(adapters: Mapping[str, Any]) -> ClaudeCodeSettings | None:
@@ -752,12 +914,12 @@ def _rule_config(
     inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own; ``orphan_status``
     inherits ``bottlenecks``' hold labels, ``needs_you`` its planned and hold labels as
     ``planned_labels`` (one definition of a planned wait), and ``return_causes``
-    ``conflict_warning``'s ``expected_shared`` the same way. ``stale_blocks`` always reads
-    ``needs_you``'s settings (see :func:`_stale_blocks_config`); ``registry`` holds the rules
-    being loaded (default: every registered one)."""
+    ``conflict_warning``'s ``expected_shared`` the same way. ``stale_blocks`` and
+    ``wait_condition`` always read ``needs_you``'s settings (see :func:`_with_inbox`);
+    ``registry`` holds the rules being loaded (default: every registered one)."""
     section = dict(config.rules.get(name, {}))
-    if name == "stale_blocks":
-        return _stale_blocks_config(section, config, REGISTRY if registry is None else registry)
+    if name in _LEAVES_TO_INBOX:
+        return _with_inbox(name, section, config, REGISTRY if registry is None else registry)
     if name == "needs_you" and "planned_labels" not in section:
         planned = planned_labels(config.rules.get("bottlenecks", {}))
         if planned:
@@ -790,24 +952,31 @@ def _rule_config(
     return section
 
 
-def _stale_blocks_config(
-    section: dict[str, Any], config: EngineConfig, registry: Mapping[str, RuleFactory]
+# Rules that leave the tasks rule 13 lists to it, with its settings (``needs_you``): rule 4
+# for blocks (#169), rule 2 for waits (#213).
+_LEAVES_TO_INBOX = frozenset({"stale_blocks", "wait_condition"})
+
+
+def _with_inbox(
+    name: str,
+    section: dict[str, Any],
+    config: EngineConfig,
+    registry: Mapping[str, RuleFactory],
 ) -> dict[str, Any]:
-    """Rule 4 leaves the blocks rule 13 lists as questions for a person to rule 13, while
-    rule 13 reaches people: it is loaded, and it is not in ``observe`` while rule 4 is not
-    (else rule 4's alerts would be the only ones a person gets). It then gets rule 13's
-    whole config section as ``needs_you`` (its reasons, the ``[[block_conditions]]``
-    patterns and planned labels included), so the two rules read the farm alike; else
-    ``needs_you = false``. Rule 13's section is checked here, so a mistake in it is reported
-    as rule 13's."""
+    """Rule ``name`` (rule 4 or 2) leaves the tasks rule 13 lists as waiting for a person to
+    rule 13, while rule 13 reaches people: it is loaded, and it is not in ``observe`` while
+    ``name`` is not (else ``name``'s alerts would be the only ones a person gets). It then
+    gets rule 13's whole config section as ``needs_you`` (its reasons, the
+    ``[[block_conditions]]`` patterns and planned labels included), so the rules read the
+    farm alike; else ``needs_you = false``. Rule 13's section is checked here, so a mistake
+    in it is reported as rule 13's."""
     if "needs_you" in section:
         raise ValueError(
             "needs_you is set automatically from the rules' modes (whether rule 13 reaches "
-            "people), not in [engine.rules.stale_blocks]"
+            f"people), not in [engine.rules.{name}]"
         )
     active = "needs_you" in registry and (
-        config.mode_for("needs_you") is not Mode.OBSERVE
-        or config.mode_for("stale_blocks") is Mode.OBSERVE
+        config.mode_for("needs_you") is not Mode.OBSERVE or config.mode_for(name) is Mode.OBSERVE
     )
     if not active:
         section["needs_you"] = False
@@ -821,29 +990,38 @@ def _stale_blocks_config(
     return section
 
 
+# Rule 13's wait, and the wait of the rule that leaves it a task, per rule: a task listed
+# there is announced by neither until rule 13's wait has passed.
+_INBOX_GAPS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "stale_blocks": (
+        ("approval_wait_after", "unlinked_alert_after", "a block that asks a person"),
+        ("human_wait_alert_after", "max_block", "a block that asks a person"),
+    ),
+    "wait_condition": (("human_wait_alert_after", "max_wait", "a wait on a person's task"),),
+}
+
+
 def _warn_inbox_gaps(rules: Sequence[Rule]) -> None:
-    """A block rule 4 leaves to rule 13 is announced by neither until rule 13's own wait has
-    passed: say so when that is longer than rule 4's (the gap is silent)."""
-    four = next((r for r in rules if r.name == "stale_blocks"), None)
-    inbox = getattr(four, "inbox", None)
-    if four is None or inbox is None:
-        return
-    pairs = (
-        ("approval_wait_after", "unlinked_alert_after"),
-        ("human_wait_alert_after", "max_block"),
-    )
-    for thirteen, own in pairs:
-        theirs, mine = getattr(inbox, thirteen), getattr(four, own)
-        if mine is not None and theirs > mine:
-            log.warning(
-                "needs_you.%s (%s) is longer than stale_blocks.%s (%s): a block that asks a "
-                "person is announced by neither rule for %s in between",
-                thirteen,
-                theirs,
-                own,
-                mine,
-                theirs - mine,
-            )
+    """A task rule 4 or rule 2 leaves to rule 13 is announced by neither until rule 13's own
+    wait has passed: say so when that is longer than the rule's own (the gap is silent)."""
+    for rule in rules:
+        inbox = getattr(rule, "inbox", None)
+        if inbox is None:
+            continue
+        for thirteen, own, what in _INBOX_GAPS.get(rule.name, ()):
+            theirs, mine = getattr(inbox, thirteen), getattr(rule, own)
+            if mine is not None and theirs > mine:
+                log.warning(
+                    "needs_you.%s (%s) is longer than %s.%s (%s): %s is announced by neither "
+                    "rule for %s in between",
+                    thirteen,
+                    _span(theirs),
+                    rule.name,
+                    own,
+                    _span(mine),
+                    what,
+                    _span(theirs - mine),
+                )
 
 
 def hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
@@ -894,6 +1072,7 @@ def merged_snapshot(
     offenders: OffenderWatch | None = None,
     remote: Callable[[datetime], Snapshot] | None = None,
     snoozes: SnoozeReader | None = None,
+    instructions: InstructionWatch | None = None,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
 
@@ -902,7 +1081,12 @@ def merged_snapshot(
     whole remote farm counts as unobserved for that tick.
 
     ``enrich`` are named connector steps run on the merged board (e.g. GitHub conditions);
-    one that raises is logged, counted in ``kelpie_connector_errors_total`` and skipped.
+    one that raises is logged, counted in ``kelpie_connector_errors_total`` (and
+    ``kelpie_connector_failing_seconds`` while it keeps failing) and skipped. The conditions
+    it found unmet or unknown on its last good tick are carried forward with their
+    ``checked_at`` (:func:`~kelpie.core.conditions.carry_forward`), so they go stale on their
+    own (``max_condition_age``); a tick that missed part of the farm keeps what it held for
+    the tasks it did not see.
 
     An adapter that raises is logged, counted in ``kelpie_adapter_errors_total`` and left
     out of that tick; the others still count. With ``spans``, stored spans of the window
@@ -921,8 +1105,12 @@ def merged_snapshot(
     recomputed hourly from the span store; a failed read is logged and counted. With
     ``snoozes``, ``Snapshot.snoozes`` is filled on the merged board (the agents' boards
     included: an agent never sends snoozes), from the store and the block reasons' markers.
+    With ``instructions``, the instruction files of this host are measured (hourly) into
+    ``Snapshot.instruction_files`` and ``instruction_duplicates``; a failed scan is logged
+    and the tick goes on without them.
     """
     last = _LastBudgets()
+    carried: dict[str, Contribution] = {}  # per connector step, from its last good tick
 
     def source() -> Snapshot:
         now = clock()
@@ -947,16 +1135,24 @@ def merged_snapshot(
                 resources=merged.resources + part.resources,
                 sessions=merged.sessions + part.sessions,
                 spans=merged.spans + part.spans,
+                waits=merged.waits + part.waits,
+                usage=merged.usage + part.usage,
+                skill_loads=merged.skill_loads + part.skill_loads,
+                skill_loads_counted=merged.skill_loads_counted + part.skill_loads_counted,
                 limit_hits=merged.limit_hits + part.limit_hits,
                 providers=merged.providers + part.providers,
                 builds=merged.builds + part.builds,
+                unobserved=merged.unobserved + part.unobserved,  # boards of a Hermes home
             )
+            for board in part.unobserved:  # one board of several could not be read
+                metrics.adapter_failed(adapter.name, board)
+                complete = False
         if remote is not None:
             try:
                 part = remote(now)
             except Exception:
                 log.exception("merging the agents' boards failed")
-                merged = replace(merged, unobserved=("hub",))
+                merged = replace(merged, unobserved=(*merged.unobserved, "hub"))
             else:
                 merged = replace(
                     merged,
@@ -966,15 +1162,25 @@ def merged_snapshot(
                     conditions=merged.conditions + part.conditions,
                     sessions=merged.sessions + part.sessions,
                     spans=merged.spans + part.spans,
-                    unobserved=part.unobserved,
+                    unobserved=merged.unobserved + part.unobserved,
                 )
+        partial = not complete or bool(merged.unobserved)  # part of the farm not seen
         for name, step in enrich:
+            before = merged
             try:
                 merged = step(merged)
             except Exception as exc:
                 log.error("connector %s failed to update the snapshot: %s", name, exc)
-                metrics.connector_failed(name)
+                metrics.connector_failed(name, now)
                 complete = False
+                if (kept := carried.get(name)) is not None:
+                    merged = carry_forward(merged, kept)
+            else:
+                done = contribution(before, merged)
+                if partial and (kept := carried.get(name)) is not None:
+                    done = widen(done, kept, merged)
+                carried[name] = done
+                metrics.connector_ok(name, now)
         if snoozes is not None:
             merged = snoozes.apply(merged, complete)
         if spans is not None:
@@ -985,11 +1191,19 @@ def merged_snapshot(
                 metrics.span_store_failed()
             else:
                 merged = replace(
-                    merged, spans=merge_spans(stored, merged.spans), span_totals=totals
+                    merged,
+                    spans=_board_tasks(merge_spans(stored, merged.spans), merged.tasks),
+                    span_totals=totals,
                 )
         if resources is not None:
             try:
                 merged = replace(merged, resources=merged.resources + tuple(resources.read(now)))
+                if isinstance(resources, ToolchainReader):
+                    merged = replace(
+                        merged,
+                        toolchain_changes=merged.toolchain_changes
+                        + tuple(resources.toolchain_changes(now)),
+                    )
             except Exception as exc:
                 log.error("resource source failed: %s", type(exc).__name__)
                 metrics.resource_failed("unexpected")
@@ -1017,6 +1231,13 @@ def merged_snapshot(
                 metrics.span_store_failed()
             else:
                 merged = replace(merged, output_offenders=found)
+        if instructions is not None:
+            try:
+                files, copies = instructions.read(merged)
+            except Exception as exc:
+                log.error("instruction files could not be measured: %s", type(exc).__name__)
+            else:
+                merged = replace(merged, instruction_files=files, instruction_duplicates=copies)
         if spans is not None and budgets is not None and budgets.budgets:
             merged = _with_budgets(merged, spans, budgets, metrics, last, remember)
         return merged
@@ -1155,6 +1376,28 @@ class SnoozeReader:
                 log.warning("task %s: snooze marker %r ignored: %s", p.task_id, p.token, p.why)
 
 
+def _board_tasks(spans: tuple[Span, ...], tasks: Sequence[Task]) -> tuple[Span, ...]:
+    """Stored spans that name a board's task by its id on the board (OTLP from Hermes:
+    ``hermes.kanban.task_id`` is ``t_1a``, the task ``qr:t_1a``) with the task's id, when
+    exactly one board has that id; others as they are."""
+    found: dict[str, list[str]] = {}
+    for t in tasks:
+        if t.board and (local := t.local_id) is not None:
+            host = t.id[: len(t.id) - len(local) - len(t.board) - 1]  # "<host>:" or ""
+            found.setdefault(f"{host}{local}", []).append(t.id)
+    if not found:
+        return spans
+    ids = {t.id for t in tasks}
+    return tuple(
+        replace(s, task_id=hit[0])
+        if s.task_id is not None
+        and s.task_id not in ids
+        and len(hit := found.get(s.task_id, [])) == 1
+        else s
+        for s in spans
+    )
+
+
 def _observed(task_id: str, unobserved: Sequence[str]) -> bool:
     """Whether the task's own part of the farm is in the snapshot (as the engine's
     ``_blind`` reads ``Snapshot.unobserved``: ``hub`` means no agent board at all)."""
@@ -1230,7 +1473,10 @@ def _unique_owners(owners: tuple[Owner, ...]) -> tuple[Owner, ...]:
     )
 
 
-def build_adapters(settings: Settings) -> list[PlatformAdapter]:
+def build_adapters(
+    settings: Settings, environ: Mapping[str, str] = os.environ
+) -> list[PlatformAdapter]:
+    """The enabled platform adapters; tokens are read from ``environ``."""
     adapters: list[PlatformAdapter] = []
     if settings.hermes is not None and settings.hermes.enabled:
         adapters.append(settings.hermes.build())
@@ -1241,7 +1487,7 @@ def build_adapters(settings: Settings) -> list[PlatformAdapter]:
     for issues in (settings.github_issues, settings.linear):
         if issues is not None and issues.enabled:
             try:
-                adapters.append(issues.build())
+                adapters.append(issues.build(environ))
             except ValueError as exc:
                 raise ConfigError(str(exc)) from exc
     return adapters
@@ -1251,7 +1497,10 @@ def board_only(adapter: PlatformAdapter) -> PlatformAdapter:
     """``adapter`` reading its board alone: tasks, blocks and dependencies, without the
     spool, git or process checks a tick also runs (``kelpie snooze``, ``kelpie doctor``)."""
     if isinstance(adapter, hermes.HermesAdapter):
-        return replace(adapter, git_state=False, spool=None, tools=None)
+        return replace(adapter, git_state=False, spool=None, tools=None, state_home=None)
+    if isinstance(adapter, HermesBoards):
+        boards = [replace(b, git_state=False) for b in adapter.boards]
+        return HermesBoards(boards, name=adapter.name)
     if isinstance(adapter, OpenClawAdapter):
         return replace(adapter, spool=None)
     return adapter
@@ -1362,8 +1611,8 @@ def trace_window_warnings(rules: Sequence[Rule], traces: TraceSettings) -> list[
     if not traces.enabled:
         return []
     return [
-        f"rule 'no_progress' window ({rule.window}) is longer than [traces] window "
-        f"({traces.window}): it sees only the newest spans and undercounts tokens"
+        f"rule 'no_progress' window ({_span(rule.window)}) is longer than [traces] window "
+        f"({_span(traces.window)}): it sees only the newest spans and undercounts tokens"
         for rule in rules
         if isinstance(rule, NoProgress) and rule.window > traces.window
     ]
@@ -1401,8 +1650,8 @@ def ci_window_errors(rules: Sequence[Rule], settings: Settings) -> list[str]:
     if ci is None or not ci.enabled:
         return []
     return [
-        f"rule 'ci_economy' window ({rule.window}) is longer than [connectors.github.ci] "
-        f"window ({ci.window}): it would undercount builds and burn"
+        f"rule 'ci_economy' window ({_span(rule.window)}) is longer than [connectors.github.ci] "
+        f"window ({_span(ci.window)}): it would undercount builds and burn"
         for rule in rules
         if isinstance(rule, CiEconomy) and rule.window > ci.window
     ]
@@ -1417,10 +1666,10 @@ def billing_interval_warnings(rules: Sequence[Rule], settings: Settings) -> list
         return []
     kept = ci.billing_interval * KEEP_FOR
     return [
-        f"[connectors.github.ci] billing_interval ({ci.billing_interval}) keeps a reading for "
-        f"up to {kept}, longer than rule 'ci_economy' max_reading_age "
-        f"({rule.max_reading_age}): when reads fail, the CI minutes quota would go unwatched "
-        "until the reading expires"
+        f"[connectors.github.ci] billing_interval ({_span(ci.billing_interval)}) keeps a "
+        f"reading for up to {_span(kept)}, longer than rule 'ci_economy' max_reading_age "
+        f"({_span(rule.max_reading_age)}): when reads fail, the CI minutes quota would go "
+        "unwatched until the reading expires"
         for rule in rules
         if isinstance(rule, CiEconomy) and kept > rule.max_reading_age
     ]
@@ -1433,8 +1682,8 @@ def resource_interval_warnings(rules: Sequence[Rule], resources: ResourceSetting
     if prometheus is None:
         return []
     return [
-        f"[resources.prometheus] interval ({prometheus.interval}) is longer than rule "
-        f"'resources' max_reading_age ({rule.max_reading_age}): host readings would be "
+        f"[resources.prometheus] interval ({_span(prometheus.interval)}) is longer than rule "
+        f"'resources' max_reading_age ({_span(rule.max_reading_age)}): host readings would be "
         "ignored as stale between fetches"
         for rule in rules
         if isinstance(rule, Resources) and prometheus.interval > rule.max_reading_age
@@ -1459,9 +1708,9 @@ def provider_interval_warnings(rules: Sequence[Rule], quotas: LlmQuotaSettings |
     if quotas is None:
         return []
     return [
-        f"[connectors.llm_quotas] provider {p.name} interval ({p.interval}) is longer than "
-        f"rule 'resources' max_reading_age ({rule.max_reading_age}): its readings would be "
-        "ignored between probes"
+        f"[connectors.llm_quotas] provider {p.name} interval ({_span(p.interval)}) is longer "
+        f"than rule 'resources' max_reading_age ({_span(rule.max_reading_age)}): its readings "
+        "would be ignored between probes"
         for rule in rules
         if isinstance(rule, Resources)
         for p in quotas.providers
@@ -1478,16 +1727,11 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     pulls = (
         github is not None and github.enabled and github.pulls is not None and github.pulls.enabled
     )
-    if (
+    needs_pulls = (
         checkpoints is not None
         and not getattr(checkpoints, "wip_without_pr_check", True)
         and not pulls
-    ):
-        log.warning(
-            "checkpoints makes no WIP commits: it needs [connectors.github.pulls] to see "
-            "that a branch has no open PR (or set wip_without_pr_check = true where task "
-            "branches never carry PRs)"
-        )
+    )
     act_within = getattr(checkpoints, "act_within", None)
     if act_within is not None:
         if act_within + timedelta(hours=1) >= settings.engine.once_window:
@@ -1518,15 +1762,13 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         ),
     ]:
         log.warning(warning)
-    try:
-        store: LedgerStore = (
-            MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
-        )
-    except (OSError, sqlite3.Error, RuntimeError) as exc:
-        raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
+    # Everything build_app refuses a config for is checked before any storage is opened, so
+    # a kelpie serve that will not start leaves no database behind. Ports are found taken
+    # only when bound: the hub's at the end of build_app, the main listener's after it.
     traces = settings.traces
     try:
-        token = traces.token()
+        # With [hub] this port takes no spans: its token (or token file) is not needed.
+        token = traces.token() if settings.hub is None else None
         destinations = [f.destination() for f in traces.forward] if traces.enabled else []
         prometheus = settings.resources.prometheus
         reader = prometheus.build() if prometheus is not None else None
@@ -1545,16 +1787,50 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     # Without [[alerts.channels]] there is no alerter: an effect nobody can carry out turns
     # into an alert that is only logged. The defaults (dry-run, observe) send nothing.
     adapters = build_adapters(settings)
+    # Only where something would make WIP commits: an adapter that carries them out, or a
+    # hub, whose agents' adapters are known only once they report.
+    if needs_pulls and (
+        settings.hub is not None or any(ActionKind.WIP_COMMIT in _declared(a) for a in adapters)
+    ):
+        log.warning(
+            "checkpoints makes no WIP commits: it needs [connectors.github.pulls] to see "
+            "that a branch has no open PR (or set wip_without_pr_check = true where task "
+            "branches never carry PRs)"
+        )
     for adapter in adapters:  # Kelpie's park and stop markers are issued on the app's clock
-        if isinstance(adapter, hermes.HermesAdapter):
+        if isinstance(adapter, hermes.HermesAdapter | HermesBoards):
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
     hub = _build_hub(settings, adapters, clock)
+    enrich, connectors = connector_steps(settings, metrics, clock)
+    costs_source = cost_report_source(settings)  # kelpie serve only: reads with the admin key
+    tokens = None
+    if traces.enabled and traces.token_file is not None and settings.hub is None:
+        try:  # also refuses a file others could have written (owner, mode, folders)
+            tokens = TokenFile(
+                traces.token_file,
+                traces.token_env,
+                clock,
+                on_error=lambda why: log.error("[traces] token_file %s", why),
+            )
+        except TokenFileError as exc:
+            raise ConfigError(f"[traces] token_file {exc}") from None
+        if loose_mode(traces.token_file):
+            log.warning(
+                "[traces] token_file %s can be read by others than its owner: chmod 600 it",
+                traces.token_file,
+            )
+        metrics.token_file = tokens.status
+    try:
+        store: LedgerStore = (
+            MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
+        )
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
-    enrich, connectors = connector_steps(settings, metrics, clock)
-    costs = cost_report_steps(settings, metrics)  # kelpie serve only: reads with the admin key
+    costs = cost_report_steps(settings, metrics, costs_source)
     enrich += costs
     engine = Engine(
         loaded.rules,
@@ -1579,6 +1855,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     remote = farm.snapshot if farm is not None else None
     metrics.set_rules(loaded.statuses, dry_run=settings.engine.dry_run)
     metrics.set_adapters(a.name for a in adapters)
+    for a in adapters:  # several boards: a ``board`` label of their names (#283)
+        if isinstance(a, HermesBoards):
+            metrics.set_boards(a.name, a.board_names)
     metrics.set_budgets_enabled(bool(settings.budgets.budgets))
     if reader is not None:
         reader.observer = metrics
@@ -1596,6 +1875,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             providers=quotas,
             remote=remote,
             snoozes=snooze_reader(settings, store),
+            instructions=instruction_watch(settings, adapters),
         )
         loop = ControlLoop(engine, source, metrics)
         app = App(
@@ -1605,7 +1885,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             loop,
             metrics,
             store,
-            alerts=_start_alerts(settings, engine, metrics),
+            alerts=_start_alerts(settings, engine, metrics, store, clock),
         )
         return _with_hub(app, hub)
     span_store = _open_span_store(settings.db_path)
@@ -1621,6 +1901,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         clock=clock,
         observer=metrics,
         token=token,
+        tokens=tokens,
         max_body_bytes=traces.max_body_bytes,
         options=traces.options,
         max_concurrent=traces.max_concurrent_requests,
@@ -1658,9 +1939,10 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         offenders=OffenderWatch(span_store, traces.outputs, settings.report.tz),
         remote=remote,
         snoozes=snooze_reader(settings, store),
+        instructions=instruction_watch(settings, adapters),
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
-    alerts = _start_alerts(settings, engine, metrics)
+    alerts = _start_alerts(settings, engine, metrics, store, clock)
     if hub is not None:
         # A span whose ids no agent token vouches for could be forged into any host's
         # namespace: with a hub, spans come only through the agents.
@@ -1704,9 +1986,15 @@ def _build_hub(
         tokens = settings.hub.tokens()
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
-    if not settings.hub.tls:
+    tls = None
+    if settings.hub.tls:
+        try:  # a cert or key that does not load is refused before any storage is opened
+            tls = server_context(settings.hub)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+    else:
         log.warning("[hub] takes agents over plain http: their tokens cross the network in clear")
-    return Hub(settings.hub, tokens, clock)
+    return Hub(settings.hub, tokens, clock, tls)
 
 
 def _with_hub(app: App, hub: Hub | None, traces: TraceIngest | None = None) -> App:
@@ -1725,16 +2013,67 @@ def _with_hub(app: App, hub: Hub | None, traces: TraceIngest | None = None) -> A
     return app
 
 
-def _start_alerts(settings: Settings, engine: Engine, metrics: Metrics) -> Delivery | None:
-    """Start the alert channels (their worker threads) and give the engine its alerter. Done
-    last in ``build_app``, so a startup error before this point leaves no thread behind."""
+def _start_alerts(
+    settings: Settings,
+    engine: Engine,
+    metrics: Metrics,
+    store: LedgerStore,
+    clock: Callable[[], datetime],
+) -> Delivery | None:
+    """Start the alert channels (their worker threads, and the snooze button poller of a
+    Telegram channel with ``buttons = true``) and give the engine its alerter. Done last in
+    ``build_app``, so a startup error before this point leaves no thread behind."""
+    control = _chat_control(settings, store, metrics, clock)
     try:
-        alerts = settings.alerts.build(metrics)
+        alerts = settings.alerts.build(metrics, control=control)
     except ValueError as exc:
+        if control is not None:
+            control.store.close()
         raise ConfigError(str(exc)) from exc
     if alerts is not None:
         engine.alerter = alerts.alerter()
     return alerts
+
+
+def _chat_control(
+    settings: Settings, store: LedgerStore, metrics: Metrics, clock: Callable[[], datetime]
+) -> ChatControl | None:
+    """What snooze buttons need (#176): their store beside the database, and the callback
+    that writes a press's snooze and its ledger entry to Kelpie's store. None when no
+    channel has buttons."""
+    channels = settings.alerts.button_channels
+    if not channels:
+        return None
+    if settings.db_path is None or not isinstance(store, SqliteLedgerStore):
+        raise ConfigError(
+            '[alerts] snooze buttons need a database: set [storage] path (not ":memory:")'
+        )
+    path = button_store_path(settings.db_path)
+    try:
+        buttons = ButtonStore(path)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        raise ConfigError(f"cannot open the button store {path}: {exc}") from exc
+
+    sqlite_store = store
+
+    def snooze(press: Press, now: datetime) -> datetime:
+        record, entry = chat_snooze(
+            press.task_id,
+            press.days,
+            press.name,
+            press.user_id,
+            press.channel,
+            now,
+            settings.snooze,
+            dry_run=settings.engine.dry_run,
+        )
+        # The snooze and its ledger entry in one transaction: no chat snooze without one.
+        if (held := sqlite_store.put_chat_snooze(record, entry)) is not None:
+            raise AlreadySnoozed(held.until)
+        return record.until
+
+    metrics.set_chat_channels(c.name for c in channels)
+    return ChatControl(buttons, snooze, clock, metrics)
 
 
 def connector_steps(
@@ -1925,12 +2264,12 @@ def reconcile_spend(
     return reconcile(costs, estimated, thresholds, scopes)
 
 
-def cost_report_steps(
-    settings: Settings, metrics: Metrics | None = None
-) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+def cost_report_source(settings: Settings) -> CostReportReader | None:
+    """The reader of ``[connectors.cost_reports]`` (None without it); ConfigError when an
+    admin key is missing. Opens nothing."""
     reports = settings.cost_reports
     if reports is None:
-        return []
+        return None
     try:
         source = reports.build()
     except ValueError as exc:
@@ -1939,6 +2278,21 @@ def cost_report_steps(
         log.info(
             "[connectors.cost_reports.%s] admin key read from $%s", r.provider, r.admin_key_env
         )
+    return source
+
+
+def cost_report_steps(
+    settings: Settings,
+    metrics: Metrics | None = None,
+    source: CostReportReader | None = None,
+) -> list[tuple[str, Callable[[Snapshot], Snapshot]]]:
+    """The cost report step, with its store opened (``source``: from
+    :func:`cost_report_source`, built here when not given)."""
+    if settings.cost_reports is None:
+        return []
+    if source is None:
+        source = cost_report_source(settings)
+    assert source is not None
     try:
         store = SqliteCostReports(settings.db_path) if settings.db_path is not None else None
     except (OSError, sqlite3.Error, RuntimeError) as exc:
@@ -2030,6 +2384,33 @@ def check_exposure(settings: Settings, host: str) -> None:
         raise ConfigError(str(exc)) from exc
 
 
+def instruction_watch(
+    settings: Settings, adapters: Sequence[PlatformAdapter], record: bool = True
+) -> InstructionWatch | None:
+    """The instruction files to measure ([instructions]): the configured ones first, then
+    the defaults of the platforms whose adapters run here. None without the section.
+    ``record``: False to only read the size history (``kelpie report``)."""
+    s = settings.instructions
+    if not s.enabled:
+        return None
+    sources = list(s.files)
+    if s.defaults:
+        for adapter in adapters:
+            if isinstance(adapter, hermes.HermesAdapter):
+                sources += platform_sources(adapter.name, role_of=adapter.role_of)
+            elif isinstance(adapter, HermesBoards):  # the boards share the home's profiles
+                sources += platform_sources(adapter.name, role_of=adapter.boards[0].role_of)
+            elif isinstance(adapter, OpenClawAdapter):
+                sources += platform_sources(adapter.name, str(adapter.state_dir))
+            else:
+                sources += platform_sources(adapter.name)
+    try:
+        store = SqliteInstructionStore(settings.db_path or ":memory:")
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        raise ConfigError(f"cannot open {settings.db_path}: {exc}") from exc
+    return InstructionWatch(store, s, tuple(sources), record=record)
+
+
 def _open_span_store(db_path: Path | None) -> SpanStore:
     if db_path is None:
         return MemorySpanStore()
@@ -2089,7 +2470,7 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
     they report, so a platform gap is not judged there."""
     ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
     cancel = ci is not None and ci.enabled and ci.allow_cancel
-    has_hermes = any(isinstance(a, hermes.HermesAdapter) for a in adapters)
+    has_hermes = any(isinstance(a, hermes.HermesAdapter | HermesBoards) for a in adapters)
     found: dict[str, ActBlocker] = {}
     for planned in PLANNED:
         name, effects = planned.name, planned.effects
@@ -2271,18 +2652,25 @@ def _dry_run_status(settings: Settings) -> str:
     return "on (nothing leaves Kelpie)"
 
 
-def _traces_status(traces: TraceSettings) -> str:
+def _traces_status(traces: TraceSettings, hub: bool = False) -> str:
     if not traces.enabled:
         return "disabled"
+    if hub:
+        return "POST /v1/traces off on this port: agents relay spans to the hub"
     try:
         token = traces.token()
     except ValueError as exc:
         return f"NOT ready: {exc}"
-    auth = (
-        f"bearer token from ${traces.token_env}" if token else f"open (${traces.token_env} unset)"
-    )
+    if traces.token_file is not None:
+        grace = _span(traces.token_grace)
+        auth = f"bearer token from {traces.token_file} (rotatable, grace {grace})"
+    elif token:
+        auth = f"bearer token from ${traces.token_env}"
+    else:
+        auth = f"open (${traces.token_env} unset)"
     forward = "".join(f", forward to {f.name} ({f.display_endpoint})" for f in traces.forward)
-    return f"POST /v1/traces, {auth}, window {traces.window}, retention {traces.retention}{forward}"
+    window, retention = _span(traces.window), _span(traces.retention)
+    return f"POST /v1/traces, {auth}, window {window}, retention {retention}{forward}"
 
 
 def read_budgets(
@@ -2513,8 +2901,8 @@ def render_budgets(
             if v is not None
         )
         lines.append(
-            f"  {b.name}: {b.scope}{match}, {b.unit}, {b.mode}, window {b.window}"
-            f" (burn rate over {b.burn_window}), {limits}"
+            f"  {b.name}: {b.scope}{match}, {b.unit}, {b.mode}, window {_span(b.window)}"
+            f" (burn rate over {_span(b.burn_window)}), {limits}"
         )
         if isinstance(statuses, str):
             lines.append(f"    spend unavailable: {statuses}")
@@ -2550,7 +2938,7 @@ def _resources_status(resources: ResourceSettings) -> str:
     auth = f"bearer token from ${p.token_env}" if token else "no token"
     return (
         f"Prometheus {p.display_url}, {len(p.hosts)} host(s) by label {p.host_label}, "
-        f"every {p.interval}, {auth}"
+        f"every {_span(p.interval)}, {auth}"
     )
 
 
@@ -2591,7 +2979,7 @@ def _github_status(settings: Settings) -> list[str]:
                 auth = f"NOT ready: {exc}"
             lines.append(
                 f"github ci: minutes used from the billing usage of {kind} "
-                f"{ci.billing_account}, every {ci.billing_interval} ({auth})"
+                f"{ci.billing_account}, every {_span(ci.billing_interval)} ({auth})"
             )
     return lines
 
@@ -2650,7 +3038,7 @@ def _providers_status(quotas: LlmQuotaSettings | None) -> str:
         except ValueError as exc:
             return f"NOT ready: {exc}"
         parts.append(
-            f"{p.name} ({p.kind} {p.display_url}{p.path.split('?')[0]}, every {p.interval})"
+            f"{p.name} ({p.kind} {p.display_url}{p.path.split('?')[0]}, every {_span(p.interval)})"
         )
     return ", ".join(parts)
 
@@ -2662,8 +3050,6 @@ def _alerts_status(alerts: AlertSettings) -> list[str]:
     problems = alerts.problems()
     lines = [f"alerts:   {c.name}: {c.describe()}" for c in alerts.channels]
     lines += [f"alerts:   NOT ready: {p}" for p in problems]
-    if alerts.links_note:
-        lines.append(f"alerts:   task links: off ({alerts.links_note})")
     return lines
 
 
@@ -2681,9 +3067,9 @@ def render_status(
     lines = [
         f"config:   {settings.source or '(defaults)'}",
         f"dry-run:  {_dry_run_status(settings)}",
-        f"interval: {engine.interval}",
+        f"interval: {_span(engine.interval)}",
         f"ledger:   {settings.db_path or '(in memory)'}",
-        f"traces:   {_traces_status(settings.traces)}",
+        f"traces:   {_traces_status(settings.traces, settings.hub is not None)}",
         *render_prices(settings, unpriced),
         f"resources: {_resources_status(settings.resources)}",
         *_github_status(settings),
@@ -2712,7 +3098,10 @@ def render_status(
 
 def _span(d: timedelta) -> str:
     """A config duration as it is written, e.g. ``7d``, ``36h``, ``90m``."""
-    seconds = int(d.total_seconds())
+    total = d.total_seconds()
+    seconds = int(total)
+    if seconds != total or seconds == 0:  # a fraction of a second, or none
+        return f"{total:g}s"
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
         if seconds % size == 0:
             return f"{seconds // size}{unit}"

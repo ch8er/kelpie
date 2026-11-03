@@ -55,7 +55,8 @@ class OutputOffenders:
             f"{who}: `{command}` floods the {role} context, {o.mean_tokens:,.0f} tokens per "
             f"call on average over {o.calls} calls, above the threshold on {o.days} days. Add "
             f"to the {role} instructions: {o.how}. Estimated saving: about "
-            f"{o.saved_tokens:,} tokens; the daily report checks it before/after."
+            f"{o.saved_tokens:,} tokens; the daily report checks it before/after"
+            + (_fix_hint(o) if o.command.startswith("tool:") else ".")
         )
         return Action(
             ActionKind.COMMENT if task else ActionKind.ALERT,
@@ -87,6 +88,17 @@ class OutputOffenders:
                 ),
             },
         )
+
+
+def _fix_hint(o: OutputOffender) -> str:
+    """How to note the change so the report measures it: no filter shows in a tool's calls,
+    so the comparison waits for ``kelpie fix``, which matches the command and role exactly.
+    The exact names only, when they are safe to post; else just the advice to note it."""
+    exact = SAFE_NAME.fullmatch(o.command) and (o.role is None or SAFE_NAME.fullmatch(o.role))
+    if not exact:
+        return " once the change is noted with `kelpie fix`."
+    role = f" --role {o.role}" if o.role is not None else ""
+    return f' once the change is noted (`kelpie fix "<what changed>" --command {o.command}{role}`).'
 
 
 def _clean(text: str) -> str:

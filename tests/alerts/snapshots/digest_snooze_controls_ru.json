@@ -1,0 +1,248 @@
+{
+  "text": "🟡 Ждут вас: 3 задачи (самая давняя — 24 ч)\n\n1. Enable R2 for backups — 24 ч · t_r2a1b2c3\n   Нужно: CEO: enable R2 in the Cloudflare dashboard\n   Блокирует: 2 задачи · Открыть задачу: https://board.example.org/tasks/t_r2a1b2c3\n   kelpie snooze t_r2a1b2c3 --until 2026-10-22\n2. Sign the vendor contract — 6,0 ч · H-1\n   Блокирует: 2 задачи · Открыть задачу: https://board.example.org/tasks/H-1\n   kelpie snooze H-1 --until 2026-10-22\n3. Publish the app — 1,0 ч · t_dead\n   Нужно: its PR was closed unmerged\n   Блокирует: ничего · Открыть задачу: https://board.example.org/tasks/t_dead\nПочему: Needs you (ceo): 3 item(s) hold 4 agent task(s), 31.0 agent-hours waited so far.\nПравило: needs_you",
+  "mrkdwn": false,
+  "blocks": [
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "🟡 "
+            },
+            {
+              "type": "text",
+              "text": "Ждут вас: 3 задачи (самая давняя — 24 ч)",
+              "style": {
+                "bold": true
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "1. "
+            },
+            {
+              "type": "text",
+              "text": "Enable R2 for backups",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 24 ч · "
+            },
+            {
+              "type": "text",
+              "text": "t_r2a1b2c3",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Нужно: "
+            },
+            {
+              "type": "text",
+              "text": "CEO: enable R2 in the Cloudflare dashboard"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Блокирует: 2 задачи"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_r2a1b2c3",
+              "text": "Открыть задачу"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "kelpie snooze t_r2a1b2c3 --until 2026-10-22"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "2. "
+            },
+            {
+              "type": "text",
+              "text": "Sign the vendor contract",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 6,0 ч · "
+            },
+            {
+              "type": "text",
+              "text": "H-1",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Блокирует: 2 задачи"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/H-1",
+              "text": "Открыть задачу"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "kelpie snooze H-1 --until 2026-10-22"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "3. "
+            },
+            {
+              "type": "text",
+              "text": "Publish the app",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": " — 1,0 ч · "
+            },
+            {
+              "type": "text",
+              "text": "t_dead",
+              "style": {
+                "code": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "\n   Нужно: "
+            },
+            {
+              "type": "text",
+              "text": "its PR was closed unmerged"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "Блокирует: ничего"
+            },
+            {
+              "type": "text",
+              "text": " · "
+            },
+            {
+              "type": "link",
+              "url": "https://board.example.org/tasks/t_dead",
+              "text": "Открыть задачу"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Почему: ",
+              "style": {
+                "bold": true
+              }
+            },
+            {
+              "type": "text",
+              "text": "Needs you (ceo): 3 item(s) hold 4 agent task(s), 31.0 agent-hours waited so far."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "rich_text",
+      "elements": [
+        {
+          "type": "rich_text_section",
+          "elements": [
+            {
+              "type": "text",
+              "text": "Правило: "
+            },
+            {
+              "type": "text",
+              "text": "needs_you",
+              "style": {
+                "code": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

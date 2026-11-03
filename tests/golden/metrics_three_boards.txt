@@ -1,0 +1,146 @@
+# HELP kelpie_adapter_errors_total Adapter snapshots that raised; the adapter is skipped for that tick.
+# TYPE kelpie_adapter_errors_total counter
+kelpie_adapter_errors_total{adapter="hermes"} 0
+kelpie_adapter_errors_total{adapter="hermes",board="app-a"} 0
+kelpie_adapter_errors_total{adapter="hermes",board="app-b"} 0
+kelpie_adapter_errors_total{adapter="hermes",board="svc"} 0
+# HELP kelpie_tasks Tasks in the last snapshot, by normalized status.
+# TYPE kelpie_tasks gauge
+kelpie_tasks{board="app-a",status="backlog"} 0
+kelpie_tasks{board="app-a",status="ready"} 1
+kelpie_tasks{board="app-a",status="in_progress"} 1
+kelpie_tasks{board="app-a",status="review"} 0
+kelpie_tasks{board="app-a",status="blocked"} 0
+kelpie_tasks{board="app-a",status="waiting"} 0
+kelpie_tasks{board="app-a",status="accepted"} 0
+kelpie_tasks{board="app-a",status="done"} 0
+kelpie_tasks{board="app-a",status="failed"} 0
+kelpie_tasks{board="app-a",status="cancelled"} 0
+kelpie_tasks{board="app-b",status="backlog"} 1
+kelpie_tasks{board="app-b",status="ready"} 0
+kelpie_tasks{board="app-b",status="in_progress"} 0
+kelpie_tasks{board="app-b",status="review"} 0
+kelpie_tasks{board="app-b",status="blocked"} 0
+kelpie_tasks{board="app-b",status="waiting"} 0
+kelpie_tasks{board="app-b",status="accepted"} 0
+kelpie_tasks{board="app-b",status="done"} 1
+kelpie_tasks{board="app-b",status="failed"} 0
+kelpie_tasks{board="app-b",status="cancelled"} 0
+kelpie_tasks{board="svc",status="backlog"} 0
+kelpie_tasks{board="svc",status="ready"} 0
+kelpie_tasks{board="svc",status="in_progress"} 0
+kelpie_tasks{board="svc",status="review"} 0
+kelpie_tasks{board="svc",status="blocked"} 1
+kelpie_tasks{board="svc",status="waiting"} 0
+kelpie_tasks{board="svc",status="accepted"} 0
+kelpie_tasks{board="svc",status="done"} 0
+kelpie_tasks{board="svc",status="failed"} 0
+kelpie_tasks{board="svc",status="cancelled"} 0
+# HELP kelpie_prework_tasks Cards in a status before any work starts (Hermes triage, scheduled), by the platform's own status (incident 17); also those still waiting for parents of their own. A status shows only while a card is in it.
+# TYPE kelpie_prework_tasks gauge
+kelpie_prework_tasks{board="app-b",platform_status="triage"} 1
+# HELP kelpie_prework_oldest_seconds How long the oldest card in each pre-work status has sat there.
+# TYPE kelpie_prework_oldest_seconds gauge
+kelpie_prework_oldest_seconds{board="app-b",platform_status="triage"} 14400
+# HELP kelpie_idle_agents Agent owners with no live session and no open task, by role.
+# TYPE kelpie_idle_agents gauge
+kelpie_idle_agents{role="dev"} 1
+kelpie_idle_agents{role="ops"} 1
+# HELP kelpie_role_agents Agent owners per role.
+# TYPE kelpie_role_agents gauge
+kelpie_role_agents{role="dev"} 1
+kelpie_role_agents{role="ops"} 1
+kelpie_role_agents{role="unknown"} 0
+# HELP kelpie_role_agents_with_work Agents with a live session or an open task, by role.
+# TYPE kelpie_role_agents_with_work gauge
+kelpie_role_agents_with_work{role="dev"} 0
+kelpie_role_agents_with_work{role="ops"} 0
+kelpie_role_agents_with_work{role="unknown"} 0
+# HELP kelpie_role_ownerless_queue_tasks Ownerless tasks waiting for the role (ready, review, accepted).
+# TYPE kelpie_role_ownerless_queue_tasks gauge
+kelpie_role_ownerless_queue_tasks{role="dev"} 0
+kelpie_role_ownerless_queue_tasks{role="ops"} 0
+kelpie_role_ownerless_queue_tasks{role="unknown"} 0
+# HELP kelpie_role_tasks_done_24h Tasks of the role that reached done in the last 24h.
+# TYPE kelpie_role_tasks_done_24h gauge
+kelpie_role_tasks_done_24h{board="app-a",role="dev"} 0
+kelpie_role_tasks_done_24h{board="app-a",role="ops"} 0
+kelpie_role_tasks_done_24h{board="app-a",role="unknown"} 0
+kelpie_role_tasks_done_24h{board="app-b",role="dev"} 0
+kelpie_role_tasks_done_24h{board="app-b",role="ops"} 0
+kelpie_role_tasks_done_24h{board="app-b",role="unknown"} 1
+kelpie_role_tasks_done_24h{board="svc",role="dev"} 0
+kelpie_role_tasks_done_24h{board="svc",role="ops"} 0
+kelpie_role_tasks_done_24h{board="svc",role="unknown"} 0
+# HELP kelpie_role_returns_24h Returns (sent back) in the last 24h, counted for the role that redoes the work.
+# TYPE kelpie_role_returns_24h gauge
+kelpie_role_returns_24h{board="app-a",role="dev"} 0
+kelpie_role_returns_24h{board="app-a",role="ops"} 0
+kelpie_role_returns_24h{board="app-a",role="unknown"} 0
+kelpie_role_returns_24h{board="app-b",role="dev"} 0
+kelpie_role_returns_24h{board="app-b",role="ops"} 0
+kelpie_role_returns_24h{board="app-b",role="unknown"} 0
+kelpie_role_returns_24h{board="svc",role="dev"} 0
+kelpie_role_returns_24h{board="svc",role="ops"} 0
+kelpie_role_returns_24h{board="svc",role="unknown"} 0
+# HELP kelpie_role_reopened_after_done_24h Done tasks of the role moved back out of done in the last 24h.
+# TYPE kelpie_role_reopened_after_done_24h gauge
+kelpie_role_reopened_after_done_24h{board="app-a",role="dev"} 0
+kelpie_role_reopened_after_done_24h{board="app-a",role="ops"} 0
+kelpie_role_reopened_after_done_24h{board="app-a",role="unknown"} 0
+kelpie_role_reopened_after_done_24h{board="app-b",role="dev"} 0
+kelpie_role_reopened_after_done_24h{board="app-b",role="ops"} 0
+kelpie_role_reopened_after_done_24h{board="app-b",role="unknown"} 0
+kelpie_role_reopened_after_done_24h{board="svc",role="dev"} 0
+kelpie_role_reopened_after_done_24h{board="svc",role="ops"} 0
+kelpie_role_reopened_after_done_24h{board="svc",role="unknown"} 0
+# HELP kelpie_role_reopened_after_done_ratio Of the role's completions in the last 24h (tasks still done, plus those reopened since), the share reopened; roles with a completion only.
+# TYPE kelpie_role_reopened_after_done_ratio gauge
+kelpie_role_reopened_after_done_ratio{board="app-b",role="unknown"} 0
+# HELP kelpie_tasks_by_stage Open tasks now per stage (working, queue, review, waiting, ownerless) and role.
+# TYPE kelpie_tasks_by_stage gauge
+kelpie_tasks_by_stage{board="app-a",role="dev",stage="ownerless"} 0
+kelpie_tasks_by_stage{board="app-a",role="dev",stage="queue"} 1
+kelpie_tasks_by_stage{board="app-a",role="dev",stage="review"} 0
+kelpie_tasks_by_stage{board="app-a",role="dev",stage="waiting"} 0
+kelpie_tasks_by_stage{board="app-a",role="dev",stage="working"} 0
+kelpie_tasks_by_stage{board="app-a",role="ops",stage="ownerless"} 0
+kelpie_tasks_by_stage{board="app-a",role="ops",stage="queue"} 0
+kelpie_tasks_by_stage{board="app-a",role="ops",stage="review"} 0
+kelpie_tasks_by_stage{board="app-a",role="ops",stage="waiting"} 0
+kelpie_tasks_by_stage{board="app-a",role="ops",stage="working"} 0
+kelpie_tasks_by_stage{board="app-a",role="unknown",stage="ownerless"} 0
+kelpie_tasks_by_stage{board="app-a",role="unknown",stage="queue"} 1
+kelpie_tasks_by_stage{board="app-a",role="unknown",stage="review"} 0
+kelpie_tasks_by_stage{board="app-a",role="unknown",stage="waiting"} 0
+kelpie_tasks_by_stage{board="app-a",role="unknown",stage="working"} 0
+kelpie_tasks_by_stage{board="app-b",role="dev",stage="ownerless"} 0
+kelpie_tasks_by_stage{board="app-b",role="dev",stage="queue"} 0
+kelpie_tasks_by_stage{board="app-b",role="dev",stage="review"} 0
+kelpie_tasks_by_stage{board="app-b",role="dev",stage="waiting"} 0
+kelpie_tasks_by_stage{board="app-b",role="dev",stage="working"} 0
+kelpie_tasks_by_stage{board="app-b",role="ops",stage="ownerless"} 0
+kelpie_tasks_by_stage{board="app-b",role="ops",stage="queue"} 0
+kelpie_tasks_by_stage{board="app-b",role="ops",stage="review"} 0
+kelpie_tasks_by_stage{board="app-b",role="ops",stage="waiting"} 0
+kelpie_tasks_by_stage{board="app-b",role="ops",stage="working"} 0
+kelpie_tasks_by_stage{board="app-b",role="unknown",stage="ownerless"} 0
+kelpie_tasks_by_stage{board="app-b",role="unknown",stage="queue"} 0
+kelpie_tasks_by_stage{board="app-b",role="unknown",stage="review"} 0
+kelpie_tasks_by_stage{board="app-b",role="unknown",stage="waiting"} 0
+kelpie_tasks_by_stage{board="app-b",role="unknown",stage="working"} 0
+kelpie_tasks_by_stage{board="svc",role="dev",stage="ownerless"} 0
+kelpie_tasks_by_stage{board="svc",role="dev",stage="queue"} 0
+kelpie_tasks_by_stage{board="svc",role="dev",stage="review"} 0
+kelpie_tasks_by_stage{board="svc",role="dev",stage="waiting"} 0
+kelpie_tasks_by_stage{board="svc",role="dev",stage="working"} 0
+kelpie_tasks_by_stage{board="svc",role="ops",stage="ownerless"} 0
+kelpie_tasks_by_stage{board="svc",role="ops",stage="queue"} 0
+kelpie_tasks_by_stage{board="svc",role="ops",stage="review"} 0
+kelpie_tasks_by_stage{board="svc",role="ops",stage="waiting"} 1
+kelpie_tasks_by_stage{board="svc",role="ops",stage="working"} 0
+kelpie_tasks_by_stage{board="svc",role="unknown",stage="ownerless"} 0
+kelpie_tasks_by_stage{board="svc",role="unknown",stage="queue"} 0
+kelpie_tasks_by_stage{board="svc",role="unknown",stage="review"} 0
+kelpie_tasks_by_stage{board="svc",role="unknown",stage="waiting"} 0
+kelpie_tasks_by_stage{board="svc",role="unknown",stage="working"} 0

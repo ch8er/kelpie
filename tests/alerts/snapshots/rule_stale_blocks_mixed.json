@@ -1,5 +1,5 @@
 {
-  "text": "🟡 T-1023 blocked 13h with nothing Kelpie can check\n\n1. FIX: flaky upload test — 13 h · T-1023\n   Needed: Clear the block, or register a condition Kelpie can check\n   Blocking: none · Open task: https://board.example.org/tasks/T-1023\nWhy: Task T-1023 has been blocked for 13h on 'Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase» — the fix in cart/total.py rounds before the discount, so 19.99 * 3 comes out as 59.96 instead of 59.97; нужно пересчитать скидку до округления и добавить кейс в tests/test_cart.py, затем прогнать весь набор ещё раз. Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase» — the fix in cart/total.py rounds before the discount, so 19.99 * 3 comes out as 59.96 instead of 59.97; нужно пересчитать скидку до округления и добавить кейс в tests/test_cart.py, затем прогнать весь набор ещё раз. Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase» — the fix in cart/total.py rounds before the discount, so 19.99 * 3 comes out as 59.96 instead of 59.97; нужно пересчитать скидку до округления и добавить кейс в tests/test_cart.py, затем прогнать весь набор ещё раз. Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase»…\nRule: stale_blocks",
+  "text": "🟡 T-1023 blocked 13h with nothing Kelpie can check\n\n1. FIX: flaky upload test — 13 h · T-1023\n   Needed: Clear the block, or register a condition Kelpie can check\n   Blocking: none · Open task: https://board.example.org/tasks/T-1023\n   kelpie snooze T-1023 --until 2026-03-05\nWhy: Task T-1023 has been blocked for 13h on 'Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase» — the fix in cart/total.py rounds before the discount, so 19.99 * 3 comes out as 59.96 instead of 59.97; нужно пересчитать скидку до округления и добавить кейс в tests/test_cart.py, затем прогнать весь набор ещё раз. Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase» — the fix in cart/total.py rounds before the discount, so 19.99 * 3 comes out as 59.96 instead of 59.97; нужно пересчитать скидку до округления и добавить кейс в tests/test_cart.py, затем прогнать весь набор ещё раз. Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase» — the fix in cart/total.py rounds before the discount, so 19.99 * 3 comes out as 59.96 instead of 59.97; нужно пересчитать скидку до округления и добавить кейс в tests/test_cart.py, затем прогнать весь набор ещё раз. Ревьюер вернул задачу: «тест test_checkout_total падает на CI после rebase»…\nRule: stale_blocks",
   "mrkdwn": false,
   "blocks": [
     {
@@ -75,6 +75,14 @@
               "type": "link",
               "url": "https://board.example.org/tasks/T-1023",
               "text": "Open task"
+            },
+            {
+              "type": "text",
+              "text": "\n   "
+            },
+            {
+              "type": "text",
+              "text": "kelpie snooze T-1023 --until 2026-03-05"
             }
           ]
         }

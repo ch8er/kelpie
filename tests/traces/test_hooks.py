@@ -379,3 +379,13 @@ def test_hermes_hooks_and_otlp_are_not_double_counted(tmp_path: Path) -> None:
     assert {s.attributes["gen_ai.tool.call.id"] for s in tools} == {"call_1", "call_2"}
     assert [is_hook_span(s) for s in tools] == [False, True]  # call_1 from OTLP
     app.close()
+
+
+def test_a_merged_span_keeps_the_hooks_exit_code_and_result() -> None:
+    from kelpie.core.tools import EXIT_CODE_ATTRIBUTE, RESULT_ATTRIBUTE, exit_code_of, result_of
+
+    attrs = {EXIT_CODE_ATTRIBUTE: 127, RESULT_ATTRIBUTE: "error"}
+    (hook,) = hook_tools(tool(1, ago(minutes=5), tool_call_id="call_1", attributes=attrs))
+    otlp = otlp_span(1, hook.start, attributes={"gen_ai.tool.call.id": "call_1"})
+    (span,) = merge_hook_spans([otlp, hook]).spans
+    assert (result_of(span), exit_code_of(span)) == ("error", 127)

@@ -24,6 +24,9 @@ class ActionKind(StrEnum):
     CANCEL_BUILD = "cancel_build"
     ESCALATE = "escalate"
     ALERT = "alert"
+    # A person snoozed a task from a chat button (#176). Ledger only: recorded with the
+    # press (who, what, until); no rule emits it and no executor carries it out.
+    SNOOZE = "snooze"
 
 
 class ActionResult(StrEnum):
@@ -66,8 +69,12 @@ class Action:
 
     ``about_wait`` marks an alert that a task's block or wait lasts too long or names no
     condition, not that it is broken (a dead end, stale evidence). While a farm-wide
-    incident that explains the task's wait is open (a CI outage, :mod:`kelpie.core.incidents`),
-    the engine folds such alerts under it.
+    incident that explains the task's wait is open (an outage: failing CI jobs, a block
+    storm, :mod:`kelpie.core.incidents`), the engine folds such alerts under it.
+
+    ``observe_only`` makes the engine handle the action as in observe mode whatever its
+    rule's mode: a new check inside a rule that already runs live stays in observe until its
+    own setting switches it on.
     """
 
     kind: ActionKind
@@ -83,3 +90,4 @@ class Action:
     once: bool = False
     once_per_key: bool = False
     about_wait: bool = False
+    observe_only: bool = False

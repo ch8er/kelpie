@@ -117,7 +117,8 @@ class Agent:
                 parts.append(AdapterReport(adapter.name, kinds, error="cannot take snapshots"))
                 continue
             try:
-                parts.append(AdapterReport(adapter.name, kinds, adapter.snapshot(now)))
+                snap = adapter.snapshot(now)
+                parts.append(AdapterReport(adapter.name, kinds, snap, unobserved=snap.unobserved))
             except Exception as exc:
                 log.error("adapter %s failed to snapshot: %s", adapter.name, exc)
                 parts.append(AdapterReport(adapter.name, kinds, error=type(exc).__name__))

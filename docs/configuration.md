@@ -34,7 +34,7 @@ configure what exists.
 - [[connectors.human_tasks]](#connectorshuman_tasks)
 - [[connectors.llm_quotas]](#connectorsllm_quotas)
 - [[connectors.cost_reports]](#connectorscost_reports)
-- [[alerts]](#alerts)
+- [[alerts]](#alerts), [snoozing from the alert](#snoozing-from-the-alert)
 - [[report]](#report), [report sections](#report-sections)
 - [[agent]](#agent) and [[hub]](#hub): multi-host
 - [Checks across sections](#checks-across-sections)
@@ -167,6 +167,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | 14 | `compaction_gate` | P2 | not implemented | | |
 | – | `return_causes` | P1 | implemented | `alert`, `comment` | adapter `comment` |
 | – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
+| – | `instruction_bloat` | P1 | implemented | `alert` | alert channel |
 
 Several rules share these terms:
 
@@ -203,7 +204,7 @@ The resume note goes out with the commit and says where the changes are if it fa
 | `tool_long_after` | `"5m"` | duration, > 0 | An open TOOL span holds reminders once it has run this long: short calls do not. An adapter's `running_tool` holds from its start (it is long by what it is). |
 | `wip_ci` | `"skip_ci"` | `skip_ci` \| `draft_pr` | How the WIP commit avoids CI: `[skip ci]` in the message, or a push to a draft PR. Never onto an open PR (drafts included, so with `draft_pr` the draft of a first WIP commit refuses the next ones), nor onto a branch whose PR closed after the session started: none whose head is the session's or task's branch or that belongs to the task, and not without a known branch. A person gets an alert about the uncommitted changes instead. |
 | `wip_pr_margin` | `"1m"` | duration, > 0, < `act_within` | A WIP commit waits until `[connectors.github.pulls]` read the open PRs in full at least this long after the exit (an agent's last act may be opening a PR); until then nothing is said, not even the resume note. A PR someone else opens between that scan and the commit (up to `poll_interval`) is not seen. |
-| `wip_without_pr_check` | `false` | bool | WIP commits without that wait, for a farm whose task branches never carry PRs. Without it and without `[connectors.github.pulls]`, there are no WIP commits (warned at startup). A fork's PR, or one in a repository not in `[connectors.github] repos`, is not seen. |
+| `wip_without_pr_check` | `false` | bool | WIP commits without that wait, for a farm whose task branches never carry PRs. Without it and without `[connectors.github.pulls]`, there are no WIP commits (warned at startup when a configured adapter makes WIP commits, or on a hub). A fork's PR, or one in a repository not in `[connectors.github] repos`, is not seen. |
 | `session_stale_after` | `"30m"` | duration, > 0 | See [live session](#rules). |
 | `act_within` | `"24h"` | duration, > 0 | WIP commit and resume note only this long after the exit; a decision never made by then gets one alert. Keep it plus 1h shorter than `[engine] once_window`, and no longer than `[connectors.github.pulls] closed_lookback` (Kelpie warns at startup). |
 
@@ -232,7 +233,9 @@ on `/metrics` (`kelpie_role_reopened_after_done_ratio`) and in the daily report.
 
 Wakes a waiting task when every condition of its current wait holds on fresh evidence;
 alerts when a wait can never be met, runs past `max_wait`, or has no condition; comments on
-sessions that poll a known check instead of registering a condition and exiting. A wait
+sessions that poll a known check instead of registering a condition and exiting, and on
+sessions that waited inside themselves (`sleep`, a CI watch, a loop over them) however they
+ended. A wait
 past `max_wait`, or one with no condition, that an open CI outage explains (rule 9) is
 folded under the outage's alert instead of being sent; a dead end or a condition Kelpie
 cannot see is not.
@@ -247,6 +250,31 @@ cannot see is not.
 | `poll_window` | `"10m"` | duration, > 0 | Window for the repeat count; also how long one check may block before it counts as polling. |
 | `poll_error_streak` | `5` | count, >= 1 | Comment when the same polled check failed this many times in a row. |
 | `session_stale_after` | `"30m"` | duration, > 0 | See [live session](#rules). |
+| `session_waits` | `3` | count, >= 0 | A session that waited inside itself this many times within `session_wait_lookback` gets one comment on its task (block on a condition and exit), however it ended; under the live polling check's key, so a session gets one comment or the other. Only waits of 30 seconds or more, or of unknown length (a watch, a loop), count. `0`: off. The waits come from the platform's own record of the commands (the Hermes adapter: each profile's `state.db`, `state_home`), as their shape and duration bucket only. |
+| `session_wait_time` | `"10m"` | duration, > 0 | Also flag a session whose waits add up to this long (the lower bounds of their buckets: under 30s, 30s, 1m, 5m, 15m, 30m, 1h). |
+| `session_wait_lookback` | `"6h"` | duration, > 0 | Waits older than this do not count (the Hermes adapter reads the last 6 hours: longer sees no more there). Sessions not on an open task Kelpie knows of (an orchestrator's, a finished task's) are counted per role in one `info` alert instead: the role's instructions are the owner's to change. |
+
+**Waits rule 13 lists go to rule 13.** A waiting task that rule 13 lists in a person's
+"needs you" digest, parked on a task the person can do now by a `human_task` condition with
+no other unmet condition, gets no overdue alert from this rule: the person gets one message
+instead of two, as for blocks (rule 4, above). This rule reads the farm with rule 13's whole
+`[engine.rules.needs_you]` section and leaves exactly what rule 13 lists, its time
+thresholds aside. Under the hand-off rule 13's snooze handling decides what the person
+hears: a snoozed human task is in the digest's footer, and one whose snooze ended or whose
+work grew is back in the digest. A listed wait whose conditions Kelpie cannot check (never
+checked, last checked longer ago than `max_condition_age`, or the connector reports an error) keeps this rule's overdue alert, worded as a
+connector problem ("C-1 was not checked on this pass: is the connector
+running?"), snoozed or not: the digest cannot say what Kelpie does not know. Everything else
+stays this rule's: a wait on a task the person cannot move yet (in the backlog or triage),
+one that also waits for a PR or CI, a dead end (the human task was cancelled), a condition
+Kelpie cannot see, a task waiting on nothing, and the wake. When a wait moves to the digest
+while its alert is open, the "Resolved" notice says it is in the person's digest now (rule 4
+does the same for a block). The hand-off applies only while rule 13 reaches people: it is loaded, and it is not in
+`observe` mode while this rule is in `suggest` or `act` (else this rule alerts as before).
+Kelpie decides that from the modes: `needs_you` is not a key to set here, and a mistake in
+rule 13's section is reported as rule 13's. Kelpie logs a warning at startup when rule 13
+waits longer than this rule before it lists a wait (`human_wait_alert_after` longer than
+`max_wait`): the wait is then announced by neither rule in between.
 
 ### 3. orphan_status
 
@@ -272,7 +300,7 @@ Alerts (critical when many open tasks depend on it) and proposes an idle agent o
 | `recovery_labels` | `["recovery"]` | list of labels | Labels that mark a recovery task. |
 | `recovery_titles` | `[]` | list of regexes | Titles that mark a recovery task, case-insensitive; a named group `target` names the task it recovers. The only way on Hermes, which has no labels. |
 | `parent_close_after` | `"1h"` | duration, or `false` | Stop pattern (incident 17): every subtask of a parent is finished, the last this long ago, and the parent is still open with no live session → alert "close it?" with the tasks waiting behind it and the merged PRs, and `close` (act mode, on an adapter that supports it). Only when its work has certainly landed: the last two scans of `[connectors.github.pulls]` read every repository's open and recently closed PRs in full, every PR linked to the parent or a subtask is merged, and every subtask has a merged PR of its own into the default branch. Otherwise no `close`: a PR closed without merging (or a merged revert) alerts `parent-prs-unmerged` naming it, anything else unknown alerts `parent-unverified` ("check its PRs"). An open PR of the family means the parent is not finished. Rules 1 and 5 never resume a finished parent. |
-| `prework_after` | `"4h"` | duration, or `false` | Stop pattern (incident 17): a card in a pre-work status (Hermes `[adapters.hermes] prework_statuses`) this long, with open tasks depending on it → alert with those tasks. The daily report counts these states as their own cost-of-chaos line, "cards stuck before work", in condition-hours; a card past this threshold that nothing depends on (and that is not held, ignored or queued behind its own parent) is only listed ("Stuck, blocking nothing", with its age), not counted. |
+| `prework_after` | `"4h"` | duration, or `false` | Stop pattern (incident 17): a card in a pre-work status (Hermes `[adapters.hermes] prework_statuses`) this long, with open tasks depending on it → alert with those tasks. The daily report counts these states as their own cost-of-chaos line, "cards stuck before work", in card-hours (a task-hour counted once across causes); a card past this threshold that nothing depends on (and that is not held, ignored or queued behind its own parent) is only listed ("Stuck, blocking nothing", with its age), not counted. |
 | `hold_labels` | bottlenecks' | list of labels | Tasks with one of these labels are parked on purpose: no stop pattern looks at them. Unset: `bottlenecks` `hold_labels` and `holds` labels. |
 | `ignore_tasks` | `[]` | list of ids or globs | Tasks rule 3 never looks at, e.g. `["t_parked*"]`: the escape hatch on boards without labels (Hermes), where holds cannot be expressed. |
 
@@ -298,6 +326,10 @@ that came due during the outage is sent when it ends.
 | `unlinked_alert_after` | `"4h"` | duration or `false` | Alert on a block with no condition Kelpie can see after this. `false`: off. |
 | `max_block` | `"8h"` | duration or `false` | Alert when a linked condition is still unmet after this. `false`: off. |
 | `stale_evidence_after` | `"1h"` | duration or `false` | Alert when the connector has not checked a linked condition for this long. `false`: off. |
+| `storm_min_tasks` | `5` | count, 0 (off) or 2–1000 | A block storm (#229): this many tasks blocked on the same reason (the task's own id, dates, times and hashes stripped; the PRs, URLs and other tasks it names kept apart; more than a kind of wait; blocks without a condition Kelpie can check, not snoozed)... |
+| `storm_window` | `"2h"` | duration, > 0 | ...within this of each other are one outage: one alert with the shared reason, the person it names and the tasks. Once open it stays open while half of `storm_min_tasks` (at least 2) are still blocked on the reason. |
+| `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes. Text only: it changes no action. |
+| `storm_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its alert (and its "resolved" notice) is only logged until set to `"rule"`, which follows the rule's mode and folds this rule's no-condition and overdue alerts of its tasks under it (not rule 13's inbox items). |
 
 A condition that can never be met (a PR closed without merging, a human task cancelled)
 alerts at once.
@@ -441,9 +473,27 @@ forecasts the CI minutes quota, and reports a CI outage as one incident. Needs b
 | `max_reading_age` | `"1h"` | duration, > 0 | Quota readings older than this are ignored. |
 | `outage_min_prs` | `3` | count, 0 (off) or 2–1000 | A CI outage: some window holds failures of this many change requests (repository and branch; retries count) at the same workflow, job and step, with evidence that the environment broke; twice as many without it... |
 | `outage_window` | `"2h"` | duration, > 0 | ...that window's length; a failure counts until the job passes again in its repository. |
+| `queued_after` | `"30m"` | duration, > 0 | CI jobs not starting: a build still queued this long while no runner on the farm takes work is a sign, as is a job the CI refused (no runner, no step) that used to run, or a whole run refused; signs of `outage_min_prs` change requests within `outage_window` → one outage. |
+| `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes. Text only: it changes no action. |
+| `not_started_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"` (then it follows the rule's mode and folds the tasks' own alerts). |
 
 Waste categories, each build counted once in this order: superseded, already verified
 commit, docs-only, draft, WIP commit.
+
+The waste summary also recommends the CI configuration change that would have saved each
+category's minutes, the most saved first: cancel a running build when a newer commit is
+pushed (`cancel_in_progress`; it saves only the part of a build after its newer build
+started), skip a build of a commit that already passed this pipeline for the same trigger
+(`skip_verified`), skip changes that touch only docs (`ignore_docs_paths`), skip draft change
+requests (`skip_drafts`), skip WIP commits (`skip_wip`). The changes are named, not written in
+any CI's syntax. Its `params.pipelines` lists them per pipeline, the most minutes saved
+first, at most 10 (`pipelines_total` counts them all):
+
+| Key | Meaning |
+| --- | --- |
+| `source`, `repo`, `workflow` | The pipeline: the CI connector that reported it, the repository, the workflow |
+| `minutes` | Minutes its changes would have saved in the window |
+| `changes` | Each `{change, minutes, builds}`; `ignore_docs_paths` adds `paths` (the `docs_globs`, fnmatch: `*` crosses `/`), `skip_wip` adds `patterns` (the `wip_patterns`) and `case_insensitive: true` |
 
 A CI outage (incident 20) is one `warning` "CI outage since <time>": the failing workflow,
 job and step, the repositories, runners and PRs it affects, and the tasks waiting on those
@@ -458,6 +508,22 @@ failures leave the CI connector's window or too few of them stay readable, and m
 open again. The failing step comes from the job list the CI connector reads for billable
 minutes (no logs); a build whose jobs it did not read takes no part. Times are the builds'
 finish times.
+
+CI jobs that never start (#229) are a separate outage: a CI that hit a spending limit or a
+failed payment refuses jobs (they end at once with no runner and no step) or leaves runs
+queued. A refused job is not a failing one: it never counts toward the outage above. It is
+a sign when the CI refused the whole run, or where that job used to run (an earlier build
+of the repository and workflow started it for the same trigger; for a push, the same
+branch: a deploy job that branch or environment rules refuse is no sign). It counts until a
+later build there starts that job again (a skipped job never ran). A queued build is a
+sign after `queued_after`, unless the CI holds it on purpose (an approval, a concurrency
+group) or runners take work anywhere on the farm (a build is running, or a later one
+started a job). Signs of `outage_min_prs` change requests within `outage_window` of each
+other → one `warning` "CI jobs not starting since <time>" with the repositories, PRs and
+waiting tasks, saying which: check the CI's billing and spending limits or a protection
+rule (refused), or that runners are up (queued). The "Resolved" notice names the first
+build that ran a job refused since the outage began. Builds are dated by when they
+started. Observe-only until `not_started_mode = "rule"`.
 
 ### 10. loop_breaker
 
@@ -489,6 +555,11 @@ Other keys:
 | `session_stale_after` | `"30m"` | duration, > 0 | Only live sessions are stopped. |
 | `agents.<owner id>` | `{}` | table of thresholds | Per-agent overrides. Wins over `roles`. |
 | `roles.<role>` | `{}` | table of thresholds | Per-role overrides. |
+| `tool_outage_tools` | `[]` (off) | list of non-empty strings | Correlated tool failures: the farm's build and test runners (e.g. `["ios_sim.sh", "xcodebuild"]`), matched as the command of a tool call's last segment, path aside (see below). |
+| `tool_outage_min_tasks` | `3` | 2 to 1000 | Distinct tasks (a session tied to no task counts as one) failing one tool with one exit code within `tool_outage_window` → one outage. |
+| `tool_outage_window` | `"30m"` | duration, > 0 | How close together those failures must be; the `[traces] window` at most, whose spans the snapshot holds. |
+| `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes; a change on the tool's own host comes first. Text only: it changes no action. |
+| `tool_outage_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"`. |
 
 ```toml
 [engine.rules.loop_breaker.agents.agent-ops-1]
@@ -497,16 +568,49 @@ identical_calls = 20
 consecutive_errors = 8
 ```
 
+Correlated tool failures (#229, signal 2): a tool of `tool_outage_tools` failing on the
+farm's own hosts, where no CI check sees it (a broken Xcode install: every
+`ios_sim.sh` run exits 127). It reads the exit codes adapters record on tool calls
+(`kelpie.tool.exit_code`, `kelpie.tool.result`; the Hermes adapter takes them from the
+terminal tool's result, never its `error` key): a foreground call that exited non-zero is a
+failure, its exit code the error class; one that exited 0 a success; a call sent to the
+background (its 0 means started) and one the platform did not run (Hermes:
+`status: "blocked"` or `"pending_approval"`) are neither; an exit code -1 alone is a failure
+(a degraded backend, a fatal error). A call is the tool's when the tool is the command of the command's last segment
+(after `;` or `|`, or after `&&` only from setup commands such as `cd` or `export`; past
+`FOO=1` and the wrappers `env`, `sudo`, `nice`, `rtk`, `time`): `cd app && ios_sim.sh test`
+is, `lint.sh && ios_sim.sh test`, `ios_sim.sh test | xcbeautify`, `pkill ios_sim.sh` and
+`command -v xcodebuild` are not. Commands are read as the trace redaction kept them: a
+script run as `bash x.sh` or `timeout 600 ./x.sh` is masked whole and never seen. A success
+counts only when the adapter says the redacted command is whole (Hermes:
+`kelpie.tool.command_whole`, one line with its last word kept) and nothing after the tool
+was masked: the redaction keeps a prefix, and a dropped `| xcbeautify` decides the exit
+code. A failure counts only when the redacted command reaches the command's end, masked flag
+values aside (`kelpie.tool.command_complete`): a dropped `; swiftlint` may be the one that
+failed. Commands of more lines are not read. Failures of one tool
+with one exit code by `tool_outage_min_tasks` distinct tasks within `tool_outage_window`,
+with no success of the tool since → one `warning` "Tool outage: ios_sim.sh exits 127 for
+3 tasks", with the tasks and what the code usually means (127 not found, 124 timed out, 137
+killed). One outage per host where the tasks' host is known: a healthy host's successes do
+not hide a broken one, nor do successes of tasks whose host is unknown. One task retrying its own failure is none. The "Resolved" notice
+names the tool's first success after the outage's last failure. Observe-only until
+`tool_outage_mode = "rule"`.
+
 ### 11. no_progress
 
 Alerts when a session spends tokens without a status change, commit or artifact, with
-recommendations.
+recommendations; and, progress or not, when a session's context runs away: every step
+re-reads all of it (an `info` alert per session, recommending compaction or a bounded
+session). The context check reads the spans' own sessions, so it also works where the board does
+not know a trace's session (the alert then names no task unless the spans do).
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `window` | `"30m"` | duration, > 0 | Tokens and progress are compared over this sliding window. `[traces] window` must be at least this long (Kelpie warns otherwise). |
 | `min_tokens_without_progress` | `100000` | tokens, >= 1 | Alert at this many input plus output tokens with no progress. |
 | `claim_grace` | `"2m"` | duration, >= 0 | A status change this soon after the session start is the claim, not progress. |
+| `context_alert_tokens` | `150000` | tokens, >= 0 | Alert when a session's latest step within `window` reads a context (input tokens, cached ones included) of at least this, after `context_min_steps` steps in the window. Once open, the alert stays open above 80% of it. `0`: off. |
+| `context_min_steps` | `5` | count, >= 2 | Steps (counted model calls, of all its models) a session needs in `window` before its context is judged. The context is the main model's: the one with most input tokens in the window, while its latest step is among the session's last two (side calls on a small model are no compaction). The alert counts as tokens re-read, not as lost work, in the daily report. |
 
 ### 12. conflict_warning
 
@@ -621,6 +725,29 @@ The rule takes no parameters of its own: thresholds and owners are in
 [[traces.outputs]](#tracesoutputs). It needs `[traces] enabled`; on a farm that reports
 tool calls only through hooks, `[adapters.hermes] lookback` must cover `repeat_days`.
 
+### instruction_bloat
+
+Incident 21: the instruction files each role loads (skills, `CLAUDE.md`, `AGENTS.md`, role
+prompts), measured read-only by Kelpie (sizes, section counts and hashes; never the text).
+A file is reported when it crossed `max_chars` within the growth window, when it grows
+faster than `max_growth_per_week`, or when it is over `max_chars` and costs at least
+`max_tokens_per_day`, counted only for files read into every session of their role or
+from counted loads: a large skill opened on demand that does not change is not bloat. The
+alert gives its size in characters and estimated tokens, its growth, whether it only grows
+(appends and nothing removed), its tokens a day and where that figure comes from, the
+near-duplicate sections and repeated values that involve it, and recommends a short core
+plus topic references. Copies that involve no reported file get their own informational
+alert per role. Both are lasting states: alerted once, kept open while the file stays over
+`max_chars` (also once the growth window has moved past its growth), resolved when it is
+split. Kelpie never edits instruction files; the rule only alerts.
+
+| Key | Default | Type | Meaning |
+| --- | --- | --- | --- |
+| `max_chars` | `40000` | integer > 0 | Size threshold in characters (about 10,000 tokens). |
+| `max_growth_per_week` | `10000` | integer > 0 | Characters added per week, over the growth window. |
+| `max_tokens_per_day` | `500000` | integer > 0 | Daily read cost that makes a file over `max_chars` worth splitting even when it is stable. |
+| `min_span` | `"1d"` | duration > 0 | Growth is judged only over at least this much history. |
+
 ## [storage]
 
 | Key | Default | Meaning |
@@ -631,8 +758,9 @@ tool calls only through hooks, `[adapters.hermes] lookback` must cover `repeat_d
 
 A snooze records that a person knows a task waits on purpose until a date (a decision
 deferred to a release, a manual pass planned for a day). `kelpie snooze <task> --until ...`
-stores one ([install.md, "Command line"](install.md)). A stored snooze wins over a marker
-for the same task. `kelpie serve` puts active snoozes, and those expired within the last 7
+stores one ([install.md, "Command line"](install.md)), and so does a press on a Telegram
+alert's snooze button ([Snoozing from the alert](#snoozing-from-the-alert)). A stored
+snooze wins over a marker for the same task. `kelpie serve` puts active snoozes, and those expired within the last 7
 days, into every snapshot; expired snoozes are pruned from the database after 30 days.
 `kelpie why <task>` shows the task's snooze.
 
@@ -664,7 +792,12 @@ agent-health alerts, and list it as "from marker".
   reminders. A marker holds only a block that waits on a person (it asks one, or waits
   only on human tasks), never an agent's own wait on CI or its own parking.
 - `wait_condition` (rule 2): no overdue alert on a waiting task whose only unmet
-  conditions are human tasks a snooze holds; a dead end still alerts.
+  conditions are human tasks a snooze holds; a dead end still alerts. A wait Kelpie cannot
+  check (a condition never checked or not checked within `max_condition_age`, or one the connector reports an error for) is never
+  held: it keeps alerting. While rule 13 reaches people, a wait it lists is left to it, and
+  rule 13's snooze handling decides what the person hears (see
+  [2. wait_condition](#2-wait_condition)); a wait Kelpie cannot check keeps rule 2's alert
+  then too.
 
 Agent-health rules (`loop_breaker`, `no_progress`, `exit_contract`, `orphan_status`, ...)
 never honour a snooze. A snoozed task alerts again when its snooze ends ("Snooze ran
@@ -715,12 +848,78 @@ The Hermes platform adapter. Absent: no platform, and snapshots hold no tasks. D
 | `git_timeout` | `"5s"` | duration, > 0 | Limit for each git call. |
 | `cli` | `"hermes"` | name or path | Hermes executable used for `stop`. |
 | `cli_timeout` | `"10s"` | duration, > 0 and <= 60s | Limit for one `stop` command; it runs inside the tick. |
-| `end_worker` | `true` | bool | After a stop's block, end the run's worker processes (submitter, agent, the agent's descendants) once their pid and start fingerprint match what Hermes recorded; Linux only. `false`: left to Hermes' dispatcher, which reaps a worker it can verify at least 2 minutes later. See the [Hermes adapter](../src/kelpie/adapters/hermes/README.md). |
+| `end_worker` | `true` | bool | After a stop's block, end the run's worker processes (submitter, agent, the agent's descendants) once their pid and start fingerprint match what Hermes recorded; Linux (`/proc`) and macOS (libproc). `false`: left to Hermes' dispatcher, which reaps a worker it can verify at least 2 minutes later. See the [Hermes adapter](../src/kelpie/adapters/hermes/README.md). |
 | `author` | `"kelpie"` | lowercase name | What Kelpie signs its comments, blocks, parks and wakes with on the board (`--author`, `HERMES_PROFILE_NAME`); its own comments are skipped when people's are read, so not the name of a profile or of one of `human_owners`. |
 | `worker_grace` | `"5s"` | duration, > 0 and <= 30s | Between SIGTERM and SIGKILL when ending a stopped run's worker; it runs inside the tick, after the block. A stop takes about `cli_timeout` + `worker_grace` + 2s at most (plus waits on a busy board): on a `kelpie agent`, keep that well below `[hub] action_timeout`. |
+| `state_home` | Hermes' home of `db_path` | path or `false` | Hermes' home: each profile's `state.db` (`state.db` itself for `default`, `profiles/<name>/state.db` for the others), read-only, at most once a minute, for the waits inside sessions of the last 6 hours (rule 2's `session_waits`) and each session's token usage within `lookback` (the daily report's spend per role). Default: the directory of `db_path`, or `<home>` for a named board's `<home>/kanban/boards/<slug>/kanban.db`. A home without any `state.db` is logged once. `false`: not read. |
+| `state_sources` | `["kanban", "subagent", "cron"]` | list of Hermes session sources | Whose sessions are read for waits: Kanban workers, their subagents and cron jobs by default, not a person's own chats (`cli`, `telegram`, ...). |
 | `prework_statuses` | `["triage", "scheduled"]` | list of `triage`, `scheduled` | Hermes statuses before any work starts: rule 3 alerts when a card sits there past `prework_after` with tasks depending on it. Kelpie's own parks in `scheduled` are `waiting`, not pre-work. |
 | `human_owners` | `[]` | list of names | Assignees that are people, not agents; case-insensitive. Their tasks get a human owner, which `[connectors.human_tasks]` needs. Also changes `ping_pong`'s default escalation target and who `bottlenecks` and `orphan_status` count as agents. A person stays a person when another adapter lists the same name, in any case (e.g. a Claude Code task-list owner), and never counts as an idle agent. Comment and description authors with these names are people too (rule 1's acceptance criteria). |
+| `boards` | none | array of tables | Several boards of this Hermes home: see [[[adapters.hermes.boards]]](#adaptershermesboards). Then `db_path` and `wait_key` are set per board; setting them here stops Kelpie at startup. |
 | `human_decisions` | `[]` | array of tables: `marker`, `relays`, optional `person` | A person's decisions an agent records (`[[adapters.hermes.human_decisions]]`, e.g. `marker = "решение CEO"`, `relays = ["partner"]`, `person = "ceo"`): a comment, or a task description, by one of `relays` (profiles, case-insensitive) that opens with `marker` and a separator on its line (`:`, `-` before no word, an en or em dash; case-insensitive, past invisible characters and markdown emphasis: "Решение CEO: ...") is a person's, all of it, written by `person` (one of `human_owners`; else the relay). "Жду решение CEO", a quote or the marker further on are the agent's own words. Rule 1 then reads its acceptance criteria and verdicts as that person's; relayed comments are kept apart from people's own, so they never push those out. Relays are required, and may not be human owners, `kelpie` or `user` (Hermes' default CLI author), nor appear in two entries; `kelpie status` lists them: any agent can write the words. On a multi-host farm set it where the Hermes adapter runs (the `kelpie agent` host). |
+
+### [[adapters.hermes.boards]]
+
+One Kelpie watches several Kanban boards of one Hermes home (named boards,
+`~/.hermes/kanban/boards/<slug>/kanban.db`), as one adapter. Everything that belongs to the
+home stays in `[adapters.hermes]` and is shared by the boards: the spool, `cli`, profiles
+and their `roles`, `human_owners`, `human_decisions`, `author`, `lookback`, `git_state` and
+`[adapters.hermes.tools]`. Each board has:
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `name` | required | 1-32 of `a-z 0-9 - _`, starting with a letter or digit | Prefixes the board's ids: task `t_1a` of board `qr` is `qr:t_1a` in rules, alerts, the report and `kelpie why`, its run 42 is session `qr:hermes-run-42` (run ids restart on every board). Distinct per board. |
+| `db_path` | required | path | The board's `kanban.db`. Opened read-only. Distinct per board. |
+| `wait_key` | `hermes-wait-<name>.key` next to the ledger | path | Signs Kelpie's parks and stops on this board; a marker of one board never verifies on another. Distinct per board. |
+
+```toml
+[adapters.hermes]
+spool = "~/.hermes/kelpie/spool.jsonl"   # one spool for the home: each line goes to its board
+human_owners = ["alice"]
+
+[[adapters.hermes.boards]]
+name = "qr"
+db_path = "~/.hermes/kanban/boards/qr/kanban.db"
+
+[[adapters.hermes.boards]]
+name = "sign"
+db_path = "~/.hermes/kanban/boards/sign/kanban.db"
+```
+
+- **Spool.** Read once per tick; a line goes to the board that has its task and, under that
+  task, its run. A line that names no Kanban task, or that two boards claim, goes to none (a
+  session is never on two boards). With `db_path` alone (no `boards`) such lines are kept, unattributed.
+- **Host-level readings exist once:** tool runs and slot pools (`[adapters.hermes.tools]`)
+  are read once over every board's tasks; resources (`[resources.prometheus]`), OTLP ingest
+  and the ledger are Kelpie's, not a board's. A stored OTLP span that names a task by its
+  id on the board (`[traces] task_attribute = "hermes.kanban.task_id"` gives `t_1a`) is
+  linked to `qr:t_1a` when exactly one board has that id.
+- **Actions** (rule 10's stop, parks and wakes, comments) go to the board in the id's
+  prefix, through `hermes` with that board's `HERMES_KANBAN_DB`; an id of no board is
+  refused before anything runs.
+- **A board that cannot be read** is left out of that tick and listed as unobserved: its
+  open alerts are held, not resolved, and
+  `kelpie_adapter_errors_total{adapter="hermes",board="<name>"}` counts it (it was
+  `adapter="hermes/<name>"` before #283). The other boards go on. If none can be read, the
+  adapter fails as one board would and only `{adapter="hermes"}` counts it.
+- **Metrics** carry a `board` label (#283) on the per-task gauges: `kelpie_tasks`,
+  `kelpie_prework_tasks`, `kelpie_prework_oldest_seconds`, `kelpie_tasks_by_stage`,
+  `kelpie_role_tasks_done_24h`, `kelpie_role_returns_24h`,
+  `kelpie_role_reopened_after_done_24h` and `_ratio`. Its values are the configured board
+  names only, never a value from the data: a task on no configured board (another adapter's,
+  or an agent's on a hub) has `board=""`, shown only while such a task exists. Agent gauges (`kelpie_role_agents`,
+  `kelpie_idle_agents`, ...) have no board label: the home's profiles work on every board.
+  The Grafana dashboard sums over boards; `sum by (board) (...)` splits a panel.
+- **Alerts** name each task's board ("Board: qr" beside "Blocking"), and so does `kelpie why`
+  (a `board` line, and `board` in `--json`).
+- `kelpie status` lists each board (`board qr: <path>`); `kelpie doctor` checks each
+  (`kanban.db (qr)`, `worktrees readable (qr)`, `PR blocks have conditions (qr)`); the hooks,
+  worker-stop and host checks run once.
+- On a multi-host farm the same section goes in the `kelpie agent`'s config; ids are then
+  `<host>:<board>:<id>`.
+
+The single-table form (`db_path` in `[adapters.hermes]`) is unchanged: ids are not prefixed.
+Moving from two Kelpie instances to one: [install.md](install.md#two-hermes-boards-on-one-host).
 
 ### [adapters.hermes.tools]
 
@@ -857,18 +1056,39 @@ What is kept from each span: [privacy.md](privacy.md).
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `true` | bool | `false`: no ingest, no span store, no budgets. |
-| `token_env` | `"KELPIE_TRACES_TOKEN"` | variable name | Bearer token exporters must send. Used when the variable is set. Written here, the variable must be set or Kelpie refuses to start. |
+| `token_env` | `"KELPIE_TRACES_TOKEN"` | variable name | Bearer token exporters must send. Used when the variable is set. Written here, the variable must be set or Kelpie refuses to start. With `token_file`: the variable name inside that file. |
+| `token_file` | none | path | An env file holding `<token_env>=<token>`, read instead of the environment and read again when it changes, so the token can be rotated without a restart (below). It must exist, hold the token and be a regular file of the user `kelpie serve` runs as (not a symlink), or Kelpie refuses to start; `kelpie traces rotate-token` creates it. A relative path is taken from the working directory, like `[storage] path`. Not read with `[hub]` (that port takes no spans). |
+| `token_grace` | `"2h"` | duration, 0 to 7d | How long `kelpie traces rotate-token` keeps the replaced token valid. 0: it accepts no previous token at all. |
 | `allow_unauthenticated` | `false` | bool | Accept spans without a token on a non-loopback address. See [install.md](install.md#otlp-token-and-the-exposure-check). |
 | `window` | `"30m"` | duration, > 0 | Stored spans each tick sees. |
 | `totals_window` | `"24h"` | duration, > 0 | Per-session totals (calls, errors, tokens) in each tick. |
 | `retention` | `"7d"` | duration, > 0, <= 3650d | Spans older than this are pruned, hourly. Must be at least `window` and `totals_window`. |
 | `max_rows` | `1000000` | count, >= 1 | ...and the oldest beyond this row count. |
-| `max_body_bytes` | `8388608` | bytes, >= 1 | Larger requests (also after gunzip) get 413. |
+| `max_body_bytes` | `8388608` | bytes, >= 1 | Larger requests (also after gunzip) get 413. A gzip body of more than 64 members gets 400 (exporters send one). |
 | `max_snapshot_spans` | `50000` | count, >= 1 | At most this many stored spans per tick, newest first. |
 | `max_concurrent_requests` | `4` | count, >= 1 | Requests decoded at once; more get 503 and are retried by the exporter. |
 | `task_attribute` | `"kelpie.task_id"` | attribute name | Span or resource attribute naming the task. |
 | `session_attribute` | `"kelpie.session_id"` | attribute name | Attribute naming the session; else `gen_ai.conversation.id`, else `session.id`. |
 | `commands` | `true` | bool | Keep a grouping prefix of shell commands on tool spans (`kelpie.tool.command_prefix`). `false`: drop it. |
+
+**Rotating the token.** With `token_file` set, `kelpie traces rotate-token [--grace 2h]`
+writes a new token to the file (mode 600, replaced atomically under a lock; other lines
+are kept, commented-out copies of the token lines are dropped; a missing folder is
+created with mode 700) and keeps the token it replaces valid for the grace period, so sessions that
+started with it keep reporting. `--grace 0s` accepts no previous token at all, revoking
+those of earlier rotations too. The replaced token is kept only as a SHA-256 hash with its expiry, on the
+line `<token_env>_GRACE`. It prints no token, only what it did and how many previous
+tokens are still accepted. It runs only as the user who owns the file's folder and
+refuses a symlink, a file of another user and a folder others may write to.
+`kelpie serve` reads the file again within a second, and only trusts a regular file of
+its own user (or root) that others may not write, in a folder others may not write;
+otherwise it keeps the tokens it read before and `kelpie_traces_token_file_ok` is 0.
+`/metrics` has `kelpie_traces_grace_tokens` (previous tokens still accepted) and
+`kelpie_traces_grace_requests_total` (requests that used one: agents not on the new token
+yet). `kelpie doctor` warns when the token is in a backup (`*.bak*`, `*~`, `*.orig`,
+`*.old`) or a file others can read under the token file's folder, the Hermes home or
+`~/.claude`, and lists the other files that hold a copy. See
+[security.md](security.md#traces-token).
 
 ### [[traces.forward]]
 
@@ -885,6 +1105,12 @@ destination. Needs `[traces]` enabled. The global dry-run does not stop forwardi
 | `queue_size` | `1000` | requests, >= 1 | Requests waiting per destination; beyond that they are dropped. |
 | `queue_bytes` | `67108864` | bytes, >= 1 | Bytes waiting per destination (64 MiB). |
 | `retries` | `3` | count, 0 to 10 | Retries on network errors, 429 and 5xx. |
+
+An `http://` endpoint is always reached directly, never through `http_proxy` or
+`all_proxy`: a proxy would see the `headers_env` secrets and the spans in clear. An
+`https://` endpoint follows `https_proxy` and `no_proxy` (a CONNECT tunnel), so use https to
+reach a collector through an egress proxy. Kelpie reads at most 64 KiB of a collector's
+answer.
 
 Examples for Langfuse, Phoenix and Datadog are in [How Kelpie works, "Forwarding"](guide.md#forwarding-to-langfuse-phoenix-or-datadog).
 
@@ -906,8 +1132,14 @@ filter recommendation, read by the daily report. Only the size of an output is r
 With `[traces.outputs]` present, `[traces] retention` must cover `repeat_days` and twice
 `window`.
 
-`[[traces.outputs.filters]]` entries (built-in: `rtk`, `xcbeautify`, `errors-only`,
-`range`):
+`[[traces.outputs.filters]]` entries (built-in, in order: `rtk`, `xcbeautify`,
+`errors-only` for shell commands; then for other tools `downscale-images` for image tools
+(`vision*`, `*_vision*`, `*screenshot*`, `*_image`, ...), `range` for file reads,
+`compact-view` for tools that show a whole record (`*_show`, `show_*`, e.g. Hermes'
+`kanban_show`) and `ask-less` for any other tool, so every tool is ranked by its output tokens
+with advice for its kind. Globs match on word boundaries (`get_revision` is no vision tool).
+A shell tool's calls that carry no command (`tool:terminal`, `tool:Bash` with `[traces]
+commands = false`) group every command the role ran: the catch-all leaves them alone):
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -916,6 +1148,7 @@ With `[traces.outputs]` present, `[traces] retention` must cover `repeat_days` a
 | `commands` | *required* | Globs over the command prefix or executable; `*` is any shell command, `tool:*` any other tool. |
 | `reduction` | *required* | Expected share of output tokens removed, between 0 and 1 (exclusive). |
 | `platforms` | any | Agent platforms the filter works with, e.g. `["hermes", "claude-code"]`. |
+| `advice` | none | For advice that is not a filter (the built-in tool rows): what to do, as a title (`"Downscale images"`). |
 
 ## [[budgets]] and [prices]
 
@@ -1034,6 +1267,66 @@ and names the models without a price.
 | OpenAI | GPT-5.5, GPT-5.4, GPT-5.4 mini, GPT-5 | [developers.openai.com pricing](https://developers.openai.com/api/docs/pricing) |
 | Google | Gemini 4 Argon, Gemini 3.8 Flash, Gemini 3 Flash Preview | [ai.google.dev pricing](https://ai.google.dev/gemini-api/docs/pricing) |
 
+## [instructions]
+
+The instruction files each role loads (skills, `CLAUDE.md`, `AGENTS.md`, role prompts),
+measured for rule [`instruction_bloat`](#instruction_bloat) (incident 21). Off unless the
+section is present: with it, Kelpie reads these files on its own host, read-only (a file that is itself a
+symlink is skipped), and stores only their sizes and hashes (see
+[privacy](privacy.md#instruction-files)); it never edits them. Files on a `kelpie agent`
+host are not measured yet.
+
+| Key | Default | Type | Meaning |
+| --- | --- | --- | --- |
+| `defaults` | `true` | bool | Also measure the platform defaults of the adapters configured here (below). |
+| `every` | `"1h"` | duration ≥ 1m | How often the files are measured. |
+| `window` | `"7d"` | duration ≥ 1d | Growth, appends and edits are counted over this. |
+| `max_bytes` | `2000000` | integer > 0 | A larger file is skipped and logged. |
+| `max_files` | `2000` | integer > 0 | Files measured per scan, at most. |
+| `similarity` | `0.8` | number in (0, 1] | Two sections whose bodies are this alike (Jaccard over 3-word shingles) are near duplicates. |
+| `same_heading_similarity` | `0.5` | number in (0, 1] | ...or this alike under the same normalised heading. |
+| `min_value_files` | `3` | integer ≥ 2 | The same `key: value` line in this many files of a role is one value kept in several places. |
+
+`[[instructions.files]]` adds files; the first entry naming a path wins, and these come
+before the defaults:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `paths` | required | Globs (`~` expanded, `**` any depth). `{role}` in a path matches one path part and names the role; no `**` before it. |
+| `role` | every role | The role that loads them (not with `{role}`). |
+| `loaded` | `"always"` | `always`: read into every session of the role; `on_demand`: opened when needed (a skill). |
+| `owner` | unset | Who owns these instructions; named in the alert. |
+
+Platform defaults (`loaded` in brackets): Hermes `~/.hermes/SOUL.md` (always),
+`~/.hermes/skills/**/SKILL.md` (on demand), and per profile `~/.hermes/profiles/{role}/SOUL.md`
+and `.../skills/**/SKILL.md`, the profile mapped to its role as `[adapters.hermes] roles`
+does; Claude Code `~/.claude/CLAUDE.md` (always), `~/.claude/skills/*/SKILL.md` (on demand),
+`~/.claude/agents/{role}.md` (always); OpenClaw `AGENTS.md`, `SOUL.md`, `TOOLS.md` (always)
+and `skills/*/SKILL.md` (on demand) in `<state_dir>/workspace` and `<state_dir>/workspace-{role}`.
+A project's own `CLAUDE.md` and `.claude/skills` live in its checkout: list them under
+`[[instructions.files]]`.
+
+Tokens a day spent reading a file are its estimated tokens (characters / 4) times how often
+it was read in the last 24 hours, and `token_basis` says which count that is:
+
+- `loads`: a skill (`<name>/SKILL.md`, on demand) of a platform that counts skill loads, times
+  the loads of a skill of that name (with its categories, when the call named them) in the
+  profile whose files it is in, else by its role, else, for a skill every role shares, by
+  any role. Hermes counts `skill_view` calls from each profile's `state.db`
+  (`[adapters.hermes] state_home`; a view of a linked reference file is not a load), Claude
+  Code its `Skill` calls from the hook (version 2 of `hook.py` or later, a `lookback` of at
+  least 24 hours, and a spool that still holds the day: not rotated away). A plugin's skill
+  (`plugin:name`) matches none of these files. A skill nobody opened costs nothing. When a
+  platform cannot count every load (a `state.db` it cannot read, a call it cannot parse,
+  over 2,000 sessions a day in a profile), it counts none that time.
+- `sessions`, otherwise: the sessions of its role (on its platform, for the defaults) that
+  started in the last 24 hours. The cost of an always-loaded file; for an on-demand file of
+  a platform whose loads could not be counted this time (no `state.db`, one that cannot be
+  read, an older hook) an upper bound.
+
+A file listed under `[[instructions.files]]` names no platform, so it is always on
+`sessions`.
+
 ## [resources.prometheus]
 
 Host readings from node_exporter through the Prometheus HTTP API, for rule 7. Off unless
@@ -1051,6 +1344,9 @@ present.
 | `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. |
 | `growth_sustain` | `"1h"`, or `growth_window` when that is shorter | duration, 5m to 24h and at most `growth_window` | How long growth must go on to count. The growth rate is the rate over `growth_window`, capped at the first quartile of the rates in the slices (`growth_sustain` / 4, at least 1m, aligned to the clock) of the last `growth_sustain`, a slice that shrank counting as 0. So a burst within about half of `growth_sustain` adds a few GB a day at most, for about one slice (5 GB written in 17 minutes reads at most about 5 GB a day on a flat disk, 35 on one growing 30 GB a day), then nothing; a cleanup of less than a few hours' growth leaves about the rate (an open forecast does not resolve), while a larger one turns the window's trend negative, so an open forecast resolves until the cleanup leaves the window (about 4 to 5 hours with the 6h default); a longer burst counts in part (5 GB in 40 to 50 minutes reads up to about 15 to 18 GB a day). Growth that comes in bursts with gaps longer than a slice (a build every 30 minutes, nothing written in between) reads as no growth. A shrinking trend stays negative: no forecast. |
 | `load_on_macos` | `false` | bool | macOS counts threads waiting on I/O in its load average (300 to 800 on a healthy farm Mac), so hosts whose `node_uname_info` says Darwin get no load reading unless this is true. Needs node_exporter's uname collector (on by default), as does leaving out macOS's read-only volumes; a host once seen as macOS stays so when that query fails, and until it first answers no host gets a load reading. |
+| `toolchain_metric` | `"kelpie_toolchain_info"` | a metric name | Toolchain versions per host (incident 20), one series per tool with its version in a label, e.g. from `scripts/kelpie-toolchain.sh` (the active Xcode and CoreSimulator on macOS, or any `TOOL=COMMAND`). A version seen within `toolchain_lookback` right after another version of the same tool on the same host is a change; the first version a host reports is none. Report one version per tool. An outage that begins soon after a change names it as its likely cause in its alert (rules 4, 9 and 10, `toolchain_window`) and in the daily report. Absent metric: no changes, nothing else changes. |
+| `toolchain_tool_label`, `toolchain_version_label` | `"tool"`, `"version"` | label names, different, not `host_label` | The labels holding the tool's name and its version. |
+| `toolchain_lookback` | `"48h"` | duration, 1h to 7d | How far back changes are read: one subquery, the versions scraped at each 5m step, read as a timeline (a rollback is a change too). A change spans from the old version's last scrape to the new one's first, so a tool that reported nothing while it was replaced still matches an outage in between. Keep it longer than the rules' `toolchain_window` plus how long an outage may stay open: a change that leaves the lookback is no longer named in that outage's later alerts. |
 
 `[resources.prometheus.queries]` keys: `disk_size`, `disk_avail`, `memory_total`,
 `memory_available`, `load1`, `cores`, `cpu_busy`, `processes`, `processes_max`, `os`,
@@ -1064,6 +1360,10 @@ system volumes, so a Mac shows its data volume, `/System/Volumes/Data`. Each res
 names the filesystem they are on). `path_bytes` and `path_growth` read `kelpie_path_bytes`
 from `scripts/kelpie-path-sizes.sh` (install.md, Host resources); `path_written` is when
 node_exporter last saw that file change, so sizes from a script that stopped count as old.
+`toolchain` reads `toolchain_metric` from `scripts/kelpie-toolchain.sh` (install.md): an
+override must stay a subquery (`[...:...]`) answering a matrix, the versions scraped at each
+step with `toolchain_tool_label` and `toolchain_version_label`; an instant query fails, logged
+once, and no change is read.
 The growth queries take the lower of two rates (`deriv`, in bytes per day): over
 `growth_window` (the trend) and the first quartile over the slices of the last
 `growth_sustain`, each at least 0 (`quantile_over_time` of a subquery, Prometheus 2.7 or
@@ -1426,7 +1726,7 @@ report's own text stays English.
 | `dedup_window` | `"10m"` | duration, >= 0 | Identical alerts within this window are sent once per channel. |
 | `queue_size` | `50` | count, 1 to 1000 | Per channel; alerts that do not fit are dropped and counted. |
 | `language` | `"en"` | `en` \| `ru` | Language of Kelpie's own words in an alert (headlines, labels, units, "Kelpie did"). Text that rules and agents wrote is shown as it is. Any other value stops startup. |
-| `task_url` | `[report] task_url` | http(s) URL with `{id}` | The "Open task" link of each task in an alert; the id is URL-quoted into `{id}`, which must not be in the host. Unset: `[report] task_url` when that is an http(s) URL, else no links. |
+| `task_url` | `[report] task_url` | http(s) URL with `{id}` | The "Open task" link of each task in an alert; the id is URL-quoted into `{id}`, which must not be in the host. At most 600 characters once a 64-character id fills `{id}`. Unset: `[report] task_url`, or no links when that is unset too. |
 | `channels` | `[]` | array of tables | `[[alerts.channels]]`, see below. Names must be unique. |
 
 Telegram channel (`type = "telegram"`):
@@ -1440,6 +1740,8 @@ Telegram channel (`type = "telegram"`):
 | `name` | `"telegram"` | Lower-case word; needed with two Telegram channels. |
 | `api_url` | `"https://api.telegram.org"` | Another Bot API server; plain http only on loopback. |
 | `format` | `"html"` | `html` (bold headline and titles, links) or `plain`. An HTML message Telegram cannot parse is sent once more as plain text. |
+| `buttons` | `false` | Snooze buttons on the alerts a snooze would quiet, and a poller that takes the presses ([Snoozing from the alert](#snoozing-from-the-alert)). On at most one Telegram channel; needs `[storage] path`. |
+| `allowed_user_ids` | `[]` | Telegram user ids (numbers, at most 100) that may press the buttons. With `buttons = true` an empty list stops startup and fails `kelpie doctor`. |
 
 Slack channel (`type = "slack"`):
 
@@ -1465,6 +1767,119 @@ is inserted into the text, so ids, commands and URLs copy as they are. In every 
 in task and agent text is shown as a fullwidth `＠`, so `@here` or `<!channel>` ping nobody,
 and invisible format characters are removed.
 
+### Snoozing from the alert
+
+A person can snooze a wait from the alert that reminds them of it, without a terminal
+([#176](https://github.com/ch8er/kelpie/issues/176)). It appears only on the items a snooze
+would quiet: each item of rule 13's digest (not one whose block can never clear), rule 4's
+no-condition and overdue alerts (not a dead end, a condition Kelpie cannot see or stale
+evidence), and rule 2's overdue alert on a wait for one person's human task (the button
+snoozes the human task, and says so: "1. Snooze H-7 1d"). Never on agent-health alerts, and
+never on a "resolved" message.
+
+- **Slack** gets no buttons. Under each such item it shows the command that does it, as
+  plain text on its own line so it copies cleanly: `kelpie snooze T-101 --until
+  2026-10-22`, a date 3 days after the alert's day in `[report] timezone` (through that day;
+  edit it before you run it). A task id that is not a plain token (letters, digits and
+  `._:/#+=,%~-`), or that starts with `-` (the command would read it as an option), gets no
+  line: it would have to be pasted into a shell. Ids with `#` or `~` are shell-quoted.
+- **Telegram**, with `buttons = true`, puts three buttons under each such item: "1. Snooze
+  1d", "3d", "7d". A press snoozes that task from now for that many days (stored like
+  `kelpie snooze`, "from chat"), answers with a short toast and edits the alert: a line
+  "✅ 1. Snoozed T-101 until 2026-10-22 14:05 UTC by Alice" is added at the end and that
+  item's buttons go (when the line would not fit Telegram's 4096 characters, the buttons go
+  and the line is sent as a reply to the alert). The next digest lists the task in its
+  footer. A button that has expired answers so, with the `kelpie snooze` command that still
+  works, and that message's buttons are taken off. A press never shortens
+  a snooze set with `kelpie snooze` that ends later: it is refused (`already_snoozed`) and
+  the toast says until when the task is already snoozed.
+
+Like `kelpie snooze`, a press stores its snooze even under the global dry-run (`dry_run =
+true`, the default): a snooze changes nothing on the farm, it only quiets alerts. Its ledger
+entry then says so (`dry_run: true` in its parameters, and "Stored under the global
+dry-run" in its reason).
+
+```toml
+[[alerts.channels]]
+type = "telegram"
+token_env = "KELPIE_TELEGRAM_TOKEN"
+chat_id = "-1001234567890"
+buttons = true
+allowed_user_ids = [123456789, 987654321]   # who may snooze; ask @userinfobot for yours
+```
+
+Use a bot dedicated to Kelpie. Kelpie reads presses with `getUpdates` long polling only,
+never a webhook, so it needs no inbound port; Telegram refuses `getUpdates` while the bot
+has a webhook, and another program reading the same bot's updates would take Kelpie's
+presses. `kelpie doctor` checks both settings and the bot ("snooze buttons telegram": FAIL
+with an empty `allowed_user_ids`, without a database, or when the bot has a webhook set).
+
+**Security model.** The buttons are an inbound control channel, so they are built to do one
+thing and refuse everything else.
+
+- *What a press can do*: snooze one task for 1, 3 or 7 days (at most `[snooze] max_days`).
+  Nothing else: no button can unblock, close, stop, requeue or reassign a task, or change a
+  rule's mode. A snooze only holds repeat human-wait reminders (see [[snooze]](#snooze)),
+  and it ends early when more work is blocked behind the task, as any snooze does.
+- *Who*: a press counts only when its sender's Telegram user id is in `allowed_user_ids`
+  **and** the message is in the configured `chat_id`. A user id is a number Telegram
+  assigns; a name or `@username` is never trusted. Everything else is ignored and counted
+  in `kelpie_chat_rejected_total{reason}`: `unknown_user`, `wrong_chat`, `bad_ref`,
+  `expired_ref`, `used_ref`, `already_snoozed`, `rate_limited`, `malformed`,
+  `not_callback`. A press from someone not in `allowed_user_ids` or from another chat gets
+  no answer at all, and neither does a malformed one or a user's 11th press within a
+  minute. A refused press of an allowed person in the chat is answered "Not allowed." and
+  nothing more (for `already_snoozed`, until when the task is snoozed; for `expired_ref`,
+  that the button has expired).
+- *What a button carries*: no task text, only a signed reference,
+  `s<days>.<record id>.<MAC>` (at most 41 bytes; Telegram allows 64). The record, kept by
+  Kelpie, names the alert, the task, the item, when it was issued and the message it went
+  out in; the MAC is the first 16 bytes of an HMAC-SHA256, under a key Kelpie generates on
+  first use, over the chat id, the days and the record id, compared in constant time.
+  Record ids are never reused. A forged, truncated or edited reference, or one from another
+  chat or another message, is `bad_ref`.
+- *Expiry*: a reference is good for 24 hours (the longest escalation step), and only while
+  it is on the latest message of its alert in that chat. Every message of the alert counts,
+  with buttons or without: the next escalation step, a changed digest, a digest with
+  nothing left to snooze or the alert resolving makes the older message's buttons expire
+  (`expired_ref`), and Kelpie removes them from that message (best effort). An alert that
+  resolves expires its buttons also when the channel does not show the "resolved" message
+  (it is `info`, below the default `min_severity`), when that message cannot be sent, or
+  when the alert queue is full; then only the removal from the chat may be skipped (also
+  while Telegram asks Kelpie to slow down). Each reference is used once (`used_ref`): it is
+  claimed before the snooze is written, and given back only when the write fails.
+- *Replay*: Kelpie stores the `getUpdates` offset and moves it past an update before acting
+  on it, so a press is taken at most once, also across restarts. The offset also moves past
+  updates Kelpie drops as malformed, so none comes back.
+- *Where the key lives*: in the button store, `kelpie.buttons.db` beside `[storage] path`
+  (for `/var/lib/kelpie/kelpie.db`: `/var/lib/kelpie/kelpie.buttons.db`), created with mode
+  `0600` (tightened if it was readable by others), owned by Kelpie's user, never opened
+  through a symlink (Kelpie refuses to start when another user owns the file, or when the
+  file SQLite opened is not the one it checked, and warns when the directory is writable by
+  others), apart from `kelpie.db`, which other commands read and people share to debug. It
+  also holds the update offset, the references (pruned 7 days after issue), each alert's
+  latest message id and Kelpie's copy of the messages with buttons (their text as Telegram
+  answered it, which the acknowledgements edit). The key is never logged and never in config. Delete the file to rotate the key: every
+  button already sent then stops working.
+- *Every press is recorded*: the snooze (`kelpie snoozes`, "from chat", with the person's
+  name) and a ledger entry (kind `snooze`, rule `chat`, outcome `executed`, executor the
+  channel; who, with their user id, what and until when; `kelpie why <task>` lists it),
+  written in one transaction that takes the write lock before it reads, so a `kelpie
+  snooze` from another process cannot slip in between: there is no chat snooze without its
+  entry.
+- *Untrusted text*: the person's name is shown cleaned, without invisible characters and
+  with `@` broken, set as code so that Telegram turns nothing in it into a link, and the
+  acknowledgement is plain text with the message's own formatting entities, never parsed
+  as HTML. It is built from Kelpie's copy of the message, never from the copy a press
+  carries, so presses close together keep every acknowledgement. A task id with a control
+  or invisible character gets no button. Every Bot API call goes through Kelpie's HTTP helper to the configured `api_url`
+  only (no redirects, bounded answers), with the token never logged.
+- *Never in the control loop*: the poller runs in its own thread, waits at least a second
+  between two polls, backs off exponentially on errors (up to 5 minutes, longer when
+  Telegram says so; `kelpie_chat_api_errors_total{call,cause}`), and stops with Kelpie
+  under the alert delivery's shutdown deadline. Presses are counted in
+  `kelpie_chat_actions_total{outcome}` (`snoozed`, `rejected`, `failed`).
+
 ## [report]
 
 The daily "cost of chaos" report (rule 8), built by `kelpie report`, or by `kelpie serve`
@@ -1474,14 +1889,14 @@ once a day when `at` is set.
 | --- | --- | --- | --- |
 | `timezone` | `"UTC"` | IANA name | Where a day starts and ends. |
 | `dir` | unset | path | Writes `kelpie-report-<date>.md` there. Unset: stdout only. |
-| `task_url` | unset | string with `{id}` | Links task ids in the Markdown. |
+| `task_url` | unset | http(s) URL with `{id}` | Links task ids in the Markdown; the id is URL-quoted into `{id}`, which must not be in the host. No credentials, and at most 600 characters once a 64-character id fills `{id}`. Anything else stops startup. |
 | `url` | unset | http(s) URL with `{date}` | Where the full report of a day can be read (e.g. where `dir` is served); the chat summary links it as "Open report", with the day (YYYY-MM-DD) in `{date}`, which must not be in the host. Unset: no link. |
 | `hour_usd` | unset | dollars, > 0 | What an hour lost costs: a stuck task-hour, or an agent-hour idle behind a hold or waiting on a person. Unset: hours stay hours. |
 | `channels` | all | list of channel names | `[[alerts.channels]]` that get the summary with `--send`. |
 | `severity` | `"warning"` | `info` \| `warning` \| `critical` | Severity of the summary; channels filter by `min_severity`. |
 | `verify_window` | `"1d"` | duration string, > 0 | Before/after of fixes: this long on each side. |
 | `review_roles` | `["reviewer"]` | list of roles | Whose sessions make "review time". |
-| `min_sample` | `10` | count, >= 1 | Fewer observations on a side: a small sample. |
+| `min_sample` | `10` | count, >= 1 | Fewer observations on a side: the row says *direction only*. |
 | `sections` | unset | `[report.sections.<name>]` tables | Settings of a report section. A key the section does not accept is noted in the report and the section does not run until the table is fixed; a table for a section that does not exist is noted too; a bad value fails that section only (also noted). |
 | `llm` | unset | `[report.llm]` table | The optional LLM root-cause section; see [[report.llm]](#reportllm). |
 | `at` | unset | `"HH:MM"`, local time in `timezone` | `kelpie serve` builds yesterday's report once a day after this time, writes it to `dir` and sends the summary to `channels`. A serve that was down at that time catches up the same day; a failed run is retried every 10 minutes, at most 3 times a day. Unset: only `kelpie report` (by hand or from cron). |
@@ -1532,9 +1947,10 @@ model = "claude-sonnet-5-5"
 
 ### Report sections
 
-`[report.sections.tokens]` (token optimization, `kelpie.traces.tokens`) and
-`[report.sections.tokens_fit]` (context and model fit, `kelpie.traces.fit`) accept the
-fields of `TokenSettings` and `FitSettings`. Durations are strings (`"5m"`), counts whole
+`[report.sections.tokens]` (token optimization, `kelpie.traces.tokens`),
+`[report.sections.tokens_fit]` (context and model fit, `kelpie.traces.fit`) and
+`[report.sections.instructions]` (instruction files) accept the fields of `TokenSettings`,
+`FitSettings` and the section's own settings. Durations are strings (`"5m"`), counts whole
 numbers >= 0, ratios, shares and tolerances numbers between 0 and 1, lists lists of names;
 any other value fails that section (noted in the report).
 
@@ -1549,6 +1965,7 @@ any other value fails that section (noted in the report).
 | `tokens_fit.routine_min_calls` / `routine_output_tokens` / `routine_max_tool_tokens` | `20` / `400` / `1000` | Routine work: at least this many calls a day, at most this median output and mean tool output per call. |
 | `tokens_fit.min_after` | `"12h"` | After a model switch, how long before its quality is judged. |
 | `tokens_fit.min_saving_tokens` | `50000` | A recommendation needs at least this many tokens a day. |
+| `instructions.top` | `10` | Instruction files listed, the costliest first (`0`: no section). |
 
 The other fields (`break_ratio`, `fragment_min_sessions`, `review_reads`, ...) are
 documented in those modules.

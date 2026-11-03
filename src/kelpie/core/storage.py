@@ -212,11 +212,26 @@ ALTER TABLE snoozes ADD COLUMN grown_at TEXT;
 ALTER TABLE snoozes ADD COLUMN grown_by INTEGER;
 UPDATE snoozes SET behind_at_snooze = NULL WHERE source <> 'marker';
 """
+# Instruction files' sizes (kelpie.instructions, incident 21): one row when a file is first
+# measured and one each time its hash changes; never its text. ``appended`` is 1 when the
+# change only added bytes at the end, 0 when it changed or removed some, NULL for the first.
+_V10 = """
+CREATE TABLE instruction_sizes (
+    path        TEXT NOT NULL,
+    measured_at TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    chars       INTEGER NOT NULL,
+    sha256      TEXT NOT NULL,
+    sections    INTEGER NOT NULL,
+    appended    INTEGER,
+    PRIMARY KEY (path, measured_at)
+);
+"""
 SNOOZES_SINCE = 8  # the first schema with snoozes: read-only readers accept it (no growth)
 
 # version -> script that upgrades from version - 1. Append, never edit a released one.
 MIGRATIONS: dict[int, str] = {
-    1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9,
+    1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10,
 }  # fmt: skip
 SCHEMA_VERSION = max(MIGRATIONS)
 
@@ -296,24 +311,7 @@ class SqliteLedgerStore:
             return fn(self._db)
 
     def append(self, entry: LedgerEntry) -> None:
-        values = (
-            _ts(entry.at),
-            entry.fingerprint,
-            entry.subject,
-            entry.rule,
-            entry.kind,
-            entry.mode,
-            entry.outcome,
-            entry.reason,
-            entry.task_id,
-            entry.executor,
-            to_json(entry.params),
-            entry.suppressed,
-            entry.suppression,
-            entry.detail,
-        )
-        sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * len(values))})"
-        self._write(lambda db: db.execute(sql, values))
+        self._write(lambda db: _insert_entry(db, entry))
 
     def by_fingerprint(self, fingerprint: str, after: datetime) -> Sequence[LedgerEntry]:
         sql = f"SELECT {_COLUMNS} FROM actions WHERE fingerprint = ? AND at > ? ORDER BY at, id"
@@ -397,26 +395,32 @@ class SqliteLedgerStore:
 
     def put_snooze(self, snooze: Snooze) -> None:
         """Store ``snooze``, replacing the task's previous one. Markers are never stored."""
-        if snooze.source == "marker":
-            raise ValueError("snooze markers are read from the board, not stored")
-        values = (
-            snooze.task_id,
-            _ts(snooze.until),
-            None if snooze.reason is None else snooze.reason.strip()[:MAX_REASON] or None,
-            None if snooze.by is None else snooze.by.strip()[:MAX_BY] or None,
-            _ts(snooze.created_at),
-            snooze.source,
-            snooze.behind_at_snooze,
-            None if snooze.grown_at is None else _ts(snooze.grown_at),
-            snooze.grown_by,
-        )
-        self._write(
-            lambda db: db.execute(
-                f"INSERT OR REPLACE INTO snoozes ({_SNOOZE_COLUMNS})"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                values,
-            )
-        )
+        self._write(lambda db: _insert_snooze(db, snooze))
+
+    def put_chat_snooze(self, snooze: Snooze, entry: LedgerEntry) -> Snooze | None:
+        """Store a snooze set from a chat (#176) and the ledger entry that records it, in one
+        transaction: both or neither. Unless the task has a snooze from another source
+        (``kelpie snooze``) that still holds at ``snooze.created_at`` (not expired, not
+        grown) and ends later: then nothing is written and that snooze is returned. The
+        write lock is taken before the read (``BEGIN IMMEDIATE``), so a ``kelpie snooze``
+        from another process cannot land between the check and the write."""
+        with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute(
+                f"SELECT {_SNOOZE_COLUMNS} FROM snoozes WHERE task_id = ?", (snooze.task_id,)
+            ).fetchone()
+            if row is not None:
+                held = snooze_row(row)
+                if (
+                    held.source != snooze.source
+                    and held.grown_at is None
+                    and held.until > snooze.created_at
+                    and held.until > snooze.until
+                ):
+                    return held
+            _insert_snooze(self._db, snooze)
+            _insert_entry(self._db, entry)
+        return None
 
     def set_snooze_baseline(self, snooze: Snooze, behind: int) -> bool:
         """Record how much work was behind a stored snooze's task when ``kelpie serve`` first
@@ -466,6 +470,49 @@ _SNOOZE_COLUMNS = (
     "task_id, until_at, reason, snoozed_by, created_at, source, behind_at_snooze, grown_at,"
     " grown_by"
 )
+
+
+def _insert_snooze(db: sqlite3.Connection, snooze: Snooze) -> sqlite3.Cursor:
+    """Store ``snooze``, replacing the task's previous one. Markers are never stored."""
+    if snooze.source == "marker":
+        raise ValueError("snooze markers are read from the board, not stored")
+    values = (
+        snooze.task_id,
+        _ts(snooze.until),
+        None if snooze.reason is None else snooze.reason.strip()[:MAX_REASON] or None,
+        None if snooze.by is None else snooze.by.strip()[:MAX_BY] or None,
+        _ts(snooze.created_at),
+        snooze.source,
+        snooze.behind_at_snooze,
+        None if snooze.grown_at is None else _ts(snooze.grown_at),
+        snooze.grown_by,
+    )
+    return db.execute(
+        f"INSERT OR REPLACE INTO snoozes ({_SNOOZE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        values,
+    )
+
+
+def _insert_entry(db: sqlite3.Connection, entry: LedgerEntry) -> sqlite3.Cursor:
+    """Append ``entry`` to the action ledger."""
+    values = (
+        _ts(entry.at),
+        entry.fingerprint,
+        entry.subject,
+        entry.rule,
+        entry.kind,
+        entry.mode,
+        entry.outcome,
+        entry.reason,
+        entry.task_id,
+        entry.executor,
+        to_json(entry.params),
+        entry.suppressed,
+        entry.suppression,
+        entry.detail,
+    )
+    sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * len(values))})"
+    return db.execute(sql, values)
 
 
 def snooze_row(r: sqlite3.Row) -> Snooze:
@@ -633,7 +680,10 @@ def open_readonly(
 ) -> sqlite3.Connection:
     """A connection that never writes, not even a migration (``kelpie status``). ``oldest``:
     an older schema it may also read (the snooze readers accept :data:`SNOOZES_SINCE`)."""
-    db = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True, check_same_thread=False)
+    # as_uri() escapes the path: a "?", "#" or "%" in it no longer ends or changes the URI
+    # (a "#" used to drop "?mode=ro" and open another file read-write).
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    db = sqlite3.connect(uri, uri=True, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -1058,3 +1108,160 @@ class SqliteCostReports:
             ReportedCost(r["provider"], date.fromisoformat(r["day"]), r["usd"], r["model"] or None)
             for r in rows
         )
+
+
+# --- instruction file sizes (kelpie.instructions) ------------------------------------------
+
+
+class SizeRow(NamedTuple):
+    """One stored measurement of an instruction file: sizes and its hash, never its text."""
+
+    path: str
+    measured_at: datetime
+    bytes: int
+    chars: int
+    sha256: str
+    sections: int
+    appended: bool | None
+
+
+class SqliteInstructionStore:
+    """The size history of instruction files: a row when a file is first measured and when
+    its hash changes. :meth:`history` gives, per path, the last row at or before ``since``
+    (what the file was then) and every row after it, oldest first."""
+
+    def __init__(self, path: Path | str, busy_timeout_ms: int = 5000) -> None:
+        self._lock = threading.Lock()
+        self._db = _open(path, busy_timeout_ms)
+        self._tokens_table = False  # instruction_tokens created (on first write)
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    def record(self, rows: Sequence[SizeRow]) -> None:
+        with self._lock, self._db:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO instruction_sizes"
+                " (path, measured_at, bytes, chars, sha256, sections, appended)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        r.path, _ts(r.measured_at), r.bytes, r.chars, r.sha256, r.sections,
+                        None if r.appended is None else int(r.appended),
+                    )
+                    for r in rows
+                ],
+            )  # fmt: skip
+
+    def history(self, since: datetime) -> dict[str, list[SizeRow]]:
+        cutoff = _ts(since)
+        sql = (
+            "SELECT * FROM instruction_sizes s WHERE measured_at > ? OR measured_at = ("
+            " SELECT MAX(measured_at) FROM instruction_sizes p"
+            " WHERE p.path = s.path AND p.measured_at <= ?)"
+            " ORDER BY path, measured_at"
+        )
+        with self._lock:
+            rows = self._db.execute(sql, (cutoff, cutoff)).fetchall()
+        out: dict[str, list[SizeRow]] = {}
+        for r in rows:
+            appended = r["appended"]
+            out.setdefault(r["path"], []).append(
+                SizeRow(
+                    r["path"], datetime.fromisoformat(r["measured_at"]), r["bytes"], r["chars"],
+                    r["sha256"], r["sections"], None if appended is None else bool(appended),
+                )
+            )  # fmt: skip
+        return out
+
+    def record_tokens(self, rows: Sequence[TokenRow]) -> None:
+        """Store one measurement's tokens a day per role (the before/after of a split);
+        rows older than ``INSTRUCTION_TOKENS_KEEP`` go."""
+        if not rows:
+            return
+        with self._lock, self._db:
+            if not self._tokens_table:
+                self._db.execute(_INSTRUCTION_TOKENS)
+                self._tokens_table = True
+            self._db.executemany(
+                "INSERT OR REPLACE INTO instruction_tokens"
+                " (at, role, tokens_per_day, files, loads) VALUES (?, ?, ?, ?, ?)",
+                [(_ts(r.at), r.role or "", r.tokens_per_day, r.files, r.loads) for r in rows],
+            )
+            oldest = min(r.at for r in rows) - INSTRUCTION_TOKENS_KEEP
+            self._db.execute("DELETE FROM instruction_tokens WHERE at < ?", (_ts(oldest),))
+
+    def tokens(self, start: datetime, end: datetime) -> list[TokenRow]:
+        with self._lock:
+            return read_instruction_tokens(self._db, start, end)
+
+    def prune(self, before: datetime, keep: Collection[str] | None = None) -> int:
+        """Drop rows before ``before`` except each path's last one there (its size then);
+        with ``keep``, also every row of a path not in it (a file no longer measured)."""
+        cutoff = _ts(before)
+        with self._lock, self._db:
+            n = self._db.execute(
+                "DELETE FROM instruction_sizes WHERE measured_at < ? AND measured_at < ("
+                " SELECT MAX(measured_at) FROM instruction_sizes p"
+                " WHERE p.path = instruction_sizes.path AND p.measured_at <= ?)",
+                (cutoff, cutoff),
+            ).rowcount
+            if keep is not None:
+                stored = [
+                    r[0] for r in self._db.execute("SELECT DISTINCT path FROM instruction_sizes")
+                ]
+                gone = [(p,) for p in stored if p not in keep]
+                n += self._db.executemany(
+                    "DELETE FROM instruction_sizes WHERE path = ?", gone
+                ).rowcount
+            return n
+
+
+# --- instruction tokens a day per role (before/after of a split, #282) ----------------------
+
+# Created on first write, not by a migration, like report_fixes: a schema bump would make
+# every ``kelpie report`` refuse the database until ``kelpie serve`` ran once, for a table
+# only farms with [instructions] use. The cost: a later change of its columns needs its own
+# check of the table. A database that never measured instruction files has no such table,
+# and readers treat it as no rows.
+_INSTRUCTION_TOKENS = """
+CREATE TABLE IF NOT EXISTS instruction_tokens (
+    at             TEXT NOT NULL,
+    role           TEXT NOT NULL,  -- '' : files every role loads
+    tokens_per_day INTEGER NOT NULL,
+    files          INTEGER NOT NULL,
+    loads          INTEGER NOT NULL,  -- files whose tokens a day come from counted loads
+    PRIMARY KEY (at, role)
+);
+"""
+INSTRUCTION_TOKENS_KEEP = timedelta(days=30)
+
+
+class TokenRow(NamedTuple):
+    """Tokens a day spent reading one role's instruction files at one measurement (``role``
+    None: the files every role loads); sums only, never a file's text."""
+
+    at: datetime
+    role: str | None
+    tokens_per_day: int
+    files: int
+    loads: int
+
+
+def read_instruction_tokens(
+    db: sqlite3.Connection, start: datetime, end: datetime
+) -> list[TokenRow]:
+    """Rows measured in ``[start, end)`` from an open (read-only) connection, oldest first;
+    none when the table was never created."""
+    try:
+        found = db.execute(
+            "SELECT at, role, tokens_per_day, files, loads FROM instruction_tokens"
+            " WHERE at >= ? AND at < ? ORDER BY at, role",
+            (_ts(start), _ts(end)),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
+    return [TokenRow(datetime.fromisoformat(r[0]), r[1] or None, r[2], r[3], r[4]) for r in found]

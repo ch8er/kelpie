@@ -1,0 +1,63 @@
+id: "10-reviewer-sleeps-before-block"
+incident: 10
+title: "Reviewer sleeps in its session polling CI, then blocks the task"
+description: >
+  On a live farm a reviewer waited for CI by running `sleep 300` between checks, several
+  times per review, and only then blocked the task on CI as it should. Every check re-read
+  the session's whole context, so the waiting cost tokens and held a slot even though the
+  session ended properly; neither the live polling check nor rule 11 saw it, because the
+  session was over by the time anyone looked. The platform's own record of the commands
+  (Hermes' state.db) shows the waits, kept as their shape and duration bucket only. The
+  task gets one comment: block on a condition and exit instead. A session that slept once
+  briefly, as a build step may, is not flagged.
+rule: wait_condition
+config:
+  session_waits: 3           # a session that waited this many times...
+  session_wait_time: "10m"   # ...or at least this long in all...
+  session_wait_lookback: "6h"  # ...within this window
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  owners:
+    - {id: reviewer-1, role: reviewer}
+    - {id: agent-dev-1, role: dev}
+  tasks:
+    - id: T-1001
+      title: "Review: rate limiter middleware"
+      status: blocked
+      status_since: "2026-03-02T11:40:00+00:00"
+      role: reviewer
+      block: {reason: "waiting_ci: checks of PR 101", since: "2026-03-02T11:40:00+00:00"}
+    - id: T-1002
+      title: "Add retry to the uploader"
+      status: in_progress
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: dev
+      owner_id: agent-dev-1
+  sessions:
+    - id: S-1001
+      task_id: T-1001
+      owner_id: reviewer-1
+      started_at: "2026-03-02T11:00:00+00:00"
+      ended_at: "2026-03-02T11:40:00+00:00"
+      final_status: blocked
+    - id: S-1002
+      task_id: T-1002
+      owner_id: agent-dev-1
+      started_at: "2026-03-02T11:00:00+00:00"
+      last_heartbeat: "2026-03-02T11:59:00+00:00"
+  waits:
+    - {session_id: S-1001, at: "2026-03-02T11:05:00+00:00", shape: sleep, waited: "5m", task_id: T-1001, role: reviewer}
+    - {session_id: S-1001, at: "2026-03-02T11:12:00+00:00", shape: sleep, waited: "5m", task_id: T-1001, role: reviewer}
+    - {session_id: S-1001, at: "2026-03-02T11:19:00+00:00", shape: sleep, waited: "5m", task_id: T-1001, role: reviewer}
+    - {session_id: S-1001, at: "2026-03-02T11:30:00+00:00", shape: "gh pr checks --watch", task_id: T-1001, role: reviewer}
+    - {session_id: S-1002, at: "2026-03-02T11:20:00+00:00", shape: sleep, waited: "30s", task_id: T-1002, role: dev}
+expected_actions:
+  - kind: comment
+    task_id: T-1001
+    reason_contains: "block the task on a condition"
+    params: {session_id: S-1001, waits: 4, waited_s: 900}
+not_expected_actions:
+  - kind: comment
+    task_id: T-1002
+  - kind: requeue
+    task_id: T-1001

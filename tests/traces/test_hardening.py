@@ -248,6 +248,18 @@ def test_gzip_members_and_trailing_junk() -> None:
         _gunzip(gzip.compress(b"ab") + b"junk", 10)
 
 
+def test_gzip_member_count_is_capped() -> None:
+    """Many tiny members used to cost quadratic CPU: 8 MiB of them took minutes (#275 M2)."""
+    from kelpie.traces.ingest import MAX_GZIP_MEMBERS
+
+    member = gzip.compress(b"")
+    assert _gunzip(member * MAX_GZIP_MEMBERS, 10) == b""
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="too many gzip members"):
+        _gunzip(member * 400_000, 10)
+    assert time.monotonic() - started < 2
+
+
 # --- server -----------------------------------------------------------------------------
 
 

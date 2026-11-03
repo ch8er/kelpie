@@ -33,7 +33,8 @@ Priorities: **P0** — now, this week · **P1** — next step · **P2** — late
 | 17 | A parent task stayed open after its subtasks were done and their PR merged; cards also sat in triage/scheduled. Tasks with their own branch closed within 0.7 h of merge (148 of 148), so the lag came only from parents and stuck cards | the parent gated 20 tasks; one card sat 21 h in scheduled | Parents whose children are all done (and whose PR merged) → "close it?" with the work waiting behind it; cards in triage/scheduled past a threshold with dependents → alert. A PR belongs to a task only by the task code in the PR title or branch, never by a mention in comments (8 of 10 candidates matched that way were wrong) |
 | 18 | A human asked for "20 runs in a row, 20 of 20" before automerge of a flaky-test fix; the reviewer confirmed only green CI and a clean merge, and the PR merged without that evidence | low this time (the race was fixed elsewhere), but the explicit acceptance check was silently dropped | Rule 1 "done needs evidence" also checks task-specific acceptance criteria stated by a human (in the task or its comments): before merge or done, evidence for each must be present, else alert the reviewer and the human. Flaky tests that fail other PRs become a return cause |
 | 19 | Disk at 94% and growing ~9 GB a day: an iOS simulator system cache (lock-screen wallpaper data) that the simulator never cleans, 34 GB of 59 GB of simulators; Kelpie did not see it because node_exporter/Prometheus were not installed | 2–3 days to ENOSPC and failing builds (incident 3 again) | Rule 7: time-to-full forecast from the growth rate, and the top-growing paths from configured directories measured by a small script feeding node_exporter's textfile collector (no own collector); doctor fails when resources are not watched |
-| 20 | The farm's Xcode installation broke for ~12 h (01:41–13:40); no iOS PR could go green. Kelpie raised one alert per blocked task and the report called it "reviewer waiting for merges" with a suggestion to enable automerge, which the farm already uses. A post-release task waiting on a planned human task added 143 agent-hours of "waiting" | ~12 h of iOS CI down; the day's headline inflated ($3,235 of mostly planned waits) | Correlated CI failures (many PRs failing at once with the same failing step or error) → one "CI outage" incident with start, scope and cause, linked blocks suppressed under it; the report names the outage as the cause; suggestions check what the farm already has; waits on tasks planned for later don't count as waiting |
+| 20 | The farm's Xcode installation broke for ~12 h (01:41–13:40); no iOS PR could go green. Kelpie raised one alert per blocked task and the report called it "reviewer waiting for merges" with a suggestion to enable automerge, which the farm already uses. A post-release task waiting on a planned human task added 143 agent-hours of "waiting" | ~12 h of iOS CI down; the day's headline inflated ($3,235 of mostly planned waits) | Correlated CI failures (many PRs failing at once with the same failing step or error) → one "CI outage" incident with start, scope and cause, linked blocks suppressed under it; the same for a block storm (many tasks blocked on one reason, the 2026-10-17 shape: 7 tasks "waiting for CEO (Xcode first launch)") and CI jobs that never start (billing, limits, no runners); the report names the outage as the cause; suggestions check what the farm already has; waits on tasks planned for later don't count as waiting |
+| 21 | On a second farm (five roles), the self-written skills of three roles grew append-only to the platform's ~100K-character cap: one had 46 sections, mostly write-ups of single cases, several sections duplicated; one role kept its standing answers in six overlapping files and the same default value in eight places. Nobody noticed until a person looked; the agents split them by hand the same day | ~25–30K tokens per run of each role before any work, re-read on every step; new lessons no longer fit; a changed fact left stale in one of the copies goes into the output | Instruction bloat (P1): size and growth of the instruction files each role loads, duplicated sections and facts, tokens a day spent reading them; alert at a threshold with a split recommendation, measured before/after; Kelpie never edits the files |
 
 Example of what Kelpie must compute by itself: after a manual fix, review time dropped from 48 to 27 minutes, and failures went from 9 of 29 to 1 of 11.
 
@@ -79,14 +80,14 @@ The numbers in brackets are the farm incidents each rule is validated against.
 1. Exit contract: a session ended without a final status, or with a block that has no allowed reason → the task goes back to the queue (2)
 2. "Wait for condition" instead of waiting inside a session: the agent registers a condition through any connector and exits; Kelpie wakes the task up (10)
 3. Orphan statuses: a task sits in a status with no owner for more than N minutes → alert or reassignment (11)
-4. Stale blocks: the cause was fixed in the outside world → the block is cleared; block reasons that match configurable patterns ("waiting for CI/merge") get a condition through a connector and count as waiting, not dead (1, 8, 15)
+4. Stale blocks: the cause was fixed in the outside world → the block is cleared; block reasons that match configurable patterns ("waiting for CI/merge") get a condition through a connector and count as waiting, not dead; many tasks blocked on the same reason at once (a block storm) → one outage naming the person who can end it (1, 8, 15, 20)
 5. Ping-pong: after K review rounds → escalate to the architect or a human (12)
 6. Bottlenecks and idle time per role → alert with a rebalancing suggestion; the whole farm or a role idle while ready work waits (e.g. mergeable PRs) → alert naming the likely cause, such as a hold; holds (labels, flags, pauses) carry an owner and an expiry, an expired hold → alert, or lifted in act mode; free slots while the ready queue holds only human tasks → alert naming the human tasks on the critical path and how many agent tasks wait behind each (9, 10, 14, 16)
 7. Environment resources: disk, memory, processes or provider quotas running out, auth expiring → alert before the agents stop (3, 4, 6). Provider usage and cost also feed budgets (see below)
 8. Daily "cost of chaos" report and before/after verification of every fix
 9. CI economy: finds builds that burn minutes for nothing — on drafts and WIP commits, superseded by a newer push, triggered by docs-only changes, repeated for an already verified commit, or expensive jobs queued on a head where a cheap required check already failed. Cancels superseded and doomed builds by itself and forecasts how long the quota will last (5). Proposing a PR with a better CI configuration is P1 (rules backlog)
 10. Loop and budget breaker, cross-platform, built on traces: N identical consecutive tool calls (same tool and same arguments hash; default 8 in 10 minutes), 5 consecutive tool errors, or a budget's hard threshold exceeded (see "Budgets and spend") → stop the run through the adapter and alert. Defaults reuse the AgentWatchdog thresholds. Polling that rule 2 recognizes is coached by rule 2 first and stopped only if it continues (field evidence: heartbeat runaway)
-11. Activity without progress: tokens spent by sessions that produce no status change, commit or artifact → alert with recommendations: a longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file (field evidence: idle context resend)
+11. Activity without progress: tokens spent by sessions that produce no status change, commit or artifact → alert with recommendations: a longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file (field evidence: idle context resend). Also, progress or not, a session whose context runs away (every step re-reads all of it) → info alert recommending compaction or a bounded session (#197)
 
 ### P0. Budgets and spend — week 2, dollars in the report in week 3
 
@@ -123,7 +124,7 @@ Rework and wasted sessions are the largest token leak on our farm (46 of 63 task
 
 - **Rule 12. Early conflict warning:** two live tasks editing the same files → warn both, or serialize the later one until the earlier merges (7)
 - **Dispatch gate:** a ready task whose prerequisite is not met (a referenced PR not merged, its CI red, a parent task not done) is put into "waiting" with that condition instead of being picked up; rule 2 wakes it when the condition is met. Field case: an agent was about to redo a migration while the PR it depended on was still red
-- **Huge tool outputs:** commands whose output floods the context (build and test logs, e.g. `xcodebuild`) are found in traces, ranked by tokens, and get a concrete filter recommendation — [RTK](https://github.com/rtk-ai/rtk) where it supports the platform, otherwise `xcbeautify`, errors only, tail; Kelpie measures and verifies the savings before/after and does not build its own filter; repeated offenders → `comment` to the agent's role instructions owner
+- **Huge tool outputs:** commands whose output floods the context (build and test logs, e.g. `xcodebuild`) are found in traces, ranked by tokens, and get a concrete filter recommendation — [RTK](https://github.com/rtk-ai/rtk) where it supports the platform, otherwise `xcbeautify`, errors only, tail; Kelpie measures and verifies the savings before/after and does not build its own filter; repeated offenders → `comment` to the agent's role instructions owner. Built-in tools are ranked too, with advice for their kind (images downscaled, a record read compactly and not re-read, a file in a range; #197)
 
 ### P1. Basic token optimization — recommendations in the daily report, from traces, no LLM
 
@@ -133,6 +134,7 @@ Each recommendation comes with estimated savings and is verified before/after:
 - **Model fit per role:** roles doing routine work (triage, polling, status updates) that could run on a cheaper model; after a switch, quality is checked by returns and ping-pong rounds
 - **Diff-only review:** reviewers re-reading the whole PR on rounds 2+ instead of the changes since the last round
 - Context growth per step, repeated prompt fragments, unused tools, restarts from zero
+- **Instruction bloat** (incident 21): the skills, CLAUDE.md, AGENTS.md and role prompts each role loads, by size, growth per week and tokens a day spent reading them; near-duplicate sections and facts repeated across files (one fact, one place); an alert when a file crosses a size threshold or grows fast, recommending a short core plus topic references. Platform-agnostic: paths are config data. Kelpie measures and recommends, never edits instruction files
 
 ### P1. Farm optimization
 
@@ -157,7 +159,7 @@ Metrics: tasks per hour per role, task time by stage (queue, review, waiting for
 - **Decision (Oct 16): Kelpie is published free and open source; no monetization for now.** Success is measured by adoption: farms running Kelpie, incidents and fixes they report, contributed adapters. The paid tier and the farm audit are out of scope until this decision is revisited.
 - Segments: engineering teams running fleets of coding agents; self-hosted farms on Hermes, OpenClaw, Paperclip
 - **P1** feedback: talk to 10 people who run agent farms — as a source of incidents and requirements, not as demand validation
-- **P1** naming: check domains and USPTO for Kelpie; the PyPI package is `kelpie-sre` because `kelpie` is taken
+- **Naming — decided (Nov 2):** keep Kelpie; the PyPI package is `kelpie-sre` (`kelpie` is taken). Four small GitHub projects share the name (0–3 stars, one archived, one renamed); kelpie.dev/.io/.sh/.app are taken, and no domain is needed for an open-source release (repo, PyPI and docs suffice). One CLI clash is possible: another agent-coordination tool also installs a `kelpie` command. USPTO not searched yet (manual, classes 9 and 42) — before any commercial use
 
 ### Risks
 
@@ -186,38 +188,72 @@ To keep the scope focused, Kelpie does not build what already exists or is not n
 
 ## Plan and status
 
-Three weeks, three steps: the core with traces and the first adapter, the full rule set, then the report with optimization and publication.
+Three weeks, three steps: the core with traces and the first adapter, the full rule set, then the report with optimization and publication. Status as of Nov 2; the evidence for every item is in `docs/roadmap.md`. A line is ticked only when its roadmap items have no open criterion; otherwise it says what is left.
 
 **Week 1, Oct 15–21**
 
 - [x] Engine safety first: action ledger, routing to executors, stop capability, per-rule mode (A–D)
 - [x] Repository, `CLAUDE.md`, cloud environment, fixtures from the farm incidents
-- [x] Core: model of tasks, statuses, owners, conditions and resources
-- [ ] Traces: OTLP intake following GenAI semantic conventions, storage, export to Langfuse
-- [x] Checkpoints: commit reminders, WIP commit on exit, resume from the last commit
+- [ ] Core: model of tasks, statuses, owners, conditions and resources — in use by every rule; the model gaps item is open (shared conditions, block categories, status history, session hosts)
+- [x] Traces: OTLP intake following GenAI semantic conventions, storage, export to Langfuse
+- [ ] Checkpoints: commit reminders, WIP commit on exit, resume from the last commit — the resume note carries no git log and reaches the next session as a task comment, not in its prompt
 - [x] Hermes adapter: hooks and reading `kanban.db`
 - [x] Rules: exit contract, "wait for condition", orphan statuses, stale blocks
 
 **Week 2, Oct 22–28** (started early, Week 1 finished on Oct 15)
 
-- [ ] Before the rules: span dedup by tool-call id, quickstart for Hermes and `kelpie doctor`, so the live run can start in parallel
-- [ ] Rules: ping-pong, role bottlenecks, environment resources, CI economy
-- [ ] Rules: loop and budget breaker (10), activity without progress (11)
-- [ ] Budgets and spend: budget config, thresholds, burn-rate forecast, spend from traces, Claude Code metrics and provider cost APIs
-- [ ] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container
-- [ ] Condition connectors: GitHub and CI, LLM provider quotas, human tasks
-- [ ] Run on our own farm and record every rule trigger
+- [x] Before the rules: span dedup by tool-call id, quickstart for Hermes and `kelpie doctor`, so the live run can start in parallel
+- [ ] Rules: ping-pong, role bottlenecks, environment resources, CI economy — all four act; open: holds by flag or pause and lifted in act mode, suggested concurrency per LLM provider, rule 9's fail-fast cancel, the green-main/red-PR fixture
+- [x] Rules: loop and budget breaker (10), activity without progress (11)
+- [ ] Budgets and spend: budget config, thresholds, burn-rate forecast, spend from traces, Claude Code metrics and provider cost APIs — all but two spend sources: Claude Code's OpenTelemetry metrics are not ingested, and provider cost reports check the bill but do not feed budgets
+- [ ] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container — works; an unreachable Prometheus is logged and counted, not alerted
+- [ ] Condition connectors: GitHub and CI, LLM provider quotas, human tasks — all three work; no connector evaluates `quota_reset` yet, and limit hits come from provider probes, not spans
+- [ ] Run on our own farm and record every rule trigger — observe runs on the farm produced incidents 14–20 and their fixes; the recorded 24 h observe and 48 h act runs of the roadmap item were not done
 
 **Week 3, Oct 29 – Nov 4**
 
-- [ ] Daily "cost of chaos" report with dollars, cost per completed task, and before/after verification of fixes
-- [ ] Token savings that act: rule 12 (conflict warning), dispatch gate, huge tool outputs
-- [ ] Token optimization recommendations (cache breaks, model fit per role, diff-only review) and throughput metrics
+- [x] Daily "cost of chaos" report with dollars, cost per completed task, and before/after verification of fixes
+- [x] Token savings that act: rule 12 (conflict warning), dispatch gate, huge tool outputs
+- [x] Token optimization recommendations (cache breaks, model fit per role, diff-only review) and throughput metrics
 - [x] Multi-host: `kelpie agent` on each agent machine, central `kelpie serve` anywhere (blocks the release)
-- [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring
-- [ ] Whole-codebase security audit after the code-health pass (blocks the release)
+- [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring — the survey and the release-safe part are done (#248); the rest is after the release
+- [ ] Whole-codebase security audit after the code-health pass (blocks the release) — the audit is done (#275) and no critical or high finding is open; M1 waits for the owner, other medium and low findings are open
 - [x] `kelpie demo`: the farm simulator replays real incidents so anyone can see Kelpie work in two minutes without a farm
-- [ ] Documentation and publication of the open core
+- [ ] Documentation and publication of the open core — the guides, quickstarts, `docs/security.md`, the release workflow and the changelog are in place; nothing is published yet
 - [ ] 10 conversations with farm owners
 
 Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1 item (the rules backlog, `kelpie why`, the Claude Code adapter, return causes, the LLM root-cause section, the naming check) follows weeks 2–3, in the order of the backlog in `docs/roadmap.md`.
+
+**Where the project is.** Every P0 rule (1–7, 9–12, the dispatch gate) and the daily report (rule 8) are merged. So are the P1 rules backlog except the rule-9 CI config PR and the #229 outage follow-ups, `kelpie why`, and four adapters (Hermes, Claude Code, OpenClaw, GitHub Issues / Linear). Multi-host, budgets with spend modes, real-time alerts to Telegram and Slack with snoozes, `kelpie demo` and `kelpie selftest` are merged too. The release-safe part of the code-health pass and the security audit are done.
+
+**Left before 0.1.0a1:**
+
+- The owner decides the audit's open M1 item (forged spans can make rule 10 stop another agent's run; options on #275).
+- The owner creates the PyPI and TestPyPI accounts for trusted publishing.
+- Then the first tag. Its release notes say that `kelpie serve` stays on loopback, or behind a limiting reverse proxy, until audit item M5 is fixed. The tag's release ticks the publish item.
+
+The plan marks only multi-host and the audit as blocking the release. Several older P0 roadmap items are still open. Whether any of them should block the release is an open question for the owner:
+
+- `kelpie status` as a farm view
+- ledger retention and status history in storage
+- the cloud setup script
+- `kelpie run-once`
+- the rest of the model gaps
+- the live-run records
+
+**After 0.1.0a1, in progress:**
+
+- instruction files: counted loads and the report section (#282)
+- the board in metrics and the report (#283)
+- backlog-release spikes and the toolchain version in outages (#284)
+- outage kinds in the report (#270, #229)
+- before/after over hours with work (#266, #193)
+- the rule-9 CI config PR (#237)
+- declared actions per adapter (#219)
+
+**After 0.1.0a1, next:**
+
+- the audit's remaining medium and low items (M1 as the owner decides; M4–M7; L4, L5, L7–L11, L13, L14)
+- the rest of #248
+- the open P1 items in the roadmap backlog
+- 10 conversations with farm owners and the naming check

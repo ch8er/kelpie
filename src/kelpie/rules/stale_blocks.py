@@ -72,6 +72,15 @@ snoozed; they then say so (``params.snooze``, as rule 13's items carry it). Whil
 snooze holds the block's alert state resolves; when the snooze is what closed it, the
 notice says the block is snoozed.
 
+**Block storms** (issue #229, :mod:`kelpie.rules._block_storm`). ``storm_min_tasks`` (5)
+tasks blocked within ``storm_window`` (2h) on the same reason (the task's own id, times
+and hashes stripped; what it names kept apart) are one outage: one alert with the shared
+reason as its cause, the person it names (who can end it) and the tasks. Only blocks
+without a condition Kelpie can check count, and not snoozed ones. A new check: its alert and
+its "resolved" notice are only logged (``storm_mode = "observe"``) until set to ``"rule"``,
+which follows the rule's mode and folds this rule's alerts of its tasks under it (rule 13's
+inbox items are not folded).
+
 The dead-end and no-condition alerts list the tasks stuck behind the blocked one
 (``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
 does not raise a second alert for the same dead end.
@@ -84,7 +93,7 @@ rules share (``behind_lookup``), which is also ``params.stuck_ids`` where an ale
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from types import MappingProxyType
@@ -94,7 +103,8 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import Condition, ConditionKind, KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import needs_you, register
-from kelpie.rules._alerts import alert_params
+from kelpie.rules._alerts import alert_params, check_connectors
+from kelpie.rules._block_storm import storms
 from kelpie.rules._chains import behind_lookup, behind_text
 from kelpie.rules._snoozes import SnoozeCheck, checker, describe
 from kelpie.rules._tasks import (
@@ -105,6 +115,7 @@ from kelpie.rules._tasks import (
     fresh,
     linked_conditions,
 )
+from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
 
 NAME = "stale_blocks"
 
@@ -120,6 +131,13 @@ class StaleBlocks:
     # Rule 13 as it reaches people (kelpie.app sets it from needs_you's config while it
     # does), or None: the blocks it lists that ask a person are left to it.
     inbox: needs_you.NeedsYou | None = None
+    # Block storms (#229): this many tasks blocked on the same reason within storm_window
+    # are one outage; 0 turns it off.
+    storm_min_tasks: int = 5
+    storm_window: timedelta = timedelta(hours=2)
+    storm_mode: str = "observe"  # "observe" (a new check: logged only) or "rule": the rule's mode
+    # A toolchain change on a host this long before a storm began is its likely cause.
+    toolchain_window: timedelta = TOOLCHAIN_WINDOW
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -130,6 +148,18 @@ class StaleBlocks:
         for task in snapshot.tasks:
             if task.status is Status.BLOCKED and task.block is not None:
                 actions.extend(self._check(task, snapshot, behind, listed, snoozed))
+        observe = self.storm_mode == "observe"
+        actions.extend(
+            storms(
+                snapshot,
+                NAME,
+                self.storm_min_tasks,
+                self.storm_window,
+                observe,
+                snoozed,
+                self.toolchain_window,
+            )
+        )
         return actions
 
     def _check(
@@ -181,6 +211,8 @@ class StaleBlocks:
                     {
                         "stuck_ids": stuck,
                         **_snooze_params(snooze),
+                        # a snooze holds it unless the condition is one Kelpie cannot see
+                        **({} if missing else {"snooze_task": task.id}),
                         **alert_params(
                             f"{task.id} blocked {_short(age)} on a condition Kelpie "
                             f"cannot see: {missing}"
@@ -225,7 +257,7 @@ class StaleBlocks:
                         if unchecked
                         else "never checked"
                     ),
-                    _check_connectors(kinds),
+                    check_connectors(kinds),
                     len(behind(task.id)),
                 ),
             )
@@ -263,6 +295,7 @@ class StaleBlocks:
                     f"(limit {_human(self.max_block)}) waiting for {pending}." + _back(snooze),
                     {
                         **_snooze_params(snooze),
+                        "snooze_task": task.id,  # a snooze holds it (#176)
                         **alert_params(
                             f"{task.id} blocked {_short(age)}, past the "
                             f"{_human(self.max_block)} limit: waiting for "
@@ -308,10 +341,15 @@ class StaleBlocks:
         settings = self.inbox or needs_you.NeedsYou()
         return asks_a_person(task, snapshot, settings.approval_reasons, settings.condition_reasons)
 
-    def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
-        """The resolve notice of a block whose snooze is what closed its state (without the
-        snooze this rule would still alert on it): that it is snoozed and until when, not
-        that the block is gone. None otherwise: the engine's general notice."""
+    def resolved(
+        self, state_id: str, snapshot: Snapshot, last_key: str | None = None
+    ) -> str | None:
+        """The resolve notice of a block whose state closed because a snooze holds it (without
+        the snooze this rule would still alert on it), or because rule 13 lists it now (without
+        the hand-off it would): that it is snoozed and until when, or that it is in the
+        person's digest, not that the block is gone. None otherwise: the engine's general
+        notice. A block whose last alert was about stale evidence is not described as handed
+        off: the connector recovered, which is what closed it."""
         task = next(
             (
                 t
@@ -322,21 +360,29 @@ class StaleBlocks:
         )
         if task is None or task.status is not Status.BLOCKED:
             return None
-        snooze = checker(snapshot)(task.id)
-        if snooze is None or not snooze.holds:
-            return None
-        others = {k: v for k, v in snapshot.snoozes.items() if k != task.id}
-        unsnoozed = replace(snapshot, snoozes=MappingProxyType(others))
         behind = behind_lookup(snapshot)
         listed = needs_you.inbox_task_ids(snapshot, self.inbox) if self.inbox is not None else None
-        if any(a.state == state_id for a in self._check(task, snapshot, behind, listed)):
-            return None  # still reported: the snooze held nothing
-        if not any(a.state == state_id for a in self._check(task, unsnoozed, behind, listed)):
-            return None  # it would be gone anyway: the block's own news, not the snooze's
-        return (
-            f"{describe(snooze.snooze, task.title)}: no reminders on its block until then, "
-            "unless more work is blocked behind it."
-        )
+        reported = any(a.state == state_id for a in self._check(task, snapshot, behind, listed))
+        if reported:
+            return None  # still reported: nothing held it
+        snooze = checker(snapshot)(task.id)
+        if snooze is not None and snooze.holds:
+            others = {k: v for k, v in snapshot.snoozes.items() if k != task.id}
+            unsnoozed = replace(snapshot, snoozes=MappingProxyType(others))
+            if any(a.state == state_id for a in self._check(task, unsnoozed, behind, listed)):
+                return (
+                    f"{describe(snooze.snooze, task.title)}: no reminders on its block until "
+                    "then, unless more work is blocked behind it."
+                )
+        if (
+            listed is not None
+            and task.id in listed
+            and not (last_key or "").startswith("stale-evidence:")
+            and any(a.state == state_id for a in self._check(task, snapshot, behind))
+        ):
+            assert self.inbox is not None  # a list of listed tasks comes from its settings
+            return needs_you.digest_notice(snapshot, self.inbox, task.id, "block")
+        return None  # it would be gone anyway: the block's own news
 
     def _alert(
         self,
@@ -395,16 +441,6 @@ def _unique(values: Iterable[Any]) -> list[str]:
     return list(dict.fromkeys(str(v) for v in values))
 
 
-def _check_connectors(kinds: Sequence[str]) -> str:
-    """The ask for stale evidence, by condition kind: which connector checks a kind is the
-    deployment's business (a rule cannot know); the doctor lists the connectors."""
-    names = kinds[0] if len(kinds) == 1 else f"{', '.join(kinds[:-1])} and {kinds[-1]}"
-    return (
-        f"Check that whatever checks {names} conditions is running "
-        "(kelpie doctor shows the connectors)"
-    )
-
-
 def _ended(ended: Sequence[Condition]) -> str:
     """What ended wrong, for a headline: ``PR #12 closed without merging``."""
     first = _ended_one(ended[0])
@@ -437,17 +473,6 @@ def _duration(value: Any, name: str, allow_zero: bool = False) -> timedelta:
     return result
 
 
-def _inbox(value: Any) -> needs_you.NeedsYou | None:
-    """``needs_you``: false, or rule 13's config section (true: its defaults)."""
-    if value is False:
-        return None
-    if value is True:
-        return needs_you.build({})
-    if isinstance(value, Mapping):
-        return needs_you.build(dict(value))
-    raise ValueError("needs_you must be false, true or rule 13's settings")
-
-
 @register(NAME)
 def build(config: dict[str, Any]) -> StaleBlocks:
     config = dict(config)
@@ -464,7 +489,22 @@ def build(config: dict[str, Any]) -> StaleBlocks:
             # false switches the alert off
             kwargs[key] = None if value is False else _duration(value, key)
     if "needs_you" in config:
-        kwargs["inbox"] = _inbox(config.pop("needs_you"))
+        kwargs["inbox"] = needs_you.hand_off(config.pop("needs_you"))
+    if "storm_min_tasks" in config:
+        value = config.pop("storm_min_tasks")
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1000:
+            raise ValueError("storm_min_tasks must be a whole number from 0 (off) to 1000")
+        if value == 1:
+            raise ValueError("storm_min_tasks must be at least 2: one blocked task is no storm")
+        kwargs["storm_min_tasks"] = value
+    for key in ("storm_window", "toolchain_window"):
+        if key in config:
+            kwargs[key] = _duration(config.pop(key), key)
+    if "storm_mode" in config:
+        mode = config.pop("storm_mode")
+        if mode not in ("observe", "rule"):
+            raise ValueError('storm_mode must be "observe" or "rule" (the rule\'s own mode)')
+        kwargs["storm_mode"] = mode
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return StaleBlocks(**kwargs)
