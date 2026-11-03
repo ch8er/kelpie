@@ -8,8 +8,8 @@ running ahead of the monotonic one by more than ``min_gap`` is a suspend of that
 A forward step of the wall clock itself (a manual change, NTP stepping a badly drifted
 clock) looks the same; NTP slews small drifts, far below ``min_gap``. A long tick (a slow
 adapter) advances both clocks and is no suspend. On a platform whose monotonic clock
-keeps counting through a suspend no jump shows; a wake log configured as data (``[host]
-wake_log``) reports the sleeps there.
+keeps counting through a suspend no jump shows: sleeps found another way (an OS wake log)
+can be added with :meth:`SleepWatch.add`.
 
 The engine owns the clocks: :class:`SleepWatch` reads them, rules only see the
 ``HostSleep`` records in ``Snapshot.host_sleeps``.
