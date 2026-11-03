@@ -133,7 +133,8 @@ DEFAULT_QUERIES: Mapping[str, str] = {
             "{path_sustain}",
             "{path_window}",
         )
-        + " and kelpie_path_bytes offset {half_window}"
+        # Only directories measured for all of path_sustain: every slice has data.
+        + " and kelpie_path_bytes offset {path_sustain}"
     ),
     "path_written": 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}',
     # Toolchain versions per host (incident 20), e.g. from scripts/kelpie-toolchain.sh: at

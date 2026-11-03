@@ -475,6 +475,15 @@ def test_current_sizes_that_do_not_grow_yet_are_not_called_unmeasured() -> None:
     assert "not measured" not in a.reason
 
 
+def test_no_directory_sentence_when_none_are_shown() -> None:
+    growing = path("/srv/cache", 5)
+    quiet = Resources(growing_paths_shown=0)
+    [a] = full_alerts(run(disk(495, 9.0), growing, rule=quiet))
+    assert a.params["growing_paths"] == []
+    assert "grew" not in a.reason and "not measured" not in a.reason
+    assert "full in about" in a.reason
+
+
 def test_directory_sizes_from_a_stopped_script_are_said_to_be_old() -> None:
     old = replace(path("/srv/cache", 5), at=NOW - 4 * 60 * M)
     [a] = full_alerts(run(disk(495, 9.0), old))

@@ -135,7 +135,8 @@ class Forecast:
     stale: bool  # directory sizes exist for it, but none recent: the script stopped
     elsewhere: bool = False  # the host's directory sizes are all on other filesystems
     unplaced: bool = False  # the host has directory sizes that do not say their filesystem
-    measured: bool = False  # current sizes of this filesystem exist (none of them grows yet)
+    measured: bool = False  # current sizes of this filesystem exist, and none of them grows
+    named: bool = True  # growing directories are named at all (growing_paths_shown > 0)
     path_max_age: timedelta = timedelta(hours=3)  # how old ``stale`` sizes are at least
 
 
@@ -239,7 +240,8 @@ class Resources:
                 stale,
                 elsewhere,
                 unplaced,
-                bool(current),
+                bool(current) and not any((p.growth_per_day or 0) > 0 for p in current),
+                self.growing_paths_shown > 0,
                 self.path_max_age,
             )
         return out
@@ -822,7 +824,9 @@ def _on(
 
 def _forecast_text(c: Forecast) -> str:
     unit = c.disk.unit
-    if c.growing:
+    if not c.named:
+        what = ""  # growing_paths_shown = 0: no sentence about directories
+    elif c.growing:
         what = (
             "Growing fastest: "
             + ", ".join(
@@ -856,7 +860,8 @@ def _forecast_text(c: Forecast) -> str:
             "Which directories grow is not measured: run scripts/kelpie-path-sizes.sh on the "
             "host (node_exporter's textfile collector) to see them here."
         )
-    return f"grows {c.growth:.1f} {unit} a day: full in about {_hours(c.hours)}. {what}"
+    text = f"grows {c.growth:.1f} {unit} a day: full in about {_hours(c.hours)}."
+    return f"{text} {what}" if what else text
 
 
 def _forecast_params(c: Forecast) -> dict[str, object]:

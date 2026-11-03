@@ -198,6 +198,9 @@ def test_path_interval() -> None:
     assert config.path_interval == timedelta(hours=1)
     assert "[21600s:7200s]" in config.query_text("path_growth")
     assert "[3600s:900s]" in config.query_text("disk_growth")  # disks keep their slices
+    # A new directory is named only once all three slices hold its sizes.
+    assert config.query_text("path_growth").endswith("offset 21600s")
+    assert config.query_text("disk_growth").endswith("offset 10800s")
     fast = prometheus(path_interval="5m").build().config
     assert "[3600s:900s]" in fast.query_text("path_growth")  # never shorter than the disk's
     slow = prometheus(path_interval="6h").build().config

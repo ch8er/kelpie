@@ -467,7 +467,10 @@ def test_disk_growth_and_directory_sizes() -> None:
         load_farm(prom, cfg)
         for name in ("disk_growth", "path_growth"):
             # Over the window, and only for series that existed half a window ago.
-            assert "[43200s]" in text(cfg, name) and "offset 21600s" in text(cfg, name)
+            # Disks: series that existed half a window ago; directories: measured for all
+            # of path_sustain (6h), so every slice has data.
+            offset = "offset 21600s"
+            assert "[43200s]" in text(cfg, name) and text(cfg, name).endswith(offset)
             # ((trend < held) or held): the window's rate, capped at the first quartile of
             # the quarter-hour slices of the last hour, each at least 0 (a cleanup is no
             # negative rate). tests/resources/test_growth_promql.py runs it in promtool.

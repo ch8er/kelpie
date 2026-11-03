@@ -1344,9 +1344,9 @@ present.
 | `interval` | `"60s"` | duration, >= 5s | At most one fetch this often. Keep it at most rule 7's `max_reading_age`. |
 | `token_env` | `"KELPIE_PROMETHEUS_TOKEN"` | variable name | Bearer token, sent only to `url`. Written here, the variable must be set. |
 | `queries` | built-in | table | PromQL overrides, one per reading, see below. |
-| `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. |
+| `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. Directories use at least `{path_window}` (see `path_interval`). |
 | `growth_sustain` | `"1h"`, or `growth_window` when that is shorter | duration, 5m to 24h and at most `growth_window` | How long growth must go on to count. The growth rate is the rate over `growth_window`, capped at the first quartile of the rates in the slices (`growth_sustain` / 4, at least 1m, aligned to the clock) of the last `growth_sustain`, a slice that shrank counting as 0. So a burst within about half of `growth_sustain` adds a few GB a day at most, for about one slice (5 GB written in 17 minutes reads at most about 5 GB a day on a flat disk, 35 on one growing 30 GB a day), then nothing; a cleanup of less than a few hours' growth leaves about the rate (an open forecast does not resolve), while a larger one turns the window's trend negative, so an open forecast resolves until the cleanup leaves the window (about 4 to 5 hours with the 6h default); a longer burst counts in part (5 GB in 40 to 50 minutes reads up to about 15 to 18 GB a day). Growth that comes in bursts with gaps longer than a slice (a build every 30 minutes, nothing written in between) reads as no growth. A shrinking trend stays negative: no forecast. |
-| `path_interval` | `"1h"` | duration, 1m to 6h | How often `scripts/kelpie-path-sizes.sh` runs (the shipped launchd agent and systemd timer: hourly). Its sizes change in steps, so directory growth is sustained over slices of at least two runs (`{path_slice}`, at least the disk's slice), three of them (`{path_sustain}`, at least `growth_sustain`), and its trend spans at least that too (`{path_window}`, at least `growth_window`); with quarter-hour slices most would see no change and no directory would be named. So with the defaults a directory is named once it grew for about 4 of the last 6 hours; a disk forecast that comes sooner says that none of the measured directories grew yet. |
+| `path_interval` | `"1h"` | duration, 1m to 6h | How often `scripts/kelpie-path-sizes.sh` runs (the shipped launchd agent and systemd timer: hourly). Its sizes change in steps, so directory growth is sustained over slices of at least two runs (`{path_slice}`, at least the disk's slice), three of them (`{path_sustain}`, at least `growth_sustain`), and its trend spans at least that too (`{path_window}`, at least `growth_window`); with quarter-hour slices most would see no change and no directory would be named. So with the defaults a directory is named once it was measured for 6 hours and grew for about 4 of them; a disk forecast that comes sooner says that none of the measured directories grew yet. Set rule 7's `path_max_age` above `path_interval` plus one run when you raise it. |
 | `load_on_macos` | `false` | bool | macOS counts threads waiting on I/O in its load average (300 to 800 on a healthy farm Mac), so hosts whose `node_uname_info` says Darwin get no load reading unless this is true. Needs node_exporter's uname collector (on by default), as does leaving out macOS's read-only volumes; a host once seen as macOS stays so when that query fails, and until it first answers no host gets a load reading. |
 | `toolchain_metric` | `"kelpie_toolchain_info"` | a metric name | Toolchain versions per host (incident 20), one series per tool with its version in a label, e.g. from `scripts/kelpie-toolchain.sh` (the active Xcode and CoreSimulator on macOS, or any `TOOL=COMMAND`). A version seen within `toolchain_lookback` right after another version of the same tool on the same host is a change; the first version a host reports is none. Report one version per tool. An outage that begins soon after a change names it as its likely cause in its alert (rules 4, 9 and 10, `toolchain_window`) and in the daily report. Absent metric: no changes, nothing else changes. |
 | `toolchain_tool_label`, `toolchain_version_label` | `"tool"`, `"version"` | label names, different, not `host_label` | The labels holding the tool's name and its version. |
@@ -1374,15 +1374,16 @@ The growth queries take the lower of two rates (`deriv`, in bytes per day): over
 later; doctor warns when the query fails). The trend is not clamped: a disk that shrinks
 over the window reads negative and forecasts nothing. A slice needs at least two scrapes, or
 the query answers nothing: keep `growth_sustain` at least 8 scrape intervals long (doctor
-notes a host with no growth rate). The growth queries only answer for series
-that existed half a window ago, so a new Prometheus or host forecasts nothing at first. The
+notes a host with no growth rate). The disk growth query only answers for series that
+existed half a window ago, the directory one for directories measured for all of
+`{path_sustain}` (6h), so a new Prometheus, host or directory forecasts nothing at first. The
 growth and directory queries may fail or be empty without costing the other readings (each
 failure is counted in `kelpie_resource_read_failures_total`, cause `<query>_<cause>`). In
 every query, custom ones too, `{host_label}`, `{window}` (`growth_window`), `{half_window}`,
 `{sustain}` (`growth_sustain`), `{slice}` (a quarter of it, at least 1m), `{path_slice}`,
 `{path_sustain}` and `{path_window}` (the same for directory sizes, see `path_interval`) are
-filled in; a custom
-`disk_growth` or `path_growth` is sustained only if it uses those itself. The defaults are in `kelpie.example.toml`. `processes` needs node_exporter's
+filled in; a custom `disk_growth` or `path_growth` is sustained only if it uses those itself.
+The defaults are in `kelpie.example.toml`. `processes` needs node_exporter's
 `--collector.processes`.
 
 ## [connectors.github]
