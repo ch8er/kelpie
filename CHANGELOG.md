@@ -81,6 +81,10 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   for the report, not sent one per task ([#183](https://github.com/ch8er/kelpie/pull/183)).
 - An action that a platform cannot perform becomes an alert for a human instead of an error
   ([#66](https://github.com/ch8er/kelpie/pull/66)).
+- Host sleep and wake: a suspend (the wall clock running ahead of the monotonic clock
+  between ticks) is recorded, and session and task ages count awake time, so a laptop that
+  slept raises no requeue or orphan alert; a session that does not come back after the
+  wake is requeued once as "ended while the host slept" ([#311](https://github.com/ch8er/kelpie/pull/311)).
 
 #### Platform adapters
 
