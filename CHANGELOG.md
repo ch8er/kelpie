@@ -187,8 +187,9 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 - Honest before/after: fixes less than a window apart are measured together and credited
   to none alone (per fix only its own role or command), per-day rates whose signal began
   inside the window are listed as not compared, throughput is compared only over hours
-  when agent work was available, and small samples say *direction only*
-  ([#193](https://github.com/ch8er/kelpie/issues/193)).
+  when agent work was available (a spike of released backlog right after a fix is named
+  and the next full day compared instead), and small samples say *direction only*
+  ([#193](https://github.com/ch8er/kelpie/issues/193), [#284](https://github.com/ch8er/kelpie/issues/284)).
 - Farm throughput per role, live gauges and Grafana panels; rework counted for the role that
   redid the work, not the reviewer ([#78](https://github.com/ch8er/kelpie/pull/78), [#116](https://github.com/ch8er/kelpie/pull/116)).
 - A sections extension point with per-section settings, and token sections that read them

@@ -1846,6 +1846,7 @@ def _single_lines(v: Verification, report: DailyReport) -> list[str]:
         f"{title}. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
         "",
         *_metric_table(v.metrics),
+        *_release_lines(v, report),
         *_excluded_lines(v, report),
     ]
 
@@ -1870,6 +1871,7 @@ def _group_lines(v: Verification, report: DailyReport) -> list[str]:
             f"Together. After-window: {hours:.1f}h.{_direction_only(v, v.metrics)}",
             "",
             *_metric_table(v.metrics),
+            *_release_lines(v, report),
         ]
     else:
         out.append(f"Together: no data on either side yet (after-window: {hours:.1f}h).")
@@ -1912,6 +1914,32 @@ def _metric_cells(m: Metric) -> str:
         f"{m.name}{small} | {_value(m.before, m.unit)} | {_value(m.after, m.unit)} "
         f"| {_change(m)} | {m.n_before} / {m.n_after} |"
     )
+
+
+def _release_lines(v: Verification, report: DailyReport) -> list[str]:
+    """A throughput spike right after the fix that came from released backlog (#193)."""
+    r = v.release
+    if r is None:
+        return []
+    burst = (r.end - r.start).total_seconds() / 3600
+    which = "fix" if not v.together else "last fix"
+    if r.full_day:
+        then = (
+            f"tasks done per hour compares the next full day "
+            f"({_local(r.steady[0], report)} to {_local(r.steady[1], report)}) instead"
+        )
+    else:
+        then = (
+            "the next full day is not in yet, so tasks done per hour compares the rest of "
+            f"the after-window from {_local(r.steady[0], report)} on, and a later report "
+            "settles it"
+        )
+    return [
+        "",
+        f"Backlog release: {r.tasks} of the {r.done} tasks done in the {burst:.1f}h after the "
+        f"{which} were ready or blocked before it, a burst of released backlog rather than a "
+        f"faster farm; {then}.",
+    ]
 
 
 def _excluded_lines(v: Verification, report: DailyReport) -> list[str]:
