@@ -60,7 +60,7 @@ Kelpie runs on that farm, mostly in observe mode. Measured there so far:
   now reports a block storm, CI jobs that never start and correlated tool failures as one
   outage; the report side is in progress ([#229](https://github.com/ch8er/kelpie/issues/229)).
 - **A token baseline:** 210.4M tokens in 24 h, 92% cache reads, 8.1M per completed task,
-  and 97 `sleep` calls inside sessions, which rule 2 now flags
+  and 97 `sleep` calls inside sessions, which `wait_condition` now flags
   ([#197](https://github.com/ch8er/kelpie/issues/197#issuecomment-6278901109)).
 - **Before/after of three fixes made within 72 minutes**, direction only (one farm, small
   samples): tasks closed per active hour 2.0 → 4.1–4.8, returns per closed task 0.50 →
