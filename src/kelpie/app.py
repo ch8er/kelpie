@@ -2497,7 +2497,7 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
         name, effects = planned.name, planned.effects
         if name not in REGISTRY:
             continue
-        platform = effects - {ActionKind.CANCEL_BUILD}
+        platform = effects - CI_WRITES
         if ActionKind.CANCEL_BUILD in effects and not cancel:
             found[name] = ActBlocker(_no_cancel(settings), refused=has_hermes)
         elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
@@ -2520,7 +2520,7 @@ def act_gaps(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dict[st
     for planned in PLANNED:
         if planned.name not in REGISTRY or planned.name in blocked:
             continue
-        platform = planned.effects - {ActionKind.CANCEL_BUILD}
+        platform = planned.effects - CI_WRITES
         if platform and (said := _gaps(adapters, platform)):
             gaps[planned.name] = said
     return gaps
@@ -2557,6 +2557,11 @@ def _gaps(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) 
         else:
             said.append(f"neither {' nor '.join(names)} can {_verbs(lacking)} yet")
     return " and ".join(sorted(said))
+
+
+# The CI connector's writes (rule 9), allowed by its own settings, not by a platform adapter.
+# ``propose_ci_config`` has no executor yet: ``kelpie ci-config`` previews it.
+CI_WRITES = frozenset({ActionKind.CANCEL_BUILD, ActionKind.PROPOSE_CI_CONFIG})
 
 
 def _no_cancel(settings: Settings) -> str:
@@ -2649,12 +2654,12 @@ def _refuse_unimplemented_actions(
 
 def acting_rules(settings: Settings, loaded: LoadedRules) -> list[str]:
     """The rules that act on a board here: in act mode, implemented, not under dry-run, with
-    an effect a platform adapter carries out (not only alerts, or cancelling CI builds)."""
+    an effect a platform adapter carries out (not only alerts, or the CI connector's writes:
+    cancelling builds, proposing a CI configuration)."""
     if settings.engine.dry_run:
         return []
-    on_boards = {
-        p.name for p in PLANNED if p.effects - {ActionKind.CANCEL_BUILD}
-    }  # what act_blockers calls a rule's platform effects
+    # What act_blockers calls a rule's platform effects.
+    on_boards = {p.name for p in PLANNED if p.effects - CI_WRITES}
     return sorted(
         s.name
         for s in loaded.statuses

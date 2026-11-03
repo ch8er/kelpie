@@ -1,0 +1,13 @@
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -5,6 +5,10 @@
+     branches: [main, 'release/**']
+   pull_request:
+ 
++concurrency:
++  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) && github.event.pull_request.number) || (github.event_name == 'push' && github.ref != 'refs/heads/main' && github.ref) || github.run_id }}
++  cancel-in-progress: true
++
+ jobs:
+   test:
+     runs-on: ubuntu-latest

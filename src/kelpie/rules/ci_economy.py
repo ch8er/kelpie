@@ -37,6 +37,13 @@ connector's business.
    billable job minutes where known, otherwise wall-clock time), so treat the totals as an
    order of magnitude.
 
+   With ``propose_config``, each pipeline whose wasted minutes reach ``propose_min_minutes``
+   also gets ``propose_ci_config``, routed to the connector that reported its builds
+   (``executor`` = ``Build.source``), with its ``repo``, ``workflow`` and ``changes``: in
+   act mode a connector that declares the kind opens a pull request with the changes written
+   for its CI (none does yet: it is a "not executed" alert; ``kelpie ci-config`` previews
+   it). Once per pipeline and set of changes.
+
 2. **Superseded builds still running** → ``cancel_build`` (``cancel_superseded``), only
    for builds the connector marked ``cancellable`` (within its cancel policy), routed to
    that connector (``executor`` = ``Build.source``). The connector re-checks the build
@@ -121,6 +128,7 @@ CHANGES = {
     "wip": ("skip_wip", "skip WIP commits"),
 }
 _MAX_PIPELINES = 10
+CHANGES_BY_NAME = dict(CHANGES.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +152,8 @@ class CiEconomy:
     not_started_mode: str = "observe"  # a new check: "observe", or "rule" (the rule's mode)
     # A toolchain change on a host this long before an outage began is its likely cause.
     toolchain_window: timedelta = TOOLCHAIN_WINDOW
+    propose_config: bool = False  # opt-in
+    propose_min_minutes: float = 60.0
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -156,6 +166,8 @@ class CiEconomy:
                 keys = [c.key for c in cancels if c.key]
                 waste = replace(waste, params={**waste.params, ANNOUNCES: keys})
             actions.append(waste)
+            if self.propose_config:
+                actions.extend(self._proposals(waste.params["pipelines"]))
         actions.extend(self._quota(recent, snapshot))
         actions.extend(
             outages(snapshot, NAME, self.outage_min_prs, self.outage_window, self.toolchain_window)
@@ -352,6 +364,36 @@ class CiEconomy:
             key=lambda p: (-p["minutes"], str(p["repo"]), str(p["workflow"]), str(p["source"]))
         )
         return out[:_MAX_PIPELINES], len(out)
+
+    def _proposals(self, pipelines: list[dict[str, Any]]) -> list[Action]:
+        hours = self.window.total_seconds() / 3600
+        actions = []
+        for p in pipelines:
+            source, repo, workflow = p["source"], p["repo"], p["workflow"]
+            if not source or not repo or not workflow or p["minutes"] < self.propose_min_minutes:
+                continue
+            names = [c["change"] for c in p["changes"]]
+            what = "; ".join(
+                f"{CHANGES_BY_NAME[c['change']]} ({_minutes(c['minutes'])})" for c in p["changes"]
+            )
+            actions.append(
+                Action(
+                    ActionKind.PROPOSE_CI_CONFIG,
+                    NAME,
+                    f"A better CI configuration for {workflow} in {repo} would have saved "
+                    f"{_minutes(p['minutes'])} in the last {hours:g}h: {what}.",
+                    executor=source,
+                    key=f"{NAME}:propose:{repo}:{workflow}:{'+'.join(sorted(names))}",
+                    once=True,
+                    params={
+                        "repo": repo,
+                        "workflow": workflow,
+                        "minutes": p["minutes"],
+                        "changes": p["changes"],
+                    },
+                )
+            )
+        return actions
 
     # --- 2. cancel superseded builds ----------------------------------------------------
 
@@ -621,6 +663,15 @@ def build(config: dict[str, Any]) -> CiEconomy:
         kwargs["outage_min_prs"] = value
     if "quota_critical" in config:
         kwargs["quota_critical"] = _number(config.pop("quota_critical"), "quota_critical", top=1)
+    if "propose_min_minutes" in config:
+        kwargs["propose_min_minutes"] = _number(
+            config.pop("propose_min_minutes"), "propose_min_minutes", zero=True
+        )
+    if "propose_config" in config:
+        value = config.pop("propose_config")
+        if not isinstance(value, bool):
+            raise ValueError("propose_config must be true or false")
+        kwargs["propose_config"] = value
     if "cancel_superseded" in config:
         value = config.pop("cancel_superseded")
         if not isinstance(value, bool):

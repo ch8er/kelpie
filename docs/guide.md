@@ -535,6 +535,7 @@ uv run kelpie status                 # rules that would load, with their mode
 uv run kelpie why T-101               # why a task is not moving (read-only; --json)
 uv run kelpie snooze T-101 --until 2026-10-25 --reason "deferred to the release"
 uv run kelpie snoozes                # active snoozes; kelpie unsnooze T-101 removes one
+uv run kelpie ci-config               # rule 9's workflow changes as diffs (reads GitHub; writes nothing)
 uv run kelpie serve                  # listens on 127.0.0.1:9464; --host 0.0.0.0 to expose
 ```
 

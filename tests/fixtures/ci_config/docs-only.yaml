@@ -1,0 +1,30 @@
+id: docs-only
+waste: docs_only
+description: >
+  README and docs fixes ran the full test matrix.
+config: {waste_min_minutes: 0, propose_config: true, propose_min_minutes: 30, docs_globs: [docs/*, '*.md'], cancel_superseded: false}
+default_branch: main
+snapshot:
+  now: "2026-03-05T12:00:00+00:00"
+  builds:
+    - {id: D-1, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: success, branch: task/T-611, sha: 5e5e5e5, started_at: '2026-03-05T08:00:00+00:00', finished_at: '2026-03-05T08:15:00+00:00', minutes: 15, changed_paths: [README.md]}
+    - {id: D-2, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: success, branch: task/T-612, sha: 6f6f6f6, started_at: '2026-03-05T09:00:00+00:00', finished_at: '2026-03-05T09:15:00+00:00', minutes: 15, changed_paths: [docs/guide.md, docs/api/index.md]}
+    - {id: D-3, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: success, branch: task/T-613, sha: 7a7a7a7, started_at: '2026-03-05T10:00:00+00:00', finished_at: '2026-03-05T10:15:00+00:00', minutes: 15, changed_paths: [docs/faq.md]}
+workflow: |
+  name: Tests
+  # Runs the test matrix on every change.
+  on:
+    push:
+      branches: [main, 'release/**']
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - run: make test  # the full matrix
+expected:
+  changes: [ignore_docs_paths]
+  applied: [ignore_docs_paths]
+  left_out: []

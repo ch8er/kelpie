@@ -1,0 +1,32 @@
+id: verified-commits
+waste: already_verified
+description: >
+  The same commit was built again for the same trigger after it had already passed (re-
+  runs by agents that polled CI).
+config: {waste_min_minutes: 0, propose_config: true, propose_min_minutes: 30, docs_globs: [docs/*, '*.md'], cancel_superseded: false}
+default_branch: main
+snapshot:
+  now: "2026-03-05T12:00:00+00:00"
+  builds:
+    - {id: V-1, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: success, branch: task/T-631, sha: 1e1e1e1, started_at: '2026-03-05T08:00:00+00:00', finished_at: '2026-03-05T08:20:00+00:00', minutes: 20}
+    - {id: V-2, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: success, branch: task/T-631, sha: 1e1e1e1, started_at: '2026-03-05T08:30:00+00:00', finished_at: '2026-03-05T08:50:00+00:00', minutes: 20}
+    - {id: V-3, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: success, branch: task/T-631, sha: 1e1e1e1, started_at: '2026-03-05T09:00:00+00:00', finished_at: '2026-03-05T09:20:00+00:00', minutes: 20}
+workflow: |
+  name: Tests
+  # Runs the test matrix on every change.
+  on:
+    push:
+      branches: [main, 'release/**']
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - run: make test  # the full matrix
+expected:
+  changes: [skip_verified]
+  applied: []
+  left_out:
+    - [skip_verified, GitHub Actions has no setting that skips an already verified commit]

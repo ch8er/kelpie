@@ -1,0 +1,32 @@
+id: superseded-pushes
+waste: superseded
+description: >
+  Each push to an open pull request started a full build while the build of the previous
+  commit was still running; the older build's remaining minutes bought nothing.
+config: {waste_min_minutes: 0, propose_config: true, propose_min_minutes: 30, docs_globs: [docs/*, '*.md'], cancel_superseded: false}
+default_branch: main
+snapshot:
+  now: "2026-03-05T12:00:00+00:00"
+  builds:
+    - {id: S-1, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: cancelled, branch: task/T-601, sha: 1a1a1a1, started_at: '2026-03-05T08:00:00+00:00', finished_at: '2026-03-05T08:40:00+00:00', minutes: 40, superseded_by: S-2}
+    - {id: S-2, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: success, branch: task/T-601, sha: 2b2b2b2, started_at: '2026-03-05T08:10:00+00:00', finished_at: '2026-03-05T08:50:00+00:00', minutes: 40}
+    - {id: S-3, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: cancelled, branch: task/T-602, sha: 3c3c3c3, started_at: '2026-03-05T09:00:00+00:00', finished_at: '2026-03-05T09:40:00+00:00', minutes: 40, superseded_by: S-4}
+    - {id: S-4, source: ci, repo: example/app, workflow: .github/workflows/test.yml, event: pull_request, status: success, branch: task/T-602, sha: 4d4d4d4, started_at: '2026-03-05T09:05:00+00:00', finished_at: '2026-03-05T09:45:00+00:00', minutes: 40}
+workflow: |
+  name: Tests
+  # Runs the test matrix on every change.
+  on:
+    push:
+      branches: [main, 'release/**']
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - run: make test  # the full matrix
+expected:
+  changes: [cancel_in_progress]
+  applied: [cancel_in_progress]
+  left_out: []

@@ -1,0 +1,32 @@
+id: all-kinds
+waste: all
+description: >
+  One pipeline wasted minutes in every way rule 9 knows; the changes are written in the
+  order of the minutes they would have saved, and the two GitHub Actions has no setting
+  for are listed as left out.
+config: {waste_min_minutes: 0, propose_config: true, propose_min_minutes: 30, docs_globs: [docs/*, '*.md'], cancel_superseded: false}
+default_branch: main
+snapshot:
+  now: "2026-03-05T12:00:00+00:00"
+  # The builds of every other fixture here, together.
+  builds_from: [superseded-pushes, docs-only, drafts, verified-commits, wip-commits]
+workflow: |
+  name: Tests
+  # Runs the test matrix on every change.
+  on:
+    push:
+      branches: [main, 'release/**']
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - run: make test  # the full matrix
+expected:
+  changes: [cancel_in_progress, skip_drafts, skip_wip, ignore_docs_paths, skip_verified]
+  applied: [cancel_in_progress, ignore_docs_paths, skip_drafts]
+  left_out:
+    - [skip_wip, GitHub expressions cannot match the WIP patterns (no regular expressions)]
+    - [skip_verified, GitHub Actions has no setting that skips an already verified commit]
