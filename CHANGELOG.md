@@ -30,7 +30,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - The Linear client goes through Kelpie's HTTP helper: one deadline per request however
   slowly the server answers, and a time budget for all the reads of one refresh
   (`[adapters.linear] tick_budget`, 30s), so a slow Linear cannot stall the control loop
-  (audit M4, #PR_M4).
+  (audit M4, [#324](https://github.com/ch8er/kelpie/pull/324)).
 
 ## [0.1.0a1] - 2026-11-03
 
