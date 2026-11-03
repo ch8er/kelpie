@@ -20,6 +20,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   (until it is switched on; switched back to observe, it stops counting)
   ([#270](https://github.com/ch8er/kelpie/pull/270)).
 
+### Safety
+
+- One acting Kelpie per board is enforced: an instance with a rule in `act` (and
+  `kelpie agent`, unless `[agent] actions = []`) holds a lock per board, and a second
+  acting instance on the same board refuses to start, naming the board and the holder's
+  pid. Observe and suggest instances are unaffected (audit M7, #PR_M7).
+
 ## [0.1.0a1] - 2026-11-03
 
 First public pre-release, an alpha: interfaces and configuration keys may still

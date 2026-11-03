@@ -43,7 +43,9 @@ from kelpie.adapters.issues.mapping import (
     login_key,
     map_items,
 )
+from kelpie.core import actlock
 from kelpie.core.actions import ActionKind
+from kelpie.core.actlock import ActLock
 from kelpie.core.alerts import format_age
 from kelpie.core.model import Snapshot, Task
 from kelpie.core.ports import Deferred, PlatformEvent, UnsupportedAction
@@ -134,6 +136,18 @@ class IssuesAdapter:
     @property
     def _boards(self) -> dict[str, Board]:
         return {b.key: b for b in self.boards}
+
+    def act_locks(self) -> tuple[ActLock, ...]:
+        """One act lock per repository or team, in Kelpie's per-user state folder (audit
+        M7). It keeps two instances on this host apart, not two hosts."""
+        return tuple(
+            ActLock(
+                f"{self.name} {b.key}",
+                actlock.keyed(self.name, self.where, b.key),
+                create_folder=True,
+            )
+            for b in self.boards
+        )
 
     # --- status --------------------------------------------------------------------------
 

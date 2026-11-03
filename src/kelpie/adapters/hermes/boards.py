@@ -35,6 +35,7 @@ from typing import Any, ClassVar
 
 from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError
 from kelpie.core.actions import ActionKind, ActionResult
+from kelpie.core.actlock import ActLock
 from kelpie.core.model import (
     Condition,
     ConditionKind,
@@ -88,6 +89,10 @@ class HermesBoards:
     def clock(self, clock: Callable[[], datetime]) -> None:
         for b in self.boards:
             b.clock = clock
+
+    def act_locks(self) -> tuple[ActLock, ...]:
+        """Every board's act lock (audit M7)."""
+        return tuple(lock for b in self.boards for lock in b.act_locks())
 
     # --- reading -------------------------------------------------------------------------
 

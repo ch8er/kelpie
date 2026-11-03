@@ -1992,7 +1992,7 @@ and the report.
 | `allow_plain_http` | `false` | Allow `http://`; the server name must resolve to loopback or private addresses only (RFC 1918, `100.64.0.0/10`, IPv6 ULA). The token then crosses the network in clear. |
 | `interval` | `15s` | Between reports (1s–5m). The server merges a report for 2 × interval + 10s. |
 | `timeout` | `30s` | One request to the hub (1s–5m). |
-| `actions` | every kind the adapters declare | Narrows the action kinds this agent carries out, e.g. `["comment"]`. |
+| `actions` | every kind the adapters declare | Narrows the action kinds this agent carries out, e.g. `["comment"]`. `[]`: the agent only reports and takes no [act lock](security.md#one-acting-instance-per-board). |
 | `max_body_bytes` | 16 MiB | Largest report sent; must not exceed the hub's. |
 | `relay` | `"127.0.0.1:4318"` | Loopback address of the OTLP relay (spans from this machine go through it to the hub); `false`: none. |
 

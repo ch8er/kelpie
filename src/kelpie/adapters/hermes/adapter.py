@@ -166,7 +166,9 @@ from kelpie.adapters.hermes.stop import (
 from kelpie.adapters.hermes.worker import DEFAULT_GRACE, OLD_BOARD, Ended, run_worker
 from kelpie.adapters.hermes.worker import end as end_workers
 from kelpie.adapters.hermes.worker import targets as worker_targets
+from kelpie.core import actlock
 from kelpie.core.actions import ActionKind, ActionResult
+from kelpie.core.actlock import ActLock
 from kelpie.core.model import (
     Artifact,
     Block,
@@ -702,6 +704,12 @@ class HermesAdapter:
             return self.roles[key]
         m = _INSTANCE.match(key) if self.role_from_name else None
         return m[1] if m else key
+
+    def act_locks(self) -> tuple[ActLock, ...]:
+        """The act lock of this board, next to its database (audit M7)."""
+        where = str(self.db_path)
+        label = f"{self.board} ({where})" if self.board is not None else where
+        return (ActLock(label, actlock.beside(self.db_path)),)
 
     # --- reading -------------------------------------------------------------------------
 

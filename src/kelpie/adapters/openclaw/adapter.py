@@ -79,7 +79,9 @@ from kelpie.adapters.openclaw.stop import (
     write_marker,
 )
 from kelpie.adapters.openclaw.workboard import Card, WorkboardError
+from kelpie.core import actlock
 from kelpie.core.actions import ActionResult
+from kelpie.core.actlock import ActLock
 from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
 from kelpie.traces.command import redact_command
@@ -275,6 +277,14 @@ class OpenClawAdapter:
             self.workboard_db = Path(self.workboard_db).expanduser()
         if self.spool is not None:
             self.spool = Path(self.spool).expanduser()
+
+    def act_locks(self) -> tuple[ActLock, ...]:
+        """The act lock next to the spool (audit M7): instances that read one spool see the
+        same sessions, and both would stop them. None without a spool or a stop folder:
+        nothing can be stopped then."""
+        if self.spool is None or self.stop_dir is None:
+            return ()
+        return (ActLock(f"{self.name} ({self.spool})", actlock.beside(self.spool)),)
 
     # --- status --------------------------------------------------------------------------
 

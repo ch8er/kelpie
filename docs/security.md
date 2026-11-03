@@ -142,6 +142,32 @@ leaked token must stop working now, rotate with `--grace 0s` (running sessions t
 The comparison of a presented token takes constant time, for the current token and for the
 hashes of previous ones.
 
+## One acting instance per board
+
+Two Kelpie instances acting on one board (two `kelpie serve`, or a `kelpie agent` and a
+local `kelpie serve`) would each keep their own ledger and park key: they would comment and
+requeue twice and treat each other's parks and stops as foreign. So an instance that may
+act holds an exclusive lock (`flock`) per board for as long as it runs, and a second one
+refuses to start ("another Kelpie acts on board ...", naming the lock file and the pid
+holding it):
+
+- **`kelpie serve`** takes the locks of its boards when any rule is in `act` mode and
+  `dry_run` is off. An instance whose rules all observe or suggest takes none, so it can
+  run next to an acting one (it still alerts twice). With `[hub]` serve has no boards of
+  its own: each agent locks its own.
+- **`kelpie agent`** takes the locks of the boards whose adapters carry out actions; with
+  `[agent] actions = []` it only reports and takes none.
+- **Where.** Hermes: `<kanban.db>.kelpie-act.lock` next to each board's database. Claude
+  Code and OpenClaw: `<spool>.kelpie-act.lock` next to the hook spool (instances reading one
+  spool would stop the same sessions); none without a spool or with `stop_dir = false`.
+  GitHub Issues and Linear: one file per repository or team under
+  `$XDG_STATE_HOME/kelpie/locks/` (by default `~/.local/state/kelpie/locks/`, created 0700),
+  named by a hash of the API address and the board.
+- **Limits.** The lock is advisory and per machine, for instances that can see the same
+  file: it keeps apart two instances on one host (Linux and macOS, local file systems), not
+  two machines acting on one GitHub repository or Linear team, nor instances under
+  different users for a server board (each has its own state folder). The file holds the
+  holder's pid only; the lock goes with the process, so a crash leaves nothing to clean up.
 
 ## Known residual risks
 
@@ -210,7 +236,4 @@ front that limits connections and request time. Do not publish it with a bare
 - **M6:** one authenticated `kelpie agent` can grow the hub's executors, metric series and
   alerts without bound by reporting new adapter names. Give hub tokens only to agents you
   run. Follow-up on [#275](https://github.com/ch8er/kelpie/issues/275).
-- **M7:** "one Kelpie acts on a board" is documented, not enforced. Two acting instances
-  on one board (two `serve`, or an `agent` and a local `serve`) duplicate comments and
-  requeues. Run one ([install.md](install.md#two-hermes-boards-on-one-host)). Follow-up on
-  [#275](https://github.com/ch8er/kelpie/issues/275).
+
