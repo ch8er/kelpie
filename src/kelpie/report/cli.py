@@ -14,6 +14,7 @@ from kelpie.app import (
     Settings,
     _rule_config,
     act_blockers,
+    act_gaps,
     build_adapters,
     connector_steps,
     hold_labels,
@@ -45,6 +46,7 @@ MAX_LIST_DAYS = 3650
 def sources(settings: Settings) -> ReportSources:
     engine = settings.engine
     modes = {name: Mode.OBSERVE if engine.dry_run else engine.mode_for(name) for name in REGISTRY}
+    adapters = build_adapters(settings)
     return ReportSources(
         db_path=settings.db_path,
         report=settings.report,
@@ -63,9 +65,8 @@ def sources(settings: Settings) -> ReportSources:
         ),
         stuck_check=_stuck_check(engine),
         # What keeps a rule from acting here: never recommend a config kelpie serve refuses.
-        act_blockers={
-            rule: b.reason for rule, b in act_blockers(settings, build_adapters(settings)).items()
-        },
+        act_blockers={rule: b.reason for rule, b in act_blockers(settings, adapters).items()},
+        act_gaps=act_gaps(settings, adapters),
         farm=farm_facts(settings),
         reconcile=(
             (lambda since, until: read_reconciliations(settings, since, until))

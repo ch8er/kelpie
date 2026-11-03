@@ -3,6 +3,7 @@ actually did."""
 
 from __future__ import annotations
 
+import html
 import io
 import logging
 import os
@@ -23,6 +24,7 @@ from kelpie.demo.narrate import Narrator
 from kelpie.demo.story import Story, summary
 
 README = Path(__file__).resolve().parents[2] / "README.md"
+RECORDING = README.parent / "docs" / "assets" / "demo.svg"
 
 
 @pytest.fixture
@@ -102,28 +104,23 @@ def test_the_story_is_the_same_every_time(tmp_path: Path) -> None:
     assert first.replace(str(tmp_path / "a"), "") == second.replace(str(tmp_path / "b"), "")
 
 
-def test_the_readme_shows_what_the_demo_prints(tmp_path: Path) -> None:
-    """The README's first screen quotes the demo: each quoted run of lines (between the
-    "..." that mark cuts) must still be printed, whole and in order."""
+def test_the_readme_recording_shows_what_the_demo_prints(tmp_path: Path) -> None:
+    """The README's first screen is a recording of ``kelpie demo --fast``
+    (docs/assets/demo.svg): every word it shows must still be printed by the demo, or the
+    recording is stale (re-record it, docs/assets/README.md). Lines wrap at 80 columns in
+    the recording, so a word may be a piece of a printed one; the typed command is not
+    output."""
+    assert "docs/assets/demo.svg" in README.read_text(encoding="utf-8")
     text, _ = demo(tmp_path)
-    printed = text.splitlines()
-    readme = README.read_text(encoding="utf-8")
-    block = readme.split("```console\n$ kelpie demo\n", 1)[1].split("```", 1)[0]
-    chunks: list[list[str]] = [[]]
-    for line in block.splitlines():
-        if line == "...":
-            chunks.append([])
-        else:
-            chunks[-1].append(line)
-    chunks = [c for c in chunks if any(line.strip() for line in c)]
-    assert len(chunks) >= 3
-    at = 0
-    for chunk in chunks:
-        found = next(
-            (i for i in range(at, len(printed)) if printed[i : i + len(chunk)] == chunk), None
-        )
-        assert found is not None, f"not printed in order: {chunk[:3]}"
-        at = found + len(chunk)
+    svg = RECORDING.read_text(encoding="utf-8")
+    words = {
+        html.unescape(re.sub(r"<[^>]+>", "", raw))
+        for raw in re.findall(r"<text[^>]*>(.*?)</text>", svg)
+    }
+    typed = ("$", "kelpie", "demo", "--fast")
+    shown = {w for w in words if w.strip() and not any(c.startswith(w) for c in typed)}
+    assert len(shown) > 100
+    assert sorted(w for w in shown if w not in text) == []
 
 
 def test_the_farm_is_removed_unless_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

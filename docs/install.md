@@ -5,9 +5,11 @@ Kelpie is one process, `kelpie serve`. It runs the control loop and serves `/met
 or as a container next to Prometheus and Grafana with docker compose. Both start safe:
 global dry-run on and every rule in `observe` mode, so nothing leaves Kelpie.
 
-Kelpie is pre-alpha. Both ways below build from the repository; once a version is
-released (see [release.md](release.md)), `pipx install kelpie-sre` and the image
-`ghcr.io/ch8er/kelpie:<version>` work too.
+Kelpie is an alpha. Released versions install with `pipx install kelpie-sre` (or
+`pip install kelpie-sre`), and the image is `ghcr.io/ch8er/kelpie:<version>`
+([release.md](release.md#using-a-published-version)); both ways below build from the
+repository, for `main`. Before a farm, read the release notes:
+[CHANGELOG.md](../CHANGELOG.md#before-you-install).
 
 - Configuration reference: [configuration.md](configuration.md)
 - First live run on a Hermes farm: [quickstart-hermes.md](quickstart-hermes.md)
@@ -264,7 +266,7 @@ with a `pip` install, read them on GitHub.
 | Check | Passes when |
 | --- | --- |
 | config loads | The config parses and every configured rule is known. |
-| rule modes | Lists each mode with its rules and whether `[engine.rules.<name>] mode` or `default_mode` put them there, e.g. `dry_run off; act: loop_breaker (per rule); suggest: needs_you (per rule); observe: 14 rules (default_mode)`. Passes when the rules run as the config says, a deliberate `suggest` or `act` included. WARN when `dry_run = true` holds back rules configured to suggest or act (nothing acts); when a rule in `act` cannot act on this farm, because no adapter or connector carries out its actions (they become alerts) or because the startup check refuses it (`kelpie serve` refuses to start once `dry_run` is off); when `dispatch_gate`, or `conflict_warning` with `serialize`, parks tasks in `act` but `wait_condition` is not in `act` (nothing wakes them, as `kelpie serve` warns at startup); when `dry_run = false` and rules are in `suggest` or `act` but there is no `[[alerts.channels]]` (their alerts, suggestions and action notices are only logged and dropped); or when `act` comes only from `default_mode`. Fails only when `kelpie serve` would refuse to start: `dry_run = false` and a rule in `act` that the startup check refuses. The fixes point to [`act-checklist.md`](act-checklist.md). |
+| rule modes | Lists each mode with its rules and whether `[engine.rules.<name>] mode` or `default_mode` put them there, e.g. `dry_run off; act: loop_breaker (per rule); suggest: needs_you (per rule); observe: 14 rules (default_mode)`. Passes when the rules run as the config says, a deliberate `suggest` or `act` included. WARN when `dry_run = true` holds back rules configured to suggest or act (nothing acts); when a rule in `act` cannot act on this farm, because no adapter or connector carries out its actions (they become alerts) or because the startup check refuses it (`kelpie serve` refuses to start once `dry_run` is off); when a rule in `act` acts on some adapters' tasks but another adapter lacks its actions (there they become alerts); when `dispatch_gate`, or `conflict_warning` with `serialize`, parks tasks in `act` but `wait_condition` is not in `act` (nothing wakes them, as `kelpie serve` warns at startup); when `dry_run = false` and rules are in `suggest` or `act` but there is no `[[alerts.channels]]` (their alerts, suggestions and action notices are only logged and dropped); or when `act` comes only from `default_mode`. Fails only when `kelpie serve` would refuse to start: `dry_run = false` and a rule in `act` that the startup check refuses. The fixes point to [`act-checklist.md`](act-checklist.md). |
 | kanban.db | The Hermes board is readable (skipped without `[adapters.hermes]`). |
 | hooks fire | The spool has a line from the last hour. |
 | OTLP spans arrive | A span arrived in the last hour (skipped if none ever did: OTLP is optional). |

@@ -31,6 +31,7 @@ from kelpie.core.ports import (
     SupportsReassign,
     SupportsStop,
     SupportsWait,
+    declared_actions,
 )
 from kelpie.core.serde import from_dict, parse_datetime
 
@@ -133,8 +134,8 @@ def adapter_actions(
     """The action kinds ``adapter`` carries out: those it declares in ``actions`` (as action
     connectors do), else the platform's base kinds plus one per capability protocol it
     supports; narrowed to ``allowed`` when given. Never more than the platform kinds."""
-    declared = getattr(adapter, "actions", None)
-    if isinstance(declared, frozenset | set):
+    declared = declared_actions(adapter)
+    if declared is not None:
         kinds = {k for k in declared if k in PLATFORM_ACTIONS}
     else:
         kinds = set(BASE_ACTIONS)

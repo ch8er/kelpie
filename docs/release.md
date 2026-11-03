@@ -83,7 +83,9 @@ are done.
 
 1. In a PR: set the version in `pyproject.toml` (`[project] version`) and
    `src/kelpie/__init__.py` (`__version__`), run `uv lock` (the lock file records the
-   project version), update [CHANGELOG.md](../CHANGELOG.md), and set the classifier in
+   project version), update [CHANGELOG.md](../CHANGELOG.md) (date the version's section,
+   and lead it with "Before you install": what a user must know first, such as open
+   security findings and known limits; that is the release notes), and set the classifier in
    `pyproject.toml` if the development status changes (`3 - Alpha` for the first
    pre-release). Merge it.
 2. Tag the merge commit on `main` and push the tag:
@@ -96,7 +98,9 @@ are done.
 
 3. Watch **Actions → Release**. When TestPyPI is done, open the run and approve the `pypi`
    deployment.
-4. Check: `pipx run --spec kelpie-sre==0.1.0a1 kelpie --version` (or
+4. The GitHub release carries generated notes (the merged PRs). Edit it and paste the
+   version's "Before you install" section from the changelog at the top.
+5. Check: `pipx run --spec kelpie-sre==0.1.0a1 kelpie --version` (or
    `uvx --from kelpie-sre==0.1.0a1 kelpie --version`),
    `docker run --rm ghcr.io/ch8er/kelpie:0.1.0a1 --version`, and the release page.
 
@@ -125,7 +129,7 @@ before anything is built.
 
 ```sh
 pipx install kelpie-sre            # or: uv tool install kelpie-sre
-pip install --pre kelpie-sre       # pre-releases need --pre (or ==<version>)
+pip install --pre kelpie-sre       # once a final release exists, pre-releases need --pre (or ==<version>)
 docker pull ghcr.io/ch8er/kelpie:<version>
 KELPIE_IMAGE=ghcr.io/ch8er/kelpie:<version> docker compose up -d --no-build
 ```
