@@ -10,7 +10,8 @@ task and role under both Kelpie's session id and the platform's own).
 A call's role is its task's (the task's own, else its owner's), else its session owner's,
 else the role its usage record names, else :data:`kelpie.core.stages.UNKNOWN_ROLE`: the
 order the throughput section prices roles by, so a line that moves spend away from a role
-moves it from the same role. Pure and deterministic.
+moves it from the same role. Rework (#197 item 7) asks who made the call instead
+(:meth:`CallOwners.doer_of`): the session's role first. Pure and deterministic.
 """
 
 from __future__ import annotations
@@ -43,6 +44,16 @@ class CallOwners:
         role = self.task_roles.get(task) if task else None
         if role is None and session_id:
             role = self.session_roles.get(session_id)
+        return role or UNKNOWN_ROLE
+
+    def doer_of(self, task_id: str | None, session_id: str | None) -> str:
+        """Who made a call: its session's role, else its task's, else unknown. For rework
+        (#197 item 7), where the reviewer's next look and the developer's redo are told
+        apart; a task in review often carries the reviewer's role by then."""
+        role = self.session_roles.get(session_id) if session_id else None
+        if role is None:
+            task = self.task_of(task_id, session_id)
+            role = self.task_roles.get(task) if task else None
         return role or UNKNOWN_ROLE
 
     def span_task(self, span: Span) -> str | None:
