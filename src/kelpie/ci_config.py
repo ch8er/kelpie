@@ -37,8 +37,11 @@ def run(settings: Settings, clock: Callable[[], datetime] | None = None) -> tupl
         client = github.build(github.token(), clock).client
     except ValueError as exc:
         return "", f"{exc}\n", 2
-    # Reading needs no write token: the snapshot is built with cancelling off.
-    reading = replace(settings, github=replace(github, ci=replace(github.ci, allow_cancel=False)))
+    # Reading needs no write token: the snapshot is built with proposing and cancelling off.
+    reading = replace(
+        settings,
+        github=replace(github, ci=replace(github.ci, allow_propose=False, allow_cancel=False)),
+    )
     read = read_snapshot(reading, clock, refresh=True)
     problems = [*read.adapter_failures, *read.problems]
     if not getattr(rule, "propose_config", False):

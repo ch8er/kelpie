@@ -107,6 +107,7 @@ their actions become alerts"); such a rule can still go to `act`.
 | `loop_breaker` | `stop` on Claude Code: a stop marker the hook enforces at the session's next tool call | `[adapters.claude_code]` with `stop_dir`; see [Claude Code](#claude-code) below |
 | `loop_breaker` | `stop` on OpenClaw: a stop marker the plugin enforces in the Gateway, and `openclaw gateway call sessions.abort` for the run in flight | `[adapters.openclaw]` with `stop_dir` and `cli`; see [OpenClaw](#openclaw) below |
 | `ci_economy` | `cancel_build` of a superseded GitHub Actions run, by the CI connector | `[connectors.github.ci]` with `allow_cancel = true`, `cancel_repos`, ideally `cancel_token_env` (a separate token with Actions: write on those repos only) |
+| `ci_economy` | `propose_ci_config`: a draft pull request changing a workflow file to cut its wasted builds; never merged by Kelpie, never on the default branch, one open per repository. Preview with `kelpie ci-config` | `[engine.rules.ci_economy] propose_config = true`; `[connectors.github.ci]` with `allow_propose = true`, `propose_repos`, `propose_token_env` (a separate token with Contents, Pull requests and Workflows: write on those repos only) |
 | `dispatch_gate` | `wait`: `hermes kanban schedule` of a ready task, with its conditions in the reason (**unverified**) | `wait_condition` in `act` too, or parked tasks are never woken (Kelpie warns at startup) |
 | `wait_condition` | `wake` of a task Kelpie parked: `hermes kanban unblock` (**unverified**); `comment` (`hermes kanban comment --author kelpie`; blocks, parks and wakes are signed `kelpie` too, `[adapters.hermes] author`) | |
 | `conflict_warning` | `comment` on both tasks; with `serialize`, `wait` of the later running task pinned to its run (**unverified**) | `wait_condition` in `act` too |
@@ -215,6 +216,19 @@ cancellations with the runs you would cancel. Then set `allow_cancel = true` wit
 and `cancel_token_env`. Kelpie only cancels a run its last scan offered as superseded and a
 fresh re-check agrees with, never on the default branch.
 
+For `propose_ci_config` (rule 9's draft pull requests), the gate applies as to any action:
+
+- [ ] Turn on `propose_config` with the rule in `observe` and run `kelpie ci-config` (read
+  token only). Every proposal it prints is a trigger to review: a workflow change you would
+  have made yourself, with the "check before merging" notes understood for that repository
+  (required checks and `paths-ignore`, skipped draft runs reported as passed, which branches
+  the `concurrency` group cancels).
+- [ ] Then `allow_propose = true` with `propose_repos` as short as possible (one repository
+  first) and `propose_token_env`, a fine-grained token with Contents, Pull requests and
+  Workflows: write on those repositories only ([security.md](security.md#what-kelpie-can-write-to-github)).
+- [ ] In `act`, expect one draft pull request from `kelpie/ci-config/<file>`, the ledger
+  `executed`, and nothing more until it is merged or closed. Kelpie never merges it.
+
 ## 4. Go live, small
 
 - [ ] The rule passed [the gate](#the-gate-observe-before-act), and its written review is at
@@ -269,7 +283,10 @@ The steps above apply, with these differences
 
 - Fastest: `dry_run = true` and restart. Every rule is back to log-only, whatever its mode.
 - Per rule: set its `mode` back to `suggest` or `observe` (or remove the line) and restart.
-- For `ci_economy`: set `allow_cancel = false`, and revoke the cancel token if in doubt.
+- For `ci_economy`: set `allow_cancel = false` and `allow_propose = false`, and revoke the
+  cancel or propose token if in doubt. Close an open proposal's pull request (and delete its
+  `kelpie/ci-config/` branch) if it should not stay; a change closed unmerged is not proposed
+  again for that file.
 - Stopped tasks: `hermes kanban unblock <task>`. Stopped Claude Code sessions: delete the
   marker or type a prompt. Stopped OpenClaw sessions: delete the marker or message the session
   as the operator. A cancelled CI run is re-run from GitHub.
@@ -282,5 +299,9 @@ The steps above apply, with these differences
   source and tested against fakes, not against a running farm. Test step 3 is how you find out.
 - GitHub Actions: the run fields Kelpie relies on to call a run superseded (workflow,
   branch, PR, event, re-run attempt, status) and the cancel request itself, including the
-  token scopes, have not been tried on a live repository.
+  token scopes, have not been tried on a live repository. Neither has `propose_ci_config`:
+  creating the branch, the contents commit with the workflow permission, the draft pull
+  request, the rendered workflow running as intended on GitHub, the `head=owner:branch`
+  filter still finding closed pull requests after their branch was deleted, and the
+  compare API's answer for a half-made branch.
 - Whether a read-only mount of the Hermes files is enough in Docker (see the quickstart).

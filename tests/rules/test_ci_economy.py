@@ -544,16 +544,20 @@ def test_propose_config_values() -> None:
         build({"propose_config": "yes"})
 
 
-def test_no_connector_opens_a_proposal_yet_so_act_only_alerts() -> None:
-    """Until a CI connector declares propose_ci_config, an act-mode proposal reaches no
-    connector: it is recorded as not executed and a human is told."""
+def test_without_allow_propose_an_act_mode_proposal_only_alerts() -> None:
+    """A CI connector declares propose_ci_config only with a proposer (``allow_propose``);
+    otherwise an act-mode proposal reaches no connector: it is recorded as not executed and
+    a human is told."""
     from kelpie.connectors.github.builds import CiSettings, GitHubCI
     from kelpie.connectors.github.client import GitHubClient
+    from kelpie.connectors.github.proposals import Proposer
 
+    client = GitHubClient("http://127.0.0.1:9", None)
     for allow_cancel in (False, True):
         settings = CiSettings(repos=("example/repo",), allow_cancel=allow_cancel)
-        github = GitHubCI(GitHubClient("http://127.0.0.1:9", None), settings)
-        assert ActionKind.PROPOSE_CI_CONFIG not in github.actions
+        assert ActionKind.PROPOSE_CI_CONFIG not in GitHubCI(client, settings).actions
+        proposer = Proposer(client, ("example/repo",))
+        assert ActionKind.PROPOSE_CI_CONFIG in GitHubCI(client, settings, proposer=proposer).actions
     snap = Snapshot(
         now=NOW,
         builds=(b("A-1", draft=True, minutes=20), b("A-2", draft=True, minutes=15, sha="x2")),

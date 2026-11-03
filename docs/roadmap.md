@@ -964,10 +964,10 @@ progress on new pushes, skip already verified commits).
 
 **Acceptance criteria**
 - [x] Recommendation lists each suggested change with the minutes it would have saved
-- [ ] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff) (rendering and `kelpie ci-config` done; opening the draft PR in progress, #237)
+- [x] The CI connector renders the change for its CI system and opens the PR (dry-run: prints the diff)
 - [x] No CI-specific syntax in `kelpie.rules`
 
-The recommendation is in #227 (the waste summary and its `params.pipelines`). The GitHub renderer and `kelpie ci-config`, which prints the diff, are the first half of #237; opening the draft pull request is the second.
+The recommendation is in #227 (the waste summary and its `params.pipelines`). The GitHub renderer and `kelpie ci-config`, which prints the diff, are the first half of #237; opening the draft pull request (`allow_propose`) is the second. Not tried on a live repository yet.
 
 ### rules: return_causes — root causes of task returns (incident 7)
 labels: P1, area:rules
