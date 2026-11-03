@@ -36,16 +36,21 @@ a token to hold its threads:
 - **Connection cap.** Connections not yet admitted (an OTLP export or hub request until its
   token checks out, a `GET` throughout) are capped per listener
   (`[server] max_connections`, `[hub] max_connections`, 64 each) and per address
-  (`max_connections_per_address`, 16, per /64 for IPv6), checked before a thread starts.
-- **Slow-client cutoff.** When every slot is taken, the oldest connection not yet admitted
-  is cut to make room, so a real client (through in milliseconds) still gets in. Someone with many addresses who opens connections faster than a client
-  sends its headers can still crowd it out; firewall the port to the networks that need
-  it where that matters.
-- **Bodies.** A body is read only after the token checks out, within `read_timeout` (30s)
-  per read and `body_timeout` (60s) for the whole body, and only up to the endpoint's
-  limit (`[traces] max_body_bytes`, `[hub] max_body_bytes`), checked before reading and
-  again after gzip. Ingest decodes at most `[traces] max_concurrent_requests` exports at
-  once; the hub holds a few requests per agent. One request per connection.
+  (`max_connections_per_address`, 16, per /64 for IPv6). Over the per-address cap a
+  connection is closed at accept, before a thread starts. Behind a reverse proxy or NAT
+  every client shares the proxy's address and its 16 slots; raise the cap there.
+- **Slow-client cutoff.** When every slot of a listener is taken, the oldest connection not
+  yet admitted is cut to make room, so a real client (through in milliseconds) still gets
+  in. Someone with many addresses who opens connections faster than a client sends its
+  headers can still crowd it out; firewall the port to the networks that need it where
+  that matters.
+- **Bodies.** With a token configured, a body is read only after the token checks out.
+  Every body is read within `read_timeout` (30s) per read and `body_timeout` (60s) in all,
+  and only up to the endpoint's limit (`[traces] max_body_bytes`, `[hub] max_body_bytes`),
+  checked before reading and again after gzip. Ingest decodes at most
+  `[traces] max_concurrent_requests` exports at once (a tokenless loopback ingest lets any
+  local process take one of those for `body_timeout`); the hub holds a few requests per
+  agent. One request per connection.
 
 These guards bound threads and memory; they do not stop a flood from a fast client, which
 is a firewall's job. `/metrics` and `/healthz` stay unauthenticated: keep the main port on

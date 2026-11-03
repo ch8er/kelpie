@@ -85,6 +85,8 @@ def load_server(section: Any) -> Limits:
     header = _seconds(section, "header_timeout", DEFAULT_HEADER_TIMEOUT, 1, 60, "1s and 1m")
     read = _seconds(section, "read_timeout", DEFAULT_READ_TIMEOUT, 1, 300, "1s and 5m")
     body = _seconds(section, "body_timeout", DEFAULT_BODY_TIMEOUT, 1, 600, "1s and 10m")
+    if per_address > connections:
+        raise ValueError("[server] max_connections_per_address must not exceed max_connections")
     if body < read:
         raise ValueError("[server] body_timeout must not be shorter than read_timeout")
     return Limits(connections, per_address, header, read, body)
@@ -155,6 +157,9 @@ class GuardedServer(ThreadingHTTPServer):
                 if len(self._pending) >= self.limits.max_connections:
                     evicted = self._pending.pop(next(iter(self._pending)))
                     self._drop_peer(evicted.peer)
+                    # Shut under the lock: its handler cannot admit it in between and then
+                    # lose an authorized request.
+                    shut(evicted.sock)
             if not refused:
                 self._pending[id(request)] = _Pending(peer, request)
                 self._per_peer[peer] = self._per_peer.get(peer, 0) + 1
@@ -169,7 +174,6 @@ class GuardedServer(ThreadingHTTPServer):
                 self.name,
                 evicted.peer,
             )
-            shut(evicted.sock)
         try:
             super().process_request(request, client_address)
         except BaseException:

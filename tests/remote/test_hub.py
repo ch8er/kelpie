@@ -428,7 +428,11 @@ def test_strangers_cannot_lock_agents_out(server: HubServer, clock: Clock) -> No
     wait_unauthenticated(server, 3)
     # ...an agent still gets in: the oldest stranger is cut to make room.
     agent_for(server, BoardAdapter(), clock).report()
+    idle[0].settimeout(1)  # well under the 3s deadline: cut to make room
     assert idle[0].recv(10) == b""
+    idle[1].settimeout(0.2)
+    with pytest.raises(TimeoutError):  # the others keep their slots
+        idle[1].recv(10)
     for sock in idle:
         sock.close()
     wait_unauthenticated(server, 0)
@@ -439,8 +443,8 @@ def test_one_address_gets_at_most_its_share(server: HubServer) -> None:
     port = server.server_address[1]
     idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(2)]
     wait_unauthenticated(server, 2)
-    with socket.create_connection(("127.0.0.1", port), timeout=5) as extra:
-        assert extra.recv(10) == b""  # closed at accept
+    with socket.create_connection(("127.0.0.1", port), timeout=0.5) as extra:
+        assert extra.recv(10) == b""  # closed at accept, long before the 3s deadline
     for sock in idle:
         sock.close()
     wait_unauthenticated(server, 0)

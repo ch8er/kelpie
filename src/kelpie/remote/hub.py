@@ -428,7 +428,13 @@ class HubServer(GuardedServer):
         settings = hub.settings
         self.hub = hub
         self.traces = traces  # OTLP exports agents relay; None: refused (404)
-        limits = replace(limits or Limits(), max_connections=settings.max_connections)
+        limits = limits or Limits()
+        limits = replace(
+            limits,
+            max_connections=settings.max_connections,
+            # One address never holds every slot of a small hub.
+            max_per_address=min(limits.max_per_address, settings.max_connections),
+        )
         tls = hub.tls or (server_context(settings) if settings.tls else None)
         super().__init__((settings.host, settings.port), HubHandler, limits, tls)
 

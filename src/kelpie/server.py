@@ -59,7 +59,6 @@ class Handler(GuardedHandler):
         self.close_connection = True  # one request per connection, like the hub
         ingest = self.server.ingest
         if self.path.split("?")[0] != TRACES_PATH or ingest is None:
-            self.close_connection = True
             self._reply(404, "not found\n", "text/plain; charset=utf-8")
             return
         try:
@@ -67,16 +66,13 @@ class Handler(GuardedHandler):
         except OSError as exc:  # the client stalled past the timeout or went away
             log.info("trace export from %s aborted: %s", self.client_address[0], exc)
             self.server.metrics.traces_request(408)
-            self.close_connection = True
             return
         except Exception:  # a bug in ingest must not look like a client error or kill Kelpie
             log.exception("trace ingest failed")
             self.server.metrics.traces_request(500)
-            self.close_connection = True
             self._reply(500, "internal error\n", "text/plain; charset=utf-8")
             return
-        if reply.close:
-            self.close_connection = True
+        # ``reply.close`` (body left unread) needs nothing more: every connection closes.
         self._send(reply.status, reply.body, reply.content_type, reply.headers)
 
     def _read_body(self, length: int) -> bytes:

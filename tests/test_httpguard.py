@@ -7,6 +7,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,21 @@ from tests.traces.otlp_builders import NOW
 
 TOKEN = "t" * 32
 FAST = Limits(max_connections=3, max_per_address=8, header_timeout=0.5, read_timeout=2.0)
+# For the caps: no deadline cuts a connection during the test, only the caps do.
+SLOW = Limits(max_connections=3, max_per_address=8, header_timeout=30.0)
+
+
+def _aliases() -> bool:
+    """127.0.0.2 and up are usable (Linux; macOS has only 127.0.0.1 without an alias)."""
+    try:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.2", 0))
+    except OSError:
+        return False
+    return True
+
+
+needs_aliases = pytest.mark.skipif(not _aliases(), reason="no 127.0.0.2 loopback alias")
 
 
 def start(server: GuardedServer) -> Iterator[GuardedServer]:
@@ -50,18 +66,23 @@ def connect(server: GuardedServer, source: str = "127.0.0.1") -> socket.socket:
     return sock
 
 
-def wait_pending(server: GuardedServer, n: int) -> None:
-    deadline = time.monotonic() + 5
+def wait_pending(server: GuardedServer, n: int, within: float = 5.0) -> None:
+    deadline = time.monotonic() + within
     while server.pending() != n and time.monotonic() < deadline:
         time.sleep(0.01)
     assert server.pending() == n
 
 
-def closed(sock: socket.socket) -> bool:
+def closed(sock: socket.socket, within: float | None = None) -> bool:
+    """The server closed the connection (within ``within`` seconds, when given)."""
+    if within is not None:
+        sock.settimeout(within)
     try:
         return sock.recv(100) == b""
     except ConnectionResetError:
         return True
+    except TimeoutError:
+        return False
 
 
 def head(length: int, token: bool = True) -> bytes:
@@ -138,25 +159,33 @@ def test_a_stranger_without_the_token_keeps_its_slot_until_answered(
         assert b" 401 " in sock.recv(200)
 
 
+@needs_aliases
+@pytest.mark.parametrize("serve", [SLOW], indirect=True)
 def test_too_many_connections_cut_the_oldest_stranger(serve: KelpieHTTPServer) -> None:
     # Idle strangers from several addresses fill every pending slot...
     idle = [connect(serve, f"127.0.0.{i + 2}") for i in range(3)]
     wait_pending(serve, 3)
-    # ...a scrape still gets in: the oldest stranger is cut to make room.
+    # ...a scrape still gets in: the oldest stranger is cut to make room, the others stay.
     assert get(serve, "/metrics").startswith(b"HTTP/1.0 200")
-    assert closed(idle[0])
+    assert closed(idle[0], within=1.0)
+    assert not closed(idle[1], within=0.2)
+    assert not closed(idle[2], within=0.2)
+    wait_pending(serve, 2)
     for sock in idle:
         sock.close()
     wait_pending(serve, 0)
 
 
+@needs_aliases
+@pytest.mark.parametrize("serve", [replace(SLOW, max_per_address=2)], indirect=True)
 def test_one_address_gets_at_most_its_share(serve: KelpieHTTPServer) -> None:
-    serve.limits = Limits(max_connections=8, max_per_address=2, header_timeout=5.0)
     idle = [connect(serve) for _ in range(2)]
     wait_pending(serve, 2)
     with connect(serve) as extra:
-        assert closed(extra)  # closed at accept, before a thread starts
+        assert closed(extra, within=0.5)  # closed at accept, long before any deadline
+    wait_pending(serve, 2)
     assert get(serve, source="127.0.0.9").endswith(b"ok\n")  # other addresses still get in
+    assert not closed(idle[0], within=0.2)  # one slot was free: nobody was cut
     for sock in idle:
         sock.close()
     wait_pending(serve, 0)
@@ -174,10 +203,11 @@ class BigMetrics(Metrics):
         return "#" * (8 * 1024 * 1024)
 
 
+@needs_aliases
 def test_a_reader_that_never_reads_cannot_hold_the_main_port() -> None:
     """GET /metrics, then a tiny receive window: the reply cannot be written, and the
-    connection must still be cut at the header deadline and stay evictable."""
-    server = make_server("127.0.0.1", 0, BigMetrics(), None, FAST)
+    connection must stay evictable and be cut at the header deadline."""
+    server = make_server("127.0.0.1", 0, BigMetrics(), None, replace(SLOW, header_timeout=4.0))
     for running in start(server):
         stalled = []
         for i in range(3):
@@ -188,10 +218,20 @@ def test_a_reader_that_never_reads_cannot_hold_the_main_port() -> None:
             sock.sendall(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
             stalled.append(sock)
         wait_pending(running, 3)
-        # Every slot is held by a stalled reader; a newcomer still gets in...
-        assert get(running, source="127.0.0.9").endswith(b"ok\n")
-        # ...and the readers lose their slots at the header deadline.
-        wait_pending(running, 0)
+        time.sleep(0.3)  # the replies are stuck in the write
+        assert running.pending() == 3
+        # Every slot is held by a stalled reader; a newcomer still gets in at once...
+        started = time.monotonic()
+        with connect(running, "127.0.0.9") as sock:
+            sock.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+            sock.settimeout(2)
+            reply = b""
+            while chunk := sock.recv(65536):
+                reply += chunk
+            assert reply.endswith(b"ok\n")
+        assert time.monotonic() - started < 2
+        # ...and the other readers lose their slots at the header deadline.
+        wait_pending(running, 0, within=8.0)
         for sock in stalled:
             sock.close()
 
@@ -217,6 +257,11 @@ def test_the_hub_listener_takes_the_same_guards() -> None:
             started = time.monotonic()
             assert closed(sock)
             assert time.monotonic() - started < 2
+    clamped = HubServer(hub, None, Limits(max_connections=64, max_per_address=16))
+    try:
+        assert clamped.limits.max_per_address == 9  # never more than the hub's cap
+    finally:
+        clamped.server_close()
 
 
 def test_server_section_defaults_and_bounds(tmp_path: Path) -> None:
@@ -242,6 +287,7 @@ def test_server_section_defaults_and_bounds(tmp_path: Path) -> None:
         ({"read_timeout": "10m"}, "between 1s and 5m"),
         ({"body_timeout": "1h"}, "between 1s and 10m"),
         ({"read_timeout": "40s", "body_timeout": "30s"}, "not be shorter"),
+        ({"max_connections": 8, "max_connections_per_address": 9}, "must not exceed"),
     ],
 )
 def test_server_section_is_checked(section: dict[str, Any], message: str) -> None:
