@@ -848,7 +848,7 @@ def _outage_spend(
     mine: dict[tuple[str, datetime], dict[str, list[Span]]] = defaultdict(lambda: defaultdict(list))
     for span in spans:
         if (occurrence := held.get(span_key(span))) is not None:
-            role = owners.role_of(owners.span_task(span), span.session_id)
+            role = owners.role_of(span.task_id, span.session_id)
             mine[occurrence][role].append(span)
     out = []
     for line in lines:
@@ -2584,12 +2584,15 @@ def _outage_spent(line: OutageLine, report: DailyReport) -> str:
     total = Spend()
     for _, spend in line.spend:
         total = total + spend
-    roles = "; ".join(
-        f"{md.text(role)} {spend.tokens:,} ({_usd(spend, report)})" for role, spend in line.spend
-    )
+
+    def usd(spend: Spend, mark: str = "") -> str:
+        dollars = _usd(spend, report)  # "-" on a subscription: tokens only
+        return "" if dollars == "-" else f" ({dollars}{mark})"
+
+    roles = "; ".join(f"{md.text(role)} {spend.tokens:,}{usd(spend)}" for role, spend in line.spend)
     return (
-        f". Its tasks spent {total.tokens:,} tokens ({_usd(total, report)}{_mark(report)}) "
-        f"while it held them: {roles}"
+        f". Its tasks spent {total.tokens:,} tokens{usd(total, _mark(report))} while it held "
+        f"them: {roles}"
     )
 
 

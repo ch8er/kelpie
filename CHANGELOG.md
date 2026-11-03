@@ -22,10 +22,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - Outage tokens (#197 item 6): the model calls an outage's tasks made while it held them
   are the outage's, per role: in its line under Outages, in its cost-of-chaos line, and out
   of each role's cost per completed task. A call without a task id finds its task through
+<<<<<<< HEAD
   its session, now including the platform's usage records (`Snapshot.usage`, #271).
 - Tokens per return (#197 item 7): the "Farm throughput" section lists "Tokens on rework",
   the model calls on each task returned within the day from its first return on, per role
   (who made the call) and per task, with tokens per return.
+=======
+  its session, now including the platform's usage records (`Snapshot.usage`, #271)
+  ([#325](https://github.com/ch8er/kelpie/pull/325)).
+>>>>>>> report-outage-tokens
 
 ## [0.1.0a1] - 2026-11-03
 
