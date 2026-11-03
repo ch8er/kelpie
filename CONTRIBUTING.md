@@ -1,6 +1,6 @@
 # Contributing to Kelpie
 
-Thanks for helping. Kelpie is pre-alpha, so expect interfaces to move. Small, focused
+Thanks for helping. Kelpie is an alpha, so expect interfaces to move. Small, focused
 pull requests are the fastest way to get changes merged.
 
 ## Development setup

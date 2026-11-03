@@ -4,9 +4,9 @@ How Kelpie handles the secrets it holds and the endpoints it opens. How to repor
 vulnerability: [SECURITY.md](../SECURITY.md). What Kelpie stores from the farm:
 [privacy.md](privacy.md).
 
-This page grows with the whole-codebase security audit before the first public release
-([roadmap](roadmap.md), "project: whole-codebase security audit"), which adds the threat
-model and what Kelpie trusts. Until then it covers the parts already settled.
+The whole-codebase security audit before the first public release
+([#275](https://github.com/ch8er/kelpie/issues/275)) fixed its high findings; what it left
+open and what to do meanwhile is under [Known residual risks](#known-residual-risks).
 
 ## Secrets Kelpie holds
 
@@ -80,3 +80,76 @@ leaked token must stop working now, rotate with `--grace 0s` (running sessions t
 
 The comparison of a presented token takes constant time, for the current token and for the
 hashes of previous ones.
+
+
+## Known residual risks
+
+What 0.1.0a1 ships knowing, from the audit's open medium findings. Each has a follow-up;
+this section shrinks as they land.
+
+### Rule 10 in act trusts every holder of the traces token (M1)
+
+`loop_breaker` (rule 10) stops a run that repeats identical tool calls, hits an error
+streak or exceeds a hard budget (`[[budgets]] hard`), and it reads all of that from spans.
+Kelpie cannot tell who wrote a span:
+
+- **OTLP spans.** A span's session id is whatever the sender writes in it, and the ingest has
+  one token that every agent's exporter holds. Whoever has the token can send a few identical
+  tool spans tagged with another agent's session id; without a token (loopback, or
+  `allow_unauthenticated`), any process that reaches the port can.
+- **Hook spool lines.** A line names its run (Hermes `run_id`, Claude Code and OpenClaw
+  `session_id`), and any agent that can write to the spool (the same user, or a container
+  with it mounted) can name another agent's run.
+
+With rule 10 in `act`, either makes Kelpie stop the other agent's run, and on Hermes end
+its worker processes; forged spend can do the same through a hard budget (with
+`stop_on_shared_budgets`, through a shared one). The stop looks like Kelpie's own decision.
+In `observe` and `suggest` no run is stopped. Forged spans can also make rule 2 in `act`
+comment on another agent's task (its CI-polling note), hold back `checkpoints`' commit
+reminders, and skew alerts and the daily report; rule 10 is the only rule that stops a run.
+
+**Who is affected.** Farms that run rule 10 in `act` and whose agents are untrusted or
+sandboxed (in a container, as another user, on another machine reporting straight to
+`kelpie serve`) while sharing the one traces token. An unsandboxed agent running as the same
+user as its peers gains nothing new: it could already signal their processes or block their
+tasks. Across hosts the multi-host hub is not affected: it namespaces every span and run by
+the `kelpie agent` whose token sent it, so one host cannot reach another host's runs. Agents
+on one host share that host's OTLP relay, which takes spans without a token, so within a
+host the risk is the same as on a single-host farm.
+
+**What to do meanwhile.**
+
+- On such farms keep `loop_breaker` in `observe` or `suggest`
+  ([act-checklist.md](act-checklist.md)); a person decides each stop.
+- Or give agents that do not trust each other separate farms: their own `kelpie serve` and
+  traces token, or their own host with its own `kelpie agent` behind a hub.
+- Set a traces token, keep the ingest on loopback or a private address, and do not hand
+  the token to processes that are not agents' exporters. The shipped docker compose file
+  allows ingest without a token (its port is on `127.0.0.1`): before rule 10 acts there,
+  set `KELPIE_TRACES_TOKEN` and drop `KELPIE_TRACES_ALLOW_UNAUTHENTICATED`.
+
+**The fix.** Per-agent ingest tokens, each allowed to report only for its own owners and
+sessions, and a check that a spool line comes from the run it names
+([#302](https://github.com/ch8er/kelpie/issues/302)). This section goes when it lands.
+
+### `kelpie serve`'s HTTP server has no connection guards (M5)
+
+The port of `kelpie serve` (OTLP ingest, `/metrics`, `/healthz`; 9464 by default) has no
+deadline before authentication and no cap on connections, so a slow client can hold its
+threads without a token. The hub's port (`[hub]`) has these guards. Keep serve on loopback
+(the default; docker compose publishes it on `127.0.0.1` only), or put a reverse proxy in
+front that limits connections and request time. Do not publish it with a bare
+`docker run -p 9464:9464`. Fix: [#304](https://github.com/ch8er/kelpie/issues/304).
+
+### Other open medium findings
+
+- **M4:** the Linear client has no overall deadline: a server that answers one byte at a
+  time can stall the control loop. Only farms with `[adapters.linear]` are affected.
+  Follow-up on [#275](https://github.com/ch8er/kelpie/issues/275).
+- **M6:** one authenticated `kelpie agent` can grow the hub's executors, metric series and
+  alerts without bound by reporting new adapter names. Give hub tokens only to agents you
+  run. Follow-up on [#275](https://github.com/ch8er/kelpie/issues/275).
+- **M7:** "one Kelpie acts on a board" is documented, not enforced. Two acting instances
+  on one board (two `serve`, or an `agent` and a local `serve`) duplicate comments and
+  requeues. Run one ([install.md](install.md#two-hermes-boards-on-one-host)). Follow-up on
+  [#275](https://github.com/ch8er/kelpie/issues/275).
