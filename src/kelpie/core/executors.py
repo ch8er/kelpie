@@ -17,6 +17,7 @@ from kelpie.core.ports import (
     SupportsStop,
     SupportsWait,
     UnsupportedAction,
+    declared_actions,
 )
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,12 @@ class PlatformExecutor:
         return self.adapter.name
 
     def execute(self, action: Action) -> bool | str | Outcome:
+        declared = declared_actions(self.adapter)
+        if declared is not None and action.kind not in declared:
+            # An adapter that declares its actions carries out only those (a wake is not a
+            # requeue on an adapter that leaves wake out).
+            log.warning("%s does not declare %s", self.name, action.kind)
+            return False
         try:
             return self._execute(action)
         except UnsupportedAction as exc:

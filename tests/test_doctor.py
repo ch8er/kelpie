@@ -880,3 +880,22 @@ def test_prometheus_redirect_is_not_followed(farm: Farm, prometheus: str) -> Non
 
 def test_prometheus_malformed_url_fails_cleanly(farm: Farm) -> None:
     assert farm.checks("http://[::1")["Prometheus reachable"].status == "FAIL"
+
+
+def test_a_parking_rule_that_acts_on_some_adapters_still_warns_of_stranded_parks(
+    tmp_path: Path,
+) -> None:
+    """Hermes parks, Claude Code cannot: the gate acts on Hermes tasks, so parks that
+    nothing wakes are still a warning, and Claude Code's gap is said apart."""
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        "[adapters.hermes]\n[adapters.claude_code]\n"
+        '[engine]\ndry_run = false\n[engine.rules.dispatch_gate]\nmode = "act"\n'
+    )
+    check = {c.name: c for c in run_checks(path, environ={})}["rule modes"]
+    assert "parked tasks are not woken" in check.detail
+    assert "cannot act on this farm" not in check.detail
+    assert (
+        "in act, but on some adapters' tasks their actions become alerts: dispatch_gate "
+        "(Claude Code can't park tasks or wake tasks yet)"
+    ) in check.detail
