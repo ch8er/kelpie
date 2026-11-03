@@ -87,7 +87,8 @@ _LABELS = {
 }
 # GitHub's answers that will not change by retrying: no access (403 forbidden or an
 # organization policy), the file or repository gone (404), a request it rejects (422).
-_REFUSED_KINDS = frozenset({"forbidden", "policy", "not_found"})
+# A redirect (the repository renamed or moved) will not change either: fix propose_repos.
+_REFUSED_KINDS = frozenset({"forbidden", "policy", "not_found", "redirect"})
 
 
 @dataclass(slots=True)
@@ -132,6 +133,9 @@ class Proposer:
         if open_now or self._open(repo, head_filter):
             return ActionResult.NOTHING_TO_DO  # one open proposal per repository at a time
         closed = self._closed(repo, head_filter)
+        if closed is None:
+            log.warning("ci-config: %s: too many closed proposals to tell; refused", repo)
+            return ActionResult.REFUSED
         # A change a closed proposal of Kelpie's named is never proposed again for this
         # file, alone or with others: closed unmerged, a human turned it down; merged, it
         # is in the file (rendering leaves it out), unless a human undid it since.
@@ -257,7 +261,9 @@ class Proposer:
                 {"state": "open", "per_page": "100", "page": str(page)},
                 fresh=True,
             ).body
-            prs = [pr for pr in found if isinstance(pr, Mapping)] if isinstance(found, list) else []
+            if not isinstance(found, list):
+                return None  # cannot tell: refused
+            prs = [pr for pr in found if isinstance(pr, Mapping)]
             if any(_is_proposal(pr, repo) for pr in prs):
                 return True
             if len(prs) < 100:
@@ -280,14 +286,28 @@ class Proposer:
                 return None
             raise
         sha = (ref.body.get("object") or {}).get("sha") if isinstance(ref.body, Mapping) else None
-        return sha if isinstance(sha, str) else ""
+        if not isinstance(sha, str):
+            raise GitHubError("bad_response", f"{repo}: branch {branch} without a sha")
+        return sha
 
-    def _closed(self, repo: str, head_filter: str) -> list[Mapping[str, Any]]:
-        """Closed pull requests from Kelpie's branch for this file, merged ones too."""
+    def _closed(self, repo: str, head_filter: str) -> list[Mapping[str, Any]] | None:
+        """Closed pull requests from Kelpie's branch for this file, merged ones too; None
+        when there are 100 or more (Kelpie cannot tell what was turned down)."""
         closed = self.client.get(
-            f"/repos/{repo}/pulls", {"head": head_filter, "state": "closed"}, fresh=True
+            f"/repos/{repo}/pulls",
+            {"head": head_filter, "state": "closed", "per_page": "100"},
+            fresh=True,
         ).body
-        return [pr for pr in closed if isinstance(pr, Mapping)] if isinstance(closed, list) else []
+        if not isinstance(closed, list):
+            raise GitHubError("bad_response", f"{repo}: closed pull requests: not a list")
+        return None if len(closed) >= 100 else [pr for pr in closed if isinstance(pr, Mapping)]
+
+    def _based_on(self, repo: str, branch: str) -> bool:
+        """Whether an open pull request targets ``branch`` (deleting it would close it)."""
+        found = self.client.get(
+            f"/repos/{repo}/pulls", {"base": branch, "state": "open"}, fresh=True
+        ).body
+        return not isinstance(found, list) or bool(found)
 
     def _left_by_kelpie(
         self, repo: str, path: str, branch: str, default: str, head: str, text: str
@@ -330,7 +350,7 @@ class Proposer:
         go with the branch (a window of one request). ``strict``: GitHub's errors raise (a
         rate limit is retried, not taken for a branch kept); otherwise they are logged."""
         if strict:
-            if self._open(repo, head_filter):
+            if self._open(repo, head_filter) or self._based_on(repo, branch):
                 log.warning("ci-config: %s: branch %s heads a pull request; kept", repo, branch)
                 return False
             if self._branch_sha(repo, branch) not in ours:
@@ -339,7 +359,7 @@ class Proposer:
             self.client.send("DELETE", f"/repos/{repo}/git/refs/heads/{quote(branch)}")
             return True
         try:
-            if self._open_now(repo, head_filter) is not False:
+            if self._open_now(repo, head_filter) is not False or self._based_on(repo, branch):
                 log.warning("ci-config: %s: branch %s may head a pull request; kept", repo, branch)
                 return False
             if self._branch_sha(repo, branch) not in ours:

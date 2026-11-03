@@ -148,14 +148,27 @@ For `propose_ci_config` in particular:
   a `kelpie/ci-config/` branch of the repository is open, a proposal is nothing to do. A
   change a human turned down is never proposed again for that file.
 - **Nothing from the repository in what Kelpie writes**, beyond the workflow file itself:
-  the pull request's title and description hold Kelpie's own words and the rule's numbers,
-  and only fixed text, the default branch's name (checked) and the docs globs (checked,
+  the pull request's title, description and commit message hold Kelpie's own words, the
+  rule's numbers and the workflow file's path (letters, digits, `.`, `_`, `-` only), and
+  only fixed text, the default branch's name (checked) and the docs globs (checked,
   quoted) are written into the workflow.
 - **A token of its own.** Kelpie refuses to start when `propose_token_env` names, or holds
   the same value as, the read, cancel, billing or issues-adapter token, so a leaked read
   token cannot change workflows and the propose token can be revoked alone. Use a
   fine-grained token limited to `propose_repos`; the Workflows permission is what lets it
   change `.github/workflows/` at all.
+- **Branches it deletes**: only `kelpie/ci-config/<file>`, and only while no pull request is
+  open from it or into it and it still points at Kelpie's own commit (made in the same
+  attempt) or at the head of an earlier closed proposal. GitHub has no conditional delete:
+  a push in the moment between that check and the delete goes with the branch.
+- **A branch of that name it did not make**: one with no commits of its own (Kelpie cannot
+  tell it from a branch its own earlier attempt left) is fast-forwarded and committed on;
+  any other refuses.
+- **Known limits.** "An earlier proposal of Kelpie's" is a pull request from its branch whose
+  description holds Kelpie's hidden mark; anyone who can open pull requests from that
+  branch could write the mark. Two Kelpie instances with `allow_propose` on one repository
+  can each open a proposal (for different workflow files) at the same moment: enable it on
+  one instance only.
 - `kelpie ci-config` previews the same change with the read token only (`Contents: read`)
   and writes nothing.
 

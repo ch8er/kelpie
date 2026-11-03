@@ -1621,7 +1621,11 @@ skipped draft run counts as passed for a required check, so a pull request marke
 auto-merge or an agent) could merge before its real run. The description holds Kelpie's own
 words and the rule's numbers only, never text from the workflow file, and a hidden line
 naming the changes. Kelpie never merges it. A pipeline with no file under
-`.github/workflows/` (CodeQL default setup, a dynamic workflow) has nothing to propose.
+`.github/workflows/` (CodeQL default setup, a dynamic workflow) has nothing to propose; a
+file there whose name Kelpie does not edit (not ASCII, `..`, a subfolder, an extension
+other than lowercase `.yml` or `.yaml`) refuses, and a human is told. A repository that was
+renamed or moved refuses too: update `propose_repos`. Enable `allow_propose` on one Kelpie
+instance per repository.
 
 Nothing twice:
 
@@ -1643,7 +1647,7 @@ Nothing twice:
 
 Kelpie deletes only a branch it made in the same attempt, still at its own commit, or the
 branch of an earlier merged or closed proposal still at that proposal's head, and never one
-a pull request is open from (deleting it would close that pull request). The rule emits
+a pull request is open from or into (deleting it would close that pull request). The rule emits
 a proposal once per `[engine] once_window` for the same changes. `kelpie ci-config` prints
 the same changes as a diff and writes nothing; it needs only the read token, with
 `Contents: read` on the repositories.

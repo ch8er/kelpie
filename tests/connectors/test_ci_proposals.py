@@ -24,7 +24,10 @@ REPO = "example/app"
 PATH = ".github/workflows/test.yml"
 BRANCH = "kelpie/ci-config/test.yml"
 OPEN = f"/repos/{REPO}/pulls?" + urlencode({"head": f"example:{BRANCH}", "state": "open"})
-CLOSED = f"/repos/{REPO}/pulls?" + urlencode({"head": f"example:{BRANCH}", "state": "closed"})
+CLOSED = f"/repos/{REPO}/pulls?" + urlencode(
+    {"head": f"example:{BRANCH}", "per_page": "100", "state": "closed"}
+)
+BASED = f"/repos/{REPO}/pulls?" + urlencode({"base": BRANCH, "state": "open"})
 REF = f"/repos/{REPO}/git/ref/heads/{BRANCH}"
 ANY_OPEN = f"/repos/{REPO}/pulls?" + urlencode({"page": "1", "per_page": "100", "state": "open"})
 COMMIT = "e" * 40  # the commit Kelpie makes on its branch
@@ -42,6 +45,7 @@ def gh() -> Iterator[FakeGitHub]:
         fake.reply(f"/repos/{REPO}", {"default_branch": "main"})
         fake.reply(OPEN, [])
         fake.reply(ANY_OPEN, [])
+        fake.reply(BASED, [])
         fake.reply(CLOSED, [])
         content = base64.b64encode(TYPICAL.encode()).decode()
         fake.reply(
@@ -445,3 +449,45 @@ def test_a_rate_limit_while_remaking_an_earlier_branch_is_retried_not_refused(
     gh.reply(f"DELETE /repos/{REPO}/git/refs/heads/{BRANCH}", {"message": "boom"}, 502)
     with pytest.raises(GitHubError):
         proposer(gh).execute(action())
+
+
+def test_a_branch_another_pull_request_targets_is_never_deleted(gh: FakeGitHub) -> None:
+    # Someone stacked a pull request onto an earlier proposal's branch: deleting the
+    # branch would close it.
+    earlier = {"number": 3, "merged_at": None, "head": {"sha": "d" * 40}, "body": marker(["x"])}
+    gh.reply(CLOSED, [earlier])
+    gh.reply(f"POST /repos/{REPO}/git/refs", {"message": "Reference already exists"}, 422)
+    gh.reply(REF, {"object": {"sha": "d" * 40}})
+    gh.reply(BASED, [{"number": 11}])
+    assert proposer(gh).execute(action()) is ActionResult.REFUSED
+    assert "DELETE" not in [w[0] for w in writes(gh)]
+    # Nor after a failed attempt of its own.
+    gh.requests.clear()
+    gh.reply(CLOSED, [])
+    gh.reply(f"POST /repos/{REPO}/git/refs", {"ref": f"refs/heads/{BRANCH}"}, 201)
+    gh.reply(f"POST /repos/{REPO}/pulls", {"message": "Validation Failed"}, 422)
+    gh.reply(REF, {"object": {"sha": COMMIT}})
+    assert proposer(gh).execute(action()) is ActionResult.REFUSED
+    assert "DELETE" not in [w[0] for w in writes(gh)]
+
+
+def test_too_many_closed_proposals_to_tell_refuses(gh: FakeGitHub) -> None:
+    gh.reply(CLOSED, [{"number": n, "body": ""} for n in range(100)])
+    assert proposer(gh).execute(action()) is ActionResult.REFUSED
+    assert writes(gh) == []
+
+
+def test_answers_kelpie_cannot_read_never_lead_to_a_write(gh: FakeGitHub) -> None:
+    gh.reply(ANY_OPEN, {"message": "not a list"})
+    assert proposer(gh).execute(action()) is ActionResult.REFUSED
+    gh.reply(ANY_OPEN, [])
+    gh.reply(CLOSED, {"message": "not a list"})
+    with pytest.raises(GitHubError):
+        proposer(gh).execute(action())
+    assert writes(gh) == []
+
+
+def test_a_moved_repository_refuses(gh: FakeGitHub) -> None:
+    gh.reply(f"/repos/{REPO}", {"message": "Moved Permanently"}, 301)
+    assert proposer(gh).execute(action()) is ActionResult.REFUSED
+    assert writes(gh) == []
