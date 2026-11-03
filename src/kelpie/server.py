@@ -4,7 +4,7 @@
 Requests are served on their own threads, so a large trace export never delays the control
 loop, which runs on its own thread too. Connections are guarded by :mod:`kelpie.httpguard`
 (``[server]``), like the hub's: a connection is pending until an OTLP export's token checks
-out or a ``GET`` is answered.
+out; a ``GET`` stays pending, so its reply too must be written within the header deadline.
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ class Handler(GuardedHandler):
     server: KelpieHTTPServer
 
     def do_GET(self) -> None:
-        # Answered at once; the connection keeps its slot until the reply is written.
-        self.headers_done()
+        # Never admitted: rendered at once, the reply must be written within the header
+        # deadline, so a client that asks and does not read loses its slot.
         self.close_connection = True
         match self.path:
             case "/metrics":
@@ -56,7 +56,6 @@ class Handler(GuardedHandler):
                 self._reply(404, "not found\n", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:
-        self.headers_done()
         self.close_connection = True  # one request per connection, like the hub
         ingest = self.server.ingest
         if self.path.split("?")[0] != TRACES_PATH or ingest is None:

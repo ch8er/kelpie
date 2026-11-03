@@ -3,14 +3,15 @@ ingest, ``/metrics``, ``/healthz``) and the hub (``[hub] listen``).
 
 A connection is *pending* from accept until it is admitted: the hub admits it once its
 agent token checks out, the main port once an OTLP export's token checks out (before its
-body is read) or once a ``GET`` has been answered. While pending:
+body is read). A ``GET`` (``/metrics``, ``/healthz``) is never admitted: its reply must be
+written within the header deadline too, so a client that asks and never reads cannot keep
+its slot. While pending:
 
 - it has ``header_timeout`` in all (TLS handshake, request line and headers included,
   however slowly they come); then its socket is shut down;
 - at most ``max_connections`` connections are pending at once; when all are taken the
-  oldest one still sending its request line or headers is cut to make room (a real client
-  sends them at once, a stranger holding slots does not), and when every pending
-  connection is already past its headers the new one is closed at accept;
+  oldest is cut to make room (a real client is through in milliseconds, a stranger holding
+  slots is not);
 - at most ``max_per_address`` of them come from one address (an IPv6 /64), checked at
   accept, before a thread is started.
 
@@ -113,11 +114,10 @@ def _seconds(
     return value
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _Pending:
     peer: str
     sock: Any
-    headers_read: bool = False
 
 
 class GuardedServer(ThreadingHTTPServer):
@@ -150,16 +150,11 @@ class GuardedServer(ThreadingHTTPServer):
         with self._slots_lock:
             if self._per_peer.get(peer, 0) >= self.limits.max_per_address:
                 refused = "too many connections from this address"
-            elif len(self._pending) >= self.limits.max_connections:
-                oldest = next((k for k, p in self._pending.items() if not p.headers_read), None)
-                if oldest is None:
-                    refused = "every connection slot is busy"
-                else:
-                    evicted = self._pending.pop(oldest)
-                    self._drop_peer(evicted.peer)
-                    refused = ""
             else:
                 refused = ""
+                if len(self._pending) >= self.limits.max_connections:
+                    evicted = self._pending.pop(next(iter(self._pending)))
+                    self._drop_peer(evicted.peer)
             if not refused:
                 self._pending[id(request)] = _Pending(peer, request)
                 self._per_peer[peer] = self._per_peer.get(peer, 0) + 1
@@ -170,8 +165,7 @@ class GuardedServer(ThreadingHTTPServer):
         if evicted is not None:
             self.warn_once(
                 evicted.peer,
-                "%s: all connection slots taken; cut the oldest one still sending its "
-                "request, from %s",
+                "%s: all connection slots taken; cut the oldest pending one, from %s",
                 self.name,
                 evicted.peer,
             )
@@ -194,14 +188,6 @@ class GuardedServer(ThreadingHTTPServer):
             entry = self._pending.pop(id(request), None)
             if entry is not None:
                 self._drop_peer(entry.peer)
-
-    def headers_read(self, request: Any) -> None:
-        """The connection sent its request line and headers: it is no longer cut to make
-        room, but it keeps its slot until admitted."""
-        with self._slots_lock:
-            entry = self._pending.get(id(request))
-            if entry is not None:
-                entry.headers_read = True
 
     def _drop_peer(self, peer: str) -> None:
         left = self._per_peer.get(peer, 0) - 1
@@ -243,9 +229,9 @@ class GuardedServer(ThreadingHTTPServer):
 
 
 class GuardedHandler(BaseHTTPRequestHandler):
-    """A request handler under its server's :class:`Limits`. Subclasses call
-    :meth:`headers_done` when a request's headers are in (at the top of ``do_*``),
-    :meth:`admit` once the request is authorized, and read bodies with :meth:`read_body`."""
+    """A request handler under its server's :class:`Limits`. Subclasses call :meth:`admit`
+    once the request is authorized and read bodies with :meth:`read_body`; until then the
+    header deadline applies to everything, the reply included."""
 
     server: GuardedServer
 
@@ -266,11 +252,6 @@ class GuardedHandler(BaseHTTPRequestHandler):
 
     def _cut(self) -> None:
         shut(self.request)
-
-    def headers_done(self) -> None:
-        """The request line and headers are in: the header deadline no longer applies."""
-        self._guard.cancel()
-        self.server.headers_read(self.request)
 
     def admit(self) -> None:
         """The request is authorized: it gives its pending slot back."""

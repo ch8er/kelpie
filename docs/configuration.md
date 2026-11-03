@@ -2022,14 +2022,16 @@ as `kelpie_adapter_errors_total{adapter="<agent>/<adapter>"}`.
 The connection guards of every listener of `kelpie serve`: the main port (`/v1/traces`,
 `/metrics`, `/healthz`) and the hub (`[hub] listen`), one implementation for both. A
 connection is *pending* from accept until it is admitted: an OTLP export or a hub request
-once its token checks out (before its body is read), a `GET` once it is answered. The
-defaults are safe off loopback; change them only when a client is known to be slower.
+once its token checks out (before its body is read). A `GET` (`/metrics`, `/healthz`) is
+never admitted: its reply too must be written within `header_timeout`, so a client that
+asks and never reads cannot keep a slot. The defaults are safe off loopback; change them
+only when a client is known to be slower.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `max_connections` | `64` | Pending connections on the main port at once (8–10000; the hub has `[hub] max_connections`). When all are taken, the oldest one still sending its request line or headers is cut to make room; when every pending connection is already past its headers, a new one is closed at accept. |
-| `max_connections_per_address` | `16` | Pending connections from one address (an IPv6 /64), on each listener (1–10000). More are closed at accept, before a thread is started. |
-| `header_timeout` | `3s` | From accept to the end of the headers (TLS handshake included on the hub), however slowly they come; then the socket is shut down (1s–1m). |
+| `max_connections` | `64` | Pending connections on the main port at once (8–10000; the hub has `[hub] max_connections`). When all are taken, the oldest pending one is cut to make room. |
+| `max_connections_per_address` | `16` | Pending connections from one address (an IPv6 /64), on each listener (1–10000). More are closed at accept, before a thread is started. Every exporter and scraper on the Kelpie host shares `127.0.0.1`'s share; an export is pending only until its token is checked, so raise this only if a host with many agents logs refusals. |
+| `header_timeout` | `3s` | From accept to the end of the headers (TLS handshake included on the hub) and, for a `GET`, to the end of the reply, however slowly they come; then the socket is shut down (1s–1m). |
 | `read_timeout` | `30s` | Each socket read or write, for every connection (1s–5m). |
 | `body_timeout` | `60s` | A whole request body, read only after the token checks out; past it the connection is closed (an OTLP export counts as 408). Not shorter than `read_timeout`, at most 10m. |
 

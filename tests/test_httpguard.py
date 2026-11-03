@@ -1,4 +1,4 @@
-"""The connection guards of every ``kelpie serve`` listener (audit #275 M5): slow headers,
+"""The connection guards of every ``kelpie serve`` listener (#304; audit #275 M5): slow headers,
 slow bodies, too many connections, oversized bodies, and the ``[server]`` settings."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import pytest
 
 from kelpie.app import ConfigError, load_settings
 from kelpie.core.spans import MemorySpanStore
-from kelpie.httpguard import GuardedHandler, GuardedServer, Limits, load_server
+from kelpie.httpguard import GuardedServer, Limits, load_server
 from kelpie.metrics import Metrics
 from kelpie.server import KelpieHTTPServer, make_server
 from kelpie.traces.ingest import TraceIngest
@@ -169,34 +169,31 @@ def test_an_oversized_body_is_refused_unread(serve: KelpieHTTPServer, length: in
         assert b" 413 " in sock.recv(200)
 
 
-class Holding(GuardedHandler):
-    """Reads its headers, then holds the connection until released."""
-
-    release = threading.Event()
-
-    def do_GET(self) -> None:
-        self.headers_done()
-        self.release.wait(5)
-        self.close_connection = True
-        self.send_response(204)
-        self.end_headers()
+class BigMetrics(Metrics):
+    def render(self) -> str:
+        return "#" * (8 * 1024 * 1024)
 
 
-def test_requests_past_their_headers_are_not_cut_to_make_room() -> None:
-    Holding.release.clear()
-    server = GuardedServer(("127.0.0.1", 0), Holding, FAST)
+def test_a_reader_that_never_reads_cannot_hold_the_main_port() -> None:
+    """GET /metrics, then a tiny receive window: the reply cannot be written, and the
+    connection must still be cut at the header deadline and stay evictable."""
+    server = make_server("127.0.0.1", 0, BigMetrics(), None, FAST)
     for running in start(server):
-        held = [connect(running, f"127.0.0.{i + 2}") for i in range(3)]
-        for sock in held:
-            sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-        time.sleep(0.2)
-        with connect(running, "127.0.0.9") as extra:
-            assert closed(extra)  # every slot is a real request: the newcomer is refused
-        Holding.release.set()
-        for sock in held:
-            assert sock.recv(100).startswith(b"HTTP/1.0 204")
-            sock.close()
+        stalled = []
+        for i in range(3):
+            sock = socket.socket()
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            sock.bind((f"127.0.0.{i + 2}", 0))
+            sock.connect(("127.0.0.1", running.server_address[1]))
+            sock.sendall(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+            stalled.append(sock)
+        wait_pending(running, 3)
+        # Every slot is held by a stalled reader; a newcomer still gets in...
+        assert get(running, source="127.0.0.9").endswith(b"ok\n")
+        # ...and the readers lose their slots at the header deadline.
         wait_pending(running, 0)
+        for sock in stalled:
+            sock.close()
 
 
 def test_the_hub_listener_takes_the_same_guards() -> None:

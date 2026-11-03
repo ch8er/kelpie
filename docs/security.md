@@ -30,14 +30,15 @@ a token to hold its threads:
 
 - **Header deadline.** From accept to the end of the headers (the hub's TLS handshake
   included) a connection has `header_timeout` (3s) in all, however slowly it sends; then
-  its socket is shut down. A slowloris that drips header bytes is cut at the deadline.
+  its socket is shut down. A slowloris that drips header bytes is cut at the deadline. A
+  `GET` (`/metrics`, `/healthz`) has the same 3s for its reply too, so a client that asks
+  and never reads is cut as well.
 - **Connection cap.** Connections not yet admitted (an OTLP export or hub request until its
-  token checks out, a `GET` until it is answered) are capped per listener
+  token checks out, a `GET` throughout) are capped per listener
   (`[server] max_connections`, `[hub] max_connections`, 64 each) and per address
   (`max_connections_per_address`, 16, per /64 for IPv6), checked before a thread starts.
-- **Slow-client cutoff.** When every slot is taken, the oldest connection still sending its
-  request line or headers is cut to make room, so a real client (which sends them at once)
-  still gets in. Someone with many addresses who opens connections faster than a client
+- **Slow-client cutoff.** When every slot is taken, the oldest connection not yet admitted
+  is cut to make room, so a real client (through in milliseconds) still gets in. Someone with many addresses who opens connections faster than a client
   sends its headers can still crowd it out; firewall the port to the networks that need
   it where that matters.
 - **Bodies.** A body is read only after the token checks out, within `read_timeout` (30s)
