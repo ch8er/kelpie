@@ -97,9 +97,13 @@ def _metrics() -> Metrics:
     )
     metrics.budgets_at = NOW
     card = Task("C", "c", Status.BACKLOG, NOW, prework=True, platform_status="triage")
+    done = Task("D", "d", Status.DONE, NOW, role="role-a", owner_id="agent-a", board="board-a")
     slot = Resource("pool-a:agent", ResourceKind.SLOTS, used=1, limit=2)
     snapshot = Snapshot(
-        now=NOW, owners=(Owner("agent-a", "role-a"),), tasks=(card,), resources=(slot,)
+        now=NOW,
+        owners=(Owner("agent-a", "role-a"),),
+        tasks=(card, done),
+        resources=(slot,),
     )
     ControlLoop(Engine([]), lambda: snapshot, metrics).tick_once()  # fleet gauges
     return metrics
@@ -158,7 +162,9 @@ def _names(exprs: list[str]) -> set[str]:
 
 
 def _source_names() -> set[str]:
-    """Metric names written literally in metrics.py (f-string prefixes left out)."""
+    """Metric names written literally in metrics.py. A name built in an f-string
+    (``kelpie_llm_provider_{field_}``) is not seen here: it is caught only if _metrics()
+    switches its block on."""
     text = (ROOT / "src/kelpie/metrics.py").read_text()
     return set(re.findall(r'"(kelpie_[a-z0-9_]*[a-z0-9])(?=[\s{"])', text))
 
@@ -234,3 +240,21 @@ def test_template_variables_used_are_defined() -> None:
     for v in _variables():
         # "All" must match series without the label too (one board, a single host).
         assert v["includeAll"] and v["allValue"] == ".*", v["name"]
+
+
+def _labels_by_metric() -> dict[str, set[str]]:
+    """Labels each exported metric carries (a summary's samples count as its family's)."""
+    out: dict[str, set[str]] = {name: set(labels) for name, labels in _textfile().items()}
+    for name, labels in re.findall(r"^(kelpie_\w+)\{([^}]*)\}", _rendered(), re.M):
+        out.setdefault(name, set()).update(re.findall(r'(\w+)="', labels))
+    return out
+
+
+def test_selectors_match_labels_of_their_metric() -> None:
+    # A filter on a label the metric lacks matches nothing once a value is picked
+    # ({board=~"$board"} on a gauge without a board label goes empty).
+    labels = _labels_by_metric()
+    for expr in _exprs() + _alert_exprs():
+        for name, selector in re.findall(r"\b(kelpie_\w+)\{([^}]*)\}", expr):
+            used = set(re.findall(r"(\w+)\s*(?:=~|!~|!=|=)", selector))
+            assert used <= labels.get(name, set()), (name, sorted(used))

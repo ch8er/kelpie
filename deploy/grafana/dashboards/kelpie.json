@@ -315,7 +315,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (adapter, board) (rate(kelpie_adapter_errors_total{board=~\"$board\"}[5m])) * 60",
+          "expr": "sum by (adapter, board) (rate(kelpie_adapter_errors_total{board=~\"$board|\"}[5m])) * 60",
           "legendFormat": "adapter {{adapter}} {{board}}"
         },
         {
@@ -469,7 +469,8 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "noValue": "single host"
         },
         "overrides": []
       },
@@ -2128,8 +2129,8 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "B",
-          "expr": "kelpie_role_reopened_after_done_ratio{board=~\"$board\"}",
-          "legendFormat": "{{role}} {{board}} reopened after done"
+          "expr": "sum by (role) (kelpie_role_reopened_after_done_24h{board=~\"$board\"}) / ((sum by (role) (kelpie_role_tasks_done_24h{board=~\"$board\"}) + sum by (role) (kelpie_role_reopened_after_done_24h{board=~\"$board\"})) > 0)",
+          "legendFormat": "{{role}} reopened after done"
         }
       ],
       "fieldConfig": {
@@ -2143,7 +2144,7 @@
     {
       "id": 63,
       "type": "timeseries",
-      "title": "Done tasks reopened by role (24h)",
+      "title": "Share of completions reopened by role and board (24h)",
       "datasource": {
         "type": "prometheus",
         "uid": "kelpie-prometheus"
@@ -2161,17 +2162,17 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (role) (kelpie_role_reopened_after_done_24h{board=~\"$board\"})",
-          "legendFormat": "{{role}}"
+          "expr": "kelpie_role_reopened_after_done_ratio{board=~\"$board\"}",
+          "legendFormat": "{{role}} {{board}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "percentunit"
         },
         "overrides": []
       },
-      "description": "Done tasks of the role moved back out of done in the last 24h."
+      "description": "Of the role's completions in the last 24h (still done, plus reopened since), the share moved back out of done; per board on a farm with several boards."
     },
     {
       "id": 70,
@@ -2282,7 +2283,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "time() - kelpie_spend_reconciled_day_timestamp_seconds",
+          "expr": "time() - (kelpie_spend_reconciled_day_timestamp_seconds > 0)",
           "legendFormat": "{{provider}}"
         }
       ],
