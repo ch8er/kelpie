@@ -352,7 +352,10 @@ enabled, no token is set, the bind address is not loopback (`127.0.0.1`, `::1`,
 `localhost`), and neither `[traces] allow_unauthenticated = true` nor
 `KELPIE_TRACES_ALLOW_UNAUTHENTICATED=1` is set. Set one of those only when something else
 already restricts access, such as a port published on `127.0.0.1` or a proxy that
-authenticates. Disabling `[traces]` also passes the check.
+authenticates. Disabling `[traces]` also passes the check. Off loopback a token that is
+set must also be strong (16 characters or more, no spaces, at least 6 different ones), unless
+one of those two settings is set; `openssl rand -hex 32` gives one
+([security.md](security.md#traces-token)).
 
 ```bash
 export KELPIE_TRACES_TOKEN=$(openssl rand -hex 24)

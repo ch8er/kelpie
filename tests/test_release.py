@@ -138,6 +138,21 @@ def test_every_action_is_pinned_to_a_commit(file: str) -> None:
                 assert re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", step["uses"]), (name, step)
 
 
+@pytest.mark.parametrize(
+    "file", sorted(p.name for p in (ROOT / ".github/workflows").glob("*.y*ml"))
+)
+def test_checkouts_leave_no_token_behind(file: str) -> None:
+    """Audit L14: a checkout keeps the job's token in .git/config unless told not to; only
+    the CI change filter (which may fetch the base branch) keeps it, read-only."""
+    data = yaml.safe_load((ROOT / ".github/workflows" / file).read_text())
+    for name, job in data["jobs"].items():
+        steps = job.get("steps", ())
+        filtered = (file, name) == ("ci.yml", "changes")  # its paths-filter may git fetch
+        for step in steps:
+            if str(step.get("uses", "")).startswith("actions/checkout@") and not filtered:
+                assert (step.get("with") or {}).get("persist-credentials") is False, (file, name)
+
+
 def test_only_our_wheel_comes_from_testpypi() -> None:
     [check] = [s for s in workflow()["jobs"]["testpypi-install"]["steps"] if "run" in s]
     script = check["run"]

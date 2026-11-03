@@ -205,9 +205,26 @@ class TraceSettings:
         """Refuse an open ingest endpoint on a non-loopback address.
 
         Raises ValueError unless traces are disabled, a token is set, the bind host is
-        loopback, or ``allow_unauthenticated`` (or its env var) says so on purpose.
+        loopback, or ``allow_unauthenticated`` (or its env var) says so on purpose. Off
+        loopback the token must be strong (:func:`weak_token`, audit L11), unless
+        ``allow_unauthenticated`` says the network is trusted anyway (doctor still warns).
         """
-        if not self.enabled or self.token(environ) or is_loopback(host):
+        if not self.enabled or is_loopback(host):
+            return
+        token = self.token(environ)
+        if token:
+            why = weak_token(token)
+            if why is not None and not self.unauthenticated_allowed(environ):
+                where = (
+                    f"the token in {self.token_file}"
+                    if self.token_file is not None
+                    else f"${self.token_env}"
+                )
+                raise ValueError(
+                    f"[traces] {where} {why}, and OTLP ingest listens on {host}: replace it "
+                    "with a random token (`kelpie traces rotate-token`, or `openssl rand -hex "
+                    "32`), or bind to 127.0.0.1 where nothing else must reach the port"
+                )
             return
         if self.unauthenticated_allowed(environ):
             return
@@ -217,6 +234,19 @@ class TraceSettings:
             f"(or ${ALLOW_UNAUTHENTICATED_ENV}=1) behind a trusted network, or disable "
             f"[traces]"
         )
+
+
+MIN_TOKEN_CHARS = 16  # as for the token file
+MIN_TOKEN_SYMBOLS = 6  # distinct characters: "a" * 16 is not a secret; random hex passes
+
+
+def weak_token(token: str) -> str | None:
+    """Why ``token`` is too weak to guard an ingest port others can reach, or None."""
+    if len(token) < MIN_TOKEN_CHARS or any(c.isspace() for c in token):
+        return f"must be at least {MIN_TOKEN_CHARS} characters, no spaces"
+    if len(set(token)) < MIN_TOKEN_SYMBOLS:
+        return f"must use at least {MIN_TOKEN_SYMBOLS} different characters"
+    return None
 
 
 def is_loopback(host: str) -> bool:

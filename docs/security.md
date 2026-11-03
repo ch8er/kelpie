@@ -181,6 +181,22 @@ leaked token must stop working now, rotate with `--grace 0s` (running sessions t
 The comparison of a presented token takes constant time, for the current token and for the
 hashes of previous ones.
 
+When the ingest listens off loopback, `kelpie serve` refuses a weak token (audit L11), from
+`$KELPIE_TRACES_TOKEN` or the token file: under 16 characters, with spaces, or of fewer than
+6 different characters. The token file always required 16 characters and no spaces. With
+`allow_unauthenticated` (the network is trusted on purpose, as in the shipped docker
+compose file) a weak token is taken as no token would be. `kelpie doctor` warns about a
+weak token wherever serve listens ("traces token kept private"). `kelpie traces
+rotate-token` and `openssl rand -hex 32` give strong ones.
+
+## CI and release workflows
+
+Every workflow action is pinned to a commit. Checkouts keep no token in `.git/config`
+(`persist-credentials: false`), except the CI job that picks which checks a change needs,
+whose filter may fetch the base branch with the job's read-only token (audit L14). The
+Docker image's base images (`python:3.12-slim-bookworm`, `ghcr.io/astral-sh/uv`) are
+pinned by tag, not yet by digest.
+
 ## One acting instance per board
 
 Two Kelpie instances acting on one board (two `kelpie serve`, or a `kelpie agent` and a

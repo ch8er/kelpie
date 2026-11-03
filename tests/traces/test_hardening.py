@@ -62,7 +62,7 @@ def test_is_loopback(host: str, loopback: bool) -> None:
     [
         (TraceSettings(), {}, "127.0.0.1", True),
         (TraceSettings(), {}, "0.0.0.0", False),
-        (TraceSettings(), {"KELPIE_TRACES_TOKEN": "t"}, "0.0.0.0", True),
+        (TraceSettings(), {"KELPIE_TRACES_TOKEN": "0123456789abcdef"}, "0.0.0.0", True),
         (TraceSettings(allow_unauthenticated=True), {}, "0.0.0.0", True),
         (TraceSettings(), {"KELPIE_TRACES_ALLOW_UNAUTHENTICATED": "1"}, "0.0.0.0", True),
         (TraceSettings(), {"KELPIE_TRACES_ALLOW_UNAUTHENTICATED": "no"}, "0.0.0.0", False),
@@ -75,6 +75,55 @@ def test_check_exposure(traces: TraceSettings, env: dict[str, str], host: str, o
     else:
         with pytest.raises(ValueError, match="accept spans from anyone"):
             traces.check_exposure(host, env)
+
+
+@pytest.mark.parametrize(
+    ("token", "host", "ok"),
+    [
+        ("t", "127.0.0.1", True),  # loopback: doctor warns, serve starts
+        ("t", "0.0.0.0", False),  # audit L11: too short off loopback
+        ("short-token", "10.0.0.5", False),
+        ("abababababababababababab", "0.0.0.0", False),  # too few different characters
+        ("has a space in it 1234", "0.0.0.0", False),
+        ("0123456789abcdef", "0.0.0.0", True),
+    ],
+)
+def test_an_env_token_off_loopback_must_be_strong(token: str, host: str, ok: bool) -> None:
+    traces, env = TraceSettings(), {"KELPIE_TRACES_TOKEN": token}
+    if ok:
+        traces.check_exposure(host, env)
+    else:
+        with pytest.raises(ValueError, match="KELPIE_TRACES_TOKEN must") as exc:
+            traces.check_exposure(host, env)
+        if len(token) > 4:
+            assert token not in str(exc.value)  # names the variable, never the value
+        # a network declared trusted on purpose takes it, as it would take no token
+        env["KELPIE_TRACES_ALLOW_UNAUTHENTICATED"] = "1"
+        traces.check_exposure(host, env)
+
+
+def test_a_weak_token_file_is_refused_off_loopback_too(tmp_path: Path) -> None:
+    path = tmp_path / "traces.env"
+    path.write_text("KELPIE_TRACES_TOKEN=abababababababab\n")
+    path.chmod(0o600)
+    traces = TraceSettings(token_file=path)
+    with pytest.raises(ValueError, match=r"the token in .*traces.env must use") as exc:
+        traces.check_exposure("0.0.0.0", {})
+    assert "abab" not in str(exc.value)
+    traces.check_exposure("127.0.0.1", {})
+
+
+def test_serve_refuses_a_weak_token_off_loopback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KELPIE_TRACES_TOKEN", "short")
+    monkeypatch.delenv("KELPIE_TRACES_ALLOW_UNAUTHENTICATED", raising=False)
+    config = tmp_path / "kelpie.toml"
+    config.write_text("")
+    assert main(["--config", str(config), "serve", "--host", "0.0.0.0"]) == 2
+    err = capsys.readouterr().err
+    assert "config error" in err and "$KELPIE_TRACES_TOKEN must be at least 16" in err
+    assert "short" not in err
 
 
 def test_serve_refuses_an_open_endpoint(
