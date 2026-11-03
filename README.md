@@ -222,6 +222,10 @@ cp .env.example .env   # set GRAFANA_ADMIN_PASSWORD
 docker compose up      # Kelpie, Prometheus and Grafana with Kelpie's dashboard
 ```
 
+**Dashboard:** every metric on one Grafana dashboard, plus Prometheus alerts about Kelpie
+itself; with or without compose (Homebrew on macOS):
+[dashboard](https://github.com/ch8er/kelpie/blob/main/docs/dashboard.md).
+
 ## How it works
 
 - **A snapshot, then rules.** Every 30 seconds Kelpie builds one immutable snapshot of the
@@ -273,6 +277,7 @@ The incidents behind each rule, the design and the daily report in full:
 - [How Kelpie works](https://github.com/ch8er/kelpie/blob/main/docs/guide.md): rules, daily report, alerts, traces, budgets
 - [Install and run](https://github.com/ch8er/kelpie/blob/main/docs/install.md): uv, Docker, `kelpie doctor`, ports, tokens, data
 - [Several machines](https://github.com/ch8er/kelpie/blob/main/docs/deploy.md): `kelpie agent` on each, a central `kelpie serve` (laptop + cloud VM, two VMs)
+- [Dashboard and alerts](https://github.com/ch8er/kelpie/blob/main/docs/dashboard.md): Grafana and Prometheus with or without docker compose; the [runbook](https://github.com/ch8er/kelpie/blob/main/docs/runbook.md)
 - [Configuration reference](https://github.com/ch8er/kelpie/blob/main/docs/configuration.md): every section, rule and threshold
 - Quickstarts: [Hermes](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-hermes.md), [Claude Code](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-claude-code.md), [OpenClaw](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-openclaw.md), [GitHub Issues](https://github.com/ch8er/kelpie/blob/main/docs/quickstart-github-issues.md);
   the [observe-to-act checklist](https://github.com/ch8er/kelpie/blob/main/docs/act-checklist.md)

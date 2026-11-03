@@ -5,4 +5,7 @@
   so the cast's line timing was spread over about 38 s before rendering (longer holds on
   scene headings, alerts and the report's first line). Re-record it when the demo's output
   changes.
+- `dashboard.png` (once rendered): the Grafana dashboard over `kelpie demo`'s day, from
+  `scripts/demo_metrics.py`, a backfilled Prometheus and Grafana on 127.0.0.1, captured with
+  Playwright; steps in [dashboard.md](../dashboard.md#the-screenshot).
 - `social-preview.png`: the repository's social preview image.
