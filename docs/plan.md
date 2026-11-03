@@ -217,7 +217,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [x] Token optimization recommendations (cache breaks, model fit per role, diff-only review) and throughput metrics
 - [x] Multi-host: `kelpie agent` on each agent machine, central `kelpie serve` anywhere (blocks the release)
 - [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring — the survey and the release-safe part are done (#248); the rest is after the release
-- [ ] Whole-codebase security audit after the code-health pass (blocks the release) — the audit is done (#275) and no critical or high finding is open; M1 waits for the owner, other medium and low findings are open
+- [ ] Whole-codebase security audit after the code-health pass (blocks the release) — the audit is done (#275) and no critical or high finding is open; M1 decided by the owner (documented for 0.1.0a1, fix in #302), M5 and L5 fixed (#309, #314), other medium and low findings are open
 - [x] `kelpie demo`: the farm simulator replays real incidents so anyone can see Kelpie work in two minutes without a farm
 - [ ] Documentation and publication of the open core — the guides, quickstarts, `docs/security.md`, the release workflow and the changelog are in place; nothing is published yet
 - [ ] 10 conversations with farm owners
@@ -228,7 +228,6 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 
 **Left before 0.1.0a1:**
 
-- The owner decides the audit's open M1 item (forged spans can make rule 10 stop another agent's run; options on #275).
 - The owner creates the PyPI and TestPyPI accounts for trusted publishing.
 - Then the first tag. Its release notes say that `kelpie serve` stays on loopback, or behind a limiting reverse proxy, until audit item M5 is fixed. The tag's release ticks the publish item.
 
@@ -253,7 +252,7 @@ The plan marks only multi-host and the audit as blocking the release. Several ol
 
 **After 0.1.0a1, next:**
 
-- the audit's remaining medium and low items (M1 as the owner decides; M4–M7; L4, L5, L7–L11, L13, L14)
+- the audit's remaining medium and low items (M1 → #302; M4, M6, M7; L4, L5, L7–L11, L13, L14)
 - the rest of #248
 - the open P1 items in the roadmap backlog
 - 10 conversations with farm owners and the naming check
