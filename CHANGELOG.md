@@ -6,11 +6,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [PEP 440](https://peps.python.org/pep-0440/), so a pre-release is written `0.1.0a1`, not
 `0.1.0-alpha.1`. The release process is in [docs/release.md](docs/release.md).
 
-## [0.1.0a1] - Unreleased
+## [0.1.0a1] - 2026-11-03
 
 First public pre-release, an alpha: interfaces and configuration keys may still
 change. It starts in global dry-run (`dry_run = true`) with every rule in `observe` mode,
 so a fresh install changes nothing on your farm until you turn it on, rule by rule.
+
+### Before you install
+
+These are the release notes for the tag, ahead of what changed.
+
+- **Keep `kelpie serve` on loopback** (the default, `127.0.0.1`; docker compose publishes
+  it on `127.0.0.1` only), or behind a reverse proxy that limits connections and request
+  time. Its HTTP server has no pre-auth deadline or connection cap yet, so a slow client
+  can tie it up without a token (audit item M5, fix in
+  [#304](https://github.com/ch8er/kelpie/issues/304)).
+- **Rule 10 in `act` trusts every holder of the traces token** (audit item M1). Spans and
+  hook spool lines say which run they belong to, and every agent holds the one ingest
+  token, so an agent can make `loop_breaker` stop another agent's run. If your agents are
+  untrusted or sandboxed and share one token, keep rule 10 in `observe` or `suggest`, or
+  give them separate farms. Fix: per-agent ingest tokens
+  ([#302](https://github.com/ch8er/kelpie/issues/302)). Details:
+  [docs/security.md](docs/security.md#known-residual-risks).
+- Other open medium findings of the security audit
+  ([#275](https://github.com/ch8er/kelpie/issues/275)), each fixed after this release:
+  - M4: the Linear client has no overall deadline; a server that answers a byte at a time
+    can stall the control loop (`[adapters.linear]` only). Follow-up on #275.
+  - M5: as above, `kelpie serve`'s port has no connection guards. Follow-up:
+    [#304](https://github.com/ch8er/kelpie/issues/304).
+  - M6: one authenticated `kelpie agent` can grow the hub's executors, metric series and
+    alerts by reporting new adapter names; give hub tokens only to agents you run.
+    Follow-up on #275.
+  - M7: only one Kelpie may act on a board, but nothing enforces it yet; two acting
+    instances duplicate comments and requeues. Follow-up on #275.
+- **Known limits.** Not verified before the release
+  ([#249](https://github.com/ch8er/kelpie/issues/249)): the Docker image (its build and
+  `kelpie demo` inside it; the release workflow builds and publishes it), live runs on real
+  Hermes, Claude Code and OpenClaw platforms with this version (the adapters are tested
+  against synthetic boards and spools, Hermes also against a simulated farm; plugin and
+  hook registration were not run), and GitHub Issues and Linear beyond the token check.
+  The wheel and sdist were installed and run on Python 3.12 and 3.13.
 
 ### Added
 
@@ -81,6 +116,10 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   for the report, not sent one per task ([#183](https://github.com/ch8er/kelpie/pull/183)).
 - An action that a platform cannot perform becomes an alert for a human instead of an error
   ([#66](https://github.com/ch8er/kelpie/pull/66)).
+- On a farm with several adapters, each rule's actions are judged per adapter: `kelpie
+  doctor` and the daily report say which adapters a rule cannot act on yet (there its actions
+  become alerts), and an adapter that declares its action kinds is sent no other
+  ([#219](https://github.com/ch8er/kelpie/pull/219)).
 - Host sleep and wake: a suspend (the wall clock running ahead of the monotonic clock
   between ticks) of the host `kelpie serve` runs on is recorded, and session ages, rule 1's
   grace and rule 3's ownerless and undriven checks count awake time, so a laptop that slept
@@ -488,4 +527,4 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   mode and the daily report ([#62](https://github.com/ch8er/kelpie/pull/62), [#73](https://github.com/ch8er/kelpie/pull/73), [#74](https://github.com/ch8er/kelpie/pull/74), [#81](https://github.com/ch8er/kelpie/pull/81)).
 - A code health and security audit plan was written before the first release ([#92](https://github.com/ch8er/kelpie/pull/92)).
 
-[0.1.0a1]: https://github.com/ch8er/kelpie/commits/main
+[0.1.0a1]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a1

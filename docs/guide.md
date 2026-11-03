@@ -481,9 +481,9 @@ switches Kelpie's own words to Russian. See `kelpie.example.toml`.
 
 ## Running from source
 
-> While Kelpie is pre-alpha, `kelpie serve` runs the control loop and exposes `/metrics` and
-> `/healthz` on port 9464. Without an `[adapters.hermes]` section the snapshot is empty. It
-> starts safe: global dry-run on, every rule in observe mode.
+> `kelpie serve` runs the control loop and exposes `/metrics` and `/healthz` on port 9464.
+> Without an `[adapters.hermes]` section the snapshot is empty. It starts safe: global
+> dry-run on, every rule in observe mode.
 
 Requirements: Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
