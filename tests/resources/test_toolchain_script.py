@@ -42,20 +42,33 @@ def test_one_line_per_tool_from_its_command(tmp_path: Path) -> None:
     assert not [p for p in tmp_path.iterdir() if p.name.startswith(".kelpie_toolchain.")]
 
 
-def test_macos_defaults_read_the_active_xcode(tmp_path: Path) -> None:
+def test_macos_defaults_read_the_selected_xcode(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    xcode = tmp_path / "Xcode.app" / "Contents"
+    (xcode / "Developer").mkdir(parents=True)
     (bin_dir / "uname").write_text("#!/bin/sh\necho Darwin\n")
-    (bin_dir / "xcodebuild").write_text("#!/bin/sh\nprintf 'Xcode 16.1\\nBuild version 16B40\\n'\n")
+    (bin_dir / "xcode-select").write_text(f"#!/bin/sh\necho {xcode / 'Developer'}\n")
+    # PlistBuddy -c 'Print :KEY' FILE: the fake answers by key, and fails for CoreSimulator
+    buddy = bin_dir / "plistbuddy"
+    buddy.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        "  *CFBundleShortVersionString) echo 16.1 ;;\n"
+        "  *ProductBuildVersion) echo 16B40 ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n"
+    )
     for f in bin_dir.iterdir():
         f.chmod(0o755)
     out = tmp_path / "out"
     out.mkdir()
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "KELPIE_PLISTBUDDY": str(buddy)}
     result = run(str(out), env=env)
     assert result.returncode == 0, result.stderr
-    # CoreSimulator's framework is not on this machine: skipped, not an error
+    # CoreSimulator's framework is not there: skipped, not an error
     assert metrics(out) == ['kelpie_toolchain_info{tool="xcode",version="16.1 (16B40)"} 1']
+    assert "skipped coresimulator" in result.stderr
 
 
 def test_elsewhere_without_tools_no_versions(tmp_path: Path) -> None:
@@ -76,7 +89,7 @@ def test_usage_errors(tmp_path: Path) -> None:
 
 def test_long_versions_are_cut_and_slow_commands_bounded(tmp_path: Path) -> None:
     env = {**os.environ, "KELPIE_TOOL_TIMEOUT": "1"}
-    long = "x" * 300
+    long = "é" + "x" * 300  # non-ASCII is dropped: a cut never splits a character
     result = run(str(tmp_path), f"long=echo {long}", "slow=sleep 5; echo late", env=env)
     assert result.returncode == 0, result.stderr
     assert metrics(tmp_path) == [f'kelpie_toolchain_info{{tool="long",version="{"x" * 100}"}} 1']

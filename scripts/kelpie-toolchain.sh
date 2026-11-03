@@ -10,10 +10,10 @@
 # OUTPUT_DIR is node_exporter's --collector.textfile.directory. Each TOOL=COMMAND runs
 # COMMAND with sh -c and takes the first line it prints as TOOL's version (TOOL: lower-case
 # letters, digits, ".", "_" and "-"), e.g. 'node=node --version'; at most 100 characters of
-# it are kept. Without any, on macOS it reads the active Xcode (xcodebuild -version:
-# "16.1 (16B40)"; when xcodebuild itself fails, as a broken install does, the version in
-# the selected Xcode's Info.plist followed by "(xcodebuild fails)", which reads as a change
-# too) and CoreSimulator (its framework's CFBundleVersion); elsewhere it writes no versions.
+# it (printable ASCII) are kept. Without any, on macOS it reads the selected Xcode
+# ("16.1 (16B40)", from its Info.plist and version.plist, not xcodebuild, which can fail
+# for a moment) and CoreSimulator (its framework's CFBundleVersion); elsewhere it writes
+# no versions.
 # Report one version per tool: two at once read as changes back and forth. A command that
 # fails or prints nothing is skipped with a message on stderr. Each gets at most
 # KELPIE_TOOL_TIMEOUT seconds (20), through timeout(1), gtimeout or else perl's alarm (macOS
@@ -37,6 +37,8 @@ case "$seconds" in
   '' | *[!0-9]*) echo "$0: KELPIE_TOOL_TIMEOUT must be whole seconds" >&2; exit 2 ;;
 esac
 
+plistbuddy=${KELPIE_PLISTBUDDY:-/usr/libexec/PlistBuddy}  # macOS's; a test may swap it
+
 # Runs "$@" for at most $seconds.
 bounded() {
   if command -v timeout >/dev/null 2>&1; then
@@ -50,27 +52,28 @@ bounded() {
   fi
 }
 
+# The selected Xcode's version and build ("16.1 (16B40)") from its own plists: no
+# xcodebuild, which can be slow or fail for a moment (a false change each time).
 xcode_version() {
-  v=$(bounded xcodebuild -version 2>/dev/null \
-    | awk 'NR==1{v=$2} /^Build version/{b=$3} END{if (v) print v (b ? " (" b ")" : "")}' || true)
-  if [ -z "$v" ]; then
-    dir=$(xcode-select -p 2>/dev/null || true)
-    [ -z "$dir" ] || p=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
-      "$dir/../Info.plist" 2>/dev/null || true)
-    [ -z "${p:-}" ] || v="$p (xcodebuild fails)"
-  fi
-  printf '%s\n' "$v"
+  dir=$(xcode-select -p 2>/dev/null || true)
+  [ -n "$dir" ] || return 0
+  v=$("$plistbuddy" -c 'Print :CFBundleShortVersionString' "$dir/../Info.plist" \
+    2>/dev/null || true)
+  b=$("$plistbuddy" -c 'Print :ProductBuildVersion' "$dir/../version.plist" \
+    2>/dev/null || true)
+  [ -n "$v" ] || return 0
+  if [ -n "$b" ]; then printf '%s (%s)\n' "$v" "$b"; else printf '%s\n' "$v"; fi
 }
 
 coresimulator_version() {
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
+  "$plistbuddy" -c 'Print :CFBundleVersion' \
     /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/Info.plist \
     2>/dev/null || true
 }
 
 # One metric line for tool $1 with the first line of $2 as its version, or a message.
 emit() {
-  version=$(printf '%s\n' "$2" | head -n 1 | tr -d '\000-\037\177' \
+  version=$(printf '%s\n' "$2" | head -n 1 | LC_ALL=C tr -cd '\040-\176' \
     | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c1-100)
   if [ -z "$version" ]; then
     echo "$0: skipped $1: no version" >&2

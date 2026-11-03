@@ -179,3 +179,43 @@ def test_config_validates_names_and_lookback() -> None:
     ):
         with pytest.raises(ValueError, match="toolchain"):
             load_resources({"prometheus": {**base, **bad}})
+
+
+def test_a_matrix_answer_keeps_only_well_formed_points() -> None:
+    import json
+
+    from kelpie.resources import prometheus
+
+    body = {
+        "status": "success",
+        "data": {
+            "resultType": "matrix",
+            "result": [
+                "not a series",
+                {"metric": {"tool": "x"}},  # no values
+                {"metric": ["not", "a", "dict"], "values": [[1, "1"]]},
+                {
+                    "metric": {"tool": "x"},
+                    "values": [[1, "1"], ["bad"], [2, "NaN"], [3, "nope"], [4, "4"]],
+                },
+            ],
+        },
+    }
+    found = prometheus._parse(json.dumps(body).encode(), matrix=True)
+    assert [(s.timestamp, s.value) for s in found] == [(1.0, 1.0), (4.0, 4.0)]
+
+
+def test_a_matrix_answer_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    from kelpie.resources import prometheus
+
+    monkeypatch.setattr(prometheus, "MAX_POINTS", 3)
+    body = {
+        "status": "success",
+        "data": {
+            "resultType": "matrix",
+            "result": [{"metric": {}, "values": [[i, str(i)] for i in range(10)]}],
+        },
+    }
+    assert len(prometheus._parse(json.dumps(body).encode(), matrix=True)) == 3
