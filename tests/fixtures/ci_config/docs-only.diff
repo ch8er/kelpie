@@ -1,0 +1,17 @@
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -2,8 +2,14 @@
+ # Runs the test matrix on every change.
+ on:
+   push:
++    paths-ignore:
++      - 'docs/**'
++      - '**.md'
+     branches: [main, 'release/**']
+   pull_request:
++    paths-ignore:
++      - 'docs/**'
++      - '**.md'
+ 
+ jobs:
+   test:

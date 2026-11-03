@@ -1,0 +1,79 @@
+# Rule 9 waste kind -> proposed workflow change; see README.md here.
+id: drafts
+waste: draft
+description: Agents opened draft pull requests and pushed to them; every push ran the full matrix before
+  anyone could review.
+config:
+  waste_min_minutes: 0
+  propose_config: true
+  propose_min_minutes: 30
+  docs_globs:
+  - docs/*
+  - '*.md'
+  cancel_superseded: false
+default_branch: main
+snapshot:
+  now: '2026-03-05T12:00:00+00:00'
+  builds:
+  - id: R-1
+    source: ci
+    repo: example/app
+    workflow: .github/workflows/test.yml
+    event: pull_request
+    status: success
+    branch: task/T-621
+    sha: 8b8b8b8
+    draft: true
+    started_at: '2026-03-05T08:00:00+00:00'
+    finished_at: '2026-03-05T08:20:00+00:00'
+    minutes: 20
+    changed_paths:
+    - src/api.py
+  - id: R-2
+    source: ci
+    repo: example/app
+    workflow: .github/workflows/test.yml
+    event: pull_request
+    status: success
+    branch: task/T-621
+    sha: 9c9c9c9
+    draft: true
+    started_at: '2026-03-05T09:00:00+00:00'
+    finished_at: '2026-03-05T09:20:00+00:00'
+    minutes: 20
+    changed_paths:
+    - src/api.py
+  - id: R-3
+    source: ci
+    repo: example/app
+    workflow: .github/workflows/test.yml
+    event: pull_request
+    status: failure
+    branch: task/T-622
+    sha: 0d0d0d0
+    draft: true
+    started_at: '2026-03-05T10:00:00+00:00'
+    finished_at: '2026-03-05T10:20:00+00:00'
+    minutes: 20
+    changed_paths:
+    - src/db.py
+workflow: |
+  name: Tests
+  # Runs the test matrix on every change.
+  on:
+    push:
+      branches: [main, 'release/**']
+    pull_request:
+
+  jobs:
+    test:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - run: make test  # the full matrix
+expected:
+  changes:
+  - skip_drafts
+  applied:
+  - skip_drafts
+  left_out: []

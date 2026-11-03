@@ -112,7 +112,7 @@ PLANNED: tuple[PlannedRule, ...] = (
         _P0,
         "Wasted CI builds, superseded runs, quota forecast",
         (5,),
-        effects=_fx(_K.CANCEL_BUILD),
+        effects=_fx(_K.CANCEL_BUILD, _K.PROPOSE_CI_CONFIG),
     ),
     PlannedRule(
         "loop_breaker",

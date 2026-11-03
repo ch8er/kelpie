@@ -160,7 +160,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | 6 | `bottlenecks` | P0 | implemented | `alert`, `escalate` | alert channel |
 | 7 | `resources` | P0 | implemented | `alert` | alert channel |
 | 8 | daily report | P0 | `kelpie report` | — | configured in [[report]](#report), not here |
-| 9 | `ci_economy` | P0 | implemented | `cancel_build`, `alert` | `[connectors.github.ci] allow_cancel` |
+| 9 | `ci_economy` | P0 | implemented | `cancel_build`, `propose_ci_config` (no executor yet), `alert` | `[connectors.github.ci] allow_cancel` |
 | 10 | `loop_breaker` | P0 | implemented | `stop`, `alert` | adapter with `SupportsStop` (Hermes and Claude Code have it) |
 | 11 | `no_progress` | P0 | implemented | `alert` | alert channel |
 | 12 | `conflict_warning` | P0 | implemented | `comment`, `wait`, `wake` | adapter `comment`; `SupportsWait` for `serialize` (not in Hermes yet) |
@@ -469,6 +469,8 @@ forecasts the CI minutes quota, and reports a CI outage as one incident. Needs b
 | `wip_patterns` | `['^\s*\[?wip\b', '^\s*(fixup\|squash)!']` | list of patterns | Commit messages that mark a WIP commit. |
 | `waste_min_minutes` | `30` | minutes, >= 0 | Send the waste summary once this many minutes were wasted in the window. |
 | `cancel_superseded` | `true` | bool | Emit `cancel_build` for superseded builds the connector marked cancellable. |
+| `propose_config` | `false` | bool | Emit `propose_ci_config` for each pipeline with at least `propose_min_minutes` to save: the changes for that pipeline, in no CI's syntax. Preview them with [`kelpie ci-config`](#proposed-ci-configuration-kelpie-ci-config). No connector opens them yet, so in `act` each is a "not executed" alert. |
+| `propose_min_minutes` | `60` | minutes, >= 0 | A pipeline's minutes to save in the window before a proposal (the window's waste must reach `waste_min_minutes` too). |
 | `quota_critical` | `1.0` | ratio, > 0 and <= 1 | Used / quota at which the quota counts as exhausted. |
 | `forecast_horizon` | `"7d"` | duration, > 0 | Warn when the quota runs out within this, before it resets. |
 | `quota_period` | `"30d"` | duration, > 0 | Without a usage reading: warn when the burn over this period would exceed the quota. |
@@ -496,6 +498,50 @@ first, at most 10 (`pipelines_total` counts them all):
 | `source`, `repo`, `workflow` | The pipeline: the CI connector that reported it, the repository, the workflow |
 | `minutes` | Minutes its changes would have saved in the window |
 | `changes` | Each `{change, minutes, builds}`; `ignore_docs_paths` adds `paths` (the `docs_globs`, fnmatch: `*` crosses `/`), `skip_wip` adds `patterns` (the `wip_patterns`) and `case_insensitive: true` |
+
+#### Proposed CI configuration (`kelpie ci-config`)
+
+With `propose_config`, each pipeline in `params.pipelines` whose `minutes` reach
+`propose_min_minutes` also gets one `propose_ci_config` action, routed to the connector that
+reported its builds (`executor` = its `source`), with the pipeline's `repo`, `workflow`,
+`minutes` and `changes`. It is emitted once per `[engine] once_window` for the same changes.
+A pipeline no connector reported gets none.
+
+`kelpie ci-config` shows what those proposals would change, and writes nothing, whatever the
+rule's mode or the dry-run. It reads the recent builds as a tick would (only the read token,
+`token_env`, with `Contents: read` on the repositories; cancelling is turned off for the
+read), evaluates `ci_economy` with its config (with a warning, and as if it were on, when
+`propose_config` is off), reads each workflow file from the default branch and prints, per
+proposal, the unified diff, the changes left out and why, and what to check before merging.
+Text from the repository is printed with terminal control and bidi characters replaced.
+Exit code 0 with the proposals (or "No pipeline wasted enough minutes"), 2 when it cannot
+run (no `[connectors.github.ci]`, no `ci_economy`, a missing token).
+
+What the GitHub renderer writes (`kelpie.connectors.github.workflow_config`), only into a
+file under `.github/workflows/` with an ASCII name without `..`, editing the text so
+comments and layout stay, and keeping an edit only when the re-parsed workflow says exactly
+what it said before plus the change:
+
+- `cancel_in_progress`: a top-level `concurrency` group with `cancel-in-progress: true`, one
+  group per workflow file and per pull request or branch, so a newer commit cancels the
+  running build. Only runs for a commit share it: a pull request's `opened`, `synchronize`
+  and `reopened` runs, and pushes to branches other than the default. Every other run (a
+  label, an edit, `ready_for_review`, the default branch, manual and scheduled runs) has a
+  group of its own, so a run whose jobs skip never cancels the commit's real run. Left out
+  when the workflow sets `concurrency` already.
+- `ignore_docs_paths`: `paths-ignore` with the docs globs on `push` and `pull_request` (`*`
+  becomes `**`: GitHub's `*` stops at `/`). Left out for a trigger with its own `paths` or
+  `paths-ignore`. Check before merging: a skipped workflow leaves a required check pending
+  on a docs-only pull request.
+- `skip_drafts`: a draft condition on each job without an `if` of its own, and
+  `ready_for_review` among the pull request types. Check before merging: GitHub reports a
+  job skipped by its `if` as passed, also for a required check, so nothing should merge a
+  pull request the moment it is marked ready.
+- `skip_wip` and `skip_verified` are never rendered (GitHub expressions have no regular
+  expressions, and nothing skips a commit another run already verified): listed as left
+  out, with why.
+
+The diff for each waste kind is pinned by the fixtures in `tests/fixtures/ci_config/`.
 
 A CI outage (incident 20) is one `warning` "CI outage since <time>": the failing workflow,
 job and step, the repositories, runners and PRs it affects, and the tasks waiting on those

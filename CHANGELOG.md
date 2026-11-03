@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added
+
+- `kelpie ci-config`: rule 9's proposed CI configuration changes, printed as a diff of each
+  GitHub Actions workflow file (concurrency with cancel-in-progress, `paths-ignore` for docs,
+  skipping drafts). Read-only; it needs only the read token. `ci_economy` emits the
+  proposals as `propose_ci_config` with `propose_config = true` (off by default); nothing
+  opens them yet ([#237](https://github.com/ch8er/kelpie/pull/237)).
+
 ### Changed
 
 - Every outage kind in the report (#229, incident 20): a block storm's waits count under "a
