@@ -1937,9 +1937,10 @@ model = "claude-sonnet-5-5"
 
 ### Report sections
 
-`[report.sections.tokens]` (token optimization, `kelpie.traces.tokens`) and
-`[report.sections.tokens_fit]` (context and model fit, `kelpie.traces.fit`) accept the
-fields of `TokenSettings` and `FitSettings`. Durations are strings (`"5m"`), counts whole
+`[report.sections.tokens]` (token optimization, `kelpie.traces.tokens`),
+`[report.sections.tokens_fit]` (context and model fit, `kelpie.traces.fit`) and
+`[report.sections.instructions]` (instruction files) accept the fields of `TokenSettings`,
+`FitSettings` and the section's own settings. Durations are strings (`"5m"`), counts whole
 numbers >= 0, ratios, shares and tolerances numbers between 0 and 1, lists lists of names;
 any other value fails that section (noted in the report).
 
@@ -1954,6 +1955,7 @@ any other value fails that section (noted in the report).
 | `tokens_fit.routine_min_calls` / `routine_output_tokens` / `routine_max_tool_tokens` | `20` / `400` / `1000` | Routine work: at least this many calls a day, at most this median output and mean tool output per call. |
 | `tokens_fit.min_after` | `"12h"` | After a model switch, how long before its quality is judged. |
 | `tokens_fit.min_saving_tokens` | `50000` | A recommendation needs at least this many tokens a day. |
+| `instructions.top` | `10` | Instruction files listed, the costliest first (`0`: no section). |
 
 The other fields (`break_ratio`, `fragment_min_sessions`, `review_reads`, ...) are
 documented in those modules.

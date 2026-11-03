@@ -66,6 +66,9 @@ class InstructionWatch:
     sources: tuple[Source, ...]  # configured entries first: the first source of a path wins
     home: str = field(default_factory=lambda: os.path.expanduser("~"))
     retry_after: timedelta = RETRY_AFTER
+    # False: the store is only read (``kelpie report``: ``kelpie serve`` keeps the history,
+    # and a second writer would record each change twice).
+    record: bool = True
     skipped: dict[str, str] = field(default_factory=dict)  # shown path -> why (kelpie status)
     failed: bool = False  # the last scan failed: the result is the one before
     _found: tuple[Found, ...] = ()
@@ -126,11 +129,12 @@ class InstructionWatch:
                               m.appended)  # fmt: skip
                 rows.append(row)
                 history.setdefault(str(path), []).append(row)
-        if rows:
+        if rows and self.record:
             self.store.record(rows)
         # A file no longer found (deleted, unconfigured) loses its history; one that could
         # not be read this time keeps it.
-        self.store.prune(window_start, keep={str(f.path) for f in found} | unread)
+        if self.record:
+            self.store.prune(window_start, keep={str(f.path) for f in found} | unread)
         for shown, why in skipped.items():
             if self.skipped.get(shown) != why:
                 log.warning("instruction file %s not measured: %s", shown, why)
