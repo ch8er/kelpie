@@ -110,6 +110,7 @@ Variables named by `token_env`, `webhook_env`, `headers_env`, `cancel_token_env`
 | `once_attempts` | `3` | count, >= 1 | A one-off action is given up after this many failed attempts. |
 | `state_escalations` | `["4h", "12h", "24h"]` | list of durations, increasing | Alerts about a lasting condition are sent again when its age passes each of these. |
 | `state_resolve_after` | `"10m"` | duration, >= 0 | A lasting condition no rule reported for this long is resolved, and a short "resolved" alert goes out: what is true now, from the rule (rule 7: the current reading, "disk h:/ is 80% full, ..."), or, quoted as the past, what the rule no longer reports ('task T-1 (...): no longer reported: "..."'). |
+| `host_sleep_min_gap` | `"2m"` | duration, >= 0 (0: off) | A suspend of the host (a laptop lid closed) is the wall clock running ahead of the monotonic clock by at least this between two ticks. Kelpie records it (`Snapshot.host_sleeps`) and counts session and task ages in awake time: no stale-session requeue, orphan or commit reminder for the gap, and a session that does not come back within its stale bar of awake time after the wake is requeued once as "ended while the host slept" (issue #296). `kelpie agent` watches its own host the same way. |
 | `rules` | `{}` | tables | One table per rule, `[engine.rules.<name>]`; see [Rules](#rules). |
 
 ## Modes and dry-run

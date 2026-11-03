@@ -73,6 +73,7 @@ from kelpie.core.conditions import (
 )
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
+from kelpie.core.host_sleep import SleepWatch
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
 from kelpie.core.model import (
     Owner,
@@ -1052,6 +1053,16 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _sleep_watch(
+    config: EngineConfig, clock: Callable[[], datetime], agent: str | None = None
+) -> SleepWatch | None:
+    """The host sleep watch (issue #296): off when ``host_sleep_min_gap`` is 0, and with an
+    injected clock (tests, simulations), whose jumps the monotonic clock never sees."""
+    if config.host_sleep_min_gap <= timedelta(0) or clock is not utc_now:
+        return None
+    return SleepWatch(min_gap=config.host_sleep_min_gap, agent=agent)
+
+
 def empty_snapshot(clock: Callable[[], datetime] = utc_now) -> Callable[[], Snapshot]:
     """Snapshot source without adapters: just the current time."""
     return lambda: Snapshot(now=clock())
@@ -1838,6 +1849,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         ledger_store=store,
         state_store=states,
         fallback=hub is None,
+        sleep_watch=_sleep_watch(settings.engine, clock),
     )
     farm = None
     if hub is not None:

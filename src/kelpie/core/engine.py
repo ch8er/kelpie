@@ -29,6 +29,7 @@ from kelpie.core.alerts import (
 from kelpie.core.alerts import Transition as AlertTransition
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
+from kelpie.core.host_sleep import SleepWatch, merge_sleeps
 from kelpie.core.incidents import FOLDED_UNDER, Outage, is_outage_state
 from kelpie.core.ledger import (
     ActionLedger,
@@ -99,6 +100,9 @@ class Engine:
     ledger_store: LedgerStore = field(default_factory=MemoryLedgerStore)
     state_store: StateStore = field(default_factory=MemoryStateStore)
     fallback: bool = True  # route to the only platform adapter when nothing else says where
+    # Finds suspends of this host between ticks (issue #296); its sleeps are added to every
+    # snapshot's ``host_sleeps``. None: no clock watch (tests, one-off evaluations).
+    sleep_watch: SleepWatch | None = None
     _by_name: dict[str, Rule] = field(init=False, default_factory=dict)
     _detail: str | None = field(init=False, default=None)  # of the action being handled
     ledger: ActionLedger = field(init=False)
@@ -583,7 +587,15 @@ class Engine:
         return self._alert(action, snapshot, executed=executed, kind=kind, did=did)
 
     def tick(self, snapshot_source: Callable[[], Snapshot]) -> list[Dispatched]:
+        watch = self.sleep_watch
+        if watch is not None:
+            watch.mark()  # the source reads the wall clock first
         snapshot = snapshot_source()
+        if watch is not None:
+            watch.observe(snapshot.now)
+            mine = watch.sleeps(snapshot.now)
+            if mine:
+                snapshot = replace(snapshot, host_sleeps=merge_sleeps(snapshot.host_sleeps, mine))
         return self.execute(self.evaluate(snapshot), snapshot)
 
     def _handle(self, action: Action, mode: Mode, snapshot: Snapshot) -> Outcome:

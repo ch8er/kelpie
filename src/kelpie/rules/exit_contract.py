@@ -75,6 +75,7 @@ from kelpie.core.model import (
     Snapshot,
     Status,
     Task,
+    source_agent,
 )
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
@@ -83,9 +84,11 @@ from kelpie.rules._alerts import alert_params
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     Exit,
+    awake,
     finished_parent,
     last_exit,
     linked_conditions,
+    slept_since,
     undeclared_exit,
 )
 
@@ -180,7 +183,7 @@ class ExitContract:
                 continue
             end = undeclared_exit(task, snapshot, self.session_stale_after)
             if end is not None and self._past_grace(end, snapshot):
-                actions.append(self._requeue_exit(task, end))
+                actions.append(self._requeue_exit(task, end, snapshot))
             elif end is None:
                 actions.extend(self._check_unapplied(task, snapshot))
         return actions
@@ -359,7 +362,10 @@ class ExitContract:
         )
 
     def _past_grace(self, end: Exit, snapshot: Snapshot) -> bool:
-        return snapshot.now - end.at >= self.session_exit_grace
+        """The platform had ``session_exit_grace`` of awake time after the exit to record a
+        status: a host asleep since then had none (issue #296)."""
+        agent = source_agent(end.session.source)
+        return awake(end.at, snapshot.now, snapshot.host_sleeps, agent) >= self.session_exit_grace
 
     def _check_block(self, task: Task, snapshot: Snapshot) -> Iterable[Action]:
         end = last_exit(task, snapshot, self.session_stale_after)
@@ -410,7 +416,7 @@ class ExitContract:
             },
         )
 
-    def _requeue_exit(self, task: Task, end: Exit) -> Action:
+    def _requeue_exit(self, task: Task, end: Exit, snapshot: Snapshot) -> Action:
         s = end.session
         when = f"{end.at.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
         how = (
@@ -420,9 +426,27 @@ class ExitContract:
         )
         params: dict[str, Any] = {"session_id": s.id, "owner_id": s.owner_id}
         note = ""
+        bar = self.session_stale_after if end.silent else self.session_exit_grace
+        sleep = slept_since(s, snapshot, bar)
+        if sleep is not None:
+            # Issue #296: it went quiet before or while its host slept and did not come back
+            # within the stale bar of awake time after the wake: it ended while the host slept.
+            how = (
+                f"{how}, ended while the host slept "
+                f"({sleep.start.astimezone(UTC):%H:%M}-{sleep.end.astimezone(UTC):%H:%M} UTC, "
+                f"{_minutes(sleep.length)}) and did not come back after the wake,"
+            )
+            params["host_slept"] = {
+                "start": sleep.start.isoformat(),
+                "end": sleep.end.isoformat(),
+                "minutes": round(sleep.length.total_seconds() / 60),
+            }
+            if s.last_commit and s.branch:
+                params["resume"] = {"branch": s.branch, "commit": s.last_commit}
+                note = f" Resume from commit {s.last_commit} on {s.branch}."
         if s.dirty_worktree:
             params["dirty_worktree"] = True
-            note = " The worktree has uncommitted changes: commit them as WIP before reassigning."
+            note += " The worktree has uncommitted changes: commit them as WIP before reassigning."
         return Action(
             ActionKind.REQUEUE,
             NAME,
@@ -473,6 +497,10 @@ def _how_to_answer(c: Criterion) -> str:
         f'Comment "{c.ref}: met, <result>"{shown}, or run a CI workflow named {c.ref} '
         "that passes on the task's branch"
     )
+
+
+def _minutes(d: timedelta) -> str:
+    return f"{round(d.total_seconds() / 60)} min"
 
 
 def _hours(d: timedelta) -> str:

@@ -152,7 +152,7 @@ class WaitCondition:
             for session in snapshot.sessions:
                 if session.task_id in waiting:
                     continue  # already did the right thing; the wake will follow
-                if is_live(session, snapshot.now, self.session_stale_after):
+                if is_live(session, snapshot.now, self.session_stale_after, snapshot.host_sleeps):
                     found = list(self._check_polling(session, snapshot))
                     if found:
                         polled.add(session.id)

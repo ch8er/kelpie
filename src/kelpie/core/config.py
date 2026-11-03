@@ -53,6 +53,9 @@ class EngineConfig:
     state_escalations: tuple[timedelta, ...] = DEFAULT_STATE_ESCALATIONS
     # A state no rule reported for this long is resolved (absorbs one-tick gaps).
     state_resolve_after: timedelta = timedelta(minutes=10)
+    # A host suspend is the wall clock running ahead of the monotonic one by at least this
+    # between ticks (issue #296); 0 turns the watch off.
+    host_sleep_min_gap: timedelta = timedelta(minutes=2)
     default_mode: Mode = Mode.OBSERVE
     modes: Mapping[str, Mode] = field(default_factory=dict)
     rules: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
@@ -81,6 +84,7 @@ class EngineConfig:
             "once_attempts",
             "state_escalations",
             "state_resolve_after",
+            "host_sleep_min_gap",
             "rules",
         }
         unknown = set(data) - known
@@ -127,6 +131,9 @@ class EngineConfig:
         resolve_after = parse_duration(data.get("state_resolve_after", "10m"))
         if resolve_after < timedelta(0):
             raise ValueError("engine.state_resolve_after must not be negative")
+        min_gap = parse_duration(data.get("host_sleep_min_gap", "2m"))
+        if min_gap < timedelta(0):
+            raise ValueError("engine.host_sleep_min_gap must not be negative")
         # Core cannot import kelpie.rules, so rule names are not checked against PLANNED
         # here; whoever wires the engine (CLI/server) must do it.
         return cls(
@@ -139,6 +146,7 @@ class EngineConfig:
             once_attempts=once_attempts,
             state_escalations=escalations,
             state_resolve_after=resolve_after,
+            host_sleep_min_gap=min_gap,
             default_mode=Mode(data.get("default_mode", Mode.OBSERVE)),
             modes=modes,
             rules=rules,

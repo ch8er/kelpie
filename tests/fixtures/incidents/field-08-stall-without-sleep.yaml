@@ -1,0 +1,37 @@
+id: "field-08-stall-without-sleep"
+incident: null
+title: "A real 47-minute stall without a clock jump alerts as today"
+description: >
+  The negative case of host sleep: the same farm and the same silent session, but the host
+  never slept (no `host_sleeps`): the clocks ran together, so the 49 minutes since the
+  session's last heartbeat are 49 minutes of a farm that could have worked. It is past the
+  stale bar and is requeued as on any day, without a word about sleep; so is the review
+  session that ended without a status 53 minutes ago. The session that is beating is left
+  alone.
+rule: exit_contract
+config:
+  session_exit_grace: "10m"
+  session_stale_after: "30m"
+snapshot:
+  now: "2026-03-02T12:13:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - {id: T-F821, title: "Add CSV export", status: in_progress, status_since: "2026-03-02T11:00:00+00:00", owner_id: agent-dev-1}
+    - {id: T-F822, title: "Fix date parsing", status: in_progress, status_since: "2026-03-02T11:05:00+00:00", owner_id: agent-dev-2}
+    - {id: T-F823, title: "Review: search filters", status: review, status_since: "2026-03-02T10:40:00+00:00", owner_id: reviewer-1}
+  sessions:
+    - {id: S-F821, task_id: T-F821, owner_id: agent-dev-1, started_at: "2026-03-02T11:00:00+00:00", last_heartbeat: "2026-03-02T11:23:30+00:00"}
+    - {id: S-F822, task_id: T-F822, owner_id: agent-dev-2, started_at: "2026-03-02T11:05:00+00:00", last_heartbeat: "2026-03-02T12:12:30+00:00"}
+    - {id: S-F823, task_id: T-F823, owner_id: reviewer-1, started_at: "2026-03-02T10:50:00+00:00", ended_at: "2026-03-02T11:20:00+00:00"}
+expected_actions:
+  - kind: requeue
+    task_id: T-F821
+    reason_contains: "stopped sending heartbeats at 2026-03-02 11:23 UTC without a final status"
+  - kind: requeue
+    task_id: T-F823
+not_expected_actions:
+  - {kind: requeue, task_id: T-F822}
+  - {kind: requeue, task_id: T-F821, reason_contains: "host slept"}

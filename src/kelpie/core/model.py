@@ -6,7 +6,7 @@ read-only input; they never mutate it and never perform I/O.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import StrEnum
@@ -800,6 +800,54 @@ def _no_snoozes() -> Mapping[str, Snooze]:
 
 
 @dataclass(frozen=True, slots=True)
+class HostSleep:
+    """A stretch when a machine running agents was suspended (a laptop lid closed), issue
+    #296. Found from a wall-clock jump against the monotonic clock between two ticks: the
+    engine's own (``agent`` None: the host ``kelpie serve`` runs on, whose local adapters
+    read their boards on it) or a ``kelpie agent``'s (``agent`` its name). ``start`` and
+    ``end`` are wall-clock times; where the jump falls inside its tick interval is not
+    known, so they are exact in length and placed to within one interval. ``source`` is
+    ``clock`` (the jump) or the name of a configured OS wake log."""
+
+    start: datetime
+    end: datetime
+    agent: str | None = None
+    source: str = "clock"
+
+    @property
+    def length(self) -> timedelta:
+        return max(self.end - self.start, timedelta(0))
+
+
+def source_agent(source: str | None) -> str | None:
+    """The ``kelpie agent`` behind a board or session ``source`` (``<agent>/<adapter>`` on a
+    multi-host farm); None for an adapter that runs inside ``kelpie serve``."""
+    if source is None or "/" not in source:
+        return None
+    return source.split("/", 1)[0]
+
+
+def slept(
+    sleeps: Iterable[HostSleep], start: datetime, end: datetime, agent: str | None
+) -> timedelta:
+    """How long ``agent``'s host (None: the server's own) slept between ``start`` and
+    ``end``; overlapping records of one sleep count once."""
+    spans = sorted(
+        (max(s.start, start), min(s.end, end))
+        for s in sleeps
+        if s.agent == agent and s.start < end and s.end > start
+    )
+    total = timedelta(0)
+    cursor = start
+    for a, b in spans:
+        a = max(a, cursor)
+        if b > a:
+            total += b - a
+            cursor = b
+    return total
+
+
+@dataclass(frozen=True, slots=True)
 class Snapshot:
     """Everything a rule may look at, captured at ``now``."""
 
@@ -871,6 +919,10 @@ class Snapshot:
     # block reasons, a stored one winning over a marker. Active ones and those that expired
     # within the last 7 days; :func:`active_snooze` tells them apart.
     snoozes: Mapping[str, Snooze] = field(default_factory=_no_snoozes)
+    # Recent stretches when a host running agents slept (issue #296), the engine's own from
+    # its clocks and the agents' from their reports: rules count an age in awake time
+    # (``slept``), so a gap the host slept through raises no stale-session alert.
+    host_sleeps: tuple[HostSleep, ...] = ()
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )

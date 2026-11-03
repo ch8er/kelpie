@@ -66,7 +66,11 @@ class DispatchGate:
         parents: dict[str, set[str]] = {}
         for d in snapshot.dependencies:
             parents.setdefault(d.task_id, set()).add(d.depends_on)
-        live = {s.task_id for s in snapshot.sessions if is_live(s, snapshot.now)}
+        live = {
+            s.task_id
+            for s in snapshot.sessions
+            if is_live(s, snapshot.now, sleeps=snapshot.host_sleeps)
+        }
         actions: list[Action] = []
         for task in snapshot.tasks:
             if task.status is not Status.READY or task.id in live:
