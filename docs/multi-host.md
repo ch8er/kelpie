@@ -111,8 +111,10 @@ namespace.
 
 - **Strangers:** connections that have not presented a valid token are capped at
   `[hub] max_connections` (default 64; when full, the oldest is cut to make room, since an
-  agent sends its token at once) and 16 per address (per /64 for IPv6), and get 3 seconds
-  in all, TLS handshake and headers included. A connection gives its slot back once its
+  agent sends its token at once) and `[server] max_connections_per_address` (default 16,
+  per /64 for IPv6), and get `[server] header_timeout` (default 3 seconds) in all, TLS
+  handshake and headers included; the main port has the same guards
+  ([configuration](configuration.md#server)). A connection gives its slot back once its
   token checks out. Someone with several addresses who opens connections faster than an
   agent completes its handshake can still crowd agents out; put the hub behind a firewall
   that admits only the agents' networks where that matters.
@@ -124,7 +126,8 @@ namespace.
 - **Bodies:** `Content-Length` required, at most `[hub] max_body_bytes` (default 16 MiB)
   before and after decompression. `Content-Encoding: gzip` is inflated with that bound, so
   a small compressed bomb is refused. 411/413/415 otherwise; one request per connection;
-  socket timeout and a whole-body deadline as on the OTLP endpoint (slowloris).
+  `[server] read_timeout` per socket read and `body_timeout` for the whole body, as on the
+  OTLP endpoint (slowloris).
 - **Counts:** per adapter at most 20,000 tasks, 50,000 sessions, 100,000 spans, 20,000
   conditions and dependencies; ids of at most 256 printable characters; JSON nesting is
   bounded by the decoder (a too-deep body is a 400).
