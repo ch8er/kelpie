@@ -22,8 +22,10 @@ from kelpie.core.storage import (
     SCHEMA_VERSION,
     SchemaOutdated,
     SqliteSpanStore,
+    TokenRow,
     _entry,
     _state,
+    read_instruction_tokens,
     read_snoozes,
 )
 from kelpie.report.fixes import FixEvent, read_fixes
@@ -95,6 +97,10 @@ class ReportStore:
 
     def fixes(self, start: datetime, end: datetime) -> list[FixEvent]:
         return read_fixes(self._db, start, end)
+
+    def instruction_tokens(self, start: datetime, end: datetime) -> list[TokenRow]:
+        """Tokens a day on instructions per role, sampled per scan ([instructions])."""
+        return read_instruction_tokens(self._db, start, end)
 
     def snoozes(self, after: datetime) -> list[Snooze]:
         """Stored snoozes that ended after ``after`` (#176)."""

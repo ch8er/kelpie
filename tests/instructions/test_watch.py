@@ -264,4 +264,50 @@ def test_loads_go_to_the_profile_they_were_opened_in(tmp_path: Path) -> None:
         "~/profiles/dev-1/skills/review/SKILL.md": 0,
         "~/profiles/dev-2/skills/review/SKILL.md": 2,
     }
+
+
+def test_each_scan_stores_one_sample_of_tokens_a_day_per_role(farm: Path, tmp_path: Path) -> None:
+    from kelpie.core.storage import read_instruction_tokens
+
+    store = SqliteInstructionStore(tmp_path / "k.db")
+    (farm / "profiles" / "reviewer" / "skills" / "review" / "SKILL.md").write_text(lesson(1))
+    (farm / "AGENTS.md").write_text("# Core\n")
+    w = watch(farm, store)
+    owners = (Owner("reviewer", "reviewer"),)
+    for minutes in (0, 30, 60):  # scans at 0 and 60 (every hour); 30 reuses the last
+        now = T0 + timedelta(minutes=minutes)
+        w.read(Snapshot(now=now, owners=owners, sessions=sessions(now, 2)))
+    rows = read_instruction_tokens(store._db, T0, T0 + timedelta(hours=2))
+    assert [(r.at, r.role, r.files) for r in rows] == [
+        (T0, None, 1), (T0, "reviewer", 1),
+        (T0 + timedelta(hours=1), None, 1), (T0 + timedelta(hours=1), "reviewer", 1),
+    ]  # fmt: skip
+    assert rows[1].tokens_per_day > 0
+    # No session in the day (the board may not have been read), part of the farm unseen:
+    # no sample.
+    w.read(Snapshot(now=T0 + timedelta(hours=2), owners=owners))
+    later = T0 + timedelta(hours=3)
+    w.read(Snapshot(now=later, owners=owners, sessions=sessions(later, 2), unobserved=("a",)))
+    ro = watch(farm, store)
+    ro.record = False  # kelpie report: reads, never writes
+    now = T0 + timedelta(hours=4)
+    ro.read(Snapshot(now=now, owners=owners, sessions=sessions(now, 2)))
+    assert len(read_instruction_tokens(store._db, T0, T0 + timedelta(days=1))) == 4
+
+
+def test_a_failed_sample_does_not_stop_the_read(
+    farm: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SqliteInstructionStore(tmp_path / "k.db")
+    (farm / "AGENTS.md").write_text("# Core\n")
+
+    def boom(rows: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "record_tokens", boom)
+    files, _ = watch(farm, store).read(
+        Snapshot(now=T0, owners=(Owner("reviewer", "reviewer"),), sessions=sessions(T0, 1))
+    )
+    assert files
+    store.close()
     store.close()

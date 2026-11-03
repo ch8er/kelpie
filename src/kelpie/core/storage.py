@@ -1133,6 +1133,7 @@ class SqliteInstructionStore:
     def __init__(self, path: Path | str, busy_timeout_ms: int = 5000) -> None:
         self._lock = threading.Lock()
         self._db = _open(path, busy_timeout_ms)
+        self._tokens_table = False  # instruction_tokens created (on first write)
 
     def close(self) -> None:
         with self._lock:
@@ -1174,6 +1175,27 @@ class SqliteInstructionStore:
             )  # fmt: skip
         return out
 
+    def record_tokens(self, rows: Sequence[TokenRow]) -> None:
+        """Store one measurement's tokens a day per role (the before/after of a split);
+        rows older than ``INSTRUCTION_TOKENS_KEEP`` go."""
+        if not rows:
+            return
+        with self._lock, self._db:
+            if not self._tokens_table:
+                self._db.execute(_INSTRUCTION_TOKENS)
+                self._tokens_table = True
+            self._db.executemany(
+                "INSERT OR REPLACE INTO instruction_tokens"
+                " (at, role, tokens_per_day, files, loads) VALUES (?, ?, ?, ?, ?)",
+                [(_ts(r.at), r.role or "", r.tokens_per_day, r.files, r.loads) for r in rows],
+            )
+            oldest = min(r.at for r in rows) - INSTRUCTION_TOKENS_KEEP
+            self._db.execute("DELETE FROM instruction_tokens WHERE at < ?", (_ts(oldest),))
+
+    def tokens(self, start: datetime, end: datetime) -> list[TokenRow]:
+        with self._lock:
+            return read_instruction_tokens(self._db, start, end)
+
     def prune(self, before: datetime, keep: Collection[str] | None = None) -> int:
         """Drop rows before ``before`` except each path's last one there (its size then);
         with ``keep``, also every row of a path not in it (a file no longer measured)."""
@@ -1194,3 +1216,52 @@ class SqliteInstructionStore:
                     "DELETE FROM instruction_sizes WHERE path = ?", gone
                 ).rowcount
             return n
+
+
+# --- instruction tokens a day per role (before/after of a split, #282) ----------------------
+
+# Created on first write, not by a migration, like report_fixes: a schema bump would make
+# every ``kelpie report`` refuse the database until ``kelpie serve`` ran once, for a table
+# only farms with [instructions] use. The cost: a later change of its columns needs its own
+# check of the table. A database that never measured instruction files has no such table,
+# and readers treat it as no rows.
+_INSTRUCTION_TOKENS = """
+CREATE TABLE IF NOT EXISTS instruction_tokens (
+    at             TEXT NOT NULL,
+    role           TEXT NOT NULL,  -- '' : files every role loads
+    tokens_per_day INTEGER NOT NULL,
+    files          INTEGER NOT NULL,
+    loads          INTEGER NOT NULL,  -- files whose tokens a day come from counted loads
+    PRIMARY KEY (at, role)
+);
+"""
+INSTRUCTION_TOKENS_KEEP = timedelta(days=30)
+
+
+class TokenRow(NamedTuple):
+    """Tokens a day spent reading one role's instruction files at one measurement (``role``
+    None: the files every role loads); sums only, never a file's text."""
+
+    at: datetime
+    role: str | None
+    tokens_per_day: int
+    files: int
+    loads: int
+
+
+def read_instruction_tokens(
+    db: sqlite3.Connection, start: datetime, end: datetime
+) -> list[TokenRow]:
+    """Rows measured in ``[start, end)`` from an open (read-only) connection, oldest first;
+    none when the table was never created."""
+    try:
+        found = db.execute(
+            "SELECT at, role, tokens_per_day, files, loads FROM instruction_tokens"
+            " WHERE at >= ? AND at < ? ORDER BY at, role",
+            (_ts(start), _ts(end)),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
+    return [TokenRow(datetime.fromisoformat(r[0]), r[1] or None, r[2], r[3], r[4]) for r in found]
