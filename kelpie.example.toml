@@ -401,6 +401,11 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # growth_window = "6h"                # disk and directory growth rates (rule 7's time-to-full)
 # growth_sustain = "1h"               # ...capped at what held in most quarters of this (5m-24h)
 # load_on_macos = false               # macOS load counts waiting threads (300-800 when healthy)
+# toolchain_metric = "kelpie_toolchain_info"  # toolchain versions per host (incident 20), e.g.
+#                                     # from scripts/kelpie-toolchain.sh; absent: no changes
+# toolchain_tool_label = "tool"       # the label naming the tool (xcode, coresimulator, ...)
+# toolchain_version_label = "version" # the label holding its version
+# toolchain_lookback = "48h"          # how far back a version change is found (1h-7d)
 # token_env = "KELPIE_PROMETHEUS_TOKEN"  # bearer token from this env var. Used when set; when
 #                                     # written here the variable must be set or Kelpie refuses to start
 #
@@ -422,9 +427,11 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # path_bytes = "kelpie_path_bytes"   # from scripts/kelpie-path-sizes.sh
 # path_growth = "((deriv(kelpie_path_bytes[{window}]) * 86400 < quantile_over_time(0.25, clamp_min(deriv(kelpie_path_bytes[{slice}]) * 86400, 0)[{sustain}:{slice}])) or quantile_over_time(0.25, clamp_min(deriv(kelpie_path_bytes[{slice}]) * 86400, 0)[{sustain}:{slice}])) and kelpie_path_bytes offset {half_window}"
 # path_written = 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}'
+# toolchain = "max by (instance, {tool_label}, {version_label}) (timestamp({toolchain_metric}))[{lookback}:{step}]"   # a timeline (subquery)
 # ({host_label}, written here as instance, {window} = growth_window, {half_window},
 # {sustain} = growth_sustain and {slice} = a quarter of it are filled in, in custom queries
-# too.)
+# too; so are {toolchain_metric}, {tool_label}, {version_label}, {lookback} =
+# toolchain_lookback and {step} = 5m.)
 
 # LLM provider quotas and key health, for rule 7. Off unless providers are listed. Each
 # provider is probed with one GET of `path` at most once per `interval`. Probes must cost

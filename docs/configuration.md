@@ -328,6 +328,7 @@ that came due during the outage is sent when it ends.
 | `stale_evidence_after` | `"1h"` | duration or `false` | Alert when the connector has not checked a linked condition for this long. `false`: off. |
 | `storm_min_tasks` | `5` | count, 0 (off) or 2–1000 | A block storm (#229): this many tasks blocked on the same reason (the task's own id, dates, times and hashes stripped; the PRs, URLs and other tasks it names kept apart; more than a kind of wait; blocks without a condition Kelpie can check, not snoozed)... |
 | `storm_window` | `"2h"` | duration, > 0 | ...within this of each other are one outage: one alert with the shared reason, the person it names and the tasks. Once open it stays open while half of `storm_min_tasks` (at least 2) are still blocked on the reason. |
+| `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes. Text only: it changes no action. |
 | `storm_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its alert (and its "resolved" notice) is only logged until set to `"rule"`, which follows the rule's mode and folds this rule's no-condition and overdue alerts of its tasks under it (not rule 13's inbox items). |
 
 A condition that can never be met (a PR closed without merging, a human task cancelled)
@@ -473,6 +474,7 @@ forecasts the CI minutes quota, and reports a CI outage as one incident. Needs b
 | `outage_min_prs` | `3` | count, 0 (off) or 2–1000 | A CI outage: some window holds failures of this many change requests (repository and branch; retries count) at the same workflow, job and step, with evidence that the environment broke; twice as many without it... |
 | `outage_window` | `"2h"` | duration, > 0 | ...that window's length; a failure counts until the job passes again in its repository. |
 | `queued_after` | `"30m"` | duration, > 0 | CI jobs not starting: a build still queued this long while no runner on the farm takes work is a sign, as is a job the CI refused (no runner, no step) that used to run, or a whole run refused; signs of `outage_min_prs` change requests within `outage_window` → one outage. |
+| `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes. Text only: it changes no action. |
 | `not_started_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"` (then it follows the rule's mode and folds the tasks' own alerts). |
 
 Waste categories, each build counted once in this order: superseded, already verified
@@ -556,6 +558,7 @@ Other keys:
 | `tool_outage_tools` | `[]` (off) | list of non-empty strings | Correlated tool failures: the farm's build and test runners (e.g. `["ios_sim.sh", "xcodebuild"]`), matched as the command of a tool call's last segment, path aside (see below). |
 | `tool_outage_min_tasks` | `3` | 2 to 1000 | Distinct tasks (a session tied to no task counts as one) failing one tool with one exit code within `tool_outage_window` → one outage. |
 | `tool_outage_window` | `"30m"` | duration, > 0 | How close together those failures must be; the `[traces] window` at most, whose spans the snapshot holds. |
+| `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes; a change on the tool's own host comes first. Text only: it changes no action. |
 | `tool_outage_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"`. |
 
 ```toml
@@ -1341,6 +1344,9 @@ present.
 | `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. |
 | `growth_sustain` | `"1h"`, or `growth_window` when that is shorter | duration, 5m to 24h and at most `growth_window` | How long growth must go on to count. The growth rate is the rate over `growth_window`, capped at the first quartile of the rates in the slices (`growth_sustain` / 4, at least 1m, aligned to the clock) of the last `growth_sustain`, a slice that shrank counting as 0. So a burst within about half of `growth_sustain` adds a few GB a day at most, for about one slice (5 GB written in 17 minutes reads at most about 5 GB a day on a flat disk, 35 on one growing 30 GB a day), then nothing; a cleanup of less than a few hours' growth leaves about the rate (an open forecast does not resolve), while a larger one turns the window's trend negative, so an open forecast resolves until the cleanup leaves the window (about 4 to 5 hours with the 6h default); a longer burst counts in part (5 GB in 40 to 50 minutes reads up to about 15 to 18 GB a day). Growth that comes in bursts with gaps longer than a slice (a build every 30 minutes, nothing written in between) reads as no growth. A shrinking trend stays negative: no forecast. |
 | `load_on_macos` | `false` | bool | macOS counts threads waiting on I/O in its load average (300 to 800 on a healthy farm Mac), so hosts whose `node_uname_info` says Darwin get no load reading unless this is true. Needs node_exporter's uname collector (on by default), as does leaving out macOS's read-only volumes; a host once seen as macOS stays so when that query fails, and until it first answers no host gets a load reading. |
+| `toolchain_metric` | `"kelpie_toolchain_info"` | a metric name | Toolchain versions per host (incident 20), one series per tool with its version in a label, e.g. from `scripts/kelpie-toolchain.sh` (the active Xcode and CoreSimulator on macOS, or any `TOOL=COMMAND`). A version seen within `toolchain_lookback` right after another version of the same tool on the same host is a change; the first version a host reports is none. Report one version per tool. An outage that begins soon after a change names it as its likely cause in its alert (rules 4, 9 and 10, `toolchain_window`) and in the daily report. Absent metric: no changes, nothing else changes. |
+| `toolchain_tool_label`, `toolchain_version_label` | `"tool"`, `"version"` | label names, different, not `host_label` | The labels holding the tool's name and its version. |
+| `toolchain_lookback` | `"48h"` | duration, 1h to 7d | How far back changes are read: one subquery, the versions scraped at each 5m step, read as a timeline (a rollback is a change too). A change spans from the old version's last scrape to the new one's first, so a tool that reported nothing while it was replaced still matches an outage in between. Keep it longer than the rules' `toolchain_window` plus how long an outage may stay open: a change that leaves the lookback is no longer named in that outage's later alerts. |
 
 `[resources.prometheus.queries]` keys: `disk_size`, `disk_avail`, `memory_total`,
 `memory_available`, `load1`, `cores`, `cpu_busy`, `processes`, `processes_max`, `os`,
@@ -1354,6 +1360,10 @@ system volumes, so a Mac shows its data volume, `/System/Volumes/Data`. Each res
 names the filesystem they are on). `path_bytes` and `path_growth` read `kelpie_path_bytes`
 from `scripts/kelpie-path-sizes.sh` (install.md, Host resources); `path_written` is when
 node_exporter last saw that file change, so sizes from a script that stopped count as old.
+`toolchain` reads `toolchain_metric` from `scripts/kelpie-toolchain.sh` (install.md): an
+override must stay a subquery (`[...:...]`) answering a matrix, the versions scraped at each
+step with `toolchain_tool_label` and `toolchain_version_label`; an instant query fails, logged
+once, and no change is read.
 The growth queries take the lower of two rates (`deriv`, in bytes per day): over
 `growth_window` (the trend) and the first quartile over the slices of the last
 `growth_sustain`, each at least 0 (`quantile_over_time` of a subquery, Prometheus 2.7 or

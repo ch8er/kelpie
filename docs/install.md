@@ -171,6 +171,14 @@ devices, Xcode DerivedData, caches, `~/.hermes`, Docker). `deploy/textfile/` has
 agent (`com.kelpie.path-sizes.plist`, macOS) and a systemd service and timer (Linux): edit the
 paths in them first. Pick a few directories, not the whole disk: `du` walks every file.
 
+**What changed.** An outage that starts soon after a toolchain update names the update as
+its likely cause (incident 20: an automatic Xcode update broke every iOS build). Copy
+`scripts/kelpie-toolchain.sh` to `/usr/local/share/kelpie/` and run it every few minutes with
+node_exporter's textfile directory: on macOS it writes the active Xcode and CoreSimulator
+versions; elsewhere, or for other tools, pass `TOOL=COMMAND` arguments (`'node=node
+--version'`). `deploy/textfile/com.kelpie.toolchain.plist` is a launchd agent for it.
+Optional: without it Kelpie names no change.
+
 ## Hermes plugin
 
 On a Hermes farm Kelpie needs the `[adapters.hermes]` section and the Kelpie hooks plugin on

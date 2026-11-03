@@ -283,7 +283,10 @@ board the report is unchanged.
   the hold's). Under the cost of chaos, "CI outages" lists each outage of the day: its
   signature, since when (perhaps an earlier day) and until when or still open, and the PRs
   in its scope and the alerts folded under it that day (a lower bound), with the waiting
-  time all of them explained together. The report makes no network calls: it runs the
+  time all of them explained together. "Toolchain changes before outages" lists each
+  outage of the day, of any kind, whose alert named a toolchain version change on a host
+  shortly before it began as its likely cause (`[resources.prometheus] toolchain_metric`,
+  incident 20). The report makes no network calls: it runs the
   connector steps that read only the board (`task_status`, human tasks from block
   reasons), and a block reason a `[[block_conditions]]` pattern matches counts as a CI or
   merge wait by the pattern's kind, without a PR lookup. The "Farm throughput" section

@@ -73,6 +73,8 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.rules._alerts import alert_params, count
+from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
+from kelpie.rules._toolchain import with_change
 
 MAX_LISTED = 10  # PRs and tasks named in the alert text
 UNSURE_FACTOR = 2  # change requests needed, in multiples of min_prs, without evidence
@@ -91,7 +93,13 @@ class _Failure:
     at: datetime
 
 
-def outages(snapshot: Snapshot, rule: str, min_prs: int, window: timedelta) -> list[Action]:
+def outages(
+    snapshot: Snapshot,
+    rule: str,
+    min_prs: int,
+    window: timedelta,
+    toolchain_window: timedelta = TOOLCHAIN_WINDOW,
+) -> list[Action]:
     """One alert per open outage (see the module docs); none with ``min_prs`` = 0."""
     if min_prs <= 0:
         return []
@@ -102,7 +110,8 @@ def outages(snapshot: Snapshot, rule: str, min_prs: int, window: timedelta) -> l
         if (opened := _opened(active, passes, sig, min_prs, window)) is not None:
             since, repos = opened
             scope = [f for f in active if f.at >= since and _repo(f.build) in repos]
-            actions.append(_alert(snapshot, rule, sig, scope, since, window))
+            alert = _alert(snapshot, rule, sig, scope, since, window)
+            actions.append(with_change(alert, snapshot, since, toolchain_window))
     return actions
 
 

@@ -127,3 +127,39 @@ def test_folds_after_the_last_sighting_count_while_still_open(closed_at: datetim
     entries = (outage_sample(at(3)), folded(4, "a"), folded(23, "b"))
     report = build_report(inputs(states=(state,), actions=entries), sections={})
     assert [(o.folded, o.open) for o in report.outages] == [(2, True)]
+
+
+XCODE = (
+    "xcode changed from 16.0 to 16.1 on mac-ios-1 at 2026-03-02 01:41 UTC, 19 min before it began"
+)
+
+
+def test_an_outage_after_a_toolchain_change_names_it_as_the_likely_cause() -> None:
+    """Incident 20 (#284): the report says which version change on which host the outage's
+    alert named, for any kind (a block storm included, which the CI list leaves out)."""
+    from kelpie.core.incidents import BLOCK_STORM, Outage, incident_state_id
+
+    storm = incident_state_id("stale_blocks", "xcodebuild fails")
+    storm_state = StateRow(
+        replace(outage_state(storm, at(2), at(9)).state, rule="stale_blocks"), at(9.5)
+    )
+    params = Outage(
+        state=storm, signature="xcodebuild fails", kind=BLOCK_STORM, tasks=("T-1",), toolchain=XCODE
+    ).to_params()
+    named = replace(ledger("stale_blocks", **params), at=at(2.1))
+    ci = closed(outage_state(SID, at(12), at(14)), at(15))  # names no change
+    report = build_report(
+        inputs(states=(storm_state, ci), actions=(named, outage_sample(at(12.5)))), sections={}
+    )
+    [cause] = report.toolchain_causes
+    assert (cause.kind, cause.signature, cause.change) == (BLOCK_STORM, "xcodebuild fails", XCODE)
+    markdown = render_markdown(report)
+    assert "**Toolchain changes before outages**" in markdown
+    assert f"- block storm `xcodebuild fails` since 2026-03-02 02:00 UTC: {XCODE}" in markdown
+
+
+def test_no_change_named_no_toolchain_lines() -> None:
+    state = closed(outage_state(SID, at(2), at(20)), at(20.5))
+    report = build_report(inputs(states=(state,), actions=(outage_sample(at(3)),)), sections={})
+    assert report.toolchain_causes == ()
+    assert "Toolchain changes" not in render_markdown(report)

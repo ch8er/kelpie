@@ -115,6 +115,7 @@ from kelpie.rules._tasks import (
     fresh,
     linked_conditions,
 )
+from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
 
 NAME = "stale_blocks"
 
@@ -135,6 +136,8 @@ class StaleBlocks:
     storm_min_tasks: int = 5
     storm_window: timedelta = timedelta(hours=2)
     storm_mode: str = "observe"  # "observe" (a new check: logged only) or "rule": the rule's mode
+    # A toolchain change on a host this long before a storm began is its likely cause.
+    toolchain_window: timedelta = TOOLCHAIN_WINDOW
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -147,7 +150,15 @@ class StaleBlocks:
                 actions.extend(self._check(task, snapshot, behind, listed, snoozed))
         observe = self.storm_mode == "observe"
         actions.extend(
-            storms(snapshot, NAME, self.storm_min_tasks, self.storm_window, observe, snoozed)
+            storms(
+                snapshot,
+                NAME,
+                self.storm_min_tasks,
+                self.storm_window,
+                observe,
+                snoozed,
+                self.toolchain_window,
+            )
         )
         return actions
 
@@ -486,8 +497,9 @@ def build(config: dict[str, Any]) -> StaleBlocks:
         if value == 1:
             raise ValueError("storm_min_tasks must be at least 2: one blocked task is no storm")
         kwargs["storm_min_tasks"] = value
-    if "storm_window" in config:
-        kwargs["storm_window"] = _duration(config.pop("storm_window"), "storm_window")
+    for key in ("storm_window", "toolchain_window"):
+        if key in config:
+            kwargs[key] = _duration(config.pop(key), key)
     if "storm_mode" in config:
         mode = config.pop("storm_mode")
         if mode not in ("observe", "rule"):

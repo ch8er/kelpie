@@ -41,6 +41,8 @@ from kelpie.core.incidents import CI_NOT_STARTED, CI_NOT_STARTED_STATE, MAX_BUIL
 from kelpie.core.model import Build, BuildStatus, Snapshot
 from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._ci_outage import _change, _listed, _newest, _pulls, _repo, _tasks
+from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
+from kelpie.rules._toolchain import with_change
 
 STATE = CI_NOT_STARTED_STATE
 
@@ -61,6 +63,7 @@ def not_started(
     window: timedelta,
     queued_after: timedelta,
     observe: bool = True,
+    toolchain_window: timedelta = TOOLCHAIN_WINDOW,
 ) -> list[Action]:
     """The outage of CI jobs that never start, if open (see the module docs); none with
     ``min_prs`` = 0. With ``observe`` (a new check) its alert is only logged."""
@@ -71,7 +74,12 @@ def not_started(
     if since is None:
         return []
     scope = [s for s in signs if s.at >= since]
-    alert = _alert(snapshot, rule, scope, since, window, queued_after)
+    alert = with_change(
+        _alert(snapshot, rule, scope, since, window, queued_after),
+        snapshot,
+        since,
+        toolchain_window,
+    )
     return [replace(alert, observe_only=observe)]
 
 

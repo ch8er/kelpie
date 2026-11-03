@@ -184,6 +184,12 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   ([#54](https://github.com/ch8er/kelpie/pull/54), [#57](https://github.com/ch8er/kelpie/pull/57)).
 - `kelpie fix --at` takes `now` and times before now (`-30m`, `-2h`, `-1d2h`) as well as
   ISO times, and the confirmation gives the recorded time in UTC ([#235](https://github.com/ch8er/kelpie/pull/235)).
+- Toolchain versions per host from node_exporter's textfile collector (metric and labels
+  are config data; `scripts/kelpie-toolchain.sh` writes the active Xcode and CoreSimulator
+  on macOS, or any `TOOL=COMMAND`): an outage (rule 9's CI outages, rule 4's block storm,
+  rule 10's tool failures) that begins within `toolchain_window` after a version change names
+  the change as its likely cause, in the alert and the daily report (incident 20,
+  [#284](https://github.com/ch8er/kelpie/issues/284)).
 - Honest before/after: fixes less than a window apart are measured together and credited
   to none alone (per fix only its own role or command), per-day rates whose signal began
   inside the window are listed as not compared, throughput is compared only over hours

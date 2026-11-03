@@ -96,6 +96,7 @@ from kelpie.core.ports import (
     SupportsReassign,
     SupportsStop,
     SupportsWait,
+    ToolchainReader,
 )
 from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
 from kelpie.core.rule import Rule
@@ -1195,6 +1196,12 @@ def merged_snapshot(
         if resources is not None:
             try:
                 merged = replace(merged, resources=merged.resources + tuple(resources.read(now)))
+                if isinstance(resources, ToolchainReader):
+                    merged = replace(
+                        merged,
+                        toolchain_changes=merged.toolchain_changes
+                        + tuple(resources.toolchain_changes(now)),
+                    )
             except Exception as exc:
                 log.error("resource source failed: %s", type(exc).__name__)
                 metrics.resource_failed("unexpected")

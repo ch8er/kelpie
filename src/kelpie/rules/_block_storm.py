@@ -51,6 +51,8 @@ from kelpie.core.incidents import BLOCK_STORM, Outage, incident_state_id
 from kelpie.core.model import KelpieMark, OwnerKind, Snapshot, Status, Task
 from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._snoozes import SnoozeCheck
+from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
+from kelpie.rules._toolchain import with_change
 
 MAX_REASON = 300  # characters of a block reason shown and normalised
 MAX_LISTED = 10  # tasks named in the alert text
@@ -143,6 +145,7 @@ def storms(
     window: timedelta,
     observe: bool = True,
     snoozed: Callable[[str], SnoozeCheck | None] | None = None,
+    toolchain_window: timedelta = TOOLCHAIN_WINDOW,
 ) -> list[Action]:
     """One alert per block storm (see the module docs); none with ``min_tasks`` = 0. With
     ``observe`` (the default for a new check) the alerts are only logged, whatever the
@@ -175,7 +178,12 @@ def storms(
             since = min(b.since for b in blocked)  # open: kept while enough still wait
         if since is not None:
             scope = sorted((b for b in blocked if b.since >= since), key=lambda b: b.task.id)
-            alert = _alert(snapshot, rule, state, text, scope, since)
+            alert = with_change(
+                _alert(snapshot, rule, state, text, scope, since),
+                snapshot,
+                since,
+                toolchain_window,
+            )
             actions.append(replace(alert, observe_only=observe))
     return actions
 

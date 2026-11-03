@@ -19,6 +19,7 @@ from kelpie.core.model import (
     Snapshot,
     Status,
     Task,
+    ToolchainChange,
 )
 
 
@@ -161,6 +162,14 @@ class ActionConnector(Protocol):
         state that could not be re-checked) raises, so the engine records a failure and
         the ledger retries it later."""
         ...
+
+
+@runtime_checkable
+class ToolchainReader(Protocol):
+    """Reads toolchain version changes per host (incident 20), e.g. from the same
+    Prometheus as the host resources. Must not raise; the caller owns the clock."""
+
+    def toolchain_changes(self, now: datetime) -> Sequence[ToolchainChange]: ...
 
 
 @runtime_checkable

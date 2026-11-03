@@ -97,9 +97,11 @@ class Outage:
     ``state`` is its state id and ``kind`` the signal that found it (:data:`KINDS`).
     ``signature`` is how people read what is shared (a CI job, a block reason, a tool);
     ``cause`` says in one line what happened; ``person`` is who can end it, when its cause
-    names someone (a block storm's "waiting for CEO"). For failing CI jobs, ``workflow``,
-    ``job`` and ``step`` are the signature's parts. ``prs`` are ``owner/name#N``. ``tasks``
-    are the tasks the outage explains (for CI kinds: the blocked or waiting tasks of the
+    names someone (a block storm's "waiting for CEO"); ``toolchain`` names a toolchain
+    change on a host shortly before it began, its likely cause (#284). For failing CI
+    jobs, ``workflow``, ``job`` and ``step`` are the signature's parts. ``prs`` are
+    ``owner/name#N``. ``tasks`` are the tasks the outage explains (for CI kinds: the
+    blocked or waiting tasks of the
     PRs in scope, and tasks waiting on an unmet CI or merge condition of those PRs; for a
     block storm: the blocked tasks; for tool failures: the tasks whose runs failed).
     ``runners`` are runner names and labels; ``builds`` build ids (at most
@@ -119,6 +121,7 @@ class Outage:
     kind: str = CI_FAILURES
     cause: str | None = None
     person: str | None = None
+    toolchain: str | None = None
 
     def to_params(self) -> dict[str, Any]:
         """The alert's params (JSON-ready)."""
@@ -128,6 +131,7 @@ class Outage:
             "signature": self.signature,
             "cause": self.cause,
             "person": self.person,
+            "toolchain": self.toolchain,
             "workflow": self.workflow,
             "job": self.job,
             "step": self.step,
@@ -167,6 +171,7 @@ class Outage:
             kind=kind,
             cause=_text(params.get("cause")),
             person=_text(params.get("person")),
+            toolchain=_text(params.get("toolchain")),
         )
 
 
